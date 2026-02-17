@@ -16,20 +16,34 @@ IronCurtain is a secure agent runtime that mediates between an AI agent and MCP 
 
 ## Architecture
 
-The system has three layers connected in a pipeline: **Agent → Trusted Process → MCP Servers**.
+The system has four layers: **Agent → Code Mode Sandbox → MCP Proxy (Trusted Process) → MCP Servers**.
 
 ### Agent (`src/agent/`)
-Uses Vercel AI SDK (`ai` package) with Anthropic's Claude to run an agentic loop. `tools.ts` bridges MCP tools into AI SDK `CoreTool` objects — each tool's `execute` function sends a `ToolCallRequest` to the trusted process instead of calling MCP directly. Tool names are prefixed with the server name (e.g., `filesystem__read_file`).
+Uses Vercel AI SDK v6 (`ai` package) with Anthropic's Claude. The agent has a single `execute_code` tool that sends TypeScript to the Code Mode sandbox. Uses `stepCountIs()` for loop control (not `maxSteps`). The AI SDK v6 API uses `inputSchema` (not `parameters`), `stopWhen` (not `maxSteps`), and `toolCalls[].input` (not `.args`).
+
+`tools.ts` provides a fallback direct-tool-call mode (used by integration tests) where MCP tools are bridged into AI SDK tools with `execute` functions routing through `TrustedProcess.handleToolCall()`. Tool names use `serverName__toolName` format.
+
+### Sandbox (`src/sandbox/`)
+UTCP Code Mode (`@utcp/code-mode`) provides a V8-isolated TypeScript execution environment. The LLM writes TypeScript that calls typed function stubs (e.g., `filesystem.read_file({path: '...'})`). These stubs produce MCP requests that exit the sandbox to the MCP proxy. Requires `@utcp/mcp` to be imported for the MCP call template type. Tool functions inside the sandbox are **synchronous** (no `await`).
+
+### MCP Proxy Server (`src/trusted-process/mcp-proxy-server.ts`)
+A standalone MCP server spawned by Code Mode as a child process. This is the security boundary. Uses the low-level `Server` class (not `McpServer`) to pass through raw JSON schemas. For each tool call: evaluates policy → forwards allowed calls to real MCP servers → logs to audit. Escalations are auto-denied in proxy mode (no stdin access for CLI prompts).
 
 ### Trusted Process (`src/trusted-process/`)
-The security kernel. `TrustedProcess` orchestrates the full request lifecycle:
-1. **PolicyEngine** (`policy-engine.ts`) — evaluates requests against an ordered rule chain. First matching rule wins. Rules: protect structural files → deny deletes → allow reads in sandbox → deny reads outside → allow writes in sandbox → escalate writes outside → default deny.
-2. **EscalationHandler** (`escalation.ts`) — CLI-based human approval prompt for escalated requests. Can be overridden via `onEscalation` callback (used in tests).
-3. **MCPClientManager** (`mcp-client-manager.ts`) — manages stdio-based MCP client connections. Connects to MCP servers defined in `src/config/mcp-servers.json`.
-4. **AuditLog** (`audit-log.ts`) — append-only JSONL logging of every request, policy decision, and result.
+The security kernel. Two modes of operation:
+1. **Proxy mode** (`mcp-proxy-server.ts`) — standalone process for Code Mode. Has its own PolicyEngine and AuditLog instances.
+2. **In-process mode** (`index.ts`) — `TrustedProcess` class used by integration tests and the direct-tool-call fallback. Orchestrates PolicyEngine, MCPClientManager, EscalationHandler, and AuditLog.
+
+**PolicyEngine** (`policy-engine.ts`) — evaluates requests against an ordered rule chain. First matching rule wins. Rules: protect structural files → deny deletes → allow reads in sandbox → deny reads outside → allow writes in sandbox → escalate writes outside → default deny.
+
+**EscalationHandler** (`escalation.ts`) — CLI-based human approval for escalated requests. Can be overridden via `onEscalation` callback (used in tests).
+
+**MCPClientManager** (`mcp-client-manager.ts`) — manages stdio-based MCP client connections.
+
+**AuditLog** (`audit-log.ts`) — append-only JSONL logging.
 
 ### Configuration (`src/config/`)
-`loadConfig()` reads from environment variables (`ANTHROPIC_API_KEY`, `AUDIT_LOG_PATH`, `ALLOWED_DIRECTORY`) and `src/config/mcp-servers.json` for MCP server definitions. The `ALLOWED_DIRECTORY` (default `/tmp/ironcurtain-sandbox`) defines the sandbox boundary for policy evaluation.
+`loadConfig()` reads from environment variables (`ANTHROPIC_API_KEY`, `AUDIT_LOG_PATH`, `ALLOWED_DIRECTORY`) and `src/config/mcp-servers.json` for MCP server definitions. The `ALLOWED_DIRECTORY` (default `/tmp/ironcurtain-sandbox`) defines the sandbox boundary for policy evaluation. Requires a `.env` file (loaded via `dotenv/config` in `src/index.ts`).
 
 ### Types (`src/types/`)
 Shared types: `ToolCallRequest`/`ToolCallResult`/`PolicyDecision` in `mcp.ts`, `AuditEntry` in `audit.ts`. Policy decisions have three states: `allow`, `deny`, `escalate`.
