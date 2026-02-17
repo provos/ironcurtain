@@ -1,0 +1,32 @@
+{
+  "name": "ironcurtain",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Secure agent runtime with trusted process mediation",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint src/ test/"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^3.0.44",
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "@utcp/code-mode": "^1.2.11",
+    "@utcp/mcp": "^1.1.1",
+    "ai": "^6.0.86",
+    "dotenv": "^17.3.1",
+    "uuid": "^13.0.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.2",
+    "@types/node": "^22.0.0",
+    "@types/uuid": "^10.0.0",
+    "eslint": "^9.39.2",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "typescript-eslint": "^8.56.0",
+    "vitest": "^3.0.0"
+  }
+}
