@@ -10,17 +10,16 @@
 import type { LanguageModel } from 'ai';
 import { generateText, Output } from 'ai';
 import { z } from 'zod';
-import type { ToolAnnotation, CompiledRule, ArgumentRole } from './types.js';
+import type { ToolAnnotation, CompiledRule } from './types.js';
+import { isArgumentRole, getArgumentRoleValues } from '../types/argument-roles.js';
 
 export interface CompilerConfig {
   sandboxDirectory: string;
   protectedPaths: string[];
 }
 
-const VALID_ROLES: ArgumentRole[] = ['read-path', 'write-path', 'delete-path', 'none'];
-
 const pathConditionSchema = z.object({
-  roles: z.array(z.enum(['read-path', 'write-path', 'delete-path', 'none'])),
+  roles: z.array(z.enum(getArgumentRoleValues())),
   within: z.string(),
 });
 
@@ -33,7 +32,7 @@ function buildCompilerResponseSchema(
     description: z.string(),
     principle: z.string(),
     if: z.object({
-      roles: z.array(z.enum(['read-path', 'write-path', 'delete-path', 'none'])).optional(),
+      roles: z.array(z.enum(getArgumentRoleValues())).optional(),
       server: z.array(z.enum(serverNames)).optional(),
       tool: z.array(z.enum(toolNames)).optional(),
       sideEffects: z.boolean().optional(),
@@ -145,7 +144,7 @@ export function validateCompiledRules(
     // Validate top-level roles
     if (rule.if.roles) {
       for (const role of rule.if.roles) {
-        if (!VALID_ROLES.includes(role)) {
+        if (!isArgumentRole(role)) {
           errors.push(`Rule "${rule.name}": invalid role "${role}" in roles`);
         }
       }
@@ -154,7 +153,7 @@ export function validateCompiledRules(
     // Validate path roles
     if (rule.if.paths) {
       for (const role of rule.if.paths.roles) {
-        if (!VALID_ROLES.includes(role)) {
+        if (!isArgumentRole(role)) {
           errors.push(`Rule "${rule.name}": invalid role "${role}" in paths.roles`);
         }
       }

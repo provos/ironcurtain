@@ -6,7 +6,7 @@ import { PolicyEngine } from './policy-engine.js';
 import { MCPClientManager } from './mcp-client-manager.js';
 import { AuditLog } from './audit-log.js';
 import { EscalationHandler } from './escalation.js';
-import { normalizeToolArgPaths } from './path-utils.js';
+import { prepareToolArgs } from './path-utils.js';
 import * as logger from '../logger.js';
 
 export type EscalationPromptFn = (request: ToolCallRequest, reason: string) => Promise<'approved' | 'denied'>;
@@ -54,12 +54,14 @@ export class TrustedProcess {
   async handleToolCall(request: ToolCallRequest): Promise<ToolCallResult> {
     const startTime = Date.now();
 
-    // Normalize paths in arguments before policy evaluation (security: tilde expansion, traversal resolution)
-    const normalizedArgs = normalizeToolArgPaths(request.arguments);
-    const normalizedRequest = { ...request, arguments: normalizedArgs };
+    // Annotation-driven normalization: split into transport vs policy args
+    const annotation = this.policyEngine.getAnnotation(request.serverName, request.toolName);
+    const { argsForTransport, argsForPolicy } = prepareToolArgs(request.arguments, annotation);
+    const policyRequest = { ...request, arguments: argsForPolicy };
+    const transportRequest = { ...request, arguments: argsForTransport };
 
     // Step 1: Evaluate request against the policy rule chain
-    const evaluation = this.policyEngine.evaluate(normalizedRequest);
+    const evaluation = this.policyEngine.evaluate(policyRequest);
     const policyDecision: PolicyDecision = {
       status: evaluation.decision,
       rule: evaluation.rule,
@@ -75,8 +77,8 @@ export class TrustedProcess {
       // Step 2: Handle escalation via human approval
       if (evaluation.decision === 'escalate') {
         escalationResult = this.onEscalation
-          ? await this.onEscalation(normalizedRequest, evaluation.reason)
-          : await this.escalation.prompt(normalizedRequest, evaluation.reason);
+          ? await this.onEscalation(transportRequest, evaluation.reason)
+          : await this.escalation.prompt(transportRequest, evaluation.reason);
 
         if (escalationResult === 'approved') {
           policyDecision.status = 'allow';
@@ -87,12 +89,12 @@ export class TrustedProcess {
         }
       }
 
-      // Step 3: Forward to MCP server or deny
+      // Step 3: Forward to MCP server or deny (using transport args)
       if (policyDecision.status === 'allow') {
         resultContent = await this.mcpManager.callTool(
-          normalizedRequest.serverName,
-          normalizedRequest.toolName,
-          normalizedRequest.arguments,
+          transportRequest.serverName,
+          transportRequest.toolName,
+          transportRequest.arguments,
         );
         resultStatus = 'success';
       } else {
@@ -107,13 +109,13 @@ export class TrustedProcess {
 
     const durationMs = Date.now() - startTime;
 
-    // Step 4: Append-only audit log (records normalized paths)
+    // Step 4: Append-only audit log (records argsForTransport -- what was sent to MCP server)
     const auditEntry: AuditEntry = {
       timestamp: new Date().toISOString(),
-      requestId: normalizedRequest.requestId,
-      serverName: normalizedRequest.serverName,
-      toolName: normalizedRequest.toolName,
-      arguments: normalizedRequest.arguments,
+      requestId: transportRequest.requestId,
+      serverName: transportRequest.serverName,
+      toolName: transportRequest.toolName,
+      arguments: transportRequest.arguments,
       policyDecision,
       escalationResult,
       result: {
@@ -127,7 +129,7 @@ export class TrustedProcess {
 
     // Step 5: Return result to caller
     return {
-      requestId: normalizedRequest.requestId,
+      requestId: transportRequest.requestId,
       status: resultStatus,
       content: resultContent,
       policyDecision,

@@ -84,6 +84,20 @@ Both use the same PolicyEngine with compiled artifacts.
 - `getSessionLogPath()` added to `src/config/paths.ts`
 - Session factory calls `setup()`, session close calls `teardown()`
 
+## ArgumentRole Registry Design (designed 2026-02-18)
+- See design spec in conversation for full details
+- New file: `src/types/argument-roles.ts` -- canonical source for ArgumentRole type + RoleDefinition registry
+- `src/pipeline/types.ts` re-exports ArgumentRole for backward compat
+- `normalizeToolArgsFromAnnotation(args, annotation)` in path-utils.ts replaces heuristic normalization
+- PolicyEngine gets `getAnnotation()` public method to expose annotation lookup
+- Heuristic `normalizeToolArgPaths` retained (deprecated) for defense-in-depth in structural invariants
+- Registry uses ReadonlyMap<ArgumentRole, RoleDefinition> with normalize function per role
+- getResourceRoles() replaces hardcoded `['read-path', 'write-path', 'delete-path']`
+- getArgumentRoleValues() returns tuple for z.enum() compatibility in Zod schemas
+- Compile-time completeness check ensures every union member has a registry entry
+- Generated JSON artifacts unchanged (roles stay as strings)
+- 4-PR migration: (1) add registry, (2) pipeline strings, (3) engine strings, (4) annotation-driven normalization
+
 ## NOT Implemented (aspirational in docs)
 - Per-task policy layer
 - Runtime LLM assessment (semantic checks)

@@ -20,6 +20,7 @@ import type {
   CompiledRule,
   ArgumentRole,
 } from '../pipeline/types.js';
+import { getResourceRoles, getRoleDefinition } from '../types/argument-roles.js';
 
 /**
  * Heuristically extracts filesystem paths from tool call arguments.
@@ -106,7 +107,7 @@ function collectDistinctRoles(annotation: ToolAnnotation): ArgumentRole[] {
   const roles = new Set<ArgumentRole>();
   for (const argRoles of Object.values(annotation.args)) {
     for (const role of argRoles) {
-      if (role !== 'none') roles.add(role);
+      if (getRoleDefinition(role).isResourceIdentifier) roles.add(role);
     }
   }
   return [...roles];
@@ -161,6 +162,11 @@ export class PolicyEngine {
     return map;
   }
 
+  /** Returns the annotation for a tool, or undefined if unknown. */
+  getAnnotation(serverName: string, toolName: string): ToolAnnotation | undefined {
+    return this.annotationMap.get(`${serverName}__${toolName}`);
+  }
+
   evaluate(request: ToolCallRequest): EvaluationResult {
     // Phase 1: Structural invariants
     const structuralResult = this.evaluateStructuralInvariants(request);
@@ -182,7 +188,7 @@ export class PolicyEngine {
     const heuristicPaths = extractPathsHeuristic(request.arguments);
     const annotation = this.annotationMap.get(`${request.serverName}__${request.toolName}`);
 
-    const allPathRoles: ArgumentRole[] = ['read-path', 'write-path', 'delete-path'];
+    const allPathRoles = getResourceRoles();
     const annotatedPaths = annotation
       ? extractAnnotatedPaths(request.arguments, annotation, allPathRoles)
       : [];

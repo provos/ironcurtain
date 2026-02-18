@@ -25,6 +25,15 @@
 - `onStepFinish` callback receives `(stepResult: StepResult<TOOLS>)` -- no `stepIndex` parameter
 - `ModelMessage` importable from both `ai` and `@ai-sdk/provider-utils`
 
+## ArgumentRole Registry
+- **Canonical location**: `src/types/argument-roles.ts` -- type, registry, normalizers, accessors
+- **Re-exported from**: `src/pipeline/types.ts` (backward compat: `ArgumentRole`, `isArgumentRole`, `getArgumentRoleValues`)
+- **Key exports**: `ARGUMENT_ROLE_REGISTRY`, `getRoleDefinition()`, `getResourceRoles()`, `isArgumentRole()`, `getArgumentRoleValues()`, `expandTilde()`, `normalizePath()`
+- **Normalizers**: path roles use `normalizePath` (tilde expand + resolve), `none` uses identity
+- **prepareToolArgs()**: in `src/trusted-process/path-utils.ts` -- annotation-driven normalization, returns `{ argsForTransport, argsForPolicy }`
+- **PolicyEngine.getAnnotation()**: public method to look up ToolAnnotation for a tool
+- **Heuristic fallback**: `normalizeToolArgPaths()` is `@deprecated` but retained for defense-in-depth and fallback when no annotation
+
 ## ToolAnnotation shape (post-refactor)
 - Fields: `toolName`, `serverName`, `comment` (string), `sideEffects` (boolean), `args` (Record<string, ArgumentRole[]>)
 - No `effect` field -- argument roles are the single source of truth

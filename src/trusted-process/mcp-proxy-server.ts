@@ -34,7 +34,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { loadGeneratedPolicy } from '../config/index.js';
 import { PolicyEngine } from './policy-engine.js';
 import { AuditLog } from './audit-log.js';
-import { normalizeToolArgPaths } from './path-utils.js';
+import { prepareToolArgs } from './path-utils.js';
 import type { ToolCallRequest } from '../types/mcp.js';
 import type { AuditEntry } from '../types/audit.js';
 import type { MCPServerConfig } from '../config/types.js';
@@ -192,7 +192,6 @@ async function main(): Promise<void> {
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
     const toolName = req.params.name;
     const rawArgs = (req.params.arguments ?? {}) as Record<string, unknown>;
-    const args = normalizeToolArgPaths(rawArgs);
     const toolInfo = toolMap.get(toolName);
 
     if (!toolInfo) {
@@ -202,11 +201,15 @@ async function main(): Promise<void> {
       };
     }
 
+    // Annotation-driven normalization: split into transport vs policy args
+    const annotation = policyEngine.getAnnotation(toolInfo.serverName, toolInfo.name);
+    const { argsForTransport, argsForPolicy } = prepareToolArgs(rawArgs, annotation);
+
     const request: ToolCallRequest = {
       requestId: uuidv4(),
       serverName: toolInfo.serverName,
       toolName: toolInfo.name,
-      arguments: args,
+      arguments: argsForPolicy,
       timestamp: new Date().toISOString(),
     };
 
@@ -221,14 +224,14 @@ async function main(): Promise<void> {
     // escalation falls through to the forwarding section below.
     let escalationResult: 'approved' | 'denied' | undefined;
 
-    // Build the base audit entry; result fields are set per branch below
+    // Audit log records argsForTransport (what was actually sent to the MCP server)
     function logAudit(result: AuditEntry['result'], durationMs: number, overrideEscalation?: 'approved' | 'denied'): void {
       const entry: AuditEntry = {
         timestamp: request.timestamp,
         requestId: request.requestId,
         serverName: request.serverName,
         toolName: request.toolName,
-        arguments: request.arguments,
+        arguments: argsForTransport,
         policyDecision,
         escalationResult: overrideEscalation ?? escalationResult,
         result,
@@ -256,7 +259,7 @@ async function main(): Promise<void> {
         escalationId,
         serverName: request.serverName,
         toolName: request.toolName,
-        arguments: request.arguments,
+        arguments: argsForTransport,
         reason: evaluation.reason,
       });
 
@@ -282,13 +285,13 @@ async function main(): Promise<void> {
       };
     }
 
-    // Policy allows -- forward to the real MCP server
+    // Policy allows -- forward to the real MCP server with transport args
     const startTime = Date.now();
     try {
       const client = clients.get(toolInfo.serverName)!;
       const result = await client.callTool({
         name: toolInfo.name,
-        arguments: args,
+        arguments: argsForTransport,
       });
 
       logAudit({ status: 'success' }, Date.now() - startTime);

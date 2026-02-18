@@ -11,6 +11,7 @@ import type { LanguageModel } from 'ai';
 import { generateText, Output } from 'ai';
 import { z } from 'zod';
 import type { ToolAnnotation } from './types.js';
+import { getArgumentRoleValues, getRoleDefinition } from '../types/argument-roles.js';
 
 // Input type matching what MCP's listTools() returns
 export interface MCPToolSchema {
@@ -19,7 +20,7 @@ export interface MCPToolSchema {
   inputSchema: Record<string, unknown>;
 }
 
-const argumentRoleSchema = z.enum(['read-path', 'write-path', 'delete-path', 'none']);
+const argumentRoleSchema = z.enum(getArgumentRoleValues());
 
 // LLMs sometimes return a bare string instead of a single-element array.
 // Accept both formats and normalize to an array.
@@ -175,7 +176,7 @@ export function validateAnnotationsHeuristic(
       if (!looksLikePathArgument(argName)) continue;
 
       const roles = annotation.args[argName];
-      const hasPathRole = roles && roles.some(r => r !== 'none');
+      const hasPathRole = roles && roles.some(r => getRoleDefinition(r).isResourceIdentifier);
 
       if (!hasPathRole) {
         warnings.push(
@@ -187,7 +188,7 @@ export function validateAnnotationsHeuristic(
     // Check for path-like default values or examples
     if (hasPathLikeValues(tool.inputSchema)) {
       const hasAnyPathRole = Object.values(annotation.args).some(
-        roles => roles.some(r => r !== 'none'),
+        roles => roles.some(r => getRoleDefinition(r).isResourceIdentifier),
       );
       if (!hasAnyPathRole) {
         warnings.push(

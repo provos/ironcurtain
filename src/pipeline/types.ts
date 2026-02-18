@@ -11,7 +11,10 @@
 // Tool Annotations
 // ---------------------------------------------------------------------------
 
-export type ArgumentRole = 'read-path' | 'write-path' | 'delete-path' | 'none';
+// Canonical definition lives in src/types/argument-roles.ts.
+// Re-exported here for backward compatibility with pipeline consumers.
+export type { ArgumentRole } from '../types/argument-roles.js';
+export { isArgumentRole, getArgumentRoleValues } from '../types/argument-roles.js';
 
 export interface ToolAnnotation {
   toolName: string;

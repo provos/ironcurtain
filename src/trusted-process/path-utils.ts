@@ -1,13 +1,16 @@
 /**
  * Path normalization utilities for the trusted process security boundary.
  *
- * Normalizes path-like tool arguments before policy evaluation so that
- * tilde paths, relative paths, and path traversals cannot bypass
- * containment checks.
+ * Provides annotation-driven normalization via `prepareToolArgs()` and a
+ * legacy heuristic fallback via `normalizeToolArgPaths()`. The heuristic
+ * is retained for defense-in-depth and as a fallback when annotations are
+ * unavailable.
  */
 
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
+import { getRoleDefinition } from '../types/argument-roles.js';
+import type { ToolAnnotation, ArgumentRole } from '../pipeline/types.js';
 
 /**
  * Expands a leading `~` or `~/` to the current user's home directory.
@@ -38,6 +41,9 @@ function normalizePath(value: string): string {
  * Non-string and non-path values pass through unchanged.
  *
  * The input object is never mutated.
+ *
+ * @deprecated Use `prepareToolArgs()` with annotation-driven normalization.
+ * Retained as a fallback when annotations are unavailable.
  */
 export function normalizeToolArgPaths(
   args: Record<string, unknown>,
@@ -59,4 +65,90 @@ export function normalizeToolArgPaths(
   }
 
   return result;
+}
+
+// ---------------------------------------------------------------------------
+// Annotation-driven normalization
+// ---------------------------------------------------------------------------
+
+export interface PreparedToolArgs {
+  /** Canonical args sent to the real MCP server. */
+  argsForTransport: Record<string, unknown>;
+  /** Args presented to the policy engine (may differ if prepareForPolicy is defined). */
+  argsForPolicy: Record<string, unknown>;
+}
+
+/**
+ * Finds the first resource-identifier role in a role array, or undefined
+ * if all roles are non-resource (e.g., 'none').
+ */
+function findResourceRole(roles: ArgumentRole[]): ArgumentRole | undefined {
+  return roles.find(r => getRoleDefinition(r).isResourceIdentifier);
+}
+
+/**
+ * Normalizes a single argument value using a role's normalizer.
+ * Handles both string and string-array values. Non-string values
+ * pass through unchanged.
+ */
+function normalizeArgValue(
+  value: unknown,
+  normalize: (v: string) => string,
+): unknown {
+  if (typeof value === 'string') {
+    return normalize(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map(item =>
+      typeof item === 'string' ? normalize(item) : item,
+    );
+  }
+  return value;
+}
+
+/**
+ * Annotation-driven normalization of tool call arguments.
+ *
+ * For each argument, looks up its annotated roles and applies the
+ * corresponding normalizer from the registry. Returns two argument
+ * objects: one for transport (MCP server) and one for policy evaluation.
+ *
+ * When `annotation` is undefined (unknown tool), falls back to the
+ * heuristic `normalizeToolArgPaths()` for both outputs.
+ *
+ * The input object is never mutated.
+ */
+export function prepareToolArgs(
+  args: Record<string, unknown>,
+  annotation: ToolAnnotation | undefined,
+): PreparedToolArgs {
+  if (!annotation) {
+    const fallback = normalizeToolArgPaths(args);
+    return { argsForTransport: fallback, argsForPolicy: fallback };
+  }
+
+  const argsForTransport: Record<string, unknown> = {};
+  const argsForPolicy: Record<string, unknown> = {};
+
+  for (const [key, value] of Object.entries(args)) {
+    const roles = annotation.args[key];
+    const resourceRole = roles ? findResourceRole(roles) : undefined;
+
+    if (resourceRole) {
+      const def = getRoleDefinition(resourceRole);
+      const transportValue = normalizeArgValue(value, def.normalize);
+      argsForTransport[key] = transportValue;
+
+      if (def.prepareForPolicy) {
+        argsForPolicy[key] = normalizeArgValue(transportValue, def.prepareForPolicy);
+      } else {
+        argsForPolicy[key] = transportValue;
+      }
+    } else {
+      argsForTransport[key] = value;
+      argsForPolicy[key] = value;
+    }
+  }
+
+  return { argsForTransport, argsForPolicy };
 }
