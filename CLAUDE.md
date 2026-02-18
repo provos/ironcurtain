@@ -34,7 +34,7 @@ The security kernel. Two modes of operation:
 1. **Proxy mode** (`mcp-proxy-server.ts`) — standalone process for Code Mode. Has its own PolicyEngine and AuditLog instances.
 2. **In-process mode** (`index.ts`) — `TrustedProcess` class used by integration tests and the direct-tool-call fallback. Orchestrates PolicyEngine, MCPClientManager, EscalationHandler, and AuditLog.
 
-**PolicyEngine** (`policy-engine.ts`) — evaluates requests against an ordered rule chain. First matching rule wins. Rules: protect structural files → deny deletes → allow reads in sandbox → deny reads outside → allow writes in sandbox → escalate writes outside → default deny.
+**PolicyEngine** (`policy-engine.ts`) — two-phase evaluation. Phase 1: structural invariants (hardcoded) — protected paths + unknown tool denial. Phase 2: compiled declarative rules from `compiled-policy.json` — first match wins per role, most restrictive across roles. Multi-role arguments (e.g., `edit_file` with read-path + write-path) are evaluated independently per role; the most restrictive result wins (deny > escalate > allow).
 
 **EscalationHandler** (`escalation.ts`) — CLI-based human approval for escalated requests. Can be overridden via `onEscalation` callback (used in tests).
 
@@ -42,8 +42,16 @@ The security kernel. Two modes of operation:
 
 **AuditLog** (`audit-log.ts`) — append-only JSONL logging.
 
+### Policy Compilation Pipeline (`src/pipeline/`)
+Offline pipeline (`npm run compile-policy`) that produces generated artifacts in `src/config/generated/`:
+- **tool-annotations.json** — LLM-classified tool capabilities (argument roles: read-path, write-path, delete-path, none)
+- **compiled-policy.json** — declarative rules compiled from `src/config/constitution.md` via LLM
+- **test-scenarios.json** — LLM-generated + handwritten test scenarios
+
+All artifacts use content-hash caching (`inputHash`) to skip unnecessary LLM calls. The LLM prompt text is included in the hash so template changes invalidate the cache. Artifacts are written to disk immediately after each step (not gated on verification). LLM interactions logged to `llm-interactions.jsonl`.
+
 ### Configuration (`src/config/`)
-`loadConfig()` reads from environment variables (`ANTHROPIC_API_KEY`, `AUDIT_LOG_PATH`, `ALLOWED_DIRECTORY`) and `src/config/mcp-servers.json` for MCP server definitions. The `ALLOWED_DIRECTORY` (default `/tmp/ironcurtain-sandbox`) defines the sandbox boundary for policy evaluation. Requires a `.env` file (loaded via `dotenv/config` in `src/index.ts`).
+`loadConfig()` reads from environment variables (`ANTHROPIC_API_KEY`, `AUDIT_LOG_PATH`, `ALLOWED_DIRECTORY`) and `src/config/mcp-servers.json` for MCP server definitions. The `ALLOWED_DIRECTORY` (default `/tmp/ironcurtain-sandbox`) defines the sandbox boundary for policy evaluation. Requires a `.env` file (loaded via `dotenv/config` in `src/index.ts`). `loadGeneratedPolicy()` loads compiled artifacts from `src/config/generated/`.
 
 ### Types (`src/types/`)
 Shared types: `ToolCallRequest`/`ToolCallResult`/`PolicyDecision` in `mcp.ts`, `AuditEntry` in `audit.ts`. Policy decisions have three states: `allow`, `deny`, `escalate`.
