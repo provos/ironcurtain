@@ -1,6 +1,6 @@
 # Design: Policy Compilation Pipeline
 
-**Status:** Draft v4
+**Status:** Implemented
 **Date:** 2026-02-17
 
 ## Problem
@@ -41,7 +41,7 @@ constitution.md + MCP tool schemas
 +---------------------------+
 ```
 
-If the verifier passes, the artifacts are written to `src/config/generated/`. At runtime, `PolicyEngine` loads `compiled-policy.json` and `tool-annotations.json` and evaluates declaratively -- no hardcoded tool sets.
+Artifacts are written to `src/config/generated/` as each pipeline step completes (regardless of whether verification passes). At runtime, `PolicyEngine` loads `compiled-policy.json` and `tool-annotations.json` and evaluates declaratively -- no hardcoded tool sets.
 
 **Critical architectural constraint:** Structural invariants are **never** part of the compiled policy. They are hardcoded in the PolicyEngine and evaluated before any compiled rules. See Section 7 for details.
 
@@ -51,7 +51,7 @@ If the verifier passes, the artifacts are written to `src/config/generated/`. At
 
 ### 1. Tool Annotation Schema
 
-Each MCP tool is annotated with its **effect**, whether it has **side effects**, and the **roles** of its arguments. An argument can carry multiple roles (e.g., the source of a move is both a read-path and a delete-path).
+Each MCP tool is annotated with whether it has **side effects** and the **roles** of its arguments. Argument roles are the single source of truth for tool classification -- there is no separate `effect` field. An argument can carry multiple roles (e.g., the source of a move is both a read-path and a delete-path).
 
 ```typescript
 type ArgumentRole = 'read-path' | 'write-path' | 'delete-path' | 'none';
@@ -59,7 +59,7 @@ type ArgumentRole = 'read-path' | 'write-path' | 'delete-path' | 'none';
 interface ToolAnnotation {
   toolName: string;
   serverName: string;
-  effect: 'read' | 'write' | 'delete' | 'move' | 'other';
+  comment: string;                // LLM-generated description of the tool's purpose
   sideEffects: boolean;           // false = no security-relevant side effects (no state changes, no information disclosure)
   args: Record<string, ArgumentRole[]>;
 }
@@ -67,8 +67,8 @@ interface ToolAnnotation {
 // Per-server annotations file
 interface ToolAnnotationsFile {
   generatedAt: string;
-  constitutionHash: string;
   servers: Record<string, {
+    inputHash: string;            // content hash for caching (see Section 9)
     tools: ToolAnnotation[];
   }>;
 }
@@ -91,7 +91,7 @@ interface ToolAnnotationsFile {
 {
   "toolName": "move_file",
   "serverName": "filesystem",
-  "effect": "move",
+  "comment": "Moves a file from source to destination, deleting the source",
   "sideEffects": true,
   "args": {
     "source": ["read-path", "delete-path"],
@@ -106,7 +106,7 @@ The `source` of a move carries both `read-path` and `delete-path` roles. This me
 {
   "toolName": "list_allowed_directories",
   "serverName": "filesystem",
-  "effect": "read",
+  "comment": "Lists directories the server is allowed to access",
   "sideEffects": false,
   "args": {}
 }
@@ -121,7 +121,7 @@ No arguments, no side effects. The compiled policy can include a rule allowing s
 **Process:** Single LLM call per server. The prompt provides:
 - The tool name, description, and input schema for every tool on that server.
 - The `ToolAnnotation` output schema with role definitions.
-- Instructions to classify each tool's effect, determine whether it has side effects (in security terms: state changes OR information disclosure from resource paths), and map argument names to roles. An argument may have multiple roles. Tools with path arguments should be marked `sideEffects: true` even if they only read.
+- Instructions to determine whether each tool has side effects (in security terms: state changes OR information disclosure from resource paths) and map argument names to roles. An argument may have multiple roles. Tools with path arguments should be marked `sideEffects: true` even if they only read.
 
 **Output:** `ToolAnnotation[]` for the server.
 
@@ -130,7 +130,7 @@ No arguments, no side effects. The compiled policy can include a rule allowing s
 **Design notes:**
 - Single-pass (no verifier for annotations). The constitution verifier downstream validates the overall pipeline.
 - The annotator does not see the constitution. It classifies tools purely by their schemas and descriptions.
-- Module exports a function with signature:
+- Module exports the main function and a prompt builder (for hash computation):
 
 ```typescript
 async function annotateTools(
@@ -138,11 +138,16 @@ async function annotateTools(
   tools: Tool[],               // MCP Tool type from listTools()
   llm: LanguageModel            // AI SDK model instance (injectable for testing)
 ): Promise<ToolAnnotation[]>
+
+function buildAnnotationPrompt(
+  serverName: string,
+  tools: Tool[],
+): string                       // exported for content-hash computation
 ```
 
 ### 3. Constitution Compiler (`src/pipeline/constitution-compiler.ts`)
 
-**Input:** Constitution text + tool annotations + system config (concrete directory paths for sandbox, documents, etc.).
+**Input:** Constitution text + tool annotations + system config (`CompilerConfig` with `sandboxDirectory: string` and `protectedPaths: string[]`).
 
 **Process:** Single LLM call. The prompt provides:
 - The full constitution text.
@@ -156,23 +161,29 @@ async function annotateTools(
 
 ```typescript
 interface PathCondition {
-  roles: ArgumentRole[];           // which argument roles to check
+  roles: ArgumentRole[];           // which argument roles to extract paths from
   within: string;                  // concrete absolute directory path
   // True if ALL extracted paths resolve to within this directory.
   // Zero extracted paths = condition not satisfied (rule does not match).
+}
+
+interface CompiledRuleCondition {
+  roles?: ArgumentRole[];          // match tools with any argument having these roles (blanket rules)
+  server?: string[];               // server names to match (omit = all)
+  tool?: string[];                 // specific tool names (omit = all)
+  sideEffects?: boolean;           // match on side-effect annotation (omit = don't filter)
+  paths?: PathCondition;           // if present, rule only fires when path condition is met
+  // Note: `roles` and `paths` serve different purposes. `roles` is for blanket
+  // matching (e.g., "deny all tools with delete-path args"). `paths` extracts
+  // concrete path values and checks containment. They should not both appear
+  // in the same rule.
 }
 
 interface CompiledRule {
   name: string;
   description: string;
   principle: string;               // which constitution principle this implements
-  if: {
-    effect?: string[];             // tool effects to match (read/write/delete/move/other)
-    server?: string[];             // server names to match (omit = all)
-    tool?: string[];               // specific tool names (omit = all matching effects)
-    sideEffects?: boolean;         // match on side-effect annotation (omit = don't filter)
-    paths?: PathCondition;         // if present, rule only fires when path condition is met
-  };
+  if: CompiledRuleCondition;
   then: 'allow' | 'deny' | 'escalate';
   reason: string;
 }
@@ -180,6 +191,7 @@ interface CompiledRule {
 interface CompiledPolicyFile {
   generatedAt: string;
   constitutionHash: string;
+  inputHash: string;               // content hash for caching (see Section 9)
   rules: CompiledRule[];
 }
 ```
@@ -188,7 +200,7 @@ interface CompiledPolicyFile {
 
 1. Rules are evaluated in order. First matching rule wins.
 2. A rule **matches** if ALL conditions in the `if` block are true:
-   - `effect` is absent OR the tool's annotated effect is in the list.
+   - `roles` is absent OR the tool has at least one argument whose annotated roles include any role in the list.
    - `server` is absent OR the request's server is in the list.
    - `tool` is absent OR the request's tool is in the list.
    - `sideEffects` is absent OR the tool's `sideEffects` annotation matches the value.
@@ -223,56 +235,35 @@ In this example, the sandbox is at `/tmp/ironcurtain-sandbox`. A richer constitu
     },
     {
       "name": "deny-delete-operations",
-      "description": "Block all tools that delete data",
+      "description": "Block all tools that carry a delete-path role argument",
       "principle": "No destruction",
-      "if": { "effect": ["delete"] },
+      "if": { "roles": ["delete-path"] },
       "then": "deny",
-      "reason": "Delete operations are never permitted"
+      "reason": "Delete operations are never permitted. This also catches move_file because its source argument has a delete-path role."
     },
     {
-      "name": "allow-move-within-sandbox",
-      "description": "Allow moves where all paths (source and destination) are in sandbox",
-      "principle": "Containment",
-      "if": {
-        "effect": ["move"],
-        "paths": { "roles": ["read-path", "write-path", "delete-path"], "within": "/tmp/ironcurtain-sandbox" }
-      },
-      "then": "allow",
-      "reason": "Move within sandbox directory"
-    },
-    {
-      "name": "deny-move-elsewhere",
-      "description": "Moves involving paths outside sandbox are denied (source deletion = destruction)",
-      "principle": "No destruction",
-      "if": { "effect": ["move"] },
-      "then": "deny",
-      "reason": "Move outside sandbox would delete source file outside controlled directory"
-    },
-    {
-      "name": "allow-read-in-sandbox",
+      "name": "allow-sandbox-read",
       "description": "Allow reading files within the sandbox directory",
       "principle": "Containment",
       "if": {
-        "effect": ["read"],
         "paths": { "roles": ["read-path"], "within": "/tmp/ironcurtain-sandbox" }
       },
       "then": "allow",
       "reason": "Read within sandbox directory"
     },
     {
-      "name": "deny-read-elsewhere",
-      "description": "Deny reading files outside permitted directories",
-      "principle": "Containment",
-      "if": { "effect": ["read"] },
-      "then": "deny",
-      "reason": "Read outside permitted directories"
+      "name": "escalate-read-elsewhere",
+      "description": "Reads outside permitted directories need human approval",
+      "principle": "Human oversight",
+      "if": { "roles": ["read-path"] },
+      "then": "escalate",
+      "reason": "Read outside permitted directories requires human approval"
     },
     {
-      "name": "allow-write-in-sandbox",
+      "name": "allow-sandbox-write",
       "description": "Allow writes where all paths are within sandbox",
       "principle": "Containment",
       "if": {
-        "effect": ["write"],
         "paths": { "roles": ["write-path"], "within": "/tmp/ironcurtain-sandbox" }
       },
       "then": "allow",
@@ -282,7 +273,7 @@ In this example, the sandbox is at `/tmp/ironcurtain-sandbox`. A richer constitu
       "name": "escalate-write-elsewhere",
       "description": "Writes outside sandbox need human approval",
       "principle": "Human oversight",
-      "if": { "effect": ["write"] },
+      "if": { "roles": ["write-path"] },
       "then": "escalate",
       "reason": "Write outside sandbox requires human approval"
     }
@@ -290,9 +281,9 @@ In this example, the sandbox is at `/tmp/ironcurtain-sandbox`. A richer constitu
 }
 ```
 
-Note how move is handled with two rules: the first allows moves only when ALL paths (source with `read-path` + `delete-path` roles, destination with `write-path`) are within the sandbox. Any move involving an external path falls through to `deny-move-elsewhere`, which denies because moving implies deleting the source -- a destructive operation outside the controlled directory. This works because `source` is annotated with `["read-path", "delete-path"]`.
+Note how all moves are denied by the `deny-delete-operations` rule: `move_file`'s source argument carries `["read-path", "delete-path"]` roles, so any move matches the blanket `roles: ["delete-path"]` condition. No separate move-specific rules are needed.
 
-A richer constitution allowing read access to a documents folder would add a rule before `deny-read-elsewhere`:
+A richer constitution allowing read access to a documents folder would add a rule before `escalate-read-elsewhere`:
 
 ```json
 {
@@ -300,7 +291,6 @@ A richer constitution allowing read access to a documents folder would add a rul
   "description": "Allow reading files in the user's documents folder",
   "principle": "Containment",
   "if": {
-    "effect": ["read"],
     "paths": { "roles": ["read-path"], "within": "/home/user/Documents" }
   },
   "then": "allow",
@@ -317,7 +307,7 @@ A richer constitution allowing read access to a documents folder would add a rul
 - Generate test scenarios: concrete tool call examples with expected policy decisions.
 - Cover positive cases (should be allowed), negative cases (should be denied), and edge cases (boundary conditions, path traversal attempts).
 - Include scenarios for side-effect-free tools.
-- Include scenarios for multi-role arguments (e.g., `move_file` with all permutations: sandbox-to-sandbox, sandbox-to-external, external-to-sandbox, external-to-external).
+- Include scenarios for multi-role arguments (e.g., `move_file` -- all permutations should be denied because the source has a `delete-path` role).
 
 **Output:** `TestScenario[]`
 
@@ -337,6 +327,7 @@ interface TestScenario {
 interface TestScenariosFile {
   generatedAt: string;
   constitutionHash: string;
+  inputHash: string;               // content hash for caching (see Section 9)
   scenarios: TestScenario[];
 }
 ```
@@ -345,17 +336,20 @@ interface TestScenariosFile {
 
 The handwritten scenarios cover:
 - Read inside sandbox, allow
-- Read outside sandbox, deny
+- Read outside sandbox, escalate
+- List directory inside sandbox, allow
+- Search files inside sandbox, allow
 - Write inside sandbox, allow
 - Write outside sandbox, escalate
-- Delete, deny
-- Path traversal attempts, deny
-- Protected path access, deny (structural invariant)
-- Move sandbox-to-sandbox, allow
-- Move sandbox-to-external, escalate
-- Move external-to-sandbox, deny (source deletion outside sandbox)
-- Side-effect-free tool, allow
-- Unknown tool, deny
+- Delete inside sandbox, deny
+- Delete outside sandbox, deny
+- Path traversal attempt, escalate (resolves outside sandbox)
+- Move sandbox-to-sandbox, deny (source has delete-path role)
+- Move sandbox-to-external, deny (source has delete-path role)
+- Move external-to-sandbox, deny (source has delete-path role)
+- Move external-to-external, deny (source has delete-path role)
+- Side-effect-free tool (`list_allowed_directories`), allow
+- Unknown tool, deny (structural invariant)
 
 ### 5. Policy Verifier (`src/pipeline/policy-verifier.ts`)
 
@@ -363,7 +357,7 @@ The verifier is a **multi-round loop** that executes test scenarios against the 
 
 **Round 1 -- Execute and judge:**
 
-1. Instantiate a real `PolicyEngine` with the compiled policy, tool annotations, and structural invariant config.
+1. Instantiate a real `PolicyEngine` with the compiled policy, tool annotations, and `protectedPaths`.
 2. Run every test scenario (handwritten + LLM-generated) through the engine.
 3. Collect execution results: for each scenario, the actual decision, matching rule, and whether it matches the expected decision.
 4. Send to Verifier LLM: the constitution, the compiled rules, the tool annotations, and the full execution results table. The LLM is asked to:
@@ -407,7 +401,7 @@ interface VerificationResult {
 
 **Design notes:**
 - The verifier is told about structural invariants so it understands the complete policy stack.
-- If verification fails, the command prints diagnostics and exits with a non-zero code.
+- If verification fails, the command prints diagnostics and exits with a non-zero code. Artifacts remain on disk for inspection and caching (verification is a quality report, not a deployment gate).
 - The multi-round loop lets the verifier probe edges it's suspicious about, similar to an engineer running tests, reading failures, and writing more targeted tests.
 - Future enhancement: feed failures back to the compiler for a re-compilation attempt. Not in tracer bullet scope.
 
@@ -436,11 +430,22 @@ class PolicyEngine {
 3. Check each resolved path against `protectedPaths`. If any path is a protected path or is within a protected directory, return `{ decision: 'deny', rule: 'structural-protected-path', reason: '...' }`.
 4. If the tool has no annotation (unknown tool), return `{ decision: 'deny', rule: 'structural-unknown-tool', reason: '...' }`.
 
-**Phase 2 -- Compiled rules:**
+**Phase 2 -- Compiled rules with multi-role evaluation:**
 
 5. Look up `ToolAnnotation` for `request.serverName + request.toolName`.
-6. For each rule in `compiledPolicy.rules` (in order):
-   a. Check `if.effect` -- does the tool's effect match?
+6. Collect all distinct non-`none` roles from the tool's annotation (e.g., `edit_file` might have `read-path` and `write-path`).
+
+**If the tool has no roles** (e.g., `list_allowed_directories`), evaluate the rule chain once without role filtering. First matching rule wins.
+
+**If the tool has one or more roles**, evaluate the rule chain independently for each role. For each role evaluation:
+   - Rules with role-related conditions (`roles` or `paths`) are only considered if they are relevant to the current role.
+   - Rules without role conditions (role-agnostic) are always considered.
+   - First matching rule wins for that role.
+
+The **most restrictive result** across all per-role evaluations wins: `deny > escalate > allow`. This ensures that a tool like `move_file` (with `read-path`, `write-path`, and `delete-path` roles) is denied if any single role triggers a deny, even if the other roles would allow.
+
+7. For each rule in `compiledPolicy.rules` (in order):
+   a. Check `if.roles` -- does the tool have any argument with a matching role?
    b. Check `if.server` -- does the server match?
    c. Check `if.tool` -- does the tool name match?
    d. Check `if.sideEffects` -- does the tool's side-effect annotation match?
@@ -450,7 +455,7 @@ class PolicyEngine {
       - Resolve all extracted paths via `path.resolve()`.
       - Evaluate: true if ALL resolved paths are within `paths.within` directory.
    f. If all conditions met, return this rule's decision.
-7. No rule matched, return `{ decision: 'deny', rule: 'default-deny', reason: 'No matching policy rule' }`.
+8. No rule matched, return `{ decision: 'deny', rule: 'default-deny', reason: 'No matching policy rule' }`.
 
 ### 7. Structural Invariants -- Hardcoded, Never Compiled
 
@@ -458,16 +463,10 @@ The architecture document states that structural invariants are "hardcoded, neve
 
 **What structural invariants enforce:**
 
-- The agent cannot read, write, or delete protected paths (constitution, compiled policy artifacts, audit log, server configuration).
+- The agent cannot access protected paths in any way -- reads, writes, and deletes are all denied. The check extracts ALL path-bearing arguments (including read-path), not just writes and deletes.
 - Unknown tools (no annotation) are denied.
 
-**Protected paths** are concrete filesystem paths (not substring patterns) configured at system level:
-
-```typescript
-interface StructuralConfig {
-  protectedPaths: string[];       // absolute paths or directories
-}
-```
+**Protected paths** are concrete filesystem paths (not substring patterns) passed to the `PolicyEngine` constructor as `protectedPaths: string[]`.
 
 For the current system, protected paths include:
 - The constitution file (e.g., `src/config/constitution.md`)
@@ -491,25 +490,27 @@ Entry point for `ironcurtain compile-policy`. Orchestrates the full pipeline:
 1.  Load config (mcp-servers.json, constitution.md, directory paths, protected paths)
 2.  Connect to each MCP server, list tools
 3.  For each server: annotateTools() -> ToolAnnotation[]
+    - Write tool-annotations.json immediately (for inspection/caching even if later steps fail)
 4.  Validate annotations against heuristic (flag potential paths not annotated with roles)
 5.  compileConstitution(constitution, annotations, config) -> CompiledRule[]
+    - Write compiled-policy.json immediately
 6.  Load mandatory handwritten scenarios
 7.  generateScenarios(constitution, annotations, handwrittenScenarios) -> TestScenario[]
-8.  verifyPolicy(constitution, rules, annotations, structuralConfig, scenarios) -> VerificationResult
+    - Write test-scenarios.json immediately
+8.  verifyPolicy(constitution, rules, annotations, protectedPaths, scenarios) -> VerificationResult
     - Instantiate real PolicyEngine
     - Execute scenarios, collect results
     - LLM judge analyzes results (up to 3 rounds)
-9.  If verification passes:
-    - Write src/config/generated/tool-annotations.json
-    - Write src/config/generated/compiled-policy.json
-    - Write src/config/generated/test-scenarios.json
-    - Print success summary
+9.  Print summary (rules count, scenarios tested, verification rounds)
 10. If verification fails:
     - Print diagnostics (which scenarios failed, why, LLM analysis)
-    - Exit with code 1
-    - Do NOT write/overwrite config files
+    - Exit with code 1 (artifacts remain on disk for inspection and caching)
 11. Disconnect MCP servers, clean up
 ```
+
+Artifacts are always written to disk as each pipeline step completes, regardless of whether subsequent steps (including verification) succeed. This serves two purposes: (1) artifacts are available for human inspection even when verification fails, and (2) the content-hash caching system (see Section 9) can skip expensive LLM calls on re-runs when inputs haven't changed.
+
+All LLM interactions are logged to `src/config/generated/llm-interactions.jsonl` via AI SDK middleware (`src/pipeline/llm-logger.ts`). Each entry records the step name, model ID, prompt, response, token usage, and duration.
 
 **Development vs published usage:**
 ```bash
@@ -533,6 +534,7 @@ src/pipeline/
   policy-verifier.ts          # Step 5: real engine execution + LLM judge
   types.ts                    # Shared types (ToolAnnotation, CompiledRule, etc.)
   handwritten-scenarios.ts    # Mandatory test scenarios from existing tests
+  llm-logger.ts               # AI SDK middleware for LLM interaction logging
 
 src/config/
   constitution.md             # (existing) English-language principles
@@ -541,23 +543,38 @@ src/config/
     tool-annotations.json
     compiled-policy.json
     test-scenarios.json
+    llm-interactions.jsonl    # LLM call log (not checked in, covered by .gitignore)
 
 src/trusted-process/
   policy-engine.ts            # Refactored: structural invariants + compiled rules
   policy-types.ts             # Updated: declarative rule types
 ```
 
+### 9. Content-Hash Caching
+
+Each pipeline artifact includes an `inputHash` field that captures a SHA-256 hash of all inputs that produced it (including the LLM prompt text). On subsequent runs, the CLI loads existing artifacts via the generic `loadExistingArtifact<T>()` loader and compares the stored `inputHash` against the freshly computed hash. If they match, the LLM call is skipped entirely and the cached artifact is reused.
+
+The hash computation includes the prompt text itself (via exported prompt builders `buildAnnotationPrompt`, `buildCompilerPrompt`, `buildGeneratorPrompt`), ensuring that prompt changes invalidate the cache.
+
+**Per-artifact hashing:**
+
+- **Tool annotations:** Hash of `serverName + JSON(tools) + annotationPrompt`. Stored per server in `ToolAnnotationsFile.servers[name].inputHash`.
+- **Compiled policy:** Hash of `constitutionText + JSON(annotations) + JSON(config) + compilerPrompt`. Stored in `CompiledPolicyFile.inputHash`.
+- **Test scenarios:** Hash of `generatorPrompt + constitutionText + JSON(annotations) + JSON(handwrittenScenarios) + JSON(config) + JSON(protectedPaths)`. Stored in `TestScenariosFile.inputHash`.
+
+This is a lightweight alternative to a full incremental recompilation system -- it simply skips the LLM call when nothing has changed, but always reruns verification.
+
 ## Testing Strategy
 
 Each pipeline component is independently testable:
 
-- **Tool Annotator tests:** Provide mock tool schemas, mock LLM returning canned responses, verify annotations have correct effects, side-effect flags, and argument roles (including multi-role args like move source). Test the compile-time heuristic validator catches unannotated path arguments.
+- **Tool Annotator tests:** Provide mock tool schemas, mock LLM returning canned responses, verify annotations have correct side-effect flags and argument roles (including multi-role args like move source). Test the compile-time heuristic validator catches unannotated path arguments.
 - **Constitution Compiler tests:** Provide constitution + annotations, mock LLM, verify compiled rules cover expected cases. Assert that structural invariant rules are NOT present in output. Verify the `principle` field links back to the constitution.
 - **Scenario Generator tests:** Provide constitution + annotations + handwritten scenarios, mock LLM, verify output includes both generated and handwritten scenarios with valid structure.
 - **Policy Verifier tests:** Provide known-good and known-bad rule sets. For known-bad rules (e.g., missing delete denial), verify that executing scenarios against the real engine produces failures and the verifier reports them.
 - **PolicyEngine tests -- structural invariants:** Directly test that protected paths are denied regardless of compiled rules. Test with an empty compiled rule set to confirm invariants work standalone.
 - **PolicyEngine tests -- compiled rules:** Load compiled artifacts, run existing test cases. Test zero-path-extraction behavior (side-effect-free tools). Test unknown tools (no annotation, deny). Test path traversal attacks.
-- **PolicyEngine tests -- move matrix:** Test all four permutations (sandbox-to-sandbox allow, sandbox-to-external escalate, external-to-sandbox deny via delete-path, external-to-external deny/escalate) to verify correct decisions.
+- **PolicyEngine tests -- move matrix:** Test all four permutations (sandbox-to-sandbox, sandbox-to-external, external-to-sandbox, external-to-external) -- all denied via `deny-delete-operations` rule because `move_file`'s source has a `delete-path` role.
 
 **Integration test:** Run the full pipeline against the filesystem MCP server with a real LLM and verify the compiled policy produces identical decisions to the current hardcoded policy for all existing test cases in `policy-engine.test.ts`.
 
@@ -580,14 +597,14 @@ Each pipeline component is independently testable:
 - Per-task policy layer -- future enhancement on top of compiled constitution policy.
 - LLM assessment rules (semantic checks like PII detection) -- all rules are deterministic for now.
 - Retry loop feeding verifier failures back to the compiler for re-compilation.
-- Caching / incremental recompilation -- full recompile each time the command is run.
+- Full incremental recompilation -- content-hash caching skips unchanged LLM calls, but does not support partial recompilation of individual rules.
 - Runtime constitution hash verification -- generated files record the hash; runtime check is deferred.
 
 ## Resolved Design Decisions
 
 1. **Heuristic fallback:** Compile-time validation only (not runtime). The annotator's output is checked against the heuristic during `compile-policy`. The structural invariants use both heuristic and role-based extraction as defense-in-depth for protected path checks. Compiled rules trust annotations.
 
-2. **Move semantics:** The `source` argument of `move_file` carries `["read-path", "delete-path"]` roles. This prevents the move tool from being used as a backdoor around delete policies. The compiled rules can match on `delete-path` to catch moves that implicitly delete.
+2. **Move semantics:** The `source` argument of `move_file` carries `["read-path", "delete-path"]` roles. All moves are denied by the blanket `deny-delete-operations` rule (which matches on `roles: ["delete-path"]`). No separate move-specific rules are needed. This prevents the move tool from being used as a backdoor around delete policies.
 
 3. **Side-effect-free tools:** `sideEffects` is framed as security-relevant side effects, not just state mutation. Tools that take path arguments are `sideEffects: true` even if they only read (information disclosure is a side effect). Only argument-less query tools like `list_allowed_directories` get `sideEffects: false`. The LLM compiler generates an explicit allow rule for them (e.g., `"if": { "sideEffects": false }, "then": "allow"`). This is a compiled rule, not a structural invariant, because which tools are side-effect-free is determined by the annotator LLM and may vary by MCP server.
 
@@ -614,4 +631,4 @@ For the tracer bullet, not a concern -- we control the filesystem MCP server. Fu
 
 LLM outputs are non-deterministic. Two runs of `compile-policy` with the same inputs may produce different rules. The verifier with real engine execution provides a strong safety net, and the persistent files mean we only accept a compilation that passes verification.
 
-Future improvements: temperature=0, seed parameters, structured output constraints. Could also cache and only recompile when inputs change (constitution hash + tool schema hash).
+Future improvements: temperature=0, seed parameters, structured output constraints. Content-hash caching is implemented (see Section 9), so unchanged inputs skip LLM calls on re-runs.

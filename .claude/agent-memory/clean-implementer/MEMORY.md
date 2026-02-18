@@ -62,6 +62,11 @@ Zod v4 (^4.3.6) strict by default. Mock response JSON must exactly match Zod sch
 ## Move Operations Policy
 All moves denied via `deny-delete-operations` rule (move_file source has `delete-path` role). No move-specific rules.
 
+## Design Documents
+- `docs/designs/policy-compilation-pipeline.md` -- design spec (updated to match implementation)
+- `docs/designs/policy-compilation-implementation-plan.md` -- implementation plan (marked as completed)
+- Both updated 2026-02-17 to reflect: no `effect` field, `roles` instead, `inputHash` caching, `escalate-read-elsewhere`, all moves denied, artifacts always written
+
 ## LLM Interaction Logging
 - `src/pipeline/llm-logger.ts` -- AI SDK middleware that captures all LLM prompts and responses
 - Uses `wrapLanguageModel()` with `LanguageModelMiddleware.wrapGenerate` to intercept calls

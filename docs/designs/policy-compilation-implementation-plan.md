@@ -2,6 +2,7 @@
 
 **Design spec:** `docs/designs/policy-compilation-pipeline.md`
 **Date:** 2026-02-17
+**Status:** Implemented -- all steps completed.
 
 ## Principles
 
@@ -39,15 +40,14 @@ type ArgumentRole = 'read-path' | 'write-path' | 'delete-path' | 'none';
 interface ToolAnnotation {
   toolName: string;
   serverName: string;
-  effect: 'read' | 'write' | 'delete' | 'move' | 'other';
+  comment: string;               // LLM-generated description
   sideEffects: boolean;
   args: Record<string, ArgumentRole[]>;
 }
 
 interface ToolAnnotationsFile {
   generatedAt: string;
-  constitutionHash: string;
-  servers: Record<string, { tools: ToolAnnotation[] }>;
+  servers: Record<string, { inputHash: string; tools: ToolAnnotation[] }>;
 }
 
 // Compiled policy types
@@ -56,17 +56,19 @@ interface PathCondition {
   within: string;
 }
 
+interface CompiledRuleCondition {
+  roles?: ArgumentRole[];        // match tools with any argument having these roles
+  server?: string[];
+  tool?: string[];
+  sideEffects?: boolean;
+  paths?: PathCondition;
+}
+
 interface CompiledRule {
   name: string;
   description: string;
   principle: string;
-  if: {
-    effect?: string[];
-    server?: string[];
-    tool?: string[];
-    sideEffects?: boolean;
-    paths?: PathCondition;
-  };
+  if: CompiledRuleCondition;
   then: 'allow' | 'deny' | 'escalate';
   reason: string;
 }
@@ -74,6 +76,7 @@ interface CompiledRule {
 interface CompiledPolicyFile {
   generatedAt: string;
   constitutionHash: string;
+  inputHash: string;             // content hash for caching
   rules: CompiledRule[];
 }
 
@@ -93,6 +96,7 @@ interface TestScenario {
 interface TestScenariosFile {
   generatedAt: string;
   constitutionHash: string;
+  inputHash: string;             // content hash for caching
   scenarios: TestScenario[];
 }
 
@@ -117,12 +121,9 @@ interface VerificationResult {
   summary: string;
   failedScenarios: ExecutionResult[];
 }
-
-// Structural config (passed to PolicyEngine, not compiled)
-interface StructuralConfig {
-  protectedPaths: string[];
-}
 ```
+
+Note: The design originally included a `StructuralConfig` interface. In the implementation, `protectedPaths: string[]` is passed directly to the `PolicyEngine` constructor and to `CompilerConfig` -- no wrapper interface is needed.
 
 **Files modified:**
 - `src/trusted-process/policy-types.ts` -- add `import type` for `EvaluationResult` from here as needed, but keep the existing `EvaluationResult` interface (the refactored engine in Step 2 still returns it).
@@ -174,13 +175,15 @@ This is the most important step. It is the architectural pivot point.
    - Look up the `ToolAnnotation` for the request.
    - Iterate `compiledPolicy.rules` in order.
    - For each rule, check all conditions in the `if` block:
-     - `effect`: absent or tool's annotated effect is in the array.
+     - `roles`: absent or tool has at least one argument whose annotated roles include any role in the list.
      - `server`: absent or `request.serverName` is in the array.
      - `tool`: absent or `request.toolName` is in the array.
      - `sideEffects`: absent or matches annotation's `sideEffects` value.
      - `paths`: absent or path condition evaluates to true (see below).
    - First fully matching rule: return its `then` as the decision.
    - No match: return default deny.
+
+   **Multi-role evaluation:** For tools with multiple distinct roles (e.g., `move_file` with `read-path`, `write-path`, `delete-path`), each role is evaluated independently through the rule chain. The most restrictive result wins: `deny > escalate > allow`.
 
    **Path condition evaluation:**
    - For each argument in `request.arguments`, look up the argument's roles from the annotation.
@@ -220,46 +223,25 @@ This is the "tracer bullet moment" -- the new engine works with hand-crafted dat
 
 **Hand-crafted `tool-annotations.json`:**
 
-Include annotations for all known filesystem tools:
-- `read_file`: effect=read, sideEffects=false (*), args: `{ path: ["read-path"] }`
-- `read_text_file`: effect=read, sideEffects=false, args: `{ path: ["read-path"] }`
-- `read_media_file`: effect=read, sideEffects=false, args: `{ path: ["read-path"] }`
-- `read_multiple_files`: effect=read, sideEffects=false, args: `{ paths: ["read-path"] }` -- note: this is an array argument, needs special handling or flatten
-- `list_directory`: effect=read, sideEffects=false, args: `{ path: ["read-path"] }`
-- `list_directory_with_sizes`: effect=read, sideEffects=false, args: `{ path: ["read-path"] }`
-- `directory_tree`: effect=read, sideEffects=false, args: `{ path: ["read-path"] }`
-- `search_files`: effect=read, sideEffects=false, args: `{ path: ["read-path"] }`
-- `get_file_info`: effect=read, sideEffects=false, args: `{ path: ["read-path"] }`
-- `list_allowed_directories`: effect=read, sideEffects=false, args: `{}`
-- `write_file`: effect=write, sideEffects=true, args: `{ path: ["write-path"] }`
-- `edit_file`: effect=write, sideEffects=true, args: `{ path: ["write-path"] }`
-- `create_directory`: effect=write, sideEffects=true, args: `{ path: ["write-path"] }`
-- `move_file`: effect=move, sideEffects=true, args: `{ source: ["read-path", "delete-path"], destination: ["write-path"] }`
-- `delete_file`: effect=delete, sideEffects=true, args: `{ path: ["delete-path"] }`
-- `delete_directory`: effect=delete, sideEffects=true, args: `{ path: ["delete-path"] }`
+Include annotations for all known filesystem tools (no `effect` field -- argument roles are the single source of truth):
+- `read_file`: sideEffects=true, args: `{ path: ["read-path"] }`
+- `read_text_file`: sideEffects=true, args: `{ path: ["read-path"] }`
+- `read_media_file`: sideEffects=true, args: `{ path: ["read-path"] }`
+- `read_multiple_files`: sideEffects=true, args: `{ paths: ["read-path"] }` -- note: this is an array argument, handled by the path extraction logic
+- `list_directory`: sideEffects=true, args: `{ path: ["read-path"] }`
+- `list_directory_with_sizes`: sideEffects=true, args: `{ path: ["read-path"] }`
+- `directory_tree`: sideEffects=true, args: `{ path: ["read-path"] }`
+- `search_files`: sideEffects=true, args: `{ path: ["read-path"] }`
+- `get_file_info`: sideEffects=true, args: `{ path: ["read-path"] }`
+- `list_allowed_directories`: sideEffects=false, args: `{}`
+- `write_file`: sideEffects=true, args: `{ path: ["write-path"] }`
+- `edit_file`: sideEffects=true, args: `{ path: ["write-path"] }`
+- `create_directory`: sideEffects=true, args: `{ path: ["write-path"] }`
+- `move_file`: sideEffects=true, args: `{ source: ["read-path", "delete-path"], destination: ["write-path"] }`
+- `delete_file`: sideEffects=true, args: `{ path: ["delete-path"] }`
+- `delete_directory`: sideEffects=true, args: `{ path: ["delete-path"] }`
 
-(*) Note on `sideEffects`: Read tools genuinely have no side effects. However, the current engine does NOT allow reads unconditionally -- it checks directory containment. The compiled rules must still have path-based allow/deny rules for reads, not just a blanket `sideEffects: false -> allow`. The `sideEffects: false -> allow` rule in the design spec example is too permissive for read tools that take path arguments; it is intended for no-argument tools like `list_allowed_directories`. The hand-crafted policy must place the `sideEffects: false` allow rule ONLY for tools that truly have no path arguments, or the path-based rules for reads must come before it. Looking at the design spec example more carefully: the `allow-side-effect-free-tools` rule comes FIRST and matches ALL tools with `sideEffects: false`, which includes `read_file`. This means `read_file` with a path outside the sandbox would be ALLOWED by this rule -- a security regression.
-
-**IMPORTANT DESIGN CLARIFICATION NEEDED:** The design spec example compiled policy has `allow-side-effect-free-tools` as the first rule with `sideEffects: false -> allow`. This would allow `read_file /etc/passwd` because `read_file` has `sideEffects: false`. This contradicts the constitution's containment principle. There are two fixes:
-
-- **Option A:** Mark read tools that take paths as `sideEffects: true` (they have the side effect of information disclosure). This is semantically wrong but makes the rules work.
-- **Option B:** The `sideEffects: false -> allow` rule should also require either no path arguments OR that all paths are within the sandbox. But this complicates the rule.
-- **Option C (recommended):** Only tools with NO path-argument roles AND `sideEffects: false` should match the unconditional allow rule. The path condition with zero extracted paths means "condition not satisfied, rule does not match." So the rule should be: `{ sideEffects: false, paths: { roles: ["read-path", "write-path", "delete-path"], within: "/any" } }` -- but this requires ALL paths to be within "/any", and zero paths makes it not match. This is also wrong because we WANT zero-path tools to match.
-
-Actually, re-reading the design spec more carefully: the `sideEffects` annotation for read tools should reflect that reads DO have side effects in a security sense (information disclosure). But the spec says `sideEffects: false` means "no state changes." The solution in the design spec is that `list_allowed_directories` (no path args) matches `sideEffects: false -> allow`, while `read_file` (has path args) would ALSO match this rule -- which is a bug in the example policy.
-
-**Resolution for the hand-crafted artifacts:** We will mark read tools that take path arguments as `sideEffects: true` in our hand-crafted annotations. The `sideEffects: false` annotation is reserved for truly argument-less query tools like `list_allowed_directories` and `get_file_info` (which operates on paths but is purely informational). This gives us the correct security behavior. When the LLM compiler generates rules later, the verifier will catch any mismatch.
-
-Actually, `get_file_info` takes a path and could leak information. For the hand-crafted artifacts, let us mark ONLY `list_allowed_directories` as `sideEffects: false` and all others as `sideEffects: true`. This is the conservative choice and matches the current engine's behavior (which restricts reads by directory).
-
-Wait -- stepping back. The current tests show:
-- `read_file` inside sandbox: allow (rule `allow-read-in-allowed-dir`)
-- `read_file` outside sandbox: deny (rule `deny-read-outside-allowed-dir`)
-- `list_allowed_directories`: allowed (special-cased in current engine)
-
-So the hand-crafted compiled policy should NOT use the `sideEffects: false -> allow` shortcut for reads. Instead, it should have explicit path-based rules for reads exactly as the design spec example shows (`allow-read-in-sandbox`, `deny-read-elsewhere`). The `sideEffects: false -> allow` rule should ONLY match `list_allowed_directories` (zero path args, so the read path rules with their `paths` conditions won't match it either).
-
-The fix: In the hand-crafted annotations, mark `list_allowed_directories` as `sideEffects: false` and all other tools as `sideEffects: true`. The compiled rules list `allow-side-effect-free-tools` first, which only matches `list_allowed_directories`. All other tools fall through to the effect-based rules.
+**Note on `sideEffects`:** Read tools that take path arguments are marked `sideEffects: true` because they can disclose information from arbitrary paths (information disclosure is a security-relevant side effect). Only `list_allowed_directories` (no path arguments, returns system configuration the agent already knows) gets `sideEffects: false`. The `allow-side-effect-free-tools` compiled rule then only matches truly argument-less query tools. All path-bearing tools fall through to the role-based and path-based rules.
 
 **Test adaptation details:**
 
@@ -269,9 +251,9 @@ The existing tests check specific rule names. The new engine uses different rule
 |---|---|
 | `structural-protect-policy-files` | `structural-protected-path` |
 | `deny-delete-operations` | `deny-delete-operations` (same name in compiled rules) |
-| `allow-read-in-allowed-dir` | `allow-read-in-sandbox` |
-| `deny-read-outside-allowed-dir` | `deny-read-elsewhere` |
-| `allow-write-in-allowed-dir` | `allow-write-in-sandbox` |
+| `allow-read-in-allowed-dir` | `allow-sandbox-read` |
+| `deny-read-outside-allowed-dir` | `escalate-read-elsewhere` (changed to escalate) |
+| `allow-write-in-allowed-dir` | `allow-sandbox-write` |
 | `escalate-write-outside-allowed-dir` | `escalate-write-elsewhere` |
 | `default-deny` | `default-deny` (same) |
 
@@ -514,21 +496,20 @@ export function getHandwrittenScenarios(sandboxDir: string): TestScenario[]
 The function takes the sandbox directory as a parameter (since scenarios need concrete paths) and returns scenarios covering:
 
 1. Read inside sandbox -> allow
-2. Read outside sandbox -> deny
-3. Write inside sandbox -> allow
-4. Write outside sandbox -> escalate
-5. Delete inside sandbox -> deny
-6. Delete outside sandbox -> deny
-7. Path traversal attempt -> deny
-8. Protected path access -> deny (structural invariant)
-9. Move sandbox-to-sandbox -> allow
-10. Move sandbox-to-external -> deny (delete-path outside sandbox)
-11. Move external-to-sandbox -> deny (delete-path outside sandbox)
-12. Move external-to-external -> deny
-13. Side-effect-free tool (`list_allowed_directories`) -> allow
-14. Unknown tool -> deny (structural invariant)
-15. `list_directory` inside sandbox -> allow
-16. `search_files` inside sandbox -> allow
+2. Read outside sandbox -> escalate
+3. List directory inside sandbox -> allow
+4. Search files inside sandbox -> allow
+5. Write inside sandbox -> allow
+6. Write outside sandbox -> escalate
+7. Delete inside sandbox -> deny
+8. Delete outside sandbox -> deny
+9. Path traversal attempt -> escalate (resolves outside sandbox)
+10. Move sandbox-to-sandbox -> deny (source has delete-path role)
+11. Move sandbox-to-external -> deny (source has delete-path role)
+12. Move external-to-sandbox -> deny (source has delete-path role)
+13. Move external-to-external -> deny (source has delete-path role)
+14. Side-effect-free tool (`list_allowed_directories`) -> allow
+15. Unknown tool -> deny (structural invariant)
 
 Each scenario includes:
 - `description`: human-readable description
@@ -560,7 +541,7 @@ npx vitest run test/handwritten-scenarios.test.ts
 
 ```typescript
 import type { LanguageModel } from 'ai';
-import { generateObject } from 'ai';
+import { generateText, Output } from 'ai';
 import type { ToolAnnotation } from './types.js';
 
 export async function annotateTools(
@@ -572,7 +553,7 @@ export async function annotateTools(
 
 **Process:**
 1. Build the prompt with all tool schemas for the server.
-2. Call `generateObject()` with the LLM, requesting a JSON array of `ToolAnnotation` objects.
+2. Call `generateText()` with `output: Output.object({ schema })` (AI SDK v6 pattern).
 3. Validate the response: every tool from the input must appear in the output. Warn on missing tools.
 4. Run the compile-time heuristic validator: for each tool, examine the schema for string arguments with path-like defaults or examples. If any look like paths but aren't annotated with a path role, emit a warning and return an error.
 
@@ -621,11 +602,12 @@ npx vitest run test/tool-annotator.test.ts
 
 ```typescript
 import type { LanguageModel } from 'ai';
+import { generateText, Output } from 'ai';
 import type { ToolAnnotation, CompiledRule } from './types.js';
 
 export interface CompilerConfig {
   sandboxDirectory: string;
-  // Future: additional permitted directories
+  protectedPaths: string[];
 }
 
 export async function compileConstitution(
@@ -636,27 +618,27 @@ export async function compileConstitution(
 ): Promise<CompiledRule[]>
 ```
 
+The prompt builder `buildCompilerPrompt` is also exported for content-hash computation.
+
 **Process:**
 1. Build the prompt with:
    - Full constitution text.
    - All tool annotations (so the LLM knows what tools exist).
    - The `CompiledRule` schema.
-   - Concrete directory paths from config.
+   - Concrete directory paths and protected paths from config.
    - Explicit instruction: do NOT generate rules for protected path checking or unknown tool denial (handled by structural invariants).
-2. Call `generateObject()` with the LLM.
+2. Call `generateText()` with `output: Output.object({ schema })` (AI SDK v6 pattern).
 3. Validate output: rules must use concrete absolute paths, must have valid `then` values, must reference roles that exist in the annotations.
 
 **Post-processing validation:**
 ```typescript
 export function validateCompiledRules(
   rules: CompiledRule[],
-  annotations: ToolAnnotation[],
-): { valid: boolean; errors: string[] }
+): RuleValidationResult   // { valid: boolean; errors: string[]; warnings: string[] }
 ```
 
 Checks:
-- Every role referenced in `paths.roles` is a valid `ArgumentRole`.
-- Every `effect` referenced exists in at least one annotation.
+- Every role referenced in `roles` or `paths.roles` is a valid `ArgumentRole`.
 - `within` paths are absolute.
 - No rule references "protected" or "structural" concepts (these are not compiled).
 
@@ -686,6 +668,7 @@ npx vitest run test/constitution-compiler.test.ts
 
 ```typescript
 import type { LanguageModel } from 'ai';
+import { generateText, Output } from 'ai';
 import type { ToolAnnotation, TestScenario } from './types.js';
 
 export async function generateScenarios(
@@ -693,13 +676,16 @@ export async function generateScenarios(
   annotations: ToolAnnotation[],
   handwrittenScenarios: TestScenario[],
   sandboxDirectory: string,
+  protectedPaths: string[],
   llm: LanguageModel,
 ): Promise<TestScenario[]>
 ```
 
+The prompt builder `buildGeneratorPrompt` is also exported for content-hash computation.
+
 **Process:**
-1. Build the prompt with constitution, annotations, and instructions for edge case coverage.
-2. Call `generateObject()` with the LLM.
+1. Build the prompt with constitution, annotations, protected paths, and instructions for edge case coverage.
+2. Call `generateText()` with `output: Output.object({ schema })` (AI SDK v6 pattern).
 3. Mark all LLM-generated scenarios with `source: 'generated'`.
 4. Merge with handwritten scenarios (handwritten first, then generated).
 5. Deduplicate: if a generated scenario is substantially similar to a handwritten one (same tool, same arguments), drop the generated one.
@@ -763,7 +749,7 @@ export async function verifyPolicy(
    - The tool annotations.
    - The full execution results table.
    - Instructions: analyze discrepancies, identify suspicious patterns, identify missing coverage, optionally produce additional test scenarios.
-4. Call LLM judge via `generateObject()`.
+4. Call LLM judge via `generateText()` with `output: Output.object({ schema })`.
 5. If the judge produces additional scenarios, run them through the engine (Round 2).
 6. Repeat up to `maxRounds`.
 7. Aggregate results into `VerificationResult`.
@@ -863,7 +849,7 @@ async function main() {
 
   // 2. Create LLM instance
   const anthropic = createAnthropic();
-  const llm = anthropic('claude-sonnet-4-20250514');
+  const llm = anthropic('claude-sonnet-4-6');
 
   // 3. Connect to MCP servers and list tools
   const allAnnotations: ToolAnnotation[] = [];
@@ -905,27 +891,27 @@ async function main() {
   const compiledRules = await compileConstitution(
     constitutionText,
     allAnnotations,
-    { sandboxDirectory: allowedDirectory },
+    { sandboxDirectory: allowedDirectory, protectedPaths },
     llm,
   );
 
   // 7. Validate compiled rules
-  const ruleValidation = validateCompiledRules(compiledRules, allAnnotations);
+  const ruleValidation = validateCompiledRules(compiledRules);
   if (!ruleValidation.valid) {
     console.error('Compiled rule validation failed:');
     for (const e of ruleValidation.errors) console.error(`  - ${e}`);
     process.exit(1);
   }
 
-  // 8. Build artifacts
+  // 8. Build artifacts (in the actual implementation, each artifact includes
+  //    an inputHash for content-hash caching)
   const toolAnnotationsFile: ToolAnnotationsFile = {
     generatedAt: new Date().toISOString(),
-    constitutionHash,
-    servers: {},
+    servers: {},    // per-server entries include inputHash
   };
   for (const ann of allAnnotations) {
     if (!toolAnnotationsFile.servers[ann.serverName]) {
-      toolAnnotationsFile.servers[ann.serverName] = { tools: [] };
+      toolAnnotationsFile.servers[ann.serverName] = { inputHash: '...', tools: [] };
     }
     toolAnnotationsFile.servers[ann.serverName].tools.push(ann);
   }
@@ -933,6 +919,7 @@ async function main() {
   const compiledPolicyFile: CompiledPolicyFile = {
     generatedAt: new Date().toISOString(),
     constitutionHash,
+    inputHash: '...',     // content hash for caching
     rules: compiledRules,
   };
 
@@ -944,6 +931,7 @@ async function main() {
     allAnnotations,
     handwrittenScenarios,
     allowedDirectory,
+    protectedPaths,
     llm,
   );
 
@@ -959,36 +947,16 @@ async function main() {
     3,  // max rounds
   );
 
+  // Note: In the actual implementation, artifacts are written to disk
+  // immediately after each step (not only on success). This ensures
+  // they're available for inspection even when verification fails,
+  // and enables content-hash caching on subsequent runs.
+  // LLM interactions are logged to llm-interactions.jsonl via AI SDK middleware.
+
   if (!verificationResult.pass) {
-    console.error('\nVerification FAILED:');
-    console.error(verificationResult.summary);
-    for (const f of verificationResult.failedScenarios) {
-      console.error(`  FAIL: ${f.scenario.description}`);
-      console.error(`    Expected: ${f.scenario.expectedDecision}, Got: ${f.actualDecision} (rule: ${f.matchingRule})`);
-    }
+    console.error('\nVerification FAILED -- artifacts written but policy may need review.');
     process.exit(1);
   }
-
-  // 11. Write artifacts
-  mkdirSync(generatedDir, { recursive: true });
-  writeFileSync(
-    resolve(generatedDir, 'tool-annotations.json'),
-    JSON.stringify(toolAnnotationsFile, null, 2) + '\n',
-  );
-  writeFileSync(
-    resolve(generatedDir, 'compiled-policy.json'),
-    JSON.stringify(compiledPolicyFile, null, 2) + '\n',
-  );
-
-  const scenariosFile: TestScenariosFile = {
-    generatedAt: new Date().toISOString(),
-    constitutionHash,
-    scenarios,
-  };
-  writeFileSync(
-    resolve(generatedDir, 'test-scenarios.json'),
-    JSON.stringify(scenariosFile, null, 2) + '\n',
-  );
 
   console.error('\nPolicy compilation successful!');
   console.error(`  Rules: ${compiledRules.length}`);

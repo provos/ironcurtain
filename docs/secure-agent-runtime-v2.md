@@ -43,7 +43,7 @@ The architecture does not attempt to prevent the LLM from going rogue. It assume
 
 3. **Policy is expressed in plain English and compiled into enforcement.** The constitution is a human-readable document written in natural language. An LLM translates it into deterministic rules, LLM-assessable checks, and human escalation triggers for each MCP interface. Users write intent; the system figures out enforcement.
 
-4. **Every task gets its own policy.** When a user assigns a task, the task description itself becomes a security constraint. The system generates a task-specific policy that limits the agent to actions consistent with the stated objective.
+4. **Every task gets its own policy.** [Planned] When a user assigns a task, the task description itself becomes a security constraint. The system generates a task-specific policy that limits the agent to actions consistent with the stated objective.
 
 5. **Secure by default, customizable by choice.** The system ships with a sensible default constitution. Users can relax specific policies but cannot disable structural invariants.
 
@@ -55,18 +55,18 @@ The system consists of four components with strict trust boundaries between them
 
 ```
 +----------------------------------------------------------+
-|                    V8 Isolated VM                         |
+|             UTCP Code Mode (V8 Isolated VM)              |
 |                                                          |
 |  +----------------------------------------------------+  |
 |  |           Code Mode TypeScript Runtime              |  |
 |  |                                                     |  |
 |  |  - LLM-generated TypeScript executes here           |  |
-|  |  - Typed function stubs for each skill              |  |
+|  |  - Typed synchronous function stubs for each skill  |  |
 |  |  - Read-only task data                              |  |
 |  |  - Agent working memory / scratchpad                |  |
 |  |  - No credentials, no network, no filesystem        |  |
 |  |                                                     |  |
-|  |  gmail.sendEmail({to, subject, body})               |  |
+|  |  filesystem.read_file({path: '...'})                |  |
 |  |    --> produces structured MCP request              |  |
 |  +----------------------|-----------------------------+  |
 +-----------------------  |  ----------------------------+
@@ -79,15 +79,12 @@ The system consists of four components with strict trust boundaries between them
 |  |          Constitution + Policy Engine               |  |
 |  |                                                     |  |
 |  |  Constitution (English)                             |  |
-|  |    --> compiled to per-interface policies            |  |
-|  |                                                     |  |
-|  |  Task Policy (derived from task description)        |  |
-|  |    --> compiled to task-specific constraints         |  |
+|  |    --> compiled to declarative rules                 |  |
 |  |                                                     |  |
 |  |  For each MCP request:                              |  |
-|  |  1. Validate and sanitize request                   |  |
-|  |  2. Evaluate deterministic rules                    |  |
-|  |  3. If ambiguous: LLM assessment (sanitized input)  |  |
+|  |  1. Structural invariants (hardcoded)               |  |
+|  |  2. Compiled rules (per-role, most-restrictive)     |  |
+|  |  3. Default deny                                    |  |
 |  |  4. Decision: allow / deny / escalate to human      |  |
 |  +----------------------|-----------------------------+  |
 |                         |                                |
@@ -105,10 +102,13 @@ The system consists of four components with strict trust boundaries between them
 |                    MCP Servers                            |
 |                                                          |
 |  +----------------+ +----------------+ +---------------+ |
-|  | Gmail MCP      | | Slack MCP      | | Calendar MCP  | |
-|  | - Gmail OAuth   | | - Slack bot    | | - Google Cal  | |
-|  |   token only   | |   token only   | |   creds only  | |
+|  | Filesystem MCP | | Gmail MCP [P]  | | Slack MCP [P] | |
+|  | - sandbox dir  | | - Gmail OAuth  | | - Slack bot   | |
+|  |   access only  | |   token only   | |   token only  | |
 |  +----------------+ +----------------+ +---------------+ |
+|                                                          |
+|  [P] = Planned. Currently only the filesystem MCP server |
+|  (@modelcontextprotocol/server-filesystem) is configured.|
 |                                                          |
 |  Each server holds only its own credentials.             |
 |  Servers accept requests only from the trusted process.  |
@@ -121,6 +121,18 @@ The system consists of four components with strict trust boundaries between them
 The constitution is the heart of the system. It is written in plain English and describes what the agent is and is not allowed to do.
 
 ### Example Constitution
+
+The example below illustrates a vision constitution for an agent with access to multiple services. The **actual constitution** currently implemented in the codebase (`src/config/constitution.md`) is scoped to filesystem operations and defines five principles:
+
+1. **Least privilege**: The agent may only access resources explicitly permitted by policy.
+2. **No destruction**: Delete operations outside the sandbox are never permitted.
+3. **Sandbox freedom**: Within the designated sandbox directory, the agent may freely read and write files.
+4. **Human oversight**: Operations outside the sandbox require explicit human approval.
+5. **Transparency**: Every tool call is logged to the audit trail.
+
+Self-protection of the constitution, compiled policies, and audit log is enforced by **structural invariants** in the PolicyEngine (hardcoded protected-path checks), not by a constitution principle.
+
+The following is a richer example showing how the constitution would scale to multiple services:
 
 ```
 ## General Principles
@@ -193,23 +205,23 @@ making progress, it should stop and ask me for guidance.
 
 ### Constitution Compilation
 
-The constitution is compiled into enforceable policy through an LLM-powered compilation step. Because this compilation is the bridge between human intent and machine enforcement, it is the single most critical point of failure in the architecture. A hallucination here -- interpreting "don't email strangers" as an allow-all rule -- would compromise the runtime before the agent even starts.
+The constitution is compiled into enforceable policy through an LLM-powered compilation pipeline (`npm run compile-policy`). Because this compilation is the bridge between human intent and machine enforcement, it is the single most critical point of failure in the architecture. A hallucination here -- interpreting "don't email strangers" as an allow-all rule -- would compromise the runtime before the agent even starts.
 
-To mitigate this, compilation uses a **dual-verification** process:
+The pipeline has four stages:
 
-**Step 1: Compile.** A compiler LLM parses the constitution against each registered MCP server's interface (tool names, method signatures, parameter types). For each method, it generates one of three enforcement types:
+**Stage 1: Tool Annotation.** For each registered MCP server, an LLM classifies every tool's arguments by their semantic role. Each argument receives one or more roles from a fixed vocabulary: `read-path`, `write-path`, `delete-path`, or `none`. The LLM also determines whether each tool has side effects. These annotations are the bridge between tool schemas (which describe data types) and policy rules (which reason about intent). For example, `edit_file`'s `path` argument gets both `read-path` and `write-path` roles, while `move_file`'s `source` gets `read-path` and `delete-path`. Annotations are validated heuristically (checking coverage, consistency) and cached by a content hash of the tool schemas.
 
-   - **Deterministic rule**: A concrete condition evaluated programmatically against the MCP request parameters. The compiler selects from a library of **verified policy primitives** rather than generating arbitrary logic. Primitives include: `allowlist_match(param, list)`, `blocklist_match(param, list)`, `rate_limit(n, period)`, `threshold(param, op, value)`, `regex_match(param, pattern)`, `contains_pii(param)`, `is_in_scope(task_policy)`. This constrains the compilation task from "writing code" (high risk) to "selecting and configuring known-good building blocks" (lower risk).
-   - **LLM assessment**: A natural language check that requires semantic understanding. Example: "contains sensitive information (financial, medical, legal)" cannot be reduced to a regex -- it needs an LLM to assess the content at runtime.
-   - **Human escalation**: The action always requires human approval. Example: "make purchases or financial commitments."
+**Stage 2: Constitution Compilation.** An LLM reads the constitution and the tool annotations, then produces an ordered list of declarative rules. Each rule has a `name`, a condition block (`if`) that can match on argument roles, server names, tool names, side-effect status, and path containment within directories, and an action (`then`: `allow`, `deny`, or `escalate`). Rules are evaluated first-match-wins. The compiler does not generate arbitrary code -- it populates a fixed declarative schema (`CompiledRule` / `CompiledRuleCondition`). Rules are validated structurally (checking for required fields, valid role references, and rule ordering). The compiled policy is cached by a content hash of the constitution, annotations, and compiler prompt.
 
-**Step 2: Verify.** A separate verifier LLM reads the compiled policy (translated back to a human-readable description) alongside the original English constitution. The verifier attempts to find discrepancies: cases where the compiled policy would allow something the constitution prohibits, or block something the constitution permits. It generates specific test scenarios ("If the agent tries to email someone not in contacts, does the policy escalate?") and checks them against the compiled rules.
+**Stage 3: Scenario Generation.** An LLM generates test scenarios -- pairs of tool-call requests and expected policy decisions -- designed to probe edge cases in the compiled rules. These LLM-generated scenarios are combined with a set of mandatory handwritten scenarios (currently 15) that cover critical invariants like protected-path access and delete denial. Together, they form the test suite for verification.
 
-**Step 3: Accept.** Only if the compiler and verifier agree is the policy stored. If the verifier finds discrepancies, the compilation is rejected and the user is notified with the specific disagreement.
+**Stage 4: Multi-Round Verification.** The verifier instantiates a **real PolicyEngine** with the compiled rules and tool annotations, then executes every test scenario through it. An LLM judge analyzes the results, identifies discrepancies between expected and actual decisions, and generates additional probe scenarios to explore gaps. This repeats for up to 3 rounds. If failures remain after all rounds, the pipeline exits with an error. Artifacts are still written to disk for inspection, but the non-zero exit code signals that the policy needs review.
 
-The compilation step happens when the constitution is written or updated, not at request time. The compiled and signed policies are cached and reused until the constitution changes.
+All four stages are content-hash cached: if the inputs to a stage have not changed since the last run, the LLM call is skipped and the cached artifact is reused. The compilation step happens when the constitution is written or updated, not at request time. Generated artifacts are written to `src/config/generated/`.
 
-### Per-Task Policy
+### Per-Task Policy [Planned]
+
+> **Status: Not yet implemented.** The description below is the intended design.
 
 When a user assigns a task, the task description is used to generate an additional, task-scoped policy layer:
 
@@ -247,27 +259,26 @@ Task policies are generated once when the task is assigned and logged to the aud
 
 For each MCP request, policies are evaluated in this order:
 
-1. **Structural invariants** (hardcoded, never overridden)
-   - Agent cannot modify the constitution or its compiled policies
-   - Agent cannot escalate its own privileges
-   - Credentials are never exposed to the sandbox
-   - Audit log cannot be disabled or modified
+1. **Structural invariants** (hardcoded, never overridden) -- **Implemented**
+   - Protected paths: agent cannot modify the constitution, compiled policies, MCP server config, or audit log
+   - Unknown tools: any tool not present in the tool annotations is denied
+   - Path extraction uses both heuristic detection and annotation-based extraction for defense-in-depth
 
-2. **Task policy** (most restrictive -- scoped to current task)
+2. **Task policy** (most restrictive -- scoped to current task) -- **Planned**
    - If the action is outside the task's expected scope, deny or escalate
 
-3. **Compiled constitution** (general rules)
-   - Deterministic rules first (fast, provable)
-   - LLM assessment for ambiguous cases
-   - Human escalation as fallback
+3. **Compiled rules** (declarative, per-role evaluation) -- **Implemented**
+   - For tools with multiple argument roles (e.g., `edit_file` has `read-path` + `write-path`), each role is evaluated independently through the rule chain (first-match-wins per role); the most restrictive result across all roles wins (`deny` > `escalate` > `allow`)
+   - For tools with no role-bearing arguments, the chain is evaluated once without role filtering
+   - **LLM assessment** for ambiguous cases -- **Planned** (currently all rules are deterministic)
 
 4. **Default deny** -- if no rule matches, the action is denied
 
 ## Component Details
 
-### 1. Agent Sandbox (V8 Isolated VM)
+### 1. Agent Sandbox (UTCP Code Mode)
 
-The agent's LLM-generated code runs inside a V8 isolate using the `isolated-vm` library. This provides:
+The agent's LLM-generated code runs inside UTCP Code Mode (`@utcp/code-mode`), which provides a V8-isolated TypeScript execution environment. This provides:
 
 - **Separate V8 heap** with no access to the host Node.js environment
 - **No network access** -- the only way out is structured MCP requests over a controlled IPC channel
@@ -275,7 +286,7 @@ The agent's LLM-generated code runs inside a V8 isolate using the `isolated-vm` 
 - **No credentials** in scope -- the agent cannot leak what it does not have
 - **Timeout protection** -- runaway code is terminated
 
-The Code Mode library (UTCP) runs inside this isolate. It provides typed TypeScript function stubs for each registered skill. When the agent calls `await gmail.sendEmail({to: "...", body: "..."})`, the stub serializes this into a structured MCP request and sends it over the IPC channel. The stub does not and cannot execute the actual API call.
+Code Mode provides typed TypeScript function stubs for each registered MCP server. The LLM writes TypeScript that calls these stubs synchronously (e.g., `filesystem.read_file({path: '...'})`). Each stub serializes the call into a structured MCP request and sends it over the IPC channel to the MCP proxy server. The stub does not and cannot execute the actual API call. Tool functions inside the sandbox are **synchronous** -- no `await` is needed.
 
 **Why V8 isolates and not a full container?** The primary threat is the LLM generating malicious code via prompt injection or multi-turn drift. That attacker operates at the TypeScript level, not the OS level. The V8 isolate is a sufficient boundary for this threat. A V8 escape exploit is a nation-state-tier attack; if the attacker has that, the agent runtime is not the weakest link. Dropping the container requirement dramatically simplifies deployment -- it is just a Node.js process.
 
@@ -285,7 +296,7 @@ The trusted process is the security kernel of the system. It:
 
 - **Receives** structured MCP requests from the sandbox over IPC
 - **Validates and sanitizes** each request -- reconstructs it from validated fields rather than forwarding raw input
-- **Evaluates** the request against the task policy and compiled constitution
+- **Evaluates** the request against structural invariants and compiled policy rules
 - **Routes** approved requests to the appropriate MCP server
 - **Returns** results from MCP servers back to the sandbox
 - **Logs** every request, decision, and result to an append-only audit log
@@ -293,9 +304,11 @@ The trusted process is the security kernel of the system. It:
 
 The trusted process is the only component that communicates with MCP servers. It acts as an MCP proxy -- to the sandbox, it looks like an MCP server; to the real MCP servers, it looks like an MCP client.
 
-**Trust model:** The trusted process is the TCB (trusted computing base). It must be small, auditable, and conservatively written. It does not run LLM-generated code. Its behavior is determined entirely by the compiled constitution, the task policy, and deterministic logic, with a narrow LLM assessment path for ambiguous cases.
+**Trust model:** The trusted process is the TCB (trusted computing base). It must be small, auditable, and conservatively written. It does not run LLM-generated code. Its behavior is currently determined entirely by hardcoded structural invariants, compiled declarative rules, and a default-deny fallback. Planned additions include task-scoped policy and LLM assessment for ambiguous cases.
 
-### 3. LLM Assessment with Input Sanitization
+### 3. LLM Assessment with Input Sanitization [Planned]
+
+> **Status: Not yet implemented.** Currently all policy rules are deterministic. The description below is the intended design for handling ambiguous cases that require semantic evaluation.
 
 When the constitution requires semantic evaluation (e.g., "does this email contain sensitive financial information?"), the trusted process invokes a separate LLM. This creates a second-order prompt injection risk: the content being assessed (an email body, a document) might contain adversarial instructions targeting the assessment LLM.
 
@@ -321,7 +334,9 @@ Standard, unmodified MCP server implementations. Each server:
 
 The system is compatible with the existing MCP ecosystem. Any MCP server that works today can be plugged in without modification. Security is enforced by the trusted process, not by the MCP servers.
 
-### 5. Agent Identity and Attribution
+### 5. Agent Identity and Attribution [Planned]
+
+> **Status: Not yet implemented.** The description below is the intended design.
 
 Agent actions must be distinguishable from direct user actions in service logs and audit trails. When the trusted process forwards an approved MCP request to an MCP server, it ensures the request is attributed to the agent rather than the user directly:
 
@@ -331,7 +346,9 @@ Agent actions must be distinguishable from direct user actions in service logs a
 
 This means the agent is a first-class identity in the system, not an invisible proxy wearing the user's credentials.
 
-### 6. Resource Budget Enforcement
+### 6. Resource Budget Enforcement [Planned]
+
+> **Status: Not yet implemented.** The description below is the intended design.
 
 The trusted process enforces resource limits from the constitution to prevent runaway costs and reasoning loops:
 
@@ -352,7 +369,9 @@ The agent can write any code it wants inside the sandbox. It can create new Type
 
 This means the agent can freely experiment, iterate, and self-improve without any security implications. The sandbox is a safe playground; the trusted process is the gate to the real world.
 
-## Static Analysis of Agent Code
+## Static Analysis of Agent Code [Planned]
+
+> **Status: Not yet implemented.** The description below is the intended design.
 
 Because Code Mode produces a complete TypeScript code block before execution, the trusted process can optionally perform static analysis before running anything:
 
@@ -364,7 +383,9 @@ Because Code Mode produces a complete TypeScript code block before execution, th
 
 This is a significant advantage over traditional sequential tool calling, where each call is decided independently. The trusted process sees the full plan and can reason about the aggregate intent.
 
-## Multi-Agent Coordination
+## Multi-Agent Coordination [Planned]
+
+> **Status: Not yet implemented.** The description below is the intended design.
 
 When multiple agents interact, each agent gets its own sandbox. There is no shared trust domain between agents.
 
@@ -374,9 +395,11 @@ If Agent A asks Agent B to send an email, Agent B's email-sending request still 
 
 ## Data Flow Example
 
+> **Note:** This example illustrates the full vision, including several planned features: Gmail MCP server, per-task policy, LLM assessment, static analysis, and push notification escalation. The current implementation supports only filesystem operations with deterministic policy rules and CLI-based escalation.
+
 **User says via Telegram:** "Forward my latest email from Alice to Bob with a summary"
 
-1. **Task policy generation.** The system generates a task-scoped policy: this task requires gmail.search (read), gmail.sendEmail (send to specific recipient). Other skills are not needed.
+1. **Task policy generation.** [Planned] The system generates a task-scoped policy: this task requires gmail.search (read), gmail.sendEmail (send to specific recipient). Other skills are not needed.
 
 2. **LLM generates TypeScript code** inside the V8 isolate:
    ```typescript
@@ -419,7 +442,9 @@ If Agent A asks Agent B to send an email, Agent B's email-sending request still 
 
 ## Human Escalation Design
 
-When the trusted process requires human approval:
+When the trusted process requires human approval, the current implementation uses a **CLI-based prompt** via stdin/stderr. The `EscalationHandler` (`src/trusted-process/escalation.ts`) displays the tool name, arguments, and policy reason, then asks for `y/N` approval. In proxy mode (MCP proxy server), escalations are auto-denied since there is no stdin access.
+
+The following capabilities are **planned but not yet implemented**:
 
 - **Notification** sent via user's preferred channel (push notification, Telegram, SMS)
 - **Context** includes: what the agent wants to do, which policy triggered escalation, and a brief summary of why
@@ -431,7 +456,9 @@ The learning loop means the constitution evolves from the user's actual trust de
 
 ## Audit Log
 
-Every interaction is logged in an append-only, tamper-evident log:
+Every interaction is logged in an append-only JSONL audit log.
+
+> **Note on field names:** The actual implementation (`src/types/audit.ts`) uses a flatter schema than the vision example below. Actual fields: `timestamp`, `requestId`, `serverName`, `toolName`, `arguments`, `policyDecision` (containing `status`, `rule`, `reason`), `escalationResult` (optional: `'approved'` | `'denied'`), `result` (containing `status`, `content`, `error`), and `durationMs`. The example below illustrates the richer schema envisioned when task policy, agent identity, and budget enforcement are implemented.
 
 ```json
 {
@@ -479,11 +506,11 @@ The log enables forensic analysis: given any agent action, you can trace exactly
 | **Strata AI Identity Gateway** | OPA/Rego policy + identity management for agents | Enterprise IAM, not a runtime for individual users |
 | **Claude Code Sandbox** | OS-level sandbox for bash commands | No policy engine, no MCP proxy, not a standalone runtime |
 | **Superagent** | Safety Agent evaluates actions before execution | Policies coupled to framework, not MCP-native |
-| **This Project** | Dual-verified English constitution, V8 sandbox, MCP proxy, per-task policy, agent identity, resource budgets, audit log | Targets individual users, agent-framework agnostic |
+| **This Project** | English constitution compiled via four-stage LLM pipeline, UTCP Code Mode sandbox, MCP proxy, audit log. Planned: per-task policy, agent identity, LLM assessment, resource budgets | Targets individual users, agent-framework agnostic |
 
 Key differentiators:
 
-1. **English-language constitution** compiled to enforceable policy via dual-verified LLM compilation -- no DSL, no OPA/Rego, no JSON Schema policy authoring
+1. **English-language constitution** compiled to enforceable policy via four-stage LLM pipeline (annotate, compile, generate scenarios, verify) -- no DSL, no OPA/Rego, no JSON Schema policy authoring
 2. **Per-task policy generation** that scopes the agent to the current objective
 3. **Agent-framework agnostic** -- works with any agent that can emit MCP requests
 4. **Individual-user focused** -- not an enterprise product, not a "talk to sales" solution
@@ -494,14 +521,22 @@ Key differentiators:
 
 ## Next Steps
 
+**Completed:**
+- [x] Prototype the trusted process as an MCP proxy with a compiled constitution
+- [x] Implement constitution compilation with four-stage pipeline (annotate, compile, generate scenarios, verify)
+- [x] Integrate UTCP Code Mode TypeScript execution in V8 sandbox
+- [x] Build and test with filesystem MCP server
+
+**Planned:**
 - [ ] Write detailed threat model with attack scenarios and mitigations
-- [ ] Prototype the trusted process as an MCP proxy with a minimal compiled constitution
-- [ ] Implement constitution compilation with dual-verification and policy primitive library
 - [ ] Implement per-task policy generation from task descriptions
-- [ ] Integrate Code Mode TypeScript execution in isolated-vm
+- [ ] Implement LLM assessment for ambiguous policy cases (with input sanitization)
 - [ ] Implement agent identity injection and down-scoped credential management
 - [ ] Implement resource budget enforcement and loop detection in the trusted process
+- [ ] Implement push notification escalation channels (Telegram, SMS)
+- [ ] Implement static analysis of agent code before execution
 - [ ] Build and test with Gmail, Slack, and Calendar MCP servers
 - [ ] Design the policy learning loop (human decisions -> constitution amendments)
+- [ ] Implement multi-agent coordination
 - [ ] Evaluate against known attack scenarios (Cisco prompt injection, CVE-2025-6514, AgentDojo benchmark)
 - [ ] Write up as paper and/or blog post for community feedback
