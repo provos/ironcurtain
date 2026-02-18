@@ -108,3 +108,14 @@ When mocking `generateText` for session tests:
 - `runAgent()` in `src/agent/index.ts` is deprecated (still used by integration tests)
 - `loadConfig()` default ALLOWED_DIRECTORY uses `getIronCurtainHome()/sandbox` (not `/tmp/ironcurtain-sandbox`)
 - Session factory overrides `allowedDirectory`, `auditLogPath`, and `escalationDir` per-session
+
+## Session Logging System
+- **Logger module**: `src/logger.ts` -- module-level singleton with `setup()`/`teardown()` lifecycle
+- **Log file**: `~/.ironcurtain/sessions/{id}/session.log` (path via `getSessionLogPath()` in `src/config/paths.ts`)
+- **API**: `logger.debug/info/warn/error()` -- no-ops when not set up (safe for code running outside sessions)
+- **Console interception**: `setup()` patches `console.log/error/warn/debug` to redirect to log file; `teardown()` restores originals
+- **User-facing output**: must use `process.stdout.write()` / `process.stderr.write()` to bypass interception
+- **Lifecycle**: `createSession()` calls `setup()` after mkdirSync; `AgentSession.close()` calls `teardown()` at the end
+- **Excluded**: `mcp-proxy-server.ts` (separate process) and `pipeline/compile.ts` (standalone CLI)
+- **Test gotcha**: session tests must call `logger.teardown()` in `afterEach` to prevent "Logger already set up" errors when creating multiple sessions across tests
+- **Design spec**: `docs/logging-design.md`

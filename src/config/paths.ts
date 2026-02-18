@@ -17,10 +17,21 @@ export function getSessionsDir(): string {
 }
 
 /**
+ * Validates that a session ID contains only safe characters
+ * (alphanumeric, hyphens, underscores) to prevent path traversal.
+ */
+function validateSessionId(sessionId: string): void {
+  if (!/^[a-zA-Z0-9_-]+$/.test(sessionId)) {
+    throw new Error(`Invalid session ID: ${sessionId}`);
+  }
+}
+
+/**
  * Returns the session directory for a given session ID:
  *   {home}/sessions/{sessionId}/
  */
 export function getSessionDir(sessionId: string): string {
+  validateSessionId(sessionId);
   return resolve(getSessionsDir(), sessionId);
 }
 
@@ -46,6 +57,14 @@ export function getSessionEscalationDir(sessionId: string): string {
  */
 export function getSessionAuditLogPath(sessionId: string): string {
   return resolve(getSessionDir(sessionId), 'audit.jsonl');
+}
+
+/**
+ * Returns the session log path for a given session:
+ *   {home}/sessions/{sessionId}/session.log
+ */
+export function getSessionLogPath(sessionId: string): string {
+  return resolve(getSessionDir(sessionId), 'session.log');
 }
 
 /**

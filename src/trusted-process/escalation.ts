@@ -17,19 +17,19 @@ export class EscalationHandler {
   async prompt(request: ToolCallRequest, reason: string): Promise<'approved' | 'denied'> {
     const rl = this.getReadline();
 
-    console.error('\n========================================');
-    console.error('  ESCALATION: Human approval required');
-    console.error('========================================');
-    console.error(`  Tool:      ${request.serverName}/${request.toolName}`);
-    console.error(`  Arguments: ${JSON.stringify(request.arguments, null, 2)}`);
-    console.error(`  Reason:    ${reason}`);
-    console.error('========================================');
+    process.stderr.write('\n========================================\n');
+    process.stderr.write('  ESCALATION: Human approval required\n');
+    process.stderr.write('========================================\n');
+    process.stderr.write(`  Tool:      ${request.serverName}/${request.toolName}\n`);
+    process.stderr.write(`  Arguments: ${JSON.stringify(request.arguments, null, 2)}\n`);
+    process.stderr.write(`  Reason:    ${reason}\n`);
+    process.stderr.write('========================================\n');
 
     return new Promise((resolve) => {
       rl.question('  Approve? (y/N): ', (answer) => {
         const approved = answer.trim().toLowerCase() === 'y';
-        console.error(approved ? '  -> APPROVED' : '  -> DENIED');
-        console.error('========================================\n');
+        process.stderr.write(approved ? '  -> APPROVED\n' : '  -> DENIED\n');
+        process.stderr.write('========================================\n\n');
         resolve(approved ? 'approved' : 'denied');
       });
     });

@@ -9,6 +9,7 @@ import {
 } from 'vitest';
 import { mkdirSync, existsSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
+import * as logger from '../src/logger.js';
 
 // Mock external dependencies before importing session modules.
 // The AgentSession uses generateText from 'ai', anthropic from '@ai-sdk/anthropic',
@@ -129,6 +130,8 @@ describe('Session', () => {
   });
 
   afterEach(async () => {
+    // Restore console in case the logger is still active from a session
+    logger.teardown();
     if (originalHome !== undefined) {
       process.env.IRONCURTAIN_HOME = originalHome;
     } else {
@@ -566,13 +569,15 @@ describe('Session', () => {
   describe('session info', () => {
     it('has a unique session ID', async () => {
       const session1 = await createTestSession();
+      const id1 = session1.getInfo().id;
+      await session1.close();
+      logger.teardown();
+
       const session2 = await createTestSession();
-      try {
-        expect(session1.getInfo().id).not.toBe(session2.getInfo().id);
-      } finally {
-        await session1.close();
-        await session2.close();
-      }
+      const id2 = session2.getInfo().id;
+      await session2.close();
+
+      expect(id1).not.toBe(id2);
     });
 
     it('tracks turn count', async () => {

@@ -28,8 +28,8 @@ export class CliTransport implements Transport {
 
   private async runSingleShot(session: Session): Promise<void> {
     const response = await session.sendMessage(this.initialMessage!);
-    console.log('\n=== Agent Response ===');
-    console.log(response);
+    process.stdout.write('\n=== Agent Response ===\n');
+    process.stdout.write(response + '\n');
   }
 
   private async runInteractive(session: Session): Promise<void> {
@@ -38,8 +38,8 @@ export class CliTransport implements Transport {
       output: process.stderr, // Prompts to stderr, responses to stdout
     });
 
-    console.error('IronCurtain interactive mode. Type /quit to exit.\n');
-    console.error('Commands: /quit /logs /approve /deny\n');
+    process.stderr.write('IronCurtain interactive mode. Type /quit to exit.\n\n');
+    process.stderr.write('Commands: /quit /logs /approve /deny\n\n');
 
     let running = true;
     let messageInFlight = false;
@@ -57,18 +57,18 @@ export class CliTransport implements Transport {
       }
 
       if (messageInFlight) {
-        console.error('  (still processing previous message, please wait)');
+        process.stderr.write('  (still processing previous message, please wait)\n');
         return;
       }
 
       messageInFlight = true;
       try {
         const response = await session.sendMessage(trimmed);
-        console.log(response);
-        console.log();
+        process.stdout.write(response + '\n');
+        process.stdout.write('\n');
       } catch (error) {
-        console.error(
-          `Error: ${error instanceof Error ? error.message : String(error)}`,
+        process.stderr.write(
+          `Error: ${error instanceof Error ? error.message : String(error)}\n`,
         );
       } finally {
         messageInFlight = false;
@@ -78,7 +78,7 @@ export class CliTransport implements Transport {
     rl.on('line', (line) => {
       if (running) {
         processLine(line).catch((err) => {
-          console.error(`Unexpected error: ${err}`);
+          process.stderr.write(`Unexpected error: ${err}\n`);
         });
       }
     });
@@ -119,20 +119,17 @@ export class CliTransport implements Transport {
 
   private displayDiagnosticLog(logs: readonly DiagnosticEvent[]): void {
     if (logs.length === 0) {
-      console.error('  (no diagnostic events yet)');
+      process.stderr.write('  (no diagnostic events yet)\n');
       return;
     }
 
     for (const event of logs) {
       switch (event.kind) {
         case 'tool_call':
-          console.error(`  [tool] ${event.toolName}: ${event.preview}`);
+          process.stderr.write(`  [tool] ${event.toolName}: ${event.preview}\n`);
           break;
         case 'agent_text':
-          console.error(`  [agent] ${event.preview}`);
-          break;
-        case 'step_finish':
-          console.error(`  [step] ${event.stepIndex} completed`);
+          process.stderr.write(`  [agent] ${event.preview}\n`);
           break;
       }
     }
@@ -141,17 +138,17 @@ export class CliTransport implements Transport {
   private handleEscalationCommand(command: string, session: Session): void {
     const pending = session.getPendingEscalation();
     if (!pending) {
-      console.error('  No escalation pending.');
+      process.stderr.write('  No escalation pending.\n');
       return;
     }
 
     const decision = command === '/approve' ? 'approved' as const : 'denied' as const;
     session.resolveEscalation(pending.escalationId, decision)
       .then(() => {
-        console.error(`  Escalation ${decision}.`);
+        process.stderr.write(`  Escalation ${decision}.\n`);
       })
       .catch((err) => {
-        console.error(`  Error: ${err instanceof Error ? err.message : String(err)}`);
+        process.stderr.write(`  Error: ${err instanceof Error ? err.message : String(err)}\n`);
       });
   }
 }

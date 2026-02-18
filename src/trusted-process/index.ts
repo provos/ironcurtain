@@ -6,6 +6,7 @@ import { PolicyEngine } from './policy-engine.js';
 import { MCPClientManager } from './mcp-client-manager.js';
 import { AuditLog } from './audit-log.js';
 import { EscalationHandler } from './escalation.js';
+import * as logger from '../logger.js';
 
 export type EscalationPromptFn = (request: ToolCallRequest, reason: string) => Promise<'approved' | 'denied'>;
 
@@ -31,9 +32,9 @@ export class TrustedProcess {
 
   async initialize(): Promise<void> {
     for (const [name, serverConfig] of Object.entries(this.config.mcpServers)) {
-      console.error(`Connecting to MCP server: ${name}...`);
+      logger.info(`Connecting to MCP server: ${name}...`);
       await this.mcpManager.connect(name, serverConfig);
-      console.error(`Connected to MCP server: ${name}`);
+      logger.info(`Connected to MCP server: ${name}`);
     }
   }
 

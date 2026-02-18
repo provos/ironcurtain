@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { CodeModeUtcpClient } from '@utcp/code-mode';
 import type { Sandbox } from '../sandbox/index.js';
 import { buildSystemPrompt } from './prompts.js';
+import * as logger from '../logger.js';
 
 const MAX_AGENT_STEPS = 10;
 
@@ -32,7 +33,7 @@ export async function runAgent(
         code: z.string().describe('TypeScript code to execute in the sandbox'),
       }),
       execute: async ({ code }) => {
-        console.error(`  [sandbox] Executing code (${code.length} chars)`);
+        logger.info(`[sandbox] Executing code (${code.length} chars)`);
         try {
           const { result, logs } = await sandbox.executeCode(code);
           const output: Record<string, unknown> = {};
@@ -50,8 +51,8 @@ export async function runAgent(
     }),
   };
 
-  console.error(`Agent starting with Code Mode sandbox`);
-  console.error(`Task: ${task}\n`);
+  logger.info(`Agent starting with Code Mode sandbox`);
+  logger.info(`Task: ${task}`);
 
   const result = await generateText({
     model: anthropic('claude-sonnet-4-6'),
@@ -65,12 +66,12 @@ export async function runAgent(
           if (tc.toolName === 'execute_code' && 'input' in tc) {
             const input = tc.input as { code: string };
             const preview = input.code.substring(0, 120).replace(/\n/g, '\\n');
-            console.error(`  Tool: execute_code("${preview}${input.code.length > 120 ? '...' : ''}")`);
+            logger.info(`Tool: execute_code("${preview}${input.code.length > 120 ? '...' : ''}")`);
           }
         }
       }
       if (text) {
-        console.error(`  Agent: ${text.substring(0, 200)}${text.length > 200 ? '...' : ''}`);
+        logger.info(`Agent: ${text.substring(0, 200)}${text.length > 200 ? '...' : ''}`);
       }
     },
   });

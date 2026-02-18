@@ -73,6 +73,17 @@ Both use the same PolicyEngine with compiled artifacts.
 - buildSystemPrompt() extracted to src/agent/prompts.ts (shared utility)
 - Context window: fail with clear error, no automatic pruning
 
+## Logger Design (designed 2026-02-18)
+- Module singleton at `src/logger.ts` with `setup()`/`teardown()` lifecycle
+- File-based: `appendFileSync` to `~/.ironcurtain/sessions/{id}/session.log`
+- Console interception: monkey-patches console.log/error/warn/debug, saves originals for restoration
+- No-op when not set up (safe for code running both inside/outside sessions)
+- User-facing output (escalation banners, agent responses) uses `process.stderr.write()`/`process.stdout.write()` to bypass interception
+- Proxy process (`mcp-proxy-server.ts`) does NOT import logger (separate child process)
+- Pipeline (`compile.ts`) does NOT import logger (standalone CLI tool)
+- `getSessionLogPath()` added to `src/config/paths.ts`
+- Session factory calls `setup()`, session close calls `teardown()`
+
 ## NOT Implemented (aspirational in docs)
 - Per-task policy layer
 - Runtime LLM assessment (semantic checks)

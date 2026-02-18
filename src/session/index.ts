@@ -12,7 +12,9 @@ import {
   getSessionSandboxDir,
   getSessionEscalationDir,
   getSessionAuditLogPath,
+  getSessionLogPath,
 } from '../config/paths.js';
+import * as logger from '../logger.js';
 import { AgentSession } from './agent-session.js';
 import { SessionError } from './errors.js';
 import { createSessionId } from './types.js';
@@ -46,6 +48,13 @@ export async function createSession(options: SessionOptions = {}): Promise<Sessi
   mkdirSync(sandboxDir, { recursive: true });
   mkdirSync(escalationDir, { recursive: true });
 
+  // Set up session logging -- captures all console output to file
+  logger.setup({ logFilePath: getSessionLogPath(sessionId) });
+  logger.info(`Session ${sessionId} created`);
+  logger.info(`Sandbox: ${sandboxDir}`);
+  logger.info(`Escalation dir: ${escalationDir}`);
+  logger.info(`Audit log: ${auditLogPath}`);
+
   // Override config paths for this session's isolated directories.
   // Deep-clone mcpServers so patching doesn't mutate the caller's config.
   const sessionConfig = {
@@ -66,6 +75,7 @@ export async function createSession(options: SessionOptions = {}): Promise<Sessi
   } catch (error) {
     // Clean up on init failure
     await session.close().catch(() => {});
+    logger.teardown();
     throw new SessionError(
       `Session initialization failed: ${error instanceof Error ? error.message : String(error)}`,
       'SESSION_INIT_FAILED',

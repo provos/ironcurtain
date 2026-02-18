@@ -1,6 +1,7 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import type { MCPServerConfig } from '../config/types.js';
+import * as logger from '../logger.js';
 
 interface ManagedServer {
   client: Client;
@@ -53,7 +54,7 @@ export class MCPClientManager {
       try {
         await server.client.close();
       } catch (err) {
-        console.error(`Error closing MCP server "${name}":`, err);
+        logger.error(`Error closing MCP server "${name}": ${err}`);
       }
     }
     this.servers.clear();

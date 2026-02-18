@@ -120,6 +120,7 @@ export class AgentSession implements Session {
 
     this.status = 'processing';
     const turnStart = new Date().toISOString();
+    const messageCountBefore = this.messages.length;
 
     try {
       this.messages.push({ role: 'user', content: userMessage });
@@ -144,9 +145,9 @@ export class AgentSession implements Session {
       this.status = 'ready';
       return result.text;
     } catch (error) {
-      // Remove the user message that had no corresponding response,
-      // so the history stays consistent for subsequent turns.
-      this.messages.pop();
+      // Truncate back to the state before this turn, removing the user
+      // message and any partial response messages that may have been pushed.
+      this.messages.length = messageCountBefore;
       this.status = 'ready';
       throw error;
     }
