@@ -5,6 +5,11 @@
  * - Single-shot: if initialMessage is provided, sends it and returns
  * - Interactive: event-driven REPL with slash commands
  *
+ * Provides a rich terminal experience:
+ * - Spinner (via ora) during message processing
+ * - Colored prompts and status messages (via chalk)
+ * - Markdown-rendered agent responses (via marked + marked-terminal)
+ *
  * Slash commands:
  *   /quit, /exit  -- end the session
  *   /logs         -- display accumulated diagnostic events
@@ -13,11 +18,36 @@
  */
 
 import { createInterface } from 'node:readline';
+import ora from 'ora';
+import chalk from 'chalk';
+import { marked } from 'marked';
+import { markedTerminal } from 'marked-terminal';
+import type { Ora } from 'ora';
 import type { Transport } from './transport.js';
-import type { Session, DiagnosticEvent } from './types.js';
+import type { Session, DiagnosticEvent, EscalationRequest } from './types.js';
+
+/** Options for constructing a CliTransport. */
+export interface CliTransportOptions {
+  /** If provided, run in single-shot mode with this message. */
+  initialMessage?: string;
+}
+
+// Configure marked to render markdown for the terminal.
+// This is module-level since marked is a singleton.
+marked.use(markedTerminal());
 
 export class CliTransport implements Transport {
-  constructor(private readonly initialMessage?: string) {}
+  private readonly initialMessage?: string;
+
+  /** The spinner instance, managed across the message lifecycle. */
+  private spinner: Ora | null = null;
+
+  /** The readline interface, stored so escalation handlers can re-prompt. */
+  private rl: ReturnType<typeof createInterface> | null = null;
+
+  constructor(options: CliTransportOptions = {}) {
+    this.initialMessage = options.initialMessage;
+  }
 
   async run(session: Session): Promise<void> {
     if (this.initialMessage) {
@@ -26,67 +56,140 @@ export class CliTransport implements Transport {
     return this.runInteractive(session);
   }
 
-  private async runSingleShot(session: Session): Promise<void> {
-    const response = await session.sendMessage(this.initialMessage!);
-    process.stdout.write('\n=== Agent Response ===\n');
-    process.stdout.write(response + '\n');
+  /**
+   * Returns an onDiagnostic callback that updates the spinner.
+   * Wire this into SessionOptions so the transport controls display.
+   */
+  createDiagnosticHandler(): (event: DiagnosticEvent) => void {
+    return (event) => {
+      if (!this.spinner?.isSpinning) return;
+
+      switch (event.kind) {
+        case 'tool_call':
+          this.spinner.text = 'Executing code...';
+          break;
+        case 'agent_text':
+          this.spinner.text = 'Generating response...';
+          break;
+      }
+    };
   }
 
+  /**
+   * Returns an onEscalation callback that stops the spinner and
+   * shows an escalation banner with the readline prompt so the user
+   * can type /approve or /deny. The spinner is restarted only after
+   * the user resolves the escalation (see handleEscalationCommand).
+   */
+  createEscalationHandler(): (request: EscalationRequest) => void {
+    return (request) => {
+      if (this.spinner?.isSpinning) {
+        this.spinner.stop();
+      }
+
+      this.writeEscalationBanner(request);
+
+      // Re-show the readline prompt so the user can type /approve or /deny
+      if (this.rl) {
+        this.rl.prompt();
+      }
+    };
+  }
+
+  // --- Single-shot mode ---
+
+  private async runSingleShot(session: Session): Promise<void> {
+    this.startSpinner('Thinking...');
+
+    try {
+      const response = await session.sendMessage(this.initialMessage!);
+      this.spinner!.stop();
+      process.stdout.write('\n');
+      process.stdout.write(renderMarkdown(response));
+    } catch (error) {
+      this.stopSpinnerWithError(error);
+      throw error;
+    }
+  }
+
+  // --- Interactive mode ---
+
   private async runInteractive(session: Session): Promise<void> {
-    const rl = createInterface({
+    this.rl = createInterface({
       input: process.stdin,
       output: process.stderr, // Prompts to stderr, responses to stdout
+      prompt: chalk.cyan('> '),
     });
+    const rl = this.rl;
 
-    process.stderr.write('IronCurtain interactive mode. Type /quit to exit.\n\n');
-    process.stderr.write('Commands: /quit /logs /approve /deny\n\n');
+    process.stderr.write(
+      chalk.dim('IronCurtain interactive mode. Type /quit to exit.\n\n'),
+    );
+    process.stderr.write(
+      chalk.dim('Commands: /quit /logs /approve /deny\n\n'),
+    );
+    rl.prompt();
 
     let running = true;
     let messageInFlight = false;
-    const handleSlashCommand = this.handleSlashCommand.bind(this);
 
-    async function processLine(input: string): Promise<void> {
+    const processLine = async (input: string): Promise<void> => {
       const trimmed = input.trim();
-      if (!trimmed) return;
+      if (!trimmed) {
+        rl.prompt();
+        return;
+      }
 
-      if (handleSlashCommand(trimmed, session, () => {
+      if (this.handleSlashCommand(trimmed, session, () => {
         running = false;
         rl.close();
       })) {
+        if (running) rl.prompt();
         return;
       }
 
       if (messageInFlight) {
-        process.stderr.write('  (still processing previous message, please wait)\n');
+        process.stderr.write(
+          chalk.dim('  (still processing previous message, please wait)\n'),
+        );
+        rl.prompt();
         return;
       }
 
       messageInFlight = true;
+      this.startSpinner('Thinking...');
+
       try {
         const response = await session.sendMessage(trimmed);
-        process.stdout.write(response + '\n');
+        this.spinner!.stop();
+        process.stdout.write('\n');
+        process.stdout.write(renderMarkdown(response));
         process.stdout.write('\n');
       } catch (error) {
-        process.stderr.write(
-          `Error: ${error instanceof Error ? error.message : String(error)}\n`,
-        );
+        this.stopSpinnerWithError(error);
       } finally {
         messageInFlight = false;
+        if (running) rl.prompt();
       }
-    }
+    };
 
     rl.on('line', (line) => {
       if (running) {
         processLine(line).catch((err) => {
-          process.stderr.write(`Unexpected error: ${err}\n`);
+          process.stderr.write(chalk.red(`Unexpected error: ${err}\n`));
         });
       }
     });
 
     await new Promise<void>((resolvePromise) => {
-      rl.on('close', resolvePromise);
+      rl.on('close', () => {
+        this.rl = null;
+        resolvePromise();
+      });
     });
   }
+
+  // --- Slash commands ---
 
   /**
    * Handles slash commands. Returns true if the input was a command,
@@ -119,17 +222,17 @@ export class CliTransport implements Transport {
 
   private displayDiagnosticLog(logs: readonly DiagnosticEvent[]): void {
     if (logs.length === 0) {
-      process.stderr.write('  (no diagnostic events yet)\n');
+      process.stderr.write(chalk.dim('  (no diagnostic events yet)\n'));
       return;
     }
 
     for (const event of logs) {
       switch (event.kind) {
         case 'tool_call':
-          process.stderr.write(`  [tool] ${event.toolName}: ${event.preview}\n`);
+          process.stderr.write(chalk.dim(`  [tool] ${event.toolName}: ${event.preview}\n`));
           break;
         case 'agent_text':
-          process.stderr.write(`  [agent] ${event.preview}\n`);
+          process.stderr.write(chalk.dim(`  [agent] ${event.preview}\n`));
           break;
       }
     }
@@ -138,17 +241,82 @@ export class CliTransport implements Transport {
   private handleEscalationCommand(command: string, session: Session): void {
     const pending = session.getPendingEscalation();
     if (!pending) {
-      process.stderr.write('  No escalation pending.\n');
+      process.stderr.write(chalk.dim('  No escalation pending.\n'));
       return;
     }
 
     const decision = command === '/approve' ? 'approved' as const : 'denied' as const;
     session.resolveEscalation(pending.escalationId, decision)
       .then(() => {
-        process.stderr.write(`  Escalation ${decision}.\n`);
+        const color = decision === 'approved' ? chalk.green : chalk.red;
+        process.stderr.write(color(`  Escalation ${decision}.\n`));
+        // Restart the spinner — sendMessage() is still in-flight, waiting
+        // for the proxy to process the escalation result and continue.
+        this.startSpinner('Processing...');
       })
       .catch((err) => {
-        process.stderr.write(`  Error: ${err instanceof Error ? err.message : String(err)}\n`);
+        process.stderr.write(
+          chalk.red(`  Error: ${err instanceof Error ? err.message : String(err)}\n`),
+        );
       });
   }
+
+  // --- Spinner helpers ---
+
+  private startSpinner(text: string): void {
+    this.spinner = ora({
+      text,
+      stream: process.stderr,
+      discardStdin: false,
+    }).start();
+  }
+
+  private stopSpinnerWithError(error: unknown): void {
+    const message = error instanceof Error ? error.message : String(error);
+    if (this.spinner?.isSpinning) {
+      this.spinner.fail(chalk.red(message));
+    } else {
+      process.stderr.write(chalk.red(`Error: ${message}\n`));
+    }
+  }
+
+  // --- Escalation banner ---
+
+  private writeEscalationBanner(request: EscalationRequest): void {
+    const border = chalk.yellow.bold('========================================');
+    const lines = [
+      '',
+      border,
+      chalk.yellow.bold('  ESCALATION: Human approval required'),
+      border,
+      chalk.yellow(`  Tool:      ${request.serverName}/${request.toolName}`),
+      chalk.yellow(`  Arguments: ${JSON.stringify(request.arguments, null, 2)}`),
+      chalk.yellow(`  Reason:    ${request.reason}`),
+      border,
+      chalk.yellow.bold('  Type /approve or /deny'),
+      border,
+      '',
+    ];
+    process.stderr.write(lines.join('\n') + '\n');
+  }
+}
+
+// --- Markdown rendering ---
+
+/**
+ * Renders a markdown string for terminal display.
+ * Returns the formatted string with ANSI codes for colors,
+ * bold/italic, syntax-highlighted code blocks, etc.
+ */
+function renderMarkdown(text: string): string {
+  if (!text.trim()) return '';
+
+  // marked.parse() can return string or Promise<string> depending on
+  // extensions. With marked-terminal (synchronous), it returns a string.
+  const rendered = marked.parse(text);
+  if (typeof rendered !== 'string') {
+    // Defensive: if somehow async, fall back to raw text
+    return text;
+  }
+  return rendered;
 }

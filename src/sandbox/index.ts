@@ -44,6 +44,11 @@ export class Sandbox {
       proxyEnv.ESCALATION_DIR = config.escalationDir;
     }
 
+    // Pass the session log path so the proxy can capture child process stderr.
+    if (config.sessionLogPath) {
+      proxyEnv.SESSION_LOG_PATH = config.sessionLogPath;
+    }
+
     await this.client.registerManual({
       name: 'filesystem',
       call_template_type: 'mcp',

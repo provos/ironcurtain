@@ -1,43 +1,38 @@
 import 'dotenv/config';
+import ora from 'ora';
+import chalk from 'chalk';
 import { loadConfig } from './config/index.js';
 import { createSession } from './session/index.js';
 import { CliTransport } from './session/cli-transport.js';
 import * as logger from './logger.js';
 
-async function main() {
+async function main(): Promise<void> {
   const task = process.argv.slice(2).join(' ');
   const config = loadConfig();
 
-  process.stderr.write('Initializing session...\n');
-  const session = await createSession({
-    config,
-    onEscalation: (req) => {
-      process.stderr.write('\n========================================\n');
-      process.stderr.write('  ESCALATION: Human approval required\n');
-      process.stderr.write('========================================\n');
-      process.stderr.write(`  Tool:      ${req.serverName}/${req.toolName}\n`);
-      process.stderr.write(`  Arguments: ${JSON.stringify(req.arguments, null, 2)}\n`);
-      process.stderr.write(`  Reason:    ${req.reason}\n`);
-      process.stderr.write('========================================\n');
-      process.stderr.write('  Type /approve or /deny\n');
-      process.stderr.write('========================================\n\n');
-    },
-    onDiagnostic: (event) => {
-      switch (event.kind) {
-        case 'tool_call':
-          logger.info(`[sandbox] ${event.toolName}: ${event.preview}`);
-          break;
-        case 'agent_text':
-          logger.info(`[agent] ${event.preview}`);
-          break;
-      }
-    },
-  });
-  process.stderr.write('Session ready.\n\n');
+  // Create the transport first so we can wire its callbacks into the session.
+  const transport = new CliTransport({ initialMessage: task || undefined });
 
-  // If a task was provided on the command line, run single-shot.
-  // Otherwise, enter interactive mode.
-  const transport = new CliTransport(task || undefined);
+  const initSpinner = ora({
+    text: 'Initializing session...',
+    stream: process.stderr,
+    discardStdin: false,
+  }).start();
+
+  let session;
+  try {
+    session = await createSession({
+      config,
+      onEscalation: transport.createEscalationHandler(),
+      onDiagnostic: transport.createDiagnosticHandler(),
+    });
+  } catch (error) {
+    initSpinner.fail(chalk.red('Session initialization failed'));
+    throw error;
+  }
+
+  initSpinner.succeed(chalk.dim('Session ready'));
+  process.stderr.write('\n');
 
   try {
     await transport.run(session);
@@ -49,6 +44,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  process.stderr.write(`Fatal error: ${err}\n`);
+  process.stderr.write(chalk.red(`Fatal error: ${err}\n`));
   process.exit(1);
 });

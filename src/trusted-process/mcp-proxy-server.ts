@@ -16,6 +16,7 @@
  *   GENERATED_DIR      -- path to the generated artifacts directory
  *   PROTECTED_PATHS    -- JSON array of protected paths
  *   ESCALATION_DIR     -- (optional) directory for file-based escalation IPC
+ *   SESSION_LOG_PATH   -- (optional) path for capturing child process stderr
  */
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -26,7 +27,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { existsSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { v4 as uuidv4 } from 'uuid';
 import { loadGeneratedPolicy } from '../config/index.js';
@@ -90,11 +91,13 @@ async function waitForEscalationDecision(
   return 'denied';
 }
 
-async function main() {
+async function main(): Promise<void> {
   const auditLogPath = process.env.AUDIT_LOG_PATH ?? './audit.jsonl';
   const serversConfigJson = process.env.MCP_SERVERS_CONFIG;
   const generatedDir = process.env.GENERATED_DIR;
   const protectedPathsJson = process.env.PROTECTED_PATHS ?? '[]';
+  const sessionLogPath = process.env.SESSION_LOG_PATH;
+  const escalationDir = process.env.ESCALATION_DIR;
 
   if (!serversConfigJson) {
     process.stderr.write('MCP_SERVERS_CONFIG environment variable is required\n');
@@ -124,7 +127,24 @@ async function main() {
       env: config.env
         ? { ...(process.env as Record<string, string>), ...config.env }
         : undefined,
+      stderr: 'pipe', // Prevent child server stderr from leaking to the terminal
     });
+
+    // Drain the piped stderr to prevent buffer backpressure from blocking
+    // the child process. Write output to the session log if configured.
+    if (transport.stderr) {
+      transport.stderr.on('data', (chunk: Buffer) => {
+        if (sessionLogPath) {
+          const lines = chunk.toString().trimEnd();
+          if (lines) {
+            const timestamp = new Date().toISOString();
+            try {
+              appendFileSync(sessionLogPath, `${timestamp} INFO  [mcp:${serverName}] ${lines}\n`);
+            } catch { /* ignore write failures */ }
+          }
+        }
+      });
+    }
 
     const client = new Client({ name: 'ironcurtain-proxy', version: '0.1.0' });
     await client.connect(transport);
@@ -214,8 +234,6 @@ async function main() {
     }
 
     if (evaluation.decision === 'escalate') {
-      const escalationDir = process.env.ESCALATION_DIR;
-
       if (!escalationDir) {
         // No escalation directory configured -- auto-deny (backward compatible)
         logAudit({ status: 'denied', error: evaluation.reason }, 0, 'denied');
@@ -285,14 +303,19 @@ async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
-  // Clean shutdown
-  process.on('SIGINT', async () => {
+  // Clean shutdown -- handle both SIGINT and SIGTERM since this process
+  // is spawned as a child by Code Mode and may receive either signal.
+  async function shutdown(): Promise<void> {
     for (const client of clients.values()) {
       try { await client.close(); } catch { /* ignore */ }
     }
+    try { await server.close(); } catch { /* ignore */ }
     await auditLog.close();
     process.exit(0);
-  });
+  }
+
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
 }
 
 main().catch((err) => {

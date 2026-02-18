@@ -48,8 +48,10 @@ export async function createSession(options: SessionOptions = {}): Promise<Sessi
   mkdirSync(sandboxDir, { recursive: true });
   mkdirSync(escalationDir, { recursive: true });
 
+  const sessionLogPath = getSessionLogPath(sessionId);
+
   // Set up session logging -- captures all console output to file
-  logger.setup({ logFilePath: getSessionLogPath(sessionId) });
+  logger.setup({ logFilePath: sessionLogPath });
   logger.info(`Session ${sessionId} created`);
   logger.info(`Sandbox: ${sandboxDir}`);
   logger.info(`Escalation dir: ${escalationDir}`);
@@ -62,6 +64,7 @@ export async function createSession(options: SessionOptions = {}): Promise<Sessi
     allowedDirectory: sandboxDir,
     auditLogPath,
     escalationDir,
+    sessionLogPath,
     mcpServers: JSON.parse(JSON.stringify(config.mcpServers)),
   };
 

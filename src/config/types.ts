@@ -14,4 +14,6 @@ export interface IronCurtainConfig {
   constitutionPath: string;
   /** Per-session escalation directory for file-based IPC with the proxy. Optional for backward compatibility. */
   escalationDir?: string;
+  /** Per-session log file path for capturing child process output. Optional for backward compatibility. */
+  sessionLogPath?: string;
 }
