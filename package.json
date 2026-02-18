@@ -5,6 +5,7 @@
   "description": "Secure agent runtime with trusted process mediation",
   "scripts": {
     "start": "tsx src/index.ts",
+    "compile-policy": "tsx src/pipeline/compile.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "eslint src/ test/"

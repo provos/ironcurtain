@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { IronCurtainConfig, MCPServerConfig } from './types.js';
+import type { CompiledPolicyFile, ToolAnnotationsFile } from '../pipeline/types.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -31,10 +32,36 @@ export function loadConfig(): IronCurtainConfig {
     }
   }
 
+  const constitutionPath = resolve(__dirname, 'constitution.md');
+  const generatedDir = resolve(__dirname, 'generated');
+
+  const protectedPaths = [
+    constitutionPath,
+    generatedDir,
+    mcpServersPath,
+    resolve(auditLogPath),
+  ];
+
   return {
     anthropicApiKey,
     auditLogPath,
     allowedDirectory,
     mcpServers,
+    protectedPaths,
+    generatedDir,
+    constitutionPath,
   };
+}
+
+export function loadGeneratedPolicy(generatedDir: string): {
+  compiledPolicy: CompiledPolicyFile;
+  toolAnnotations: ToolAnnotationsFile;
+} {
+  const compiledPolicy: CompiledPolicyFile = JSON.parse(
+    readFileSync(resolve(generatedDir, 'compiled-policy.json'), 'utf-8'),
+  );
+  const toolAnnotations: ToolAnnotationsFile = JSON.parse(
+    readFileSync(resolve(generatedDir, 'tool-annotations.json'), 'utf-8'),
+  );
+  return { compiledPolicy, toolAnnotations };
 }

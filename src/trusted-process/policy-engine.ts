@@ -1,29 +1,66 @@
+/**
+ * PolicyEngine -- Two-phase declarative policy evaluation.
+ *
+ * Phase 1: Hardcoded structural invariants (protected paths, unknown tools).
+ *          These are never overridden by compiled rules.
+ *
+ * Phase 2: Compiled declarative rules loaded from compiled-policy.json.
+ *          First matching rule wins; default deny if none match.
+ */
+
 import { resolve } from 'node:path';
 import type { ToolCallRequest } from '../types/mcp.js';
-import type { PolicyRule, EvaluationResult } from './policy-types.js';
-
-/**
- * Structural invariant: file name patterns that the agent must never
- * access. These protect the constitution, policy engine, audit log,
- * and server configuration from tampering by a compromised agent.
- */
-const PROTECTED_PATTERNS = [
-  'constitution.md',
-  'policy-engine',
-  'policy-types',
-  'audit-log',
-  'mcp-servers.json',
-];
+import type { EvaluationResult } from './policy-types.js';
+import type {
+  CompiledPolicyFile,
+  ToolAnnotationsFile,
+  ToolAnnotation,
+  CompiledRule,
+  ArgumentRole,
+} from '../pipeline/types.js';
 
 /**
  * Heuristically extracts filesystem paths from tool call arguments.
  * Any string value starting with '/' or '.' is treated as a path.
+ * Handles both single string values and arrays of strings.
  */
-function extractPaths(args: Record<string, unknown>): string[] {
+function extractPathsHeuristic(args: Record<string, unknown>): string[] {
   const paths: string[] = [];
   for (const value of Object.values(args)) {
     if (typeof value === 'string' && (value.startsWith('/') || value.startsWith('.'))) {
       paths.push(value);
+    } else if (Array.isArray(value)) {
+      for (const item of value) {
+        if (typeof item === 'string' && (item.startsWith('/') || item.startsWith('.'))) {
+          paths.push(item);
+        }
+      }
+    }
+  }
+  return paths;
+}
+
+/**
+ * Extracts paths from arguments based on annotation roles.
+ * Only returns paths for arguments whose annotated roles intersect
+ * with the target roles. Handles both string and string[] arguments.
+ */
+function extractAnnotatedPaths(
+  args: Record<string, unknown>,
+  annotation: ToolAnnotation,
+  targetRoles: ArgumentRole[],
+): string[] {
+  const paths: string[] = [];
+  for (const [argName, roles] of Object.entries(annotation.args)) {
+    if (!roles.some(r => targetRoles.includes(r))) continue;
+
+    const value = args[argName];
+    if (typeof value === 'string') {
+      paths.push(value);
+    } else if (Array.isArray(value)) {
+      for (const item of value) {
+        if (typeof item === 'string') paths.push(item);
+      }
     }
   }
   return paths;
@@ -32,7 +69,7 @@ function extractPaths(args: Record<string, unknown>): string[] {
 /**
  * Checks whether a target path is contained within a directory.
  * Both paths are resolved to absolute form before comparison,
- * which neutralizes path traversal attacks (e.g., "../../etc/passwd").
+ * which neutralizes path traversal attacks.
  */
 function isWithinDirectory(targetPath: string, directory: string): boolean {
   const resolved = resolve(targetPath);
@@ -41,141 +78,172 @@ function isWithinDirectory(targetPath: string, directory: string): boolean {
 }
 
 /**
- * Returns true if any path argument contains a protected file pattern.
- * Uses substring matching intentionally -- conservative over permissive.
+ * Checks whether a resolved path matches any protected path.
+ * A path is protected if it equals a protected path exactly
+ * or is contained within a protected directory.
  */
-function touchesProtectedFile(args: Record<string, unknown>): boolean {
-  const paths = extractPaths(args);
-  return paths.some(p =>
-    PROTECTED_PATTERNS.some(pattern => p.includes(pattern))
-  );
-}
-
-const READ_TOOLS = new Set([
-  'read_file',
-  'read_text_file',
-  'read_media_file',
-  'read_multiple_files',
-  'list_directory',
-  'list_directory_with_sizes',
-  'directory_tree',
-  'search_files',
-  'get_file_info',
-  'list_allowed_directories',
-]);
-
-const WRITE_TOOLS = new Set([
-  'write_file',
-  'edit_file',
-  'create_directory',
-  'move_file',
-]);
-
-const DELETE_TOOLS = new Set([
-  'delete_file',
-  'delete_directory',
-]);
-
-/**
- * Builds the ordered policy rule chain. Rules are evaluated top-to-bottom;
- * the first matching rule wins. This implements a subset of the full
- * policy evaluation order from the architecture doc:
- *
- *   Structural invariants -> (Task policy: not yet in PoC) ->
- *   Compiled constitution (deterministic rules) -> Default deny
- */
-function buildRules(): PolicyRule[] {
-  return [
-    // Structural invariants: protect constitution, policy, and audit files
-    {
-      name: 'structural-protect-policy-files',
-      description: 'Deny any access to constitution or policy files',
-      condition: (req) => touchesProtectedFile(req.arguments),
-      decision: 'deny',
-      reason: 'Access to constitution/policy files is forbidden',
-    },
-
-    // Constitution: "The agent must never delete data permanently"
-    {
-      name: 'deny-delete-operations',
-      description: 'Deny all delete operations',
-      condition: (req) => DELETE_TOOLS.has(req.toolName),
-      decision: 'deny',
-      reason: 'Delete operations are not permitted',
-    },
-
-    // Constitution: allow read operations within the sandbox boundary
-    {
-      name: 'allow-read-in-allowed-dir',
-      description: 'Allow read operations within the allowed directory',
-      condition: (req, allowedDir) => {
-        if (!READ_TOOLS.has(req.toolName)) return false;
-        if (req.toolName === 'list_allowed_directories') return true;
-        const paths = extractPaths(req.arguments);
-        return paths.length > 0 && paths.every(p => isWithinDirectory(p, allowedDir));
-      },
-      decision: 'allow',
-      reason: 'Read operation within allowed directory',
-    },
-
-    // Constitution: deny reads outside the sandbox boundary
-    {
-      name: 'deny-read-outside-allowed-dir',
-      description: 'Deny read operations outside the allowed directory',
-      condition: (req) => READ_TOOLS.has(req.toolName),
-      decision: 'deny',
-      reason: 'Read operation outside allowed directory',
-    },
-
-    // Constitution: allow writes within the sandbox boundary
-    {
-      name: 'allow-write-in-allowed-dir',
-      description: 'Allow write operations within the allowed directory',
-      condition: (req, allowedDir) => {
-        if (!WRITE_TOOLS.has(req.toolName)) return false;
-        const paths = extractPaths(req.arguments);
-        return paths.length > 0 && paths.every(p => isWithinDirectory(p, allowedDir));
-      },
-      decision: 'allow',
-      reason: 'Write operation within allowed directory',
-    },
-
-    // Constitution: escalate writes outside sandbox to human approval
-    {
-      name: 'escalate-write-outside-allowed-dir',
-      description: 'Escalate write operations outside the allowed directory',
-      condition: (req) => WRITE_TOOLS.has(req.toolName),
-      decision: 'escalate',
-      reason: 'Write operation outside allowed directory requires human approval',
-    },
-  ];
+function isProtectedPath(resolvedPath: string, protectedPaths: string[]): boolean {
+  return protectedPaths.some(pp => {
+    const resolvedPP = resolve(pp);
+    return resolvedPath === resolvedPP || resolvedPath.startsWith(resolvedPP + '/');
+  });
 }
 
 export class PolicyEngine {
-  private rules: PolicyRule[];
-  private allowedDirectory: string;
+  private annotationMap: Map<string, ToolAnnotation>;
+  private compiledPolicy: CompiledPolicyFile;
+  private protectedPaths: string[];
 
-  constructor(allowedDirectory: string) {
-    this.rules = buildRules();
-    this.allowedDirectory = resolve(allowedDirectory);
+  constructor(
+    compiledPolicy: CompiledPolicyFile,
+    toolAnnotations: ToolAnnotationsFile,
+    protectedPaths: string[],
+  ) {
+    this.compiledPolicy = compiledPolicy;
+    this.protectedPaths = protectedPaths;
+    this.annotationMap = this.buildAnnotationMap(toolAnnotations);
+  }
+
+  private buildAnnotationMap(annotations: ToolAnnotationsFile): Map<string, ToolAnnotation> {
+    const map = new Map<string, ToolAnnotation>();
+    for (const [serverName, serverData] of Object.entries(annotations.servers)) {
+      for (const tool of serverData.tools) {
+        const key = `${serverName}__${tool.toolName}`;
+        map.set(key, tool);
+      }
+    }
+    return map;
   }
 
   evaluate(request: ToolCallRequest): EvaluationResult {
-    for (const rule of this.rules) {
-      if (rule.condition(request, this.allowedDirectory)) {
+    // Phase 1: Structural invariants
+    const structuralResult = this.evaluateStructuralInvariants(request);
+    if (structuralResult) return structuralResult;
+
+    // Phase 2: Compiled rules
+    return this.evaluateCompiledRules(request);
+  }
+
+  /**
+   * Phase 1: Hardcoded structural invariants.
+   *
+   * Uses the union of heuristic and annotation-based path extraction
+   * for defense-in-depth. Returns a result if a structural rule fires,
+   * or undefined to fall through to compiled rules.
+   */
+  private evaluateStructuralInvariants(request: ToolCallRequest): EvaluationResult | undefined {
+    // Extract paths using both methods for defense-in-depth
+    const heuristicPaths = extractPathsHeuristic(request.arguments);
+    const annotation = this.annotationMap.get(`${request.serverName}__${request.toolName}`);
+
+    const allPathRoles: ArgumentRole[] = ['read-path', 'write-path', 'delete-path'];
+    const annotatedPaths = annotation
+      ? extractAnnotatedPaths(request.arguments, annotation, allPathRoles)
+      : [];
+
+    // Union of both extraction methods, deduplicated
+    const allPaths = [...new Set([...heuristicPaths, ...annotatedPaths])];
+    const resolvedPaths = allPaths.map(p => resolve(p));
+
+    // Check protected paths
+    for (const rp of resolvedPaths) {
+      if (isProtectedPath(rp, this.protectedPaths)) {
         return {
-          decision: rule.decision,
+          decision: 'deny',
+          rule: 'structural-protected-path',
+          reason: `Access to protected path is forbidden: ${rp}`,
+        };
+      }
+    }
+
+    // Unknown tool check
+    if (!annotation) {
+      return {
+        decision: 'deny',
+        rule: 'structural-unknown-tool',
+        reason: `Unknown tool: ${request.serverName}/${request.toolName}`,
+      };
+    }
+
+    return undefined;
+  }
+
+  /**
+   * Phase 2: Evaluate compiled declarative rules.
+   *
+   * Rules are evaluated in order; first matching rule wins.
+   * If no rule matches, default deny.
+   */
+  private evaluateCompiledRules(request: ToolCallRequest): EvaluationResult {
+    const annotation = this.annotationMap.get(`${request.serverName}__${request.toolName}`)!;
+
+    for (const rule of this.compiledPolicy.rules) {
+      if (this.ruleMatches(rule, request, annotation)) {
+        return {
+          decision: rule.then,
           rule: rule.name,
           reason: rule.reason,
         };
       }
     }
 
-    // Default deny
     return {
       decision: 'deny',
       rule: 'default-deny',
-      reason: 'No matching policy rule — denied by default',
+      reason: 'No matching policy rule -- denied by default',
     };
+  }
+
+  /**
+   * Checks whether all conditions in a rule's `if` block are satisfied.
+   */
+  private ruleMatches(
+    rule: CompiledRule,
+    request: ToolCallRequest,
+    annotation: ToolAnnotation,
+  ): boolean {
+    const cond = rule.if;
+
+    // Check roles condition: tool must have at least one argument
+    // whose roles include any of the specified roles
+    if (cond.roles !== undefined) {
+      const toolHasMatchingRole = Object.values(annotation.args).some(
+        argRoles => argRoles.some(r => cond.roles!.includes(r)),
+      );
+      if (!toolHasMatchingRole) return false;
+    }
+
+    // Check server condition
+    if (cond.server !== undefined && !cond.server.includes(request.serverName)) {
+      return false;
+    }
+
+    // Check tool condition
+    if (cond.tool !== undefined && !cond.tool.includes(request.toolName)) {
+      return false;
+    }
+
+    // Check sideEffects condition
+    if (cond.sideEffects !== undefined && annotation.sideEffects !== cond.sideEffects) {
+      return false;
+    }
+
+    // Check paths condition
+    if (cond.paths !== undefined) {
+      const extracted = extractAnnotatedPaths(
+        request.arguments,
+        annotation,
+        cond.paths.roles,
+      );
+
+      // Zero paths extracted = condition not satisfied, rule does not match
+      if (extracted.length === 0) return false;
+
+      const resolved = extracted.map(p => resolve(p));
+      const allWithin = resolved.every(p => isWithinDirectory(p, cond.paths!.within));
+      if (!allWithin) return false;
+    }
+
+    return true;
   }
 }

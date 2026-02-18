@@ -1,12 +1,58 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { v4 as uuidv4 } from 'uuid';
 import { TrustedProcess, type EscalationPromptFn } from '../src/trusted-process/index.js';
 import type { IronCurtainConfig } from '../src/config/types.js';
 import type { ToolCallRequest } from '../src/types/mcp.js';
+import type { CompiledPolicyFile, ToolAnnotationsFile } from '../src/pipeline/types.js';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const projectRoot = resolve(__dirname, '..');
 
 const SANDBOX_DIR = '/tmp/ironcurtain-test-' + process.pid;
 const AUDIT_LOG_PATH = `/tmp/ironcurtain-test-audit-${process.pid}.jsonl`;
+const DEFAULT_SANDBOX = '/tmp/ironcurtain-sandbox';
+
+/**
+ * Loads compiled policy and rewrites `within` paths to use the test's
+ * dynamic sandbox directory instead of the default `/tmp/ironcurtain-sandbox`.
+ */
+function loadTestPolicy(generatedDir: string, sandboxDir: string): {
+  compiledPolicy: CompiledPolicyFile;
+  toolAnnotations: ToolAnnotationsFile;
+} {
+  const compiledPolicy: CompiledPolicyFile = JSON.parse(
+    readFileSync(resolve(generatedDir, 'compiled-policy.json'), 'utf-8'),
+  );
+  const toolAnnotations: ToolAnnotationsFile = JSON.parse(
+    readFileSync(resolve(generatedDir, 'tool-annotations.json'), 'utf-8'),
+  );
+
+  // Rewrite sandbox paths in compiled rules to match the test sandbox
+  for (const rule of compiledPolicy.rules) {
+    if (rule.if.paths?.within === DEFAULT_SANDBOX) {
+      rule.if.paths.within = sandboxDir;
+    }
+  }
+
+  return { compiledPolicy, toolAnnotations };
+}
+
+/**
+ * Writes the rewritten policy artifacts to a temp directory so that
+ * TrustedProcess.loadGeneratedPolicy() reads the correct paths.
+ */
+function writeTestArtifacts(
+  dir: string,
+  compiledPolicy: CompiledPolicyFile,
+  toolAnnotations: ToolAnnotationsFile,
+): void {
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(resolve(dir, 'compiled-policy.json'), JSON.stringify(compiledPolicy));
+  writeFileSync(resolve(dir, 'tool-annotations.json'), JSON.stringify(toolAnnotations));
+}
 
 function makeRequest(overrides: Partial<ToolCallRequest> = {}): ToolCallRequest {
   return {
@@ -29,11 +75,18 @@ describe('Integration: TrustedProcess with filesystem MCP server', () => {
     return escalationResponse;
   };
 
+  const testGeneratedDir = `/tmp/ironcurtain-test-generated-${process.pid}`;
+
   beforeAll(async () => {
     // Create sandbox with test files
     mkdirSync(SANDBOX_DIR, { recursive: true });
     writeFileSync(`${SANDBOX_DIR}/hello.txt`, 'Hello, IronCurtain!');
     writeFileSync(`${SANDBOX_DIR}/data.json`, JSON.stringify({ key: 'value' }));
+
+    // Load and rewrite policy artifacts with test sandbox paths
+    const sourceGeneratedDir = resolve(projectRoot, 'src/config/generated');
+    const { compiledPolicy, toolAnnotations } = loadTestPolicy(sourceGeneratedDir, SANDBOX_DIR);
+    writeTestArtifacts(testGeneratedDir, compiledPolicy, toolAnnotations);
 
     const config: IronCurtainConfig = {
       anthropicApiKey: 'not-needed-for-this-test',
@@ -45,6 +98,14 @@ describe('Integration: TrustedProcess with filesystem MCP server', () => {
           args: ['-y', '@modelcontextprotocol/server-filesystem', SANDBOX_DIR],
         },
       },
+      protectedPaths: [
+        resolve(projectRoot, 'src/config/constitution.md'),
+        resolve(projectRoot, 'src/config/generated'),
+        resolve(projectRoot, 'src/config/mcp-servers.json'),
+        resolve(AUDIT_LOG_PATH),
+      ],
+      generatedDir: testGeneratedDir,
+      constitutionPath: resolve(projectRoot, 'src/config/constitution.md'),
     };
 
     trustedProcess = new TrustedProcess(config, { onEscalation: mockEscalation });
@@ -56,6 +117,7 @@ describe('Integration: TrustedProcess with filesystem MCP server', () => {
     // Cleanup
     rmSync(SANDBOX_DIR, { recursive: true, force: true });
     rmSync(AUDIT_LOG_PATH, { force: true });
+    rmSync(testGeneratedDir, { recursive: true, force: true });
   });
 
   it('lists tools from the filesystem MCP server', async () => {
@@ -76,7 +138,7 @@ describe('Integration: TrustedProcess with filesystem MCP server', () => {
 
     expect(result.status).toBe('success');
     expect(result.policyDecision.status).toBe('allow');
-    expect(result.policyDecision.rule).toBe('allow-read-in-allowed-dir');
+    expect(result.policyDecision.rule).toBe('allow-read-in-sandbox');
   });
 
   it('allows listing the sandbox directory', async () => {
@@ -125,21 +187,25 @@ describe('Integration: TrustedProcess with filesystem MCP server', () => {
 
     expect(result.status).toBe('denied');
     expect(result.policyDecision.status).toBe('deny');
-    expect(result.policyDecision.rule).toBe('deny-read-outside-allowed-dir');
+    expect(result.policyDecision.rule).toBe('deny-read-elsewhere');
   });
 
-  it('denies access to constitution files', async () => {
+  it('denies access to protected constitution file', async () => {
+    // The new engine protects concrete paths, not substring patterns.
+    // We test the actual constitution file path, not a sandbox file
+    // that happens to contain "constitution.md" in its name.
+    const constitutionPath = resolve(projectRoot, 'src/config/constitution.md');
     const result = await trustedProcess.handleToolCall(makeRequest({
       toolName: 'read_file',
-      arguments: { path: `${SANDBOX_DIR}/constitution.md` },
+      arguments: { path: constitutionPath },
     }));
 
     expect(result.status).toBe('denied');
     expect(result.policyDecision.status).toBe('deny');
-    expect(result.policyDecision.rule).toBe('structural-protect-policy-files');
+    expect(result.policyDecision.rule).toBe('structural-protected-path');
   });
 
-  it('escalates writing outside the sandbox — denied by human', async () => {
+  it('escalates writing outside the sandbox -- denied by human', async () => {
     escalationResponse = 'denied';
     lastEscalationRequest = null;
 
@@ -154,7 +220,7 @@ describe('Integration: TrustedProcess with filesystem MCP server', () => {
     expect(result.policyDecision.reason).toBe('Denied by human during escalation');
   });
 
-  it('escalates writing outside the sandbox — approved by human', async () => {
+  it('escalates writing outside the sandbox -- approved by human', async () => {
     escalationResponse = 'approved';
     lastEscalationRequest = null;
 
@@ -165,7 +231,7 @@ describe('Integration: TrustedProcess with filesystem MCP server', () => {
     }));
 
     expect(lastEscalationRequest).not.toBeNull();
-    // The MCP server may deny the write (path not in its allowed dirs), which is fine —
+    // The MCP server may deny the write (path not in its allowed dirs), which is fine --
     // the point is that the policy engine escalated and the human approved
     expect(result.policyDecision.reason).toBe('Approved by human during escalation');
 

@@ -1,6 +1,7 @@
 import type { IronCurtainConfig } from '../config/types.js';
 import type { ToolCallRequest, ToolCallResult, PolicyDecision } from '../types/mcp.js';
 import type { AuditEntry } from '../types/audit.js';
+import { loadGeneratedPolicy } from '../config/index.js';
 import { PolicyEngine } from './policy-engine.js';
 import { MCPClientManager } from './mcp-client-manager.js';
 import { AuditLog } from './audit-log.js';
@@ -20,7 +21,8 @@ export class TrustedProcess {
   private onEscalation?: EscalationPromptFn;
 
   constructor(private config: IronCurtainConfig, options?: TrustedProcessOptions) {
-    this.policyEngine = new PolicyEngine(config.allowedDirectory);
+    const { compiledPolicy, toolAnnotations } = loadGeneratedPolicy(config.generatedDir);
+    this.policyEngine = new PolicyEngine(compiledPolicy, toolAnnotations, config.protectedPaths);
     this.mcpManager = new MCPClientManager();
     this.auditLog = new AuditLog(config.auditLogPath);
     this.escalation = new EscalationHandler();

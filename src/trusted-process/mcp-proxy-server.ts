@@ -11,9 +11,10 @@
  * 5. Logs every request and decision to the append-only audit log
  *
  * Configuration via environment variables:
- *   ALLOWED_DIRECTORY  -- sandbox boundary for policy evaluation
  *   AUDIT_LOG_PATH     -- path to the audit log file
  *   MCP_SERVERS_CONFIG -- JSON string of MCP server configs to proxy
+ *   GENERATED_DIR      -- path to the generated artifacts directory
+ *   PROTECTED_PATHS    -- JSON array of protected paths
  */
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -25,6 +26,7 @@ import {
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { v4 as uuidv4 } from 'uuid';
+import { loadGeneratedPolicy } from '../config/index.js';
 import { PolicyEngine } from './policy-engine.js';
 import { AuditLog } from './audit-log.js';
 import type { ToolCallRequest } from '../types/mcp.js';
@@ -39,17 +41,26 @@ interface ProxiedTool {
 }
 
 async function main() {
-  const allowedDirectory = process.env.ALLOWED_DIRECTORY ?? '/tmp/ironcurtain-sandbox';
   const auditLogPath = process.env.AUDIT_LOG_PATH ?? './audit.jsonl';
   const serversConfigJson = process.env.MCP_SERVERS_CONFIG;
+  const generatedDir = process.env.GENERATED_DIR;
+  const protectedPathsJson = process.env.PROTECTED_PATHS ?? '[]';
 
   if (!serversConfigJson) {
     process.stderr.write('MCP_SERVERS_CONFIG environment variable is required\n');
     process.exit(1);
   }
 
+  if (!generatedDir) {
+    process.stderr.write('GENERATED_DIR environment variable is required\n');
+    process.exit(1);
+  }
+
   const serversConfig: Record<string, MCPServerConfig> = JSON.parse(serversConfigJson);
-  const policyEngine = new PolicyEngine(allowedDirectory);
+  const protectedPaths: string[] = JSON.parse(protectedPathsJson);
+
+  const { compiledPolicy, toolAnnotations } = loadGeneratedPolicy(generatedDir);
+  const policyEngine = new PolicyEngine(compiledPolicy, toolAnnotations, protectedPaths);
   const auditLog = new AuditLog(auditLogPath);
 
   // Connect to real MCP servers as clients

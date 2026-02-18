@@ -9,4 +9,7 @@ export interface IronCurtainConfig {
   auditLogPath: string;
   allowedDirectory: string;
   mcpServers: Record<string, MCPServerConfig>;
+  protectedPaths: string[];
+  generatedDir: string;
+  constitutionPath: string;
 }

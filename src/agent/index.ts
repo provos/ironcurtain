@@ -58,7 +58,7 @@ export async function runAgent(
   console.error(`Task: ${task}\n`);
 
   const result = await generateText({
-    model: anthropic('claude-sonnet-4-5'),
+    model: anthropic('claude-sonnet-4-6'),
     system: buildSystemPrompt(codeModePrompt, toolInterfaces),
     prompt: task,
     tools,

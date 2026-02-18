@@ -1,0 +1,124 @@
+{
+  "generatedAt": "2026-02-17T00:00:00.000Z",
+  "servers": {
+    "filesystem": {
+      "tools": [
+        {
+          "toolName": "read_file",
+          "serverName": "filesystem",
+          "comment": "Reads the complete contents of a file from disk",
+          "sideEffects": true,
+          "args": { "path": ["read-path"] }
+        },
+        {
+          "toolName": "read_text_file",
+          "serverName": "filesystem",
+          "comment": "Reads a text file from disk",
+          "sideEffects": true,
+          "args": { "path": ["read-path"] }
+        },
+        {
+          "toolName": "read_media_file",
+          "serverName": "filesystem",
+          "comment": "Reads a media file from disk",
+          "sideEffects": true,
+          "args": { "path": ["read-path"] }
+        },
+        {
+          "toolName": "read_multiple_files",
+          "serverName": "filesystem",
+          "comment": "Reads multiple files from disk in a single call",
+          "sideEffects": true,
+          "args": { "paths": ["read-path"] }
+        },
+        {
+          "toolName": "list_directory",
+          "serverName": "filesystem",
+          "comment": "Lists files and subdirectories in a directory",
+          "sideEffects": true,
+          "args": { "path": ["read-path"] }
+        },
+        {
+          "toolName": "list_directory_with_sizes",
+          "serverName": "filesystem",
+          "comment": "Lists files and subdirectories with their sizes",
+          "sideEffects": true,
+          "args": { "path": ["read-path"] }
+        },
+        {
+          "toolName": "directory_tree",
+          "serverName": "filesystem",
+          "comment": "Returns a recursive tree view of a directory",
+          "sideEffects": true,
+          "args": { "path": ["read-path"] }
+        },
+        {
+          "toolName": "search_files",
+          "serverName": "filesystem",
+          "comment": "Searches for files matching a pattern within a directory",
+          "sideEffects": true,
+          "args": { "path": ["read-path"] }
+        },
+        {
+          "toolName": "get_file_info",
+          "serverName": "filesystem",
+          "comment": "Returns metadata about a file or directory",
+          "sideEffects": true,
+          "args": { "path": ["read-path"] }
+        },
+        {
+          "toolName": "list_allowed_directories",
+          "serverName": "filesystem",
+          "comment": "Lists directories the server is allowed to access",
+          "sideEffects": false,
+          "args": {}
+        },
+        {
+          "toolName": "write_file",
+          "serverName": "filesystem",
+          "comment": "Creates or overwrites a file with new content",
+          "sideEffects": true,
+          "args": { "path": ["write-path"] }
+        },
+        {
+          "toolName": "edit_file",
+          "serverName": "filesystem",
+          "comment": "Edits an existing file by applying changes",
+          "sideEffects": true,
+          "args": { "path": ["write-path"] }
+        },
+        {
+          "toolName": "create_directory",
+          "serverName": "filesystem",
+          "comment": "Creates a new directory at the specified path",
+          "sideEffects": true,
+          "args": { "path": ["write-path"] }
+        },
+        {
+          "toolName": "move_file",
+          "serverName": "filesystem",
+          "comment": "Moves a file from source to destination, deleting the source",
+          "sideEffects": true,
+          "args": {
+            "source": ["read-path", "delete-path"],
+            "destination": ["write-path"]
+          }
+        },
+        {
+          "toolName": "delete_file",
+          "serverName": "filesystem",
+          "comment": "Permanently deletes a file from disk",
+          "sideEffects": true,
+          "args": { "path": ["delete-path"] }
+        },
+        {
+          "toolName": "delete_directory",
+          "serverName": "filesystem",
+          "comment": "Permanently deletes a directory and its contents",
+          "sideEffects": true,
+          "args": { "path": ["delete-path"] }
+        }
+      ]
+    }
+  }
+}

@@ -41,9 +41,10 @@ export class Sandbox {
             command: 'npx',
             args: ['tsx', PROXY_SERVER_PATH],
             env: {
-              ALLOWED_DIRECTORY: config.allowedDirectory,
               AUDIT_LOG_PATH: config.auditLogPath,
               MCP_SERVERS_CONFIG: JSON.stringify(config.mcpServers),
+              GENERATED_DIR: config.generatedDir,
+              PROTECTED_PATHS: JSON.stringify(config.protectedPaths),
             },
             timeout: 30000,
           },

@@ -1,12 +1,4 @@
-import type { ToolCallRequest, PolicyDecisionStatus } from '../types/mcp.js';
-
-export interface PolicyRule {
-  name: string;
-  description: string;
-  condition: (request: ToolCallRequest, allowedDirectory: string) => boolean;
-  decision: PolicyDecisionStatus;
-  reason: string;
-}
+import type { PolicyDecisionStatus } from '../types/mcp.js';
 
 export interface EvaluationResult {
   decision: PolicyDecisionStatus;
