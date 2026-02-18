@@ -5,11 +5,16 @@
 export function buildSystemPrompt(
   codeModePrompt: string,
   toolInterfaces: string,
+  allowedDirectory?: string,
 ): string {
+  const sandboxInfo = allowedDirectory
+    ? `\nYour sandbox directory is: ${allowedDirectory}\nAll file operations within this directory are automatically allowed.\n`
+    : '';
+
   return `You are a helpful assistant. You complete tasks by writing TypeScript code that executes in a secure sandbox.
 
-Every tool call in your code goes through a security policy engine. Calls may be ALLOWED, DENIED, or require ESCALATION (human approval). If a call is denied, do NOT retry it \u2014 explain the denial to the user.
-
+Every tool call in your code goes through a security policy engine. If a call is denied, do NOT retry it -- explain the denial to the user.
+${sandboxInfo}
 ${codeModePrompt}
 
 ## Currently available tool interfaces

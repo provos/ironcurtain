@@ -5,11 +5,21 @@
  * via createSession() in index.ts.
  */
 
-import { generateText, stepCountIs, tool, type ModelMessage, type ToolSet } from 'ai';
+import {
+  generateText,
+  stepCountIs,
+  tool,
+  wrapLanguageModel,
+  type LanguageModel,
+  type ModelMessage,
+  type ToolSet,
+} from 'ai';
 import { anthropic } from '@ai-sdk/anthropic';
 import { z } from 'zod';
 import { CodeModeUtcpClient } from '@utcp/code-mode';
 import { readFileSync, writeFileSync, readdirSync } from 'node:fs';
+import { createLlmLoggingMiddleware } from '../pipeline/llm-logger.js';
+import type { LlmLogContext } from '../pipeline/llm-logger.js';
 import { resolve } from 'node:path';
 import type { IronCurtainConfig } from '../config/types.js';
 import type { Sandbox } from '../sandbox/index.js';
@@ -62,6 +72,9 @@ export class AgentSession implements Session {
   /** The tool set, built once after sandbox initialization. */
   private tools: ToolSet = {};
 
+  /** Language model, optionally wrapped with logging middleware. */
+  private model: LanguageModel | null = null;
+
   /** Currently pending escalation, if any. */
   private pendingEscalation: EscalationRequest | undefined;
 
@@ -99,8 +112,10 @@ export class AgentSession implements Session {
     this.systemPrompt = buildSystemPrompt(
       CodeModeUtcpClient.AGENT_PROMPT_TEMPLATE,
       this.sandbox.getToolInterfaces(),
+      this.config.allowedDirectory,
     );
     this.tools = this.buildTools();
+    this.model = this.buildModel();
     this.startEscalationWatcher();
     this.status = 'ready';
   }
@@ -126,7 +141,7 @@ export class AgentSession implements Session {
       this.messages.push({ role: 'user', content: userMessage });
 
       const result = await generateText({
-        model: anthropic('claude-sonnet-4-6'),
+        model: this.model!,
         system: this.systemPrompt,
         messages: this.messages,
         tools: this.tools,
@@ -219,6 +234,17 @@ export class AgentSession implements Session {
         },
       }),
     };
+  }
+
+  private buildModel(): LanguageModel {
+    const baseModel = anthropic('claude-sonnet-4-6');
+    if (!this.config.llmLogPath) return baseModel;
+
+    const logContext: LlmLogContext = { stepName: 'agent' };
+    return wrapLanguageModel({
+      model: baseModel,
+      middleware: createLlmLoggingMiddleware(this.config.llmLogPath, logContext),
+    });
   }
 
   private emitToolCallDiagnostics(toolCalls: readonly { toolName: string; input?: unknown }[]): void {

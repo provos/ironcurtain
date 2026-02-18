@@ -36,6 +36,7 @@ export class Sandbox {
       MCP_SERVERS_CONFIG: JSON.stringify(config.mcpServers),
       GENERATED_DIR: config.generatedDir,
       PROTECTED_PATHS: JSON.stringify(config.protectedPaths),
+      ALLOWED_DIRECTORY: config.allowedDirectory,
     };
 
     // Pass the escalation directory to the proxy when configured.
@@ -59,7 +60,7 @@ export class Sandbox {
             command: 'npx',
             args: ['tsx', PROXY_SERVER_PATH],
             env: proxyEnv,
-            timeout: 30000,
+            timeout: 300000, // 5 minutes -- must accommodate human escalation approval
           },
         },
       },
@@ -93,7 +94,7 @@ export class Sandbox {
     return this.toolInterfaces;
   }
 
-  async executeCode(code: string, timeoutMs = 30000): Promise<CodeExecutionResult> {
+  async executeCode(code: string, timeoutMs = 300000): Promise<CodeExecutionResult> {
     if (!this.client) throw new Error('Sandbox not initialized');
 
     const { result, logs } = await this.client.callToolChain(code, timeoutMs);

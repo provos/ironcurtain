@@ -13,6 +13,7 @@ import {
   getSessionEscalationDir,
   getSessionAuditLogPath,
   getSessionLogPath,
+  getSessionLlmLogPath,
 } from '../config/paths.js';
 import * as logger from '../logger.js';
 import { AgentSession } from './agent-session.js';
@@ -49,6 +50,7 @@ export async function createSession(options: SessionOptions = {}): Promise<Sessi
   mkdirSync(escalationDir, { recursive: true });
 
   const sessionLogPath = getSessionLogPath(sessionId);
+  const llmLogPath = getSessionLlmLogPath(sessionId);
 
   // Set up session logging -- captures all console output to file
   logger.setup({ logFilePath: sessionLogPath });
@@ -56,6 +58,7 @@ export async function createSession(options: SessionOptions = {}): Promise<Sessi
   logger.info(`Sandbox: ${sandboxDir}`);
   logger.info(`Escalation dir: ${escalationDir}`);
   logger.info(`Audit log: ${auditLogPath}`);
+  logger.info(`LLM log: ${llmLogPath}`);
 
   // Override config paths for this session's isolated directories.
   // Deep-clone mcpServers so patching doesn't mutate the caller's config.
@@ -65,6 +68,7 @@ export async function createSession(options: SessionOptions = {}): Promise<Sessi
     auditLogPath,
     escalationDir,
     sessionLogPath,
+    llmLogPath,
     mcpServers: JSON.parse(JSON.stringify(config.mcpServers)),
   };
 

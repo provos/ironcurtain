@@ -105,6 +105,7 @@ describe('Policy Verifier', () => {
       scenarios,
       judge,
       3,
+      SANDBOX_DIR,
     );
 
     expect(result.pass).toBe(true);
@@ -123,6 +124,7 @@ describe('Policy Verifier', () => {
       scenarios,
       judge,
       3,
+      SANDBOX_DIR,
     );
 
     const executionResults = result.rounds[0].executionResults;
@@ -145,6 +147,7 @@ describe('Policy Verifier', () => {
       scenarios,
       judge,
       3,
+      SANDBOX_DIR,
     );
 
     expect(result.pass).toBe(true);
@@ -198,6 +201,7 @@ describe('Policy Verifier', () => {
       scenarios,
       failJudge,
       3,
+      SANDBOX_DIR,
     );
 
     expect(result.pass).toBe(false);
@@ -241,6 +245,7 @@ describe('Policy Verifier', () => {
       scenarios,
       infiniteJudge,
       2, // limit to 2 rounds
+      SANDBOX_DIR,
     );
 
     expect(result.rounds).toHaveLength(2);

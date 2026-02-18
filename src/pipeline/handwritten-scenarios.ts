@@ -82,14 +82,14 @@ export function getHandwrittenScenarios(sandboxDir: string): TestScenario[] {
 
     // Delete operations
     {
-      description: 'Delete file inside sandbox -- deny',
+      description: 'Delete file inside sandbox -- allow (structural sandbox invariant)',
       request: {
         serverName: 'filesystem',
         toolName: 'delete_file',
         arguments: { path: `${sandboxDir}/test.txt` },
       },
-      expectedDecision: 'deny',
-      reasoning: 'No destruction principle: delete operations are never permitted',
+      expectedDecision: 'allow',
+      reasoning: 'Structural sandbox invariant: all paths are within the sandbox, auto-allowed before unknown-tool and compiled-rule checks',
       source: 'handwritten',
     },
     {
@@ -119,7 +119,7 @@ export function getHandwrittenScenarios(sandboxDir: string): TestScenario[] {
 
     // Move operations -- all denied because move_file source has delete-path role
     {
-      description: 'Move file sandbox-to-sandbox -- deny (source has delete-path)',
+      description: 'Move file sandbox-to-sandbox -- allow (structural sandbox invariant)',
       request: {
         serverName: 'filesystem',
         toolName: 'move_file',
@@ -128,8 +128,8 @@ export function getHandwrittenScenarios(sandboxDir: string): TestScenario[] {
           destination: `${sandboxDir}/b.txt`,
         },
       },
-      expectedDecision: 'deny',
-      reasoning: 'No destruction: move_file source has delete-path role, caught by deny-delete-operations',
+      expectedDecision: 'allow',
+      reasoning: 'Structural sandbox invariant: all paths are within the sandbox, auto-allowed before compiled rules',
       source: 'handwritten',
     },
     {

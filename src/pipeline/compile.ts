@@ -390,6 +390,7 @@ async function verifyCompiledPolicy(
   protectedPaths: string[],
   scenarios: TestScenario[],
   llm: LanguageModel,
+  allowedDirectory?: string,
 ): Promise<VerificationResult> {
   console.error('[5/5] Verifying policy...');
   const result = await verifyPolicy(
@@ -400,6 +401,7 @@ async function verifyCompiledPolicy(
     scenarios,
     llm,
     3,
+    allowedDirectory,
   );
 
   if (!result.pass) {
@@ -565,6 +567,7 @@ async function main(): Promise<void> {
       config.protectedPaths,
       scenarioResult.scenarios,
       llm,
+      config.allowedDirectory,
     );
 
     console.error('');

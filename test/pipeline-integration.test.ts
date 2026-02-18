@@ -36,7 +36,7 @@ describe('Pipeline Integration: hand-crafted artifacts produce correct decisions
     resolve('./audit.jsonl'),
   ];
 
-  const engine = new PolicyEngine(compiledPolicy, toolAnnotations, protectedPaths);
+  const engine = new PolicyEngine(compiledPolicy, toolAnnotations, protectedPaths, SANDBOX_DIR);
   const scenarios = getHandwrittenScenarios(SANDBOX_DIR);
 
   it('all handwritten scenarios produce correct decisions', () => {

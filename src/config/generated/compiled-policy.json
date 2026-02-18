@@ -17,38 +17,8 @@
       "reason": "list_allowed_directories makes no filesystem changes and takes no path arguments; it is always safe to call."
     },
     {
-      "name": "allow-sandbox-reads",
-      "description": "Allow all read operations targeting paths inside the sandbox directory.",
-      "principle": "Sandbox freedom",
-      "if": {
-        "paths": {
-          "roles": [
-            "read-path"
-          ],
-          "within": "/tmp/ironcurtain-sandbox"
-        }
-      },
-      "then": "allow",
-      "reason": "The agent may freely read files within the designated sandbox directory."
-    },
-    {
-      "name": "allow-sandbox-writes",
-      "description": "Allow all write operations targeting paths inside the sandbox directory.",
-      "principle": "Sandbox freedom",
-      "if": {
-        "paths": {
-          "roles": [
-            "write-path"
-          ],
-          "within": "/tmp/ironcurtain-sandbox"
-        }
-      },
-      "then": "allow",
-      "reason": "The agent may freely write files within the designated sandbox directory."
-    },
-    {
       "name": "deny-all-deletes",
-      "description": "Deny any tool invocation that carries a delete-path role argument, regardless of location.",
+      "description": "Deny any tool invocation that carries a delete-path role argument when it reaches compiled rules (i.e., at least one path is outside the sandbox).",
       "principle": "No destruction",
       "if": {
         "roles": [
@@ -56,7 +26,7 @@
         ]
       },
       "then": "deny",
-      "reason": "Delete operations are never permitted outside (or inside) the sandbox per the No Destruction principle. This also blocks move_file whose source carries delete-path."
+      "reason": "Delete operations outside the sandbox are never permitted. If this rule fires, at least one path is outside the sandbox boundary."
     },
     {
       "name": "escalate-reads-outside-sandbox",
@@ -71,7 +41,7 @@
         ]
       },
       "then": "escalate",
-      "reason": "Any read that was not already allowed by the sandbox-reads rule is outside the sandbox and requires explicit human approval."
+      "reason": "Any read that was not already allowed by the structural sandbox invariant is outside the sandbox and requires explicit human approval."
     },
     {
       "name": "escalate-writes-outside-sandbox",
@@ -86,7 +56,7 @@
         ]
       },
       "then": "escalate",
-      "reason": "Any write that was not already allowed by the sandbox-writes rule is outside the sandbox and requires explicit human approval."
+      "reason": "Any write that was not already allowed by the structural sandbox invariant is outside the sandbox and requires explicit human approval."
     }
   ]
 }

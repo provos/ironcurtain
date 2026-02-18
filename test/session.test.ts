@@ -47,6 +47,7 @@ import {
   getSessionSandboxDir,
   getSessionEscalationDir,
   getSessionAuditLogPath,
+  getSessionLlmLogPath,
 } from '../src/config/paths.js';
 
 const mockGenerateText = generateText as unknown as MockInstance;
@@ -373,6 +374,18 @@ describe('Session', () => {
 
       const session = await createTestSession({ sandboxFactory });
       await session.close();
+    });
+
+    it('creates llm-interactions.jsonl in the session directory', async () => {
+      const session = await createTestSession();
+      try {
+        const sessionId = session.getInfo().id;
+        const llmLogPath = getSessionLlmLogPath(sessionId);
+
+        expect(existsSync(llmLogPath)).toBe(true);
+      } finally {
+        await session.close();
+      }
     });
 
     it('overrides allowedDirectory to the session sandbox dir', async () => {

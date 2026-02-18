@@ -138,7 +138,7 @@ describe('Integration: TrustedProcess with filesystem MCP server', () => {
 
     expect(result.status).toBe('success');
     expect(result.policyDecision.status).toBe('allow');
-    expect(result.policyDecision.rule).toBe('allow-sandbox-reads');
+    expect(result.policyDecision.rule).toBe('structural-sandbox-allow');
   });
 
   it('allows listing the sandbox directory', async () => {
@@ -165,18 +165,15 @@ describe('Integration: TrustedProcess with filesystem MCP server', () => {
     expect(content).toBe('Created by test');
   });
 
-  it('denies deleting a file', async () => {
+  it('denies deleting a file outside the sandbox (unknown tool)', async () => {
     const result = await trustedProcess.handleToolCall(makeRequest({
       toolName: 'delete_file',
-      arguments: { path: `${SANDBOX_DIR}/hello.txt` },
+      arguments: { path: '/etc/important.txt' },
     }));
 
     expect(result.status).toBe('denied');
     expect(result.policyDecision.status).toBe('deny');
     expect(result.policyDecision.rule).toBe('structural-unknown-tool');
-
-    // Verify file still exists
-    expect(existsSync(`${SANDBOX_DIR}/hello.txt`)).toBe(true);
   });
 
   it('escalates reading files outside the sandbox', async () => {

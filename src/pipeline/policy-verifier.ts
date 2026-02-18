@@ -140,8 +140,9 @@ export async function verifyPolicy(
   scenarios: TestScenario[],
   llm: LanguageModel,
   maxRounds: number = DEFAULT_MAX_ROUNDS,
+  allowedDirectory?: string,
 ): Promise<VerificationResult> {
-  const engine = new PolicyEngine(compiledPolicy, toolAnnotations, protectedPaths);
+  const engine = new PolicyEngine(compiledPolicy, toolAnnotations, protectedPaths, allowedDirectory);
 
   const allAnnotations = Object.values(toolAnnotations.servers).flatMap(s => s.tools);
   const serverNames = [...new Set(allAnnotations.map(a => a.serverName))] as [string, ...string[]];

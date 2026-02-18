@@ -13,7 +13,7 @@
         }
       },
       "expectedDecision": "allow",
-      "reasoning": "Containment principle: reads within the sandbox directory are permitted",
+      "reasoning": "Containment principle: reads within the sandbox directory are permitted by the structural sandbox invariant",
       "source": "handwritten"
     },
     {
@@ -39,7 +39,7 @@
         }
       },
       "expectedDecision": "allow",
-      "reasoning": "Containment principle: listing the sandbox directory is permitted",
+      "reasoning": "Containment principle: listing the sandbox directory is permitted by the structural sandbox invariant",
       "source": "handwritten"
     },
     {
@@ -53,7 +53,7 @@
         }
       },
       "expectedDecision": "allow",
-      "reasoning": "Containment principle: searching within the sandbox is permitted",
+      "reasoning": "Containment principle: searching within the sandbox is permitted by the structural sandbox invariant",
       "source": "handwritten"
     },
     {
@@ -67,7 +67,7 @@
         }
       },
       "expectedDecision": "allow",
-      "reasoning": "Containment principle: writes within the sandbox directory are permitted",
+      "reasoning": "Containment principle: writes within the sandbox directory are permitted by the structural sandbox invariant",
       "source": "handwritten"
     },
     {
@@ -85,7 +85,7 @@
       "source": "handwritten"
     },
     {
-      "description": "Delete file inside sandbox -- deny",
+      "description": "Delete file inside sandbox -- allow (structural sandbox invariant)",
       "request": {
         "serverName": "filesystem",
         "toolName": "delete_file",
@@ -93,8 +93,8 @@
           "path": "/tmp/ironcurtain-sandbox/test.txt"
         }
       },
-      "expectedDecision": "deny",
-      "reasoning": "No destruction principle: delete operations are never permitted",
+      "expectedDecision": "allow",
+      "reasoning": "Structural sandbox invariant: all paths are within the sandbox, auto-allowed before unknown-tool and compiled-rule checks",
       "source": "handwritten"
     },
     {
@@ -124,7 +124,7 @@
       "source": "handwritten"
     },
     {
-      "description": "Move file sandbox-to-sandbox -- deny (source has delete-path)",
+      "description": "Move file sandbox-to-sandbox -- allow (structural sandbox invariant)",
       "request": {
         "serverName": "filesystem",
         "toolName": "move_file",
@@ -133,8 +133,8 @@
           "destination": "/tmp/ironcurtain-sandbox/b.txt"
         }
       },
-      "expectedDecision": "deny",
-      "reasoning": "No destruction: move_file source has delete-path role, caught by deny-delete-operations",
+      "expectedDecision": "allow",
+      "reasoning": "Structural sandbox invariant: all paths (source and destination) are within the sandbox directory, so the move is auto-allowed before compiled rules are reached",
       "source": "handwritten"
     },
     {
@@ -204,7 +204,7 @@
       "source": "handwritten"
     },
     {
-      "description": "Read a file inside the sandbox — should be allowed by sandbox freedom principle",
+      "description": "Read a file inside the sandbox — should be allowed by structural sandbox invariant",
       "request": {
         "serverName": "filesystem",
         "toolName": "read_text_file",
@@ -213,7 +213,7 @@
         }
       },
       "expectedDecision": "allow",
-      "reasoning": "The path is inside the designated sandbox directory. Sandbox freedom permits unrestricted reads and writes within /tmp/ironcurtain-sandbox.",
+      "reasoning": "The path is inside the designated sandbox directory. The structural sandbox invariant permits unrestricted reads and writes within /tmp/ironcurtain-sandbox.",
       "source": "generated"
     },
     {
@@ -227,7 +227,7 @@
         }
       },
       "expectedDecision": "allow",
-      "reasoning": "Writing within the sandbox directory is explicitly permitted by the Sandbox freedom principle. No protected paths are involved.",
+      "reasoning": "Writing within the sandbox directory is permitted by the structural sandbox invariant. No protected paths are involved.",
       "source": "generated"
     },
     {
@@ -258,7 +258,7 @@
       "source": "generated"
     },
     {
-      "description": "Move a file from sandbox to another sandbox location — should be denied because move implies delete-path on source",
+      "description": "Move a file from sandbox to another sandbox location — should be allowed by structural sandbox invariant",
       "request": {
         "serverName": "filesystem",
         "toolName": "move_file",
@@ -267,8 +267,8 @@
           "destination": "/tmp/ironcurtain-sandbox/new_name.txt"
         }
       },
-      "expectedDecision": "deny",
-      "reasoning": "All move operations are denied because the source argument carries a delete-path role, which constitutes a destructive operation violating the No destruction principle.",
+      "expectedDecision": "allow",
+      "reasoning": "All paths (source and destination) are within the sandbox directory. The structural sandbox invariant auto-allows before compiled rules are reached, so the delete-path role on source never triggers deny-all-deletes.",
       "source": "generated"
     },
     {
@@ -282,7 +282,7 @@
         }
       },
       "expectedDecision": "deny",
-      "reasoning": "Move operations are unconditionally denied because source carries a delete-path role, which is a destructive operation regardless of source or destination paths.",
+      "reasoning": "Move operations are denied because source is outside the sandbox so the structural invariant does not fire, and source carries a delete-path role which is caught by deny-all-deletes.",
       "source": "generated"
     },
     {
@@ -308,7 +308,7 @@
         }
       },
       "expectedDecision": "allow",
-      "reasoning": "Creating directories within the sandbox is covered by sandbox freedom. The write-path role on this path falls within /tmp/ironcurtain-sandbox.",
+      "reasoning": "Creating directories within the sandbox is permitted by the structural sandbox invariant. The write-path role on this path falls within /tmp/ironcurtain-sandbox.",
       "source": "generated"
     },
     {
@@ -337,7 +337,7 @@
         }
       },
       "expectedDecision": "allow",
-      "reasoning": "All paths are within the sandbox directory. Sandbox freedom permits reading any files within /tmp/ironcurtain-sandbox.",
+      "reasoning": "All paths are within the sandbox directory. The structural sandbox invariant permits reading any files within /tmp/ironcurtain-sandbox.",
       "source": "generated"
     },
     {
@@ -367,7 +367,7 @@
         }
       },
       "expectedDecision": "allow",
-      "reasoning": "The search root is within the sandbox directory. Read operations scoped entirely to /tmp/ironcurtain-sandbox are permitted by sandbox freedom.",
+      "reasoning": "The search root is within the sandbox directory. Read operations scoped entirely to /tmp/ironcurtain-sandbox are permitted by the structural sandbox invariant.",
       "source": "generated"
     },
     {
@@ -394,7 +394,7 @@
         }
       },
       "expectedDecision": "allow",
-      "reasoning": "Retrieving metadata for a file within the sandbox is a read operation permitted by sandbox freedom. No destructive or external access is involved.",
+      "reasoning": "Retrieving metadata for a file within the sandbox is a read operation permitted by the structural sandbox invariant. No destructive or external access is involved.",
       "source": "generated"
     },
     {
@@ -414,7 +414,7 @@
         }
       },
       "expectedDecision": "allow",
-      "reasoning": "edit_file targets a path inside the sandbox. Both the read-path and write-path roles for this path are within /tmp/ironcurtain-sandbox, so sandbox freedom applies.",
+      "reasoning": "edit_file targets a path inside the sandbox. Both the read-path and write-path roles for this path are within /tmp/ironcurtain-sandbox, so the structural sandbox invariant applies.",
       "source": "generated"
     },
     {
@@ -447,7 +447,7 @@
         }
       },
       "expectedDecision": "allow",
-      "reasoning": "Generating a directory tree from within the sandbox is a read operation. It is fully contained within /tmp/ironcurtain-sandbox and is permitted by sandbox freedom.",
+      "reasoning": "Generating a directory tree from within the sandbox is a read operation. It is fully contained within /tmp/ironcurtain-sandbox and is permitted by the structural sandbox invariant.",
       "source": "generated"
     },
     {
@@ -473,7 +473,7 @@
         }
       },
       "expectedDecision": "allow",
-      "reasoning": "Reading a media file within the sandbox is permitted by sandbox freedom. The path is fully inside /tmp/ironcurtain-sandbox and poses no risk.",
+      "reasoning": "Reading a media file within the sandbox is permitted by the structural sandbox invariant. The path is fully inside /tmp/ironcurtain-sandbox and poses no risk.",
       "source": "generated"
     },
     {

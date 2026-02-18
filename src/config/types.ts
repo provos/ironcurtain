@@ -16,4 +16,6 @@ export interface IronCurtainConfig {
   escalationDir?: string;
   /** Per-session log file path for capturing child process output. Optional for backward compatibility. */
   sessionLogPath?: string;
+  /** Per-session LLM interaction log path. When set, all LLM calls are logged to this JSONL file. */
+  llmLogPath?: string;
 }

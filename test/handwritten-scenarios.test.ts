@@ -55,7 +55,7 @@ describe('Handwritten Scenarios', () => {
       resolve('./audit.jsonl'),
     ];
 
-    const engine = new PolicyEngine(compiledPolicy, toolAnnotations, protectedPaths);
+    const engine = new PolicyEngine(compiledPolicy, toolAnnotations, protectedPaths, SANDBOX_DIR);
 
     for (const scenario of scenarios) {
       it(`${scenario.description} -> ${scenario.expectedDecision}`, () => {

@@ -68,6 +68,14 @@ export function getSessionLogPath(sessionId: string): string {
 }
 
 /**
+ * Returns the LLM interaction log path for a given session:
+ *   {home}/sessions/{sessionId}/llm-interactions.jsonl
+ */
+export function getSessionLlmLogPath(sessionId: string): string {
+  return resolve(getSessionDir(sessionId), 'llm-interactions.jsonl');
+}
+
+/**
  * Returns the logs directory: {home}/logs/
  */
 export function getLogsDir(): string {

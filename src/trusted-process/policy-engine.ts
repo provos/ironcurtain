@@ -23,17 +23,17 @@ import type {
 
 /**
  * Heuristically extracts filesystem paths from tool call arguments.
- * Any string value starting with '/' or '.' is treated as a path.
+ * Any string value starting with '/', '.', or '~' is treated as a path.
  * Handles both single string values and arrays of strings.
  */
 function extractPathsHeuristic(args: Record<string, unknown>): string[] {
   const paths: string[] = [];
   for (const value of Object.values(args)) {
-    if (typeof value === 'string' && (value.startsWith('/') || value.startsWith('.'))) {
+    if (typeof value === 'string' && (value.startsWith('/') || value.startsWith('.') || value.startsWith('~'))) {
       paths.push(value);
     } else if (Array.isArray(value)) {
       for (const item of value) {
-        if (typeof item === 'string' && (item.startsWith('/') || item.startsWith('.'))) {
+        if (typeof item === 'string' && (item.startsWith('/') || item.startsWith('.') || item.startsWith('~'))) {
           paths.push(item);
         }
       }
@@ -136,14 +136,17 @@ export class PolicyEngine {
   private annotationMap: Map<string, ToolAnnotation>;
   private compiledPolicy: CompiledPolicyFile;
   private protectedPaths: string[];
+  private allowedDirectory?: string;
 
   constructor(
     compiledPolicy: CompiledPolicyFile,
     toolAnnotations: ToolAnnotationsFile,
     protectedPaths: string[],
+    allowedDirectory?: string,
   ) {
     this.compiledPolicy = compiledPolicy;
     this.protectedPaths = protectedPaths;
+    this.allowedDirectory = allowedDirectory;
     this.annotationMap = this.buildAnnotationMap(toolAnnotations);
   }
 
@@ -195,6 +198,23 @@ export class PolicyEngine {
           decision: 'deny',
           rule: 'structural-protected-path',
           reason: `Access to protected path is forbidden: ${rp}`,
+        };
+      }
+    }
+
+    // Sandbox containment structural check:
+    // If ALL resolved paths are within the allowed directory, auto-allow.
+    // Requires at least one path (tools with no path args fall through to
+    // compiled rules -- the sandbox predicate is about path containment).
+    if (this.allowedDirectory && resolvedPaths.length > 0) {
+      const allWithinSandbox = resolvedPaths.every(
+        rp => isWithinDirectory(rp, this.allowedDirectory!),
+      );
+      if (allWithinSandbox) {
+        return {
+          decision: 'allow',
+          rule: 'structural-sandbox-allow',
+          reason: `All paths are within the sandbox directory: ${this.allowedDirectory}`,
         };
       }
     }

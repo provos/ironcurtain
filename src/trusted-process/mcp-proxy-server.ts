@@ -15,6 +15,7 @@
  *   MCP_SERVERS_CONFIG -- JSON string of MCP server configs to proxy
  *   GENERATED_DIR      -- path to the generated artifacts directory
  *   PROTECTED_PATHS    -- JSON array of protected paths
+ *   ALLOWED_DIRECTORY  -- (optional) sandbox directory for structural containment check
  *   ESCALATION_DIR     -- (optional) directory for file-based escalation IPC
  *   SESSION_LOG_PATH   -- (optional) path for capturing child process stderr
  */
@@ -33,6 +34,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { loadGeneratedPolicy } from '../config/index.js';
 import { PolicyEngine } from './policy-engine.js';
 import { AuditLog } from './audit-log.js';
+import { normalizeToolArgPaths } from './path-utils.js';
 import type { ToolCallRequest } from '../types/mcp.js';
 import type { AuditEntry } from '../types/audit.js';
 import type { MCPServerConfig } from '../config/types.js';
@@ -97,6 +99,7 @@ async function main(): Promise<void> {
   const generatedDir = process.env.GENERATED_DIR;
   const protectedPathsJson = process.env.PROTECTED_PATHS ?? '[]';
   const sessionLogPath = process.env.SESSION_LOG_PATH;
+  const allowedDirectory = process.env.ALLOWED_DIRECTORY;
   const escalationDir = process.env.ESCALATION_DIR;
 
   if (!serversConfigJson) {
@@ -113,7 +116,7 @@ async function main(): Promise<void> {
   const protectedPaths: string[] = JSON.parse(protectedPathsJson);
 
   const { compiledPolicy, toolAnnotations } = loadGeneratedPolicy(generatedDir);
-  const policyEngine = new PolicyEngine(compiledPolicy, toolAnnotations, protectedPaths);
+  const policyEngine = new PolicyEngine(compiledPolicy, toolAnnotations, protectedPaths, allowedDirectory);
   const auditLog = new AuditLog(auditLogPath);
 
   // Connect to real MCP servers as clients
@@ -188,7 +191,8 @@ async function main(): Promise<void> {
   // Handle tools/call -- evaluate policy, then forward or deny
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
     const toolName = req.params.name;
-    const args = (req.params.arguments ?? {}) as Record<string, unknown>;
+    const rawArgs = (req.params.arguments ?? {}) as Record<string, unknown>;
+    const args = normalizeToolArgPaths(rawArgs);
     const toolInfo = toolMap.get(toolName);
 
     if (!toolInfo) {
