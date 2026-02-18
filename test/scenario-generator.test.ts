@@ -67,6 +67,7 @@ const llmGeneratedScenarios = [
 
 const sampleConstitution = '# Constitution\n1. Containment\n2. No destruction';
 const SANDBOX_DIR = '/tmp/sandbox';
+const PROTECTED_PATHS = ['/home/test/config/constitution.md', '/home/test/config/generated'];
 
 function createMockModel(response: unknown): MockLanguageModelV3 {
   return new MockLanguageModelV3({
@@ -93,6 +94,7 @@ describe('Scenario Generator', () => {
       sampleAnnotations,
       handwrittenScenarios,
       SANDBOX_DIR,
+      PROTECTED_PATHS,
       mockLLM,
     );
 
@@ -111,6 +113,7 @@ describe('Scenario Generator', () => {
       sampleAnnotations,
       handwrittenScenarios,
       SANDBOX_DIR,
+      PROTECTED_PATHS,
       mockLLM,
     );
 
@@ -129,6 +132,7 @@ describe('Scenario Generator', () => {
       sampleAnnotations,
       handwrittenScenarios,
       SANDBOX_DIR,
+      PROTECTED_PATHS,
       mockLLM,
     );
 
@@ -145,6 +149,7 @@ describe('Scenario Generator', () => {
       sampleAnnotations,
       handwrittenScenarios,
       SANDBOX_DIR,
+      PROTECTED_PATHS,
       mockLLM,
     );
 
@@ -159,6 +164,7 @@ describe('Scenario Generator', () => {
       sampleAnnotations,
       handwrittenScenarios,
       SANDBOX_DIR,
+      PROTECTED_PATHS,
       mockLLM,
     );
 
@@ -175,6 +181,7 @@ describe('Scenario Generator', () => {
       sampleAnnotations,
       handwrittenScenarios,
       SANDBOX_DIR,
+      PROTECTED_PATHS,
       mockLLM,
     );
 

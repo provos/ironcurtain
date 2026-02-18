@@ -1,54 +1,92 @@
 {
-  "generatedAt": "2026-02-17T00:00:00.000Z",
-  "constitutionHash": "hand-crafted",
+  "generatedAt": "2026-02-18T02:41:06.057Z",
+  "constitutionHash": "d6bf09a1d92525c7d4f99de0760b6abef60ad11f99d35c4fdf50e0d0d59b5e85",
+  "inputHash": "ccc24720006751040071d010cda399b43420675dc433e467677b5a96743511a2",
   "rules": [
     {
-      "name": "allow-side-effect-free-tools",
-      "description": "Pure query tools with no path arguments can always be called",
+      "name": "allow-list-allowed-directories",
+      "description": "Permit the list_allowed_directories tool unconditionally since it has no side effects and exposes no sensitive data.",
       "principle": "Least privilege",
-      "if": { "sideEffects": false },
+      "if": {
+        "tool": [
+          "list_allowed_directories"
+        ],
+        "sideEffects": false
+      },
       "then": "allow",
-      "reason": "Tool has no security-relevant side effects"
+      "reason": "list_allowed_directories makes no filesystem changes and takes no path arguments; it is always safe to call."
     },
     {
-      "name": "deny-delete-operations",
-      "description": "Block all tools that have delete-path arguments",
+      "name": "allow-sandbox-reads",
+      "description": "Allow all read operations targeting paths inside the sandbox directory.",
+      "principle": "Sandbox freedom",
+      "if": {
+        "paths": {
+          "roles": [
+            "read-path"
+          ],
+          "within": "/tmp/ironcurtain-sandbox"
+        }
+      },
+      "then": "allow",
+      "reason": "The agent may freely read files within the designated sandbox directory."
+    },
+    {
+      "name": "allow-sandbox-writes",
+      "description": "Allow all write operations targeting paths inside the sandbox directory.",
+      "principle": "Sandbox freedom",
+      "if": {
+        "paths": {
+          "roles": [
+            "write-path"
+          ],
+          "within": "/tmp/ironcurtain-sandbox"
+        }
+      },
+      "then": "allow",
+      "reason": "The agent may freely write files within the designated sandbox directory."
+    },
+    {
+      "name": "deny-all-deletes",
+      "description": "Deny any tool invocation that carries a delete-path role argument, regardless of location.",
       "principle": "No destruction",
-      "if": { "roles": ["delete-path"] },
+      "if": {
+        "roles": [
+          "delete-path"
+        ]
+      },
       "then": "deny",
-      "reason": "Delete operations are never permitted"
+      "reason": "Delete operations are never permitted outside (or inside) the sandbox per the No Destruction principle. This also blocks move_file whose source carries delete-path."
     },
     {
-      "name": "allow-read-in-sandbox",
-      "description": "Allow reading files within the sandbox directory",
-      "principle": "Containment",
-      "if": { "paths": { "roles": ["read-path"], "within": "/tmp/ironcurtain-sandbox" } },
-      "then": "allow",
-      "reason": "Read within sandbox directory"
-    },
-    {
-      "name": "deny-read-elsewhere",
-      "description": "Deny reading files outside permitted directories",
-      "principle": "Containment",
-      "if": { "roles": ["read-path"] },
-      "then": "deny",
-      "reason": "Read outside permitted directories"
-    },
-    {
-      "name": "allow-write-in-sandbox",
-      "description": "Allow writes where all paths are within sandbox",
-      "principle": "Containment",
-      "if": { "paths": { "roles": ["write-path"], "within": "/tmp/ironcurtain-sandbox" } },
-      "then": "allow",
-      "reason": "Write within sandbox directory"
-    },
-    {
-      "name": "escalate-write-elsewhere",
-      "description": "Writes outside sandbox need human approval",
+      "name": "escalate-reads-outside-sandbox",
+      "description": "Escalate read operations whose target path is outside the sandbox to a human approver.",
       "principle": "Human oversight",
-      "if": { "roles": ["write-path"] },
+      "if": {
+        "roles": [
+          "read-path"
+        ],
+        "server": [
+          "filesystem"
+        ]
+      },
       "then": "escalate",
-      "reason": "Write outside sandbox requires human approval"
+      "reason": "Any read that was not already allowed by the sandbox-reads rule is outside the sandbox and requires explicit human approval."
+    },
+    {
+      "name": "escalate-writes-outside-sandbox",
+      "description": "Escalate write operations whose target path is outside the sandbox to a human approver.",
+      "principle": "Human oversight",
+      "if": {
+        "roles": [
+          "write-path"
+        ],
+        "server": [
+          "filesystem"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Any write that was not already allowed by the sandbox-writes rule is outside the sandbox and requires explicit human approval."
     }
   ]
 }

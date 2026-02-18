@@ -85,6 +85,7 @@ function buildJudgePrompt(
   constitutionText: string,
   compiledPolicy: CompiledPolicyFile,
   toolAnnotations: ToolAnnotationsFile,
+  protectedPaths: string[],
   executionResults: ExecutionResult[],
   roundNumber: number,
   previousAnalysis?: string,
@@ -110,8 +111,11 @@ ${rulesText}
 
 ## Structural Invariants (hardcoded, evaluated before compiled rules)
 
-- Protected paths: constitution file, generated policy directory, MCP config, audit log
 - Unknown tools (no annotation): denied
+- Protected paths (any write/delete targeting these is automatically denied):
+${protectedPaths.map(p => `  - ${p}`).join('\n')}
+
+A \`deny\` result for write/delete operations on these paths is correct structural behavior, not a policy gap. Files with similar names inside the sandbox are NOT protected.
 
 ## Execution Results (Round ${roundNumber})
 ${previousContext}
@@ -145,7 +149,7 @@ export async function verifyPolicy(
   const judgeResponseSchema = buildJudgeResponseSchema(serverNames, toolNames);
 
   const rounds: VerifierRound[] = [];
-  let allFailedScenarios: ExecutionResult[] = [];
+  const allFailedScenarios: ExecutionResult[] = [];
   let currentScenarios = scenarios;
   let previousAnalysis: string | undefined;
 
@@ -153,13 +157,14 @@ export async function verifyPolicy(
     // Execute scenarios against the real engine
     const executionResults = executeScenarios(engine, currentScenarios);
     const failures = executionResults.filter(r => !r.pass);
-    allFailedScenarios = [...allFailedScenarios, ...failures];
+    allFailedScenarios.push(...failures);
 
     // Send results to LLM judge
     const prompt = buildJudgePrompt(
       constitutionText,
       compiledPolicy,
       toolAnnotations,
+      protectedPaths,
       executionResults,
       round,
       previousAnalysis,

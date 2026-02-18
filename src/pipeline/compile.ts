@@ -17,13 +17,15 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import type { LanguageModel } from 'ai';
+import { wrapLanguageModel } from 'ai';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { annotateTools, validateAnnotationsHeuristic } from './tool-annotator.js';
-import { compileConstitution, validateCompiledRules } from './constitution-compiler.js';
-import { generateScenarios } from './scenario-generator.js';
+import { annotateTools, validateAnnotationsHeuristic, buildAnnotationPrompt } from './tool-annotator.js';
+import { compileConstitution, validateCompiledRules, buildCompilerPrompt } from './constitution-compiler.js';
+import { generateScenarios, buildGeneratorPrompt } from './scenario-generator.js';
 import { verifyPolicy } from './policy-verifier.js';
 import { getHandwrittenScenarios } from './handwritten-scenarios.js';
+import { createLlmLoggingMiddleware, type LlmLogContext } from './llm-logger.js';
 import type { MCPServerConfig } from '../config/types.js';
 import type {
   ToolAnnotation,
@@ -42,7 +44,6 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // ---------------------------------------------------------------------------
 
 interface PipelineConfig {
-  configDir: string;
   constitutionPath: string;
   constitutionText: string;
   constitutionHash: string;
@@ -73,7 +74,6 @@ function loadPipelineConfig(): PipelineConfig {
   ];
 
   return {
-    configDir,
     constitutionPath,
     constitutionText,
     constitutionHash,
@@ -96,18 +96,8 @@ function computeHash(...inputs: string[]): string {
   return hash.digest('hex');
 }
 
-function loadExistingAnnotations(generatedDir: string): ToolAnnotationsFile | undefined {
-  const filePath = resolve(generatedDir, 'tool-annotations.json');
-  if (!existsSync(filePath)) return undefined;
-  try {
-    return JSON.parse(readFileSync(filePath, 'utf-8'));
-  } catch {
-    return undefined;
-  }
-}
-
-function loadExistingPolicy(generatedDir: string): CompiledPolicyFile | undefined {
-  const filePath = resolve(generatedDir, 'compiled-policy.json');
+function loadExistingArtifact<T>(generatedDir: string, filename: string): T | undefined {
+  const filePath = resolve(generatedDir, filename);
   if (!existsSync(filePath)) return undefined;
   try {
     return JSON.parse(readFileSync(filePath, 'utf-8'));
@@ -120,18 +110,47 @@ function computeAnnotationHash(
   serverName: string,
   tools: ServerConnection['tools'],
 ): string {
-  return computeHash(serverName, JSON.stringify(tools));
+  return computeHash(serverName, JSON.stringify(tools), buildAnnotationPrompt(serverName, tools));
 }
 
 function computePolicyHash(
   constitutionText: string,
   allAnnotations: ToolAnnotation[],
   sandboxDirectory: string,
+  protectedPaths: string[],
 ): string {
+  const prompt = buildCompilerPrompt(constitutionText, allAnnotations, {
+    sandboxDirectory,
+    protectedPaths,
+  });
   return computeHash(
     constitutionText,
     JSON.stringify(allAnnotations),
     JSON.stringify({ sandboxDirectory }),
+    prompt,
+  );
+}
+
+function computeScenariosHash(
+  constitutionText: string,
+  annotations: ToolAnnotation[],
+  handwrittenScenarios: TestScenario[],
+  sandboxDirectory: string,
+  protectedPaths: string[],
+): string {
+  const prompt = buildGeneratorPrompt(
+    constitutionText,
+    annotations,
+    sandboxDirectory,
+    protectedPaths,
+  );
+  return computeHash(
+    prompt,
+    constitutionText,
+    JSON.stringify(annotations),
+    JSON.stringify(handwrittenScenarios),
+    JSON.stringify({ sandboxDirectory }),
+    JSON.stringify(protectedPaths),
   );
 }
 
@@ -234,10 +253,11 @@ async function compilePolicyRules(
   constitutionText: string,
   annotations: ToolAnnotation[],
   allowedDirectory: string,
+  protectedPaths: string[],
   existingPolicy: CompiledPolicyFile | undefined,
   llm: LanguageModel,
 ): Promise<CompilationResult> {
-  const inputHash = computePolicyHash(constitutionText, annotations, allowedDirectory);
+  const inputHash = computePolicyHash(constitutionText, annotations, allowedDirectory, protectedPaths);
 
   // Check cache: skip LLM call if inputs haven't changed
   if (existingPolicy && existingPolicy.inputHash === inputHash) {
@@ -249,7 +269,7 @@ async function compilePolicyRules(
   const compiledRules = await compileConstitution(
     constitutionText,
     annotations,
-    { sandboxDirectory: allowedDirectory },
+    { sandboxDirectory: allowedDirectory, protectedPaths },
     llm,
   );
 
@@ -315,26 +335,48 @@ function buildPolicyArtifact(
 // Scenario Generation (LLM step -- cacheable by constitution + annotations)
 // ---------------------------------------------------------------------------
 
+interface ScenarioResult {
+  scenarios: TestScenario[];
+  inputHash: string;
+}
+
 async function generateTestScenarios(
   constitutionText: string,
   annotations: ToolAnnotation[],
   allowedDirectory: string,
+  protectedPaths: string[],
+  existingScenarios: TestScenariosFile | undefined,
   llm: LanguageModel,
-): Promise<TestScenario[]> {
-  console.error('[4/5] Generating test scenarios...');
+): Promise<ScenarioResult> {
   const handwrittenScenarios = getHandwrittenScenarios(allowedDirectory);
+  const inputHash = computeScenariosHash(
+    constitutionText,
+    annotations,
+    handwrittenScenarios,
+    allowedDirectory,
+    protectedPaths,
+  );
+
+  // Check cache: skip LLM call if inputs haven't changed
+  if (existingScenarios && existingScenarios.inputHash === inputHash) {
+    console.error('[4/5] Generating test scenarios... (cached)');
+    return { scenarios: existingScenarios.scenarios, inputHash };
+  }
+
+  console.error('[4/5] Generating test scenarios...');
   const scenarios = await generateScenarios(
     constitutionText,
     annotations,
     handwrittenScenarios,
     allowedDirectory,
+    protectedPaths,
     llm,
   );
   const generatedCount = scenarios.length - handwrittenScenarios.length;
   console.error(
     `  ${scenarios.length} scenarios (${handwrittenScenarios.length} handwritten + ${generatedCount} generated).`,
   );
-  return scenarios;
+  return { scenarios, inputHash };
 }
 
 // ---------------------------------------------------------------------------
@@ -391,23 +433,18 @@ function writeAnnotationsArtifact(
   );
 }
 
-function writeRemainingArtifacts(
+function writeScenariosArtifact(
   generatedDir: string,
   constitutionHash: string,
-  compiledPolicyFile: CompiledPolicyFile,
-  scenarios: TestScenario[],
+  scenarioResult: ScenarioResult,
 ): void {
   mkdirSync(generatedDir, { recursive: true });
-
-  writeFileSync(
-    resolve(generatedDir, 'compiled-policy.json'),
-    JSON.stringify(compiledPolicyFile, null, 2) + '\n',
-  );
 
   const scenariosFile: TestScenariosFile = {
     generatedAt: new Date().toISOString(),
     constitutionHash,
-    scenarios,
+    inputHash: scenarioResult.inputHash,
+    scenarios: scenarioResult.scenarios,
   };
   writeFileSync(
     resolve(generatedDir, 'test-scenarios.json'),
@@ -415,26 +452,30 @@ function writeRemainingArtifacts(
   );
 }
 
+function writePolicyArtifact(
+  generatedDir: string,
+  compiledPolicyFile: CompiledPolicyFile,
+): void {
+  mkdirSync(generatedDir, { recursive: true });
+
+  writeFileSync(
+    resolve(generatedDir, 'compiled-policy.json'),
+    JSON.stringify(compiledPolicyFile, null, 2) + '\n',
+  );
+}
+
 // ---------------------------------------------------------------------------
 // MCP Client Cleanup
 // ---------------------------------------------------------------------------
 
-async function disconnectClients(clients: Map<string, Client>): Promise<void> {
-  for (const client of clients.values()) {
+async function disconnectAll(connections: Map<string, ServerConnection>): Promise<void> {
+  for (const conn of connections.values()) {
     try {
-      await client.close();
+      await conn.client.close();
     } catch {
       // Ignore cleanup errors
     }
   }
-}
-
-function extractClients(connections: Map<string, ServerConnection>): Map<string, Client> {
-  const clients = new Map<string, Client>();
-  for (const [name, conn] of connections) {
-    clients.set(name, conn.client);
-  }
-  return clients;
 }
 
 // ---------------------------------------------------------------------------
@@ -452,20 +493,28 @@ async function main(): Promise<void> {
   console.error('');
 
   const anthropic = createAnthropic();
-  const llm = anthropic('claude-sonnet-4-6');
+  const baseLlm = anthropic('claude-sonnet-4-6');
+
+  const logContext: LlmLogContext = { stepName: 'unknown' };
+  const logPath = resolve(config.generatedDir, 'llm-interactions.jsonl');
+  const llm = wrapLanguageModel({
+    model: baseLlm,
+    middleware: createLlmLoggingMiddleware(logPath, logContext),
+  });
 
   const connections = await connectAndDiscoverTools(config.mcpServers);
-  const clients = extractClients(connections);
 
   try {
     // Load existing artifacts for cache comparison
-    const existingAnnotations = loadExistingAnnotations(config.generatedDir);
-    const existingPolicy = loadExistingPolicy(config.generatedDir);
+    const existingAnnotations = loadExistingArtifact<ToolAnnotationsFile>(config.generatedDir, 'tool-annotations.json');
+    const existingPolicy = loadExistingArtifact<CompiledPolicyFile>(config.generatedDir, 'compiled-policy.json');
+    const existingScenarios = loadExistingArtifact<TestScenariosFile>(config.generatedDir, 'test-scenarios.json');
 
     // Annotate tools for each server (LLM-cacheable per server)
     const annotationResults = new Map<string, AnnotationResult>();
     const allAnnotations: ToolAnnotation[] = [];
     for (const [serverName, conn] of connections) {
+      logContext.stepName = `annotate-${serverName}`;
       const result = await annotateServerTools(serverName, conn.tools, existingAnnotations, llm);
       annotationResults.set(serverName, result);
       allAnnotations.push(...result.annotations);
@@ -477,55 +526,64 @@ async function main(): Promise<void> {
     writeAnnotationsArtifact(config.generatedDir, toolAnnotationsFile);
 
     // Compile constitution into policy rules (LLM-cacheable)
+    logContext.stepName = 'compile-constitution';
     const compilationResult = await compilePolicyRules(
       config.constitutionText,
       allAnnotations,
       config.allowedDirectory,
+      config.protectedPaths,
       existingPolicy,
       llm,
     );
 
-    // Build policy artifact
+    // Build and write policy artifact immediately so it's available for
+    // inspection even if verification fails, and cached for next run.
     const compiledPolicyFile = buildPolicyArtifact(config.constitutionHash, compilationResult);
+    writePolicyArtifact(config.generatedDir, compiledPolicyFile);
 
     // Generate test scenarios (LLM-cacheable)
-    const scenarios = await generateTestScenarios(
+    logContext.stepName = 'generate-scenarios';
+    const scenarioResult = await generateTestScenarios(
       config.constitutionText,
       allAnnotations,
       config.allowedDirectory,
+      config.protectedPaths,
+      existingScenarios,
       llm,
     );
 
+    // Write scenarios to disk immediately so they're available for
+    // inspection even if verification fails, and cached for next run.
+    writeScenariosArtifact(config.generatedDir, config.constitutionHash, scenarioResult);
+
     // Verify compiled policy against scenarios
+    logContext.stepName = 'verify-policy';
     const verificationResult = await verifyCompiledPolicy(
       config.constitutionText,
       compiledPolicyFile,
       toolAnnotationsFile,
       config.protectedPaths,
-      scenarios,
+      scenarioResult.scenarios,
       llm,
     );
 
+    console.error('');
+    console.error(`  Rules: ${compilationResult.rules.length}`);
+    console.error(`  Scenarios tested: ${scenarioResult.scenarios.length}`);
+    console.error(`  Verification rounds: ${verificationResult.rounds.length}`);
+    console.error(`  Artifacts written to: ${config.generatedDir}/`);
+    console.error(`  LLM interaction log: ${logPath}`);
+
     if (!verificationResult.pass) {
+      console.error('');
+      console.error('Verification FAILED — artifacts written but policy may need review.');
       process.exit(1);
     }
 
-    // Write remaining artifacts to disk (annotations already written above)
-    writeRemainingArtifacts(
-      config.generatedDir,
-      config.constitutionHash,
-      compiledPolicyFile,
-      scenarios,
-    );
-
     console.error('');
     console.error('Policy compilation successful!');
-    console.error(`  Rules: ${compilationResult.rules.length}`);
-    console.error(`  Scenarios tested: ${scenarios.length}`);
-    console.error(`  Verification rounds: ${verificationResult.rounds.length}`);
-    console.error(`  Artifacts written to: ${config.generatedDir}/`);
   } finally {
-    await disconnectClients(clients);
+    await disconnectAll(connections);
   }
 }
 

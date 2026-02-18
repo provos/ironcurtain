@@ -5,11 +5,13 @@
  *          These are never overridden by compiled rules.
  *
  * Phase 2: Compiled declarative rules loaded from compiled-policy.json.
- *          First matching rule wins; default deny if none match.
+ *          Each distinct role from the tool's annotation is evaluated
+ *          independently through the rule chain (first-match-wins per role).
+ *          The most restrictive result wins: deny > escalate > allow.
  */
 
 import { resolve } from 'node:path';
-import type { ToolCallRequest } from '../types/mcp.js';
+import type { ToolCallRequest, PolicyDecisionStatus } from '../types/mcp.js';
 import type { EvaluationResult } from './policy-types.js';
 import type {
   CompiledPolicyFile,
@@ -87,6 +89,47 @@ function isProtectedPath(resolvedPath: string, protectedPaths: string[]): boolea
     const resolvedPP = resolve(pp);
     return resolvedPath === resolvedPP || resolvedPath.startsWith(resolvedPP + '/');
   });
+}
+
+/** Higher severity = more restrictive. Used to pick the strictest per-role result. */
+const DECISION_SEVERITY: Record<PolicyDecisionStatus, number> = {
+  allow: 0,
+  escalate: 1,
+  deny: 2,
+};
+
+/**
+ * Collects all distinct non-"none" roles from a tool annotation's arguments.
+ * Returns an empty array if the tool has no role-bearing arguments.
+ */
+function collectDistinctRoles(annotation: ToolAnnotation): ArgumentRole[] {
+  const roles = new Set<ArgumentRole>();
+  for (const argRoles of Object.values(annotation.args)) {
+    for (const role of argRoles) {
+      if (role !== 'none') roles.add(role);
+    }
+  }
+  return [...roles];
+}
+
+/**
+ * Checks whether a rule has role-related conditions (roles or paths).
+ * Rules without these conditions are role-agnostic and match any role.
+ */
+function hasRoleConditions(rule: CompiledRule): boolean {
+  return rule.if.roles !== undefined || rule.if.paths !== undefined;
+}
+
+/**
+ * Checks whether a rule's role-related conditions include a specific role.
+ * For `roles` conditions: the role must be in the list.
+ * For `paths` conditions: the role must be in the paths.roles list.
+ */
+function ruleRelevantToRole(rule: CompiledRule, role: ArgumentRole): boolean {
+  const cond = rule.if;
+  if (cond.roles !== undefined && !cond.roles.includes(role)) return false;
+  if (cond.paths !== undefined && !cond.paths.roles.includes(role)) return false;
+  return true;
 }
 
 export class PolicyEngine {
@@ -171,13 +214,51 @@ export class PolicyEngine {
   /**
    * Phase 2: Evaluate compiled declarative rules.
    *
-   * Rules are evaluated in order; first matching rule wins.
-   * If no rule matches, default deny.
+   * For tools with multiple roles (e.g., edit_file has read-path + write-path),
+   * each role is evaluated independently through the rule chain. The most
+   * restrictive result across all roles wins (deny > escalate > allow).
+   *
+   * For tools with no roles (e.g., list_allowed_directories), the chain is
+   * evaluated once without role filtering.
    */
   private evaluateCompiledRules(request: ToolCallRequest): EvaluationResult {
     const annotation = this.annotationMap.get(`${request.serverName}__${request.toolName}`)!;
+    const roles = collectDistinctRoles(annotation);
 
+    if (roles.length === 0) {
+      return this.evaluateRulesForRole(request, annotation, undefined);
+    }
+
+    let mostRestrictive = this.evaluateRulesForRole(request, annotation, roles[0]);
+    if (mostRestrictive.decision === 'deny') return mostRestrictive;
+
+    for (let i = 1; i < roles.length; i++) {
+      const result = this.evaluateRulesForRole(request, annotation, roles[i]);
+      if (DECISION_SEVERITY[result.decision] > DECISION_SEVERITY[mostRestrictive.decision]) {
+        mostRestrictive = result;
+      }
+      if (result.decision === 'deny') return result;
+    }
+
+    return mostRestrictive;
+  }
+
+  /**
+   * Evaluates the rule chain for a single role (or all roles if undefined).
+   *
+   * When evaluatingRole is set, only rules that are either role-agnostic
+   * (no roles/paths conditions) or relevant to the specified role are
+   * considered. First matching rule wins; default deny if none match.
+   */
+  private evaluateRulesForRole(
+    request: ToolCallRequest,
+    annotation: ToolAnnotation,
+    evaluatingRole: ArgumentRole | undefined,
+  ): EvaluationResult {
     for (const rule of this.compiledPolicy.rules) {
+      if (evaluatingRole !== undefined && hasRoleConditions(rule) && !ruleRelevantToRole(rule, evaluatingRole)) {
+        continue;
+      }
       if (this.ruleMatches(rule, request, annotation)) {
         return {
           decision: rule.then,
@@ -239,8 +320,8 @@ export class PolicyEngine {
       // Zero paths extracted = condition not satisfied, rule does not match
       if (extracted.length === 0) return false;
 
-      const resolved = extracted.map(p => resolve(p));
-      const allWithin = resolved.every(p => isWithinDirectory(p, cond.paths!.within));
+      // isWithinDirectory resolves paths internally, no pre-resolution needed
+      const allWithin = extracted.every(p => isWithinDirectory(p, cond.paths!.within));
       if (!allWithin) return false;
     }
 

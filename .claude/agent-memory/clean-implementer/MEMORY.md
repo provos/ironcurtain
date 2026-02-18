@@ -61,3 +61,11 @@ Zod v4 (^4.3.6) strict by default. Mock response JSON must exactly match Zod sch
 
 ## Move Operations Policy
 All moves denied via `deny-delete-operations` rule (move_file source has `delete-path` role). No move-specific rules.
+
+## LLM Interaction Logging
+- `src/pipeline/llm-logger.ts` -- AI SDK middleware that captures all LLM prompts and responses
+- Uses `wrapLanguageModel()` with `LanguageModelMiddleware.wrapGenerate` to intercept calls
+- Writes JSONL to `src/config/generated/llm-interactions.jsonl` (covered by `*.jsonl` in .gitignore)
+- Caller sets `LlmLogContext.stepName` before each pipeline phase (mutable context pattern)
+- Each entry: timestamp, stepName, modelId, prompt, responseText, usage, durationMs
+- Middleware `specificationVersion: 'v3'` required for AI SDK v6

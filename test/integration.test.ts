@@ -138,7 +138,7 @@ describe('Integration: TrustedProcess with filesystem MCP server', () => {
 
     expect(result.status).toBe('success');
     expect(result.policyDecision.status).toBe('allow');
-    expect(result.policyDecision.rule).toBe('allow-read-in-sandbox');
+    expect(result.policyDecision.rule).toBe('allow-sandbox-reads');
   });
 
   it('allows listing the sandbox directory', async () => {
@@ -173,21 +173,22 @@ describe('Integration: TrustedProcess with filesystem MCP server', () => {
 
     expect(result.status).toBe('denied');
     expect(result.policyDecision.status).toBe('deny');
-    expect(result.policyDecision.rule).toBe('deny-delete-operations');
+    expect(result.policyDecision.rule).toBe('structural-unknown-tool');
 
     // Verify file still exists
     expect(existsSync(`${SANDBOX_DIR}/hello.txt`)).toBe(true);
   });
 
-  it('denies reading files outside the sandbox', async () => {
+  it('escalates reading files outside the sandbox', async () => {
     const result = await trustedProcess.handleToolCall(makeRequest({
       toolName: 'read_file',
       arguments: { path: '/etc/hostname' },
     }));
 
+    // Escalation is denied by mock handler, so final status is 'deny'
     expect(result.status).toBe('denied');
     expect(result.policyDecision.status).toBe('deny');
-    expect(result.policyDecision.rule).toBe('deny-read-elsewhere');
+    expect(result.policyDecision.rule).toBe('escalate-reads-outside-sandbox');
   });
 
   it('denies access to protected constitution file', async () => {

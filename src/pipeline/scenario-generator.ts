@@ -31,10 +31,11 @@ function buildGeneratorResponseSchema(
   });
 }
 
-function buildGeneratorPrompt(
+export function buildGeneratorPrompt(
   constitutionText: string,
   annotations: ToolAnnotation[],
   sandboxDirectory: string,
+  protectedPaths: string[],
 ): string {
   const annotationsSummary = annotations.map(a => {
     const argsDesc = Object.entries(a.args)
@@ -56,6 +57,17 @@ ${annotationsSummary}
 ## System Configuration
 
 - Sandbox directory: ${sandboxDirectory}
+
+## Protected Paths (Structural Invariants)
+
+The following paths are protected by hardcoded structural invariants in the engine. These checks run BEFORE any compiled rules and always result in \`deny\` for any write or delete operation targeting them:
+
+${protectedPaths.map(p => `- ${p}`).join('\n')}
+
+IMPORTANT:
+- These specific absolute paths are the ONLY protected paths. A file with a similar name inside the sandbox (e.g., "${sandboxDirectory}/constitution.md") is NOT protected -- it is a regular file governed by normal policy rules.
+- Scenarios testing protected path access should use the REAL paths listed above and expect \`deny\`.
+- Do NOT generate scenarios that assume files inside the sandbox are protected just because they share a name with a protected file.
 
 ## Instructions
 
@@ -97,12 +109,13 @@ export async function generateScenarios(
   annotations: ToolAnnotation[],
   handwrittenScenarios: TestScenario[],
   sandboxDirectory: string,
+  protectedPaths: string[],
   llm: LanguageModel,
 ): Promise<TestScenario[]> {
   const serverNames = [...new Set(annotations.map(a => a.serverName))] as [string, ...string[]];
   const toolNames = [...new Set(annotations.map(a => a.toolName))] as [string, ...string[]];
   const schema = buildGeneratorResponseSchema(serverNames, toolNames);
-  const prompt = buildGeneratorPrompt(constitutionText, annotations, sandboxDirectory);
+  const prompt = buildGeneratorPrompt(constitutionText, annotations, sandboxDirectory, protectedPaths);
 
   const { output } = await generateText({
     model: llm,

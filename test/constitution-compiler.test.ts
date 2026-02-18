@@ -63,12 +63,12 @@ const cannedRules: CompiledRule[] = [
     reason: 'Read within sandbox directory',
   },
   {
-    name: 'deny-read-elsewhere',
-    description: 'Deny reading files outside permitted directories',
-    principle: 'Containment',
+    name: 'escalate-read-elsewhere',
+    description: 'Reads outside sandbox need human approval',
+    principle: 'Human oversight',
     if: { roles: ['read-path'] },
-    then: 'deny',
-    reason: 'Read outside permitted directories',
+    then: 'escalate',
+    reason: 'Read outside sandbox requires human approval',
   },
 ];
 
@@ -82,6 +82,7 @@ const sampleConstitution = `# Constitution
 
 const compilerConfig: CompilerConfig = {
   sandboxDirectory: '/tmp/ironcurtain-sandbox',
+  protectedPaths: ['/home/test/config/constitution.md', '/home/test/config/generated'],
 };
 
 function createMockModel(response: unknown): MockLanguageModelV3 {
@@ -132,7 +133,7 @@ describe('Constitution Compiler', () => {
         'allow-side-effect-free-tools',
         'deny-delete-operations',
         'allow-read-in-sandbox',
-        'deny-read-elsewhere',
+        'escalate-read-elsewhere',
       ]);
     });
 

@@ -41,7 +41,7 @@ function buildAnnotationsResponseSchema(toolNames: [string, ...string[]]) {
   });
 }
 
-function buildAnnotationPrompt(serverName: string, tools: MCPToolSchema[]): string {
+export function buildAnnotationPrompt(serverName: string, tools: MCPToolSchema[]): string {
   const toolDescriptions = tools.map(t => {
     return [
       `Tool: ${t.name}`,

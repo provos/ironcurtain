@@ -1,122 +1,196 @@
 {
-  "generatedAt": "2026-02-17T00:00:00.000Z",
+  "generatedAt": "2026-02-18T02:40:56.617Z",
   "servers": {
     "filesystem": {
+      "inputHash": "d8d1ffec39ebd506ad6da6a359cb79e112053046e1fe27e4769534f8a7a3ba0b",
       "tools": [
         {
           "toolName": "read_file",
-          "serverName": "filesystem",
-          "comment": "Reads the complete contents of a file from disk",
+          "comment": "Reads the complete contents of a file as text (deprecated in favor of read_text_file), with optional head/tail line filtering.",
           "sideEffects": true,
-          "args": { "path": ["read-path"] }
+          "args": {
+            "path": [
+              "read-path"
+            ],
+            "tail": [
+              "none"
+            ],
+            "head": [
+              "none"
+            ]
+          },
+          "serverName": "filesystem"
         },
         {
           "toolName": "read_text_file",
-          "serverName": "filesystem",
-          "comment": "Reads a text file from disk",
+          "comment": "Reads the complete contents of a text file from the filesystem, with optional head/tail line filtering.",
           "sideEffects": true,
-          "args": { "path": ["read-path"] }
+          "args": {
+            "path": [
+              "read-path"
+            ],
+            "tail": [
+              "none"
+            ],
+            "head": [
+              "none"
+            ]
+          },
+          "serverName": "filesystem"
         },
         {
           "toolName": "read_media_file",
-          "serverName": "filesystem",
-          "comment": "Reads a media file from disk",
+          "comment": "Reads an image or audio file and returns its base64-encoded data and MIME type.",
           "sideEffects": true,
-          "args": { "path": ["read-path"] }
+          "args": {
+            "path": [
+              "read-path"
+            ]
+          },
+          "serverName": "filesystem"
         },
         {
           "toolName": "read_multiple_files",
-          "serverName": "filesystem",
-          "comment": "Reads multiple files from disk in a single call",
+          "comment": "Reads the contents of multiple files simultaneously, returning each file's content keyed by its path.",
           "sideEffects": true,
-          "args": { "paths": ["read-path"] }
-        },
-        {
-          "toolName": "list_directory",
-          "serverName": "filesystem",
-          "comment": "Lists files and subdirectories in a directory",
-          "sideEffects": true,
-          "args": { "path": ["read-path"] }
-        },
-        {
-          "toolName": "list_directory_with_sizes",
-          "serverName": "filesystem",
-          "comment": "Lists files and subdirectories with their sizes",
-          "sideEffects": true,
-          "args": { "path": ["read-path"] }
-        },
-        {
-          "toolName": "directory_tree",
-          "serverName": "filesystem",
-          "comment": "Returns a recursive tree view of a directory",
-          "sideEffects": true,
-          "args": { "path": ["read-path"] }
-        },
-        {
-          "toolName": "search_files",
-          "serverName": "filesystem",
-          "comment": "Searches for files matching a pattern within a directory",
-          "sideEffects": true,
-          "args": { "path": ["read-path"] }
-        },
-        {
-          "toolName": "get_file_info",
-          "serverName": "filesystem",
-          "comment": "Returns metadata about a file or directory",
-          "sideEffects": true,
-          "args": { "path": ["read-path"] }
-        },
-        {
-          "toolName": "list_allowed_directories",
-          "serverName": "filesystem",
-          "comment": "Lists directories the server is allowed to access",
-          "sideEffects": false,
-          "args": {}
+          "args": {
+            "paths": [
+              "read-path"
+            ]
+          },
+          "serverName": "filesystem"
         },
         {
           "toolName": "write_file",
-          "serverName": "filesystem",
-          "comment": "Creates or overwrites a file with new content",
+          "comment": "Creates a new file or completely overwrites an existing file with the provided text content.",
           "sideEffects": true,
-          "args": { "path": ["write-path"] }
+          "args": {
+            "path": [
+              "write-path"
+            ],
+            "content": [
+              "none"
+            ]
+          },
+          "serverName": "filesystem"
         },
         {
           "toolName": "edit_file",
-          "serverName": "filesystem",
-          "comment": "Edits an existing file by applying changes",
+          "comment": "Makes targeted line-based edits to a text file by replacing exact line sequences, returning a git-style diff of the changes.",
           "sideEffects": true,
-          "args": { "path": ["write-path"] }
+          "args": {
+            "path": [
+              "read-path",
+              "write-path"
+            ],
+            "edits": [
+              "none"
+            ],
+            "dryRun": [
+              "none"
+            ]
+          },
+          "serverName": "filesystem"
         },
         {
           "toolName": "create_directory",
-          "serverName": "filesystem",
-          "comment": "Creates a new directory at the specified path",
+          "comment": "Creates a new directory (including nested directories) or silently succeeds if it already exists.",
           "sideEffects": true,
-          "args": { "path": ["write-path"] }
+          "args": {
+            "path": [
+              "write-path"
+            ]
+          },
+          "serverName": "filesystem"
+        },
+        {
+          "toolName": "list_directory",
+          "comment": "Returns a detailed listing of all files and directories at the specified path, prefixed with [FILE] or [DIR].",
+          "sideEffects": true,
+          "args": {
+            "path": [
+              "read-path"
+            ]
+          },
+          "serverName": "filesystem"
+        },
+        {
+          "toolName": "list_directory_with_sizes",
+          "comment": "Returns a detailed listing of all files and directories at the specified path including their sizes, with optional sorting.",
+          "sideEffects": true,
+          "args": {
+            "path": [
+              "read-path"
+            ],
+            "sortBy": [
+              "none"
+            ]
+          },
+          "serverName": "filesystem"
+        },
+        {
+          "toolName": "directory_tree",
+          "comment": "Recursively generates a JSON tree view of files and directories under the specified path, with optional exclusion patterns.",
+          "sideEffects": true,
+          "args": {
+            "path": [
+              "read-path"
+            ],
+            "excludePatterns": [
+              "none"
+            ]
+          },
+          "serverName": "filesystem"
         },
         {
           "toolName": "move_file",
-          "serverName": "filesystem",
-          "comment": "Moves a file from source to destination, deleting the source",
+          "comment": "Moves or renames a file or directory from a source path to a destination path in a single operation.",
           "sideEffects": true,
           "args": {
-            "source": ["read-path", "delete-path"],
-            "destination": ["write-path"]
-          }
+            "source": [
+              "read-path",
+              "delete-path"
+            ],
+            "destination": [
+              "write-path"
+            ]
+          },
+          "serverName": "filesystem"
         },
         {
-          "toolName": "delete_file",
-          "serverName": "filesystem",
-          "comment": "Permanently deletes a file from disk",
+          "toolName": "search_files",
+          "comment": "Recursively searches for files and directories matching a glob-style pattern under a given path, returning all matching full paths.",
           "sideEffects": true,
-          "args": { "path": ["delete-path"] }
+          "args": {
+            "path": [
+              "read-path"
+            ],
+            "pattern": [
+              "none"
+            ],
+            "excludePatterns": [
+              "none"
+            ]
+          },
+          "serverName": "filesystem"
         },
         {
-          "toolName": "delete_directory",
-          "serverName": "filesystem",
-          "comment": "Permanently deletes a directory and its contents",
+          "toolName": "get_file_info",
+          "comment": "Retrieves detailed metadata (size, timestamps, permissions, type) about a file or directory without reading its content.",
           "sideEffects": true,
-          "args": { "path": ["delete-path"] }
+          "args": {
+            "path": [
+              "read-path"
+            ]
+          },
+          "serverName": "filesystem"
+        },
+        {
+          "toolName": "list_allowed_directories",
+          "comment": "Returns the static list of directories the server is permitted to access; makes no filesystem state changes and takes no path arguments.",
+          "sideEffects": false,
+          "args": {},
+          "serverName": "filesystem"
         }
       ]
     }

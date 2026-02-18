@@ -14,6 +14,7 @@ import type { ToolAnnotation, CompiledRule, ArgumentRole } from './types.js';
 
 export interface CompilerConfig {
   sandboxDirectory: string;
+  protectedPaths: string[];
 }
 
 const VALID_ROLES: ArgumentRole[] = ['read-path', 'write-path', 'delete-path', 'none'];
@@ -47,7 +48,7 @@ function buildCompilerResponseSchema(
   });
 }
 
-function buildCompilerPrompt(
+export function buildCompilerPrompt(
   constitutionText: string,
   annotations: ToolAnnotation[],
   config: CompilerConfig,
@@ -74,6 +75,12 @@ ${annotationsSummary}
 ## System Configuration
 
 - Sandbox directory: ${config.sandboxDirectory}
+
+## Protected Paths (Structural Invariants -- handled automatically by the engine)
+
+The following paths are protected by hardcoded structural invariants evaluated BEFORE compiled rules. Any write or delete targeting these paths is automatically denied. Do NOT generate rules for protecting these paths -- the engine handles this:
+
+${config.protectedPaths.map(p => `- ${p}`).join('\n')}
 
 ## Instructions
 

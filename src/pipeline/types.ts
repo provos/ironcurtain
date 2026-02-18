@@ -78,6 +78,7 @@ export interface TestScenario {
 export interface TestScenariosFile {
   generatedAt: string;
   constitutionHash: string;
+  inputHash: string;
   scenarios: TestScenario[];
 }
 
@@ -104,12 +105,4 @@ export interface VerificationResult {
   rounds: VerifierRound[];
   summary: string;
   failedScenarios: ExecutionResult[];
-}
-
-// ---------------------------------------------------------------------------
-// Structural Config (passed to PolicyEngine, not compiled)
-// ---------------------------------------------------------------------------
-
-export interface StructuralConfig {
-  protectedPaths: string[];
 }

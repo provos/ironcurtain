@@ -154,8 +154,10 @@ describe('Policy Verifier', () => {
   });
 
   it('detects failures with a bad policy (overly broad allow)', async () => {
-    // Create a policy with a rule that allows ALL read operations unconditionally,
-    // causing reads outside sandbox to be allowed instead of denied
+    // Create a policy where reads AND writes are allowed unconditionally.
+    // This causes read-outside and write-outside scenarios (expected escalate)
+    // to get allow instead. Per-role evaluation still correctly denies
+    // move_file via the delete-path role, so we check escalate->allow flips.
     const badPolicy: CompiledPolicyFile = {
       ...compiledPolicy,
       rules: [
@@ -167,14 +169,22 @@ describe('Policy Verifier', () => {
           then: 'allow',
           reason: 'Allow all reads',
         },
-        ...compiledPolicy.rules.filter(r => !r.name.includes('read')),
+        {
+          name: 'allow-all-writes',
+          description: 'Overly broad: allow all write operations',
+          principle: 'Broken rule',
+          if: { roles: ['write-path'] },
+          then: 'allow',
+          reason: 'Allow all writes',
+        },
+        ...compiledPolicy.rules.filter(r => !r.name.includes('read') && !r.name.includes('write')),
       ],
     };
 
     // Judge that reports failure
     const failJudge = new MockLanguageModelV3({
       doGenerate: async () => mockV3Result({
-        analysis: 'Read-outside-sandbox scenarios fail -- reads are allowed everywhere.',
+        analysis: 'Outside-sandbox scenarios fail -- reads and writes are allowed everywhere.',
         pass: false,
         additionalScenarios: [],
       }),
@@ -193,11 +203,11 @@ describe('Policy Verifier', () => {
     expect(result.pass).toBe(false);
     expect(result.failedScenarios.length).toBeGreaterThan(0);
 
-    // Read-outside-sandbox scenarios should fail: expected deny, got allow
-    const readFailures = result.failedScenarios.filter(
-      f => f.scenario.expectedDecision === 'deny' && f.actualDecision === 'allow',
+    // Outside-sandbox scenarios should fail: expected escalate, got allow
+    const escalateFailures = result.failedScenarios.filter(
+      f => f.scenario.expectedDecision === 'escalate' && f.actualDecision === 'allow',
     );
-    expect(readFailures.length).toBeGreaterThan(0);
+    expect(escalateFailures.length).toBeGreaterThan(0);
   });
 
   it('respects maxRounds limit', async () => {
