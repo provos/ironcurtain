@@ -1,37 +1,115 @@
 {
-  "generatedAt": "2026-02-18T02:41:06.057Z",
-  "constitutionHash": "d6bf09a1d92525c7d4f99de0760b6abef60ad11f99d35c4fdf50e0d0d59b5e85",
-  "inputHash": "ccc24720006751040071d010cda399b43420675dc433e467677b5a96743511a2",
+  "generatedAt": "2026-02-18T21:11:34.419Z",
+  "constitutionHash": "618c4afd16309b9cb2609fc3db11d52f83be9c51ec870254ed4f2365fab07c6c",
+  "inputHash": "b7c23f5ed2fab79028192d8cef870a6b0bcda428bde616f170ee941e5bd8bbec",
   "rules": [
     {
       "name": "allow-list-allowed-directories",
-      "description": "Permit the list_allowed_directories tool unconditionally since it has no side effects and exposes no sensitive data.",
-      "principle": "Least privilege",
+      "description": "Allow the agent to call list_allowed_directories, which has no side effects and no path arguments.",
+      "principle": "Least privilege — this read-only introspection tool carries no risk.",
       "if": {
+        "server": [
+          "filesystem"
+        ],
         "tool": [
           "list_allowed_directories"
-        ],
-        "sideEffects": false
+        ]
       },
       "then": "allow",
-      "reason": "list_allowed_directories makes no filesystem changes and takes no path arguments; it is always safe to call."
+      "reason": "list_allowed_directories makes no filesystem changes and reveals only the statically configured allowed directories, so it is always safe to permit."
     },
     {
-      "name": "deny-all-deletes",
-      "description": "Deny any tool invocation that carries a delete-path role argument when it reaches compiled rules (i.e., at least one path is outside the sandbox).",
-      "principle": "No destruction",
+      "name": "allow-read-write-delete-sandbox",
+      "description": "Allow all operations (read, write, delete) within the sandbox directory /tmp/ironcurtain-sandbox.",
+      "principle": "Least privilege — the sandbox is the unrestricted work area for the agent.",
+      "if": {
+        "server": [
+          "filesystem"
+        ],
+        "paths": {
+          "roles": [
+            "read-path",
+            "write-path",
+            "delete-path"
+          ],
+          "within": "/tmp/ironcurtain-sandbox"
+        }
+      },
+      "then": "allow",
+      "reason": "The sandbox directory is the designated safe area where the agent may freely read, write, and delete without restriction."
+    },
+    {
+      "name": "allow-read-write-delete-downloads",
+      "description": "Allow read, write, and delete operations within the Downloads folder.",
+      "principle": "Least privilege — the constitution explicitly grants full access to the Downloads folder.",
+      "if": {
+        "server": [
+          "filesystem"
+        ],
+        "paths": {
+          "roles": [
+            "read-path",
+            "write-path",
+            "delete-path"
+          ],
+          "within": "/home/provos/Downloads"
+        }
+      },
+      "then": "allow",
+      "reason": "The constitution states the agent is allowed to read, write, and delete content in the Downloads folder."
+    },
+    {
+      "name": "allow-read-documents",
+      "description": "Allow read operations within the user's Documents folder.",
+      "principle": "Least privilege — the constitution grants read-only access to the Documents folder.",
+      "if": {
+        "server": [
+          "filesystem"
+        ],
+        "paths": {
+          "roles": [
+            "read-path"
+          ],
+          "within": "/home/provos/Documents"
+        }
+      },
+      "then": "allow",
+      "reason": "The constitution states the agent is allowed to read documents in the Users document folder. Only read-path roles are permitted; write and delete are not granted."
+    },
+    {
+      "name": "deny-delete-outside-permitted-areas",
+      "description": "Deny any operation that carries a delete-path role (including move source) outside permitted areas.",
+      "principle": "No destruction — delete operations outside the sandbox and Downloads folder are never permitted.",
       "if": {
         "roles": [
           "delete-path"
+        ],
+        "server": [
+          "filesystem"
         ]
       },
       "then": "deny",
-      "reason": "Delete operations outside the sandbox are never permitted. If this rule fires, at least one path is outside the sandbox boundary."
+      "reason": "The constitution's 'No destruction' principle forbids delete operations outside explicitly permitted areas. Prior rules already allowed deletes inside /tmp/ironcurtain-sandbox and /home/provos/Downloads, so this fallthrough catches everything else."
     },
     {
-      "name": "escalate-reads-outside-sandbox",
-      "description": "Escalate read operations whose target path is outside the sandbox to a human approver.",
-      "principle": "Human oversight",
+      "name": "deny-write-outside-permitted-areas",
+      "description": "Deny any write operation targeting a path outside the sandbox and Downloads folder.",
+      "principle": "Least privilege — write access is only granted to the sandbox and Downloads folder.",
+      "if": {
+        "roles": [
+          "write-path"
+        ],
+        "server": [
+          "filesystem"
+        ]
+      },
+      "then": "deny",
+      "reason": "Write access is only permitted inside /tmp/ironcurtain-sandbox and /home/provos/Downloads. This fallthrough denies all other write attempts."
+    },
+    {
+      "name": "escalate-read-outside-permitted-areas",
+      "description": "Escalate read operations that fall outside all explicitly permitted read areas to a human for approval.",
+      "principle": "Human oversight — operations outside the sandbox require explicit human approval.",
       "if": {
         "roles": [
           "read-path"
@@ -41,22 +119,7 @@
         ]
       },
       "then": "escalate",
-      "reason": "Any read that was not already allowed by the structural sandbox invariant is outside the sandbox and requires explicit human approval."
-    },
-    {
-      "name": "escalate-writes-outside-sandbox",
-      "description": "Escalate write operations whose target path is outside the sandbox to a human approver.",
-      "principle": "Human oversight",
-      "if": {
-        "roles": [
-          "write-path"
-        ],
-        "server": [
-          "filesystem"
-        ]
-      },
-      "then": "escalate",
-      "reason": "Any write that was not already allowed by the structural sandbox invariant is outside the sandbox and requires explicit human approval."
+      "reason": "The constitution requires human approval for operations outside permitted areas. Reads outside /tmp/ironcurtain-sandbox, /home/provos/Downloads, and /home/provos/Documents are escalated rather than silently denied, giving a human the opportunity to approve legitimate requests."
     }
   ]
 }

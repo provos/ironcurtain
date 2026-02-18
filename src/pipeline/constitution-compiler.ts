@@ -77,7 +77,7 @@ ${annotationsSummary}
 
 ## Protected Paths (Structural Invariants -- handled automatically by the engine)
 
-The following paths are protected by hardcoded structural invariants evaluated BEFORE compiled rules. Any write or delete targeting these paths is automatically denied. Do NOT generate rules for protecting these paths -- the engine handles this:
+The following paths are protected by hardcoded structural invariants evaluated BEFORE compiled rules. Any read, write or delete targeting these paths is automatically denied. Do NOT generate rules for protecting these paths -- the engine handles this:
 
 ${config.protectedPaths.map(p => `- ${p}`).join('\n')}
 
