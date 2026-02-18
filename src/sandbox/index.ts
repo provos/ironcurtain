@@ -31,6 +31,19 @@ export class Sandbox {
     // Register the MCP proxy server instead of real MCP servers.
     // The proxy is the trusted process boundary -- it evaluates policy
     // on every tool call before forwarding to the real MCP server.
+    const proxyEnv: Record<string, string> = {
+      AUDIT_LOG_PATH: config.auditLogPath,
+      MCP_SERVERS_CONFIG: JSON.stringify(config.mcpServers),
+      GENERATED_DIR: config.generatedDir,
+      PROTECTED_PATHS: JSON.stringify(config.protectedPaths),
+    };
+
+    // Pass the escalation directory to the proxy when configured.
+    // When set, the proxy uses file-based IPC for escalation instead of auto-deny.
+    if (config.escalationDir) {
+      proxyEnv.ESCALATION_DIR = config.escalationDir;
+    }
+
     await this.client.registerManual({
       name: 'filesystem',
       call_template_type: 'mcp',
@@ -40,12 +53,7 @@ export class Sandbox {
             transport: 'stdio',
             command: 'npx',
             args: ['tsx', PROXY_SERVER_PATH],
-            env: {
-              AUDIT_LOG_PATH: config.auditLogPath,
-              MCP_SERVERS_CONFIG: JSON.stringify(config.mcpServers),
-              GENERATED_DIR: config.generatedDir,
-              PROTECTED_PATHS: JSON.stringify(config.protectedPaths),
-            },
+            env: proxyEnv,
             timeout: 30000,
           },
         },

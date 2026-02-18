@@ -1,33 +1,47 @@
 import 'dotenv/config';
-import { mkdirSync } from 'node:fs';
 import { loadConfig } from './config/index.js';
-import { Sandbox } from './sandbox/index.js';
-import { runAgent } from './agent/index.js';
+import { createSession } from './session/index.js';
+import { CliTransport } from './session/cli-transport.js';
 
 async function main() {
   const task = process.argv.slice(2).join(' ');
-  if (!task) {
-    console.error('Usage: npm start "Your task description"');
-    process.exit(1);
-  }
-
   const config = loadConfig();
 
-  mkdirSync(config.allowedDirectory, { recursive: true });
+  console.error('Initializing session...');
+  const session = await createSession({
+    config,
+    onEscalation: (req) => {
+      console.error('\n========================================');
+      console.error('  ESCALATION: Human approval required');
+      console.error('========================================');
+      console.error(`  Tool:      ${req.serverName}/${req.toolName}`);
+      console.error(`  Arguments: ${JSON.stringify(req.arguments, null, 2)}`);
+      console.error(`  Reason:    ${req.reason}`);
+      console.error('========================================');
+      console.error('  Type /approve or /deny');
+      console.error('========================================\n');
+    },
+    onDiagnostic: (event) => {
+      switch (event.kind) {
+        case 'tool_call':
+          console.error(`  [sandbox] ${event.toolName}: ${event.preview}`);
+          break;
+        case 'agent_text':
+          console.error(`  [agent] ${event.preview}`);
+          break;
+      }
+    },
+  });
+  console.error('Session ready.\n');
 
-  // The sandbox connects to the MCP proxy server, which mediates
-  // all tool calls through the trusted process policy engine.
-  console.error('Initializing sandbox...');
-  const sandbox = new Sandbox();
-  await sandbox.initialize(config);
-  console.error('Sandbox ready.\n');
+  // If a task was provided on the command line, run single-shot.
+  // Otherwise, enter interactive mode.
+  const transport = new CliTransport(task || undefined);
 
   try {
-    const result = await runAgent(task, sandbox);
-    console.log('\n=== Agent Response ===');
-    console.log(result);
+    await transport.run(session);
   } finally {
-    await sandbox.shutdown();
+    await session.close();
     process.exit(0);
   }
 }

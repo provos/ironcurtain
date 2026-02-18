@@ -15,6 +15,7 @@
  *   MCP_SERVERS_CONFIG -- JSON string of MCP server configs to proxy
  *   GENERATED_DIR      -- path to the generated artifacts directory
  *   PROTECTED_PATHS    -- JSON array of protected paths
+ *   ESCALATION_DIR     -- (optional) directory for file-based escalation IPC
  */
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -25,6 +26,8 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { existsSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { v4 as uuidv4 } from 'uuid';
 import { loadGeneratedPolicy } from '../config/index.js';
 import { PolicyEngine } from './policy-engine.js';
@@ -38,6 +41,53 @@ interface ProxiedTool {
   name: string;
   description?: string;
   inputSchema: Record<string, unknown>;
+}
+
+interface EscalationFileRequest {
+  escalationId: string;
+  serverName: string;
+  toolName: string;
+  arguments: Record<string, unknown>;
+  reason: string;
+}
+
+const ESCALATION_POLL_INTERVAL_MS = 500;
+const ESCALATION_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+
+/**
+ * Waits for a human decision via file-based IPC.
+ *
+ * Writes a request file to the escalation directory, then polls
+ * for a response file. The session process (on the other side)
+ * detects the request, surfaces it to the user, and writes the response.
+ *
+ * Returns 'approved' or 'denied'. On timeout, returns 'denied'.
+ */
+async function waitForEscalationDecision(
+  escalationDir: string,
+  request: EscalationFileRequest,
+): Promise<'approved' | 'denied'> {
+  const requestPath = resolve(escalationDir, `request-${request.escalationId}.json`);
+  const responsePath = resolve(escalationDir, `response-${request.escalationId}.json`);
+
+  writeFileSync(requestPath, JSON.stringify(request));
+
+  const deadline = Date.now() + ESCALATION_TIMEOUT_MS;
+
+  while (Date.now() < deadline) {
+    if (existsSync(responsePath)) {
+      const response = JSON.parse(readFileSync(responsePath, 'utf-8')) as { decision: 'approved' | 'denied' };
+      // Clean up both files
+      try { unlinkSync(requestPath); } catch { /* ignore */ }
+      try { unlinkSync(responsePath); } catch { /* ignore */ }
+      return response.decision;
+    }
+    await new Promise((r) => setTimeout(r, ESCALATION_POLL_INTERVAL_MS));
+  }
+
+  // Timeout -- clean up request file and treat as denied
+  try { unlinkSync(requestPath); } catch { /* ignore */ }
+  return 'denied';
 }
 
 async function main() {
@@ -143,8 +193,12 @@ async function main() {
       reason: evaluation.reason,
     };
 
+    // Tracks the escalation outcome for audit logging when an approved
+    // escalation falls through to the forwarding section below.
+    let escalationResult: 'approved' | 'denied' | undefined;
+
     // Build the base audit entry; result fields are set per branch below
-    function logAudit(result: AuditEntry['result'], durationMs: number, escalationResult?: 'approved' | 'denied'): void {
+    function logAudit(result: AuditEntry['result'], durationMs: number, overrideEscalation?: 'approved' | 'denied'): void {
       const entry: AuditEntry = {
         timestamp: request.timestamp,
         requestId: request.requestId,
@@ -152,7 +206,7 @@ async function main() {
         toolName: request.toolName,
         arguments: request.arguments,
         policyDecision,
-        escalationResult,
+        escalationResult: overrideEscalation ?? escalationResult,
         result,
         durationMs,
       };
@@ -160,14 +214,42 @@ async function main() {
     }
 
     if (evaluation.decision === 'escalate') {
-      logAudit({ status: 'denied', error: evaluation.reason }, 0, 'denied');
-      return {
-        content: [{
-          type: 'text',
-          text: `ESCALATION REQUIRED: ${evaluation.reason}. Action denied pending human review.`,
-        }],
-        isError: true,
-      };
+      const escalationDir = process.env.ESCALATION_DIR;
+
+      if (!escalationDir) {
+        // No escalation directory configured -- auto-deny (backward compatible)
+        logAudit({ status: 'denied', error: evaluation.reason }, 0, 'denied');
+        return {
+          content: [{
+            type: 'text',
+            text: `ESCALATION REQUIRED: ${evaluation.reason}. Action denied (no escalation handler).`,
+          }],
+          isError: true,
+        };
+      }
+
+      // File-based escalation rendezvous: write request, poll for response
+      const escalationId = uuidv4();
+      const decision = await waitForEscalationDecision(escalationDir, {
+        escalationId,
+        serverName: request.serverName,
+        toolName: request.toolName,
+        arguments: request.arguments,
+        reason: evaluation.reason,
+      });
+
+      if (decision === 'denied') {
+        logAudit({ status: 'denied', error: evaluation.reason }, 0, 'denied');
+        return {
+          content: [{ type: 'text', text: `ESCALATION DENIED: ${evaluation.reason}` }],
+          isError: true,
+        };
+      }
+
+      // Approved -- update policy decision and fall through to forward the call
+      escalationResult = 'approved';
+      policyDecision.status = 'allow';
+      policyDecision.reason = 'Approved by human during escalation';
     }
 
     if (evaluation.decision === 'deny') {

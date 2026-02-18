@@ -3,6 +3,7 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { IronCurtainConfig, MCPServerConfig } from './types.js';
 import type { CompiledPolicyFile, ToolAnnotationsFile } from '../pipeline/types.js';
+import { getIronCurtainHome } from './paths.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -13,7 +14,11 @@ export function loadConfig(): IronCurtainConfig {
   }
 
   const auditLogPath = process.env.AUDIT_LOG_PATH ?? './audit.jsonl';
-  const allowedDirectory = process.env.ALLOWED_DIRECTORY ?? '/tmp/ironcurtain-sandbox';
+  // Default to a path under the IronCurtain home directory.
+  // In practice, the session factory overrides this per-session,
+  // so this default is a fallback for non-session usage (e.g., pipeline).
+  const defaultAllowedDir = resolve(getIronCurtainHome(), 'sandbox');
+  const allowedDirectory = process.env.ALLOWED_DIRECTORY ?? defaultAllowedDir;
 
   const mcpServersPath = resolve(__dirname, 'mcp-servers.json');
   const mcpServers: Record<string, MCPServerConfig> = JSON.parse(

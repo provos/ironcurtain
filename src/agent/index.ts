@@ -3,22 +3,18 @@ import { anthropic } from '@ai-sdk/anthropic';
 import { z } from 'zod';
 import { CodeModeUtcpClient } from '@utcp/code-mode';
 import type { Sandbox } from '../sandbox/index.js';
+import { buildSystemPrompt } from './prompts.js';
 
 const MAX_AGENT_STEPS = 10;
 
-function buildSystemPrompt(codeModePrompt: string, toolInterfaces: string): string {
-  return `You are a helpful assistant. You complete tasks by writing TypeScript code that executes in a secure sandbox.
-
-Every tool call in your code goes through a security policy engine. Calls may be ALLOWED, DENIED, or require ESCALATION (human approval). If a call is denied, do NOT retry it — explain the denial to the user.
-
-${codeModePrompt}
-
-## Currently available tool interfaces
-
-${toolInterfaces}
-`;
-}
-
+/**
+ * Runs the agent for a single task. This is the legacy single-shot entry point.
+ *
+ * @deprecated Use {@link createSession} from `src/session/index.ts` instead.
+ * Sessions provide multi-turn conversation, per-session isolation, and
+ * escalation routing. This function is retained for backward compatibility
+ * with integration tests but should not be used in new code.
+ */
 export async function runAgent(
   task: string,
   sandbox: Sandbox,

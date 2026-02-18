@@ -7,6 +7,24 @@
 - **Generated artifacts**: `src/config/generated/{compiled-policy,tool-annotations}.json`
 - **Config**: `src/config/types.ts` has `IronCurtainConfig` with `protectedPaths`, `generatedDir`, `constitutionPath`
 
+## Session Architecture (multi-turn)
+- **Path utilities**: `src/config/paths.ts` -- `getIronCurtainHome()`, `getSessionDir()`, etc.
+- **Session types**: `src/session/types.ts` -- `Session` interface, `SessionId`, `SessionOptions`, etc.
+- **Session errors**: `src/session/errors.ts` -- `SessionError`, `SessionNotReadyError`, `SessionClosedError`
+- **Transport interface**: `src/session/transport.ts` -- `Transport` with `run(session): Promise<void>`
+- **AgentSession**: `src/session/agent-session.ts` -- concrete Session impl (not exported publicly)
+- **Session factory**: `src/session/index.ts` -- `createSession()` factory + re-exports
+- **CLI transport**: `src/session/cli-transport.ts` -- `CliTransport` with single-shot + interactive REPL
+- **System prompt**: `src/agent/prompts.ts` -- `buildSystemPrompt()` extracted from `src/agent/index.ts`
+- **Design spec**: `docs/multi-turn-session-design.md` -- full design with 13-step migration plan
+- **Home dir**: `~/.ironcurtain/` (overridable via `IRONCURTAIN_HOME`), per-session dirs under `sessions/{id}/`
+
+## AI SDK v6 Type Gotchas
+- `ToolSet` type (not `Record<string, ReturnType<typeof tool>>`) for tool collections -- avoids `Tool<never, never>` inference
+- `LanguageModelUsage` uses `inputTokens`/`outputTokens`/`totalTokens` (NOT `promptTokens`/`completionTokens`)
+- `onStepFinish` callback receives `(stepResult: StepResult<TOOLS>)` -- no `stepIndex` parameter
+- `ModelMessage` importable from both `ai` and `@ai-sdk/provider-utils`
+
 ## ToolAnnotation shape (post-refactor)
 - Fields: `toolName`, `serverName`, `comment` (string), `sideEffects` (boolean), `args` (Record<string, ArgumentRole[]>)
 - No `effect` field -- argument roles are the single source of truth
@@ -74,3 +92,19 @@ All moves denied via `deny-delete-operations` rule (move_file source has `delete
 - Caller sets `LlmLogContext.stepName` before each pipeline phase (mutable context pattern)
 - Each entry: timestamp, stepName, modelId, prompt, responseText, usage, durationMs
 - Middleware `specificationVersion: 'v3'` required for AI SDK v6
+
+## Session Test Mocking Pattern
+When mocking `generateText` for session tests:
+- Use `vi.mock('ai', ...)` to replace `generateText` with `vi.fn()`
+- Also mock `@ai-sdk/anthropic` (anthropic function) and `@utcp/code-mode` (CodeModeUtcpClient)
+- Mock `generateText` result shape: `{ text, response: { messages: [...] }, totalUsage: { inputTokens, outputTokens, totalTokens } }`
+- GOTCHA: `messages` array is passed by reference to `generateText`. Inspecting `mock.calls[n][0].messages` after the test shows mutated state. Snapshot with `[...opts.messages]` at call time.
+- Use `IRONCURTAIN_HOME` env var pointed at `/tmp/ironcurtain-test-<pid>` for isolation
+- `createSession` factory adds `escalationDir` to session config (required for sandbox to pass ESCALATION_DIR to proxy)
+
+## Entry Point Architecture (post-session refactor)
+- `src/index.ts` uses `createSession()` + `CliTransport` (backward compatible)
+- `npm start "task"` = single-shot mode, `npm start` = interactive REPL
+- `runAgent()` in `src/agent/index.ts` is deprecated (still used by integration tests)
+- `loadConfig()` default ALLOWED_DIRECTORY uses `getIronCurtainHome()/sandbox` (not `/tmp/ironcurtain-sandbox`)
+- Session factory overrides `allowedDirectory`, `auditLogPath`, and `escalationDir` per-session
