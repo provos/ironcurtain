@@ -217,7 +217,7 @@ describe('PolicyEngine', () => {
         arguments: { path: '/etc/passwd' },
       }));
       expect(result.decision).toBe('escalate');
-      expect(result.rule).toBe('escalate-reads-outside-sandbox');
+      expect(result.rule).toBe('escalate-read-outside-permitted-areas');
     });
 
     it('escalates path traversal attempts', () => {
@@ -226,7 +226,7 @@ describe('PolicyEngine', () => {
         arguments: { path: '/tmp/ironcurtain-sandbox/../../../etc/passwd' },
       }));
       expect(result.decision).toBe('escalate');
-      expect(result.rule).toBe('escalate-reads-outside-sandbox');
+      expect(result.rule).toBe('escalate-read-outside-permitted-areas');
     });
   });
 
@@ -249,13 +249,13 @@ describe('PolicyEngine', () => {
       expect(result.rule).toBe('structural-sandbox-allow');
     });
 
-    it('escalates write_file outside allowed directory', () => {
+    it('denies write_file outside allowed directory', () => {
       const result = engine.evaluate(makeRequest({
         toolName: 'write_file',
         arguments: { path: '/etc/test.txt', content: 'hello' },
       }));
-      expect(result.decision).toBe('escalate');
-      expect(result.rule).toBe('escalate-writes-outside-sandbox');
+      expect(result.decision).toBe('deny');
+      expect(result.rule).toBe('deny-write-outside-permitted-areas');
     });
   });
 
@@ -281,7 +281,7 @@ describe('PolicyEngine', () => {
         },
       }));
       expect(result.decision).toBe('deny');
-      expect(result.rule).toBe('deny-all-deletes');
+      expect(result.rule).toBe('deny-delete-outside-permitted-areas');
     });
 
     it('denies move from external to sandbox', () => {
@@ -293,7 +293,7 @@ describe('PolicyEngine', () => {
         },
       }));
       expect(result.decision).toBe('deny');
-      expect(result.rule).toBe('deny-all-deletes');
+      expect(result.rule).toBe('deny-delete-outside-permitted-areas');
     });
 
     it('denies move from external to external', () => {
@@ -305,7 +305,7 @@ describe('PolicyEngine', () => {
         },
       }));
       expect(result.decision).toBe('deny');
-      expect(result.rule).toBe('deny-all-deletes');
+      expect(result.rule).toBe('deny-delete-outside-permitted-areas');
     });
   });
 
@@ -323,7 +323,7 @@ describe('PolicyEngine', () => {
       expect(result.rule).toBe('structural-sandbox-allow');
     });
 
-    it('escalates edit_file outside sandbox (read-path + write-path both escalate)', () => {
+    it('denies edit_file outside sandbox (write-path denied, most restrictive wins)', () => {
       const result = engine.evaluate(makeRequest({
         toolName: 'edit_file',
         arguments: {
@@ -332,7 +332,7 @@ describe('PolicyEngine', () => {
           dryRun: false,
         },
       }));
-      expect(result.decision).toBe('escalate');
+      expect(result.decision).toBe('deny');
     });
 
     it('allows list_allowed_directories with no roles (no role iteration needed)', () => {

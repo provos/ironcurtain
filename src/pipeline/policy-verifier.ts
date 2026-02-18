@@ -129,7 +129,7 @@ ${resultsText}
 4. If you suspect gaps, generate additional test scenarios to probe them.
 5. Set "pass" to true ONLY if all results are correct and coverage is adequate.
 
-For additional scenarios, use concrete paths. The sandbox directory is specified in the compiled rules' "within" fields.`;
+For additional scenarios, use concrete paths. Note: sandbox containment is handled by a structural invariant before compiled rules run — any tool call where all paths are within the sandbox directory is automatically allowed.`;
 }
 
 export async function verifyPolicy(

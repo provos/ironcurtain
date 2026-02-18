@@ -16,7 +16,6 @@ import {
 } from 'ai';
 import { anthropic } from '@ai-sdk/anthropic';
 import { z } from 'zod';
-import { CodeModeUtcpClient } from '@utcp/code-mode';
 import { readFileSync, writeFileSync, readdirSync } from 'node:fs';
 import { createLlmLoggingMiddleware } from '../pipeline/llm-logger.js';
 import type { LlmLogContext } from '../pipeline/llm-logger.js';
@@ -110,7 +109,6 @@ export class AgentSession implements Session {
   async initialize(): Promise<void> {
     this.sandbox = await this.sandboxFactory(this.config);
     this.systemPrompt = buildSystemPrompt(
-      CodeModeUtcpClient.AGENT_PROMPT_TEMPLATE,
       this.sandbox.getToolInterfaces(),
       this.config.allowedDirectory,
     );
@@ -210,9 +208,10 @@ export class AgentSession implements Session {
       execute_code: tool({
         description:
           'Execute TypeScript code in a secure sandbox with access to filesystem tools. ' +
-          'Write code that calls tool functions like filesystem.read_file(), ' +
-          'filesystem.list_directory(), etc. ' +
-          'Tools are synchronous — no await needed. Use return to provide results.',
+          'Write code that calls tool functions like filesystem.filesystem_read_file({ path }), ' +
+          'filesystem.filesystem_list_directory({ path }), etc. ' +
+          'Tools are synchronous — no await needed. Use return to provide results. ' +
+          'Call __getToolInterface(\'tool.name\') to discover the full type signature of any tool.',
         inputSchema: z.object({
           code: z
             .string()

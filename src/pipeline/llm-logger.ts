@@ -21,7 +21,15 @@ export interface LlmLogEntry {
   timestamp: string;
   stepName: string;
   modelId: string;
+  /**
+   * For the first entry (promptOffset === 0), this is the full prompt array.
+   * For subsequent entries, this contains only new messages since the last
+   * logged entry. Reconstruct the full prompt by concatenating all entries'
+   * prompt arrays in order.
+   */
   prompt: unknown;
+  /** Index into the full prompt array where this entry's messages start. */
+  promptOffset: number;
   responseText: string;
   usage: {
     inputTokens: number | undefined;
@@ -51,6 +59,9 @@ export function createLlmLoggingMiddleware(
 ): LanguageModelMiddleware {
   initLogFile(logPath);
 
+  // Track how many prompt items were logged so far to enable delta logging.
+  let previousPromptLength = 0;
+
   return {
     specificationVersion: 'v3',
     wrapGenerate: async ({ doGenerate, params, model }) => {
@@ -60,11 +71,19 @@ export function createLlmLoggingMiddleware(
 
       const responseText = extractTextFromContent(result.content);
 
+      // Only log new messages since the last entry (delta logging).
+      const fullPrompt = params.prompt;
+      const promptArray = Array.isArray(fullPrompt) ? fullPrompt : [fullPrompt];
+      const promptOffset = previousPromptLength;
+      const newMessages = promptArray.slice(promptOffset);
+      previousPromptLength = promptArray.length;
+
       const entry: LlmLogEntry = {
         timestamp: new Date().toISOString(),
         stepName: context.stepName,
         modelId: model.modelId,
-        prompt: params.prompt,
+        prompt: newMessages,
+        promptOffset,
         responseText,
         usage: {
           inputTokens: result.usage?.inputTokens?.total,

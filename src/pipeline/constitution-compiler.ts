@@ -14,7 +14,6 @@ import type { ToolAnnotation, CompiledRule } from './types.js';
 import { isArgumentRole, getArgumentRoleValues } from '../types/argument-roles.js';
 
 export interface CompilerConfig {
-  sandboxDirectory: string;
   protectedPaths: string[];
 }
 
@@ -71,15 +70,14 @@ These are the available tools and their classified capabilities:
 
 ${annotationsSummary}
 
-## System Configuration
+## Structural Invariants (handled automatically by the engine -- do NOT generate rules for these)
 
-- Sandbox directory: ${config.sandboxDirectory}
+The following checks are hardcoded and evaluated BEFORE compiled rules:
 
-## Protected Paths (Structural Invariants -- handled automatically by the engine)
-
-The following paths are protected by hardcoded structural invariants evaluated BEFORE compiled rules. Any read, write or delete targeting these paths is automatically denied. Do NOT generate rules for protecting these paths -- the engine handles this:
-
+1. **Protected paths** -- any read, write, or delete targeting these paths is automatically denied:
 ${config.protectedPaths.map(p => `- ${p}`).join('\n')}
+
+2. **Sandbox containment** -- any tool call where ALL paths are within the sandbox directory is automatically allowed. Do NOT generate rules for sandbox-internal operations; the engine handles this at runtime with the dynamically configured sandbox path.
 
 ## Instructions
 
@@ -97,8 +95,8 @@ Produce an ORDERED list of policy rules (first match wins). Each rule has:
 - "reason": human-readable explanation
 
 CRITICAL RULES:
-1. Do NOT generate rules for protected path checking or unknown tool denial -- those are handled by structural invariants in the engine.
-2. Use CONCRETE ABSOLUTE paths (e.g., "${config.sandboxDirectory}"), not abstract labels.
+1. Do NOT generate rules for protected path checking, unknown tool denial, or sandbox containment -- those are handled by structural invariants in the engine.
+2. Use CONCRETE ABSOLUTE paths (e.g., "/home/user/Downloads"), not abstract labels.
 3. "Outside a directory" semantics: use rule ordering. A rule with "within" matches the inside case; the next rule without "paths" catches everything else as a fallthrough.
 4. The move tool's source argument has both read-path and delete-path roles. A blanket "roles": ["delete-path"] rule will catch all moves.
 5. Order matters: more specific rules before more general ones.`;

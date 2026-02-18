@@ -1,7 +1,6 @@
 import { generateText, tool, stepCountIs } from 'ai';
 import { anthropic } from '@ai-sdk/anthropic';
 import { z } from 'zod';
-import { CodeModeUtcpClient } from '@utcp/code-mode';
 import type { Sandbox } from '../sandbox/index.js';
 import { buildSystemPrompt } from './prompts.js';
 import * as logger from '../logger.js';
@@ -21,14 +20,15 @@ export async function runAgent(
   sandbox: Sandbox,
 ): Promise<string> {
   const toolInterfaces = sandbox.getToolInterfaces();
-  const codeModePrompt = CodeModeUtcpClient.AGENT_PROMPT_TEMPLATE;
 
   const tools = {
     execute_code: tool({
       description:
         'Execute TypeScript code in a secure sandbox with access to filesystem tools. ' +
-        'Write code that calls tool functions like filesystem.read_file(), filesystem.list_directory(), etc. ' +
-        'Tools are synchronous — no await needed. Use return to provide results.',
+        'Write code that calls tool functions like filesystem.filesystem_read_file({ path }), ' +
+        'filesystem.filesystem_list_directory({ path }), etc. ' +
+        'Tools are synchronous — no await needed. Use return to provide results. ' +
+        'Call __getToolInterface(\'tool.name\') to discover the full type signature of any tool.',
       inputSchema: z.object({
         code: z.string().describe('TypeScript code to execute in the sandbox'),
       }),
@@ -56,7 +56,7 @@ export async function runAgent(
 
   const result = await generateText({
     model: anthropic('claude-sonnet-4-6'),
-    system: buildSystemPrompt(codeModePrompt, toolInterfaces),
+    system: buildSystemPrompt(toolInterfaces),
     prompt: task,
     tools,
     stopWhen: stepCountIs(MAX_AGENT_STEPS),

@@ -81,7 +81,6 @@ const sampleConstitution = `# Constitution
 6. Self-protection`;
 
 const compilerConfig: CompilerConfig = {
-  sandboxDirectory: '/tmp/ironcurtain-sandbox',
   protectedPaths: ['/home/test/config/constitution.md', '/home/test/config/generated'],
 };
 

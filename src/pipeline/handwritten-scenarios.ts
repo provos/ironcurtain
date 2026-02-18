@@ -69,14 +69,14 @@ export function getHandwrittenScenarios(sandboxDir: string): TestScenario[] {
       source: 'handwritten',
     },
     {
-      description: 'Write file outside sandbox -- escalate',
+      description: 'Write file outside sandbox -- deny',
       request: {
         serverName: 'filesystem',
         toolName: 'write_file',
         arguments: { path: '/etc/test.txt', content: 'hello' },
       },
-      expectedDecision: 'escalate',
-      reasoning: 'Human oversight principle: writes outside sandbox require human approval',
+      expectedDecision: 'deny',
+      reasoning: 'Least privilege: writes outside permitted areas (sandbox, Downloads) are denied',
       source: 'handwritten',
     },
 

@@ -16,6 +16,30 @@ import type { IronCurtainConfig } from '../config/types.js';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROXY_SERVER_PATH = resolve(__dirname, '../trusted-process/mcp-proxy-server.ts');
 
+/**
+ * Transforms a UTCP tool name (dotted) into the actual callable function name
+ * in the sandbox. Mirrors UTCP Code Mode's sanitizeIdentifier() behavior:
+ * split on first dot (manual name), join remaining parts with underscores.
+ *
+ * Example: "filesystem.filesystem.list_directory" → "filesystem.filesystem_list_directory"
+ */
+function toCallableName(toolName: string): string {
+  const sanitize = (s: string) =>
+    s.replace(/[^a-zA-Z0-9_]/g, '_').replace(/^[0-9]/, '_$&');
+  if (!toolName.includes('.')) return sanitize(toolName);
+  const [manual, ...parts] = toolName.split('.');
+  return `${sanitize(manual)}.${parts.map(sanitize).join('_')}`;
+}
+
+/**
+ * Extracts required parameter names from a tool's JSON Schema inputs
+ * to show inline in the catalog, e.g. "{ path }" or "{ path, content }".
+ */
+function extractRequiredParams(inputs?: { properties?: Record<string, unknown>; required?: string[] }): string {
+  if (!inputs?.required?.length) return '';
+  return `{ ${inputs.required.join(', ')} }`;
+}
+
 export interface CodeExecutionResult {
   result: unknown;
   logs: string[];
@@ -23,7 +47,7 @@ export interface CodeExecutionResult {
 
 export class Sandbox {
   private client: CodeModeUtcpClient | null = null;
-  private toolInterfaces: string = '';
+  private toolCatalog: string = '';
 
   async initialize(config: IronCurtainConfig): Promise<void> {
     this.client = await CodeModeUtcpClient.create();
@@ -66,32 +90,34 @@ export class Sandbox {
       },
     });
 
-    this.toolInterfaces = await this.discoverToolInterfaces();
+    this.toolCatalog = await this.buildToolCatalog();
   }
 
   /**
-   * Retrieves the generated TypeScript interface declarations for all
-   * registered tools. These are injected into the agent's system prompt
-   * so the LLM knows what functions are available in the sandbox.
+   * Builds a compact one-line-per-tool catalog from registered tools.
+   * Each entry shows the correct callable function name (with underscores)
+   * and required parameters so the LLM can invoke tools without introspection.
    */
-  private async discoverToolInterfaces(): Promise<string> {
+  private async buildToolCatalog(): Promise<string> {
     if (!this.client) throw new Error('Sandbox not initialized');
 
     try {
-      // __interfaces is a Code Mode built-in that returns the
-      // generated TypeScript declarations for all registered tools.
-      const { result } = await this.client.callToolChain(
-        'return __interfaces ?? "No interfaces available"',
-        15000,
-      );
-      return typeof result === 'string' ? result : JSON.stringify(result, null, 2);
+      const tools = await this.client.getTools();
+      if (tools.length === 0) return 'No tools available';
+      return tools
+        .map((t) => {
+          const callableName = toCallableName(t.name);
+          const params = extractRequiredParams(t.inputs);
+          return `- \`${callableName}(${params})\` — ${t.description}`;
+        })
+        .join('\n');
     } catch {
-      return 'Tool interfaces not available — use filesystem.* tools';
+      return 'Tool catalog not available — use filesystem.* tools';
     }
   }
 
   getToolInterfaces(): string {
-    return this.toolInterfaces;
+    return this.toolCatalog;
   }
 
   async executeCode(code: string, timeoutMs = 300000): Promise<CodeExecutionResult> {

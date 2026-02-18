@@ -3,8 +3,7 @@
  * the legacy runAgent() function and the new AgentSession.
  */
 export function buildSystemPrompt(
-  codeModePrompt: string,
-  toolInterfaces: string,
+  toolCatalog: string,
   allowedDirectory?: string,
 ): string {
   const sandboxInfo = allowedDirectory
@@ -15,10 +14,16 @@ export function buildSystemPrompt(
 
 Every tool call in your code goes through a security policy engine. If a call is denied, do NOT retry it -- explain the denial to the user.
 ${sandboxInfo}
-${codeModePrompt}
+## Code Mode rules
 
-## Currently available tool interfaces
+- Tools are synchronous — do NOT use \`await\`.
+- Use \`return\` to send a value back to the conversation.
+- Example: \`const result = filesystem.filesystem_list_directory({ path: "/tmp" });\`
 
-${toolInterfaces}
+## Available tools
+
+${toolCatalog}
+
+To get the full TypeScript interface for any tool (parameter types, optional params), call \`__getToolInterface('tool.name')\` inside your code.
 `;
 }

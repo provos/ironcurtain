@@ -76,6 +76,7 @@ describe('LLM Logger Middleware', () => {
     expect(entry.durationMs).toBeGreaterThanOrEqual(0);
     expect(entry.timestamp).toBeTruthy();
     expect(entry.prompt).toBeTruthy();
+    expect(entry.promptOffset).toBe(0);
   });
 
   it('logs multiple calls with different step names', async () => {
@@ -139,6 +140,47 @@ describe('LLM Logger Middleware', () => {
     const entries = readLogEntries();
     expect(entries).toHaveLength(1);
     expect(entries[0].stepName).toBe('new-step');
+  });
+
+  it('uses delta logging with promptOffset for growing message histories', async () => {
+    const context: LlmLogContext = { stepName: 'agent' };
+    const mockModel = createMockModel({ ok: true });
+    const wrappedModel = wrapLanguageModel({
+      model: mockModel,
+      middleware: createLlmLoggingMiddleware(LOG_PATH, context),
+    });
+
+    // Simulate the agent pattern: each call sends the full growing history,
+    // but the logger should only record the new messages.
+    const messages: Array<{ role: string; content: string }> = [];
+
+    messages.push({ role: 'user', content: 'Hello' });
+    await generateText({
+      model: wrappedModel,
+      messages: messages as Parameters<typeof generateText>[0]['messages'],
+    });
+
+    // Simulate assistant response + next user message being added
+    messages.push({ role: 'assistant', content: 'Hi there' });
+    messages.push({ role: 'user', content: 'What is 2+2?' });
+    await generateText({
+      model: wrappedModel,
+      messages: messages as Parameters<typeof generateText>[0]['messages'],
+    });
+
+    const entries = readLogEntries();
+    expect(entries).toHaveLength(2);
+
+    // First entry: full prompt at offset 0
+    expect(entries[0].promptOffset).toBe(0);
+
+    // Second entry: only the new messages, offset past the first entry's messages
+    expect(entries[1].promptOffset).toBeGreaterThan(0);
+
+    // The second entry's prompt should NOT contain the first user message
+    const secondPromptStr = JSON.stringify(entries[1].prompt);
+    expect(secondPromptStr).not.toContain('Hello');
+    expect(secondPromptStr).toContain('What is 2+2?');
   });
 
   it('captures prompt content in the log entry', async () => {

@@ -116,17 +116,14 @@ function computeAnnotationHash(
 function computePolicyHash(
   constitutionText: string,
   allAnnotations: ToolAnnotation[],
-  sandboxDirectory: string,
   protectedPaths: string[],
 ): string {
   const prompt = buildCompilerPrompt(constitutionText, allAnnotations, {
-    sandboxDirectory,
     protectedPaths,
   });
   return computeHash(
     constitutionText,
     JSON.stringify(allAnnotations),
-    JSON.stringify({ sandboxDirectory }),
     prompt,
   );
 }
@@ -257,7 +254,7 @@ async function compilePolicyRules(
   existingPolicy: CompiledPolicyFile | undefined,
   llm: LanguageModel,
 ): Promise<CompilationResult> {
-  const inputHash = computePolicyHash(constitutionText, annotations, allowedDirectory, protectedPaths);
+  const inputHash = computePolicyHash(constitutionText, annotations, protectedPaths);
 
   // Check cache: skip LLM call if inputs haven't changed
   if (existingPolicy && existingPolicy.inputHash === inputHash) {
@@ -269,7 +266,7 @@ async function compilePolicyRules(
   const compiledRules = await compileConstitution(
     constitutionText,
     annotations,
-    { sandboxDirectory: allowedDirectory, protectedPaths },
+    { protectedPaths },
     llm,
   );
 

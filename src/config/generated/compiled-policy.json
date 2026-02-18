@@ -1,7 +1,7 @@
 {
   "generatedAt": "2026-02-18T21:11:34.419Z",
   "constitutionHash": "618c4afd16309b9cb2609fc3db11d52f83be9c51ec870254ed4f2365fab07c6c",
-  "inputHash": "b7c23f5ed2fab79028192d8cef870a6b0bcda428bde616f170ee941e5bd8bbec",
+  "inputHash": "",
   "rules": [
     {
       "name": "allow-list-allowed-directories",
@@ -17,26 +17,6 @@
       },
       "then": "allow",
       "reason": "list_allowed_directories makes no filesystem changes and reveals only the statically configured allowed directories, so it is always safe to permit."
-    },
-    {
-      "name": "allow-read-write-delete-sandbox",
-      "description": "Allow all operations (read, write, delete) within the sandbox directory /tmp/ironcurtain-sandbox.",
-      "principle": "Least privilege — the sandbox is the unrestricted work area for the agent.",
-      "if": {
-        "server": [
-          "filesystem"
-        ],
-        "paths": {
-          "roles": [
-            "read-path",
-            "write-path",
-            "delete-path"
-          ],
-          "within": "/tmp/ironcurtain-sandbox"
-        }
-      },
-      "then": "allow",
-      "reason": "The sandbox directory is the designated safe area where the agent may freely read, write, and delete without restriction."
     },
     {
       "name": "allow-read-write-delete-downloads",
@@ -89,7 +69,7 @@
         ]
       },
       "then": "deny",
-      "reason": "The constitution's 'No destruction' principle forbids delete operations outside explicitly permitted areas. Prior rules already allowed deletes inside /tmp/ironcurtain-sandbox and /home/provos/Downloads, so this fallthrough catches everything else."
+      "reason": "The constitution's 'No destruction' principle forbids delete operations outside explicitly permitted areas. Prior structural invariants already allow deletes inside the sandbox, so this fallthrough catches everything else."
     },
     {
       "name": "deny-write-outside-permitted-areas",
@@ -104,7 +84,7 @@
         ]
       },
       "then": "deny",
-      "reason": "Write access is only permitted inside /tmp/ironcurtain-sandbox and /home/provos/Downloads. This fallthrough denies all other write attempts."
+      "reason": "Write access is only permitted inside the sandbox and /home/provos/Downloads. This fallthrough denies all other write attempts."
     },
     {
       "name": "escalate-read-outside-permitted-areas",
@@ -119,7 +99,7 @@
         ]
       },
       "then": "escalate",
-      "reason": "The constitution requires human approval for operations outside permitted areas. Reads outside /tmp/ironcurtain-sandbox, /home/provos/Downloads, and /home/provos/Documents are escalated rather than silently denied, giving a human the opportunity to approve legitimate requests."
+      "reason": "The constitution requires human approval for operations outside permitted areas. Reads outside the sandbox, /home/provos/Downloads, and /home/provos/Documents are escalated rather than silently denied, giving a human the opportunity to approve legitimate requests."
     }
   ]
 }

@@ -185,7 +185,7 @@ describe('Integration: TrustedProcess with filesystem MCP server', () => {
     // Escalation is denied by mock handler, so final status is 'deny'
     expect(result.status).toBe('denied');
     expect(result.policyDecision.status).toBe('deny');
-    expect(result.policyDecision.rule).toBe('escalate-reads-outside-sandbox');
+    expect(result.policyDecision.rule).toBe('escalate-read-outside-permitted-areas');
   });
 
   it('denies access to protected constitution file', async () => {
@@ -203,8 +203,7 @@ describe('Integration: TrustedProcess with filesystem MCP server', () => {
     expect(result.policyDecision.rule).toBe('structural-protected-path');
   });
 
-  it('escalates writing outside the sandbox -- denied by human', async () => {
-    escalationResponse = 'denied';
+  it('denies writing outside the sandbox', async () => {
     lastEscalationRequest = null;
 
     const result = await trustedProcess.handleToolCall(makeRequest({
@@ -212,29 +211,26 @@ describe('Integration: TrustedProcess with filesystem MCP server', () => {
       arguments: { path: '/tmp/outside-sandbox.txt', content: 'should not work' },
     }));
 
-    expect(lastEscalationRequest).not.toBeNull();
-    expect(lastEscalationRequest!.toolName).toBe('write_file');
+    // Write outside permitted areas is denied outright (no escalation)
+    expect(lastEscalationRequest).toBeNull();
     expect(result.status).toBe('denied');
-    expect(result.policyDecision.reason).toBe('Denied by human during escalation');
+    expect(result.policyDecision.status).toBe('deny');
+    expect(result.policyDecision.rule).toBe('deny-write-outside-permitted-areas');
   });
 
-  it('escalates writing outside the sandbox -- approved by human', async () => {
+  it('escalates reading outside the sandbox -- approved by human', async () => {
     escalationResponse = 'approved';
     lastEscalationRequest = null;
 
-    const outsidePath = `/tmp/ironcurtain-test-outside-${process.pid}.txt`;
     const result = await trustedProcess.handleToolCall(makeRequest({
-      toolName: 'write_file',
-      arguments: { path: outsidePath, content: 'approved by human' },
+      toolName: 'read_file',
+      arguments: { path: '/etc/hostname' },
     }));
 
     expect(lastEscalationRequest).not.toBeNull();
-    // The MCP server may deny the write (path not in its allowed dirs), which is fine --
-    // the point is that the policy engine escalated and the human approved
+    expect(lastEscalationRequest!.toolName).toBe('read_file');
+    // The policy engine escalated and the human approved
     expect(result.policyDecision.reason).toBe('Approved by human during escalation');
-
-    // Cleanup
-    rmSync(outsidePath, { force: true });
   });
 
   it('writes audit log entries', async () => {
