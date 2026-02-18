@@ -118,6 +118,17 @@ When mocking `generateText` for session tests:
 - `loadConfig()` default ALLOWED_DIRECTORY uses `getIronCurtainHome()/sandbox` (not `/tmp/ironcurtain-sandbox`)
 - Session factory overrides `allowedDirectory`, `auditLogPath`, and `escalationDir` per-session
 
+## MCP Roots Integration
+- **Policy roots module**: `src/trusted-process/policy-roots.ts` -- `extractPolicyRoots()`, `toMcpRoots()`, `directoryForPath()`
+- **MCPClientManager**: `connect()` takes optional `roots?: McpRoot[]` param, `addRoot()` with sync wait pattern
+- **McpRoot interface**: exported from `mcp-client-manager.ts` -- `{ uri: string; name: string }`
+- **Root sync pattern**: `addRoot` registers `rootsRefreshed` callback, calls `sendRootsListChanged()`, awaits callback when `roots/list` handler fires
+- **Proxy server**: uses inline `ClientState` interface (not MCPClientManager) for roots management
+- **TrustedProcess**: computes roots in constructor via `extractPolicyRoots` + `toMcpRoots`, passes to `connect()`, calls `addRoot()` after escalation approval
+- **Node.js resolve() gotcha**: `resolve('/path/')` strips trailing slash; check for trailing slash *before* resolve
+- **MCP SDK**: `ListRootsRequestSchema` from `@modelcontextprotocol/sdk/types.js`, `sendRootsListChanged()` on Client, `setRequestHandler()` on Client
+- **Tests**: `test/policy-roots.test.ts` -- unit tests for extraction/conversion/directory functions
+
 ## Session Logging System
 - **Logger module**: `src/logger.ts` -- module-level singleton with `setup()`/`teardown()` lifecycle
 - **Log file**: `~/.ironcurtain/sessions/{id}/session.log` (path via `getSessionLogPath()` in `src/config/paths.ts`)

@@ -1,17 +1,31 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import {
+  ListRootsRequestSchema,
+} from '@modelcontextprotocol/sdk/types.js';
 import type { MCPServerConfig } from '../config/types.js';
 import * as logger from '../logger.js';
+
+export interface McpRoot {
+  uri: string;
+  name: string;
+}
 
 interface ManagedServer {
   client: Client;
   transport: StdioClientTransport;
+  roots?: McpRoot[];
+  rootsRefreshed?: () => void;
 }
 
 export class MCPClientManager {
   private servers = new Map<string, ManagedServer>();
 
-  async connect(name: string, config: MCPServerConfig): Promise<void> {
+  async connect(
+    name: string,
+    config: MCPServerConfig,
+    roots?: McpRoot[],
+  ): Promise<void> {
     const transport = new StdioClientTransport({
       command: config.command,
       args: config.args,
@@ -20,10 +34,52 @@ export class MCPClientManager {
 
     const client = new Client(
       { name: 'ironcurtain', version: '0.1.0' },
+      roots ? { capabilities: { roots: { listChanged: true } } } : {},
     );
 
+    // Mutable copy -- addRoot() pushes to this array.
+    const mutableRoots = roots ? [...roots] : undefined;
+    const managed: ManagedServer = { client, transport, roots: mutableRoots };
+
+    // When the server asks for roots, return the current set.
+    // If a rootsRefreshed callback is registered (from addRoot),
+    // resolve it so the caller knows the server has the latest roots.
+    if (mutableRoots) {
+      client.setRequestHandler(ListRootsRequestSchema, async () => {
+        if (managed.rootsRefreshed) {
+          managed.rootsRefreshed();
+          managed.rootsRefreshed = undefined;
+        }
+        return { roots: mutableRoots };
+      });
+    }
+
     await client.connect(transport);
-    this.servers.set(name, { client, transport });
+    this.servers.set(name, managed);
+  }
+
+  /**
+   * Adds a root directory to a connected server and waits for the
+   * server to fetch the updated root list. This ensures the server's
+   * allowed directories include the new root before any tool call
+   * that depends on it is forwarded.
+   *
+   * No-op if the root URI is already present.
+   */
+  async addRoot(serverName: string, root: McpRoot): Promise<void> {
+    const server = this.servers.get(serverName);
+    if (!server?.roots) return;
+
+    // Deduplicate
+    if (server.roots.some(r => r.uri === root.uri)) return;
+    server.roots.push(root);
+
+    // Wait for the server to call roots/list after we notify it.
+    const refreshed = new Promise<void>(resolve => {
+      server.rootsRefreshed = resolve;
+    });
+    await server.client.sendRootsListChanged();
+    await refreshed;
   }
 
   async listTools(serverName: string): Promise<{ name: string; description?: string; inputSchema: unknown }[]> {

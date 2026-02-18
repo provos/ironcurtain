@@ -98,6 +98,28 @@ Both use the same PolicyEngine with compiled artifacts.
 - Generated JSON artifacts unchanged (roles stay as strings)
 - 4-PR migration: (1) add registry, (2) pipeline strings, (3) engine strings, (4) annotation-driven normalization
 
+## MCP Roots Integration Design (designed 2026-02-18)
+- See `docs/designs/mcp-roots-integration.md` for full spec
+- New file: `src/trusted-process/policy-roots.ts` -- `extractPolicyRoots()` + `toMcpRoots()`
+- Extracts directories from compiled policy rules where `then` is `allow` or `escalate` and `paths.within` exists
+- Sandbox directory always included as first root
+- MCPClientManager.connect() gains optional `roots` parameter; declares `roots` capability, registers `ListRootsRequestSchema` handler
+- Proxy mode: roots passed via `POLICY_ROOTS` env var (JSON array of `{ uri, name }`)
+- In-process mode: TrustedProcess extracts roots in constructor, passes to MCPClientManager
+- CLI args retained as fallback for servers without roots support
+- No `notifications/roots/list_changed` -- roots are static per session
+
+## MCP SDK Roots API
+- `Client` constructor accepts `{ capabilities: { roots: { listChanged: boolean } } }`
+- Server calls `roots/list` on client after init; client responds with `{ roots: [{ uri, name? }] }`
+- `ListRootsRequestSchema` imported from `@modelcontextprotocol/sdk/types.js`
+- `client.sendRootsListChanged()` sends notification (not needed for static roots)
+- Filesystem server: when roots provided, they REPLACE CLI args entirely
+
+## Current Constitution (updated 2026-02-18)
+- Only 3 principles now: Least privilege, No destruction, Human oversight
+- Concrete guidance: RWD in Downloads, read-only in Documents
+
 ## NOT Implemented (aspirational in docs)
 - Per-task policy layer
 - Runtime LLM assessment (semantic checks)

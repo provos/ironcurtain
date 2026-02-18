@@ -25,6 +25,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
+  ListRootsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
@@ -35,8 +36,10 @@ import { loadGeneratedPolicy } from '../config/index.js';
 import { PolicyEngine } from './policy-engine.js';
 import { AuditLog } from './audit-log.js';
 import { prepareToolArgs } from './path-utils.js';
+import { extractPolicyRoots, toMcpRoots, directoryForPath } from './policy-roots.js';
 import type { ToolCallRequest } from '../types/mcp.js';
 import type { AuditEntry } from '../types/audit.js';
+import type { McpRoot } from './mcp-client-manager.js';
 import type { MCPServerConfig } from '../config/types.js';
 
 interface ProxiedTool {
@@ -52,6 +55,27 @@ interface EscalationFileRequest {
   toolName: string;
   arguments: Record<string, unknown>;
   reason: string;
+}
+
+interface ClientState {
+  client: Client;
+  roots: McpRoot[];
+  rootsRefreshed?: () => void;
+}
+
+/**
+ * Adds a root to a client's root list and waits for the server to
+ * fetch the updated list. No-op if the root URI is already present.
+ */
+async function addRootToClient(state: ClientState, root: McpRoot): Promise<void> {
+  if (state.roots.some(r => r.uri === root.uri)) return;
+  state.roots.push(root);
+
+  const refreshed = new Promise<void>(resolve => {
+    state.rootsRefreshed = resolve;
+  });
+  await state.client.sendRootsListChanged();
+  await refreshed;
 }
 
 const ESCALATION_POLL_INTERVAL_MS = 500;
@@ -119,8 +143,13 @@ async function main(): Promise<void> {
   const policyEngine = new PolicyEngine(compiledPolicy, toolAnnotations, protectedPaths, allowedDirectory);
   const auditLog = new AuditLog(auditLogPath);
 
+  // Compute initial roots from compiled policy for the MCP Roots protocol
+  const policyRoots = extractPolicyRoots(compiledPolicy, allowedDirectory ?? '/tmp');
+  const mcpRoots = toMcpRoots(policyRoots);
+
+  const clientStates = new Map<string, ClientState>();
+
   // Connect to real MCP servers as clients
-  const clients = new Map<string, Client>();
   const allTools: ProxiedTool[] = [];
 
   for (const [serverName, config] of Object.entries(serversConfig)) {
@@ -149,9 +178,28 @@ async function main(): Promise<void> {
       });
     }
 
-    const client = new Client({ name: 'ironcurtain-proxy', version: '0.1.0' });
+    const client = new Client(
+      { name: 'ironcurtain-proxy', version: '0.1.0' },
+      { capabilities: { roots: { listChanged: true } } },
+    );
+
+    // Mutable copy per client -- root expansion pushes to this array
+    const state: ClientState = { client, roots: [...mcpRoots] };
+
+    // When the server asks for roots, return the current set.
+    // If a rootsRefreshed callback is registered (from escalation-triggered
+    // root expansion), resolve it so the caller knows the server has
+    // the latest roots.
+    client.setRequestHandler(ListRootsRequestSchema, async () => {
+      if (state.rootsRefreshed) {
+        state.rootsRefreshed();
+        state.rootsRefreshed = undefined;
+      }
+      return { roots: state.roots };
+    });
+
     await client.connect(transport);
-    clients.set(serverName, client);
+    clientStates.set(serverName, state);
 
     const result = await client.listTools();
     for (const tool of result.tools) {
@@ -275,6 +323,21 @@ async function main(): Promise<void> {
       escalationResult = 'approved';
       policyDecision.status = 'allow';
       policyDecision.reason = 'Approved by human during escalation';
+
+      // Expand roots to include target directories so the filesystem
+      // server accepts the forwarded call.
+      const state = clientStates.get(toolInfo.serverName);
+      if (state) {
+        const paths = Object.values(argsForTransport).filter(
+          (v): v is string => typeof v === 'string',
+        );
+        for (const p of paths) {
+          await addRootToClient(state, {
+            uri: `file://${directoryForPath(p)}`,
+            name: 'escalation-approved',
+          });
+        }
+      }
     }
 
     if (evaluation.decision === 'deny') {
@@ -288,7 +351,7 @@ async function main(): Promise<void> {
     // Policy allows -- forward to the real MCP server with transport args
     const startTime = Date.now();
     try {
-      const client = clients.get(toolInfo.serverName)!;
+      const client = clientStates.get(toolInfo.serverName)!.client;
       const result = await client.callTool({
         name: toolInfo.name,
         arguments: argsForTransport,
@@ -313,8 +376,8 @@ async function main(): Promise<void> {
   // Clean shutdown -- handle both SIGINT and SIGTERM since this process
   // is spawned as a child by Code Mode and may receive either signal.
   async function shutdown(): Promise<void> {
-    for (const client of clients.values()) {
-      try { await client.close(); } catch { /* ignore */ }
+    for (const state of clientStates.values()) {
+      try { await state.client.close(); } catch { /* ignore */ }
     }
     try { await server.close(); } catch { /* ignore */ }
     await auditLog.close();

@@ -3,10 +3,11 @@ import type { ToolCallRequest, ToolCallResult, PolicyDecision } from '../types/m
 import type { AuditEntry } from '../types/audit.js';
 import { loadGeneratedPolicy } from '../config/index.js';
 import { PolicyEngine } from './policy-engine.js';
-import { MCPClientManager } from './mcp-client-manager.js';
+import { MCPClientManager, type McpRoot } from './mcp-client-manager.js';
 import { AuditLog } from './audit-log.js';
 import { EscalationHandler } from './escalation.js';
 import { prepareToolArgs } from './path-utils.js';
+import { extractPolicyRoots, toMcpRoots, directoryForPath } from './policy-roots.js';
 import * as logger from '../logger.js';
 
 export type EscalationPromptFn = (request: ToolCallRequest, reason: string) => Promise<'approved' | 'denied'>;
@@ -18,6 +19,7 @@ export interface TrustedProcessOptions {
 export class TrustedProcess {
   private policyEngine: PolicyEngine;
   private mcpManager: MCPClientManager;
+  private mcpRoots: McpRoot[];
   private auditLog: AuditLog;
   private escalation: EscalationHandler;
   private onEscalation?: EscalationPromptFn;
@@ -25,6 +27,10 @@ export class TrustedProcess {
   constructor(private config: IronCurtainConfig, options?: TrustedProcessOptions) {
     const { compiledPolicy, toolAnnotations } = loadGeneratedPolicy(config.generatedDir);
     this.policyEngine = new PolicyEngine(compiledPolicy, toolAnnotations, config.protectedPaths, config.allowedDirectory);
+
+    const policyRoots = extractPolicyRoots(compiledPolicy, config.allowedDirectory);
+    this.mcpRoots = toMcpRoots(policyRoots);
+
     this.mcpManager = new MCPClientManager();
     this.auditLog = new AuditLog(config.auditLogPath);
     this.escalation = new EscalationHandler();
@@ -34,7 +40,7 @@ export class TrustedProcess {
   async initialize(): Promise<void> {
     for (const [name, serverConfig] of Object.entries(this.config.mcpServers)) {
       logger.info(`Connecting to MCP server: ${name}...`);
-      await this.mcpManager.connect(name, serverConfig);
+      await this.mcpManager.connect(name, serverConfig, this.mcpRoots);
       logger.info(`Connected to MCP server: ${name}`);
     }
   }
@@ -83,6 +89,19 @@ export class TrustedProcess {
         if (escalationResult === 'approved') {
           policyDecision.status = 'allow';
           policyDecision.reason = 'Approved by human during escalation';
+
+          // Expand roots to include target directories so the filesystem
+          // server accepts the forwarded call.
+          const paths = Object.values(transportRequest.arguments).filter(
+            (v): v is string => typeof v === 'string',
+          );
+          for (const p of paths) {
+            const dir = directoryForPath(p);
+            await this.mcpManager.addRoot(transportRequest.serverName, {
+              uri: `file://${dir}`,
+              name: 'escalation-approved',
+            });
+          }
         } else {
           policyDecision.status = 'deny';
           policyDecision.reason = 'Denied by human during escalation';
