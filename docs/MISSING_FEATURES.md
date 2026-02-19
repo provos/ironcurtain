@@ -10,8 +10,8 @@ The architecture doc describes a per-task policy layer that is currently unimple
 ### LLM Assessment Rules (Semantic Policy Checks)
 Currently all policy rules are deterministic pattern matching. The design envisions a new rule outcome `assess` that triggers an LLM to evaluate content semantically — "does this output contain PII?", "is this content obfuscated/encoded?" This bridges the gap between static rules and human escalation. A tracer bullet could implement just the intelligibility check: deny outbound content that appears to be exfiltrating data via encoding.
 
-### Loop Detection / Anomaly Monitoring
-Track recent tool calls in a sliding window. Detect repetitive patterns (same tool + same args N times), rapid-fire calls, or cost spikes. Auto-escalate or auto-deny with diagnostics. The trusted process already has request data; this needs a stateful monitor sitting alongside the policy engine.
+### Loop Detection / Anomaly Monitoring — **IMPLEMENTED**
+Two-layer loop detection: `StepLoopDetector` at the agent level (2x2 progress matrix with warn/block thresholds) and `CallCircuitBreaker` at the proxy level (sliding-window rate limiter). See `docs/designs/loop-detection.md`.
 
 ### Resource Budget Enforcement
 Add token counting, API call limits, wall-clock timeouts, and cost tracking per agent run. Kill the agent when any budget is exhausted. The AI SDK's `onStepFinish` callback is the natural hook. A misbehaving agent can currently run indefinitely.
@@ -40,8 +40,8 @@ Add Zod schema validation for `mcp-servers.json`, compiled artifacts, and the `I
 
 ## User Experience
 
-### Multi-Turn Conversational Agent
-Currently the agent is single-shot: one task in, one result out. Adding conversation history management transforms it from a task runner into an interactive assistant. This is a prerequisite for messaging platform integration.
+### Multi-Turn Conversational Agent — **IMPLEMENTED**
+Session-based multi-turn agent with per-session sandboxes, file-based escalation IPC, and conversation history. See `docs/multi-turn-session-design.md`.
 
 ### Messaging / UI Integration
 Connect IronCurtain to messaging platforms or a web UI so users can interact without the command line. This requires a richer escalation system (see below) and multi-turn conversation support.
@@ -54,5 +54,5 @@ Replace the CLI readline with something pluggable: configurable timeout-to-deny,
 ### Multiple Concurrent Agents
 Support multiple concurrent agent sessions with independent policies, audit logs, and escalation queues. Add session isolation and per-session resource budgets. Enable different constitution profiles for different use cases.
 
-### Compilation Feedback Loop
-When policy verification fails, automatically feed failures back to the compiler LLM for re-compilation (up to N attempts). Add a human review step for newly generated rules before acceptance. Enable incremental recompilation when only one server's tools change.
+### Compilation Feedback Loop — **IMPLEMENTED**
+Compile-verify-repair loop in `src/pipeline/compile.ts` feeds verification failures + judge analysis back to the compiler for targeted repair (up to 2 attempts). Incremental recompilation when only one server's tools change is still planned.

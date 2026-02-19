@@ -83,6 +83,8 @@ interface ToolAnnotationsFile {
 | `delete-path` | Argument is a path that will be deleted | Subject to delete policy |
 | `none` | Not a resource path | No path-based policy check |
 
+All path-bearing roles use symlink-aware `resolveRealPath()` for normalization, which follows symlinks to canonical forms. This prevents symlink-escape attacks where a symlinked directory could circumvent containment checks.
+
 **Side effects:** `sideEffects` is framed in security terms, not just state mutation. A tool has `sideEffects: true` if it modifies state OR can disclose information from resource paths (information disclosure is a security-relevant side effect). Only tools with NO path arguments AND no state changes qualify as `sideEffects: false` -- e.g., `list_allowed_directories` which returns system configuration the agent already knows. Tools like `read_file` are `sideEffects: true` because they can disclose file contents from arbitrary paths. The compiled policy can allow `sideEffects: false` tools unconditionally (subject to structural invariants), while path-taking tools always go through path-based rules.
 
 **Example annotations:**

@@ -32,7 +32,7 @@ Each role definition provides:
 
 - **`description`** -- Human-readable explanation of the role's security semantics.
 - **`isResourceIdentifier`** -- True if the role tags an argument that names an external resource (filesystem path, URL, etc.). False for `'none'`. Replaces all `role !== 'none'` checks in the codebase.
-- **`normalize`** -- Canonicalizes a string argument value for transport to the MCP server. For path roles: tilde expansion + `path.resolve()`. For `'none'`: identity function. Must be pure and must not throw.
+- **`normalize`** -- Canonicalizes a string argument value for transport to the MCP server. For path roles: tilde expansion + symlink-aware `resolveRealPath()` (follows symlinks via `realpathSync`, with fallbacks for non-existent paths). For `'none'`: identity function. Must be pure and must not throw.
 - **`prepareForPolicy`** -- Optional. Transforms the already-normalized value into a form suitable for policy evaluation. When absent, the policy engine sees the normalized value directly. When present, the policy engine sees the transformed value while the MCP server still receives the `normalize`-only value. Must be pure and must not throw.
 
 ### Convenience accessors
@@ -59,12 +59,12 @@ A type-level assertion ensures every member of the `ArgumentRole` union has a re
 
 | Role | isResourceIdentifier | normalize | prepareForPolicy | Description |
 |------|---------------------|-----------|-----------------|-------------|
-| `read-path` | true | tilde expand + resolve | -- | Filesystem path that will be read |
-| `write-path` | true | tilde expand + resolve | -- | Filesystem path that will be written to |
-| `delete-path` | true | tilde expand + resolve | -- | Filesystem path that will be deleted |
+| `read-path` | true | tilde expand + `resolveRealPath()` | -- | Filesystem path that will be read |
+| `write-path` | true | tilde expand + `resolveRealPath()` | -- | Filesystem path that will be written to |
+| `delete-path` | true | tilde expand + `resolveRealPath()` | -- | Filesystem path that will be deleted |
 | `none` | false | identity (no-op) | -- | Argument carries no resource-identifier semantics |
 
-For path roles, `normalize` produces the canonical value used by both the MCP server and the policy engine. No `prepareForPolicy` is needed because the resolved absolute path is the correct form for both.
+For path roles, `normalize` uses `resolveRealPath()` which follows symlinks to produce the canonical real path. This neutralizes both path traversal attacks (via `resolve`) and symlink-escape attacks (via `realpathSync`). The function has a three-tier fallback: (1) `realpathSync(path)` for existing paths, (2) `realpathSync(dirname) + basename` for new files in existing directories, (3) `path.resolve()` for entirely new paths. No `prepareForPolicy` is needed because the resolved real path is the correct form for both.
 
 Future roles may use `prepareForPolicy` to diverge the two views. For example, a `content` role might use `normalize = identity` (the MCP server receives the original text) and `prepareForPolicy = stripSpecialChars` (the policy engine evaluates a sanitized version to resist prompt injection from rogue agents).
 
