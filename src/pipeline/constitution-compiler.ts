@@ -10,8 +10,9 @@
 import type { LanguageModel } from 'ai';
 import { z } from 'zod';
 import { generateObjectWithRepair } from './generate-with-repair.js';
-import type { ToolAnnotation, CompiledRule } from './types.js';
+import type { ToolAnnotation, CompiledRule, RepairContext } from './types.js';
 import { isArgumentRole, getArgumentRoleValues } from '../types/argument-roles.js';
+import { formatExecutionResults } from './policy-verifier.js';
 
 export interface CompilerConfig {
   protectedPaths: string[];
@@ -102,16 +103,56 @@ CRITICAL RULES:
 5. Order matters: more specific rules before more general ones.`;
 }
 
+export function buildRepairPrompt(
+  basePrompt: string,
+  repairContext: RepairContext,
+): string {
+  const rulesText = repairContext.previousRules
+    .map((r, i) => `  ${i + 1}. [${r.name}] if: ${JSON.stringify(r.if)} then: ${r.then} -- ${r.reason}`)
+    .join('\n');
+
+  const failuresText = formatExecutionResults(repairContext.failedScenarios);
+
+  return `${basePrompt}
+
+## REPAIR INSTRUCTIONS (attempt ${repairContext.attemptNumber})
+
+Your previous compilation produced rules that failed verification. You MUST fix these issues.
+
+### Previous Rules
+
+${rulesText}
+
+### Failed Scenarios
+
+${failuresText}
+
+### Judge Analysis
+
+${repairContext.judgeAnalysis}
+
+### Requirements
+
+1. Fix the rule ordering, conditions, or add missing rules to make ALL failed scenarios pass.
+2. Do NOT break scenarios that were already passing — only fix the failures.
+3. Pay close attention to the judge analysis for specific guidance on what went wrong.
+4. Return a complete, corrected rule set (not just the changed rules).`;
+}
+
 export async function compileConstitution(
   constitutionText: string,
   annotations: ToolAnnotation[],
   config: CompilerConfig,
   llm: LanguageModel,
+  repairContext?: RepairContext,
 ): Promise<CompiledRule[]> {
   const serverNames = [...new Set(annotations.map(a => a.serverName))] as [string, ...string[]];
   const toolNames = [...new Set(annotations.map(a => a.toolName))] as [string, ...string[]];
   const schema = buildCompilerResponseSchema(serverNames, toolNames);
-  const prompt = buildCompilerPrompt(constitutionText, annotations, config);
+  const basePrompt = buildCompilerPrompt(constitutionText, annotations, config);
+  const prompt = repairContext
+    ? buildRepairPrompt(basePrompt, repairContext)
+    : basePrompt;
 
   const { output } = await generateObjectWithRepair({
     model: llm,

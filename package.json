@@ -4,6 +4,7 @@
   "type": "module",
   "description": "Secure agent runtime with trusted process mediation",
   "scripts": {
+    "build": "tsc",
     "start": "tsx src/index.ts",
     "compile-policy": "tsx src/pipeline/compile.ts",
     "test": "vitest run",

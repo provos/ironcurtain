@@ -23,7 +23,7 @@ import type {
 
 const DEFAULT_MAX_ROUNDS = 3;
 
-function executeScenarios(
+export function executeScenarios(
   engine: PolicyEngine,
   scenarios: TestScenario[],
 ): ExecutionResult[] {
@@ -45,7 +45,7 @@ function executeScenarios(
   });
 }
 
-function formatExecutionResults(results: ExecutionResult[]): string {
+export function formatExecutionResults(results: ExecutionResult[]): string {
   return results.map((r, i) => {
     const status = r.pass ? 'PASS' : 'FAIL';
     return [

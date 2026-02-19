@@ -13,7 +13,8 @@
 
 // Canonical definition lives in src/types/argument-roles.ts.
 // Re-exported here for backward compatibility with pipeline consumers.
-export type { ArgumentRole } from '../types/argument-roles.js';
+import type { ArgumentRole } from '../types/argument-roles.js';
+export type { ArgumentRole };
 export { isArgumentRole, getArgumentRoleValues } from '../types/argument-roles.js';
 
 export interface ToolAnnotation {
@@ -108,4 +109,15 @@ export interface VerificationResult {
   rounds: VerifierRound[];
   summary: string;
   failedScenarios: ExecutionResult[];
+}
+
+// ---------------------------------------------------------------------------
+// Repair Context (compile-verify-repair loop)
+// ---------------------------------------------------------------------------
+
+export interface RepairContext {
+  previousRules: CompiledRule[];
+  failedScenarios: ExecutionResult[];
+  judgeAnalysis: string;
+  attemptNumber: number;
 }

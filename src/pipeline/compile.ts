@@ -35,6 +35,7 @@ import type {
   TestScenario,
   TestScenariosFile,
   VerificationResult,
+  RepairContext,
 } from './types.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -332,6 +333,42 @@ class RuleValidationError extends Error {
   }
 }
 
+async function compilePolicyRulesWithRepair(
+  constitutionText: string,
+  annotations: ToolAnnotation[],
+  protectedPaths: string[],
+  baseInputHash: string,
+  repairContext: RepairContext,
+  llm: LanguageModel,
+): Promise<CompilationResult> {
+  const compiledRules = resolveRulePaths(await compileConstitution(
+    constitutionText,
+    annotations,
+    { protectedPaths },
+    llm,
+    repairContext,
+  ));
+
+  const ruleValidation = validateCompiledRules(compiledRules);
+  if (ruleValidation.warnings.length > 0) {
+    for (const w of ruleValidation.warnings) {
+      console.error(`  Warning: ${w}`);
+    }
+  }
+  if (!ruleValidation.valid) {
+    console.error('');
+    console.error('Repair compilation validation FAILED:');
+    for (const e of ruleValidation.errors) {
+      console.error(`  - ${e}`);
+    }
+    throw new RuleValidationError(ruleValidation.errors);
+  }
+
+  console.error(`  ${compiledRules.length} rules compiled.`);
+
+  return { rules: compiledRules, inputHash: `${baseInputHash}-repair` };
+}
+
 // ---------------------------------------------------------------------------
 // Artifact Construction (pure data transformation)
 // ---------------------------------------------------------------------------
@@ -424,8 +461,9 @@ async function verifyCompiledPolicy(
   scenarios: TestScenario[],
   llm: LanguageModel,
   allowedDirectory?: string,
+  maxRounds: number = 3,
+  verbose: boolean = true,
 ): Promise<VerificationResult> {
-  console.error('[5/5] Verifying policy...');
   const result = await verifyPolicy(
     constitutionText,
     compiledPolicyFile,
@@ -433,20 +471,24 @@ async function verifyCompiledPolicy(
     protectedPaths,
     scenarios,
     llm,
-    3,
+    maxRounds,
     allowedDirectory,
   );
 
   if (!result.pass) {
-    console.error('');
-    console.error('Verification FAILED:');
-    console.error(result.summary);
-    console.error('');
-    for (const f of result.failedScenarios) {
-      console.error(`  FAIL: ${f.scenario.description}`);
-      console.error(
-        `    Expected: ${f.scenario.expectedDecision}, Got: ${f.actualDecision} (rule: ${f.matchingRule})`,
-      );
+    if (verbose) {
+      console.error('');
+      console.error('Verification FAILED:');
+      console.error(result.summary);
+      console.error('');
+      for (const f of result.failedScenarios) {
+        console.error(`  FAIL: ${f.scenario.description}`);
+        console.error(
+          `    Expected: ${f.scenario.expectedDecision}, Got: ${f.actualDecision} (rule: ${f.matchingRule})`,
+        );
+      }
+    } else {
+      console.error(`  ${result.failedScenarios.length} scenario(s) failed.`);
     }
   }
 
@@ -562,7 +604,7 @@ async function main(): Promise<void> {
 
     // Compile constitution into policy rules (LLM-cacheable)
     logContext.stepName = 'compile-constitution';
-    const compilationResult = await compilePolicyRules(
+    let compilationResult = await compilePolicyRules(
       config.constitutionText,
       allAnnotations,
       config.allowedDirectory,
@@ -573,7 +615,7 @@ async function main(): Promise<void> {
 
     // Build and write policy artifact immediately so it's available for
     // inspection even if verification fails, and cached for next run.
-    const compiledPolicyFile = buildPolicyArtifact(config.constitutionHash, compilationResult);
+    let compiledPolicyFile = buildPolicyArtifact(config.constitutionHash, compilationResult);
     writePolicyArtifact(config.generatedDir, compiledPolicyFile);
 
     // Generate test scenarios (LLM-cacheable)
@@ -591,9 +633,10 @@ async function main(): Promise<void> {
     // inspection even if verification fails, and cached for next run.
     writeScenariosArtifact(config.generatedDir, config.constitutionHash, scenarioResult);
 
-    // Verify compiled policy against scenarios
+    // Verify compiled policy against scenarios (full depth)
     logContext.stepName = 'verify-policy';
-    const verificationResult = await verifyCompiledPolicy(
+    console.error('[5/5] Verifying policy...');
+    let verificationResult = await verifyCompiledPolicy(
       config.constitutionText,
       compiledPolicyFile,
       toolAnnotationsFile,
@@ -601,12 +644,124 @@ async function main(): Promise<void> {
       scenarioResult.scenarios,
       llm,
       config.allowedDirectory,
+      3,
+      true,
     );
+
+    // Collect probe scenarios from verifier across all attempts
+    let accumulatedProbes: TestScenario[] = [];
+    for (const round of verificationResult.rounds) {
+      accumulatedProbes.push(...round.newScenarios);
+    }
+
+    // Compile-verify-repair loop (up to 2 repair attempts)
+    const MAX_REPAIRS = 2;
+    let repairAttempts = 0;
+
+    if (!verificationResult.pass) {
+      const baseInputHash = compilationResult.inputHash;
+
+      for (let attempt = 1; attempt <= MAX_REPAIRS; attempt++) {
+        console.error('');
+        console.error(`--- Repair attempt ${attempt}/${MAX_REPAIRS} ---`);
+
+        // Gather judge analysis from the most recent verification
+        const lastRound = verificationResult.rounds[verificationResult.rounds.length - 1];
+        const judgeAnalysis = lastRound?.llmAnalysis ?? verificationResult.summary;
+
+        // Build repair context from failures
+        const repairContext: RepairContext = {
+          previousRules: compilationResult.rules,
+          failedScenarios: verificationResult.failedScenarios,
+          judgeAnalysis,
+          attemptNumber: attempt,
+        };
+
+        // Recompile with failure feedback (always calls LLM, no cache)
+        logContext.stepName = `repair-compile-${attempt}`;
+        console.error('  Recompiling with failure feedback...');
+        compilationResult = await compilePolicyRulesWithRepair(
+          config.constitutionText,
+          allAnnotations,
+          config.protectedPaths,
+          baseInputHash,
+          repairContext,
+          llm,
+        );
+
+        // Write updated policy artifact
+        compiledPolicyFile = buildPolicyArtifact(config.constitutionHash, compilationResult);
+        writePolicyArtifact(config.generatedDir, compiledPolicyFile);
+
+        // Verify with reduced depth, using base scenarios + accumulated probes
+        logContext.stepName = `repair-verify-${attempt}`;
+        const repairScenarios = [...scenarioResult.scenarios, ...accumulatedProbes];
+        console.error('  Verifying...');
+        verificationResult = await verifyCompiledPolicy(
+          config.constitutionText,
+          compiledPolicyFile,
+          toolAnnotationsFile,
+          config.protectedPaths,
+          repairScenarios,
+          llm,
+          config.allowedDirectory,
+          1,
+          false,
+        );
+
+        // Accumulate any new probe scenarios
+        for (const round of verificationResult.rounds) {
+          accumulatedProbes.push(...round.newScenarios);
+        }
+
+        repairAttempts = attempt;
+
+        if (verificationResult.pass) {
+          // Run final full verification with all accumulated scenarios
+          console.error('');
+          console.error('  Running final full verification...');
+          logContext.stepName = 'final-verify';
+          const finalScenarios = [...scenarioResult.scenarios, ...accumulatedProbes];
+          verificationResult = await verifyCompiledPolicy(
+            config.constitutionText,
+            compiledPolicyFile,
+            toolAnnotationsFile,
+            config.protectedPaths,
+            finalScenarios,
+            llm,
+            config.allowedDirectory,
+            3,
+            true,
+          );
+
+          // Accumulate any new probes from final verification
+          for (const round of verificationResult.rounds) {
+            accumulatedProbes.push(...round.newScenarios);
+          }
+          break;
+        }
+      }
+    }
+
+    // Deduplicate accumulated probes by description
+    const seenDescriptions = new Set(scenarioResult.scenarios.map(s => s.description));
+    const uniqueProbes = accumulatedProbes.filter(s => {
+      if (seenDescriptions.has(s.description)) return false;
+      seenDescriptions.add(s.description);
+      return true;
+    });
+
+    const totalScenariosTested = scenarioResult.scenarios.length + uniqueProbes.length;
 
     console.error('');
     console.error(`  Rules: ${compilationResult.rules.length}`);
-    console.error(`  Scenarios tested: ${scenarioResult.scenarios.length}`);
-    console.error(`  Verification rounds: ${verificationResult.rounds.length}`);
+    console.error(`  Scenarios tested: ${totalScenariosTested}`);
+    if (uniqueProbes.length > 0) {
+      console.error(`  Probe scenarios accumulated: ${uniqueProbes.length}`);
+    }
+    if (repairAttempts > 0) {
+      console.error(`  Repair attempts: ${repairAttempts}`);
+    }
     console.error(`  Artifacts written to: ${config.generatedDir}/`);
     console.error(`  LLM interaction log: ${logPath}`);
 
