@@ -2,12 +2,15 @@
  * PolicyEngine -- Two-phase declarative policy evaluation.
  *
  * Phase 1: Hardcoded structural invariants (protected paths, unknown tools).
- *          These are never overridden by compiled rules.
+ *          These are never overridden by compiled rules. Sandbox containment
+ *          is checked per-role: roles whose paths are all within the sandbox
+ *          are resolved here and skipped in Phase 2.
  *
  * Phase 2: Compiled declarative rules loaded from compiled-policy.json.
  *          Each distinct role from the tool's annotation is evaluated
  *          independently through the rule chain (first-match-wins per role).
  *          The most restrictive result wins: deny > escalate > allow.
+ *          Roles already resolved by Phase 1 sandbox containment are skipped.
  */
 
 import type { ToolCallRequest, PolicyDecisionStatus } from '../types/mcp.js';
@@ -93,6 +96,26 @@ function isProtectedPath(resolvedPath: string, protectedPaths: string[]): boolea
   });
 }
 
+/**
+ * Result of Phase 1 structural invariant evaluation.
+ *
+ * Three possible outcomes:
+ * 1. Final decision (deny for protected paths, allow if all paths in sandbox)
+ * 2. Partial sandbox resolution (some roles' paths are all within sandbox)
+ * 3. No structural match (empty sandboxResolvedRoles, fall through to Phase 2)
+ */
+interface StructuralResult {
+  readonly decision?: EvaluationResult;
+  readonly sandboxResolvedRoles: ReadonlySet<ArgumentRole>;
+}
+
+const NO_ROLES_RESOLVED: ReadonlySet<ArgumentRole> = new Set();
+
+/** Wraps a final EvaluationResult into a StructuralResult. */
+function finalDecision(decision: EvaluationResult): StructuralResult {
+  return { decision, sandboxResolvedRoles: NO_ROLES_RESOLVED };
+}
+
 /** Higher severity = more restrictive. Used to pick the strictest per-role result. */
 const DECISION_SEVERITY: Record<PolicyDecisionStatus, number> = {
   allow: 0,
@@ -169,22 +192,22 @@ export class PolicyEngine {
   }
 
   evaluate(request: ToolCallRequest): EvaluationResult {
-    // Phase 1: Structural invariants
-    const structuralResult = this.evaluateStructuralInvariants(request);
-    if (structuralResult) return structuralResult;
+    // Phase 1: Structural invariants (may resolve some roles via sandbox containment)
+    const structural = this.evaluateStructuralInvariants(request);
+    if (structural.decision) return structural.decision;
 
-    // Phase 2: Compiled rules
-    return this.evaluateCompiledRules(request);
+    // Phase 2: Compiled rules (skipping sandbox-resolved roles)
+    return this.evaluateCompiledRules(request, structural.sandboxResolvedRoles);
   }
 
   /**
    * Phase 1: Hardcoded structural invariants.
    *
    * Uses the union of heuristic and annotation-based path extraction
-   * for defense-in-depth. Returns a result if a structural rule fires,
-   * or undefined to fall through to compiled rules.
+   * for defense-in-depth. Returns a StructuralResult with either a
+   * final decision or a set of roles resolved by sandbox containment.
    */
-  private evaluateStructuralInvariants(request: ToolCallRequest): EvaluationResult | undefined {
+  private evaluateStructuralInvariants(request: ToolCallRequest): StructuralResult {
     // Extract paths using both methods for defense-in-depth
     const heuristicPaths = extractPathsHeuristic(request.arguments);
     const annotation = this.annotationMap.get(`${request.serverName}__${request.toolName}`);
@@ -198,44 +221,59 @@ export class PolicyEngine {
     const allPaths = [...new Set([...heuristicPaths, ...annotatedPaths])];
     const resolvedPaths = allPaths.map(p => resolveRealPath(p));
 
-    // Check protected paths
+    // Protected paths: any match is an immediate deny
     for (const rp of resolvedPaths) {
       if (isProtectedPath(rp, this.protectedPaths)) {
-        return {
+        return finalDecision({
           decision: 'deny',
           rule: 'structural-protected-path',
           reason: `Access to protected path is forbidden: ${rp}`,
-        };
+        });
       }
     }
 
-    // Sandbox containment structural check:
-    // If ALL resolved paths are within the allowed directory, auto-allow.
-    // Requires at least one path (tools with no path args fall through to
-    // compiled rules -- the sandbox predicate is about path containment).
+    // Sandbox containment checks
     if (this.allowedDirectory && resolvedPaths.length > 0) {
+      // Fast path: all paths within sandbox -> auto-allow
       const allWithinSandbox = resolvedPaths.every(
         rp => isWithinDirectory(rp, this.allowedDirectory!),
       );
       if (allWithinSandbox) {
-        return {
+        return finalDecision({
           decision: 'allow',
           rule: 'structural-sandbox-allow',
           reason: `All paths are within the sandbox directory: ${this.allowedDirectory}`,
-        };
+        });
+      }
+
+      // Partial sandbox resolution: check each resource role independently.
+      // A role is "sandbox-resolved" if every path for that role is within
+      // the sandbox. Roles with zero extracted paths are not resolved.
+      if (annotation) {
+        const resolvedRoles = new Set<ArgumentRole>();
+        for (const role of allPathRoles) {
+          const pathsForRole = extractAnnotatedPaths(request.arguments, annotation, [role]);
+          if (pathsForRole.length > 0 && pathsForRole.every(p => isWithinDirectory(p, this.allowedDirectory!))) {
+            resolvedRoles.add(role);
+          }
+        }
+
+        if (resolvedRoles.size > 0) {
+          return { sandboxResolvedRoles: resolvedRoles };
+        }
       }
     }
 
     // Unknown tool check
     if (!annotation) {
-      return {
+      return finalDecision({
         decision: 'deny',
         rule: 'structural-unknown-tool',
         reason: `Unknown tool: ${request.serverName}/${request.toolName}`,
-      };
+      });
     }
 
-    return undefined;
+    return { sandboxResolvedRoles: NO_ROLES_RESOLVED };
   }
 
   /**
@@ -244,30 +282,45 @@ export class PolicyEngine {
    * For tools with multiple roles (e.g., edit_file has read-path + write-path),
    * each role is evaluated independently through the rule chain. The most
    * restrictive result across all roles wins (deny > escalate > allow).
+   * Roles already resolved by Phase 1 sandbox containment are skipped.
    *
    * For tools with no roles (e.g., list_allowed_directories), the chain is
    * evaluated once without role filtering.
    */
-  private evaluateCompiledRules(request: ToolCallRequest): EvaluationResult {
+  private evaluateCompiledRules(
+    request: ToolCallRequest,
+    sandboxResolvedRoles: ReadonlySet<ArgumentRole>,
+  ): EvaluationResult {
     const annotation = this.annotationMap.get(`${request.serverName}__${request.toolName}`)!;
-    const roles = collectDistinctRoles(annotation);
+    const allRoles = collectDistinctRoles(annotation);
 
-    if (roles.length === 0) {
+    // Filter out roles already resolved by sandbox containment
+    const rolesToEvaluate = allRoles.filter(r => !sandboxResolvedRoles.has(r));
+
+    // All resource roles were sandbox-resolved → allow
+    if (allRoles.length > 0 && rolesToEvaluate.length === 0) {
+      return {
+        decision: 'allow',
+        rule: 'structural-sandbox-allow',
+        reason: 'All path roles resolved by sandbox containment',
+      };
+    }
+
+    if (rolesToEvaluate.length === 0) {
+      // No resource roles at all (e.g., list_allowed_directories)
       return this.evaluateRulesForRole(request, annotation, undefined);
     }
 
-    let mostRestrictive = this.evaluateRulesForRole(request, annotation, roles[0]);
-    if (mostRestrictive.decision === 'deny') return mostRestrictive;
-
-    for (let i = 1; i < roles.length; i++) {
-      const result = this.evaluateRulesForRole(request, annotation, roles[i]);
-      if (DECISION_SEVERITY[result.decision] > DECISION_SEVERITY[mostRestrictive.decision]) {
+    let mostRestrictive: EvaluationResult | undefined;
+    for (const role of rolesToEvaluate) {
+      const result = this.evaluateRulesForRole(request, annotation, role);
+      if (result.decision === 'deny') return result;
+      if (!mostRestrictive || DECISION_SEVERITY[result.decision] > DECISION_SEVERITY[mostRestrictive.decision]) {
         mostRestrictive = result;
       }
-      if (result.decision === 'deny') return result;
     }
 
-    return mostRestrictive;
+    return mostRestrictive!;
   }
 
   /**

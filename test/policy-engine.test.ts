@@ -1,7 +1,8 @@
-import { describe, it, expect } from 'vitest';
 import { homedir } from 'node:os';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { describe, it, expect } from 'vitest';
+import type { CompiledPolicyFile, ToolAnnotationsFile } from '../src/pipeline/types.js';
 import { PolicyEngine } from '../src/trusted-process/policy-engine.js';
 import type { ToolCallRequest } from '../src/types/mcp.js';
 import { testCompiledPolicy, testToolAnnotations } from './fixtures/test-policy.js';
@@ -264,7 +265,7 @@ describe('PolicyEngine', () => {
       expect(result.rule).toBe('structural-sandbox-allow');
     });
 
-    it('denies move from sandbox to external', () => {
+    it('escalates move from sandbox to external (source roles sandbox-resolved)', () => {
       const result = engine.evaluate(makeRequest({
         toolName: 'move_file',
         arguments: {
@@ -272,11 +273,13 @@ describe('PolicyEngine', () => {
           destination: '/tmp/outside/b.txt',
         },
       }));
-      expect(result.decision).toBe('deny');
-      expect(result.rule).toBe('deny-delete-outside-permitted-areas');
+      // read-path and delete-path on source are sandbox-resolved.
+      // Only write-path on destination is evaluated via compiled rules → escalate.
+      expect(result.decision).toBe('escalate');
+      expect(result.rule).toBe('escalate-write-outside-permitted-areas');
     });
 
-    it('denies move from external to sandbox', () => {
+    it('denies move from external to sandbox (delete-path on source denied)', () => {
       const result = engine.evaluate(makeRequest({
         toolName: 'move_file',
         arguments: {
@@ -284,6 +287,9 @@ describe('PolicyEngine', () => {
           destination: '/tmp/ironcurtain-sandbox/important.txt',
         },
       }));
+      // write-path (destination in sandbox) is sandbox-resolved and skipped.
+      // read-path and delete-path (source outside sandbox) go to compiled rules.
+      // delete-path hits deny-delete-outside-permitted-areas.
       expect(result.decision).toBe('deny');
       expect(result.rule).toBe('deny-delete-outside-permitted-areas');
     });
@@ -408,6 +414,76 @@ describe('PolicyEngine', () => {
         arguments: { path: '/tmp/ironcurtain-sandbox/test.txt' },
       }));
       expect(result.rule).not.toBe('structural-sandbox-allow');
+    });
+  });
+
+  describe('partial sandbox resolution (mixed-path tool calls)', () => {
+    it('allows move from permitted area to sandbox when source roles are allowed', () => {
+      // Custom policy allowing reads and deletes in /home/user/Downloads.
+      // move_file from Downloads to sandbox:
+      //   write-path (destination in sandbox) -> sandbox-resolved, skipped
+      //   read-path (source in Downloads) -> allow-read-downloads
+      //   delete-path (source in Downloads) -> allow-delete-downloads
+      const permissivePolicy: CompiledPolicyFile = {
+        generatedAt: 'test',
+        constitutionHash: 'test',
+        inputHash: 'test',
+        rules: [
+          {
+            name: 'allow-read-downloads',
+            description: 'Allow reads in Downloads',
+            principle: 'test',
+            if: { paths: { roles: ['read-path'], within: '/home/user/Downloads' } },
+            then: 'allow',
+            reason: 'Reads in Downloads are allowed',
+          },
+          {
+            name: 'allow-delete-downloads',
+            description: 'Allow deletes in Downloads',
+            principle: 'test',
+            if: { paths: { roles: ['delete-path'], within: '/home/user/Downloads' } },
+            then: 'allow',
+            reason: 'Deletes in Downloads are allowed',
+          },
+          {
+            name: 'deny-all-else',
+            description: 'Deny everything else',
+            principle: 'test',
+            if: {},
+            then: 'deny',
+            reason: 'Default deny',
+          },
+        ],
+      };
+
+      const moveEngine = new PolicyEngine(
+        permissivePolicy,
+        testToolAnnotations,
+        [],
+        SANDBOX_DIR,
+      );
+
+      const result = moveEngine.evaluate(makeRequest({
+        toolName: 'move_file',
+        arguments: {
+          source: '/home/user/Downloads/file.zip',
+          destination: '/tmp/ironcurtain-sandbox/file.zip',
+        },
+      }));
+      expect(result.decision).toBe('allow');
+    });
+
+    it('does not sandbox-resolve roles when array has paths both inside and outside', () => {
+      // read-path extracts both paths; /etc/b.txt is outside sandbox,
+      // so the role is NOT sandbox-resolved and falls to compiled rules.
+      const result = engine.evaluate(makeRequest({
+        toolName: 'read_multiple_files',
+        arguments: {
+          paths: ['/tmp/ironcurtain-sandbox/a.txt', '/etc/b.txt'],
+        },
+      }));
+      expect(result.decision).toBe('escalate');
+      expect(result.rule).toBe('escalate-read-outside-permitted-areas');
     });
   });
 

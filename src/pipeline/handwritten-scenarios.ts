@@ -117,7 +117,7 @@ export function getHandwrittenScenarios(sandboxDir: string): TestScenario[] {
       source: 'handwritten',
     },
 
-    // Move operations -- all denied because move_file source has delete-path role
+    // Move operations (move_file source has read-path + delete-path, destination has write-path)
     {
       description: 'Move file sandbox-to-sandbox -- allow (structural sandbox invariant)',
       request: {
@@ -133,7 +133,7 @@ export function getHandwrittenScenarios(sandboxDir: string): TestScenario[] {
       source: 'handwritten',
     },
     {
-      description: 'Move file sandbox-to-external -- deny (source has delete-path)',
+      description: 'Move file sandbox-to-external -- escalate (source sandbox-resolved, write-path escalated)',
       request: {
         serverName: 'filesystem',
         toolName: 'move_file',
@@ -142,8 +142,8 @@ export function getHandwrittenScenarios(sandboxDir: string): TestScenario[] {
           destination: '/tmp/outside/b.txt',
         },
       },
-      expectedDecision: 'deny',
-      reasoning: 'No destruction: move_file source has delete-path role, caught by deny-delete-operations',
+      expectedDecision: 'escalate',
+      reasoning: 'Source roles (read-path, delete-path) are sandbox-resolved. Only write-path on external destination is evaluated → escalate.',
       source: 'handwritten',
     },
     {
