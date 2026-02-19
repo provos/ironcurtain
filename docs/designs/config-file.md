@@ -53,7 +53,7 @@ A single config file at `~/.ironcurtain/config.json` would give users a persiste
   "agentModelId": "claude-sonnet-4-6",
 
   // LLM model used for the policy compilation pipeline
-  "pipelineModelId": "claude-sonnet-4-6",
+  "policyModelId": "claude-sonnet-4-6",
 
   // Anthropic API key (alternative to ANTHROPIC_API_KEY env var)
   "apiKey": "<key>",
@@ -73,7 +73,7 @@ All fields are optional. Missing fields use defaults. Unknown fields are ignored
 /** Schema for ~/.ironcurtain/config.json. All fields optional. */
 export interface UserConfig {
   readonly agentModelId?: string;
-  readonly pipelineModelId?: string;
+  readonly policyModelId?: string;
   readonly apiKey?: string;
   readonly escalationTimeoutSeconds?: number;
 }
@@ -81,14 +81,14 @@ export interface UserConfig {
 /** Validated, defaults-applied configuration. All fields present. */
 export interface ResolvedUserConfig {
   readonly agentModelId: string;
-  readonly pipelineModelId: string;
+  readonly policyModelId: string;
   readonly apiKey: string;
   readonly escalationTimeoutSeconds: number;
 }
 
 export const USER_CONFIG_DEFAULTS = {
   agentModelId: 'claude-sonnet-4-6',
-  pipelineModelId: 'claude-sonnet-4-6',
+  policyModelId: 'claude-sonnet-4-6',
   escalationTimeoutSeconds: 300,
 } as const;
 ```
@@ -98,7 +98,7 @@ export const USER_CONFIG_DEFAULTS = {
 | Field | Type | Constraint | On violation |
 |-------|------|-----------|--------------|
 | `agentModelId` | `string` | Non-empty | Error at startup |
-| `pipelineModelId` | `string` | Non-empty | Error at startup |
+| `policyModelId` | `string` | Non-empty | Error at startup |
 | `apiKey` | `string` | Non-empty if present | Ignored (falls through to env var) |
 | `escalationTimeoutSeconds` | `number` | Integer, 30-600 | Error at startup |
 
@@ -141,7 +141,7 @@ Auto-creation writes this content:
 ```json
 {
   "agentModelId": "claude-sonnet-4-6",
-  "pipelineModelId": "claude-sonnet-4-6",
+  "policyModelId": "claude-sonnet-4-6",
   "escalationTimeoutSeconds": 300
 }
 ```
@@ -186,13 +186,13 @@ const baseModel = anthropic(this.config.agentModelId);
 
 ### `src/pipeline/compile.ts`
 
-Needs access to `pipelineModelId`. Options:
+Needs access to `policyModelId`. Options:
 
 **Option A (recommended):** Import and call `loadUserConfig()` directly, since the pipeline is a standalone CLI entry point that already loads its own config independently.
 
 ```typescript
 const userConfig = loadUserConfig();
-const baseLlm = anthropic(userConfig.pipelineModelId);
+const baseLlm = anthropic(userConfig.policyModelId);
 ```
 
 **Option B:** Thread through `PipelineConfig`. More coupling for no real benefit since the pipeline is not called from the session layer.

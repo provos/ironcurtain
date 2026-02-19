@@ -13,7 +13,7 @@ import { getUserConfigPath } from './paths.js';
 
 export const USER_CONFIG_DEFAULTS = {
   agentModelId: 'claude-sonnet-4-6',
-  pipelineModelId: 'claude-sonnet-4-6',
+  policyModelId: 'claude-sonnet-4-6',
   escalationTimeoutSeconds: 300,
 } as const;
 
@@ -27,7 +27,7 @@ const ESCALATION_TIMEOUT_MAX = 600;
  */
 const userConfigSchema = z.object({
   agentModelId: z.string().min(1, 'agentModelId must be non-empty').optional(),
-  pipelineModelId: z.string().min(1, 'pipelineModelId must be non-empty').optional(),
+  policyModelId: z.string().min(1, 'policyModelId must be non-empty').optional(),
   apiKey: z.string().min(1, 'apiKey must be non-empty').optional(),
   escalationTimeoutSeconds: z
     .number()
@@ -43,7 +43,7 @@ export type UserConfig = z.infer<typeof userConfigSchema>;
 /** Validated, defaults-applied configuration. All fields present. */
 export interface ResolvedUserConfig {
   readonly agentModelId: string;
-  readonly pipelineModelId: string;
+  readonly policyModelId: string;
   readonly apiKey: string;
   readonly escalationTimeoutSeconds: number;
 }
@@ -55,7 +55,7 @@ const KNOWN_FIELDS = new Set<string>(Object.keys(userConfigSchema.shape));
 const DEFAULT_CONFIG_CONTENT = JSON.stringify(
   {
     agentModelId: USER_CONFIG_DEFAULTS.agentModelId,
-    pipelineModelId: USER_CONFIG_DEFAULTS.pipelineModelId,
+    policyModelId: USER_CONFIG_DEFAULTS.policyModelId,
     escalationTimeoutSeconds: USER_CONFIG_DEFAULTS.escalationTimeoutSeconds,
   },
   null,
@@ -142,7 +142,7 @@ function validateConfig(parsed: unknown, configPath: string): UserConfig {
 function mergeWithDefaults(config: UserConfig): ResolvedUserConfig {
   return {
     agentModelId: config.agentModelId ?? USER_CONFIG_DEFAULTS.agentModelId,
-    pipelineModelId: config.pipelineModelId ?? USER_CONFIG_DEFAULTS.pipelineModelId,
+    policyModelId: config.policyModelId ?? USER_CONFIG_DEFAULTS.policyModelId,
     apiKey: config.apiKey ?? '',
     escalationTimeoutSeconds:
       config.escalationTimeoutSeconds ?? USER_CONFIG_DEFAULTS.escalationTimeoutSeconds,

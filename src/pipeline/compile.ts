@@ -586,7 +586,7 @@ async function main(): Promise<void> {
 
   const userConfig = loadUserConfig();
   const anthropic = createAnthropic();
-  const baseLlm = anthropic(userConfig.pipelineModelId);
+  const baseLlm = anthropic(userConfig.policyModelId);
 
   const logContext: LlmLogContext = { stepName: 'unknown' };
   const logPath = resolve(config.generatedDir, 'llm-interactions.jsonl');

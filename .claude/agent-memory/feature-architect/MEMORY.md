@@ -124,7 +124,7 @@ Both use the same PolicyEngine with compiled artifacts.
 - See `docs/designs/config-file.md` for full spec
 - File: `~/.ironcurtain/config.json`, auto-created with defaults
 - New file: `src/config/user-config.ts` -- `loadUserConfig()`, `UserConfig`, `ResolvedUserConfig`
-- Settings: agentModelId, pipelineModelId, apiKey, maxAgentSteps, escalationTimeoutSeconds
+- Settings: agentModelId, policyModelId, apiKey, maxAgentSteps, escalationTimeoutSeconds
 - Resolution order: env var > config file > defaults
 - Hardcoded model `'claude-sonnet-4-6'` in `agent-session.ts:260` and `compile.ts:587`
 - `ESCALATION_TIMEOUT_MS = 5 * 60 * 1000` in `mcp-proxy-server.ts:83`

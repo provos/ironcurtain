@@ -1,27 +1,29 @@
 {
-  "generatedAt": "2026-02-19T05:04:40.238Z",
-  "constitutionHash": "618c4afd16309b9cb2609fc3db11d52f83be9c51ec870254ed4f2365fab07c6c",
-  "inputHash": "9fdee0e254e0520b0c54be384eac63f0fb957c8580e7f04fc02f49c280a10554-repair",
+  "generatedAt": "2026-02-19T18:06:22.142Z",
+  "constitutionHash": "1a55ddbb30027ca598f4a36aada3b5bd5fa3507baa177bdc796a08fa2f1d8c28",
+  "inputHash": "fb9cf133381a47b4109f159b1194a469f58cee162e5315dcf2b46a5f379d7a1c",
   "rules": [
     {
-      "name": "allow-read-downloads",
-      "description": "Allow reading files within the Downloads folder, as explicitly permitted by the constitution.",
-      "principle": "Least privilege: grant only what is explicitly permitted.",
+      "name": "allow-downloads-full-access",
+      "description": "Allow all read, write, and delete operations within the Downloads folder",
+      "principle": "Concrete Guidance - Downloads folder full access",
       "if": {
         "paths": {
           "roles": [
-            "read-path"
+            "read-path",
+            "write-path",
+            "delete-path"
           ],
           "within": "/mnt/c/Users/provo/Downloads"
         }
       },
       "then": "allow",
-      "reason": "The constitution explicitly permits reading content in the Downloads folder."
+      "reason": "Constitution explicitly permits read, write, and delete in Downloads folder"
     },
     {
-      "name": "allow-read-documents",
-      "description": "Allow reading files within the Users Documents folder, as explicitly permitted by the constitution.",
-      "principle": "Least privilege: grant only what is explicitly permitted.",
+      "name": "allow-documents-read-only",
+      "description": "Allow read-only access to the Users document folder",
+      "principle": "Concrete Guidance - Documents folder read access",
       "if": {
         "paths": {
           "roles": [
@@ -31,81 +33,56 @@
         }
       },
       "then": "allow",
-      "reason": "The constitution explicitly permits reading documents in the Users document folder."
+      "reason": "Constitution explicitly permits read access to Documents folder"
     },
     {
-      "name": "allow-write-downloads",
-      "description": "Allow writing files within the Downloads folder, as explicitly permitted by the constitution.",
-      "principle": "Least privilege: grant only what is explicitly permitted.",
-      "if": {
-        "paths": {
-          "roles": [
-            "write-path"
-          ],
-          "within": "/mnt/c/Users/provo/Downloads"
-        }
-      },
-      "then": "allow",
-      "reason": "The constitution explicitly permits writing content in the Downloads folder."
-    },
-    {
-      "name": "allow-delete-downloads",
-      "description": "Allow deleting files within the Downloads folder, as explicitly permitted by the constitution.",
-      "principle": "Least privilege: grant only what is explicitly permitted.",
-      "if": {
-        "paths": {
-          "roles": [
-            "delete-path"
-          ],
-          "within": "/mnt/c/Users/provo/Downloads"
-        }
-      },
-      "then": "allow",
-      "reason": "The constitution explicitly permits deleting content in the Downloads folder."
-    },
-    {
-      "name": "deny-delete-outside-sandbox-and-downloads",
-      "description": "Deny any delete operation where the path is outside both the sandbox (handled by structural invariants) and the Downloads folder. The constitution prohibits destruction outside the sandbox.",
-      "principle": "No destruction: Delete operations outside the sandbox are never permitted.",
+      "name": "deny-delete-outside-sandbox",
+      "description": "Deny all delete operations outside the Downloads folder",
+      "principle": "No destruction - Delete operations outside sandbox never permitted",
       "if": {
         "roles": [
           "delete-path"
         ]
       },
       "then": "deny",
-      "reason": "The constitution absolutely prohibits delete operations outside the Downloads folder (and sandbox, which is handled by structural invariants). Any delete-path not matched by the allow rules above is categorically forbidden per the No Destruction principle."
+      "reason": "Constitution prohibits deletion outside the Downloads sandbox"
     },
     {
-      "name": "escalate-write-outside-downloads",
-      "description": "Escalate write operations targeting paths outside the Downloads folder for human review.",
-      "principle": "Human oversight: Operations outside the sandbox require explicit human approval.",
+      "name": "escalate-write-outside-permitted",
+      "description": "Require human approval for write operations outside Downloads folder",
+      "principle": "Human oversight - Operations outside sandbox require approval",
       "if": {
         "roles": [
           "write-path"
         ]
       },
       "then": "escalate",
-      "reason": "The constitution only grants write access to the Downloads folder. Writes elsewhere are not explicitly forbidden but are not permitted — a human should decide."
+      "reason": "Write operations outside explicitly permitted directories require human approval"
     },
     {
       "name": "escalate-read-outside-permitted",
-      "description": "Escalate read operations targeting paths outside the permitted read zones (Downloads and Documents) for human review.",
-      "principle": "Human oversight: Operations outside the sandbox require explicit human approval.",
+      "description": "Require human approval for read operations outside permitted directories",
+      "principle": "Human oversight - Least privilege access control",
       "if": {
         "roles": [
           "read-path"
         ]
       },
       "then": "escalate",
-      "reason": "The constitution grants read access only to the Downloads and Documents folders. Reads outside these zones are not explicitly permitted — a human should decide."
+      "reason": "Read operations outside explicitly permitted directories require human approval"
     },
     {
-      "name": "escalate-all-remaining",
-      "description": "Escalate any remaining operations not covered by prior rules, ensuring human oversight for anything not explicitly granted or denied.",
-      "principle": "Human oversight: Operations outside the sandbox require explicit human approval.",
-      "if": {},
-      "then": "escalate",
-      "reason": "The constitution requires explicit human approval for anything not covered by a specific grant or prohibition. This catch-all ensures no gap in the rule chain."
+      "name": "allow-list-allowed-directories",
+      "description": "Allow the list_allowed_directories tool which has no side effects and takes no paths",
+      "principle": "Least privilege - Safe informational access",
+      "if": {
+        "tool": [
+          "list_allowed_directories"
+        ],
+        "sideEffects": false
+      },
+      "then": "allow",
+      "reason": "Tool provides informational access only with no side effects or path arguments"
     }
   ]
 }

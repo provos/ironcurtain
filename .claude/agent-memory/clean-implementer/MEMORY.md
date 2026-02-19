@@ -133,7 +133,7 @@ When mocking `generateText` for session tests:
 - **User config module**: `src/config/user-config.ts` -- `loadUserConfig()`, `UserConfig`, `ResolvedUserConfig`, `USER_CONFIG_DEFAULTS`
 - **Config path**: `src/config/paths.ts` -- `getUserConfigPath()` returns `{home}/config.json`
 - **Config file**: `~/.ironcurtain/config.json` -- auto-created with defaults if missing
-- **Fields**: `agentModelId`, `pipelineModelId`, `apiKey`, `escalationTimeoutSeconds` (all optional in file)
+- **Fields**: `agentModelId`, `policyModelId`, `apiKey`, `escalationTimeoutSeconds` (all optional in file)
 - **Resolution order**: env var > config file > defaults
 - **IronCurtainConfig**: now has `agentModelId: string` and `escalationTimeoutSeconds: number` (required)
 - **Proxy escalation timeout**: passed via `ESCALATION_TIMEOUT_SECONDS` env var from sandbox to proxy child process

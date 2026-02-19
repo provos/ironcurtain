@@ -36,7 +36,7 @@ describe('loadUserConfig', () => {
     const config = loadUserConfig();
 
     expect(config.agentModelId).toBe(USER_CONFIG_DEFAULTS.agentModelId);
-    expect(config.pipelineModelId).toBe(USER_CONFIG_DEFAULTS.pipelineModelId);
+    expect(config.policyModelId).toBe(USER_CONFIG_DEFAULTS.policyModelId);
     expect(config.escalationTimeoutSeconds).toBe(USER_CONFIG_DEFAULTS.escalationTimeoutSeconds);
     expect(config.apiKey).toBe('');
   });
@@ -47,7 +47,7 @@ describe('loadUserConfig', () => {
     const configPath = resolve(testHome, 'config.json');
     const content = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(content.agentModelId).toBe(USER_CONFIG_DEFAULTS.agentModelId);
-    expect(content.pipelineModelId).toBe(USER_CONFIG_DEFAULTS.pipelineModelId);
+    expect(content.policyModelId).toBe(USER_CONFIG_DEFAULTS.policyModelId);
     expect(content.escalationTimeoutSeconds).toBe(USER_CONFIG_DEFAULTS.escalationTimeoutSeconds);
     // apiKey intentionally omitted from auto-created file
     expect(content.apiKey).toBeUndefined();
@@ -71,14 +71,14 @@ describe('loadUserConfig', () => {
 
     expect(config.agentModelId).toBe('claude-opus-4-6');
     // Other fields should use defaults
-    expect(config.pipelineModelId).toBe(USER_CONFIG_DEFAULTS.pipelineModelId);
+    expect(config.policyModelId).toBe(USER_CONFIG_DEFAULTS.policyModelId);
     expect(config.escalationTimeoutSeconds).toBe(USER_CONFIG_DEFAULTS.escalationTimeoutSeconds);
   });
 
   it('reads all fields from config file', () => {
     writeConfigFile({
       agentModelId: 'claude-opus-4-6',
-      pipelineModelId: 'claude-haiku-3-5',
+      policyModelId: 'claude-haiku-3-5',
       apiKey: 'sk-test-config-key',
       escalationTimeoutSeconds: 60,
     });
@@ -86,7 +86,7 @@ describe('loadUserConfig', () => {
     const config = loadUserConfig();
 
     expect(config.agentModelId).toBe('claude-opus-4-6');
-    expect(config.pipelineModelId).toBe('claude-haiku-3-5');
+    expect(config.policyModelId).toBe('claude-haiku-3-5');
     expect(config.apiKey).toBe('sk-test-config-key');
     expect(config.escalationTimeoutSeconds).toBe(60);
   });
@@ -170,7 +170,7 @@ describe('loadUserConfig', () => {
     const config = loadUserConfig();
 
     expect(config.agentModelId).toBe(USER_CONFIG_DEFAULTS.agentModelId);
-    expect(config.pipelineModelId).toBe(USER_CONFIG_DEFAULTS.pipelineModelId);
+    expect(config.policyModelId).toBe(USER_CONFIG_DEFAULTS.policyModelId);
     expect(config.escalationTimeoutSeconds).toBe(USER_CONFIG_DEFAULTS.escalationTimeoutSeconds);
     expect(config.apiKey).toBe('');
   });
