@@ -20,6 +20,16 @@ ${sandboxInfo}
 - Use \`return\` to send a value back to the conversation.
 - Example: \`const result = filesystem.filesystem_list_directory({ path: "/tmp" });\`
 
+## Context management
+
+Large tool results are automatically truncated. To avoid losing information:
+
+- Before reading files, use list_directory to survey what exists. Assess which files are relevant to the task.
+- Do NOT read all files in a directory at once. Read a few at a time, summarize findings, then continue if needed.
+- For large files, use the head and tail parameters on read_text_file to read specific portions.
+  Example: filesystem.filesystem_read_text_file({ path: "large.log", tail: 50 })
+- If a result contains [... truncated N bytes ...], use targeted reads to access the specific portion you need.
+
 ## Available tools
 
 ${toolCatalog}

@@ -36,6 +36,8 @@ import type {
 } from './types.js';
 import { SessionNotReadyError, SessionClosedError } from './errors.js';
 import { StepLoopDetector } from './step-loop-detector.js';
+import { truncateResult, getResultSizeLimit, formatKB } from './truncate-result.js';
+import * as logger from '../logger.js';
 
 const MAX_AGENT_STEPS = 10;
 const ESCALATION_POLL_INTERVAL_MS = 300;
@@ -233,7 +235,15 @@ export class AgentSession implements Session {
             const { result, logs } = await this.sandbox.executeCode(code);
             const output: Record<string, unknown> = {};
             if (logs.length > 0) output.console = logs;
-            output.result = result;
+
+            const truncation = truncateResult(result, getResultSizeLimit());
+            output.result = truncation.value;
+            if (truncation.truncated) {
+              output.warning = `Tool result truncated from ${formatKB(truncation.originalSize)} to ${formatKB(truncation.finalSize)}. Use targeted reads (head/tail parameters) for specific portions.`;
+              logger.warn(`[truncation] Result truncated: ${formatKB(truncation.originalSize)} -> ${formatKB(truncation.finalSize)}`);
+              this.emitTruncationDiagnostic(truncation.originalSize, truncation.finalSize);
+            }
+
             return this.applyLoopVerdict(code, output);
           } catch (err) {
             const output: Record<string, unknown> = {
@@ -277,10 +287,22 @@ export class AgentSession implements Session {
   private applyLoopVerdict(code: string, output: Record<string, unknown>): Record<string, unknown> {
     const verdict = this.loopDetector.analyzeStep(code, output);
     if (verdict.action === 'warn' || verdict.action === 'block') {
-      output.warning = verdict.message;
+      output.warning = output.warning
+        ? `${output.warning} | ${verdict.message}`
+        : verdict.message;
       this.emitLoopDetectionDiagnostic(verdict.action, verdict.category, verdict.message);
     }
     return output;
+  }
+
+  private emitTruncationDiagnostic(originalSize: number, finalSize: number): void {
+    const event: DiagnosticEvent = {
+      kind: 'result_truncation',
+      originalKB: +(originalSize / 1024).toFixed(1),
+      finalKB: +(finalSize / 1024).toFixed(1),
+    };
+    this.diagnosticLog.push(event);
+    this.onDiagnostic?.(event);
   }
 
   private emitLoopDetectionDiagnostic(action: 'warn' | 'block', category: string, message: string): void {

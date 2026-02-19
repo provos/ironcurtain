@@ -57,7 +57,8 @@ export type DiagnosticEvent =
   | { readonly kind: 'tool_call'; readonly toolName: string; readonly preview: string }
   | { readonly kind: 'agent_text'; readonly preview: string }
   | { readonly kind: 'step_finish'; readonly stepIndex: number }
-  | { readonly kind: 'loop_detection'; readonly action: 'warn' | 'block'; readonly category: string; readonly message: string };
+  | { readonly kind: 'loop_detection'; readonly action: 'warn' | 'block'; readonly category: string; readonly message: string }
+  | { readonly kind: 'result_truncation'; readonly originalKB: number; readonly finalKB: number };
 
 /**
  * Read-only snapshot of session state. Exposed to transports
