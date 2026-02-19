@@ -1,51 +1,28 @@
 {
-  "generatedAt": "2026-02-18T21:11:34.419Z",
+  "generatedAt": "2026-02-19T05:04:40.238Z",
   "constitutionHash": "618c4afd16309b9cb2609fc3db11d52f83be9c51ec870254ed4f2365fab07c6c",
-  "inputHash": "",
+  "inputHash": "9fdee0e254e0520b0c54be384eac63f0fb957c8580e7f04fc02f49c280a10554-repair",
   "rules": [
     {
-      "name": "allow-list-allowed-directories",
-      "description": "Allow the agent to call list_allowed_directories, which has no side effects and no path arguments.",
-      "principle": "Least privilege — this read-only introspection tool carries no risk.",
+      "name": "allow-read-downloads",
+      "description": "Allow reading files within the Downloads folder, as explicitly permitted by the constitution.",
+      "principle": "Least privilege: grant only what is explicitly permitted.",
       "if": {
-        "server": [
-          "filesystem"
-        ],
-        "tool": [
-          "list_allowed_directories"
-        ]
-      },
-      "then": "allow",
-      "reason": "list_allowed_directories makes no filesystem changes and reveals only the statically configured allowed directories, so it is always safe to permit."
-    },
-    {
-      "name": "allow-read-write-delete-downloads",
-      "description": "Allow read, write, and delete operations within the Downloads folder.",
-      "principle": "Least privilege — the constitution explicitly grants full access to the Downloads folder.",
-      "if": {
-        "server": [
-          "filesystem"
-        ],
         "paths": {
           "roles": [
-            "read-path",
-            "write-path",
-            "delete-path"
+            "read-path"
           ],
-          "within": "/home/provos/Downloads"
+          "within": "/mnt/c/Users/provo/Downloads"
         }
       },
       "then": "allow",
-      "reason": "The constitution states the agent is allowed to read, write, and delete content in the Downloads folder."
+      "reason": "The constitution explicitly permits reading content in the Downloads folder."
     },
     {
       "name": "allow-read-documents",
-      "description": "Allow read operations within the user's Documents folder.",
-      "principle": "Least privilege — the constitution grants read-only access to the Documents folder.",
+      "description": "Allow reading files within the Users Documents folder, as explicitly permitted by the constitution.",
+      "principle": "Least privilege: grant only what is explicitly permitted.",
       "if": {
-        "server": [
-          "filesystem"
-        ],
         "paths": {
           "roles": [
             "read-path"
@@ -54,52 +31,81 @@
         }
       },
       "then": "allow",
-      "reason": "The constitution states the agent is allowed to read documents in the Users document folder. Only read-path roles are permitted; write and delete are not granted."
+      "reason": "The constitution explicitly permits reading documents in the Users document folder."
     },
     {
-      "name": "deny-delete-outside-permitted-areas",
-      "description": "Deny any operation that carries a delete-path role (including move source) outside permitted areas.",
-      "principle": "No destruction — delete operations outside the sandbox and Downloads folder are never permitted.",
+      "name": "allow-write-downloads",
+      "description": "Allow writing files within the Downloads folder, as explicitly permitted by the constitution.",
+      "principle": "Least privilege: grant only what is explicitly permitted.",
+      "if": {
+        "paths": {
+          "roles": [
+            "write-path"
+          ],
+          "within": "/mnt/c/Users/provo/Downloads"
+        }
+      },
+      "then": "allow",
+      "reason": "The constitution explicitly permits writing content in the Downloads folder."
+    },
+    {
+      "name": "allow-delete-downloads",
+      "description": "Allow deleting files within the Downloads folder, as explicitly permitted by the constitution.",
+      "principle": "Least privilege: grant only what is explicitly permitted.",
+      "if": {
+        "paths": {
+          "roles": [
+            "delete-path"
+          ],
+          "within": "/mnt/c/Users/provo/Downloads"
+        }
+      },
+      "then": "allow",
+      "reason": "The constitution explicitly permits deleting content in the Downloads folder."
+    },
+    {
+      "name": "deny-delete-outside-sandbox-and-downloads",
+      "description": "Deny any delete operation where the path is outside both the sandbox (handled by structural invariants) and the Downloads folder. The constitution prohibits destruction outside the sandbox.",
+      "principle": "No destruction: Delete operations outside the sandbox are never permitted.",
       "if": {
         "roles": [
           "delete-path"
-        ],
-        "server": [
-          "filesystem"
         ]
       },
       "then": "deny",
-      "reason": "The constitution's 'No destruction' principle forbids delete operations outside explicitly permitted areas. Prior structural invariants already allow deletes inside the sandbox, so this fallthrough catches everything else."
+      "reason": "The constitution absolutely prohibits delete operations outside the Downloads folder (and sandbox, which is handled by structural invariants). Any delete-path not matched by the allow rules above is categorically forbidden per the No Destruction principle."
     },
     {
-      "name": "deny-write-outside-permitted-areas",
-      "description": "Deny any write operation targeting a path outside the sandbox and Downloads folder.",
-      "principle": "Least privilege — write access is only granted to the sandbox and Downloads folder.",
+      "name": "escalate-write-outside-downloads",
+      "description": "Escalate write operations targeting paths outside the Downloads folder for human review.",
+      "principle": "Human oversight: Operations outside the sandbox require explicit human approval.",
       "if": {
         "roles": [
           "write-path"
-        ],
-        "server": [
-          "filesystem"
-        ]
-      },
-      "then": "deny",
-      "reason": "Write access is only permitted inside the sandbox and /home/provos/Downloads. This fallthrough denies all other write attempts."
-    },
-    {
-      "name": "escalate-read-outside-permitted-areas",
-      "description": "Escalate read operations that fall outside all explicitly permitted read areas to a human for approval.",
-      "principle": "Human oversight — operations outside the sandbox require explicit human approval.",
-      "if": {
-        "roles": [
-          "read-path"
-        ],
-        "server": [
-          "filesystem"
         ]
       },
       "then": "escalate",
-      "reason": "The constitution requires human approval for operations outside permitted areas. Reads outside the sandbox, /home/provos/Downloads, and /home/provos/Documents are escalated rather than silently denied, giving a human the opportunity to approve legitimate requests."
+      "reason": "The constitution only grants write access to the Downloads folder. Writes elsewhere are not explicitly forbidden but are not permitted — a human should decide."
+    },
+    {
+      "name": "escalate-read-outside-permitted",
+      "description": "Escalate read operations targeting paths outside the permitted read zones (Downloads and Documents) for human review.",
+      "principle": "Human oversight: Operations outside the sandbox require explicit human approval.",
+      "if": {
+        "roles": [
+          "read-path"
+        ]
+      },
+      "then": "escalate",
+      "reason": "The constitution grants read access only to the Downloads and Documents folders. Reads outside these zones are not explicitly permitted — a human should decide."
+    },
+    {
+      "name": "escalate-all-remaining",
+      "description": "Escalate any remaining operations not covered by prior rules, ensuring human oversight for anything not explicitly granted or denied.",
+      "principle": "Human oversight: Operations outside the sandbox require explicit human approval.",
+      "if": {},
+      "then": "escalate",
+      "reason": "The constitution requires explicit human approval for anything not covered by a specific grant or prohibition. This catch-all ensures no gap in the rule chain."
     }
   ]
 }
