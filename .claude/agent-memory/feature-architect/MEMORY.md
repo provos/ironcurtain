@@ -141,6 +141,45 @@ Both use the same PolicyEngine with compiled artifacts.
 - AI SDK's `createProviderRegistry` rejected: requires eager instantiation of all providers
 - Only two callsites need changes: agent-session.ts:260 and compile.ts:588-589
 
+## Dual-Feedback Repair Loop Design (designed 2026-02-19)
+- Current repair loop only feeds failures to constitution compiler; fails when scenario expectations are wrong
+- Judge gets `failureAttributions` array in response schema with `blame: 'rule' | 'scenario' | 'both'`
+- New types: `FailureBlame` (discriminated union), `AttributedFailure`, `ScenarioCorrection`
+- `applyScenarioCorrections()` does targeted patches on generated scenarios; handwritten scenarios never auto-corrected
+- Repair loop: apply scenario corrections first, then conditionally recompile rules, then re-verify
+- Both channels can fire in same iteration to prevent oscillation
+- Corrected scenarios written to disk with `-corrected` hash suffix
+- Files changed: `types.ts`, `policy-verifier.ts`, `compile.ts`; no new files needed
+- Key invariant: handwritten scenarios are human ground truth, never mutated by LLM
+
+## Execution Containment Design (TB0, designed 2026-02-19)
+- See `docs/designs/execution-containment.md` for full spec
+- Integrates `@anthropic-ai/sandbox-runtime` (npm) for OS-level process sandboxing
+- Integration point: `mcp-proxy-server.ts` (proxy spawns MCP servers, so proxy wraps them)
+- New module: `src/trusted-process/sandbox-integration.ts`
+- `SandboxManager.wrapWithSandbox(cmd, binShell, customConfig)` returns shell string
+- Shell bridge: `command='/bin/sh'`, `args=['-c', wrappedString]` for StdioClientTransport (which uses `shell:false`)
+- Sandbox-by-default: omitted `sandbox` field = sandboxed with restrictive defaults
+- Opt-out: `"sandbox": false` for mediated servers (e.g., filesystem)
+- Per-command filesystem via `customConfig` param; network is process-wide (union of all servers' domains)
+- Session sandbox dir auto-injected into `allowWrite`
+- Platform degradation: `SandboxAvailabilityPolicy = 'enforce' | 'warn' | 'skip'` (default: warn)
+- New types: `ServerSandboxConfig`, `SandboxNetworkConfig`, `SandboxFilesystemConfig`, `ResolvedSandboxConfig`
+- New diagnostic event: `sandbox_violation` (heuristic EPERM detection)
+- New audit field: `sandboxed?: boolean`
+- 4-phase migration: (1) types+module, (2) proxy integration, (3) violation detection, (4) integration tests
+
+### sandbox-runtime API Key Facts
+- Singleton per process: one network config (HTTP/SOCKS proxy pair)
+- `wrapWithSandbox(command, binShell?, customConfig?, abortSignal?)` -> `Promise<string>`
+- `customConfig: Partial<SandboxRuntimeConfig>` allows per-command filesystem overrides
+- `isSupportedPlatform()` and `checkDependencies()` for detection
+- `initialize(config)`, `reset()`, `updateConfig(newConfig)`
+- Linux: bubblewrap + seccomp-bpf + `--unshare-net` with socat bridges
+- macOS: Seatbelt (sandbox-exec, deprecated but functional)
+- No Windows support
+- stdio passes through transparently (MCP compatible)
+
 ## NOT Implemented (aspirational in docs)
 - Per-task policy layer
 - Runtime LLM assessment (semantic checks)

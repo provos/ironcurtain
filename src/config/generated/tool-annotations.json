@@ -1,12 +1,12 @@
 {
-  "generatedAt": "2026-02-19T19:02:16.712Z",
+  "generatedAt": "2026-02-19T22:19:26.701Z",
   "servers": {
     "filesystem": {
-      "inputHash": "d8d1ffec39ebd506ad6da6a359cb79e112053046e1fe27e4769534f8a7a3ba0b",
+      "inputHash": "b8ded9ec4ba8190d7a570f35121d388a594b692f6f988a956e6b85e80d312d4f",
       "tools": [
         {
           "toolName": "read_file",
-          "comment": "Reads the complete contents of a file as text (deprecated in favor of read_text_file), with optional head/tail line filtering.",
+          "comment": "Reads the complete contents of a file as text, with optional head/tail line limiting (deprecated in favor of read_text_file).",
           "sideEffects": true,
           "args": {
             "path": [
@@ -23,7 +23,7 @@
         },
         {
           "toolName": "read_text_file",
-          "comment": "Reads the complete contents of a text file from the filesystem, with optional head/tail line filtering.",
+          "comment": "Reads the complete contents of a text file from the filesystem, with optional head/tail line limiting.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -40,7 +40,7 @@
         },
         {
           "toolName": "read_media_file",
-          "comment": "Reads an image or audio file and returns its base64-encoded data and MIME type.",
+          "comment": "Reads an image or audio file and returns its base64-encoded data along with its MIME type.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -51,7 +51,7 @@
         },
         {
           "toolName": "read_multiple_files",
-          "comment": "Reads the contents of multiple files simultaneously, returning each file's content keyed by its path.",
+          "comment": "Reads the contents of multiple files simultaneously and returns each file's content keyed by its path.",
           "sideEffects": true,
           "args": {
             "paths": [
@@ -76,7 +76,7 @@
         },
         {
           "toolName": "edit_file",
-          "comment": "Makes targeted line-based edits to a text file by replacing exact line sequences, returning a git-style diff of the changes.",
+          "comment": "Makes targeted line-based edits to an existing text file by replacing exact line sequences with new content.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -94,7 +94,7 @@
         },
         {
           "toolName": "create_directory",
-          "comment": "Creates a new directory (including nested directories) or silently succeeds if it already exists.",
+          "comment": "Creates a new directory (including nested directories) or silently succeeds if the directory already exists.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -105,7 +105,7 @@
         },
         {
           "toolName": "list_directory",
-          "comment": "Returns a detailed listing of all files and directories at the specified path, prefixed with [FILE] or [DIR].",
+          "comment": "Returns a detailed listing of all files and directories at the specified path, prefixed with [FILE] or [DIR] labels.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -116,7 +116,7 @@
         },
         {
           "toolName": "list_directory_with_sizes",
-          "comment": "Returns a detailed listing of all files and directories at the specified path including their sizes, with optional sorting.",
+          "comment": "Returns a detailed listing of all files and directories at the specified path, including file sizes, with optional sorting.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -130,7 +130,7 @@
         },
         {
           "toolName": "directory_tree",
-          "comment": "Recursively generates a JSON tree view of files and directories under the specified path, with optional exclusion patterns.",
+          "comment": "Recursively produces a JSON tree view of all files and directories under the specified path, with optional exclusion patterns.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -159,7 +159,7 @@
         },
         {
           "toolName": "search_files",
-          "comment": "Recursively searches for files and directories matching a glob-style pattern under a given path, returning all matching full paths.",
+          "comment": "Recursively searches for files and directories matching a glob-style pattern under the specified path and returns their full paths.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -187,7 +187,7 @@
         },
         {
           "toolName": "list_allowed_directories",
-          "comment": "Returns the static list of directories the server is permitted to access; makes no filesystem state changes and takes no path arguments.",
+          "comment": "Returns the static list of directories this server is permitted to access, with no path arguments or state changes.",
           "sideEffects": false,
           "args": {},
           "serverName": "filesystem"
