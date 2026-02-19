@@ -35,6 +35,7 @@ import type {
   SandboxFactory,
 } from './types.js';
 import { SessionNotReadyError, SessionClosedError } from './errors.js';
+import { StepLoopDetector } from './step-loop-detector.js';
 
 const MAX_AGENT_STEPS = 10;
 const ESCALATION_POLL_INTERVAL_MS = 300;
@@ -82,6 +83,9 @@ export class AgentSession implements Session {
 
   /** Escalation IDs already detected, to prevent re-detection after resolution. */
   private seenEscalationIds = new Set<string>();
+
+  /** Step-level loop detector for the agent. */
+  private loopDetector = new StepLoopDetector();
 
   /** Callbacks from SessionOptions. */
   private readonly onEscalation?: (request: EscalationRequest) => void;
@@ -219,16 +223,23 @@ export class AgentSession implements Session {
         }),
         execute: async ({ code }) => {
           if (!this.sandbox) throw new Error('Sandbox not initialized');
+
+          const blockCheck = this.loopDetector.isBlocked();
+          if (blockCheck) {
+            return { error: blockCheck.message };
+          }
+
           try {
             const { result, logs } = await this.sandbox.executeCode(code);
             const output: Record<string, unknown> = {};
             if (logs.length > 0) output.console = logs;
             output.result = result;
-            return output;
+            return this.applyLoopVerdict(code, output);
           } catch (err) {
-            return {
+            const output: Record<string, unknown> = {
               error: err instanceof Error ? err.message : String(err),
             };
+            return this.applyLoopVerdict(code, output);
           }
         },
       }),
@@ -260,6 +271,22 @@ export class AgentSession implements Session {
         this.onDiagnostic?.(event);
       }
     }
+  }
+
+  /** Analyze a step for loop detection and attach a warning if needed. */
+  private applyLoopVerdict(code: string, output: Record<string, unknown>): Record<string, unknown> {
+    const verdict = this.loopDetector.analyzeStep(code, output);
+    if (verdict.action === 'warn' || verdict.action === 'block') {
+      output.warning = verdict.message;
+      this.emitLoopDetectionDiagnostic(verdict.action, verdict.category, verdict.message);
+    }
+    return output;
+  }
+
+  private emitLoopDetectionDiagnostic(action: 'warn' | 'block', category: string, message: string): void {
+    const event: DiagnosticEvent = { kind: 'loop_detection', action, category, message };
+    this.diagnosticLog.push(event);
+    this.onDiagnostic?.(event);
   }
 
   private emitTextDiagnostic(text: string): void {

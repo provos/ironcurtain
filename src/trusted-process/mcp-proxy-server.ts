@@ -40,6 +40,7 @@ import { extractPolicyRoots, toMcpRoots, directoryForPath } from './policy-roots
 import type { ToolCallRequest } from '../types/mcp.js';
 import type { AuditEntry } from '../types/audit.js';
 import type { McpRoot } from './mcp-client-manager.js';
+import { CallCircuitBreaker } from './call-circuit-breaker.js';
 import type { MCPServerConfig } from '../config/types.js';
 
 interface ProxiedTool {
@@ -142,6 +143,7 @@ async function main(): Promise<void> {
   const { compiledPolicy, toolAnnotations } = loadGeneratedPolicy(generatedDir);
   const policyEngine = new PolicyEngine(compiledPolicy, toolAnnotations, protectedPaths, allowedDirectory);
   const auditLog = new AuditLog(auditLogPath);
+  const circuitBreaker = new CallCircuitBreaker();
 
   // Compute initial roots from compiled policy for the MCP Roots protocol
   const policyRoots = extractPolicyRoots(compiledPolicy, allowedDirectory ?? '/tmp');
@@ -344,6 +346,16 @@ async function main(): Promise<void> {
       logAudit({ status: 'denied', error: evaluation.reason }, 0);
       return {
         content: [{ type: 'text', text: `DENIED: ${evaluation.reason}` }],
+        isError: true,
+      };
+    }
+
+    // Circuit breaker: deny if the same tool+args is called too many times
+    const cbVerdict = circuitBreaker.check(toolInfo.name, argsForTransport);
+    if (!cbVerdict.allowed) {
+      logAudit({ status: 'denied', error: cbVerdict.reason }, 0);
+      return {
+        content: [{ type: 'text', text: cbVerdict.reason }],
         isError: true,
       };
     }

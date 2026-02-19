@@ -56,7 +56,8 @@ export interface ConversationTurn {
 export type DiagnosticEvent =
   | { readonly kind: 'tool_call'; readonly toolName: string; readonly preview: string }
   | { readonly kind: 'agent_text'; readonly preview: string }
-  | { readonly kind: 'step_finish'; readonly stepIndex: number };
+  | { readonly kind: 'step_finish'; readonly stepIndex: number }
+  | { readonly kind: 'loop_detection'; readonly action: 'warn' | 'block'; readonly category: string; readonly message: string };
 
 /**
  * Read-only snapshot of session state. Exposed to transports
