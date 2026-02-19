@@ -12,12 +12,6 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 export function loadConfig(): IronCurtainConfig {
   const userConfig = loadUserConfig();
 
-  if (!userConfig.apiKey) {
-    throw new Error(
-      'ANTHROPIC_API_KEY environment variable is required (or set apiKey in ~/.ironcurtain/config.json)',
-    );
-  }
-
   const auditLogPath = process.env.AUDIT_LOG_PATH ?? './audit.jsonl';
   // Default to a path under the IronCurtain home directory.
   // In practice, the session factory overrides this per-session,
@@ -53,7 +47,6 @@ export function loadConfig(): IronCurtainConfig {
   ];
 
   return {
-    anthropicApiKey: userConfig.apiKey,
     auditLogPath,
     allowedDirectory,
     mcpServers,
@@ -62,6 +55,7 @@ export function loadConfig(): IronCurtainConfig {
     constitutionPath,
     agentModelId: userConfig.agentModelId,
     escalationTimeoutSeconds: userConfig.escalationTimeoutSeconds,
+    userConfig,
   };
 }
 

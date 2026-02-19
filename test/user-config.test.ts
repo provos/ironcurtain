@@ -4,30 +4,36 @@ import { resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { loadUserConfig, USER_CONFIG_DEFAULTS } from '../src/config/user-config.js';
 
+/** Env var names that need save/restore between tests. */
+const ENV_VARS_TO_ISOLATE = [
+  'IRONCURTAIN_HOME',
+  'ANTHROPIC_API_KEY',
+  'GOOGLE_GENERATIVE_AI_API_KEY',
+  'OPENAI_API_KEY',
+] as const;
+
 describe('loadUserConfig', () => {
   let testHome: string;
-  let originalHome: string | undefined;
-  let originalApiKey: string | undefined;
+  const savedEnv: Record<string, string | undefined> = {};
 
   beforeEach(() => {
     testHome = mkdtempSync(resolve(tmpdir(), 'ironcurtain-userconfig-'));
-    originalHome = process.env.IRONCURTAIN_HOME;
-    originalApiKey = process.env.ANTHROPIC_API_KEY;
+    // Save and clear all env vars that affect config loading
+    for (const key of ENV_VARS_TO_ISOLATE) {
+      savedEnv[key] = process.env[key];
+      delete process.env[key];
+    }
     process.env.IRONCURTAIN_HOME = testHome;
-    // Clear API key to isolate tests from env
-    delete process.env.ANTHROPIC_API_KEY;
   });
 
   afterEach(() => {
-    if (originalHome !== undefined) {
-      process.env.IRONCURTAIN_HOME = originalHome;
-    } else {
-      delete process.env.IRONCURTAIN_HOME;
-    }
-    if (originalApiKey !== undefined) {
-      process.env.ANTHROPIC_API_KEY = originalApiKey;
-    } else {
-      delete process.env.ANTHROPIC_API_KEY;
+    // Restore all saved env vars
+    for (const key of ENV_VARS_TO_ISOLATE) {
+      if (savedEnv[key] !== undefined) {
+        process.env[key] = savedEnv[key];
+      } else {
+        delete process.env[key];
+      }
     }
     rmSync(testHome, { recursive: true, force: true });
   });
@@ -199,6 +205,80 @@ describe('loadUserConfig', () => {
     writeRawConfigFile('not json');
 
     expect(() => loadUserConfig()).toThrow(resolve(testHome, 'config.json'));
+  });
+
+  // --- New API key fields ---
+
+  it('new API key fields default to empty string', () => {
+    const config = loadUserConfig();
+
+    expect(config.googleApiKey).toBe('');
+    expect(config.openaiApiKey).toBe('');
+  });
+
+  it('reads googleApiKey and openaiApiKey from config file', () => {
+    writeConfigFile({
+      googleApiKey: 'test-google-key',
+      openaiApiKey: 'test-openai-key',
+    });
+
+    const config = loadUserConfig();
+
+    expect(config.googleApiKey).toBe('test-google-key');
+    expect(config.openaiApiKey).toBe('test-openai-key');
+  });
+
+  it('GOOGLE_GENERATIVE_AI_API_KEY env var overrides config googleApiKey', () => {
+    writeConfigFile({ googleApiKey: 'from-config' });
+    process.env.GOOGLE_GENERATIVE_AI_API_KEY = 'from-env';
+
+    const config = loadUserConfig();
+
+    expect(config.googleApiKey).toBe('from-env');
+  });
+
+  it('OPENAI_API_KEY env var overrides config openaiApiKey', () => {
+    writeConfigFile({ openaiApiKey: 'from-config' });
+    process.env.OPENAI_API_KEY = 'from-env';
+
+    const config = loadUserConfig();
+
+    expect(config.openaiApiKey).toBe('from-env');
+  });
+
+  // --- Qualified model ID validation ---
+
+  it('accepts qualified model IDs with known providers', () => {
+    writeConfigFile({ agentModelId: 'anthropic:claude-sonnet-4-6' });
+    expect(() => loadUserConfig()).not.toThrow();
+
+    writeConfigFile({ agentModelId: 'google:gemini-2.0-flash' });
+    expect(() => loadUserConfig()).not.toThrow();
+
+    writeConfigFile({ agentModelId: 'openai:gpt-4o' });
+    expect(() => loadUserConfig()).not.toThrow();
+  });
+
+  it('accepts bare model IDs (no colon prefix)', () => {
+    writeConfigFile({ agentModelId: 'claude-sonnet-4-6' });
+    expect(() => loadUserConfig()).not.toThrow();
+  });
+
+  it('rejects model IDs with unknown provider prefix', () => {
+    writeConfigFile({ agentModelId: 'unknown:model-id' });
+
+    expect(() => loadUserConfig()).toThrow(/provider/i);
+  });
+
+  it('rejects policyModelId with unknown provider prefix', () => {
+    writeConfigFile({ policyModelId: 'mistral:model-id' });
+
+    expect(() => loadUserConfig()).toThrow(/provider/i);
+  });
+
+  it('defaults include anthropic: prefix', () => {
+    expect(USER_CONFIG_DEFAULTS.agentModelId).toMatch(/^anthropic:/);
+    expect(USER_CONFIG_DEFAULTS.policyModelId).toMatch(/^anthropic:/);
   });
 
   // --- Test helpers ---

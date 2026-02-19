@@ -1,3 +1,5 @@
+import type { ResolvedUserConfig } from './user-config.js';
+
 export interface MCPServerConfig {
   command: string;
   args: string[];
@@ -5,7 +7,6 @@ export interface MCPServerConfig {
 }
 
 export interface IronCurtainConfig {
-  anthropicApiKey: string;
   auditLogPath: string;
   allowedDirectory: string;
   mcpServers: Record<string, MCPServerConfig>;
@@ -18,8 +19,10 @@ export interface IronCurtainConfig {
   sessionLogPath?: string;
   /** Per-session LLM interaction log path. When set, all LLM calls are logged to this JSONL file. */
   llmLogPath?: string;
-  /** AI SDK model ID for the interactive agent (e.g. 'claude-sonnet-4-6'). */
+  /** AI SDK model ID for the interactive agent (e.g. 'anthropic:claude-sonnet-4-6'). */
   agentModelId: string;
   /** Escalation timeout in seconds (30-600). Controls how long to wait for human approval. */
   escalationTimeoutSeconds: number;
+  /** Resolved user configuration. Provides API keys for model resolution. */
+  userConfig: ResolvedUserConfig;
 }

@@ -6,6 +6,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { TrustedProcess, type EscalationPromptFn } from '../src/trusted-process/index.js';
 import type { IronCurtainConfig } from '../src/config/types.js';
 import type { ToolCallRequest } from '../src/types/mcp.js';
+import type { CompiledPolicyFile, ToolAnnotationsFile } from '../src/pipeline/types.js';
 import { testCompiledPolicy, testToolAnnotations } from './fixtures/test-policy.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -61,7 +62,6 @@ describe('Integration: TrustedProcess with filesystem MCP server', () => {
     writeTestArtifacts(testGeneratedDir, testCompiledPolicy, testToolAnnotations);
 
     const config: IronCurtainConfig = {
-      anthropicApiKey: 'not-needed-for-this-test',
       auditLogPath: AUDIT_LOG_PATH,
       allowedDirectory: SANDBOX_DIR,
       mcpServers: {
@@ -78,8 +78,16 @@ describe('Integration: TrustedProcess with filesystem MCP server', () => {
       ],
       generatedDir: testGeneratedDir,
       constitutionPath: resolve(projectRoot, 'src/config/constitution.md'),
-      agentModelId: 'claude-sonnet-4-6',
+      agentModelId: 'anthropic:claude-sonnet-4-6',
       escalationTimeoutSeconds: 300,
+      userConfig: {
+        agentModelId: 'anthropic:claude-sonnet-4-6',
+        policyModelId: 'anthropic:claude-sonnet-4-6',
+        apiKey: '',
+        googleApiKey: '',
+        openaiApiKey: '',
+        escalationTimeoutSeconds: 300,
+      },
     };
 
     trustedProcess = new TrustedProcess(config, { onEscalation: mockEscalation });

@@ -11,7 +11,7 @@
  */
 
 import 'dotenv/config';
-import { createAnthropic } from '@ai-sdk/anthropic';
+import { createLanguageModel } from '../config/model-provider.js';
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -585,8 +585,7 @@ async function main(): Promise<void> {
   console.error('');
 
   const userConfig = loadUserConfig();
-  const anthropic = createAnthropic();
-  const baseLlm = anthropic(userConfig.policyModelId);
+  const baseLlm = await createLanguageModel(userConfig.policyModelId, userConfig);
 
   const logContext: LlmLogContext = { stepName: 'unknown' };
   const logPath = resolve(config.generatedDir, 'llm-interactions.jsonl');

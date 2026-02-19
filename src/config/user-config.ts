@@ -10,10 +10,11 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { z } from 'zod';
 import { getUserConfigPath } from './paths.js';
+import { parseModelId } from './model-provider.js';
 
 export const USER_CONFIG_DEFAULTS = {
-  agentModelId: 'claude-sonnet-4-6',
-  policyModelId: 'claude-sonnet-4-6',
+  agentModelId: 'anthropic:claude-sonnet-4-6',
+  policyModelId: 'anthropic:claude-sonnet-4-6',
   escalationTimeoutSeconds: 300,
 } as const;
 
@@ -21,14 +22,36 @@ const ESCALATION_TIMEOUT_MIN = 30;
 const ESCALATION_TIMEOUT_MAX = 600;
 
 /**
+ * Validates a qualified model ID string: either a bare model name
+ * or "provider:model-name" where provider is a known provider.
+ * Delegates to parseModelId() so validation logic is not duplicated.
+ */
+const qualifiedModelId = z.string().min(1).refine(
+  (val) => {
+    try {
+      parseModelId(val);
+      return true;
+    } catch {
+      return false;
+    }
+  },
+  {
+    message: 'Model ID must be "model-name" or "provider:model-name" ' +
+             'where provider is one of: anthropic, google, openai',
+  },
+);
+
+/**
  * Zod schema for validating user config. All fields optional.
  * Validates types and constraints without applying defaults --
  * defaults are merged separately so we can distinguish "missing" from "present".
  */
 const userConfigSchema = z.object({
-  agentModelId: z.string().min(1, 'agentModelId must be non-empty').optional(),
-  policyModelId: z.string().min(1, 'policyModelId must be non-empty').optional(),
+  agentModelId: qualifiedModelId.optional(),
+  policyModelId: qualifiedModelId.optional(),
   apiKey: z.string().min(1, 'apiKey must be non-empty').optional(),
+  googleApiKey: z.string().min(1, 'googleApiKey must be non-empty').optional(),
+  openaiApiKey: z.string().min(1, 'openaiApiKey must be non-empty').optional(),
   escalationTimeoutSeconds: z
     .number()
     .int('escalationTimeoutSeconds must be an integer')
@@ -45,6 +68,8 @@ export interface ResolvedUserConfig {
   readonly agentModelId: string;
   readonly policyModelId: string;
   readonly apiKey: string;
+  readonly googleApiKey: string;
+  readonly openaiApiKey: string;
   readonly escalationTimeoutSeconds: number;
 }
 
@@ -137,26 +162,29 @@ function validateConfig(parsed: unknown, configPath: string): UserConfig {
 
 /**
  * Merges validated (partial) config with defaults.
- * apiKey defaults to empty string when not provided.
+ * API key fields default to empty string when not provided.
  */
 function mergeWithDefaults(config: UserConfig): ResolvedUserConfig {
   return {
     agentModelId: config.agentModelId ?? USER_CONFIG_DEFAULTS.agentModelId,
     policyModelId: config.policyModelId ?? USER_CONFIG_DEFAULTS.policyModelId,
     apiKey: config.apiKey ?? '',
+    googleApiKey: config.googleApiKey ?? '',
+    openaiApiKey: config.openaiApiKey ?? '',
     escalationTimeoutSeconds:
       config.escalationTimeoutSeconds ?? USER_CONFIG_DEFAULTS.escalationTimeoutSeconds,
   };
 }
 
 /**
- * Applies environment variable overrides.
- * ANTHROPIC_API_KEY takes precedence over config file apiKey.
+ * Applies environment variable overrides for all provider API keys.
+ * Each provider's standard env var takes precedence over config file values.
  */
 function applyEnvOverrides(config: ResolvedUserConfig): ResolvedUserConfig {
-  const envApiKey = process.env.ANTHROPIC_API_KEY;
-  if (envApiKey) {
-    return { ...config, apiKey: envApiKey };
-  }
-  return config;
+  return {
+    ...config,
+    apiKey: process.env.ANTHROPIC_API_KEY || config.apiKey,
+    googleApiKey: process.env.GOOGLE_GENERATIVE_AI_API_KEY || config.googleApiKey,
+    openaiApiKey: process.env.OPENAI_API_KEY || config.openaiApiKey,
+  };
 }

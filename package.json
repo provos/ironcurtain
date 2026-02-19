@@ -13,6 +13,8 @@
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.44",
+    "@ai-sdk/google": "^3.0.30",
+    "@ai-sdk/openai": "^3.0.30",
     "@modelcontextprotocol/sdk": "^1.26.0",
     "@utcp/code-mode": "^1.2.11",
     "@utcp/mcp": "^1.1.1",

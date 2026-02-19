@@ -14,7 +14,7 @@ import {
   type ModelMessage,
   type ToolSet,
 } from 'ai';
-import { anthropic } from '@ai-sdk/anthropic';
+import { createLanguageModel } from '../config/model-provider.js';
 import { z } from 'zod';
 import { readFileSync, writeFileSync, readdirSync } from 'node:fs';
 import { createLlmLoggingMiddleware } from '../pipeline/llm-logger.js';
@@ -119,7 +119,7 @@ export class AgentSession implements Session {
       this.config.allowedDirectory,
     );
     this.tools = this.buildTools();
-    this.model = this.buildModel();
+    this.model = await this.buildModel();
     this.startEscalationWatcher();
     this.status = 'ready';
   }
@@ -256,8 +256,11 @@ export class AgentSession implements Session {
     };
   }
 
-  private buildModel(): LanguageModel {
-    const baseModel = anthropic(this.config.agentModelId);
+  private async buildModel(): Promise<LanguageModel> {
+    const baseModel = await createLanguageModel(
+      this.config.agentModelId,
+      this.config.userConfig,
+    );
     if (!this.config.llmLogPath) return baseModel;
 
     const logContext: LlmLogContext = { stepName: 'agent' };

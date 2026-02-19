@@ -26,6 +26,7 @@ vi.mock('ai', async () => {
 
 vi.mock('@ai-sdk/anthropic', () => ({
   anthropic: vi.fn(() => 'mock-model'),
+  createAnthropic: vi.fn(() => vi.fn(() => 'mock-model')),
 }));
 
 vi.mock('@utcp/code-mode', () => ({
@@ -58,7 +59,6 @@ const TEST_HOME = `/tmp/ironcurtain-test-${process.pid}`;
 
 function createTestConfig(): IronCurtainConfig {
   return {
-    anthropicApiKey: 'test-api-key',
     auditLogPath: './audit.jsonl',
     allowedDirectory: '/tmp/ironcurtain-sandbox',
     mcpServers: {
@@ -70,8 +70,16 @@ function createTestConfig(): IronCurtainConfig {
     protectedPaths: [],
     generatedDir: '/tmp/test-generated',
     constitutionPath: '/tmp/test-constitution.md',
-    agentModelId: 'claude-sonnet-4-6',
+    agentModelId: 'anthropic:claude-sonnet-4-6',
     escalationTimeoutSeconds: 300,
+    userConfig: {
+      agentModelId: 'anthropic:claude-sonnet-4-6',
+      policyModelId: 'anthropic:claude-sonnet-4-6',
+      apiKey: 'test-api-key',
+      googleApiKey: '',
+      openaiApiKey: '',
+      escalationTimeoutSeconds: 300,
+    },
   };
 }
 
