@@ -38,6 +38,7 @@ import type {
   RepairContext,
 } from './types.js';
 import { resolveRealPath } from '../types/argument-roles.js';
+import { getIronCurtainHome } from '../config/paths.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -65,7 +66,8 @@ function loadPipelineConfig(): PipelineConfig {
     readFileSync(mcpServersPath, 'utf-8'),
   );
   const generatedDir = resolve(configDir, 'generated');
-  const allowedDirectory = process.env.ALLOWED_DIRECTORY ?? '/tmp/ironcurtain-sandbox';
+  const defaultAllowedDir = resolve(getIronCurtainHome(), 'sandbox');
+  const allowedDirectory = process.env.ALLOWED_DIRECTORY ?? defaultAllowedDir;
   const auditLogPath = process.env.AUDIT_LOG_PATH ?? './audit.jsonl';
 
   const protectedPaths = [
