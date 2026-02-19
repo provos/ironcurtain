@@ -329,12 +329,24 @@ export class PolicyEngine {
    * When evaluatingRole is set, only rules that are either role-agnostic
    * (no roles/paths conditions) or relevant to the specified role are
    * considered. First matching rule wins; default deny if none match.
+   *
+   * For roles with multiple extracted paths, delegates to
+   * evaluateRulesForMultiPaths for per-element evaluation.
    */
   private evaluateRulesForRole(
     request: ToolCallRequest,
     annotation: ToolAnnotation,
     evaluatingRole: ArgumentRole | undefined,
   ): EvaluationResult {
+    // Per-element evaluation: when a role has multiple paths, each path
+    // is independently discharged by the first matching rule.
+    if (evaluatingRole !== undefined) {
+      const rolePaths = extractAnnotatedPaths(request.arguments, annotation, [evaluatingRole]);
+      if (rolePaths.length > 1) {
+        return this.evaluateRulesForMultiPaths(request, annotation, evaluatingRole, rolePaths);
+      }
+    }
+
     for (const rule of this.compiledPolicy.rules) {
       if (evaluatingRole !== undefined && hasRoleConditions(rule) && !ruleRelevantToRole(rule, evaluatingRole)) {
         continue;
@@ -356,17 +368,83 @@ export class PolicyEngine {
   }
 
   /**
-   * Checks whether all conditions in a rule's `if` block are satisfied.
+   * Per-element path evaluation for roles with multiple paths.
+   *
+   * Each path is independently "discharged" by the first rule whose
+   * paths.within contains it. Rules without path conditions match all
+   * remaining paths. The most restrictive decision across all discharged
+   * paths wins (deny > escalate > allow). Undischarged paths default-deny.
    */
-  private ruleMatches(
+  private evaluateRulesForMultiPaths(
+    request: ToolCallRequest,
+    annotation: ToolAnnotation,
+    role: ArgumentRole,
+    paths: string[],
+  ): EvaluationResult {
+    const remainingPaths = new Set(paths);
+    let mostRestrictive: EvaluationResult | undefined;
+
+    for (const rule of this.compiledPolicy.rules) {
+      if (remainingPaths.size === 0) break;
+
+      // Skip rules not relevant to this role
+      if (hasRoleConditions(rule) && !ruleRelevantToRole(rule, role)) continue;
+
+      // Skip rules whose non-path conditions don't match
+      if (!this.ruleMatchesNonPathConditions(rule, request, annotation)) continue;
+
+      const cond = rule.if;
+      let matched: string[];
+
+      if (cond.paths !== undefined) {
+        // Rule has a path condition: discharge only paths within the directory
+        matched = [];
+        for (const p of remainingPaths) {
+          if (isWithinDirectory(p, cond.paths.within)) {
+            matched.push(p);
+          }
+        }
+        if (matched.length === 0) continue;
+      } else {
+        // Rule has no path condition: matches all remaining paths
+        matched = [...remainingPaths];
+      }
+
+      // Discharge matched paths and record decision
+      for (const p of matched) remainingPaths.delete(p);
+
+      const result: EvaluationResult = {
+        decision: rule.then,
+        rule: rule.name,
+        reason: rule.reason,
+      };
+      if (!mostRestrictive || DECISION_SEVERITY[result.decision] > DECISION_SEVERITY[mostRestrictive.decision]) {
+        mostRestrictive = result;
+      }
+    }
+
+    // Any undischarged paths -> default-deny (deny is the most restrictive decision)
+    if (remainingPaths.size > 0) {
+      return {
+        decision: 'deny',
+        rule: 'default-deny',
+        reason: 'No matching policy rule -- denied by default',
+      };
+    }
+
+    return mostRestrictive!;
+  }
+
+  /**
+   * Checks non-path conditions in a rule's `if` block: roles, server, tool, sideEffects.
+   */
+  private ruleMatchesNonPathConditions(
     rule: CompiledRule,
     request: ToolCallRequest,
     annotation: ToolAnnotation,
   ): boolean {
     const cond = rule.if;
 
-    // Check roles condition: tool must have at least one argument
-    // whose roles include any of the specified roles
     if (cond.roles !== undefined) {
       const toolHasMatchingRole = Object.values(annotation.args).some(
         argRoles => argRoles.some(r => cond.roles!.includes(r)),
@@ -374,22 +452,33 @@ export class PolicyEngine {
       if (!toolHasMatchingRole) return false;
     }
 
-    // Check server condition
     if (cond.server !== undefined && !cond.server.includes(request.serverName)) {
       return false;
     }
 
-    // Check tool condition
     if (cond.tool !== undefined && !cond.tool.includes(request.toolName)) {
       return false;
     }
 
-    // Check sideEffects condition
     if (cond.sideEffects !== undefined && annotation.sideEffects !== cond.sideEffects) {
       return false;
     }
 
+    return true;
+  }
+
+  /**
+   * Checks whether all conditions in a rule's `if` block are satisfied.
+   */
+  private ruleMatches(
+    rule: CompiledRule,
+    request: ToolCallRequest,
+    annotation: ToolAnnotation,
+  ): boolean {
+    if (!this.ruleMatchesNonPathConditions(rule, request, annotation)) return false;
+
     // Check paths condition
+    const cond = rule.if;
     if (cond.paths !== undefined) {
       const extracted = extractAnnotatedPaths(
         request.arguments,

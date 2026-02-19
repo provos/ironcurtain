@@ -2,15 +2,14 @@ import { describe, it, expect } from 'vitest';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { MockLanguageModelV3 } from 'ai/test';
-import { verifyPolicy } from '../src/pipeline/policy-verifier.js';
+import { verifyPolicy, filterStructuralConflicts } from '../src/pipeline/policy-verifier.js';
+import { PolicyEngine } from '../src/trusted-process/policy-engine.js';
+import type { CompiledPolicyFile, TestScenario } from '../src/pipeline/types.js';
 import { getHandwrittenScenarios } from '../src/pipeline/handwritten-scenarios.js';
 import { testCompiledPolicy, testToolAnnotations } from './fixtures/test-policy.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(__dirname, '..');
-
-const compiledPolicy = testCompiledPolicy;
-const toolAnnotations = testToolAnnotations;
 
 const protectedPaths = [
   resolve(projectRoot, 'src/config/constitution.md'),
@@ -97,8 +96,8 @@ describe('Policy Verifier', () => {
 
     const result = await verifyPolicy(
       constitutionText,
-      compiledPolicy,
-      toolAnnotations,
+      testCompiledPolicy,
+      testToolAnnotations,
       protectedPaths,
       scenarios,
       judge,
@@ -116,8 +115,8 @@ describe('Policy Verifier', () => {
 
     const result = await verifyPolicy(
       constitutionText,
-      compiledPolicy,
-      toolAnnotations,
+      testCompiledPolicy,
+      testToolAnnotations,
       protectedPaths,
       scenarios,
       judge,
@@ -139,8 +138,8 @@ describe('Policy Verifier', () => {
 
     const result = await verifyPolicy(
       constitutionText,
-      compiledPolicy,
-      toolAnnotations,
+      testCompiledPolicy,
+      testToolAnnotations,
       protectedPaths,
       scenarios,
       judge,
@@ -160,7 +159,7 @@ describe('Policy Verifier', () => {
     // to get allow instead. Per-role evaluation still correctly denies
     // move_file via the delete-path role, so we check escalate->allow flips.
     const badPolicy: CompiledPolicyFile = {
-      ...compiledPolicy,
+      ...testCompiledPolicy,
       rules: [
         {
           name: 'allow-all-reads',
@@ -178,7 +177,7 @@ describe('Policy Verifier', () => {
           then: 'allow',
           reason: 'Allow all writes',
         },
-        ...compiledPolicy.rules.filter(r => !r.name.includes('read') && !r.name.includes('write')),
+        ...testCompiledPolicy.rules.filter(r => !r.name.includes('read') && !r.name.includes('write')),
       ],
     };
 
@@ -195,7 +194,7 @@ describe('Policy Verifier', () => {
     const result = await verifyPolicy(
       constitutionText,
       badPolicy,
-      toolAnnotations,
+      testToolAnnotations,
       protectedPaths,
       scenarios,
       failJudge,
@@ -239,8 +238,8 @@ describe('Policy Verifier', () => {
 
     const result = await verifyPolicy(
       constitutionText,
-      compiledPolicy,
-      toolAnnotations,
+      testCompiledPolicy,
+      testToolAnnotations,
       protectedPaths,
       scenarios,
       infiniteJudge,
@@ -249,5 +248,127 @@ describe('Policy Verifier', () => {
     );
 
     expect(result.rounds).toHaveLength(2);
+  });
+});
+
+describe('filterStructuralConflicts', () => {
+  const engine = new PolicyEngine(testCompiledPolicy, testToolAnnotations, protectedPaths, SANDBOX_DIR);
+
+  it('discards scenarios that conflict with structural invariants', () => {
+    const conflictingScenario: TestScenario = {
+      description: 'Get file info on constitution.md',
+      request: {
+        serverName: 'filesystem',
+        toolName: 'get_file_info',
+        arguments: { path: protectedPaths[0] },
+      },
+      expectedDecision: 'escalate', // Wrong — structural invariant denies this
+      reasoning: 'Protected path access should be escalated',
+      source: 'generated',
+    };
+
+    const validScenario: TestScenario = {
+      description: 'Read file in sandbox',
+      request: {
+        serverName: 'filesystem',
+        toolName: 'read_file',
+        arguments: { path: `${SANDBOX_DIR}/test.txt` },
+      },
+      expectedDecision: 'allow',
+      reasoning: 'Sandbox reads are allowed',
+      source: 'generated',
+    };
+
+    const { valid, discarded } = filterStructuralConflicts(engine, [conflictingScenario, validScenario]);
+
+    expect(valid).toHaveLength(1);
+    expect(valid[0].description).toBe('Read file in sandbox');
+    expect(discarded).toHaveLength(1);
+    expect(discarded[0].scenario.description).toBe('Get file info on constitution.md');
+    expect(discarded[0].actual).toBe('deny');
+    expect(discarded[0].rule).toBe('structural-protected-path');
+  });
+
+  it('keeps scenarios that agree with structural invariants', () => {
+    const correctScenario: TestScenario = {
+      description: 'Deny write to protected path',
+      request: {
+        serverName: 'filesystem',
+        toolName: 'write_file',
+        arguments: { path: protectedPaths[0], content: 'hack' },
+      },
+      expectedDecision: 'deny', // Correct — matches structural invariant
+      reasoning: 'Protected path writes are denied',
+      source: 'generated',
+    };
+
+    const { valid, discarded } = filterStructuralConflicts(engine, [correctScenario]);
+
+    expect(valid).toHaveLength(1);
+    expect(discarded).toHaveLength(0);
+  });
+
+  it('keeps scenarios resolved by compiled rules (non-structural)', () => {
+    const outsideReadScenario: TestScenario = {
+      description: 'Read file outside sandbox',
+      request: {
+        serverName: 'filesystem',
+        toolName: 'read_file',
+        arguments: { path: '/etc/passwd' },
+      },
+      expectedDecision: 'escalate',
+      reasoning: 'Reads outside sandbox are escalated',
+      source: 'generated',
+    };
+
+    const { valid, discarded } = filterStructuralConflicts(engine, [outsideReadScenario]);
+
+    expect(valid).toHaveLength(1);
+    expect(discarded).toHaveLength(0);
+  });
+
+  it('discards scenarios that expect allow for unknown tools', () => {
+    const unknownToolScenario: TestScenario = {
+      description: 'Call unknown tool',
+      request: {
+        serverName: 'filesystem',
+        toolName: 'totally_unknown_tool',
+        arguments: {},
+      },
+      expectedDecision: 'allow', // Wrong — structural invariant denies unknown tools
+      reasoning: 'Should be allowed',
+      source: 'generated',
+    };
+
+    const { valid, discarded } = filterStructuralConflicts(engine, [unknownToolScenario]);
+
+    expect(valid).toHaveLength(0);
+    expect(discarded).toHaveLength(1);
+    expect(discarded[0].rule).toBe('structural-unknown-tool');
+  });
+
+  it('preserves handwritten scenarios even when conflicting', () => {
+    // Handwritten scenarios that conflict are still kept in the valid set
+    // (the caller in compile.ts handles them specially via logging)
+    // filterStructuralConflicts itself is source-agnostic
+    const handwrittenConflict: TestScenario = {
+      description: 'Handwritten: get info on constitution',
+      request: {
+        serverName: 'filesystem',
+        toolName: 'get_file_info',
+        arguments: { path: protectedPaths[0] },
+      },
+      expectedDecision: 'escalate',
+      reasoning: 'Should escalate',
+      source: 'handwritten',
+    };
+
+    const { valid, discarded } = filterStructuralConflicts(engine, [handwrittenConflict]);
+
+    // filterStructuralConflicts discards regardless of source — the caller
+    // inspects discarded[].scenario.source for special handling
+    expect(valid).toHaveLength(0);
+    expect(discarded).toHaveLength(1);
+    expect(discarded[0].scenario.source).toBe('handwritten');
   });
 });

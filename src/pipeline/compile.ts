@@ -25,7 +25,8 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { annotateTools, validateAnnotationsHeuristic, buildAnnotationPrompt } from './tool-annotator.js';
 import { compileConstitution, validateCompiledRules, buildCompilerPrompt } from './constitution-compiler.js';
 import { generateScenarios, buildGeneratorPrompt } from './scenario-generator.js';
-import { verifyPolicy, extractScenarioCorrections, applyScenarioCorrections } from './policy-verifier.js';
+import { verifyPolicy, extractScenarioCorrections, applyScenarioCorrections, filterStructuralConflicts, type DiscardedScenario } from './policy-verifier.js';
+import { PolicyEngine } from '../trusted-process/policy-engine.js';
 import { getHandwrittenScenarios } from './handwritten-scenarios.js';
 import { createLlmLoggingMiddleware, type LlmLogContext } from './llm-logger.js';
 import type { MCPServerConfig } from '../config/types.js';
@@ -173,6 +174,25 @@ function extractPermittedDirectories(rules: CompiledRule[]): string[] {
 
 function collectProbeScenarios(result: VerificationResult): TestScenario[] {
   return result.rounds.flatMap(round => round.newScenarios);
+}
+
+/**
+ * Filters scenarios against structural invariants and logs any discarded ones.
+ * Returns the valid scenarios and the full list of discarded scenarios.
+ */
+function filterAndLogStructuralConflicts(
+  engine: PolicyEngine,
+  scenarios: TestScenario[],
+  label: string = 'Discarded scenario (structural conflict)',
+): { valid: TestScenario[]; discarded: DiscardedScenario[] } {
+  const { valid, discarded } = filterStructuralConflicts(engine, scenarios);
+  for (const d of discarded) {
+    const prefix = d.scenario.source === 'handwritten'
+      ? chalk.yellow('Warning: handwritten scenario conflicts with structural invariant:')
+      : chalk.dim(`${label}:`);
+    console.error(`  ${prefix} "${d.scenario.description}" — ${d.rule} always returns ${d.actual}`);
+  }
+  return { valid, discarded };
 }
 
 // ---------------------------------------------------------------------------
@@ -709,6 +729,13 @@ async function main(): Promise<void> {
     // inspection even if verification fails, and cached for next run.
     writeScenariosArtifact(config.generatedDir, config.constitutionHash, scenarioResult);
 
+    // Filter out scenarios that conflict with structural invariants
+    const filterEngine = new PolicyEngine(compiledPolicyFile, toolAnnotationsFile, config.protectedPaths, config.allowedDirectory);
+    const { valid: initialValid, discarded: discardedScenarios } = filterAndLogStructuralConflicts(
+      filterEngine, scenarioResult.scenarios, 'Discarded scenario (structural conflict)',
+    );
+    let filteredScenarios = initialValid;
+
     // Verify compiled policy against scenarios (full depth)
     logContext.stepName = 'verify-policy';
     const { result: verificationResultInitial } = await withSpinner(
@@ -719,7 +746,7 @@ async function main(): Promise<void> {
           compiledPolicyFile,
           toolAnnotationsFile,
           config.protectedPaths,
-          scenarioResult.scenarios,
+          filteredScenarios,
           llm,
           config.allowedDirectory,
           3,
@@ -733,8 +760,12 @@ async function main(): Promise<void> {
     );
     let verificationResult = verificationResultInitial;
 
-    // Collect probe scenarios from verifier across all attempts
-    const accumulatedProbes: TestScenario[] = collectProbeScenarios(verificationResult);
+    // Collect probe scenarios from verifier across all attempts, filtering
+    // out any that conflict with structural invariants
+    const { valid: filteredInitialProbes } = filterAndLogStructuralConflicts(
+      filterEngine, collectProbeScenarios(verificationResult), 'Discarded probe (structural conflict)',
+    );
+    const accumulatedProbes: TestScenario[] = filteredInitialProbes;
 
     // Dual-channel compile-verify-repair loop (up to 2 repair attempts)
     // The judge attributes each failure to 'rule', 'scenario', or 'both':
@@ -774,6 +805,10 @@ async function main(): Promise<void> {
           accumulatedProbes.splice(0, accumulatedProbes.length, ...correctedProbes);
           scenarioCorrectionsApplied += corrections.length;
           console.error(`  ${chalk.dim(`Corrected ${corrections.length} scenario expectation(s)`)}`);
+
+          // Re-filter after corrections (a corrected expected decision might
+          // now match a structural invariant result, making it valid)
+          ({ valid: filteredScenarios } = filterAndLogStructuralConflicts(filterEngine, scenarioResult.scenarios));
         }
 
         // Determine which failures need rule recompilation:
@@ -823,7 +858,7 @@ async function main(): Promise<void> {
 
         // Verify with reduced depth, using base scenarios + accumulated probes
         logContext.stepName = `repair-verify-${attempt}`;
-        const repairScenarios = [...scenarioResult.scenarios, ...accumulatedProbes];
+        const repairScenarios = [...filteredScenarios, ...accumulatedProbes];
         const repairVerifyText = `Repair ${attempt}/${MAX_REPAIRS}: Verifying`;
         const { result: repairVerifyResult } = await withSpinner(
           repairVerifyText,
@@ -847,15 +882,18 @@ async function main(): Promise<void> {
         );
         verificationResult = repairVerifyResult;
 
-        // Accumulate any new probe scenarios
-        accumulatedProbes.push(...collectProbeScenarios(verificationResult));
+        // Accumulate any new probe scenarios, filtering structural conflicts
+        const { valid: validRepairProbes } = filterAndLogStructuralConflicts(
+          filterEngine, collectProbeScenarios(verificationResult), 'Discarded probe (structural conflict)',
+        );
+        accumulatedProbes.push(...validRepairProbes);
 
         repairAttempts = attempt;
 
         if (verificationResult.pass) {
           // Run final full verification with all accumulated scenarios
           logContext.stepName = 'final-verify';
-          const finalScenarios = [...scenarioResult.scenarios, ...accumulatedProbes];
+          const finalScenarios = [...filteredScenarios, ...accumulatedProbes];
           const { result: finalVerifyResult } = await withSpinner(
             'Final full verification',
             async (spinner) => {
@@ -878,8 +916,11 @@ async function main(): Promise<void> {
           );
           verificationResult = finalVerifyResult;
 
-          // Accumulate any new probes from final verification
-          accumulatedProbes.push(...collectProbeScenarios(verificationResult));
+          // Accumulate any new probes from final verification, filtering structural conflicts
+          const { valid: validFinalProbes } = filterAndLogStructuralConflicts(
+            filterEngine, collectProbeScenarios(verificationResult), 'Discarded probe (structural conflict)',
+          );
+          accumulatedProbes.push(...validFinalProbes);
           break;
         }
       }
@@ -893,11 +934,14 @@ async function main(): Promise<void> {
       return true;
     });
 
-    const totalScenariosTested = scenarioResult.scenarios.length + uniqueProbes.length;
+    const totalScenariosTested = filteredScenarios.length + uniqueProbes.length;
 
     console.error('');
     console.error(`  Rules: ${compilationResult.rules.length}`);
     console.error(`  Scenarios tested: ${totalScenariosTested}`);
+    if (discardedScenarios.length > 0) {
+      console.error(`  Scenarios discarded (structural conflicts): ${discardedScenarios.length}`);
+    }
     if (uniqueProbes.length > 0) {
       console.error(`  Probe scenarios accumulated: ${uniqueProbes.length}`);
     }

@@ -10,9 +10,6 @@ import { testCompiledPolicy, testToolAnnotations } from './fixtures/test-policy.
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(__dirname, '..');
 
-const compiledPolicy = testCompiledPolicy;
-const toolAnnotations = testToolAnnotations;
-
 const protectedPaths = [
   resolve(projectRoot, 'src/config/constitution.md'),
   resolve(projectRoot, 'src/config/generated'),
@@ -34,7 +31,7 @@ function makeRequest(overrides: Partial<ToolCallRequest> = {}): ToolCallRequest 
 }
 
 describe('PolicyEngine', () => {
-  const engine = new PolicyEngine(compiledPolicy, toolAnnotations, protectedPaths, SANDBOX_DIR);
+  const engine = new PolicyEngine(testCompiledPolicy, testToolAnnotations, protectedPaths, SANDBOX_DIR);
 
   describe('structural invariants', () => {
     // The new engine protects concrete filesystem paths, not substring
@@ -100,8 +97,8 @@ describe('PolicyEngine', () => {
       // and checked against protected paths.
       const homeDir = homedir();
       const engineWithHome = new PolicyEngine(
-        compiledPolicy,
-        toolAnnotations,
+        testCompiledPolicy,
+        testToolAnnotations,
         [homeDir],
         SANDBOX_DIR,
       );
@@ -123,8 +120,8 @@ describe('PolicyEngine', () => {
     it('with pre-normalized tilde path, denies access to protected home directory', () => {
       const homeDir = homedir();
       const engineWithHome = new PolicyEngine(
-        compiledPolicy,
-        toolAnnotations,
+        testCompiledPolicy,
+        testToolAnnotations,
         [homeDir],
         SANDBOX_DIR,
       );
@@ -358,8 +355,8 @@ describe('PolicyEngine', () => {
       // Create an engine where a protected path is inside the sandbox
       const sandboxProtectedPath = '/tmp/ironcurtain-sandbox/secret.txt';
       const engineWithProtected = new PolicyEngine(
-        compiledPolicy,
-        toolAnnotations,
+        testCompiledPolicy,
+        testToolAnnotations,
         [sandboxProtectedPath],
         SANDBOX_DIR,
       );
@@ -374,8 +371,8 @@ describe('PolicyEngine', () => {
     it('works with dynamic sandbox path', () => {
       const dynamicSandbox = '/home/user/.ironcurtain/sessions/abc123/sandbox';
       const dynamicEngine = new PolicyEngine(
-        compiledPolicy,
-        toolAnnotations,
+        testCompiledPolicy,
+        testToolAnnotations,
         [],
         dynamicSandbox,
       );
@@ -390,8 +387,8 @@ describe('PolicyEngine', () => {
     it('blocks path traversal out of dynamic sandbox', () => {
       const dynamicSandbox = '/home/user/.ironcurtain/sessions/abc123/sandbox';
       const dynamicEngine = new PolicyEngine(
-        compiledPolicy,
-        toolAnnotations,
+        testCompiledPolicy,
+        testToolAnnotations,
         [],
         dynamicSandbox,
       );
@@ -405,8 +402,8 @@ describe('PolicyEngine', () => {
 
     it('engine without allowedDirectory skips sandbox check', () => {
       const noSandboxEngine = new PolicyEngine(
-        compiledPolicy,
-        toolAnnotations,
+        testCompiledPolicy,
+        testToolAnnotations,
         [],
       );
       const result = noSandboxEngine.evaluate(makeRequest({
@@ -484,6 +481,72 @@ describe('PolicyEngine', () => {
       }));
       expect(result.decision).toBe('escalate');
       expect(result.rule).toBe('escalate-read-outside-permitted-areas');
+    });
+  });
+
+  describe('per-element path evaluation', () => {
+    it('allows read_multiple_files with paths spanning two permitted directories', () => {
+      const result = engine.evaluate(makeRequest({
+        toolName: 'read_multiple_files',
+        arguments: {
+          paths: ['/tmp/permitted-a/file1.txt', '/tmp/permitted-b/file2.txt'],
+        },
+      }));
+      expect(result.decision).toBe('allow');
+    });
+
+    it('escalates when paths span permitted and non-permitted directories', () => {
+      const result = engine.evaluate(makeRequest({
+        toolName: 'read_multiple_files',
+        arguments: {
+          paths: ['/tmp/permitted-a/file1.txt', '/etc/some-file.txt'],
+        },
+      }));
+      // /tmp/permitted-a/file1.txt is allowed, /etc/some-file.txt hits escalate rule
+      // Most restrictive wins: escalate > allow
+      expect(result.decision).toBe('escalate');
+      expect(result.rule).toBe('escalate-read-outside-permitted-areas');
+    });
+
+    it('allows all paths in one permitted directory (regression)', () => {
+      const result = engine.evaluate(makeRequest({
+        toolName: 'read_multiple_files',
+        arguments: {
+          paths: ['/tmp/permitted-a/file1.txt', '/tmp/permitted-a/file2.txt'],
+        },
+      }));
+      expect(result.decision).toBe('allow');
+      expect(result.rule).toBe('allow-reads-within-dir-a');
+    });
+
+    it('denies when one path has no matching rule (default-deny)', () => {
+      // Custom policy with only one permitted dir and no catch-all escalate
+      const restrictivePolicy: CompiledPolicyFile = {
+        generatedAt: 'test',
+        constitutionHash: 'test',
+        inputHash: 'test',
+        rules: [
+          {
+            name: 'allow-reads-dir-a',
+            description: 'Allow reads within dir-a',
+            principle: 'test',
+            if: { paths: { roles: ['read-path'], within: '/tmp/permitted-a' }, server: ['filesystem'] },
+            then: 'allow',
+            reason: 'Allowed in dir-a',
+          },
+        ],
+      };
+      const restrictiveEngine = new PolicyEngine(restrictivePolicy, testToolAnnotations, []);
+      const result = restrictiveEngine.evaluate(makeRequest({
+        toolName: 'read_multiple_files',
+        arguments: {
+          paths: ['/tmp/permitted-a/file1.txt', '/tmp/nowhere/file2.txt'],
+        },
+      }));
+      // /tmp/permitted-a/file1.txt -> allow, /tmp/nowhere/file2.txt -> default-deny
+      // Most restrictive wins: deny > allow
+      expect(result.decision).toBe('deny');
+      expect(result.rule).toBe('default-deny');
     });
   });
 

@@ -267,6 +267,48 @@ export async function verifyPolicy(
 }
 
 // ---------------------------------------------------------------------------
+// Structural Conflict Filtering
+// ---------------------------------------------------------------------------
+
+export interface DiscardedScenario {
+  scenario: TestScenario;
+  actual: ExecutionResult['actualDecision'];
+  rule: string;
+}
+
+/**
+ * Filters out scenarios whose expected decision conflicts with a structural
+ * invariant result. Structural invariants are ground truth (hardcoded in the
+ * engine), so a disagreeing scenario expectation is wrong by definition.
+ *
+ * Returns the valid scenarios and the discarded ones (with metadata for
+ * logging / feedback).
+ */
+export function filterStructuralConflicts(
+  engine: PolicyEngine,
+  scenarios: TestScenario[],
+): { valid: TestScenario[]; discarded: DiscardedScenario[] } {
+  const results = executeScenarios(engine, scenarios);
+  const valid: TestScenario[] = [];
+  const discarded: DiscardedScenario[] = [];
+
+  for (const result of results) {
+    const isStructural = result.matchingRule.startsWith('structural-');
+    if (isStructural && !result.pass) {
+      discarded.push({
+        scenario: result.scenario,
+        actual: result.actualDecision,
+        rule: result.matchingRule,
+      });
+    } else {
+      valid.push(result.scenario);
+    }
+  }
+
+  return { valid, discarded };
+}
+
+// ---------------------------------------------------------------------------
 // Scenario Corrections
 // ---------------------------------------------------------------------------
 

@@ -54,6 +54,28 @@ export const testCompiledPolicy: CompiledPolicyFile = {
       reason: 'Writes outside sandbox require human approval.',
     },
     {
+      name: 'allow-reads-within-dir-a',
+      description: 'Allow read-path within /tmp/permitted-a.',
+      principle: 'Least privilege',
+      if: {
+        paths: { roles: ['read-path'], within: '/tmp/permitted-a' },
+        server: ['filesystem'],
+      },
+      then: 'allow',
+      reason: 'Reads within permitted-a are allowed.',
+    },
+    {
+      name: 'allow-reads-within-dir-b',
+      description: 'Allow read-path within /tmp/permitted-b.',
+      principle: 'Least privilege',
+      if: {
+        paths: { roles: ['read-path'], within: '/tmp/permitted-b' },
+        server: ['filesystem'],
+      },
+      then: 'allow',
+      reason: 'Reads within permitted-b are allowed.',
+    },
+    {
       name: 'escalate-read-outside-permitted-areas',
       description: 'Escalate read-path operations outside sandbox to human.',
       principle: 'Human oversight',
