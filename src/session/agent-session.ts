@@ -22,7 +22,7 @@ import type { LlmLogContext } from '../pipeline/llm-logger.js';
 import { resolve } from 'node:path';
 import type { IronCurtainConfig } from '../config/types.js';
 import type { Sandbox } from '../sandbox/index.js';
-import { buildSystemPrompt } from '../agent/prompts.js';
+import { buildSystemPrompt } from './prompts.js';
 import type {
   Session,
   SessionId,
