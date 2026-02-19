@@ -36,6 +36,7 @@ export function buildGeneratorPrompt(
   annotations: ToolAnnotation[],
   sandboxDirectory: string,
   protectedPaths: string[],
+  permittedDirectories?: string[],
 ): string {
   const annotationsSummary = annotations.map(a => {
     const argsDesc = Object.entries(a.args)
@@ -57,7 +58,13 @@ ${annotationsSummary}
 ## System Configuration
 
 - Sandbox directory: ${sandboxDirectory}
+${permittedDirectories && permittedDirectories.length > 0 ? `
+## Permitted Directories (from compiled policy rules)
 
+The compiled rules reference these specific directories. Use these EXACT paths in your scenarios:
+
+${permittedDirectories.map(p => `- ${p}`).join('\n')}
+` : ''}
 ## Protected Paths (Structural Invariants)
 
 The following paths are protected by hardcoded structural invariants in the engine. These checks run BEFORE any compiled rules and always result in \`deny\` for any write or delete operation targeting them:
@@ -72,12 +79,17 @@ IMPORTANT:
 ## Instructions
 
 Generate diverse test scenarios covering:
-1. **Positive cases**: operations that SHOULD be allowed (reads/writes within sandbox)
-2. **Negative cases**: operations that SHOULD be denied (reads outside sandbox, deletes, all moves)
-3. **Edge cases**: path traversal attacks, boundary conditions
-4. **Side-effect-free tools**: tools with no path arguments (should be allowed)
-5. **Move operations**: all moves are denied because the source argument has a delete-path role
-6. **Escalation cases**: writes outside sandbox (should escalate)
+1. **Positive cases**: operations that SHOULD be allowed (within sandbox or permitted directories per constitution)
+2. **Negative cases**: operations that SHOULD be denied (categorically forbidden by the constitution, e.g., deletes outside sandbox)
+3. **Escalation cases**: operations outside the sandbox and permitted directories that are NOT categorically forbidden — these require human approval
+4. **Edge cases**: path traversal attacks, boundary conditions
+5. **Side-effect-free tools**: tools with no path arguments (should be allowed)
+6. **Move operations**: all moves involve a delete-path role on the source argument
+
+The three possible decisions are:
+- "allow" — explicitly permitted by the constitution
+- "deny" — categorically forbidden by the constitution
+- "escalate" — not explicitly permitted and not forbidden; requires human approval
 
 For each scenario provide:
 - description: what the test checks
@@ -85,11 +97,12 @@ For each scenario provide:
 - expectedDecision: "allow", "deny", or "escalate"
 - reasoning: why this decision follows from the constitution
 
-Use concrete paths based on the sandbox directory "${sandboxDirectory}". For external paths, use paths like "/etc/passwd", "/home/user/documents/file.txt", etc.
-
 IMPORTANT:
+- Use the EXACT permitted directory paths listed above (not generic paths like "/home/user/Downloads").
+- Use concrete paths based on the sandbox directory "${sandboxDirectory}".
+- For paths outside all permitted areas, use paths like "/etc/passwd", "/var/log/syslog", etc.
 - Structural invariants (protected paths, unknown tools) are handled separately. Focus on the constitution's content rules.
-- Generate at least 10 scenarios with good coverage.`;
+- Generate at least 10 scenarios with good coverage across all three decision types (allow, deny, escalate).`;
 }
 
 /**
@@ -111,11 +124,12 @@ export async function generateScenarios(
   sandboxDirectory: string,
   protectedPaths: string[],
   llm: LanguageModel,
+  permittedDirectories?: string[],
 ): Promise<TestScenario[]> {
   const serverNames = [...new Set(annotations.map(a => a.serverName))] as [string, ...string[]];
   const toolNames = [...new Set(annotations.map(a => a.toolName))] as [string, ...string[]];
   const schema = buildGeneratorResponseSchema(serverNames, toolNames);
-  const prompt = buildGeneratorPrompt(constitutionText, annotations, sandboxDirectory, protectedPaths);
+  const prompt = buildGeneratorPrompt(constitutionText, annotations, sandboxDirectory, protectedPaths, permittedDirectories);
 
   const { output } = await generateObjectWithRepair({
     model: llm,

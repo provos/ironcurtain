@@ -8,8 +8,7 @@
  */
 
 import { homedir } from 'node:os';
-import { resolve } from 'node:path';
-import { getRoleDefinition } from '../types/argument-roles.js';
+import { getRoleDefinition, resolveRealPath } from '../types/argument-roles.js';
 import type { ToolAnnotation, ArgumentRole } from '../pipeline/types.js';
 
 /**
@@ -27,9 +26,9 @@ function looksLikePath(value: string): boolean {
   return value.startsWith('/') || value.startsWith('.') || value.startsWith('~');
 }
 
-/** Resolves a path-like string to an absolute normalized form. */
+/** Resolves a path-like string to its canonical real path, following symlinks. */
 function normalizePath(value: string): string {
-  return resolve(expandTilde(value));
+  return resolveRealPath(expandTilde(value));
 }
 
 /**

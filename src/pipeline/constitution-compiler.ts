@@ -92,7 +92,10 @@ Produce an ORDERED list of policy rules (first match wins). Each rule has:
   - "tool": array of specific tool names (omit = any matching tool)
   - "sideEffects": match on the tool's sideEffects annotation (omit = don't filter)
   - "paths": path condition with "roles" (which argument roles to extract paths from) and "within" (concrete absolute directory). Rule fires only if ALL extracted paths are within that directory. If zero paths are extracted (tool has no matching path arguments), the condition is NOT satisfied and the rule does NOT match. This implicitly requires matching roles, so top-level "roles" is redundant when "paths" is present.
-- "then": "allow", "deny", or "escalate"
+- "then": the policy decision:
+  - "allow" — the operation is explicitly permitted by the constitution
+  - "deny" — the operation is categorically forbidden by the constitution (absolute prohibition)
+  - "escalate" — the operation is not explicitly permitted but also not forbidden; route to a human for approval
 - "reason": human-readable explanation
 
 CRITICAL RULES:
@@ -100,7 +103,9 @@ CRITICAL RULES:
 2. Use CONCRETE ABSOLUTE paths (e.g., "/home/user/Downloads"), not abstract labels.
 3. "Outside a directory" semantics: use rule ordering. A rule with "within" matches the inside case; the next rule without "paths" catches everything else as a fallthrough.
 4. The move tool's source argument has both read-path and delete-path roles. A blanket "roles": ["delete-path"] rule will catch all moves.
-5. Order matters: more specific rules before more general ones.`;
+5. Order matters: more specific rules before more general ones.
+6. Use all three decision types. Map each constitution principle to the appropriate decision: "allow" for grants, "deny" for prohibitions, and "escalate" for principles that require human judgment or approval. If the constitution does not explicitly forbid an operation, prefer "escalate" over "deny" so a human can decide.
+7. The rule chain must cover all operation types with appropriate fallthrough rules. Do not leave gaps — every combination of argument roles should eventually match a rule.`;
 }
 
 export function buildRepairPrompt(

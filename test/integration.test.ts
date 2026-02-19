@@ -175,7 +175,8 @@ describe('Integration: TrustedProcess with filesystem MCP server', () => {
     expect(result.policyDecision.rule).toBe('structural-protected-path');
   });
 
-  it('denies writing outside the sandbox', async () => {
+  it('escalates writing outside the sandbox -- denied by human', async () => {
+    escalationResponse = 'denied';
     lastEscalationRequest = null;
 
     const result = await trustedProcess.handleToolCall(makeRequest({
@@ -183,11 +184,11 @@ describe('Integration: TrustedProcess with filesystem MCP server', () => {
       arguments: { path: '/tmp/outside-sandbox.txt', content: 'should not work' },
     }));
 
-    // Write outside permitted areas is denied outright (no escalation)
-    expect(lastEscalationRequest).toBeNull();
+    // Write outside permitted areas is escalated for human approval, then denied
+    expect(lastEscalationRequest).not.toBeNull();
     expect(result.status).toBe('denied');
-    expect(result.policyDecision.status).toBe('deny');
-    expect(result.policyDecision.rule).toBe('deny-write-outside-permitted-areas');
+    expect(result.policyDecision.rule).toBe('escalate-write-outside-permitted-areas');
+    expect(result.policyDecision.reason).toBe('Denied by human during escalation');
   });
 
   it('escalates reading outside the sandbox -- approved by human', async () => {

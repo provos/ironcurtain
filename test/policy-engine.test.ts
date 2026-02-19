@@ -241,13 +241,13 @@ describe('PolicyEngine', () => {
       expect(result.rule).toBe('structural-sandbox-allow');
     });
 
-    it('denies write_file outside allowed directory', () => {
+    it('escalates write_file outside allowed directory', () => {
       const result = engine.evaluate(makeRequest({
         toolName: 'write_file',
         arguments: { path: '/etc/test.txt', content: 'hello' },
       }));
-      expect(result.decision).toBe('deny');
-      expect(result.rule).toBe('deny-write-outside-permitted-areas');
+      expect(result.decision).toBe('escalate');
+      expect(result.rule).toBe('escalate-write-outside-permitted-areas');
     });
   });
 
@@ -315,7 +315,7 @@ describe('PolicyEngine', () => {
       expect(result.rule).toBe('structural-sandbox-allow');
     });
 
-    it('denies edit_file outside sandbox (write-path denied, most restrictive wins)', () => {
+    it('escalates edit_file outside sandbox (both read-path and write-path escalated)', () => {
       const result = engine.evaluate(makeRequest({
         toolName: 'edit_file',
         arguments: {
@@ -324,7 +324,7 @@ describe('PolicyEngine', () => {
           dryRun: false,
         },
       }));
-      expect(result.decision).toBe('deny');
+      expect(result.decision).toBe('escalate');
     });
 
     it('allows list_allowed_directories with no roles (no role iteration needed)', () => {

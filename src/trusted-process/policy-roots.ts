@@ -1,5 +1,6 @@
-import { resolve, dirname } from 'node:path';
+import { dirname } from 'node:path';
 import type { CompiledPolicyFile } from '../pipeline/types.js';
+import { resolveRealPath } from '../types/argument-roles.js';
 
 /**
  * Root entry for the MCP Roots protocol.
@@ -40,7 +41,7 @@ export function extractPolicyRoots(
   const roots: PolicyRoot[] = [];
 
   // Sandbox is always the first root.
-  const resolvedSandbox = resolve(allowedDirectory);
+  const resolvedSandbox = resolveRealPath(allowedDirectory);
   seen.add(resolvedSandbox);
   roots.push({ path: resolvedSandbox, name: 'sandbox' });
 
@@ -48,7 +49,7 @@ export function extractPolicyRoots(
     if (rule.then === 'deny') continue;
     if (!rule.if.paths?.within) continue;
 
-    const dir = resolve(rule.if.paths.within);
+    const dir = resolveRealPath(rule.if.paths.within);
     if (seen.has(dir)) continue;
 
     seen.add(dir);
@@ -81,7 +82,7 @@ export function toMcpRoots(
  * Otherwise dirname is used to get the containing directory.
  */
 export function directoryForPath(filePath: string): string {
-  // Check for trailing slash before resolving, since resolve() strips it.
-  if (filePath.endsWith('/')) return resolve(filePath);
-  return dirname(resolve(filePath));
+  // Check for trailing slash before resolving, since resolveRealPath() strips it.
+  if (filePath.endsWith('/')) return resolveRealPath(filePath);
+  return dirname(resolveRealPath(filePath));
 }

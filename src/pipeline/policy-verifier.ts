@@ -100,15 +100,24 @@ A \`deny\` result for write/delete operations on these paths is correct structur
 ${previousContext}
 ${resultsText}
 
+## Decision Types
+
+The three possible policy decisions are:
+- **allow** — the operation is explicitly permitted by the constitution
+- **deny** — the operation is categorically forbidden by the constitution (absolute prohibition)
+- **escalate** — the operation is not explicitly permitted but also not forbidden; it requires human approval
+
+When analyzing FAIL results, pay attention to whether the constitution implies "deny" vs "escalate". If the constitution does not explicitly forbid an operation, the correct decision is typically "escalate" (not "deny") so a human can make the judgment call.
+
 ## Instructions
 
 1. Analyze any FAIL results. Is the compiled rule wrong, or is the test expectation wrong?
-2. Identify suspicious patterns (e.g., a broad allow rule shadowing a narrow deny).
+2. Identify suspicious patterns (e.g., a broad allow rule shadowing a narrow deny, or "deny" used where "escalate" would be more appropriate).
 3. Identify missing coverage -- scenarios the constitution implies that were not tested.
 4. If you suspect gaps, generate additional test scenarios to probe them.
 5. Set "pass" to true ONLY if all results are correct and coverage is adequate.
 
-For additional scenarios, use concrete paths. Note: sandbox containment is handled by a structural invariant before compiled rules run — any tool call where all paths are within the sandbox directory is automatically allowed.
+For additional scenarios, use concrete paths matching the directories in the compiled rules. Note: sandbox containment is handled by a structural invariant before compiled rules run — any tool call where all paths are within the sandbox directory is automatically allowed.
 
 ## Available Tools
 

@@ -43,15 +43,15 @@ export const testCompiledPolicy: CompiledPolicyFile = {
       reason: 'Deletes outside sandbox are forbidden. Structural sandbox invariant allows sandbox-internal deletes before this rule fires.',
     },
     {
-      name: 'deny-write-outside-permitted-areas',
-      description: 'Deny write-path operations outside sandbox.',
-      principle: 'Least privilege',
+      name: 'escalate-write-outside-permitted-areas',
+      description: 'Escalate write-path operations outside sandbox to human.',
+      principle: 'Human oversight',
       if: {
         roles: ['write-path'],
         server: ['filesystem'],
       },
-      then: 'deny',
-      reason: 'Writes outside sandbox are denied.',
+      then: 'escalate',
+      reason: 'Writes outside sandbox require human approval.',
     },
     {
       name: 'escalate-read-outside-permitted-areas',

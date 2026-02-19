@@ -12,7 +12,7 @@
 
 import 'dotenv/config';
 import { createAnthropic } from '@ai-sdk/anthropic';
-import { readFileSync, writeFileSync, mkdirSync, existsSync, realpathSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
@@ -37,6 +37,7 @@ import type {
   VerificationResult,
   RepairContext,
 } from './types.js';
+import { resolveRealPath } from '../types/argument-roles.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -68,10 +69,10 @@ function loadPipelineConfig(): PipelineConfig {
   const auditLogPath = process.env.AUDIT_LOG_PATH ?? './audit.jsonl';
 
   const protectedPaths = [
-    constitutionPath,
-    generatedDir,
-    mcpServersPath,
-    resolve(auditLogPath),
+    resolveRealPath(constitutionPath),
+    resolveRealPath(generatedDir),
+    resolveRealPath(mcpServersPath),
+    resolveRealPath(auditLogPath),
   ];
 
   return {
@@ -135,12 +136,14 @@ function computeScenariosHash(
   handwrittenScenarios: TestScenario[],
   sandboxDirectory: string,
   protectedPaths: string[],
+  permittedDirectories: string[],
 ): string {
   const prompt = buildGeneratorPrompt(
     constitutionText,
     annotations,
     sandboxDirectory,
     protectedPaths,
+    permittedDirectories,
   );
   return computeHash(
     prompt,
@@ -149,7 +152,18 @@ function computeScenariosHash(
     JSON.stringify(handwrittenScenarios),
     JSON.stringify({ sandboxDirectory }),
     JSON.stringify(protectedPaths),
+    JSON.stringify(permittedDirectories),
   );
+}
+
+function extractPermittedDirectories(rules: CompiledRule[]): string[] {
+  const dirs = new Set<string>();
+  for (const rule of rules) {
+    if (rule.if.paths?.within) {
+      dirs.add(rule.if.paths.within);
+    }
+  }
+  return [...dirs].sort();
 }
 
 // ---------------------------------------------------------------------------
@@ -255,12 +269,7 @@ export function resolveRulePaths(rules: CompiledRule[]): CompiledRule[] {
   return rules.map(rule => {
     if (!rule.if.paths?.within) return rule;
 
-    let resolved: string;
-    try {
-      resolved = realpathSync(rule.if.paths.within);
-    } catch {
-      resolved = resolve(rule.if.paths.within);
-    }
+    const resolved = resolveRealPath(rule.if.paths.within);
     if (resolved === rule.if.paths.within) return rule;
 
     return {
@@ -415,6 +424,7 @@ async function generateTestScenarios(
   annotations: ToolAnnotation[],
   allowedDirectory: string,
   protectedPaths: string[],
+  permittedDirectories: string[],
   existingScenarios: TestScenariosFile | undefined,
   llm: LanguageModel,
 ): Promise<ScenarioResult> {
@@ -425,6 +435,7 @@ async function generateTestScenarios(
     handwrittenScenarios,
     allowedDirectory,
     protectedPaths,
+    permittedDirectories,
   );
 
   // Check cache: skip LLM call if inputs haven't changed
@@ -441,6 +452,7 @@ async function generateTestScenarios(
     allowedDirectory,
     protectedPaths,
     llm,
+    permittedDirectories,
   );
   const generatedCount = scenarios.length - handwrittenScenarios.length;
   console.error(
@@ -618,6 +630,9 @@ async function main(): Promise<void> {
     let compiledPolicyFile = buildPolicyArtifact(config.constitutionHash, compilationResult);
     writePolicyArtifact(config.generatedDir, compiledPolicyFile);
 
+    // Extract permitted directories from compiled rules for scenario generation
+    const permittedDirectories = extractPermittedDirectories(compilationResult.rules);
+
     // Generate test scenarios (LLM-cacheable)
     logContext.stepName = 'generate-scenarios';
     const scenarioResult = await generateTestScenarios(
@@ -625,6 +640,7 @@ async function main(): Promise<void> {
       allAnnotations,
       config.allowedDirectory,
       config.protectedPaths,
+      permittedDirectories,
       existingScenarios,
       llm,
     );
@@ -649,7 +665,7 @@ async function main(): Promise<void> {
     );
 
     // Collect probe scenarios from verifier across all attempts
-    let accumulatedProbes: TestScenario[] = [];
+    const accumulatedProbes: TestScenario[] = [];
     for (const round of verificationResult.rounds) {
       accumulatedProbes.push(...round.newScenarios);
     }

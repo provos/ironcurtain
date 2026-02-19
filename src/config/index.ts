@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import type { IronCurtainConfig, MCPServerConfig } from './types.js';
 import type { CompiledPolicyFile, ToolAnnotationsFile } from '../pipeline/types.js';
 import { getIronCurtainHome } from './paths.js';
+import { resolveRealPath } from '../types/argument-roles.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -41,10 +42,10 @@ export function loadConfig(): IronCurtainConfig {
   const generatedDir = resolve(__dirname, 'generated');
 
   const protectedPaths = [
-    constitutionPath,
-    generatedDir,
-    mcpServersPath,
-    resolve(auditLogPath),
+    resolveRealPath(constitutionPath),
+    resolveRealPath(generatedDir),
+    resolveRealPath(mcpServersPath),
+    resolveRealPath(auditLogPath),
   ];
 
   return {

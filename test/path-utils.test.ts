@@ -1,6 +1,12 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
+
+// Mock realpathSync so tests don't depend on real filesystem symlinks.
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return { ...actual, realpathSync: (p: string) => p };
+});
 import { expandTilde, normalizeToolArgPaths, prepareToolArgs } from '../src/trusted-process/path-utils.js';
 import type { ToolAnnotation } from '../src/pipeline/types.js';
 

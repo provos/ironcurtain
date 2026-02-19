@@ -10,7 +10,6 @@
  *          The most restrictive result wins: deny > escalate > allow.
  */
 
-import { resolve } from 'node:path';
 import type { ToolCallRequest, PolicyDecisionStatus } from '../types/mcp.js';
 import type { EvaluationResult } from './policy-types.js';
 import type {
@@ -20,7 +19,7 @@ import type {
   CompiledRule,
   ArgumentRole,
 } from '../pipeline/types.js';
-import { getResourceRoles, getRoleDefinition } from '../types/argument-roles.js';
+import { getResourceRoles, getRoleDefinition, resolveRealPath } from '../types/argument-roles.js';
 
 /**
  * Heuristically extracts filesystem paths from tool call arguments.
@@ -71,12 +70,12 @@ function extractAnnotatedPaths(
 
 /**
  * Checks whether a target path is contained within a directory.
- * Both paths are resolved to absolute form before comparison,
- * which neutralizes path traversal attacks.
+ * Both paths are resolved to their real canonical form (following symlinks)
+ * before comparison, which neutralizes both path traversal and symlink attacks.
  */
 function isWithinDirectory(targetPath: string, directory: string): boolean {
-  const resolved = resolve(targetPath);
-  const resolvedDir = resolve(directory);
+  const resolved = resolveRealPath(targetPath);
+  const resolvedDir = resolveRealPath(directory);
   return resolved === resolvedDir || resolved.startsWith(resolvedDir + '/');
 }
 
@@ -84,11 +83,13 @@ function isWithinDirectory(targetPath: string, directory: string): boolean {
  * Checks whether a resolved path matches any protected path.
  * A path is protected if it equals a protected path exactly
  * or is contained within a protected directory.
+ * Both sides are resolved through symlinks for accurate comparison.
  */
 function isProtectedPath(resolvedPath: string, protectedPaths: string[]): boolean {
+  const realPath = resolveRealPath(resolvedPath);
   return protectedPaths.some(pp => {
-    const resolvedPP = resolve(pp);
-    return resolvedPath === resolvedPP || resolvedPath.startsWith(resolvedPP + '/');
+    const resolvedPP = resolveRealPath(pp);
+    return realPath === resolvedPP || realPath.startsWith(resolvedPP + '/');
   });
 }
 
@@ -195,7 +196,7 @@ export class PolicyEngine {
 
     // Union of both extraction methods, deduplicated
     const allPaths = [...new Set([...heuristicPaths, ...annotatedPaths])];
-    const resolvedPaths = allPaths.map(p => resolve(p));
+    const resolvedPaths = allPaths.map(p => resolveRealPath(p));
 
     // Check protected paths
     for (const rp of resolvedPaths) {

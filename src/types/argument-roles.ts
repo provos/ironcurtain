@@ -7,8 +7,9 @@
  * normalization instead of fragile heuristics.
  */
 
+import { realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { resolve } from 'node:path';
+import { resolve, dirname, basename, join } from 'node:path';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -34,9 +35,33 @@ export function expandTilde(filePath: string): string {
   return filePath;
 }
 
-/** Tilde expansion + path.resolve() to produce an absolute canonical path. */
+/**
+ * Resolves a filesystem path to its canonical real path, following symlinks.
+ *
+ * Tries three strategies in order:
+ * 1. `realpathSync(path)` — works for existing paths, follows all symlinks
+ * 2. `realpathSync(parent) + basename` — works for new files in existing dirs
+ * 3. `path.resolve(path)` — fallback for entirely new paths
+ *
+ * This is security-critical: without symlink resolution, a symlinked
+ * directory inside the sandbox could escape containment checks.
+ */
+export function resolveRealPath(filePath: string): string {
+  const absolute = resolve(filePath);
+  try {
+    return realpathSync(absolute);
+  } catch {
+    try {
+      return join(realpathSync(dirname(absolute)), basename(absolute));
+    } catch {
+      return absolute;
+    }
+  }
+}
+
+/** Tilde expansion + symlink resolution to produce a canonical real path. */
 export function normalizePath(value: string): string {
-  return resolve(expandTilde(value));
+  return resolveRealPath(expandTilde(value));
 }
 
 /** Identity function -- returns the value unchanged. */
