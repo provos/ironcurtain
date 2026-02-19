@@ -39,7 +39,7 @@ import { StepLoopDetector } from './step-loop-detector.js';
 import { truncateResult, getResultSizeLimit, formatKB } from './truncate-result.js';
 import * as logger from '../logger.js';
 
-const MAX_AGENT_STEPS = 10;
+const MAX_AGENT_STEPS = 100;
 const ESCALATION_POLL_INTERVAL_MS = 300;
 
 /** Default sandbox factory: creates a real UTCP Code Mode sandbox. */
