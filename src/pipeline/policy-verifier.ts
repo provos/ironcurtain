@@ -19,6 +19,8 @@ import type {
   ExecutionResult,
   VerifierRound,
   VerificationResult,
+  AttributedFailure,
+  ScenarioCorrection,
 } from './types.js';
 
 const DEFAULT_MAX_ROUNDS = 3;
@@ -111,11 +113,15 @@ When analyzing FAIL results, pay attention to whether the constitution implies "
 
 ## Instructions
 
-1. Analyze any FAIL results. Is the compiled rule wrong, or is the test expectation wrong?
+1. Analyze any FAIL results. For each failure, determine the blame:
+   - **"rule"**: The compiled rule is wrong and needs to be fixed. The scenario expectation correctly reflects the constitution.
+   - **"scenario"**: The scenario expectation is wrong. The compiled rule is correct per the constitution. Provide the corrected expectedDecision and reasoning.
+   - **"both"**: The rule needs adjustment AND the scenario expectation is wrong. Provide the corrected expectedDecision and reasoning.
 2. Identify suspicious patterns (e.g., a broad allow rule shadowing a narrow deny, or "deny" used where "escalate" would be more appropriate).
 3. Identify missing coverage -- scenarios the constitution implies that were not tested.
 4. If you suspect gaps, generate additional test scenarios to probe them.
 5. Set "pass" to true ONLY if all results are correct and coverage is adequate.
+6. Return a "failureAttributions" entry for EVERY FAIL result. The scenarioDescription must exactly match the FAIL scenario's description.
 
 For additional scenarios, use concrete paths matching the directories in the compiled rules. Note: sandbox containment is handled by a structural invariant before compiled rules run — any tool call where all paths are within the sandbox directory is automatically allowed.
 
@@ -148,9 +154,32 @@ export async function verifyPolicy(
   const toolNamesList = [...new Set(allAnnotations.map(a => a.toolName))] as [string, ...string[]];
   const availableTools = allAnnotations.map(a => ({ serverName: a.serverName, toolName: a.toolName }));
 
+  const blameSchema = z.discriminatedUnion('kind', [
+    z.object({
+      kind: z.literal('rule'),
+      reasoning: z.string(),
+    }),
+    z.object({
+      kind: z.literal('scenario'),
+      reasoning: z.string(),
+      correctedDecision: z.enum(['allow', 'deny', 'escalate']),
+      correctedReasoning: z.string(),
+    }),
+    z.object({
+      kind: z.literal('both'),
+      reasoning: z.string(),
+      correctedDecision: z.enum(['allow', 'deny', 'escalate']),
+      correctedReasoning: z.string(),
+    }),
+  ]);
+
   const responseSchema = z.object({
     analysis: z.string(),
     pass: z.boolean(),
+    failureAttributions: z.array(z.object({
+      scenarioDescription: z.string(),
+      blame: blameSchema,
+    })),
     additionalScenarios: z.array(z.object({
       description: z.string(),
       request: z.object({
@@ -162,7 +191,6 @@ export async function verifyPolicy(
       reasoning: z.string(),
     })),
   });
-
 
   const rounds: VerifierRound[] = [];
   const allFailedScenarios: ExecutionResult[] = [];
@@ -204,6 +232,7 @@ export async function verifyPolicy(
       executionResults,
       llmAnalysis: judgment.analysis,
       newScenarios,
+      attributedFailures: judgment.failureAttributions,
     });
 
     previousAnalysis = judgment.analysis;
@@ -235,4 +264,65 @@ export async function verifyPolicy(
     summary: lastRound?.llmAnalysis ?? 'Verification did not complete',
     failedScenarios: allFailedScenarios,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Scenario Corrections
+// ---------------------------------------------------------------------------
+
+/**
+ * Extracts scenario corrections from attributed failures.
+ * Only failures blamed on 'scenario' or 'both' produce corrections.
+ * Handwritten scenarios are never auto-corrected — they are returned
+ * separately as warnings so the caller can reclassify them as rule issues.
+ */
+export function extractScenarioCorrections(
+  attributedFailures: AttributedFailure[],
+  scenarios: TestScenario[],
+): { corrections: ScenarioCorrection[]; handwrittenWarnings: string[] } {
+  const corrections: ScenarioCorrection[] = [];
+  const handwrittenWarnings: string[] = [];
+
+  for (const af of attributedFailures) {
+    if (af.blame.kind === 'rule') continue;
+
+    const scenario = scenarios.find(s => s.description === af.scenarioDescription);
+    if (!scenario) continue;
+
+    if (scenario.source === 'handwritten') {
+      handwrittenWarnings.push(
+        `Judge blamed scenario "${af.scenarioDescription}" but it is handwritten — treating as rule issue`,
+      );
+      continue;
+    }
+
+    corrections.push({
+      scenarioDescription: af.scenarioDescription,
+      correctedDecision: af.blame.correctedDecision,
+      correctedReasoning: af.blame.correctedReasoning,
+    });
+  }
+
+  return { corrections, handwrittenWarnings };
+}
+
+/**
+ * Applies corrections to a scenario list, returning a new array with
+ * updated expectedDecision and reasoning for corrected scenarios.
+ */
+export function applyScenarioCorrections(
+  scenarios: TestScenario[],
+  corrections: ScenarioCorrection[],
+): TestScenario[] {
+  const correctionMap = new Map(corrections.map(c => [c.scenarioDescription, c]));
+
+  return scenarios.map(s => {
+    const correction = correctionMap.get(s.description);
+    if (!correction) return s;
+    return {
+      ...s,
+      expectedDecision: correction.correctedDecision,
+      reasoning: correction.correctedReasoning,
+    };
+  });
 }

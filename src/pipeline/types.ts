@@ -17,6 +17,10 @@ import type { ArgumentRole } from '../types/argument-roles.js';
 export type { ArgumentRole };
 export { isArgumentRole, getArgumentRoleValues } from '../types/argument-roles.js';
 
+// Re-use the runtime decision type under a pipeline-friendly alias.
+import type { PolicyDecisionStatus } from '../types/mcp.js';
+export type Decision = PolicyDecisionStatus;
+
 export interface ToolAnnotation {
   toolName: string;
   serverName: string;
@@ -52,7 +56,7 @@ export interface CompiledRule {
   description: string;
   principle: string;
   if: CompiledRuleCondition;
-  then: 'allow' | 'deny' | 'escalate';
+  then: Decision;
   reason: string;
 }
 
@@ -74,7 +78,7 @@ export interface TestScenario {
     toolName: string;
     arguments: Record<string, unknown>;
   };
-  expectedDecision: 'allow' | 'deny' | 'escalate';
+  expectedDecision: Decision;
   reasoning: string;
   source: 'generated' | 'handwritten';
 }
@@ -92,7 +96,7 @@ export interface TestScenariosFile {
 
 export interface ExecutionResult {
   scenario: TestScenario;
-  actualDecision: 'allow' | 'deny' | 'escalate';
+  actualDecision: Decision;
   matchingRule: string;
   pass: boolean;
 }
@@ -102,6 +106,7 @@ export interface VerifierRound {
   executionResults: ExecutionResult[];
   llmAnalysis: string;
   newScenarios: TestScenario[];
+  attributedFailures?: AttributedFailure[];
 }
 
 export interface VerificationResult {
@@ -109,6 +114,26 @@ export interface VerificationResult {
   rounds: VerifierRound[];
   summary: string;
   failedScenarios: ExecutionResult[];
+}
+
+// ---------------------------------------------------------------------------
+// Blame Attribution (dual-channel repair)
+// ---------------------------------------------------------------------------
+
+export type FailureBlame =
+  | { kind: 'rule'; reasoning: string }
+  | { kind: 'scenario'; reasoning: string; correctedDecision: Decision; correctedReasoning: string }
+  | { kind: 'both'; reasoning: string; correctedDecision: Decision; correctedReasoning: string };
+
+export interface AttributedFailure {
+  scenarioDescription: string;
+  blame: FailureBlame;
+}
+
+export interface ScenarioCorrection {
+  scenarioDescription: string;
+  correctedDecision: Decision;
+  correctedReasoning: string;
 }
 
 // ---------------------------------------------------------------------------

@@ -50,6 +50,7 @@ function createPassingJudge(): MockLanguageModelV3 {
     doGenerate: async () => mockV3Result({
       analysis: 'All scenarios pass. Policy correctly implements the constitution.',
       pass: true,
+      failureAttributions: [],
       additionalScenarios: [],
     }),
   });
@@ -66,6 +67,7 @@ function createMultiRoundJudge(): MockLanguageModelV3 {
         ? {
             analysis: 'Some scenarios pass but need to probe edge cases.',
             pass: false,
+            failureAttributions: [],
             additionalScenarios: [{
               description: 'Read file at sandbox boundary',
               request: {
@@ -80,6 +82,7 @@ function createMultiRoundJudge(): MockLanguageModelV3 {
         : {
             analysis: 'All scenarios including probes pass. Policy is correct.',
             pass: true,
+            failureAttributions: [],
             additionalScenarios: [],
           };
 
@@ -184,6 +187,7 @@ describe('Policy Verifier', () => {
       doGenerate: async () => mockV3Result({
         analysis: 'Outside-sandbox scenarios fail -- reads and writes are allowed everywhere.',
         pass: false,
+        failureAttributions: [],
         additionalScenarios: [],
       }),
     });
@@ -218,6 +222,7 @@ describe('Policy Verifier', () => {
         return mockV3Result({
           analysis: `Round ${callCount}: generating more probes.`,
           pass: false,
+          failureAttributions: [],
           additionalScenarios: [{
             description: `Probe scenario ${callCount}`,
             request: {

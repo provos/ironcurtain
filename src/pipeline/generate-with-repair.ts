@@ -12,6 +12,10 @@ import type { z } from 'zod';
 
 const DEFAULT_MAX_TOKENS = 8192;
 
+function formatValidationError(cause: unknown): string {
+  return cause instanceof Error ? cause.message : String(cause);
+}
+
 interface GenerateObjectWithRepairOptions<T extends z.ZodType> {
   model: LanguageModel;
   schema: T;
@@ -48,7 +52,7 @@ export async function generateObjectWithRepair<T extends z.ZodType>({
       { role: 'assistant', content: error.text ?? '' },
       {
         role: 'user',
-        content: `Your response failed schema validation:\n${error.cause instanceof Error ? error.cause.message : String(error.cause)}\n\nPlease fix the errors and return valid JSON matching the schema.`,
+        content: `Your response failed schema validation:\n${formatValidationError(error.cause)}\n\nPlease fix the errors and return valid JSON matching the schema.`,
       },
     ];
 
@@ -73,7 +77,7 @@ export async function generateObjectWithRepair<T extends z.ZodType>({
           { role: 'assistant', content: retryError.text ?? '' },
           {
             role: 'user',
-            content: `Still failing schema validation:\n${retryError.cause instanceof Error ? retryError.cause.message : String(retryError.cause)}\n\nPlease fix the errors and return valid JSON matching the schema.`,
+            content: `Still failing schema validation:\n${formatValidationError(retryError.cause)}\n\nPlease fix the errors and return valid JSON matching the schema.`,
           },
         );
       }

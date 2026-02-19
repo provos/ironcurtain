@@ -25,7 +25,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { annotateTools, validateAnnotationsHeuristic, buildAnnotationPrompt } from './tool-annotator.js';
 import { compileConstitution, validateCompiledRules, buildCompilerPrompt } from './constitution-compiler.js';
 import { generateScenarios, buildGeneratorPrompt } from './scenario-generator.js';
-import { verifyPolicy } from './policy-verifier.js';
+import { verifyPolicy, extractScenarioCorrections, applyScenarioCorrections } from './policy-verifier.js';
 import { getHandwrittenScenarios } from './handwritten-scenarios.js';
 import { createLlmLoggingMiddleware, type LlmLogContext } from './llm-logger.js';
 import type { MCPServerConfig } from '../config/types.js';
@@ -171,9 +171,18 @@ function extractPermittedDirectories(rules: CompiledRule[]): string[] {
   return [...dirs].sort();
 }
 
+function collectProbeScenarios(result: VerificationResult): TestScenario[] {
+  return result.rounds.flatMap(round => round.newScenarios);
+}
+
 // ---------------------------------------------------------------------------
-// Spinner Helper
+// Spinner Helpers
 // ---------------------------------------------------------------------------
+
+function showCached(text: string): void {
+  const spinner = ora({ text, stream: process.stderr, discardStdin: false }).start();
+  spinner.succeed(`${text} ${chalk.dim('(cached)')}`);
+}
 
 async function withSpinner<T>(
   text: string,
@@ -266,8 +275,7 @@ async function annotateServerTools(
   // Check cache: skip LLM call if inputs haven't changed
   const cached = existingAnnotations?.servers[serverName];
   if (cached && cached.inputHash === inputHash) {
-    const spinner = ora({ text: stepText, stream: process.stderr, discardStdin: false }).start();
-    spinner.succeed(`${stepText} ${chalk.dim('(cached)')}`);
+    showCached(stepText);
     return { annotations: cached.tools, inputHash };
   }
 
@@ -354,8 +362,7 @@ async function compilePolicyRules(
   // Check cache: skip LLM call if inputs haven't changed.
   // Still resolve paths in case symlink targets changed since last run.
   if (existingPolicy && existingPolicy.inputHash === inputHash) {
-    const spinner = ora({ text: stepText, stream: process.stderr, discardStdin: false }).start();
-    spinner.succeed(`${stepText} ${chalk.dim('(cached)')}`);
+    showCached(stepText);
     return { rules: resolveRulePaths(existingPolicy.rules), inputHash };
   }
 
@@ -370,16 +377,7 @@ async function compilePolicyRules(
         undefined,
         (msg) => { spinner.text = `${stepText} — ${msg}`; },
       ));
-
-      const ruleValidation = validateCompiledRules(rules);
-      if (ruleValidation.warnings.length > 0) {
-        for (const w of ruleValidation.warnings) {
-          console.error(`  ${chalk.yellow('Warning:')} ${w}`);
-        }
-      }
-      if (!ruleValidation.valid) {
-        throw new RuleValidationError(ruleValidation.errors);
-      }
+      validateRulesOrThrow(rules);
       return rules;
     },
     (rules, elapsed) =>
@@ -393,6 +391,18 @@ class RuleValidationError extends Error {
   constructor(public readonly errors: string[]) {
     super('Compiled rule validation failed');
     this.name = 'RuleValidationError';
+  }
+}
+
+function validateRulesOrThrow(rules: CompiledRule[]): void {
+  const ruleValidation = validateCompiledRules(rules);
+  if (ruleValidation.warnings.length > 0) {
+    for (const w of ruleValidation.warnings) {
+      console.error(`  ${chalk.yellow('Warning:')} ${w}`);
+    }
+  }
+  if (!ruleValidation.valid) {
+    throw new RuleValidationError(ruleValidation.errors);
   }
 }
 
@@ -413,16 +423,7 @@ async function compilePolicyRulesWithRepair(
     repairContext,
     onProgress,
   ));
-
-  const ruleValidation = validateCompiledRules(compiledRules);
-  if (ruleValidation.warnings.length > 0) {
-    for (const w of ruleValidation.warnings) {
-      console.error(`  ${chalk.yellow('Warning:')} ${w}`);
-    }
-  }
-  if (!ruleValidation.valid) {
-    throw new RuleValidationError(ruleValidation.errors);
-  }
+  validateRulesOrThrow(compiledRules);
 
   return { rules: compiledRules, inputHash: `${baseInputHash}-repair` };
 }
@@ -491,8 +492,7 @@ async function generateTestScenarios(
 
   // Check cache: skip LLM call if inputs haven't changed
   if (existingScenarios && existingScenarios.inputHash === inputHash) {
-    const spinner = ora({ text: stepText, stream: process.stderr, discardStdin: false }).start();
-    spinner.succeed(`${stepText} ${chalk.dim('(cached)')}`);
+    showCached(stepText);
     return { scenarios: existingScenarios.scenarios, inputHash };
   }
 
@@ -734,14 +734,16 @@ async function main(): Promise<void> {
     let verificationResult = verificationResultInitial;
 
     // Collect probe scenarios from verifier across all attempts
-    const accumulatedProbes: TestScenario[] = [];
-    for (const round of verificationResult.rounds) {
-      accumulatedProbes.push(...round.newScenarios);
-    }
+    const accumulatedProbes: TestScenario[] = collectProbeScenarios(verificationResult);
 
-    // Compile-verify-repair loop (up to 2 repair attempts)
+    // Dual-channel compile-verify-repair loop (up to 2 repair attempts)
+    // The judge attributes each failure to 'rule', 'scenario', or 'both':
+    //   - scenario-blamed: patch the test expectation
+    //   - rule-blamed: recompile rules with failure feedback
+    //   - both: patch scenario AND recompile
     const MAX_REPAIRS = 2;
     let repairAttempts = 0;
+    let scenarioCorrectionsApplied = 0;
 
     if (!verificationResult.pass) {
       const baseInputHash = compilationResult.inputHash;
@@ -749,42 +751,75 @@ async function main(): Promise<void> {
       for (let attempt = 1; attempt <= MAX_REPAIRS; attempt++) {
         console.error('');
 
-        // Gather judge analysis from the most recent verification
+        // Gather judge analysis and attributions from the most recent verification
         const lastRound = verificationResult.rounds[verificationResult.rounds.length - 1];
         const judgeAnalysis = lastRound?.llmAnalysis ?? verificationResult.summary;
+        const attributedFailures = lastRound?.attributedFailures ?? [];
 
-        // Build repair context from failures
-        const repairContext: RepairContext = {
-          previousRules: compilationResult.rules,
-          failedScenarios: verificationResult.failedScenarios,
-          judgeAnalysis,
-          attemptNumber: attempt,
-        };
-
-        // Recompile with failure feedback (always calls LLM, no cache)
-        logContext.stepName = `repair-compile-${attempt}`;
-        const repairCompileText = `Repair ${attempt}/${MAX_REPAIRS}: Recompiling`;
-        const { result: repairCompileResult } = await withSpinner(
-          repairCompileText,
-          async (spinner) => {
-            return await compilePolicyRulesWithRepair(
-              config.constitutionText,
-              allAnnotations,
-              config.protectedPaths,
-              baseInputHash,
-              repairContext,
-              llm,
-              (msg) => { spinner.text = `${repairCompileText} — ${msg}`; },
-            );
-          },
-          (r, elapsed) =>
-            `Repair ${attempt}/${MAX_REPAIRS}: Recompiled ${r.rules.length} rules (${elapsed.toFixed(1)}s)`,
+        // Split failures into scenario corrections and rule-blamed failures
+        const allScenarios = [...scenarioResult.scenarios, ...accumulatedProbes];
+        const { corrections, handwrittenWarnings } = extractScenarioCorrections(
+          attributedFailures,
+          allScenarios,
         );
-        compilationResult = repairCompileResult;
 
-        // Write updated policy artifact
-        compiledPolicyFile = buildPolicyArtifact(config.constitutionHash, compilationResult);
-        writePolicyArtifact(config.generatedDir, compiledPolicyFile);
+        for (const warning of handwrittenWarnings) {
+          console.error(`  ${chalk.yellow('Warning:')} ${warning}`);
+        }
+
+        // Apply scenario corrections (patch expectations on generated scenarios)
+        if (corrections.length > 0) {
+          scenarioResult.scenarios = applyScenarioCorrections(scenarioResult.scenarios, corrections);
+          const correctedProbes = applyScenarioCorrections(accumulatedProbes, corrections);
+          accumulatedProbes.splice(0, accumulatedProbes.length, ...correctedProbes);
+          scenarioCorrectionsApplied += corrections.length;
+          console.error(`  ${chalk.dim(`Corrected ${corrections.length} scenario expectation(s)`)}`);
+        }
+
+        // Determine which failures need rule recompilation:
+        // - no attribution or blamed on 'rule'/'both' (conservative default)
+        // - handwritten scenarios blamed on 'scenario' (reclassified as rule issues)
+        const allRuleBlamedFailures = verificationResult.failedScenarios.filter(f => {
+          const attr = attributedFailures.find(a => a.scenarioDescription === f.scenario.description);
+          if (!attr || attr.blame.kind === 'rule' || attr.blame.kind === 'both') return true;
+          return handwrittenWarnings.some(w => w.includes(f.scenario.description));
+        });
+
+        if (allRuleBlamedFailures.length > 0) {
+          // Recompile with failure feedback (always calls LLM, no cache)
+          const repairContext: RepairContext = {
+            previousRules: compilationResult.rules,
+            failedScenarios: allRuleBlamedFailures,
+            judgeAnalysis,
+            attemptNumber: attempt,
+          };
+
+          logContext.stepName = `repair-compile-${attempt}`;
+          const repairCompileText = `Repair ${attempt}/${MAX_REPAIRS}: Recompiling`;
+          const { result: repairCompileResult } = await withSpinner(
+            repairCompileText,
+            async (spinner) => {
+              return await compilePolicyRulesWithRepair(
+                config.constitutionText,
+                allAnnotations,
+                config.protectedPaths,
+                baseInputHash,
+                repairContext,
+                llm,
+                (msg) => { spinner.text = `${repairCompileText} — ${msg}`; },
+              );
+            },
+            (r, elapsed) =>
+              `Repair ${attempt}/${MAX_REPAIRS}: Recompiled ${r.rules.length} rules (${elapsed.toFixed(1)}s)`,
+          );
+          compilationResult = repairCompileResult;
+
+          // Write updated policy artifact
+          compiledPolicyFile = buildPolicyArtifact(config.constitutionHash, compilationResult);
+          writePolicyArtifact(config.generatedDir, compiledPolicyFile);
+        } else {
+          console.error(`  ${chalk.dim('No rule-blamed failures — skipping recompilation')}`);
+        }
 
         // Verify with reduced depth, using base scenarios + accumulated probes
         logContext.stepName = `repair-verify-${attempt}`;
@@ -813,9 +848,7 @@ async function main(): Promise<void> {
         verificationResult = repairVerifyResult;
 
         // Accumulate any new probe scenarios
-        for (const round of verificationResult.rounds) {
-          accumulatedProbes.push(...round.newScenarios);
-        }
+        accumulatedProbes.push(...collectProbeScenarios(verificationResult));
 
         repairAttempts = attempt;
 
@@ -846,9 +879,7 @@ async function main(): Promise<void> {
           verificationResult = finalVerifyResult;
 
           // Accumulate any new probes from final verification
-          for (const round of verificationResult.rounds) {
-            accumulatedProbes.push(...round.newScenarios);
-          }
+          accumulatedProbes.push(...collectProbeScenarios(verificationResult));
           break;
         }
       }
@@ -872,6 +903,9 @@ async function main(): Promise<void> {
     }
     if (repairAttempts > 0) {
       console.error(`  Repair attempts: ${repairAttempts}`);
+    }
+    if (scenarioCorrectionsApplied > 0) {
+      console.error(`  Scenario corrections: ${scenarioCorrectionsApplied}`);
     }
     console.error(`  Artifacts written to: ${chalk.dim(config.generatedDir + '/')}`);
     console.error(`  LLM interaction log: ${chalk.dim(logPath)}`);
