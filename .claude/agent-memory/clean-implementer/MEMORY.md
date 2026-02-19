@@ -105,8 +105,10 @@ All moves denied via `deny-delete-operations` rule (move_file source has `delete
 ## Session Test Mocking Pattern
 When mocking `generateText` for session tests:
 - Use `vi.mock('ai', ...)` to replace `generateText` with `vi.fn()`
-- Also mock `@ai-sdk/anthropic` (anthropic function) and `@utcp/code-mode` (CodeModeUtcpClient)
+- Mock `@ai-sdk/anthropic` with BOTH `anthropic` and `createAnthropic` (latter used by `createLanguageModel()` dynamic import)
+- Also mock `@utcp/code-mode` (CodeModeUtcpClient)
 - Mock `generateText` result shape: `{ text, response: { messages: [...] }, totalUsage: { inputTokens, outputTokens, totalTokens } }`
+- Test config must include `userConfig: ResolvedUserConfig` with all 6 fields (agentModelId, policyModelId, apiKey, googleApiKey, openaiApiKey, escalationTimeoutSeconds)
 - GOTCHA: `messages` array is passed by reference to `generateText`. Inspecting `mock.calls[n][0].messages` after the test shows mutated state. Snapshot with `[...opts.messages]` at call time.
 - Use `IRONCURTAIN_HOME` env var pointed at `/tmp/ironcurtain-test-<pid>` for isolation
 - `createSession` factory adds `escalationDir` to session config (required for sandbox to pass ESCALATION_DIR to proxy)
@@ -129,16 +131,24 @@ When mocking `generateText` for session tests:
 - **MCP SDK**: `ListRootsRequestSchema` from `@modelcontextprotocol/sdk/types.js`, `sendRootsListChanged()` on Client, `setRequestHandler()` on Client
 - **Tests**: `test/policy-roots.test.ts` -- unit tests for extraction/conversion/directory functions
 
-## User Configuration
+## User Configuration & Multi-Provider Models
 - **User config module**: `src/config/user-config.ts` -- `loadUserConfig()`, `UserConfig`, `ResolvedUserConfig`, `USER_CONFIG_DEFAULTS`
 - **Config path**: `src/config/paths.ts` -- `getUserConfigPath()` returns `{home}/config.json`
 - **Config file**: `~/.ironcurtain/config.json` -- auto-created with defaults if missing
-- **Fields**: `agentModelId`, `policyModelId`, `apiKey`, `escalationTimeoutSeconds` (all optional in file)
+- **Fields**: `agentModelId`, `policyModelId`, `apiKey`, `googleApiKey`, `openaiApiKey`, `escalationTimeoutSeconds` (all optional in file)
 - **Resolution order**: env var > config file > defaults
-- **IronCurtainConfig**: now has `agentModelId: string` and `escalationTimeoutSeconds: number` (required)
+- **IronCurtainConfig**: has `agentModelId`, `escalationTimeoutSeconds`, `userConfig: ResolvedUserConfig`; NO `anthropicApiKey` (removed)
+- **Model provider module**: `src/config/model-provider.ts` -- `parseModelId()`, `createLanguageModel()`, `getKnownProviders()`
+- **Qualified model ID format**: `"provider:model-id"` (e.g., `"anthropic:claude-sonnet-4-6"`, `"google:gemini-2.0-flash"`)
+- **Bare model IDs** (no colon) default to `anthropic` for backward compat
+- **Dynamic imports**: provider packages (`@ai-sdk/anthropic`, `@ai-sdk/google`, `@ai-sdk/openai`) loaded via `await import()`
+- **Return type**: `createLanguageModel()` returns `Promise<LanguageModelV3>` (from `@ai-sdk/provider`), NOT `LanguageModel` (union with string)
+- **LanguageModel type gotcha**: AI SDK v6 `LanguageModel = GlobalProviderModelId | LanguageModelV3 | LanguageModelV2` -- includes string. Use `LanguageModelV3` from `@ai-sdk/provider` for concrete model return types.
+- **Zod validation**: `qualifiedModelId` refine validates known provider prefix before model creation
+- **Env var overrides**: `ANTHROPIC_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`, `OPENAI_API_KEY`
 - **Proxy escalation timeout**: passed via `ESCALATION_TIMEOUT_SECONDS` env var from sandbox to proxy child process
-- **Pipeline model**: `compile.ts` calls `loadUserConfig()` directly (standalone CLI, Option A from design)
-- **Tests**: `test/user-config.test.ts` -- uses `IRONCURTAIN_HOME` temp dirs for isolation
+- **Pipeline model**: `compile.ts` calls `loadUserConfig()` + `createLanguageModel()` directly (standalone CLI)
+- **Tests**: `test/user-config.test.ts` and `test/model-provider.test.ts` -- uses `IRONCURTAIN_HOME` temp dirs for isolation
 - **Zod validation**: unknown fields warn to stderr, invalid types/values throw
 
 ## Session Logging System

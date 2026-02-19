@@ -120,16 +120,26 @@ Both use the same PolicyEngine with compiled artifacts.
 - Only 3 principles now: Least privilege, No destruction, Human oversight
 - Concrete guidance: RWD in Downloads, read-only in Documents
 
-## User Config File Design (designed 2026-02-19)
+## User Config File Design (designed 2026-02-19, implemented)
 - See `docs/designs/config-file.md` for full spec
 - File: `~/.ironcurtain/config.json`, auto-created with defaults
-- New file: `src/config/user-config.ts` -- `loadUserConfig()`, `UserConfig`, `ResolvedUserConfig`
-- Settings: agentModelId, policyModelId, apiKey, maxAgentSteps, escalationTimeoutSeconds
+- `src/config/user-config.ts` -- `loadUserConfig()`, `UserConfig`, `ResolvedUserConfig`
+- Settings: agentModelId, policyModelId, apiKey, escalationTimeoutSeconds
 - Resolution order: env var > config file > defaults
-- Hardcoded model `'claude-sonnet-4-6'` in `agent-session.ts:260` and `compile.ts:587`
-- `ESCALATION_TIMEOUT_MS = 5 * 60 * 1000` in `mcp-proxy-server.ts:83`
-- Proxy gets timeout via `ESCALATION_TIMEOUT_SECONDS` env var from sandbox
 - Pipeline loads user config directly (standalone CLI, not part of session layer)
+
+## Multi-Provider Model Design (designed 2026-02-19)
+- See `docs/designs/multi-provider-models.md` for full spec
+- Qualified model IDs: `provider:model-id` format (e.g. `anthropic:claude-sonnet-4-6`)
+- Bare model IDs (no colon) default to Anthropic for backward compatibility
+- New file: `src/config/model-provider.ts` -- `parseModelId()`, `createLanguageModel()`
+- Dynamic imports for provider packages (only used provider needs to be installed)
+- Per-provider API keys: apiKey (Anthropic), googleApiKey, openaiApiKey
+- Env var precedence: ANTHROPIC_API_KEY, GOOGLE_GENERATIVE_AI_API_KEY, OPENAI_API_KEY
+- `anthropicApiKey` removed from IronCurtainConfig; replaced by `userConfig: ResolvedUserConfig`
+- API key validation deferred to first LLM call (AI SDK gives better errors than we can)
+- AI SDK's `createProviderRegistry` rejected: requires eager instantiation of all providers
+- Only two callsites need changes: agent-session.ts:260 and compile.ts:588-589
 
 ## NOT Implemented (aspirational in docs)
 - Per-task policy layer
