@@ -129,6 +129,18 @@ When mocking `generateText` for session tests:
 - **MCP SDK**: `ListRootsRequestSchema` from `@modelcontextprotocol/sdk/types.js`, `sendRootsListChanged()` on Client, `setRequestHandler()` on Client
 - **Tests**: `test/policy-roots.test.ts` -- unit tests for extraction/conversion/directory functions
 
+## User Configuration
+- **User config module**: `src/config/user-config.ts` -- `loadUserConfig()`, `UserConfig`, `ResolvedUserConfig`, `USER_CONFIG_DEFAULTS`
+- **Config path**: `src/config/paths.ts` -- `getUserConfigPath()` returns `{home}/config.json`
+- **Config file**: `~/.ironcurtain/config.json` -- auto-created with defaults if missing
+- **Fields**: `agentModelId`, `pipelineModelId`, `apiKey`, `escalationTimeoutSeconds` (all optional in file)
+- **Resolution order**: env var > config file > defaults
+- **IronCurtainConfig**: now has `agentModelId: string` and `escalationTimeoutSeconds: number` (required)
+- **Proxy escalation timeout**: passed via `ESCALATION_TIMEOUT_SECONDS` env var from sandbox to proxy child process
+- **Pipeline model**: `compile.ts` calls `loadUserConfig()` directly (standalone CLI, Option A from design)
+- **Tests**: `test/user-config.test.ts` -- uses `IRONCURTAIN_HOME` temp dirs for isolation
+- **Zod validation**: unknown fields warn to stderr, invalid types/values throw
+
 ## Session Logging System
 - **Logger module**: `src/logger.ts` -- module-level singleton with `setup()`/`teardown()` lifecycle
 - **Log file**: `~/.ironcurtain/sessions/{id}/session.log` (path via `getSessionLogPath()` in `src/config/paths.ts`)
