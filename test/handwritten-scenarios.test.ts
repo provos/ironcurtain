@@ -1,10 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getHandwrittenScenarios } from '../src/pipeline/handwritten-scenarios.js';
 import { PolicyEngine } from '../src/trusted-process/policy-engine.js';
-import type { CompiledPolicyFile, ToolAnnotationsFile } from '../src/pipeline/types.js';
+import { testCompiledPolicy, testToolAnnotations } from './fixtures/test-policy.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(__dirname, '..');
@@ -42,12 +41,6 @@ describe('Handwritten Scenarios', () => {
   });
 
   describe('scenarios produce correct decisions when run against PolicyEngine', () => {
-    const compiledPolicy: CompiledPolicyFile = JSON.parse(
-      readFileSync(resolve(projectRoot, 'src/config/generated/compiled-policy.json'), 'utf-8'),
-    );
-    const toolAnnotations: ToolAnnotationsFile = JSON.parse(
-      readFileSync(resolve(projectRoot, 'src/config/generated/tool-annotations.json'), 'utf-8'),
-    );
     const protectedPaths = [
       resolve(projectRoot, 'src/config/constitution.md'),
       resolve(projectRoot, 'src/config/generated'),
@@ -55,7 +48,7 @@ describe('Handwritten Scenarios', () => {
       resolve('./audit.jsonl'),
     ];
 
-    const engine = new PolicyEngine(compiledPolicy, toolAnnotations, protectedPaths, SANDBOX_DIR);
+    const engine = new PolicyEngine(testCompiledPolicy, testToolAnnotations, protectedPaths, SANDBOX_DIR);
 
     for (const scenario of scenarios) {
       it(`${scenario.description} -> ${scenario.expectedDecision}`, () => {

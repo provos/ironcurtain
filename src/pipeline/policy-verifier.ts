@@ -8,8 +8,8 @@
  */
 
 import type { LanguageModel } from 'ai';
-import { generateText, Output } from 'ai';
 import { z } from 'zod';
+import { generateObjectWithRepair } from './generate-with-repair.js';
 import { PolicyEngine } from '../trusted-process/policy-engine.js';
 import type { ToolCallRequest } from '../types/mcp.js';
 import type {
@@ -22,28 +22,6 @@ import type {
 } from './types.js';
 
 const DEFAULT_MAX_ROUNDS = 3;
-
-function buildJudgeResponseSchema(
-  serverNames: [string, ...string[]],
-  toolNames: [string, ...string[]],
-) {
-  const additionalScenarioSchema = z.object({
-    description: z.string(),
-    request: z.object({
-      serverName: z.enum(serverNames),
-      toolName: z.enum(toolNames),
-      arguments: z.record(z.string(), z.unknown()),
-    }),
-    expectedDecision: z.enum(['allow', 'deny', 'escalate']),
-    reasoning: z.string(),
-  });
-
-  return z.object({
-    analysis: z.string(),
-    pass: z.boolean(),
-    additionalScenarios: z.array(additionalScenarioSchema),
-  });
-}
 
 function executeScenarios(
   engine: PolicyEngine,
@@ -89,6 +67,7 @@ function buildJudgePrompt(
   executionResults: ExecutionResult[],
   roundNumber: number,
   previousAnalysis?: string,
+  availableTools?: { serverName: string; toolName: string }[],
 ): string {
   const rulesText = compiledPolicy.rules
     .map((r, i) => `  ${i + 1}. [${r.name}] if: ${JSON.stringify(r.if)} then: ${r.then} -- ${r.reason}`)
@@ -129,7 +108,13 @@ ${resultsText}
 4. If you suspect gaps, generate additional test scenarios to probe them.
 5. Set "pass" to true ONLY if all results are correct and coverage is adequate.
 
-For additional scenarios, use concrete paths. Note: sandbox containment is handled by a structural invariant before compiled rules run — any tool call where all paths are within the sandbox directory is automatically allowed.`;
+For additional scenarios, use concrete paths. Note: sandbox containment is handled by a structural invariant before compiled rules run — any tool call where all paths are within the sandbox directory is automatically allowed.
+
+## Available Tools
+
+IMPORTANT: Only use these exact server/tool combinations in additional scenarios. Do NOT invent tool names.
+
+${(availableTools ?? []).map(t => `- ${t.serverName}/${t.toolName}`).join('\n')}`;
 }
 
 export async function verifyPolicy(
@@ -145,9 +130,25 @@ export async function verifyPolicy(
   const engine = new PolicyEngine(compiledPolicy, toolAnnotations, protectedPaths, allowedDirectory);
 
   const allAnnotations = Object.values(toolAnnotations.servers).flatMap(s => s.tools);
-  const serverNames = [...new Set(allAnnotations.map(a => a.serverName))] as [string, ...string[]];
-  const toolNames = [...new Set(allAnnotations.map(a => a.toolName))] as [string, ...string[]];
-  const judgeResponseSchema = buildJudgeResponseSchema(serverNames, toolNames);
+  const serverNamesList = [...new Set(allAnnotations.map(a => a.serverName))] as [string, ...string[]];
+  const toolNamesList = [...new Set(allAnnotations.map(a => a.toolName))] as [string, ...string[]];
+  const availableTools = allAnnotations.map(a => ({ serverName: a.serverName, toolName: a.toolName }));
+
+  const responseSchema = z.object({
+    analysis: z.string(),
+    pass: z.boolean(),
+    additionalScenarios: z.array(z.object({
+      description: z.string(),
+      request: z.object({
+        serverName: z.enum(serverNamesList),
+        toolName: z.enum(toolNamesList),
+        arguments: z.record(z.string(), z.unknown()),
+      }),
+      expectedDecision: z.enum(['allow', 'deny', 'escalate']),
+      reasoning: z.string(),
+    })),
+  });
+
 
   const rounds: VerifierRound[] = [];
   const allFailedScenarios: ExecutionResult[] = [];
@@ -169,11 +170,12 @@ export async function verifyPolicy(
       executionResults,
       round,
       previousAnalysis,
+      availableTools,
     );
 
-    const { output: judgment } = await generateText({
+    const { output: judgment } = await generateObjectWithRepair({
       model: llm,
-      output: Output.object({ schema: judgeResponseSchema }),
+      schema: responseSchema,
       prompt,
     });
 

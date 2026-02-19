@@ -8,8 +8,8 @@
  */
 
 import type { LanguageModel } from 'ai';
-import { generateText, Output } from 'ai';
 import { z } from 'zod';
+import { generateObjectWithRepair } from './generate-with-repair.js';
 import type { ToolAnnotation, CompiledRule } from './types.js';
 import { isArgumentRole, getArgumentRoleValues } from '../types/argument-roles.js';
 
@@ -113,9 +113,9 @@ export async function compileConstitution(
   const schema = buildCompilerResponseSchema(serverNames, toolNames);
   const prompt = buildCompilerPrompt(constitutionText, annotations, config);
 
-  const { output } = await generateText({
+  const { output } = await generateObjectWithRepair({
     model: llm,
-    output: Output.object({ schema }),
+    schema,
     prompt,
   });
 

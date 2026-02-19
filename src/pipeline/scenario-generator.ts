@@ -7,8 +7,8 @@
  */
 
 import type { LanguageModel } from 'ai';
-import { generateText, Output } from 'ai';
 import { z } from 'zod';
+import { generateObjectWithRepair } from './generate-with-repair.js';
 import type { ToolAnnotation, TestScenario } from './types.js';
 
 function buildGeneratorResponseSchema(
@@ -117,9 +117,9 @@ export async function generateScenarios(
   const schema = buildGeneratorResponseSchema(serverNames, toolNames);
   const prompt = buildGeneratorPrompt(constitutionText, annotations, sandboxDirectory, protectedPaths);
 
-  const { output } = await generateText({
+  const { output } = await generateObjectWithRepair({
     model: llm,
-    output: Output.object({ schema }),
+    schema,
     prompt,
   });
 

@@ -1,21 +1,16 @@
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { MockLanguageModelV3 } from 'ai/test';
 import { verifyPolicy } from '../src/pipeline/policy-verifier.js';
 import { getHandwrittenScenarios } from '../src/pipeline/handwritten-scenarios.js';
-import type { CompiledPolicyFile, ToolAnnotationsFile } from '../src/pipeline/types.js';
+import { testCompiledPolicy, testToolAnnotations } from './fixtures/test-policy.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(__dirname, '..');
 
-const compiledPolicy: CompiledPolicyFile = JSON.parse(
-  readFileSync(resolve(projectRoot, 'src/config/generated/compiled-policy.json'), 'utf-8'),
-);
-const toolAnnotations: ToolAnnotationsFile = JSON.parse(
-  readFileSync(resolve(projectRoot, 'src/config/generated/tool-annotations.json'), 'utf-8'),
-);
+const compiledPolicy = testCompiledPolicy;
+const toolAnnotations = testToolAnnotations;
 
 const protectedPaths = [
   resolve(projectRoot, 'src/config/constitution.md'),

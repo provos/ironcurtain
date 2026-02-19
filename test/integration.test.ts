@@ -6,39 +6,13 @@ import { v4 as uuidv4 } from 'uuid';
 import { TrustedProcess, type EscalationPromptFn } from '../src/trusted-process/index.js';
 import type { IronCurtainConfig } from '../src/config/types.js';
 import type { ToolCallRequest } from '../src/types/mcp.js';
-import type { CompiledPolicyFile, ToolAnnotationsFile } from '../src/pipeline/types.js';
+import { testCompiledPolicy, testToolAnnotations } from './fixtures/test-policy.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(__dirname, '..');
 
 const SANDBOX_DIR = '/tmp/ironcurtain-test-' + process.pid;
 const AUDIT_LOG_PATH = `/tmp/ironcurtain-test-audit-${process.pid}.jsonl`;
-const DEFAULT_SANDBOX = '/tmp/ironcurtain-sandbox';
-
-/**
- * Loads compiled policy and rewrites `within` paths to use the test's
- * dynamic sandbox directory instead of the default `/tmp/ironcurtain-sandbox`.
- */
-function loadTestPolicy(generatedDir: string, sandboxDir: string): {
-  compiledPolicy: CompiledPolicyFile;
-  toolAnnotations: ToolAnnotationsFile;
-} {
-  const compiledPolicy: CompiledPolicyFile = JSON.parse(
-    readFileSync(resolve(generatedDir, 'compiled-policy.json'), 'utf-8'),
-  );
-  const toolAnnotations: ToolAnnotationsFile = JSON.parse(
-    readFileSync(resolve(generatedDir, 'tool-annotations.json'), 'utf-8'),
-  );
-
-  // Rewrite sandbox paths in compiled rules to match the test sandbox
-  for (const rule of compiledPolicy.rules) {
-    if (rule.if.paths?.within === DEFAULT_SANDBOX) {
-      rule.if.paths.within = sandboxDir;
-    }
-  }
-
-  return { compiledPolicy, toolAnnotations };
-}
 
 /**
  * Writes the rewritten policy artifacts to a temp directory so that
@@ -83,10 +57,8 @@ describe('Integration: TrustedProcess with filesystem MCP server', () => {
     writeFileSync(`${SANDBOX_DIR}/hello.txt`, 'Hello, IronCurtain!');
     writeFileSync(`${SANDBOX_DIR}/data.json`, JSON.stringify({ key: 'value' }));
 
-    // Load and rewrite policy artifacts with test sandbox paths
-    const sourceGeneratedDir = resolve(projectRoot, 'src/config/generated');
-    const { compiledPolicy, toolAnnotations } = loadTestPolicy(sourceGeneratedDir, SANDBOX_DIR);
-    writeTestArtifacts(testGeneratedDir, compiledPolicy, toolAnnotations);
+    // Write deterministic test policy artifacts to temp directory
+    writeTestArtifacts(testGeneratedDir, testCompiledPolicy, testToolAnnotations);
 
     const config: IronCurtainConfig = {
       anthropicApiKey: 'not-needed-for-this-test',

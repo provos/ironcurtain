@@ -8,8 +8,8 @@
  */
 
 import type { LanguageModel } from 'ai';
-import { generateText, Output } from 'ai';
 import { z } from 'zod';
+import { generateObjectWithRepair } from './generate-with-repair.js';
 import type { ToolAnnotation } from './types.js';
 import { getArgumentRoleValues, getRoleDefinition } from '../types/argument-roles.js';
 
@@ -92,9 +92,9 @@ export async function annotateTools(
   const schema = buildAnnotationsResponseSchema(toolNames);
   const prompt = buildAnnotationPrompt(serverName, tools);
 
-  const { output } = await generateText({
+  const { output } = await generateObjectWithRepair({
     model: llm,
-    output: Output.object({ schema }),
+    schema,
     prompt,
   });
 
