@@ -102,7 +102,9 @@ IMPORTANT:
 - Use concrete paths based on the sandbox directory "${sandboxDirectory}".
 - For paths outside all permitted areas, use paths like "/etc/passwd", "/var/log/syslog", etc.
 - Structural invariants (protected paths, unknown tools) are handled separately. Focus on the constitution's content rules.
-- Generate at least 10 scenarios with good coverage across all three decision types (allow, deny, escalate).`;
+- Generate at least 10 scenarios with good coverage across all three decision types (allow, deny, escalate).
+
+Be concise in descriptions and reasoning -- one sentence each.`;
 }
 
 /**
@@ -125,6 +127,7 @@ export async function generateScenarios(
   protectedPaths: string[],
   llm: LanguageModel,
   permittedDirectories?: string[],
+  onProgress?: (message: string) => void,
 ): Promise<TestScenario[]> {
   const serverNames = [...new Set(annotations.map(a => a.serverName))] as [string, ...string[]];
   const toolNames = [...new Set(annotations.map(a => a.toolName))] as [string, ...string[]];
@@ -135,6 +138,7 @@ export async function generateScenarios(
     model: llm,
     schema,
     prompt,
+    onProgress,
   });
 
   // Mark all LLM-generated scenarios with source: 'generated'

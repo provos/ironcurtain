@@ -62,7 +62,7 @@ const cannedAnnotations = {
       toolName: 'write_file',
       comment: 'Creates or overwrites a file with new content',
       sideEffects: true,
-      args: { path: ['write-path'] },
+      args: { path: ['write-path'], content: ['none'] },
     },
     {
       toolName: 'move_file',

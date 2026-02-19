@@ -123,7 +123,11 @@ For additional scenarios, use concrete paths matching the directories in the com
 
 IMPORTANT: Only use these exact server/tool combinations in additional scenarios. Do NOT invent tool names.
 
-${(availableTools ?? []).map(t => `- ${t.serverName}/${t.toolName}`).join('\n')}`;
+${(availableTools ?? []).map(t => `- ${t.serverName}/${t.toolName}`).join('\n')}
+
+## Response Format
+
+Be concise. Keep the analysis to 2-3 sentences per issue found. Only generate additional scenarios that test genuinely untested gaps -- do not duplicate existing coverage. Limit additional scenarios to at most 5.`;
 }
 
 export async function verifyPolicy(
@@ -135,6 +139,7 @@ export async function verifyPolicy(
   llm: LanguageModel,
   maxRounds: number = DEFAULT_MAX_ROUNDS,
   allowedDirectory?: string,
+  onProgress?: (message: string) => void,
 ): Promise<VerificationResult> {
   const engine = new PolicyEngine(compiledPolicy, toolAnnotations, protectedPaths, allowedDirectory);
 
@@ -186,6 +191,7 @@ export async function verifyPolicy(
       model: llm,
       schema: responseSchema,
       prompt,
+      onProgress,
     });
 
     const newScenarios: TestScenario[] = judgment.additionalScenarios.map(s => ({

@@ -11,6 +11,8 @@
  */
 
 import 'dotenv/config';
+import chalk from 'chalk';
+import ora, { type Ora } from 'ora';
 import { createLanguageModel } from '../config/model-provider.js';
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
@@ -170,6 +172,37 @@ function extractPermittedDirectories(rules: CompiledRule[]): string[] {
 }
 
 // ---------------------------------------------------------------------------
+// Spinner Helper
+// ---------------------------------------------------------------------------
+
+async function withSpinner<T>(
+  text: string,
+  fn: (spinner: Ora) => Promise<T>,
+  successFn?: (result: T, elapsed: number) => string,
+): Promise<{ result: T; elapsed: number }> {
+  const spinner = ora({ text, stream: process.stderr, discardStdin: false }).start();
+  const start = Date.now();
+  const timer = setInterval(() => {
+    const secs = ((Date.now() - start) / 1000).toFixed(0);
+    spinner.text = `${text} (${secs}s)`;
+  }, 1000);
+  try {
+    const result = await fn(spinner);
+    clearInterval(timer);
+    const elapsed = (Date.now() - start) / 1000;
+    const successText = successFn
+      ? successFn(result, elapsed)
+      : `${text} (${elapsed.toFixed(1)}s)`;
+    spinner.succeed(successText);
+    return { result, elapsed };
+  } catch (err) {
+    clearInterval(timer);
+    spinner.fail(chalk.red(text));
+    throw err;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // MCP Server Connection & Tool Discovery
 // ---------------------------------------------------------------------------
 
@@ -181,27 +214,35 @@ interface ServerConnection {
 async function connectAndDiscoverTools(
   mcpServers: Record<string, MCPServerConfig>,
 ): Promise<Map<string, ServerConnection>> {
-  const connections = new Map<string, ServerConnection>();
+  const { result } = await withSpinner(
+    '[1/5] Connecting to MCP servers',
+    async (spinner) => {
+      const connections = new Map<string, ServerConnection>();
+      let totalTools = 0;
 
-  for (const [serverName, config] of Object.entries(mcpServers)) {
-    console.error(`[1/5] Connecting to MCP server: ${serverName}...`);
-    const transport = new StdioClientTransport({
-      command: config.command,
-      args: config.args,
-      env: config.env
-        ? { ...(process.env as Record<string, string>), ...config.env }
-        : undefined,
-    });
-    const client = new Client({ name: 'ironcurtain-compiler', version: '0.1.0' });
-    await client.connect(transport);
+      for (const [serverName, config] of Object.entries(mcpServers)) {
+        spinner.text = `[1/5] Connecting to MCP server: ${serverName}...`;
+        const transport = new StdioClientTransport({
+          command: config.command,
+          args: config.args,
+          env: config.env
+            ? { ...(process.env as Record<string, string>), ...config.env }
+            : undefined,
+        });
+        const client = new Client({ name: 'ironcurtain-compiler', version: '0.1.0' });
+        await client.connect(transport);
 
-    const toolsResult = await client.listTools();
-    console.error(`  Found ${toolsResult.tools.length} tools on ${serverName}`);
+        const toolsResult = await client.listTools();
+        totalTools += toolsResult.tools.length;
 
-    connections.set(serverName, { client, tools: toolsResult.tools });
-  }
+        connections.set(serverName, { client, tools: toolsResult.tools });
+      }
+      return { connections, totalTools };
+    },
+    (r, elapsed) => `[1/5] Found ${r.totalTools} tools (${elapsed.toFixed(1)}s)`,
+  );
 
-  return connections;
+  return result.connections;
 }
 
 // ---------------------------------------------------------------------------
@@ -220,29 +261,34 @@ async function annotateServerTools(
   llm: LanguageModel,
 ): Promise<AnnotationResult> {
   const inputHash = computeAnnotationHash(serverName, tools);
+  const stepText = `[2/5] Annotating tools for ${serverName}`;
 
   // Check cache: skip LLM call if inputs haven't changed
   const cached = existingAnnotations?.servers[serverName];
   if (cached && cached.inputHash === inputHash) {
-    console.error(`[2/5] Annotating tools for ${serverName}... (cached)`);
+    const spinner = ora({ text: stepText, stream: process.stderr, discardStdin: false }).start();
+    spinner.succeed(`${stepText} ${chalk.dim('(cached)')}`);
     return { annotations: cached.tools, inputHash };
   }
 
-  console.error(`[2/5] Annotating tools for ${serverName}...`);
-  const annotations = await annotateTools(serverName, tools, llm);
+  const { result } = await withSpinner(
+    stepText,
+    async (spinner) => {
+      const annotations = await annotateTools(serverName, tools, llm,
+        (msg) => { spinner.text = `${stepText} — ${msg}`; },
+      );
 
-  const validation = validateAnnotationsHeuristic(tools, annotations);
-  if (!validation.valid) {
-    console.error('');
-    console.error('Annotation validation FAILED:');
-    for (const w of validation.warnings) {
-      console.error(`  - ${w}`);
-    }
-    throw new AnnotationValidationError(serverName, validation.warnings);
-  }
-  console.error(`  Annotations validated.`);
+      const validation = validateAnnotationsHeuristic(tools, annotations);
+      if (!validation.valid) {
+        throw new AnnotationValidationError(serverName, validation.warnings);
+      }
+      return annotations;
+    },
+    (annotations, elapsed) =>
+      `${stepText}: ${annotations.length} tools annotated (${elapsed.toFixed(1)}s)`,
+  );
 
-  return { annotations, inputHash };
+  return { annotations: result, inputHash };
 }
 
 class AnnotationValidationError extends Error {
@@ -303,37 +349,42 @@ async function compilePolicyRules(
   llm: LanguageModel,
 ): Promise<CompilationResult> {
   const inputHash = computePolicyHash(constitutionText, annotations, protectedPaths);
+  const stepText = '[3/5] Compiling constitution';
 
   // Check cache: skip LLM call if inputs haven't changed.
   // Still resolve paths in case symlink targets changed since last run.
   if (existingPolicy && existingPolicy.inputHash === inputHash) {
-    console.error('[3/5] Compiling constitution... (cached)');
+    const spinner = ora({ text: stepText, stream: process.stderr, discardStdin: false }).start();
+    spinner.succeed(`${stepText} ${chalk.dim('(cached)')}`);
     return { rules: resolveRulePaths(existingPolicy.rules), inputHash };
   }
 
-  console.error('[3/5] Compiling constitution...');
-  const compiledRules = resolveRulePaths(await compileConstitution(
-    constitutionText,
-    annotations,
-    { protectedPaths },
-    llm,
-  ));
+  const { result: compiledRules } = await withSpinner(
+    stepText,
+    async (spinner) => {
+      const rules = resolveRulePaths(await compileConstitution(
+        constitutionText,
+        annotations,
+        { protectedPaths },
+        llm,
+        undefined,
+        (msg) => { spinner.text = `${stepText} — ${msg}`; },
+      ));
 
-  const ruleValidation = validateCompiledRules(compiledRules);
-  if (ruleValidation.warnings.length > 0) {
-    for (const w of ruleValidation.warnings) {
-      console.error(`  Warning: ${w}`);
-    }
-  }
-  if (!ruleValidation.valid) {
-    console.error('');
-    console.error('Compiled rule validation FAILED:');
-    for (const e of ruleValidation.errors) {
-      console.error(`  - ${e}`);
-    }
-    throw new RuleValidationError(ruleValidation.errors);
-  }
-  console.error(`  ${compiledRules.length} rules compiled and validated.`);
+      const ruleValidation = validateCompiledRules(rules);
+      if (ruleValidation.warnings.length > 0) {
+        for (const w of ruleValidation.warnings) {
+          console.error(`  ${chalk.yellow('Warning:')} ${w}`);
+        }
+      }
+      if (!ruleValidation.valid) {
+        throw new RuleValidationError(ruleValidation.errors);
+      }
+      return rules;
+    },
+    (rules, elapsed) =>
+      `${stepText}: ${rules.length} rules compiled (${elapsed.toFixed(1)}s)`,
+  );
 
   return { rules: compiledRules, inputHash };
 }
@@ -352,6 +403,7 @@ async function compilePolicyRulesWithRepair(
   baseInputHash: string,
   repairContext: RepairContext,
   llm: LanguageModel,
+  onProgress?: (message: string) => void,
 ): Promise<CompilationResult> {
   const compiledRules = resolveRulePaths(await compileConstitution(
     constitutionText,
@@ -359,24 +411,18 @@ async function compilePolicyRulesWithRepair(
     { protectedPaths },
     llm,
     repairContext,
+    onProgress,
   ));
 
   const ruleValidation = validateCompiledRules(compiledRules);
   if (ruleValidation.warnings.length > 0) {
     for (const w of ruleValidation.warnings) {
-      console.error(`  Warning: ${w}`);
+      console.error(`  ${chalk.yellow('Warning:')} ${w}`);
     }
   }
   if (!ruleValidation.valid) {
-    console.error('');
-    console.error('Repair compilation validation FAILED:');
-    for (const e of ruleValidation.errors) {
-      console.error(`  - ${e}`);
-    }
     throw new RuleValidationError(ruleValidation.errors);
   }
-
-  console.error(`  ${compiledRules.length} rules compiled.`);
 
   return { rules: compiledRules, inputHash: `${baseInputHash}-repair` };
 }
@@ -441,26 +487,35 @@ async function generateTestScenarios(
     permittedDirectories,
   );
 
+  const stepText = '[4/5] Generating test scenarios';
+
   // Check cache: skip LLM call if inputs haven't changed
   if (existingScenarios && existingScenarios.inputHash === inputHash) {
-    console.error('[4/5] Generating test scenarios... (cached)');
+    const spinner = ora({ text: stepText, stream: process.stderr, discardStdin: false }).start();
+    spinner.succeed(`${stepText} ${chalk.dim('(cached)')}`);
     return { scenarios: existingScenarios.scenarios, inputHash };
   }
 
-  console.error('[4/5] Generating test scenarios...');
-  const scenarios = await generateScenarios(
-    constitutionText,
-    annotations,
-    handwrittenScenarios,
-    allowedDirectory,
-    protectedPaths,
-    llm,
-    permittedDirectories,
+  const { result: scenarios } = await withSpinner(
+    stepText,
+    async (spinner) => {
+      return await generateScenarios(
+        constitutionText,
+        annotations,
+        handwrittenScenarios,
+        allowedDirectory,
+        protectedPaths,
+        llm,
+        permittedDirectories,
+        (msg) => { spinner.text = `${stepText} — ${msg}`; },
+      );
+    },
+    (scenarios, elapsed) => {
+      const generatedCount = scenarios.length - handwrittenScenarios.length;
+      return `${stepText}: ${scenarios.length} scenarios (${handwrittenScenarios.length} handwritten + ${generatedCount} generated) (${elapsed.toFixed(1)}s)`;
+    },
   );
-  const generatedCount = scenarios.length - handwrittenScenarios.length;
-  console.error(
-    `  ${scenarios.length} scenarios (${handwrittenScenarios.length} handwritten + ${generatedCount} generated).`,
-  );
+
   return { scenarios, inputHash };
 }
 
@@ -478,6 +533,7 @@ async function verifyCompiledPolicy(
   allowedDirectory?: string,
   maxRounds: number = 3,
   verbose: boolean = true,
+  onProgress?: (message: string) => void,
 ): Promise<VerificationResult> {
   const result = await verifyPolicy(
     constitutionText,
@@ -488,16 +544,17 @@ async function verifyCompiledPolicy(
     llm,
     maxRounds,
     allowedDirectory,
+    onProgress,
   );
 
   if (!result.pass) {
     if (verbose) {
       console.error('');
-      console.error('Verification FAILED:');
+      console.error(chalk.red('Verification FAILED:'));
       console.error(result.summary);
       console.error('');
       for (const f of result.failedScenarios) {
-        console.error(`  FAIL: ${f.scenario.description}`);
+        console.error(`  ${chalk.red('FAIL:')} ${f.scenario.description}`);
         console.error(
           `    Expected: ${f.scenario.expectedDecision}, Got: ${f.actualDecision} (rule: ${f.matchingRule})`,
         );
@@ -577,11 +634,11 @@ async function disconnectAll(connections: Map<string, ServerConnection>): Promis
 async function main(): Promise<void> {
   const config = loadPipelineConfig();
 
-  console.error('Policy Compilation Pipeline');
-  console.error('===========================');
-  console.error(`Constitution: ${config.constitutionPath}`);
-  console.error(`Sandbox: ${config.allowedDirectory}`);
-  console.error(`Output: ${config.generatedDir}/`);
+  console.error(chalk.bold('Policy Compilation Pipeline'));
+  console.error(chalk.bold('==========================='));
+  console.error(`Constitution: ${chalk.dim(config.constitutionPath)}`);
+  console.error(`Sandbox:      ${chalk.dim(config.allowedDirectory)}`);
+  console.error(`Output:       ${chalk.dim(config.generatedDir + '/')}`);
   console.error('');
 
   const userConfig = loadUserConfig();
@@ -654,18 +711,27 @@ async function main(): Promise<void> {
 
     // Verify compiled policy against scenarios (full depth)
     logContext.stepName = 'verify-policy';
-    console.error('[5/5] Verifying policy...');
-    let verificationResult = await verifyCompiledPolicy(
-      config.constitutionText,
-      compiledPolicyFile,
-      toolAnnotationsFile,
-      config.protectedPaths,
-      scenarioResult.scenarios,
-      llm,
-      config.allowedDirectory,
-      3,
-      true,
+    const { result: verificationResultInitial } = await withSpinner(
+      '[5/5] Verifying policy',
+      async (spinner) => {
+        return await verifyCompiledPolicy(
+          config.constitutionText,
+          compiledPolicyFile,
+          toolAnnotationsFile,
+          config.protectedPaths,
+          scenarioResult.scenarios,
+          llm,
+          config.allowedDirectory,
+          3,
+          true,
+          (msg) => { spinner.text = `[5/5] Verifying policy — ${msg}`; },
+        );
+      },
+      (r, elapsed) => r.pass
+        ? `[5/5] Verified policy: ${r.rounds.length} round(s) (${elapsed.toFixed(1)}s)`
+        : `[5/5] Verification completed with failures (${elapsed.toFixed(1)}s)`,
     );
+    let verificationResult = verificationResultInitial;
 
     // Collect probe scenarios from verifier across all attempts
     const accumulatedProbes: TestScenario[] = [];
@@ -682,7 +748,6 @@ async function main(): Promise<void> {
 
       for (let attempt = 1; attempt <= MAX_REPAIRS; attempt++) {
         console.error('');
-        console.error(`--- Repair attempt ${attempt}/${MAX_REPAIRS} ---`);
 
         // Gather judge analysis from the most recent verification
         const lastRound = verificationResult.rounds[verificationResult.rounds.length - 1];
@@ -698,15 +763,24 @@ async function main(): Promise<void> {
 
         // Recompile with failure feedback (always calls LLM, no cache)
         logContext.stepName = `repair-compile-${attempt}`;
-        console.error('  Recompiling with failure feedback...');
-        compilationResult = await compilePolicyRulesWithRepair(
-          config.constitutionText,
-          allAnnotations,
-          config.protectedPaths,
-          baseInputHash,
-          repairContext,
-          llm,
+        const repairCompileText = `Repair ${attempt}/${MAX_REPAIRS}: Recompiling`;
+        const { result: repairCompileResult } = await withSpinner(
+          repairCompileText,
+          async (spinner) => {
+            return await compilePolicyRulesWithRepair(
+              config.constitutionText,
+              allAnnotations,
+              config.protectedPaths,
+              baseInputHash,
+              repairContext,
+              llm,
+              (msg) => { spinner.text = `${repairCompileText} — ${msg}`; },
+            );
+          },
+          (r, elapsed) =>
+            `Repair ${attempt}/${MAX_REPAIRS}: Recompiled ${r.rules.length} rules (${elapsed.toFixed(1)}s)`,
         );
+        compilationResult = repairCompileResult;
 
         // Write updated policy artifact
         compiledPolicyFile = buildPolicyArtifact(config.constitutionHash, compilationResult);
@@ -715,18 +789,28 @@ async function main(): Promise<void> {
         // Verify with reduced depth, using base scenarios + accumulated probes
         logContext.stepName = `repair-verify-${attempt}`;
         const repairScenarios = [...scenarioResult.scenarios, ...accumulatedProbes];
-        console.error('  Verifying...');
-        verificationResult = await verifyCompiledPolicy(
-          config.constitutionText,
-          compiledPolicyFile,
-          toolAnnotationsFile,
-          config.protectedPaths,
-          repairScenarios,
-          llm,
-          config.allowedDirectory,
-          1,
-          false,
+        const repairVerifyText = `Repair ${attempt}/${MAX_REPAIRS}: Verifying`;
+        const { result: repairVerifyResult } = await withSpinner(
+          repairVerifyText,
+          async (spinner) => {
+            return await verifyCompiledPolicy(
+              config.constitutionText,
+              compiledPolicyFile,
+              toolAnnotationsFile,
+              config.protectedPaths,
+              repairScenarios,
+              llm,
+              config.allowedDirectory,
+              1,
+              false,
+              (msg) => { spinner.text = `${repairVerifyText} — ${msg}`; },
+            );
+          },
+          (r, elapsed) => r.pass
+            ? `Repair ${attempt}/${MAX_REPAIRS}: Verified (${elapsed.toFixed(1)}s)`
+            : `Repair ${attempt}/${MAX_REPAIRS}: ${r.failedScenarios.length} failure(s) (${elapsed.toFixed(1)}s)`,
         );
+        verificationResult = repairVerifyResult;
 
         // Accumulate any new probe scenarios
         for (const round of verificationResult.rounds) {
@@ -737,21 +821,29 @@ async function main(): Promise<void> {
 
         if (verificationResult.pass) {
           // Run final full verification with all accumulated scenarios
-          console.error('');
-          console.error('  Running final full verification...');
           logContext.stepName = 'final-verify';
           const finalScenarios = [...scenarioResult.scenarios, ...accumulatedProbes];
-          verificationResult = await verifyCompiledPolicy(
-            config.constitutionText,
-            compiledPolicyFile,
-            toolAnnotationsFile,
-            config.protectedPaths,
-            finalScenarios,
-            llm,
-            config.allowedDirectory,
-            3,
-            true,
+          const { result: finalVerifyResult } = await withSpinner(
+            'Final full verification',
+            async (spinner) => {
+              return await verifyCompiledPolicy(
+                config.constitutionText,
+                compiledPolicyFile,
+                toolAnnotationsFile,
+                config.protectedPaths,
+                finalScenarios,
+                llm,
+                config.allowedDirectory,
+                3,
+                true,
+                (msg) => { spinner.text = `Final full verification — ${msg}`; },
+              );
+            },
+            (r, elapsed) => r.pass
+              ? `Final full verification: passed (${elapsed.toFixed(1)}s)`
+              : `Final full verification: ${r.failedScenarios.length} failure(s) (${elapsed.toFixed(1)}s)`,
           );
+          verificationResult = finalVerifyResult;
 
           // Accumulate any new probes from final verification
           for (const round of verificationResult.rounds) {
@@ -781,23 +873,23 @@ async function main(): Promise<void> {
     if (repairAttempts > 0) {
       console.error(`  Repair attempts: ${repairAttempts}`);
     }
-    console.error(`  Artifacts written to: ${config.generatedDir}/`);
-    console.error(`  LLM interaction log: ${logPath}`);
+    console.error(`  Artifacts written to: ${chalk.dim(config.generatedDir + '/')}`);
+    console.error(`  LLM interaction log: ${chalk.dim(logPath)}`);
 
     if (!verificationResult.pass) {
       console.error('');
-      console.error('Verification FAILED — artifacts written but policy may need review.');
+      console.error(chalk.red.bold('Verification FAILED — artifacts written but policy may need review.'));
       process.exit(1);
     }
 
     console.error('');
-    console.error('Policy compilation successful!');
+    console.error(chalk.green.bold('Policy compilation successful!'));
   } finally {
     await disconnectAll(connections);
   }
 }
 
 main().catch((err) => {
-  console.error('Policy compilation failed:', err);
+  console.error(chalk.red.bold('Policy compilation failed:'), err);
   process.exit(1);
 });

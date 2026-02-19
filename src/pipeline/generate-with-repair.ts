@@ -10,11 +10,15 @@ import type { LanguageModel } from 'ai';
 import { generateText, NoObjectGeneratedError, Output } from 'ai';
 import type { z } from 'zod';
 
+const DEFAULT_MAX_TOKENS = 8192;
+
 interface GenerateObjectWithRepairOptions<T extends z.ZodType> {
   model: LanguageModel;
   schema: T;
   prompt: string;
   maxRepairAttempts?: number;
+  maxTokens?: number;
+  onProgress?: (message: string) => void;
 }
 
 export async function generateObjectWithRepair<T extends z.ZodType>({
@@ -22,15 +26,18 @@ export async function generateObjectWithRepair<T extends z.ZodType>({
   schema,
   prompt,
   maxRepairAttempts = 2,
-}: GenerateObjectWithRepairOptions<T>): Promise<{ output: z.infer<T> }> {
+  maxTokens = DEFAULT_MAX_TOKENS,
+  onProgress,
+}: GenerateObjectWithRepairOptions<T>): Promise<{ output: z.infer<T>; repairAttempts: number }> {
   // First attempt: simple prompt-based call
   try {
     const result = await generateText({
       model,
       output: Output.object({ schema }),
       prompt,
+      maxTokens,
     });
-    return { output: result.output as z.infer<T> };
+    return { output: result.output as z.infer<T>, repairAttempts: 0 };
   } catch (error) {
     if (!NoObjectGeneratedError.isInstance(error)) throw error;
     if (maxRepairAttempts <= 0) throw error;
@@ -48,14 +55,15 @@ export async function generateObjectWithRepair<T extends z.ZodType>({
     let lastError: unknown = error;
 
     for (let attempt = 0; attempt < maxRepairAttempts; attempt++) {
-      console.error(`  Schema repair attempt ${attempt + 1}/${maxRepairAttempts}...`);
+      onProgress?.(`Schema repair ${attempt + 1}/${maxRepairAttempts}...`);
       try {
         const result = await generateText({
           model,
           output: Output.object({ schema }),
           messages,
+          maxTokens,
         });
-        return { output: result.output as z.infer<T> };
+        return { output: result.output as z.infer<T>, repairAttempts: attempt + 1 };
       } catch (retryError) {
         if (!NoObjectGeneratedError.isInstance(retryError)) throw retryError;
         lastError = retryError;

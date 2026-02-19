@@ -105,7 +105,9 @@ CRITICAL RULES:
 4. The move tool's source argument has both read-path and delete-path roles. A blanket "roles": ["delete-path"] rule will catch all moves.
 5. Order matters: more specific rules before more general ones.
 6. Use all three decision types. Map each constitution principle to the appropriate decision: "allow" for grants, "deny" for prohibitions, and "escalate" for principles that require human judgment or approval. If the constitution does not explicitly forbid an operation, prefer "escalate" over "deny" so a human can decide.
-7. The rule chain must cover all operation types with appropriate fallthrough rules. Do not leave gaps — every combination of argument roles should eventually match a rule.`;
+7. The rule chain must cover all operation types with appropriate fallthrough rules. Do not leave gaps — every combination of argument roles should eventually match a rule.
+
+Be concise in descriptions and reasons -- one sentence each.`;
 }
 
 export function buildRepairPrompt(
@@ -150,6 +152,7 @@ export async function compileConstitution(
   config: CompilerConfig,
   llm: LanguageModel,
   repairContext?: RepairContext,
+  onProgress?: (message: string) => void,
 ): Promise<CompiledRule[]> {
   const serverNames = [...new Set(annotations.map(a => a.serverName))] as [string, ...string[]];
   const toolNames = [...new Set(annotations.map(a => a.toolName))] as [string, ...string[]];
@@ -163,6 +166,7 @@ export async function compileConstitution(
     model: llm,
     schema,
     prompt,
+    onProgress,
   });
 
   return output.rules;

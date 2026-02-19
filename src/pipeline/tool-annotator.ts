@@ -29,7 +29,16 @@ const rolesArraySchema = z.union([
   argumentRoleSchema.transform(r => [r]),
 ]);
 
-function buildAnnotationsResponseSchema(toolNames: [string, ...string[]]) {
+function buildAnnotationsResponseSchema(tools: MCPToolSchema[]) {
+  const toolNames = tools.map(t => t.name) as [string, ...string[]];
+
+  // Map tool name → expected argument names from input schemas
+  const toolArgNames = new Map<string, string[]>();
+  for (const t of tools) {
+    const props = (t.inputSchema['properties'] ?? {}) as Record<string, unknown>;
+    toolArgNames.set(t.name, Object.keys(props));
+  }
+
   const toolAnnotationSchema = z.object({
     toolName: z.enum(toolNames),
     comment: z.string(),
@@ -38,7 +47,20 @@ function buildAnnotationsResponseSchema(toolNames: [string, ...string[]]) {
   });
 
   return z.object({
-    annotations: z.array(toolAnnotationSchema),
+    annotations: z.array(toolAnnotationSchema).superRefine((annotations, ctx) => {
+      for (let i = 0; i < annotations.length; i++) {
+        const a = annotations[i];
+        const expectedArgs = toolArgNames.get(a.toolName) ?? [];
+        const missingArgs = expectedArgs.filter(name => !(name in a.args));
+        if (missingArgs.length > 0) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: [i, 'args'],
+            message: `Tool "${a.toolName}" is missing role annotations for arguments: ${missingArgs.join(', ')}. Each argument must have a role array (e.g. ["read-path"] or ["none"]).`,
+          });
+        }
+      }
+    }),
   });
 }
 
@@ -74,6 +96,18 @@ export function buildAnnotationPrompt(serverName: string, tools: MCPToolSchema[]
 
    Only include arguments that appear in the tool's input schema. If the tool has no arguments, use an empty object.
 
+Here is a complete example annotation for a move_file tool that shows multi-role arguments:
+
+{
+  "toolName": "move_file",
+  "comment": "Moves or renames a file or directory from a source path to a destination path in a single operation.",
+  "sideEffects": true,
+  "args": {
+    "source": ["read-path", "delete-path"],
+    "destination": ["write-path"]
+  }
+}
+
 Here are the tools to annotate:
 
 ${toolDescriptions}
@@ -85,17 +119,18 @@ export async function annotateTools(
   serverName: string,
   tools: MCPToolSchema[],
   llm: LanguageModel,
+  onProgress?: (message: string) => void,
 ): Promise<ToolAnnotation[]> {
   if (tools.length === 0) return [];
 
-  const toolNames = tools.map(t => t.name) as [string, ...string[]];
-  const schema = buildAnnotationsResponseSchema(toolNames);
+  const schema = buildAnnotationsResponseSchema(tools);
   const prompt = buildAnnotationPrompt(serverName, tools);
 
   const { output } = await generateObjectWithRepair({
     model: llm,
     schema,
     prompt,
+    onProgress,
   });
 
   const annotations: ToolAnnotation[] = output.annotations.map(a => ({
