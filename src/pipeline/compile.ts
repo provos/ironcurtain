@@ -12,7 +12,7 @@
 
 import 'dotenv/config';
 import { createAnthropic } from '@ai-sdk/anthropic';
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, realpathSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
@@ -238,6 +238,41 @@ class AnnotationValidationError extends Error {
 }
 
 // ---------------------------------------------------------------------------
+// Path Resolution (post-LLM normalization)
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolves all `paths.within` values in compiled rules to their real
+ * filesystem paths, following symlinks. This ensures that symlinked
+ * directories (e.g., ~/Downloads -> /mnt/c/.../Downloads on WSL) are
+ * resolved to their canonical form so that runtime path comparisons
+ * match correctly.
+ *
+ * Falls back to path.resolve() if the path does not exist on disk.
+ */
+export function resolveRulePaths(rules: CompiledRule[]): CompiledRule[] {
+  return rules.map(rule => {
+    if (!rule.if.paths?.within) return rule;
+
+    let resolved: string;
+    try {
+      resolved = realpathSync(rule.if.paths.within);
+    } catch {
+      resolved = resolve(rule.if.paths.within);
+    }
+    if (resolved === rule.if.paths.within) return rule;
+
+    return {
+      ...rule,
+      if: {
+        ...rule.if,
+        paths: { ...rule.if.paths, within: resolved },
+      },
+    };
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Constitution Compilation (LLM step -- cacheable by constitution + annotations)
 // ---------------------------------------------------------------------------
 
@@ -256,19 +291,20 @@ async function compilePolicyRules(
 ): Promise<CompilationResult> {
   const inputHash = computePolicyHash(constitutionText, annotations, protectedPaths);
 
-  // Check cache: skip LLM call if inputs haven't changed
+  // Check cache: skip LLM call if inputs haven't changed.
+  // Still resolve paths in case symlink targets changed since last run.
   if (existingPolicy && existingPolicy.inputHash === inputHash) {
     console.error('[3/5] Compiling constitution... (cached)');
-    return { rules: existingPolicy.rules, inputHash };
+    return { rules: resolveRulePaths(existingPolicy.rules), inputHash };
   }
 
   console.error('[3/5] Compiling constitution...');
-  const compiledRules = await compileConstitution(
+  const compiledRules = resolveRulePaths(await compileConstitution(
     constitutionText,
     annotations,
     { protectedPaths },
     llm,
-  );
+  ));
 
   const ruleValidation = validateCompiledRules(compiledRules);
   if (ruleValidation.warnings.length > 0) {
