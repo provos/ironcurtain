@@ -257,7 +257,7 @@ export class AgentSession implements Session {
   }
 
   private buildModel(): LanguageModel {
-    const baseModel = anthropic('claude-sonnet-4-6');
+    const baseModel = anthropic(this.config.agentModelId);
     if (!this.config.llmLogPath) return baseModel;
 
     const logContext: LlmLogContext = { stepName: 'agent' };

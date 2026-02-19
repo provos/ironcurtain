@@ -39,6 +39,7 @@ import type {
 } from './types.js';
 import { resolveRealPath } from '../types/argument-roles.js';
 import { getIronCurtainHome } from '../config/paths.js';
+import { loadUserConfig } from '../config/user-config.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -583,8 +584,9 @@ async function main(): Promise<void> {
   console.error(`Output: ${config.generatedDir}/`);
   console.error('');
 
+  const userConfig = loadUserConfig();
   const anthropic = createAnthropic();
-  const baseLlm = anthropic('claude-sonnet-4-6');
+  const baseLlm = anthropic(userConfig.pipelineModelId);
 
   const logContext: LlmLogContext = { stepName: 'unknown' };
   const logPath = resolve(config.generatedDir, 'llm-interactions.jsonl');

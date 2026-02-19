@@ -70,6 +70,8 @@ function createTestConfig(): IronCurtainConfig {
     protectedPaths: [],
     generatedDir: '/tmp/test-generated',
     constitutionPath: '/tmp/test-constitution.md',
+    agentModelId: 'claude-sonnet-4-6',
+    escalationTimeoutSeconds: 300,
   };
 }
 

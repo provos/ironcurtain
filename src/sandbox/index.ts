@@ -74,6 +74,11 @@ export class Sandbox {
       proxyEnv.SESSION_LOG_PATH = config.sessionLogPath;
     }
 
+    // Pass escalation timeout to the proxy process and use it for the sandbox timeout.
+    // The sandbox timeout must accommodate human escalation approval time.
+    proxyEnv.ESCALATION_TIMEOUT_SECONDS = String(config.escalationTimeoutSeconds);
+    const timeoutMs = config.escalationTimeoutSeconds * 1000;
+
     await this.client.registerManual({
       name: 'filesystem',
       call_template_type: 'mcp',
@@ -84,7 +89,7 @@ export class Sandbox {
             command: 'npx',
             args: ['tsx', PROXY_SERVER_PATH],
             env: proxyEnv,
-            timeout: 300000, // 5 minutes -- must accommodate human escalation approval
+            timeout: timeoutMs,
           },
         },
       },

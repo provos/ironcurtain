@@ -78,6 +78,8 @@ describe('Integration: TrustedProcess with filesystem MCP server', () => {
       ],
       generatedDir: testGeneratedDir,
       constitutionPath: resolve(projectRoot, 'src/config/constitution.md'),
+      agentModelId: 'claude-sonnet-4-6',
+      escalationTimeoutSeconds: 300,
     };
 
     trustedProcess = new TrustedProcess(config, { onEscalation: mockEscalation });

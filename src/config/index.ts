@@ -5,13 +5,17 @@ import type { IronCurtainConfig, MCPServerConfig } from './types.js';
 import type { CompiledPolicyFile, ToolAnnotationsFile } from '../pipeline/types.js';
 import { getIronCurtainHome } from './paths.js';
 import { resolveRealPath } from '../types/argument-roles.js';
+import { loadUserConfig } from './user-config.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 export function loadConfig(): IronCurtainConfig {
-  const anthropicApiKey = process.env.ANTHROPIC_API_KEY;
-  if (!anthropicApiKey) {
-    throw new Error('ANTHROPIC_API_KEY environment variable is required');
+  const userConfig = loadUserConfig();
+
+  if (!userConfig.apiKey) {
+    throw new Error(
+      'ANTHROPIC_API_KEY environment variable is required (or set apiKey in ~/.ironcurtain/config.json)',
+    );
   }
 
   const auditLogPath = process.env.AUDIT_LOG_PATH ?? './audit.jsonl';
@@ -49,13 +53,15 @@ export function loadConfig(): IronCurtainConfig {
   ];
 
   return {
-    anthropicApiKey,
+    anthropicApiKey: userConfig.apiKey,
     auditLogPath,
     allowedDirectory,
     mcpServers,
     protectedPaths,
     generatedDir,
     constitutionPath,
+    agentModelId: userConfig.agentModelId,
+    escalationTimeoutSeconds: userConfig.escalationTimeoutSeconds,
   };
 }
 

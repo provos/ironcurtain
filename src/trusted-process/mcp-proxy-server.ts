@@ -80,7 +80,19 @@ async function addRootToClient(state: ClientState, root: McpRoot): Promise<void>
 }
 
 const ESCALATION_POLL_INTERVAL_MS = 500;
-const ESCALATION_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+const DEFAULT_ESCALATION_TIMEOUT_SECONDS = 300;
+
+/** Reads escalation timeout from env var, falling back to default. */
+function getEscalationTimeoutMs(): number {
+  const envValue = process.env.ESCALATION_TIMEOUT_SECONDS;
+  if (envValue) {
+    const parsed = Number(envValue);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return parsed * 1000;
+    }
+  }
+  return DEFAULT_ESCALATION_TIMEOUT_SECONDS * 1000;
+}
 
 /**
  * Waits for a human decision via file-based IPC.
@@ -100,7 +112,7 @@ async function waitForEscalationDecision(
 
   writeFileSync(requestPath, JSON.stringify(request));
 
-  const deadline = Date.now() + ESCALATION_TIMEOUT_MS;
+  const deadline = Date.now() + getEscalationTimeoutMs();
 
   while (Date.now() < deadline) {
     if (existsSync(responsePath)) {

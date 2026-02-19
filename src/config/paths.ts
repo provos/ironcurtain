@@ -76,6 +76,13 @@ export function getSessionLlmLogPath(sessionId: string): string {
 }
 
 /**
+ * Returns the user config file path: {home}/config.json
+ */
+export function getUserConfigPath(): string {
+  return resolve(getIronCurtainHome(), 'config.json');
+}
+
+/**
  * Returns the logs directory: {home}/logs/
  */
 export function getLogsDir(): string {
