@@ -26,6 +26,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import {
   CallToolRequestSchema,
+  CompatibilityCallToolResultSchema,
   ListToolsRequestSchema,
   ListRootsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
@@ -482,10 +483,30 @@ async function main(): Promise<void> {
     const startTime = Date.now();
     try {
       const client = clientStates.get(toolInfo.serverName)!.client;
+
+      // TODO(workaround): Remove once @cyanheads/git-mcp-server fixes outputSchema declarations.
+      //
+      // WHY: The git MCP server v2.8.4 declares outputSchema for tools like git_add and
+      // git_commit, but the structuredContent it actually returns does not match those schemas.
+      // The MCP SDK v1.26.0 Client.callTool() validates responses client-side against the
+      // declared outputSchema and throws McpError(-32602, "Structured content does not match
+      // the tool's output schema: ...") when there is a mismatch.
+      //
+      // WHAT: git_add declares required properties {success, stagedFiles, totalFiles, status}
+      // in its outputSchema, but actual responses (especially errors) are missing these and
+      // include additional undeclared properties. git_commit similarly requires {success,
+      // commitHash, author, timestamp, committedFiles, status} but returns different shapes.
+      //
+      // FIX: Passing CompatibilityCallToolResultSchema instead of the default
+      // CallToolResultSchema makes the response parsing more permissive, which avoids the
+      // client-side validation failure.
+      //
+      // CONSEQUENCE: By using CompatibilityCallToolResultSchema we lose client-side output
+      // validation for ALL MCP servers proxied through this path, not just the git server.
       const result = await client.callTool({
         name: toolInfo.name,
         arguments: argsForTransport,
-      });
+      }, CompatibilityCallToolResultSchema);
 
       if (result.isError) {
         const errorText = extractTextFromContent(result.content) ?? 'Unknown tool error';

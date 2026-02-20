@@ -1,6 +1,7 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import {
+  CompatibilityCallToolResultSchema,
   ListRootsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import type { MCPServerConfig } from '../config/types.js';
@@ -102,7 +103,11 @@ export class MCPClientManager {
       throw new Error(`MCP server "${serverName}" not connected`);
     }
 
-    return server.client.callTool({ name: toolName, arguments: args });
+    // TODO(workaround): Remove once @cyanheads/git-mcp-server fixes outputSchema declarations.
+    // See the detailed comment in mcp-proxy-server.ts for full context.
+    // CompatibilityCallToolResultSchema bypasses client-side output schema validation that
+    // fails when servers declare outputSchema but return non-conforming structuredContent.
+    return server.client.callTool({ name: toolName, arguments: args }, CompatibilityCallToolResultSchema);
   }
 
   async closeAll(): Promise<void> {
