@@ -1,7 +1,7 @@
 import type { IronCurtainConfig } from '../config/types.js';
 import type { ToolCallRequest, ToolCallResult, PolicyDecision } from '../types/mcp.js';
 import type { AuditEntry } from '../types/audit.js';
-import { loadGeneratedPolicy } from '../config/index.js';
+import { loadGeneratedPolicy, extractServerDomainAllowlists } from '../config/index.js';
 import { PolicyEngine } from './policy-engine.js';
 import { MCPClientManager, type McpRoot } from './mcp-client-manager.js';
 import { AuditLog } from './audit-log.js';
@@ -26,7 +26,9 @@ export class TrustedProcess {
 
   constructor(private config: IronCurtainConfig, options?: TrustedProcessOptions) {
     const { compiledPolicy, toolAnnotations } = loadGeneratedPolicy(config.generatedDir);
-    this.policyEngine = new PolicyEngine(compiledPolicy, toolAnnotations, config.protectedPaths, config.allowedDirectory);
+
+    const serverDomainAllowlists = extractServerDomainAllowlists(config.mcpServers);
+    this.policyEngine = new PolicyEngine(compiledPolicy, toolAnnotations, config.protectedPaths, config.allowedDirectory, serverDomainAllowlists);
 
     const policyRoots = extractPolicyRoots(compiledPolicy, config.allowedDirectory);
     this.mcpRoots = toMcpRoots(policyRoots);
@@ -110,12 +112,25 @@ export class TrustedProcess {
 
       // Step 3: Forward to MCP server or deny (using transport args)
       if (policyDecision.status === 'allow') {
-        resultContent = await this.mcpManager.callTool(
+        const mcpResult = await this.mcpManager.callTool(
           transportRequest.serverName,
           transportRequest.toolName,
           transportRequest.arguments,
-        );
-        resultStatus = 'success';
+        ) as { content?: unknown; isError?: boolean };
+        resultContent = mcpResult;
+
+        if (mcpResult.isError) {
+          resultStatus = 'error';
+          const content = mcpResult.content;
+          if (Array.isArray(content)) {
+            resultError = content
+              .filter((c: Record<string, unknown>) => c.type === 'text' && typeof c.text === 'string')
+              .map((c: Record<string, unknown>) => c.text as string)
+              .join('\n');
+          }
+        } else {
+          resultStatus = 'success';
+        }
       } else {
         resultContent = { denied: true, reason: policyDecision.reason };
         resultStatus = 'denied';

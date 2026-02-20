@@ -223,6 +223,45 @@ describe('Integration: TrustedProcess with filesystem MCP server', () => {
     expect(result.policyDecision.reason).toBe('Approved by human during escalation');
   });
 
+  it('reports error status when MCP server returns isError (e.g. file not found)', async () => {
+    const result = await trustedProcess.handleToolCall(makeRequest({
+      toolName: 'read_file',
+      arguments: { path: `${SANDBOX_DIR}/nonexistent-file.txt` },
+    }));
+
+    // Policy allows (file is in sandbox) but the MCP server returns isError
+    // because the file doesn't exist. Previously this was reported as 'success'.
+    expect(result.policyDecision.status).toBe('allow');
+    expect(result.status).toBe('error');
+  });
+
+  it('records error in audit log when MCP server returns isError', async () => {
+    // Trigger an MCP error: move a nonexistent file within the sandbox
+    await trustedProcess.handleToolCall(makeRequest({
+      toolName: 'move_file',
+      arguments: {
+        source: `${SANDBOX_DIR}/does-not-exist.txt`,
+        destination: `${SANDBOX_DIR}/target.txt`,
+      },
+    }));
+
+    // Wait for audit writes to flush
+    await new Promise(resolve => setTimeout(resolve, 100));
+
+    const logContent = readFileSync(AUDIT_LOG_PATH, 'utf-8').trim();
+    const entries = logContent.split('\n').map(line => JSON.parse(line));
+
+    // Find the move_file entry -- it should be logged as 'error', not 'success'
+    const moveEntry = entries.find(
+      (e: Record<string, unknown>) =>
+        (e as { toolName: string }).toolName === 'move_file' &&
+        ((e as { arguments: { source: string } }).arguments.source as string).includes('does-not-exist'),
+    );
+    expect(moveEntry).toBeDefined();
+    expect(moveEntry.result.status).toBe('error');
+    expect(moveEntry.result.error).toBeDefined();
+  });
+
   it('writes audit log entries', async () => {
     // Wait a moment for writes to flush
     await new Promise(resolve => setTimeout(resolve, 100));

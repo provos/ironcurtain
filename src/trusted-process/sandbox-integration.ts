@@ -181,7 +181,10 @@ export function wrapServerCommand(
   }
 
   const settingsPath = join(settingsDir, `${serverName}.srt-settings.json`);
-  const cmdString = quote([command, ...args]);
+  // Resolve relative paths in args to absolute so the command works when
+  // the proxy sets cwd to the sandbox directory.
+  const resolvedArgs = args.map(a => (!isAbsolute(a) && !a.startsWith('-') ? resolve(a) : a));
+  const cmdString = quote([command, ...resolvedArgs]);
 
   return {
     command: SRT_BIN,

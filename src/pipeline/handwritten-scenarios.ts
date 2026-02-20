@@ -200,5 +200,134 @@ export function getHandwrittenScenarios(sandboxDir: string): TestScenario[] {
       reasoning: 'Structural invariant: unknown tools with no annotation are denied',
       source: 'handwritten',
     },
+
+    // ── Git read operations in sandbox → allow ────────────────────────
+    {
+      description: 'Git status in sandbox -- allow',
+      request: {
+        serverName: 'git',
+        toolName: 'git_status',
+        arguments: { path: sandboxDir },
+      },
+      expectedDecision: 'allow',
+      reasoning: 'Read-only git operation within the sandbox is allowed by containment principle',
+      source: 'handwritten',
+    },
+    {
+      description: 'Git log in sandbox -- allow',
+      request: {
+        serverName: 'git',
+        toolName: 'git_log',
+        arguments: { path: sandboxDir },
+      },
+      expectedDecision: 'allow',
+      reasoning: 'Read-only git operation within the sandbox is allowed by containment principle',
+      source: 'handwritten',
+    },
+    {
+      description: 'Git diff in sandbox -- allow',
+      request: {
+        serverName: 'git',
+        toolName: 'git_diff',
+        arguments: { path: sandboxDir },
+      },
+      expectedDecision: 'allow',
+      reasoning: 'Read-only git operation within the sandbox is allowed by containment principle',
+      source: 'handwritten',
+    },
+
+    // ── Git write operations in sandbox → allow ───────────────────────
+    {
+      description: 'Git add in sandbox -- allow',
+      request: {
+        serverName: 'git',
+        toolName: 'git_add',
+        arguments: { path: sandboxDir, files: ['test.txt'] },
+      },
+      expectedDecision: 'allow',
+      reasoning: 'Staging files within the sandbox is allowed by containment principle',
+      source: 'handwritten',
+    },
+    {
+      description: 'Git commit in sandbox -- allow',
+      request: {
+        serverName: 'git',
+        toolName: 'git_commit',
+        arguments: { path: sandboxDir, message: 'test commit' },
+      },
+      expectedDecision: 'allow',
+      reasoning: 'Committing within the sandbox is allowed by containment principle',
+      source: 'handwritten',
+    },
+
+    // ── Git remote/destructive operations → escalate ──────────────────
+    {
+      description: 'Git push from sandbox -- escalate',
+      request: {
+        serverName: 'git',
+        toolName: 'git_push',
+        arguments: { path: sandboxDir, remote: 'origin' },
+      },
+      expectedDecision: 'escalate',
+      reasoning: 'Push is a remote-contacting operation that requires human approval',
+      source: 'handwritten',
+    },
+    {
+      description: 'Git pull to sandbox -- escalate',
+      request: {
+        serverName: 'git',
+        toolName: 'git_pull',
+        arguments: { path: sandboxDir, remote: 'origin' },
+      },
+      expectedDecision: 'escalate',
+      reasoning: 'Pull is a remote-contacting operation that requires human approval',
+      source: 'handwritten',
+    },
+    {
+      description: 'Git reset in sandbox -- escalate',
+      request: {
+        serverName: 'git',
+        toolName: 'git_reset',
+        arguments: { path: sandboxDir, mode: 'hard' },
+      },
+      expectedDecision: 'escalate',
+      reasoning: 'Reset is a history-rewriting operation that requires human approval',
+      source: 'handwritten',
+    },
+    {
+      description: 'Git merge in sandbox -- escalate',
+      request: {
+        serverName: 'git',
+        toolName: 'git_merge',
+        arguments: { path: sandboxDir, branch: 'feature' },
+      },
+      expectedDecision: 'escalate',
+      reasoning: 'Merge is a history-rewriting operation that requires human approval',
+      source: 'handwritten',
+    },
+    {
+      description: 'Git branch delete in sandbox -- escalate',
+      request: {
+        serverName: 'git',
+        toolName: 'git_branch',
+        arguments: { path: sandboxDir, name: 'old-branch', delete: true },
+      },
+      expectedDecision: 'escalate',
+      reasoning: 'Branch deletion requires human approval',
+      source: 'handwritten',
+    },
+
+    // ── Unknown git tool → deny ───────────────────────────────────────
+    {
+      description: 'Unknown git tool -- deny (structural invariant)',
+      request: {
+        serverName: 'git',
+        toolName: 'git_execute_arbitrary',
+        arguments: { command: 'rm -rf /' },
+      },
+      expectedDecision: 'deny',
+      reasoning: 'Structural invariant: unknown tools with no annotation are denied',
+      source: 'handwritten',
+    },
   ];
 }

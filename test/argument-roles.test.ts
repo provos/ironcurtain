@@ -16,25 +16,44 @@ import {
   getArgumentRoleValues,
   expandTilde,
   normalizePath,
+  getRolesByCategory,
+  getPathRoles,
+  getUrlRoles,
+  normalizeUrl,
+  extractDomain,
+  normalizeGitUrl,
+  extractGitDomain,
+  resolveGitRemote,
 } from '../src/types/argument-roles.js';
 import type { ArgumentRole } from '../src/types/argument-roles.js';
 
 describe('ARGUMENT_ROLE_REGISTRY', () => {
-  it('contains exactly four roles', () => {
-    expect(ARGUMENT_ROLE_REGISTRY.size).toBe(4);
+  it('contains all ten roles', () => {
+    expect(ARGUMENT_ROLE_REGISTRY.size).toBe(10);
   });
 
   it('has entries for all known roles', () => {
-    const expectedRoles: ArgumentRole[] = ['read-path', 'write-path', 'delete-path', 'none'];
+    const expectedRoles: ArgumentRole[] = [
+      'read-path', 'write-path', 'delete-path',
+      'write-history', 'delete-history',
+      'fetch-url', 'git-remote-url',
+      'branch-name', 'commit-message',
+      'none',
+    ];
     for (const role of expectedRoles) {
       expect(ARGUMENT_ROLE_REGISTRY.has(role)).toBe(true);
     }
   });
 
+  it('every role has category and annotationGuidance', () => {
+    for (const [, def] of ARGUMENT_ROLE_REGISTRY) {
+      expect(def.category).toBeDefined();
+      expect(def.annotationGuidance).toBeDefined();
+      expect(def.annotationGuidance.length).toBeGreaterThan(0);
+    }
+  });
+
   it('is read-only (Map interface prevents set)', () => {
-    // ReadonlyMap does not expose .set(), verified at the type level.
-    // Runtime check: the registry object is a standard Map under the hood,
-    // but the exported type prevents mutation in TypeScript.
     expect(ARGUMENT_ROLE_REGISTRY.get('read-path')).toBeDefined();
   });
 });
@@ -71,11 +90,15 @@ describe('getResourceRoles', () => {
     expect(roles).toContain('read-path');
     expect(roles).toContain('write-path');
     expect(roles).toContain('delete-path');
+    expect(roles).toContain('fetch-url');
+    expect(roles).toContain('git-remote-url');
     expect(roles).not.toContain('none');
+    expect(roles).not.toContain('branch-name');
+    expect(roles).not.toContain('commit-message');
   });
 
-  it('returns exactly three roles', () => {
-    expect(getResourceRoles()).toHaveLength(3);
+  it('returns exactly seven roles', () => {
+    expect(getResourceRoles()).toHaveLength(7);
   });
 });
 
@@ -84,6 +107,10 @@ describe('isArgumentRole', () => {
     expect(isArgumentRole('read-path')).toBe(true);
     expect(isArgumentRole('write-path')).toBe(true);
     expect(isArgumentRole('delete-path')).toBe(true);
+    expect(isArgumentRole('fetch-url')).toBe(true);
+    expect(isArgumentRole('git-remote-url')).toBe(true);
+    expect(isArgumentRole('branch-name')).toBe(true);
+    expect(isArgumentRole('commit-message')).toBe(true);
     expect(isArgumentRole('none')).toBe(true);
   });
 
@@ -100,11 +127,15 @@ describe('getArgumentRoleValues', () => {
     expect(values.length).toBeGreaterThanOrEqual(1);
   });
 
-  it('contains all four roles', () => {
+  it('contains all eight roles', () => {
     const values = getArgumentRoleValues();
     expect(values).toContain('read-path');
     expect(values).toContain('write-path');
     expect(values).toContain('delete-path');
+    expect(values).toContain('fetch-url');
+    expect(values).toContain('git-remote-url');
+    expect(values).toContain('branch-name');
+    expect(values).toContain('commit-message');
     expect(values).toContain('none');
   });
 });
@@ -174,9 +205,148 @@ describe('normalizers via registry', () => {
     expect(def.normalize('hello world')).toBe('hello world');
   });
 
-  it('no current role defines prepareForPolicy', () => {
-    for (const [, def] of ARGUMENT_ROLE_REGISTRY) {
-      expect(def.prepareForPolicy).toBeUndefined();
+  it('url roles define prepareForPolicy', () => {
+    const fetchDef = getRoleDefinition('fetch-url');
+    expect(fetchDef.prepareForPolicy).toBeDefined();
+    expect(fetchDef.prepareForPolicy!('https://example.com/path')).toBe('example.com');
+
+    const gitDef = getRoleDefinition('git-remote-url');
+    expect(gitDef.prepareForPolicy).toBeDefined();
+    expect(gitDef.prepareForPolicy!('git@github.com:user/repo.git')).toBe('github.com');
+  });
+
+  it('git-remote-url defines resolveForPolicy', () => {
+    const def = getRoleDefinition('git-remote-url');
+    expect(def.resolveForPolicy).toBeDefined();
+  });
+
+  it('opaque roles use identity', () => {
+    for (const role of ['branch-name', 'commit-message', 'none'] as ArgumentRole[]) {
+      const def = getRoleDefinition(role);
+      expect(def.normalize('anything')).toBe('anything');
     }
+  });
+});
+
+describe('normalizeUrl', () => {
+  it('normalizes simple URL', () => {
+    expect(normalizeUrl('https://example.com/')).toBe('https://example.com');
+  });
+
+  it('preserves path component', () => {
+    expect(normalizeUrl('https://example.com/path/to/resource')).toBe('https://example.com/path/to/resource');
+  });
+
+  it('preserves port', () => {
+    expect(normalizeUrl('https://example.com:8080/path')).toBe('https://example.com:8080/path');
+  });
+
+  it('returns invalid input as-is', () => {
+    expect(normalizeUrl('not-a-url')).toBe('not-a-url');
+  });
+});
+
+describe('extractDomain', () => {
+  it('extracts domain from HTTPS URL', () => {
+    expect(extractDomain('https://github.com/user/repo')).toBe('github.com');
+  });
+
+  it('extracts domain from HTTP URL', () => {
+    expect(extractDomain('http://example.com')).toBe('example.com');
+  });
+
+  it('returns invalid input as-is', () => {
+    expect(extractDomain('not-a-url')).toBe('not-a-url');
+  });
+});
+
+describe('normalizeGitUrl', () => {
+  it('returns SSH URLs as-is', () => {
+    expect(normalizeGitUrl('git@github.com:user/repo.git')).toBe('git@github.com:user/repo.git');
+  });
+
+  it('normalizes HTTP git URLs', () => {
+    expect(normalizeGitUrl('https://github.com/user/repo.git/')).toBe('https://github.com/user/repo.git');
+  });
+
+  it('returns non-URL strings as-is', () => {
+    expect(normalizeGitUrl('origin')).toBe('origin');
+  });
+});
+
+describe('extractGitDomain', () => {
+  it('extracts domain from SSH URL', () => {
+    expect(extractGitDomain('git@github.com:user/repo.git')).toBe('github.com');
+  });
+
+  it('extracts domain from HTTPS URL', () => {
+    expect(extractGitDomain('https://gitlab.com/user/repo.git')).toBe('gitlab.com');
+  });
+
+  it('returns named remote as-is (not a URL)', () => {
+    expect(extractGitDomain('origin')).toBe('origin');
+  });
+});
+
+describe('resolveGitRemote', () => {
+  it('returns URLs with :// as-is', () => {
+    expect(resolveGitRemote('https://github.com/user/repo.git', {})).toBe('https://github.com/user/repo.git');
+  });
+
+  it('returns SSH URLs as-is', () => {
+    expect(resolveGitRemote('git@github.com:user/repo.git', {})).toBe('git@github.com:user/repo.git');
+  });
+
+  it('returns original value when git command fails (no repo)', () => {
+    // Resolution will fail because /nonexistent is not a git repo
+    expect(resolveGitRemote('origin', { path: '/nonexistent' })).toBe('origin');
+  });
+
+  it('uses path argument as cwd for git command', () => {
+    // This test verifies the function signature accepts allArgs with path
+    const result = resolveGitRemote('nonexistent-remote', { path: '/tmp' });
+    // Should fail gracefully and return original value
+    expect(result).toBe('nonexistent-remote');
+  });
+});
+
+describe('getRolesByCategory', () => {
+  it('returns path-category roles', () => {
+    const paths = getRolesByCategory('path');
+    expect(paths).toContain('read-path');
+    expect(paths).toContain('write-path');
+    expect(paths).toContain('delete-path');
+    expect(paths).toContain('write-history');
+    expect(paths).toContain('delete-history');
+    expect(paths).toHaveLength(5);
+  });
+
+  it('returns url-category roles', () => {
+    const urls = getRolesByCategory('url');
+    expect(urls).toContain('fetch-url');
+    expect(urls).toContain('git-remote-url');
+    expect(urls).toHaveLength(2);
+  });
+
+  it('returns opaque-category roles', () => {
+    const opaques = getRolesByCategory('opaque');
+    expect(opaques).toContain('branch-name');
+    expect(opaques).toContain('commit-message');
+    expect(opaques).toContain('none');
+    expect(opaques).toHaveLength(3);
+  });
+});
+
+describe('getPathRoles', () => {
+  it('returns all five path roles', () => {
+    const roles = getPathRoles();
+    expect(roles).toEqual(['read-path', 'write-path', 'delete-path', 'write-history', 'delete-history']);
+  });
+});
+
+describe('getUrlRoles', () => {
+  it('returns exactly the two URL roles', () => {
+    const roles = getUrlRoles();
+    expect(roles).toEqual(['fetch-url', 'git-remote-url']);
   });
 });

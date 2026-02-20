@@ -88,3 +88,12 @@ export function getUserConfigPath(): string {
 export function getLogsDir(): string {
   return resolve(getIronCurtainHome(), 'logs');
 }
+
+/**
+ * Returns the user constitution file path: {home}/constitution-user.md
+ * User policy customizations live in this file, separate from the
+ * base constitution (which is version-controlled).
+ */
+export function getUserConstitutionPath(): string {
+  return resolve(getIronCurtainHome(), 'constitution-user.md');
+}

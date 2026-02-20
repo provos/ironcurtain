@@ -43,12 +43,18 @@ export interface PathCondition {
   within: string;
 }
 
+export interface DomainCondition {
+  roles: ArgumentRole[];
+  allowed: string[];
+}
+
 export interface CompiledRuleCondition {
   roles?: ArgumentRole[];
   server?: string[];
   tool?: string[];
   sideEffects?: boolean;
   paths?: PathCondition;
+  domains?: DomainCondition;
 }
 
 export interface CompiledRule {

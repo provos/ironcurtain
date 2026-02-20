@@ -3,5 +3,20 @@
     "command": "npx",
     "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp/ironcurtain-sandbox"],
     "sandbox": false
+  },
+  "git": {
+    "command": "node",
+    "args": ["node_modules/.bin/git-mcp-server"],
+    "env": {
+      "MCP_TRANSPORT_TYPE": "stdio"
+    },
+    "sandbox": {
+      "filesystem": {
+        "denyRead": []
+      },
+      "network": {
+        "allowedDomains": ["github.com", "*.github.com", "gitlab.com", "*.gitlab.com"]
+      }
+    }
   }
 }

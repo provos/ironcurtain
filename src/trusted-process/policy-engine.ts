@@ -22,7 +22,14 @@ import type {
   CompiledRule,
   ArgumentRole,
 } from '../pipeline/types.js';
-import { getResourceRoles, getRoleDefinition, resolveRealPath } from '../types/argument-roles.js';
+import {
+  getPathRoles,
+  getUrlRoles,
+  getRoleDefinition,
+  resolveRealPath,
+  SANDBOX_SAFE_PATH_ROLES,
+  type RoleDefinition,
+} from '../types/argument-roles.js';
 
 /**
  * Heuristically extracts filesystem paths from tool call arguments.
@@ -138,22 +145,88 @@ function collectDistinctRoles(annotation: ToolAnnotation): ArgumentRole[] {
 }
 
 /**
- * Checks whether a rule has role-related conditions (roles or paths).
+ * Extracts URL values from arguments based on annotation roles.
+ * Returns an array of { value, role, roleDef } for each URL-category argument.
+ */
+function extractAnnotatedUrls(
+  args: Record<string, unknown>,
+  annotation: ToolAnnotation,
+  targetRoles: ArgumentRole[],
+): Array<{ value: string; role: ArgumentRole; roleDef: RoleDefinition }> {
+  const urls: Array<{ value: string; role: ArgumentRole; roleDef: RoleDefinition }> = [];
+  for (const [argName, roles] of Object.entries(annotation.args)) {
+    const matchingRole = roles.find(r => targetRoles.includes(r));
+    if (!matchingRole) continue;
+
+    const value = args[argName];
+    const roleDef = getRoleDefinition(matchingRole);
+    if (typeof value === 'string') {
+      urls.push({ value, role: matchingRole, roleDef });
+    } else if (Array.isArray(value)) {
+      for (const item of value) {
+        if (typeof item === 'string') {
+          urls.push({ value: item, role: matchingRole, roleDef });
+        }
+      }
+    }
+  }
+  return urls;
+}
+
+/**
+ * Applies the resolution pipeline for a URL-category value:
+ *   1. resolveForPolicy(value, allArgs)  -- resolve named remote to URL
+ *   2. normalize(resolvedValue)          -- canonicalize URL format
+ *   3. prepareForPolicy(normalizedValue) -- extract domain for allowlist check
+ */
+function resolveUrlForDomainCheck(
+  value: string,
+  roleDef: RoleDefinition,
+  allArgs: Record<string, unknown>,
+): string {
+  const resolved = roleDef.resolveForPolicy?.(value, allArgs) ?? value;
+  const normalized = roleDef.normalize(resolved);
+  return roleDef.prepareForPolicy?.(normalized) ?? normalized;
+}
+
+/**
+ * Checks whether a domain matches any pattern in an allowlist.
+ * Supports exact match, `*` wildcard (matches everything),
+ * and `*.example.com` prefix wildcards (matches example.com and *.example.com).
+ */
+export function domainMatchesAllowlist(
+  domain: string,
+  allowedDomains: readonly string[],
+): boolean {
+  return allowedDomains.some(pattern => {
+    if (pattern === '*') return true;
+    if (pattern.startsWith('*.')) {
+      const suffix = pattern.slice(1); // ".github.com"
+      return domain === pattern.slice(2) || domain.endsWith(suffix);
+    }
+    return domain === pattern;
+  });
+}
+
+/**
+ * Checks whether a rule has role-related conditions (roles, paths, or domains).
  * Rules without these conditions are role-agnostic and match any role.
  */
 function hasRoleConditions(rule: CompiledRule): boolean {
-  return rule.if.roles !== undefined || rule.if.paths !== undefined;
+  return rule.if.roles !== undefined || rule.if.paths !== undefined || rule.if.domains !== undefined;
 }
 
 /**
  * Checks whether a rule's role-related conditions include a specific role.
  * For `roles` conditions: the role must be in the list.
  * For `paths` conditions: the role must be in the paths.roles list.
+ * For `domains` conditions: the role must be in the domains.roles list.
  */
 function ruleRelevantToRole(rule: CompiledRule, role: ArgumentRole): boolean {
   const cond = rule.if;
   if (cond.roles !== undefined && !cond.roles.includes(role)) return false;
   if (cond.paths !== undefined && !cond.paths.roles.includes(role)) return false;
+  if (cond.domains !== undefined && !cond.domains.roles.includes(role)) return false;
   return true;
 }
 
@@ -162,16 +235,19 @@ export class PolicyEngine {
   private compiledPolicy: CompiledPolicyFile;
   private protectedPaths: string[];
   private allowedDirectory?: string;
+  private serverDomainAllowlists: ReadonlyMap<string, readonly string[]>;
 
   constructor(
     compiledPolicy: CompiledPolicyFile,
     toolAnnotations: ToolAnnotationsFile,
     protectedPaths: string[],
     allowedDirectory?: string,
+    serverDomainAllowlists?: ReadonlyMap<string, readonly string[]>,
   ) {
     this.compiledPolicy = compiledPolicy;
     this.protectedPaths = protectedPaths;
     this.allowedDirectory = allowedDirectory;
+    this.serverDomainAllowlists = serverDomainAllowlists ?? new Map();
     this.annotationMap = this.buildAnnotationMap(toolAnnotations);
   }
 
@@ -203,6 +279,11 @@ export class PolicyEngine {
   /**
    * Phase 1: Hardcoded structural invariants.
    *
+   * 1a. Protected path check (deny)
+   * 1b. Sandbox containment for path-category roles (allow/partial)
+   * 1c. Domain allowlist for url-category roles (escalate)
+   * 1d. Unknown tool denial (deny)
+   *
    * Uses the union of heuristic and annotation-based path extraction
    * for defense-in-depth. Returns a StructuralResult with either a
    * final decision or a set of roles resolved by sandbox containment.
@@ -212,16 +293,17 @@ export class PolicyEngine {
     const heuristicPaths = extractPathsHeuristic(request.arguments);
     const annotation = this.annotationMap.get(`${request.serverName}__${request.toolName}`);
 
-    const allPathRoles = getResourceRoles();
+    // Phase 1a/1b use path-category roles only (not URL roles)
+    const pathRoles = getPathRoles();
     const annotatedPaths = annotation
-      ? extractAnnotatedPaths(request.arguments, annotation, allPathRoles)
+      ? extractAnnotatedPaths(request.arguments, annotation, pathRoles)
       : [];
 
     // Union of both extraction methods, deduplicated
     const allPaths = [...new Set([...heuristicPaths, ...annotatedPaths])];
     const resolvedPaths = allPaths.map(p => resolveRealPath(p));
 
-    // Protected paths: any match is an immediate deny
+    // Phase 1a: Protected paths -- any match is an immediate deny
     for (const rp of resolvedPaths) {
       if (isProtectedPath(rp, this.protectedPaths)) {
         return finalDecision({
@@ -232,13 +314,43 @@ export class PolicyEngine {
       }
     }
 
-    // Sandbox containment checks
-    if (this.allowedDirectory && resolvedPaths.length > 0) {
-      // Fast path: all paths within sandbox -> auto-allow
-      const allWithinSandbox = resolvedPaths.every(
+    // Phase 1b: Sandbox containment checks (path-category roles)
+    //
+    // The sandbox auto-allow decision uses annotated paths when annotations
+    // exist (not heuristic paths). An arg annotated as 'none' should not
+    // grant sandbox containment even if the value looks like a path.
+    // Heuristic paths are only used for defense-in-depth on the deny side
+    // (Phase 1a protected path check).
+    //
+    // Only SANDBOX_SAFE_PATH_ROLES (read-path, write-path, delete-path) can
+    // be auto-resolved by sandbox containment. Higher-risk path roles like
+    // write-history and delete-history always fall through to Phase 2.
+    const sandboxResolvedRoles = new Set<ArgumentRole>();
+    const resolvedSandboxPaths = annotation
+      ? annotatedPaths.map(p => resolveRealPath(p))
+      : resolvedPaths;
+
+    // Extract URL args once for use in both Phase 1b (fast-path guard) and Phase 1c
+    const urlArgs = annotation
+      ? extractAnnotatedUrls(request.arguments, annotation, getUrlRoles())
+      : [];
+
+    // Determine if the tool has any non-sandbox-safe path roles
+    const toolHasUnsafePathRoles = annotation
+      ? pathRoles.some(role =>
+          !SANDBOX_SAFE_PATH_ROLES.has(role) &&
+          Object.values(annotation.args).some(argRoles => argRoles.includes(role)),
+        )
+      : false;
+
+    if (this.allowedDirectory && resolvedSandboxPaths.length > 0) {
+      // Fast path: all annotated paths within sandbox -> auto-allow
+      // Only fires when ALL path roles are sandbox-safe and no URL roles need checking
+      const allWithinSandbox = resolvedSandboxPaths.every(
         rp => isWithinDirectory(rp, this.allowedDirectory!),
       );
-      if (allWithinSandbox) {
+
+      if (allWithinSandbox && urlArgs.length === 0 && !toolHasUnsafePathRoles) {
         return finalDecision({
           decision: 'allow',
           rule: 'structural-sandbox-allow',
@@ -246,25 +358,46 @@ export class PolicyEngine {
         });
       }
 
-      // Partial sandbox resolution: check each resource role independently.
+      // Partial sandbox resolution: check each path role independently.
       // A role is "sandbox-resolved" if every path for that role is within
-      // the sandbox. Roles with zero extracted paths are not resolved.
+      // the sandbox. Only sandbox-safe roles can be resolved here.
+      // Roles with zero extracted paths are not resolved.
       if (annotation) {
-        const resolvedRoles = new Set<ArgumentRole>();
-        for (const role of allPathRoles) {
+        for (const role of pathRoles) {
+          if (!SANDBOX_SAFE_PATH_ROLES.has(role)) continue;
           const pathsForRole = extractAnnotatedPaths(request.arguments, annotation, [role]);
           if (pathsForRole.length > 0 && pathsForRole.every(p => isWithinDirectory(p, this.allowedDirectory!))) {
-            resolvedRoles.add(role);
+            sandboxResolvedRoles.add(role);
           }
-        }
-
-        if (resolvedRoles.size > 0) {
-          return { sandboxResolvedRoles: resolvedRoles };
         }
       }
     }
 
-    // Unknown tool check
+    // Phase 1c: Domain allowlist for URL-category roles
+    if (urlArgs.length > 0) {
+      const allowlist = this.serverDomainAllowlists.get(request.serverName);
+
+      if (allowlist) {
+        for (const { value, roleDef } of urlArgs) {
+          const domain = resolveUrlForDomainCheck(value, roleDef, request.arguments);
+          if (!domainMatchesAllowlist(domain, allowlist)) {
+            return finalDecision({
+              decision: 'escalate',
+              rule: 'structural-domain-escalate',
+              reason: `URL domain "${domain}" is not in the allowlist for server "${request.serverName}"`,
+            });
+          }
+        }
+
+        // All URLs passed domain check -- mark URL roles as resolved
+        for (const { role } of urlArgs) {
+          sandboxResolvedRoles.add(role);
+        }
+      }
+      // If no allowlist, URL roles are not structurally restricted -- fall through to Phase 2
+    }
+
+    // Phase 1d: Unknown tool check
     if (!annotation) {
       return finalDecision({
         decision: 'deny',
@@ -273,7 +406,7 @@ export class PolicyEngine {
       });
     }
 
-    return { sandboxResolvedRoles: NO_ROLES_RESOLVED };
+    return { sandboxResolvedRoles: sandboxResolvedRoles.size > 0 ? sandboxResolvedRoles : NO_ROLES_RESOLVED };
   }
 
   /**
@@ -492,6 +625,20 @@ export class PolicyEngine {
       // isWithinDirectory resolves paths internally, no pre-resolution needed
       const allWithin = extracted.every(p => isWithinDirectory(p, cond.paths!.within));
       if (!allWithin) return false;
+    }
+
+    // Check domains condition
+    if (cond.domains !== undefined) {
+      const urlArgs = extractAnnotatedUrls(request.arguments, annotation, cond.domains.roles);
+
+      // Zero URL args extracted = condition not satisfied, rule does not match
+      if (urlArgs.length === 0) return false;
+
+      const allMatch = urlArgs.every(({ value, roleDef }) => {
+        const domain = resolveUrlForDomainCheck(value, roleDef, request.arguments);
+        return domainMatchesAllowlist(domain, cond.domains!.allowed);
+      });
+      if (!allMatch) return false;
     }
 
     return true;

@@ -82,20 +82,30 @@ export class Sandbox {
     // Pass sandbox availability policy to the proxy process
     proxyEnv.SANDBOX_POLICY = config.sandboxPolicy ?? 'warn';
 
+    // Register one proxy per backend server so UTCP names them cleanly:
+    //   tools.<serverName>_<toolName>(...)
+    // Each proxy gets a SERVER_FILTER env var to connect only to its server.
+    const mcpServers: Record<string, {
+      transport: 'stdio';
+      command: string;
+      args: string[];
+      env: Record<string, string>;
+      timeout: number;
+    }> = {};
+    for (const serverName of Object.keys(config.mcpServers)) {
+      mcpServers[serverName] = {
+        transport: 'stdio',
+        command: 'npx',
+        args: ['tsx', PROXY_SERVER_PATH],
+        env: { ...proxyEnv, SERVER_FILTER: serverName },
+        timeout: timeoutMs,
+      };
+    }
+
     await this.client.registerManual({
-      name: 'filesystem',
+      name: 'tools',
       call_template_type: 'mcp',
-      config: {
-        mcpServers: {
-          filesystem: {
-            transport: 'stdio',
-            command: 'npx',
-            args: ['tsx', PROXY_SERVER_PATH],
-            env: proxyEnv,
-            timeout: timeoutMs,
-          },
-        },
-      },
+      config: { mcpServers },
     });
 
     this.toolCatalog = await this.buildToolCatalog();
@@ -120,7 +130,7 @@ export class Sandbox {
         })
         .join('\n');
     } catch {
-      return 'Tool catalog not available — use filesystem.* tools';
+      return 'Tool catalog not available — use tools.* functions';
     }
   }
 

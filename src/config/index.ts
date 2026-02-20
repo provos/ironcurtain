@@ -59,6 +59,26 @@ export function loadConfig(): IronCurtainConfig {
   };
 }
 
+/**
+ * Extracts domain allowlists from MCP server sandbox network configurations.
+ * Filters out the `*` wildcard since it means "no domain restriction".
+ * Returns a map from server name to its list of restricted domains.
+ */
+export function extractServerDomainAllowlists(
+  mcpServers: Record<string, MCPServerConfig>,
+): Map<string, string[]> {
+  const allowlists = new Map<string, string[]>();
+  for (const [serverName, config] of Object.entries(mcpServers)) {
+    if (config.sandbox && typeof config.sandbox === 'object' && config.sandbox.network && typeof config.sandbox.network === 'object') {
+      const domains = config.sandbox.network.allowedDomains.filter(d => d !== '*');
+      if (domains.length > 0) {
+        allowlists.set(serverName, domains);
+      }
+    }
+  }
+  return allowlists;
+}
+
 export function loadGeneratedPolicy(generatedDir: string): {
   compiledPolicy: CompiledPolicyFile;
   toolAnnotations: ToolAnnotationsFile;

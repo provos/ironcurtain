@@ -11,7 +11,7 @@ import type { LanguageModel } from 'ai';
 import { z } from 'zod';
 import { generateObjectWithRepair } from './generate-with-repair.js';
 import type { ToolAnnotation } from './types.js';
-import { getArgumentRoleValues, getRoleDefinition } from '../types/argument-roles.js';
+import { getArgumentRoleValues, getRoleDefinition, ARGUMENT_ROLE_REGISTRY } from '../types/argument-roles.js';
 
 // Input type matching what MCP's listTools() returns
 export interface MCPToolSchema {
@@ -64,6 +64,15 @@ function buildAnnotationsResponseSchema(tools: MCPToolSchema[]) {
   });
 }
 
+/** Builds role description lines dynamically from the registry for the LLM prompt. */
+export function buildRoleDescriptions(): string {
+  const lines: string[] = [];
+  for (const [role, def] of ARGUMENT_ROLE_REGISTRY) {
+    lines.push(`   - "${role}" -- ${def.description}. ${def.annotationGuidance}`);
+  }
+  return lines.join('\n');
+}
+
 export function buildAnnotationPrompt(serverName: string, tools: MCPToolSchema[]): string {
   const toolDescriptions = tools.map(t => {
     return [
@@ -83,10 +92,7 @@ export function buildAnnotationPrompt(serverName: string, tools: MCPToolSchema[]
    - When in doubt, mark as true (conservative)
 
 3. **args**: For each argument in the tool's input schema, assign an ARRAY of one or more roles:
-   - "read-path" -- the argument is a filesystem path that will be read
-   - "write-path" -- the argument is a filesystem path that will be written to
-   - "delete-path" -- the argument is a filesystem path that will be deleted
-   - "none" -- the argument is not a resource path
+${buildRoleDescriptions()}
 
    IMPORTANT: Each value in the args object MUST be an ARRAY of roles, even for single roles.
    Example: { "path": ["read-path"], "content": ["none"] }
@@ -205,10 +211,14 @@ export function validateAnnotationsHeuristic(
       continue;
     }
 
-    const properties = (tool.inputSchema['properties'] ?? {}) as Record<string, unknown>;
+    const properties = (tool.inputSchema['properties'] ?? {}) as Record<string, Record<string, unknown>>;
 
-    for (const argName of Object.keys(properties)) {
+    for (const [argName, argSchema] of Object.entries(properties)) {
       if (!looksLikePathArgument(argName)) continue;
+
+      // Skip non-string arguments (booleans, enums, numbers named "directories" etc.)
+      const argType = argSchema?.['type'];
+      if (argType === 'boolean' || argType === 'number' || argType === 'integer') continue;
 
       const roles = annotation.args[argName];
       const hasPathRole = roles && roles.some(r => getRoleDefinition(r).isResourceIdentifier);

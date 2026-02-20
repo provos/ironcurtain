@@ -85,6 +85,7 @@ Generate diverse test scenarios covering:
 4. **Edge cases**: path traversal attacks, boundary conditions
 5. **Side-effect-free tools**: tools with no path arguments (should be allowed)
 6. **Move operations**: all moves involve a delete-path role on the source argument
+7. **Domain-based operations**: if any tools have URL roles (fetch-url, git-remote-url), generate scenarios for allowed domains, disallowed domains, and named remote resolution
 
 The three possible decisions are:
 - "allow" — explicitly permitted by the constitution

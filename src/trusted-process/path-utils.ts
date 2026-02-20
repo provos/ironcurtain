@@ -7,19 +7,10 @@
  * unavailable.
  */
 
-import { homedir } from 'node:os';
-import { getRoleDefinition, resolveRealPath } from '../types/argument-roles.js';
+import { getRoleDefinition, resolveRealPath, expandTilde } from '../types/argument-roles.js';
 import type { ToolAnnotation, ArgumentRole } from '../pipeline/types.js';
 
-/**
- * Expands a leading `~` or `~/` to the current user's home directory.
- * Non-tilde paths are returned unchanged.
- */
-export function expandTilde(filePath: string): string {
-  if (filePath === '~') return homedir();
-  if (filePath.startsWith('~/')) return homedir() + filePath.slice(1);
-  return filePath;
-}
+export { expandTilde } from '../types/argument-roles.js';
 
 /** Returns true if the string looks like a filesystem path. */
 function looksLikePath(value: string): boolean {
@@ -137,12 +128,9 @@ export function prepareToolArgs(
       const def = getRoleDefinition(resourceRole);
       const transportValue = normalizeArgValue(value, def.normalize);
       argsForTransport[key] = transportValue;
-
-      if (def.prepareForPolicy) {
-        argsForPolicy[key] = normalizeArgValue(transportValue, def.prepareForPolicy);
-      } else {
-        argsForPolicy[key] = transportValue;
-      }
+      // Policy args get the normalized value — domain extraction (prepareForPolicy)
+      // is handled later by the policy engine's resolveUrlForDomainCheck().
+      argsForPolicy[key] = transportValue;
     } else {
       argsForTransport[key] = value;
       argsForPolicy[key] = value;
