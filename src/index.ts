@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { parseArgs } from 'node:util';
 import ora from 'ora';
 import chalk from 'chalk';
 import { loadConfig } from './config/index.js';
@@ -7,7 +8,17 @@ import { CliTransport } from './session/cli-transport.js';
 import * as logger from './logger.js';
 
 async function main(): Promise<void> {
-  const task = process.argv.slice(2).join(' ');
+  const { values, positionals } = parseArgs({
+    args: process.argv.slice(2),
+    options: {
+      resume: { type: 'string', short: 'r' },
+    },
+    allowPositionals: true,
+    strict: false,
+  });
+
+  const task = positionals.join(' ');
+  const resumeSessionId = values.resume as string | undefined;
   const config = loadConfig();
 
   // Create the transport first so we can wire its callbacks into the session.
@@ -23,6 +34,7 @@ async function main(): Promise<void> {
   try {
     session = await createSession({
       config,
+      resumeSessionId,
       onEscalation: transport.createEscalationHandler(),
       onDiagnostic: transport.createDiagnosticHandler(),
     });

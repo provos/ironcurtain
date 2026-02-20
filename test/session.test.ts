@@ -914,4 +914,60 @@ describe('Session', () => {
       expect(mockSandbox.shutdown).toHaveBeenCalledOnce();
     });
   });
+
+  describe('resume session', () => {
+    it('reuses the previous session directory', async () => {
+      const sessionA = await createTestSession();
+      const idA = sessionA.getInfo().id;
+      await sessionA.close();
+      logger.teardown();
+
+      // Capture the config passed to the sandbox factory
+      const sandboxFactory = vi.fn().mockImplementation(async (config: IronCurtainConfig) => {
+        // allowedDirectory must point to session A's sandbox
+        expect(config.allowedDirectory).toBe(getSessionSandboxDir(idA));
+        return createMockSandbox();
+      });
+
+      const sessionB = await createSession({
+        config: createTestConfig(),
+        resumeSessionId: idA,
+        sandboxFactory,
+      });
+      try {
+        expect(sandboxFactory).toHaveBeenCalledOnce();
+      } finally {
+        await sessionB.close();
+      }
+    });
+
+    it('rejects resume when previous session does not exist', async () => {
+      await expect(
+        createTestSession({ resumeSessionId: 'nonexistent-session-id' }),
+      ).rejects.toThrow(/Cannot resume session.*session directory not found/);
+    });
+
+    it('resumed session can send messages', async () => {
+      const sessionA = await createTestSession();
+      await sessionA.close();
+      logger.teardown();
+
+      mockGenerateText.mockResolvedValue(createMockGenerateResult('resumed response'));
+
+      const sessionB = await createTestSession({ resumeSessionId: sessionA.getInfo().id });
+      try {
+        const response = await sessionB.sendMessage('hello from resumed session');
+        expect(response).toBe('resumed response');
+        expect(sessionB.getInfo().turnCount).toBe(1);
+      } finally {
+        await sessionB.close();
+      }
+    });
+
+    it('validates session ID format to prevent path traversal', async () => {
+      await expect(
+        createTestSession({ resumeSessionId: '../../../etc' }),
+      ).rejects.toThrow(/Invalid session ID/);
+    });
+  });
 });

@@ -225,3 +225,147 @@ describe('prepareToolArgs', () => {
     expect(argsForPolicy).toEqual({});
   });
 });
+
+describe('prepareToolArgs with allowedDirectory (sandbox-aware)', () => {
+  const home = homedir();
+  const sandboxDir = '/home/user/sandbox/project';
+
+  const readAnnotation: ToolAnnotation = {
+    toolName: 'git_add',
+    serverName: 'git',
+    comment: 'Stages files',
+    sideEffects: true,
+    args: {
+      files: ['read-path'],
+      message: ['none'],
+    },
+  };
+
+  const writeAnnotation: ToolAnnotation = {
+    toolName: 'write_file',
+    serverName: 'filesystem',
+    comment: 'Writes a file',
+    sideEffects: true,
+    args: {
+      path: ['write-path'],
+      content: ['none'],
+    },
+  };
+
+  it('passes relative paths through unchanged for transport', () => {
+    const { argsForTransport } = prepareToolArgs(
+      { files: ['src/index.ts', 'README.md'], message: 'test' },
+      readAnnotation,
+      sandboxDir,
+    );
+    expect(argsForTransport.files).toEqual(['src/index.ts', 'README.md']);
+    expect(argsForTransport.message).toBe('test');
+  });
+
+  it('resolves relative paths against sandbox for policy', () => {
+    const { argsForPolicy } = prepareToolArgs(
+      { files: ['src/index.ts', 'README.md'], message: 'test' },
+      readAnnotation,
+      sandboxDir,
+    );
+    expect(argsForPolicy.files).toEqual([
+      `${sandboxDir}/src/index.ts`,
+      `${sandboxDir}/README.md`,
+    ]);
+    expect(argsForPolicy.message).toBe('test');
+  });
+
+  it('normalizes absolute paths for both transport and policy', () => {
+    const { argsForTransport, argsForPolicy } = prepareToolArgs(
+      { path: '/tmp/output.txt', content: 'hello' },
+      writeAnnotation,
+      sandboxDir,
+    );
+    expect(argsForTransport.path).toBe('/tmp/output.txt');
+    expect(argsForPolicy.path).toBe('/tmp/output.txt');
+  });
+
+  it('normalizes tilde paths for both transport and policy', () => {
+    const { argsForTransport, argsForPolicy } = prepareToolArgs(
+      { path: '~/Documents/file.txt', content: 'hello' },
+      writeAnnotation,
+      sandboxDir,
+    );
+    expect(argsForTransport.path).toBe(`${home}/Documents/file.txt`);
+    expect(argsForPolicy.path).toBe(`${home}/Documents/file.txt`);
+  });
+
+  it('handles dot-relative paths as relative', () => {
+    const { argsForTransport, argsForPolicy } = prepareToolArgs(
+      { path: './local/file.txt', content: 'hello' },
+      writeAnnotation,
+      sandboxDir,
+    );
+    // Transport: pass through (MCP server resolves against its CWD)
+    expect(argsForTransport.path).toBe('./local/file.txt');
+    // Policy: resolve against sandbox
+    expect(argsForPolicy.path).toBe(`${sandboxDir}/local/file.txt`);
+  });
+
+  it('handles dot-dot-relative paths as relative', () => {
+    const { argsForTransport, argsForPolicy } = prepareToolArgs(
+      { path: '../sibling/file.txt', content: 'hello' },
+      writeAnnotation,
+      sandboxDir,
+    );
+    expect(argsForTransport.path).toBe('../sibling/file.txt');
+    // resolve() collapses the ..: /home/user/sandbox/project/../sibling/file.txt
+    // → /home/user/sandbox/sibling/file.txt
+    expect(argsForPolicy.path).toBe('/home/user/sandbox/sibling/file.txt');
+  });
+
+  it('handles bare relative paths (no prefix)', () => {
+    const { argsForTransport, argsForPolicy } = prepareToolArgs(
+      { files: ['src/content/pages/links.mdx'], message: 'test' },
+      readAnnotation,
+      sandboxDir,
+    );
+    expect(argsForTransport.files).toEqual(['src/content/pages/links.mdx']);
+    expect(argsForPolicy.files).toEqual([`${sandboxDir}/src/content/pages/links.mdx`]);
+  });
+
+  it('does not split relative/absolute for URL roles', () => {
+    const urlAnnotation: ToolAnnotation = {
+      toolName: 'fetch',
+      serverName: 'web',
+      comment: 'Fetches a URL',
+      sideEffects: false,
+      args: { url: ['fetch-url'] },
+    };
+    const { argsForTransport, argsForPolicy } = prepareToolArgs(
+      { url: 'https://example.com/api' },
+      urlAnnotation,
+      sandboxDir,
+    );
+    // URL roles are not path-category — same normalization for both
+    expect(argsForTransport.url).toBe('https://example.com/api');
+    expect(argsForPolicy.url).toBe('https://example.com/api');
+  });
+
+  it('falls back to heuristic when annotation is undefined (with allowedDirectory)', () => {
+    const { argsForTransport, argsForPolicy } = prepareToolArgs(
+      { path: '~/test/file.txt' },
+      undefined,
+      sandboxDir,
+    );
+    // Heuristic path — allowedDirectory is ignored
+    expect(argsForTransport.path).toBe(`${home}/test/file.txt`);
+    expect(argsForPolicy.path).toBe(`${home}/test/file.txt`);
+  });
+
+  it('without allowedDirectory, normalizes relative paths for both (legacy behavior)', () => {
+    const { argsForTransport, argsForPolicy } = prepareToolArgs(
+      { path: './relative/file.txt', content: 'hello' },
+      writeAnnotation,
+    );
+    // No allowedDirectory → falls back to full normalization for both
+    const expected = resolve('./relative/file.txt');
+    expect(argsForTransport.path).toBe(expected);
+    expect(argsForPolicy.path).toBe(expected);
+  });
+});

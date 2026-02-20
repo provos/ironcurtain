@@ -367,7 +367,7 @@ async function main(): Promise<void> {
 
     // Annotation-driven normalization: split into transport vs policy args
     const annotation = policyEngine.getAnnotation(toolInfo.serverName, toolInfo.name);
-    const { argsForTransport, argsForPolicy } = prepareToolArgs(rawArgs, annotation);
+    const { argsForTransport, argsForPolicy } = prepareToolArgs(rawArgs, annotation, allowedDirectory);
 
     const request: ToolCallRequest = {
       requestId: uuidv4(),

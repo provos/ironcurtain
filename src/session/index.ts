@@ -6,9 +6,10 @@
  * depend on the Session interface only.
  */
 
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { loadConfig } from '../config/index.js';
 import {
+  getSessionDir,
   getSessionSandboxDir,
   getSessionEscalationDir,
   getSessionAuditLogPath,
@@ -42,15 +43,30 @@ export async function createSession(options: SessionOptions = {}): Promise<Sessi
   const config = options.config ?? loadConfig();
   const sessionId = createSessionId();
 
-  const sandboxDir = getSessionSandboxDir(sessionId);
-  const escalationDir = getSessionEscalationDir(sessionId);
-  const auditLogPath = getSessionAuditLogPath(sessionId);
+  // When resuming, reuse the previous session's directory tree entirely.
+  // Logs are append-only so they simply extend.
+  const effectiveSessionId = options.resumeSessionId ?? sessionId;
+
+  if (options.resumeSessionId) {
+    const sessionDir = getSessionDir(options.resumeSessionId);
+    if (!existsSync(sessionDir)) {
+      throw new SessionError(
+        `Cannot resume session "${options.resumeSessionId}": ` +
+        `session directory not found at ${sessionDir}`,
+        'SESSION_INIT_FAILED',
+      );
+    }
+  }
+
+  const sandboxDir = getSessionSandboxDir(effectiveSessionId);
+  const escalationDir = getSessionEscalationDir(effectiveSessionId);
+  const auditLogPath = getSessionAuditLogPath(effectiveSessionId);
 
   mkdirSync(sandboxDir, { recursive: true });
   mkdirSync(escalationDir, { recursive: true });
 
-  const sessionLogPath = getSessionLogPath(sessionId);
-  const llmLogPath = getSessionLlmLogPath(sessionId);
+  const sessionLogPath = getSessionLogPath(effectiveSessionId);
+  const llmLogPath = getSessionLlmLogPath(effectiveSessionId);
 
   // Set up session logging -- captures all console output to file
   logger.setup({ logFilePath: sessionLogPath });
@@ -59,6 +75,9 @@ export async function createSession(options: SessionOptions = {}): Promise<Sessi
   logger.info(`Escalation dir: ${escalationDir}`);
   logger.info(`Audit log: ${auditLogPath}`);
   logger.info(`LLM log: ${llmLogPath}`);
+  if (options.resumeSessionId) {
+    logger.info(`Resumed from session: ${options.resumeSessionId}`);
+  }
 
   // Override config paths for this session's isolated directories.
   // Deep-clone mcpServers so patching doesn't mutate the caller's config.

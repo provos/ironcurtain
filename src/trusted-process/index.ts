@@ -64,7 +64,7 @@ export class TrustedProcess {
 
     // Annotation-driven normalization: split into transport vs policy args
     const annotation = this.policyEngine.getAnnotation(request.serverName, request.toolName);
-    const { argsForTransport, argsForPolicy } = prepareToolArgs(request.arguments, annotation);
+    const { argsForTransport, argsForPolicy } = prepareToolArgs(request.arguments, annotation, this.config.allowedDirectory);
     const policyRequest = { ...request, arguments: argsForPolicy };
     const transportRequest = { ...request, arguments: argsForTransport };
 

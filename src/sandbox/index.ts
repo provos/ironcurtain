@@ -23,7 +23,7 @@ const PROXY_SERVER_PATH = resolve(__dirname, '../trusted-process/mcp-proxy-serve
  *
  * Example: "filesystem.filesystem.list_directory" → "filesystem.filesystem_list_directory"
  */
-function toCallableName(toolName: string): string {
+export function toCallableName(toolName: string): string {
   const sanitize = (s: string) =>
     s.replace(/[^a-zA-Z0-9_]/g, '_').replace(/^[0-9]/, '_$&');
   if (!toolName.includes('.')) return sanitize(toolName);
@@ -45,9 +45,41 @@ export interface CodeExecutionResult {
   logs: string[];
 }
 
+/**
+ * Builds a JavaScript snippet that patches __getToolInterface inside the
+ * sandbox isolate so that callable names (with underscores) resolve to
+ * the same interface as the raw UTCP tool names (with dots).
+ *
+ * UTCP Code Mode keys its interface map by raw tool name (e.g.,
+ * "tools.git.git_add") but the callable function name the agent sees
+ * uses underscores (e.g., "tools.git_git_add"). Without this patch,
+ * __getToolInterface(callableName) returns null.
+ */
+function buildInterfacePatchSnippet(callableToRawMap: Record<string, string>): string {
+  const mapJson = JSON.stringify(callableToRawMap);
+  // The snippet runs inside the V8 isolate before user code.
+  // It wraps the existing __getToolInterface to also accept callable names.
+  return `
+    (function() {
+      var _callableToRaw = ${mapJson};
+      var _origGetToolInterface = global.__getToolInterface;
+      if (_origGetToolInterface) {
+        global.__getToolInterface = function(toolName) {
+          var result = _origGetToolInterface(toolName);
+          if (result) return result;
+          var rawName = _callableToRaw[toolName];
+          if (rawName) return _origGetToolInterface(rawName);
+          return null;
+        };
+      }
+    })();
+  `;
+}
+
 export class Sandbox {
   private client: CodeModeUtcpClient | null = null;
   private toolCatalog: string = '';
+  private interfacePatchSnippet: string = '';
 
   async initialize(config: IronCurtainConfig): Promise<void> {
     this.client = await CodeModeUtcpClient.create();
@@ -108,29 +140,46 @@ export class Sandbox {
       config: { mcpServers },
     });
 
-    this.toolCatalog = await this.buildToolCatalog();
+    const { catalog, patchSnippet } = await this.buildToolCatalogAndPatch();
+    this.toolCatalog = catalog;
+    this.interfacePatchSnippet = patchSnippet;
   }
 
   /**
-   * Builds a compact one-line-per-tool catalog from registered tools.
-   * Each entry shows the correct callable function name (with underscores)
-   * and required parameters so the LLM can invoke tools without introspection.
+   * Builds the tool catalog and the __getToolInterface patch in one pass.
+   *
+   * The catalog is a compact one-line-per-tool listing using callable names.
+   * The patch snippet maps callable names back to raw UTCP names so that
+   * __getToolInterface works with either naming convention.
    */
-  private async buildToolCatalog(): Promise<string> {
+  private async buildToolCatalogAndPatch(): Promise<{ catalog: string; patchSnippet: string }> {
     if (!this.client) throw new Error('Sandbox not initialized');
 
     try {
       const tools = await this.client.getTools();
-      if (tools.length === 0) return 'No tools available';
-      return tools
-        .map((t) => {
-          const callableName = toCallableName(t.name);
-          const params = extractRequiredParams(t.inputs);
-          return `- \`${callableName}(${params})\` — ${t.description}`;
-        })
-        .join('\n');
+      if (tools.length === 0) return { catalog: 'No tools available', patchSnippet: '' };
+
+      const callableToRaw: Record<string, string> = {};
+      const catalogLines: string[] = [];
+
+      for (const t of tools) {
+        const callableName = toCallableName(t.name);
+        const params = extractRequiredParams(t.inputs);
+        catalogLines.push(`- \`${callableName}(${params})\` — ${t.description}`);
+
+        // Only add mapping when the names actually differ
+        if (callableName !== t.name) {
+          callableToRaw[callableName] = t.name;
+        }
+      }
+
+      const patchSnippet = Object.keys(callableToRaw).length > 0
+        ? buildInterfacePatchSnippet(callableToRaw)
+        : '';
+
+      return { catalog: catalogLines.join('\n'), patchSnippet };
     } catch {
-      return 'Tool catalog not available — use tools.* functions';
+      return { catalog: 'Tool catalog not available — use tools.* functions', patchSnippet: '' };
     }
   }
 
@@ -141,7 +190,14 @@ export class Sandbox {
   async executeCode(code: string, timeoutMs = 300000): Promise<CodeExecutionResult> {
     if (!this.client) throw new Error('Sandbox not initialized');
 
-    const { result, logs } = await this.client.callToolChain(code, timeoutMs);
+    // Prepend the interface patch so __getToolInterface accepts callable names.
+    // Each callToolChain invocation creates a fresh V8 isolate, so the patch
+    // must be re-applied every time.
+    const patchedCode = this.interfacePatchSnippet
+      ? `${this.interfacePatchSnippet}\n${code}`
+      : code;
+
+    const { result, logs } = await this.client.callToolChain(patchedCode, timeoutMs);
     return { result, logs: logs ?? [] };
   }
 

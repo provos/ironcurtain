@@ -120,6 +120,9 @@ export interface SessionOptions {
   /** Base configuration. If omitted, loaded from environment. */
   config?: IronCurtainConfig;
 
+  /** If provided, reuses the sandbox from this previous session via symlink. */
+  resumeSessionId?: string;
+
   /**
    * Maximum number of messages to retain in history before pruning.
    * Defined as an extension point but not enforced in the initial
