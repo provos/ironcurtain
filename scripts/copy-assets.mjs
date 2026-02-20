@@ -3,7 +3,7 @@
  * so that __dirname-relative path resolution works from compiled output.
  */
 
-import { cpSync, existsSync, mkdirSync } from 'node:fs';
+import { cpSync, chmodSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -31,6 +31,12 @@ if (existsSync(generatedDir)) {
       cpSync(src, resolve(distConfig, 'generated', file));
     }
   }
+}
+
+// Ensure the CLI entry point is executable after TypeScript compilation
+const cliBin = resolve(__dirname, '..', 'dist', 'cli.js');
+if (existsSync(cliBin)) {
+  chmodSync(cliBin, 0o755);
 }
 
 console.log('Assets copied to dist/config/');

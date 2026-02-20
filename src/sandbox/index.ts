@@ -161,32 +161,28 @@ export class Sandbox {
   private async buildToolCatalogAndPatch(): Promise<{ catalog: string; patchSnippet: string }> {
     if (!this.client) throw new Error('Sandbox not initialized');
 
-    try {
-      const tools = await this.client.getTools();
-      if (tools.length === 0) return { catalog: 'No tools available', patchSnippet: '' };
+    const tools = await this.client.getTools();
+    if (tools.length === 0) return { catalog: 'No tools available', patchSnippet: '' };
 
-      const callableToRaw: Record<string, string> = {};
-      const catalogLines: string[] = [];
+    const callableToRaw: Record<string, string> = {};
+    const catalogLines: string[] = [];
 
-      for (const t of tools) {
-        const callableName = toCallableName(t.name);
-        const params = extractRequiredParams(t.inputs);
-        catalogLines.push(`- \`${callableName}(${params})\` — ${t.description}`);
+    for (const t of tools) {
+      const callableName = toCallableName(t.name);
+      const params = extractRequiredParams(t.inputs);
+      catalogLines.push(`- \`${callableName}(${params})\` — ${t.description}`);
 
-        // Only add mapping when the names actually differ
-        if (callableName !== t.name) {
-          callableToRaw[callableName] = t.name;
-        }
+      // Only add mapping when the names actually differ
+      if (callableName !== t.name) {
+        callableToRaw[callableName] = t.name;
       }
-
-      const patchSnippet = Object.keys(callableToRaw).length > 0
-        ? buildInterfacePatchSnippet(callableToRaw)
-        : '';
-
-      return { catalog: catalogLines.join('\n'), patchSnippet };
-    } catch {
-      return { catalog: 'Tool catalog not available — use tools.* functions', patchSnippet: '' };
     }
+
+    const patchSnippet = Object.keys(callableToRaw).length > 0
+      ? buildInterfacePatchSnippet(callableToRaw)
+      : '';
+
+    return { catalog: catalogLines.join('\n'), patchSnippet };
   }
 
   getToolInterfaces(): string {

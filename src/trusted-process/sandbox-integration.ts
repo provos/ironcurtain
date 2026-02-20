@@ -11,8 +11,9 @@
  */
 
 import { SandboxManager } from '@anthropic-ai/sandbox-runtime';
-import { writeFileSync, rmSync } from 'node:fs';
-import { join, resolve, isAbsolute } from 'node:path';
+import { writeFileSync, rmSync, existsSync } from 'node:fs';
+import { join, resolve, dirname, isAbsolute } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { quote } from 'shell-quote';
 import type {
   MCPServerConfig,
@@ -58,8 +59,13 @@ export interface SandboxAvailabilityResult {
 /** Sensitive directories blocked from reads by default. */
 const DEFAULT_DENY_READ = ['~/.ssh', '~/.gnupg', '~/.aws'];
 
-/** Resolve the absolute path to the `srt` binary in node_modules. */
-const SRT_BIN = resolve('node_modules/.bin/srt');
+/**
+ * Resolve the absolute path to the `srt` binary in node_modules.
+ * Walks up from the package root to handle npm's dependency hoisting,
+ * where bins may be in a parent node_modules/.bin/ directory.
+ */
+const __sandboxDirname = dirname(fileURLToPath(import.meta.url));
+const SRT_BIN = resolveNodeModulesBin('srt', resolve(__sandboxDirname, '..', '..'));
 
 /** Pattern matching common OS-level permission errors from sandbox containment. */
 const SANDBOX_BLOCK_PATTERN = /EACCES|EPERM|Operation not permitted|Permission denied|read-only file system/i;
@@ -250,4 +256,21 @@ function resolveNetworkConfig(
     allowedDomains: config.allowedDomains,
     deniedDomains: config.deniedDomains ?? [],
   };
+}
+
+/**
+ * Resolves a binary name in node_modules/.bin/ by walking up from startDir.
+ * Handles npm's dependency hoisting where bins may live in a parent node_modules/.bin/.
+ */
+function resolveNodeModulesBin(binName: string, startDir: string): string {
+  let dir = startDir;
+  for (;;) {
+    const candidate = join(dir, 'node_modules', '.bin', binName);
+    if (existsSync(candidate)) return candidate;
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  // Fallback: assume it's directly under the package root
+  return join(startDir, 'node_modules', '.bin', binName);
 }

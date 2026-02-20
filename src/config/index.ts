@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { IronCurtainConfig, MCPServerConfig } from './types.js';
@@ -33,6 +33,22 @@ export function loadConfig(): IronCurtainConfig {
     const dirIndex = fsServer.args.indexOf(defaultDir);
     if (dirIndex !== -1) {
       fsServer.args[dirIndex] = allowedDirectory;
+    }
+  }
+
+  // Resolve node_modules/ relative paths to absolute paths.
+  // Bundled MCP servers reference binaries via node_modules/ which only works
+  // from the dev checkout root. After npm install, deps may be hoisted to a
+  // parent node_modules/, so we walk up from the package root to find them.
+  const packageRoot = resolve(__dirname, '..', '..');
+  for (const config of Object.values(mcpServers)) {
+    if (config.command.startsWith('node_modules/')) {
+      config.command = resolveNodeModulesPath(config.command, packageRoot);
+    }
+    for (let i = 0; i < config.args.length; i++) {
+      if (config.args[i].startsWith('node_modules/')) {
+        config.args[i] = resolveNodeModulesPath(config.args[i], packageRoot);
+      }
     }
   }
 
@@ -90,4 +106,21 @@ export function loadGeneratedPolicy(generatedDir: string): {
     readFileSync(resolve(generatedDir, 'tool-annotations.json'), 'utf-8'),
   );
   return { compiledPolicy, toolAnnotations };
+}
+
+/**
+ * Resolves a node_modules/ relative path by walking up from startDir.
+ * Handles npm's dependency hoisting where packages may live in a parent node_modules/.
+ */
+function resolveNodeModulesPath(relativePath: string, startDir: string): string {
+  let dir = startDir;
+  for (;;) {
+    const candidate = resolve(dir, relativePath);
+    if (existsSync(candidate)) return candidate;
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  // Fallback: assume it's directly under the package root
+  return resolve(startDir, relativePath);
 }

@@ -38,13 +38,15 @@
     "marked": "^15.0.12",
     "marked-terminal": "^7.3.0",
     "ora": "^9.3.0",
+    "@cyanheads/git-mcp-server": "^2.8.4",
+    "shell-quote": "^1.8.3",
     "uuid": "^13.0.0",
     "zod": "^4.3.6"
   },
   "devDependencies": {
-    "@cyanheads/git-mcp-server": "^2.8.4",
     "@eslint/js": "^9.39.2",
     "@types/node": "^22.0.0",
+    "@types/shell-quote": "^1.7.5",
     "@types/uuid": "^10.0.0",
     "eslint": "^9.39.2",
     "tsx": "^4.19.0",
