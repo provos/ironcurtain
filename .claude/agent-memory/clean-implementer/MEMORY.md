@@ -121,7 +121,7 @@ When mocking `generateText` for session tests:
 - Mock `@ai-sdk/anthropic` with BOTH `anthropic` and `createAnthropic` (latter used by `createLanguageModel()` dynamic import)
 - Also mock `@utcp/code-mode` (CodeModeUtcpClient)
 - Mock `generateText` result shape: `{ text, response: { messages: [...] }, totalUsage: { inputTokens, outputTokens, totalTokens } }`
-- Test config must include `userConfig: ResolvedUserConfig` with all 6 fields (agentModelId, policyModelId, apiKey, googleApiKey, openaiApiKey, escalationTimeoutSeconds)
+- Test config must include `userConfig: ResolvedUserConfig` with all 6 fields (agentModelId, policyModelId, anthropicApiKey, googleApiKey, openaiApiKey, escalationTimeoutSeconds)
 - GOTCHA: `messages` array is passed by reference to `generateText`. Inspecting `mock.calls[n][0].messages` after the test shows mutated state. Snapshot with `[...opts.messages]` at call time.
 - Use `IRONCURTAIN_HOME` env var pointed at `/tmp/ironcurtain-test-<pid>` for isolation
 - `createSession` factory adds `escalationDir` to session config (required for sandbox to pass ESCALATION_DIR to proxy)
@@ -148,7 +148,7 @@ When mocking `generateText` for session tests:
 - **User config module**: `src/config/user-config.ts` -- `loadUserConfig()`, `UserConfig`, `ResolvedUserConfig`, `USER_CONFIG_DEFAULTS`
 - **Config path**: `src/config/paths.ts` -- `getUserConfigPath()` returns `{home}/config.json`
 - **Config file**: `~/.ironcurtain/config.json` -- auto-created with defaults if missing
-- **Fields**: `agentModelId`, `policyModelId`, `apiKey`, `googleApiKey`, `openaiApiKey`, `escalationTimeoutSeconds` (all optional in file)
+- **Fields**: `agentModelId`, `policyModelId`, `anthropicApiKey`, `googleApiKey`, `openaiApiKey`, `escalationTimeoutSeconds` (all optional in file)
 - **Resolution order**: env var > config file > defaults
 - **IronCurtainConfig**: has `agentModelId`, `escalationTimeoutSeconds`, `userConfig: ResolvedUserConfig`; NO `anthropicApiKey` (removed)
 - **Model provider module**: `src/config/model-provider.ts` -- `parseModelId()`, `createLanguageModel()`, `getKnownProviders()`

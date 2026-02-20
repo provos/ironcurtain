@@ -75,7 +75,7 @@ function createTestConfig(): IronCurtainConfig {
     userConfig: {
       agentModelId: 'anthropic:claude-sonnet-4-6',
       policyModelId: 'anthropic:claude-sonnet-4-6',
-      apiKey: 'test-api-key',
+      anthropicApiKey: 'test-api-key',
       googleApiKey: '',
       openaiApiKey: '',
       escalationTimeoutSeconds: 300,

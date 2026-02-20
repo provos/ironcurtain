@@ -31,7 +31,7 @@ function createTestUserConfig(overrides: Partial<ResolvedUserConfig> = {}): Reso
   return {
     agentModelId: 'anthropic:claude-sonnet-4-6',
     policyModelId: 'anthropic:claude-sonnet-4-6',
-    apiKey: 'test-anthropic-key',
+    anthropicApiKey: 'test-anthropic-key',
     googleApiKey: 'test-google-key',
     openaiApiKey: 'test-openai-key',
     escalationTimeoutSeconds: 300,
@@ -119,7 +119,7 @@ describe('createLanguageModel', () => {
   });
 
   it('passes undefined for API key when config key is empty', async () => {
-    const config = createTestUserConfig({ apiKey: '' });
+    const config = createTestUserConfig({ anthropicApiKey: '' });
     await createLanguageModel('anthropic:claude-sonnet-4-6', config);
 
     const { createAnthropic } = await import('@ai-sdk/anthropic');

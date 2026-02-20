@@ -124,7 +124,7 @@ Both use the same PolicyEngine with compiled artifacts.
 - See `docs/designs/config-file.md` for full spec
 - File: `~/.ironcurtain/config.json`, auto-created with defaults
 - `src/config/user-config.ts` -- `loadUserConfig()`, `UserConfig`, `ResolvedUserConfig`
-- Settings: agentModelId, policyModelId, apiKey, escalationTimeoutSeconds
+- Settings: agentModelId, policyModelId, anthropicApiKey, escalationTimeoutSeconds
 - Resolution order: env var > config file > defaults
 - Pipeline loads user config directly (standalone CLI, not part of session layer)
 
@@ -134,7 +134,7 @@ Both use the same PolicyEngine with compiled artifacts.
 - Bare model IDs (no colon) default to Anthropic for backward compatibility
 - New file: `src/config/model-provider.ts` -- `parseModelId()`, `createLanguageModel()`
 - Dynamic imports for provider packages (only used provider needs to be installed)
-- Per-provider API keys: apiKey (Anthropic), googleApiKey, openaiApiKey
+- Per-provider API keys: anthropicApiKey, googleApiKey, openaiApiKey
 - Env var precedence: ANTHROPIC_API_KEY, GOOGLE_GENERATIVE_AI_API_KEY, OPENAI_API_KEY
 - `anthropicApiKey` removed from IronCurtainConfig; replaced by `userConfig: ResolvedUserConfig`
 - API key validation deferred to first LLM call (AI SDK gives better errors than we can)

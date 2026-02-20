@@ -77,7 +77,7 @@ const autoCompactSchema = z.object({
 const userConfigSchema = z.object({
   agentModelId: qualifiedModelId.optional(),
   policyModelId: qualifiedModelId.optional(),
-  apiKey: z.string().min(1, 'apiKey must be non-empty').optional(),
+  anthropicApiKey: z.string().min(1, 'anthropicApiKey must be non-empty').optional(),
   googleApiKey: z.string().min(1, 'googleApiKey must be non-empty').optional(),
   openaiApiKey: z.string().min(1, 'openaiApiKey must be non-empty').optional(),
   escalationTimeoutSeconds: z
@@ -114,7 +114,7 @@ export interface ResolvedAutoCompactConfig {
 export interface ResolvedUserConfig {
   readonly agentModelId: string;
   readonly policyModelId: string;
-  readonly apiKey: string;
+  readonly anthropicApiKey: string;
   readonly googleApiKey: string;
   readonly openaiApiKey: string;
   readonly escalationTimeoutSeconds: number;
@@ -126,14 +126,14 @@ export interface ResolvedUserConfig {
 const KNOWN_FIELDS = new Set<string>(Object.keys(userConfigSchema.shape));
 
 /** Fields that must never be backfilled into the config file. */
-const SENSITIVE_FIELDS = new Set(['apiKey', 'googleApiKey', 'openaiApiKey']);
+const SENSITIVE_FIELDS = new Set(['anthropicApiKey', 'googleApiKey', 'openaiApiKey']);
 
 /** Type guard for non-null, non-array objects. */
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-/** Default config file content (apiKey intentionally omitted). */
+/** Default config file content (anthropicApiKey intentionally omitted). */
 const DEFAULT_CONFIG_CONTENT = JSON.stringify(
   {
     agentModelId: USER_CONFIG_DEFAULTS.agentModelId,
@@ -152,7 +152,7 @@ const DEFAULT_CONFIG_CONTENT = JSON.stringify(
  * Behavior:
  * 1. If file does not exist: create with defaults, log to stderr
  * 2. If file exists: parse JSON, validate with Zod, merge with defaults
- * 3. Apply env var overrides (ANTHROPIC_API_KEY overrides apiKey)
+ * 3. Apply env var overrides (ANTHROPIC_API_KEY overrides anthropicApiKey)
  * 4. Return ResolvedUserConfig with all fields present
  *
  * @throws Error on invalid JSON or schema validation failure
@@ -336,7 +336,7 @@ function mergeWithDefaults(config: UserConfig): ResolvedUserConfig {
   return {
     agentModelId: config.agentModelId ?? USER_CONFIG_DEFAULTS.agentModelId,
     policyModelId: config.policyModelId ?? USER_CONFIG_DEFAULTS.policyModelId,
-    apiKey: config.apiKey ?? '',
+    anthropicApiKey: config.anthropicApiKey ?? '',
     googleApiKey: config.googleApiKey ?? '',
     openaiApiKey: config.openaiApiKey ?? '',
     escalationTimeoutSeconds:
@@ -366,7 +366,7 @@ function mergeWithDefaults(config: UserConfig): ResolvedUserConfig {
 function applyEnvOverrides(config: ResolvedUserConfig): ResolvedUserConfig {
   return {
     ...config,
-    apiKey: process.env.ANTHROPIC_API_KEY || config.apiKey,
+    anthropicApiKey: process.env.ANTHROPIC_API_KEY || config.anthropicApiKey,
     googleApiKey: process.env.GOOGLE_GENERATIVE_AI_API_KEY || config.googleApiKey,
     openaiApiKey: process.env.OPENAI_API_KEY || config.openaiApiKey,
   };

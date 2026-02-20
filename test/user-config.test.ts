@@ -44,7 +44,7 @@ describe('loadUserConfig', () => {
     expect(config.agentModelId).toBe(USER_CONFIG_DEFAULTS.agentModelId);
     expect(config.policyModelId).toBe(USER_CONFIG_DEFAULTS.policyModelId);
     expect(config.escalationTimeoutSeconds).toBe(USER_CONFIG_DEFAULTS.escalationTimeoutSeconds);
-    expect(config.apiKey).toBe('');
+    expect(config.anthropicApiKey).toBe('');
   });
 
   it('auto-creates config file with defaults when missing', () => {
@@ -55,8 +55,8 @@ describe('loadUserConfig', () => {
     expect(content.agentModelId).toBe(USER_CONFIG_DEFAULTS.agentModelId);
     expect(content.policyModelId).toBe(USER_CONFIG_DEFAULTS.policyModelId);
     expect(content.escalationTimeoutSeconds).toBe(USER_CONFIG_DEFAULTS.escalationTimeoutSeconds);
-    // apiKey intentionally omitted from auto-created file
-    expect(content.apiKey).toBeUndefined();
+    // anthropicApiKey intentionally omitted from auto-created file
+    expect(content.anthropicApiKey).toBeUndefined();
   });
 
   it('logs creation message to stderr when auto-creating', () => {
@@ -85,7 +85,7 @@ describe('loadUserConfig', () => {
     writeConfigFile({
       agentModelId: 'claude-opus-4-6',
       policyModelId: 'claude-haiku-3-5',
-      apiKey: 'sk-test-config-key',
+      anthropicApiKey: 'sk-test-config-key',
       escalationTimeoutSeconds: 60,
     });
 
@@ -93,26 +93,26 @@ describe('loadUserConfig', () => {
 
     expect(config.agentModelId).toBe('claude-opus-4-6');
     expect(config.policyModelId).toBe('claude-haiku-3-5');
-    expect(config.apiKey).toBe('sk-test-config-key');
+    expect(config.anthropicApiKey).toBe('sk-test-config-key');
     expect(config.escalationTimeoutSeconds).toBe(60);
   });
 
-  it('ANTHROPIC_API_KEY env var overrides config file apiKey', () => {
-    writeConfigFile({ apiKey: 'sk-from-config' });
+  it('ANTHROPIC_API_KEY env var overrides config file anthropicApiKey', () => {
+    writeConfigFile({ anthropicApiKey: 'sk-from-config' });
     process.env.ANTHROPIC_API_KEY = 'sk-from-env';
 
     const config = loadUserConfig();
 
-    expect(config.apiKey).toBe('sk-from-env');
+    expect(config.anthropicApiKey).toBe('sk-from-env');
   });
 
-  it('uses config file apiKey when env var is not set', () => {
-    writeConfigFile({ apiKey: 'sk-from-config' });
+  it('uses config file anthropicApiKey when env var is not set', () => {
+    writeConfigFile({ anthropicApiKey: 'sk-from-config' });
     delete process.env.ANTHROPIC_API_KEY;
 
     const config = loadUserConfig();
 
-    expect(config.apiKey).toBe('sk-from-config');
+    expect(config.anthropicApiKey).toBe('sk-from-config');
   });
 
   it('throws on invalid JSON', () => {
@@ -178,7 +178,7 @@ describe('loadUserConfig', () => {
     expect(config.agentModelId).toBe(USER_CONFIG_DEFAULTS.agentModelId);
     expect(config.policyModelId).toBe(USER_CONFIG_DEFAULTS.policyModelId);
     expect(config.escalationTimeoutSeconds).toBe(USER_CONFIG_DEFAULTS.escalationTimeoutSeconds);
-    expect(config.apiKey).toBe('');
+    expect(config.anthropicApiKey).toBe('');
   });
 
   it('accepts boundary escalation timeout values', () => {
@@ -308,13 +308,13 @@ describe('loadUserConfig', () => {
     expect(budget.warnThresholdPercent).toBe(USER_CONFIG_DEFAULTS.resourceBudget.warnThresholdPercent);
   });
 
-  it('does not backfill sensitive fields (apiKey, googleApiKey, openaiApiKey)', () => {
+  it('does not backfill sensitive fields (anthropicApiKey, googleApiKey, openaiApiKey)', () => {
     writeConfigFile({ agentModelId: 'claude-opus-4-6' });
 
     loadUserConfig();
 
     const onDisk = readConfigFromDisk();
-    expect(onDisk.apiKey).toBeUndefined();
+    expect(onDisk.anthropicApiKey).toBeUndefined();
     expect(onDisk.googleApiKey).toBeUndefined();
     expect(onDisk.openaiApiKey).toBeUndefined();
   });

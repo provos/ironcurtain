@@ -56,7 +56,7 @@ A single config file at `~/.ironcurtain/config.json` would give users a persiste
   "policyModelId": "claude-sonnet-4-6",
 
   // Anthropic API key (alternative to ANTHROPIC_API_KEY env var)
-  "apiKey": "<key>",
+  "anthropicApiKey": "<key>",
 
   // Escalation timeout in seconds (30-600)
   "escalationTimeoutSeconds": 300
@@ -74,7 +74,7 @@ All fields are optional. Missing fields use defaults. Unknown fields are ignored
 export interface UserConfig {
   readonly agentModelId?: string;
   readonly policyModelId?: string;
-  readonly apiKey?: string;
+  readonly anthropicApiKey?: string;
   readonly escalationTimeoutSeconds?: number;
 }
 
@@ -82,7 +82,7 @@ export interface UserConfig {
 export interface ResolvedUserConfig {
   readonly agentModelId: string;
   readonly policyModelId: string;
-  readonly apiKey: string;
+  readonly anthropicApiKey: string;
   readonly escalationTimeoutSeconds: number;
 }
 
@@ -99,7 +99,7 @@ export const USER_CONFIG_DEFAULTS = {
 |-------|------|-----------|--------------|
 | `agentModelId` | `string` | Non-empty | Error at startup |
 | `policyModelId` | `string` | Non-empty | Error at startup |
-| `apiKey` | `string` | Non-empty if present | Ignored (falls through to env var) |
+| `anthropicApiKey` | `string` | Non-empty if present | Ignored (falls through to env var) |
 | `escalationTimeoutSeconds` | `number` | Integer, 30-600 | Error at startup |
 
 Validation uses Zod for consistency with the rest of the codebase. Invalid JSON is a hard error (not silently ignored).
@@ -117,7 +117,7 @@ Rationale: env vars take precedence because they are the standard mechanism for 
 For the API key specifically:
 
 ```
-ANTHROPIC_API_KEY env var  >  config.json apiKey  >  error
+ANTHROPIC_API_KEY env var  >  config.json anthropicApiKey  >  error
 ```
 
 ## 5. Loading Behavior
@@ -133,7 +133,7 @@ Behavior:
 1. Compute config path: `${getIronCurtainHome()}/config.json`
 2. If file does not exist: create it with defaults (pretty-printed JSON with comments stripped, since JSON does not support comments). Log to stderr: `Created default config at ~/.ironcurtain/config.json`
 3. If file exists: parse JSON, validate with Zod, merge with defaults
-4. Apply env var overrides (`ANTHROPIC_API_KEY` overrides `apiKey`)
+4. Apply env var overrides (`ANTHROPIC_API_KEY` overrides `anthropicApiKey`)
 5. Return `ResolvedUserConfig`
 
 Auto-creation writes this content:
@@ -146,7 +146,7 @@ Auto-creation writes this content:
 }
 ```
 
-Note: `apiKey` is intentionally omitted from the auto-created file. Users who want to store their key in config can add it manually.
+Note: `anthropicApiKey` is intentionally omitted from the auto-created file. Users who want to store their key in config can add it manually.
 
 ### Error handling
 
@@ -163,7 +163,7 @@ Note: `apiKey` is intentionally omitted from the auto-created file. Users who wa
 
 ### `src/config/index.ts` -- `loadConfig()`
 
-Call `loadUserConfig()` early. Use `resolvedConfig.apiKey` as the fallback for `ANTHROPIC_API_KEY`. Pass `agentModelId` through on `IronCurtainConfig`.
+Call `loadUserConfig()` early. Use `resolvedConfig.anthropicApiKey` as the fallback for `ANTHROPIC_API_KEY`. Pass `agentModelId` through on `IronCurtainConfig`.
 
 ```typescript
 export interface IronCurtainConfig {
@@ -227,7 +227,7 @@ src/config/
   - Returns defaults when file does not exist
   - Parses valid config and merges with defaults
   - Rejects invalid JSON with useful error
-  - Env var `ANTHROPIC_API_KEY` overrides config file `apiKey`
+  - Env var `ANTHROPIC_API_KEY` overrides config file `anthropicApiKey`
   - Unknown fields produce warning but do not cause error
   - Missing optional fields use defaults
 - Use temp directories (`/tmp/ironcurtain-test-*`) with `IRONCURTAIN_HOME` override to isolate tests from real user config.

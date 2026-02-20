@@ -92,7 +92,7 @@ export async function createLanguageModel(
   switch (provider) {
     case 'anthropic': {
       const { createAnthropic } = await import('@ai-sdk/anthropic');
-      const apiKey = config.apiKey || undefined;
+      const apiKey = config.anthropicApiKey || undefined;
       return createAnthropic({ apiKey })(modelId);
     }
     case 'google': {

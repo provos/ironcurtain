@@ -83,7 +83,7 @@ describe('Integration: TrustedProcess with filesystem MCP server', () => {
       userConfig: {
         agentModelId: 'anthropic:claude-sonnet-4-6',
         policyModelId: 'anthropic:claude-sonnet-4-6',
-        apiKey: '',
+        anthropicApiKey: '',
         googleApiKey: '',
         openaiApiKey: '',
         escalationTimeoutSeconds: 300,

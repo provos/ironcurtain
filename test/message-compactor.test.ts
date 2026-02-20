@@ -33,7 +33,7 @@ function createUserConfig(): ResolvedUserConfig {
   return {
     agentModelId: 'anthropic:claude-sonnet-4-6',
     policyModelId: 'anthropic:claude-sonnet-4-6',
-    apiKey: 'test-key',
+    anthropicApiKey: 'test-key',
     googleApiKey: '',
     openaiApiKey: '',
     escalationTimeoutSeconds: 300,

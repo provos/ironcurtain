@@ -126,7 +126,7 @@ Or add it to `~/.ironcurtain/config.json` (auto-created on first run with defaul
 
 ```json
 {
-  "apiKey": "sk-ant-..."
+  "anthropicApiKey": "sk-ant-..."
 }
 ```
 
@@ -238,7 +238,7 @@ Each provider has its own API key field in the config (and corresponding environ
 
 | Provider | Config Key | Environment Variable |
 |----------|-----------|---------------------|
-| Anthropic | `apiKey` | `ANTHROPIC_API_KEY` |
+| Anthropic | `anthropicApiKey` | `ANTHROPIC_API_KEY` |
 | Google | `googleApiKey` | `GOOGLE_GENERATIVE_AI_API_KEY` |
 | OpenAI | `openaiApiKey` | `OPENAI_API_KEY` |
 

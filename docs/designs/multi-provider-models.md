@@ -61,7 +61,7 @@ Each provider has its own API key convention. The AI SDK providers already look 
 
 | Provider | Env Var (AI SDK default) | Config file field |
 |----------|------------------------|-------------------|
-| Anthropic | `ANTHROPIC_API_KEY` | `apiKey` (existing, remains the default) |
+| Anthropic | `ANTHROPIC_API_KEY` | `anthropicApiKey` |
 | Google | `GOOGLE_GENERATIVE_AI_API_KEY` | `googleApiKey` |
 | OpenAI | `OPENAI_API_KEY` | `openaiApiKey` |
 
@@ -82,7 +82,7 @@ This matches how the AI SDK providers work internally -- `createAnthropic()` rea
   "policyModelId": "anthropic:claude-sonnet-4-6",
 
   // API keys -- optional, env vars take precedence
-  "apiKey": "<anthropic-key>",       // existing field, now explicitly Anthropic
+  "anthropicApiKey": "<anthropic-key>",
   "googleApiKey": "<google-key>",    // optional
   "openaiApiKey": "<openai-key>",    // optional
 
@@ -186,7 +186,7 @@ export async function createLanguageModel(
   switch (provider) {
     case 'anthropic': {
       const { createAnthropic } = await import('@ai-sdk/anthropic');
-      const apiKey = config.apiKey || undefined;
+      const apiKey = config.anthropicApiKey || undefined;
       return createAnthropic({ apiKey })(modelId);
     }
     case 'google': {
@@ -229,7 +229,7 @@ Add optional API key fields for additional providers. Update the Zod schema and 
 const userConfigSchema = z.object({
   agentModelId: z.string().min(1).optional(),
   policyModelId: z.string().min(1).optional(),
-  apiKey: z.string().min(1).optional(),          // Anthropic (existing)
+  anthropicApiKey: z.string().min(1).optional(),  // Anthropic
   googleApiKey: z.string().min(1).optional(),     // NEW
   openaiApiKey: z.string().min(1).optional(),     // NEW
   escalationTimeoutSeconds: z.number().int().min(30).max(600).optional(),
@@ -238,7 +238,7 @@ const userConfigSchema = z.object({
 export interface ResolvedUserConfig {
   readonly agentModelId: string;
   readonly policyModelId: string;
-  readonly apiKey: string;          // Anthropic
+  readonly anthropicApiKey: string;          // Anthropic
   readonly googleApiKey: string;    // NEW (empty string if not set)
   readonly openaiApiKey: string;    // NEW (empty string if not set)
   readonly escalationTimeoutSeconds: number;
@@ -251,7 +251,7 @@ Update `applyEnvOverrides()` to respect additional provider env vars:
 function applyEnvOverrides(config: ResolvedUserConfig): ResolvedUserConfig {
   return {
     ...config,
-    apiKey: process.env.ANTHROPIC_API_KEY || config.apiKey,
+    anthropicApiKey: process.env.ANTHROPIC_API_KEY || config.anthropicApiKey,
     googleApiKey: process.env.GOOGLE_GENERATIVE_AI_API_KEY || config.googleApiKey,
     openaiApiKey: process.env.OPENAI_API_KEY || config.openaiApiKey,
   };
@@ -349,7 +349,7 @@ For a PoC, shipping all three as regular dependencies is pragmatic. They are sma
 Currently `IronCurtainConfig.anthropicApiKey` is set from the user config and checked in `loadConfig()`:
 
 ```typescript
-if (!userConfig.apiKey) {
+if (!userConfig.anthropicApiKey) {
   throw new Error('ANTHROPIC_API_KEY environment variable is required ...');
 }
 ```
