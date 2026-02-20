@@ -223,7 +223,7 @@ describe('ResourceBudgetTracker', () => {
         'unknown-model-xyz',
       );
 
-      // Fallback: input=$5/M, output=$15/M
+      // Fallback: input=$3/M, output=$15/M
       tracker.recordStep(makeUsage({
         inputTokens: 1_000_000,
         outputTokens: 0,
@@ -231,7 +231,7 @@ describe('ResourceBudgetTracker', () => {
       }));
 
       const snapshot = tracker.getSnapshot();
-      expect(snapshot.estimatedCostUsd).toBeCloseTo(5.0, 1);
+      expect(snapshot.estimatedCostUsd).toBeCloseTo(3.0, 1);
     });
   });
 

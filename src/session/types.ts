@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { IronCurtainConfig } from '../config/types.js';
 import type { Sandbox } from '../sandbox/index.js';
+import type { ResolvedResourceBudgetConfig } from '../config/user-config.js';
 
 /**
  * Unique identifier for a session. Branded to prevent accidental
@@ -61,6 +62,20 @@ export type DiagnosticEvent =
   | { readonly kind: 'result_truncation'; readonly originalKB: number; readonly finalKB: number }
   | { readonly kind: 'budget_warning'; readonly dimension: string; readonly percentUsed: number; readonly message: string }
   | { readonly kind: 'budget_exhausted'; readonly dimension: string; readonly message: string };
+
+/**
+ * Budget status: current consumption snapshot plus configured limits.
+ * Exposed to transports for the /budget command and end-of-session summary.
+ */
+export interface BudgetStatus {
+  readonly totalInputTokens: number;
+  readonly totalOutputTokens: number;
+  readonly totalTokens: number;
+  readonly stepCount: number;
+  readonly elapsedSeconds: number;
+  readonly estimatedCostUsd: number;
+  readonly limits: ResolvedResourceBudgetConfig;
+}
 
 /**
  * Read-only snapshot of session state. Exposed to transports
@@ -186,6 +201,12 @@ export interface Session {
    * Returns any currently pending escalation, or undefined.
    */
   getPendingEscalation(): EscalationRequest | undefined;
+
+  /**
+   * Returns current resource budget consumption and configured limits.
+   * Used by transports for /budget display and end-of-session summary.
+   */
+  getBudgetStatus(): BudgetStatus;
 
   /**
    * Releases all session resources: sandbox, MCP connections,

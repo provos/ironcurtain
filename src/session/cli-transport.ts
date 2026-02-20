@@ -13,6 +13,7 @@
  * Slash commands:
  *   /quit, /exit  -- end the session
  *   /logs         -- display accumulated diagnostic events
+ *   /budget       -- show resource budget usage
  *   /approve      -- approve a pending escalation
  *   /deny         -- deny a pending escalation
  */
@@ -24,7 +25,7 @@ import { marked } from 'marked';
 import { markedTerminal } from 'marked-terminal';
 import type { Ora } from 'ora';
 import type { Transport } from './transport.js';
-import type { Session, DiagnosticEvent, EscalationRequest } from './types.js';
+import type { Session, DiagnosticEvent, EscalationRequest, BudgetStatus } from './types.js';
 
 /** Options for constructing a CliTransport. */
 export interface CliTransportOptions {
@@ -112,6 +113,7 @@ export class CliTransport implements Transport {
       this.spinner!.stop();
       process.stdout.write('\n');
       process.stdout.write(renderMarkdown(response));
+      this.displaySessionSummary(session.getBudgetStatus());
     } catch (error) {
       this.stopSpinnerWithError(error);
       throw error;
@@ -132,7 +134,7 @@ export class CliTransport implements Transport {
       chalk.dim('IronCurtain interactive mode. Type /quit to exit.\n\n'),
     );
     process.stderr.write(
-      chalk.dim('Commands: /quit /logs /approve /deny\n\n'),
+      chalk.dim('Commands: /quit /logs /budget /approve /deny\n\n'),
     );
     rl.prompt();
 
@@ -193,6 +195,8 @@ export class CliTransport implements Transport {
         resolvePromise();
       });
     });
+
+    this.displaySessionSummary(session.getBudgetStatus());
   }
 
   // --- Slash commands ---
@@ -214,6 +218,10 @@ export class CliTransport implements Transport {
 
       case '/logs':
         this.displayDiagnosticLog(session.getDiagnosticLog());
+        return true;
+
+      case '/budget':
+        this.displayBudgetStatus(session.getBudgetStatus());
         return true;
 
       case '/approve':
@@ -273,6 +281,34 @@ export class CliTransport implements Transport {
       });
   }
 
+  // --- Budget display ---
+
+  private displayBudgetStatus(status: BudgetStatus): void {
+    const { limits } = status;
+    process.stderr.write(chalk.cyan('  Resource budget:\n'));
+    process.stderr.write(formatBudgetLine(
+      'Tokens', status.totalTokens, limits.maxTotalTokens, (v) => v.toLocaleString(),
+    ));
+    process.stderr.write(formatBudgetLine(
+      'Steps', status.stepCount, limits.maxSteps, String,
+    ));
+    process.stderr.write(formatBudgetLine(
+      'Time', status.elapsedSeconds, limits.maxSessionSeconds, (v) => `${Math.round(v)}s`,
+    ));
+    process.stderr.write(formatBudgetLine(
+      'Est. cost', status.estimatedCostUsd, limits.maxEstimatedCostUsd, (v) => `$${v.toFixed(2)}`,
+    ));
+  }
+
+  private displaySessionSummary(status: BudgetStatus): void {
+    process.stderr.write(chalk.dim(
+      `\nSession: ${status.totalTokens.toLocaleString()} tokens` +
+      ` · ${status.stepCount} steps` +
+      ` · ${Math.round(status.elapsedSeconds)}s` +
+      ` · ~$${status.estimatedCostUsd.toFixed(2)}\n`,
+    ));
+  }
+
   // --- Spinner helpers ---
 
   private startSpinner(text: string): void {
@@ -311,6 +347,20 @@ export class CliTransport implements Transport {
     ];
     process.stderr.write(lines.join('\n') + '\n');
   }
+}
+
+// --- Budget formatting ---
+
+function formatBudgetLine(
+  label: string,
+  current: number,
+  limit: number | null,
+  format: (v: number) => string,
+): string {
+  const currentStr = format(current);
+  if (limit === null) return `    ${label}: ${currentStr} (no limit)\n`;
+  const pct = limit > 0 ? Math.round((current / limit) * 100) : 0;
+  return `    ${label}: ${currentStr} / ${format(limit)} (${pct}%)\n`;
 }
 
 // --- Markdown rendering ---

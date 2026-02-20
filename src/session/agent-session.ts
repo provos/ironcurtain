@@ -33,6 +33,7 @@ import type {
   DiagnosticEvent,
   EscalationRequest,
   SandboxFactory,
+  BudgetStatus,
 } from './types.js';
 import { SessionNotReadyError, SessionClosedError, BudgetExhaustedError } from './errors.js';
 import { StepLoopDetector } from './step-loop-detector.js';
@@ -227,6 +228,14 @@ export class AgentSession implements Session {
 
   getPendingEscalation(): EscalationRequest | undefined {
     return this.pendingEscalation;
+  }
+
+  getBudgetStatus(): BudgetStatus {
+    const snapshot = this.budgetTracker.getSnapshot();
+    return {
+      ...snapshot,
+      limits: this.config.userConfig.resourceBudget,
+    };
   }
 
   async resolveEscalation(

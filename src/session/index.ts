@@ -122,6 +122,7 @@ export type {
   DiagnosticEvent,
   EscalationRequest,
   SandboxFactory,
+  BudgetStatus,
 } from './types.js';
 export type { Transport } from './transport.js';
 export { SessionError, SessionNotReadyError, SessionClosedError, BudgetExhaustedError } from './errors.js';
