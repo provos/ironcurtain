@@ -86,6 +86,12 @@ function createTestConfig(): IronCurtainConfig {
         maxEstimatedCostUsd: 5.00,
         warnThresholdPercent: 80,
       },
+      autoCompact: {
+        enabled: false,
+        thresholdTokens: 80_000,
+        keepRecentMessages: 10,
+        summaryModelId: 'anthropic:claude-haiku-4-5',
+      },
     },
   };
 }

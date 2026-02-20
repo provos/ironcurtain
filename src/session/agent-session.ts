@@ -38,6 +38,7 @@ import type {
 import { SessionNotReadyError, SessionClosedError, BudgetExhaustedError } from './errors.js';
 import { StepLoopDetector } from './step-loop-detector.js';
 import { ResourceBudgetTracker } from './resource-budget-tracker.js';
+import { MessageCompactor } from './message-compactor.js';
 import { truncateResult, getResultSizeLimit, formatKB } from './truncate-result.js';
 import * as logger from '../logger.js';
 
@@ -94,6 +95,12 @@ export class AgentSession implements Session {
   /** Resource budget tracker for token, step, time, and cost limits. */
   private readonly budgetTracker: ResourceBudgetTracker;
 
+  /** Message compactor for auto-summarizing older messages. */
+  private readonly compactor: MessageCompactor;
+
+  /** Last step's input token count, used by the compactor to detect threshold. */
+  private lastStepInputTokens = 0;
+
   /** Callbacks from SessionOptions. */
   private readonly onEscalation?: (request: EscalationRequest) => void;
   private readonly onDiagnostic?: (event: DiagnosticEvent) => void;
@@ -115,6 +122,7 @@ export class AgentSession implements Session {
       config.userConfig.resourceBudget,
       config.agentModelId,
     );
+    this.compactor = new MessageCompactor(config.userConfig.autoCompact);
   }
 
   /**
@@ -167,6 +175,22 @@ export class AgentSession implements Session {
     try {
       this.messages.push({ role: 'user', content: userMessage });
 
+      // Auto-compact older messages if the previous turn exceeded the threshold
+      if (this.compactor.shouldCompact()) {
+        const compactionResult = await this.compactor.compact(
+          this.messages,
+          this.config.userConfig,
+        );
+        if (compactionResult) {
+          this.emitDiagnostic({
+            kind: 'message_compaction',
+            originalMessageCount: compactionResult.originalMessageCount,
+            newMessageCount: compactionResult.newMessageCount,
+            summaryPreview: compactionResult.summaryPreview,
+          });
+        }
+      }
+
       const result = await generateText({
         model: this.model!,
         system: this.systemPrompt,
@@ -178,6 +202,7 @@ export class AgentSession implements Session {
         ],
         ...(abortController ? { abortSignal: abortController.signal } : {}),
         onStepFinish: (stepResult) => {
+          this.lastStepInputTokens = stepResult.usage?.inputTokens ?? 0;
           this.emitToolCallDiagnostics(stepResult.toolCalls);
           this.emitTextDiagnostic(stepResult.text);
           this.emitBudgetWarnings();
@@ -191,6 +216,9 @@ export class AgentSession implements Session {
       }
 
       this.messages.push(...result.response.messages);
+
+      // Record input tokens for the compactor's next-turn threshold check
+      this.compactor.recordInputTokens(this.lastStepInputTokens);
 
       const turn = this.recordTurn(userMessage, result.text, result.totalUsage, turnStart);
       this.turns.push(turn);

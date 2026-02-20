@@ -281,7 +281,126 @@ describe('loadUserConfig', () => {
     expect(USER_CONFIG_DEFAULTS.policyModelId).toMatch(/^anthropic:/);
   });
 
+  // --- Backfill missing fields ---
+
+  it('backfills missing top-level fields while preserving user values', () => {
+    writeConfigFile({ agentModelId: 'claude-opus-4-6' });
+
+    const config = loadUserConfig();
+    expect(config.agentModelId).toBe('claude-opus-4-6');
+
+    const onDisk = readConfigFromDisk();
+    expect(onDisk.agentModelId).toBe('claude-opus-4-6');
+    expect(onDisk.escalationTimeoutSeconds).toBe(USER_CONFIG_DEFAULTS.escalationTimeoutSeconds);
+    expect(onDisk.resourceBudget).toEqual(USER_CONFIG_DEFAULTS.resourceBudget);
+    expect(onDisk.autoCompact).toEqual(USER_CONFIG_DEFAULTS.autoCompact);
+  });
+
+  it('backfills missing nested sub-fields in existing objects', () => {
+    writeConfigFile({ resourceBudget: { maxSteps: 100 } });
+
+    loadUserConfig();
+
+    const onDisk = readConfigFromDisk();
+    const budget = onDisk.resourceBudget as Record<string, unknown>;
+    expect(budget.maxSteps).toBe(100);
+    expect(budget.maxTotalTokens).toBe(USER_CONFIG_DEFAULTS.resourceBudget.maxTotalTokens);
+    expect(budget.warnThresholdPercent).toBe(USER_CONFIG_DEFAULTS.resourceBudget.warnThresholdPercent);
+  });
+
+  it('does not backfill sensitive fields (apiKey, googleApiKey, openaiApiKey)', () => {
+    writeConfigFile({ agentModelId: 'claude-opus-4-6' });
+
+    loadUserConfig();
+
+    const onDisk = readConfigFromDisk();
+    expect(onDisk.apiKey).toBeUndefined();
+    expect(onDisk.googleApiKey).toBeUndefined();
+    expect(onDisk.openaiApiKey).toBeUndefined();
+  });
+
+  it('is idempotent — no write when file already has all fields', () => {
+    // First call creates and backfills
+    loadUserConfig();
+    const configPath = resolve(testHome, 'config.json');
+    const contentAfterFirst = readFileSync(configPath, 'utf-8');
+
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    loadUserConfig();
+    stderrSpy.mockRestore();
+
+    const contentAfterSecond = readFileSync(configPath, 'utf-8');
+    expect(contentAfterSecond).toBe(contentAfterFirst);
+    // Should not log backfill message on second call
+    expect(stderrSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining('Backfilled config fields'),
+    );
+  });
+
+  it('logs added fields to stderr during backfill', () => {
+    writeConfigFile({ agentModelId: 'claude-opus-4-6' });
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+
+    loadUserConfig();
+
+    expect(stderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Backfilled config fields'),
+    );
+    stderrSpy.mockRestore();
+  });
+
+  it('preserves JSON formatting (2-space indent, trailing newline)', () => {
+    writeConfigFile({ agentModelId: 'claude-opus-4-6' });
+
+    loadUserConfig();
+
+    const raw = readFileSync(resolve(testHome, 'config.json'), 'utf-8');
+    expect(raw).toMatch(/^\{/);
+    expect(raw.endsWith('\n')).toBe(true);
+    expect(raw).toContain('  "agentModelId"');
+  });
+
+  it('preserves unknown fields in the file during backfill', () => {
+    writeConfigFile({
+      agentModelId: 'claude-opus-4-6',
+      customField: 'keep-me',
+    } as Record<string, unknown>);
+
+    loadUserConfig();
+
+    const onDisk = readConfigFromDisk();
+    expect(onDisk.customField).toBe('keep-me');
+  });
+
+  it('preserves explicit null values in nested objects during backfill', () => {
+    writeRawConfigFile(JSON.stringify({
+      resourceBudget: { maxSteps: null, maxTotalTokens: 500000 },
+    }, null, 2));
+
+    loadUserConfig();
+
+    const onDisk = readConfigFromDisk();
+    const budget = onDisk.resourceBudget as Record<string, unknown>;
+    expect(budget.maxSteps).toBeNull();
+    expect(budget.maxTotalTokens).toBe(500000);
+    expect(budget.warnThresholdPercent).toBe(USER_CONFIG_DEFAULTS.resourceBudget.warnThresholdPercent);
+  });
+
+  it('skips backfill on invalid JSON (file unchanged)', () => {
+    const invalidJson = '{ invalid json }';
+    writeRawConfigFile(invalidJson);
+
+    expect(() => loadUserConfig()).toThrow(/Invalid JSON/);
+
+    const raw = readFileSync(resolve(testHome, 'config.json'), 'utf-8');
+    expect(raw).toBe(invalidJson);
+  });
+
   // --- Test helpers ---
+
+  function readConfigFromDisk(): Record<string, unknown> {
+    return JSON.parse(readFileSync(resolve(testHome, 'config.json'), 'utf-8'));
+  }
 
   function writeRawConfigFile(content: string): void {
     mkdirSync(testHome, { recursive: true });

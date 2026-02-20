@@ -78,6 +78,9 @@ export class CliTransport implements Transport {
         case 'budget_exhausted':
           this.spinner.fail(chalk.red(`Budget exhausted: ${event.message}`));
           break;
+        case 'message_compaction':
+          this.spinner.text = 'Compacting conversation history...';
+          break;
       }
     };
   }
@@ -253,6 +256,11 @@ export class CliTransport implements Transport {
           break;
         case 'budget_exhausted':
           process.stderr.write(chalk.red(`  [budget] ${event.message}\n`));
+          break;
+        case 'message_compaction':
+          process.stderr.write(chalk.dim(
+            `  [compact] ${event.originalMessageCount} → ${event.newMessageCount} messages\n`,
+          ));
           break;
       }
     }

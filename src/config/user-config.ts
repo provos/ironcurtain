@@ -23,6 +23,12 @@ export const USER_CONFIG_DEFAULTS = {
     maxEstimatedCostUsd: 5.00,
     warnThresholdPercent: 80,
   },
+  autoCompact: {
+    enabled: true,
+    thresholdTokens: 160_000,
+    keepRecentMessages: 10,
+    summaryModelId: 'anthropic:claude-haiku-4-5',
+  },
 } as const;
 
 const ESCALATION_TIMEOUT_MIN = 30;
@@ -56,6 +62,13 @@ const qualifiedModelId = z.string().min(1).refine(
   },
 );
 
+const autoCompactSchema = z.object({
+  enabled: z.boolean().optional(),
+  thresholdTokens: z.number().int().positive().optional(),
+  keepRecentMessages: z.number().int().positive().optional(),
+  summaryModelId: qualifiedModelId.optional(),
+}).optional();
+
 /**
  * Zod schema for validating user config. All fields optional.
  * Validates types and constraints without applying defaults --
@@ -74,6 +87,7 @@ const userConfigSchema = z.object({
     .max(ESCALATION_TIMEOUT_MAX, `escalationTimeoutSeconds must be at most ${ESCALATION_TIMEOUT_MAX}`)
     .optional(),
   resourceBudget: resourceBudgetSchema,
+  autoCompact: autoCompactSchema,
 });
 
 /** Parsed config from ~/.ironcurtain/config.json. All fields optional. */
@@ -88,6 +102,14 @@ export interface ResolvedResourceBudgetConfig {
   readonly warnThresholdPercent: number;
 }
 
+/** Resolved auto-compaction config with all fields present. */
+export interface ResolvedAutoCompactConfig {
+  readonly enabled: boolean;
+  readonly thresholdTokens: number;
+  readonly keepRecentMessages: number;
+  readonly summaryModelId: string;
+}
+
 /** Validated, defaults-applied configuration. All fields present. */
 export interface ResolvedUserConfig {
   readonly agentModelId: string;
@@ -97,10 +119,19 @@ export interface ResolvedUserConfig {
   readonly openaiApiKey: string;
   readonly escalationTimeoutSeconds: number;
   readonly resourceBudget: ResolvedResourceBudgetConfig;
+  readonly autoCompact: ResolvedAutoCompactConfig;
 }
 
 /** Known fields derived from the schema. Used for unknown-field detection. */
 const KNOWN_FIELDS = new Set<string>(Object.keys(userConfigSchema.shape));
+
+/** Fields that must never be backfilled into the config file. */
+const SENSITIVE_FIELDS = new Set(['apiKey', 'googleApiKey', 'openaiApiKey']);
+
+/** Type guard for non-null, non-array objects. */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
 
 /** Default config file content (apiKey intentionally omitted). */
 const DEFAULT_CONFIG_CONTENT = JSON.stringify(
@@ -109,6 +140,7 @@ const DEFAULT_CONFIG_CONTENT = JSON.stringify(
     policyModelId: USER_CONFIG_DEFAULTS.policyModelId,
     escalationTimeoutSeconds: USER_CONFIG_DEFAULTS.escalationTimeoutSeconds,
     resourceBudget: USER_CONFIG_DEFAULTS.resourceBudget,
+    autoCompact: USER_CONFIG_DEFAULTS.autoCompact,
   },
   null,
   2,
@@ -127,11 +159,116 @@ const DEFAULT_CONFIG_CONTENT = JSON.stringify(
  */
 export function loadUserConfig(): ResolvedUserConfig {
   const configPath = getUserConfigPath();
-  const raw = readOrCreateConfigFile(configPath);
+  let raw = readOrCreateConfigFile(configPath);
+  raw = backfillMissingFields(configPath, raw);
   const parsed = parseConfigJson(raw, configPath);
   warnUnknownFields(parsed, configPath);
   const validated = validateConfig(parsed, configPath);
   return applyEnvOverrides(mergeWithDefaults(validated));
+}
+
+/**
+ * Detects fields present in USER_CONFIG_DEFAULTS but missing from the file,
+ * writes them back with default values, and logs what was added.
+ * Returns raw unchanged on parse failure (validation catches this later).
+ */
+function backfillMissingFields(configPath: string, raw: string): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return raw;
+  }
+  if (!isPlainObject(parsed)) return raw;
+  const fileContent = parsed;
+
+  const patch = computeMissingDefaults(fileContent);
+  if (patch === null) return raw;
+
+  const updated = applyPatchToFileContent(fileContent, patch);
+  const newRaw = JSON.stringify(updated, null, 2) + '\n';
+  writeFileSync(configPath, newRaw);
+  process.stderr.write(`Backfilled config fields: ${describeAddedFields(patch)}\n`);
+  return newRaw;
+}
+
+/**
+ * Computes a patch of default values for fields missing from the config file.
+ * Skips sensitive fields. One level deep for nested objects.
+ * Returns null when nothing is missing.
+ */
+function computeMissingDefaults(
+  fileContent: Record<string, unknown>,
+): Record<string, unknown> | null {
+  const patch: Record<string, unknown> = {};
+
+  for (const [key, defaultValue] of Object.entries(USER_CONFIG_DEFAULTS)) {
+    if (SENSITIVE_FIELDS.has(key)) continue;
+
+    if (!(key in fileContent)) {
+      patch[key] = defaultValue;
+      continue;
+    }
+
+    // For nested objects, check for missing sub-fields one level deep
+    if (!isPlainObject(defaultValue) || !isPlainObject(fileContent[key])) continue;
+
+    const existing = fileContent[key] as Record<string, unknown>;
+    const subPatch: Record<string, unknown> = {};
+    for (const [subKey, subDefault] of Object.entries(defaultValue)) {
+      if (!(subKey in existing)) {
+        subPatch[subKey] = subDefault;
+      }
+    }
+    if (Object.keys(subPatch).length > 0) {
+      patch[key] = subPatch;
+    }
+  }
+
+  return Object.keys(patch).length > 0 ? patch : null;
+}
+
+/**
+ * Merges a patch of missing defaults into the file content.
+ * Preserves all user values; only adds missing fields.
+ */
+function applyPatchToFileContent(
+  fileContent: Record<string, unknown>,
+  patch: Record<string, unknown>,
+): Record<string, unknown> {
+  const result = { ...fileContent };
+  for (const [key, patchValue] of Object.entries(patch)) {
+    if (key in result && isPlainObject(result[key])) {
+      const existing = result[key] as Record<string, unknown>;
+      result[key] = { ...existing, ...(patchValue as Record<string, unknown>) };
+    } else {
+      result[key] = patchValue;
+    }
+  }
+  return result;
+}
+
+/**
+ * Produces a human-readable list of added fields for the log message.
+ * Sub-field patches (partial nested objects) are listed as "parent.child".
+ * Whole new top-level objects are listed by their key name alone.
+ */
+function describeAddedFields(patch: Record<string, unknown>): string {
+  const fields: string[] = [];
+  for (const [key, value] of Object.entries(patch)) {
+    const defaultValue = (USER_CONFIG_DEFAULTS as Record<string, unknown>)[key];
+    const isSubFieldPatch = isPlainObject(value) && isPlainObject(defaultValue) &&
+      Object.keys(value).length < Object.keys(defaultValue).length;
+
+    if (isSubFieldPatch) {
+      for (const subKey of Object.keys(value as Record<string, unknown>)) {
+        fields.push(`${key}.${subKey}`);
+      }
+    } else {
+      fields.push(key);
+    }
+  }
+  return fields.join(', ');
 }
 
 /**
@@ -193,7 +330,9 @@ function validateConfig(parsed: unknown, configPath: string): UserConfig {
  */
 function mergeWithDefaults(config: UserConfig): ResolvedUserConfig {
   const budgetDefaults = USER_CONFIG_DEFAULTS.resourceBudget;
+  const compactDefaults = USER_CONFIG_DEFAULTS.autoCompact;
   const b = config.resourceBudget;
+  const c = config.autoCompact;
   return {
     agentModelId: config.agentModelId ?? USER_CONFIG_DEFAULTS.agentModelId,
     policyModelId: config.policyModelId ?? USER_CONFIG_DEFAULTS.policyModelId,
@@ -210,6 +349,12 @@ function mergeWithDefaults(config: UserConfig): ResolvedUserConfig {
       maxSessionSeconds: b?.maxSessionSeconds !== undefined ? b.maxSessionSeconds : budgetDefaults.maxSessionSeconds,
       maxEstimatedCostUsd: b?.maxEstimatedCostUsd !== undefined ? b.maxEstimatedCostUsd : budgetDefaults.maxEstimatedCostUsd,
       warnThresholdPercent: b?.warnThresholdPercent ?? budgetDefaults.warnThresholdPercent,
+    },
+    autoCompact: {
+      enabled: c?.enabled ?? compactDefaults.enabled,
+      thresholdTokens: c?.thresholdTokens ?? compactDefaults.thresholdTokens,
+      keepRecentMessages: c?.keepRecentMessages ?? compactDefaults.keepRecentMessages,
+      summaryModelId: c?.summaryModelId ?? compactDefaults.summaryModelId,
     },
   };
 }
