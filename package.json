@@ -5,6 +5,26 @@
   "description": "Secure agent runtime with trusted process mediation",
   "license": "Apache-2.0",
   "author": "Niels Provos",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/provos/ironcurtain.git"
+  },
+  "bugs": {
+    "url": "https://github.com/provos/ironcurtain/issues"
+  },
+  "homepage": "https://github.com/provos/ironcurtain#readme",
+  "keywords": [
+    "mcp",
+    "agent",
+    "security",
+    "sandbox",
+    "policy",
+    "trusted-process",
+    "model-context-protocol"
+  ],
+  "engines": {
+    "node": ">=18.3.0"
+  },
   "bin": {
     "ironcurtain": "dist/cli.js"
   },
