@@ -145,13 +145,14 @@ Edit `src/config/constitution.md` to express your security policy in plain Engli
 - The agent must receive human approval before git reset, rebase, merge, or any history-rewriting operation.
 ```
 
-### 3. Compile the policy
+### 3. Annotate tools and compile the policy
 
 ```bash
-npm run compile-policy
+npm run annotate-tools   # classify MCP tool arguments (developer task)
+npm run compile-policy   # compile constitution into enforceable rules (user task)
 ```
 
-This runs the four-stage pipeline. The compiled artifacts are written to `src/config/generated/`. Review the generated `compiled-policy.json` -- these are the rules that will be enforced at runtime.
+Tool annotation connects to your MCP servers and classifies each tool's arguments via LLM. This only needs re-running when you add or change MCP servers. Policy compilation translates your constitution into deterministic rules, generates test scenarios, and verifies them. The compiled artifacts are written to `src/config/generated/`. Review the generated `compiled-policy.json` -- these are the rules that will be enforced at runtime.
 
 IronCurtain ships with pre-configured MCP servers for filesystem and git operations. See [Adding MCP Servers](#adding-mcp-servers) for how to extend this.
 
@@ -238,7 +239,8 @@ IronCurtain ships with filesystem and git MCP servers pre-configured. Adding a n
 1. **Register the server** in `src/config/mcp-servers.json` with its command, arguments, and optional environment variables or sandbox settings.
 2. **Extend the argument role registry** in `src/types/argument-roles.ts` if the new server's tools have argument semantics not covered by existing roles (e.g., `read-path`, `write-path`, `fetch-url`). Each role defines how values are normalized and evaluated by the policy engine.
 3. **Update the constitution** in `src/config/constitution.md` to cover the new server's capabilities.
-4. **Re-run `npm run compile-policy`** -- the annotation stage classifies tool arguments by role, and the compiler generates policy rules based on your constitution. The verification stage will flag gaps.
+4. **Re-run `npm run annotate-tools`** to classify the new server's tool arguments by role.
+5. **Re-run `npm run compile-policy`** to compile policy rules from your constitution. The verification stage will flag gaps.
 
 After compilation, review the updated `tool-annotations.json` and `compiled-policy.json` to verify the new tools are correctly classified and covered by policy.
 

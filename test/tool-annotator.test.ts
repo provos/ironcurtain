@@ -3,9 +3,11 @@ import { MockLanguageModelV3 } from 'ai/test';
 import {
   annotateTools,
   validateAnnotationsHeuristic,
+  buildRoleDescriptions,
   type MCPToolSchema,
 } from '../src/pipeline/tool-annotator.js';
 import type { ToolAnnotation } from '../src/pipeline/types.js';
+import { getRolesForServer, ARGUMENT_ROLE_REGISTRY } from '../src/types/argument-roles.js';
 
 const sampleTools: MCPToolSchema[] = [
   {
@@ -202,6 +204,72 @@ describe('Tool Annotator', () => {
       const result = validateAnnotationsHeuristic(toolWithDefaults, noPathRoleAnnotations);
       expect(result.valid).toBe(false);
       expect(result.warnings.some(w => w.includes('path-like defaults'))).toBe(true);
+    });
+  });
+
+  describe('getRolesForServer', () => {
+    const gitOnlyRoles = ['git-remote-url', 'branch-name', 'commit-message', 'write-history', 'delete-history'];
+    const universalRoles = ['read-path', 'write-path', 'delete-path', 'fetch-url', 'none'];
+
+    it('excludes git-specific roles for filesystem server', () => {
+      const roles = getRolesForServer('filesystem');
+      const roleNames = roles.map(([name]) => name);
+      for (const gitRole of gitOnlyRoles) {
+        expect(roleNames).not.toContain(gitRole);
+      }
+    });
+
+    it('includes git-specific roles for git server', () => {
+      const roles = getRolesForServer('git');
+      const roleNames = roles.map(([name]) => name);
+      for (const gitRole of gitOnlyRoles) {
+        expect(roleNames).toContain(gitRole);
+      }
+    });
+
+    it('always includes universal roles', () => {
+      for (const serverName of ['filesystem', 'git', 'unknown-server']) {
+        const roles = getRolesForServer(serverName);
+        const roleNames = roles.map(([name]) => name);
+        for (const role of universalRoles) {
+          expect(roleNames).toContain(role);
+        }
+      }
+    });
+
+    it('returns all roles when no server filtering is needed (git server)', () => {
+      const gitRoles = getRolesForServer('git');
+      expect(gitRoles.length).toBe(ARGUMENT_ROLE_REGISTRY.size);
+    });
+
+    it('returns fewer roles for non-git servers', () => {
+      const fsRoles = getRolesForServer('filesystem');
+      expect(fsRoles.length).toBeLessThan(ARGUMENT_ROLE_REGISTRY.size);
+    });
+  });
+
+  describe('buildRoleDescriptions', () => {
+    it('includes all roles when no server name is given', () => {
+      const descriptions = buildRoleDescriptions();
+      expect(descriptions).toContain('read-path');
+      expect(descriptions).toContain('git-remote-url');
+      expect(descriptions).toContain('branch-name');
+    });
+
+    it('excludes git-specific roles for filesystem server', () => {
+      const descriptions = buildRoleDescriptions('filesystem');
+      expect(descriptions).toContain('read-path');
+      expect(descriptions).toContain('write-path');
+      expect(descriptions).not.toContain('git-remote-url');
+      expect(descriptions).not.toContain('branch-name');
+      expect(descriptions).not.toContain('commit-message');
+    });
+
+    it('includes git-specific roles for git server', () => {
+      const descriptions = buildRoleDescriptions('git');
+      expect(descriptions).toContain('git-remote-url');
+      expect(descriptions).toContain('branch-name');
+      expect(descriptions).toContain('commit-message');
     });
   });
 });

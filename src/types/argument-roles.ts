@@ -62,6 +62,11 @@ export interface RoleDefinition {
    * dynamically from the registry -- no manual prompt maintenance.
    */
   readonly annotationGuidance: string;
+  /**
+   * When set, this role is only relevant for the named MCP servers.
+   * Roles without serverNames are universal (included for all servers).
+   */
+  readonly serverNames?: readonly string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -241,6 +246,7 @@ const registryEntries: [ArgumentRole, RoleDefinition][] = [
         'Assign to the repository path argument of git operations that rewrite history or modify refs. ' +
         'Includes git_reset, git_rebase, git_merge, git_cherry_pick, and similar operations. ' +
         'These operations are dangerous even within the sandbox and require human oversight.',
+      serverNames: ['git'],
     },
   ],
   [
@@ -254,6 +260,7 @@ const registryEntries: [ArgumentRole, RoleDefinition][] = [
         'Assign to the repository path argument of git operations that delete refs (branches, tags). ' +
         'Includes git_branch (delete mode), git_tag (delete mode), and similar operations. ' +
         'These operations are dangerous even within the sandbox and require human oversight.',
+      serverNames: ['git'],
     },
   ],
   [
@@ -281,6 +288,7 @@ const registryEntries: [ArgumentRole, RoleDefinition][] = [
       annotationGuidance:
         'Assign to arguments that identify a git remote (URL or named remote like "origin"). ' +
         'Typically applies to git server tools like git_clone, git_push, git_pull, git_fetch, git_remote.',
+      serverNames: ['git'],
     },
   ],
   [
@@ -293,6 +301,7 @@ const registryEntries: [ArgumentRole, RoleDefinition][] = [
       annotationGuidance:
         'Assign to arguments that are git branch names. ' +
         'Typically applies to git server tools like git_branch, git_checkout, git_merge, git_push.',
+      serverNames: ['git'],
     },
   ],
   [
@@ -305,6 +314,7 @@ const registryEntries: [ArgumentRole, RoleDefinition][] = [
       annotationGuidance:
         'Assign to arguments that are git commit messages. ' +
         'Typically applies to git_commit.',
+      serverNames: ['git'],
     },
   ],
   [
@@ -357,13 +367,9 @@ export function getRoleDefinition(role: ArgumentRole): RoleDefinition {
 
 /** Returns all roles where isResourceIdentifier is true. */
 export function getResourceRoles(): ArgumentRole[] {
-  const roles: ArgumentRole[] = [];
-  for (const [role, def] of ARGUMENT_ROLE_REGISTRY) {
-    if (def.isResourceIdentifier) {
-      roles.push(role);
-    }
-  }
-  return roles;
+  return Array.from(ARGUMENT_ROLE_REGISTRY)
+    .filter(([, def]) => def.isResourceIdentifier)
+    .map(([role]) => role);
 }
 
 /** Type guard: returns true if the value is a valid ArgumentRole string. */
@@ -377,13 +383,21 @@ export function getArgumentRoleValues(): [ArgumentRole, ...ArgumentRole[]] {
   return roles as [ArgumentRole, ...ArgumentRole[]];
 }
 
+/**
+ * Returns roles relevant to a specific MCP server.
+ * Universal roles (no serverNames) are always included.
+ * Server-specific roles are included only when the server matches.
+ */
+export function getRolesForServer(serverName: string): [ArgumentRole, RoleDefinition][] {
+  return Array.from(ARGUMENT_ROLE_REGISTRY)
+    .filter(([, def]) => !def.serverNames || def.serverNames.includes(serverName));
+}
+
 /** Returns all roles with the given category. */
 export function getRolesByCategory(category: RoleCategory): ArgumentRole[] {
-  const roles: ArgumentRole[] = [];
-  for (const [role, def] of ARGUMENT_ROLE_REGISTRY) {
-    if (def.category === category) roles.push(role);
-  }
-  return roles;
+  return Array.from(ARGUMENT_ROLE_REGISTRY)
+    .filter(([, def]) => def.category === category)
+    .map(([role]) => role);
 }
 
 /** Returns path-category roles only. Used by Phase 1a/1b structural invariants. */

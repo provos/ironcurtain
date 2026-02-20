@@ -6,6 +6,7 @@
   "scripts": {
     "build": "tsc",
     "start": "tsx src/index.ts",
+    "annotate-tools": "tsx src/pipeline/annotate.ts",
     "compile-policy": "tsx src/pipeline/compile.ts",
     "test": "vitest run",
     "test:watch": "vitest",

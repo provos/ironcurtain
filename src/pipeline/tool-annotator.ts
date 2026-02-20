@@ -9,9 +9,14 @@
 
 import type { LanguageModel } from 'ai';
 import { z } from 'zod';
+import {
+  ARGUMENT_ROLE_REGISTRY,
+  getRoleDefinition,
+  getRolesForServer,
+  type ArgumentRole,
+} from '../types/argument-roles.js';
 import { generateObjectWithRepair } from './generate-with-repair.js';
 import type { ToolAnnotation } from './types.js';
-import { getArgumentRoleValues, getRoleDefinition, ARGUMENT_ROLE_REGISTRY } from '../types/argument-roles.js';
 
 // Input type matching what MCP's listTools() returns
 export interface MCPToolSchema {
@@ -20,17 +25,19 @@ export interface MCPToolSchema {
   inputSchema: Record<string, unknown>;
 }
 
-const argumentRoleSchema = z.enum(getArgumentRoleValues());
-
-// LLMs sometimes return a bare string instead of a single-element array.
-// Accept both formats and normalize to an array.
-const rolesArraySchema = z.union([
-  z.array(argumentRoleSchema),
-  argumentRoleSchema.transform(r => [r]),
-]);
-
-function buildAnnotationsResponseSchema(tools: MCPToolSchema[]) {
+function buildAnnotationsResponseSchema(serverName: string, tools: MCPToolSchema[]) {
   const toolNames = tools.map(t => t.name) as [string, ...string[]];
+
+  // Build a per-server role enum so the schema rejects irrelevant roles
+  const roleValues = getRolesForServer(serverName).map(([role]) => role) as [ArgumentRole, ...ArgumentRole[]];
+  const argumentRoleSchema = z.enum(roleValues);
+
+  // LLMs sometimes return a bare string instead of a single-element array.
+  // Accept both formats and normalize to an array.
+  const rolesArraySchema = z.union([
+    z.array(argumentRoleSchema),
+    argumentRoleSchema.transform(r => [r]),
+  ]);
 
   // Map tool name → expected argument names from input schemas
   const toolArgNames = new Map<string, string[]>();
@@ -65,9 +72,12 @@ function buildAnnotationsResponseSchema(tools: MCPToolSchema[]) {
 }
 
 /** Builds role description lines dynamically from the registry for the LLM prompt. */
-export function buildRoleDescriptions(): string {
+export function buildRoleDescriptions(serverName?: string): string {
+  const entries = serverName
+    ? getRolesForServer(serverName)
+    : [...ARGUMENT_ROLE_REGISTRY.entries()];
   const lines: string[] = [];
-  for (const [role, def] of ARGUMENT_ROLE_REGISTRY) {
+  for (const [role, def] of entries) {
     lines.push(`   - "${role}" -- ${def.description}. ${def.annotationGuidance}`);
   }
   return lines.join('\n');
@@ -92,7 +102,7 @@ export function buildAnnotationPrompt(serverName: string, tools: MCPToolSchema[]
    - When in doubt, mark as true (conservative)
 
 3. **args**: For each argument in the tool's input schema, assign an ARRAY of one or more roles:
-${buildRoleDescriptions()}
+${buildRoleDescriptions(serverName)}
 
    IMPORTANT: Each value in the args object MUST be an ARRAY of roles, even for single roles.
    Example: { "path": ["read-path"], "content": ["none"] }
@@ -129,7 +139,7 @@ export async function annotateTools(
 ): Promise<ToolAnnotation[]> {
   if (tools.length === 0) return [];
 
-  const schema = buildAnnotationsResponseSchema(tools);
+  const schema = buildAnnotationsResponseSchema(serverName, tools);
   const prompt = buildAnnotationPrompt(serverName, tools);
 
   const { output } = await generateObjectWithRepair({
