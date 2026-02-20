@@ -4,6 +4,9 @@ This document tracks potential features for IronCurtain, organized by strategic 
 
 ## Deeper Security
 
+### OS-Level Execution Containment (TB0) — **IMPLEMENTED**
+Sandboxed MCP servers via `@anthropic-ai/sandbox-runtime`. Each sandboxed server runs in its own `srt` process with independent filesystem and network restrictions (bubblewrap+seccomp on Linux, Seatbelt on macOS). Sandbox-by-default with `"sandbox": false` opt-out. Configurable `sandboxPolicy: "enforce" | "warn"`. See `docs/designs/execution-containment.md` and `src/trusted-process/sandbox-integration.ts`.
+
 ### Per-Task Policy Generation
 The architecture doc describes a per-task policy layer that is currently unimplemented. When a task arrives, an LLM generates a scoped policy restricting which tools and servers are relevant to that task. For example, "organize my documents" would revoke access to everything except filesystem tools. The policy engine already supports rule-chain evaluation — task policy would be a second chain checked before the constitution. This is the highest-value missing piece from the original design.
 

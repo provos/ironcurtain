@@ -1,6 +1,7 @@
 {
   "filesystem": {
     "command": "npx",
-    "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp/ironcurtain-sandbox"]
+    "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp/ironcurtain-sandbox"],
+    "sandbox": false
   }
 }

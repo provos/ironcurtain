@@ -79,6 +79,9 @@ export class Sandbox {
     proxyEnv.ESCALATION_TIMEOUT_SECONDS = String(config.escalationTimeoutSeconds);
     const timeoutMs = config.escalationTimeoutSeconds * 1000;
 
+    // Pass sandbox availability policy to the proxy process
+    proxyEnv.SANDBOX_POLICY = config.sandboxPolicy ?? 'warn';
+
     await this.client.registerManual({
       name: 'filesystem',
       call_template_type: 'mcp',

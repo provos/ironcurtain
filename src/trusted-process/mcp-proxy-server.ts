@@ -18,6 +18,7 @@
  *   ALLOWED_DIRECTORY  -- (optional) sandbox directory for structural containment check
  *   ESCALATION_DIR     -- (optional) directory for file-based escalation IPC
  *   SESSION_LOG_PATH   -- (optional) path for capturing child process stderr
+ *   SANDBOX_POLICY     -- (optional) "enforce" | "warn" (default: "warn")
  */
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -29,19 +30,29 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { appendFileSync, existsSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
 import { v4 as uuidv4 } from 'uuid';
 import { loadGeneratedPolicy } from '../config/index.js';
 import { PolicyEngine } from './policy-engine.js';
 import { AuditLog } from './audit-log.js';
 import { prepareToolArgs } from './path-utils.js';
 import { extractPolicyRoots, toMcpRoots, directoryForPath } from './policy-roots.js';
+import {
+  checkSandboxAvailability,
+  resolveSandboxConfig,
+  writeServerSettings,
+  wrapServerCommand,
+  cleanupSettingsFiles,
+  annotateSandboxViolation,
+  type ResolvedSandboxConfig,
+} from './sandbox-integration.js';
 import type { ToolCallRequest } from '../types/mcp.js';
 import type { AuditEntry } from '../types/audit.js';
 import type { McpRoot } from './mcp-client-manager.js';
 import { CallCircuitBreaker } from './call-circuit-breaker.js';
-import type { MCPServerConfig } from '../config/types.js';
+import type { MCPServerConfig, SandboxAvailabilityPolicy } from '../config/types.js';
 
 interface ProxiedTool {
   serverName: string;
@@ -77,6 +88,14 @@ async function addRootToClient(state: ClientState, root: McpRoot): Promise<void>
   });
   await state.client.sendRootsListChanged();
   await refreshed;
+}
+
+/** Appends a timestamped line to the session log file. */
+function logToSessionFile(sessionLogPath: string, message: string): void {
+  const timestamp = new Date().toISOString();
+  try {
+    appendFileSync(sessionLogPath, `${timestamp} INFO  ${message}\n`);
+  } catch { /* ignore write failures */ }
 }
 
 const ESCALATION_POLL_INTERVAL_MS = 500;
@@ -149,6 +168,8 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  const sandboxPolicy = (process.env.SANDBOX_POLICY ?? 'warn') as SandboxAvailabilityPolicy;
+
   const serversConfig: Record<string, MCPServerConfig> = JSON.parse(serversConfigJson);
   const protectedPaths: string[] = JSON.parse(protectedPathsJson);
 
@@ -161,18 +182,70 @@ async function main(): Promise<void> {
   const policyRoots = extractPolicyRoots(compiledPolicy, allowedDirectory ?? '/tmp');
   const mcpRoots = toMcpRoots(policyRoots);
 
+  // ── Sandbox availability check (once for all servers) ──────────────
+  const { platformSupported, errors: depErrors, warnings: depWarnings } = checkSandboxAvailability();
+
+  if (sessionLogPath) {
+    for (const warning of depWarnings) {
+      logToSessionFile(sessionLogPath, `[sandbox] WARNING: ${warning}`);
+    }
+  }
+
+  if (sandboxPolicy === 'enforce' && (!platformSupported || depErrors.length > 0)) {
+    const reasons = !platformSupported
+      ? [`Platform ${process.platform} not supported`]
+      : depErrors;
+    throw new Error(
+      `[sandbox] FATAL: sandboxPolicy is "enforce" but sandboxing is unavailable:\n` +
+      reasons.map(r => `  - ${r}`).join('\n') + '\n' +
+      `Install with: sudo apt-get install -y bubblewrap socat`,
+    );
+  }
+
+  const sandboxAvailable = platformSupported && depErrors.length === 0;
+
+  if (!sandboxAvailable && sessionLogPath) {
+    const missing = depErrors.length > 0 ? depErrors.join(', ') : `platform ${process.platform}`;
+    logToSessionFile(sessionLogPath,
+      `[sandbox] WARNING: OS-level sandboxing unavailable (${missing}). ` +
+      `Servers will run without OS containment. ` +
+      `Set SANDBOX_POLICY=enforce to require sandboxing.`,
+    );
+  }
+
+  // ── Resolve sandbox configs and write per-server srt settings ─────
+  const resolvedSandboxConfigs = new Map<string, ResolvedSandboxConfig>();
+  const settingsDir = mkdtempSync(join(tmpdir(), 'ironcurtain-srt-'));
+
+  for (const [serverName, config] of Object.entries(serversConfig)) {
+    const resolved = resolveSandboxConfig(
+      config,
+      allowedDirectory ?? '/tmp',
+      sandboxAvailable,
+      sandboxPolicy,
+    );
+    resolvedSandboxConfigs.set(serverName, resolved);
+
+    if (resolved.sandboxed) {
+      writeServerSettings(serverName, resolved.config, settingsDir);
+    }
+  }
+
   const clientStates = new Map<string, ClientState>();
 
-  // Connect to real MCP servers as clients
+  // Connect to real MCP servers as clients, wrapping sandboxed ones with srt
   const allTools: ProxiedTool[] = [];
 
   for (const [serverName, config] of Object.entries(serversConfig)) {
+    const resolved = resolvedSandboxConfigs.get(serverName)!;
+    const wrapped = wrapServerCommand(serverName, config.command, config.args, resolved, settingsDir);
+
     const transport = new StdioClientTransport({
-      command: config.command,
-      args: config.args,
-      env: config.env
-        ? { ...(process.env as Record<string, string>), ...config.env }
-        : undefined,
+      command: wrapped.command,
+      args: wrapped.args,
+      // Always pass full process.env -- never rely on getDefaultEnvironment()
+      // which strips vars that srt and MCP servers may need
+      env: { ...(process.env as Record<string, string>), ...(config.env ?? {}) },
       stderr: 'pipe', // Prevent child server stderr from leaking to the terminal
     });
 
@@ -286,6 +359,10 @@ async function main(): Promise<void> {
     // escalation falls through to the forwarding section below.
     let escalationResult: 'approved' | 'denied' | undefined;
 
+    // Look up whether this server is sandboxed for audit logging
+    const serverSandboxConfig = resolvedSandboxConfigs.get(toolInfo.serverName);
+    const serverIsSandboxed = serverSandboxConfig?.sandboxed === true;
+
     // Audit log records argsForTransport (what was actually sent to the MCP server)
     function logAudit(result: AuditEntry['result'], durationMs: number, overrideEscalation?: 'approved' | 'denied'): void {
       const entry: AuditEntry = {
@@ -298,6 +375,7 @@ async function main(): Promise<void> {
         escalationResult: overrideEscalation ?? escalationResult,
         result,
         durationMs,
+        sandboxed: serverIsSandboxed || undefined,
       };
       auditLog.log(entry);
     }
@@ -384,7 +462,8 @@ async function main(): Promise<void> {
       logAudit({ status: 'success' }, Date.now() - startTime);
       return { content: result.content };
     } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : String(err);
+      const rawError = err instanceof Error ? err.message : String(err);
+      const errorMessage = annotateSandboxViolation(rawError, serverIsSandboxed);
       logAudit({ status: 'error', error: errorMessage }, Date.now() - startTime);
       return {
         content: [{ type: 'text', text: `Error: ${errorMessage}` }],
@@ -403,6 +482,7 @@ async function main(): Promise<void> {
     for (const state of clientStates.values()) {
       try { await state.client.close(); } catch { /* ignore */ }
     }
+    cleanupSettingsFiles(settingsDir);
     try { await server.close(); } catch { /* ignore */ }
     await auditLog.close();
     process.exit(0);

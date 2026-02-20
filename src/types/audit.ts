@@ -14,4 +14,6 @@ export interface AuditEntry {
     error?: string;
   };
   durationMs: number;
+  /** Whether the MCP server process was running inside an OS-level sandbox. */
+  sandboxed?: boolean;
 }

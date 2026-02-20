@@ -29,6 +29,8 @@ UTCP Code Mode (`@utcp/code-mode`) provides a V8-isolated TypeScript execution e
 ### MCP Proxy Server (`src/trusted-process/mcp-proxy-server.ts`)
 A standalone MCP server spawned by Code Mode as a child process. This is the security boundary. Uses the low-level `Server` class (not `McpServer`) to pass through raw JSON schemas. For each tool call: evaluates policy → forwards allowed calls to real MCP servers → logs to audit. In single-shot mode, escalations are auto-denied (no escalation handler). In interactive sessions, escalations are routed via file-based IPC for human approval through `/approve` or `/deny` commands.
 
+**Sandbox Integration** (`sandbox-integration.ts`) — wraps sandboxed MCP servers in `srt` (sandbox-runtime CLI) processes for OS-level containment. Each sandboxed server gets its own `srt` process with independent proxy infrastructure for per-server network isolation. Uses `shell-quote` for safe command string construction. Sandbox-blocked operations are annotated with `[SANDBOX BLOCKED]` in MCP error responses. Config: `"sandbox": false` to opt out, omit for restrictive defaults (no network, session-dir-only writes), or specify `{ filesystem, network }` overrides. `sandboxPolicy: "enforce" | "warn"` controls behavior when bubblewrap/socat are unavailable.
+
 ### Trusted Process (`src/trusted-process/`)
 The security kernel. Two modes of operation:
 1. **Proxy mode** (`mcp-proxy-server.ts`) — standalone process for Code Mode. Has its own PolicyEngine and AuditLog instances.
