@@ -1,5 +1,5 @@
 {
-  "name": "ironcurtain",
+  "name": "@provos/ironcurtain",
   "version": "0.1.0",
   "type": "module",
   "description": "Secure agent runtime with trusted process mediation",
