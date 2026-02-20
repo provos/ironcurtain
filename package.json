@@ -3,11 +3,22 @@
   "version": "0.1.0",
   "type": "module",
   "description": "Secure agent runtime with trusted process mediation",
+  "bin": {
+    "ironcurtain": "dist/cli.js"
+  },
+  "main": "dist/index.js",
+  "files": [
+    "dist/",
+    "src/config/",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
-    "build": "tsc",
-    "start": "tsx src/index.ts",
-    "annotate-tools": "tsx src/pipeline/annotate.ts",
-    "compile-policy": "tsx src/pipeline/compile.ts",
+    "build": "tsc && node scripts/copy-assets.mjs",
+    "start": "tsx src/cli.ts start",
+    "annotate-tools": "tsx src/cli.ts annotate-tools",
+    "compile-policy": "tsx src/cli.ts compile-policy",
+    "prepublishOnly": "npm run build",
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "eslint src/ test/"
