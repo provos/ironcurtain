@@ -3,13 +3,19 @@
   "version": "0.1.0",
   "type": "module",
   "description": "Secure agent runtime with trusted process mediation",
+  "license": "Apache-2.0",
+  "author": "Niels Provos",
   "bin": {
     "ironcurtain": "dist/cli.js"
   },
   "main": "dist/index.js",
   "files": [
     "dist/",
-    "src/config/",
+    "src/config/constitution.md",
+    "src/config/mcp-servers.json",
+    "src/config/generated/compiled-policy.json",
+    "src/config/generated/tool-annotations.json",
+    "src/config/generated/test-scenarios.json",
     "README.md",
     "LICENSE"
   ],
