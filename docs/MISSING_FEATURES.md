@@ -16,8 +16,8 @@ Currently all policy rules are deterministic pattern matching. The design envisi
 ### Loop Detection / Anomaly Monitoring — **IMPLEMENTED**
 Two-layer loop detection: `StepLoopDetector` at the agent level (2x2 progress matrix with warn/block thresholds) and `CallCircuitBreaker` at the proxy level (sliding-window rate limiter). See `docs/designs/loop-detection.md`.
 
-### Resource Budget Enforcement
-Add token counting, API call limits, wall-clock timeouts, and cost tracking per agent run. Kill the agent when any budget is exhausted. The AI SDK's `onStepFinish` callback is the natural hook. A misbehaving agent can currently run indefinitely.
+### Resource Budget Enforcement — **IMPLEMENTED**
+Per-session limits on tokens, steps, wall-clock time, and estimated cost via `ResourceBudgetTracker` in `src/session/resource-budget-tracker.ts`. Three enforcement points: StopCondition (between steps), AbortSignal (wall-clock timeout), and pre-check in `execute_code`. Configured via `resourceBudget` in `~/.ironcurtain/config.json`. Defaults: 1M tokens, 200 steps, 30min, $5.
 
 ## Operational Confidence
 
