@@ -87,6 +87,13 @@ describe('Integration: TrustedProcess with filesystem MCP server', () => {
         googleApiKey: '',
         openaiApiKey: '',
         escalationTimeoutSeconds: 300,
+        resourceBudget: {
+          maxTotalTokens: 1_000_000,
+          maxSteps: 200,
+          maxSessionSeconds: 1800,
+          maxEstimatedCostUsd: 5.00,
+          warnThresholdPercent: 80,
+        },
       },
     };
 

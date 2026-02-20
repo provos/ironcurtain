@@ -15,7 +15,8 @@ export class SessionError extends Error {
 export type SessionErrorCode =
   | 'SESSION_NOT_READY'
   | 'SESSION_CLOSED'
-  | 'SESSION_INIT_FAILED';
+  | 'SESSION_INIT_FAILED'
+  | 'BUDGET_EXHAUSTED';
 
 export class SessionNotReadyError extends SessionError {
   constructor(currentStatus: string) {
@@ -31,5 +32,15 @@ export class SessionClosedError extends SessionError {
   constructor() {
     super('Session has been closed', 'SESSION_CLOSED');
     this.name = 'SessionClosedError';
+  }
+}
+
+export class BudgetExhaustedError extends SessionError {
+  constructor(
+    public readonly dimension: string,
+    message: string,
+  ) {
+    super(message, 'BUDGET_EXHAUSTED');
+    this.name = 'BudgetExhaustedError';
   }
 }

@@ -34,8 +34,9 @@ import type {
   EscalationRequest,
   SandboxFactory,
 } from './types.js';
-import { SessionNotReadyError, SessionClosedError } from './errors.js';
+import { SessionNotReadyError, SessionClosedError, BudgetExhaustedError } from './errors.js';
 import { StepLoopDetector } from './step-loop-detector.js';
+import { ResourceBudgetTracker } from './resource-budget-tracker.js';
 import { truncateResult, getResultSizeLimit, formatKB } from './truncate-result.js';
 import * as logger from '../logger.js';
 
@@ -89,6 +90,9 @@ export class AgentSession implements Session {
   /** Step-level loop detector for the agent. */
   private loopDetector = new StepLoopDetector();
 
+  /** Resource budget tracker for token, step, time, and cost limits. */
+  private readonly budgetTracker: ResourceBudgetTracker;
+
   /** Callbacks from SessionOptions. */
   private readonly onEscalation?: (request: EscalationRequest) => void;
   private readonly onDiagnostic?: (event: DiagnosticEvent) => void;
@@ -106,6 +110,10 @@ export class AgentSession implements Session {
     this.onEscalation = options.onEscalation;
     this.onDiagnostic = options.onDiagnostic;
     this.createdAt = new Date().toISOString();
+    this.budgetTracker = new ResourceBudgetTracker(
+      config.userConfig.resourceBudget,
+      config.agentModelId,
+    );
   }
 
   /**
@@ -137,9 +145,23 @@ export class AgentSession implements Session {
     if (this.status === 'closed') throw new SessionClosedError();
     if (this.status !== 'ready') throw new SessionNotReadyError(this.status);
 
+    // Pre-check: budget may already be exhausted from a previous turn
+    const budgetCheck = this.budgetTracker.isExhausted();
+    if (budgetCheck) {
+      this.emitBudgetExhaustedDiagnostic(budgetCheck.dimension, budgetCheck.message);
+      throw new BudgetExhaustedError(budgetCheck.dimension, budgetCheck.message);
+    }
+
     this.status = 'processing';
     const turnStart = new Date().toISOString();
     const messageCountBefore = this.messages.length;
+
+    // Wall-clock abort signal (null when wall-clock budget is disabled)
+    const remainingMs = this.budgetTracker.getRemainingWallClockMs();
+    const abortController = remainingMs !== null ? new AbortController() : null;
+    const abortTimeout = abortController
+      ? setTimeout(() => abortController.abort(), remainingMs!)
+      : null;
 
     try {
       this.messages.push({ role: 'user', content: userMessage });
@@ -149,12 +171,23 @@ export class AgentSession implements Session {
         system: this.systemPrompt,
         messages: this.messages,
         tools: this.tools,
-        stopWhen: stepCountIs(MAX_AGENT_STEPS),
+        stopWhen: [
+          stepCountIs(MAX_AGENT_STEPS),
+          this.budgetTracker.createStopCondition(),
+        ],
+        ...(abortController ? { abortSignal: abortController.signal } : {}),
         onStepFinish: (stepResult) => {
           this.emitToolCallDiagnostics(stepResult.toolCalls);
           this.emitTextDiagnostic(stepResult.text);
+          this.emitBudgetWarnings();
         },
       });
+
+      // Check if budget triggered the stop
+      const postCheck = this.budgetTracker.isExhausted();
+      if (postCheck) {
+        this.emitBudgetExhaustedDiagnostic(postCheck.dimension, postCheck.message);
+      }
 
       this.messages.push(...result.response.messages);
 
@@ -168,7 +201,19 @@ export class AgentSession implements Session {
       // message and any partial response messages that may have been pushed.
       this.messages.length = messageCountBefore;
       this.status = 'ready';
+
+      // Detect AbortError from wall-clock timeout
+      if (error instanceof Error && error.name === 'AbortError') {
+        const exhausted = this.budgetTracker.isExhausted();
+        const dimension = exhausted?.dimension ?? 'wall_clock';
+        const message = exhausted?.message ?? 'Session aborted: wall-clock time budget exceeded';
+        this.emitBudgetExhaustedDiagnostic(dimension, message);
+        throw new BudgetExhaustedError(dimension, message);
+      }
+
       throw error;
+    } finally {
+      if (abortTimeout !== null) clearTimeout(abortTimeout);
     }
   }
 
@@ -226,6 +271,11 @@ export class AgentSession implements Session {
         execute: async ({ code }) => {
           if (!this.sandbox) throw new Error('Sandbox not initialized');
 
+          const budgetBlock = this.budgetTracker.isExhausted();
+          if (budgetBlock) {
+            return { error: budgetBlock.message };
+          }
+
           const blockCheck = this.loopDetector.isBlocked();
           if (blockCheck) {
             return { error: blockCheck.message };
@@ -270,18 +320,22 @@ export class AgentSession implements Session {
     });
   }
 
+  /** Logs a diagnostic event and forwards it to the transport callback. */
+  private emitDiagnostic(event: DiagnosticEvent): void {
+    this.diagnosticLog.push(event);
+    this.onDiagnostic?.(event);
+  }
+
   private emitToolCallDiagnostics(toolCalls: readonly { toolName: string; input?: unknown }[]): void {
     for (const tc of toolCalls) {
       if (tc.toolName === 'execute_code' && tc.input != null) {
         const input = tc.input as { code: string };
         const preview = input.code.substring(0, 120).replace(/\n/g, '\\n');
-        const event: DiagnosticEvent = {
+        this.emitDiagnostic({
           kind: 'tool_call',
           toolName: tc.toolName,
           preview: `${preview}${input.code.length > 120 ? '...' : ''}`,
-        };
-        this.diagnosticLog.push(event);
-        this.onDiagnostic?.(event);
+        });
       }
     }
   }
@@ -299,29 +353,38 @@ export class AgentSession implements Session {
   }
 
   private emitTruncationDiagnostic(originalSize: number, finalSize: number): void {
-    const event: DiagnosticEvent = {
+    this.emitDiagnostic({
       kind: 'result_truncation',
       originalKB: +(originalSize / 1024).toFixed(1),
       finalKB: +(finalSize / 1024).toFixed(1),
-    };
-    this.diagnosticLog.push(event);
-    this.onDiagnostic?.(event);
+    });
   }
 
   private emitLoopDetectionDiagnostic(action: 'warn' | 'block', category: string, message: string): void {
-    const event: DiagnosticEvent = { kind: 'loop_detection', action, category, message };
-    this.diagnosticLog.push(event);
-    this.onDiagnostic?.(event);
+    this.emitDiagnostic({ kind: 'loop_detection', action, category, message });
+  }
+
+  private emitBudgetWarnings(): void {
+    for (const warning of this.budgetTracker.getActiveWarnings()) {
+      this.emitDiagnostic({
+        kind: 'budget_warning',
+        dimension: warning.dimension,
+        percentUsed: warning.percentUsed,
+        message: warning.message,
+      });
+    }
+  }
+
+  private emitBudgetExhaustedDiagnostic(dimension: string, message: string): void {
+    this.emitDiagnostic({ kind: 'budget_exhausted', dimension, message });
   }
 
   private emitTextDiagnostic(text: string): void {
     if (!text) return;
-    const event: DiagnosticEvent = {
+    this.emitDiagnostic({
       kind: 'agent_text',
       preview: `${text.substring(0, 200)}${text.length > 200 ? '...' : ''}`,
-    };
-    this.diagnosticLog.push(event);
-    this.onDiagnostic?.(event);
+    });
   }
 
   private recordTurn(

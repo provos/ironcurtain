@@ -124,4 +124,4 @@ export type {
   SandboxFactory,
 } from './types.js';
 export type { Transport } from './transport.js';
-export { SessionError, SessionNotReadyError, SessionClosedError } from './errors.js';
+export { SessionError, SessionNotReadyError, SessionClosedError, BudgetExhaustedError } from './errors.js';

@@ -71,6 +71,12 @@ export class CliTransport implements Transport {
         case 'agent_text':
           this.spinner.text = 'Generating response...';
           break;
+        case 'budget_warning':
+          this.spinner.text = chalk.yellow(`Budget warning: ${event.message}`);
+          break;
+        case 'budget_exhausted':
+          this.spinner.fail(chalk.red(`Budget exhausted: ${event.message}`));
+          break;
       }
     };
   }
@@ -233,6 +239,12 @@ export class CliTransport implements Transport {
           break;
         case 'agent_text':
           process.stderr.write(chalk.dim(`  [agent] ${event.preview}\n`));
+          break;
+        case 'budget_warning':
+          process.stderr.write(chalk.yellow(`  [budget] ${event.message}\n`));
+          break;
+        case 'budget_exhausted':
+          process.stderr.write(chalk.red(`  [budget] ${event.message}\n`));
           break;
       }
     }

@@ -35,6 +35,13 @@ function createTestUserConfig(overrides: Partial<ResolvedUserConfig> = {}): Reso
     googleApiKey: 'test-google-key',
     openaiApiKey: 'test-openai-key',
     escalationTimeoutSeconds: 300,
+    resourceBudget: {
+      maxTotalTokens: 1_000_000,
+      maxSteps: 200,
+      maxSessionSeconds: 1800,
+      maxEstimatedCostUsd: 5.00,
+      warnThresholdPercent: 80,
+    },
     ...overrides,
   };
 }

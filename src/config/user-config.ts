@@ -16,10 +16,25 @@ export const USER_CONFIG_DEFAULTS = {
   agentModelId: 'anthropic:claude-sonnet-4-6',
   policyModelId: 'anthropic:claude-sonnet-4-6',
   escalationTimeoutSeconds: 300,
+  resourceBudget: {
+    maxTotalTokens: 1_000_000,
+    maxSteps: 200,
+    maxSessionSeconds: 1800,
+    maxEstimatedCostUsd: 5.00,
+    warnThresholdPercent: 80,
+  },
 } as const;
 
 const ESCALATION_TIMEOUT_MIN = 30;
 const ESCALATION_TIMEOUT_MAX = 600;
+
+const resourceBudgetSchema = z.object({
+  maxTotalTokens: z.number().int().positive().nullable().optional(),
+  maxSteps: z.number().int().positive().nullable().optional(),
+  maxSessionSeconds: z.number().positive().nullable().optional(),
+  maxEstimatedCostUsd: z.number().positive().nullable().optional(),
+  warnThresholdPercent: z.number().min(1).max(99).optional(),
+}).optional();
 
 /**
  * Validates a qualified model ID string: either a bare model name
@@ -58,10 +73,20 @@ const userConfigSchema = z.object({
     .min(ESCALATION_TIMEOUT_MIN, `escalationTimeoutSeconds must be at least ${ESCALATION_TIMEOUT_MIN}`)
     .max(ESCALATION_TIMEOUT_MAX, `escalationTimeoutSeconds must be at most ${ESCALATION_TIMEOUT_MAX}`)
     .optional(),
+  resourceBudget: resourceBudgetSchema,
 });
 
 /** Parsed config from ~/.ironcurtain/config.json. All fields optional. */
 export type UserConfig = z.infer<typeof userConfigSchema>;
+
+/** Resolved resource budget with all fields present. */
+export interface ResolvedResourceBudgetConfig {
+  readonly maxTotalTokens: number | null;
+  readonly maxSteps: number | null;
+  readonly maxSessionSeconds: number | null;
+  readonly maxEstimatedCostUsd: number | null;
+  readonly warnThresholdPercent: number;
+}
 
 /** Validated, defaults-applied configuration. All fields present. */
 export interface ResolvedUserConfig {
@@ -71,6 +96,7 @@ export interface ResolvedUserConfig {
   readonly googleApiKey: string;
   readonly openaiApiKey: string;
   readonly escalationTimeoutSeconds: number;
+  readonly resourceBudget: ResolvedResourceBudgetConfig;
 }
 
 /** Known fields derived from the schema. Used for unknown-field detection. */
@@ -82,6 +108,7 @@ const DEFAULT_CONFIG_CONTENT = JSON.stringify(
     agentModelId: USER_CONFIG_DEFAULTS.agentModelId,
     policyModelId: USER_CONFIG_DEFAULTS.policyModelId,
     escalationTimeoutSeconds: USER_CONFIG_DEFAULTS.escalationTimeoutSeconds,
+    resourceBudget: USER_CONFIG_DEFAULTS.resourceBudget,
   },
   null,
   2,
@@ -165,6 +192,8 @@ function validateConfig(parsed: unknown, configPath: string): UserConfig {
  * API key fields default to empty string when not provided.
  */
 function mergeWithDefaults(config: UserConfig): ResolvedUserConfig {
+  const budgetDefaults = USER_CONFIG_DEFAULTS.resourceBudget;
+  const b = config.resourceBudget;
   return {
     agentModelId: config.agentModelId ?? USER_CONFIG_DEFAULTS.agentModelId,
     policyModelId: config.policyModelId ?? USER_CONFIG_DEFAULTS.policyModelId,
@@ -173,6 +202,15 @@ function mergeWithDefaults(config: UserConfig): ResolvedUserConfig {
     openaiApiKey: config.openaiApiKey ?? '',
     escalationTimeoutSeconds:
       config.escalationTimeoutSeconds ?? USER_CONFIG_DEFAULTS.escalationTimeoutSeconds,
+    resourceBudget: {
+      // Nullable fields: null means "disabled", undefined means "use default".
+      // Must use !== undefined (not ??) so explicit null is preserved.
+      maxTotalTokens: b?.maxTotalTokens !== undefined ? b.maxTotalTokens : budgetDefaults.maxTotalTokens,
+      maxSteps: b?.maxSteps !== undefined ? b.maxSteps : budgetDefaults.maxSteps,
+      maxSessionSeconds: b?.maxSessionSeconds !== undefined ? b.maxSessionSeconds : budgetDefaults.maxSessionSeconds,
+      maxEstimatedCostUsd: b?.maxEstimatedCostUsd !== undefined ? b.maxEstimatedCostUsd : budgetDefaults.maxEstimatedCostUsd,
+      warnThresholdPercent: b?.warnThresholdPercent ?? budgetDefaults.warnThresholdPercent,
+    },
   };
 }
 

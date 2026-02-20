@@ -161,3 +161,25 @@ When mocking `generateText` for session tests:
 - **Excluded**: `mcp-proxy-server.ts` (separate process) and `pipeline/compile.ts` (standalone CLI)
 - **Test gotcha**: session tests must call `logger.teardown()` in `afterEach` to prevent "Logger already set up" errors when creating multiple sessions across tests
 - **Design spec**: `docs/logging-design.md`
+
+## Execution Containment (TB0)
+- **Sandbox integration module**: `src/trusted-process/sandbox-integration.ts` -- wraps MCP servers in `srt` CLI processes
+- **Key exports**: `checkSandboxAvailability()`, `resolveSandboxConfig()`, `writeServerSettings()`, `wrapServerCommand()`, `cleanupSettingsFiles()`, `annotateSandboxViolation()`
+- **Types**: `ResolvedSandboxConfig` (discriminated union: sandboxed true/false), `ResolvedSandboxParams`, `SandboxAvailabilityResult`
+- **Config types** (in `src/config/types.ts`): `SandboxNetworkConfig`, `SandboxFilesystemConfig`, `ServerSandboxConfig`, `SandboxAvailabilityPolicy`
+- **MCPServerConfig**: has `sandbox?: ServerSandboxConfig` (false = opt-out, object = overrides, omitted = restrictive defaults)
+- **IronCurtainConfig**: has `sandboxPolicy?: SandboxAvailabilityPolicy` (default 'warn')
+- **AuditEntry**: has `sandboxed?: boolean` field
+- **Per-server srt processes**: each sandboxed server gets its own `srt` CLI process with independent proxy infrastructure (true network isolation)
+- **Settings files**: `{tempDir}/{serverName}.srt-settings.json` with `network` and `filesystem` sections
+- **Command wrapping**: `srt -s <settingsPath> -c <shell-quoted-cmd>` via `shell-quote` for escaping
+- **srt binary**: `resolve('node_modules/.bin/srt')` -- from `@anthropic-ai/sandbox-runtime`
+- **Shell-quote types**: `src/types/shell-quote.d.ts` (no `@types/shell-quote` available)
+- **Sandbox-by-default**: omitted sandbox field = sandboxed with restrictive defaults (no network, only session sandbox dir writable)
+- **Default denyRead**: `['~/.ssh', '~/.gnupg', '~/.aws']`
+- **Env var**: `SANDBOX_POLICY` passed from `src/sandbox/index.ts` to proxy process
+- **Env passing fix**: proxy always passes `{ ...process.env, ...config.env }` to StdioClientTransport (never undefined)
+- **Violation annotation**: `annotateSandboxViolation()` prefixes EPERM/EACCES errors with `[SANDBOX BLOCKED]` for sandboxed servers
+- **mcp-servers.json**: filesystem server has `"sandbox": false` (opt-out, mediated by policy engine)
+- **Tests**: `test/sandbox-integration.test.ts` -- 32 unit tests + 3 integration tests (gated behind platform check)
+- **Design spec**: `docs/designs/execution-containment.md`
