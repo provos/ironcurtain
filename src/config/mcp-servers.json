@@ -12,7 +12,7 @@
     },
     "sandbox": {
       "filesystem": {
-        "denyRead": []
+        "denyRead": ["~/.gnupg", "~/.aws"]
       },
       "network": {
         "allowedDomains": ["github.com", "*.github.com", "gitlab.com", "*.gitlab.com"]
