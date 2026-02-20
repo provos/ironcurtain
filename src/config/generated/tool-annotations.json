@@ -1,12 +1,12 @@
 {
-  "generatedAt": "2026-02-20T02:51:14.392Z",
+  "generatedAt": "2026-02-20T16:51:30.978Z",
   "servers": {
     "filesystem": {
-      "inputHash": "ab8be8eda17a9411f38b78373926ad193f9df40a5fab38e6a7c477d65f156c79",
+      "inputHash": "a1185a78242f2b1b809313233c7296bfcc2ec362aed66f003eb4f47ade7f942a",
       "tools": [
         {
           "toolName": "read_file",
-          "comment": "Reads the complete contents of a file as text, with optional head/tail line limiting (deprecated in favor of read_text_file).",
+          "comment": "Reads the complete (or partial) text contents of a file at the specified path (deprecated in favor of read_text_file).",
           "sideEffects": true,
           "args": {
             "path": [
@@ -23,7 +23,7 @@
         },
         {
           "toolName": "read_text_file",
-          "comment": "Reads the complete contents of a text file from the filesystem, with optional head/tail line limiting.",
+          "comment": "Reads the complete (or partial) text contents of a file at the specified path, handling various text encodings.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -40,7 +40,7 @@
         },
         {
           "toolName": "read_media_file",
-          "comment": "Reads an image or audio file and returns its base64-encoded data and MIME type.",
+          "comment": "Reads an image or audio file and returns its base64-encoded data along with its MIME type.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -51,7 +51,7 @@
         },
         {
           "toolName": "read_multiple_files",
-          "comment": "Reads the contents of multiple files simultaneously, returning each file's content keyed by its path.",
+          "comment": "Reads the text contents of multiple files simultaneously, returning each file's content keyed by its path.",
           "sideEffects": true,
           "args": {
             "paths": [
@@ -94,7 +94,7 @@
         },
         {
           "toolName": "create_directory",
-          "comment": "Creates a new directory (including any necessary parent directories) or silently succeeds if it already exists.",
+          "comment": "Creates a new directory (including any necessary parent directories) at the specified path, succeeding silently if it already exists.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -130,7 +130,7 @@
         },
         {
           "toolName": "directory_tree",
-          "comment": "Recursively retrieves a JSON tree view of all files and directories under the specified path, with optional exclusion patterns.",
+          "comment": "Recursively returns a JSON tree structure of all files and directories under the specified path, with optional exclusion patterns.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -144,7 +144,7 @@
         },
         {
           "toolName": "move_file",
-          "comment": "Moves or renames a file or directory from a source path to a destination path in a single atomic operation.",
+          "comment": "Moves or renames a file or directory from a source path to a destination path in a single operation.",
           "sideEffects": true,
           "args": {
             "source": [
@@ -159,7 +159,7 @@
         },
         {
           "toolName": "search_files",
-          "comment": "Recursively searches for files and directories matching a glob pattern under the specified path, returning all matching full paths.",
+          "comment": "Recursively searches for files and directories matching a glob-style pattern under a specified root path, returning full matching paths.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -187,7 +187,7 @@
         },
         {
           "toolName": "list_allowed_directories",
-          "comment": "Returns the list of directories this server is permitted to access, requiring no arguments.",
+          "comment": "Returns the static list of directories this server is permitted to access, with no path arguments or state changes.",
           "sideEffects": false,
           "args": {},
           "serverName": "filesystem"
