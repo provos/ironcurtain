@@ -634,6 +634,251 @@ describe('Session', () => {
     });
   });
 
+  describe('auto-compaction', () => {
+    /** Summarizer calls from the compactor have no `tools` property. */
+    function isSummarizerCall(opts: { tools?: unknown }): boolean {
+      return !('tools' in opts);
+    }
+
+    /** Creates a config with compaction enabled at the given threshold. */
+    function createCompactConfig(thresholdTokens = 1000, keepRecentMessages = 4): IronCurtainConfig {
+      const config = createTestConfig();
+      config.userConfig = {
+        ...config.userConfig,
+        autoCompact: {
+          enabled: true,
+          thresholdTokens,
+          keepRecentMessages,
+          summaryModelId: 'anthropic:claude-haiku-4-5',
+        },
+      };
+      return config;
+    }
+
+    /**
+     * Returns a multi-message result to build up history quickly.
+     * Four response messages (2 tool-call + 2 tool-result) means after
+     * 1 turn the session has 5 messages (1 user + 4 response), so turn 2
+     * starts with 6 -- enough for the compactor's MIN_MESSAGES_TO_COMPACT=4.
+     */
+    function createBulkResult(text: string, inputTokens: number) {
+      return {
+        text,
+        response: {
+          messages: [
+            { role: 'assistant', content: [{ type: 'tool-call', toolName: 'execute_code', args: { code: 'x' } }] },
+            { role: 'tool', content: [{ type: 'tool-result', result: 'ok' }] },
+            { role: 'assistant', content: [{ type: 'tool-call', toolName: 'execute_code', args: { code: 'y' } }] },
+            { role: 'tool', content: [{ type: 'tool-result', result: 'done' }] },
+          ],
+        },
+        totalUsage: { inputTokens, outputTokens: 50, totalTokens: inputTokens + 50 },
+      };
+    }
+
+    /**
+     * Returns a mock generateText implementation for compaction tests.
+     * Routes summarizer calls to return `summaryText` and agent calls to
+     * `agentHandler(callIndex)` where callIndex is 1-based.
+     */
+    function mockCompactionAgent(
+      summaryText: string,
+      agentHandler: (callIndex: number, opts: { onStepFinish?: (step: unknown) => void }) => {
+        text: string;
+        inputTokens: number;
+      },
+    ) {
+      let agentCallCount = 0;
+      return async (opts: {
+        messages?: unknown[];
+        tools?: unknown;
+        onStepFinish?: (step: unknown) => void;
+      }) => {
+        if (isSummarizerCall(opts)) {
+          return { text: summaryText };
+        }
+
+        agentCallCount++;
+        const { text, inputTokens } = agentHandler(agentCallCount, opts);
+        opts.onStepFinish?.({
+          toolCalls: [],
+          text,
+          usage: { inputTokens, outputTokens: 50 },
+        });
+        return createBulkResult(text, inputTokens);
+      };
+    }
+
+    /**
+     * Returns a mock generateText implementation that reports the given
+     * inputTokens via onStepFinish. Used for simple below-threshold and
+     * disabled-compaction tests.
+     */
+    function mockAgentWithFixedTokens(text: string, inputTokens: number) {
+      return async (opts: { onStepFinish?: (step: unknown) => void }) => {
+        opts.onStepFinish?.({
+          toolCalls: [],
+          text,
+          usage: { inputTokens, outputTokens: 50 },
+        });
+        return {
+          text,
+          response: {
+            messages: [
+              { role: 'assistant', content: [{ type: 'text', text }] },
+            ],
+          },
+          totalUsage: { inputTokens, outputTokens: 50, totalTokens: inputTokens + 50 },
+        };
+      };
+    }
+
+    it('compacts messages when token threshold is exceeded across turns', async () => {
+      const capturedMessages: unknown[][] = [];
+
+      mockGenerateText.mockImplementation(async (opts: {
+        messages?: unknown[];
+        tools?: unknown;
+        onStepFinish?: (step: unknown) => void;
+      }) => {
+        capturedMessages.push([...(opts.messages ?? [])]);
+
+        if (isSummarizerCall(opts)) {
+          return { text: 'Summary of the conversation so far.' };
+        }
+
+        const isFirstAgentCall = capturedMessages.length === 1;
+        const inputTokens = isFirstAgentCall ? 5000 : 200;
+        const text = isFirstAgentCall ? 'response 1' : 'response 2';
+
+        opts.onStepFinish?.({
+          toolCalls: [],
+          text,
+          usage: { inputTokens, outputTokens: 50 },
+        });
+        return createBulkResult(text, inputTokens);
+      });
+
+      const diagnostics: DiagnosticEvent[] = [];
+      const session = await createTestSession({
+        config: createCompactConfig(1000, 2),
+        onDiagnostic: (e) => diagnostics.push(e),
+      });
+
+      try {
+        // Turn 1: returns 4 response messages + records 5000 tokens (> threshold)
+        const r1 = await session.sendMessage('first message');
+        expect(r1).toBe('response 1');
+
+        // Turn 2: 6 messages in history -> compactor fires -> summarizer + agent
+        const r2 = await session.sendMessage('second message');
+        expect(r2).toBe('response 2');
+
+        // 3 calls: Turn 1 agent, Summarizer, Turn 2 agent
+        expect(mockGenerateText).toHaveBeenCalledTimes(3);
+
+        // Call 1 (Turn 1 agent): just the user message
+        expect(capturedMessages[0]).toHaveLength(1);
+        expect(capturedMessages[0][0]).toEqual({ role: 'user', content: 'first message' });
+
+        // Call 2 (Summarizer): older messages + "Summarize..." trigger
+        expect(capturedMessages[1].length).toBeGreaterThanOrEqual(2);
+        const lastSummarizerMsg = capturedMessages[1].at(-1) as { content: string };
+        expect(lastSummarizerMsg.content).toContain('Summarize');
+
+        // Call 3 (Turn 2 agent): compacted -- starts with [Conversation summary]
+        const turn2Messages = capturedMessages[2] as Array<{ role: string; content: string }>;
+        expect(turn2Messages[0].content).toContain('[Conversation summary]');
+        expect(turn2Messages[0].content).toContain('Summary of the conversation so far.');
+
+        // Diagnostic event emitted
+        const compactionEvents = diagnostics.filter(e => e.kind === 'message_compaction');
+        expect(compactionEvents).toHaveLength(1);
+        expect(compactionEvents[0]).toMatchObject({
+          kind: 'message_compaction',
+          summaryPreview: expect.stringContaining('Summary of the conversation'),
+        });
+        expect((compactionEvents[0] as { originalMessageCount: number; newMessageCount: number }).originalMessageCount)
+          .toBeGreaterThan((compactionEvents[0] as { newMessageCount: number }).newMessageCount);
+      } finally {
+        await session.close();
+      }
+    });
+
+    it('does not compact when tokens are below threshold', async () => {
+      mockGenerateText.mockImplementation(
+        mockAgentWithFixedTokens('low-token response', 500),
+      );
+
+      const diagnostics: DiagnosticEvent[] = [];
+      const session = await createTestSession({
+        config: createCompactConfig(1000),
+        onDiagnostic: (e) => diagnostics.push(e),
+      });
+
+      try {
+        await session.sendMessage('msg 1');
+        await session.sendMessage('msg 2');
+        await session.sendMessage('msg 3');
+
+        expect(mockGenerateText).toHaveBeenCalledTimes(3);
+        expect(diagnostics.filter(e => e.kind === 'message_compaction')).toHaveLength(0);
+      } finally {
+        await session.close();
+      }
+    });
+
+    it('does not compact when disabled', async () => {
+      mockGenerateText.mockImplementation(
+        mockAgentWithFixedTokens('response', 5000),
+      );
+
+      const diagnostics: DiagnosticEvent[] = [];
+      const session = await createTestSession({
+        onDiagnostic: (e) => diagnostics.push(e),
+      });
+
+      try {
+        await session.sendMessage('msg 1');
+        await session.sendMessage('msg 2');
+
+        expect(mockGenerateText).toHaveBeenCalledTimes(2);
+        expect(diagnostics.filter(e => e.kind === 'message_compaction')).toHaveLength(0);
+      } finally {
+        await session.close();
+      }
+    });
+
+    it('session continues working normally after compaction', async () => {
+      mockGenerateText.mockImplementation(mockCompactionAgent(
+        'Conversation summary.',
+        (callIndex) => ({
+          text: `r${callIndex}`,
+          inputTokens: callIndex === 1 ? 5000 : 200,
+        }),
+      ));
+
+      const session = await createTestSession({
+        config: createCompactConfig(1000, 2),
+      });
+
+      try {
+        await session.sendMessage('turn 1');
+        await session.sendMessage('turn 2');
+        const r3 = await session.sendMessage('turn 3');
+
+        expect(r3).toBeTruthy();
+        expect(session.getInfo().turnCount).toBe(3);
+        expect(session.getInfo().status).toBe('ready');
+
+        // 3 agent calls + 1 summarizer = 4 total
+        expect(mockGenerateText).toHaveBeenCalledTimes(4);
+      } finally {
+        await session.close();
+      }
+    });
+  });
+
   describe('sandbox factory', () => {
     it('passes session-specific config to the sandbox factory', async () => {
       const sandboxFactory = vi.fn().mockImplementation(async (config: IronCurtainConfig) => {
