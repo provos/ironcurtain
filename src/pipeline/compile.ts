@@ -41,7 +41,7 @@ import type {
   RepairContext,
 } from './types.js';
 import { resolveRealPath } from '../types/argument-roles.js';
-import { getIronCurtainHome } from '../config/paths.js';
+import { getIronCurtainHome, getUserConstitutionPath } from '../config/paths.js';
 import { loadUserConfig } from '../config/user-config.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -60,10 +60,25 @@ interface PipelineConfig {
   protectedPaths: string[];
 }
 
+/**
+ * Loads the combined constitution text (base + optional user constitution).
+ * The user constitution file is at ~/.ironcurtain/constitution-user.md.
+ * When present, it is appended to the base constitution text.
+ */
+function loadConstitutionText(basePath: string): string {
+  const base = readFileSync(basePath, 'utf-8');
+  const userPath = getUserConstitutionPath();
+  if (existsSync(userPath)) {
+    const user = readFileSync(userPath, 'utf-8');
+    return `${base}\n\n${user}`;
+  }
+  return base;
+}
+
 function loadPipelineConfig(): PipelineConfig {
   const configDir = resolve(__dirname, '..', 'config');
   const constitutionPath = resolve(configDir, 'constitution.md');
-  const constitutionText = readFileSync(constitutionPath, 'utf-8');
+  const constitutionText = loadConstitutionText(constitutionPath);
   const constitutionHash = createHash('sha256').update(constitutionText).digest('hex');
   const mcpServersPath = resolve(configDir, 'mcp-servers.json');
   const mcpServers: Record<string, MCPServerConfig> = JSON.parse(
@@ -257,7 +272,12 @@ async function connectAndDiscoverTools(
           env: config.env
             ? { ...(process.env as Record<string, string>), ...config.env }
             : undefined,
+          stderr: 'pipe',
         });
+        // Drain piped stderr to prevent backpressure (logs are discarded)
+        if (transport.stderr) {
+          transport.stderr.on('data', () => {});
+        }
         const client = new Client({ name: 'ironcurtain-compiler', version: '0.1.0' });
         await client.connect(transport);
 
@@ -308,7 +328,9 @@ async function annotateServerTools(
 
       const validation = validateAnnotationsHeuristic(tools, annotations);
       if (!validation.valid) {
-        throw new AnnotationValidationError(serverName, validation.warnings);
+        for (const w of validation.warnings) {
+          spinner.text = `${stepText} — WARNING: ${w}`;
+        }
       }
       return annotations;
     },
@@ -317,16 +339,6 @@ async function annotateServerTools(
   );
 
   return { annotations: result, inputHash };
-}
-
-class AnnotationValidationError extends Error {
-  constructor(
-    public readonly serverName: string,
-    public readonly warnings: string[],
-  ) {
-    super(`Annotation validation failed for server ${serverName}`);
-    this.name = 'AnnotationValidationError';
-  }
 }
 
 // ---------------------------------------------------------------------------

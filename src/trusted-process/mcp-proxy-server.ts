@@ -19,6 +19,7 @@
  *   ESCALATION_DIR     -- (optional) directory for file-based escalation IPC
  *   SESSION_LOG_PATH   -- (optional) path for capturing child process stderr
  *   SANDBOX_POLICY     -- (optional) "enforce" | "warn" (default: "warn")
+ *   SERVER_FILTER      -- (optional) when set, only connect to this single server name
  */
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -34,7 +35,7 @@ import { appendFileSync, existsSync, mkdtempSync, readFileSync, writeFileSync, u
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { v4 as uuidv4 } from 'uuid';
-import { loadGeneratedPolicy } from '../config/index.js';
+import { loadGeneratedPolicy, extractServerDomainAllowlists } from '../config/index.js';
 import { PolicyEngine } from './policy-engine.js';
 import { AuditLog } from './audit-log.js';
 import { prepareToolArgs } from './path-utils.js';
@@ -96,6 +97,15 @@ function logToSessionFile(sessionLogPath: string, message: string): void {
   try {
     appendFileSync(sessionLogPath, `${timestamp} INFO  ${message}\n`);
   } catch { /* ignore write failures */ }
+}
+
+/** Extracts concatenated text from MCP content blocks. */
+function extractTextFromContent(content: unknown): string | undefined {
+  if (!Array.isArray(content)) return undefined;
+  const texts = content
+    .filter((c: Record<string, unknown>) => c.type === 'text' && typeof c.text === 'string')
+    .map((c: Record<string, unknown>) => c.text as string);
+  return texts.length > 0 ? texts.join('\n') : undefined;
 }
 
 const ESCALATION_POLL_INTERVAL_MS = 500;
@@ -170,11 +180,25 @@ async function main(): Promise<void> {
 
   const sandboxPolicy = (process.env.SANDBOX_POLICY ?? 'warn') as SandboxAvailabilityPolicy;
 
-  const serversConfig: Record<string, MCPServerConfig> = JSON.parse(serversConfigJson);
+  const allServersConfig: Record<string, MCPServerConfig> = JSON.parse(serversConfigJson);
   const protectedPaths: string[] = JSON.parse(protectedPathsJson);
 
+  // When SERVER_FILTER is set, only connect to that single backend server.
+  // This allows per-server proxy processes with clean tool naming.
+  const serverFilter = process.env.SERVER_FILTER;
+  const serversConfig: Record<string, MCPServerConfig> = serverFilter
+    ? { [serverFilter]: allServersConfig[serverFilter] }
+    : allServersConfig;
+
+  if (serverFilter && !allServersConfig[serverFilter]) {
+    process.stderr.write(`SERVER_FILTER: unknown server "${serverFilter}"\n`);
+    process.exit(1);
+  }
+
   const { compiledPolicy, toolAnnotations } = loadGeneratedPolicy(generatedDir);
-  const policyEngine = new PolicyEngine(compiledPolicy, toolAnnotations, protectedPaths, allowedDirectory);
+
+  const serverDomainAllowlists = extractServerDomainAllowlists(serversConfig);
+  const policyEngine = new PolicyEngine(compiledPolicy, toolAnnotations, protectedPaths, allowedDirectory, serverDomainAllowlists);
   const auditLog = new AuditLog(auditLogPath);
   const circuitBreaker = new CallCircuitBreaker();
 
@@ -247,6 +271,10 @@ async function main(): Promise<void> {
       // which strips vars that srt and MCP servers may need
       env: { ...(process.env as Record<string, string>), ...(config.env ?? {}) },
       stderr: 'pipe', // Prevent child server stderr from leaking to the terminal
+      // Sandboxed servers get the sandbox dir as cwd so relative-path writes
+      // (e.g., log files) land inside the writable sandbox instead of failing
+      // with EROFS on the read-only host filesystem.
+      ...(resolved.sandboxed && allowedDirectory ? { cwd: allowedDirectory } : {}),
     });
 
     // Drain the piped stderr to prevent buffer backpressure from blocking
@@ -458,6 +486,13 @@ async function main(): Promise<void> {
         name: toolInfo.name,
         arguments: argsForTransport,
       });
+
+      if (result.isError) {
+        const errorText = extractTextFromContent(result.content) ?? 'Unknown tool error';
+        const errorMessage = annotateSandboxViolation(errorText, serverIsSandboxed);
+        logAudit({ status: 'error', error: errorMessage }, Date.now() - startTime);
+        return { content: result.content, isError: true };
+      }
 
       logAudit({ status: 'success' }, Date.now() - startTime);
       return { content: result.content };

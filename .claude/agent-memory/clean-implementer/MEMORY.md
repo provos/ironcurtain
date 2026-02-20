@@ -3,7 +3,7 @@
 ## Project Architecture
 - **Pipeline types**: `src/pipeline/types.ts` -- shared types for all pipeline modules
 - **PolicyEngine**: `src/trusted-process/policy-engine.ts` -- two-phase: structural invariants + compiled rules
-- **Constructor**: `new PolicyEngine(compiledPolicy, toolAnnotations, protectedPaths)`
+- **Constructor**: `new PolicyEngine(compiledPolicy, toolAnnotations, protectedPaths, allowedDirectory?, serverDomainAllowlists?)`
 - **Generated artifacts**: `src/config/generated/{compiled-policy,tool-annotations}.json`
 - **Config**: `src/config/types.ts` has `IronCurtainConfig` with `protectedPaths`, `generatedDir`, `constitutionPath`
 
@@ -25,23 +25,28 @@
 - `onStepFinish` callback receives `(stepResult: StepResult<TOOLS>)` -- no `stepIndex` parameter
 - `ModelMessage` importable from both `ai` and `@ai-sdk/provider-utils`
 
-## ArgumentRole Registry
-- **Canonical location**: `src/types/argument-roles.ts` -- type, registry, normalizers, accessors
+## ArgumentRole Registry (TB1a: extended)
+- **Canonical location**: `src/types/argument-roles.ts` -- type, registry, normalizers, accessors, URL helpers
 - **Re-exported from**: `src/pipeline/types.ts` (backward compat: `ArgumentRole`, `isArgumentRole`, `getArgumentRoleValues`)
-- **Key exports**: `ARGUMENT_ROLE_REGISTRY`, `getRoleDefinition()`, `getResourceRoles()`, `isArgumentRole()`, `getArgumentRoleValues()`, `expandTilde()`, `normalizePath()`
-- **Normalizers**: path roles use `normalizePath` (tilde expand + resolve), `none` uses identity
+- **8 roles**: `read-path`, `write-path`, `delete-path`, `fetch-url`, `git-remote-url`, `branch-name`, `commit-message`, `none`
+- **RoleCategory**: `'path' | 'url' | 'opaque'` -- determines which structural invariant applies
+- **RoleDefinition fields**: `description`, `isResourceIdentifier`, `category`, `normalize`, `prepareForPolicy?`, `resolveForPolicy?`, `annotationGuidance`
+- **Category accessors**: `getRolesByCategory()`, `getPathRoles()`, `getUrlRoles()`, `getResourceRoles()`
+- **URL normalizers**: `normalizeUrl()`, `extractDomain()`, `normalizeGitUrl()`, `extractGitDomain()`, `resolveGitRemote()`
+- **resolveGitRemote()**: uses `execFileSync` (not `execSync`) for safety; resolves named remotes to URLs via `git remote get-url`
 - **prepareToolArgs()**: in `src/trusted-process/path-utils.ts` -- annotation-driven normalization, returns `{ argsForTransport, argsForPolicy }`
 - **PolicyEngine.getAnnotation()**: public method to look up ToolAnnotation for a tool
-- **Heuristic fallback**: `normalizeToolArgPaths()` is `@deprecated` but retained for defense-in-depth and fallback when no annotation
+- **Heuristic fallback**: `normalizeToolArgPaths()` is `@deprecated` but retained for defense-in-depth on deny-side only
 
 ## ToolAnnotation shape (post-refactor)
 - Fields: `toolName`, `serverName`, `comment` (string), `sideEffects` (boolean), `args` (Record<string, ArgumentRole[]>)
 - No `effect` field -- argument roles are the single source of truth
 
-## CompiledRuleCondition shape (post-refactor)
+## CompiledRuleCondition shape (post-TB1a)
 - `roles?: ArgumentRole[]` -- match tools with any argument having these roles (blanket rules)
 - `paths?: PathCondition` -- extract paths from args with matching roles, check within directory
-- `roles` and `paths` serve different purposes; should not both appear in same rule
+- `domains?: DomainCondition` -- `{ roles: ArgumentRole[], allowed: string[] }` -- match URL-role args against domain allowlist (supports `*.example.com` wildcards)
+- `roles`, `paths`, and `domains` serve different purposes; may coexist in same rule
 - No `effect` field
 
 ## AI SDK v6 Mock Pattern (MockLanguageModelV3)
@@ -76,7 +81,7 @@ Engine uses concrete filesystem paths with `path.resolve()` and directory contai
 - `src/pipeline/constitution-compiler.ts` -- LLM rule compilation
 - `src/pipeline/scenario-generator.ts` -- LLM test generation
 - `src/pipeline/policy-verifier.ts` -- multi-round real engine + LLM judge
-- `src/pipeline/handwritten-scenarios.ts` -- 15 mandatory test scenarios
+- `src/pipeline/handwritten-scenarios.ts` -- 26 mandatory test scenarios (15 filesystem + 11 git)
 - `src/pipeline/compile.ts` -- CLI entry point (`npm run compile-policy`)
 - `src/config/index.ts` -- `loadConfig()` and `loadGeneratedPolicy()`
 
@@ -90,9 +95,17 @@ Zod v4 (^4.3.6) strict by default. Mock response JSON must exactly match Zod sch
 All moves denied via `deny-delete-operations` rule (move_file source has `delete-path` role). No move-specific rules.
 
 ## Design Documents
-- `docs/designs/policy-compilation-pipeline.md` -- design spec (updated to match implementation)
-- `docs/designs/policy-compilation-implementation-plan.md` -- implementation plan (marked as completed)
-- Both updated 2026-02-17 to reflect: no `effect` field, `roles` instead, `inputHash` caching, `escalate-read-elsewhere`, all moves denied, artifacts always written
+- `docs/designs/policy-compilation-pipeline.md` -- pipeline design spec
+- `docs/designs/multi-server-onboarding.md` -- TB1a design spec (role extensibility + git server)
+- `docs/designs/multi-provider-models.md` -- multi-provider model support design
+
+## TB1a: Domain Allowlists & Sandbox Containment Architecture
+- **Phase 1c**: structural invariant checks URL-role args against `serverDomainAllowlists` -- escalates (not denies) unknown domains
+- **Domain allowlists source**: extracted from `mcp-servers.json` sandbox network `allowedDomains` (wildcards filtered out)
+- **Domain matching**: `domainMatchesAllowlist()` exported from policy-engine -- exact match or `*.suffix` wildcard
+- **Annotation-aware sandbox auto-allow**: when annotation exists, only annotated path-category args trigger sandbox auto-allow; heuristic paths only used for deny-side (Phase 1a protected paths)
+- **Git tool annotation strategy**: read-only ops (status/log/diff) use `path: ['read-path']` for sandbox containment; remote/destructive ops use `path: ['none']` to prevent sandbox auto-allow, letting compiled rules handle escalation
+- **User constitution**: `getUserConstitutionPath()` in `src/config/paths.ts`; `loadConstitutionText()` in `src/pipeline/compile.ts` concatenates base + optional user constitution
 
 ## LLM Interaction Logging
 - `src/pipeline/llm-logger.ts` -- AI SDK middleware that captures all LLM prompts and responses

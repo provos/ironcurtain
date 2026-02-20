@@ -23,6 +23,11 @@ const pathConditionSchema = z.object({
   within: z.string(),
 });
 
+const domainConditionSchema = z.object({
+  roles: z.array(z.enum(getArgumentRoleValues())),
+  allowed: z.array(z.string()),
+});
+
 function buildCompilerResponseSchema(
   serverNames: [string, ...string[]],
   toolNames: [string, ...string[]],
@@ -37,6 +42,7 @@ function buildCompilerResponseSchema(
       tool: z.array(z.enum(toolNames)).optional(),
       sideEffects: z.boolean().optional(),
       paths: pathConditionSchema.optional(),
+      domains: domainConditionSchema.optional(),
     }),
     then: z.enum(['allow', 'deny', 'escalate']),
     reason: z.string(),
@@ -92,6 +98,7 @@ Produce an ORDERED list of policy rules (first match wins). Each rule has:
   - "tool": array of specific tool names (omit = any matching tool)
   - "sideEffects": match on the tool's sideEffects annotation (omit = don't filter)
   - "paths": path condition with "roles" (which argument roles to extract paths from) and "within" (concrete absolute directory). Rule fires only if ALL extracted paths are within that directory. If zero paths are extracted (tool has no matching path arguments), the condition is NOT satisfied and the rule does NOT match. This implicitly requires matching roles, so top-level "roles" is redundant when "paths" is present.
+  - "domains": domain condition with "roles" (which URL argument roles to extract domains from) and "allowed" (list of allowed domain patterns, e.g. ["github.com", "*.github.com"]). Rule fires only if ALL extracted domains match an allowed pattern. Supports exact match, "*.example.com" prefix wildcards, and "*" (any domain). If zero URLs are extracted, the condition is NOT satisfied and the rule does NOT match.
 - "then": the policy decision:
   - "allow" — the operation is explicitly permitted by the constitution
   - "deny" — the operation is categorically forbidden by the constitution (absolute prohibition)
@@ -209,6 +216,18 @@ export function validateCompiledRules(
       // Validate within is an absolute path
       if (!rule.if.paths.within.startsWith('/')) {
         errors.push(`Rule "${rule.name}": paths.within must be an absolute path, got "${rule.if.paths.within}"`);
+      }
+    }
+
+    // Validate domain roles
+    if (rule.if.domains) {
+      for (const role of rule.if.domains.roles) {
+        if (!isArgumentRole(role)) {
+          errors.push(`Rule "${rule.name}": invalid role "${role}" in domains.roles`);
+        }
+      }
+      if (rule.if.domains.allowed.length === 0) {
+        warnings.push(`Rule "${rule.name}": domains.allowed is empty (condition will never match)`);
       }
     }
 

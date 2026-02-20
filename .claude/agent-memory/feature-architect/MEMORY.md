@@ -6,7 +6,7 @@
 - `src/types/mcp.ts` - ToolCallRequest, PolicyDecision, ToolCallResult
 - `src/pipeline/types.ts` - ToolAnnotation, CompiledRule, TestScenario, etc.
 - `src/pipeline/compile.ts` - CLI entry point for policy compilation
-- `src/config/constitution.md` - 5 principles, filesystem-only
+- `src/config/constitution.md` - 3 principles (Least privilege, No destruction, Human oversight)
 - `src/config/generated/` - LLM-generated artifacts (tool-annotations.json, compiled-policy.json, test-scenarios.json)
 - `docs/secure-agent-runtime-v2.md` - vision doc (many features aspirational)
 - `docs/ironcurtain-poc-handoff.md` - PoC handoff (significantly stale)
@@ -180,11 +180,28 @@ Both use the same PolicyEngine with compiled artifacts.
 - No Windows support
 - stdio passes through transparently (MCP compatible)
 
+## TB1: Multi-Server Onboarding Design (designed 2026-02-19)
+- See `docs/designs/multi-server-onboarding.md` for full spec
+- Target servers: `@cyanheads/git-mcp-server` (TS, 28 tools, Apache 2.0) + custom fetch server
+- Official MCP git server is Python-only (rejected); official fetch also Python (rejected)
+- Custom fetch server: single `fetch` tool with url, method, headers, body, max_length args
+- New `RoleCategory` type: `'path' | 'url' | 'opaque'` groups roles for structural invariant dispatch
+- New roles: `fetch-url`, `git-remote-url`, `branch-name`, `commit-message`
+- Each `RoleDefinition` gains `category` and `annotationGuidance` fields
+- URL normalizers: `normalizeUrl()`, `extractDomain()`, `normalizeGitUrl()`, `extractGitDomain()`
+- Policy engine Phase 1c: domain allowlist check for url-category roles (escalate, not deny)
+- `serverDomainAllowlists` derived from sandbox network config's `allowedDomains`
+- New compiled rule condition: `DomainCondition { roles, allowed }` alongside `PathCondition`
+- Annotation prompt dynamically built from registry `annotationGuidance` fields
+- User constitution: separate file `~/.ironcurtain/constitution-user.md` (never overwritten by updates)
+- User credentials: `serverCredentials` in config.json, merged into server spawn env
+- LLM-assisted constitution customization: `npm run customize-policy` interactive CLI
+- 6-phase migration: (1) role extensibility, (2) engine domain support, (3) git server, (4) fetch server, (5) user config, (6) constitution customizer
+
 ## NOT Implemented (aspirational in docs)
 - Per-task policy layer
 - Runtime LLM assessment (semantic checks)
 - Agent identity / resource budgets / push notifications / policy learning
-- Non-filesystem MCP servers
 
 ## Document Staleness (reviewed 2026-02-18)
 - `ironcurtain-poc-handoff.md`: most stale (sandbox tech, policy engine, constitution, missing pipeline)

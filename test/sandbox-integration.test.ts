@@ -364,8 +364,9 @@ describe('wrapServerCommand', () => {
       settingsDir,
     );
     const cmdString = result.args[3];
-    // shell-quote wraps strings containing spaces in single quotes
-    expect(cmdString).toContain("'./servers/exec server.js'");
+    // Relative paths are resolved to absolute; shell-quote wraps spaces in quotes
+    expect(cmdString).toContain('exec server.js');
+    expect(cmdString).not.toContain("'./servers/exec server.js'"); // resolved to absolute
     expect(cmdString).toContain("'--flag=value with spaces'");
   });
 

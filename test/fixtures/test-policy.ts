@@ -8,7 +8,21 @@
  * move handling, and side-effect-free tool allowance.
  */
 
+import { resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { CompiledPolicyFile, ToolAnnotationsFile } from '../../src/pipeline/types.js';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const projectRoot = resolve(__dirname, '..', '..');
+
+export const TEST_SANDBOX_DIR = '/tmp/ironcurtain-sandbox';
+
+export const TEST_PROTECTED_PATHS = [
+  resolve(projectRoot, 'src/config/constitution.md'),
+  resolve(projectRoot, 'src/config/generated'),
+  resolve(projectRoot, 'src/config/mcp-servers.json'),
+  resolve('./audit.jsonl'),
+];
 
 /**
  * Compiled policy rules. Order matters (first match wins per role).
@@ -31,6 +45,63 @@ export const testCompiledPolicy: CompiledPolicyFile = {
       then: 'allow',
       reason: 'No filesystem changes, no path arguments.',
     },
+    // ── Git-specific rules ──────────────────────────────────────────
+    {
+      name: 'escalate-git-remote-ops',
+      description: 'Escalate git push/pull/fetch and other remote-contacting operations.',
+      principle: 'Human oversight',
+      if: {
+        server: ['git'],
+        tool: ['git_push', 'git_pull', 'git_fetch'],
+      },
+      then: 'escalate',
+      reason: 'Remote-contacting git operations require human approval.',
+    },
+    {
+      name: 'escalate-git-destructive-ops',
+      description: 'Escalate git reset/rebase/merge and other history-rewriting operations.',
+      principle: 'Human oversight',
+      if: {
+        server: ['git'],
+        tool: ['git_reset', 'git_rebase', 'git_merge'],
+      },
+      then: 'escalate',
+      reason: 'History-rewriting git operations require human approval.',
+    },
+    {
+      name: 'escalate-git-branch-management',
+      description: 'Escalate git branch management (creation/deletion).',
+      principle: 'Human oversight',
+      if: {
+        server: ['git'],
+        tool: ['git_branch'],
+      },
+      then: 'escalate',
+      reason: 'Branch management requires human approval.',
+    },
+    {
+      name: 'allow-git-read-ops',
+      description: 'Allow read-only git operations (status, log, diff, etc.).',
+      principle: 'Least privilege',
+      if: {
+        server: ['git'],
+        sideEffects: false,
+      },
+      then: 'allow',
+      reason: 'Read-only git operations are safe.',
+    },
+    {
+      name: 'allow-git-staging-and-commit',
+      description: 'Allow git add and commit in sandbox.',
+      principle: 'Least privilege',
+      if: {
+        server: ['git'],
+        tool: ['git_add', 'git_commit'],
+      },
+      then: 'allow',
+      reason: 'Staging and committing within sandbox are safe.',
+    },
+    // ── Filesystem rules ────────────────────────────────────────────
     {
       name: 'deny-delete-outside-permitted-areas',
       description: 'Deny delete-path operations outside sandbox.',
@@ -90,8 +161,9 @@ export const testCompiledPolicy: CompiledPolicyFile = {
 };
 
 /**
- * Tool annotations for the filesystem MCP server.
- * Matches the stable tool set from @modelcontextprotocol/server-filesystem.
+ * Tool annotations for the filesystem and git MCP servers.
+ * Filesystem: matches the stable tool set from @modelcontextprotocol/server-filesystem.
+ * Git: covers the tools referenced by handwritten git scenarios.
  */
 export const testToolAnnotations: ToolAnnotationsFile = {
   generatedAt: 'test-fixture',
@@ -196,6 +268,102 @@ export const testToolAnnotations: ToolAnnotationsFile = {
           comment: 'Lists allowed directories (no side effects).',
           sideEffects: false,
           args: {},
+        },
+      ],
+    },
+    git: {
+      inputHash: 'test-fixture',
+      tools: [
+        // Read-only operations: path is read-path so sandbox containment auto-allows
+        {
+          toolName: 'git_status',
+          serverName: 'git',
+          comment: 'Shows working tree status.',
+          sideEffects: false,
+          args: { path: ['read-path'] },
+        },
+        {
+          toolName: 'git_log',
+          serverName: 'git',
+          comment: 'Shows commit history.',
+          sideEffects: false,
+          args: { path: ['read-path'] },
+        },
+        {
+          toolName: 'git_diff',
+          serverName: 'git',
+          comment: 'Shows changes between commits or working tree.',
+          sideEffects: false,
+          args: { path: ['read-path'] },
+        },
+        // Local write operations: path is write-path so sandbox containment auto-allows
+        {
+          toolName: 'git_add',
+          serverName: 'git',
+          comment: 'Stages files for commit.',
+          sideEffects: true,
+          args: { path: ['write-path'], files: ['none'] },
+        },
+        {
+          toolName: 'git_commit',
+          serverName: 'git',
+          comment: 'Creates a new commit.',
+          sideEffects: true,
+          args: { path: ['write-path'], message: ['commit-message'] },
+        },
+        // Remote operations: path is none (repo locator), remote is git-remote-url
+        // These must go to compiled rules even when path is in sandbox
+        {
+          toolName: 'git_push',
+          serverName: 'git',
+          comment: 'Pushes commits to remote.',
+          sideEffects: true,
+          args: { path: ['none'], remote: ['git-remote-url'], branch: ['branch-name'] },
+        },
+        {
+          toolName: 'git_pull',
+          serverName: 'git',
+          comment: 'Pulls changes from remote.',
+          sideEffects: true,
+          args: { path: ['none'], remote: ['git-remote-url'], branch: ['branch-name'] },
+        },
+        {
+          toolName: 'git_fetch',
+          serverName: 'git',
+          comment: 'Fetches from remote without merging.',
+          sideEffects: true,
+          args: { path: ['none'], remote: ['git-remote-url'] },
+        },
+        // History-rewriting operations: path has write-history (not sandbox-safe)
+        // so Phase 1b won't auto-resolve, forcing Phase 2 evaluation
+        {
+          toolName: 'git_reset',
+          serverName: 'git',
+          comment: 'Resets HEAD to a commit.',
+          sideEffects: true,
+          args: { path: ['read-path', 'write-history'], mode: ['none'] },
+        },
+        {
+          toolName: 'git_rebase',
+          serverName: 'git',
+          comment: 'Reapplies commits on top of another branch.',
+          sideEffects: true,
+          args: { path: ['read-path', 'write-history'], branch: ['branch-name'] },
+        },
+        {
+          toolName: 'git_merge',
+          serverName: 'git',
+          comment: 'Merges branches.',
+          sideEffects: true,
+          args: { path: ['read-path', 'write-history'], branch: ['branch-name'] },
+        },
+        // Branch management: path has both write-history and delete-history
+        {
+          toolName: 'git_branch',
+          serverName: 'git',
+          comment: 'Creates, lists, or deletes branches.',
+          sideEffects: true,
+          args: { path: ['read-path', 'write-history', 'delete-history'], name: ['branch-name'], delete: ['none'] },
         },
       ],
     },
