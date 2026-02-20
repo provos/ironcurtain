@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { IronCurtainConfig } from '../config/types.js';
 import type { Sandbox } from '../sandbox/index.js';
 import type { ResolvedResourceBudgetConfig } from '../config/user-config.js';
+import type { CumulativeBudgetSnapshot } from './resource-budget-tracker.js';
 
 /**
  * Unique identifier for a session. Branded to prevent accidental
@@ -76,6 +77,7 @@ export interface BudgetStatus {
   readonly elapsedSeconds: number;
   readonly estimatedCostUsd: number;
   readonly limits: ResolvedResourceBudgetConfig;
+  readonly cumulative: CumulativeBudgetSnapshot;
 }
 
 /**

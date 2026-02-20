@@ -154,13 +154,7 @@ export class AgentSession implements Session {
     if (this.status === 'closed') throw new SessionClosedError();
     if (this.status !== 'ready') throw new SessionNotReadyError(this.status);
 
-    // Pre-check: budget may already be exhausted from a previous turn
-    const budgetCheck = this.budgetTracker.isExhausted();
-    if (budgetCheck) {
-      this.emitBudgetExhaustedDiagnostic(budgetCheck.dimension, budgetCheck.message);
-      throw new BudgetExhaustedError(budgetCheck.dimension, budgetCheck.message);
-    }
-
+    this.budgetTracker.startTurn();
     this.status = 'processing';
     const turnStart = new Date().toISOString();
     const messageCountBefore = this.messages.length;
@@ -243,6 +237,7 @@ export class AgentSession implements Session {
       throw error;
     } finally {
       if (abortTimeout !== null) clearTimeout(abortTimeout);
+      this.budgetTracker.endTurn();
     }
   }
 
@@ -259,9 +254,8 @@ export class AgentSession implements Session {
   }
 
   getBudgetStatus(): BudgetStatus {
-    const snapshot = this.budgetTracker.getSnapshot();
     return {
-      ...snapshot,
+      ...this.budgetTracker.getSnapshot(),
       limits: this.config.userConfig.resourceBudget,
     };
   }

@@ -1,7 +1,13 @@
 /**
- * ResourceBudgetTracker -- enforces configurable resource limits per session.
+ * ResourceBudgetTracker -- enforces configurable resource limits per turn.
  *
- * Tracks token usage, step count, wall-clock time, and estimated cost.
+ * All four budget dimensions (tokens, steps, wall-clock time, cost) are
+ * per-turn limits that reset when the agent returns control. Cumulative
+ * session totals are tracked separately for display purposes.
+ *
+ * Turn lifecycle: call startTurn() before each agent turn, endTurn() after.
+ * Idle time between turns does not count against the wall-clock budget.
+ *
  * Provides:
  * - isExhausted() pre-check for belt-and-suspenders enforcement
  * - recordStep() for accumulation after each AI SDK step
@@ -15,6 +21,16 @@ import type { LanguageModelUsage, ToolSet, StopCondition } from 'ai';
 
 export type BudgetDimension = 'tokens' | 'steps' | 'wall_clock' | 'cost';
 
+/** Cumulative session totals across all turns. */
+export interface CumulativeBudgetSnapshot {
+  readonly totalInputTokens: number;
+  readonly totalOutputTokens: number;
+  readonly totalTokens: number;
+  readonly stepCount: number;
+  readonly activeSeconds: number;
+  readonly estimatedCostUsd: number;
+}
+
 export interface BudgetSnapshot {
   readonly totalInputTokens: number;
   readonly totalOutputTokens: number;
@@ -22,6 +38,7 @@ export interface BudgetSnapshot {
   readonly stepCount: number;
   readonly elapsedSeconds: number;
   readonly estimatedCostUsd: number;
+  readonly cumulative: CumulativeBudgetSnapshot;
 }
 
 export interface BudgetExhaustedVerdict {
@@ -128,17 +145,25 @@ function resolvePricing(modelId: string): ModelPricing {
 export class ResourceBudgetTracker {
   private readonly config: ResolvedResourceBudgetConfig;
   private readonly pricing: ModelPricing;
-  private readonly sessionStartMs: number;
 
-  private totalInputTokens = 0;
-  private totalOutputTokens = 0;
-  private totalCacheReadTokens = 0;
-  private stepCount = 0;
+  // --- Per-turn state (reset on each startTurn) ---
+  private turnStartMs: number | null = null;
+  private turnInputTokens = 0;
+  private turnOutputTokens = 0;
+  private turnCacheReadTokens = 0;
+  private turnStepCount = 0;
 
-  /** Once a dimension is exhausted, the verdict is latched. */
+  // --- Cumulative session state (rolled up on each endTurn) ---
+  private cumulativeInputTokens = 0;
+  private cumulativeOutputTokens = 0;
+  private cumulativeCacheReadTokens = 0;
+  private cumulativeStepCount = 0;
+  private cumulativeActiveMs = 0;
+
+  /** Once a dimension is exhausted within a turn, the verdict is latched. */
   private exhaustedVerdict: BudgetExhaustedVerdict | null = null;
 
-  /** Track which dimensions have already fired a warning (emit each once). */
+  /** Track which dimensions have already fired a warning (emit each once per turn). */
   private warnedDimensions = new Set<BudgetDimension>();
 
   /** Pending warnings accumulated by recordStep(), drained by getActiveWarnings(). */
@@ -147,7 +172,36 @@ export class ResourceBudgetTracker {
   constructor(config: ResolvedResourceBudgetConfig, modelId: string) {
     this.config = config;
     this.pricing = resolvePricing(modelId);
-    this.sessionStartMs = Date.now();
+  }
+
+  /**
+   * Begin a new turn. Resets per-turn accumulators and starts the clock.
+   * If a turn is already active, defensively ends it first.
+   */
+  startTurn(): void {
+    if (this.turnStartMs !== null) {
+      this.endTurn();
+    }
+    this.resetTurnCounters();
+    this.exhaustedVerdict = null;
+    this.warnedDimensions.clear();
+    this.pendingWarnings = [];
+    this.turnStartMs = Date.now();
+  }
+
+  /**
+   * End the current turn. Rolls per-turn values into cumulative totals.
+   * No-op if no turn is active.
+   */
+  endTurn(): void {
+    if (this.turnStartMs === null) return;
+    this.cumulativeActiveMs += Date.now() - this.turnStartMs;
+    this.cumulativeInputTokens += this.turnInputTokens;
+    this.cumulativeOutputTokens += this.turnOutputTokens;
+    this.cumulativeCacheReadTokens += this.turnCacheReadTokens;
+    this.cumulativeStepCount += this.turnStepCount;
+    this.turnStartMs = null;
+    this.resetTurnCounters();
   }
 
   /**
@@ -162,35 +216,36 @@ export class ResourceBudgetTracker {
   }
 
   /**
-   * Record token usage from a completed step. Accumulates totals and
-   * evaluates all budget dimensions. Returns exhausted verdict or ok.
+   * Record token usage from a completed step. Accumulates per-turn totals
+   * and evaluates all budget dimensions. Returns exhausted verdict or ok.
    */
   recordStep(usage: LanguageModelUsage): BudgetVerdict {
     if (this.exhaustedVerdict) return this.exhaustedVerdict;
 
-    this.totalInputTokens += usage.inputTokens ?? 0;
-    this.totalOutputTokens += usage.outputTokens ?? 0;
-    this.totalCacheReadTokens += usage.inputTokenDetails?.cacheReadTokens ?? 0;
-    this.stepCount++;
+    this.turnInputTokens += usage.inputTokens ?? 0;
+    this.turnOutputTokens += usage.outputTokens ?? 0;
+    this.turnCacheReadTokens += usage.inputTokenDetails?.cacheReadTokens ?? 0;
+    this.turnStepCount++;
 
     return this.evaluate();
   }
 
-  /** Returns a read-only snapshot of current budget consumption. */
+  /** Returns a read-only snapshot of current per-turn budget consumption. */
   getSnapshot(): BudgetSnapshot {
     return {
-      totalInputTokens: this.totalInputTokens,
-      totalOutputTokens: this.totalOutputTokens,
-      totalTokens: this.totalInputTokens + this.totalOutputTokens,
-      stepCount: this.stepCount,
-      elapsedSeconds: this.getElapsedSeconds(),
-      estimatedCostUsd: this.estimateCost(),
+      totalInputTokens: this.turnInputTokens,
+      totalOutputTokens: this.turnOutputTokens,
+      totalTokens: this.turnInputTokens + this.turnOutputTokens,
+      stepCount: this.turnStepCount,
+      elapsedSeconds: this.getTurnElapsedSeconds(),
+      estimatedCostUsd: this.estimateCost(this.turnInputTokens, this.turnOutputTokens, this.turnCacheReadTokens),
+      cumulative: this.getCumulativeSnapshot(),
     };
   }
 
   /**
    * Returns warnings that have been generated since the last call.
-   * Each dimension warns at most once.
+   * Each dimension warns at most once per turn.
    */
   getActiveWarnings(): BudgetWarningVerdict[] {
     return this.pendingWarnings.splice(0);
@@ -219,31 +274,57 @@ export class ResourceBudgetTracker {
   }
 
   /**
-   * Returns remaining wall-clock time in milliseconds, or null
-   * if wall-clock budget is disabled.
+   * Returns remaining wall-clock time in milliseconds for the current turn,
+   * or null if wall-clock budget is disabled.
    */
   getRemainingWallClockMs(): number | null {
     if (this.config.maxSessionSeconds === null) return null;
-    const elapsedMs = Date.now() - this.sessionStartMs;
+    const elapsedMs = this.getTurnElapsedMs();
     const limitMs = this.config.maxSessionSeconds * 1000;
     return Math.max(0, limitMs - elapsedMs);
   }
 
   // --- Private helpers ---
 
-  private getElapsedSeconds(): number {
-    return (Date.now() - this.sessionStartMs) / 1000;
+  private resetTurnCounters(): void {
+    this.turnInputTokens = 0;
+    this.turnOutputTokens = 0;
+    this.turnCacheReadTokens = 0;
+    this.turnStepCount = 0;
   }
 
-  private estimateCost(): number {
-    // Cache-read tokens are a subset of input tokens counted at a reduced rate.
-    // Non-cached input tokens pay the full input rate.
-    const nonCachedInput = this.totalInputTokens - this.totalCacheReadTokens;
+  private getTurnElapsedMs(): number {
+    if (this.turnStartMs === null) return 0;
+    return Date.now() - this.turnStartMs;
+  }
+
+  private getTurnElapsedSeconds(): number {
+    return this.getTurnElapsedMs() / 1000;
+  }
+
+  private estimateCost(inputTokens: number, outputTokens: number, cacheReadTokens: number): number {
+    const nonCachedInput = inputTokens - cacheReadTokens;
     return (
       (nonCachedInput / 1_000_000) * this.pricing.inputPerMillion +
-      (this.totalCacheReadTokens / 1_000_000) * this.pricing.cacheReadPerMillion +
-      (this.totalOutputTokens / 1_000_000) * this.pricing.outputPerMillion
+      (cacheReadTokens / 1_000_000) * this.pricing.cacheReadPerMillion +
+      (outputTokens / 1_000_000) * this.pricing.outputPerMillion
     );
+  }
+
+  /** Returns cumulative snapshot including the current in-progress turn. */
+  private getCumulativeSnapshot(): CumulativeBudgetSnapshot {
+    const totalInput = this.cumulativeInputTokens + this.turnInputTokens;
+    const totalOutput = this.cumulativeOutputTokens + this.turnOutputTokens;
+    const totalCacheRead = this.cumulativeCacheReadTokens + this.turnCacheReadTokens;
+    const totalActiveMs = this.cumulativeActiveMs + this.getTurnElapsedMs();
+    return {
+      totalInputTokens: totalInput,
+      totalOutputTokens: totalOutput,
+      totalTokens: totalInput + totalOutput,
+      stepCount: this.cumulativeStepCount + this.turnStepCount,
+      activeSeconds: totalActiveMs / 1000,
+      estimatedCostUsd: this.estimateCost(totalInput, totalOutput, totalCacheRead),
+    };
   }
 
   private evaluate(): BudgetVerdict {
@@ -256,7 +337,7 @@ export class ResourceBudgetTracker {
       return exhausted;
     }
 
-    // Check warnings (only fires once per dimension)
+    // Check warnings (only fires once per dimension per turn)
     this.checkWarnings(snapshot);
 
     return { ok: true };

@@ -36,18 +36,25 @@ function makeStepResult(usage: LanguageModelUsage): any {
   return { usage };
 }
 
+/** Creates a tracker and starts a turn (most tests need an active turn). */
+function createTracker(config?: Partial<ResolvedResourceBudgetConfig>, modelId = 'claude-sonnet') {
+  const tracker = new ResourceBudgetTracker(defaultConfig(config), modelId);
+  tracker.startTurn();
+  return tracker;
+}
+
 // --- Tests ---
 
 describe('ResourceBudgetTracker', () => {
   describe('token budget', () => {
     it('allows usage below limit', () => {
-      const tracker = new ResourceBudgetTracker(defaultConfig({ maxTotalTokens: 1000 }), 'claude-sonnet');
+      const tracker = createTracker({ maxTotalTokens: 1000 });
       const verdict = tracker.recordStep(makeUsage({ inputTokens: 100, outputTokens: 50, totalTokens: 150 }));
       expect(verdict).toEqual({ ok: true });
     });
 
     it('warns at threshold', () => {
-      const tracker = new ResourceBudgetTracker(defaultConfig({ maxTotalTokens: 1000 }), 'claude-sonnet');
+      const tracker = createTracker({ maxTotalTokens: 1000 });
 
       // Record steps to reach 80%+ of 1000 tokens
       for (let i = 0; i < 5; i++) {
@@ -62,7 +69,7 @@ describe('ResourceBudgetTracker', () => {
     });
 
     it('exhausts at limit', () => {
-      const tracker = new ResourceBudgetTracker(defaultConfig({ maxTotalTokens: 500 }), 'claude-sonnet');
+      const tracker = createTracker({ maxTotalTokens: 500 });
 
       // First step: 300 tokens, ok
       const v1 = tracker.recordStep(makeUsage({ inputTokens: 200, outputTokens: 100, totalTokens: 300 }));
@@ -77,10 +84,7 @@ describe('ResourceBudgetTracker', () => {
 
   describe('step budget', () => {
     it('tracks step count and exhausts at limit', () => {
-      const tracker = new ResourceBudgetTracker(
-        defaultConfig({ maxSteps: 3, maxTotalTokens: null, maxEstimatedCostUsd: null }),
-        'claude-sonnet',
-      );
+      const tracker = createTracker({ maxSteps: 3, maxTotalTokens: null, maxEstimatedCostUsd: null });
 
       expect(tracker.recordStep(makeUsage())).toEqual({ ok: true });
       expect(tracker.recordStep(makeUsage())).toEqual({ ok: true });
@@ -91,10 +95,7 @@ describe('ResourceBudgetTracker', () => {
     });
 
     it('warns at step threshold', () => {
-      const tracker = new ResourceBudgetTracker(
-        defaultConfig({ maxSteps: 10, maxTotalTokens: null, maxEstimatedCostUsd: null }),
-        'claude-sonnet',
-      );
+      const tracker = createTracker({ maxSteps: 10, maxTotalTokens: null, maxEstimatedCostUsd: null });
 
       // Reach 80%: 8 steps of 10
       for (let i = 0; i < 8; i++) {
@@ -118,10 +119,7 @@ describe('ResourceBudgetTracker', () => {
     });
 
     it('exhausts at time limit', () => {
-      const tracker = new ResourceBudgetTracker(
-        defaultConfig({ maxSessionSeconds: 10, maxTotalTokens: null, maxSteps: null, maxEstimatedCostUsd: null }),
-        'claude-sonnet',
-      );
+      const tracker = createTracker({ maxSessionSeconds: 10, maxTotalTokens: null, maxSteps: null, maxEstimatedCostUsd: null });
 
       // Initially not exhausted
       expect(tracker.isExhausted()).toBeNull();
@@ -135,10 +133,7 @@ describe('ResourceBudgetTracker', () => {
     });
 
     it('getRemainingWallClockMs returns correct value', () => {
-      const tracker = new ResourceBudgetTracker(
-        defaultConfig({ maxSessionSeconds: 30 }),
-        'claude-sonnet',
-      );
+      const tracker = createTracker({ maxSessionSeconds: 30 });
 
       expect(tracker.getRemainingWallClockMs()).toBe(30_000);
 
@@ -150,10 +145,7 @@ describe('ResourceBudgetTracker', () => {
     });
 
     it('getRemainingWallClockMs returns null when disabled', () => {
-      const tracker = new ResourceBudgetTracker(
-        defaultConfig({ maxSessionSeconds: null }),
-        'claude-sonnet',
-      );
+      const tracker = createTracker({ maxSessionSeconds: null });
 
       expect(tracker.getRemainingWallClockMs()).toBeNull();
     });
@@ -161,10 +153,7 @@ describe('ResourceBudgetTracker', () => {
 
   describe('cost estimation', () => {
     it('estimates cost from token counts and pricing table', () => {
-      const tracker = new ResourceBudgetTracker(
-        defaultConfig({ maxEstimatedCostUsd: 10, maxTotalTokens: null, maxSteps: null }),
-        'claude-sonnet',
-      );
+      const tracker = createTracker({ maxEstimatedCostUsd: 10, maxTotalTokens: null, maxSteps: null });
 
       // claude-sonnet: input=$3/M, output=$15/M
       // 1M input + 100K output = $3 + $1.5 = $4.50
@@ -180,10 +169,7 @@ describe('ResourceBudgetTracker', () => {
     });
 
     it('applies reduced rate for cache-read tokens', () => {
-      const tracker = new ResourceBudgetTracker(
-        defaultConfig({ maxEstimatedCostUsd: 10, maxTotalTokens: null, maxSteps: null }),
-        'claude-sonnet',
-      );
+      const tracker = createTracker({ maxEstimatedCostUsd: 10, maxTotalTokens: null, maxSteps: null });
 
       // claude-sonnet: input=$3/M, cacheRead=$0.3/M, output=$15/M
       // 500K cached + 500K non-cached input + 100K output
@@ -201,10 +187,7 @@ describe('ResourceBudgetTracker', () => {
     });
 
     it('exhausts when cost exceeds budget', () => {
-      const tracker = new ResourceBudgetTracker(
-        defaultConfig({ maxEstimatedCostUsd: 1.00, maxTotalTokens: null, maxSteps: null }),
-        'claude-sonnet',
-      );
+      const tracker = createTracker({ maxEstimatedCostUsd: 1.00, maxTotalTokens: null, maxSteps: null });
 
       // claude-sonnet: enough tokens to exceed $1
       const v = tracker.recordStep(makeUsage({
@@ -218,8 +201,8 @@ describe('ResourceBudgetTracker', () => {
     });
 
     it('uses fallback pricing for unknown models', () => {
-      const tracker = new ResourceBudgetTracker(
-        defaultConfig({ maxEstimatedCostUsd: 100, maxTotalTokens: null, maxSteps: null }),
+      const tracker = createTracker(
+        { maxEstimatedCostUsd: 100, maxTotalTokens: null, maxSteps: null },
         'unknown-model-xyz',
       );
 
@@ -237,15 +220,12 @@ describe('ResourceBudgetTracker', () => {
 
   describe('null dimensions', () => {
     it('skips disabled dimensions', () => {
-      const tracker = new ResourceBudgetTracker(
-        defaultConfig({
-          maxTotalTokens: null,
-          maxSteps: null,
-          maxSessionSeconds: null,
-          maxEstimatedCostUsd: null,
-        }),
-        'claude-sonnet',
-      );
+      const tracker = createTracker({
+        maxTotalTokens: null,
+        maxSteps: null,
+        maxSessionSeconds: null,
+        maxEstimatedCostUsd: null,
+      });
 
       // Should never exhaust with all limits disabled
       for (let i = 0; i < 100; i++) {
@@ -263,11 +243,8 @@ describe('ResourceBudgetTracker', () => {
   });
 
   describe('isExhausted persistence', () => {
-    it('once exhausted, stays exhausted', () => {
-      const tracker = new ResourceBudgetTracker(
-        defaultConfig({ maxSteps: 2, maxTotalTokens: null, maxEstimatedCostUsd: null }),
-        'claude-sonnet',
-      );
+    it('once exhausted, stays exhausted within a turn', () => {
+      const tracker = createTracker({ maxSteps: 2, maxTotalTokens: null, maxEstimatedCostUsd: null });
 
       tracker.recordStep(makeUsage());
       tracker.recordStep(makeUsage());
@@ -286,10 +263,7 @@ describe('ResourceBudgetTracker', () => {
 
   describe('createStopCondition', () => {
     it('returns false when within budget', () => {
-      const tracker = new ResourceBudgetTracker(
-        defaultConfig({ maxSteps: 10, maxTotalTokens: null, maxEstimatedCostUsd: null }),
-        'claude-sonnet',
-      );
+      const tracker = createTracker({ maxSteps: 10, maxTotalTokens: null, maxEstimatedCostUsd: null });
 
       const condition = tracker.createStopCondition();
       const steps = [makeStepResult(makeUsage())];
@@ -297,10 +271,7 @@ describe('ResourceBudgetTracker', () => {
     });
 
     it('returns true when budget exhausted', () => {
-      const tracker = new ResourceBudgetTracker(
-        defaultConfig({ maxSteps: 2, maxTotalTokens: null, maxEstimatedCostUsd: null }),
-        'claude-sonnet',
-      );
+      const tracker = createTracker({ maxSteps: 2, maxTotalTokens: null, maxEstimatedCostUsd: null });
 
       const condition = tracker.createStopCondition();
 
@@ -314,10 +285,7 @@ describe('ResourceBudgetTracker', () => {
     });
 
     it('processes only new steps (no double-counting)', () => {
-      const tracker = new ResourceBudgetTracker(
-        defaultConfig({ maxSteps: 5, maxTotalTokens: null, maxEstimatedCostUsd: null }),
-        'claude-sonnet',
-      );
+      const tracker = createTracker({ maxSteps: 5, maxTotalTokens: null, maxEstimatedCostUsd: null });
 
       const condition = tracker.createStopCondition();
 
@@ -334,12 +302,9 @@ describe('ResourceBudgetTracker', () => {
     });
   });
 
-  describe('cross-turn accumulation', () => {
-    it('accumulates tokens across multiple recordStep calls', () => {
-      const tracker = new ResourceBudgetTracker(
-        defaultConfig({ maxTotalTokens: null, maxSteps: null, maxEstimatedCostUsd: null }),
-        'claude-sonnet',
-      );
+  describe('cross-step accumulation', () => {
+    it('accumulates tokens across multiple recordStep calls within a turn', () => {
+      const tracker = createTracker({ maxTotalTokens: null, maxSteps: null, maxEstimatedCostUsd: null });
 
       tracker.recordStep(makeUsage({ inputTokens: 100, outputTokens: 50, totalTokens: 150 }));
       tracker.recordStep(makeUsage({ inputTokens: 200, outputTokens: 80, totalTokens: 280 }));
@@ -354,8 +319,19 @@ describe('ResourceBudgetTracker', () => {
   });
 
   describe('getSnapshot', () => {
-    it('returns zero values initially', () => {
+    it('returns zero values initially (no turn active)', () => {
       const tracker = new ResourceBudgetTracker(defaultConfig(), 'claude-sonnet');
+      const snapshot = tracker.getSnapshot();
+      expect(snapshot.totalInputTokens).toBe(0);
+      expect(snapshot.totalOutputTokens).toBe(0);
+      expect(snapshot.totalTokens).toBe(0);
+      expect(snapshot.stepCount).toBe(0);
+      expect(snapshot.estimatedCostUsd).toBe(0);
+      expect(snapshot.elapsedSeconds).toBe(0);
+    });
+
+    it('returns zero per-turn values after startTurn', () => {
+      const tracker = createTracker();
       const snapshot = tracker.getSnapshot();
       expect(snapshot.totalInputTokens).toBe(0);
       expect(snapshot.totalOutputTokens).toBe(0);
@@ -366,11 +342,8 @@ describe('ResourceBudgetTracker', () => {
   });
 
   describe('warnings', () => {
-    it('each dimension warns at most once', () => {
-      const tracker = new ResourceBudgetTracker(
-        defaultConfig({ maxSteps: 10, maxTotalTokens: null, maxEstimatedCostUsd: null }),
-        'claude-sonnet',
-      );
+    it('each dimension warns at most once per turn', () => {
+      const tracker = createTracker({ maxSteps: 10, maxTotalTokens: null, maxEstimatedCostUsd: null });
 
       // Reach 80%: 8 steps
       for (let i = 0; i < 8; i++) {
@@ -387,10 +360,7 @@ describe('ResourceBudgetTracker', () => {
     });
 
     it('getActiveWarnings drains pending warnings', () => {
-      const tracker = new ResourceBudgetTracker(
-        defaultConfig({ maxSteps: 10, maxTotalTokens: null, maxEstimatedCostUsd: null }),
-        'claude-sonnet',
-      );
+      const tracker = createTracker({ maxSteps: 10, maxTotalTokens: null, maxEstimatedCostUsd: null });
 
       for (let i = 0; i < 8; i++) {
         tracker.recordStep(makeUsage());
@@ -402,6 +372,233 @@ describe('ResourceBudgetTracker', () => {
       // Second call returns empty
       const second = tracker.getActiveWarnings();
       expect(second).toEqual([]);
+    });
+  });
+
+  describe('turn lifecycle', () => {
+    it('startTurn resets per-turn counters', () => {
+      const tracker = createTracker({ maxTotalTokens: null, maxSteps: null, maxEstimatedCostUsd: null, maxSessionSeconds: null });
+
+      tracker.recordStep(makeUsage({ inputTokens: 500, outputTokens: 200, totalTokens: 700 }));
+      expect(tracker.getSnapshot().totalTokens).toBe(700);
+
+      // End turn 1, start turn 2
+      tracker.endTurn();
+      tracker.startTurn();
+
+      // Per-turn counters should be reset
+      const snapshot = tracker.getSnapshot();
+      expect(snapshot.totalInputTokens).toBe(0);
+      expect(snapshot.totalOutputTokens).toBe(0);
+      expect(snapshot.totalTokens).toBe(0);
+      expect(snapshot.stepCount).toBe(0);
+    });
+
+    it('cumulative snapshot accumulates across turns', () => {
+      const tracker = createTracker({ maxTotalTokens: null, maxSteps: null, maxEstimatedCostUsd: null, maxSessionSeconds: null });
+
+      tracker.recordStep(makeUsage({ inputTokens: 100, outputTokens: 50, totalTokens: 150 }));
+      tracker.recordStep(makeUsage({ inputTokens: 200, outputTokens: 80, totalTokens: 280 }));
+      tracker.endTurn();
+
+      tracker.startTurn();
+      tracker.recordStep(makeUsage({ inputTokens: 300, outputTokens: 100, totalTokens: 400 }));
+
+      // Per-turn: only turn 2 values
+      const snapshot = tracker.getSnapshot();
+      expect(snapshot.totalInputTokens).toBe(300);
+      expect(snapshot.totalOutputTokens).toBe(100);
+      expect(snapshot.stepCount).toBe(1);
+
+      // Cumulative: turn 1 + turn 2
+      expect(snapshot.cumulative.totalInputTokens).toBe(600);
+      expect(snapshot.cumulative.totalOutputTokens).toBe(230);
+      expect(snapshot.cumulative.totalTokens).toBe(830);
+      expect(snapshot.cumulative.stepCount).toBe(3);
+    });
+
+    it('exhausted verdict resets between turns', () => {
+      const tracker = createTracker({ maxSteps: 2, maxTotalTokens: null, maxEstimatedCostUsd: null, maxSessionSeconds: null });
+
+      tracker.recordStep(makeUsage());
+      tracker.recordStep(makeUsage());
+      expect(tracker.isExhausted()).not.toBeNull();
+
+      // New turn should reset
+      tracker.endTurn();
+      tracker.startTurn();
+      expect(tracker.isExhausted()).toBeNull();
+
+      // Can use budget again in new turn
+      const v = tracker.recordStep(makeUsage());
+      expect(v).toEqual({ ok: true });
+    });
+
+    it('warnings fire fresh each turn', () => {
+      const tracker = createTracker({ maxSteps: 10, maxTotalTokens: null, maxEstimatedCostUsd: null, maxSessionSeconds: null });
+
+      // Reach 80% in turn 1
+      for (let i = 0; i < 8; i++) tracker.recordStep(makeUsage());
+      const turn1Warnings = tracker.getActiveWarnings();
+      expect(turn1Warnings.find(w => w.dimension === 'steps')).toBeDefined();
+
+      // New turn: warnings should fire again
+      tracker.endTurn();
+      tracker.startTurn();
+      for (let i = 0; i < 8; i++) tracker.recordStep(makeUsage());
+      const turn2Warnings = tracker.getActiveWarnings();
+      expect(turn2Warnings.find(w => w.dimension === 'steps')).toBeDefined();
+    });
+
+    it('endTurn without startTurn is a no-op', () => {
+      const tracker = new ResourceBudgetTracker(defaultConfig(), 'claude-sonnet');
+      // Should not throw
+      tracker.endTurn();
+      const snapshot = tracker.getSnapshot();
+      expect(snapshot.cumulative.stepCount).toBe(0);
+      expect(snapshot.cumulative.activeSeconds).toBe(0);
+    });
+
+    it('startTurn defensively ends active turn', () => {
+      const tracker = createTracker({ maxTotalTokens: null, maxSteps: null, maxEstimatedCostUsd: null, maxSessionSeconds: null });
+
+      tracker.recordStep(makeUsage({ inputTokens: 100, outputTokens: 50, totalTokens: 150 }));
+
+      // startTurn without endTurn: should roll up turn 1
+      tracker.startTurn();
+
+      const snapshot = tracker.getSnapshot();
+      expect(snapshot.totalInputTokens).toBe(0); // per-turn reset
+      expect(snapshot.cumulative.totalInputTokens).toBe(100); // rolled up
+      expect(snapshot.cumulative.stepCount).toBe(1);
+    });
+
+    it('getSnapshot between turns shows zero per-turn and correct cumulative', () => {
+      const tracker = createTracker({ maxTotalTokens: null, maxSteps: null, maxEstimatedCostUsd: null, maxSessionSeconds: null });
+
+      tracker.recordStep(makeUsage({ inputTokens: 500, outputTokens: 200, totalTokens: 700 }));
+      tracker.endTurn();
+
+      // Between turns: no active turn
+      const snapshot = tracker.getSnapshot();
+      expect(snapshot.totalInputTokens).toBe(0);
+      expect(snapshot.totalOutputTokens).toBe(0);
+      expect(snapshot.totalTokens).toBe(0);
+      expect(snapshot.stepCount).toBe(0);
+      expect(snapshot.elapsedSeconds).toBe(0);
+
+      // Cumulative reflects completed turn
+      expect(snapshot.cumulative.totalInputTokens).toBe(500);
+      expect(snapshot.cumulative.totalOutputTokens).toBe(200);
+      expect(snapshot.cumulative.totalTokens).toBe(700);
+      expect(snapshot.cumulative.stepCount).toBe(1);
+    });
+  });
+
+  describe('wall-clock per-turn isolation', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('idle time between turns does not count against wall-clock budget', () => {
+      const tracker = new ResourceBudgetTracker(
+        defaultConfig({ maxSessionSeconds: 10, maxTotalTokens: null, maxSteps: null, maxEstimatedCostUsd: null }),
+        'claude-sonnet',
+      );
+
+      // Turn 1: 3 seconds
+      tracker.startTurn();
+      vi.advanceTimersByTime(3_000);
+      expect(tracker.isExhausted()).toBeNull();
+      tracker.endTurn();
+
+      // Idle for 30 minutes (should not count)
+      vi.advanceTimersByTime(30 * 60 * 1000);
+
+      // Turn 2: starts fresh with full 10s budget
+      tracker.startTurn();
+      expect(tracker.isExhausted()).toBeNull();
+      expect(tracker.getRemainingWallClockMs()).toBe(10_000);
+
+      // 5 seconds into turn 2: still within budget
+      vi.advanceTimersByTime(5_000);
+      expect(tracker.isExhausted()).toBeNull();
+
+      // 6 more seconds: exceeds 10s turn budget
+      vi.advanceTimersByTime(6_000);
+      expect(tracker.isExhausted()).not.toBeNull();
+      expect(tracker.isExhausted()!.dimension).toBe('wall_clock');
+    });
+
+    it('cumulative activeSeconds tracks only active time', () => {
+      const tracker = new ResourceBudgetTracker(
+        defaultConfig({ maxSessionSeconds: null, maxTotalTokens: null, maxSteps: null, maxEstimatedCostUsd: null }),
+        'claude-sonnet',
+      );
+
+      // Turn 1: 5 seconds
+      tracker.startTurn();
+      vi.advanceTimersByTime(5_000);
+      tracker.endTurn();
+
+      // Idle 60 seconds
+      vi.advanceTimersByTime(60_000);
+
+      // Turn 2: 3 seconds
+      tracker.startTurn();
+      vi.advanceTimersByTime(3_000);
+
+      // Cumulative should be 5 + 3 = 8 seconds (not 68)
+      const snapshot = tracker.getSnapshot();
+      expect(snapshot.cumulative.activeSeconds).toBeCloseTo(8, 0);
+    });
+
+    it('getRemainingWallClockMs returns full budget when no turn active', () => {
+      const tracker = new ResourceBudgetTracker(
+        defaultConfig({ maxSessionSeconds: 30 }),
+        'claude-sonnet',
+      );
+
+      // No turn active: elapsed is 0
+      expect(tracker.getRemainingWallClockMs()).toBe(30_000);
+    });
+  });
+
+  describe('cumulative cost estimation', () => {
+    it('cumulative cost reflects all turns', () => {
+      const tracker = new ResourceBudgetTracker(
+        defaultConfig({ maxEstimatedCostUsd: null, maxTotalTokens: null, maxSteps: null, maxSessionSeconds: null }),
+        'claude-sonnet',
+      );
+
+      // Turn 1
+      tracker.startTurn();
+      tracker.recordStep(makeUsage({
+        inputTokens: 1_000_000,
+        outputTokens: 100_000,
+        totalTokens: 1_100_000,
+        inputTokenDetails: { noCacheTokens: 1_000_000, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      }));
+      tracker.endTurn();
+
+      // Turn 2
+      tracker.startTurn();
+      tracker.recordStep(makeUsage({
+        inputTokens: 1_000_000,
+        outputTokens: 100_000,
+        totalTokens: 1_100_000,
+        inputTokenDetails: { noCacheTokens: 1_000_000, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      }));
+
+      const snapshot = tracker.getSnapshot();
+      // Per-turn cost: $4.50 (same as single-turn test)
+      expect(snapshot.estimatedCostUsd).toBeCloseTo(4.5, 1);
+      // Cumulative cost: $9.00
+      expect(snapshot.cumulative.estimatedCostUsd).toBeCloseTo(9.0, 1);
     });
   });
 });

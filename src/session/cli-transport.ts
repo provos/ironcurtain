@@ -292,8 +292,8 @@ export class CliTransport implements Transport {
   // --- Budget display ---
 
   private displayBudgetStatus(status: BudgetStatus): void {
-    const { limits } = status;
-    process.stderr.write(chalk.cyan('  Resource budget:\n'));
+    const { limits, cumulative } = status;
+    process.stderr.write(chalk.cyan('  Current turn budget:\n'));
     process.stderr.write(formatBudgetLine(
       'Tokens', status.totalTokens, limits.maxTotalTokens, (v) => v.toLocaleString(),
     ));
@@ -306,14 +306,20 @@ export class CliTransport implements Transport {
     process.stderr.write(formatBudgetLine(
       'Est. cost', status.estimatedCostUsd, limits.maxEstimatedCostUsd, (v) => `$${v.toFixed(2)}`,
     ));
+    process.stderr.write(chalk.cyan('  Session totals:\n'));
+    process.stderr.write(`    Tokens: ${cumulative.totalTokens.toLocaleString()}\n`);
+    process.stderr.write(`    Steps: ${cumulative.stepCount}\n`);
+    process.stderr.write(`    Active time: ${Math.round(cumulative.activeSeconds)}s\n`);
+    process.stderr.write(`    Est. cost: $${cumulative.estimatedCostUsd.toFixed(2)}\n`);
   }
 
   private displaySessionSummary(status: BudgetStatus): void {
+    const { cumulative } = status;
     process.stderr.write(chalk.dim(
-      `\nSession: ${status.totalTokens.toLocaleString()} tokens` +
-      ` · ${status.stepCount} steps` +
-      ` · ${Math.round(status.elapsedSeconds)}s` +
-      ` · ~$${status.estimatedCostUsd.toFixed(2)}\n`,
+      `\nSession: ${cumulative.totalTokens.toLocaleString()} tokens` +
+      ` · ${cumulative.stepCount} steps` +
+      ` · ${Math.round(cumulative.activeSeconds)}s` +
+      ` · ~$${cumulative.estimatedCostUsd.toFixed(2)}\n`,
     ));
   }
 
