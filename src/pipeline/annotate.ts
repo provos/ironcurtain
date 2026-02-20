@@ -179,7 +179,7 @@ export async function main(): Promise<void> {
 
   try {
     const existingAnnotations = loadExistingArtifact<ToolAnnotationsFile>(
-      config.generatedDir, 'tool-annotations.json',
+      config.generatedDir, 'tool-annotations.json', config.packageGeneratedDir,
     );
 
     const annotationResults = new Map<string, AnnotationResult>();

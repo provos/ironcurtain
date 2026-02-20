@@ -14,11 +14,11 @@ import type { LanguageModel } from 'ai';
 import { wrapLanguageModel } from 'ai';
 import chalk from 'chalk';
 import ora, { type Ora } from 'ora';
+import { computeProtectedPaths } from '../config/index.js';
 import { createLanguageModel } from '../config/model-provider.js';
-import { getIronCurtainHome, getUserConstitutionPath } from '../config/paths.js';
+import { getIronCurtainHome, getUserConstitutionPath, getUserGeneratedDir } from '../config/paths.js';
 import type { MCPServerConfig } from '../config/types.js';
 import { loadUserConfig } from '../config/user-config.js';
-import { resolveRealPath } from '../types/argument-roles.js';
 import { createLlmLoggingMiddleware, type LlmLogContext } from './llm-logger.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -32,7 +32,8 @@ export interface PipelineConfig {
   constitutionText: string;
   constitutionHash: string;
   mcpServers: Record<string, MCPServerConfig>;
-  generatedDir: string;
+  generatedDir: string;           // write target (user-local)
+  packageGeneratedDir: string;    // fallback for reads (package-bundled)
   allowedDirectory: string;
   protectedPaths: string[];
 }
@@ -61,17 +62,19 @@ export function loadPipelineConfig(): PipelineConfig {
   const mcpServers: Record<string, MCPServerConfig> = JSON.parse(
     readFileSync(mcpServersPath, 'utf-8'),
   );
-  const generatedDir = resolve(configDir, 'generated');
+  const generatedDir = getUserGeneratedDir();
+  const packageGeneratedDir = resolve(configDir, 'generated');
   const defaultAllowedDir = resolve(getIronCurtainHome(), 'sandbox');
   const allowedDirectory = process.env.ALLOWED_DIRECTORY ?? defaultAllowedDir;
   const auditLogPath = process.env.AUDIT_LOG_PATH ?? './audit.jsonl';
 
-  const protectedPaths = [
-    resolveRealPath(constitutionPath),
-    resolveRealPath(generatedDir),
-    resolveRealPath(mcpServersPath),
-    resolveRealPath(auditLogPath),
-  ];
+  const protectedPaths = computeProtectedPaths({
+    constitutionPath,
+    generatedDir,
+    packageGeneratedDir,
+    mcpServersPath,
+    auditLogPath,
+  });
 
   return {
     constitutionPath,
@@ -79,6 +82,7 @@ export function loadPipelineConfig(): PipelineConfig {
     constitutionHash,
     mcpServers,
     generatedDir,
+    packageGeneratedDir,
     allowedDirectory,
     protectedPaths,
   };
@@ -96,14 +100,25 @@ export function computeHash(...inputs: string[]): string {
   return hash.digest('hex');
 }
 
-export function loadExistingArtifact<T>(generatedDir: string, filename: string): T | undefined {
-  const filePath = resolve(generatedDir, filename);
-  if (!existsSync(filePath)) return undefined;
-  try {
-    return JSON.parse(readFileSync(filePath, 'utf-8'));
-  } catch {
-    return undefined;
+export function loadExistingArtifact<T>(
+  generatedDir: string,
+  filename: string,
+  fallbackDir?: string,
+): T | undefined {
+  const candidates = [resolve(generatedDir, filename)];
+  if (fallbackDir) {
+    candidates.push(resolve(fallbackDir, filename));
   }
+  for (const path of candidates) {
+    if (existsSync(path)) {
+      try {
+        return JSON.parse(readFileSync(path, 'utf-8'));
+      } catch {
+        // Corrupt file -- try next candidate
+      }
+    }
+  }
+  return undefined;
 }
 
 // ---------------------------------------------------------------------------

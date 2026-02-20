@@ -399,7 +399,7 @@ export async function main(): Promise<void> {
 
   // Load tool annotations from disk (produced by `npm run annotate-tools`)
   const toolAnnotationsFile = loadExistingArtifact<ToolAnnotationsFile>(
-    config.generatedDir, 'tool-annotations.json',
+    config.generatedDir, 'tool-annotations.json', config.packageGeneratedDir,
   );
   if (!toolAnnotationsFile) {
     console.error(chalk.red.bold(
@@ -425,8 +425,8 @@ export async function main(): Promise<void> {
   );
 
   // Load existing artifacts for cache comparison
-  const existingPolicy = loadExistingArtifact<CompiledPolicyFile>(config.generatedDir, 'compiled-policy.json');
-  const existingScenarios = loadExistingArtifact<TestScenariosFile>(config.generatedDir, 'test-scenarios.json');
+  const existingPolicy = loadExistingArtifact<CompiledPolicyFile>(config.generatedDir, 'compiled-policy.json', config.packageGeneratedDir);
+  const existingScenarios = loadExistingArtifact<TestScenariosFile>(config.generatedDir, 'test-scenarios.json', config.packageGeneratedDir);
 
   // Compile constitution into policy rules (LLM-cacheable)
   logContext.stepName = 'compile-constitution';

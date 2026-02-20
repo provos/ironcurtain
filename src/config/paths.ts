@@ -97,3 +97,12 @@ export function getLogsDir(): string {
 export function getUserConstitutionPath(): string {
   return resolve(getIronCurtainHome(), 'constitution-user.md');
 }
+
+/**
+ * Returns the user-local generated artifacts directory: {home}/generated/
+ * Pipeline commands write here; runtime reads from here first, falling back
+ * to the package-bundled defaults in dist/config/generated/.
+ */
+export function getUserGeneratedDir(): string {
+  return resolve(getIronCurtainHome(), 'generated');
+}

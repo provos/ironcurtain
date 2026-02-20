@@ -3,11 +3,47 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { IronCurtainConfig, MCPServerConfig } from './types.js';
 import type { CompiledPolicyFile, ToolAnnotationsFile } from '../pipeline/types.js';
-import { getIronCurtainHome } from './paths.js';
+import { getIronCurtainHome, getUserGeneratedDir } from './paths.js';
 import { resolveRealPath } from '../types/argument-roles.js';
 import { loadUserConfig } from './user-config.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+/**
+ * Returns the user-local generated dir if it contains compiled-policy.json,
+ * otherwise falls back to the package-bundled generated dir.
+ */
+function resolveGeneratedDir(packageGeneratedDir: string): string {
+  const userDir = getUserGeneratedDir();
+  if (existsSync(resolve(userDir, 'compiled-policy.json'))) {
+    return userDir;
+  }
+  return packageGeneratedDir;
+}
+
+/**
+ * Computes the list of protected paths that the policy engine should
+ * prevent agents from modifying. When the active generated dir differs
+ * from the package-bundled dir, both are protected.
+ */
+export function computeProtectedPaths(opts: {
+  constitutionPath: string;
+  generatedDir: string;
+  packageGeneratedDir: string;
+  mcpServersPath: string;
+  auditLogPath: string;
+}): string[] {
+  const paths = [
+    resolveRealPath(opts.constitutionPath),
+    resolveRealPath(opts.generatedDir),
+    resolveRealPath(opts.mcpServersPath),
+    resolveRealPath(opts.auditLogPath),
+  ];
+  if (opts.generatedDir !== opts.packageGeneratedDir) {
+    paths.push(resolveRealPath(opts.packageGeneratedDir));
+  }
+  return paths;
+}
 
 export function loadConfig(): IronCurtainConfig {
   const userConfig = loadUserConfig();
@@ -53,14 +89,16 @@ export function loadConfig(): IronCurtainConfig {
   }
 
   const constitutionPath = resolve(__dirname, 'constitution.md');
-  const generatedDir = resolve(__dirname, 'generated');
+  const packageGeneratedDir = resolve(__dirname, 'generated');
+  const generatedDir = resolveGeneratedDir(packageGeneratedDir);
 
-  const protectedPaths = [
-    resolveRealPath(constitutionPath),
-    resolveRealPath(generatedDir),
-    resolveRealPath(mcpServersPath),
-    resolveRealPath(auditLogPath),
-  ];
+  const protectedPaths = computeProtectedPaths({
+    constitutionPath,
+    generatedDir,
+    packageGeneratedDir,
+    mcpServersPath,
+    auditLogPath,
+  });
 
   return {
     auditLogPath,
@@ -95,17 +133,35 @@ export function extractServerDomainAllowlists(
   return allowlists;
 }
 
-export function loadGeneratedPolicy(generatedDir: string): {
+export function loadGeneratedPolicy(generatedDir: string, fallbackDir?: string): {
   compiledPolicy: CompiledPolicyFile;
   toolAnnotations: ToolAnnotationsFile;
 } {
   const compiledPolicy: CompiledPolicyFile = JSON.parse(
-    readFileSync(resolve(generatedDir, 'compiled-policy.json'), 'utf-8'),
+    readGeneratedFile(generatedDir, 'compiled-policy.json', fallbackDir),
   );
   const toolAnnotations: ToolAnnotationsFile = JSON.parse(
-    readFileSync(resolve(generatedDir, 'tool-annotations.json'), 'utf-8'),
+    readGeneratedFile(generatedDir, 'tool-annotations.json', fallbackDir),
   );
   return { compiledPolicy, toolAnnotations };
+}
+
+/**
+ * Reads a generated artifact file, trying the primary dir first then the fallback.
+ */
+function readGeneratedFile(generatedDir: string, filename: string, fallbackDir?: string): string {
+  const primaryPath = resolve(generatedDir, filename);
+  if (existsSync(primaryPath)) {
+    return readFileSync(primaryPath, 'utf-8');
+  }
+  if (fallbackDir) {
+    const fallbackPath = resolve(fallbackDir, filename);
+    if (existsSync(fallbackPath)) {
+      return readFileSync(fallbackPath, 'utf-8');
+    }
+  }
+  // Neither primary nor fallback exist -- read primary to throw with a clear path
+  return readFileSync(primaryPath, 'utf-8');
 }
 
 /**
