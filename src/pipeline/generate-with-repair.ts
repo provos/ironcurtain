@@ -21,7 +21,7 @@ interface GenerateObjectWithRepairOptions<T extends z.ZodType> {
   schema: T;
   prompt: string;
   maxRepairAttempts?: number;
-  maxTokens?: number;
+  maxOutputTokens?: number;
   onProgress?: (message: string) => void;
 }
 
@@ -30,7 +30,7 @@ export async function generateObjectWithRepair<T extends z.ZodType>({
   schema,
   prompt,
   maxRepairAttempts = 2,
-  maxTokens = DEFAULT_MAX_TOKENS,
+  maxOutputTokens = DEFAULT_MAX_TOKENS,
   onProgress,
 }: GenerateObjectWithRepairOptions<T>): Promise<{ output: z.infer<T>; repairAttempts: number }> {
   // First attempt: simple prompt-based call
@@ -39,7 +39,7 @@ export async function generateObjectWithRepair<T extends z.ZodType>({
       model,
       output: Output.object({ schema }),
       prompt,
-      maxTokens,
+      maxOutputTokens,
     });
     return { output: result.output as z.infer<T>, repairAttempts: 0 };
   } catch (error) {
@@ -65,7 +65,7 @@ export async function generateObjectWithRepair<T extends z.ZodType>({
           model,
           output: Output.object({ schema }),
           messages,
-          maxTokens,
+          maxOutputTokens,
         });
         return { output: result.output as z.infer<T>, repairAttempts: attempt + 1 };
       } catch (retryError) {

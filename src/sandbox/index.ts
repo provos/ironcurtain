@@ -7,14 +7,20 @@
  * to our MCP proxy server which evaluates policy on every tool call.
  */
 
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import '@utcp/mcp'; // Register MCP call template type with UTCP SDK
 import { CodeModeUtcpClient } from '@utcp/code-mode';
-import { resolve, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import type { IronCurtainConfig } from '../config/types.js';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PROXY_SERVER_PATH = resolve(__dirname, '../trusted-process/mcp-proxy-server.ts');
+// Detect compiled (.js in dist/) vs source (.ts in src/) mode.
+// In compiled mode, spawn with `node`; in source mode, spawn with `npx tsx`.
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const isCompiled = __filename.endsWith('.js');
+const proxyServerPath = resolve(__dirname, `../trusted-process/mcp-proxy-server.${isCompiled ? 'js' : 'ts'}`);
+const PROXY_COMMAND = isCompiled ? 'node' : 'npx';
+const PROXY_ARGS = isCompiled ? [proxyServerPath] : ['tsx', proxyServerPath];
 
 /**
  * Transforms a UTCP tool name (dotted) into the actual callable function name
@@ -127,8 +133,8 @@ export class Sandbox {
     for (const serverName of Object.keys(config.mcpServers)) {
       mcpServers[serverName] = {
         transport: 'stdio',
-        command: 'npx',
-        args: ['tsx', PROXY_SERVER_PATH],
+        command: PROXY_COMMAND,
+        args: [...PROXY_ARGS],
         env: { ...proxyEnv, SERVER_FILTER: serverName },
         timeout: timeoutMs,
       };

@@ -1,8 +1,8 @@
 {
-  "generatedAt": "2026-02-19T22:19:26.701Z",
+  "generatedAt": "2026-02-20T02:51:14.392Z",
   "servers": {
     "filesystem": {
-      "inputHash": "b8ded9ec4ba8190d7a570f35121d388a594b692f6f988a956e6b85e80d312d4f",
+      "inputHash": "ab8be8eda17a9411f38b78373926ad193f9df40a5fab38e6a7c477d65f156c79",
       "tools": [
         {
           "toolName": "read_file",
@@ -40,7 +40,7 @@
         },
         {
           "toolName": "read_media_file",
-          "comment": "Reads an image or audio file and returns its base64-encoded data along with its MIME type.",
+          "comment": "Reads an image or audio file and returns its base64-encoded data and MIME type.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -51,7 +51,7 @@
         },
         {
           "toolName": "read_multiple_files",
-          "comment": "Reads the contents of multiple files simultaneously and returns each file's content keyed by its path.",
+          "comment": "Reads the contents of multiple files simultaneously, returning each file's content keyed by its path.",
           "sideEffects": true,
           "args": {
             "paths": [
@@ -76,7 +76,7 @@
         },
         {
           "toolName": "edit_file",
-          "comment": "Makes targeted line-based edits to an existing text file by replacing exact line sequences with new content.",
+          "comment": "Makes targeted line-based edits to an existing text file by replacing exact text sequences, returning a git-style diff of changes.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -94,7 +94,7 @@
         },
         {
           "toolName": "create_directory",
-          "comment": "Creates a new directory (including nested directories) or silently succeeds if the directory already exists.",
+          "comment": "Creates a new directory (including any necessary parent directories) or silently succeeds if it already exists.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -105,7 +105,7 @@
         },
         {
           "toolName": "list_directory",
-          "comment": "Returns a detailed listing of all files and directories at the specified path, prefixed with [FILE] or [DIR] labels.",
+          "comment": "Lists all files and directories at the specified path, distinguishing entries with [FILE] and [DIR] prefixes.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -116,7 +116,7 @@
         },
         {
           "toolName": "list_directory_with_sizes",
-          "comment": "Returns a detailed listing of all files and directories at the specified path, including file sizes, with optional sorting.",
+          "comment": "Lists all files and directories at the specified path including their sizes, with optional sorting by name or size.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -130,7 +130,7 @@
         },
         {
           "toolName": "directory_tree",
-          "comment": "Recursively produces a JSON tree view of all files and directories under the specified path, with optional exclusion patterns.",
+          "comment": "Recursively retrieves a JSON tree view of all files and directories under the specified path, with optional exclusion patterns.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -144,7 +144,7 @@
         },
         {
           "toolName": "move_file",
-          "comment": "Moves or renames a file or directory from a source path to a destination path in a single operation.",
+          "comment": "Moves or renames a file or directory from a source path to a destination path in a single atomic operation.",
           "sideEffects": true,
           "args": {
             "source": [
@@ -159,7 +159,7 @@
         },
         {
           "toolName": "search_files",
-          "comment": "Recursively searches for files and directories matching a glob-style pattern under the specified path and returns their full paths.",
+          "comment": "Recursively searches for files and directories matching a glob pattern under the specified path, returning all matching full paths.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -187,10 +187,767 @@
         },
         {
           "toolName": "list_allowed_directories",
-          "comment": "Returns the static list of directories this server is permitted to access, with no path arguments or state changes.",
+          "comment": "Returns the list of directories this server is permitted to access, requiring no arguments.",
           "sideEffects": false,
           "args": {},
           "serverName": "filesystem"
+        }
+      ]
+    },
+    "git": {
+      "inputHash": "355fd0e6429639fb284d0119a13ecba6c4af6d0a5467958fe4bb9a4c44753788",
+      "tools": [
+        {
+          "toolName": "git_add",
+          "comment": "Stages specified files (or all changes) in the repository index in preparation for a commit.",
+          "sideEffects": true,
+          "args": {
+            "path": [
+              "read-path"
+            ],
+            "files": [
+              "read-path"
+            ],
+            "update": [
+              "none"
+            ],
+            "all": [
+              "none"
+            ],
+            "force": [
+              "none"
+            ]
+          },
+          "serverName": "git"
+        },
+        {
+          "toolName": "git_blame",
+          "comment": "Shows line-by-line authorship information for a file, revealing who last modified each line and when.",
+          "sideEffects": true,
+          "args": {
+            "path": [
+              "read-path"
+            ],
+            "file": [
+              "read-path"
+            ],
+            "startLine": [
+              "none"
+            ],
+            "endLine": [
+              "none"
+            ],
+            "ignoreWhitespace": [
+              "none"
+            ]
+          },
+          "serverName": "git"
+        },
+        {
+          "toolName": "git_branch",
+          "comment": "Manages git branches by listing, creating, deleting, renaming, or showing the current branch.",
+          "sideEffects": true,
+          "args": {
+            "path": [
+              "read-path",
+              "delete-history"
+            ],
+            "operation": [
+              "none"
+            ],
+            "name": [
+              "branch-name"
+            ],
+            "newName": [
+              "branch-name"
+            ],
+            "startPoint": [
+              "none"
+            ],
+            "force": [
+              "none"
+            ],
+            "all": [
+              "none"
+            ],
+            "remote": [
+              "none"
+            ],
+            "merged": [
+              "none"
+            ],
+            "noMerged": [
+              "none"
+            ]
+          },
+          "serverName": "git"
+        },
+        {
+          "toolName": "git_changelog_analyze",
+          "comment": "Gathers git history context (commits, tags) and provides structured review instructions to support LLM-driven changelog analysis.",
+          "sideEffects": true,
+          "args": {
+            "path": [
+              "read-path"
+            ],
+            "reviewTypes": [
+              "none"
+            ],
+            "maxCommits": [
+              "none"
+            ],
+            "sinceTag": [
+              "none"
+            ],
+            "branch": [
+              "branch-name"
+            ]
+          },
+          "serverName": "git"
+        },
+        {
+          "toolName": "git_checkout",
+          "comment": "Switches branches, creates new branches, or restores specific working tree files to a given state.",
+          "sideEffects": true,
+          "args": {
+            "path": [
+              "read-path"
+            ],
+            "target": [
+              "branch-name"
+            ],
+            "createBranch": [
+              "none"
+            ],
+            "force": [
+              "none"
+            ],
+            "paths": [
+              "read-path"
+            ],
+            "track": [
+              "none"
+            ]
+          },
+          "serverName": "git"
+        },
+        {
+          "toolName": "git_cherry_pick",
+          "comment": "Applies one or more specific commits from other branches onto the current branch, rewriting history.",
+          "sideEffects": true,
+          "args": {
+            "path": [
+              "read-path",
+              "write-history"
+            ],
+            "commits": [
+              "none"
+            ],
+            "noCommit": [
+              "none"
+            ],
+            "continueOperation": [
+              "none"
+            ],
+            "abort": [
+              "none"
+            ],
+            "mainline": [
+              "none"
+            ],
+            "strategy": [
+              "none"
+            ],
+            "signoff": [
+              "none"
+            ]
+          },
+          "serverName": "git"
+        },
+        {
+          "toolName": "git_clean",
+          "comment": "Removes untracked files (and optionally directories and ignored files) from the working directory.",
+          "sideEffects": true,
+          "args": {
+            "path": [
+              "read-path",
+              "delete-path"
+            ],
+            "force": [
+              "none"
+            ],
+            "dryRun": [
+              "none"
+            ],
+            "directories": [
+              "none"
+            ],
+            "ignored": [
+              "none"
+            ]
+          },
+          "serverName": "git"
+        },
+        {
+          "toolName": "git_clear_working_dir",
+          "comment": "Clears the session working directory setting so subsequent git operations require an explicit path parameter.",
+          "sideEffects": false,
+          "args": {
+            "confirm": [
+              "none"
+            ]
+          },
+          "serverName": "git"
+        },
+        {
+          "toolName": "git_clone",
+          "comment": "Clones a remote git repository to a local path, optionally with shallow cloning or specific branch selection.",
+          "sideEffects": true,
+          "args": {
+            "url": [
+              "git-remote-url"
+            ],
+            "localPath": [
+              "write-path"
+            ],
+            "branch": [
+              "branch-name"
+            ],
+            "depth": [
+              "none"
+            ],
+            "bare": [
+              "none"
+            ],
+            "mirror": [
+              "none"
+            ]
+          },
+          "serverName": "git"
+        },
+        {
+          "toolName": "git_commit",
+          "comment": "Creates a new commit recording staged changes in the repository with a given commit message.",
+          "sideEffects": true,
+          "args": {
+            "path": [
+              "read-path"
+            ],
+            "message": [
+              "commit-message"
+            ],
+            "author": [
+              "none"
+            ],
+            "amend": [
+              "none"
+            ],
+            "allowEmpty": [
+              "none"
+            ],
+            "sign": [
+              "none"
+            ],
+            "noVerify": [
+              "none"
+            ],
+            "filesToStage": [
+              "read-path"
+            ],
+            "forceUnsignedOnFailure": [
+              "none"
+            ]
+          },
+          "serverName": "git"
+        },
+        {
+          "toolName": "git_diff",
+          "comment": "Shows differences between commits, branches, the staging area, or the working tree in unified diff format.",
+          "sideEffects": true,
+          "args": {
+            "path": [
+              "read-path"
+            ],
+            "target": [
+              "none"
+            ],
+            "source": [
+              "none"
+            ],
+            "paths": [
+              "read-path"
+            ],
+            "staged": [
+              "none"
+            ],
+            "includeUntracked": [
+              "none"
+            ],
+            "nameOnly": [
+              "none"
+            ],
+            "stat": [
+              "none"
+            ],
+            "contextLines": [
+              "none"
+            ]
+          },
+          "serverName": "git"
+        },
+        {
+          "toolName": "git_fetch",
+          "comment": "Downloads objects and refs from a remote repository without merging them into the local branch.",
+          "sideEffects": true,
+          "args": {
+            "path": [
+              "read-path"
+            ],
+            "remote": [
+              "git-remote-url"
+            ],
+            "prune": [
+              "none"
+            ],
+            "tags": [
+              "none"
+            ],
+            "depth": [
+              "none"
+            ]
+          },
+          "serverName": "git"
+        },
+        {
+          "toolName": "git_init",
+          "comment": "Initializes a new git repository at the specified path by creating a .git directory and setting up the initial branch.",
+          "sideEffects": true,
+          "args": {
+            "path": [
+              "write-path"
+            ],
+            "initialBranch": [
+              "branch-name"
+            ],
+            "bare": [
+              "none"
+            ]
+          },
+          "serverName": "git"
+        },
+        {
+          "toolName": "git_log",
+          "comment": "Displays commit history with optional filtering by author, date range, file path, or commit message pattern.",
+          "sideEffects": true,
+          "args": {
+            "path": [
+              "read-path"
+            ],
+            "maxCount": [
+              "none"
+            ],
+            "skip": [
+              "none"
+            ],
+            "since": [
+              "none"
+            ],
+            "until": [
+              "none"
+            ],
+            "author": [
+              "none"
+            ],
+            "grep": [
+              "none"
+            ],
+            "branch": [
+              "branch-name"
+            ],
+            "filePath": [
+              "read-path"
+            ],
+            "oneline": [
+              "none"
+            ],
+            "stat": [
+              "none"
+            ],
+            "patch": [
+              "none"
+            ],
+            "showSignature": [
+              "none"
+            ]
+          },
+          "serverName": "git"
+        },
+        {
+          "toolName": "git_merge",
+          "comment": "Merges another branch into the current branch, integrating its history with optional merge strategies.",
+          "sideEffects": true,
+          "args": {
+            "path": [
+              "read-path",
+              "write-history"
+            ],
+            "branch": [
+              "branch-name"
+            ],
+            "strategy": [
+              "none"
+            ],
+            "noFastForward": [
+              "none"
+            ],
+            "squash": [
+              "none"
+            ],
+            "message": [
+              "commit-message"
+            ],
+            "abort": [
+              "none"
+            ]
+          },
+          "serverName": "git"
+        },
+        {
+          "toolName": "git_pull",
+          "comment": "Fetches changes from a remote repository and integrates them into the current local branch.",
+          "sideEffects": true,
+          "args": {
+            "path": [
+              "read-path",
+              "write-history"
+            ],
+            "remote": [
+              "git-remote-url"
+            ],
+            "branch": [
+              "branch-name"
+            ],
+            "rebase": [
+              "none"
+            ],
+            "fastForwardOnly": [
+              "none"
+            ]
+          },
+          "serverName": "git"
+        },
+        {
+          "toolName": "git_push",
+          "comment": "Uploads local commits to a remote repository branch, with options for force-push and branch deletion.",
+          "sideEffects": true,
+          "args": {
+            "path": [
+              "read-path"
+            ],
+            "remote": [
+              "git-remote-url"
+            ],
+            "branch": [
+              "branch-name"
+            ],
+            "force": [
+              "none"
+            ],
+            "forceWithLease": [
+              "none"
+            ],
+            "setUpstream": [
+              "none"
+            ],
+            "tags": [
+              "none"
+            ],
+            "dryRun": [
+              "none"
+            ],
+            "delete": [
+              "none"
+            ],
+            "remoteBranch": [
+              "branch-name"
+            ],
+            "confirmed": [
+              "none"
+            ]
+          },
+          "serverName": "git"
+        },
+        {
+          "toolName": "git_rebase",
+          "comment": "Reapplies commits on top of another base tip, rewriting history for a cleaner linear commit graph.",
+          "sideEffects": true,
+          "args": {
+            "path": [
+              "read-path",
+              "write-history"
+            ],
+            "mode": [
+              "none"
+            ],
+            "upstream": [
+              "none"
+            ],
+            "branch": [
+              "branch-name"
+            ],
+            "interactive": [
+              "none"
+            ],
+            "onto": [
+              "none"
+            ],
+            "preserve": [
+              "none"
+            ]
+          },
+          "serverName": "git"
+        },
+        {
+          "toolName": "git_reflog",
+          "comment": "Displays the reference logs showing when branch tips and other refs were updated, useful for recovering lost commits.",
+          "sideEffects": true,
+          "args": {
+            "path": [
+              "read-path"
+            ],
+            "ref": [
+              "none"
+            ],
+            "maxCount": [
+              "none"
+            ]
+          },
+          "serverName": "git"
+        },
+        {
+          "toolName": "git_remote",
+          "comment": "Manages remote repository configurations by listing, adding, removing, renaming, or updating remote URLs.",
+          "sideEffects": true,
+          "args": {
+            "path": [
+              "read-path"
+            ],
+            "mode": [
+              "none"
+            ],
+            "name": [
+              "none"
+            ],
+            "url": [
+              "git-remote-url"
+            ],
+            "newName": [
+              "none"
+            ],
+            "push": [
+              "none"
+            ]
+          },
+          "serverName": "git"
+        },
+        {
+          "toolName": "git_reset",
+          "comment": "Resets the current HEAD to a specified state, optionally discarding staged changes or all working tree changes.",
+          "sideEffects": true,
+          "args": {
+            "path": [
+              "read-path",
+              "write-history"
+            ],
+            "mode": [
+              "none"
+            ],
+            "target": [
+              "none"
+            ],
+            "paths": [
+              "read-path"
+            ],
+            "confirmed": [
+              "none"
+            ]
+          },
+          "serverName": "git"
+        },
+        {
+          "toolName": "git_set_working_dir",
+          "comment": "Sets the session-level default working directory so subsequent git commands can omit the path parameter.",
+          "sideEffects": true,
+          "args": {
+            "path": [
+              "read-path"
+            ],
+            "validateGitRepo": [
+              "none"
+            ],
+            "initializeIfNotPresent": [
+              "none"
+            ],
+            "includeMetadata": [
+              "none"
+            ]
+          },
+          "serverName": "git"
+        },
+        {
+          "toolName": "git_show",
+          "comment": "Displays details and diff of a git object such as a commit, tree, blob, or tag.",
+          "sideEffects": true,
+          "args": {
+            "path": [
+              "read-path"
+            ],
+            "object": [
+              "none"
+            ],
+            "format": [
+              "none"
+            ],
+            "stat": [
+              "none"
+            ],
+            "filePath": [
+              "read-path"
+            ]
+          },
+          "serverName": "git"
+        },
+        {
+          "toolName": "git_stash",
+          "comment": "Manages stashes by listing, saving, restoring, or removing stashed working tree changes.",
+          "sideEffects": true,
+          "args": {
+            "path": [
+              "read-path"
+            ],
+            "mode": [
+              "none"
+            ],
+            "message": [
+              "none"
+            ],
+            "stashRef": [
+              "none"
+            ],
+            "includeUntracked": [
+              "none"
+            ],
+            "keepIndex": [
+              "none"
+            ]
+          },
+          "serverName": "git"
+        },
+        {
+          "toolName": "git_status",
+          "comment": "Shows the current working tree status including staged, unstaged, and untracked file changes.",
+          "sideEffects": true,
+          "args": {
+            "path": [
+              "read-path"
+            ],
+            "includeUntracked": [
+              "none"
+            ]
+          },
+          "serverName": "git"
+        },
+        {
+          "toolName": "git_tag",
+          "comment": "Manages git tags by listing, creating (lightweight or annotated), or deleting tags that mark specific history points.",
+          "sideEffects": true,
+          "args": {
+            "path": [
+              "read-path",
+              "delete-history"
+            ],
+            "mode": [
+              "none"
+            ],
+            "tagName": [
+              "none"
+            ],
+            "commit": [
+              "none"
+            ],
+            "message": [
+              "none"
+            ],
+            "annotated": [
+              "none"
+            ],
+            "sign": [
+              "none"
+            ],
+            "forceUnsignedOnFailure": [
+              "none"
+            ],
+            "force": [
+              "none"
+            ]
+          },
+          "serverName": "git"
+        },
+        {
+          "toolName": "git_worktree",
+          "comment": "Manages multiple linked working trees, allowing parallel work on different branches in separate directories.",
+          "sideEffects": true,
+          "args": {
+            "path": [
+              "read-path"
+            ],
+            "mode": [
+              "none"
+            ],
+            "worktreePath": [
+              "write-path",
+              "delete-path"
+            ],
+            "branch": [
+              "branch-name"
+            ],
+            "commitish": [
+              "none"
+            ],
+            "force": [
+              "none"
+            ],
+            "newPath": [
+              "write-path"
+            ],
+            "detach": [
+              "none"
+            ],
+            "verbose": [
+              "none"
+            ],
+            "dryRun": [
+              "none"
+            ]
+          },
+          "serverName": "git"
+        },
+        {
+          "toolName": "git_wrapup_instructions",
+          "comment": "Returns the user's configured git wrap-up workflow or default best-practice instructions for reviewing, documenting, and committing changes.",
+          "sideEffects": false,
+          "args": {
+            "acknowledgement": [
+              "none"
+            ],
+            "updateAgentMetaFiles": [
+              "none"
+            ],
+            "createTag": [
+              "none"
+            ]
+          },
+          "serverName": "git"
         }
       ]
     }

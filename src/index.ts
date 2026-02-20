@@ -1,15 +1,16 @@
-import 'dotenv/config';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import ora from 'ora';
 import chalk from 'chalk';
+import ora from 'ora';
 import { loadConfig } from './config/index.js';
-import { createSession } from './session/index.js';
-import { CliTransport } from './session/cli-transport.js';
 import * as logger from './logger.js';
+import { CliTransport } from './session/cli-transport.js';
+import { createSession } from './session/index.js';
 
-async function main(): Promise<void> {
+export async function main(args?: string[]): Promise<void> {
   const { values, positionals } = parseArgs({
-    args: process.argv.slice(2),
+    args: args ?? process.argv.slice(2),
     options: {
       resume: { type: 'string', short: 'r' },
     },
@@ -55,7 +56,11 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err) => {
-  process.stderr.write(chalk.red(`Fatal error: ${err}\n`));
-  process.exit(1);
-});
+// Only run when executed directly (not when imported by cli.ts)
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  await import('dotenv/config');
+  main().catch((err) => {
+    process.stderr.write(chalk.red(`Fatal error: ${err}\n`));
+    process.exit(1);
+  });
+}

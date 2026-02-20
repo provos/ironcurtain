@@ -10,7 +10,8 @@
  * `npm run annotate-tools` first to generate it.
  */
 
-import 'dotenv/config';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { LanguageModel } from 'ai';
 import chalk from 'chalk';
 import { PolicyEngine } from '../trusted-process/policy-engine.js';
@@ -393,7 +394,7 @@ function writePolicyArtifact(
 // Main Pipeline
 // ---------------------------------------------------------------------------
 
-async function main(): Promise<void> {
+export async function main(): Promise<void> {
   const config = loadPipelineConfig();
 
   // Load tool annotations from disk (produced by `npm run annotate-tools`)
@@ -696,10 +697,9 @@ async function main(): Promise<void> {
   console.error(chalk.green.bold('Policy compilation successful!'));
 }
 
-// Only run when executed directly (not when imported by tests)
-import { fileURLToPath } from 'node:url';
-import { resolve } from 'node:path';
+// Only run when executed directly (not when imported by cli.ts or tests)
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  await import('dotenv/config');
   main().catch((err) => {
     console.error(chalk.red.bold('Policy compilation failed:'), err);
     process.exit(1);

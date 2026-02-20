@@ -8,11 +8,14 @@ IronCurtain is a secure agent runtime that mediates between an AI agent and MCP 
 
 ## Commands
 
+- `ironcurtain start "your task"` — run the agent with a task (or `npm start "your task"` during development)
+- `ironcurtain annotate-tools` — classify MCP tool arguments via LLM (or `npm run annotate-tools`)
+- `ironcurtain compile-policy` — compile constitution into policy rules (or `npm run compile-policy`)
+- `npm run build` — TypeScript compilation + copy config assets to `dist/`
 - `npm test` — run all tests (vitest)
 - `npx vitest run test/policy-engine.test.ts` — run a single test file
 - `npx vitest run -t "denies delete_file"` — run a single test by name
 - `npm run lint` — run ESLint
-- `npm start "your task"` — run the agent with a task (requires `ANTHROPIC_API_KEY` in `.env` or environment)
 
 ## Architecture
 
@@ -45,10 +48,10 @@ The security kernel. Two modes of operation:
 **AuditLog** (`audit-log.ts`) — append-only JSONL logging.
 
 ### Policy Compilation Pipeline (`src/pipeline/`)
-Offline pipeline (`npm run compile-policy`) that produces generated artifacts in `src/config/generated/`:
-- **tool-annotations.json** — LLM-classified tool capabilities (argument roles: read-path, write-path, delete-path, none)
-- **compiled-policy.json** — declarative rules compiled from `src/config/constitution.md` via LLM
-- **test-scenarios.json** — LLM-generated + handwritten test scenarios
+Two-command offline pipeline that produces generated artifacts in `src/config/generated/`:
+
+1. **`npm run annotate-tools`** (`annotate.ts`) — Developer task. Connects to MCP servers, classifies tool arguments via LLM, writes **tool-annotations.json**. Only needs re-running when servers, tools, or the argument role registry change. Roles are filtered per-server via `serverNames` on `RoleDefinition`.
+2. **`npm run compile-policy`** (`compile.ts`) — User task. Loads annotations from disk, compiles the constitution into **compiled-policy.json**, generates **test-scenarios.json**, and verifies via LLM judge. Requires `tool-annotations.json` to exist.
 
 All artifacts use content-hash caching (`inputHash`) to skip unnecessary LLM calls. The LLM prompt text is included in the hash so template changes invalidate the cache. Artifacts are written to disk immediately after each step (not gated on verification). When verification fails, a compile-verify-repair loop feeds failures back to the compiler for targeted repair (up to 2 attempts). LLM interactions logged to `llm-interactions.jsonl`.
 

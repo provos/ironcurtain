@@ -7,7 +7,8 @@
  * registry change.
  */
 
-import 'dotenv/config';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { LanguageModel } from 'ai';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
@@ -162,7 +163,7 @@ async function disconnectAll(connections: Map<string, ServerConnection>): Promis
 // Main
 // ---------------------------------------------------------------------------
 
-async function main(): Promise<void> {
+export async function main(): Promise<void> {
   const config = loadPipelineConfig();
 
   console.error(chalk.bold('Tool Annotation Pipeline'));
@@ -204,7 +205,11 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err) => {
-  console.error(chalk.red.bold('Tool annotation failed:'), err);
-  process.exit(1);
-});
+// Only run when executed directly (not when imported by cli.ts)
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  await import('dotenv/config');
+  main().catch((err) => {
+    console.error(chalk.red.bold('Tool annotation failed:'), err);
+    process.exit(1);
+  });
+}

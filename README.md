@@ -100,6 +100,14 @@ All artifacts are content-hash cached -- only changed inputs trigger recompilati
 
 ### Install
 
+**As a global CLI tool (end users):**
+
+```bash
+npm install -g ironcurtain
+```
+
+**From source (development):**
+
 ```bash
 git clone https://github.com/provos/ironcurtain.git
 cd ironcurtain
@@ -148,9 +156,11 @@ Edit `src/config/constitution.md` to express your security policy in plain Engli
 ### 3. Annotate tools and compile the policy
 
 ```bash
-npm run annotate-tools   # classify MCP tool arguments (developer task)
-npm run compile-policy   # compile constitution into enforceable rules (user task)
+ironcurtain annotate-tools   # classify MCP tool arguments (developer task)
+ironcurtain compile-policy   # compile constitution into enforceable rules (user task)
 ```
+
+Or with npm scripts during development: `npm run annotate-tools` / `npm run compile-policy`.
 
 Tool annotation connects to your MCP servers and classifies each tool's arguments via LLM. This only needs re-running when you add or change MCP servers. Policy compilation translates your constitution into deterministic rules, generates test scenarios, and verifies them. The compiled artifacts are written to `src/config/generated/`. Review the generated `compiled-policy.json` -- these are the rules that will be enforced at runtime.
 
@@ -161,14 +171,16 @@ IronCurtain ships with pre-configured MCP servers for filesystem and git operati
 **Interactive mode** (multi-turn session with human escalation support):
 
 ```bash
-npm start
+ironcurtain start
 ```
 
 **Single-shot mode** (send one task, get a response):
 
 ```bash
-npm start "Summarize the files in the current directory"
+ironcurtain start "Summarize the files in the current directory"
 ```
+
+Or with npm scripts during development: `npm start` / `npm start "task"`.
 
 ### Session Commands
 
@@ -239,8 +251,8 @@ IronCurtain ships with filesystem and git MCP servers pre-configured. Adding a n
 1. **Register the server** in `src/config/mcp-servers.json` with its command, arguments, and optional environment variables or sandbox settings.
 2. **Extend the argument role registry** in `src/types/argument-roles.ts` if the new server's tools have argument semantics not covered by existing roles (e.g., `read-path`, `write-path`, `fetch-url`). Each role defines how values are normalized and evaluated by the policy engine.
 3. **Update the constitution** in `src/config/constitution.md` to cover the new server's capabilities.
-4. **Re-run `npm run annotate-tools`** to classify the new server's tool arguments by role.
-5. **Re-run `npm run compile-policy`** to compile policy rules from your constitution. The verification stage will flag gaps.
+4. **Re-run `ironcurtain annotate-tools`** (or `npm run annotate-tools`) to classify the new server's tool arguments by role.
+5. **Re-run `ironcurtain compile-policy`** (or `npm run compile-policy`) to compile policy rules from your constitution. The verification stage will flag gaps.
 
 After compilation, review the updated `tool-annotations.json` and `compiled-policy.json` to verify the new tools are correctly classified and covered by policy.
 
@@ -275,7 +287,7 @@ npm test                                    # Run all tests
 npx vitest run test/policy-engine.test.ts   # Run a single test file
 npx vitest run -t "denies delete_file"      # Run a single test by name
 npm run lint                                # Lint
-npm run build                               # TypeScript compilation
+npm run build                               # TypeScript compilation + asset copy
 ```
 
 ### Project Structure
