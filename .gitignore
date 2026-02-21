@@ -1,5 +1,27 @@
-.env
+# Dependencies
 node_modules/
+
+# Build output
 dist/
+
+# Environment and secrets
+.env
+.env.*
+
+# Logs
 logs/
 *.jsonl
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# IronCurtain runtime
+.ironcurtain/

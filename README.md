@@ -104,7 +104,7 @@ All artifacts are content-hash cached -- only changed inputs trigger recompilati
 **As a global CLI tool (end users):**
 
 ```bash
-npm install -g ironcurtain
+npm install -g @provos/ironcurtain
 ```
 
 **From source (development):**
@@ -164,7 +164,7 @@ ironcurtain refresh-lists    # re-resolve dynamic lists without full recompilati
 
 Or with npm scripts during development: `npm run annotate-tools` / `npm run compile-policy`.
 
-Tool annotation connects to your MCP servers and classifies each tool's arguments via LLM. This only needs re-running when you add or change MCP servers. Policy compilation translates your constitution into deterministic rules, generates test scenarios, and verifies them. The compiled artifacts are written to `src/config/generated/`. Review the generated `compiled-policy.json` -- these are the rules that will be enforced at runtime.
+Tool annotation connects to your MCP servers and classifies each tool's arguments via LLM. This only needs re-running when you add or change MCP servers. Policy compilation translates your constitution into deterministic rules, generates test scenarios, and verifies them. The compiled artifacts are written to `~/.ironcurtain/generated/`. Review the generated `compiled-policy.json` -- these are the rules that will be enforced at runtime. (The package ships with pre-compiled defaults so you can run immediately without compiling.)
 
 IronCurtain ships with pre-configured MCP servers for filesystem and git operations. See [Adding MCP Servers](#adding-mcp-servers) for how to extend this.
 
@@ -203,6 +203,7 @@ IronCurtain stores its configuration and session data in `~/.ironcurtain/`:
 ```
 ~/.ironcurtain/
 ├── config.json              # User configuration
+├── generated/               # User-compiled policy artifacts (overrides package defaults)
 ├── sessions/
 │   └── {sessionId}/
 │       ├── sandbox/         # Per-session filesystem sandbox
