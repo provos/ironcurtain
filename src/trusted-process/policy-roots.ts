@@ -33,10 +33,7 @@ export interface PolicyRoot {
  * @param allowedDirectory - The sandbox directory (always included).
  * @returns Deduplicated array of PolicyRoot entries, sandbox first.
  */
-export function extractPolicyRoots(
-  compiledPolicy: CompiledPolicyFile,
-  allowedDirectory: string,
-): PolicyRoot[] {
+export function extractPolicyRoots(compiledPolicy: CompiledPolicyFile, allowedDirectory: string): PolicyRoot[] {
   const seen = new Set<string>();
   const roots: PolicyRoot[] = [];
 
@@ -62,10 +59,8 @@ export function extractPolicyRoots(
 /**
  * Converts PolicyRoot entries to MCP Root objects with `file://` URIs.
  */
-export function toMcpRoots(
-  policyRoots: PolicyRoot[],
-): Array<{ uri: string; name: string }> {
-  return policyRoots.map(r => ({
+export function toMcpRoots(policyRoots: PolicyRoot[]): Array<{ uri: string; name: string }> {
+  return policyRoots.map((r) => ({
     uri: `file://${r.path}`,
     name: r.name,
   }));

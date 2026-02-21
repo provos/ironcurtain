@@ -53,30 +53,37 @@ function isValidIdentifier(value: string): boolean {
 }
 
 export const LIST_TYPE_REGISTRY: ReadonlyMap<ListType, ListTypeDef> = new Map<ListType, ListTypeDef>([
-  ['domains', {
-    description: 'Domain names or wildcard domain patterns',
-    validate: isValidDomain,
-    formatGuidance: 'Return domain names or wildcard patterns like `*.example.com`.',
-  }],
-  ['emails', {
-    description: 'Email addresses',
-    validate: isValidEmail,
-    formatGuidance: 'Return email addresses in `user@domain` format.',
-  }],
-  ['identifiers', {
-    description: 'Plain string identifiers',
-    validate: isValidIdentifier,
-    formatGuidance: 'Return identifiers as plain strings, one per entry.',
-  }],
+  [
+    'domains',
+    {
+      description: 'Domain names or wildcard domain patterns',
+      validate: isValidDomain,
+      formatGuidance: 'Return domain names or wildcard patterns like `*.example.com`.',
+    },
+  ],
+  [
+    'emails',
+    {
+      description: 'Email addresses',
+      validate: isValidEmail,
+      formatGuidance: 'Return email addresses in `user@domain` format.',
+    },
+  ],
+  [
+    'identifiers',
+    {
+      description: 'Plain string identifiers',
+      validate: isValidIdentifier,
+      formatGuidance: 'Return identifiers as plain strings, one per entry.',
+    },
+  ],
 ]);
 
 /**
  * Returns a matcher function for the given list type.
  * The matcher checks whether a value matches a pattern from the allowed list.
  */
-export function getListMatcher(
-  type: ListType,
-): (value: string, pattern: string) => boolean {
+export function getListMatcher(type: ListType): (value: string, pattern: string) => boolean {
   switch (type) {
     case 'domains':
       return (v, p) => domainMatchesAllowlist(v, [p]);

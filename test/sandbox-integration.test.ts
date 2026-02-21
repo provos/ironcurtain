@@ -57,22 +57,12 @@ describe('resolveSandboxConfig', () => {
   const sessionSandboxDir = '/sessions/abc/sandbox';
 
   it('returns opt-out for sandbox: false', () => {
-    const result = resolveSandboxConfig(
-      makeServerConfig({ sandbox: false }),
-      sessionSandboxDir,
-      true,
-      'warn',
-    );
+    const result = resolveSandboxConfig(makeServerConfig({ sandbox: false }), sessionSandboxDir, true, 'warn');
     expect(result).toEqual({ sandboxed: false, reason: 'opt-out' });
   });
 
   it('applies restrictive defaults when sandbox is omitted', () => {
-    const result = resolveSandboxConfig(
-      makeServerConfig(),
-      sessionSandboxDir,
-      true,
-      'warn',
-    );
+    const result = resolveSandboxConfig(makeServerConfig(), sessionSandboxDir, true, 'warn');
     expect(result.sandboxed).toBe(true);
     if (result.sandboxed) {
       expect(result.config.allowWrite).toContain(sessionSandboxDir);
@@ -84,12 +74,7 @@ describe('resolveSandboxConfig', () => {
   });
 
   it('applies restrictive defaults when sandbox is empty object', () => {
-    const result = resolveSandboxConfig(
-      makeServerConfig({ sandbox: {} }),
-      sessionSandboxDir,
-      true,
-      'warn',
-    );
+    const result = resolveSandboxConfig(makeServerConfig({ sandbox: {} }), sessionSandboxDir, true, 'warn');
     expect(result.sandboxed).toBe(true);
     if (result.sandboxed) {
       expect(result.config.allowWrite).toContain(sessionSandboxDir);
@@ -107,9 +92,7 @@ describe('resolveSandboxConfig', () => {
     expect(result.sandboxed).toBe(true);
     if (result.sandboxed) {
       expect(result.config.allowWrite).toContain(sessionSandboxDir);
-      expect(result.config.allowWrite).toContain(
-        resolve(sessionSandboxDir, '.git'),
-      );
+      expect(result.config.allowWrite).toContain(resolve(sessionSandboxDir, '.git'));
     }
   });
 
@@ -189,33 +172,18 @@ describe('resolveSandboxConfig', () => {
   });
 
   it('degrades gracefully when platform unavailable and policy is warn', () => {
-    const result = resolveSandboxConfig(
-      makeServerConfig(),
-      sessionSandboxDir,
-      false,
-      'warn',
-    );
+    const result = resolveSandboxConfig(makeServerConfig(), sessionSandboxDir, false, 'warn');
     expect(result).toEqual({ sandboxed: false, reason: 'platform-unavailable' });
   });
 
   it('throws when platform unavailable and policy is enforce', () => {
-    expect(() =>
-      resolveSandboxConfig(
-        makeServerConfig(),
-        sessionSandboxDir,
-        false,
-        'enforce',
-      ),
-    ).toThrow(/sandboxPolicy is "enforce"/);
+    expect(() => resolveSandboxConfig(makeServerConfig(), sessionSandboxDir, false, 'enforce')).toThrow(
+      /sandboxPolicy is "enforce"/,
+    );
   });
 
   it('still returns opt-out even when platform unavailable', () => {
-    const result = resolveSandboxConfig(
-      makeServerConfig({ sandbox: false }),
-      sessionSandboxDir,
-      false,
-      'enforce',
-    );
+    const result = resolveSandboxConfig(makeServerConfig({ sandbox: false }), sessionSandboxDir, false, 'enforce');
     expect(result).toEqual({ sandboxed: false, reason: 'opt-out' });
   });
 });
@@ -340,13 +308,7 @@ describe('wrapServerCommand', () => {
   });
 
   it('wraps sandboxed servers with srt -s -c', () => {
-    const result = wrapServerCommand(
-      'exec',
-      'node',
-      ['server.js'],
-      makeSandboxedConfig(),
-      settingsDir,
-    );
+    const result = wrapServerCommand('exec', 'node', ['server.js'], makeSandboxedConfig(), settingsDir);
     expect(result.command).toBe(srtBin);
     expect(result.args[0]).toBe('-s');
     expect(result.args[1]).toBe(join(settingsDir, 'exec.srt-settings.json'));
@@ -371,13 +333,7 @@ describe('wrapServerCommand', () => {
   });
 
   it('shell-escapes args with shell metacharacters', () => {
-    const result = wrapServerCommand(
-      'exec',
-      'node',
-      ['--pattern=$HOME/*.txt'],
-      makeSandboxedConfig(),
-      settingsDir,
-    );
+    const result = wrapServerCommand('exec', 'node', ['--pattern=$HOME/*.txt'], makeSandboxedConfig(), settingsDir);
     const cmdString = result.args[3];
     // shell-quote should escape $ and * with backslashes to prevent shell expansion
     expect(cmdString).toContain('\\$');
@@ -411,66 +367,42 @@ describe('cleanupSettingsFiles', () => {
 
 describe('annotateSandboxViolation', () => {
   it('annotates EPERM errors for sandboxed servers', () => {
-    const result = annotateSandboxViolation(
-      'EPERM: operation not permitted',
-      true,
-    );
+    const result = annotateSandboxViolation('EPERM: operation not permitted', true);
     expect(result).toBe('[SANDBOX BLOCKED] EPERM: operation not permitted');
   });
 
   it('annotates EACCES errors for sandboxed servers', () => {
-    const result = annotateSandboxViolation(
-      'EACCES: permission denied, open /etc/shadow',
-      true,
-    );
+    const result = annotateSandboxViolation('EACCES: permission denied, open /etc/shadow', true);
     expect(result).toMatch(/^\[SANDBOX BLOCKED\]/);
   });
 
   it('annotates "Permission denied" errors for sandboxed servers', () => {
-    const result = annotateSandboxViolation(
-      'Permission denied',
-      true,
-    );
+    const result = annotateSandboxViolation('Permission denied', true);
     expect(result).toMatch(/^\[SANDBOX BLOCKED\]/);
   });
 
   it('annotates "Operation not permitted" errors for sandboxed servers', () => {
-    const result = annotateSandboxViolation(
-      'Operation not permitted',
-      true,
-    );
+    const result = annotateSandboxViolation('Operation not permitted', true);
     expect(result).toMatch(/^\[SANDBOX BLOCKED\]/);
   });
 
   it('annotates "read-only file system" errors for sandboxed servers', () => {
-    const result = annotateSandboxViolation(
-      'EROFS: read-only file system, open /usr/bin/foo',
-      true,
-    );
+    const result = annotateSandboxViolation('EROFS: read-only file system, open /usr/bin/foo', true);
     expect(result).toMatch(/^\[SANDBOX BLOCKED\]/);
   });
 
   it('passes through non-sandbox errors unchanged for sandboxed servers', () => {
-    const result = annotateSandboxViolation(
-      'ENOENT: file not found',
-      true,
-    );
+    const result = annotateSandboxViolation('ENOENT: file not found', true);
     expect(result).toBe('ENOENT: file not found');
   });
 
   it('passes through errors for unsandboxed servers', () => {
-    const result = annotateSandboxViolation(
-      'EPERM: operation not permitted',
-      false,
-    );
+    const result = annotateSandboxViolation('EPERM: operation not permitted', false);
     expect(result).toBe('EPERM: operation not permitted');
   });
 
   it('passes through non-permission errors for unsandboxed servers', () => {
-    const result = annotateSandboxViolation(
-      'ECONNREFUSED: connection refused',
-      false,
-    );
+    const result = annotateSandboxViolation('ECONNREFUSED: connection refused', false);
     expect(result).toBe('ECONNREFUSED: connection refused');
   });
 });
@@ -481,7 +413,15 @@ function findServerFilesystem(): string | null {
   const npxCache = join(homedir(), '.npm', '_npx');
   if (existsSync(npxCache)) {
     for (const dir of readdirSync(npxCache)) {
-      const candidate = join(npxCache, dir, 'node_modules', '@modelcontextprotocol', 'server-filesystem', 'dist', 'index.js');
+      const candidate = join(
+        npxCache,
+        dir,
+        'node_modules',
+        '@modelcontextprotocol',
+        'server-filesystem',
+        'dist',
+        'index.js',
+      );
       if (existsSync(candidate)) return candidate;
     }
   }
@@ -509,15 +449,9 @@ describe.skipIf(!sandboxAvailable)('sandbox integration (requires bubblewrap+soc
   });
 
   /** Creates a sandboxed MCP client connected via srt. Caller must close the client. */
-  async function connectSandboxedClient(
-    serverName: string,
-    config: ResolvedSandboxParams,
-    serverArgs: string[],
-  ) {
+  async function connectSandboxedClient(serverName: string, config: ResolvedSandboxParams, serverArgs: string[]) {
     writeServerSettings(serverName, config, settingsDir);
-    const wrapped = wrapServerCommand(
-      serverName, 'node', serverArgs, { sandboxed: true, config }, settingsDir,
-    );
+    const wrapped = wrapServerCommand(serverName, 'node', serverArgs, { sandboxed: true, config }, settingsDir);
 
     const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
     const { StdioClientTransport } = await import('@modelcontextprotocol/sdk/client/stdio.js');
@@ -529,10 +463,7 @@ describe.skipIf(!sandboxAvailable)('sandbox integration (requires bubblewrap+soc
       stderr: 'pipe',
     });
 
-    const client = new Client(
-      { name: `test-${serverName}`, version: '0.1.0' },
-      { capabilities: {} },
-    );
+    const client = new Client({ name: `test-${serverName}`, version: '0.1.0' }, { capabilities: {} });
 
     await client.connect(transport);
     return client;
@@ -561,7 +492,7 @@ describe.skipIf(!sandboxAvailable)('sandbox integration (requires bubblewrap+soc
 
     try {
       const toolsResult = await client.listTools();
-      const toolNames = toolsResult.tools.map(t => t.name);
+      const toolNames = toolsResult.tools.map((t) => t.name);
       expect(toolNames.length).toBeGreaterThan(0);
       expect(toolNames).toContain('list_directory');
 
@@ -571,7 +502,11 @@ describe.skipIf(!sandboxAvailable)('sandbox integration (requires bubblewrap+soc
       });
       expect(listResult.isError).toBeFalsy();
     } finally {
-      try { await client.close(); } catch { /* ignore */ }
+      try {
+        await client.close();
+      } catch {
+        /* ignore */
+      }
     }
   }, 30000);
 
@@ -605,7 +540,11 @@ describe.skipIf(!sandboxAvailable)('sandbox integration (requires bubblewrap+soc
       });
       expect(insideResult.isError).toBeFalsy();
     } finally {
-      try { await client.close(); } catch { /* ignore */ }
+      try {
+        await client.close();
+      } catch {
+        /* ignore */
+      }
     }
   }, 30000);
 
@@ -636,8 +575,16 @@ describe.skipIf(!sandboxAvailable)('sandbox integration (requires bubblewrap+soc
       expect(listA.isError).toBeFalsy();
       expect(listB.isError).toBeFalsy();
     } finally {
-      try { await clientA.close(); } catch { /* ignore */ }
-      try { await clientB.close(); } catch { /* ignore */ }
+      try {
+        await clientA.close();
+      } catch {
+        /* ignore */
+      }
+      try {
+        await clientB.close();
+      } catch {
+        /* ignore */
+      }
     }
   }, 30000);
 });

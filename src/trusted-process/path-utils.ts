@@ -37,20 +37,14 @@ function normalizePath(value: string): string {
  * @deprecated Use `prepareToolArgs()` with annotation-driven normalization.
  * Retained as a fallback when annotations are unavailable.
  */
-export function normalizeToolArgPaths(
-  args: Record<string, unknown>,
-): Record<string, unknown> {
+export function normalizeToolArgPaths(args: Record<string, unknown>): Record<string, unknown> {
   const result: Record<string, unknown> = {};
 
   for (const [key, value] of Object.entries(args)) {
     if (typeof value === 'string' && looksLikePath(value)) {
       result[key] = normalizePath(value);
     } else if (Array.isArray(value)) {
-      result[key] = value.map(item =>
-        typeof item === 'string' && looksLikePath(item)
-          ? normalizePath(item)
-          : item,
-      );
+      result[key] = value.map((item) => (typeof item === 'string' && looksLikePath(item) ? normalizePath(item) : item));
     } else {
       result[key] = value;
     }
@@ -95,7 +89,7 @@ export interface PreparedToolArgs {
  * if all roles are non-resource (e.g., 'none').
  */
 function findResourceRole(roles: ArgumentRole[]): ArgumentRole | undefined {
-  return roles.find(r => getRoleDefinition(r).isResourceIdentifier);
+  return roles.find((r) => getRoleDefinition(r).isResourceIdentifier);
 }
 
 /**
@@ -103,17 +97,12 @@ function findResourceRole(roles: ArgumentRole[]): ArgumentRole | undefined {
  * Handles both string and string-array values. Non-string values
  * pass through unchanged.
  */
-function normalizeArgValue(
-  value: unknown,
-  normalize: (v: string) => string,
-): unknown {
+function normalizeArgValue(value: unknown, normalize: (v: string) => string): unknown {
   if (typeof value === 'string') {
     return normalize(value);
   }
   if (Array.isArray(value)) {
-    return value.map(item =>
-      typeof item === 'string' ? normalize(item) : item,
-    );
+    return value.map((item) => (typeof item === 'string' ? normalize(item) : item));
   }
   return value;
 }
@@ -124,13 +113,8 @@ function normalizeArgValue(
  * relative paths pass through unchanged (the MCP server resolves
  * them against its own CWD, which is the sandbox directory).
  */
-function normalizePathForTransport(
-  value: unknown,
-  def: RoleDefinition,
-): unknown {
-  return normalizeArgValue(value, v =>
-    isAbsolutePath(v) ? def.normalize(v) : v,
-  );
+function normalizePathForTransport(value: unknown, def: RoleDefinition): unknown {
+  return normalizeArgValue(value, (v) => (isAbsolutePath(v) ? def.normalize(v) : v));
 }
 
 /**
@@ -139,12 +123,8 @@ function normalizePathForTransport(
  * the sandbox (allowedDirectory) so the policy engine can perform
  * containment checks with absolute canonical paths.
  */
-function normalizePathForPolicy(
-  value: unknown,
-  def: RoleDefinition,
-  allowedDirectory: string,
-): unknown {
-  return normalizeArgValue(value, v =>
+function normalizePathForPolicy(value: unknown, def: RoleDefinition, allowedDirectory: string): unknown {
+  return normalizeArgValue(value, (v) =>
     isAbsolutePath(v) ? def.normalize(v) : resolveAgainstSandbox(v, allowedDirectory),
   );
 }

@@ -15,11 +15,7 @@ import { writeFileSync, rmSync, existsSync } from 'node:fs';
 import { join, resolve, dirname, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { quote } from 'shell-quote';
-import type {
-  MCPServerConfig,
-  SandboxAvailabilityPolicy,
-  SandboxNetworkConfig,
-} from '../config/types.js';
+import type { MCPServerConfig, SandboxAvailabilityPolicy, SandboxNetworkConfig } from '../config/types.js';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -41,10 +37,12 @@ export interface ResolvedSandboxParams {
   readonly allowWrite: readonly string[];
   readonly denyRead: readonly string[];
   readonly denyWrite: readonly string[];
-  readonly network: false | {
-    readonly allowedDomains: readonly string[];
-    readonly deniedDomains: readonly string[];
-  };
+  readonly network:
+    | false
+    | {
+        readonly allowedDomains: readonly string[];
+        readonly deniedDomains: readonly string[];
+      };
 }
 
 /** Result of checking sandbox-runtime availability. */
@@ -109,8 +107,7 @@ export function resolveSandboxConfig(
   if (!platformAvailable) {
     if (policy === 'enforce') {
       throw new Error(
-        '[sandbox] Server requires sandboxing but platform is unavailable ' +
-        'and sandboxPolicy is "enforce".',
+        '[sandbox] Server requires sandboxing but platform is unavailable ' + 'and sandboxPolicy is "enforce".',
       );
     }
     return { sandboxed: false, reason: 'platform-unavailable' };
@@ -120,10 +117,7 @@ export function resolveSandboxConfig(
   const fsConfig = sandboxConfig.filesystem ?? {};
   const networkConfig = sandboxConfig.network;
 
-  const allowWrite = buildAllowWrite(
-    sessionSandboxDir,
-    fsConfig.allowWrite ?? [],
-  );
+  const allowWrite = buildAllowWrite(sessionSandboxDir, fsConfig.allowWrite ?? []);
 
   const denyRead = fsConfig.denyRead ?? DEFAULT_DENY_READ;
   const denyWrite = fsConfig.denyWrite ?? [];
@@ -144,16 +138,13 @@ export function resolveSandboxConfig(
  *
  * Returns the absolute path to the written file.
  */
-export function writeServerSettings(
-  serverName: string,
-  config: ResolvedSandboxParams,
-  settingsDir: string,
-): string {
+export function writeServerSettings(serverName: string, config: ResolvedSandboxParams, settingsDir: string): string {
   const settingsPath = join(settingsDir, `${serverName}.srt-settings.json`);
 
-  const network = config.network === false
-    ? { allowedDomains: [], deniedDomains: [] }
-    : { allowedDomains: config.network.allowedDomains, deniedDomains: config.network.deniedDomains };
+  const network =
+    config.network === false
+      ? { allowedDomains: [], deniedDomains: [] }
+      : { allowedDomains: config.network.allowedDomains, deniedDomains: config.network.deniedDomains };
 
   const settings = {
     network,
@@ -189,7 +180,7 @@ export function wrapServerCommand(
   const settingsPath = join(settingsDir, `${serverName}.srt-settings.json`);
   // Resolve relative paths in args to absolute so the command works when
   // the proxy sets cwd to the sandbox directory.
-  const resolvedArgs = args.map(a => (!isAbsolute(a) && !a.startsWith('-') ? resolve(a) : a));
+  const resolvedArgs = args.map((a) => (!isAbsolute(a) && !a.startsWith('-') ? resolve(a) : a));
   const cmdString = quote([command, ...resolvedArgs]);
 
   return {
@@ -217,10 +208,7 @@ export function cleanupSettingsFiles(settingsDir: string): void {
  * patterns (EPERM, EACCES, etc.) and the policy engine had allowed the call,
  * this prefixes the error with [SANDBOX BLOCKED] to signal OS containment.
  */
-export function annotateSandboxViolation(
-  errorMessage: string,
-  serverSandboxed: boolean,
-): string {
+export function annotateSandboxViolation(errorMessage: string, serverSandboxed: boolean): string {
   if (!serverSandboxed) return errorMessage;
   if (!SANDBOX_BLOCK_PATTERN.test(errorMessage)) return errorMessage;
 
@@ -233,13 +221,8 @@ export function annotateSandboxViolation(
  * Builds the allowWrite list with the session sandbox dir always included.
  * Relative paths are resolved against the session sandbox directory.
  */
-function buildAllowWrite(
-  sessionSandboxDir: string,
-  additionalPaths: readonly string[],
-): string[] {
-  const resolved = additionalPaths.map(p =>
-    isAbsolute(p) ? p : resolve(sessionSandboxDir, p),
-  );
+function buildAllowWrite(sessionSandboxDir: string, additionalPaths: readonly string[]): string[] {
+  const resolved = additionalPaths.map((p) => (isAbsolute(p) ? p : resolve(sessionSandboxDir, p)));
   return [sessionSandboxDir, ...resolved];
 }
 
@@ -247,9 +230,7 @@ function buildAllowWrite(
  * Resolves network config to the canonical form.
  * `undefined` and `false` both mean no network access.
  */
-function resolveNetworkConfig(
-  config: false | SandboxNetworkConfig | undefined,
-): ResolvedSandboxParams['network'] {
+function resolveNetworkConfig(config: false | SandboxNetworkConfig | undefined): ResolvedSandboxParams['network'] {
   if (!config) return false;
 
   return {

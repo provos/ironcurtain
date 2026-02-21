@@ -59,11 +59,26 @@ export type DiagnosticEvent =
   | { readonly kind: 'tool_call'; readonly toolName: string; readonly preview: string }
   | { readonly kind: 'agent_text'; readonly preview: string }
   | { readonly kind: 'step_finish'; readonly stepIndex: number }
-  | { readonly kind: 'loop_detection'; readonly action: 'warn' | 'block'; readonly category: string; readonly message: string }
+  | {
+      readonly kind: 'loop_detection';
+      readonly action: 'warn' | 'block';
+      readonly category: string;
+      readonly message: string;
+    }
   | { readonly kind: 'result_truncation'; readonly originalKB: number; readonly finalKB: number }
-  | { readonly kind: 'budget_warning'; readonly dimension: string; readonly percentUsed: number; readonly message: string }
+  | {
+      readonly kind: 'budget_warning';
+      readonly dimension: string;
+      readonly percentUsed: number;
+      readonly message: string;
+    }
   | { readonly kind: 'budget_exhausted'; readonly dimension: string; readonly message: string }
-  | { readonly kind: 'message_compaction'; readonly originalMessageCount: number; readonly newMessageCount: number; readonly summaryPreview: string };
+  | {
+      readonly kind: 'message_compaction';
+      readonly originalMessageCount: number;
+      readonly newMessageCount: number;
+      readonly summaryPreview: string;
+    };
 
 /**
  * Budget status: current consumption snapshot plus configured limits.

@@ -21,9 +21,7 @@ const DEFAULT_CONFIG: CircuitBreakerConfig = {
   threshold: 20,
 };
 
-export type CircuitBreakerVerdict =
-  | { allowed: true }
-  | { allowed: false; reason: string };
+export type CircuitBreakerVerdict = { allowed: true } | { allowed: false; reason: string };
 
 export class CallCircuitBreaker {
   private readonly config: CircuitBreakerConfig;
@@ -38,10 +36,7 @@ export class CallCircuitBreaker {
    *
    * @returns `{ allowed: true }` or `{ allowed: false, reason: string }`
    */
-  check(
-    toolName: string,
-    args: Record<string, unknown>,
-  ): CircuitBreakerVerdict {
+  check(toolName: string, args: Record<string, unknown>): CircuitBreakerVerdict {
     const argsHash = computeHash(args);
     const key = `${toolName}:${argsHash}`;
     const now = Date.now();

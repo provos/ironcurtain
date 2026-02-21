@@ -35,13 +35,17 @@ import type {
 
 const sampleAnnotations: ToolAnnotation[] = [
   {
-    toolName: 'fetch', serverName: 'fetch',
-    comment: 'Fetches a URL via HTTP', sideEffects: false,
+    toolName: 'fetch',
+    serverName: 'fetch',
+    comment: 'Fetches a URL via HTTP',
+    sideEffects: false,
     args: { url: ['fetch-url'] },
   },
   {
-    toolName: 'read_file', serverName: 'filesystem',
-    comment: 'Reads a file', sideEffects: false,
+    toolName: 'read_file',
+    serverName: 'filesystem',
+    comment: 'Reads a file',
+    sideEffects: false,
     args: { path: ['read-path'] },
   },
 ];
@@ -74,9 +78,10 @@ function createMockModel(response: unknown): MockLanguageModelV3 {
  * Creates a mock model that counts calls and returns dynamic values.
  * The valueFactory receives the 1-based call index for dynamic responses.
  */
-function createCountingModel(
-  valueFactory: (callIndex: number) => string[] = () => ['NEW'],
-): { model: MockLanguageModelV3; getCallCount: () => number } {
+function createCountingModel(valueFactory: (callIndex: number) => string[] = () => ['NEW']): {
+  model: MockLanguageModelV3;
+  getCallCount: () => number;
+} {
   let callCount = 0;
   const model = new MockLanguageModelV3({
     doGenerate: async () => {
@@ -90,9 +95,7 @@ function createCountingModel(
   return { model, getCallCount: () => callCount };
 }
 
-function createPromptCapturingModel(
-  response: unknown,
-): { model: MockLanguageModelV3; getPrompt: () => string } {
+function createPromptCapturingModel(response: unknown): { model: MockLanguageModelV3; getPrompt: () => string } {
   let capturedPrompt = '';
   const model = new MockLanguageModelV3({
     doGenerate: async (options) => {
@@ -113,8 +116,10 @@ function createPromptCapturingModel(
 }
 
 const fetchAnnotation: ToolAnnotation = {
-  toolName: 'fetch', serverName: 'fetch',
-  comment: 'Fetches URL', sideEffects: false,
+  toolName: 'fetch',
+  serverName: 'fetch',
+  comment: 'Fetches URL',
+  sideEffects: false,
   args: { url: ['fetch-url'] },
 };
 
@@ -170,20 +175,19 @@ function makeRuleWithDomainList(listName: string): CompiledRule {
   };
 }
 
-function makeRuleWithListCondition(
-  listName: string,
-  matchType: 'domains' | 'emails' | 'identifiers',
-): CompiledRule {
+function makeRuleWithListCondition(listName: string, matchType: 'domains' | 'emails' | 'identifiers'): CompiledRule {
   return {
     name: 'allow-contacts',
     description: 'Allow sending to contacts',
     principle: 'send to contacts',
     if: {
-      lists: [{
-        roles: ['fetch-url'],
-        allowed: [`@${listName}`],
-        matchType,
-      }],
+      lists: [
+        {
+          roles: ['fetch-url'],
+          allowed: [`@${listName}`],
+          matchType,
+        },
+      ],
     },
     then: 'allow',
     reason: 'Known contacts are allowed',
@@ -219,14 +223,16 @@ describe('Dynamic Lists Validation', () => {
 
   describe('orphaned list definitions', () => {
     it('warns when a list definition is not referenced by any rule', () => {
-      const rules: CompiledRule[] = [{
-        name: 'allow-all-reads',
-        description: 'Allow reads',
-        principle: 'open read',
-        if: { sideEffects: false },
-        then: 'allow',
-        reason: 'No side effects',
-      }];
+      const rules: CompiledRule[] = [
+        {
+          name: 'allow-all-reads',
+          description: 'Allow reads',
+          principle: 'open read',
+          if: { sideEffects: false },
+          then: 'allow',
+          reason: 'No side effects',
+        },
+      ];
 
       const result = validateCompiledRules(rules, [newsListDef]);
 
@@ -243,11 +249,11 @@ describe('Dynamic Lists Validation', () => {
       const result = validateCompiledRules(rules, [newsListDef]);
 
       expect(result.valid).toBe(false);
-      expect(result.errors.some(e =>
-        e.includes('@major-news-sites') &&
-        e.includes('"domains" list') &&
-        e.includes('domains.allowed'),
-      )).toBe(true);
+      expect(
+        result.errors.some(
+          (e) => e.includes('@major-news-sites') && e.includes('"domains" list') && e.includes('domains.allowed'),
+        ),
+      ).toBe(true);
     });
   });
 
@@ -258,11 +264,11 @@ describe('Dynamic Lists Validation', () => {
       const result = validateCompiledRules(rules, [contactsListDef]);
 
       expect(result.valid).toBe(false);
-      expect(result.errors.some(e =>
-        e.includes('matchType "identifiers"') &&
-        e.includes('@my-contacts') &&
-        e.includes('"emails"'),
-      )).toBe(true);
+      expect(
+        result.errors.some(
+          (e) => e.includes('matchType "identifiers"') && e.includes('@my-contacts') && e.includes('"emails"'),
+        ),
+      ).toBe(true);
     });
   });
 
@@ -272,11 +278,14 @@ describe('Dynamic Lists Validation', () => {
       const result = validateCompiledRules(rules, [contactsListDef]);
 
       expect(result.valid).toBe(false);
-      expect(result.errors.some(e =>
-        e.includes('@my-contacts') &&
-        e.includes('"emails" list') &&
-        e.includes('only "domains" lists belong in domains.allowed'),
-      )).toBe(true);
+      expect(
+        result.errors.some(
+          (e) =>
+            e.includes('@my-contacts') &&
+            e.includes('"emails" list') &&
+            e.includes('only "domains" lists belong in domains.allowed'),
+        ),
+      ).toBe(true);
     });
   });
 
@@ -309,19 +318,21 @@ describe('Dynamic Lists Validation', () => {
     });
 
     it('passes with mixed concrete values and @list-name references', () => {
-      const rules: CompiledRule[] = [{
-        name: 'allow-news-and-specific',
-        description: 'Allow news sites and a specific domain',
-        principle: 'news access',
-        if: {
-          domains: {
-            roles: ['fetch-url'],
-            allowed: ['example.com', '@major-news-sites'],
+      const rules: CompiledRule[] = [
+        {
+          name: 'allow-news-and-specific',
+          description: 'Allow news sites and a specific domain',
+          principle: 'news access',
+          if: {
+            domains: {
+              roles: ['fetch-url'],
+              allowed: ['example.com', '@major-news-sites'],
+            },
           },
+          then: 'allow',
+          reason: 'Allowed domains',
         },
-        then: 'allow',
-        reason: 'Allowed domains',
-      }];
+      ];
 
       const result = validateCompiledRules(rules, [newsListDef]);
 
@@ -369,12 +380,7 @@ describe('Dynamic Lists Compiler Output', () => {
   it('returns empty listDefinitions when LLM emits none', async () => {
     const mockLLM = createMockModel({ rules: [plainReadRule] });
 
-    const result = await compileConstitution(
-      'Allow all read operations.',
-      sampleAnnotations,
-      compilerConfig,
-      mockLLM,
-    );
+    const result = await compileConstitution('Allow all read operations.', sampleAnnotations, compilerConfig, mockLLM);
 
     expect(result.rules).toHaveLength(1);
     expect(result.listDefinitions).toEqual([]);
@@ -383,31 +389,30 @@ describe('Dynamic Lists Compiler Output', () => {
   it('returns empty listDefinitions when LLM explicitly passes empty array', async () => {
     const mockLLM = createMockModel({ rules: [plainReadRule], listDefinitions: [] });
 
-    const result = await compileConstitution(
-      'Allow all read operations.',
-      sampleAnnotations,
-      compilerConfig,
-      mockLLM,
-    );
+    const result = await compileConstitution('Allow all read operations.', sampleAnnotations, compilerConfig, mockLLM);
 
     expect(result.listDefinitions).toEqual([]);
   });
 
   it('includes lists condition in rule when LLM emits it', async () => {
-    const rulesWithListCondition: CompiledRule[] = [{
-      name: 'allow-contacts',
-      description: 'Allow sending to contacts',
-      principle: 'send to contacts',
-      if: {
-        lists: [{
-          roles: ['fetch-url'],
-          allowed: ['@my-contacts'],
-          matchType: 'emails',
-        }],
+    const rulesWithListCondition: CompiledRule[] = [
+      {
+        name: 'allow-contacts',
+        description: 'Allow sending to contacts',
+        principle: 'send to contacts',
+        if: {
+          lists: [
+            {
+              roles: ['fetch-url'],
+              allowed: ['@my-contacts'],
+              matchType: 'emails',
+            },
+          ],
+        },
+        then: 'allow',
+        reason: 'Contact is known',
       },
-      then: 'allow',
-      reason: 'Contact is known',
-    }];
+    ];
 
     const mockLLM = createMockModel({
       rules: rulesWithListCondition,
@@ -430,12 +435,7 @@ describe('Dynamic Lists Compiler Output', () => {
   it('prompt includes Dynamic Lists section', async () => {
     const { model, getPrompt } = createPromptCapturingModel({ rules: [] });
 
-    await compileConstitution(
-      'Allow news sites.',
-      sampleAnnotations,
-      compilerConfig,
-      model,
-    );
+    await compileConstitution('Allow news sites.', sampleAnnotations, compilerConfig, model);
 
     const prompt = getPrompt();
     expect(prompt).toContain('## Dynamic Lists');
@@ -459,16 +459,18 @@ describe('Dynamic Lists Backward Compatibility', () => {
   });
 
   it('CompiledRuleCondition without lists field is valid', () => {
-    const rules: CompiledRule[] = [{
-      name: 'allow-sandbox',
-      description: 'Allow sandbox reads',
-      principle: 'containment',
-      if: {
-        paths: { roles: ['read-path'], within: '/tmp/sandbox' },
+    const rules: CompiledRule[] = [
+      {
+        name: 'allow-sandbox',
+        description: 'Allow sandbox reads',
+        principle: 'containment',
+        if: {
+          paths: { roles: ['read-path'], within: '/tmp/sandbox' },
+        },
+        then: 'allow',
+        reason: 'Sandbox',
       },
-      then: 'allow',
-      reason: 'Sandbox',
-    }];
+    ];
 
     const result = validateCompiledRules(rules, []);
 
@@ -477,7 +479,9 @@ describe('Dynamic Lists Backward Compatibility', () => {
 
   it('PolicyEngine works without dynamicLists parameter', () => {
     const policy: CompiledPolicyFile = {
-      generatedAt: '', constitutionHash: '', inputHash: '',
+      generatedAt: '',
+      constitutionHash: '',
+      inputHash: '',
       rules: [plainReadRule],
     };
     const annotations: ToolAnnotationsFile = {
@@ -490,8 +494,10 @@ describe('Dynamic Lists Backward Compatibility', () => {
     // No dynamicLists parameter -- backward compatible
     const engine = new PolicyEngine(policy, annotations, []);
     const result = engine.evaluate({
-      requestId: 'test', serverName: 'filesystem',
-      toolName: 'read_file', arguments: { path: '/tmp/file.txt' },
+      requestId: 'test',
+      serverName: 'filesystem',
+      toolName: 'read_file',
+      arguments: { path: '/tmp/file.txt' },
       timestamp: '',
     });
     expect(result.decision).toBe('allow');
@@ -506,9 +512,7 @@ describe('Dynamic Lists Backward Compatibility', () => {
 // Shared fixtures for Phase 2 tests
 // ---------------------------------------------------------------------------
 
-function makeToolAnnotationsFile(
-  tools: ToolAnnotation[],
-): ToolAnnotationsFile {
+function makeToolAnnotationsFile(tools: ToolAnnotation[]): ToolAnnotationsFile {
   const servers: ToolAnnotationsFile['servers'] = {};
   for (const tool of tools) {
     if (!servers[tool.serverName]) {
@@ -519,20 +523,17 @@ function makeToolAnnotationsFile(
   return { generatedAt: '', servers };
 }
 
-function makePolicyFile(
-  rules: CompiledRule[],
-  listDefinitions?: ListDefinition[],
-): CompiledPolicyFile {
+function makePolicyFile(rules: CompiledRule[], listDefinitions?: ListDefinition[]): CompiledPolicyFile {
   return {
-    generatedAt: '', constitutionHash: '', inputHash: '',
+    generatedAt: '',
+    constitutionHash: '',
+    inputHash: '',
     rules,
     listDefinitions,
   };
 }
 
-function makeDynamicLists(
-  lists: Record<string, Partial<ResolvedList> & { values: string[] }>,
-): DynamicListsFile {
+function makeDynamicLists(lists: Record<string, Partial<ResolvedList> & { values: string[] }>): DynamicListsFile {
   const fullLists: Record<string, ResolvedList> = {};
   for (const [name, partial] of Object.entries(lists)) {
     fullLists[name] = {
@@ -719,19 +720,14 @@ describe('List Resolver', () => {
   it('fails with descriptive error for requiresMcp lists without MCP clients', async () => {
     const mockLLM = createMockModel({ values: [] });
 
-    await expect(
-      resolveList(contactsListDef, { model: mockLLM }),
-    ).rejects.toThrow(/requires MCP server access/);
+    await expect(resolveList(contactsListDef, { model: mockLLM })).rejects.toThrow(/requires MCP server access/);
   });
 
   describe('resolveAllLists', () => {
     it('resolves all definitions', async () => {
       const mockLLM = createMockModel({ values: ['AAPL', 'GOOG'] });
 
-      const result = await resolveAllLists(
-        [stocksListDef],
-        { model: mockLLM },
-      );
+      const result = await resolveAllLists([stocksListDef], { model: mockLLM });
 
       expect(result.lists['tech-stock-tickers']).toBeDefined();
       expect(result.lists['tech-stock-tickers'].values).toContain('AAPL');
@@ -747,11 +743,7 @@ describe('List Resolver', () => {
       expect(getCallCount()).toBe(1);
 
       // Second resolution with matching hash should be cached
-      const result = await resolveAllLists(
-        [stocksListDef],
-        { model },
-        first,
-      );
+      const result = await resolveAllLists([stocksListDef], { model }, first);
 
       expect(getCallCount()).toBe(1); // No additional LLM call
       expect(result.lists['tech-stock-tickers'].inputHash).toBe(firstHash);
@@ -780,10 +772,7 @@ describe('List Resolver', () => {
 
 describe('Policy Engine List Expansion', () => {
   it('expands @list-name in domains.allowed', () => {
-    const policy = makePolicyFile(
-      [makeRuleWithDomainList('major-news-sites')],
-      [newsListDef],
-    );
+    const policy = makePolicyFile([makeRuleWithDomainList('major-news-sites')], [newsListDef]);
     const lists = makeDynamicLists({
       'major-news-sites': { values: ['cnn.com', 'bbc.com'] },
     });
@@ -793,8 +782,11 @@ describe('Policy Engine List Expansion', () => {
 
     // cnn.com should be allowed (expanded from @major-news-sites)
     const result = engine.evaluate({
-      requestId: 'test', serverName: 'fetch', toolName: 'fetch',
-      arguments: { url: 'https://cnn.com/news' }, timestamp: '',
+      requestId: 'test',
+      serverName: 'fetch',
+      toolName: 'fetch',
+      arguments: { url: 'https://cnn.com/news' },
+      timestamp: '',
     });
     expect(result.decision).toBe('allow');
   });
@@ -805,11 +797,13 @@ describe('Policy Engine List Expansion', () => {
       description: 'Allow known identifiers',
       principle: 'permit known values',
       if: {
-        lists: [{
-          roles: ['fetch-url'],
-          allowed: ['@tech-stock-tickers'],
-          matchType: 'identifiers',
-        }],
+        lists: [
+          {
+            roles: ['fetch-url'],
+            allowed: ['@tech-stock-tickers'],
+            matchType: 'identifiers',
+          },
+        ],
       },
       then: 'allow',
       reason: 'Known identifier',
@@ -823,16 +817,17 @@ describe('Policy Engine List Expansion', () => {
     const engine = new PolicyEngine(policy, annotations, [], undefined, undefined, lists);
 
     const result = engine.evaluate({
-      requestId: 'test', serverName: 'fetch', toolName: 'fetch',
-      arguments: { url: 'AAPL' }, timestamp: '',
+      requestId: 'test',
+      serverName: 'fetch',
+      toolName: 'fetch',
+      arguments: { url: 'AAPL' },
+      timestamp: '',
     });
     expect(result.decision).toBe('allow');
   });
 
   it('throws when @list-name reference is missing from dynamic-lists.json', () => {
-    const policy = makePolicyFile(
-      [makeRuleWithDomainList('missing-list')],
-    );
+    const policy = makePolicyFile([makeRuleWithDomainList('missing-list')]);
     const emptyLists = makeDynamicLists({});
     const annotations = makeToolAnnotationsFile([fetchAnnotation]);
 
@@ -842,10 +837,7 @@ describe('Policy Engine List Expansion', () => {
   });
 
   it('applies manual additions during expansion', () => {
-    const policy = makePolicyFile(
-      [makeRuleWithDomainList('major-news-sites')],
-      [newsListDef],
-    );
+    const policy = makePolicyFile([makeRuleWithDomainList('major-news-sites')], [newsListDef]);
     const lists = makeDynamicLists({
       'major-news-sites': {
         values: ['cnn.com'],
@@ -857,17 +849,17 @@ describe('Policy Engine List Expansion', () => {
     const engine = new PolicyEngine(policy, annotations, [], undefined, undefined, lists);
 
     const result = engine.evaluate({
-      requestId: 'test', serverName: 'fetch', toolName: 'fetch',
-      arguments: { url: 'https://custom-news.com/article' }, timestamp: '',
+      requestId: 'test',
+      serverName: 'fetch',
+      toolName: 'fetch',
+      arguments: { url: 'https://custom-news.com/article' },
+      timestamp: '',
     });
     expect(result.decision).toBe('allow');
   });
 
   it('applies manual removals during expansion', () => {
-    const policy = makePolicyFile(
-      [makeRuleWithDomainList('major-news-sites')],
-      [newsListDef],
-    );
+    const policy = makePolicyFile([makeRuleWithDomainList('major-news-sites')], [newsListDef]);
     const lists = makeDynamicLists({
       'major-news-sites': {
         values: ['cnn.com', 'bbc.com'],
@@ -880,8 +872,11 @@ describe('Policy Engine List Expansion', () => {
 
     // bbc.com should NOT match (removed via manualRemovals)
     const result = engine.evaluate({
-      requestId: 'test', serverName: 'fetch', toolName: 'fetch',
-      arguments: { url: 'https://bbc.com/news' }, timestamp: '',
+      requestId: 'test',
+      serverName: 'fetch',
+      toolName: 'fetch',
+      arguments: { url: 'https://bbc.com/news' },
+      timestamp: '',
     });
     expect(result.decision).not.toBe('allow');
   });
@@ -910,14 +905,20 @@ describe('Policy Engine List Expansion', () => {
 
     // Both concrete and expanded values should work
     const specificResult = engine.evaluate({
-      requestId: '1', serverName: 'fetch', toolName: 'fetch',
-      arguments: { url: 'https://specific.com/page' }, timestamp: '',
+      requestId: '1',
+      serverName: 'fetch',
+      toolName: 'fetch',
+      arguments: { url: 'https://specific.com/page' },
+      timestamp: '',
     });
     expect(specificResult.decision).toBe('allow');
 
     const expandedResult = engine.evaluate({
-      requestId: '2', serverName: 'fetch', toolName: 'fetch',
-      arguments: { url: 'https://cnn.com/news' }, timestamp: '',
+      requestId: '2',
+      serverName: 'fetch',
+      toolName: 'fetch',
+      arguments: { url: 'https://cnn.com/news' },
+      timestamp: '',
     });
     expect(expandedResult.decision).toBe('allow');
   });
@@ -934,11 +935,13 @@ describe('ListCondition Evaluation', () => {
       description: 'Allow sending to contacts',
       principle: 'contacts',
       if: {
-        lists: [{
-          roles: ['fetch-url'],
-          allowed: ['alice@example.com', 'bob@example.com'],
-          matchType: 'emails',
-        }],
+        lists: [
+          {
+            roles: ['fetch-url'],
+            allowed: ['alice@example.com', 'bob@example.com'],
+            matchType: 'emails',
+          },
+        ],
       },
       then: 'allow',
       reason: 'Contact',
@@ -948,8 +951,11 @@ describe('ListCondition Evaluation', () => {
     const engine = new PolicyEngine(policy, annotations, []);
 
     const result = engine.evaluate({
-      requestId: 'test', serverName: 'fetch', toolName: 'fetch',
-      arguments: { url: 'ALICE@EXAMPLE.COM' }, timestamp: '',
+      requestId: 'test',
+      serverName: 'fetch',
+      toolName: 'fetch',
+      arguments: { url: 'ALICE@EXAMPLE.COM' },
+      timestamp: '',
     });
     expect(result.decision).toBe('allow');
   });
@@ -960,11 +966,13 @@ describe('ListCondition Evaluation', () => {
       description: 'Allow known tickers',
       principle: 'tickers',
       if: {
-        lists: [{
-          roles: ['fetch-url'],
-          allowed: ['AAPL', 'GOOG'],
-          matchType: 'identifiers',
-        }],
+        lists: [
+          {
+            roles: ['fetch-url'],
+            allowed: ['AAPL', 'GOOG'],
+            matchType: 'identifiers',
+          },
+        ],
       },
       then: 'allow',
       reason: 'Known ticker',
@@ -974,15 +982,21 @@ describe('ListCondition Evaluation', () => {
     const engine = new PolicyEngine(policy, annotations, []);
 
     const matchResult = engine.evaluate({
-      requestId: '1', serverName: 'fetch', toolName: 'fetch',
-      arguments: { url: 'AAPL' }, timestamp: '',
+      requestId: '1',
+      serverName: 'fetch',
+      toolName: 'fetch',
+      arguments: { url: 'AAPL' },
+      timestamp: '',
     });
     expect(matchResult.decision).toBe('allow');
 
     // Case mismatch should not match
     const noMatchResult = engine.evaluate({
-      requestId: '2', serverName: 'fetch', toolName: 'fetch',
-      arguments: { url: 'aapl' }, timestamp: '',
+      requestId: '2',
+      serverName: 'fetch',
+      toolName: 'fetch',
+      arguments: { url: 'aapl' },
+      timestamp: '',
     });
     expect(noMatchResult.decision).not.toBe('allow');
   });
@@ -993,18 +1007,22 @@ describe('ListCondition Evaluation', () => {
       description: 'Allow contacts',
       principle: 'contacts',
       if: {
-        lists: [{
-          roles: ['fetch-url'], // This role won't match read_file's path arg
-          allowed: ['alice@example.com'],
-          matchType: 'emails',
-        }],
+        lists: [
+          {
+            roles: ['fetch-url'], // This role won't match read_file's path arg
+            allowed: ['alice@example.com'],
+            matchType: 'emails',
+          },
+        ],
       },
       then: 'allow',
       reason: 'Contact',
     };
     const readAnnotation: ToolAnnotation = {
-      toolName: 'read_file', serverName: 'filesystem',
-      comment: 'Reads file', sideEffects: false,
+      toolName: 'read_file',
+      serverName: 'filesystem',
+      comment: 'Reads file',
+      sideEffects: false,
       args: { path: ['read-path'] },
     };
     const policy = makePolicyFile([rule]);
@@ -1012,8 +1030,11 @@ describe('ListCondition Evaluation', () => {
     const engine = new PolicyEngine(policy, annotations, []);
 
     const result = engine.evaluate({
-      requestId: 'test', serverName: 'filesystem', toolName: 'read_file',
-      arguments: { path: '/tmp/file.txt' }, timestamp: '',
+      requestId: 'test',
+      serverName: 'filesystem',
+      toolName: 'read_file',
+      arguments: { path: '/tmp/file.txt' },
+      timestamp: '',
     });
     // Rule should not match (zero extraction), falls through to default deny
     expect(result.decision).toBe('deny');
@@ -1048,8 +1069,11 @@ describe('ListCondition Evaluation', () => {
 
     // AAPL matches first condition but not second
     const result = engine.evaluate({
-      requestId: 'test', serverName: 'fetch', toolName: 'fetch',
-      arguments: { url: 'AAPL' }, timestamp: '',
+      requestId: 'test',
+      serverName: 'fetch',
+      toolName: 'fetch',
+      arguments: { url: 'AAPL' },
+      timestamp: '',
     });
     expect(result.decision).not.toBe('allow');
   });
@@ -1063,8 +1087,10 @@ describe('Per-Role Evaluation with Lists', () => {
   it('lists condition makes a rule role-specific (not role-agnostic)', () => {
     // A rule with only lists condition should be treated as role-specific
     const emailSendAnnotation: ToolAnnotation = {
-      toolName: 'send_email', serverName: 'email',
-      comment: 'Sends email', sideEffects: true,
+      toolName: 'send_email',
+      serverName: 'email',
+      comment: 'Sends email',
+      sideEffects: true,
       // Tool has both a read-path arg (for attachment) and a fetch-url arg (for recipient)
       args: { recipient: ['fetch-url'], attachment: ['read-path'] },
     };
@@ -1073,11 +1099,13 @@ describe('Per-Role Evaluation with Lists', () => {
       description: 'Allow sending to contacts',
       principle: 'contacts',
       if: {
-        lists: [{
-          roles: ['fetch-url'],
-          allowed: ['alice@example.com'],
-          matchType: 'emails',
-        }],
+        lists: [
+          {
+            roles: ['fetch-url'],
+            allowed: ['alice@example.com'],
+            matchType: 'emails',
+          },
+        ],
       },
       then: 'allow',
       reason: 'Contact',
@@ -1099,7 +1127,9 @@ describe('Per-Role Evaluation with Lists', () => {
     // but read-path role should fall through to escalate (lists condition is
     // not relevant to read-path)
     const result = engine.evaluate({
-      requestId: 'test', serverName: 'email', toolName: 'send_email',
+      requestId: 'test',
+      serverName: 'email',
+      toolName: 'send_email',
       arguments: { recipient: 'alice@example.com', attachment: '/tmp/file.txt' },
       timestamp: '',
     });
@@ -1124,9 +1154,9 @@ function createMockMcpConnection(
     client: {
       callTool: vi.fn().mockResolvedValue(toolResult),
       close: vi.fn().mockResolvedValue(undefined),
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any,
-    tools: toolNames.map(name => ({
+    tools: toolNames.map((name) => ({
       name,
       description: `Mock tool: ${name}`,
       inputSchema: { type: 'object', properties: {} },
@@ -1149,21 +1179,25 @@ function createToolUseModel(
       // Step 1: LLM decides to call a tool
       {
         ...MOCK_GENERATE_RESULT,
-        content: [{
-          type: 'tool-call' as const,
-          toolCallId: 'call-1',
-          toolName,
-          args: JSON.stringify(toolArgs),
-        }],
+        content: [
+          {
+            type: 'tool-call' as const,
+            toolCallId: 'call-1',
+            toolName,
+            args: JSON.stringify(toolArgs),
+          },
+        ],
         finishReason: { unified: 'tool-calls' as const, raw: 'tool_use' },
       },
       // Step 2: LLM returns text with the final answer
       {
         ...MOCK_GENERATE_RESULT,
-        content: [{
-          type: 'text' as const,
-          text: JSON.stringify({ values: finalValues }),
-        }],
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify({ values: finalValues }),
+          },
+        ],
       },
     ],
   });
@@ -1175,25 +1209,20 @@ function createToolUseModel(
 
 describe('MCP-Backed List Resolution', () => {
   it('resolves a data-backed list via MCP tools', async () => {
-    const connection = createMockMcpConnection(
-      ['list_contacts'],
-      {
-        content: [{
+    const connection = createMockMcpConnection(['list_contacts'], {
+      content: [
+        {
           type: 'text',
           text: JSON.stringify([
             { name: 'Alice', email: 'alice@example.com' },
             { name: 'Bob', email: 'bob@company.org' },
           ]),
-        }],
-      },
-    );
+        },
+      ],
+    });
 
     const mcpConnections = new Map([['contacts', connection]]);
-    const model = createToolUseModel(
-      'contacts__list_contacts',
-      {},
-      ['alice@example.com', 'bob@company.org'],
-    );
+    const model = createToolUseModel('contacts__list_contacts', {}, ['alice@example.com', 'bob@company.org']);
 
     const config: ListResolverConfig = { model, mcpConnections };
     const result = await resolveList(contactsListDef, config);
@@ -1208,21 +1237,20 @@ describe('MCP-Backed List Resolution', () => {
     const model = createMockModel({ values: [] });
     const emptyConnections = new Map<string, McpServerConnection>();
 
-    await expect(
-      resolveList(contactsListDef, { model, mcpConnections: emptyConnections }),
-    ).rejects.toThrow(/requires MCP server access/);
+    await expect(resolveList(contactsListDef, { model, mcpConnections: emptyConnections })).rejects.toThrow(
+      /requires MCP server access/,
+    );
   });
 
   it('uses mcpServerHint to select the correct connection', async () => {
-    const contactsConn = createMockMcpConnection(
-      ['list_contacts'],
-      {
-        content: [{
+    const contactsConn = createMockMcpConnection(['list_contacts'], {
+      content: [
+        {
           type: 'text',
           text: JSON.stringify([{ email: 'alice@example.com' }]),
-        }],
-      },
-    );
+        },
+      ],
+    });
     const otherConn = createMockMcpConnection(['other_tool']);
 
     const mcpConnections = new Map([
@@ -1230,11 +1258,7 @@ describe('MCP-Backed List Resolution', () => {
       ['contacts', contactsConn],
     ]);
 
-    const model = createToolUseModel(
-      'contacts__list_contacts',
-      {},
-      ['alice@example.com'],
-    );
+    const model = createToolUseModel('contacts__list_contacts', {}, ['alice@example.com']);
 
     const config: ListResolverConfig = { model, mcpConnections };
     const result = await resolveList(contactsListDef, config);
@@ -1243,26 +1267,19 @@ describe('MCP-Backed List Resolution', () => {
   });
 
   it('falls back to first connection when mcpServerHint does not match', async () => {
-    const fallbackConn = createMockMcpConnection(
-      ['query_data'],
-      {
-        content: [{
+    const fallbackConn = createMockMcpConnection(['query_data'], {
+      content: [
+        {
           type: 'text',
           text: JSON.stringify([{ email: 'fallback@example.com' }]),
-        }],
-      },
-    );
+        },
+      ],
+    });
 
-    const mcpConnections = new Map([
-      ['some-server', fallbackConn],
-    ]);
+    const mcpConnections = new Map([['some-server', fallbackConn]]);
 
     // contactsListDef has mcpServerHint: 'contacts' but we only have 'some-server'
-    const model = createToolUseModel(
-      'some-server__query_data',
-      {},
-      ['fallback@example.com'],
-    );
+    const model = createToolUseModel('some-server__query_data', {}, ['fallback@example.com']);
 
     const config: ListResolverConfig = { model, mcpConnections };
     const result = await resolveList(contactsListDef, config);
@@ -1275,11 +1292,11 @@ describe('MCP-Backed List Resolution', () => {
     const mcpConnections = new Map([['contacts', connection]]);
 
     // LLM returns some invalid emails mixed with valid ones
-    const model = createToolUseModel(
-      'contacts__list_contacts',
-      {},
-      ['alice@example.com', 'not-an-email', 'bob@company.org'],
-    );
+    const model = createToolUseModel('contacts__list_contacts', {}, [
+      'alice@example.com',
+      'not-an-email',
+      'bob@company.org',
+    ]);
 
     const config: ListResolverConfig = { model, mcpConnections };
     const result = await resolveList(contactsListDef, config);
@@ -1293,11 +1310,7 @@ describe('MCP-Backed List Resolution', () => {
     const connection = createMockMcpConnection(['list_contacts']);
     const mcpConnections = new Map([['contacts', connection]]);
 
-    const model = createToolUseModel(
-      'contacts__list_contacts',
-      {},
-      ['alice@example.com'],
-    );
+    const model = createToolUseModel('contacts__list_contacts', {}, ['alice@example.com']);
 
     const existing: ResolvedList = {
       values: ['old@example.com'],
@@ -1345,39 +1358,42 @@ describe('MCP-Backed resolveAllLists', () => {
         // Second+: MCP-backed list tool call then text
         if (callIndex === 1) {
           return {
-            content: [{
-              type: 'text' as const,
-              text: JSON.stringify({ values: ['AAPL', 'GOOG'] }),
-            }],
+            content: [
+              {
+                type: 'text' as const,
+                text: JSON.stringify({ values: ['AAPL', 'GOOG'] }),
+              },
+            ],
             ...MOCK_GENERATE_RESULT,
           };
         }
         if (callIndex === 2) {
           return {
             ...MOCK_GENERATE_RESULT,
-            content: [{
-              type: 'tool-call' as const,
-              toolCallId: 'call-1',
-              toolName: 'contacts__list_contacts',
-              args: '{}',
-            }],
+            content: [
+              {
+                type: 'tool-call' as const,
+                toolCallId: 'call-1',
+                toolName: 'contacts__list_contacts',
+                args: '{}',
+              },
+            ],
             finishReason: { unified: 'tool-calls' as const, raw: 'tool_use' },
           };
         }
         return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({ values: ['alice@example.com'] }),
-          }],
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify({ values: ['alice@example.com'] }),
+            },
+          ],
           ...MOCK_GENERATE_RESULT,
         };
       },
     });
 
-    const result = await resolveAllLists(
-      [stocksListDef, contactsListDef],
-      { model, mcpConnections },
-    );
+    const result = await resolveAllLists([stocksListDef, contactsListDef], { model, mcpConnections });
 
     expect(result.lists['tech-stock-tickers']).toBeDefined();
     expect(result.lists['tech-stock-tickers'].values).toContain('AAPL');
@@ -1399,13 +1415,7 @@ describe('resolveAllLists bypassCache', () => {
     expect(getCallCount()).toBe(1);
 
     // With bypassCache: true, should re-resolve despite matching hash
-    const result = await resolveAllLists(
-      [stocksListDef],
-      { model },
-      first,
-      undefined,
-      true,
-    );
+    const result = await resolveAllLists([stocksListDef], { model }, first, undefined, true);
 
     expect(getCallCount()).toBe(2);
     expect(result.lists['tech-stock-tickers'].values).toContain('value-2');
@@ -1419,11 +1429,7 @@ describe('resolveAllLists bypassCache', () => {
     expect(getCallCount()).toBe(1);
 
     // Default behavior (no bypassCache) should use cache
-    const result = await resolveAllLists(
-      [stocksListDef],
-      { model },
-      first,
-    );
+    const result = await resolveAllLists([stocksListDef], { model }, first);
 
     expect(getCallCount()).toBe(1); // No additional LLM call
     expect(result.lists['tech-stock-tickers'].values).toContain('AAPL');

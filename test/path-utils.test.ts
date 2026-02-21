@@ -189,18 +189,12 @@ describe('prepareToolArgs', () => {
   });
 
   it('normalizes tilde paths using resource role normalizer', () => {
-    const { argsForTransport } = prepareToolArgs(
-      { path: '~/Documents/notes.md', content: 'text' },
-      annotation,
-    );
+    const { argsForTransport } = prepareToolArgs({ path: '~/Documents/notes.md', content: 'text' }, annotation);
     expect(argsForTransport.path).toBe(`${home}/Documents/notes.md`);
   });
 
   it('resolves relative paths using resource role normalizer', () => {
-    const { argsForTransport } = prepareToolArgs(
-      { path: './relative/file.txt', content: 'text' },
-      annotation,
-    );
+    const { argsForTransport } = prepareToolArgs({ path: './relative/file.txt', content: 'text' }, annotation);
     expect(argsForTransport.path).toBe(resolve('./relative/file.txt'));
   });
 
@@ -212,10 +206,7 @@ describe('prepareToolArgs', () => {
       sideEffects: false,
       args: { paths: ['read-path'] },
     };
-    const { argsForTransport } = prepareToolArgs(
-      { paths: ['~/a', '/tmp/b'] },
-      arrayAnnotation,
-    );
+    const { argsForTransport } = prepareToolArgs({ paths: ['~/a', '/tmp/b'] }, arrayAnnotation);
     expect(argsForTransport.paths).toEqual([`${home}/a`, '/tmp/b']);
   });
 
@@ -268,10 +259,7 @@ describe('prepareToolArgs with allowedDirectory (sandbox-aware)', () => {
       readAnnotation,
       sandboxDir,
     );
-    expect(argsForPolicy.files).toEqual([
-      `${sandboxDir}/src/index.ts`,
-      `${sandboxDir}/README.md`,
-    ]);
+    expect(argsForPolicy.files).toEqual([`${sandboxDir}/src/index.ts`, `${sandboxDir}/README.md`]);
     expect(argsForPolicy.message).toBe('test');
   });
 
@@ -348,11 +336,7 @@ describe('prepareToolArgs with allowedDirectory (sandbox-aware)', () => {
   });
 
   it('falls back to heuristic when annotation is undefined (with allowedDirectory)', () => {
-    const { argsForTransport, argsForPolicy } = prepareToolArgs(
-      { path: '~/test/file.txt' },
-      undefined,
-      sandboxDir,
-    );
+    const { argsForTransport, argsForPolicy } = prepareToolArgs({ path: '~/test/file.txt' }, undefined, sandboxDir);
     // Heuristic path — allowedDirectory is ignored
     expect(argsForTransport.path).toBe(`${home}/test/file.txt`);
     expect(argsForPolicy.path).toBe(`${home}/test/file.txt`);

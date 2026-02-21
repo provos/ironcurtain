@@ -34,10 +34,15 @@ describe('ARGUMENT_ROLE_REGISTRY', () => {
 
   it('has entries for all known roles', () => {
     const expectedRoles: ArgumentRole[] = [
-      'read-path', 'write-path', 'delete-path',
-      'write-history', 'delete-history',
-      'fetch-url', 'git-remote-url',
-      'branch-name', 'commit-message',
+      'read-path',
+      'write-path',
+      'delete-path',
+      'write-history',
+      'delete-history',
+      'fetch-url',
+      'git-remote-url',
+      'branch-name',
+      'commit-message',
       'none',
     ];
     for (const role of expectedRoles) {

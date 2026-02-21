@@ -2,10 +2,7 @@
  * Builds the system prompt for the agent. Shared between
  * the legacy runAgent() function and the new AgentSession.
  */
-export function buildSystemPrompt(
-  toolCatalog: string,
-  allowedDirectory?: string,
-): string {
+export function buildSystemPrompt(toolCatalog: string, allowedDirectory?: string): string {
   const sandboxInfo = allowedDirectory
     ? `\nYour sandbox directory is: ${allowedDirectory}\nAll file operations within this directory are automatically allowed.\n`
     : '';

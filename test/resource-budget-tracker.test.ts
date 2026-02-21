@@ -1,8 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import {
-  ResourceBudgetTracker,
-  type BudgetExhaustedVerdict,
-} from '../src/session/resource-budget-tracker.js';
+import { ResourceBudgetTracker, type BudgetExhaustedVerdict } from '../src/session/resource-budget-tracker.js';
 import type { ResolvedResourceBudgetConfig } from '../src/config/user-config.js';
 import type { LanguageModelUsage } from 'ai';
 
@@ -13,7 +10,7 @@ function defaultConfig(overrides: Partial<ResolvedResourceBudgetConfig> = {}): R
     maxTotalTokens: 10_000,
     maxSteps: 10,
     maxSessionSeconds: 60,
-    maxEstimatedCostUsd: 1.00,
+    maxEstimatedCostUsd: 1.0,
     warnThresholdPercent: 80,
     ...overrides,
   };
@@ -63,7 +60,7 @@ describe('ResourceBudgetTracker', () => {
 
       const warnings = tracker.getActiveWarnings();
       expect(warnings.length).toBeGreaterThanOrEqual(1);
-      const tokenWarning = warnings.find(w => w.dimension === 'tokens');
+      const tokenWarning = warnings.find((w) => w.dimension === 'tokens');
       expect(tokenWarning).toBeDefined();
       expect(tokenWarning!.percentUsed).toBeGreaterThanOrEqual(80);
     });
@@ -103,7 +100,7 @@ describe('ResourceBudgetTracker', () => {
       }
 
       const warnings = tracker.getActiveWarnings();
-      const stepWarning = warnings.find(w => w.dimension === 'steps');
+      const stepWarning = warnings.find((w) => w.dimension === 'steps');
       expect(stepWarning).toBeDefined();
       expect(stepWarning!.percentUsed).toBe(80);
     });
@@ -119,7 +116,12 @@ describe('ResourceBudgetTracker', () => {
     });
 
     it('exhausts at time limit', () => {
-      const tracker = createTracker({ maxSessionSeconds: 10, maxTotalTokens: null, maxSteps: null, maxEstimatedCostUsd: null });
+      const tracker = createTracker({
+        maxSessionSeconds: 10,
+        maxTotalTokens: null,
+        maxSteps: null,
+        maxEstimatedCostUsd: null,
+      });
 
       // Initially not exhausted
       expect(tracker.isExhausted()).toBeNull();
@@ -157,12 +159,14 @@ describe('ResourceBudgetTracker', () => {
 
       // claude-sonnet: input=$3/M, output=$15/M
       // 1M input + 100K output = $3 + $1.5 = $4.50
-      tracker.recordStep(makeUsage({
-        inputTokens: 1_000_000,
-        outputTokens: 100_000,
-        totalTokens: 1_100_000,
-        inputTokenDetails: { noCacheTokens: 1_000_000, cacheReadTokens: 0, cacheWriteTokens: 0 },
-      }));
+      tracker.recordStep(
+        makeUsage({
+          inputTokens: 1_000_000,
+          outputTokens: 100_000,
+          totalTokens: 1_100_000,
+          inputTokenDetails: { noCacheTokens: 1_000_000, cacheReadTokens: 0, cacheWriteTokens: 0 },
+        }),
+      );
 
       const snapshot = tracker.getSnapshot();
       expect(snapshot.estimatedCostUsd).toBeCloseTo(4.5, 1);
@@ -175,26 +179,30 @@ describe('ResourceBudgetTracker', () => {
       // 500K cached + 500K non-cached input + 100K output
       // = (500K/1M * $3) + (500K/1M * $0.3) + (100K/1M * $15)
       // = $1.50 + $0.15 + $1.50 = $3.15
-      tracker.recordStep(makeUsage({
-        inputTokens: 1_000_000,
-        outputTokens: 100_000,
-        totalTokens: 1_100_000,
-        inputTokenDetails: { noCacheTokens: 500_000, cacheReadTokens: 500_000, cacheWriteTokens: 0 },
-      }));
+      tracker.recordStep(
+        makeUsage({
+          inputTokens: 1_000_000,
+          outputTokens: 100_000,
+          totalTokens: 1_100_000,
+          inputTokenDetails: { noCacheTokens: 500_000, cacheReadTokens: 500_000, cacheWriteTokens: 0 },
+        }),
+      );
 
       const snapshot = tracker.getSnapshot();
       expect(snapshot.estimatedCostUsd).toBeCloseTo(3.15, 1);
     });
 
     it('exhausts when cost exceeds budget', () => {
-      const tracker = createTracker({ maxEstimatedCostUsd: 1.00, maxTotalTokens: null, maxSteps: null });
+      const tracker = createTracker({ maxEstimatedCostUsd: 1.0, maxTotalTokens: null, maxSteps: null });
 
       // claude-sonnet: enough tokens to exceed $1
-      const v = tracker.recordStep(makeUsage({
-        inputTokens: 500_000,
-        outputTokens: 100_000,
-        totalTokens: 600_000,
-      }));
+      const v = tracker.recordStep(
+        makeUsage({
+          inputTokens: 500_000,
+          outputTokens: 100_000,
+          totalTokens: 600_000,
+        }),
+      );
 
       expect('exhausted' in v).toBe(true);
       expect((v as BudgetExhaustedVerdict).dimension).toBe('cost');
@@ -207,11 +215,13 @@ describe('ResourceBudgetTracker', () => {
       );
 
       // Fallback: input=$3/M, output=$15/M
-      tracker.recordStep(makeUsage({
-        inputTokens: 1_000_000,
-        outputTokens: 0,
-        totalTokens: 1_000_000,
-      }));
+      tracker.recordStep(
+        makeUsage({
+          inputTokens: 1_000_000,
+          outputTokens: 0,
+          totalTokens: 1_000_000,
+        }),
+      );
 
       const snapshot = tracker.getSnapshot();
       expect(snapshot.estimatedCostUsd).toBeCloseTo(3.0, 1);
@@ -229,11 +239,13 @@ describe('ResourceBudgetTracker', () => {
 
       // Should never exhaust with all limits disabled
       for (let i = 0; i < 100; i++) {
-        const v = tracker.recordStep(makeUsage({
-          inputTokens: 100_000,
-          outputTokens: 50_000,
-          totalTokens: 150_000,
-        }));
+        const v = tracker.recordStep(
+          makeUsage({
+            inputTokens: 100_000,
+            outputTokens: 50_000,
+            totalTokens: 150_000,
+          }),
+        );
         expect(v).toEqual({ ok: true });
       }
 
@@ -351,12 +363,12 @@ describe('ResourceBudgetTracker', () => {
       }
 
       const first = tracker.getActiveWarnings();
-      expect(first.filter(w => w.dimension === 'steps')).toHaveLength(1);
+      expect(first.filter((w) => w.dimension === 'steps')).toHaveLength(1);
 
       // Record another step, no new warning
       tracker.recordStep(makeUsage());
       const second = tracker.getActiveWarnings();
-      expect(second.filter(w => w.dimension === 'steps')).toHaveLength(0);
+      expect(second.filter((w) => w.dimension === 'steps')).toHaveLength(0);
     });
 
     it('getActiveWarnings drains pending warnings', () => {
@@ -377,7 +389,12 @@ describe('ResourceBudgetTracker', () => {
 
   describe('turn lifecycle', () => {
     it('startTurn resets per-turn counters', () => {
-      const tracker = createTracker({ maxTotalTokens: null, maxSteps: null, maxEstimatedCostUsd: null, maxSessionSeconds: null });
+      const tracker = createTracker({
+        maxTotalTokens: null,
+        maxSteps: null,
+        maxEstimatedCostUsd: null,
+        maxSessionSeconds: null,
+      });
 
       tracker.recordStep(makeUsage({ inputTokens: 500, outputTokens: 200, totalTokens: 700 }));
       expect(tracker.getSnapshot().totalTokens).toBe(700);
@@ -395,7 +412,12 @@ describe('ResourceBudgetTracker', () => {
     });
 
     it('cumulative snapshot accumulates across turns', () => {
-      const tracker = createTracker({ maxTotalTokens: null, maxSteps: null, maxEstimatedCostUsd: null, maxSessionSeconds: null });
+      const tracker = createTracker({
+        maxTotalTokens: null,
+        maxSteps: null,
+        maxEstimatedCostUsd: null,
+        maxSessionSeconds: null,
+      });
 
       tracker.recordStep(makeUsage({ inputTokens: 100, outputTokens: 50, totalTokens: 150 }));
       tracker.recordStep(makeUsage({ inputTokens: 200, outputTokens: 80, totalTokens: 280 }));
@@ -418,7 +440,12 @@ describe('ResourceBudgetTracker', () => {
     });
 
     it('exhausted verdict resets between turns', () => {
-      const tracker = createTracker({ maxSteps: 2, maxTotalTokens: null, maxEstimatedCostUsd: null, maxSessionSeconds: null });
+      const tracker = createTracker({
+        maxSteps: 2,
+        maxTotalTokens: null,
+        maxEstimatedCostUsd: null,
+        maxSessionSeconds: null,
+      });
 
       tracker.recordStep(makeUsage());
       tracker.recordStep(makeUsage());
@@ -435,19 +462,24 @@ describe('ResourceBudgetTracker', () => {
     });
 
     it('warnings fire fresh each turn', () => {
-      const tracker = createTracker({ maxSteps: 10, maxTotalTokens: null, maxEstimatedCostUsd: null, maxSessionSeconds: null });
+      const tracker = createTracker({
+        maxSteps: 10,
+        maxTotalTokens: null,
+        maxEstimatedCostUsd: null,
+        maxSessionSeconds: null,
+      });
 
       // Reach 80% in turn 1
       for (let i = 0; i < 8; i++) tracker.recordStep(makeUsage());
       const turn1Warnings = tracker.getActiveWarnings();
-      expect(turn1Warnings.find(w => w.dimension === 'steps')).toBeDefined();
+      expect(turn1Warnings.find((w) => w.dimension === 'steps')).toBeDefined();
 
       // New turn: warnings should fire again
       tracker.endTurn();
       tracker.startTurn();
       for (let i = 0; i < 8; i++) tracker.recordStep(makeUsage());
       const turn2Warnings = tracker.getActiveWarnings();
-      expect(turn2Warnings.find(w => w.dimension === 'steps')).toBeDefined();
+      expect(turn2Warnings.find((w) => w.dimension === 'steps')).toBeDefined();
     });
 
     it('endTurn without startTurn is a no-op', () => {
@@ -460,7 +492,12 @@ describe('ResourceBudgetTracker', () => {
     });
 
     it('startTurn defensively ends active turn', () => {
-      const tracker = createTracker({ maxTotalTokens: null, maxSteps: null, maxEstimatedCostUsd: null, maxSessionSeconds: null });
+      const tracker = createTracker({
+        maxTotalTokens: null,
+        maxSteps: null,
+        maxEstimatedCostUsd: null,
+        maxSessionSeconds: null,
+      });
 
       tracker.recordStep(makeUsage({ inputTokens: 100, outputTokens: 50, totalTokens: 150 }));
 
@@ -474,7 +511,12 @@ describe('ResourceBudgetTracker', () => {
     });
 
     it('getSnapshot between turns shows zero per-turn and correct cumulative', () => {
-      const tracker = createTracker({ maxTotalTokens: null, maxSteps: null, maxEstimatedCostUsd: null, maxSessionSeconds: null });
+      const tracker = createTracker({
+        maxTotalTokens: null,
+        maxSteps: null,
+        maxEstimatedCostUsd: null,
+        maxSessionSeconds: null,
+      });
 
       tracker.recordStep(makeUsage({ inputTokens: 500, outputTokens: 200, totalTokens: 700 }));
       tracker.endTurn();
@@ -558,10 +600,7 @@ describe('ResourceBudgetTracker', () => {
     });
 
     it('getRemainingWallClockMs returns full budget when no turn active', () => {
-      const tracker = new ResourceBudgetTracker(
-        defaultConfig({ maxSessionSeconds: 30 }),
-        'claude-sonnet',
-      );
+      const tracker = new ResourceBudgetTracker(defaultConfig({ maxSessionSeconds: 30 }), 'claude-sonnet');
 
       // No turn active: elapsed is 0
       expect(tracker.getRemainingWallClockMs()).toBe(30_000);
@@ -577,22 +616,26 @@ describe('ResourceBudgetTracker', () => {
 
       // Turn 1
       tracker.startTurn();
-      tracker.recordStep(makeUsage({
-        inputTokens: 1_000_000,
-        outputTokens: 100_000,
-        totalTokens: 1_100_000,
-        inputTokenDetails: { noCacheTokens: 1_000_000, cacheReadTokens: 0, cacheWriteTokens: 0 },
-      }));
+      tracker.recordStep(
+        makeUsage({
+          inputTokens: 1_000_000,
+          outputTokens: 100_000,
+          totalTokens: 1_100_000,
+          inputTokenDetails: { noCacheTokens: 1_000_000, cacheReadTokens: 0, cacheWriteTokens: 0 },
+        }),
+      );
       tracker.endTurn();
 
       // Turn 2
       tracker.startTurn();
-      tracker.recordStep(makeUsage({
-        inputTokens: 1_000_000,
-        outputTokens: 100_000,
-        totalTokens: 1_100_000,
-        inputTokenDetails: { noCacheTokens: 1_000_000, cacheReadTokens: 0, cacheWriteTokens: 0 },
-      }));
+      tracker.recordStep(
+        makeUsage({
+          inputTokens: 1_000_000,
+          outputTokens: 100_000,
+          totalTokens: 1_100_000,
+          inputTokenDetails: { noCacheTokens: 1_000_000, cacheReadTokens: 0, cacheWriteTokens: 0 },
+        }),
+      );
 
       const snapshot = tracker.getSnapshot();
       // Per-turn cost: $4.50 (same as single-turn test)

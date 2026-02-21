@@ -5,7 +5,12 @@ import { PolicyEngine, domainMatchesAllowlist, isIpAddress } from '../src/truste
 import { extractServerDomainAllowlists } from '../src/config/index.js';
 import type { MCPServerConfig } from '../src/config/types.js';
 import type { ToolCallRequest } from '../src/types/mcp.js';
-import { testCompiledPolicy, testToolAnnotations, TEST_SANDBOX_DIR, TEST_PROTECTED_PATHS } from './fixtures/test-policy.js';
+import {
+  testCompiledPolicy,
+  testToolAnnotations,
+  TEST_SANDBOX_DIR,
+  TEST_PROTECTED_PATHS,
+} from './fixtures/test-policy.js';
 
 const protectedPaths = TEST_PROTECTED_PATHS;
 const SANDBOX_DIR = TEST_SANDBOX_DIR;
@@ -32,46 +37,56 @@ describe('PolicyEngine', () => {
     // precise protection of real system files.
 
     it('denies access to the real constitution file', () => {
-      const result = engine.evaluate(makeRequest({
-        toolName: 'read_file',
-        arguments: { path: protectedPaths[0] },
-      }));
+      const result = engine.evaluate(
+        makeRequest({
+          toolName: 'read_file',
+          arguments: { path: protectedPaths[0] },
+        }),
+      );
       expect(result.decision).toBe('deny');
       expect(result.rule).toBe('structural-protected-path');
     });
 
     it('denies access to generated policy directory', () => {
-      const result = engine.evaluate(makeRequest({
-        toolName: 'read_file',
-        arguments: { path: protectedPaths[1] + '/compiled-policy.json' },
-      }));
+      const result = engine.evaluate(
+        makeRequest({
+          toolName: 'read_file',
+          arguments: { path: protectedPaths[1] + '/compiled-policy.json' },
+        }),
+      );
       expect(result.decision).toBe('deny');
       expect(result.rule).toBe('structural-protected-path');
     });
 
     it('denies write to audit log', () => {
-      const result = engine.evaluate(makeRequest({
-        toolName: 'write_file',
-        arguments: { path: protectedPaths[3] },
-      }));
+      const result = engine.evaluate(
+        makeRequest({
+          toolName: 'write_file',
+          arguments: { path: protectedPaths[3] },
+        }),
+      );
       expect(result.decision).toBe('deny');
       expect(result.rule).toBe('structural-protected-path');
     });
 
     it('denies access to mcp-servers.json', () => {
-      const result = engine.evaluate(makeRequest({
-        toolName: 'read_file',
-        arguments: { path: protectedPaths[2] },
-      }));
+      const result = engine.evaluate(
+        makeRequest({
+          toolName: 'read_file',
+          arguments: { path: protectedPaths[2] },
+        }),
+      );
       expect(result.decision).toBe('deny');
       expect(result.rule).toBe('structural-protected-path');
     });
 
     it('denies unknown tools', () => {
-      const result = engine.evaluate(makeRequest({
-        toolName: 'execute_command',
-        arguments: { command: 'rm -rf /' },
-      }));
+      const result = engine.evaluate(
+        makeRequest({
+          toolName: 'execute_command',
+          arguments: { command: 'rm -rf /' },
+        }),
+      );
       expect(result.decision).toBe('deny');
       expect(result.rule).toBe('structural-unknown-tool');
     });
@@ -83,21 +98,18 @@ describe('PolicyEngine', () => {
       // Since the heuristic now recognizes ~ paths, they will be resolved
       // and checked against protected paths.
       const homeDir = homedir();
-      const engineWithHome = new PolicyEngine(
-        testCompiledPolicy,
-        testToolAnnotations,
-        [homeDir],
-        SANDBOX_DIR,
-      );
+      const engineWithHome = new PolicyEngine(testCompiledPolicy, testToolAnnotations, [homeDir], SANDBOX_DIR);
       // A tilde path targeting the home directory should be caught.
       // path.resolve('~/') does NOT expand tilde -- it produces <cwd>/~
       // But the heuristic will extract it, and resolve will produce cwd/~.
       // The real fix is normalizeToolArgPaths at the proxy layer.
       // This test verifies the heuristic at least SEES tilde paths.
-      const result = engineWithHome.evaluate(makeRequest({
-        toolName: 'read_file',
-        arguments: { path: '~/.ssh/id_rsa' },
-      }));
+      const result = engineWithHome.evaluate(
+        makeRequest({
+          toolName: 'read_file',
+          arguments: { path: '~/.ssh/id_rsa' },
+        }),
+      );
       // The heuristic extracts '~/.ssh/id_rsa' -- resolve produces <cwd>/~/.ssh/id_rsa
       // which won't match homeDir. But this still exercises the code path.
       // The real protection comes from normalizeToolArgPaths in the proxy/TrustedProcess.
@@ -106,17 +118,14 @@ describe('PolicyEngine', () => {
 
     it('with pre-normalized tilde path, denies access to protected home directory', () => {
       const homeDir = homedir();
-      const engineWithHome = new PolicyEngine(
-        testCompiledPolicy,
-        testToolAnnotations,
-        [homeDir],
-        SANDBOX_DIR,
-      );
+      const engineWithHome = new PolicyEngine(testCompiledPolicy, testToolAnnotations, [homeDir], SANDBOX_DIR);
       // Simulate what happens AFTER normalizeToolArgPaths has expanded the tilde
-      const result = engineWithHome.evaluate(makeRequest({
-        toolName: 'read_file',
-        arguments: { path: `${homeDir}/.ssh/id_rsa` },
-      }));
+      const result = engineWithHome.evaluate(
+        makeRequest({
+          toolName: 'read_file',
+          arguments: { path: `${homeDir}/.ssh/id_rsa` },
+        }),
+      );
       expect(result.decision).toBe('deny');
       expect(result.rule).toBe('structural-protected-path');
     });
@@ -124,28 +133,34 @@ describe('PolicyEngine', () => {
 
   describe('delete operations', () => {
     it('allows delete_file in sandbox (structural sandbox invariant fires before unknown-tool check)', () => {
-      const result = engine.evaluate(makeRequest({
-        toolName: 'delete_file',
-        arguments: { path: '/tmp/ironcurtain-sandbox/test.txt' },
-      }));
+      const result = engine.evaluate(
+        makeRequest({
+          toolName: 'delete_file',
+          arguments: { path: '/tmp/ironcurtain-sandbox/test.txt' },
+        }),
+      );
       expect(result.decision).toBe('allow');
       expect(result.rule).toBe('structural-sandbox-allow');
     });
 
     it('allows delete_directory in sandbox (structural sandbox invariant fires before unknown-tool check)', () => {
-      const result = engine.evaluate(makeRequest({
-        toolName: 'delete_directory',
-        arguments: { path: '/tmp/ironcurtain-sandbox/subdir' },
-      }));
+      const result = engine.evaluate(
+        makeRequest({
+          toolName: 'delete_directory',
+          arguments: { path: '/tmp/ironcurtain-sandbox/subdir' },
+        }),
+      );
       expect(result.decision).toBe('allow');
       expect(result.rule).toBe('structural-sandbox-allow');
     });
 
     it('denies delete_file outside sandbox (unknown tool)', () => {
-      const result = engine.evaluate(makeRequest({
-        toolName: 'delete_file',
-        arguments: { path: '/etc/important.txt' },
-      }));
+      const result = engine.evaluate(
+        makeRequest({
+          toolName: 'delete_file',
+          arguments: { path: '/etc/important.txt' },
+        }),
+      );
       expect(result.decision).toBe('deny');
       expect(result.rule).toBe('structural-unknown-tool');
     });
@@ -153,55 +168,67 @@ describe('PolicyEngine', () => {
 
   describe('read operations', () => {
     it('allows read_file within allowed directory', () => {
-      const result = engine.evaluate(makeRequest({
-        toolName: 'read_file',
-        arguments: { path: '/tmp/ironcurtain-sandbox/test.txt' },
-      }));
+      const result = engine.evaluate(
+        makeRequest({
+          toolName: 'read_file',
+          arguments: { path: '/tmp/ironcurtain-sandbox/test.txt' },
+        }),
+      );
       expect(result.decision).toBe('allow');
       expect(result.rule).toBe('structural-sandbox-allow');
     });
 
     it('allows list_directory within allowed directory', () => {
-      const result = engine.evaluate(makeRequest({
-        toolName: 'list_directory',
-        arguments: { path: '/tmp/ironcurtain-sandbox' },
-      }));
+      const result = engine.evaluate(
+        makeRequest({
+          toolName: 'list_directory',
+          arguments: { path: '/tmp/ironcurtain-sandbox' },
+        }),
+      );
       expect(result.decision).toBe('allow');
       expect(result.rule).toBe('structural-sandbox-allow');
     });
 
     it('allows search_files within allowed directory', () => {
-      const result = engine.evaluate(makeRequest({
-        toolName: 'search_files',
-        arguments: { path: '/tmp/ironcurtain-sandbox', pattern: '*.txt' },
-      }));
+      const result = engine.evaluate(
+        makeRequest({
+          toolName: 'search_files',
+          arguments: { path: '/tmp/ironcurtain-sandbox', pattern: '*.txt' },
+        }),
+      );
       expect(result.decision).toBe('allow');
       expect(result.rule).toBe('structural-sandbox-allow');
     });
 
     it('allows list_allowed_directories (side-effect-free tool)', () => {
-      const result = engine.evaluate(makeRequest({
-        toolName: 'list_allowed_directories',
-        arguments: {},
-      }));
+      const result = engine.evaluate(
+        makeRequest({
+          toolName: 'list_allowed_directories',
+          arguments: {},
+        }),
+      );
       expect(result.decision).toBe('allow');
       expect(result.rule).toBe('allow-list-allowed-directories');
     });
 
     it('escalates read_file outside allowed directory', () => {
-      const result = engine.evaluate(makeRequest({
-        toolName: 'read_file',
-        arguments: { path: '/etc/passwd' },
-      }));
+      const result = engine.evaluate(
+        makeRequest({
+          toolName: 'read_file',
+          arguments: { path: '/etc/passwd' },
+        }),
+      );
       expect(result.decision).toBe('escalate');
       expect(result.rule).toBe('escalate-read-outside-permitted-areas');
     });
 
     it('escalates path traversal attempts', () => {
-      const result = engine.evaluate(makeRequest({
-        toolName: 'read_file',
-        arguments: { path: '/tmp/ironcurtain-sandbox/../../../etc/passwd' },
-      }));
+      const result = engine.evaluate(
+        makeRequest({
+          toolName: 'read_file',
+          arguments: { path: '/tmp/ironcurtain-sandbox/../../../etc/passwd' },
+        }),
+      );
       expect(result.decision).toBe('escalate');
       expect(result.rule).toBe('escalate-read-outside-permitted-areas');
     });
@@ -209,28 +236,34 @@ describe('PolicyEngine', () => {
 
   describe('write operations', () => {
     it('allows write_file within allowed directory', () => {
-      const result = engine.evaluate(makeRequest({
-        toolName: 'write_file',
-        arguments: { path: '/tmp/ironcurtain-sandbox/output.txt', content: 'hello' },
-      }));
+      const result = engine.evaluate(
+        makeRequest({
+          toolName: 'write_file',
+          arguments: { path: '/tmp/ironcurtain-sandbox/output.txt', content: 'hello' },
+        }),
+      );
       expect(result.decision).toBe('allow');
       expect(result.rule).toBe('structural-sandbox-allow');
     });
 
     it('allows create_directory within allowed directory', () => {
-      const result = engine.evaluate(makeRequest({
-        toolName: 'create_directory',
-        arguments: { path: '/tmp/ironcurtain-sandbox/newdir' },
-      }));
+      const result = engine.evaluate(
+        makeRequest({
+          toolName: 'create_directory',
+          arguments: { path: '/tmp/ironcurtain-sandbox/newdir' },
+        }),
+      );
       expect(result.decision).toBe('allow');
       expect(result.rule).toBe('structural-sandbox-allow');
     });
 
     it('escalates write_file outside allowed directory', () => {
-      const result = engine.evaluate(makeRequest({
-        toolName: 'write_file',
-        arguments: { path: '/etc/test.txt', content: 'hello' },
-      }));
+      const result = engine.evaluate(
+        makeRequest({
+          toolName: 'write_file',
+          arguments: { path: '/etc/test.txt', content: 'hello' },
+        }),
+      );
       expect(result.decision).toBe('escalate');
       expect(result.rule).toBe('escalate-write-outside-permitted-areas');
     });
@@ -238,25 +271,29 @@ describe('PolicyEngine', () => {
 
   describe('move operations', () => {
     it('allows move within sandbox (structural sandbox invariant fires first)', () => {
-      const result = engine.evaluate(makeRequest({
-        toolName: 'move_file',
-        arguments: {
-          source: '/tmp/ironcurtain-sandbox/a.txt',
-          destination: '/tmp/ironcurtain-sandbox/b.txt',
-        },
-      }));
+      const result = engine.evaluate(
+        makeRequest({
+          toolName: 'move_file',
+          arguments: {
+            source: '/tmp/ironcurtain-sandbox/a.txt',
+            destination: '/tmp/ironcurtain-sandbox/b.txt',
+          },
+        }),
+      );
       expect(result.decision).toBe('allow');
       expect(result.rule).toBe('structural-sandbox-allow');
     });
 
     it('escalates move from sandbox to external (source roles sandbox-resolved)', () => {
-      const result = engine.evaluate(makeRequest({
-        toolName: 'move_file',
-        arguments: {
-          source: '/tmp/ironcurtain-sandbox/a.txt',
-          destination: '/tmp/outside/b.txt',
-        },
-      }));
+      const result = engine.evaluate(
+        makeRequest({
+          toolName: 'move_file',
+          arguments: {
+            source: '/tmp/ironcurtain-sandbox/a.txt',
+            destination: '/tmp/outside/b.txt',
+          },
+        }),
+      );
       // read-path and delete-path on source are sandbox-resolved.
       // Only write-path on destination is evaluated via compiled rules → escalate.
       expect(result.decision).toBe('escalate');
@@ -264,13 +301,15 @@ describe('PolicyEngine', () => {
     });
 
     it('denies move from external to sandbox (delete-path on source denied)', () => {
-      const result = engine.evaluate(makeRequest({
-        toolName: 'move_file',
-        arguments: {
-          source: '/etc/important.txt',
-          destination: '/tmp/ironcurtain-sandbox/important.txt',
-        },
-      }));
+      const result = engine.evaluate(
+        makeRequest({
+          toolName: 'move_file',
+          arguments: {
+            source: '/etc/important.txt',
+            destination: '/tmp/ironcurtain-sandbox/important.txt',
+          },
+        }),
+      );
       // write-path (destination in sandbox) is sandbox-resolved and skipped.
       // read-path and delete-path (source outside sandbox) go to compiled rules.
       // delete-path hits deny-delete-outside-permitted-areas.
@@ -279,13 +318,15 @@ describe('PolicyEngine', () => {
     });
 
     it('denies move from external to external', () => {
-      const result = engine.evaluate(makeRequest({
-        toolName: 'move_file',
-        arguments: {
-          source: '/etc/a.txt',
-          destination: '/tmp/outside/b.txt',
-        },
-      }));
+      const result = engine.evaluate(
+        makeRequest({
+          toolName: 'move_file',
+          arguments: {
+            source: '/etc/a.txt',
+            destination: '/tmp/outside/b.txt',
+          },
+        }),
+      );
       expect(result.decision).toBe('deny');
       expect(result.rule).toBe('deny-delete-outside-permitted-areas');
     });
@@ -293,35 +334,41 @@ describe('PolicyEngine', () => {
 
   describe('per-role evaluation (multi-role tools)', () => {
     it('allows edit_file inside sandbox (structural sandbox invariant)', () => {
-      const result = engine.evaluate(makeRequest({
-        toolName: 'edit_file',
-        arguments: {
-          path: '/tmp/ironcurtain-sandbox/test.txt',
-          edits: [{ oldText: 'a', newText: 'b' }],
-          dryRun: false,
-        },
-      }));
+      const result = engine.evaluate(
+        makeRequest({
+          toolName: 'edit_file',
+          arguments: {
+            path: '/tmp/ironcurtain-sandbox/test.txt',
+            edits: [{ oldText: 'a', newText: 'b' }],
+            dryRun: false,
+          },
+        }),
+      );
       expect(result.decision).toBe('allow');
       expect(result.rule).toBe('structural-sandbox-allow');
     });
 
     it('escalates edit_file outside sandbox (both read-path and write-path escalated)', () => {
-      const result = engine.evaluate(makeRequest({
-        toolName: 'edit_file',
-        arguments: {
-          path: '/etc/test.txt',
-          edits: [{ oldText: 'a', newText: 'b' }],
-          dryRun: false,
-        },
-      }));
+      const result = engine.evaluate(
+        makeRequest({
+          toolName: 'edit_file',
+          arguments: {
+            path: '/etc/test.txt',
+            edits: [{ oldText: 'a', newText: 'b' }],
+            dryRun: false,
+          },
+        }),
+      );
       expect(result.decision).toBe('escalate');
     });
 
     it('allows list_allowed_directories with no roles (no role iteration needed)', () => {
-      const result = engine.evaluate(makeRequest({
-        toolName: 'list_allowed_directories',
-        arguments: {},
-      }));
+      const result = engine.evaluate(
+        makeRequest({
+          toolName: 'list_allowed_directories',
+          arguments: {},
+        }),
+      );
       expect(result.decision).toBe('allow');
       expect(result.rule).toBe('allow-list-allowed-directories');
     });
@@ -329,10 +376,12 @@ describe('PolicyEngine', () => {
 
   describe('structural sandbox invariant', () => {
     it('does not fire for tools with no path arguments', () => {
-      const result = engine.evaluate(makeRequest({
-        toolName: 'list_allowed_directories',
-        arguments: {},
-      }));
+      const result = engine.evaluate(
+        makeRequest({
+          toolName: 'list_allowed_directories',
+          arguments: {},
+        }),
+      );
       expect(result.decision).toBe('allow');
       expect(result.rule).toBe('allow-list-allowed-directories');
       expect(result.rule).not.toBe('structural-sandbox-allow');
@@ -347,56 +396,50 @@ describe('PolicyEngine', () => {
         [sandboxProtectedPath],
         SANDBOX_DIR,
       );
-      const result = engineWithProtected.evaluate(makeRequest({
-        toolName: 'read_file',
-        arguments: { path: '/tmp/ironcurtain-sandbox/secret.txt' },
-      }));
+      const result = engineWithProtected.evaluate(
+        makeRequest({
+          toolName: 'read_file',
+          arguments: { path: '/tmp/ironcurtain-sandbox/secret.txt' },
+        }),
+      );
       expect(result.decision).toBe('deny');
       expect(result.rule).toBe('structural-protected-path');
     });
 
     it('works with dynamic sandbox path', () => {
       const dynamicSandbox = '/home/user/.ironcurtain/sessions/abc123/sandbox';
-      const dynamicEngine = new PolicyEngine(
-        testCompiledPolicy,
-        testToolAnnotations,
-        [],
-        dynamicSandbox,
+      const dynamicEngine = new PolicyEngine(testCompiledPolicy, testToolAnnotations, [], dynamicSandbox);
+      const result = dynamicEngine.evaluate(
+        makeRequest({
+          toolName: 'read_file',
+          arguments: { path: '/home/user/.ironcurtain/sessions/abc123/sandbox/test.txt' },
+        }),
       );
-      const result = dynamicEngine.evaluate(makeRequest({
-        toolName: 'read_file',
-        arguments: { path: '/home/user/.ironcurtain/sessions/abc123/sandbox/test.txt' },
-      }));
       expect(result.decision).toBe('allow');
       expect(result.rule).toBe('structural-sandbox-allow');
     });
 
     it('blocks path traversal out of dynamic sandbox', () => {
       const dynamicSandbox = '/home/user/.ironcurtain/sessions/abc123/sandbox';
-      const dynamicEngine = new PolicyEngine(
-        testCompiledPolicy,
-        testToolAnnotations,
-        [],
-        dynamicSandbox,
+      const dynamicEngine = new PolicyEngine(testCompiledPolicy, testToolAnnotations, [], dynamicSandbox);
+      const result = dynamicEngine.evaluate(
+        makeRequest({
+          toolName: 'read_file',
+          arguments: { path: '/home/user/.ironcurtain/sessions/abc123/sandbox/../../etc/passwd' },
+        }),
       );
-      const result = dynamicEngine.evaluate(makeRequest({
-        toolName: 'read_file',
-        arguments: { path: '/home/user/.ironcurtain/sessions/abc123/sandbox/../../etc/passwd' },
-      }));
       expect(result.decision).not.toBe('allow');
       expect(result.rule).not.toBe('structural-sandbox-allow');
     });
 
     it('engine without allowedDirectory skips sandbox check', () => {
-      const noSandboxEngine = new PolicyEngine(
-        testCompiledPolicy,
-        testToolAnnotations,
-        [],
+      const noSandboxEngine = new PolicyEngine(testCompiledPolicy, testToolAnnotations, []);
+      const result = noSandboxEngine.evaluate(
+        makeRequest({
+          toolName: 'read_file',
+          arguments: { path: '/tmp/ironcurtain-sandbox/test.txt' },
+        }),
       );
-      const result = noSandboxEngine.evaluate(makeRequest({
-        toolName: 'read_file',
-        arguments: { path: '/tmp/ironcurtain-sandbox/test.txt' },
-      }));
       expect(result.rule).not.toBe('structural-sandbox-allow');
     });
   });
@@ -440,32 +483,31 @@ describe('PolicyEngine', () => {
         ],
       };
 
-      const moveEngine = new PolicyEngine(
-        permissivePolicy,
-        testToolAnnotations,
-        [],
-        SANDBOX_DIR,
-      );
+      const moveEngine = new PolicyEngine(permissivePolicy, testToolAnnotations, [], SANDBOX_DIR);
 
-      const result = moveEngine.evaluate(makeRequest({
-        toolName: 'move_file',
-        arguments: {
-          source: '/home/user/Downloads/file.zip',
-          destination: '/tmp/ironcurtain-sandbox/file.zip',
-        },
-      }));
+      const result = moveEngine.evaluate(
+        makeRequest({
+          toolName: 'move_file',
+          arguments: {
+            source: '/home/user/Downloads/file.zip',
+            destination: '/tmp/ironcurtain-sandbox/file.zip',
+          },
+        }),
+      );
       expect(result.decision).toBe('allow');
     });
 
     it('does not sandbox-resolve roles when array has paths both inside and outside', () => {
       // read-path extracts both paths; /etc/b.txt is outside sandbox,
       // so the role is NOT sandbox-resolved and falls to compiled rules.
-      const result = engine.evaluate(makeRequest({
-        toolName: 'read_multiple_files',
-        arguments: {
-          paths: ['/tmp/ironcurtain-sandbox/a.txt', '/etc/b.txt'],
-        },
-      }));
+      const result = engine.evaluate(
+        makeRequest({
+          toolName: 'read_multiple_files',
+          arguments: {
+            paths: ['/tmp/ironcurtain-sandbox/a.txt', '/etc/b.txt'],
+          },
+        }),
+      );
       expect(result.decision).toBe('escalate');
       expect(result.rule).toBe('escalate-read-outside-permitted-areas');
     });
@@ -473,22 +515,26 @@ describe('PolicyEngine', () => {
 
   describe('per-element path evaluation', () => {
     it('allows read_multiple_files with paths spanning two permitted directories', () => {
-      const result = engine.evaluate(makeRequest({
-        toolName: 'read_multiple_files',
-        arguments: {
-          paths: ['/tmp/permitted-a/file1.txt', '/tmp/permitted-b/file2.txt'],
-        },
-      }));
+      const result = engine.evaluate(
+        makeRequest({
+          toolName: 'read_multiple_files',
+          arguments: {
+            paths: ['/tmp/permitted-a/file1.txt', '/tmp/permitted-b/file2.txt'],
+          },
+        }),
+      );
       expect(result.decision).toBe('allow');
     });
 
     it('escalates when paths span permitted and non-permitted directories', () => {
-      const result = engine.evaluate(makeRequest({
-        toolName: 'read_multiple_files',
-        arguments: {
-          paths: ['/tmp/permitted-a/file1.txt', '/etc/some-file.txt'],
-        },
-      }));
+      const result = engine.evaluate(
+        makeRequest({
+          toolName: 'read_multiple_files',
+          arguments: {
+            paths: ['/tmp/permitted-a/file1.txt', '/etc/some-file.txt'],
+          },
+        }),
+      );
       // /tmp/permitted-a/file1.txt is allowed, /etc/some-file.txt hits escalate rule
       // Most restrictive wins: escalate > allow
       expect(result.decision).toBe('escalate');
@@ -496,12 +542,14 @@ describe('PolicyEngine', () => {
     });
 
     it('allows all paths in one permitted directory (regression)', () => {
-      const result = engine.evaluate(makeRequest({
-        toolName: 'read_multiple_files',
-        arguments: {
-          paths: ['/tmp/permitted-a/file1.txt', '/tmp/permitted-a/file2.txt'],
-        },
-      }));
+      const result = engine.evaluate(
+        makeRequest({
+          toolName: 'read_multiple_files',
+          arguments: {
+            paths: ['/tmp/permitted-a/file1.txt', '/tmp/permitted-a/file2.txt'],
+          },
+        }),
+      );
       expect(result.decision).toBe('allow');
       expect(result.rule).toBe('allow-reads-within-dir-a');
     });
@@ -524,12 +572,14 @@ describe('PolicyEngine', () => {
         ],
       };
       const restrictiveEngine = new PolicyEngine(restrictivePolicy, testToolAnnotations, []);
-      const result = restrictiveEngine.evaluate(makeRequest({
-        toolName: 'read_multiple_files',
-        arguments: {
-          paths: ['/tmp/permitted-a/file1.txt', '/tmp/nowhere/file2.txt'],
-        },
-      }));
+      const result = restrictiveEngine.evaluate(
+        makeRequest({
+          toolName: 'read_multiple_files',
+          arguments: {
+            paths: ['/tmp/permitted-a/file1.txt', '/tmp/nowhere/file2.txt'],
+          },
+        }),
+      );
       // /tmp/permitted-a/file1.txt -> allow, /tmp/nowhere/file2.txt -> default-deny
       // Most restrictive wins: deny > allow
       expect(result.decision).toBe('deny');
@@ -599,19 +649,23 @@ describe('PolicyEngine', () => {
     const asymmetricEngine = new PolicyEngine(asymmetricPolicy, minimalAnnotations, []);
 
     it('denies edit_file when write-path is denied (most restrictive wins)', () => {
-      const result = asymmetricEngine.evaluate(makeRequest({
-        toolName: 'edit_file',
-        arguments: { path: '/etc/test.txt', edits: [] },
-      }));
+      const result = asymmetricEngine.evaluate(
+        makeRequest({
+          toolName: 'edit_file',
+          arguments: { path: '/etc/test.txt', edits: [] },
+        }),
+      );
       expect(result.decision).toBe('deny');
       expect(result.rule).toBe('deny-writes-outside-sandbox');
     });
 
     it('allows read_file with only read-path role (single role, no restriction)', () => {
-      const result = asymmetricEngine.evaluate(makeRequest({
-        toolName: 'read_file',
-        arguments: { path: '/etc/test.txt' },
-      }));
+      const result = asymmetricEngine.evaluate(
+        makeRequest({
+          toolName: 'read_file',
+          arguments: { path: '/etc/test.txt' },
+        }),
+      );
       expect(result.decision).toBe('allow');
       expect(result.rule).toBe('allow-all-reads');
     });
@@ -816,11 +870,13 @@ describe('PolicyEngine', () => {
       const allowlists = new Map([['git', ['github.com', '*.github.com']]]);
       const gitEngine = new PolicyEngine(gitPolicy, gitAnnotations, [], SANDBOX_DIR, allowlists);
 
-      const result = gitEngine.evaluate(makeRequest({
-        serverName: 'git',
-        toolName: 'git_clone',
-        arguments: { url: 'https://evil.com/repo.git', path: '/tmp/ironcurtain-sandbox/repo' },
-      }));
+      const result = gitEngine.evaluate(
+        makeRequest({
+          serverName: 'git',
+          toolName: 'git_clone',
+          arguments: { url: 'https://evil.com/repo.git', path: '/tmp/ironcurtain-sandbox/repo' },
+        }),
+      );
       expect(result.decision).toBe('escalate');
       expect(result.rule).toBe('structural-domain-escalate');
     });
@@ -829,11 +885,13 @@ describe('PolicyEngine', () => {
       const allowlists = new Map([['git', ['github.com', '*.github.com']]]);
       const gitEngine = new PolicyEngine(gitPolicy, gitAnnotations, [], SANDBOX_DIR, allowlists);
 
-      const result = gitEngine.evaluate(makeRequest({
-        serverName: 'git',
-        toolName: 'git_clone',
-        arguments: { url: 'https://github.com/user/repo.git', path: '/tmp/ironcurtain-sandbox/repo' },
-      }));
+      const result = gitEngine.evaluate(
+        makeRequest({
+          serverName: 'git',
+          toolName: 'git_clone',
+          arguments: { url: 'https://github.com/user/repo.git', path: '/tmp/ironcurtain-sandbox/repo' },
+        }),
+      );
       // Domain passes (structural domain check), path is in sandbox (structural sandbox allow).
       // All resource roles are structurally resolved → allow.
       expect(result.decision).toBe('allow');
@@ -844,11 +902,13 @@ describe('PolicyEngine', () => {
       const allowlists = new Map([['git', ['github.com', '*.github.com']]]);
       const gitEngine = new PolicyEngine(gitPolicy, gitAnnotations, [], SANDBOX_DIR, allowlists);
 
-      const result = gitEngine.evaluate(makeRequest({
-        serverName: 'git',
-        toolName: 'git_clone',
-        arguments: { url: 'https://github.com/user/repo.git', path: '/some/external/repo' },
-      }));
+      const result = gitEngine.evaluate(
+        makeRequest({
+          serverName: 'git',
+          toolName: 'git_clone',
+          arguments: { url: 'https://github.com/user/repo.git', path: '/some/external/repo' },
+        }),
+      );
       // Domain passes, but path is NOT in sandbox → falls to Phase 2
       expect(result.decision).toBe('escalate');
       expect(result.rule).toBe('escalate-git-clone');
@@ -858,11 +918,13 @@ describe('PolicyEngine', () => {
       const allowlists = new Map([['git', ['*.github.com']]]);
       const gitEngine = new PolicyEngine(gitPolicy, gitAnnotations, [], SANDBOX_DIR, allowlists);
 
-      const result = gitEngine.evaluate(makeRequest({
-        serverName: 'git',
-        toolName: 'git_clone',
-        arguments: { url: 'https://api.github.com/user/repo.git', path: '/tmp/ironcurtain-sandbox/repo' },
-      }));
+      const result = gitEngine.evaluate(
+        makeRequest({
+          serverName: 'git',
+          toolName: 'git_clone',
+          arguments: { url: 'https://api.github.com/user/repo.git', path: '/tmp/ironcurtain-sandbox/repo' },
+        }),
+      );
       expect(result.rule).not.toBe('structural-domain-escalate');
     });
 
@@ -870,11 +932,13 @@ describe('PolicyEngine', () => {
       // No allowlist for 'git' server
       const gitEngine = new PolicyEngine(gitPolicy, gitAnnotations, [], SANDBOX_DIR);
 
-      const result = gitEngine.evaluate(makeRequest({
-        serverName: 'git',
-        toolName: 'git_clone',
-        arguments: { url: 'https://evil.com/repo.git', path: '/tmp/ironcurtain-sandbox/repo' },
-      }));
+      const result = gitEngine.evaluate(
+        makeRequest({
+          serverName: 'git',
+          toolName: 'git_clone',
+          arguments: { url: 'https://evil.com/repo.git', path: '/tmp/ironcurtain-sandbox/repo' },
+        }),
+      );
       // No structural domain check, falls through to Phase 2
       expect(result.rule).not.toBe('structural-domain-escalate');
     });
@@ -883,11 +947,13 @@ describe('PolicyEngine', () => {
       const allowlists = new Map([['git', ['github.com', '*.github.com']]]);
       const gitEngine = new PolicyEngine(gitPolicy, gitAnnotations, [], SANDBOX_DIR, allowlists);
 
-      const result = gitEngine.evaluate(makeRequest({
-        serverName: 'git',
-        toolName: 'git_clone',
-        arguments: { url: 'git@github.com:user/repo.git', path: '/tmp/ironcurtain-sandbox/repo' },
-      }));
+      const result = gitEngine.evaluate(
+        makeRequest({
+          serverName: 'git',
+          toolName: 'git_clone',
+          arguments: { url: 'git@github.com:user/repo.git', path: '/tmp/ironcurtain-sandbox/repo' },
+        }),
+      );
       // SSH URL → domain github.com → passes allowlist
       expect(result.rule).not.toBe('structural-domain-escalate');
     });
@@ -896,11 +962,13 @@ describe('PolicyEngine', () => {
       const allowlists = new Map([['git', ['github.com']]]);
       const gitEngine = new PolicyEngine(gitPolicy, gitAnnotations, [], SANDBOX_DIR, allowlists);
 
-      const result = gitEngine.evaluate(makeRequest({
-        serverName: 'git',
-        toolName: 'git_status',
-        arguments: { path: '/tmp/ironcurtain-sandbox/repo' },
-      }));
+      const result = gitEngine.evaluate(
+        makeRequest({
+          serverName: 'git',
+          toolName: 'git_status',
+          arguments: { path: '/tmp/ironcurtain-sandbox/repo' },
+        }),
+      );
       // git_status has only read-path args, no URL args → Phase 1c skipped
       expect(result.decision).toBe('allow');
       expect(result.rule).toBe('structural-sandbox-allow');
@@ -958,11 +1026,13 @@ describe('PolicyEngine', () => {
       };
 
       const engine = new PolicyEngine(policy, fetchAnnotations, []);
-      const result = engine.evaluate(makeRequest({
-        serverName: 'fetch',
-        toolName: 'fetch_url',
-        arguments: { url: 'https://github.com/user/repo' },
-      }));
+      const result = engine.evaluate(
+        makeRequest({
+          serverName: 'fetch',
+          toolName: 'fetch_url',
+          arguments: { url: 'https://github.com/user/repo' },
+        }),
+      );
       expect(result.decision).toBe('allow');
       expect(result.rule).toBe('allow-github-fetch');
     });
@@ -996,11 +1066,13 @@ describe('PolicyEngine', () => {
       };
 
       const engine = new PolicyEngine(policy, fetchAnnotations, []);
-      const result = engine.evaluate(makeRequest({
-        serverName: 'fetch',
-        toolName: 'fetch_url',
-        arguments: { url: 'https://evil.com/malware' },
-      }));
+      const result = engine.evaluate(
+        makeRequest({
+          serverName: 'fetch',
+          toolName: 'fetch_url',
+          arguments: { url: 'https://evil.com/malware' },
+        }),
+      );
       expect(result.decision).toBe('deny');
       expect(result.rule).toBe('deny-all');
     });
@@ -1056,11 +1128,13 @@ describe('PolicyEngine', () => {
       };
 
       const engine = new PolicyEngine(policy, cloneAnnotations, []);
-      const result = engine.evaluate(makeRequest({
-        serverName: 'git',
-        toolName: 'git_clone',
-        arguments: { url: 'https://github.com/user/repo.git', path: '/some/path' },
-      }));
+      const result = engine.evaluate(
+        makeRequest({
+          serverName: 'git',
+          toolName: 'git_clone',
+          arguments: { url: 'https://github.com/user/repo.git', path: '/some/path' },
+        }),
+      );
       // git-remote-url → allow (domain matches), write-path → escalate
       // Most restrictive: escalate
       expect(result.decision).toBe('escalate');
@@ -1074,71 +1148,85 @@ describe('PolicyEngine', () => {
     // so they force Phase 2 evaluation where compiled rules can escalate.
 
     it('escalates git_reset in sandbox (write-history not sandbox-safe)', () => {
-      const result = engine.evaluate(makeRequest({
-        serverName: 'git',
-        toolName: 'git_reset',
-        arguments: { path: '/tmp/ironcurtain-sandbox/repo', mode: 'hard' },
-      }));
+      const result = engine.evaluate(
+        makeRequest({
+          serverName: 'git',
+          toolName: 'git_reset',
+          arguments: { path: '/tmp/ironcurtain-sandbox/repo', mode: 'hard' },
+        }),
+      );
       expect(result.decision).toBe('escalate');
       expect(result.rule).toBe('escalate-git-destructive-ops');
     });
 
     it('escalates git_merge in sandbox (write-history not sandbox-safe)', () => {
-      const result = engine.evaluate(makeRequest({
-        serverName: 'git',
-        toolName: 'git_merge',
-        arguments: { path: '/tmp/ironcurtain-sandbox/repo', branch: 'feature' },
-      }));
+      const result = engine.evaluate(
+        makeRequest({
+          serverName: 'git',
+          toolName: 'git_merge',
+          arguments: { path: '/tmp/ironcurtain-sandbox/repo', branch: 'feature' },
+        }),
+      );
       expect(result.decision).toBe('escalate');
       expect(result.rule).toBe('escalate-git-destructive-ops');
     });
 
     it('escalates git_rebase in sandbox (write-history not sandbox-safe)', () => {
-      const result = engine.evaluate(makeRequest({
-        serverName: 'git',
-        toolName: 'git_rebase',
-        arguments: { path: '/tmp/ironcurtain-sandbox/repo', branch: 'main' },
-      }));
+      const result = engine.evaluate(
+        makeRequest({
+          serverName: 'git',
+          toolName: 'git_rebase',
+          arguments: { path: '/tmp/ironcurtain-sandbox/repo', branch: 'main' },
+        }),
+      );
       expect(result.decision).toBe('escalate');
       expect(result.rule).toBe('escalate-git-destructive-ops');
     });
 
     it('escalates git_branch in sandbox (write-history + delete-history not sandbox-safe)', () => {
-      const result = engine.evaluate(makeRequest({
-        serverName: 'git',
-        toolName: 'git_branch',
-        arguments: { path: '/tmp/ironcurtain-sandbox/repo', name: 'old-branch', delete: true },
-      }));
+      const result = engine.evaluate(
+        makeRequest({
+          serverName: 'git',
+          toolName: 'git_branch',
+          arguments: { path: '/tmp/ironcurtain-sandbox/repo', name: 'old-branch', delete: true },
+        }),
+      );
       expect(result.decision).toBe('escalate');
       expect(result.rule).toBe('escalate-git-branch-management');
     });
 
     it('still allows git_status in sandbox (only read-path, sandbox-safe)', () => {
-      const result = engine.evaluate(makeRequest({
-        serverName: 'git',
-        toolName: 'git_status',
-        arguments: { path: '/tmp/ironcurtain-sandbox/repo' },
-      }));
+      const result = engine.evaluate(
+        makeRequest({
+          serverName: 'git',
+          toolName: 'git_status',
+          arguments: { path: '/tmp/ironcurtain-sandbox/repo' },
+        }),
+      );
       expect(result.decision).toBe('allow');
       expect(result.rule).toBe('structural-sandbox-allow');
     });
 
     it('still allows git_add in sandbox (only write-path, sandbox-safe)', () => {
-      const result = engine.evaluate(makeRequest({
-        serverName: 'git',
-        toolName: 'git_add',
-        arguments: { path: '/tmp/ironcurtain-sandbox/repo', files: ['test.txt'] },
-      }));
+      const result = engine.evaluate(
+        makeRequest({
+          serverName: 'git',
+          toolName: 'git_add',
+          arguments: { path: '/tmp/ironcurtain-sandbox/repo', files: ['test.txt'] },
+        }),
+      );
       expect(result.decision).toBe('allow');
       expect(result.rule).toBe('structural-sandbox-allow');
     });
 
     it('still allows git_commit in sandbox (write-path sandbox-safe, commit-message opaque)', () => {
-      const result = engine.evaluate(makeRequest({
-        serverName: 'git',
-        toolName: 'git_commit',
-        arguments: { path: '/tmp/ironcurtain-sandbox/repo', message: 'test commit' },
-      }));
+      const result = engine.evaluate(
+        makeRequest({
+          serverName: 'git',
+          toolName: 'git_commit',
+          arguments: { path: '/tmp/ironcurtain-sandbox/repo', message: 'test commit' },
+        }),
+      );
       expect(result.decision).toBe('allow');
       expect(result.rule).toBe('structural-sandbox-allow');
     });
@@ -1147,11 +1235,13 @@ describe('PolicyEngine', () => {
       // git_reset has path: ['read-path', 'write-history']
       // read-path should be sandbox-resolved (skipped in Phase 2)
       // write-history should NOT be sandbox-resolved (evaluated in Phase 2)
-      const result = engine.evaluate(makeRequest({
-        serverName: 'git',
-        toolName: 'git_reset',
-        arguments: { path: '/tmp/ironcurtain-sandbox/repo', mode: 'soft' },
-      }));
+      const result = engine.evaluate(
+        makeRequest({
+          serverName: 'git',
+          toolName: 'git_reset',
+          arguments: { path: '/tmp/ironcurtain-sandbox/repo', mode: 'soft' },
+        }),
+      );
       // Falls to Phase 2 with write-history unresolved → hits escalate rule
       expect(result.decision).toBe('escalate');
       expect(result.rule).toBe('escalate-git-destructive-ops');
@@ -1206,11 +1296,13 @@ describe('PolicyEngine', () => {
       };
 
       const engine = new PolicyEngine(policy, mixedAnnotations, []);
-      const result = engine.evaluate(makeRequest({
-        serverName: 'git',
-        toolName: 'git_clone',
-        arguments: { url: 'https://github.com/user/repo.git', path: '/some/path' },
-      }));
+      const result = engine.evaluate(
+        makeRequest({
+          serverName: 'git',
+          toolName: 'git_clone',
+          arguments: { url: 'https://github.com/user/repo.git', path: '/some/path' },
+        }),
+      );
       // write-path → allow, git-remote-url → escalate, most restrictive wins
       expect(result.decision).toBe('escalate');
     });

@@ -70,7 +70,7 @@ describe('truncateResult', () => {
     const result = truncateResult(value, 5000);
     expect(result.truncated).toBe(true);
     expect(typeof result.value).toBe('string');
-    expect((result.value as string)).toContain('[... truncated');
+    expect(result.value as string).toContain('[... truncated');
     expect(result.finalSize).toBeLessThanOrEqual(5000);
   });
 

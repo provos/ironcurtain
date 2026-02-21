@@ -64,9 +64,7 @@ describe('loadUserConfig', () => {
 
     loadUserConfig();
 
-    expect(stderrSpy).toHaveBeenCalledWith(
-      expect.stringContaining('Created default config at'),
-    );
+    expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining('Created default config at'));
     stderrSpy.mockRestore();
   });
 
@@ -157,9 +155,7 @@ describe('loadUserConfig', () => {
 
     loadUserConfig();
 
-    expect(stderrSpy).toHaveBeenCalledWith(
-      expect.stringContaining('unknown field "unknownField"'),
-    );
+    expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining('unknown field "unknownField"'));
     stderrSpy.mockRestore();
   });
 
@@ -332,9 +328,7 @@ describe('loadUserConfig', () => {
     const contentAfterSecond = readFileSync(configPath, 'utf-8');
     expect(contentAfterSecond).toBe(contentAfterFirst);
     // Should not log backfill message on second call
-    expect(stderrSpy).not.toHaveBeenCalledWith(
-      expect.stringContaining('Backfilled config fields'),
-    );
+    expect(stderrSpy).not.toHaveBeenCalledWith(expect.stringContaining('Backfilled config fields'));
   });
 
   it('logs added fields to stderr during backfill', () => {
@@ -343,9 +337,7 @@ describe('loadUserConfig', () => {
 
     loadUserConfig();
 
-    expect(stderrSpy).toHaveBeenCalledWith(
-      expect.stringContaining('Backfilled config fields'),
-    );
+    expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining('Backfilled config fields'));
     stderrSpy.mockRestore();
   });
 
@@ -373,9 +365,15 @@ describe('loadUserConfig', () => {
   });
 
   it('preserves explicit null values in nested objects during backfill', () => {
-    writeRawConfigFile(JSON.stringify({
-      resourceBudget: { maxSteps: null, maxTotalTokens: 500000 },
-    }, null, 2));
+    writeRawConfigFile(
+      JSON.stringify(
+        {
+          resourceBudget: { maxSteps: null, maxTotalTokens: 500000 },
+        },
+        null,
+        2,
+      ),
+    );
 
     loadUserConfig();
 
@@ -526,8 +524,8 @@ describe('loadUserConfig', () => {
 
     loadUserConfig();
 
-    const calls = stderrSpy.mock.calls.map(c => String(c[0]));
-    expect(calls.some(c => c.includes('readable by other users'))).toBe(true);
+    const calls = stderrSpy.mock.calls.map((c) => String(c[0]));
+    expect(calls.some((c) => c.includes('readable by other users'))).toBe(true);
     stderrSpy.mockRestore();
   });
 
@@ -540,8 +538,8 @@ describe('loadUserConfig', () => {
 
     loadUserConfig();
 
-    const calls = stderrSpy.mock.calls.map(c => String(c[0]));
-    expect(calls.some(c => c.includes('readable by other users'))).toBe(false);
+    const calls = stderrSpy.mock.calls.map((c) => String(c[0]));
+    expect(calls.some((c) => c.includes('readable by other users'))).toBe(false);
     stderrSpy.mockRestore();
   });
 

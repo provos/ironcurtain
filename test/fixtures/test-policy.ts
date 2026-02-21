@@ -123,7 +123,8 @@ export const testCompiledPolicy: CompiledPolicyFile = {
         server: ['filesystem'],
       },
       then: 'deny',
-      reason: 'Deletes outside sandbox are forbidden. Structural sandbox invariant allows sandbox-internal deletes before this rule fires.',
+      reason:
+        'Deletes outside sandbox are forbidden. Structural sandbox invariant allows sandbox-internal deletes before this rule fires.',
     },
     {
       name: 'escalate-write-outside-permitted-areas',

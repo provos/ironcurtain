@@ -13,10 +13,7 @@
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-} from '@modelcontextprotocol/sdk/types.js';
+import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import TurndownService from 'turndown';
 
 const USER_AGENT = 'IronCurtain/0.1 (AI Agent Runtime)';
@@ -69,9 +66,7 @@ async function doFetch(
       }
     }
 
-    const body = new TextDecoder().decode(
-      chunks.length === 1 ? chunks[0] : concatUint8Arrays(chunks),
-    );
+    const body = new TextDecoder().decode(chunks.length === 1 ? chunks[0] : concatUint8Arrays(chunks));
 
     // Extract selected response headers
     const responseHeaders: Record<string, string> = {};
@@ -109,38 +104,37 @@ function htmlToMarkdown(html: string): string {
   }
 }
 
-const server = new Server(
-  { name: 'ironcurtain-fetch', version: '0.1.0' },
-  { capabilities: { tools: {} } },
-);
+const server = new Server({ name: 'ironcurtain-fetch', version: '0.1.0' }, { capabilities: { tools: {} } });
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: [{
-    name: 'http_fetch',
-    description: 'Fetch content from a URL via HTTP GET',
-    inputSchema: {
-      type: 'object' as const,
-      properties: {
-        url: { type: 'string', description: 'The URL to fetch' },
-        headers: {
-          type: 'object',
-          additionalProperties: { type: 'string' },
-          description: 'HTTP headers',
+  tools: [
+    {
+      name: 'http_fetch',
+      description: 'Fetch content from a URL via HTTP GET',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          url: { type: 'string', description: 'The URL to fetch' },
+          headers: {
+            type: 'object',
+            additionalProperties: { type: 'string' },
+            description: 'HTTP headers',
+          },
+          max_length: {
+            type: 'number',
+            default: DEFAULT_MAX_LENGTH,
+            description: 'Maximum response body length in characters',
+          },
+          raw_html: {
+            type: 'boolean',
+            default: false,
+            description: 'When true, return raw HTML instead of converting to markdown',
+          },
         },
-        max_length: {
-          type: 'number',
-          default: DEFAULT_MAX_LENGTH,
-          description: 'Maximum response body length in characters',
-        },
-        raw_html: {
-          type: 'boolean',
-          default: false,
-          description: 'When true, return raw HTML instead of converting to markdown',
-        },
+        required: ['url'],
       },
-      required: ['url'],
     },
-  }],
+  ],
 }));
 
 server.setRequestHandler(CallToolRequestSchema, async (req) => {
@@ -178,16 +172,9 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 
     // Truncate to max_length
     const truncated = processedBody.length > maxLength;
-    const finalBody = truncated
-      ? processedBody.slice(0, maxLength) + '\n\n[Truncated]'
-      : processedBody;
+    const finalBody = truncated ? processedBody.slice(0, maxLength) + '\n\n[Truncated]' : processedBody;
 
-    const result = [
-      `Status: ${status}`,
-      `Headers: ${JSON.stringify(headers)}`,
-      '',
-      finalBody,
-    ].join('\n');
+    const result = [`Status: ${status}`, `Headers: ${JSON.stringify(headers)}`, '', finalBody].join('\n');
 
     return { content: [{ type: 'text', text: result }] };
   } catch (err) {

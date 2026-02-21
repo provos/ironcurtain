@@ -133,12 +133,8 @@ export class CliTransport implements Transport {
     });
     const rl = this.rl;
 
-    process.stderr.write(
-      chalk.dim('IronCurtain interactive mode. Type /quit to exit.\n\n'),
-    );
-    process.stderr.write(
-      chalk.dim('Commands: /quit /logs /budget /approve /deny\n\n'),
-    );
+    process.stderr.write(chalk.dim('IronCurtain interactive mode. Type /quit to exit.\n\n'));
+    process.stderr.write(chalk.dim('Commands: /quit /logs /budget /approve /deny\n\n'));
     rl.prompt();
 
     let running = true;
@@ -151,18 +147,18 @@ export class CliTransport implements Transport {
         return;
       }
 
-      if (this.handleSlashCommand(trimmed, session, () => {
-        running = false;
-        rl.close();
-      })) {
+      if (
+        this.handleSlashCommand(trimmed, session, () => {
+          running = false;
+          rl.close();
+        })
+      ) {
         if (running) rl.prompt();
         return;
       }
 
       if (messageInFlight) {
-        process.stderr.write(
-          chalk.dim('  (still processing previous message, please wait)\n'),
-        );
+        process.stderr.write(chalk.dim('  (still processing previous message, please wait)\n'));
         rl.prompt();
         return;
       }
@@ -208,11 +204,7 @@ export class CliTransport implements Transport {
    * Handles slash commands. Returns true if the input was a command,
    * false if it should be treated as a regular message.
    */
-  private handleSlashCommand(
-    input: string,
-    session: Session,
-    onQuit: () => void,
-  ): boolean {
+  private handleSlashCommand(input: string, session: Session, onQuit: () => void): boolean {
     switch (input) {
       case '/quit':
       case '/exit':
@@ -258,9 +250,9 @@ export class CliTransport implements Transport {
           process.stderr.write(chalk.red(`  [budget] ${event.message}\n`));
           break;
         case 'message_compaction':
-          process.stderr.write(chalk.dim(
-            `  [compact] ${event.originalMessageCount} → ${event.newMessageCount} messages\n`,
-          ));
+          process.stderr.write(
+            chalk.dim(`  [compact] ${event.originalMessageCount} → ${event.newMessageCount} messages\n`),
+          );
           break;
       }
     }
@@ -273,8 +265,9 @@ export class CliTransport implements Transport {
       return;
     }
 
-    const decision = command === '/approve' ? 'approved' as const : 'denied' as const;
-    session.resolveEscalation(pending.escalationId, decision)
+    const decision = command === '/approve' ? ('approved' as const) : ('denied' as const);
+    session
+      .resolveEscalation(pending.escalationId, decision)
       .then(() => {
         const color = decision === 'approved' ? chalk.green : chalk.red;
         process.stderr.write(color(`  Escalation ${decision}.\n`));
@@ -283,9 +276,7 @@ export class CliTransport implements Transport {
         this.startSpinner('Processing...');
       })
       .catch((err) => {
-        process.stderr.write(
-          chalk.red(`  Error: ${err instanceof Error ? err.message : String(err)}\n`),
-        );
+        process.stderr.write(chalk.red(`  Error: ${err instanceof Error ? err.message : String(err)}\n`));
       });
   }
 
@@ -294,18 +285,16 @@ export class CliTransport implements Transport {
   private displayBudgetStatus(status: BudgetStatus): void {
     const { limits, cumulative } = status;
     process.stderr.write(chalk.cyan('  Current turn budget:\n'));
-    process.stderr.write(formatBudgetLine(
-      'Tokens', status.totalTokens, limits.maxTotalTokens, (v) => v.toLocaleString(),
-    ));
-    process.stderr.write(formatBudgetLine(
-      'Steps', status.stepCount, limits.maxSteps, String,
-    ));
-    process.stderr.write(formatBudgetLine(
-      'Time', status.elapsedSeconds, limits.maxSessionSeconds, (v) => `${Math.round(v)}s`,
-    ));
-    process.stderr.write(formatBudgetLine(
-      'Est. cost', status.estimatedCostUsd, limits.maxEstimatedCostUsd, (v) => `$${v.toFixed(2)}`,
-    ));
+    process.stderr.write(
+      formatBudgetLine('Tokens', status.totalTokens, limits.maxTotalTokens, (v) => v.toLocaleString()),
+    );
+    process.stderr.write(formatBudgetLine('Steps', status.stepCount, limits.maxSteps, String));
+    process.stderr.write(
+      formatBudgetLine('Time', status.elapsedSeconds, limits.maxSessionSeconds, (v) => `${Math.round(v)}s`),
+    );
+    process.stderr.write(
+      formatBudgetLine('Est. cost', status.estimatedCostUsd, limits.maxEstimatedCostUsd, (v) => `$${v.toFixed(2)}`),
+    );
     process.stderr.write(chalk.cyan('  Session totals:\n'));
     process.stderr.write(`    Tokens: ${cumulative.totalTokens.toLocaleString()}\n`);
     process.stderr.write(`    Steps: ${cumulative.stepCount}\n`);
@@ -315,12 +304,14 @@ export class CliTransport implements Transport {
 
   private displaySessionSummary(status: BudgetStatus): void {
     const { cumulative } = status;
-    process.stderr.write(chalk.dim(
-      `\nSession: ${cumulative.totalTokens.toLocaleString()} tokens` +
-      ` · ${cumulative.stepCount} steps` +
-      ` · ${Math.round(cumulative.activeSeconds)}s` +
-      ` · ~$${cumulative.estimatedCostUsd.toFixed(2)}\n`,
-    ));
+    process.stderr.write(
+      chalk.dim(
+        `\nSession: ${cumulative.totalTokens.toLocaleString()} tokens` +
+          ` · ${cumulative.stepCount} steps` +
+          ` · ${Math.round(cumulative.activeSeconds)}s` +
+          ` · ~$${cumulative.estimatedCostUsd.toFixed(2)}\n`,
+      ),
+    );
   }
 
   // --- Spinner helpers ---
@@ -365,12 +356,7 @@ export class CliTransport implements Transport {
 
 // --- Budget formatting ---
 
-function formatBudgetLine(
-  label: string,
-  current: number,
-  limit: number | null,
-  format: (v: number) => string,
-): string {
+function formatBudgetLine(label: string, current: number, limit: number | null, format: (v: number) => string): string {
   const currentStr = format(current);
   if (limit === null) return `    ${label}: ${currentStr} (no limit)\n`;
   const pct = limit > 0 ? Math.round((current / limit) * 100) : 0;

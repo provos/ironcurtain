@@ -11,28 +11,38 @@ import type { ToolAnnotation, CompiledRule, ExecutionResult, RepairContext } fro
 
 const sampleAnnotations: ToolAnnotation[] = [
   {
-    toolName: 'read_file', serverName: 'filesystem',
-    comment: 'Reads the complete contents of a file from disk', sideEffects: true,
+    toolName: 'read_file',
+    serverName: 'filesystem',
+    comment: 'Reads the complete contents of a file from disk',
+    sideEffects: true,
     args: { path: ['read-path'] },
   },
   {
-    toolName: 'write_file', serverName: 'filesystem',
-    comment: 'Creates or overwrites a file with new content', sideEffects: true,
+    toolName: 'write_file',
+    serverName: 'filesystem',
+    comment: 'Creates or overwrites a file with new content',
+    sideEffects: true,
     args: { path: ['write-path'] },
   },
   {
-    toolName: 'delete_file', serverName: 'filesystem',
-    comment: 'Permanently deletes a file from disk', sideEffects: true,
+    toolName: 'delete_file',
+    serverName: 'filesystem',
+    comment: 'Permanently deletes a file from disk',
+    sideEffects: true,
     args: { path: ['delete-path'] },
   },
   {
-    toolName: 'move_file', serverName: 'filesystem',
-    comment: 'Moves a file from source to destination, deleting the source', sideEffects: true,
+    toolName: 'move_file',
+    serverName: 'filesystem',
+    comment: 'Moves a file from source to destination, deleting the source',
+    sideEffects: true,
     args: { source: ['read-path', 'delete-path'], destination: ['write-path'] },
   },
   {
-    toolName: 'list_allowed_directories', serverName: 'filesystem',
-    comment: 'Lists directories the server is allowed to access', sideEffects: false,
+    toolName: 'list_allowed_directories',
+    serverName: 'filesystem',
+    comment: 'Lists directories the server is allowed to access',
+    sideEffects: false,
     args: {},
   },
 ];
@@ -106,9 +116,7 @@ function createMockModel(response: unknown): MockLanguageModelV3 {
   });
 }
 
-function createPromptCapturingModel(
-  response: unknown,
-): { model: MockLanguageModelV3; getPrompt: () => string } {
+function createPromptCapturingModel(response: unknown): { model: MockLanguageModelV3; getPrompt: () => string } {
   let capturedPrompt = '';
   const model = new MockLanguageModelV3({
     doGenerate: async (options) => {
@@ -133,12 +141,7 @@ describe('Constitution Compiler', () => {
     it('returns compiled rules from LLM response', async () => {
       const mockLLM = createMockModel({ rules: cannedRules });
 
-      const result = await compileConstitution(
-        sampleConstitution,
-        sampleAnnotations,
-        compilerConfig,
-        mockLLM,
-      );
+      const result = await compileConstitution(sampleConstitution, sampleAnnotations, compilerConfig, mockLLM);
 
       expect(result.rules).toHaveLength(4);
       expect(result.rules[0].name).toBe('allow-side-effect-free-tools');
@@ -149,14 +152,9 @@ describe('Constitution Compiler', () => {
     it('preserves rule order from LLM response', async () => {
       const mockLLM = createMockModel({ rules: cannedRules });
 
-      const result = await compileConstitution(
-        sampleConstitution,
-        sampleAnnotations,
-        compilerConfig,
-        mockLLM,
-      );
+      const result = await compileConstitution(sampleConstitution, sampleAnnotations, compilerConfig, mockLLM);
 
-      const names = result.rules.map(r => r.name);
+      const names = result.rules.map((r) => r.name);
       expect(names).toEqual([
         'allow-side-effect-free-tools',
         'deny-delete-operations',
@@ -168,12 +166,7 @@ describe('Constitution Compiler', () => {
     it('each rule has principle linking back to constitution', async () => {
       const mockLLM = createMockModel({ rules: cannedRules });
 
-      const result = await compileConstitution(
-        sampleConstitution,
-        sampleAnnotations,
-        compilerConfig,
-        mockLLM,
-      );
+      const result = await compileConstitution(sampleConstitution, sampleAnnotations, compilerConfig, mockLLM);
 
       for (const rule of result.rules) {
         expect(rule.principle).toBeTruthy();
@@ -190,55 +183,63 @@ describe('Constitution Compiler', () => {
     });
 
     it('catches invalid roles in paths', () => {
-      const badRules: CompiledRule[] = [{
-        ...cannedRules[2],
-        if: {
-          paths: { roles: ['invalid-role' as never], within: '/tmp/sandbox' },
+      const badRules: CompiledRule[] = [
+        {
+          ...cannedRules[2],
+          if: {
+            paths: { roles: ['invalid-role' as never], within: '/tmp/sandbox' },
+          },
         },
-      }];
+      ];
 
       const result = validateCompiledRules(badRules);
       expect(result.valid).toBe(false);
-      expect(result.errors.some(e => e.includes('invalid role'))).toBe(true);
+      expect(result.errors.some((e) => e.includes('invalid role'))).toBe(true);
     });
 
     it('catches invalid roles in top-level roles', () => {
-      const badRules: CompiledRule[] = [{
-        ...cannedRules[1],
-        if: { roles: ['invalid-role' as never] },
-      }];
+      const badRules: CompiledRule[] = [
+        {
+          ...cannedRules[1],
+          if: { roles: ['invalid-role' as never] },
+        },
+      ];
 
       const result = validateCompiledRules(badRules);
       expect(result.valid).toBe(false);
-      expect(result.errors.some(e => e.includes('invalid role'))).toBe(true);
+      expect(result.errors.some((e) => e.includes('invalid role'))).toBe(true);
     });
 
     it('catches relative paths in within', () => {
-      const badRules: CompiledRule[] = [{
-        ...cannedRules[2],
-        if: {
-          paths: { roles: ['read-path'], within: './relative/path' },
+      const badRules: CompiledRule[] = [
+        {
+          ...cannedRules[2],
+          if: {
+            paths: { roles: ['read-path'], within: './relative/path' },
+          },
         },
-      }];
+      ];
 
       const result = validateCompiledRules(badRules);
       expect(result.valid).toBe(false);
-      expect(result.errors.some(e => e.includes('absolute path'))).toBe(true);
+      expect(result.errors.some((e) => e.includes('absolute path'))).toBe(true);
     });
 
     it('catches structural invariant concepts in compiled rules', () => {
-      const badRules: CompiledRule[] = [{
-        name: 'deny-protected-paths',
-        description: 'Deny access to protected path files',
-        principle: 'Self-protection',
-        if: { roles: ['read-path'] },
-        then: 'deny',
-        reason: 'Protected paths',
-      }];
+      const badRules: CompiledRule[] = [
+        {
+          name: 'deny-protected-paths',
+          description: 'Deny access to protected path files',
+          principle: 'Self-protection',
+          if: { roles: ['read-path'] },
+          then: 'deny',
+          reason: 'Protected paths',
+        },
+      ];
 
       const result = validateCompiledRules(badRules);
       expect(result.valid).toBe(false);
-      expect(result.errors.some(e => e.includes('structural invariant'))).toBe(true);
+      expect(result.errors.some((e) => e.includes('structural invariant'))).toBe(true);
     });
   });
 
@@ -330,29 +331,25 @@ describe('Constitution Compiler', () => {
 
       const repairContext: RepairContext = {
         previousRules: cannedRules,
-        failedScenarios: [{
-          scenario: {
-            description: 'Test failure',
-            request: { serverName: 'filesystem', toolName: 'read_file', arguments: { path: '/etc/passwd' } },
-            expectedDecision: 'deny',
-            reasoning: 'Should be denied',
-            source: 'generated',
+        failedScenarios: [
+          {
+            scenario: {
+              description: 'Test failure',
+              request: { serverName: 'filesystem', toolName: 'read_file', arguments: { path: '/etc/passwd' } },
+              expectedDecision: 'deny',
+              reasoning: 'Should be denied',
+              source: 'generated',
+            },
+            actualDecision: 'allow',
+            matchingRule: 'allow-side-effect-free-tools',
+            pass: false,
           },
-          actualDecision: 'allow',
-          matchingRule: 'allow-side-effect-free-tools',
-          pass: false,
-        }],
+        ],
         judgeAnalysis: 'Rules need reordering.',
         attemptNumber: 1,
       };
 
-      await compileConstitution(
-        sampleConstitution,
-        sampleAnnotations,
-        compilerConfig,
-        model,
-        repairContext,
-      );
+      await compileConstitution(sampleConstitution, sampleAnnotations, compilerConfig, model, repairContext);
 
       const prompt = getPrompt();
       expect(prompt).toContain('REPAIR INSTRUCTIONS');
@@ -361,15 +358,9 @@ describe('Constitution Compiler', () => {
     });
 
     it('does not include repair section without repairContext', async () => {
-      const { model: noRepairModel, getPrompt: getNoRepairPrompt } =
-        createPromptCapturingModel({ rules: cannedRules });
+      const { model: noRepairModel, getPrompt: getNoRepairPrompt } = createPromptCapturingModel({ rules: cannedRules });
 
-      await compileConstitution(
-        sampleConstitution,
-        sampleAnnotations,
-        compilerConfig,
-        noRepairModel,
-      );
+      await compileConstitution(sampleConstitution, sampleAnnotations, compilerConfig, noRepairModel);
 
       expect(getNoRepairPrompt()).not.toContain('REPAIR INSTRUCTIONS');
     });

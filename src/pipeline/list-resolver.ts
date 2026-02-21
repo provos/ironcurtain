@@ -80,28 +80,27 @@ function computeListHash(definition: ListDefinition): string {
  * Applies type-specific validation to filter malformed values,
  * deduplicates, and applies manual overrides.
  */
-function postProcess(
-  rawValues: string[],
-  definition: ListDefinition,
-  existing?: ResolvedList,
-): string[] {
+function postProcess(rawValues: string[], definition: ListDefinition, existing?: ResolvedList): string[] {
   const typeDef = LIST_TYPE_REGISTRY.get(definition.type);
   const validate = typeDef?.validate ?? (() => true);
 
   // Filter invalid values and deduplicate
-  const validValues = [...new Set(rawValues.filter(v => {
-    const isValid = validate(v);
-    if (!isValid) {
-      console.error(`  Warning: Dropped invalid ${definition.type} value "${v}" from @${definition.name}`);
-    }
-    return isValid;
-  }))];
+  const validValues = [
+    ...new Set(
+      rawValues.filter((v) => {
+        const isValid = validate(v);
+        if (!isValid) {
+          console.error(`  Warning: Dropped invalid ${definition.type} value "${v}" from @${definition.name}`);
+        }
+        return isValid;
+      }),
+    ),
+  ];
 
   // Apply manual overrides from existing resolution
   const manualAdditions = existing?.manualAdditions ?? [];
   const removals = new Set(existing?.manualRemovals ?? []);
-  return [...new Set([...validValues, ...manualAdditions])]
-    .filter(v => !removals.has(v));
+  return [...new Set([...validValues, ...manualAdditions])].filter((v) => !removals.has(v));
 }
 
 /**
@@ -129,10 +128,7 @@ const MAX_MCP_TOOL_STEPS = 5;
  * Bridges MCP server tools as AI SDK tools with execute functions
  * that forward calls to the MCP client.
  */
-function bridgeMcpTools(
-  serverName: string,
-  connection: McpServerConnection,
-): ToolSet {
+function bridgeMcpTools(serverName: string, connection: McpServerConnection): ToolSet {
   const tools: ToolSet = {};
   for (const mcpTool of connection.tools) {
     const qualifiedName = `${serverName}__${mcpTool.name}`;
@@ -269,15 +265,13 @@ export async function resolveList(
   let rawValues: string[];
 
   if (definition.requiresMcp) {
-    const selected = config.mcpConnections
-      ? selectMcpConnection(definition, config.mcpConnections)
-      : undefined;
+    const selected = config.mcpConnections ? selectMcpConnection(definition, config.mcpConnections) : undefined;
 
     if (!selected) {
       throw new Error(
         `List "@${definition.name}" requires MCP server access (requiresMcp: true) ` +
-        `but no MCP clients are available. Run with --with-mcp or ensure the ` +
-        `"${definition.mcpServerHint ?? 'required'}" MCP server is configured and reachable.`,
+          `but no MCP clients are available. Run with --with-mcp or ensure the ` +
+          `"${definition.mcpServerHint ?? 'required'}" MCP server is configured and reachable.`,
       );
     }
 

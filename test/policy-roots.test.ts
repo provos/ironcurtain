@@ -1,10 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { resolve } from 'node:path';
-import {
-  extractPolicyRoots,
-  toMcpRoots,
-  directoryForPath,
-} from '../src/trusted-process/policy-roots.js';
+import { extractPolicyRoots, toMcpRoots, directoryForPath } from '../src/trusted-process/policy-roots.js';
 import type { CompiledPolicyFile, CompiledRule } from '../src/pipeline/types.js';
 
 function makeRule(overrides: {

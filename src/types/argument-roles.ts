@@ -53,10 +53,7 @@ export interface RoleDefinition {
    * E.g., resolving named git remote "origin" to its URL using the
    * `path` argument from the same tool call.
    */
-  readonly resolveForPolicy?: (
-    value: string,
-    allArgs: Record<string, unknown>,
-  ) => string;
+  readonly resolveForPolicy?: (value: string, allArgs: Record<string, unknown>) => string;
   /**
    * Guidance for the LLM annotation prompt. Built into the prompt
    * dynamically from the registry -- no manual prompt maintenance.
@@ -170,10 +167,7 @@ export function extractGitDomain(value: string): string {
  * check to escalate (the value won't match any allowed domain),
  * which is the correct behavior -- escalate when we can't verify.
  */
-export function resolveGitRemote(
-  value: string,
-  allArgs: Record<string, unknown>,
-): string {
+export function resolveGitRemote(value: string, allArgs: Record<string, unknown>): string {
   // Already a URL -- return as-is
   if (value.includes('://') || /^[\w.+-]+@[^:]+:/.test(value)) {
     return value;
@@ -315,9 +309,7 @@ const registryEntries: [ArgumentRole, RoleDefinition][] = [
       isResourceIdentifier: false,
       category: 'opaque',
       normalize: identity,
-      annotationGuidance:
-        'Assign to arguments that are git commit messages. ' +
-        'Typically applies to git_commit.',
+      annotationGuidance: 'Assign to arguments that are git commit messages. ' + 'Typically applies to git_commit.',
       serverNames: ['git'],
     },
   ],
@@ -335,8 +327,7 @@ const registryEntries: [ArgumentRole, RoleDefinition][] = [
   ],
 ];
 
-export const ARGUMENT_ROLE_REGISTRY: ReadonlyMap<ArgumentRole, RoleDefinition> =
-  new Map(registryEntries);
+export const ARGUMENT_ROLE_REGISTRY: ReadonlyMap<ArgumentRole, RoleDefinition> = new Map(registryEntries);
 
 // ---------------------------------------------------------------------------
 // Compile-time completeness check
@@ -353,7 +344,7 @@ const _ROLE_COMPLETENESS_CHECK: Record<ArgumentRole, true> = {
   'git-remote-url': true,
   'branch-name': true,
   'commit-message': true,
-  'none': true,
+  none: true,
 };
 
 // ---------------------------------------------------------------------------
@@ -393,8 +384,9 @@ export function getArgumentRoleValues(): [ArgumentRole, ...ArgumentRole[]] {
  * Server-specific roles are included only when the server matches.
  */
 export function getRolesForServer(serverName: string): [ArgumentRole, RoleDefinition][] {
-  return Array.from(ARGUMENT_ROLE_REGISTRY)
-    .filter(([, def]) => !def.serverNames || def.serverNames.includes(serverName));
+  return Array.from(ARGUMENT_ROLE_REGISTRY).filter(
+    ([, def]) => !def.serverNames || def.serverNames.includes(serverName),
+  );
 }
 
 /** Returns all roles with the given category. */
@@ -423,8 +415,4 @@ export function getUrlRoles(): ArgumentRole[] {
  * the sandbox, these operations require Phase 2 policy evaluation (and
  * typically human approval) because they can destroy git history.
  */
-export const SANDBOX_SAFE_PATH_ROLES: ReadonlySet<ArgumentRole> = new Set([
-  'read-path',
-  'write-path',
-  'delete-path',
-]);
+export const SANDBOX_SAFE_PATH_ROLES: ReadonlySet<ArgumentRole> = new Set(['read-path', 'write-path', 'delete-path']);

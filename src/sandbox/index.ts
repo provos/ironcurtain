@@ -31,8 +31,7 @@ const PROXY_ARGS = isCompiled ? [proxyServerPath] : ['tsx', proxyServerPath];
  * Example: "filesystem.filesystem.list_directory" → "filesystem.filesystem_list_directory"
  */
 export function toCallableName(toolName: string): string {
-  const sanitize = (s: string) =>
-    s.replace(/[^a-zA-Z0-9_]/g, '_').replace(/^[0-9]/, '_$&');
+  const sanitize = (s: string) => s.replace(/[^a-zA-Z0-9_]/g, '_').replace(/^[0-9]/, '_$&');
   if (!toolName.includes('.')) return sanitize(toolName);
   const [manual, ...parts] = toolName.split('.');
   return `${sanitize(manual)}.${parts.map(sanitize).join('_')}`;
@@ -137,13 +136,16 @@ export class Sandbox {
     // Register one proxy per backend server so UTCP names them cleanly:
     //   tools.<serverName>_<toolName>(...)
     // Each proxy gets a SERVER_FILTER env var to connect only to its server.
-    const mcpServers: Record<string, {
-      transport: 'stdio';
-      command: string;
-      args: string[];
-      env: Record<string, string>;
-      timeout: number;
-    }> = {};
+    const mcpServers: Record<
+      string,
+      {
+        transport: 'stdio';
+        command: string;
+        args: string[];
+        env: Record<string, string>;
+        timeout: number;
+      }
+    > = {};
     for (const serverName of Object.keys(config.mcpServers)) {
       // Per-server isolation: each proxy only receives its own credentials
       const serverCreds = config.userConfig.serverCredentials[serverName];
@@ -203,9 +205,7 @@ export class Sandbox {
       }
     }
 
-    const patchSnippet = Object.keys(callableToRaw).length > 0
-      ? buildInterfacePatchSnippet(callableToRaw)
-      : '';
+    const patchSnippet = Object.keys(callableToRaw).length > 0 ? buildInterfacePatchSnippet(callableToRaw) : '';
 
     return { catalog: catalogLines.join('\n'), patchSnippet };
   }
@@ -220,9 +220,7 @@ export class Sandbox {
     // Prepend the interface patch so __getToolInterface accepts callable names.
     // Each callToolChain invocation creates a fresh V8 isolate, so the patch
     // must be re-applied every time.
-    const patchedCode = this.interfacePatchSnippet
-      ? `${this.interfacePatchSnippet}\n${code}`
-      : code;
+    const patchedCode = this.interfacePatchSnippet ? `${this.interfacePatchSnippet}\n${code}` : code;
 
     const { result, logs } = await this.client.callToolChain(patchedCode, timeoutMs);
     return { result, logs: logs ?? [] };

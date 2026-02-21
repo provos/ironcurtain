@@ -61,9 +61,7 @@ export function computeProtectedPaths(opts: {
  * Must be called before spawning any MCP server process. Both `loadConfig()`
  * (runtime) and `loadPipelineConfig()` (pipeline) use this.
  */
-export function resolveMcpServerPaths(
-  mcpServers: Record<string, MCPServerConfig>,
-): void {
+export function resolveMcpServerPaths(mcpServers: Record<string, MCPServerConfig>): void {
   // packageRoot is two levels up from this file (src/config/ → project root)
   const packageRoot = resolve(__dirname, '..', '..');
 
@@ -80,20 +78,14 @@ export function resolveMcpServerPaths(
   }
 }
 
-function resolveInternalServerPaths(
-  config: MCPServerConfig,
-  packageRoot: string,
-  compiled: boolean,
-): void {
+function resolveInternalServerPaths(config: MCPServerConfig, packageRoot: string, compiled: boolean): void {
   for (let i = 0; i < config.args.length; i++) {
     const arg = config.args[i];
     if (!arg.startsWith('./src/') || !arg.endsWith('.ts')) continue;
 
     if (compiled) {
       // Rewrite ./src/X.ts → <abs>/dist/X.js and use node
-      const distRelative = arg
-        .replace(/^\.\/src\//, 'dist/')
-        .replace(/\.ts$/, '.js');
+      const distRelative = arg.replace(/^\.\/src\//, 'dist/').replace(/\.ts$/, '.js');
       config.args[i] = resolve(packageRoot, distRelative);
       if (config.command === 'npx') {
         config.command = 'node';
@@ -120,9 +112,7 @@ export function loadConfig(): IronCurtainConfig {
   const allowedDirectory = process.env.ALLOWED_DIRECTORY ?? defaultAllowedDir;
 
   const mcpServersPath = resolve(__dirname, 'mcp-servers.json');
-  const mcpServers: Record<string, MCPServerConfig> = JSON.parse(
-    readFileSync(mcpServersPath, 'utf-8'),
-  );
+  const mcpServers: Record<string, MCPServerConfig> = JSON.parse(readFileSync(mcpServersPath, 'utf-8'));
 
   // Sync the filesystem server's allowed directory with the configured value.
   // The mcp-servers.json ships with a default path that may differ from
@@ -158,7 +148,7 @@ export function loadConfig(): IronCurtainConfig {
     if (!serverNames.has(credKey)) {
       process.stderr.write(
         `Warning: serverCredentials["${credKey}"] does not match any server in mcp-servers.json. ` +
-        `Available servers: ${[...serverNames].join(', ')}\n`,
+          `Available servers: ${[...serverNames].join(', ')}\n`,
       );
     }
   }
@@ -184,9 +174,7 @@ export function loadConfig(): IronCurtainConfig {
  * for servers with `["*"]`. The SSRF structural invariant in
  * `domainMatchesAllowlist()` prevents `*` from matching IP addresses.
  */
-export function extractServerDomainAllowlists(
-  mcpServers: Record<string, MCPServerConfig>,
-): Map<string, string[]> {
+export function extractServerDomainAllowlists(mcpServers: Record<string, MCPServerConfig>): Map<string, string[]> {
   const allowlists = new Map<string, string[]>();
   for (const [serverName, config] of Object.entries(mcpServers)) {
     const sandbox = config.sandbox;
@@ -200,7 +188,10 @@ export function extractServerDomainAllowlists(
   return allowlists;
 }
 
-export function loadGeneratedPolicy(generatedDir: string, fallbackDir?: string): {
+export function loadGeneratedPolicy(
+  generatedDir: string,
+  fallbackDir?: string,
+): {
   compiledPolicy: CompiledPolicyFile;
   toolAnnotations: ToolAnnotationsFile;
   dynamicLists: DynamicListsFile | undefined;
@@ -211,20 +202,14 @@ export function loadGeneratedPolicy(generatedDir: string, fallbackDir?: string):
   const toolAnnotations: ToolAnnotationsFile = JSON.parse(
     readGeneratedFile(generatedDir, 'tool-annotations.json', fallbackDir),
   );
-  const dynamicLists = loadOptionalGeneratedFile<DynamicListsFile>(
-    generatedDir, 'dynamic-lists.json', fallbackDir,
-  );
+  const dynamicLists = loadOptionalGeneratedFile<DynamicListsFile>(generatedDir, 'dynamic-lists.json', fallbackDir);
   return { compiledPolicy, toolAnnotations, dynamicLists };
 }
 
 /**
  * Loads an optional generated artifact file. Returns undefined if not found.
  */
-function loadOptionalGeneratedFile<T>(
-  generatedDir: string,
-  filename: string,
-  fallbackDir?: string,
-): T | undefined {
+function loadOptionalGeneratedFile<T>(generatedDir: string, filename: string, fallbackDir?: string): T | undefined {
   const primaryPath = resolve(generatedDir, filename);
   if (existsSync(primaryPath)) {
     return JSON.parse(readFileSync(primaryPath, 'utf-8'));

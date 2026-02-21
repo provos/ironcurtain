@@ -54,17 +54,11 @@ export function parseModelId(qualifiedId: string): ParsedModelId {
 
   if (!KNOWN_PROVIDERS.has(prefix)) {
     const known = [...KNOWN_PROVIDERS].sort().join(', ');
-    throw new Error(
-      `Unknown model provider "${prefix}" in "${qualifiedId}". ` +
-      `Supported providers: ${known}`,
-    );
+    throw new Error(`Unknown model provider "${prefix}" in "${qualifiedId}". ` + `Supported providers: ${known}`);
   }
 
   if (!modelId) {
-    throw new Error(
-      `Empty model ID in "${qualifiedId}". ` +
-      `Expected format: "provider:model-id"`,
-    );
+    throw new Error(`Empty model ID in "${qualifiedId}". ` + `Expected format: "provider:model-id"`);
   }
 
   return { provider: prefix as ProviderId, modelId };
@@ -80,10 +74,7 @@ export function parseModelId(qualifiedId: string): ParsedModelId {
  * @param config - Resolved user config for API key lookup
  * @returns A LanguageModelV3 instance ready for use with generateText()
  */
-export async function createLanguageModel(
-  qualifiedId: string,
-  config: ResolvedUserConfig,
-): Promise<LanguageModelV3> {
+export async function createLanguageModel(qualifiedId: string, config: ResolvedUserConfig): Promise<LanguageModelV3> {
   const { provider } = parseModelId(qualifiedId);
   return createLanguageModelFromEnv(qualifiedId, resolveApiKeyForProvider(provider, config));
 }
@@ -99,10 +90,7 @@ export async function createLanguageModel(
  * @param apiKey - Explicit API key for the model's provider (empty string uses env/default)
  * @returns A LanguageModelV3 instance ready for use with generateText()
  */
-export async function createLanguageModelFromEnv(
-  qualifiedId: string,
-  apiKey: string,
-): Promise<LanguageModelV3> {
+export async function createLanguageModelFromEnv(qualifiedId: string, apiKey: string): Promise<LanguageModelV3> {
   const { provider, modelId } = parseModelId(qualifiedId);
   const key = apiKey || undefined;
 
@@ -126,13 +114,13 @@ export async function createLanguageModelFromEnv(
  * Resolves the API key for a given provider from user config.
  * Returns empty string when no key is configured.
  */
-export function resolveApiKeyForProvider(
-  provider: ProviderId,
-  config: ResolvedUserConfig,
-): string {
+export function resolveApiKeyForProvider(provider: ProviderId, config: ResolvedUserConfig): string {
   switch (provider) {
-    case 'anthropic': return config.anthropicApiKey;
-    case 'google': return config.googleApiKey;
-    case 'openai': return config.openaiApiKey;
+    case 'anthropic':
+      return config.anthropicApiKey;
+    case 'google':
+      return config.googleApiKey;
+    case 'openai':
+      return config.openaiApiKey;
   }
 }

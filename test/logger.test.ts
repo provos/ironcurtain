@@ -63,9 +63,7 @@ describe('Logger', () => {
 
   it('throws if setup() called twice without teardown()', () => {
     logger.setup({ logFilePath: logFile });
-    expect(() => logger.setup({ logFilePath: logFile })).toThrow(
-      'Logger already set up',
-    );
+    expect(() => logger.setup({ logFilePath: logFile })).toThrow('Logger already set up');
   });
 
   it('teardown() is idempotent', () => {

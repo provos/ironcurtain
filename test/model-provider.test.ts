@@ -4,27 +4,33 @@ import type { ResolvedUserConfig } from '../src/config/user-config.js';
 
 // Mock all provider packages so tests don't need real API keys
 vi.mock('@ai-sdk/anthropic', () => ({
-  createAnthropic: vi.fn(() => vi.fn((modelId: string) => ({
-    modelId,
-    provider: 'anthropic',
-    specificationVersion: 'v2',
-  }))),
+  createAnthropic: vi.fn(() =>
+    vi.fn((modelId: string) => ({
+      modelId,
+      provider: 'anthropic',
+      specificationVersion: 'v2',
+    })),
+  ),
 }));
 
 vi.mock('@ai-sdk/google', () => ({
-  createGoogleGenerativeAI: vi.fn(() => vi.fn((modelId: string) => ({
-    modelId,
-    provider: 'google',
-    specificationVersion: 'v2',
-  }))),
+  createGoogleGenerativeAI: vi.fn(() =>
+    vi.fn((modelId: string) => ({
+      modelId,
+      provider: 'google',
+      specificationVersion: 'v2',
+    })),
+  ),
 }));
 
 vi.mock('@ai-sdk/openai', () => ({
-  createOpenAI: vi.fn(() => vi.fn((modelId: string) => ({
-    modelId,
-    provider: 'openai',
-    specificationVersion: 'v2',
-  }))),
+  createOpenAI: vi.fn(() =>
+    vi.fn((modelId: string) => ({
+      modelId,
+      provider: 'openai',
+      specificationVersion: 'v2',
+    })),
+  ),
 }));
 
 function createTestUserConfig(overrides: Partial<ResolvedUserConfig> = {}): ResolvedUserConfig {
@@ -39,7 +45,7 @@ function createTestUserConfig(overrides: Partial<ResolvedUserConfig> = {}): Reso
       maxTotalTokens: 1_000_000,
       maxSteps: 200,
       maxSessionSeconds: 1800,
-      maxEstimatedCostUsd: 5.00,
+      maxEstimatedCostUsd: 5.0,
       warnThresholdPercent: 80,
     },
     autoCompact: {
@@ -81,9 +87,7 @@ describe('parseModelId', () => {
   });
 
   it('throws on empty model ID after colon', () => {
-    expect(() => parseModelId('anthropic:')).toThrow(
-      /Empty model ID.*Expected format/,
-    );
+    expect(() => parseModelId('anthropic:')).toThrow(/Empty model ID.*Expected format/);
   });
 
   it('handles model IDs with colons in the model name', () => {
@@ -144,8 +148,6 @@ describe('createLanguageModel', () => {
 
   it('throws on unknown provider', async () => {
     const config = createTestUserConfig();
-    await expect(
-      createLanguageModel('mistral:model', config),
-    ).rejects.toThrow(/Unknown model provider "mistral"/);
+    await expect(createLanguageModel('mistral:model', config)).rejects.toThrow(/Unknown model provider "mistral"/);
   });
 });

@@ -15,7 +15,8 @@ function getVersion(): string {
 }
 
 function printHelp(): void {
-  console.error(`
+  console.error(
+    `
 ironcurtain - Secure agent runtime with policy-driven tool mediation
 
 Usage:
@@ -41,7 +42,8 @@ Examples:
   ironcurtain refresh-lists                      # Refresh all dynamic lists
   ironcurtain refresh-lists --list major-news    # Refresh a single list
   ironcurtain refresh-lists --with-mcp           # Include MCP-backed lists
-`.trim());
+`.trim(),
+  );
 }
 
 const { values, positionals } = parseArgs({

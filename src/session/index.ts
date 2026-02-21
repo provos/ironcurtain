@@ -52,8 +52,7 @@ export async function createSession(options: SessionOptions = {}): Promise<Sessi
     const sessionDir = getSessionDir(options.resumeSessionId);
     if (!existsSync(sessionDir)) {
       throw new SessionError(
-        `Cannot resume session "${options.resumeSessionId}": ` +
-        `session directory not found at ${sessionDir}`,
+        `Cannot resume session "${options.resumeSessionId}": ` + `session directory not found at ${sessionDir}`,
         'SESSION_INIT_FAILED',
       );
     }

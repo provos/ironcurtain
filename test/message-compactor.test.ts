@@ -41,7 +41,7 @@ function createUserConfig(): ResolvedUserConfig {
       maxTotalTokens: 1_000_000,
       maxSteps: 200,
       maxSessionSeconds: 1800,
-      maxEstimatedCostUsd: 5.00,
+      maxEstimatedCostUsd: 5.0,
       warnThresholdPercent: 80,
     },
     autoCompact: createConfig(),

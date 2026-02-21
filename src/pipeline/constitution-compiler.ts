@@ -48,10 +48,7 @@ const listDefinitionSchema = z.object({
   mcpServerHint: z.string().optional(),
 });
 
-function buildCompilerResponseSchema(
-  serverNames: [string, ...string[]],
-  toolNames: [string, ...string[]],
-) {
+function buildCompilerResponseSchema(serverNames: [string, ...string[]], toolNames: [string, ...string[]]) {
   const compiledRuleSchema = z.object({
     name: z.string(),
     description: z.string(),
@@ -80,12 +77,14 @@ export function buildCompilerPrompt(
   annotations: ToolAnnotation[],
   config: CompilerConfig,
 ): string {
-  const annotationsSummary = annotations.map(a => {
-    const argsDesc = Object.entries(a.args)
-      .map(([name, roles]) => `    ${name}: [${roles.join(', ')}]`)
-      .join('\n');
-    return `  ${a.serverName}/${a.toolName}: ${a.comment}, sideEffects=${a.sideEffects}\n    args:\n${argsDesc || '    (none)'}`;
-  }).join('\n');
+  const annotationsSummary = annotations
+    .map((a) => {
+      const argsDesc = Object.entries(a.args)
+        .map(([name, roles]) => `    ${name}: [${roles.join(', ')}]`)
+        .join('\n');
+      return `  ${a.serverName}/${a.toolName}: ${a.comment}, sideEffects=${a.sideEffects}\n    args:\n${argsDesc || '    (none)'}`;
+    })
+    .join('\n');
 
   return `You are compiling a security policy from a constitution document into enforceable declarative rules.
 
@@ -104,7 +103,7 @@ ${annotationsSummary}
 The following checks are hardcoded and evaluated BEFORE compiled rules:
 
 1. **Protected paths** -- any read, write, or delete targeting these paths is automatically denied:
-${config.protectedPaths.map(p => `- ${p}`).join('\n')}
+${config.protectedPaths.map((p) => `- ${p}`).join('\n')}
 
 2. **Sandbox containment** -- any tool call where ALL paths are within the sandbox directory is automatically allowed. Do NOT generate rules for sandbox-internal operations; the engine handles this at runtime with the dynamically configured sandbox path.
 
@@ -169,10 +168,7 @@ Examples:
 - "major tech stocks" -> @tech-stock-tickers (type: identifiers, requiresMcp: false)`;
 }
 
-export function buildRepairPrompt(
-  basePrompt: string,
-  repairContext: RepairContext,
-): string {
+export function buildRepairPrompt(basePrompt: string, repairContext: RepairContext): string {
   const rulesText = repairContext.previousRules
     .map((r, i) => `  ${i + 1}. [${r.name}] if: ${JSON.stringify(r.if)} then: ${r.then} -- ${r.reason}`)
     .join('\n');
@@ -213,13 +209,11 @@ export async function compileConstitution(
   repairContext?: RepairContext,
   onProgress?: (message: string) => void,
 ): Promise<CompilationOutput> {
-  const serverNames = [...new Set(annotations.map(a => a.serverName))] as [string, ...string[]];
-  const toolNames = [...new Set(annotations.map(a => a.toolName))] as [string, ...string[]];
+  const serverNames = [...new Set(annotations.map((a) => a.serverName))] as [string, ...string[]];
+  const toolNames = [...new Set(annotations.map((a) => a.toolName))] as [string, ...string[]];
   const schema = buildCompilerResponseSchema(serverNames, toolNames);
   const basePrompt = buildCompilerPrompt(constitutionText, annotations, config);
-  const prompt = repairContext
-    ? buildRepairPrompt(basePrompt, repairContext)
-    : basePrompt;
+  const prompt = repairContext ? buildRepairPrompt(basePrompt, repairContext) : basePrompt;
 
   const { output } = await generateObjectWithRepair({
     model: llm,
@@ -251,7 +245,7 @@ export function validateCompiledRules(
   const errors: string[] = [];
   const warnings: string[] = [];
 
-  const listDefsByName = new Map(listDefinitions.map(d => [d.name, d]));
+  const listDefsByName = new Map(listDefinitions.map((d) => [d.name, d]));
 
   // Track which list definitions are referenced by at least one rule
   const referencedListNames = new Set<string>();
@@ -297,9 +291,7 @@ export function validateCompiledRules(
           const listName = entry.slice(1);
           const listDef = listDefsByName.get(listName);
           if (!listDef) {
-            errors.push(
-              `Rule "${rule.name}": @${listName} in domains.allowed has no matching list definition`,
-            );
+            errors.push(`Rule "${rule.name}": @${listName} in domains.allowed has no matching list definition`);
           } else {
             referencedListNames.add(listName);
             // Domain lists must only appear in domains.allowed, not in lists[]
@@ -329,9 +321,7 @@ export function validateCompiledRules(
             const listName = entry.slice(1);
             const listDef = listDefsByName.get(listName);
             if (!listDef) {
-              errors.push(
-                `Rule "${rule.name}": @${listName} in lists[].allowed has no matching list definition`,
-              );
+              errors.push(`Rule "${rule.name}": @${listName} in lists[].allowed has no matching list definition`);
             } else {
               referencedListNames.add(listName);
 
@@ -373,9 +363,7 @@ export function validateCompiledRules(
   // Check for orphaned list definitions (defined but never referenced)
   for (const def of listDefinitions) {
     if (!referencedListNames.has(def.name)) {
-      warnings.push(
-        `List definition "${def.name}" is not referenced by any rule`,
-      );
+      warnings.push(`List definition "${def.name}" is not referenced by any rule`);
     }
   }
 

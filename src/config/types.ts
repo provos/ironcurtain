@@ -41,15 +41,17 @@ export interface SandboxFilesystemConfig {
  * - `undefined` (omitted): server is sandboxed with restrictive defaults
  *   (session sandbox write-only, no network)
  */
-export type ServerSandboxConfig = false | {
-  /** Filesystem restrictions beyond the automatic session sandbox directory. */
-  readonly filesystem?: SandboxFilesystemConfig;
-  /**
-   * Network access. `false` means no network (default).
-   * An object specifies allowed/denied domains.
-   */
-  readonly network?: false | SandboxNetworkConfig;
-};
+export type ServerSandboxConfig =
+  | false
+  | {
+      /** Filesystem restrictions beyond the automatic session sandbox directory. */
+      readonly filesystem?: SandboxFilesystemConfig;
+      /**
+       * Network access. `false` means no network (default).
+       * An object specifies allowed/denied domains.
+       */
+      readonly network?: false | SandboxNetworkConfig;
+    };
 
 export interface MCPServerConfig {
   command: string;

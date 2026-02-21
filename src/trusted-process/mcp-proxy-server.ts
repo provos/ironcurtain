@@ -58,7 +58,7 @@ import type { ToolCallRequest } from '../types/mcp.js';
 import type { AuditEntry } from '../types/audit.js';
 import type { McpRoot } from './mcp-client-manager.js';
 import { CallCircuitBreaker } from './call-circuit-breaker.js';
-import { autoApprove, readUserContext } from './auto-approver.js';
+import { autoApprove, extractArgsForAutoApprove, readUserContext } from './auto-approver.js';
 import { createLanguageModelFromEnv } from '../config/model-provider.js';
 import { wrapLanguageModel } from 'ai';
 import { createLlmLoggingMiddleware } from '../pipeline/llm-logger.js';
@@ -91,10 +91,10 @@ interface ClientState {
  * fetch the updated list. No-op if the root URI is already present.
  */
 async function addRootToClient(state: ClientState, root: McpRoot): Promise<void> {
-  if (state.roots.some(r => r.uri === root.uri)) return;
+  if (state.roots.some((r) => r.uri === root.uri)) return;
   state.roots.push(root);
 
-  const refreshed = new Promise<void>(resolve => {
+  const refreshed = new Promise<void>((resolve) => {
     state.rootsRefreshed = resolve;
   });
   await state.client.sendRootsListChanged();
@@ -106,7 +106,9 @@ function logToSessionFile(sessionLogPath: string, message: string): void {
   const timestamp = new Date().toISOString();
   try {
     appendFileSync(sessionLogPath, `${timestamp} INFO  ${message}\n`);
-  } catch { /* ignore write failures */ }
+  } catch {
+    /* ignore write failures */
+  }
 }
 
 /** Extracts concatenated text from MCP content blocks. */
@@ -171,15 +173,27 @@ async function waitForEscalationDecision(
     if (existsSync(responsePath)) {
       const response = JSON.parse(readFileSync(responsePath, 'utf-8')) as { decision: 'approved' | 'denied' };
       // Clean up both files
-      try { unlinkSync(requestPath); } catch { /* ignore */ }
-      try { unlinkSync(responsePath); } catch { /* ignore */ }
+      try {
+        unlinkSync(requestPath);
+      } catch {
+        /* ignore */
+      }
+      try {
+        unlinkSync(responsePath);
+      } catch {
+        /* ignore */
+      }
       return response.decision;
     }
     await new Promise((r) => setTimeout(r, ESCALATION_POLL_INTERVAL_MS));
   }
 
   // Timeout -- clean up request file and treat as denied
-  try { unlinkSync(requestPath); } catch { /* ignore */ }
+  try {
+    unlinkSync(requestPath);
+  } catch {
+    /* ignore */
+  }
   return 'denied';
 }
 
@@ -234,8 +248,9 @@ async function main(): Promise<void> {
 
   // Parse per-server credentials and immediately scrub from process.env
   // so they are not inherited by child MCP server processes.
-  const serverCredentials: Record<string, string> =
-    process.env.SERVER_CREDENTIALS ? JSON.parse(process.env.SERVER_CREDENTIALS) : {};
+  const serverCredentials: Record<string, string> = process.env.SERVER_CREDENTIALS
+    ? JSON.parse(process.env.SERVER_CREDENTIALS)
+    : {};
   delete process.env.SERVER_CREDENTIALS;
 
   const sandboxPolicy = (process.env.SANDBOX_POLICY ?? 'warn') as SandboxAvailabilityPolicy;
@@ -258,7 +273,14 @@ async function main(): Promise<void> {
   const { compiledPolicy, toolAnnotations, dynamicLists } = loadGeneratedPolicy(generatedDir);
 
   const serverDomainAllowlists = extractServerDomainAllowlists(serversConfig);
-  const policyEngine = new PolicyEngine(compiledPolicy, toolAnnotations, protectedPaths, allowedDirectory, serverDomainAllowlists, dynamicLists);
+  const policyEngine = new PolicyEngine(
+    compiledPolicy,
+    toolAnnotations,
+    protectedPaths,
+    allowedDirectory,
+    serverDomainAllowlists,
+    dynamicLists,
+  );
   const auditLog = new AuditLog(auditLogPath);
   const circuitBreaker = new CallCircuitBreaker();
 
@@ -279,13 +301,12 @@ async function main(): Promise<void> {
   }
 
   if (sandboxPolicy === 'enforce' && (!platformSupported || depErrors.length > 0)) {
-    const reasons = !platformSupported
-      ? [`Platform ${process.platform} not supported`]
-      : depErrors;
+    const reasons = !platformSupported ? [`Platform ${process.platform} not supported`] : depErrors;
     throw new Error(
       `[sandbox] FATAL: sandboxPolicy is "enforce" but sandboxing is unavailable:\n` +
-      reasons.map(r => `  - ${r}`).join('\n') + '\n' +
-      `Install with: sudo apt-get install -y bubblewrap socat`,
+        reasons.map((r) => `  - ${r}`).join('\n') +
+        '\n' +
+        `Install with: sudo apt-get install -y bubblewrap socat`,
     );
   }
 
@@ -293,10 +314,11 @@ async function main(): Promise<void> {
 
   if (!sandboxAvailable && sessionLogPath) {
     const missing = depErrors.length > 0 ? depErrors.join(', ') : `platform ${process.platform}`;
-    logToSessionFile(sessionLogPath,
+    logToSessionFile(
+      sessionLogPath,
       `[sandbox] WARNING: OS-level sandboxing unavailable (${missing}). ` +
-      `Servers will run without OS containment. ` +
-      `Set SANDBOX_POLICY=enforce to require sandboxing.`,
+        `Servers will run without OS containment. ` +
+        `Set SANDBOX_POLICY=enforce to require sandboxing.`,
     );
   }
 
@@ -305,12 +327,7 @@ async function main(): Promise<void> {
   const settingsDir = mkdtempSync(join(tmpdir(), 'ironcurtain-srt-'));
 
   for (const [serverName, config] of Object.entries(serversConfig)) {
-    const resolved = resolveSandboxConfig(
-      config,
-      allowedDirectory ?? '/tmp',
-      sandboxAvailable,
-      sandboxPolicy,
-    );
+    const resolved = resolveSandboxConfig(config, allowedDirectory ?? '/tmp', sandboxAvailable, sandboxPolicy);
     resolvedSandboxConfigs.set(serverName, resolved);
 
     if (resolved.sandboxed) {
@@ -399,10 +416,7 @@ async function main(): Promise<void> {
 
   // Create the proxy MCP server using the low-level Server API
   // so we can pass through raw JSON schemas without Zod conversion
-  const server = new Server(
-    { name: 'ironcurtain-proxy', version: '0.1.0' },
-    { capabilities: { tools: {} } },
-  );
+  const server = new Server({ name: 'ironcurtain-proxy', version: '0.1.0' }, { capabilities: { tools: {} } });
 
   // Handle tools/list -- return all proxied tool schemas verbatim
   server.setRequestHandler(ListToolsRequestSchema, async () => {
@@ -459,7 +473,11 @@ async function main(): Promise<void> {
     const serverIsSandboxed = serverSandboxConfig?.sandboxed === true;
 
     // Audit log records argsForTransport (what was actually sent to the MCP server)
-    function logAudit(result: AuditEntry['result'], durationMs: number, overrideEscalation?: 'approved' | 'denied'): void {
+    function logAudit(
+      result: AuditEntry['result'],
+      durationMs: number,
+      overrideEscalation?: 'approved' | 'denied',
+    ): void {
       const entry: AuditEntry = {
         timestamp: request.timestamp,
         requestId: request.requestId,
@@ -481,10 +499,12 @@ async function main(): Promise<void> {
         // No escalation directory configured -- auto-deny (backward compatible)
         logAudit({ status: 'denied', error: evaluation.reason }, 0, 'denied');
         return {
-          content: [{
-            type: 'text',
-            text: `ESCALATION REQUIRED: ${evaluation.reason}. Action denied (no escalation handler).`,
-          }],
+          content: [
+            {
+              type: 'text',
+              text: `ESCALATION REQUIRED: ${evaluation.reason}. Action denied (no escalation handler).`,
+            },
+          ],
           isError: true,
         };
       }
@@ -498,6 +518,7 @@ async function main(): Promise<void> {
               userMessage,
               toolName: `${toolInfo.serverName}/${toolInfo.name}`,
               escalationReason: evaluation.reason,
+              arguments: extractArgsForAutoApprove(argsForPolicy, annotation),
             },
             autoApproveModel,
           );
@@ -540,9 +561,7 @@ async function main(): Promise<void> {
       // server accepts the forwarded call.
       const state = clientStates.get(toolInfo.serverName);
       if (state) {
-        const paths = Object.values(argsForTransport).filter(
-          (v): v is string => typeof v === 'string',
-        );
+        const paths = Object.values(argsForTransport).filter((v): v is string => typeof v === 'string');
         for (const p of paths) {
           await addRootToClient(state, {
             uri: `file://${directoryForPath(p)}`,
@@ -594,10 +613,13 @@ async function main(): Promise<void> {
       //
       // CONSEQUENCE: By using CompatibilityCallToolResultSchema we lose client-side output
       // validation for ALL MCP servers proxied through this path, not just the git server.
-      const result = await client.callTool({
-        name: toolInfo.name,
-        arguments: argsForTransport,
-      }, CompatibilityCallToolResultSchema);
+      const result = await client.callTool(
+        {
+          name: toolInfo.name,
+          arguments: argsForTransport,
+        },
+        CompatibilityCallToolResultSchema,
+      );
 
       if (result.isError) {
         const errorText = extractTextFromContent(result.content) ?? 'Unknown tool error';
@@ -627,10 +649,18 @@ async function main(): Promise<void> {
   // is spawned as a child by Code Mode and may receive either signal.
   async function shutdown(): Promise<void> {
     for (const state of clientStates.values()) {
-      try { await state.client.close(); } catch { /* ignore */ }
+      try {
+        await state.client.close();
+      } catch {
+        /* ignore */
+      }
     }
     cleanupSettingsFiles(settingsDir);
-    try { await server.close(); } catch { /* ignore */ }
+    try {
+      await server.close();
+    } catch {
+      /* ignore */
+    }
     await auditLog.close();
     process.exit(0);
   }

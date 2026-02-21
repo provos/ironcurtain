@@ -5,13 +5,17 @@ import type { ToolAnnotation, TestScenario } from '../src/pipeline/types.js';
 
 const sampleAnnotations: ToolAnnotation[] = [
   {
-    toolName: 'read_file', serverName: 'filesystem',
-    comment: 'Reads the complete contents of a file from disk', sideEffects: true,
+    toolName: 'read_file',
+    serverName: 'filesystem',
+    comment: 'Reads the complete contents of a file from disk',
+    sideEffects: true,
     args: { path: ['read-path'] },
   },
   {
-    toolName: 'write_file', serverName: 'filesystem',
-    comment: 'Creates or overwrites a file with new content', sideEffects: true,
+    toolName: 'write_file',
+    serverName: 'filesystem',
+    comment: 'Creates or overwrites a file with new content',
+    sideEffects: true,
     args: { path: ['write-path'] },
   },
 ];
@@ -117,7 +121,7 @@ describe('Scenario Generator', () => {
       mockLLM,
     );
 
-    const generated = result.filter(s => s.source === 'generated');
+    const generated = result.filter((s) => s.source === 'generated');
     expect(generated.length).toBeGreaterThan(0);
     for (const s of generated) {
       expect(s.source).toBe('generated');
@@ -170,7 +174,7 @@ describe('Scenario Generator', () => {
 
     // Only handwritten scenarios remain
     expect(result).toHaveLength(2);
-    expect(result.every(s => s.source === 'handwritten')).toBe(true);
+    expect(result.every((s) => s.source === 'handwritten')).toBe(true);
   });
 
   it('all scenarios have required fields', async () => {

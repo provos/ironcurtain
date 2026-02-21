@@ -58,10 +58,7 @@ export class MessageCompactor {
    * Sends toSummarize to a summarization model and replaces the array
    * with [summaryMessage, ...toKeep].
    */
-  async compact(
-    messages: ModelMessage[],
-    userConfig: ResolvedUserConfig,
-  ): Promise<CompactionResult | null> {
+  async compact(messages: ModelMessage[], userConfig: ResolvedUserConfig): Promise<CompactionResult | null> {
     const keepCount = Math.min(this.config.keepRecentMessages, messages.length);
     const splitIndex = messages.length - keepCount;
 
@@ -71,19 +68,13 @@ export class MessageCompactor {
     const toKeep = messages.slice(splitIndex);
 
     if (!this.summaryModel) {
-      this.summaryModel = await createLanguageModel(
-        this.config.summaryModelId,
-        userConfig,
-      );
+      this.summaryModel = await createLanguageModel(this.config.summaryModelId, userConfig);
     }
 
     const result = await generateText({
       model: this.summaryModel,
       system: SUMMARIZER_SYSTEM_PROMPT,
-      messages: [
-        ...toSummarize,
-        { role: 'user', content: 'Summarize the conversation above.' },
-      ],
+      messages: [...toSummarize, { role: 'user', content: 'Summarize the conversation above.' }],
     });
 
     const summary = result.text;

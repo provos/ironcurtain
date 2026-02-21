@@ -20,9 +20,7 @@ export function stableStringify(value: unknown): string | undefined {
     return '[' + value.map(stableStringify).join(',') + ']';
   }
   const keys = Object.keys(value as Record<string, unknown>).sort();
-  const pairs = keys.map(
-    (k) => JSON.stringify(k) + ':' + stableStringify((value as Record<string, unknown>)[k]),
-  );
+  const pairs = keys.map((k) => JSON.stringify(k) + ':' + stableStringify((value as Record<string, unknown>)[k]));
   return '{' + pairs.join(',') + '}';
 }
 
@@ -31,5 +29,7 @@ export function stableStringify(value: unknown): string | undefined {
  * Returns a hex-encoded digest.
  */
 export function computeHash(value: unknown): string {
-  return createHash('sha256').update(stableStringify(value) ?? '').digest('hex');
+  return createHash('sha256')
+    .update(stableStringify(value) ?? '')
+    .digest('hex');
 }

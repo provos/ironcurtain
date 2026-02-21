@@ -1,12 +1,4 @@
-import {
-  describe,
-  it,
-  expect,
-  beforeEach,
-  afterEach,
-  vi,
-  type MockInstance,
-} from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi, type MockInstance } from 'vitest';
 import { mkdirSync, existsSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
 import * as logger from '../src/logger.js';
@@ -39,11 +31,7 @@ import { generateText } from 'ai';
 import { createSession, SessionNotReadyError, SessionClosedError } from '../src/session/index.js';
 import type { Sandbox } from '../src/sandbox/index.js';
 import type { IronCurtainConfig } from '../src/config/types.js';
-import type {
-  DiagnosticEvent,
-  EscalationRequest,
-  SessionOptions,
-} from '../src/session/types.js';
+import type { DiagnosticEvent, EscalationRequest, SessionOptions } from '../src/session/types.js';
 import {
   getSessionSandboxDir,
   getSessionEscalationDir,
@@ -83,7 +71,7 @@ function createTestConfig(): IronCurtainConfig {
         maxTotalTokens: 1_000_000,
         maxSteps: 200,
         maxSessionSeconds: 1800,
-        maxEstimatedCostUsd: 5.00,
+        maxEstimatedCostUsd: 5.0,
         warnThresholdPercent: 80,
       },
       autoCompact: {
@@ -231,7 +219,9 @@ describe('Session', () => {
     it('throws SessionNotReadyError when status is processing', async () => {
       // Make generateText block so we can attempt a concurrent send
       let resolveBlocking: (() => void) | undefined;
-      const blockingPromise = new Promise<void>((r) => { resolveBlocking = r; });
+      const blockingPromise = new Promise<void>((r) => {
+        resolveBlocking = r;
+      });
 
       mockGenerateText.mockImplementation(async () => {
         await blockingPromise;
@@ -437,13 +427,16 @@ describe('Session', () => {
         // Simulate what the proxy does: write a request file
         const escalationId = 'test-escalation-123';
         const requestPath = resolve(escalationDir, `request-${escalationId}.json`);
-        writeFileSync(requestPath, JSON.stringify({
-          escalationId,
-          toolName: 'read_file',
-          serverName: 'filesystem',
-          arguments: { path: '/etc/hostname' },
-          reason: 'Read outside sandbox',
-        }));
+        writeFileSync(
+          requestPath,
+          JSON.stringify({
+            escalationId,
+            toolName: 'read_file',
+            serverName: 'filesystem',
+            arguments: { path: '/etc/hostname' },
+            reason: 'Read outside sandbox',
+          }),
+        );
 
         // Wait for the polling interval to detect it
         await new Promise((r) => setTimeout(r, 500));
@@ -469,9 +462,9 @@ describe('Session', () => {
     it('resolveEscalation throws if no matching escalation is pending', async () => {
       const session = await createTestSession();
       try {
-        await expect(
-          session.resolveEscalation('nonexistent-id', 'approved'),
-        ).rejects.toThrow('No pending escalation with ID: nonexistent-id');
+        await expect(session.resolveEscalation('nonexistent-id', 'approved')).rejects.toThrow(
+          'No pending escalation with ID: nonexistent-id',
+        );
       } finally {
         await session.close();
       }
@@ -555,8 +548,8 @@ describe('Session', () => {
         const logs = session.getDiagnosticLog();
         // Each turn should produce 2 events: tool_call + agent_text
         expect(logs.length).toBe(4);
-        expect(logs.filter(e => e.kind === 'tool_call')).toHaveLength(2);
-        expect(logs.filter(e => e.kind === 'agent_text')).toHaveLength(2);
+        expect(logs.filter((e) => e.kind === 'tool_call')).toHaveLength(2);
+        expect(logs.filter((e) => e.kind === 'agent_text')).toHaveLength(2);
       } finally {
         await session.close();
       }
@@ -586,8 +579,8 @@ describe('Session', () => {
         await session.sendMessage('do something');
 
         expect(onDiagnostic).toHaveBeenCalled();
-        expect(diagnosticEvents.some(e => e.kind === 'tool_call')).toBe(true);
-        expect(diagnosticEvents.some(e => e.kind === 'agent_text')).toBe(true);
+        expect(diagnosticEvents.some((e) => e.kind === 'tool_call')).toBe(true);
+        expect(diagnosticEvents.some((e) => e.kind === 'agent_text')).toBe(true);
       } finally {
         await session.close();
       }
@@ -684,17 +677,16 @@ describe('Session', () => {
      */
     function mockCompactionAgent(
       summaryText: string,
-      agentHandler: (callIndex: number, opts: { onStepFinish?: (step: unknown) => void }) => {
+      agentHandler: (
+        callIndex: number,
+        opts: { onStepFinish?: (step: unknown) => void },
+      ) => {
         text: string;
         inputTokens: number;
       },
     ) {
       let agentCallCount = 0;
-      return async (opts: {
-        messages?: unknown[];
-        tools?: unknown;
-        onStepFinish?: (step: unknown) => void;
-      }) => {
+      return async (opts: { messages?: unknown[]; tools?: unknown; onStepFinish?: (step: unknown) => void }) => {
         if (isSummarizerCall(opts)) {
           return { text: summaryText };
         }
@@ -725,9 +717,7 @@ describe('Session', () => {
         return {
           text,
           response: {
-            messages: [
-              { role: 'assistant', content: [{ type: 'text', text }] },
-            ],
+            messages: [{ role: 'assistant', content: [{ type: 'text', text }] }],
           },
           totalUsage: { inputTokens, outputTokens: 50, totalTokens: inputTokens + 50 },
         };
@@ -737,28 +727,26 @@ describe('Session', () => {
     it('compacts messages when token threshold is exceeded across turns', async () => {
       const capturedMessages: unknown[][] = [];
 
-      mockGenerateText.mockImplementation(async (opts: {
-        messages?: unknown[];
-        tools?: unknown;
-        onStepFinish?: (step: unknown) => void;
-      }) => {
-        capturedMessages.push([...(opts.messages ?? [])]);
+      mockGenerateText.mockImplementation(
+        async (opts: { messages?: unknown[]; tools?: unknown; onStepFinish?: (step: unknown) => void }) => {
+          capturedMessages.push([...(opts.messages ?? [])]);
 
-        if (isSummarizerCall(opts)) {
-          return { text: 'Summary of the conversation so far.' };
-        }
+          if (isSummarizerCall(opts)) {
+            return { text: 'Summary of the conversation so far.' };
+          }
 
-        const isFirstAgentCall = capturedMessages.length === 1;
-        const inputTokens = isFirstAgentCall ? 5000 : 200;
-        const text = isFirstAgentCall ? 'response 1' : 'response 2';
+          const isFirstAgentCall = capturedMessages.length === 1;
+          const inputTokens = isFirstAgentCall ? 5000 : 200;
+          const text = isFirstAgentCall ? 'response 1' : 'response 2';
 
-        opts.onStepFinish?.({
-          toolCalls: [],
-          text,
-          usage: { inputTokens, outputTokens: 50 },
-        });
-        return createBulkResult(text, inputTokens);
-      });
+          opts.onStepFinish?.({
+            toolCalls: [],
+            text,
+            usage: { inputTokens, outputTokens: 50 },
+          });
+          return createBulkResult(text, inputTokens);
+        },
+      );
 
       const diagnostics: DiagnosticEvent[] = [];
       const session = await createTestSession({
@@ -793,23 +781,22 @@ describe('Session', () => {
         expect(turn2Messages[0].content).toContain('Summary of the conversation so far.');
 
         // Diagnostic event emitted
-        const compactionEvents = diagnostics.filter(e => e.kind === 'message_compaction');
+        const compactionEvents = diagnostics.filter((e) => e.kind === 'message_compaction');
         expect(compactionEvents).toHaveLength(1);
         expect(compactionEvents[0]).toMatchObject({
           kind: 'message_compaction',
           summaryPreview: expect.stringContaining('Summary of the conversation'),
         });
-        expect((compactionEvents[0] as { originalMessageCount: number; newMessageCount: number }).originalMessageCount)
-          .toBeGreaterThan((compactionEvents[0] as { newMessageCount: number }).newMessageCount);
+        expect(
+          (compactionEvents[0] as { originalMessageCount: number; newMessageCount: number }).originalMessageCount,
+        ).toBeGreaterThan((compactionEvents[0] as { newMessageCount: number }).newMessageCount);
       } finally {
         await session.close();
       }
     });
 
     it('does not compact when tokens are below threshold', async () => {
-      mockGenerateText.mockImplementation(
-        mockAgentWithFixedTokens('low-token response', 500),
-      );
+      mockGenerateText.mockImplementation(mockAgentWithFixedTokens('low-token response', 500));
 
       const diagnostics: DiagnosticEvent[] = [];
       const session = await createTestSession({
@@ -823,16 +810,14 @@ describe('Session', () => {
         await session.sendMessage('msg 3');
 
         expect(mockGenerateText).toHaveBeenCalledTimes(3);
-        expect(diagnostics.filter(e => e.kind === 'message_compaction')).toHaveLength(0);
+        expect(diagnostics.filter((e) => e.kind === 'message_compaction')).toHaveLength(0);
       } finally {
         await session.close();
       }
     });
 
     it('does not compact when disabled', async () => {
-      mockGenerateText.mockImplementation(
-        mockAgentWithFixedTokens('response', 5000),
-      );
+      mockGenerateText.mockImplementation(mockAgentWithFixedTokens('response', 5000));
 
       const diagnostics: DiagnosticEvent[] = [];
       const session = await createTestSession({
@@ -844,20 +829,19 @@ describe('Session', () => {
         await session.sendMessage('msg 2');
 
         expect(mockGenerateText).toHaveBeenCalledTimes(2);
-        expect(diagnostics.filter(e => e.kind === 'message_compaction')).toHaveLength(0);
+        expect(diagnostics.filter((e) => e.kind === 'message_compaction')).toHaveLength(0);
       } finally {
         await session.close();
       }
     });
 
     it('session continues working normally after compaction', async () => {
-      mockGenerateText.mockImplementation(mockCompactionAgent(
-        'Conversation summary.',
-        (callIndex) => ({
+      mockGenerateText.mockImplementation(
+        mockCompactionAgent('Conversation summary.', (callIndex) => ({
           text: `r${callIndex}`,
           inputTokens: callIndex === 1 ? 5000 : 200,
-        }),
-      ));
+        })),
+      );
 
       const session = await createTestSession({
         config: createCompactConfig(1000, 2),
@@ -943,9 +927,9 @@ describe('Session', () => {
     });
 
     it('rejects resume when previous session does not exist', async () => {
-      await expect(
-        createTestSession({ resumeSessionId: 'nonexistent-session-id' }),
-      ).rejects.toThrow(/Cannot resume session.*session directory not found/);
+      await expect(createTestSession({ resumeSessionId: 'nonexistent-session-id' })).rejects.toThrow(
+        /Cannot resume session.*session directory not found/,
+      );
     });
 
     it('resumed session can send messages', async () => {
@@ -966,9 +950,7 @@ describe('Session', () => {
     });
 
     it('validates session ID format to prevent path traversal', async () => {
-      await expect(
-        createTestSession({ resumeSessionId: '../../../etc' }),
-      ).rejects.toThrow(/Invalid session ID/);
+      await expect(createTestSession({ resumeSessionId: '../../../etc' })).rejects.toThrow(/Invalid session ID/);
     });
   });
 });

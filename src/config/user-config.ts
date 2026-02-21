@@ -20,7 +20,7 @@ export const USER_CONFIG_DEFAULTS = {
     maxTotalTokens: 1_000_000,
     maxSteps: 200,
     maxSessionSeconds: 1800,
-    maxEstimatedCostUsd: 5.00,
+    maxEstimatedCostUsd: 5.0,
     warnThresholdPercent: 80,
   },
   autoCompact: {
@@ -38,45 +38,55 @@ export const USER_CONFIG_DEFAULTS = {
 const ESCALATION_TIMEOUT_MIN = 30;
 const ESCALATION_TIMEOUT_MAX = 600;
 
-const resourceBudgetSchema = z.object({
-  maxTotalTokens: z.number().int().positive().nullable().optional(),
-  maxSteps: z.number().int().positive().nullable().optional(),
-  maxSessionSeconds: z.number().positive().nullable().optional(),
-  maxEstimatedCostUsd: z.number().positive().nullable().optional(),
-  warnThresholdPercent: z.number().min(1).max(99).optional(),
-}).optional();
+const resourceBudgetSchema = z
+  .object({
+    maxTotalTokens: z.number().int().positive().nullable().optional(),
+    maxSteps: z.number().int().positive().nullable().optional(),
+    maxSessionSeconds: z.number().positive().nullable().optional(),
+    maxEstimatedCostUsd: z.number().positive().nullable().optional(),
+    warnThresholdPercent: z.number().min(1).max(99).optional(),
+  })
+  .optional();
 
 /**
  * Validates a qualified model ID string: either a bare model name
  * or "provider:model-name" where provider is a known provider.
  * Delegates to parseModelId() so validation logic is not duplicated.
  */
-const qualifiedModelId = z.string().min(1).refine(
-  (val) => {
-    try {
-      parseModelId(val);
-      return true;
-    } catch {
-      return false;
-    }
-  },
-  {
-    message: 'Model ID must be "model-name" or "provider:model-name" ' +
-             'where provider is one of: anthropic, google, openai',
-  },
-);
+const qualifiedModelId = z
+  .string()
+  .min(1)
+  .refine(
+    (val) => {
+      try {
+        parseModelId(val);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    {
+      message:
+        'Model ID must be "model-name" or "provider:model-name" ' +
+        'where provider is one of: anthropic, google, openai',
+    },
+  );
 
-const autoCompactSchema = z.object({
-  enabled: z.boolean().optional(),
-  thresholdTokens: z.number().int().positive().optional(),
-  keepRecentMessages: z.number().int().positive().optional(),
-  summaryModelId: qualifiedModelId.optional(),
-}).optional();
+const autoCompactSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    thresholdTokens: z.number().int().positive().optional(),
+    keepRecentMessages: z.number().int().positive().optional(),
+    summaryModelId: qualifiedModelId.optional(),
+  })
+  .optional();
 
-const autoApproveSchema = z.object({
-  enabled: z.boolean().optional(),
-  modelId: qualifiedModelId.optional(),
-}).optional();
+const autoApproveSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    modelId: qualifiedModelId.optional(),
+  })
+  .optional();
 
 /**
  * Zod schema for validating user config. All fields optional.
@@ -98,9 +108,7 @@ const userConfigSchema = z.object({
   resourceBudget: resourceBudgetSchema,
   autoCompact: autoCompactSchema,
   autoApprove: autoApproveSchema,
-  serverCredentials: z
-    .record(z.string(), z.record(z.string(), z.string().min(1)))
-    .optional(),
+  serverCredentials: z.record(z.string(), z.record(z.string(), z.string().min(1))).optional(),
 });
 
 /** Parsed config from ~/.ironcurtain/config.json. All fields optional. */
@@ -155,18 +163,19 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 /** Default config file content (anthropicApiKey intentionally omitted). */
-const DEFAULT_CONFIG_CONTENT = JSON.stringify(
-  {
-    agentModelId: USER_CONFIG_DEFAULTS.agentModelId,
-    policyModelId: USER_CONFIG_DEFAULTS.policyModelId,
-    escalationTimeoutSeconds: USER_CONFIG_DEFAULTS.escalationTimeoutSeconds,
-    resourceBudget: USER_CONFIG_DEFAULTS.resourceBudget,
-    autoCompact: USER_CONFIG_DEFAULTS.autoCompact,
-    autoApprove: USER_CONFIG_DEFAULTS.autoApprove,
-  },
-  null,
-  2,
-) + '\n';
+const DEFAULT_CONFIG_CONTENT =
+  JSON.stringify(
+    {
+      agentModelId: USER_CONFIG_DEFAULTS.agentModelId,
+      policyModelId: USER_CONFIG_DEFAULTS.policyModelId,
+      escalationTimeoutSeconds: USER_CONFIG_DEFAULTS.escalationTimeoutSeconds,
+      resourceBudget: USER_CONFIG_DEFAULTS.resourceBudget,
+      autoCompact: USER_CONFIG_DEFAULTS.autoCompact,
+      autoApprove: USER_CONFIG_DEFAULTS.autoApprove,
+    },
+    null,
+    2,
+  ) + '\n';
 
 /**
  * Loads user configuration from ~/.ironcurtain/config.json.
@@ -219,9 +228,7 @@ function backfillMissingFields(configPath: string, raw: string): string {
  * Skips sensitive fields. One level deep for nested objects.
  * Returns null when nothing is missing.
  */
-function computeMissingDefaults(
-  fileContent: Record<string, unknown>,
-): Record<string, unknown> | null {
+function computeMissingDefaults(fileContent: Record<string, unknown>): Record<string, unknown> | null {
   const patch: Record<string, unknown> = {};
 
   for (const [key, defaultValue] of Object.entries(USER_CONFIG_DEFAULTS)) {
@@ -279,7 +286,9 @@ function describeAddedFields(patch: Record<string, unknown>): string {
   const fields: string[] = [];
   for (const [key, value] of Object.entries(patch)) {
     const defaultValue = (USER_CONFIG_DEFAULTS as Record<string, unknown>)[key];
-    const isSubFieldPatch = isPlainObject(value) && isPlainObject(defaultValue) &&
+    const isSubFieldPatch =
+      isPlainObject(value) &&
+      isPlainObject(defaultValue) &&
       Object.keys(value).length < Object.keys(defaultValue).length;
 
     if (isSubFieldPatch) {
@@ -318,10 +327,12 @@ function warnInsecurePermissions(configPath: string): void {
     if (stats.mode & 0o044) {
       process.stderr.write(
         `Warning: ${configPath} is readable by other users (mode ${(stats.mode & 0o777).toString(8)}). ` +
-        `Run: chmod 600 ${configPath}\n`,
+          `Run: chmod 600 ${configPath}\n`,
       );
     }
-  } catch { /* ignore stat failures */ }
+  } catch {
+    /* ignore stat failures */
+  }
 }
 
 /**
@@ -356,9 +367,7 @@ function warnUnknownFields(parsed: unknown, configPath: string): void {
 function validateConfig(parsed: unknown, configPath: string): UserConfig {
   const result = userConfigSchema.safeParse(parsed);
   if (!result.success) {
-    const issues = result.error.issues
-      .map((issue) => `  ${issue.path.join('.')}: ${issue.message}`)
-      .join('\n');
+    const issues = result.error.issues.map((issue) => `  ${issue.path.join('.')}: ${issue.message}`).join('\n');
     throw new Error(`Invalid config in ${configPath}:\n${issues}`);
   }
   return result.data;
@@ -381,15 +390,15 @@ function mergeWithDefaults(config: UserConfig): ResolvedUserConfig {
     anthropicApiKey: config.anthropicApiKey ?? '',
     googleApiKey: config.googleApiKey ?? '',
     openaiApiKey: config.openaiApiKey ?? '',
-    escalationTimeoutSeconds:
-      config.escalationTimeoutSeconds ?? USER_CONFIG_DEFAULTS.escalationTimeoutSeconds,
+    escalationTimeoutSeconds: config.escalationTimeoutSeconds ?? USER_CONFIG_DEFAULTS.escalationTimeoutSeconds,
     resourceBudget: {
       // Nullable fields: null means "disabled", undefined means "use default".
       // Must use !== undefined (not ??) so explicit null is preserved.
       maxTotalTokens: b?.maxTotalTokens !== undefined ? b.maxTotalTokens : budgetDefaults.maxTotalTokens,
       maxSteps: b?.maxSteps !== undefined ? b.maxSteps : budgetDefaults.maxSteps,
       maxSessionSeconds: b?.maxSessionSeconds !== undefined ? b.maxSessionSeconds : budgetDefaults.maxSessionSeconds,
-      maxEstimatedCostUsd: b?.maxEstimatedCostUsd !== undefined ? b.maxEstimatedCostUsd : budgetDefaults.maxEstimatedCostUsd,
+      maxEstimatedCostUsd:
+        b?.maxEstimatedCostUsd !== undefined ? b.maxEstimatedCostUsd : budgetDefaults.maxEstimatedCostUsd,
       warnThresholdPercent: b?.warnThresholdPercent ?? budgetDefaults.warnThresholdPercent,
     },
     autoCompact: {

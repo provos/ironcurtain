@@ -21,11 +21,7 @@ import {
   writeArtifact,
   withSpinner,
 } from './pipeline-shared.js';
-import type {
-  CompiledPolicyFile,
-  DynamicListsFile,
-  ListDefinition,
-} from './types.js';
+import type { CompiledPolicyFile, DynamicListsFile, ListDefinition } from './types.js';
 
 // ---------------------------------------------------------------------------
 // Argument Parsing
@@ -62,28 +58,25 @@ function parseRefreshArgs(args: string[]): RefreshListsOptions {
  * Without --with-mcp, data-backed lists are skipped with a warning.
  * Without --list, all eligible lists are included.
  */
-function selectListsToRefresh(
-  definitions: ListDefinition[],
-  options: RefreshListsOptions,
-): ListDefinition[] {
+function selectListsToRefresh(definitions: ListDefinition[], options: RefreshListsOptions): ListDefinition[] {
   let selected = definitions;
 
   // Filter to a single named list if --list was specified
   if (options.listName) {
-    selected = selected.filter(d => d.name === options.listName);
+    selected = selected.filter((d) => d.name === options.listName);
     if (selected.length === 0) {
       console.error(chalk.red(`Error: List "${options.listName}" not found in compiled policy.`));
-      console.error(`Available lists: ${definitions.map(d => d.name).join(', ') || '(none)'}`);
+      console.error(`Available lists: ${definitions.map((d) => d.name).join(', ') || '(none)'}`);
       process.exit(1);
     }
   }
 
   // Without --with-mcp, skip data-backed lists
   if (!options.withMcp) {
-    for (const def of selected.filter(d => d.requiresMcp)) {
+    for (const def of selected.filter((d) => d.requiresMcp)) {
       console.error(`  ${chalk.yellow('Skipping:')} @${def.name} (requires MCP — use --with-mcp to include)`);
     }
-    selected = selected.filter(d => !d.requiresMcp);
+    selected = selected.filter((d) => !d.requiresMcp);
   }
 
   return selected;
@@ -99,12 +92,12 @@ export async function main(args: string[] = []): Promise<void> {
 
   // Load compiled policy to get list definitions
   const compiledPolicy = loadExistingArtifact<CompiledPolicyFile>(
-    config.generatedDir, 'compiled-policy.json', config.packageGeneratedDir,
+    config.generatedDir,
+    'compiled-policy.json',
+    config.packageGeneratedDir,
   );
   if (!compiledPolicy) {
-    console.error(chalk.red.bold(
-      "Error: compiled-policy.json not found. Run 'ironcurtain compile-policy' first.",
-    ));
+    console.error(chalk.red.bold("Error: compiled-policy.json not found. Run 'ironcurtain compile-policy' first."));
     process.exit(1);
   }
 
@@ -126,35 +119,36 @@ export async function main(args: string[] = []): Promise<void> {
     return;
   }
 
-  const { model: llm, logPath } = await createPipelineLlm(
-    config.generatedDir, 'refresh-lists',
-  );
+  const { model: llm, logPath } = await createPipelineLlm(config.generatedDir, 'refresh-lists');
 
   // Load existing dynamic-lists.json for manual overrides and non-refreshed lists
   const existingLists = loadExistingArtifact<DynamicListsFile>(
-    config.generatedDir, 'dynamic-lists.json', config.packageGeneratedDir,
+    config.generatedDir,
+    'dynamic-lists.json',
+    config.packageGeneratedDir,
   );
 
   // Connect to MCP servers if needed
-  const needsMcp = options.withMcp && definitionsToRefresh.some(d => d.requiresMcp);
+  const needsMcp = options.withMcp && definitionsToRefresh.some((d) => d.requiresMcp);
   let mcpConnections: Map<string, McpServerConnection> | undefined;
   if (needsMcp) {
-    mcpConnections = await connectMcpServersForLists(
-      definitionsToRefresh, config.mcpServers,
-    );
+    mcpConnections = await connectMcpServersForLists(definitionsToRefresh, config.mcpServers);
   }
 
   try {
     const stepText = 'Refreshing dynamic lists';
     const { result: refreshedLists } = await withSpinner(
       stepText,
-      async (spinner) => resolveAllLists(
-        definitionsToRefresh,
-        { model: llm, mcpConnections },
-        existingLists,
-        (msg) => { spinner.text = `${stepText} — ${msg}`; },
-        true, // bypassCache: always re-resolve on refresh
-      ),
+      async (spinner) =>
+        resolveAllLists(
+          definitionsToRefresh,
+          { model: llm, mcpConnections },
+          existingLists,
+          (msg) => {
+            spinner.text = `${stepText} — ${msg}`;
+          },
+          true, // bypassCache: always re-resolve on refresh
+        ),
       (result, elapsed) => {
         const count = Object.keys(result.lists).length;
         return `${stepText}: ${count} list(s) refreshed (${elapsed.toFixed(1)}s)`;

@@ -91,7 +91,7 @@ describe('Integration: TrustedProcess with filesystem MCP server', () => {
           maxTotalTokens: 1_000_000,
           maxSteps: 200,
           maxSessionSeconds: 1800,
-          maxEstimatedCostUsd: 5.00,
+          maxEstimatedCostUsd: 5.0,
           warnThresholdPercent: 80,
         },
         autoCompact: {
@@ -120,17 +120,19 @@ describe('Integration: TrustedProcess with filesystem MCP server', () => {
     const tools = await trustedProcess.listTools('filesystem');
     expect(tools.length).toBeGreaterThan(0);
 
-    const toolNames = tools.map(t => t.name);
+    const toolNames = tools.map((t) => t.name);
     expect(toolNames).toContain('read_file');
     expect(toolNames).toContain('write_file');
     expect(toolNames).toContain('list_directory');
   });
 
   it('allows reading a file in the sandbox', async () => {
-    const result = await trustedProcess.handleToolCall(makeRequest({
-      toolName: 'read_file',
-      arguments: { path: `${SANDBOX_DIR}/hello.txt` },
-    }));
+    const result = await trustedProcess.handleToolCall(
+      makeRequest({
+        toolName: 'read_file',
+        arguments: { path: `${SANDBOX_DIR}/hello.txt` },
+      }),
+    );
 
     expect(result.status).toBe('success');
     expect(result.policyDecision.status).toBe('allow');
@@ -138,20 +140,24 @@ describe('Integration: TrustedProcess with filesystem MCP server', () => {
   });
 
   it('allows listing the sandbox directory', async () => {
-    const result = await trustedProcess.handleToolCall(makeRequest({
-      toolName: 'list_directory',
-      arguments: { path: SANDBOX_DIR },
-    }));
+    const result = await trustedProcess.handleToolCall(
+      makeRequest({
+        toolName: 'list_directory',
+        arguments: { path: SANDBOX_DIR },
+      }),
+    );
 
     expect(result.status).toBe('success');
     expect(result.policyDecision.status).toBe('allow');
   });
 
   it('allows writing a file in the sandbox', async () => {
-    const result = await trustedProcess.handleToolCall(makeRequest({
-      toolName: 'write_file',
-      arguments: { path: `${SANDBOX_DIR}/new-file.txt`, content: 'Created by test' },
-    }));
+    const result = await trustedProcess.handleToolCall(
+      makeRequest({
+        toolName: 'write_file',
+        arguments: { path: `${SANDBOX_DIR}/new-file.txt`, content: 'Created by test' },
+      }),
+    );
 
     expect(result.status).toBe('success');
     expect(result.policyDecision.status).toBe('allow');
@@ -162,10 +168,12 @@ describe('Integration: TrustedProcess with filesystem MCP server', () => {
   });
 
   it('denies deleting a file outside the sandbox (unknown tool)', async () => {
-    const result = await trustedProcess.handleToolCall(makeRequest({
-      toolName: 'delete_file',
-      arguments: { path: '/etc/important.txt' },
-    }));
+    const result = await trustedProcess.handleToolCall(
+      makeRequest({
+        toolName: 'delete_file',
+        arguments: { path: '/etc/important.txt' },
+      }),
+    );
 
     expect(result.status).toBe('denied');
     expect(result.policyDecision.status).toBe('deny');
@@ -173,10 +181,12 @@ describe('Integration: TrustedProcess with filesystem MCP server', () => {
   });
 
   it('escalates reading files outside the sandbox', async () => {
-    const result = await trustedProcess.handleToolCall(makeRequest({
-      toolName: 'read_file',
-      arguments: { path: '/etc/hostname' },
-    }));
+    const result = await trustedProcess.handleToolCall(
+      makeRequest({
+        toolName: 'read_file',
+        arguments: { path: '/etc/hostname' },
+      }),
+    );
 
     // Escalation is denied by mock handler, so final status is 'deny'
     expect(result.status).toBe('denied');
@@ -189,10 +199,12 @@ describe('Integration: TrustedProcess with filesystem MCP server', () => {
     // We test the actual constitution file path, not a sandbox file
     // that happens to contain "constitution.md" in its name.
     const constitutionPath = resolve(projectRoot, 'src/config/constitution.md');
-    const result = await trustedProcess.handleToolCall(makeRequest({
-      toolName: 'read_file',
-      arguments: { path: constitutionPath },
-    }));
+    const result = await trustedProcess.handleToolCall(
+      makeRequest({
+        toolName: 'read_file',
+        arguments: { path: constitutionPath },
+      }),
+    );
 
     expect(result.status).toBe('denied');
     expect(result.policyDecision.status).toBe('deny');
@@ -203,10 +215,12 @@ describe('Integration: TrustedProcess with filesystem MCP server', () => {
     escalationResponse = 'denied';
     lastEscalationRequest = null;
 
-    const result = await trustedProcess.handleToolCall(makeRequest({
-      toolName: 'write_file',
-      arguments: { path: '/tmp/outside-sandbox.txt', content: 'should not work' },
-    }));
+    const result = await trustedProcess.handleToolCall(
+      makeRequest({
+        toolName: 'write_file',
+        arguments: { path: '/tmp/outside-sandbox.txt', content: 'should not work' },
+      }),
+    );
 
     // Write outside permitted areas is escalated for human approval, then denied
     expect(lastEscalationRequest).not.toBeNull();
@@ -219,10 +233,12 @@ describe('Integration: TrustedProcess with filesystem MCP server', () => {
     escalationResponse = 'approved';
     lastEscalationRequest = null;
 
-    const result = await trustedProcess.handleToolCall(makeRequest({
-      toolName: 'read_file',
-      arguments: { path: '/etc/hostname' },
-    }));
+    const result = await trustedProcess.handleToolCall(
+      makeRequest({
+        toolName: 'read_file',
+        arguments: { path: '/etc/hostname' },
+      }),
+    );
 
     expect(lastEscalationRequest).not.toBeNull();
     expect(lastEscalationRequest!.toolName).toBe('read_file');
@@ -231,10 +247,12 @@ describe('Integration: TrustedProcess with filesystem MCP server', () => {
   });
 
   it('reports error status when MCP server returns isError (e.g. file not found)', async () => {
-    const result = await trustedProcess.handleToolCall(makeRequest({
-      toolName: 'read_file',
-      arguments: { path: `${SANDBOX_DIR}/nonexistent-file.txt` },
-    }));
+    const result = await trustedProcess.handleToolCall(
+      makeRequest({
+        toolName: 'read_file',
+        arguments: { path: `${SANDBOX_DIR}/nonexistent-file.txt` },
+      }),
+    );
 
     // Policy allows (file is in sandbox) but the MCP server returns isError
     // because the file doesn't exist. Previously this was reported as 'success'.
@@ -244,19 +262,21 @@ describe('Integration: TrustedProcess with filesystem MCP server', () => {
 
   it('records error in audit log when MCP server returns isError', async () => {
     // Trigger an MCP error: move a nonexistent file within the sandbox
-    await trustedProcess.handleToolCall(makeRequest({
-      toolName: 'move_file',
-      arguments: {
-        source: `${SANDBOX_DIR}/does-not-exist.txt`,
-        destination: `${SANDBOX_DIR}/target.txt`,
-      },
-    }));
+    await trustedProcess.handleToolCall(
+      makeRequest({
+        toolName: 'move_file',
+        arguments: {
+          source: `${SANDBOX_DIR}/does-not-exist.txt`,
+          destination: `${SANDBOX_DIR}/target.txt`,
+        },
+      }),
+    );
 
     // Wait for audit writes to flush
-    await new Promise(resolve => setTimeout(resolve, 100));
+    await new Promise((resolve) => setTimeout(resolve, 100));
 
     const logContent = readFileSync(AUDIT_LOG_PATH, 'utf-8').trim();
-    const entries = logContent.split('\n').map(line => JSON.parse(line));
+    const entries = logContent.split('\n').map((line) => JSON.parse(line));
 
     // Find the move_file entry -- it should be logged as 'error', not 'success'
     const moveEntry = entries.find(
@@ -271,11 +291,11 @@ describe('Integration: TrustedProcess with filesystem MCP server', () => {
 
   it('writes audit log entries', async () => {
     // Wait a moment for writes to flush
-    await new Promise(resolve => setTimeout(resolve, 100));
+    await new Promise((resolve) => setTimeout(resolve, 100));
 
     if (existsSync(AUDIT_LOG_PATH)) {
       const logContent = readFileSync(AUDIT_LOG_PATH, 'utf-8').trim();
-      const entries = logContent.split('\n').map(line => JSON.parse(line));
+      const entries = logContent.split('\n').map((line) => JSON.parse(line));
       expect(entries.length).toBeGreaterThan(0);
 
       // Each entry should have required fields

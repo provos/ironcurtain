@@ -32,8 +32,8 @@ export interface PipelineConfig {
   constitutionText: string;
   constitutionHash: string;
   mcpServers: Record<string, MCPServerConfig>;
-  generatedDir: string;           // write target (user-local)
-  packageGeneratedDir: string;    // fallback for reads (package-bundled)
+  generatedDir: string; // write target (user-local)
+  packageGeneratedDir: string; // fallback for reads (package-bundled)
   allowedDirectory: string;
   protectedPaths: string[];
 }
@@ -59,9 +59,7 @@ export function loadPipelineConfig(): PipelineConfig {
   const constitutionText = loadConstitutionText(constitutionPath);
   const constitutionHash = createHash('sha256').update(constitutionText).digest('hex');
   const mcpServersPath = resolve(configDir, 'mcp-servers.json');
-  const mcpServers: Record<string, MCPServerConfig> = JSON.parse(
-    readFileSync(mcpServersPath, 'utf-8'),
-  );
+  const mcpServers: Record<string, MCPServerConfig> = JSON.parse(readFileSync(mcpServersPath, 'utf-8'));
   resolveMcpServerPaths(mcpServers);
 
   const defaultAllowedDir = resolve(getIronCurtainHome(), 'sandbox');
@@ -113,11 +111,7 @@ export function computeHash(...inputs: string[]): string {
   return hash.digest('hex');
 }
 
-export function loadExistingArtifact<T>(
-  generatedDir: string,
-  filename: string,
-  fallbackDir?: string,
-): T | undefined {
+export function loadExistingArtifact<T>(generatedDir: string, filename: string, fallbackDir?: string): T | undefined {
   const candidates = [resolve(generatedDir, filename)];
   if (fallbackDir) {
     candidates.push(resolve(fallbackDir, filename));
@@ -158,9 +152,7 @@ export async function withSpinner<T>(
     const result = await fn(spinner);
     clearInterval(timer);
     const elapsed = (Date.now() - start) / 1000;
-    const successText = successFn
-      ? successFn(result, elapsed)
-      : `${text} (${elapsed.toFixed(1)}s)`;
+    const successText = successFn ? successFn(result, elapsed) : `${text} (${elapsed.toFixed(1)}s)`;
     spinner.succeed(successText);
     return { result, elapsed };
   } catch (err) {
@@ -177,10 +169,7 @@ export async function withSpinner<T>(
 /** Writes a JSON artifact to the generated directory with consistent formatting. */
 export function writeArtifact(generatedDir: string, filename: string, data: unknown): void {
   mkdirSync(generatedDir, { recursive: true });
-  writeFileSync(
-    resolve(generatedDir, filename),
-    JSON.stringify(data, null, 2) + '\n',
-  );
+  writeFileSync(resolve(generatedDir, filename), JSON.stringify(data, null, 2) + '\n');
 }
 
 // ---------------------------------------------------------------------------
@@ -197,10 +186,7 @@ export interface PipelineLlm {
  * Creates a language model wrapped with pipeline logging middleware.
  * Both annotate.ts and compile.ts use this to set up their LLM instance.
  */
-export async function createPipelineLlm(
-  generatedDir: string,
-  initialStepName: string,
-): Promise<PipelineLlm> {
+export async function createPipelineLlm(generatedDir: string, initialStepName: string): Promise<PipelineLlm> {
   const userConfig = loadUserConfig();
   const baseLlm = await createLanguageModel(userConfig.policyModelId, userConfig);
   const logContext: LlmLogContext = { stepName: initialStepName };

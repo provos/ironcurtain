@@ -104,14 +104,14 @@ describe('Tool Annotator', () => {
       const result = await annotateTools('filesystem', sampleTools, mockLLM);
 
       expect(result).toHaveLength(4);
-      expect(result.every(a => a.serverName === 'filesystem')).toBe(true);
+      expect(result.every((a) => a.serverName === 'filesystem')).toBe(true);
     });
 
     it('correctly maps tool names', async () => {
       const mockLLM = createMockModel(cannedAnnotations);
       const result = await annotateTools('filesystem', sampleTools, mockLLM);
 
-      const names = result.map(a => a.toolName);
+      const names = result.map((a) => a.toolName);
       expect(names).toContain('read_file');
       expect(names).toContain('write_file');
       expect(names).toContain('move_file');
@@ -122,7 +122,7 @@ describe('Tool Annotator', () => {
       const mockLLM = createMockModel(cannedAnnotations);
       const result = await annotateTools('filesystem', sampleTools, mockLLM);
 
-      const moveAnnotation = result.find(a => a.toolName === 'move_file')!;
+      const moveAnnotation = result.find((a) => a.toolName === 'move_file')!;
       expect(moveAnnotation.args.source).toEqual(['read-path', 'delete-path']);
       expect(moveAnnotation.args.destination).toEqual(['write-path']);
     });
@@ -133,9 +133,9 @@ describe('Tool Annotator', () => {
       };
       const mockLLM = createMockModel(incomplete);
 
-      await expect(
-        annotateTools('filesystem', sampleTools, mockLLM),
-      ).rejects.toThrow('Annotation incomplete: missing tools');
+      await expect(annotateTools('filesystem', sampleTools, mockLLM)).rejects.toThrow(
+        'Annotation incomplete: missing tools',
+      );
     });
 
     it('returns empty array for empty tools list', async () => {
@@ -146,7 +146,7 @@ describe('Tool Annotator', () => {
   });
 
   describe('validateAnnotationsHeuristic', () => {
-    const fullAnnotations: ToolAnnotation[] = cannedAnnotations.annotations.map(a => ({
+    const fullAnnotations: ToolAnnotation[] = cannedAnnotations.annotations.map((a) => ({
       ...a,
       serverName: 'filesystem',
     }));
@@ -158,7 +158,7 @@ describe('Tool Annotator', () => {
     });
 
     it('warns when a path-like argument has no path role', () => {
-      const badAnnotations: ToolAnnotation[] = fullAnnotations.map(a => {
+      const badAnnotations: ToolAnnotation[] = fullAnnotations.map((a) => {
         if (a.toolName === 'read_file') {
           return { ...a, args: { path: ['none'] } };
         }
@@ -173,37 +173,41 @@ describe('Tool Annotator', () => {
     });
 
     it('warns when tool has no annotation at all', () => {
-      const missingAnnotations = fullAnnotations.filter(a => a.toolName !== 'write_file');
+      const missingAnnotations = fullAnnotations.filter((a) => a.toolName !== 'write_file');
       const result = validateAnnotationsHeuristic(sampleTools, missingAnnotations);
       expect(result.valid).toBe(false);
-      expect(result.warnings.some(w => w.includes('write_file'))).toBe(true);
+      expect(result.warnings.some((w) => w.includes('write_file'))).toBe(true);
     });
 
     it('detects path-like defaults in schema', () => {
-      const toolWithDefaults: MCPToolSchema[] = [{
-        name: 'custom_tool',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            target: {
-              type: 'string',
-              default: '/home/user/file.txt',
+      const toolWithDefaults: MCPToolSchema[] = [
+        {
+          name: 'custom_tool',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              target: {
+                type: 'string',
+                default: '/home/user/file.txt',
+              },
             },
           },
         },
-      }];
+      ];
 
-      const noPathRoleAnnotations: ToolAnnotation[] = [{
-        toolName: 'custom_tool',
-        serverName: 'test',
-        comment: 'A custom tool with path-like defaults',
-        sideEffects: false,
-        args: { target: ['none'] },
-      }];
+      const noPathRoleAnnotations: ToolAnnotation[] = [
+        {
+          toolName: 'custom_tool',
+          serverName: 'test',
+          comment: 'A custom tool with path-like defaults',
+          sideEffects: false,
+          args: { target: ['none'] },
+        },
+      ];
 
       const result = validateAnnotationsHeuristic(toolWithDefaults, noPathRoleAnnotations);
       expect(result.valid).toBe(false);
-      expect(result.warnings.some(w => w.includes('path-like defaults'))).toBe(true);
+      expect(result.warnings.some((w) => w.includes('path-like defaults'))).toBe(true);
     });
   });
 

@@ -13,16 +13,28 @@
 import { describe, it, expect } from 'vitest';
 import { PolicyEngine } from '../src/trusted-process/policy-engine.js';
 import { getHandwrittenScenarios } from '../src/pipeline/handwritten-scenarios.js';
-import { testCompiledPolicy, testToolAnnotations, TEST_SANDBOX_DIR, TEST_PROTECTED_PATHS, TEST_DOMAIN_ALLOWLISTS } from './fixtures/test-policy.js';
+import {
+  testCompiledPolicy,
+  testToolAnnotations,
+  TEST_SANDBOX_DIR,
+  TEST_PROTECTED_PATHS,
+  TEST_DOMAIN_ALLOWLISTS,
+} from './fixtures/test-policy.js';
 
 const SANDBOX_DIR = TEST_SANDBOX_DIR;
 
 describe('Pipeline Integration: hand-crafted artifacts produce correct decisions', () => {
-  const engine = new PolicyEngine(testCompiledPolicy, testToolAnnotations, TEST_PROTECTED_PATHS, SANDBOX_DIR, TEST_DOMAIN_ALLOWLISTS);
+  const engine = new PolicyEngine(
+    testCompiledPolicy,
+    testToolAnnotations,
+    TEST_PROTECTED_PATHS,
+    SANDBOX_DIR,
+    TEST_DOMAIN_ALLOWLISTS,
+  );
   const scenarios = getHandwrittenScenarios(SANDBOX_DIR);
 
   it('all handwritten scenarios produce correct decisions', () => {
-    const results = scenarios.map(scenario => {
+    const results = scenarios.map((scenario) => {
       const result = engine.evaluate({
         requestId: 'integration-test',
         serverName: scenario.request.serverName,
@@ -39,20 +51,20 @@ describe('Pipeline Integration: hand-crafted artifacts produce correct decisions
       };
     });
 
-    const failures = results.filter(r => !r.pass);
+    const failures = results.filter((r) => !r.pass);
     if (failures.length > 0) {
       const details = failures
-        .map(f => `  ${f.description}: expected=${f.expected}, actual=${f.actual} (rule=${f.rule})`)
+        .map((f) => `  ${f.description}: expected=${f.expected}, actual=${f.actual} (rule=${f.rule})`)
         .join('\n');
       throw new Error(`${failures.length} scenario(s) failed:\n${details}`);
     }
 
-    expect(results.every(r => r.pass)).toBe(true);
+    expect(results.every((r) => r.pass)).toBe(true);
     expect(results.length).toBe(scenarios.length);
   });
 
   it('engine handles all expected decision types', () => {
-    const decisions = scenarios.map(s => {
+    const decisions = scenarios.map((s) => {
       const result = engine.evaluate({
         requestId: 'test',
         serverName: s.request.serverName,

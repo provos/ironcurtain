@@ -47,7 +47,9 @@
     "prepublishOnly": "npm run build",
     "test": "vitest run",
     "test:watch": "vitest",
-    "lint": "eslint src/ test/"
+    "lint": "eslint src/ test/",
+    "format": "prettier --write 'src/**/*.ts' 'test/**/*.ts'",
+    "format:check": "prettier --check 'src/**/*.ts' 'test/**/*.ts'"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.44",
@@ -77,6 +79,8 @@
     "@types/turndown": "^5.0.6",
     "@types/uuid": "^10.0.0",
     "eslint": "^9.39.2",
+    "eslint-config-prettier": "^10.1.8",
+    "prettier": "^3.8.1",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
     "typescript-eslint": "^8.56.0",

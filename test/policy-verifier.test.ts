@@ -4,7 +4,13 @@ import { verifyPolicy, filterStructuralConflicts } from '../src/pipeline/policy-
 import { PolicyEngine } from '../src/trusted-process/policy-engine.js';
 import type { CompiledPolicyFile, TestScenario } from '../src/pipeline/types.js';
 import { getHandwrittenScenarios } from '../src/pipeline/handwritten-scenarios.js';
-import { testCompiledPolicy, testToolAnnotations, TEST_SANDBOX_DIR, TEST_PROTECTED_PATHS, TEST_DOMAIN_ALLOWLISTS } from './fixtures/test-policy.js';
+import {
+  testCompiledPolicy,
+  testToolAnnotations,
+  TEST_SANDBOX_DIR,
+  TEST_PROTECTED_PATHS,
+  TEST_DOMAIN_ALLOWLISTS,
+} from './fixtures/test-policy.js';
 
 const protectedPaths = TEST_PROTECTED_PATHS;
 const SANDBOX_DIR = TEST_SANDBOX_DIR;
@@ -35,12 +41,13 @@ function mockV3Result(responseJson: unknown) {
 
 function createPassingJudge(): MockLanguageModelV3 {
   return new MockLanguageModelV3({
-    doGenerate: async () => mockV3Result({
-      analysis: 'All scenarios pass. Policy correctly implements the constitution.',
-      pass: true,
-      failureAttributions: [],
-      additionalScenarios: [],
-    }),
+    doGenerate: async () =>
+      mockV3Result({
+        analysis: 'All scenarios pass. Policy correctly implements the constitution.',
+        pass: true,
+        failureAttributions: [],
+        additionalScenarios: [],
+      }),
   });
 }
 
@@ -56,16 +63,18 @@ function createMultiRoundJudge(): MockLanguageModelV3 {
             analysis: 'Some scenarios pass but need to probe edge cases.',
             pass: false,
             failureAttributions: [],
-            additionalScenarios: [{
-              description: 'Read file at sandbox boundary',
-              request: {
-                serverName: 'filesystem',
-                toolName: 'read_file',
-                arguments: { path: '/tmp/ironcurtain-sandbox/deep/nested/file.txt' },
+            additionalScenarios: [
+              {
+                description: 'Read file at sandbox boundary',
+                request: {
+                  serverName: 'filesystem',
+                  toolName: 'read_file',
+                  arguments: { path: '/tmp/ironcurtain-sandbox/deep/nested/file.txt' },
+                },
+                expectedDecision: 'allow' as const,
+                reasoning: 'Nested path within sandbox should be allowed',
               },
-              expectedDecision: 'allow' as const,
-              reasoning: 'Nested path within sandbox should be allowed',
-            }],
+            ],
           }
         : {
             analysis: 'All scenarios including probes pass. Policy is correct.',
@@ -172,18 +181,19 @@ describe('Policy Verifier', () => {
           then: 'allow',
           reason: 'Allow all writes',
         },
-        ...testCompiledPolicy.rules.filter(r => !r.name.includes('read') && !r.name.includes('write')),
+        ...testCompiledPolicy.rules.filter((r) => !r.name.includes('read') && !r.name.includes('write')),
       ],
     };
 
     // Judge that reports failure
     const failJudge = new MockLanguageModelV3({
-      doGenerate: async () => mockV3Result({
-        analysis: 'Outside-sandbox scenarios fail -- reads and writes are allowed everywhere.',
-        pass: false,
-        failureAttributions: [],
-        additionalScenarios: [],
-      }),
+      doGenerate: async () =>
+        mockV3Result({
+          analysis: 'Outside-sandbox scenarios fail -- reads and writes are allowed everywhere.',
+          pass: false,
+          failureAttributions: [],
+          additionalScenarios: [],
+        }),
     });
 
     const result = await verifyPolicy(
@@ -204,7 +214,7 @@ describe('Policy Verifier', () => {
 
     // Outside-sandbox scenarios should fail: expected escalate, got allow
     const escalateFailures = result.failedScenarios.filter(
-      f => f.scenario.expectedDecision === 'escalate' && f.actualDecision === 'allow',
+      (f) => f.scenario.expectedDecision === 'escalate' && f.actualDecision === 'allow',
     );
     expect(escalateFailures.length).toBeGreaterThan(0);
   });
@@ -219,16 +229,18 @@ describe('Policy Verifier', () => {
           analysis: `Round ${callCount}: generating more probes.`,
           pass: false,
           failureAttributions: [],
-          additionalScenarios: [{
-            description: `Probe scenario ${callCount}`,
-            request: {
-              serverName: 'filesystem',
-              toolName: 'read_file',
-              arguments: { path: `/tmp/ironcurtain-sandbox/probe-${callCount}.txt` },
+          additionalScenarios: [
+            {
+              description: `Probe scenario ${callCount}`,
+              request: {
+                serverName: 'filesystem',
+                toolName: 'read_file',
+                arguments: { path: `/tmp/ironcurtain-sandbox/probe-${callCount}.txt` },
+              },
+              expectedDecision: 'allow' as const,
+              reasoning: 'Read within sandbox',
             },
-            expectedDecision: 'allow' as const,
-            reasoning: 'Read within sandbox',
-          }],
+          ],
         });
       },
     });
@@ -251,7 +263,13 @@ describe('Policy Verifier', () => {
 });
 
 describe('filterStructuralConflicts', () => {
-  const engine = new PolicyEngine(testCompiledPolicy, testToolAnnotations, protectedPaths, SANDBOX_DIR, TEST_DOMAIN_ALLOWLISTS);
+  const engine = new PolicyEngine(
+    testCompiledPolicy,
+    testToolAnnotations,
+    protectedPaths,
+    SANDBOX_DIR,
+    TEST_DOMAIN_ALLOWLISTS,
+  );
 
   it('discards scenarios that conflict with structural invariants', () => {
     const conflictingScenario: TestScenario = {

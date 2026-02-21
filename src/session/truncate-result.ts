@@ -48,9 +48,7 @@ export function truncateString(s: string, maxBytes: number): string {
   const tailBytes = available - headBytes;
 
   const head = buf.subarray(0, headBytes).toString('utf-8');
-  const tail = tailBytes > 0
-    ? buf.subarray(buf.length - tailBytes).toString('utf-8')
-    : '';
+  const tail = tailBytes > 0 ? buf.subarray(buf.length - tailBytes).toString('utf-8') : '';
 
   return head + realMarker + tail;
 }

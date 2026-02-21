@@ -95,8 +95,8 @@ export function error(message: string): void {
 
 const LEVEL_PAD: Record<LogLevel, string> = {
   debug: 'DEBUG',
-  info:  'INFO ',
-  warn:  'WARN ',
+  info: 'INFO ',
+  warn: 'WARN ',
   error: 'ERROR',
 };
 
@@ -117,7 +117,5 @@ function writeEntry(level: LogLevel, message: string): void {
  * Node's util.format behavior for the common cases.
  */
 function formatArgs(args: unknown[]): string {
-  return args
-    .map((a) => (typeof a === 'string' ? a : JSON.stringify(a)))
-    .join(' ');
+  return args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ');
 }

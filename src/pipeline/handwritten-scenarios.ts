@@ -89,7 +89,8 @@ export function getHandwrittenScenarios(sandboxDir: string): TestScenario[] {
         arguments: { path: `${sandboxDir}/test.txt` },
       },
       expectedDecision: 'allow',
-      reasoning: 'Structural sandbox invariant: all paths are within the sandbox, auto-allowed before unknown-tool and compiled-rule checks',
+      reasoning:
+        'Structural sandbox invariant: all paths are within the sandbox, auto-allowed before unknown-tool and compiled-rule checks',
       source: 'handwritten',
     },
     {
@@ -143,7 +144,8 @@ export function getHandwrittenScenarios(sandboxDir: string): TestScenario[] {
         },
       },
       expectedDecision: 'escalate',
-      reasoning: 'Source roles (read-path, delete-path) are sandbox-resolved. Only write-path on external destination is evaluated → escalate.',
+      reasoning:
+        'Source roles (read-path, delete-path) are sandbox-resolved. Only write-path on external destination is evaluated → escalate.',
       source: 'handwritten',
     },
     {

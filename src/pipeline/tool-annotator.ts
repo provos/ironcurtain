@@ -26,7 +26,7 @@ export interface MCPToolSchema {
 }
 
 function buildAnnotationsResponseSchema(serverName: string, tools: MCPToolSchema[]) {
-  const toolNames = tools.map(t => t.name) as [string, ...string[]];
+  const toolNames = tools.map((t) => t.name) as [string, ...string[]];
 
   // Build a per-server role enum so the schema rejects irrelevant roles
   const roleValues = getRolesForServer(serverName).map(([role]) => role) as [ArgumentRole, ...ArgumentRole[]];
@@ -34,10 +34,7 @@ function buildAnnotationsResponseSchema(serverName: string, tools: MCPToolSchema
 
   // LLMs sometimes return a bare string instead of a single-element array.
   // Accept both formats and normalize to an array.
-  const rolesArraySchema = z.union([
-    z.array(argumentRoleSchema),
-    argumentRoleSchema.transform(r => [r]),
-  ]);
+  const rolesArraySchema = z.union([z.array(argumentRoleSchema), argumentRoleSchema.transform((r) => [r])]);
 
   // Map tool name → expected argument names from input schemas
   const toolArgNames = new Map<string, string[]>();
@@ -58,7 +55,7 @@ function buildAnnotationsResponseSchema(serverName: string, tools: MCPToolSchema
       for (let i = 0; i < annotations.length; i++) {
         const a = annotations[i];
         const expectedArgs = toolArgNames.get(a.toolName) ?? [];
-        const missingArgs = expectedArgs.filter(name => !(name in a.args));
+        const missingArgs = expectedArgs.filter((name) => !(name in a.args));
         if (missingArgs.length > 0) {
           ctx.addIssue({
             code: z.ZodIssueCode.custom,
@@ -73,9 +70,7 @@ function buildAnnotationsResponseSchema(serverName: string, tools: MCPToolSchema
 
 /** Builds role description lines dynamically from the registry for the LLM prompt. */
 export function buildRoleDescriptions(serverName?: string): string {
-  const entries = serverName
-    ? getRolesForServer(serverName)
-    : [...ARGUMENT_ROLE_REGISTRY.entries()];
+  const entries = serverName ? getRolesForServer(serverName) : [...ARGUMENT_ROLE_REGISTRY.entries()];
   const lines: string[] = [];
   for (const [role, def] of entries) {
     lines.push(`   - "${role}" -- ${def.description}. ${def.annotationGuidance}`);
@@ -84,13 +79,17 @@ export function buildRoleDescriptions(serverName?: string): string {
 }
 
 export function buildAnnotationPrompt(serverName: string, tools: MCPToolSchema[]): string {
-  const toolDescriptions = tools.map(t => {
-    return [
-      `Tool: ${t.name}`,
-      t.description ? `Description: ${t.description}` : '',
-      `Input Schema: ${JSON.stringify(t.inputSchema, null, 2)}`,
-    ].filter(Boolean).join('\n');
-  }).join('\n\n---\n\n');
+  const toolDescriptions = tools
+    .map((t) => {
+      return [
+        `Tool: ${t.name}`,
+        t.description ? `Description: ${t.description}` : '',
+        `Input Schema: ${JSON.stringify(t.inputSchema, null, 2)}`,
+      ]
+        .filter(Boolean)
+        .join('\n');
+    })
+    .join('\n\n---\n\n');
 
   return `You are annotating MCP tools for a security policy engine. For each tool on the "${serverName}" server, classify:
 
@@ -149,16 +148,16 @@ export async function annotateTools(
     onProgress,
   });
 
-  const annotations: ToolAnnotation[] = output.annotations.map(a => ({
+  const annotations: ToolAnnotation[] = output.annotations.map((a) => ({
     ...a,
     serverName,
   }));
 
   // Validate all input tools are represented in the output
-  const annotatedNames = new Set(annotations.map(a => a.toolName));
-  const missingTools = tools.filter(t => !annotatedNames.has(t.name));
+  const annotatedNames = new Set(annotations.map((a) => a.toolName));
+  const missingTools = tools.filter((t) => !annotatedNames.has(t.name));
   if (missingTools.length > 0) {
-    const names = missingTools.map(t => t.name).join(', ');
+    const names = missingTools.map((t) => t.name).join(', ');
     throw new Error(`Annotation incomplete: missing tools: ${names}`);
   }
 
@@ -174,7 +173,7 @@ const PATH_INDICATOR_NAMES = ['path', 'file', 'dir', 'directory', 'source', 'des
 
 function looksLikePathArgument(argName: string): boolean {
   const lower = argName.toLowerCase();
-  return PATH_INDICATOR_NAMES.some(indicator => lower.includes(indicator));
+  return PATH_INDICATOR_NAMES.some((indicator) => lower.includes(indicator));
 }
 
 function hasPathLikeValues(schema: Record<string, unknown>): boolean {
@@ -231,24 +230,20 @@ export function validateAnnotationsHeuristic(
       if (argType === 'boolean' || argType === 'number' || argType === 'integer') continue;
 
       const roles = annotation.args[argName];
-      const hasPathRole = roles && roles.some(r => getRoleDefinition(r).isResourceIdentifier);
+      const hasPathRole = roles && roles.some((r) => getRoleDefinition(r).isResourceIdentifier);
 
       if (!hasPathRole) {
-        warnings.push(
-          `Tool "${tool.name}" argument "${argName}" looks like a path but has no path role in annotation`,
-        );
+        warnings.push(`Tool "${tool.name}" argument "${argName}" looks like a path but has no path role in annotation`);
       }
     }
 
     // Check for path-like default values or examples
     if (hasPathLikeValues(tool.inputSchema)) {
-      const hasAnyPathRole = Object.values(annotation.args).some(
-        roles => roles.some(r => getRoleDefinition(r).isResourceIdentifier),
+      const hasAnyPathRole = Object.values(annotation.args).some((roles) =>
+        roles.some((r) => getRoleDefinition(r).isResourceIdentifier),
       );
       if (!hasAnyPathRole) {
-        warnings.push(
-          `Tool "${tool.name}" schema has path-like defaults/examples but no path roles in annotation`,
-        );
+        warnings.push(`Tool "${tool.name}" schema has path-like defaults/examples but no path roles in annotation`);
       }
     }
   }

@@ -1,9 +1,6 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import {
-  CompatibilityCallToolResultSchema,
-  ListRootsRequestSchema,
-} from '@modelcontextprotocol/sdk/types.js';
+import { CompatibilityCallToolResultSchema, ListRootsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import type { MCPServerConfig } from '../config/types.js';
 import * as logger from '../logger.js';
 
@@ -22,15 +19,11 @@ interface ManagedServer {
 export class MCPClientManager {
   private servers = new Map<string, ManagedServer>();
 
-  async connect(
-    name: string,
-    config: MCPServerConfig,
-    roots?: McpRoot[],
-  ): Promise<void> {
+  async connect(name: string, config: MCPServerConfig, roots?: McpRoot[]): Promise<void> {
     const transport = new StdioClientTransport({
       command: config.command,
       args: config.args,
-      env: config.env ? { ...process.env as Record<string, string>, ...config.env } : undefined,
+      env: config.env ? { ...(process.env as Record<string, string>), ...config.env } : undefined,
     });
 
     const client = new Client(
@@ -72,11 +65,11 @@ export class MCPClientManager {
     if (!server?.roots) return;
 
     // Deduplicate
-    if (server.roots.some(r => r.uri === root.uri)) return;
+    if (server.roots.some((r) => r.uri === root.uri)) return;
     server.roots.push(root);
 
     // Wait for the server to call roots/list after we notify it.
-    const refreshed = new Promise<void>(resolve => {
+    const refreshed = new Promise<void>((resolve) => {
       server.rootsRefreshed = resolve;
     });
     await server.client.sendRootsListChanged();
@@ -90,7 +83,7 @@ export class MCPClientManager {
     }
 
     const result = await server.client.listTools();
-    return result.tools.map(tool => ({
+    return result.tools.map((tool) => ({
       name: tool.name,
       description: tool.description,
       inputSchema: tool.inputSchema,

@@ -53,10 +53,7 @@ export interface LlmLogContext {
  * @param context - Mutable context object. Set `context.stepName` before each
  *   pipeline phase to label the log entries.
  */
-export function createLlmLoggingMiddleware(
-  logPath: string,
-  context: LlmLogContext,
-): LanguageModelMiddleware {
+export function createLlmLoggingMiddleware(logPath: string, context: LlmLogContext): LanguageModelMiddleware {
   initLogFile(logPath);
 
   // Track how many prompt items were logged so far to enable delta logging.
@@ -118,9 +115,7 @@ function appendLogEntry(logPath: string, entry: LlmLogEntry): void {
 
 function extractTextFromContent(content: Array<{ type: string; text?: string }>): string {
   return content
-    .filter((part): part is { type: string; text: string } =>
-      part.type === 'text' && typeof part.text === 'string',
-    )
-    .map(part => part.text)
+    .filter((part): part is { type: string; text: string } => part.type === 'text' && typeof part.text === 'string')
+    .map((part) => part.text)
     .join('');
 }

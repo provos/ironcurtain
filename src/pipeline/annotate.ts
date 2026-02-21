@@ -49,9 +49,7 @@ async function connectAndDiscoverTools(
         const transport = new StdioClientTransport({
           command: config.command,
           args: config.args,
-          env: config.env
-            ? { ...(process.env as Record<string, string>), ...config.env }
-            : undefined,
+          env: config.env ? { ...(process.env as Record<string, string>), ...config.env } : undefined,
           stderr: 'pipe',
         });
         // Drain piped stderr to prevent backpressure (logs are discarded)
@@ -83,10 +81,7 @@ interface AnnotationResult {
   inputHash: string;
 }
 
-function computeAnnotationHash(
-  serverName: string,
-  tools: ServerConnection['tools'],
-): string {
+function computeAnnotationHash(serverName: string, tools: ServerConnection['tools']): string {
   return computeHash(serverName, JSON.stringify(tools), buildAnnotationPrompt(serverName, tools));
 }
 
@@ -109,9 +104,9 @@ async function annotateServerTools(
   const { result } = await withSpinner(
     stepText,
     async (spinner) => {
-      const annotations = await annotateTools(serverName, tools, llm,
-        (msg) => { spinner.text = `${stepText} — ${msg}`; },
-      );
+      const annotations = await annotateTools(serverName, tools, llm, (msg) => {
+        spinner.text = `${stepText} — ${msg}`;
+      });
 
       const validation = validateAnnotationsHeuristic(tools, annotations);
       if (!validation.valid) {
@@ -121,8 +116,7 @@ async function annotateServerTools(
       }
       return annotations;
     },
-    (annotations, elapsed) =>
-      `${stepText}: ${annotations.length} tools annotated (${elapsed.toFixed(1)}s)`,
+    (annotations, elapsed) => `${stepText}: ${annotations.length} tools annotated (${elapsed.toFixed(1)}s)`,
   );
 
   return { annotations: result, inputHash };
@@ -132,9 +126,7 @@ async function annotateServerTools(
 // Artifact Construction & Output
 // ---------------------------------------------------------------------------
 
-function buildAnnotationsArtifact(
-  annotationResults: Map<string, AnnotationResult>,
-): ToolAnnotationsFile {
+function buildAnnotationsArtifact(annotationResults: Map<string, AnnotationResult>): ToolAnnotationsFile {
   const servers: ToolAnnotationsFile['servers'] = {};
   for (const [serverName, result] of annotationResults) {
     servers[serverName] = {
@@ -176,15 +168,15 @@ export async function main(): Promise<void> {
   console.error(`Output: ${chalk.dim(config.generatedDir + '/')}`);
   console.error('');
 
-  const { model: llm, logContext, logPath } = await createPipelineLlm(
-    config.generatedDir, 'annotate',
-  );
+  const { model: llm, logContext, logPath } = await createPipelineLlm(config.generatedDir, 'annotate');
 
   const connections = await connectAndDiscoverTools(config.mcpServers);
 
   try {
     const existingAnnotations = loadExistingArtifact<ToolAnnotationsFile>(
-      config.generatedDir, 'tool-annotations.json', config.packageGeneratedDir,
+      config.generatedDir,
+      'tool-annotations.json',
+      config.packageGeneratedDir,
     );
 
     const annotationResults = new Map<string, AnnotationResult>();
@@ -197,8 +189,7 @@ export async function main(): Promise<void> {
     const toolAnnotationsFile = buildAnnotationsArtifact(annotationResults);
     writeArtifact(config.generatedDir, 'tool-annotations.json', toolAnnotationsFile);
 
-    const totalTools = [...annotationResults.values()]
-      .reduce((sum, r) => sum + r.annotations.length, 0);
+    const totalTools = [...annotationResults.values()].reduce((sum, r) => sum + r.annotations.length, 0);
     console.error('');
     console.error(`  Tools annotated: ${totalTools}`);
     console.error(`  Artifact written to: ${chalk.dim(config.generatedDir + '/tool-annotations.json')}`);

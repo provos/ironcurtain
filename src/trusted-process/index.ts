@@ -29,11 +29,21 @@ export class TrustedProcess {
   private autoApproveModel: LanguageModelV3 | null = null;
   private lastUserMessage: string | null = null;
 
-  constructor(private config: IronCurtainConfig, options?: TrustedProcessOptions) {
+  constructor(
+    private config: IronCurtainConfig,
+    options?: TrustedProcessOptions,
+  ) {
     const { compiledPolicy, toolAnnotations, dynamicLists } = loadGeneratedPolicy(config.generatedDir);
 
     const serverDomainAllowlists = extractServerDomainAllowlists(config.mcpServers);
-    this.policyEngine = new PolicyEngine(compiledPolicy, toolAnnotations, config.protectedPaths, config.allowedDirectory, serverDomainAllowlists, dynamicLists);
+    this.policyEngine = new PolicyEngine(
+      compiledPolicy,
+      toolAnnotations,
+      config.protectedPaths,
+      config.allowedDirectory,
+      serverDomainAllowlists,
+      dynamicLists,
+    );
 
     const policyRoots = extractPolicyRoots(compiledPolicy, config.allowedDirectory);
     this.mcpRoots = toMcpRoots(policyRoots);
@@ -63,10 +73,7 @@ export class TrustedProcess {
     const autoApproveConfig = this.config.userConfig.autoApprove;
     if (autoApproveConfig.enabled) {
       try {
-        this.autoApproveModel = await createLanguageModel(
-          autoApproveConfig.modelId,
-          this.config.userConfig,
-        );
+        this.autoApproveModel = await createLanguageModel(autoApproveConfig.modelId, this.config.userConfig);
       } catch {
         // Model creation failure should not prevent initialization.
         // Auto-approve simply won't be available.
@@ -92,7 +99,11 @@ export class TrustedProcess {
 
     // Annotation-driven normalization: split into transport vs policy args
     const annotation = this.policyEngine.getAnnotation(request.serverName, request.toolName);
-    const { argsForTransport, argsForPolicy } = prepareToolArgs(request.arguments, annotation, this.config.allowedDirectory);
+    const { argsForTransport, argsForPolicy } = prepareToolArgs(
+      request.arguments,
+      annotation,
+      this.config.allowedDirectory,
+    );
     const policyRequest = { ...request, arguments: argsForPolicy };
     const transportRequest = { ...request, arguments: argsForTransport };
 
@@ -150,9 +161,7 @@ export class TrustedProcess {
         // Expand roots to include target directories so the filesystem
         // server accepts the forwarded call (for both auto and human approval).
         if (escalationResult === 'approved') {
-          const paths = Object.values(transportRequest.arguments).filter(
-            (v): v is string => typeof v === 'string',
-          );
+          const paths = Object.values(transportRequest.arguments).filter((v): v is string => typeof v === 'string');
           for (const p of paths) {
             const dir = directoryForPath(p);
             await this.mcpManager.addRoot(transportRequest.serverName, {
@@ -165,11 +174,11 @@ export class TrustedProcess {
 
       // Step 3: Forward to MCP server or deny (using transport args)
       if (policyDecision.status === 'allow') {
-        const mcpResult = await this.mcpManager.callTool(
+        const mcpResult = (await this.mcpManager.callTool(
           transportRequest.serverName,
           transportRequest.toolName,
           transportRequest.arguments,
-        ) as { content?: unknown; isError?: boolean };
+        )) as { content?: unknown; isError?: boolean };
         resultContent = mcpResult;
 
         if (mcpResult.isError) {

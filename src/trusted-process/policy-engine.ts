@@ -68,7 +68,7 @@ function extractAnnotatedPaths(
 ): string[] {
   const paths: string[] = [];
   for (const [argName, roles] of Object.entries(annotation.args)) {
-    if (!roles.some(r => targetRoles.includes(r))) continue;
+    if (!roles.some((r) => targetRoles.includes(r))) continue;
 
     const value = args[argName];
     if (typeof value === 'string') {
@@ -81,7 +81,6 @@ function extractAnnotatedPaths(
   }
   return paths;
 }
-
 
 /**
  * Checks whether a target path is contained within a directory.
@@ -102,7 +101,7 @@ function isWithinDirectory(targetPath: string, directory: string): boolean {
  */
 function isProtectedPath(resolvedPath: string, protectedPaths: string[]): boolean {
   const realPath = resolveRealPath(resolvedPath);
-  return protectedPaths.some(pp => {
+  return protectedPaths.some((pp) => {
     const resolvedPP = resolveRealPath(pp);
     return realPath === resolvedPP || realPath.startsWith(resolvedPP + '/');
   });
@@ -160,7 +159,7 @@ function extractAnnotatedUrls(
 ): Array<{ value: string; role: ArgumentRole; roleDef: RoleDefinition }> {
   const urls: Array<{ value: string; role: ArgumentRole; roleDef: RoleDefinition }> = [];
   for (const [argName, roles] of Object.entries(annotation.args)) {
-    const matchingRole = roles.find(r => targetRoles.includes(r));
+    const matchingRole = roles.find((r) => targetRoles.includes(r));
     if (!matchingRole) continue;
 
     const value = args[argName];
@@ -184,11 +183,7 @@ function extractAnnotatedUrls(
  *   2. normalize(resolvedValue)          -- canonicalize URL format
  *   3. prepareForPolicy(normalizedValue) -- extract domain for allowlist check
  */
-function resolveUrlForDomainCheck(
-  value: string,
-  roleDef: RoleDefinition,
-  allArgs: Record<string, unknown>,
-): string {
+function resolveUrlForDomainCheck(value: string, roleDef: RoleDefinition, allArgs: Record<string, unknown>): string {
   const resolved = roleDef.resolveForPolicy?.(value, allArgs) ?? value;
   const normalized = roleDef.normalize(resolved);
   return roleDef.prepareForPolicy?.(normalized) ?? normalized;
@@ -202,10 +197,12 @@ export { domainMatchesAllowlist, isIpAddress };
  * Rules without these conditions are role-agnostic and match any role.
  */
 function hasRoleConditions(rule: CompiledRule): boolean {
-  return rule.if.roles !== undefined
-    || rule.if.paths !== undefined
-    || rule.if.domains !== undefined
-    || (rule.if.lists !== undefined && rule.if.lists.length > 0);
+  return (
+    rule.if.roles !== undefined ||
+    rule.if.paths !== undefined ||
+    rule.if.domains !== undefined ||
+    (rule.if.lists !== undefined && rule.if.lists.length > 0)
+  );
 }
 
 /**
@@ -219,7 +216,7 @@ function ruleRelevantToRole(rule: CompiledRule, role: ArgumentRole): boolean {
   if (cond.roles !== undefined && !cond.roles.includes(role)) return false;
   if (cond.paths !== undefined && !cond.paths.roles.includes(role)) return false;
   if (cond.domains !== undefined && !cond.domains.roles.includes(role)) return false;
-  if (cond.lists !== undefined && !cond.lists.some(lc => lc.roles.includes(role))) return false;
+  if (cond.lists !== undefined && !cond.lists.some((lc) => lc.roles.includes(role))) return false;
   return true;
 }
 
@@ -232,21 +229,17 @@ function ruleRelevantToRole(rule: CompiledRule, role: ArgumentRole): boolean {
  * manual additions, and manual removals:
  *   effective = (resolved.values + manualAdditions) - manualRemovals
  */
-function getEffectiveListValues(
-  listName: string,
-  lists: DynamicListsFile,
-): string[] {
+function getEffectiveListValues(listName: string, lists: DynamicListsFile): string[] {
   const list = lists.lists[listName];
   if (!list) {
     throw new Error(
       `Dynamic list "@${listName}" referenced in policy but not found in dynamic-lists.json. ` +
-      `Run "ironcurtain compile-policy" to resolve lists.`,
+        `Run "ironcurtain compile-policy" to resolve lists.`,
     );
   }
 
   const removals = new Set(list.manualRemovals);
-  return [...new Set([...list.values, ...list.manualAdditions])]
-    .filter(v => !removals.has(v));
+  return [...new Set([...list.values, ...list.manualAdditions])].filter((v) => !removals.has(v));
 }
 
 /**
@@ -254,19 +247,14 @@ function getEffectiveListValues(
  * from the resolved dynamic lists. Called at load time so the evaluation hot
  * path never sees symbolic references.
  */
-function expandListReferences(
-  policy: CompiledPolicyFile,
-  lists: DynamicListsFile,
-): CompiledPolicyFile {
-  const expandedRules = policy.rules.map(rule => {
+function expandListReferences(policy: CompiledPolicyFile, lists: DynamicListsFile): CompiledPolicyFile {
+  const expandedRules = policy.rules.map((rule) => {
     let expandedRule = rule;
 
     // Expand @list-name in domains.allowed
-    if (rule.if.domains?.allowed.some(e => e.startsWith('@'))) {
-      const expandedAllowed = rule.if.domains.allowed.flatMap(entry =>
-        entry.startsWith('@')
-          ? getEffectiveListValues(entry.slice(1), lists)
-          : [entry],
+    if (rule.if.domains?.allowed.some((e) => e.startsWith('@'))) {
+      const expandedAllowed = rule.if.domains.allowed.flatMap((entry) =>
+        entry.startsWith('@') ? getEffectiveListValues(entry.slice(1), lists) : [entry],
       );
       expandedRule = {
         ...expandedRule,
@@ -278,13 +266,11 @@ function expandListReferences(
     }
 
     // Expand @list-name in each lists[] entry
-    if (rule.if.lists?.some(lc => lc.allowed.some(e => e.startsWith('@')))) {
-      const expandedLists = rule.if.lists!.map(listCond => {
-        if (!listCond.allowed.some(e => e.startsWith('@'))) return listCond;
-        const expandedAllowed = listCond.allowed.flatMap(entry =>
-          entry.startsWith('@')
-            ? getEffectiveListValues(entry.slice(1), lists)
-            : [entry],
+    if (rule.if.lists?.some((lc) => lc.allowed.some((e) => e.startsWith('@')))) {
+      const expandedLists = rule.if.lists!.map((listCond) => {
+        if (!listCond.allowed.some((e) => e.startsWith('@'))) return listCond;
+        const expandedAllowed = listCond.allowed.flatMap((entry) =>
+          entry.startsWith('@') ? getEffectiveListValues(entry.slice(1), lists) : [entry],
         );
         return { ...listCond, allowed: expandedAllowed };
       });
@@ -315,9 +301,7 @@ export class PolicyEngine {
     serverDomainAllowlists?: ReadonlyMap<string, readonly string[]>,
     dynamicLists?: DynamicListsFile,
   ) {
-    this.compiledPolicy = dynamicLists
-      ? expandListReferences(compiledPolicy, dynamicLists)
-      : compiledPolicy;
+    this.compiledPolicy = dynamicLists ? expandListReferences(compiledPolicy, dynamicLists) : compiledPolicy;
     this.protectedPaths = protectedPaths;
     this.allowedDirectory = allowedDirectory;
     this.serverDomainAllowlists = serverDomainAllowlists ?? new Map();
@@ -368,13 +352,11 @@ export class PolicyEngine {
 
     // Phase 1a/1b use path-category roles only (not URL roles)
     const pathRoles = getPathRoles();
-    const annotatedPaths = annotation
-      ? extractAnnotatedPaths(request.arguments, annotation, pathRoles)
-      : [];
+    const annotatedPaths = annotation ? extractAnnotatedPaths(request.arguments, annotation, pathRoles) : [];
 
     // Union of both extraction methods, deduplicated
     const allPaths = [...new Set([...heuristicPaths, ...annotatedPaths])];
-    const resolvedPaths = allPaths.map(p => resolveRealPath(p));
+    const resolvedPaths = allPaths.map((p) => resolveRealPath(p));
 
     // Phase 1a: Protected paths -- any match is an immediate deny
     for (const rp of resolvedPaths) {
@@ -399,29 +381,24 @@ export class PolicyEngine {
     // be auto-resolved by sandbox containment. Higher-risk path roles like
     // write-history and delete-history always fall through to Phase 2.
     const sandboxResolvedRoles = new Set<ArgumentRole>();
-    const resolvedSandboxPaths = annotation
-      ? annotatedPaths.map(p => resolveRealPath(p))
-      : resolvedPaths;
+    const resolvedSandboxPaths = annotation ? annotatedPaths.map((p) => resolveRealPath(p)) : resolvedPaths;
 
     // Extract URL args once for use in both Phase 1b (fast-path guard) and Phase 1c
-    const urlArgs = annotation
-      ? extractAnnotatedUrls(request.arguments, annotation, getUrlRoles())
-      : [];
+    const urlArgs = annotation ? extractAnnotatedUrls(request.arguments, annotation, getUrlRoles()) : [];
 
     // Determine if the tool has any non-sandbox-safe path roles
     const toolHasUnsafePathRoles = annotation
-      ? pathRoles.some(role =>
-          !SANDBOX_SAFE_PATH_ROLES.has(role) &&
-          Object.values(annotation.args).some(argRoles => argRoles.includes(role)),
+      ? pathRoles.some(
+          (role) =>
+            !SANDBOX_SAFE_PATH_ROLES.has(role) &&
+            Object.values(annotation.args).some((argRoles) => argRoles.includes(role)),
         )
       : false;
 
     if (this.allowedDirectory && resolvedSandboxPaths.length > 0) {
       // Fast path: all annotated paths within sandbox -> auto-allow
       // Only fires when ALL path roles are sandbox-safe and no URL roles need checking
-      const allWithinSandbox = resolvedSandboxPaths.every(
-        rp => isWithinDirectory(rp, this.allowedDirectory!),
-      );
+      const allWithinSandbox = resolvedSandboxPaths.every((rp) => isWithinDirectory(rp, this.allowedDirectory!));
 
       if (allWithinSandbox && urlArgs.length === 0 && !toolHasUnsafePathRoles) {
         return finalDecision({
@@ -439,7 +416,7 @@ export class PolicyEngine {
         for (const role of pathRoles) {
           if (!SANDBOX_SAFE_PATH_ROLES.has(role)) continue;
           const pathsForRole = extractAnnotatedPaths(request.arguments, annotation, [role]);
-          if (pathsForRole.length > 0 && pathsForRole.every(p => isWithinDirectory(p, this.allowedDirectory!))) {
+          if (pathsForRole.length > 0 && pathsForRole.every((p) => isWithinDirectory(p, this.allowedDirectory!))) {
             sandboxResolvedRoles.add(role);
           }
         }
@@ -501,7 +478,7 @@ export class PolicyEngine {
     const allRoles = collectDistinctRoles(annotation);
 
     // Filter out roles already resolved by sandbox containment
-    const rolesToEvaluate = allRoles.filter(r => !sandboxResolvedRoles.has(r));
+    const rolesToEvaluate = allRoles.filter((r) => !sandboxResolvedRoles.has(r));
 
     // All resource roles were sandbox-resolved → allow
     if (allRoles.length > 0 && rolesToEvaluate.length === 0) {
@@ -652,8 +629,8 @@ export class PolicyEngine {
     const cond = rule.if;
 
     if (cond.roles !== undefined) {
-      const toolHasMatchingRole = Object.values(annotation.args).some(
-        argRoles => argRoles.some(r => cond.roles!.includes(r)),
+      const toolHasMatchingRole = Object.values(annotation.args).some((argRoles) =>
+        argRoles.some((r) => cond.roles!.includes(r)),
       );
       if (!toolHasMatchingRole) return false;
     }
@@ -676,27 +653,19 @@ export class PolicyEngine {
   /**
    * Checks whether all conditions in a rule's `if` block are satisfied.
    */
-  private ruleMatches(
-    rule: CompiledRule,
-    request: ToolCallRequest,
-    annotation: ToolAnnotation,
-  ): boolean {
+  private ruleMatches(rule: CompiledRule, request: ToolCallRequest, annotation: ToolAnnotation): boolean {
     if (!this.ruleMatchesNonPathConditions(rule, request, annotation)) return false;
 
     // Check paths condition
     const cond = rule.if;
     if (cond.paths !== undefined) {
-      const extracted = extractAnnotatedPaths(
-        request.arguments,
-        annotation,
-        cond.paths.roles,
-      );
+      const extracted = extractAnnotatedPaths(request.arguments, annotation, cond.paths.roles);
 
       // Zero paths extracted = condition not satisfied, rule does not match
       if (extracted.length === 0) return false;
 
       // isWithinDirectory resolves paths internally, no pre-resolution needed
-      const allWithin = extracted.every(p => isWithinDirectory(p, cond.paths!.within));
+      const allWithin = extracted.every((p) => isWithinDirectory(p, cond.paths!.within));
       if (!allWithin) return false;
     }
 
@@ -717,17 +686,13 @@ export class PolicyEngine {
     // Check lists conditions (non-domain list matching)
     if (cond.lists !== undefined) {
       for (const listCond of cond.lists) {
-        const extractedValues = extractAnnotatedPaths(
-          request.arguments, annotation, listCond.roles,
-        );
+        const extractedValues = extractAnnotatedPaths(request.arguments, annotation, listCond.roles);
 
         // Zero values extracted = condition not satisfied, rule does not match
         if (extractedValues.length === 0) return false;
 
         const matcher = getListMatcher(listCond.matchType);
-        const allValuesMatch = extractedValues.every(v =>
-          listCond.allowed.some(pattern => matcher(v, pattern)),
-        );
+        const allValuesMatch = extractedValues.every((v) => listCond.allowed.some((pattern) => matcher(v, pattern)));
         if (!allValuesMatch) return false;
       }
     }

@@ -216,36 +216,26 @@ const ALL_SCENARIOS: Scenario[] = [...approveScenarios, ...escalateScenarios];
 // Test suite
 // ---------------------------------------------------------------------------
 
-describe.skipIf(!process.env.INTEGRATION_TEST)(
-  'Auto-approver integration (live LLM)',
-  () => {
-    let model: LanguageModelV3;
+describe.skipIf(!process.env.INTEGRATION_TEST)('Auto-approver integration (live LLM)', () => {
+  let model: LanguageModelV3;
 
-    // Create the model once for all scenarios.
-    // The API key comes from the ANTHROPIC_API_KEY env var.
-    beforeAll(async () => {
-      const apiKey = process.env.ANTHROPIC_API_KEY ?? '';
-      if (!apiKey) {
-        throw new Error(
-          'ANTHROPIC_API_KEY must be set to run auto-approver integration tests',
-        );
-      }
-      model = await createLanguageModelFromEnv('anthropic:claude-haiku-4-5', apiKey);
-    });
-
-    for (const scenario of ALL_SCENARIOS) {
-      it(
-        `${scenario.expected}s: ${scenario.label}`,
-        async () => {
-          const result = await autoApprove(scenario.context, model);
-
-          expect(result.decision).toBe(scenario.expected);
-          // The reasoning should be a non-empty string regardless of decision
-          expect(result.reasoning.length).toBeGreaterThan(0);
-        },
-        // LLM calls may take a few seconds each
-        30_000,
-      );
+  // Create the model once for all scenarios.
+  // The API key comes from the ANTHROPIC_API_KEY env var.
+  beforeAll(async () => {
+    const apiKey = process.env.ANTHROPIC_API_KEY ?? '';
+    if (!apiKey) {
+      throw new Error('ANTHROPIC_API_KEY must be set to run auto-approver integration tests');
     }
-  },
-);
+    model = await createLanguageModelFromEnv('anthropic:claude-haiku-4-5', apiKey);
+  });
+
+  for (const scenario of ALL_SCENARIOS) {
+    it(`${scenario.expected}s: ${scenario.label}`, async () => {
+      const result = await autoApprove(scenario.context, model);
+
+      expect(result.decision).toBe(scenario.expected);
+      // The reasoning should be a non-empty string regardless of decision
+      expect(result.reasoning.length).toBeGreaterThan(0);
+    }, 30_000); // LLM calls may take a few seconds each
+  }
+});

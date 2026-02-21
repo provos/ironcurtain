@@ -12,18 +12,11 @@ export class SessionError extends Error {
   }
 }
 
-export type SessionErrorCode =
-  | 'SESSION_NOT_READY'
-  | 'SESSION_CLOSED'
-  | 'SESSION_INIT_FAILED'
-  | 'BUDGET_EXHAUSTED';
+export type SessionErrorCode = 'SESSION_NOT_READY' | 'SESSION_CLOSED' | 'SESSION_INIT_FAILED' | 'BUDGET_EXHAUSTED';
 
 export class SessionNotReadyError extends SessionError {
   constructor(currentStatus: string) {
-    super(
-      `Session is not ready to accept messages (current status: ${currentStatus})`,
-      'SESSION_NOT_READY',
-    );
+    super(`Session is not ready to accept messages (current status: ${currentStatus})`, 'SESSION_NOT_READY');
     this.name = 'SessionNotReadyError';
   }
 }

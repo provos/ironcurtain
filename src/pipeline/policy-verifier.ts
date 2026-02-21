@@ -26,11 +26,8 @@ import type {
 
 const DEFAULT_MAX_ROUNDS = 3;
 
-export function executeScenarios(
-  engine: PolicyEngine,
-  scenarios: TestScenario[],
-): ExecutionResult[] {
-  return scenarios.map(scenario => {
+export function executeScenarios(engine: PolicyEngine, scenarios: TestScenario[]): ExecutionResult[] {
+  return scenarios.map((scenario) => {
     const request: ToolCallRequest = {
       requestId: `verify-${Date.now()}-${Math.random().toString(36).slice(2)}`,
       serverName: scenario.request.serverName,
@@ -49,17 +46,19 @@ export function executeScenarios(
 }
 
 export function formatExecutionResults(results: ExecutionResult[]): string {
-  return results.map((r, i) => {
-    const status = r.pass ? 'PASS' : 'FAIL';
-    return [
-      `[${i + 1}] ${status}: ${r.scenario.description}`,
-      `  Tool: ${r.scenario.request.serverName}/${r.scenario.request.toolName}`,
-      `  Args: ${JSON.stringify(r.scenario.request.arguments)}`,
-      `  Expected: ${r.scenario.expectedDecision}`,
-      `  Actual: ${r.actualDecision} (rule: ${r.matchingRule})`,
-      `  Source: ${r.scenario.source}`,
-    ].join('\n');
-  }).join('\n\n');
+  return results
+    .map((r, i) => {
+      const status = r.pass ? 'PASS' : 'FAIL';
+      return [
+        `[${i + 1}] ${status}: ${r.scenario.description}`,
+        `  Tool: ${r.scenario.request.serverName}/${r.scenario.request.toolName}`,
+        `  Args: ${JSON.stringify(r.scenario.request.arguments)}`,
+        `  Expected: ${r.scenario.expectedDecision}`,
+        `  Actual: ${r.actualDecision} (rule: ${r.matchingRule})`,
+        `  Source: ${r.scenario.source}`,
+      ].join('\n');
+    })
+    .join('\n\n');
 }
 
 function buildJudgePrompt(
@@ -77,9 +76,7 @@ function buildJudgePrompt(
     .join('\n');
 
   const resultsText = formatExecutionResults(executionResults);
-  const previousContext = previousAnalysis
-    ? `\n## Previous Round Analysis\n\n${previousAnalysis}\n`
-    : '';
+  const previousContext = previousAnalysis ? `\n## Previous Round Analysis\n\n${previousAnalysis}\n` : '';
 
   return `You are a security policy verifier. Analyze whether the compiled policy correctly implements the constitution.
 
@@ -95,7 +92,7 @@ ${rulesText}
 
 - Unknown tools (no annotation): denied
 - Protected paths (any write/delete targeting these is automatically denied):
-${protectedPaths.map(p => `  - ${p}`).join('\n')}
+${protectedPaths.map((p) => `  - ${p}`).join('\n')}
 
 A \`deny\` result for write/delete operations on these paths is correct structural behavior, not a policy gap. Files with similar names inside the sandbox are NOT protected.
 
@@ -130,7 +127,7 @@ For additional scenarios, use concrete paths matching the directories in the com
 
 IMPORTANT: Only use these exact server/tool combinations in additional scenarios. Do NOT invent tool names.
 
-${(availableTools ?? []).map(t => `- ${t.serverName}/${t.toolName}`).join('\n')}
+${(availableTools ?? []).map((t) => `- ${t.serverName}/${t.toolName}`).join('\n')}
 
 ## Response Format
 
@@ -150,12 +147,19 @@ export async function verifyPolicy(
   serverDomainAllowlists?: ReadonlyMap<string, readonly string[]>,
   dynamicLists?: DynamicListsFile,
 ): Promise<VerificationResult> {
-  const engine = new PolicyEngine(compiledPolicy, toolAnnotations, protectedPaths, allowedDirectory, serverDomainAllowlists, dynamicLists);
+  const engine = new PolicyEngine(
+    compiledPolicy,
+    toolAnnotations,
+    protectedPaths,
+    allowedDirectory,
+    serverDomainAllowlists,
+    dynamicLists,
+  );
 
-  const allAnnotations = Object.values(toolAnnotations.servers).flatMap(s => s.tools);
-  const serverNamesList = [...new Set(allAnnotations.map(a => a.serverName))] as [string, ...string[]];
-  const toolNamesList = [...new Set(allAnnotations.map(a => a.toolName))] as [string, ...string[]];
-  const availableTools = allAnnotations.map(a => ({ serverName: a.serverName, toolName: a.toolName }));
+  const allAnnotations = Object.values(toolAnnotations.servers).flatMap((s) => s.tools);
+  const serverNamesList = [...new Set(allAnnotations.map((a) => a.serverName))] as [string, ...string[]];
+  const toolNamesList = [...new Set(allAnnotations.map((a) => a.toolName))] as [string, ...string[]];
+  const availableTools = allAnnotations.map((a) => ({ serverName: a.serverName, toolName: a.toolName }));
 
   const blameSchema = z.discriminatedUnion('kind', [
     z.object({
@@ -179,20 +183,24 @@ export async function verifyPolicy(
   const responseSchema = z.object({
     analysis: z.string(),
     pass: z.boolean(),
-    failureAttributions: z.array(z.object({
-      scenarioDescription: z.string(),
-      blame: blameSchema,
-    })),
-    additionalScenarios: z.array(z.object({
-      description: z.string(),
-      request: z.object({
-        serverName: z.enum(serverNamesList),
-        toolName: z.enum(toolNamesList),
-        arguments: z.record(z.string(), z.unknown()),
+    failureAttributions: z.array(
+      z.object({
+        scenarioDescription: z.string(),
+        blame: blameSchema,
       }),
-      expectedDecision: z.enum(['allow', 'deny', 'escalate']),
-      reasoning: z.string(),
-    })),
+    ),
+    additionalScenarios: z.array(
+      z.object({
+        description: z.string(),
+        request: z.object({
+          serverName: z.enum(serverNamesList),
+          toolName: z.enum(toolNamesList),
+          arguments: z.record(z.string(), z.unknown()),
+        }),
+        expectedDecision: z.enum(['allow', 'deny', 'escalate']),
+        reasoning: z.string(),
+      }),
+    ),
   });
 
   const rounds: VerifierRound[] = [];
@@ -203,7 +211,7 @@ export async function verifyPolicy(
   for (let round = 1; round <= maxRounds; round++) {
     // Execute scenarios against the real engine
     const executionResults = executeScenarios(engine, currentScenarios);
-    const failures = executionResults.filter(r => !r.pass);
+    const failures = executionResults.filter((r) => !r.pass);
     allFailedScenarios.push(...failures);
 
     // Send results to LLM judge
@@ -225,7 +233,7 @@ export async function verifyPolicy(
       onProgress,
     });
 
-    const newScenarios: TestScenario[] = judgment.additionalScenarios.map(s => ({
+    const newScenarios: TestScenario[] = judgment.additionalScenarios.map((s) => ({
       ...s,
       source: 'generated' as const,
     }));
@@ -331,7 +339,7 @@ export function extractScenarioCorrections(
   for (const af of attributedFailures) {
     if (af.blame.kind === 'rule') continue;
 
-    const scenario = scenarios.find(s => s.description === af.scenarioDescription);
+    const scenario = scenarios.find((s) => s.description === af.scenarioDescription);
     if (!scenario) continue;
 
     if (scenario.source === 'handwritten') {
@@ -355,13 +363,10 @@ export function extractScenarioCorrections(
  * Applies corrections to a scenario list, returning a new array with
  * updated expectedDecision and reasoning for corrected scenarios.
  */
-export function applyScenarioCorrections(
-  scenarios: TestScenario[],
-  corrections: ScenarioCorrection[],
-): TestScenario[] {
-  const correctionMap = new Map(corrections.map(c => [c.scenarioDescription, c]));
+export function applyScenarioCorrections(scenarios: TestScenario[], corrections: ScenarioCorrection[]): TestScenario[] {
+  const correctionMap = new Map(corrections.map((c) => [c.scenarioDescription, c]));
 
-  return scenarios.map(s => {
+  return scenarios.map((s) => {
     const correction = correctionMap.get(s.description);
     if (!correction) return s;
     return {

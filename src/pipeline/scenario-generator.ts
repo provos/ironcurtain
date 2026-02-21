@@ -11,10 +11,7 @@ import { z } from 'zod';
 import { generateObjectWithRepair } from './generate-with-repair.js';
 import type { ToolAnnotation, TestScenario } from './types.js';
 
-function buildGeneratorResponseSchema(
-  serverNames: [string, ...string[]],
-  toolNames: [string, ...string[]],
-) {
+function buildGeneratorResponseSchema(serverNames: [string, ...string[]], toolNames: [string, ...string[]]) {
   const scenarioSchema = z.object({
     description: z.string(),
     request: z.object({
@@ -38,12 +35,14 @@ export function buildGeneratorPrompt(
   protectedPaths: string[],
   permittedDirectories?: string[],
 ): string {
-  const annotationsSummary = annotations.map(a => {
-    const argsDesc = Object.entries(a.args)
-      .map(([name, roles]) => `${name}: [${roles.join(', ')}]`)
-      .join(', ');
-    return `  ${a.serverName}/${a.toolName}: ${a.comment}, sideEffects=${a.sideEffects}, args={${argsDesc || 'none'}}`;
-  }).join('\n');
+  const annotationsSummary = annotations
+    .map((a) => {
+      const argsDesc = Object.entries(a.args)
+        .map(([name, roles]) => `${name}: [${roles.join(', ')}]`)
+        .join(', ');
+      return `  ${a.serverName}/${a.toolName}: ${a.comment}, sideEffects=${a.sideEffects}, args={${argsDesc || 'none'}}`;
+    })
+    .join('\n');
 
   return `You are generating test scenarios for a security policy engine. Each scenario is a concrete tool call with an expected policy decision.
 
@@ -58,18 +57,22 @@ ${annotationsSummary}
 ## System Configuration
 
 - Sandbox directory: ${sandboxDirectory}
-${permittedDirectories && permittedDirectories.length > 0 ? `
+${
+  permittedDirectories && permittedDirectories.length > 0
+    ? `
 ## Permitted Directories (from compiled policy rules)
 
 The compiled rules reference these specific directories. Use these EXACT paths in your scenarios:
 
-${permittedDirectories.map(p => `- ${p}`).join('\n')}
-` : ''}
+${permittedDirectories.map((p) => `- ${p}`).join('\n')}
+`
+    : ''
+}
 ## Protected Paths (Structural Invariants)
 
 The following paths are protected by hardcoded structural invariants in the engine. These checks run BEFORE any compiled rules and always result in \`deny\` for any write or delete operation targeting them:
 
-${protectedPaths.map(p => `- ${p}`).join('\n')}
+${protectedPaths.map((p) => `- ${p}`).join('\n')}
 
 IMPORTANT:
 - These specific absolute paths are the ONLY protected paths. A file with a similar name inside the sandbox (e.g., "${sandboxDirectory}/constitution.md") is NOT protected -- it is a regular file governed by normal policy rules.
@@ -130,10 +133,16 @@ export async function generateScenarios(
   permittedDirectories?: string[],
   onProgress?: (message: string) => void,
 ): Promise<TestScenario[]> {
-  const serverNames = [...new Set(annotations.map(a => a.serverName))] as [string, ...string[]];
-  const toolNames = [...new Set(annotations.map(a => a.toolName))] as [string, ...string[]];
+  const serverNames = [...new Set(annotations.map((a) => a.serverName))] as [string, ...string[]];
+  const toolNames = [...new Set(annotations.map((a) => a.toolName))] as [string, ...string[]];
   const schema = buildGeneratorResponseSchema(serverNames, toolNames);
-  const prompt = buildGeneratorPrompt(constitutionText, annotations, sandboxDirectory, protectedPaths, permittedDirectories);
+  const prompt = buildGeneratorPrompt(
+    constitutionText,
+    annotations,
+    sandboxDirectory,
+    protectedPaths,
+    permittedDirectories,
+  );
 
   const { output } = await generateObjectWithRepair({
     model: llm,
@@ -143,16 +152,14 @@ export async function generateScenarios(
   });
 
   // Mark all LLM-generated scenarios with source: 'generated'
-  const generated: TestScenario[] = output.scenarios.map(s => ({
+  const generated: TestScenario[] = output.scenarios.map((s) => ({
     ...s,
     source: 'generated' as const,
   }));
 
   // Deduplicate: remove generated scenarios that are substantially
   // similar to handwritten ones
-  const unique = generated.filter(
-    g => !handwrittenScenarios.some(h => areSimilar(g, h)),
-  );
+  const unique = generated.filter((g) => !handwrittenScenarios.some((h) => areSimilar(g, h)));
 
   // Handwritten first, then generated
   return [...handwrittenScenarios, ...unique];

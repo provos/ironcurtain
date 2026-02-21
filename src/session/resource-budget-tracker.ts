@@ -56,9 +56,7 @@ export interface BudgetWarningVerdict {
   readonly snapshot: BudgetSnapshot;
 }
 
-export type BudgetVerdict =
-  | { readonly ok: true }
-  | BudgetExhaustedVerdict;
+export type BudgetVerdict = { readonly ok: true } | BudgetExhaustedVerdict;
 
 /** Per-million-token pricing for cost estimation. */
 interface ModelPricing {
@@ -80,16 +78,16 @@ interface ModelPricing {
 const MODEL_PRICING: ReadonlyArray<{ readonly match: string; readonly pricing: ModelPricing }> = [
   // --- Anthropic ---
   // Opus 4.5/4.6 ($5/$25/$0.50)
-  { match: 'claude-opus-4-5', pricing: { inputPerMillion: 5, outputPerMillion: 25, cacheReadPerMillion: 0.50 } },
-  { match: 'claude-opus-4-6', pricing: { inputPerMillion: 5, outputPerMillion: 25, cacheReadPerMillion: 0.50 } },
+  { match: 'claude-opus-4-5', pricing: { inputPerMillion: 5, outputPerMillion: 25, cacheReadPerMillion: 0.5 } },
+  { match: 'claude-opus-4-6', pricing: { inputPerMillion: 5, outputPerMillion: 25, cacheReadPerMillion: 0.5 } },
   // Opus 4/4.1 ($15/$75/$1.50) — also catches unversioned 'claude-opus'
-  { match: 'claude-opus', pricing: { inputPerMillion: 15, outputPerMillion: 75, cacheReadPerMillion: 1.50 } },
+  { match: 'claude-opus', pricing: { inputPerMillion: 15, outputPerMillion: 75, cacheReadPerMillion: 1.5 } },
   // Sonnet 4/4.5/4.6 (same pricing: $3/$15/$0.30)
-  { match: 'claude-sonnet', pricing: { inputPerMillion: 3, outputPerMillion: 15, cacheReadPerMillion: 0.30 } },
+  { match: 'claude-sonnet', pricing: { inputPerMillion: 3, outputPerMillion: 15, cacheReadPerMillion: 0.3 } },
   // Haiku 4.5 ($1/$5/$0.10)
-  { match: 'claude-haiku-4-5', pricing: { inputPerMillion: 1, outputPerMillion: 5, cacheReadPerMillion: 0.10 } },
+  { match: 'claude-haiku-4-5', pricing: { inputPerMillion: 1, outputPerMillion: 5, cacheReadPerMillion: 0.1 } },
   // Haiku 3.5 ($0.80/$4/$0.08) — also catches unversioned 'claude-haiku'
-  { match: 'claude-haiku', pricing: { inputPerMillion: 0.80, outputPerMillion: 4, cacheReadPerMillion: 0.08 } },
+  { match: 'claude-haiku', pricing: { inputPerMillion: 0.8, outputPerMillion: 4, cacheReadPerMillion: 0.08 } },
 
   // --- OpenAI ---
   // GPT-5.2 Pro ($21/$168)
@@ -99,40 +97,46 @@ const MODEL_PRICING: ReadonlyArray<{ readonly match: string; readonly pricing: M
   // GPT-5 mini ($0.25/$2/$0.025)
   { match: 'gpt-5-mini', pricing: { inputPerMillion: 0.25, outputPerMillion: 2, cacheReadPerMillion: 0.025 } },
   // GPT-4.1 nano ($0.20/$0.80/$0.05)
-  { match: 'gpt-4.1-nano', pricing: { inputPerMillion: 0.20, outputPerMillion: 0.80, cacheReadPerMillion: 0.05 } },
+  { match: 'gpt-4.1-nano', pricing: { inputPerMillion: 0.2, outputPerMillion: 0.8, cacheReadPerMillion: 0.05 } },
   // GPT-4.1 mini ($0.80/$3.20/$0.20)
-  { match: 'gpt-4.1-mini', pricing: { inputPerMillion: 0.80, outputPerMillion: 3.20, cacheReadPerMillion: 0.20 } },
+  { match: 'gpt-4.1-mini', pricing: { inputPerMillion: 0.8, outputPerMillion: 3.2, cacheReadPerMillion: 0.2 } },
   // GPT-4.1 ($3/$12/$0.75)
   { match: 'gpt-4.1', pricing: { inputPerMillion: 3, outputPerMillion: 12, cacheReadPerMillion: 0.75 } },
   // o4-mini ($4/$16/$1)
   { match: 'o4-mini', pricing: { inputPerMillion: 4, outputPerMillion: 16, cacheReadPerMillion: 1 } },
   // GPT-4o mini ($0.15/$0.60/$0.075)
-  { match: 'gpt-4o-mini', pricing: { inputPerMillion: 0.15, outputPerMillion: 0.60, cacheReadPerMillion: 0.075 } },
+  { match: 'gpt-4o-mini', pricing: { inputPerMillion: 0.15, outputPerMillion: 0.6, cacheReadPerMillion: 0.075 } },
   // GPT-4o ($2.50/$10/$1.25)
-  { match: 'gpt-4o', pricing: { inputPerMillion: 2.50, outputPerMillion: 10, cacheReadPerMillion: 1.25 } },
+  { match: 'gpt-4o', pricing: { inputPerMillion: 2.5, outputPerMillion: 10, cacheReadPerMillion: 1.25 } },
 
   // --- Google Gemini ---
   // Gemini 3.1 Pro ($2/$12)
-  { match: 'gemini-3.1-pro', pricing: { inputPerMillion: 2, outputPerMillion: 12, cacheReadPerMillion: 0.20 } },
+  { match: 'gemini-3.1-pro', pricing: { inputPerMillion: 2, outputPerMillion: 12, cacheReadPerMillion: 0.2 } },
   // Gemini 3 Flash ($0.50/$3)
-  { match: 'gemini-3-flash', pricing: { inputPerMillion: 0.50, outputPerMillion: 3, cacheReadPerMillion: 0.05 } },
+  { match: 'gemini-3-flash', pricing: { inputPerMillion: 0.5, outputPerMillion: 3, cacheReadPerMillion: 0.05 } },
   // Gemini 3 Pro ($2/$12)
-  { match: 'gemini-3-pro', pricing: { inputPerMillion: 2, outputPerMillion: 12, cacheReadPerMillion: 0.20 } },
+  { match: 'gemini-3-pro', pricing: { inputPerMillion: 2, outputPerMillion: 12, cacheReadPerMillion: 0.2 } },
   // Gemini 2.5 Pro ($1.25/$10/$0.125)
   { match: 'gemini-2.5-pro', pricing: { inputPerMillion: 1.25, outputPerMillion: 10, cacheReadPerMillion: 0.125 } },
   // Gemini 2.5 Flash-Lite ($0.10/$0.40)
-  { match: 'gemini-2.5-flash-lite', pricing: { inputPerMillion: 0.10, outputPerMillion: 0.40, cacheReadPerMillion: 0.01 } },
+  {
+    match: 'gemini-2.5-flash-lite',
+    pricing: { inputPerMillion: 0.1, outputPerMillion: 0.4, cacheReadPerMillion: 0.01 },
+  },
   // Gemini 2.5 Flash ($0.30/$2.50/$0.03)
-  { match: 'gemini-2.5-flash', pricing: { inputPerMillion: 0.30, outputPerMillion: 2.50, cacheReadPerMillion: 0.03 } },
+  { match: 'gemini-2.5-flash', pricing: { inputPerMillion: 0.3, outputPerMillion: 2.5, cacheReadPerMillion: 0.03 } },
   // Gemini 2.0 Flash-Lite ($0.075/$0.30)
-  { match: 'gemini-2.0-flash-lite', pricing: { inputPerMillion: 0.075, outputPerMillion: 0.30, cacheReadPerMillion: 0.0075 } },
+  {
+    match: 'gemini-2.0-flash-lite',
+    pricing: { inputPerMillion: 0.075, outputPerMillion: 0.3, cacheReadPerMillion: 0.0075 },
+  },
   // Gemini 2.0 Flash ($0.10/$0.40/$0.01)
-  { match: 'gemini-2.0-flash', pricing: { inputPerMillion: 0.10, outputPerMillion: 0.40, cacheReadPerMillion: 0.01 } },
+  { match: 'gemini-2.0-flash', pricing: { inputPerMillion: 0.1, outputPerMillion: 0.4, cacheReadPerMillion: 0.01 } },
   // Gemini 1.5 Pro ($1.25/$5/$0.125)
   { match: 'gemini-1.5-pro', pricing: { inputPerMillion: 1.25, outputPerMillion: 5, cacheReadPerMillion: 0.125 } },
 ];
 
-const FALLBACK_PRICING: ModelPricing = { inputPerMillion: 3, outputPerMillion: 15, cacheReadPerMillion: 0.30 };
+const FALLBACK_PRICING: ModelPricing = { inputPerMillion: 3, outputPerMillion: 15, cacheReadPerMillion: 0.3 };
 
 function resolvePricing(modelId: string): ModelPricing {
   const lower = modelId.toLowerCase();
@@ -382,17 +386,39 @@ export class ResourceBudgetTracker {
   }
 
   private checkWarnings(snapshot: BudgetSnapshot): void {
-    this.maybeWarn('tokens', this.config.maxTotalTokens, snapshot.totalTokens, snapshot,
-      (pct) => `Token usage at ${pct}%: ${snapshot.totalTokens.toLocaleString()} / ${this.config.maxTotalTokens!.toLocaleString()}`);
+    this.maybeWarn(
+      'tokens',
+      this.config.maxTotalTokens,
+      snapshot.totalTokens,
+      snapshot,
+      (pct) =>
+        `Token usage at ${pct}%: ${snapshot.totalTokens.toLocaleString()} / ${this.config.maxTotalTokens!.toLocaleString()}`,
+    );
 
-    this.maybeWarn('steps', this.config.maxSteps, snapshot.stepCount, snapshot,
-      (pct) => `Step usage at ${pct}%: ${snapshot.stepCount} / ${this.config.maxSteps!}`);
+    this.maybeWarn(
+      'steps',
+      this.config.maxSteps,
+      snapshot.stepCount,
+      snapshot,
+      (pct) => `Step usage at ${pct}%: ${snapshot.stepCount} / ${this.config.maxSteps!}`,
+    );
 
-    this.maybeWarn('wall_clock', this.config.maxSessionSeconds, snapshot.elapsedSeconds, snapshot,
-      (pct) => `Time usage at ${pct}%: ${Math.round(snapshot.elapsedSeconds)}s / ${this.config.maxSessionSeconds!}s`);
+    this.maybeWarn(
+      'wall_clock',
+      this.config.maxSessionSeconds,
+      snapshot.elapsedSeconds,
+      snapshot,
+      (pct) => `Time usage at ${pct}%: ${Math.round(snapshot.elapsedSeconds)}s / ${this.config.maxSessionSeconds!}s`,
+    );
 
-    this.maybeWarn('cost', this.config.maxEstimatedCostUsd, snapshot.estimatedCostUsd, snapshot,
-      (pct) => `Cost at ${pct}%: $${snapshot.estimatedCostUsd.toFixed(2)} / $${this.config.maxEstimatedCostUsd!.toFixed(2)}`);
+    this.maybeWarn(
+      'cost',
+      this.config.maxEstimatedCostUsd,
+      snapshot.estimatedCostUsd,
+      snapshot,
+      (pct) =>
+        `Cost at ${pct}%: $${snapshot.estimatedCostUsd.toFixed(2)} / $${this.config.maxEstimatedCostUsd!.toFixed(2)}`,
+    );
   }
 
   private maybeWarn(

@@ -21,11 +21,8 @@ export function isIpAddress(domain: string): boolean {
  * IP addresses -- SSRF structural invariant), and `*.example.com` prefix
  * wildcards (matches example.com and *.example.com).
  */
-export function domainMatchesAllowlist(
-  domain: string,
-  allowedDomains: readonly string[],
-): boolean {
-  return allowedDomains.some(pattern => {
+export function domainMatchesAllowlist(domain: string, allowedDomains: readonly string[]): boolean {
+  return allowedDomains.some((pattern) => {
     if (pattern === '*') return !isIpAddress(domain);
     if (pattern.startsWith('*.')) {
       const suffix = pattern.slice(1); // ".github.com"

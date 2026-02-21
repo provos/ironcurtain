@@ -105,12 +105,7 @@ export class AgentSession implements Session {
   private readonly onEscalation?: (request: EscalationRequest) => void;
   private readonly onDiagnostic?: (event: DiagnosticEvent) => void;
 
-  constructor(
-    config: IronCurtainConfig,
-    sessionId: SessionId,
-    escalationDir: string,
-    options: SessionOptions = {},
-  ) {
+  constructor(config: IronCurtainConfig, sessionId: SessionId, escalationDir: string, options: SessionOptions = {}) {
     this.sessionId = sessionId;
     this.config = config;
     this.escalationDir = escalationDir;
@@ -118,10 +113,7 @@ export class AgentSession implements Session {
     this.onEscalation = options.onEscalation;
     this.onDiagnostic = options.onDiagnostic;
     this.createdAt = new Date().toISOString();
-    this.budgetTracker = new ResourceBudgetTracker(
-      config.userConfig.resourceBudget,
-      config.agentModelId,
-    );
+    this.budgetTracker = new ResourceBudgetTracker(config.userConfig.resourceBudget, config.agentModelId);
     this.compactor = new MessageCompactor(config.userConfig.autoCompact);
   }
 
@@ -131,10 +123,7 @@ export class AgentSession implements Session {
    */
   async initialize(): Promise<void> {
     this.sandbox = await this.sandboxFactory(this.config);
-    this.systemPrompt = buildSystemPrompt(
-      this.sandbox.getToolInterfaces(),
-      this.config.allowedDirectory,
-    );
+    this.systemPrompt = buildSystemPrompt(this.sandbox.getToolInterfaces(), this.config.allowedDirectory);
     this.tools = this.buildTools();
     this.model = await this.buildModel();
     this.startEscalationWatcher();
@@ -162,9 +151,7 @@ export class AgentSession implements Session {
     // Wall-clock abort signal (null when wall-clock budget is disabled)
     const remainingMs = this.budgetTracker.getRemainingWallClockMs();
     const abortController = remainingMs !== null ? new AbortController() : null;
-    const abortTimeout = abortController
-      ? setTimeout(() => abortController.abort(), remainingMs!)
-      : null;
+    const abortTimeout = abortController ? setTimeout(() => abortController.abort(), remainingMs!) : null;
 
     try {
       this.messages.push({ role: 'user', content: userMessage });
@@ -175,10 +162,7 @@ export class AgentSession implements Session {
 
       // Auto-compact older messages if the previous turn exceeded the threshold
       if (this.compactor.shouldCompact()) {
-        const compactionResult = await this.compactor.compact(
-          this.messages,
-          this.config.userConfig,
-        );
+        const compactionResult = await this.compactor.compact(this.messages, this.config.userConfig);
         if (compactionResult) {
           this.emitDiagnostic({
             kind: 'message_compaction',
@@ -194,10 +178,7 @@ export class AgentSession implements Session {
         system: this.systemPrompt,
         messages: this.messages,
         tools: this.tools,
-        stopWhen: [
-          stepCountIs(MAX_AGENT_STEPS),
-          this.budgetTracker.createStopCondition(),
-        ],
+        stopWhen: [stepCountIs(MAX_AGENT_STEPS), this.budgetTracker.createStopCondition()],
         ...(abortController ? { abortSignal: abortController.signal } : {}),
         onStepFinish: (stepResult) => {
           this.lastStepInputTokens = stepResult.usage?.inputTokens ?? 0;
@@ -264,10 +245,7 @@ export class AgentSession implements Session {
     };
   }
 
-  async resolveEscalation(
-    escalationId: string,
-    decision: 'approved' | 'denied',
-  ): Promise<void> {
+  async resolveEscalation(escalationId: string, decision: 'approved' | 'denied'): Promise<void> {
     if (!this.pendingEscalation || this.pendingEscalation.escalationId !== escalationId) {
       throw new Error(`No pending escalation with ID: ${escalationId}`);
     }
@@ -297,11 +275,9 @@ export class AgentSession implements Session {
           'Write code that calls tool functions like filesystem.filesystem_read_file({ path }), ' +
           'filesystem.filesystem_list_directory({ path }), etc. ' +
           'Tools are synchronous — no await needed. Use return to provide results. ' +
-          'Call __getToolInterface(\'tool.name\') to discover the full type signature of any tool.',
+          "Call __getToolInterface('tool.name') to discover the full type signature of any tool.",
         inputSchema: z.object({
-          code: z
-            .string()
-            .describe('TypeScript code to execute in the sandbox'),
+          code: z.string().describe('TypeScript code to execute in the sandbox'),
         }),
         execute: async ({ code }) => {
           if (!this.sandbox) throw new Error('Sandbox not initialized');
@@ -325,7 +301,9 @@ export class AgentSession implements Session {
             output.result = truncation.value;
             if (truncation.truncated) {
               output.warning = `Tool result truncated from ${formatKB(truncation.originalSize)} to ${formatKB(truncation.finalSize)}. Use targeted reads (head/tail parameters) for specific portions.`;
-              logger.warn(`[truncation] Result truncated: ${formatKB(truncation.originalSize)} -> ${formatKB(truncation.finalSize)}`);
+              logger.warn(
+                `[truncation] Result truncated: ${formatKB(truncation.originalSize)} -> ${formatKB(truncation.finalSize)}`,
+              );
               this.emitTruncationDiagnostic(truncation.originalSize, truncation.finalSize);
             }
 
@@ -342,10 +320,7 @@ export class AgentSession implements Session {
   }
 
   private async buildModel(): Promise<LanguageModel> {
-    const baseModel = await createLanguageModel(
-      this.config.agentModelId,
-      this.config.userConfig,
-    );
+    const baseModel = await createLanguageModel(this.config.agentModelId, this.config.userConfig);
     if (!this.config.llmLogPath) return baseModel;
 
     const logContext: LlmLogContext = { stepName: 'agent' };
@@ -379,9 +354,7 @@ export class AgentSession implements Session {
   private applyLoopVerdict(code: string, output: Record<string, unknown>): Record<string, unknown> {
     const verdict = this.loopDetector.analyzeStep(code, output);
     if (verdict.action === 'warn' || verdict.action === 'block') {
-      output.warning = output.warning
-        ? `${output.warning} | ${verdict.message}`
-        : verdict.message;
+      output.warning = output.warning ? `${output.warning} | ${verdict.message}` : verdict.message;
       this.emitLoopDetectionDiagnostic(verdict.action, verdict.category, verdict.message);
     }
     return output;
@@ -457,9 +430,9 @@ export class AgentSession implements Session {
 
     try {
       const files = readdirSync(this.escalationDir);
-      const requestFile = files.find(f =>
-        f.startsWith('request-') && f.endsWith('.json') &&
-        !this.seenEscalationIds.has(this.extractEscalationId(f)),
+      const requestFile = files.find(
+        (f) =>
+          f.startsWith('request-') && f.endsWith('.json') && !this.seenEscalationIds.has(this.extractEscalationId(f)),
       );
       if (!requestFile) return;
 

@@ -1,7 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import { getHandwrittenScenarios } from '../src/pipeline/handwritten-scenarios.js';
 import { PolicyEngine } from '../src/trusted-process/policy-engine.js';
-import { testCompiledPolicy, testToolAnnotations, TEST_SANDBOX_DIR, TEST_PROTECTED_PATHS, TEST_DOMAIN_ALLOWLISTS } from './fixtures/test-policy.js';
+import {
+  testCompiledPolicy,
+  testToolAnnotations,
+  TEST_SANDBOX_DIR,
+  TEST_PROTECTED_PATHS,
+  TEST_DOMAIN_ALLOWLISTS,
+} from './fixtures/test-policy.js';
 
 const SANDBOX_DIR = TEST_SANDBOX_DIR;
 
@@ -30,14 +36,20 @@ describe('Handwritten Scenarios', () => {
   });
 
   it('covers all expected decision types', () => {
-    const decisions = new Set(scenarios.map(s => s.expectedDecision));
+    const decisions = new Set(scenarios.map((s) => s.expectedDecision));
     expect(decisions).toContain('allow');
     expect(decisions).toContain('deny');
     expect(decisions).toContain('escalate');
   });
 
   describe('scenarios produce correct decisions when run against PolicyEngine', () => {
-    const engine = new PolicyEngine(testCompiledPolicy, testToolAnnotations, TEST_PROTECTED_PATHS, SANDBOX_DIR, TEST_DOMAIN_ALLOWLISTS);
+    const engine = new PolicyEngine(
+      testCompiledPolicy,
+      testToolAnnotations,
+      TEST_PROTECTED_PATHS,
+      SANDBOX_DIR,
+      TEST_DOMAIN_ALLOWLISTS,
+    );
 
     for (const scenario of scenarios) {
       it(`${scenario.description} -> ${scenario.expectedDecision}`, () => {
