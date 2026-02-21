@@ -5,7 +5,9 @@
 [![License](https://img.shields.io/github/license/provos/ironcurtain)](LICENSE)
 [![Website](https://img.shields.io/badge/web-ironcurtain.dev-blue)](https://ironcurtain.dev)
 
-**A secure runtime for autonomous AI agents, where security policy is derived from a human-readable constitution.**
+**A secure\* runtime for autonomous AI agents, where security policy is derived from a human-readable constitution.**
+
+_\*When someone writes "secure," you should immediately be skeptical. [What do we mean by secure?](https://ironcurtain.dev)_
 
 > **Research Prototype.** IronCurtain is an early-stage research project exploring how to make AI agents safe enough to be genuinely useful. APIs, configuration formats, and architecture may change. Contributions and feedback are welcome.
 
