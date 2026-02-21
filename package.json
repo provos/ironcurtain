@@ -4,6 +4,9 @@
   "type": "module",
   "description": "Secure agent runtime with trusted process mediation",
   "license": "Apache-2.0",
+  "publishConfig": {
+    "access": "public"
+  },
   "author": "Niels Provos",
   "repository": {
     "type": "git",

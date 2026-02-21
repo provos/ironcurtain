@@ -1,5 +1,10 @@
 # IronCurtain
 
+[![CI](https://github.com/provos/ironcurtain/actions/workflows/ci.yml/badge.svg)](https://github.com/provos/ironcurtain/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/@provos/ironcurtain)](https://www.npmjs.com/package/@provos/ironcurtain)
+[![License](https://img.shields.io/github/license/provos/ironcurtain)](LICENSE)
+[![Website](https://img.shields.io/badge/web-ironcurtain.dev-blue)](https://ironcurtain.dev)
+
 **A secure runtime for autonomous AI agents, where security policy is derived from a human-readable constitution.**
 
 > **Research Prototype.** IronCurtain is an early-stage research project exploring how to make AI agents safe enough to be genuinely useful. APIs, configuration formats, and architecture may change. Contributions and feedback are welcome.
