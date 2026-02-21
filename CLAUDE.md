@@ -41,6 +41,8 @@ The security kernel. Two modes of operation:
 
 **PolicyEngine** (`policy-engine.ts`) — two-phase evaluation. Phase 1: structural invariants (hardcoded) — protected paths, unknown tool denial, and per-role sandbox containment. For mixed-path operations (e.g., `move_file` from sandbox to external), roles whose paths are all within the sandbox are resolved in Phase 1 and skipped in Phase 2. Phase 2: compiled declarative rules from `compiled-policy.json` — first match wins per role, most restrictive across roles. Multi-role arguments (e.g., `edit_file` with read-path + write-path) are evaluated independently per role; the most restrictive result wins (deny > escalate > allow).
 
+**AutoApprover** (`auto-approver.ts`) — optional LLM-based intent matcher that can auto-approve escalations when the user's most recent message clearly authorizes the action. Uses a cheap model (default: Haiku 4.5), configurable via `autoApprove` in user config. Can only return `approve` or `escalate` (never deny). Runs in the proxy process; reads the user's message from `user-context.json` in the escalation directory (written by the session at the start of each turn). Errors fail-open to human escalation. Off by default.
+
 **EscalationHandler** (`escalation.ts`) — CLI-based human approval for escalated requests. Can be overridden via `onEscalation` callback (used in tests).
 
 **MCPClientManager** (`mcp-client-manager.ts`) — manages stdio-based MCP client connections.

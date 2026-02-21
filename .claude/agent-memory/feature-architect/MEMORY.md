@@ -198,13 +198,9 @@ Both use the same PolicyEngine with compiled artifacts.
 - LLM-assisted constitution customization: `npm run customize-policy` interactive CLI
 - 6-phase migration: (1) role extensibility, (2) engine domain support, (3) git server, (4) fetch server, (5) user config, (6) constitution customizer
 
-## NOT Implemented (aspirational in docs)
-- Per-task policy layer
-- Runtime LLM assessment (semantic checks)
-- Agent identity / resource budgets / push notifications / policy learning
-
-## Document Staleness (reviewed 2026-02-18)
-- `ironcurtain-poc-handoff.md`: most stale (sandbox tech, policy engine, constitution, missing pipeline)
-- `secure-agent-runtime-v2.md`: vision doc, many features aspirational
-- `policy-compilation-pipeline.md`: mostly accurate, main drift is effect->roles, missing multi-role eval
-- `policy-compilation-implementation-plan.md`: completed plan, same drift as pipeline doc
+## Auto-Approver Design (designed 2026-02-20)
+- See `auto-approver.md` topic file for details
+- `src/trusted-process/auto-approver.ts` -- stateless `autoApprove()` function
+- `approve | escalate` only, never deny; fail-open to human on any error
+- File-based IPC: `last-user-message.txt` in session dir; proxy reads on escalation
+- Config: `autoApprove: { enabled: false, modelId: 'anthropic:claude-haiku-4-5' }`

@@ -222,6 +222,21 @@ Sessions enforce configurable limits to prevent runaway agents:
 
 Set any limit to `null` in `config.json` to disable it.
 
+### Auto-Approve Escalations
+
+By default, all escalations require manual `/approve` or `/deny`. You can optionally enable an LLM-based auto-approver that checks whether the user's most recent message clearly authorized the escalated action:
+
+```json
+{
+  "autoApprove": {
+    "enabled": true,
+    "modelId": "anthropic:claude-haiku-4-5"
+  }
+}
+```
+
+The auto-approver is conservative — it only approves when intent is unambiguous (e.g., "push my changes to origin" clearly authorizes `git_push`). Vague messages like "go ahead" or "fix the tests" always fall through to human approval. It can never deny — only approve or escalate. All auto-approved actions are recorded in the audit log with `autoApproved: true`.
+
 ### Multi-Provider Support
 
 IronCurtain supports multiple LLM providers. Use the `provider:model-name` format in config and provide the API key for each provider you use:

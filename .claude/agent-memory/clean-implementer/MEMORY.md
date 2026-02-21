@@ -196,3 +196,19 @@ When mocking `generateText` for session tests:
 - **mcp-servers.json**: filesystem server has `"sandbox": false` (opt-out, mediated by policy engine)
 - **Tests**: `test/sandbox-integration.test.ts` -- 32 unit tests + 3 integration tests (gated behind platform check)
 - **Design spec**: `docs/designs/execution-containment.md`
+
+## Escalation Auto-Approver
+- **Module**: `src/trusted-process/auto-approver.ts` -- `autoApprove()`, `readUserContext()`, types
+- **Config**: `autoApprove: { enabled: boolean, modelId: string }` in `ResolvedUserConfig` (off by default)
+- **Config schema**: `autoApproveSchema` in `src/config/user-config.ts` -- mirrors `autoCompactSchema` pattern
+- **Model creation**: `createLanguageModelFromEnv(qualifiedId, apiKey)` in `src/config/model-provider.ts` -- for proxy env-var-only usage
+- **API key resolution**: `resolveApiKeyForProvider(provider, config)` extracts correct key from `ResolvedUserConfig`
+- **Proxy env vars**: `AUTO_APPROVE_ENABLED`, `AUTO_APPROVE_MODEL_ID`, `AUTO_APPROVE_API_KEY`, `AUTO_APPROVE_LLM_LOG_PATH`
+- **User context IPC**: `user-context.json` written to escalation dir by `AgentSession.sendMessage()`, read by proxy on escalation
+- **Audit trail**: `autoApproved?: boolean` on `AuditEntry` in `src/types/audit.ts`
+- **Log path**: `getSessionAutoApproveLlmLogPath()` in `src/config/paths.ts` -- `{sessionDir}/auto-approve-llm.jsonl`
+- **IronCurtainConfig**: has `autoApproveLlmLogPath?: string` for per-session auto-approve LLM logging
+- **Security invariants**: can only return `approve` or `escalate` (never `deny`); all errors fail-open to human; tool args excluded from LLM prompt
+- **In-process mode**: `TrustedProcess.setLastUserMessage()` + `autoApproveModel` field; model created in `initialize()`
+- **Tests**: `test/auto-approver.test.ts` -- 17 unit tests using `MockLanguageModelV3`; config tests in `test/user-config.test.ts`
+- **Test config gotcha**: `ResolvedUserConfig` now requires `autoApprove` field -- all test files creating this type must include it
