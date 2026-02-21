@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, statSync, chmodSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import { loadUserConfig, USER_CONFIG_DEFAULTS } from '../src/config/user-config.js';
+import { loadUserConfig, saveUserConfig, validateModelId, USER_CONFIG_DEFAULTS } from '../src/config/user-config.js';
 
 /** Env var names that need save/restore between tests. */
 const ENV_VARS_TO_ISOLATE = [
@@ -546,4 +546,146 @@ describe('loadUserConfig', () => {
   function writeConfigFile(config: Record<string, unknown>): void {
     writeRawConfigFile(JSON.stringify(config, null, 2));
   }
+});
+
+describe('saveUserConfig', () => {
+  let testHome: string;
+  const savedEnv: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    testHome = mkdtempSync(resolve(tmpdir(), 'ironcurtain-saveconfig-'));
+    for (const key of ENV_VARS_TO_ISOLATE) {
+      savedEnv[key] = process.env[key];
+      delete process.env[key];
+    }
+    process.env.IRONCURTAIN_HOME = testHome;
+  });
+
+  afterEach(() => {
+    for (const key of ENV_VARS_TO_ISOLATE) {
+      if (savedEnv[key] !== undefined) {
+        process.env[key] = savedEnv[key];
+      } else {
+        delete process.env[key];
+      }
+    }
+    rmSync(testHome, { recursive: true, force: true });
+  });
+
+  it('creates config when none exists', () => {
+    saveUserConfig({ agentModelId: 'anthropic:claude-opus-4-6' });
+
+    const onDisk = readConfigFromDisk();
+    expect(onDisk.agentModelId).toBe('anthropic:claude-opus-4-6');
+  });
+
+  it('merges new fields into existing config', () => {
+    writeConfigFile({ agentModelId: 'anthropic:claude-sonnet-4-6' });
+
+    saveUserConfig({ policyModelId: 'google:gemini-2.5-flash' });
+
+    const onDisk = readConfigFromDisk();
+    expect(onDisk.agentModelId).toBe('anthropic:claude-sonnet-4-6');
+    expect(onDisk.policyModelId).toBe('google:gemini-2.5-flash');
+  });
+
+  it('preserves existing fields not in changes', () => {
+    writeConfigFile({
+      agentModelId: 'anthropic:claude-sonnet-4-6',
+      escalationTimeoutSeconds: 120,
+    });
+
+    saveUserConfig({ agentModelId: 'anthropic:claude-opus-4-6' });
+
+    const onDisk = readConfigFromDisk();
+    expect(onDisk.agentModelId).toBe('anthropic:claude-opus-4-6');
+    expect(onDisk.escalationTimeoutSeconds).toBe(120);
+  });
+
+  it('handles nested object merging (resourceBudget sub-fields)', () => {
+    writeConfigFile({
+      resourceBudget: { maxSteps: 100, maxTotalTokens: 500000 },
+    });
+
+    saveUserConfig({ resourceBudget: { maxSteps: 300 } });
+
+    const onDisk = readConfigFromDisk();
+    const budget = onDisk.resourceBudget as Record<string, unknown>;
+    expect(budget.maxSteps).toBe(300);
+    expect(budget.maxTotalTokens).toBe(500000);
+  });
+
+  it('preserves null values for disabled budget fields', () => {
+    writeConfigFile({
+      resourceBudget: { maxSteps: 100 },
+    });
+
+    saveUserConfig({ resourceBudget: { maxSteps: null } });
+
+    const onDisk = readConfigFromDisk();
+    const budget = onDisk.resourceBudget as Record<string, unknown>;
+    expect(budget.maxSteps).toBeNull();
+  });
+
+  it('validates before writing (rejects invalid model IDs)', () => {
+    writeConfigFile({ agentModelId: 'anthropic:claude-sonnet-4-6' });
+
+    expect(() => saveUserConfig({ agentModelId: 'unknown:bad-model' })).toThrow(/provider/i);
+
+    // File should be unchanged
+    const onDisk = readConfigFromDisk();
+    expect(onDisk.agentModelId).toBe('anthropic:claude-sonnet-4-6');
+  });
+
+  it('preserves unknown fields in existing config', () => {
+    writeConfigFile({
+      agentModelId: 'anthropic:claude-sonnet-4-6',
+      customField: 'keep-me',
+    });
+
+    saveUserConfig({ policyModelId: 'google:gemini-2.5-flash' });
+
+    const onDisk = readConfigFromDisk();
+    expect(onDisk.customField).toBe('keep-me');
+    expect(onDisk.policyModelId).toBe('google:gemini-2.5-flash');
+  });
+
+  it('writes with 2-space indent and trailing newline', () => {
+    saveUserConfig({ agentModelId: 'anthropic:claude-opus-4-6' });
+
+    const raw = readFileSync(resolve(testHome, 'config.json'), 'utf-8');
+    expect(raw).toContain('  "agentModelId"');
+    expect(raw.endsWith('\n')).toBe(true);
+  });
+
+  it('sets owner-only permissions (0600) on saved config file', () => {
+    saveUserConfig({ agentModelId: 'anthropic:claude-opus-4-6' });
+
+    const configPath = resolve(testHome, 'config.json');
+    const mode = statSync(configPath).mode & 0o777;
+    expect(mode).toBe(0o600);
+  });
+
+  function readConfigFromDisk(): Record<string, unknown> {
+    return JSON.parse(readFileSync(resolve(testHome, 'config.json'), 'utf-8'));
+  }
+
+  function writeConfigFile(config: Record<string, unknown>): void {
+    mkdirSync(testHome, { recursive: true });
+    writeFileSync(resolve(testHome, 'config.json'), JSON.stringify(config, null, 2));
+  }
+});
+
+describe('validateModelId', () => {
+  it('returns undefined for valid model IDs', () => {
+    expect(validateModelId('anthropic:claude-sonnet-4-6')).toBeUndefined();
+    expect(validateModelId('google:gemini-2.5-flash')).toBeUndefined();
+    expect(validateModelId('openai:gpt-4o')).toBeUndefined();
+    expect(validateModelId('claude-sonnet-4-6')).toBeUndefined();
+  });
+
+  it('returns error message for invalid model IDs', () => {
+    expect(validateModelId('unknown:model')).toBeDefined();
+    expect(validateModelId('')).toBeDefined();
+  });
 });

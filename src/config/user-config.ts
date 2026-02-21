@@ -6,7 +6,7 @@
  * Environment variables override config file values.
  */
 
-import { readFileSync, writeFileSync, mkdirSync, existsSync, statSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, statSync, chmodSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { z } from 'zod';
 import { getUserConfigPath } from './paths.js';
@@ -35,8 +35,8 @@ export const USER_CONFIG_DEFAULTS = {
   },
 } as const;
 
-const ESCALATION_TIMEOUT_MIN = 30;
-const ESCALATION_TIMEOUT_MAX = 600;
+export const ESCALATION_TIMEOUT_MIN = 30;
+export const ESCALATION_TIMEOUT_MAX = 600;
 
 const resourceBudgetSchema = z
   .object({
@@ -93,7 +93,7 @@ const autoApproveSchema = z
  * Validates types and constraints without applying defaults --
  * defaults are merged separately so we can distinguish "missing" from "present".
  */
-const userConfigSchema = z.object({
+export const userConfigSchema = z.object({
   agentModelId: qualifiedModelId.optional(),
   policyModelId: qualifiedModelId.optional(),
   anthropicApiKey: z.string().min(1, 'anthropicApiKey must be non-empty').optional(),
@@ -157,6 +157,19 @@ const KNOWN_FIELDS = new Set<string>(Object.keys(userConfigSchema.shape));
 /** Fields that must never be backfilled into the config file. */
 const SENSITIVE_FIELDS = new Set(['anthropicApiKey', 'googleApiKey', 'openaiApiKey', 'serverCredentials']);
 
+/** Owner-only read/write permissions for the config file (may contain API keys). */
+const CONFIG_FILE_MODE = 0o600;
+
+/**
+ * Writes the config file and ensures owner-only permissions.
+ * Uses chmod after write so permissions are enforced even on existing files
+ * (writeFileSync's mode option only applies when creating new files).
+ */
+function writeConfigFile(path: string, content: string): void {
+  writeFileSync(path, content, { mode: CONFIG_FILE_MODE });
+  chmodSync(path, CONFIG_FILE_MODE);
+}
+
 /** Type guard for non-null, non-array objects. */
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -218,7 +231,7 @@ function backfillMissingFields(configPath: string, raw: string): string {
 
   const updated = applyPatchToFileContent(fileContent, patch);
   const newRaw = JSON.stringify(updated, null, 2) + '\n';
-  writeFileSync(configPath, newRaw);
+  writeConfigFile(configPath, newRaw);
   process.stderr.write(`Backfilled config fields: ${describeAddedFields(patch)}\n`);
   return newRaw;
 }
@@ -308,7 +321,7 @@ function describeAddedFields(patch: Record<string, unknown>): string {
 function readOrCreateConfigFile(configPath: string): string {
   if (!existsSync(configPath)) {
     mkdirSync(dirname(configPath), { recursive: true });
-    writeFileSync(configPath, DEFAULT_CONFIG_CONTENT, { mode: 0o600 });
+    writeConfigFile(configPath, DEFAULT_CONFIG_CONTENT);
     process.stderr.write(`Created default config at ${configPath}\n`);
     return DEFAULT_CONFIG_CONTENT;
   }
@@ -426,4 +439,71 @@ function applyEnvOverrides(config: ResolvedUserConfig): ResolvedUserConfig {
     googleApiKey: process.env.GOOGLE_GENERATIVE_AI_API_KEY || config.googleApiKey,
     openaiApiKey: process.env.OPENAI_API_KEY || config.openaiApiKey,
   };
+}
+
+/**
+ * Validates a model ID string for use in text prompt validators.
+ * Returns undefined on success, or an error message string on failure.
+ */
+export function validateModelId(id: string): string | undefined {
+  const result = qualifiedModelId.safeParse(id);
+  if (result.success) return undefined;
+  return result.error.issues[0]?.message ?? 'Invalid model ID';
+}
+
+/**
+ * Deep-merges changes into an existing config object one level deep.
+ * For nested objects, merges sub-fields rather than replacing the whole object.
+ * Correctly handles null values for nullable budget fields.
+ */
+function deepMergeConfig(
+  existing: Record<string, unknown>,
+  changes: Record<string, unknown>,
+): Record<string, unknown> {
+  const result = { ...existing };
+  for (const [key, value] of Object.entries(changes)) {
+    if (value !== undefined && isPlainObject(value) && isPlainObject(result[key])) {
+      result[key] = { ...(result[key] as Record<string, unknown>), ...value };
+    } else if (value !== undefined) {
+      result[key] = value;
+    }
+  }
+  return result;
+}
+
+/**
+ * Saves user config changes to ~/.ironcurtain/config.json.
+ *
+ * Reads the existing file (if any), deep-merges the changes (one level deep
+ * for nested objects), validates the result with Zod, and writes back.
+ *
+ * @throws Error if the merged config fails Zod validation
+ */
+export function saveUserConfig(changes: UserConfig): void {
+  const configPath = getUserConfigPath();
+  let existing: Record<string, unknown> = {};
+
+  if (existsSync(configPath)) {
+    try {
+      existing = JSON.parse(readFileSync(configPath, 'utf-8')) as Record<string, unknown>;
+    } catch {
+      // If the file is corrupt, start fresh
+      existing = {};
+    }
+  } else {
+    mkdirSync(dirname(configPath), { recursive: true });
+  }
+
+  const merged = deepMergeConfig(existing, changes as Record<string, unknown>);
+
+  // Validate the merged result (only known fields)
+  const result = userConfigSchema.safeParse(merged);
+  if (!result.success) {
+    const issues = result.error.issues
+      .map((issue) => `  ${issue.path.join('.')}: ${issue.message}`)
+      .join('\n');
+    throw new Error(`Invalid config after merge:\n${issues}`);
+  }
+
+  writeConfigFile(configPath, JSON.stringify(merged, null, 2) + '\n');
 }

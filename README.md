@@ -179,7 +179,15 @@ Or add it to `~/.ironcurtain/config.json` (auto-created on first run with defaul
 
 Environment variables take precedence over config file values. Supported providers: `ANTHROPIC_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`, `OPENAI_API_KEY`.
 
-### 2. Write your constitution
+### 2. Configure settings
+
+```bash
+ironcurtain config
+```
+
+This opens an interactive editor for `~/.ironcurtain/config.json` where you can configure models, security settings, resource budgets, and auto-compaction. API keys should be set via environment variables.
+
+### 3. Write your constitution
 
 Edit `src/config/constitution.md` to express your security policy in plain English. Here's the included example:
 
@@ -200,7 +208,7 @@ Edit `src/config/constitution.md` to express your security policy in plain Engli
 - The agent must receive human approval before git reset, rebase, merge, or any history-rewriting operation.
 ```
 
-### 3. Annotate tools and compile the policy
+### 4. Annotate tools and compile the policy
 
 ```bash
 ironcurtain annotate-tools   # classify MCP tool arguments (developer task)
@@ -214,7 +222,7 @@ Tool annotation connects to your MCP servers and classifies each tool's argument
 
 IronCurtain ships with pre-configured MCP servers for filesystem and git operations. See [Adding MCP Servers](#adding-mcp-servers) for how to extend this.
 
-### 4. Run the agent
+### 5. Run the agent
 
 **Interactive mode** (multi-turn session with human escalation support):
 

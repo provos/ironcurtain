@@ -9,6 +9,7 @@ IronCurtain is a secure agent runtime that mediates between an AI agent and MCP 
 ## Commands
 
 - `ironcurtain start "your task"` — run the agent with a task (or `npm start "your task"` during development)
+- `ironcurtain config` — interactively edit `~/.ironcurtain/config.json` (or `npm run config`)
 - `ironcurtain annotate-tools` — classify MCP tool arguments via LLM (or `npm run annotate-tools`)
 - `ironcurtain compile-policy` — compile constitution into policy rules (or `npm run compile-policy`)
 - `ironcurtain refresh-lists [--list <name>] [--with-mcp]` — re-resolve dynamic lists without full recompilation
@@ -65,6 +66,8 @@ All artifacts use content-hash caching (`inputHash`) to skip unnecessary LLM cal
 **ResourceBudgetTracker** (`resource-budget-tracker.ts`) — enforces per-session limits: tokens, steps, wall-clock time, estimated cost. Three enforcement points: StopCondition (between agent steps), AbortSignal (wall-clock timeout), pre-check in `execute_code`. Throws `BudgetExhaustedError` when any limit is exceeded. Configured via `resourceBudget` field in `~/.ironcurtain/config.json` (all fields nullable to disable individual limits). Defaults: 1M tokens, 200 steps, 30min, $5.
 
 ### Configuration (`src/config/`)
+**Interactive Config Editor** (`config-command.ts`) — `ironcurtain config` subcommand. Uses `@clack/prompts` for a terminal UI to view and modify `~/.ironcurtain/config.json`. Covers models, security settings, resource budgets, and auto-compaction. API keys are excluded (use env vars). Changes are tracked as a partial `UserConfig`, diffed against the resolved config, and saved via `saveUserConfig()`.
+
 `loadConfig()` reads from environment variables (`ANTHROPIC_API_KEY`, `AUDIT_LOG_PATH`, `ALLOWED_DIRECTORY`) and `src/config/mcp-servers.json` for MCP server definitions. The `ALLOWED_DIRECTORY` defines the sandbox boundary for policy evaluation. In multi-turn sessions, each session gets its own sandbox at `~/.ironcurtain/sessions/{sessionId}/sandbox/`. The fallback default is `$IRONCURTAIN_HOME/sandbox` (where `IRONCURTAIN_HOME` defaults to `~/.ironcurtain`). Requires a `.env` file (loaded via `dotenv/config` in `src/index.ts`). `loadGeneratedPolicy()` loads compiled artifacts (`compiled-policy.json`, `tool-annotations.json`, and optionally `dynamic-lists.json`) from `src/config/generated/`.
 
 ### Types (`src/types/`)

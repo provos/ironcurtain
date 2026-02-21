@@ -1,0 +1,540 @@
+/**
+ * Interactive configuration editor for IronCurtain.
+ *
+ * Provides a terminal UI using @clack/prompts for viewing and modifying
+ * ~/.ironcurtain/config.json. API keys are excluded from the interactive
+ * menu — users must set them via environment variables or edit JSON directly.
+ */
+
+import * as p from '@clack/prompts';
+import {
+  loadUserConfig,
+  saveUserConfig,
+  validateModelId,
+  ESCALATION_TIMEOUT_MIN,
+  ESCALATION_TIMEOUT_MAX,
+  type UserConfig,
+  type ResolvedUserConfig,
+} from './user-config.js';
+import { getUserConfigPath } from './paths.js';
+
+/** Known model options for selection prompts. */
+const KNOWN_MODELS: { value: string; label: string }[] = [
+  { value: 'anthropic:claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
+  { value: 'anthropic:claude-opus-4-6', label: 'Claude Opus 4.6' },
+  { value: 'anthropic:claude-haiku-4-5', label: 'Claude Haiku 4.5' },
+  { value: 'google:gemini-2.5-flash', label: 'Gemini 2.5 Flash' },
+  { value: 'google:gemini-2.5-pro', label: 'Gemini 2.5 Pro' },
+  { value: 'openai:gpt-4o', label: 'GPT-4o' },
+  { value: 'openai:gpt-4o-mini', label: 'GPT-4o Mini' },
+];
+
+const CUSTOM_MODEL_SENTINEL = '__custom__';
+
+/** Checks if a prompt result was cancelled and exits cleanly. */
+function handleCancel(value: unknown): void {
+  if (p.isCancel(value)) {
+    p.cancel('Configuration cancelled.');
+    process.exit(0);
+  }
+}
+
+// ─── Formatters ──────────────────────────────────────────────
+
+export function formatTokens(n: number | null): string {
+  if (n === null) return 'disabled';
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n % 1_000_000 === 0 ? 0 : 1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(n % 1_000 === 0 ? 0 : 1)}K`;
+  return String(n);
+}
+
+export function formatSeconds(n: number | null): string {
+  if (n === null) return 'disabled';
+  if (n >= 3600) {
+    const h = Math.floor(n / 3600);
+    const m = Math.floor((n % 3600) / 60);
+    return m > 0 ? `${h}h ${m}m` : `${h}h`;
+  }
+  if (n >= 60) {
+    const m = Math.floor(n / 60);
+    const s = n % 60;
+    return s > 0 ? `${m}m ${s}s` : `${m}m`;
+  }
+  return `${n}s`;
+}
+
+export function formatCost(n: number | null): string {
+  if (n === null) return 'disabled';
+  return `$${n.toFixed(2)}`;
+}
+
+function formatModelShort(id: string): string {
+  const known = KNOWN_MODELS.find((m) => m.value === id);
+  return known ? known.label : id;
+}
+
+// ─── Diff ────────────────────────────────────────────────────
+
+interface DiffEntry {
+  from: unknown;
+  to: unknown;
+}
+
+export function computeDiff(
+  resolved: ResolvedUserConfig,
+  pending: UserConfig,
+): [string, DiffEntry][] {
+  const diffs: [string, DiffEntry][] = [];
+
+  const topLevelKeys = ['agentModelId', 'policyModelId', 'escalationTimeoutSeconds'] as const;
+  for (const key of topLevelKeys) {
+    if (key in pending && pending[key] !== undefined && pending[key] !== resolved[key]) {
+      diffs.push([key, { from: resolved[key], to: pending[key] }]);
+    }
+  }
+
+  const nestedSections = ['resourceBudget', 'autoCompact', 'autoApprove'] as const;
+  for (const section of nestedSections) {
+    const pendingSection = pending[section];
+    if (!pendingSection) continue;
+    const resolvedSection = resolved[section] as unknown as Record<string, unknown>;
+    for (const [subKey, subValue] of Object.entries(pendingSection)) {
+      if (subValue !== undefined && subValue !== resolvedSection[subKey]) {
+        diffs.push([`${section}.${subKey}`, { from: resolvedSection[subKey], to: subValue }]);
+      }
+    }
+  }
+
+  return diffs;
+}
+
+function formatDiffValue(key: string, value: unknown): string {
+  if (value === null) return 'disabled';
+  if (typeof value === 'boolean') return value ? 'on' : 'off';
+  if (key.includes('ModelId') || key.includes('modelId')) return formatModelShort(value as string);
+  if (key.includes('Tokens') || key === 'resourceBudget.maxTotalTokens') return formatTokens(value as number);
+  if (key.includes('Seconds') || key === 'resourceBudget.maxSessionSeconds') return formatSeconds(value as number);
+  if (key.includes('Cost')) return formatCost(value as number);
+  return String(value);
+}
+
+// ─── Model prompt ────────────────────────────────────────────
+
+async function promptModelId(message: string, current: string): Promise<string | undefined> {
+  const options = KNOWN_MODELS.map((m) => ({
+    value: m.value,
+    label: m.label,
+    hint: m.value === current ? '(current)' : undefined,
+  }));
+  options.push({ value: CUSTOM_MODEL_SENTINEL, label: 'Custom...', hint: undefined });
+
+  const selected = await p.select({ message, options, initialValue: current });
+  handleCancel(selected);
+
+  if (selected === CUSTOM_MODEL_SENTINEL) {
+    const custom = await p.text({
+      message: 'Enter model ID (e.g., "anthropic:model-name"):',
+      placeholder: current,
+      validate: (val) => val ? validateModelId(val) : 'Model ID is required',
+    });
+    handleCancel(custom);
+    return custom as string;
+  }
+
+  return selected as string;
+}
+
+// ─── Nullable number prompt ──────────────────────────────────
+
+interface NullableNumberOpts {
+  message: string;
+  current: number | null;
+  validate?: (n: number) => string | undefined;
+  format?: (n: number | null) => string;
+}
+
+async function promptNullableNumber(opts: NullableNumberOpts): Promise<number | null | undefined> {
+  const currentDisplay = opts.format
+    ? opts.format(opts.current)
+    : (opts.current === null ? 'disabled' : String(opts.current));
+
+  const action = await p.select({
+    message: opts.message,
+    options: [
+      { value: 'set', label: 'Set value', hint: `current: ${currentDisplay}` },
+      { value: 'disable', label: 'Disable (set to null)' },
+      { value: 'keep', label: 'Keep current', hint: currentDisplay },
+    ],
+  });
+  handleCancel(action);
+
+  if (action === 'keep') return undefined;
+  if (action === 'disable') return null;
+
+  const input = await p.text({
+    message: `Enter value:`,
+    placeholder: opts.current !== null ? String(opts.current) : '',
+    validate: (val) => {
+      if (!val || val.trim() === '') return 'Must be a number';
+      const n = Number(val);
+      if (isNaN(n)) return 'Must be a number';
+      return opts.validate?.(n);
+    },
+  });
+  handleCancel(input);
+  return Number(input);
+}
+
+// ─── Category handlers ───────────────────────────────────────
+
+async function handleModels(
+  resolved: ResolvedUserConfig,
+  pending: UserConfig,
+): Promise<void> {
+  while (true) {
+    const currentAgent = (pending.agentModelId ?? resolved.agentModelId);
+    const currentPolicy = (pending.policyModelId ?? resolved.policyModelId);
+
+    const field = await p.select({
+      message: 'Models',
+      options: [
+        { value: 'agentModelId', label: 'Agent model', hint: formatModelShort(currentAgent) },
+        { value: 'policyModelId', label: 'Policy model', hint: formatModelShort(currentPolicy) },
+        { value: 'back', label: 'Back' },
+      ],
+    });
+    handleCancel(field);
+    if (field === 'back') return;
+
+    const current = field === 'agentModelId' ? currentAgent : currentPolicy;
+    const newValue = await promptModelId(
+      field === 'agentModelId' ? 'Select agent model:' : 'Select policy model:',
+      current,
+    );
+    if (newValue !== undefined && newValue !== current) {
+      (pending as Record<string, unknown>)[field as string] = newValue;
+    }
+  }
+}
+
+async function handleSecurity(
+  resolved: ResolvedUserConfig,
+  pending: UserConfig,
+): Promise<void> {
+  while (true) {
+    const currentTimeout = pending.escalationTimeoutSeconds ?? resolved.escalationTimeoutSeconds;
+    const currentAutoApproveEnabled = pending.autoApprove?.enabled ?? resolved.autoApprove.enabled;
+    const currentAutoApproveModel = pending.autoApprove?.modelId ?? resolved.autoApprove.modelId;
+
+    const field = await p.select({
+      message: 'Security',
+      options: [
+        {
+          value: 'timeout',
+          label: 'Escalation timeout',
+          hint: formatSeconds(currentTimeout),
+        },
+        {
+          value: 'autoApproveEnabled',
+          label: 'Auto-approve escalations',
+          hint: currentAutoApproveEnabled ? 'on' : 'off',
+        },
+        {
+          value: 'autoApproveModel',
+          label: 'Auto-approve model',
+          hint: formatModelShort(currentAutoApproveModel),
+        },
+        { value: 'back', label: 'Back' },
+      ],
+    });
+    handleCancel(field);
+    if (field === 'back') return;
+
+    if (field === 'timeout') {
+      const input = await p.text({
+        message: `Escalation timeout in seconds (${ESCALATION_TIMEOUT_MIN}-${ESCALATION_TIMEOUT_MAX}):`,
+        placeholder: String(currentTimeout),
+        validate: (val) => {
+          if (!val || val.trim() === '') return 'Must be an integer';
+          const n = Number(val);
+          if (isNaN(n) || !Number.isInteger(n)) return 'Must be an integer';
+          if (n < ESCALATION_TIMEOUT_MIN) return `Minimum: ${ESCALATION_TIMEOUT_MIN}`;
+          if (n > ESCALATION_TIMEOUT_MAX) return `Maximum: ${ESCALATION_TIMEOUT_MAX}`;
+          return undefined;
+        },
+      });
+      handleCancel(input);
+      const newTimeout = Number(input);
+      if (newTimeout !== currentTimeout) {
+        pending.escalationTimeoutSeconds = newTimeout;
+      }
+    } else if (field === 'autoApproveEnabled') {
+      const enabled = await p.confirm({
+        message: 'Enable auto-approve for escalations?',
+        initialValue: currentAutoApproveEnabled,
+      });
+      handleCancel(enabled);
+      if (enabled !== currentAutoApproveEnabled) {
+        pending.autoApprove = { ...pending.autoApprove, enabled: enabled as boolean };
+      }
+    } else if (field === 'autoApproveModel') {
+      const newModel = await promptModelId('Select auto-approve model:', currentAutoApproveModel);
+      if (newModel !== undefined && newModel !== currentAutoApproveModel) {
+        pending.autoApprove = { ...pending.autoApprove, modelId: newModel };
+      }
+    }
+  }
+}
+
+async function handleResourceLimits(
+  resolved: ResolvedUserConfig,
+  pending: UserConfig,
+): Promise<void> {
+  while (true) {
+    const budget = { ...resolved.resourceBudget, ...pending.resourceBudget };
+
+    const field = await p.select({
+      message: 'Resource Limits',
+      options: [
+        { value: 'maxTotalTokens', label: 'Max tokens', hint: formatTokens(budget.maxTotalTokens) },
+        { value: 'maxSteps', label: 'Max steps', hint: budget.maxSteps === null ? 'disabled' : String(budget.maxSteps) },
+        { value: 'maxSessionSeconds', label: 'Session timeout', hint: formatSeconds(budget.maxSessionSeconds) },
+        { value: 'maxEstimatedCostUsd', label: 'Cost cap', hint: formatCost(budget.maxEstimatedCostUsd) },
+        { value: 'warnThresholdPercent', label: 'Warning threshold', hint: `${budget.warnThresholdPercent}%` },
+        { value: 'back', label: 'Back' },
+      ],
+    });
+    handleCancel(field);
+    if (field === 'back') return;
+
+    if (field === 'warnThresholdPercent') {
+      const input = await p.text({
+        message: 'Warning threshold percent (1-99):',
+        placeholder: String(budget.warnThresholdPercent),
+        validate: (val) => {
+          if (!val || val.trim() === '') return 'Must be an integer';
+          const n = Number(val);
+          if (isNaN(n) || !Number.isInteger(n)) return 'Must be an integer';
+          if (n < 1 || n > 99) return 'Must be between 1 and 99';
+          return undefined;
+        },
+      });
+      handleCancel(input);
+      const newVal = Number(input);
+      if (newVal !== budget.warnThresholdPercent) {
+        pending.resourceBudget = { ...pending.resourceBudget, warnThresholdPercent: newVal };
+      }
+    } else {
+      const key = field as 'maxTotalTokens' | 'maxSteps' | 'maxSessionSeconds' | 'maxEstimatedCostUsd';
+      const formatFn = key === 'maxTotalTokens' ? formatTokens
+        : key === 'maxSessionSeconds' ? formatSeconds
+        : key === 'maxEstimatedCostUsd' ? formatCost
+        : (n: number | null) => n === null ? 'disabled' : String(n);
+
+      const result = await promptNullableNumber({
+        message: `${key}:`,
+        current: budget[key],
+        format: formatFn,
+        validate: (n) => {
+          if (n <= 0) return 'Must be positive';
+          if (key !== 'maxEstimatedCostUsd' && key !== 'maxSessionSeconds' && !Number.isInteger(n)) {
+            return 'Must be an integer';
+          }
+          return undefined;
+        },
+      });
+      if (result !== undefined) {
+        pending.resourceBudget = { ...pending.resourceBudget, [key]: result };
+      }
+    }
+  }
+}
+
+async function handleAutoCompact(
+  resolved: ResolvedUserConfig,
+  pending: UserConfig,
+): Promise<void> {
+  while (true) {
+    const compact = { ...resolved.autoCompact, ...pending.autoCompact };
+
+    const field = await p.select({
+      message: 'Auto-Compact',
+      options: [
+        { value: 'enabled', label: 'Enabled', hint: compact.enabled ? 'on' : 'off' },
+        { value: 'thresholdTokens', label: 'Threshold', hint: formatTokens(compact.thresholdTokens) },
+        { value: 'keepRecentMessages', label: 'Keep recent messages', hint: String(compact.keepRecentMessages) },
+        { value: 'summaryModelId', label: 'Summary model', hint: formatModelShort(compact.summaryModelId) },
+        { value: 'back', label: 'Back' },
+      ],
+    });
+    handleCancel(field);
+    if (field === 'back') return;
+
+    if (field === 'enabled') {
+      const enabled = await p.confirm({
+        message: 'Enable auto-compaction?',
+        initialValue: compact.enabled,
+      });
+      handleCancel(enabled);
+      if (enabled !== compact.enabled) {
+        pending.autoCompact = { ...pending.autoCompact, enabled: enabled as boolean };
+      }
+    } else if (field === 'thresholdTokens') {
+      const input = await p.text({
+        message: 'Compaction threshold in tokens:',
+        placeholder: String(compact.thresholdTokens),
+        validate: (val) => {
+          if (!val || val.trim() === '') return 'Must be a positive integer';
+          const n = Number(val);
+          if (isNaN(n) || !Number.isInteger(n)) return 'Must be a positive integer';
+          if (n <= 0) return 'Must be positive';
+          return undefined;
+        },
+      });
+      handleCancel(input);
+      const newVal = Number(input);
+      if (newVal !== compact.thresholdTokens) {
+        pending.autoCompact = { ...pending.autoCompact, thresholdTokens: newVal };
+      }
+    } else if (field === 'keepRecentMessages') {
+      const input = await p.text({
+        message: 'Number of recent messages to keep:',
+        placeholder: String(compact.keepRecentMessages),
+        validate: (val) => {
+          if (!val || val.trim() === '') return 'Must be a positive integer';
+          const n = Number(val);
+          if (isNaN(n) || !Number.isInteger(n)) return 'Must be a positive integer';
+          if (n <= 0) return 'Must be positive';
+          return undefined;
+        },
+      });
+      handleCancel(input);
+      const newVal = Number(input);
+      if (newVal !== compact.keepRecentMessages) {
+        pending.autoCompact = { ...pending.autoCompact, keepRecentMessages: newVal };
+      }
+    } else if (field === 'summaryModelId') {
+      const newModel = await promptModelId('Select summary model:', compact.summaryModelId);
+      if (newModel !== undefined && newModel !== compact.summaryModelId) {
+        pending.autoCompact = { ...pending.autoCompact, summaryModelId: newModel };
+      }
+    }
+  }
+}
+
+// ─── Menu descriptions ───────────────────────────────────────
+
+function modelsHint(resolved: ResolvedUserConfig, pending: UserConfig): string {
+  const agent = formatModelShort(pending.agentModelId ?? resolved.agentModelId);
+  const policy = formatModelShort(pending.policyModelId ?? resolved.policyModelId);
+  return `${agent}, ${policy}`;
+}
+
+function securityHint(resolved: ResolvedUserConfig, pending: UserConfig): string {
+  const timeout = formatSeconds(pending.escalationTimeoutSeconds ?? resolved.escalationTimeoutSeconds);
+  const autoApprove = (pending.autoApprove?.enabled ?? resolved.autoApprove.enabled) ? 'on' : 'off';
+  return `timeout: ${timeout}, auto-approve: ${autoApprove}`;
+}
+
+function resourceHint(resolved: ResolvedUserConfig, pending: UserConfig): string {
+  const b = { ...resolved.resourceBudget, ...pending.resourceBudget };
+  return `tokens: ${formatTokens(b.maxTotalTokens)}, steps: ${b.maxSteps === null ? 'off' : b.maxSteps}, time: ${formatSeconds(b.maxSessionSeconds)}, cost: ${formatCost(b.maxEstimatedCostUsd)}`;
+}
+
+function autoCompactHint(resolved: ResolvedUserConfig, pending: UserConfig): string {
+  const c = { ...resolved.autoCompact, ...pending.autoCompact };
+  return c.enabled ? `on, threshold: ${formatTokens(c.thresholdTokens)}` : 'off';
+}
+
+function changeCount(resolved: ResolvedUserConfig, pending: UserConfig): string {
+  const diffs = computeDiff(resolved, pending);
+  if (diffs.length === 0) return 'no changes';
+  return `${diffs.length} change${diffs.length > 1 ? 's' : ''} pending`;
+}
+
+// ─── Main ────────────────────────────────────────────────────
+
+export async function runConfigCommand(): Promise<void> {
+  if (!process.stdin.isTTY) {
+    console.error('Error: ironcurtain config requires an interactive terminal (TTY).');
+    process.exit(1);
+  }
+
+  let resolved: ResolvedUserConfig;
+  try {
+    resolved = loadUserConfig();
+  } catch (err) {
+    console.error(`Failed to load config: ${err instanceof Error ? err.message : err}`);
+    console.error(`Check ${getUserConfigPath()} for errors.`);
+    process.exit(1);
+  }
+
+  p.intro('IronCurtain Configuration');
+  p.note(
+    `Config path: ${getUserConfigPath()}\n` +
+    'API keys: set via environment variables or edit JSON directly.',
+    'Info',
+  );
+
+  const pending: UserConfig = {};
+
+  while (true) {
+    const category = await p.select({
+      message: 'Select a category to configure',
+      options: [
+        { value: 'models', label: 'Models', hint: modelsHint(resolved, pending) },
+        { value: 'security', label: 'Security', hint: securityHint(resolved, pending) },
+        { value: 'resources', label: 'Resource Limits', hint: resourceHint(resolved, pending) },
+        { value: 'compact', label: 'Auto-Compact', hint: autoCompactHint(resolved, pending) },
+        { value: 'save', label: 'Save & Exit', hint: changeCount(resolved, pending) },
+        { value: 'cancel', label: 'Cancel', hint: 'discard all changes' },
+      ],
+    });
+    handleCancel(category);
+
+    switch (category) {
+      case 'models':
+        await handleModels(resolved, pending);
+        break;
+      case 'security':
+        await handleSecurity(resolved, pending);
+        break;
+      case 'resources':
+        await handleResourceLimits(resolved, pending);
+        break;
+      case 'compact':
+        await handleAutoCompact(resolved, pending);
+        break;
+      case 'cancel':
+        p.cancel('Changes discarded.');
+        return;
+      case 'save': {
+        const diffs = computeDiff(resolved, pending);
+        if (diffs.length === 0) {
+          p.outro('No changes to save.');
+          return;
+        }
+
+        const diffText = diffs
+          .map(([path, { from, to }]) =>
+            `  ${path}: ${formatDiffValue(path, from)} -> ${formatDiffValue(path, to)}`)
+          .join('\n');
+        p.note(diffText, 'Pending changes');
+
+        const confirmed = await p.confirm({
+          message: 'Save these changes?',
+          initialValue: true,
+        });
+        handleCancel(confirmed);
+
+        if (confirmed) {
+          saveUserConfig(pending);
+          p.outro('Configuration saved.');
+        } else {
+          p.outro('Save cancelled. Changes not written.');
+        }
+        return;
+      }
+    }
+  }
+}

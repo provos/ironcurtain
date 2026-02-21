@@ -27,6 +27,7 @@ Commands:
   annotate-tools       Classify MCP tool arguments via LLM
   compile-policy       Compile constitution into enforceable policy rules
   refresh-lists        Re-resolve dynamic lists without full recompilation
+  config               Edit configuration interactively
   help                 Show this help message
 
 Options:
@@ -87,6 +88,11 @@ switch (subcommand) {
   case 'refresh-lists': {
     const { main } = await import('./pipeline/refresh-lists.js');
     await main(process.argv.slice(3));
+    break;
+  }
+  case 'config': {
+    const { runConfigCommand } = await import('./config/config-command.js');
+    await runConfigCommand();
     break;
   }
   default:
