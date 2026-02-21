@@ -86,20 +86,46 @@ const compilerConfig: CompilerConfig = {
   protectedPaths: ['/home/test/config/constitution.md', '/home/test/config/generated'],
 };
 
+const MOCK_GENERATE_RESULT = {
+  finishReason: { unified: 'stop' as const, raw: 'stop' },
+  usage: {
+    inputTokens: { total: 100, noCache: undefined, cacheRead: undefined, cacheWrite: undefined },
+    outputTokens: { total: 50, text: undefined, reasoning: undefined },
+  },
+  warnings: [],
+  request: {},
+  response: { id: 'test-id', modelId: 'test-model', timestamp: new Date() },
+};
+
 function createMockModel(response: unknown): MockLanguageModelV3 {
   return new MockLanguageModelV3({
     doGenerate: async () => ({
       content: [{ type: 'text' as const, text: JSON.stringify(response) }],
-      finishReason: { unified: 'stop' as const, raw: 'stop' },
-      usage: {
-        inputTokens: { total: 100, noCache: undefined, cacheRead: undefined, cacheWrite: undefined },
-        outputTokens: { total: 50, text: undefined, reasoning: undefined },
-      },
-      warnings: [],
-      request: {},
-      response: { id: 'test-id', modelId: 'test-model', timestamp: new Date() },
+      ...MOCK_GENERATE_RESULT,
     }),
   });
+}
+
+function createPromptCapturingModel(
+  response: unknown,
+): { model: MockLanguageModelV3; getPrompt: () => string } {
+  let capturedPrompt = '';
+  const model = new MockLanguageModelV3({
+    doGenerate: async (options) => {
+      for (const msg of options.prompt) {
+        if (msg.role === 'user') {
+          for (const part of msg.content) {
+            if (part.type === 'text') capturedPrompt = part.text;
+          }
+        }
+      }
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(response) }],
+        ...MOCK_GENERATE_RESULT,
+      };
+    },
+  });
+  return { model, getPrompt: () => capturedPrompt };
 }
 
 describe('Constitution Compiler', () => {
@@ -114,9 +140,10 @@ describe('Constitution Compiler', () => {
         mockLLM,
       );
 
-      expect(result).toHaveLength(4);
-      expect(result[0].name).toBe('allow-side-effect-free-tools');
-      expect(result[1].name).toBe('deny-delete-operations');
+      expect(result.rules).toHaveLength(4);
+      expect(result.rules[0].name).toBe('allow-side-effect-free-tools');
+      expect(result.rules[1].name).toBe('deny-delete-operations');
+      expect(result.listDefinitions).toEqual([]);
     });
 
     it('preserves rule order from LLM response', async () => {
@@ -129,7 +156,7 @@ describe('Constitution Compiler', () => {
         mockLLM,
       );
 
-      const names = result.map(r => r.name);
+      const names = result.rules.map(r => r.name);
       expect(names).toEqual([
         'allow-side-effect-free-tools',
         'deny-delete-operations',
@@ -148,7 +175,7 @@ describe('Constitution Compiler', () => {
         mockLLM,
       );
 
-      for (const rule of result) {
+      for (const rule of result.rules) {
         expect(rule.principle).toBeTruthy();
       }
     });
@@ -299,33 +326,7 @@ describe('Constitution Compiler', () => {
 
   describe('compileConstitution with repair context', () => {
     it('uses repair prompt when repairContext is provided', async () => {
-      let capturedPrompt = '';
-      const mockLLM = new MockLanguageModelV3({
-        doGenerate: async (options) => {
-          // Capture the prompt sent to the LLM
-          const msgs = options.prompt;
-          for (const msg of msgs) {
-            if (msg.role === 'user') {
-              for (const part of msg.content) {
-                if (part.type === 'text') {
-                  capturedPrompt = part.text;
-                }
-              }
-            }
-          }
-          return {
-            content: [{ type: 'text' as const, text: JSON.stringify({ rules: cannedRules }) }],
-            finishReason: { unified: 'stop' as const, raw: 'stop' },
-            usage: {
-              inputTokens: { total: 100, noCache: undefined, cacheRead: undefined, cacheWrite: undefined },
-              outputTokens: { total: 50, text: undefined, reasoning: undefined },
-            },
-            warnings: [],
-            request: {},
-            response: { id: 'test-id', modelId: 'test-model', timestamp: new Date() },
-          };
-        },
-      });
+      const { model, getPrompt } = createPromptCapturingModel({ rules: cannedRules });
 
       const repairContext: RepairContext = {
         previousRules: cannedRules,
@@ -349,51 +350,28 @@ describe('Constitution Compiler', () => {
         sampleConstitution,
         sampleAnnotations,
         compilerConfig,
-        mockLLM,
+        model,
         repairContext,
       );
 
-      expect(capturedPrompt).toContain('REPAIR INSTRUCTIONS');
-      expect(capturedPrompt).toContain('Rules need reordering.');
-      expect(capturedPrompt).toContain('Test failure');
+      const prompt = getPrompt();
+      expect(prompt).toContain('REPAIR INSTRUCTIONS');
+      expect(prompt).toContain('Rules need reordering.');
+      expect(prompt).toContain('Test failure');
     });
 
     it('does not include repair section without repairContext', async () => {
-      let capturedPrompt = '';
-      const mockLLM = new MockLanguageModelV3({
-        doGenerate: async (options) => {
-          const msgs = options.prompt;
-          for (const msg of msgs) {
-            if (msg.role === 'user') {
-              for (const part of msg.content) {
-                if (part.type === 'text') {
-                  capturedPrompt = part.text;
-                }
-              }
-            }
-          }
-          return {
-            content: [{ type: 'text' as const, text: JSON.stringify({ rules: cannedRules }) }],
-            finishReason: { unified: 'stop' as const, raw: 'stop' },
-            usage: {
-              inputTokens: { total: 100, noCache: undefined, cacheRead: undefined, cacheWrite: undefined },
-              outputTokens: { total: 50, text: undefined, reasoning: undefined },
-            },
-            warnings: [],
-            request: {},
-            response: { id: 'test-id', modelId: 'test-model', timestamp: new Date() },
-          };
-        },
-      });
+      const { model: noRepairModel, getPrompt: getNoRepairPrompt } =
+        createPromptCapturingModel({ rules: cannedRules });
 
       await compileConstitution(
         sampleConstitution,
         sampleAnnotations,
         compilerConfig,
-        mockLLM,
+        noRepairModel,
       );
 
-      expect(capturedPrompt).not.toContain('REPAIR INSTRUCTIONS');
+      expect(getNoRepairPrompt()).not.toContain('REPAIR INSTRUCTIONS');
     });
   });
 });

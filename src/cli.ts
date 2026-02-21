@@ -25,6 +25,7 @@ Commands:
   start [task]         Run the agent (interactive or single-shot)
   annotate-tools       Classify MCP tool arguments via LLM
   compile-policy       Compile constitution into enforceable policy rules
+  refresh-lists        Re-resolve dynamic lists without full recompilation
   help                 Show this help message
 
 Options:
@@ -37,6 +38,9 @@ Examples:
   ironcurtain start --resume <session-id>        # Resume a session
   ironcurtain annotate-tools                     # Classify tool arguments
   ironcurtain compile-policy                     # Compile policy from constitution
+  ironcurtain refresh-lists                      # Refresh all dynamic lists
+  ironcurtain refresh-lists --list major-news    # Refresh a single list
+  ironcurtain refresh-lists --with-mcp           # Include MCP-backed lists
 `.trim());
 }
 
@@ -76,6 +80,11 @@ switch (subcommand) {
   case 'compile-policy': {
     const { main } = await import('./pipeline/compile.js');
     await main();
+    break;
+  }
+  case 'refresh-lists': {
+    const { main } = await import('./pipeline/refresh-lists.js');
+    await main(process.argv.slice(3));
     break;
   }
   default:

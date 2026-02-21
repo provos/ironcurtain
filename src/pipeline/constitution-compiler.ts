@@ -10,12 +10,17 @@
 import type { LanguageModel } from 'ai';
 import { z } from 'zod';
 import { generateObjectWithRepair } from './generate-with-repair.js';
-import type { ToolAnnotation, CompiledRule, RepairContext } from './types.js';
+import type { ToolAnnotation, CompiledRule, RepairContext, ListDefinition } from './types.js';
 import { isArgumentRole, getArgumentRoleValues } from '../types/argument-roles.js';
 import { formatExecutionResults } from './policy-verifier.js';
 
 export interface CompilerConfig {
   protectedPaths: string[];
+}
+
+export interface CompilationOutput {
+  rules: CompiledRule[];
+  listDefinitions: ListDefinition[];
 }
 
 const pathConditionSchema = z.object({
@@ -26,6 +31,21 @@ const pathConditionSchema = z.object({
 const domainConditionSchema = z.object({
   roles: z.array(z.enum(getArgumentRoleValues())),
   allowed: z.array(z.string()),
+});
+
+const listConditionSchema = z.object({
+  roles: z.array(z.enum(getArgumentRoleValues())),
+  allowed: z.array(z.string()),
+  matchType: z.enum(['domains', 'emails', 'identifiers']),
+});
+
+const listDefinitionSchema = z.object({
+  name: z.string().regex(/^[a-z][a-z0-9-]*$/),
+  type: z.enum(['domains', 'emails', 'identifiers']),
+  principle: z.string(),
+  generationPrompt: z.string(),
+  requiresMcp: z.boolean(),
+  mcpServerHint: z.string().optional(),
 });
 
 function buildCompilerResponseSchema(
@@ -43,6 +63,7 @@ function buildCompilerResponseSchema(
       sideEffects: z.boolean().optional(),
       paths: pathConditionSchema.optional(),
       domains: domainConditionSchema.optional(),
+      lists: z.array(listConditionSchema).optional(),
     }),
     then: z.enum(['allow', 'deny', 'escalate']),
     reason: z.string(),
@@ -50,6 +71,7 @@ function buildCompilerResponseSchema(
 
   return z.object({
     rules: z.array(compiledRuleSchema),
+    listDefinitions: z.array(listDefinitionSchema).optional().default([]),
   });
 }
 
@@ -114,7 +136,37 @@ CRITICAL RULES:
 6. Use all three decision types. Map each constitution principle to the appropriate decision: "allow" for grants, "deny" for prohibitions, and "escalate" for principles that require human judgment or approval. If the constitution does not explicitly forbid an operation, prefer "escalate" over "deny" so a human can decide.
 7. The rule chain must cover all operation types with appropriate fallthrough rules. Do not leave gaps — every combination of argument roles should eventually match a rule.
 
-Be concise in descriptions and reasons -- one sentence each.`;
+Be concise in descriptions and reasons -- one sentence each.
+
+## Dynamic Lists
+
+When the constitution references a CATEGORY of things (e.g., "major news sites",
+"my contacts", "tech stocks"), do NOT hardcode specific values. Instead:
+
+1. Choose a descriptive kebab-case name for the category (e.g., "major-news-sites").
+2. In the rule condition, use "@major-news-sites" as an entry in the allowed list.
+   - For domain categories: put "@list-name" in domains.allowed
+   - For email/identifier categories: add a "lists" condition with the appropriate matchType
+3. In the listDefinitions output, emit a ListDefinition with:
+   - name: the symbolic name (without @)
+   - type: "domains" for website/domain categories, "emails" for email address
+     categories, "identifiers" for other value categories
+   - principle: the constitution text that references this category
+   - generationPrompt: a clear prompt describing WHAT to list (quantity, scope).
+     Do NOT include format instructions (e.g., "return domain names only") --
+     format guidance is added mechanically based on the list type.
+   - requiresMcp: true ONLY if the list requires querying live data from an
+     MCP server (e.g., "my contacts" needs a contacts database).
+     false for knowledge-based lists (e.g., "major news sites").
+   - mcpServerHint: the MCP server name if requiresMcp is true
+
+When the constitution says something like "any domain" or "all", do NOT create a
+list. Use the wildcard pattern "*" directly.
+
+Examples:
+- "major news sites" -> @major-news-sites (type: domains, requiresMcp: false)
+- "people in my contacts" -> @my-contacts (type: emails, requiresMcp: true)
+- "major tech stocks" -> @tech-stock-tickers (type: identifiers, requiresMcp: false)`;
 }
 
 export function buildRepairPrompt(
@@ -160,7 +212,7 @@ export async function compileConstitution(
   llm: LanguageModel,
   repairContext?: RepairContext,
   onProgress?: (message: string) => void,
-): Promise<CompiledRule[]> {
+): Promise<CompilationOutput> {
   const serverNames = [...new Set(annotations.map(a => a.serverName))] as [string, ...string[]];
   const toolNames = [...new Set(annotations.map(a => a.toolName))] as [string, ...string[]];
   const schema = buildCompilerResponseSchema(serverNames, toolNames);
@@ -176,7 +228,10 @@ export async function compileConstitution(
     onProgress,
   });
 
-  return output.rules;
+  return {
+    rules: output.rules,
+    listDefinitions: output.listDefinitions ?? [],
+  };
 }
 
 // -----------------------------------------------------------------------
@@ -191,9 +246,15 @@ export interface RuleValidationResult {
 
 export function validateCompiledRules(
   rules: CompiledRule[],
+  listDefinitions: ListDefinition[] = [],
 ): RuleValidationResult {
   const errors: string[] = [];
   const warnings: string[] = [];
+
+  const listDefsByName = new Map(listDefinitions.map(d => [d.name, d]));
+
+  // Track which list definitions are referenced by at least one rule
+  const referencedListNames = new Set<string>();
 
   for (const rule of rules) {
     // Validate top-level roles
@@ -219,7 +280,7 @@ export function validateCompiledRules(
       }
     }
 
-    // Validate domain roles
+    // Validate domain roles and @list-name references
     if (rule.if.domains) {
       for (const role of rule.if.domains.roles) {
         if (!isArgumentRole(role)) {
@@ -228,6 +289,68 @@ export function validateCompiledRules(
       }
       if (rule.if.domains.allowed.length === 0) {
         warnings.push(`Rule "${rule.name}": domains.allowed is empty (condition will never match)`);
+      }
+
+      // Validate @list-name references in domains.allowed
+      for (const entry of rule.if.domains.allowed) {
+        if (entry.startsWith('@')) {
+          const listName = entry.slice(1);
+          const listDef = listDefsByName.get(listName);
+          if (!listDef) {
+            errors.push(
+              `Rule "${rule.name}": @${listName} in domains.allowed has no matching list definition`,
+            );
+          } else {
+            referencedListNames.add(listName);
+            // Domain lists must only appear in domains.allowed, not in lists[]
+            // (validated on the lists[] side below). Here we just need to ensure
+            // the referenced list is actually a domain type.
+            if (listDef.type !== 'domains') {
+              errors.push(
+                `Rule "${rule.name}": @${listName} in domains.allowed references a "${listDef.type}" list, but only "domains" lists belong in domains.allowed`,
+              );
+            }
+          }
+        }
+      }
+    }
+
+    // Validate lists[] conditions
+    if (rule.if.lists) {
+      for (const listCond of rule.if.lists) {
+        for (const role of listCond.roles) {
+          if (!isArgumentRole(role)) {
+            errors.push(`Rule "${rule.name}": invalid role "${role}" in lists[].roles`);
+          }
+        }
+
+        for (const entry of listCond.allowed) {
+          if (entry.startsWith('@')) {
+            const listName = entry.slice(1);
+            const listDef = listDefsByName.get(listName);
+            if (!listDef) {
+              errors.push(
+                `Rule "${rule.name}": @${listName} in lists[].allowed has no matching list definition`,
+              );
+            } else {
+              referencedListNames.add(listName);
+
+              // Domain-type lists must go in domains.allowed, not in lists[]
+              if (listDef.type === 'domains') {
+                errors.push(
+                  `Rule "${rule.name}": @${listName} is a "domains" list and must be in domains.allowed, not in lists[]`,
+                );
+              }
+
+              // matchType must match the referenced list's type
+              if (listCond.matchType !== listDef.type) {
+                errors.push(
+                  `Rule "${rule.name}": lists[].matchType "${listCond.matchType}" does not match @${listName} list type "${listDef.type}"`,
+                );
+              }
+            }
+          }
+        }
       }
     }
 
@@ -243,6 +366,15 @@ export function validateCompiledRules(
     ) {
       errors.push(
         `Rule "${rule.name}": appears to implement a structural invariant -- these must not be in compiled rules`,
+      );
+    }
+  }
+
+  // Check for orphaned list definitions (defined but never referenced)
+  for (const def of listDefinitions) {
+    if (!referencedListNames.has(def.name)) {
+      warnings.push(
+        `List definition "${def.name}" is not referenced by any rule`,
       );
     }
   }

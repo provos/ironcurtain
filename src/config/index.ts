@@ -2,7 +2,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { IronCurtainConfig, MCPServerConfig } from './types.js';
-import type { CompiledPolicyFile, ToolAnnotationsFile } from '../pipeline/types.js';
+import type { CompiledPolicyFile, DynamicListsFile, ToolAnnotationsFile } from '../pipeline/types.js';
 import { getIronCurtainHome, getUserGeneratedDir } from './paths.js';
 import { resolveRealPath } from '../types/argument-roles.js';
 import { loadUserConfig } from './user-config.js';
@@ -99,6 +99,8 @@ function resolveInternalServerPaths(
         config.command = 'node';
         const tsxIdx = config.args.indexOf('tsx');
         if (tsxIdx !== -1) config.args.splice(tsxIdx, 1);
+      } else if (config.command === 'tsx') {
+        config.command = 'node';
       }
     } else {
       // Source mode — resolve to absolute path
@@ -201,6 +203,7 @@ export function extractServerDomainAllowlists(
 export function loadGeneratedPolicy(generatedDir: string, fallbackDir?: string): {
   compiledPolicy: CompiledPolicyFile;
   toolAnnotations: ToolAnnotationsFile;
+  dynamicLists: DynamicListsFile | undefined;
 } {
   const compiledPolicy: CompiledPolicyFile = JSON.parse(
     readGeneratedFile(generatedDir, 'compiled-policy.json', fallbackDir),
@@ -208,7 +211,31 @@ export function loadGeneratedPolicy(generatedDir: string, fallbackDir?: string):
   const toolAnnotations: ToolAnnotationsFile = JSON.parse(
     readGeneratedFile(generatedDir, 'tool-annotations.json', fallbackDir),
   );
-  return { compiledPolicy, toolAnnotations };
+  const dynamicLists = loadOptionalGeneratedFile<DynamicListsFile>(
+    generatedDir, 'dynamic-lists.json', fallbackDir,
+  );
+  return { compiledPolicy, toolAnnotations, dynamicLists };
+}
+
+/**
+ * Loads an optional generated artifact file. Returns undefined if not found.
+ */
+function loadOptionalGeneratedFile<T>(
+  generatedDir: string,
+  filename: string,
+  fallbackDir?: string,
+): T | undefined {
+  const primaryPath = resolve(generatedDir, filename);
+  if (existsSync(primaryPath)) {
+    return JSON.parse(readFileSync(primaryPath, 'utf-8'));
+  }
+  if (fallbackDir) {
+    const fallbackPath = resolve(fallbackDir, filename);
+    if (existsSync(fallbackPath)) {
+      return JSON.parse(readFileSync(fallbackPath, 'utf-8'));
+    }
+  }
+  return undefined;
 }
 
 /**

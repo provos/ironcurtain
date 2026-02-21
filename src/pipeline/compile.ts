@@ -13,12 +13,16 @@
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { LanguageModel } from 'ai';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import chalk from 'chalk';
 import { extractServerDomainAllowlists } from '../config/index.js';
+import type { MCPServerConfig } from '../config/types.js';
 import { PolicyEngine } from '../trusted-process/policy-engine.js';
 import { resolveRealPath } from '../types/argument-roles.js';
 import { buildCompilerPrompt, compileConstitution, validateCompiledRules } from './constitution-compiler.js';
 import { getHandwrittenScenarios } from './handwritten-scenarios.js';
+import { resolveAllLists, type McpServerConnection } from './list-resolver.js';
 import {
   computeHash,
   createPipelineLlm,
@@ -39,6 +43,8 @@ import { buildGeneratorPrompt, generateScenarios } from './scenario-generator.js
 import type {
   CompiledPolicyFile,
   CompiledRule,
+  DynamicListsFile,
+  ListDefinition,
   RepairContext,
   TestScenario,
   TestScenariosFile,
@@ -161,6 +167,7 @@ export function resolveRulePaths(rules: CompiledRule[]): CompiledRule[] {
 
 interface CompilationResult {
   rules: CompiledRule[];
+  listDefinitions: ListDefinition[];
   inputHash: string;
 }
 
@@ -170,36 +177,46 @@ async function compilePolicyRules(
   protectedPaths: string[],
   existingPolicy: CompiledPolicyFile | undefined,
   llm: LanguageModel,
+  stepLabel: string = '[1/3]',
 ): Promise<CompilationResult> {
   const inputHash = computePolicyHash(constitutionText, annotations, protectedPaths);
-  const stepText = '[1/3] Compiling constitution';
+  const stepText = `${stepLabel} Compiling constitution`;
 
   // Check cache: skip LLM call if inputs haven't changed.
   // Still resolve paths in case symlink targets changed since last run.
   if (existingPolicy && existingPolicy.inputHash === inputHash) {
     showCached(stepText);
-    return { rules: resolveRulePaths(existingPolicy.rules), inputHash };
+    return {
+      rules: resolveRulePaths(existingPolicy.rules),
+      listDefinitions: existingPolicy.listDefinitions ?? [],
+      inputHash,
+    };
   }
 
-  const { result: compiledRules } = await withSpinner(
+  const { result: compilationOutput } = await withSpinner(
     stepText,
     async (spinner) => {
-      const rules = resolveRulePaths(await compileConstitution(
+      const output = await compileConstitution(
         constitutionText,
         annotations,
         { protectedPaths },
         llm,
         undefined,
         (msg) => { spinner.text = `${stepText} — ${msg}`; },
-      ));
-      validateRulesOrThrow(rules);
-      return rules;
+      );
+      const rules = resolveRulePaths(output.rules);
+      validateRulesOrThrow(rules, output.listDefinitions);
+      return { rules, listDefinitions: output.listDefinitions };
     },
-    (rules, elapsed) =>
-      `${stepText}: ${rules.length} rules compiled (${elapsed.toFixed(1)}s)`,
+    (output, elapsed) =>
+      `${stepText}: ${output.rules.length} rules compiled (${elapsed.toFixed(1)}s)`,
   );
 
-  return { rules: compiledRules, inputHash };
+  return {
+    rules: compilationOutput.rules,
+    listDefinitions: compilationOutput.listDefinitions,
+    inputHash,
+  };
 }
 
 class RuleValidationError extends Error {
@@ -209,8 +226,8 @@ class RuleValidationError extends Error {
   }
 }
 
-function validateRulesOrThrow(rules: CompiledRule[]): void {
-  const ruleValidation = validateCompiledRules(rules);
+function validateRulesOrThrow(rules: CompiledRule[], listDefinitions: ListDefinition[] = []): void {
+  const ruleValidation = validateCompiledRules(rules, listDefinitions);
   if (ruleValidation.warnings.length > 0) {
     for (const w of ruleValidation.warnings) {
       console.error(`  ${chalk.yellow('Warning:')} ${w}`);
@@ -230,17 +247,22 @@ async function compilePolicyRulesWithRepair(
   llm: LanguageModel,
   onProgress?: (message: string) => void,
 ): Promise<CompilationResult> {
-  const compiledRules = resolveRulePaths(await compileConstitution(
+  const output = await compileConstitution(
     constitutionText,
     annotations,
     { protectedPaths },
     llm,
     repairContext,
     onProgress,
-  ));
-  validateRulesOrThrow(compiledRules);
+  );
+  const compiledRules = resolveRulePaths(output.rules);
+  validateRulesOrThrow(compiledRules, output.listDefinitions);
 
-  return { rules: compiledRules, inputHash: `${baseInputHash}-repair` };
+  return {
+    rules: compiledRules,
+    listDefinitions: output.listDefinitions,
+    inputHash: `${baseInputHash}-repair`,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -251,12 +273,16 @@ function buildPolicyArtifact(
   constitutionHash: string,
   compilationResult: CompilationResult,
 ): CompiledPolicyFile {
-  return {
+  const artifact: CompiledPolicyFile = {
     generatedAt: new Date().toISOString(),
     constitutionHash,
     inputHash: compilationResult.inputHash,
     rules: compilationResult.rules,
   };
+  if (compilationResult.listDefinitions.length > 0) {
+    artifact.listDefinitions = compilationResult.listDefinitions;
+  }
+  return artifact;
 }
 
 // ---------------------------------------------------------------------------
@@ -276,6 +302,7 @@ async function generateTestScenarios(
   permittedDirectories: string[],
   existingScenarios: TestScenariosFile | undefined,
   llm: LanguageModel,
+  stepLabel: string = '[2/3]',
 ): Promise<ScenarioResult> {
   const handwrittenScenarios = getHandwrittenScenarios(allowedDirectory);
   const inputHash = computeScenariosHash(
@@ -287,7 +314,7 @@ async function generateTestScenarios(
     permittedDirectories,
   );
 
-  const stepText = '[2/3] Generating test scenarios';
+  const stepText = `${stepLabel} Generating test scenarios`;
 
   // Check cache: skip LLM call if inputs haven't changed
   if (existingScenarios && existingScenarios.inputHash === inputHash) {
@@ -297,18 +324,16 @@ async function generateTestScenarios(
 
   const { result: scenarios } = await withSpinner(
     stepText,
-    async (spinner) => {
-      return await generateScenarios(
-        constitutionText,
-        annotations,
-        handwrittenScenarios,
-        allowedDirectory,
-        protectedPaths,
-        llm,
-        permittedDirectories,
-        (msg) => { spinner.text = `${stepText} — ${msg}`; },
-      );
-    },
+    async (spinner) => generateScenarios(
+      constitutionText,
+      annotations,
+      handwrittenScenarios,
+      allowedDirectory,
+      protectedPaths,
+      llm,
+      permittedDirectories,
+      (msg) => { spinner.text = `${stepText} — ${msg}`; },
+    ),
     (scenarios, elapsed) => {
       const generatedCount = scenarios.length - handwrittenScenarios.length;
       return `${stepText}: ${scenarios.length} scenarios (${handwrittenScenarios.length} handwritten + ${generatedCount} generated) (${elapsed.toFixed(1)}s)`;
@@ -334,6 +359,7 @@ async function verifyCompiledPolicy(
   verbose: boolean = true,
   onProgress?: (message: string) => void,
   serverDomainAllowlists?: ReadonlyMap<string, readonly string[]>,
+  dynamicLists?: DynamicListsFile,
 ): Promise<VerificationResult> {
   const result = await verifyPolicy(
     constitutionText,
@@ -346,6 +372,7 @@ async function verifyCompiledPolicy(
     allowedDirectory,
     onProgress,
     serverDomainAllowlists,
+    dynamicLists,
   );
 
   if (!result.pass) {
@@ -394,6 +421,71 @@ function writePolicyArtifact(
 }
 
 // ---------------------------------------------------------------------------
+// MCP Server Connection for Data-Backed Lists
+// ---------------------------------------------------------------------------
+
+/**
+ * Connects to MCP servers needed for data-backed list resolution.
+ * Only connects to servers hinted by list definitions with requiresMcp: true.
+ * Returns a map keyed by server name for the resolver.
+ */
+export async function connectMcpServersForLists(
+  definitions: ListDefinition[],
+  mcpServers: Record<string, MCPServerConfig>,
+): Promise<Map<string, McpServerConnection>> {
+  const mcpDefs = definitions.filter(d => d.requiresMcp);
+  const hasUnhintedLists = mcpDefs.some(d => !d.mcpServerHint);
+
+  // Connect all configured servers if any list lacks a hint,
+  // otherwise connect only the hinted servers.
+  const neededServers = hasUnhintedLists
+    ? new Set(Object.keys(mcpServers))
+    : new Set(mcpDefs.map(d => d.mcpServerHint!));
+
+  const connections = new Map<string, McpServerConnection>();
+  for (const serverName of neededServers) {
+    const serverConfig = mcpServers[serverName];
+    if (!serverConfig) {
+      console.error(`  ${chalk.yellow('Warning:')} MCP server "${serverName}" not configured — skipping`);
+      continue;
+    }
+
+    const transport = new StdioClientTransport({
+      command: serverConfig.command,
+      args: serverConfig.args,
+      env: serverConfig.env
+        ? { ...(process.env as Record<string, string>), ...serverConfig.env }
+        : undefined,
+      stderr: 'pipe',
+    });
+    // Drain piped stderr to prevent backpressure
+    if (transport.stderr) {
+      transport.stderr.on('data', () => {});
+    }
+
+    const client = new Client({ name: 'ironcurtain-list-resolver', version: '0.1.0' });
+    await client.connect(transport);
+    const toolsResult = await client.listTools();
+
+    connections.set(serverName, { client, tools: toolsResult.tools });
+  }
+
+  return connections;
+}
+
+export async function disconnectMcpServers(
+  connections: Map<string, McpServerConnection>,
+): Promise<void> {
+  for (const conn of connections.values()) {
+    try {
+      await conn.client.close();
+    } catch {
+      // Ignore cleanup errors
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Main Pipeline
 // ---------------------------------------------------------------------------
 
@@ -435,6 +527,8 @@ export async function main(): Promise<void> {
   const existingScenarios = loadExistingArtifact<TestScenariosFile>(config.generatedDir, 'test-scenarios.json', config.packageGeneratedDir);
 
   // Compile constitution into policy rules (LLM-cacheable)
+  // Step numbering depends on whether list definitions are emitted,
+  // so compilation always uses [1/N] and the total is determined after.
   logContext.stepName = 'compile-constitution';
   let compilationResult = await compilePolicyRules(
     config.constitutionText,
@@ -442,6 +536,7 @@ export async function main(): Promise<void> {
     config.protectedPaths,
     existingPolicy,
     llm,
+    '[1/3]',
   );
 
   // Build and write policy artifact immediately so it's available for
@@ -449,10 +544,55 @@ export async function main(): Promise<void> {
   let compiledPolicyFile = buildPolicyArtifact(config.constitutionHash, compilationResult);
   writePolicyArtifact(config.generatedDir, compiledPolicyFile);
 
+  // Resolve dynamic lists if the compiler emitted list definitions
+  const hasLists = compilationResult.listDefinitions.length > 0;
+  const totalSteps = hasLists ? 4 : 3;
+  let dynamicLists: DynamicListsFile | undefined;
+
+  if (hasLists) {
+    logContext.stepName = 'resolve-lists';
+    const existingLists = loadExistingArtifact<DynamicListsFile>(
+      config.generatedDir, 'dynamic-lists.json', config.packageGeneratedDir,
+    );
+
+    // Connect to MCP servers if any list definitions require it
+    const needsMcp = compilationResult.listDefinitions.some(d => d.requiresMcp);
+    let mcpConnections: Map<string, McpServerConnection> | undefined;
+    if (needsMcp) {
+      mcpConnections = await connectMcpServersForLists(
+        compilationResult.listDefinitions, config.mcpServers,
+      );
+    }
+
+    const listStepText = `[2/${totalSteps}] Resolving dynamic lists`;
+    try {
+      const { result: resolvedLists } = await withSpinner(
+        listStepText,
+        async (spinner) => resolveAllLists(
+          compilationResult.listDefinitions,
+          { model: llm, mcpConnections },
+          existingLists,
+          (msg) => { spinner.text = `${listStepText} — ${msg}`; },
+        ),
+        (result, elapsed) => {
+          const count = Object.keys(result.lists).length;
+          return `${listStepText}: ${count} list(s) resolved (${elapsed.toFixed(1)}s)`;
+        },
+      );
+      dynamicLists = resolvedLists;
+      writeArtifact(config.generatedDir, 'dynamic-lists.json', dynamicLists);
+    } finally {
+      if (mcpConnections) {
+        await disconnectMcpServers(mcpConnections);
+      }
+    }
+  }
+
   // Extract permitted directories from compiled rules for scenario generation
   const permittedDirectories = extractPermittedDirectories(compilationResult.rules);
 
   // Generate test scenarios (LLM-cacheable)
+  const scenarioStepLabel = `[${hasLists ? 3 : 2}/${totalSteps}]`;
   logContext.stepName = 'generate-scenarios';
   const scenarioResult = await generateTestScenarios(
     config.constitutionText,
@@ -462,6 +602,7 @@ export async function main(): Promise<void> {
     permittedDirectories,
     existingScenarios,
     llm,
+    scenarioStepLabel,
   );
 
   // Write scenarios to disk immediately so they're available for
@@ -469,34 +610,37 @@ export async function main(): Promise<void> {
   writeScenariosArtifact(config.generatedDir, config.constitutionHash, scenarioResult);
 
   // Filter out scenarios that conflict with structural invariants
-  const filterEngine = new PolicyEngine(compiledPolicyFile, toolAnnotationsFile, config.protectedPaths, config.allowedDirectory);
+  const filterEngine = new PolicyEngine(
+    compiledPolicyFile, toolAnnotationsFile, config.protectedPaths,
+    config.allowedDirectory, undefined, dynamicLists,
+  );
   const { valid: initialValid, discarded: discardedScenarios } = filterAndLogStructuralConflicts(
     filterEngine, scenarioResult.scenarios, 'Discarded scenario (structural conflict)',
   );
   let filteredScenarios = initialValid;
 
   // Verify compiled policy against scenarios (full depth)
+  const verifyStepLabel = `[${totalSteps}/${totalSteps}]`;
   logContext.stepName = 'verify-policy';
   const { result: verificationResultInitial } = await withSpinner(
-    '[3/3] Verifying policy',
-    async (spinner) => {
-      return await verifyCompiledPolicy(
-        config.constitutionText,
-        compiledPolicyFile,
-        toolAnnotationsFile,
-        config.protectedPaths,
-        filteredScenarios,
-        llm,
-        config.allowedDirectory,
-        3,
-        true,
-        (msg) => { spinner.text = `[3/3] Verifying policy — ${msg}`; },
-        serverDomainAllowlists,
-      );
-    },
+    `${verifyStepLabel} Verifying policy`,
+    async (spinner) => verifyCompiledPolicy(
+      config.constitutionText,
+      compiledPolicyFile,
+      toolAnnotationsFile,
+      config.protectedPaths,
+      filteredScenarios,
+      llm,
+      config.allowedDirectory,
+      3,
+      true,
+      (msg) => { spinner.text = `${verifyStepLabel} Verifying policy — ${msg}`; },
+      serverDomainAllowlists,
+      dynamicLists,
+    ),
     (r, elapsed) => r.pass
-      ? `[3/3] Verified policy: ${r.rounds.length} round(s) (${elapsed.toFixed(1)}s)`
-      : `[3/3] Verification completed with failures (${elapsed.toFixed(1)}s)`,
+      ? `${verifyStepLabel} Verified policy: ${r.rounds.length} round(s) (${elapsed.toFixed(1)}s)`
+      : `${verifyStepLabel} Verification completed with failures (${elapsed.toFixed(1)}s)`,
   );
   let verificationResult = verificationResultInitial;
 
@@ -573,17 +717,15 @@ export async function main(): Promise<void> {
         const repairCompileText = `Repair ${attempt}/${MAX_REPAIRS}: Recompiling`;
         const { result: repairCompileResult } = await withSpinner(
           repairCompileText,
-          async (spinner) => {
-            return await compilePolicyRulesWithRepair(
-              config.constitutionText,
-              allAnnotations,
-              config.protectedPaths,
-              baseInputHash,
-              repairContext,
-              llm,
-              (msg) => { spinner.text = `${repairCompileText} — ${msg}`; },
-            );
-          },
+          async (spinner) => compilePolicyRulesWithRepair(
+            config.constitutionText,
+            allAnnotations,
+            config.protectedPaths,
+            baseInputHash,
+            repairContext,
+            llm,
+            (msg) => { spinner.text = `${repairCompileText} — ${msg}`; },
+          ),
           (r, elapsed) =>
             `Repair ${attempt}/${MAX_REPAIRS}: Recompiled ${r.rules.length} rules (${elapsed.toFixed(1)}s)`,
         );
@@ -602,21 +744,20 @@ export async function main(): Promise<void> {
       const repairVerifyText = `Repair ${attempt}/${MAX_REPAIRS}: Verifying`;
       const { result: repairVerifyResult } = await withSpinner(
         repairVerifyText,
-        async (spinner) => {
-          return await verifyCompiledPolicy(
-            config.constitutionText,
-            compiledPolicyFile,
-            toolAnnotationsFile,
-            config.protectedPaths,
-            repairScenarios,
-            llm,
-            config.allowedDirectory,
-            1,
-            false,
-            (msg) => { spinner.text = `${repairVerifyText} — ${msg}`; },
-            serverDomainAllowlists,
-          );
-        },
+        async (spinner) => verifyCompiledPolicy(
+          config.constitutionText,
+          compiledPolicyFile,
+          toolAnnotationsFile,
+          config.protectedPaths,
+          repairScenarios,
+          llm,
+          config.allowedDirectory,
+          1,
+          false,
+          (msg) => { spinner.text = `${repairVerifyText} — ${msg}`; },
+          serverDomainAllowlists,
+          dynamicLists,
+        ),
         (r, elapsed) => r.pass
           ? `Repair ${attempt}/${MAX_REPAIRS}: Verified (${elapsed.toFixed(1)}s)`
           : `Repair ${attempt}/${MAX_REPAIRS}: ${r.failedScenarios.length} failure(s) (${elapsed.toFixed(1)}s)`,
@@ -637,21 +778,20 @@ export async function main(): Promise<void> {
         const finalScenarios = [...filteredScenarios, ...accumulatedProbes];
         const { result: finalVerifyResult } = await withSpinner(
           'Final full verification',
-          async (spinner) => {
-            return await verifyCompiledPolicy(
-              config.constitutionText,
-              compiledPolicyFile,
-              toolAnnotationsFile,
-              config.protectedPaths,
-              finalScenarios,
-              llm,
-              config.allowedDirectory,
-              3,
-              true,
-              (msg) => { spinner.text = `Final full verification — ${msg}`; },
-              serverDomainAllowlists,
-            );
-          },
+          async (spinner) => verifyCompiledPolicy(
+            config.constitutionText,
+            compiledPolicyFile,
+            toolAnnotationsFile,
+            config.protectedPaths,
+            finalScenarios,
+            llm,
+            config.allowedDirectory,
+            3,
+            true,
+            (msg) => { spinner.text = `Final full verification — ${msg}`; },
+            serverDomainAllowlists,
+            dynamicLists,
+          ),
           (r, elapsed) => r.pass
             ? `Final full verification: passed (${elapsed.toFixed(1)}s)`
             : `Final full verification: ${r.failedScenarios.length} failure(s) (${elapsed.toFixed(1)}s)`,

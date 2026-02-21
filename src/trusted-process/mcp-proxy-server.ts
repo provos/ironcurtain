@@ -255,10 +255,10 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const { compiledPolicy, toolAnnotations } = loadGeneratedPolicy(generatedDir);
+  const { compiledPolicy, toolAnnotations, dynamicLists } = loadGeneratedPolicy(generatedDir);
 
   const serverDomainAllowlists = extractServerDomainAllowlists(serversConfig);
-  const policyEngine = new PolicyEngine(compiledPolicy, toolAnnotations, protectedPaths, allowedDirectory, serverDomainAllowlists);
+  const policyEngine = new PolicyEngine(compiledPolicy, toolAnnotations, protectedPaths, allowedDirectory, serverDomainAllowlists, dynamicLists);
   const auditLog = new AuditLog(auditLogPath);
   const circuitBreaker = new CallCircuitBreaker();
 

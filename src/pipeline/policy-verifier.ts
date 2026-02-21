@@ -14,6 +14,7 @@ import { PolicyEngine } from '../trusted-process/policy-engine.js';
 import type { ToolCallRequest } from '../types/mcp.js';
 import type {
   CompiledPolicyFile,
+  DynamicListsFile,
   ToolAnnotationsFile,
   TestScenario,
   ExecutionResult,
@@ -147,8 +148,9 @@ export async function verifyPolicy(
   allowedDirectory?: string,
   onProgress?: (message: string) => void,
   serverDomainAllowlists?: ReadonlyMap<string, readonly string[]>,
+  dynamicLists?: DynamicListsFile,
 ): Promise<VerificationResult> {
-  const engine = new PolicyEngine(compiledPolicy, toolAnnotations, protectedPaths, allowedDirectory, serverDomainAllowlists);
+  const engine = new PolicyEngine(compiledPolicy, toolAnnotations, protectedPaths, allowedDirectory, serverDomainAllowlists, dynamicLists);
 
   const allAnnotations = Object.values(toolAnnotations.servers).flatMap(s => s.tools);
   const serverNamesList = [...new Set(allAnnotations.map(a => a.serverName))] as [string, ...string[]];

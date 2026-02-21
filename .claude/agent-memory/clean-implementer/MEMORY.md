@@ -3,8 +3,8 @@
 ## Project Architecture
 - **Pipeline types**: `src/pipeline/types.ts` -- shared types for all pipeline modules
 - **PolicyEngine**: `src/trusted-process/policy-engine.ts` -- two-phase: structural invariants + compiled rules
-- **Constructor**: `new PolicyEngine(compiledPolicy, toolAnnotations, protectedPaths, allowedDirectory?, serverDomainAllowlists?)`
-- **Generated artifacts**: `src/config/generated/{compiled-policy,tool-annotations}.json`
+- **Constructor**: `new PolicyEngine(compiledPolicy, toolAnnotations, protectedPaths, allowedDirectory?, serverDomainAllowlists?, dynamicLists?)`
+- **Generated artifacts**: `src/config/generated/{compiled-policy,tool-annotations,dynamic-lists}.json`
 - **Config**: `src/config/types.ts` has `IronCurtainConfig` with `protectedPaths`, `generatedDir`, `constitutionPath`
 
 ## Session Architecture (multi-turn)
@@ -42,12 +42,12 @@
 - Fields: `toolName`, `serverName`, `comment` (string), `sideEffects` (boolean), `args` (Record<string, ArgumentRole[]>)
 - No `effect` field -- argument roles are the single source of truth
 
-## CompiledRuleCondition shape (post-TB1a)
+## CompiledRuleCondition shape (post-dynamic-lists)
 - `roles?: ArgumentRole[]` -- match tools with any argument having these roles (blanket rules)
 - `paths?: PathCondition` -- extract paths from args with matching roles, check within directory
-- `domains?: DomainCondition` -- `{ roles: ArgumentRole[], allowed: string[] }` -- match URL-role args against domain allowlist (supports `*.example.com` wildcards)
-- `roles`, `paths`, and `domains` serve different purposes; may coexist in same rule
-- No `effect` field
+- `domains?: DomainCondition` -- `{ roles, allowed }` -- URL-role args against domain allowlist; `allowed` may contain `@list-name` refs
+- `lists?: ListCondition[]` -- `{ roles, allowed, matchType }` -- non-domain list matching (emails, identifiers); AND semantics across array
+- `roles`, `paths`, `domains`, and `lists` serve different purposes; may coexist in same rule
 
 ## AI SDK v6 Mock Pattern (MockLanguageModelV3)
 When mocking `generateText` with `Output.object` using `MockLanguageModelV3` from `ai/test`:
@@ -76,17 +76,19 @@ Integration tests use dynamic sandbox dirs (`/tmp/ironcurtain-test-<pid>`). The 
 Engine uses concrete filesystem paths with `path.resolve()` and directory containment. Test paths must use actual project paths like `resolve(projectRoot, 'src/config/constitution.md')`.
 
 ## Key File Inventory (post-pipeline)
-- `src/pipeline/types.ts` -- all shared types
+- `src/pipeline/types.ts` -- all shared types (ListDefinition, ResolvedList, DynamicListsFile, ListCondition, ListType)
 - `src/pipeline/tool-annotator.ts` -- LLM tool classification
-- `src/pipeline/constitution-compiler.ts` -- LLM rule compilation
+- `src/pipeline/constitution-compiler.ts` -- LLM rule compilation (emits listDefinitions)
+- `src/pipeline/dynamic-list-types.ts` -- LIST_TYPE_REGISTRY, ListTypeDef, getListMatcher()
+- `src/pipeline/list-resolver.ts` -- resolveList(), resolveAllLists()
 - `src/pipeline/scenario-generator.ts` -- LLM test generation
-- `src/pipeline/policy-verifier.ts` -- multi-round real engine + LLM judge
+- `src/pipeline/policy-verifier.ts` -- multi-round real engine + LLM judge (accepts dynamicLists)
 - `src/pipeline/handwritten-scenarios.ts` -- 26 mandatory test scenarios (15 filesystem + 11 git)
-- `src/pipeline/compile.ts` -- CLI entry point (`npm run compile-policy`)
-- `src/config/index.ts` -- `loadConfig()` and `loadGeneratedPolicy()`
+- `src/pipeline/compile.ts` -- CLI entry point; dynamic step numbering [1/3] vs [1/4] when lists present
+- `src/config/index.ts` -- `loadConfig()` and `loadGeneratedPolicy()` (returns dynamicLists)
 
 ## validateCompiledRules Signature
-`validateCompiledRules(rules: CompiledRule[])` -- no longer takes annotations parameter.
+`validateCompiledRules(rules: CompiledRule[], listDefinitions?: ListDefinition[])` -- validates rules + list cross-references.
 
 ## Zod v4 Strict Mode
 Zod v4 (^4.3.6) strict by default. Mock response JSON must exactly match Zod schema -- no extra properties.
@@ -94,10 +96,25 @@ Zod v4 (^4.3.6) strict by default. Mock response JSON must exactly match Zod sch
 ## Move Operations Policy
 All moves denied via `deny-delete-operations` rule (move_file source has `delete-path` role). No move-specific rules.
 
+## Dynamic Lists (Phase 1-3 complete)
+- **Design**: `docs/designs/dynamic-lists.md` -- full 4-phase spec
+- **Flow**: compiler emits `@list-name` in rules + `listDefinitions`; resolver produces `dynamic-lists.json`; engine expands at load time
+- **List types**: `domains` (domainMatchesAllowlist), `emails` (case-insensitive), `identifiers` (case-sensitive exact)
+- **Expansion**: `expandListReferences()` module-level fn in policy-engine.ts; `getEffectiveListValues()` = (values + manualAdditions) - manualRemovals
+- **Evaluation**: `extractAnnotatedValues()` generic extraction; `getListMatcher()` local to policy-engine (avoids circular import with dynamic-list-types)
+- **Per-role**: `hasRoleConditions()` and `ruleRelevantToRole()` both check `lists` conditions
+- **Resolver**: knowledge-based uses `generateObjectWithRepair`; MCP-backed uses `generateText` with bridged tools + `parseValuesFromText`
+- **MCP resolution**: `McpServerConnection` interface, `bridgeMcpTools()` bridges MCP tools as AI SDK tools, `selectMcpConnection()` prefers `mcpServerHint`
+- **MCP in compile.ts**: `connectMcpServersForLists()` connects only needed servers; `disconnectMcpServers()` cleans up; uses try/finally pattern
+- **Circular import gotcha**: `dynamic-list-types.ts` imports `domainMatchesAllowlist` from `domain-utils.ts`; policy-engine defines its own `getListMatcher()` to avoid reverse import
+- **loadGeneratedPolicy**: returns `{ compiledPolicy, toolAnnotations, dynamicLists }` -- dynamicLists is optional (backward compatible)
+- **Tests**: `test/dynamic-lists.test.ts` -- 60 tests (Phase 1 validation/compiler + Phase 2 registry/resolver/engine + Phase 3 MCP-backed resolution)
+
 ## Design Documents
 - `docs/designs/policy-compilation-pipeline.md` -- pipeline design spec
 - `docs/designs/multi-server-onboarding.md` -- TB1a design spec (role extensibility + git server)
 - `docs/designs/multi-provider-models.md` -- multi-provider model support design
+- `docs/designs/dynamic-lists.md` -- dynamic lists for policy rules (4-phase)
 
 ## TB1a: Domain Allowlists & Sandbox Containment Architecture
 - **Phase 1c**: structural invariant checks URL-role args against `serverDomainAllowlists` -- escalates (not denies) unknown domains
@@ -164,51 +181,7 @@ When mocking `generateText` for session tests:
 - **Tests**: `test/user-config.test.ts` and `test/model-provider.test.ts` -- uses `IRONCURTAIN_HOME` temp dirs for isolation
 - **Zod validation**: unknown fields warn to stderr, invalid types/values throw
 
-## Session Logging System
-- **Logger module**: `src/logger.ts` -- module-level singleton with `setup()`/`teardown()` lifecycle
-- **Log file**: `~/.ironcurtain/sessions/{id}/session.log` (path via `getSessionLogPath()` in `src/config/paths.ts`)
-- **API**: `logger.debug/info/warn/error()` -- no-ops when not set up (safe for code running outside sessions)
-- **Console interception**: `setup()` patches `console.log/error/warn/debug` to redirect to log file; `teardown()` restores originals
-- **User-facing output**: must use `process.stdout.write()` / `process.stderr.write()` to bypass interception
-- **Lifecycle**: `createSession()` calls `setup()` after mkdirSync; `AgentSession.close()` calls `teardown()` at the end
-- **Excluded**: `mcp-proxy-server.ts` (separate process) and `pipeline/compile.ts` (standalone CLI)
-- **Test gotcha**: session tests must call `logger.teardown()` in `afterEach` to prevent "Logger already set up" errors when creating multiple sessions across tests
-- **Design spec**: `docs/logging-design.md`
-
-## Execution Containment (TB0)
-- **Sandbox integration module**: `src/trusted-process/sandbox-integration.ts` -- wraps MCP servers in `srt` CLI processes
-- **Key exports**: `checkSandboxAvailability()`, `resolveSandboxConfig()`, `writeServerSettings()`, `wrapServerCommand()`, `cleanupSettingsFiles()`, `annotateSandboxViolation()`
-- **Types**: `ResolvedSandboxConfig` (discriminated union: sandboxed true/false), `ResolvedSandboxParams`, `SandboxAvailabilityResult`
-- **Config types** (in `src/config/types.ts`): `SandboxNetworkConfig`, `SandboxFilesystemConfig`, `ServerSandboxConfig`, `SandboxAvailabilityPolicy`
-- **MCPServerConfig**: has `sandbox?: ServerSandboxConfig` (false = opt-out, object = overrides, omitted = restrictive defaults)
-- **IronCurtainConfig**: has `sandboxPolicy?: SandboxAvailabilityPolicy` (default 'warn')
-- **AuditEntry**: has `sandboxed?: boolean` field
-- **Per-server srt processes**: each sandboxed server gets its own `srt` CLI process with independent proxy infrastructure (true network isolation)
-- **Settings files**: `{tempDir}/{serverName}.srt-settings.json` with `network` and `filesystem` sections
-- **Command wrapping**: `srt -s <settingsPath> -c <shell-quoted-cmd>` via `shell-quote` for escaping
-- **srt binary**: `resolve('node_modules/.bin/srt')` -- from `@anthropic-ai/sandbox-runtime`
-- **Shell-quote types**: `src/types/shell-quote.d.ts` (no `@types/shell-quote` available)
-- **Sandbox-by-default**: omitted sandbox field = sandboxed with restrictive defaults (no network, only session sandbox dir writable)
-- **Default denyRead**: `['~/.ssh', '~/.gnupg', '~/.aws']`
-- **Env var**: `SANDBOX_POLICY` passed from `src/sandbox/index.ts` to proxy process
-- **Env passing fix**: proxy always passes `{ ...process.env, ...config.env }` to StdioClientTransport (never undefined)
-- **Violation annotation**: `annotateSandboxViolation()` prefixes EPERM/EACCES errors with `[SANDBOX BLOCKED]` for sandboxed servers
-- **mcp-servers.json**: filesystem server has `"sandbox": false` (opt-out, mediated by policy engine)
-- **Tests**: `test/sandbox-integration.test.ts` -- 32 unit tests + 3 integration tests (gated behind platform check)
-- **Design spec**: `docs/designs/execution-containment.md`
-
-## Escalation Auto-Approver
-- **Module**: `src/trusted-process/auto-approver.ts` -- `autoApprove()`, `readUserContext()`, types
-- **Config**: `autoApprove: { enabled: boolean, modelId: string }` in `ResolvedUserConfig` (off by default)
-- **Config schema**: `autoApproveSchema` in `src/config/user-config.ts` -- mirrors `autoCompactSchema` pattern
-- **Model creation**: `createLanguageModelFromEnv(qualifiedId, apiKey)` in `src/config/model-provider.ts` -- for proxy env-var-only usage
-- **API key resolution**: `resolveApiKeyForProvider(provider, config)` extracts correct key from `ResolvedUserConfig`
-- **Proxy env vars**: `AUTO_APPROVE_ENABLED`, `AUTO_APPROVE_MODEL_ID`, `AUTO_APPROVE_API_KEY`, `AUTO_APPROVE_LLM_LOG_PATH`
-- **User context IPC**: `user-context.json` written to escalation dir by `AgentSession.sendMessage()`, read by proxy on escalation
-- **Audit trail**: `autoApproved?: boolean` on `AuditEntry` in `src/types/audit.ts`
-- **Log path**: `getSessionAutoApproveLlmLogPath()` in `src/config/paths.ts` -- `{sessionDir}/auto-approve-llm.jsonl`
-- **IronCurtainConfig**: has `autoApproveLlmLogPath?: string` for per-session auto-approve LLM logging
-- **Security invariants**: can only return `approve` or `escalate` (never `deny`); all errors fail-open to human; tool args excluded from LLM prompt
-- **In-process mode**: `TrustedProcess.setLastUserMessage()` + `autoApproveModel` field; model created in `initialize()`
-- **Tests**: `test/auto-approver.test.ts` -- 17 unit tests using `MockLanguageModelV3`; config tests in `test/user-config.test.ts`
-- **Test config gotcha**: `ResolvedUserConfig` now requires `autoApprove` field -- all test files creating this type must include it
+## Subsystems (see subsystems.md for details)
+- **Session Logging**: `src/logger.ts` -- singleton with `setup()`/`teardown()`; test gotcha: must call `teardown()` in `afterEach`
+- **Execution Containment**: `src/trusted-process/sandbox-integration.ts` -- wraps MCP servers in `srt` processes
+- **Auto-Approver**: `src/trusted-process/auto-approver.ts` -- `autoApprove()` with LLM; `autoApprove` field required in `ResolvedUserConfig`

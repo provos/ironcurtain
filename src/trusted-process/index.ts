@@ -30,10 +30,10 @@ export class TrustedProcess {
   private lastUserMessage: string | null = null;
 
   constructor(private config: IronCurtainConfig, options?: TrustedProcessOptions) {
-    const { compiledPolicy, toolAnnotations } = loadGeneratedPolicy(config.generatedDir);
+    const { compiledPolicy, toolAnnotations, dynamicLists } = loadGeneratedPolicy(config.generatedDir);
 
     const serverDomainAllowlists = extractServerDomainAllowlists(config.mcpServers);
-    this.policyEngine = new PolicyEngine(compiledPolicy, toolAnnotations, config.protectedPaths, config.allowedDirectory, serverDomainAllowlists);
+    this.policyEngine = new PolicyEngine(compiledPolicy, toolAnnotations, config.protectedPaths, config.allowedDirectory, serverDomainAllowlists, dynamicLists);
 
     const policyRoots = extractPolicyRoots(compiledPolicy, config.allowedDirectory);
     this.mcpRoots = toMcpRoots(policyRoots);

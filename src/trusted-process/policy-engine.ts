@@ -17,6 +17,7 @@ import type { ToolCallRequest, PolicyDecisionStatus } from '../types/mcp.js';
 import type { EvaluationResult } from './policy-types.js';
 import type {
   CompiledPolicyFile,
+  DynamicListsFile,
   ToolAnnotationsFile,
   ToolAnnotation,
   CompiledRule,
@@ -30,6 +31,8 @@ import {
   SANDBOX_SAFE_PATH_ROLES,
   type RoleDefinition,
 } from '../types/argument-roles.js';
+import { domainMatchesAllowlist, isIpAddress } from './domain-utils.js';
+import { getListMatcher } from '../pipeline/dynamic-list-types.js';
 
 /**
  * Heuristically extracts filesystem paths from tool call arguments.
@@ -53,9 +56,10 @@ function extractPathsHeuristic(args: Record<string, unknown>): string[] {
 }
 
 /**
- * Extracts paths from arguments based on annotation roles.
- * Only returns paths for arguments whose annotated roles intersect
+ * Extracts string values from arguments based on annotation roles.
+ * Only returns values for arguments whose annotated roles intersect
  * with the target roles. Handles both string and string[] arguments.
+ * Used for paths, URLs, and list values alike.
  */
 function extractAnnotatedPaths(
   args: Record<string, unknown>,
@@ -77,6 +81,7 @@ function extractAnnotatedPaths(
   }
   return paths;
 }
+
 
 /**
  * Checks whether a target path is contained within a directory.
@@ -189,41 +194,18 @@ function resolveUrlForDomainCheck(
   return roleDef.prepareForPolicy?.(normalized) ?? normalized;
 }
 
-/**
- * Checks whether a hostname is an IP address (IPv4 or IPv6).
- * Used by the SSRF structural invariant to prevent `*` wildcards
- * from matching IP addresses.
- */
-export function isIpAddress(domain: string): boolean {
-  return /^\d+\.\d+\.\d+\.\d+$/.test(domain) || domain.includes(':');
-}
-
-/**
- * Checks whether a domain matches any pattern in an allowlist.
- * Supports exact match, `*` wildcard (matches all domain names but NOT
- * IP addresses -- SSRF structural invariant), and `*.example.com` prefix
- * wildcards (matches example.com and *.example.com).
- */
-export function domainMatchesAllowlist(
-  domain: string,
-  allowedDomains: readonly string[],
-): boolean {
-  return allowedDomains.some(pattern => {
-    if (pattern === '*') return !isIpAddress(domain);
-    if (pattern.startsWith('*.')) {
-      const suffix = pattern.slice(1); // ".github.com"
-      return domain === pattern.slice(2) || domain.endsWith(suffix);
-    }
-    return domain === pattern;
-  });
-}
+// Re-export domain utilities for backward compatibility with existing consumers
+export { domainMatchesAllowlist, isIpAddress };
 
 /**
  * Checks whether a rule has role-related conditions (roles, paths, or domains).
  * Rules without these conditions are role-agnostic and match any role.
  */
 function hasRoleConditions(rule: CompiledRule): boolean {
-  return rule.if.roles !== undefined || rule.if.paths !== undefined || rule.if.domains !== undefined;
+  return rule.if.roles !== undefined
+    || rule.if.paths !== undefined
+    || rule.if.domains !== undefined
+    || (rule.if.lists !== undefined && rule.if.lists.length > 0);
 }
 
 /**
@@ -237,7 +219,85 @@ function ruleRelevantToRole(rule: CompiledRule, role: ArgumentRole): boolean {
   if (cond.roles !== undefined && !cond.roles.includes(role)) return false;
   if (cond.paths !== undefined && !cond.paths.roles.includes(role)) return false;
   if (cond.domains !== undefined && !cond.domains.roles.includes(role)) return false;
+  if (cond.lists !== undefined && !cond.lists.some(lc => lc.roles.includes(role))) return false;
   return true;
+}
+
+// ---------------------------------------------------------------------------
+// Dynamic list expansion (load-time)
+// ---------------------------------------------------------------------------
+
+/**
+ * Computes the effective values for a named list by combining resolved values,
+ * manual additions, and manual removals:
+ *   effective = (resolved.values + manualAdditions) - manualRemovals
+ */
+function getEffectiveListValues(
+  listName: string,
+  lists: DynamicListsFile,
+): string[] {
+  const list = lists.lists[listName];
+  if (!list) {
+    throw new Error(
+      `Dynamic list "@${listName}" referenced in policy but not found in dynamic-lists.json. ` +
+      `Run "ironcurtain compile-policy" to resolve lists.`,
+    );
+  }
+
+  const removals = new Set(list.manualRemovals);
+  return [...new Set([...list.values, ...list.manualAdditions])]
+    .filter(v => !removals.has(v));
+}
+
+/**
+ * Expands all `@list-name` references in compiled rules with concrete values
+ * from the resolved dynamic lists. Called at load time so the evaluation hot
+ * path never sees symbolic references.
+ */
+function expandListReferences(
+  policy: CompiledPolicyFile,
+  lists: DynamicListsFile,
+): CompiledPolicyFile {
+  const expandedRules = policy.rules.map(rule => {
+    let expandedRule = rule;
+
+    // Expand @list-name in domains.allowed
+    if (rule.if.domains?.allowed.some(e => e.startsWith('@'))) {
+      const expandedAllowed = rule.if.domains.allowed.flatMap(entry =>
+        entry.startsWith('@')
+          ? getEffectiveListValues(entry.slice(1), lists)
+          : [entry],
+      );
+      expandedRule = {
+        ...expandedRule,
+        if: {
+          ...expandedRule.if,
+          domains: { ...expandedRule.if.domains!, allowed: expandedAllowed },
+        },
+      };
+    }
+
+    // Expand @list-name in each lists[] entry
+    if (rule.if.lists?.some(lc => lc.allowed.some(e => e.startsWith('@')))) {
+      const expandedLists = rule.if.lists!.map(listCond => {
+        if (!listCond.allowed.some(e => e.startsWith('@'))) return listCond;
+        const expandedAllowed = listCond.allowed.flatMap(entry =>
+          entry.startsWith('@')
+            ? getEffectiveListValues(entry.slice(1), lists)
+            : [entry],
+        );
+        return { ...listCond, allowed: expandedAllowed };
+      });
+      expandedRule = {
+        ...expandedRule,
+        if: { ...expandedRule.if, lists: expandedLists },
+      };
+    }
+
+    return expandedRule;
+  });
+
+  return { ...policy, rules: expandedRules };
 }
 
 export class PolicyEngine {
@@ -253,8 +313,11 @@ export class PolicyEngine {
     protectedPaths: string[],
     allowedDirectory?: string,
     serverDomainAllowlists?: ReadonlyMap<string, readonly string[]>,
+    dynamicLists?: DynamicListsFile,
   ) {
-    this.compiledPolicy = compiledPolicy;
+    this.compiledPolicy = dynamicLists
+      ? expandListReferences(compiledPolicy, dynamicLists)
+      : compiledPolicy;
     this.protectedPaths = protectedPaths;
     this.allowedDirectory = allowedDirectory;
     this.serverDomainAllowlists = serverDomainAllowlists ?? new Map();
@@ -649,6 +712,24 @@ export class PolicyEngine {
         return domainMatchesAllowlist(domain, cond.domains!.allowed);
       });
       if (!allMatch) return false;
+    }
+
+    // Check lists conditions (non-domain list matching)
+    if (cond.lists !== undefined) {
+      for (const listCond of cond.lists) {
+        const extractedValues = extractAnnotatedPaths(
+          request.arguments, annotation, listCond.roles,
+        );
+
+        // Zero values extracted = condition not satisfied, rule does not match
+        if (extractedValues.length === 0) return false;
+
+        const matcher = getListMatcher(listCond.matchType);
+        const allValuesMatch = extractedValues.every(v =>
+          listCond.allowed.some(pattern => matcher(v, pattern)),
+        );
+        if (!allValuesMatch) return false;
+      }
     }
 
     return true;

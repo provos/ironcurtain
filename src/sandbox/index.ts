@@ -160,11 +160,16 @@ export class Sandbox {
       };
     }
 
-    await this.client.registerManual({
+    const registration = await this.client.registerManual({
       name: 'tools',
       call_template_type: 'mcp',
       config: { mcpServers },
     });
+
+    if (!registration.success) {
+      const errors = registration.errors?.join(', ') ?? 'unknown error';
+      throw new Error(`Failed to register MCP servers: ${errors}`);
+    }
 
     const { catalog, patchSnippet } = await this.buildToolCatalogAndPatch();
     this.toolCatalog = catalog;

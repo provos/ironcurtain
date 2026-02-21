@@ -11,6 +11,7 @@ IronCurtain is a secure agent runtime that mediates between an AI agent and MCP 
 - `ironcurtain start "your task"` — run the agent with a task (or `npm start "your task"` during development)
 - `ironcurtain annotate-tools` — classify MCP tool arguments via LLM (or `npm run annotate-tools`)
 - `ironcurtain compile-policy` — compile constitution into policy rules (or `npm run compile-policy`)
+- `ironcurtain refresh-lists [--list <name>] [--with-mcp]` — re-resolve dynamic lists without full recompilation
 - `npm run build` — TypeScript compilation + copy config assets to `dist/`
 - `npm test` — run all tests (vitest)
 - `npx vitest run test/policy-engine.test.ts` — run a single test file
@@ -55,13 +56,15 @@ Two-command offline pipeline that produces generated artifacts in `src/config/ge
 1. **`npm run annotate-tools`** (`annotate.ts`) — Developer task. Connects to MCP servers, classifies tool arguments via LLM, writes **tool-annotations.json**. Only needs re-running when servers, tools, or the argument role registry change. Roles are filtered per-server via `serverNames` on `RoleDefinition`.
 2. **`npm run compile-policy`** (`compile.ts`) — User task. Loads annotations from disk, compiles the constitution into **compiled-policy.json**, generates **test-scenarios.json**, and verifies via LLM judge. Requires `tool-annotations.json` to exist.
 
+**Dynamic Lists** — When the constitution references categories ("major news sites", "my contacts"), the compiler emits `@list-name` symbolic references in rules and `listDefinitions` in `compiled-policy.json`. A resolution sub-step (between compilation and scenario generation) resolves each list via LLM (knowledge-based) or LLM+MCP tool-use (data-backed, e.g. contacts). Resolved values are written to **dynamic-lists.json** (`src/pipeline/list-resolver.ts`). At load time, `PolicyEngine` expands `@list-name` → concrete values, keeping the evaluation hot path unchanged. Three list types: `domains` (wildcard matching via `domainMatchesAllowlist`), `emails` (case-insensitive), `identifiers` (exact match), defined in `dynamic-list-types.ts`. Users can inspect/edit resolved lists via `manualAdditions`/`manualRemovals`. `ironcurtain refresh-lists` re-resolves without full recompilation. Domain-typed lists go in `DomainCondition.allowed`; non-domain types use `ListCondition` (new field on `CompiledRuleCondition`).
+
 All artifacts use content-hash caching (`inputHash`) to skip unnecessary LLM calls. The LLM prompt text is included in the hash so template changes invalidate the cache. Artifacts are written to disk immediately after each step (not gated on verification). When verification fails, a compile-verify-repair loop feeds failures back to the compiler for targeted repair (up to 2 attempts). LLM interactions logged to `llm-interactions.jsonl`.
 
 ### Session (`src/session/`)
 **ResourceBudgetTracker** (`resource-budget-tracker.ts`) — enforces per-session limits: tokens, steps, wall-clock time, estimated cost. Three enforcement points: StopCondition (between agent steps), AbortSignal (wall-clock timeout), pre-check in `execute_code`. Throws `BudgetExhaustedError` when any limit is exceeded. Configured via `resourceBudget` field in `~/.ironcurtain/config.json` (all fields nullable to disable individual limits). Defaults: 1M tokens, 200 steps, 30min, $5.
 
 ### Configuration (`src/config/`)
-`loadConfig()` reads from environment variables (`ANTHROPIC_API_KEY`, `AUDIT_LOG_PATH`, `ALLOWED_DIRECTORY`) and `src/config/mcp-servers.json` for MCP server definitions. The `ALLOWED_DIRECTORY` defines the sandbox boundary for policy evaluation. In multi-turn sessions, each session gets its own sandbox at `~/.ironcurtain/sessions/{sessionId}/sandbox/`. The fallback default is `$IRONCURTAIN_HOME/sandbox` (where `IRONCURTAIN_HOME` defaults to `~/.ironcurtain`). Requires a `.env` file (loaded via `dotenv/config` in `src/index.ts`). `loadGeneratedPolicy()` loads compiled artifacts from `src/config/generated/`.
+`loadConfig()` reads from environment variables (`ANTHROPIC_API_KEY`, `AUDIT_LOG_PATH`, `ALLOWED_DIRECTORY`) and `src/config/mcp-servers.json` for MCP server definitions. The `ALLOWED_DIRECTORY` defines the sandbox boundary for policy evaluation. In multi-turn sessions, each session gets its own sandbox at `~/.ironcurtain/sessions/{sessionId}/sandbox/`. The fallback default is `$IRONCURTAIN_HOME/sandbox` (where `IRONCURTAIN_HOME` defaults to `~/.ironcurtain`). Requires a `.env` file (loaded via `dotenv/config` in `src/index.ts`). `loadGeneratedPolicy()` loads compiled artifacts (`compiled-policy.json`, `tool-annotations.json`, and optionally `dynamic-lists.json`) from `src/config/generated/`.
 
 ### Types (`src/types/`)
 Shared types: `ToolCallRequest`/`ToolCallResult`/`PolicyDecision` in `mcp.ts`, `AuditEntry` in `audit.ts`. Policy decisions have three states: `allow`, `deny`, `escalate`.

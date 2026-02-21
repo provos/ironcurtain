@@ -14,3 +14,4 @@
  - The agent must receive human approval before git push, git pull, git fetch, or any remote-contacting operation.
  - The agent must receive human approval before git reset, git rebase, git merge, or any history-rewriting operation.
  - The agent must receive human approval before git branch deletion or force operations.
+ - The agent may fetch web content from popular news sites.

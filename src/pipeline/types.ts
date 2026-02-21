@@ -48,6 +48,12 @@ export interface DomainCondition {
   allowed: string[];
 }
 
+export interface ListCondition {
+  roles: ArgumentRole[];
+  allowed: string[];
+  matchType: ListType;
+}
+
 export interface CompiledRuleCondition {
   roles?: ArgumentRole[];
   server?: string[];
@@ -55,6 +61,8 @@ export interface CompiledRuleCondition {
   sideEffects?: boolean;
   paths?: PathCondition;
   domains?: DomainCondition;
+  /** Non-domain list conditions (emails, identifiers). */
+  lists?: ListCondition[];
 }
 
 export interface CompiledRule {
@@ -66,11 +74,102 @@ export interface CompiledRule {
   reason: string;
 }
 
+// ---------------------------------------------------------------------------
+// Dynamic Lists
+// ---------------------------------------------------------------------------
+
+/**
+ * Taxonomy of list value types. Each type determines how values are
+ * matched against tool call arguments at evaluation time.
+ */
+export type ListType = 'domains' | 'emails' | 'identifiers';
+
+/**
+ * A symbolic list definition emitted by the constitution compiler.
+ * The compiler creates these when it encounters categorical references
+ * in the constitution text (e.g., "major news sites", "my contacts").
+ *
+ * Invariant: the `name` matches the @list-name reference in compiled rules.
+ * Invariant: the `type` determines matching semantics at evaluation time.
+ */
+export interface ListDefinition {
+  /** Symbolic name, e.g., "major-news-sites". Used as @major-news-sites in rules. */
+  readonly name: string;
+
+  /** Determines matching semantics and value validation. */
+  readonly type: ListType;
+
+  /**
+   * The constitution text that motivated this list.
+   * Used for provenance tracking and display to users.
+   */
+  readonly principle: string;
+
+  /**
+   * Prompt for the resolver LLM to generate concrete values.
+   * Written by the compiler LLM based on the constitution context.
+   */
+  readonly generationPrompt: string;
+
+  /**
+   * When true, the resolver should connect to MCP servers to resolve
+   * this list. When false, the resolver uses only LLM knowledge.
+   */
+  readonly requiresMcp: boolean;
+
+  /**
+   * Optional: which MCP server to query for data-backed resolution.
+   * Only meaningful when requiresMcp is true.
+   */
+  readonly mcpServerHint?: string;
+}
+
+/**
+ * A single resolved dynamic list with its values and metadata.
+ *
+ * The authoritative ListDefinition lives in CompiledPolicyFile.listDefinitions.
+ * This type holds only the resolved values and user overrides, avoiding
+ * duplication and drift between artifacts.
+ */
+export interface ResolvedList {
+  /** The concrete resolved values. */
+  readonly values: string[];
+
+  /**
+   * User-supplied additions that are always included regardless
+   * of what the resolver produces. Survives refresh cycles.
+   */
+  readonly manualAdditions: string[];
+
+  /**
+   * User-supplied removals that are always excluded regardless
+   * of what the resolver produces. Survives refresh cycles.
+   */
+  readonly manualRemovals: string[];
+
+  /** ISO timestamp of last resolution. */
+  readonly resolvedAt: string;
+
+  /** Content hash of inputs that produced this resolution. */
+  readonly inputHash: string;
+}
+
+/**
+ * The dynamic-lists.json artifact.
+ */
+export interface DynamicListsFile {
+  readonly generatedAt: string;
+  readonly lists: Record<string, ResolvedList>;
+}
+
 export interface CompiledPolicyFile {
   generatedAt: string;
   constitutionHash: string;
   inputHash: string;
   rules: CompiledRule[];
+
+  /** List definitions emitted by the compiler. Empty if no dynamic lists needed. */
+  listDefinitions?: ListDefinition[];
 }
 
 // ---------------------------------------------------------------------------

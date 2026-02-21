@@ -20,12 +20,9 @@
     }
   },
   "fetch": {
-    "command": "npx",
-    "args": ["tsx", "./src/servers/fetch-server.ts"],
-    "sandbox": {
-      "network": {
-        "allowedDomains": ["*"]
-      }
-    }
+    "command": "tsx",
+    "args": ["./src/servers/fetch-server.ts"],
+    "sandbox": false,
+    "_comment": "sandbox: false because srt's network sandbox (seccomp/bubblewrap) blocks Unix domain sockets needed by tsx in dev mode and cannot selectively allow network while restricting filesystem. The policy engine handles URL-level security (SSRF blocking, domain allowlists) independently."
   }
 }

@@ -77,17 +77,18 @@ The key ideas:
 The constitution is compiled into enforceable policy through a four-stage LLM pipeline:
 
 ```
-constitution.md → [Annotate] → [Compile] → [Generate Scenarios] → [Verify & Repair]
-                      │              │               │                     │
-                      ▼              ▼               ▼                     ▼
-              tool-annotations  compiled-policy  test-scenarios     verified policy
-                  .json            .json            .json          (or build failure)
+constitution.md → [Annotate] → [Compile] → [Resolve Lists] → [Generate Scenarios] → [Verify & Repair]
+                      │              │              │                  │                     │
+                      ▼              ▼              ▼                  ▼                     ▼
+              tool-annotations  compiled-policy  dynamic-lists   test-scenarios       verified policy
+                  .json            .json            .json            .json          (or build failure)
 ```
 
 1. **Annotate** -- Classify each MCP tool's arguments by role (read-path, write-path, delete-path, none).
-2. **Compile** -- Translate the English constitution into deterministic if/then rules.
-3. **Generate Scenarios** -- Create test scenarios from the constitution, combined with mandatory handwritten invariant tests.
-4. **Verify & Repair** -- Execute scenarios against the real policy engine. An LLM judge analyzes failures and generates targeted repairs (up to 2 rounds). The build fails if the policy cannot be verified.
+2. **Compile** -- Translate the English constitution into deterministic if/then rules. Categorical references ("major news sites", "my contacts") are emitted as `@list-name` symbolic references with list definitions.
+3. **Resolve Lists** -- Resolve dynamic list definitions to concrete values via LLM knowledge or MCP tool-use (e.g., querying a contacts database). Resolved values are written to `dynamic-lists.json` and can be user-inspected/edited. Skipped when no lists are present.
+4. **Generate Scenarios** -- Create test scenarios from the constitution, combined with mandatory handwritten invariant tests.
+5. **Verify & Repair** -- Execute scenarios against the real policy engine. An LLM judge analyzes failures and generates targeted repairs (up to 2 rounds). The build fails if the policy cannot be verified.
 
 All artifacts are content-hash cached -- only changed inputs trigger recompilation.
 
@@ -158,6 +159,7 @@ Edit `src/config/constitution.md` to express your security policy in plain Engli
 ```bash
 ironcurtain annotate-tools   # classify MCP tool arguments (developer task)
 ironcurtain compile-policy   # compile constitution into enforceable rules (user task)
+ironcurtain refresh-lists    # re-resolve dynamic lists without full recompilation
 ```
 
 Or with npm scripts during development: `npm run annotate-tools` / `npm run compile-policy`.
