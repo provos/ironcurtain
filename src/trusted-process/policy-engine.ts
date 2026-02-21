@@ -396,11 +396,16 @@ export class PolicyEngine {
       : false;
 
     if (this.allowedDirectory && resolvedSandboxPaths.length > 0) {
-      // Fast path: all annotated paths within sandbox -> auto-allow
+      // Sandbox containment is only a structural allow for filesystem operations.
+      // For other servers, paths are locators (e.g. "which repo dir") — the
+      // operation itself needs compiled-rule evaluation regardless of path location.
+      const isFilesystem = request.serverName === 'filesystem';
+
+      // Fast path: all annotated paths within sandbox -> auto-allow (filesystem only)
       // Only fires when ALL path roles are sandbox-safe and no URL roles need checking
       const allWithinSandbox = resolvedSandboxPaths.every((rp) => isWithinDirectory(rp, this.allowedDirectory!));
 
-      if (allWithinSandbox && urlArgs.length === 0 && !toolHasUnsafePathRoles) {
+      if (isFilesystem && allWithinSandbox && urlArgs.length === 0 && !toolHasUnsafePathRoles) {
         return finalDecision({
           decision: 'allow',
           rule: 'structural-sandbox-allow',
@@ -408,11 +413,11 @@ export class PolicyEngine {
         });
       }
 
-      // Partial sandbox resolution: check each path role independently.
-      // A role is "sandbox-resolved" if every path for that role is within
-      // the sandbox. Only sandbox-safe roles can be resolved here.
+      // Partial sandbox resolution (filesystem only): check each path role
+      // independently. A role is "sandbox-resolved" if every path for that
+      // role is within the sandbox. Only sandbox-safe roles can be resolved.
       // Roles with zero extracted paths are not resolved.
-      if (annotation) {
+      if (isFilesystem && annotation) {
         for (const role of pathRoles) {
           if (!SANDBOX_SAFE_PATH_ROLES.has(role)) continue;
           const pathsForRole = extractAnnotatedPaths(request.arguments, annotation, [role]);
@@ -439,10 +444,9 @@ export class PolicyEngine {
           }
         }
 
-        // All URLs passed domain check -- mark URL roles as resolved
-        for (const { role } of urlArgs) {
-          sandboxResolvedRoles.add(role);
-        }
+        // Domain check passed — but this only means "not suspicious enough
+        // to block structurally." URL roles are NOT marked as resolved;
+        // compiled rules still evaluate the operation (e.g. "escalate all git push").
       }
       // If no allowlist, URL roles are not structurally restricted -- fall through to Phase 2
     }

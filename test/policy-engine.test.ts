@@ -881,7 +881,7 @@ describe('PolicyEngine', () => {
       expect(result.rule).toBe('structural-domain-escalate');
     });
 
-    it('passes when domain matches allowlist (all roles structurally resolved)', () => {
+    it('escalates when domain matches allowlist (compiled rules still evaluate)', () => {
       const allowlists = new Map([['git', ['github.com', '*.github.com']]]);
       const gitEngine = new PolicyEngine(gitPolicy, gitAnnotations, [], SANDBOX_DIR, allowlists);
 
@@ -892,10 +892,10 @@ describe('PolicyEngine', () => {
           arguments: { url: 'https://github.com/user/repo.git', path: '/tmp/ironcurtain-sandbox/repo' },
         }),
       );
-      // Domain passes (structural domain check), path is in sandbox (structural sandbox allow).
-      // All resource roles are structurally resolved → allow.
-      expect(result.decision).toBe('allow');
-      expect(result.rule).toBe('structural-sandbox-allow');
+      // Domain passes structural check, but sandbox-allow is filesystem-only
+      // and domain check is reject-only. Roles go to Phase 2 → escalate-git-clone.
+      expect(result.decision).toBe('escalate');
+      expect(result.rule).toBe('escalate-git-clone');
     });
 
     it('falls through to Phase 2 when domain passes but path is outside sandbox', () => {
@@ -969,9 +969,11 @@ describe('PolicyEngine', () => {
           arguments: { path: '/tmp/ironcurtain-sandbox/repo' },
         }),
       );
-      // git_status has only read-path args, no URL args → Phase 1c skipped
+      // git_status has only read-path args, no URL args → Phase 1c skipped.
+      // Sandbox structural allow is filesystem-only, so git falls through
+      // to compiled rules where allow-git-read matches.
       expect(result.decision).toBe('allow');
-      expect(result.rule).toBe('structural-sandbox-allow');
+      expect(result.rule).toBe('allow-git-read');
     });
   });
 
@@ -1195,7 +1197,7 @@ describe('PolicyEngine', () => {
       expect(result.rule).toBe('escalate-git-branch-management');
     });
 
-    it('still allows git_status in sandbox (only read-path, sandbox-safe)', () => {
+    it('still allows git_status in sandbox (via compiled rule, not structural)', () => {
       const result = engine.evaluate(
         makeRequest({
           serverName: 'git',
@@ -1203,11 +1205,13 @@ describe('PolicyEngine', () => {
           arguments: { path: '/tmp/ironcurtain-sandbox/repo' },
         }),
       );
+      // Sandbox structural allow is filesystem-only; git falls through
+      // to compiled rules where allow-git-read-ops matches.
       expect(result.decision).toBe('allow');
-      expect(result.rule).toBe('structural-sandbox-allow');
+      expect(result.rule).toBe('allow-git-read-ops');
     });
 
-    it('still allows git_add in sandbox (only write-path, sandbox-safe)', () => {
+    it('still allows git_add in sandbox (via compiled rule, not structural)', () => {
       const result = engine.evaluate(
         makeRequest({
           serverName: 'git',
@@ -1216,10 +1220,10 @@ describe('PolicyEngine', () => {
         }),
       );
       expect(result.decision).toBe('allow');
-      expect(result.rule).toBe('structural-sandbox-allow');
+      expect(result.rule).toBe('allow-git-staging-and-commit');
     });
 
-    it('still allows git_commit in sandbox (write-path sandbox-safe, commit-message opaque)', () => {
+    it('still allows git_commit in sandbox (via compiled rule, not structural)', () => {
       const result = engine.evaluate(
         makeRequest({
           serverName: 'git',
@@ -1228,7 +1232,7 @@ describe('PolicyEngine', () => {
         }),
       );
       expect(result.decision).toBe('allow');
-      expect(result.rule).toBe('structural-sandbox-allow');
+      expect(result.rule).toBe('allow-git-staging-and-commit');
     });
 
     it('sandbox-resolves read-path but not write-history (partial resolution)', () => {
