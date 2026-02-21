@@ -45,7 +45,7 @@ Artifacts are written to `src/config/generated/` as each pipeline step completes
 
 **Critical architectural constraint:** Structural invariants are **never** part of the compiled policy. They are hardcoded in the PolicyEngine and evaluated before any compiled rules. See Section 7 for details.
 
-**Packaging:** During development, `npm run compile-policy`. When published as a package, `npx ironcurtain compile-policy`. The CLI entry point dispatches subcommands.
+**Packaging:** During development, `npm run compile-policy`. When published as a package, `npx @provos/ironcurtain compile-policy`. The CLI entry point dispatches subcommands.
 
 ## Component Details
 
@@ -520,7 +520,7 @@ All LLM interactions are logged to `src/config/generated/llm-interactions.jsonl`
 npm run compile-policy
 
 # When published as a package
-npx ironcurtain compile-policy
+npx @provos/ironcurtain compile-policy
 ```
 
 **Security invariant:** The `src/config/generated/` directory must NOT overlap with any directory permitted by the compiled policy (e.g., the sandbox directory). This is validated at startup. The sandbox defaults to `/tmp/ironcurtain-sandbox`; the generated config lives in the source tree. This is also enforced by the structural invariants (protected paths).
