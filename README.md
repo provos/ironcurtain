@@ -30,6 +30,12 @@ The key ideas:
 - **Semantic interposition.** Instead of giving the agent raw system access, all interactions go through [MCP](https://modelcontextprotocol.io/) servers (filesystem, git, etc.). Every tool call passes through a policy engine that can **allow**, **deny**, or **escalate** to the user for approval.
 - **Defense in depth.** Agent code runs in a V8 isolate with no direct access to the host. The only way out is through semantically meaningful MCP tool calls and every one is checked against policy.
 
+## Demo
+
+<!-- TODO: Add asciinema recording (https://asciinema.org) -->
+
+> *Coming soon: a terminal recording showing IronCurtain in action — the agent attempts a git push, the policy engine escalates to the user, and the user approves or denies the operation in real time. With [auto-approve](#auto-approve-escalations) enabled, explicit requests like "push my changes" are approved automatically without interrupting the workflow.*
+
 ## Architecture
 
 ```
@@ -98,6 +104,39 @@ constitution.md → [Annotate] → [Compile] → [Resolve Lists] → [Generate S
 5. **Verify & Repair** -- Execute scenarios against the real policy engine. An LLM judge analyzes failures and generates targeted repairs (up to 2 rounds). The build fails if the policy cannot be verified.
 
 All artifacts are content-hash cached -- only changed inputs trigger recompilation.
+
+### What compiled rules look like
+
+A constitution like:
+
+```markdown
+- The agent may perform read-only git operations (status, diff, log) within the sandbox without approval.
+- The agent must receive human approval before git push, pull, fetch, or any remote-contacting operation.
+```
+
+compiles into deterministic JSON rules:
+
+```json
+[
+  {
+    "tool": "git_status",
+    "decision": "allow",
+    "condition": { "directory": { "within": "$SANDBOX" } }
+  },
+  {
+    "tool": "git_diff",
+    "decision": "allow",
+    "condition": { "directory": { "within": "$SANDBOX" } }
+  },
+  {
+    "tool": "git_push",
+    "decision": "escalate",
+    "reason": "Remote-contacting git operations require human approval"
+  }
+]
+```
+
+Any tool call that doesn't match an explicit rule is escalated to a human by default — the system is deny-by-default with human review as the fallback.
 
 ## Getting Started
 
@@ -281,6 +320,16 @@ IronCurtain ships with filesystem and git MCP servers pre-configured. Adding a n
 
 After compilation, review the updated `tool-annotations.json` and `compiled-policy.json` to verify the new tools are correctly classified and covered by policy.
 
+## Built-in Capabilities
+
+IronCurtain ships with three pre-configured MCP servers. All tool calls are governed by your compiled policy.
+
+**Filesystem** (14 tools) — `read_file`, `read_multiple_files`, `write_file`, `edit_file`, `create_directory`, `list_directory`, `directory_tree`, `move_file`, `search_files`, `get_file_info`, `list_allowed_directories`, `file_exists`, `read_file_lines`, `calculate_diff`.
+
+**Git** (27 tools) — Full git workflow: `git_status`, `git_diff_staged`, `git_diff_unstaged`, `git_diff`, `git_log`, `git_show`, `git_add`, `git_reset`, `git_commit`, `git_checkout`, `git_create_branch`, `git_list_branches`, `git_push`, `git_pull`, `git_fetch`, `git_merge`, `git_rebase`, `git_cherry_pick`, `git_stash`, `git_stash_pop`, `git_stash_list`, `git_tag`, `git_list_tags`, `git_remote`, `git_clone`, `git_init`, `git_blame`.
+
+**Fetch** (1 tool) — `fetch` retrieves content from URLs with automatic HTML-to-markdown conversion.
+
 ## Security Model
 
 IronCurtain is designed around a specific threat model: **the LLM goes rogue.** This can happen through prompt injection (a malicious email or web page hijacks the agent) or through multi-turn drift (the agent gradually deviates from the user's intent over a long session).
@@ -290,7 +339,7 @@ IronCurtain is designed around a specific threat model: **the LLM goes rogue.** 
 - **Filesystem containment** -- Path-based policy with symlink-aware resolution prevents path traversal and symlink-escape attacks.
 - **Per-tool policy** -- Each MCP tool call is evaluated against compiled rules. The policy engine classifies tool arguments by role (read-path, write-path, delete-path) to make fine-grained decisions.
 - **Structural invariants** -- Certain protections are hardcoded and cannot be overridden by the constitution: the agent can never modify its own policy files, audit logs, or configuration.
-- **Human escalation** -- When policy says "escalate," the agent pauses and the user must explicitly `/approve` or `/deny` the action.
+- **Human escalation** -- When policy says "escalate," the agent pauses and the user must explicitly `/approve` or `/deny` the action. Optionally, an [LLM-based auto-approver](#auto-approve-escalations) can approve actions that clearly match the user's most recent request — it can never deny, only approve or fall through to human review.
 - **Audit trail** -- Every tool call and policy decision is logged to an append-only JSONL audit log.
 - **Resource limits** -- Token, step, time, and cost budgets prevent runaway sessions.
 
@@ -304,6 +353,17 @@ This is a research prototype. Known gaps include:
 - **Escalation fatigue** -- Too many false-positive escalations can lead to habitual approval. Tune your constitution to minimize unnecessary prompts.
 
 See [docs/SECURITY_CONCERNS.md](docs/SECURITY_CONCERNS.md) for a detailed threat analysis.
+
+## Troubleshooting
+
+| Issue | Guidance |
+|-------|---------|
+| **Missing API key** | Set the environment variable (`ANTHROPIC_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`, or `OPENAI_API_KEY`) or add the corresponding key to `~/.ironcurtain/config.json`. |
+| **Sandbox unavailable** | OS-level sandboxing requires `bubblewrap` and `socat`. Install both, or set `"sandboxPolicy": "warn"` in your MCP server config for development. |
+| **Budget exhausted** | Adjust limits in `~/.ironcurtain/config.json` under `resourceBudget`. Set any individual limit to `null` to disable it. |
+| **Node version errors** | Minimum Node.js 18.3.0 required. Node 20+ is recommended. |
+| **Policy doesn't match intent** | Review `compiled-policy.json` to see the generated rules. Re-run `ironcurtain compile-policy` after editing your constitution. Check that the wording is specific — vague phrasing leads to vague rules. |
+| **Auto-approve not triggering** | The auto-approver only approves when the user's message explicitly authorizes the action (e.g., "push to origin" for `git_push`). Vague messages like "go ahead" always escalate to human review. Verify `autoApprove.enabled` is `true` in `config.json`. |
 
 ## Development
 
