@@ -30,6 +30,7 @@ Thank you for your interest in contributing to IronCurtain! This is an early-sta
 npm run build          # TypeScript compilation + copy config assets to dist/
 npm test               # Run all tests (vitest)
 npm run lint           # Run ESLint
+npm run format         # Format code with Prettier
 npm start "task"       # Run the agent with a task (dev mode, uses tsx)
 ```
 
@@ -64,7 +65,7 @@ src/
 
 1. Create a feature branch from `main`.
 2. Make your changes. Add tests for new functionality.
-3. Ensure all tests pass (`npm test`) and lint is clean (`npm run lint`).
+3. Ensure all tests pass (`npm test`), lint is clean (`npm run lint`), and code is formatted (`npm run format:check`).
 4. Submit a pull request with a clear description of the change and its motivation.
 
 ## Areas Where Help is Welcome

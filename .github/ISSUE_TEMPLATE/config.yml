@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/provos/ironcurtain/blob/main/SECURITY.md
+    about: Please report security vulnerabilities via email, not public issues.
