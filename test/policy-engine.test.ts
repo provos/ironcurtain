@@ -791,7 +791,7 @@ describe('PolicyEngine', () => {
     });
   });
 
-  describe('Phase 1c domain allowlist check', () => {
+  describe('Untrusted domain gate', () => {
     // Annotations that include a git server with URL-category arguments
     const gitAnnotations: ToolAnnotationsFile = {
       generatedAt: 'test',
@@ -893,12 +893,12 @@ describe('PolicyEngine', () => {
         }),
       );
       // Domain passes structural check, but sandbox-allow is filesystem-only
-      // and domain check is reject-only. Roles go to Phase 2 → escalate-git-clone.
+      // and domain check is reject-only. Roles go to compiled rule evaluation → escalate-git-clone.
       expect(result.decision).toBe('escalate');
       expect(result.rule).toBe('escalate-git-clone');
     });
 
-    it('falls through to Phase 2 when domain passes but path is outside sandbox', () => {
+    it('falls through to compiled rule evaluation when domain passes but path is outside sandbox', () => {
       const allowlists = new Map([['git', ['github.com', '*.github.com']]]);
       const gitEngine = new PolicyEngine(gitPolicy, gitAnnotations, [], SANDBOX_DIR, allowlists);
 
@@ -909,7 +909,7 @@ describe('PolicyEngine', () => {
           arguments: { url: 'https://github.com/user/repo.git', path: '/some/external/repo' },
         }),
       );
-      // Domain passes, but path is NOT in sandbox → falls to Phase 2
+      // Domain passes, but path is NOT in sandbox → falls to compiled rule evaluation
       expect(result.decision).toBe('escalate');
       expect(result.rule).toBe('escalate-git-clone');
     });
@@ -928,7 +928,7 @@ describe('PolicyEngine', () => {
       expect(result.rule).not.toBe('structural-domain-escalate');
     });
 
-    it('skips Phase 1c when server has no domain allowlist', () => {
+    it('skips untrusted domain gate when server has no domain allowlist', () => {
       // No allowlist for 'git' server
       const gitEngine = new PolicyEngine(gitPolicy, gitAnnotations, [], SANDBOX_DIR);
 
@@ -939,7 +939,7 @@ describe('PolicyEngine', () => {
           arguments: { url: 'https://evil.com/repo.git', path: '/tmp/ironcurtain-sandbox/repo' },
         }),
       );
-      // No structural domain check, falls through to Phase 2
+      // No structural domain check, falls through to compiled rule evaluation
       expect(result.rule).not.toBe('structural-domain-escalate');
     });
 
@@ -969,7 +969,7 @@ describe('PolicyEngine', () => {
           arguments: { path: '/tmp/ironcurtain-sandbox/repo' },
         }),
       );
-      // git_status has only read-path args, no URL args → Phase 1c skipped.
+      // git_status has only read-path args, no URL args → untrusted domain gate skipped.
       // Sandbox structural allow is filesystem-only, so git falls through
       // to compiled rules where allow-git-read matches.
       expect(result.decision).toBe('allow');
@@ -977,7 +977,7 @@ describe('PolicyEngine', () => {
     });
   });
 
-  describe('Phase 2 domains condition matching', () => {
+  describe('Compiled rule evaluation: domains condition matching', () => {
     // Use a tool with only URL roles to isolate domain matching behavior
     const fetchAnnotations: ToolAnnotationsFile = {
       generatedAt: 'test',
@@ -1145,9 +1145,9 @@ describe('PolicyEngine', () => {
 
   describe('SANDBOX_SAFE_PATH_ROLES (write-history/delete-history bypass sandbox auto-allow)', () => {
     // These tests verify that dangerous git operations are NOT auto-allowed
-    // by Phase 1b sandbox containment, even when the path is in the sandbox.
+    // by filesystem sandbox containment, even when the path is in the sandbox.
     // write-history and delete-history are path-category roles but not sandbox-safe,
-    // so they force Phase 2 evaluation where compiled rules can escalate.
+    // so they force compiled rule evaluation where rules can escalate.
 
     it('escalates git_reset in sandbox (write-history not sandbox-safe)', () => {
       const result = engine.evaluate(
@@ -1237,8 +1237,8 @@ describe('PolicyEngine', () => {
 
     it('sandbox-resolves read-path but not write-history (partial resolution)', () => {
       // git_reset has path: ['read-path', 'write-history']
-      // read-path should be sandbox-resolved (skipped in Phase 2)
-      // write-history should NOT be sandbox-resolved (evaluated in Phase 2)
+      // read-path should be sandbox-resolved (skipped in compiled rule evaluation)
+      // write-history should NOT be sandbox-resolved (evaluated in compiled rule evaluation)
       const result = engine.evaluate(
         makeRequest({
           serverName: 'git',
@@ -1246,7 +1246,7 @@ describe('PolicyEngine', () => {
           arguments: { path: '/tmp/ironcurtain-sandbox/repo', mode: 'soft' },
         }),
       );
-      // Falls to Phase 2 with write-history unresolved → hits escalate rule
+      // Falls to compiled rule evaluation with write-history unresolved → hits escalate rule
       expect(result.decision).toBe('escalate');
       expect(result.rule).toBe('escalate-git-destructive-ops');
     });

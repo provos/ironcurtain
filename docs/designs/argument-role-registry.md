@@ -125,11 +125,11 @@ mcp-proxy-server.ts / TrustedProcess.handleToolCall()
      v       v
   callTool(argsForTransport)    PolicyEngine.evaluate(argsForPolicy)
      |                               |
-     |                          Phase 1: structural invariants
+     |                          Structural checks
      |                               +-- extractPathsHeuristic() (defense-in-depth)
      |                               +-- extractAnnotatedPaths()
      |                               +-- uses getResourceRoles()
-     |                          Phase 2: compiled declarative rules
+     |                          Compiled rule evaluation
      |                               +-- collectDistinctRoles() uses isResourceIdentifier
      |                               +-- per-role evaluation, most-restrictive-wins
      v                               v

@@ -307,7 +307,7 @@ describe('Role-agnostic rules after structural resolution', () => {
       }),
     );
 
-    // Non-filesystem: roles go to Phase 2, domains condition matches
+    // Non-filesystem: roles go to compiled rule evaluation, domains condition matches
     expect(result.decision).toBe('allow');
     expect(result.rule).toBe('allow-github-domain');
   });
@@ -336,7 +336,7 @@ describe('Role-agnostic rules after structural resolution', () => {
       }),
     );
 
-    // Non-filesystem: no structural sandbox-allow. Roles go to Phase 2.
+    // Non-filesystem: no structural sandbox-allow. Roles go to compiled rule evaluation.
     // The lists condition extracts the raw URL string from git-remote-url,
     // domainMatchesAllowlist('https://github.com/user/repo.git', ['github.com']) → false
     // (lists extraction uses extractAnnotatedPaths which gets the raw value,
@@ -347,7 +347,7 @@ describe('Role-agnostic rules after structural resolution', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Phase 1a: protected path edge cases
+// Protected path check: edge cases
 // ---------------------------------------------------------------------------
 
 describe('Protected path edge cases', () => {
@@ -388,7 +388,7 @@ describe('Protected path edge cases', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Phase 1b: sandbox containment edge cases
+// Filesystem sandbox containment: edge cases
 // ---------------------------------------------------------------------------
 
 describe('Sandbox containment edge cases', () => {
@@ -457,7 +457,7 @@ describe('Sandbox containment edge cases', () => {
     expect(result.rule).toBe('structural-sandbox-allow');
   });
 
-  it('write-history role is NOT sandbox-resolved (goes to Phase 2)', () => {
+  it('write-history role is NOT sandbox-resolved (goes to compiled rule evaluation)', () => {
     const engine = new PolicyEngine(policy, annotations, [], SANDBOX_DIR);
     const result = engine.evaluate(
       makeRequest({
@@ -470,7 +470,7 @@ describe('Sandbox containment edge cases', () => {
     expect(result.rule).toBe('escalate-destructive');
   });
 
-  it('delete-history role is NOT sandbox-resolved (goes to Phase 2)', () => {
+  it('delete-history role is NOT sandbox-resolved (goes to compiled rule evaluation)', () => {
     const engine = new PolicyEngine(policy, annotations, [], SANDBOX_DIR);
     const result = engine.evaluate(
       makeRequest({
@@ -483,7 +483,7 @@ describe('Sandbox containment edge cases', () => {
     expect(result.rule).toBe('escalate-destructive');
   });
 
-  it('mixed sandbox-safe and unsafe roles: safe roles resolved, unsafe go to Phase 2', () => {
+  it('mixed sandbox-safe and unsafe roles: safe roles resolved, unsafe go to compiled rule evaluation', () => {
     const engine = new PolicyEngine(policy, annotations, [], SANDBOX_DIR);
     const result = engine.evaluate(
       makeRequest({
@@ -526,7 +526,7 @@ describe('Sandbox containment edge cases', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Phase 1c: domain allowlist edge cases
+// Untrusted domain gate: edge cases
 // ---------------------------------------------------------------------------
 
 describe('Domain allowlist edge cases', () => {
@@ -638,7 +638,7 @@ describe('Domain allowlist edge cases', () => {
     expect(result.rule).not.toBe('structural-domain-escalate');
   });
 
-  it('server without domain allowlist falls through to Phase 2', () => {
+  it('server without domain allowlist falls through to compiled rule evaluation', () => {
     const engine = new PolicyEngine(defaultPolicy, gitAnnotations, [], SANDBOX_DIR);
 
     const result = engine.evaluate(
@@ -668,10 +668,10 @@ describe('Domain allowlist edge cases', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Phase 2: rule matching
+// Compiled rule evaluation: rule matching
 // ---------------------------------------------------------------------------
 
-describe('Phase 2 rule matching', () => {
+describe('Compiled rule evaluation: rule matching', () => {
   const annotations = makeAnnotations({
     filesystem: [
       makeTool('filesystem', 'read_file', { path: ['read-path'] }),
@@ -894,7 +894,7 @@ describe('Phase 2 rule matching', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Phase 2: multi-role evaluation
+// Compiled rule evaluation: multi-role evaluation
 // ---------------------------------------------------------------------------
 
 describe('Multi-role evaluation', () => {
@@ -1042,7 +1042,7 @@ describe('Multi-role evaluation', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Phase 2: per-element multi-path evaluation
+// Compiled rule evaluation: per-element multi-path evaluation
 // ---------------------------------------------------------------------------
 
 describe('Per-element multi-path evaluation', () => {
@@ -1211,7 +1211,7 @@ describe('Per-element multi-path evaluation', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Phase 2: lists condition matching
+// Compiled rule evaluation: lists condition matching
 // ---------------------------------------------------------------------------
 
 describe('Lists condition matching', () => {

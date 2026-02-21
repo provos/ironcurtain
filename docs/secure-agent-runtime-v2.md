@@ -263,7 +263,7 @@ For each MCP request, policies are evaluated in this order:
    - Protected paths: agent cannot modify the constitution, compiled policies, MCP server config, or audit log
    - Unknown tools: any tool not present in the tool annotations is denied
    - Path extraction uses both heuristic detection and annotation-based extraction for defense-in-depth
-   - **Per-role sandbox containment**: for mixed-path operations (e.g., `move_file` from sandbox to external), each argument role is checked independently. Roles whose paths are all within the sandbox are resolved here and skipped in Phase 2. All-in-sandbox is a fast path that auto-allows the entire request.
+   - **Per-role sandbox containment**: for mixed-path operations (e.g., `move_file` from sandbox to external), each argument role is checked independently. Roles whose paths are all within the sandbox are resolved here and skipped during compiled rule evaluation. All-in-sandbox is a fast path that auto-allows the entire request.
 
 2. **Task policy** (most restrictive -- scoped to current task) -- **Planned**
    - If the action is outside the task's expected scope, deny or escalate

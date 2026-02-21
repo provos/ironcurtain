@@ -189,7 +189,7 @@ Both use the same PolicyEngine with compiled artifacts.
 - New roles: `fetch-url`, `git-remote-url`, `branch-name`, `commit-message`
 - Each `RoleDefinition` gains `category` and `annotationGuidance` fields
 - URL normalizers: `normalizeUrl()`, `extractDomain()`, `normalizeGitUrl()`, `extractGitDomain()`
-- Policy engine Phase 1c: domain allowlist check for url-category roles (escalate, not deny)
+- Policy engine untrusted domain gate: domain allowlist check for url-category roles (escalate, not deny)
 - `serverDomainAllowlists` derived from sandbox network config's `allowedDomains`
 - New compiled rule condition: `DomainCondition { roles, allowed }` alongside `PathCondition`
 - Annotation prompt dynamically built from registry `annotationGuidance` fields

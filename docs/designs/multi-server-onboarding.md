@@ -235,7 +235,7 @@ export function resolveGitRemote(
 
 The policy engine calls `resolveForPolicy` (when defined) before `prepareForPolicy`, giving it the fully resolved URL to extract the domain from.
 
-**Integration point:** Resolution happens inside the policy engine only (Phase 1c and Phase 2 domain condition evaluation), not in `prepareToolArgs()`. This keeps `prepareToolArgs()` unchanged (it only handles path normalization) and co-locates resolution with the domain validation logic that needs it.
+**Integration point:** Resolution happens inside the policy engine only (the untrusted domain gate and compiled rule evaluation domain condition evaluation), not in `prepareToolArgs()`. This keeps `prepareToolArgs()` unchanged (it only handles path normalization) and co-locates resolution with the domain validation logic that needs it.
 
 ### 3.6 Annotation Pipeline Integration
 
@@ -264,7 +264,7 @@ export function getRolesByCategory(category: RoleCategory): ArgumentRole[] {
   return roles;
 }
 
-/** Returns path-category roles only. Used by Phase 1a/1b structural invariants. */
+/** Returns path-category roles only. Used by the protected path check and filesystem sandbox containment structural invariants. */
 export function getPathRoles(): ArgumentRole[] {
   return getRolesByCategory('path');
 }
@@ -274,20 +274,20 @@ export function getUrlRoles(): ArgumentRole[] {
 }
 ```
 
-**Critical: `getResourceRoles()` must NOT be used for Phase 1a/1b path checks.** Today `getResourceRoles()` returns all roles with `isResourceIdentifier: true`. Adding URL roles as resource identifiers would cause Phase 1a/1b to feed URLs into `resolveRealPath()` and `isWithinDirectory()` — producing nonsensical results. The policy engine must switch to `getPathRoles()` (category-aware) for path containment checks and use `getUrlRoles()` for domain checks. `getResourceRoles()` remains available for contexts that genuinely need all resource identifiers regardless of category.
+**Critical: `getResourceRoles()` must NOT be used for the protected path check or filesystem sandbox containment.** Today `getResourceRoles()` returns all roles with `isResourceIdentifier: true`. Adding URL roles as resource identifiers would cause the protected path check and filesystem sandbox containment to feed URLs into `resolveRealPath()` and `isWithinDirectory()` — producing nonsensical results. The policy engine must switch to `getPathRoles()` (category-aware) for path containment checks and use `getUrlRoles()` for domain checks. `getResourceRoles()` remains available for contexts that genuinely need all resource identifiers regardless of category.
 
 ## 4. Policy Engine Extensions
 
-### 4.1 Phase 1c: Domain Allowlist Check
+### 4.1 Untrusted Domain Gate
 
-Phase 1 structural invariants are extended with a URL domain check:
+Structural checks are extended with a URL domain check:
 
 ```
-Phase 1: Structural Invariants
-  1a. Protected path check (deny -- unchanged)
-  1b. Sandbox containment for path-category roles (allow/partial -- unchanged)
-  1c. Domain allowlist for url-category roles (escalate -- NEW)
-  1d. Unknown tool denial (deny -- unchanged)
+Structural Checks
+  Protected path check (deny -- unchanged)
+  Filesystem sandbox containment for path-category roles (allow/partial -- unchanged)
+  Untrusted domain gate for url-category roles (escalate -- NEW)
+  Unknown tool denial (deny -- unchanged)
 ```
 
 **Domain violations escalate, not deny.** A URL targeting an unknown domain is not inherently destructive -- the user might legitimately want to push to a new remote. Escalation lets the human decide.
@@ -335,7 +335,7 @@ export class PolicyEngine {
 }
 ```
 
-Domain allowlists are derived from `mcp-servers.json` sandbox network configuration. If a server has no allowlist, URL arguments are not structurally restricted (fall through to Phase 2 compiled rules).
+Domain allowlists are derived from `mcp-servers.json` sandbox network configuration. If a server has no allowlist, URL arguments are not structurally restricted (fall through to compiled rule evaluation).
 
 ### 4.4 Domain Matching
 
@@ -382,18 +382,18 @@ The constitution compiler prompt is updated to document the new `domains` condit
 Tool Call Request (e.g., git_push with remote="origin", path="/sandbox/repo")
   |
   v
-Phase 1: Structural Invariants
-  |-- 1a. Protected path check on path="/sandbox/repo" → not protected, continue
-  |-- 1b. Sandbox containment on path="/sandbox/repo" → within sandbox, resolve read-path
-  |-- 1c. Domain check on remote="origin":
+Structural Checks
+  |-- Protected path check on path="/sandbox/repo" → not protected, continue
+  |-- Filesystem sandbox containment on path="/sandbox/repo" → within sandbox, resolve read-path
+  |-- Untrusted domain gate on remote="origin":
   |       resolveForPolicy("origin", {path: "/sandbox/repo"})
   |         → git remote get-url origin → "git@github.com:user/repo.git"
   |       extractGitDomain("git@github.com:user/repo.git") → "github.com"
   |       domainMatchesAllowlist("github.com", ["github.com", "*.github.com"]) → pass
-  |-- 1d. Tool known → continue
+  |-- Unknown tool denial → tool known, continue
   |
   v
-Phase 2: Compiled Declarative Rules
+Compiled Rule Evaluation
   |-- Match "escalate git_push" rule → escalate
 ```
 
@@ -519,18 +519,18 @@ Each step has a natural validation gate. The compile-time completeness check on 
 
 ### Phase 1: Role Extensibility + Policy Engine Domain Support (merged)
 
-These must land together. Adding URL roles with `isResourceIdentifier: true` immediately breaks the policy engine if Phase 1a/1b still uses `getResourceRoles()` (see Section 3.7). The category-aware accessors and the engine's domain support must be co-committed.
+These must land together. Adding URL roles with `isResourceIdentifier: true` immediately breaks the policy engine if the protected path check and filesystem sandbox containment still use `getResourceRoles()` (see Section 3.7). The category-aware accessors and the engine's domain support must be co-committed.
 
 **Files changed:**
 - `src/types/argument-roles.ts` -- add `RoleCategory`, `resolveForPolicy`, `annotationGuidance` to `RoleDefinition`; add `category` and `annotationGuidance` to existing role entries; add new roles (`fetch-url`, `git-remote-url`, `branch-name`, `commit-message`); add URL normalizers and `resolveGitRemote`; add `getRolesByCategory()`, `getPathRoles()`, `getUrlRoles()`
-- `src/trusted-process/policy-engine.ts` -- switch Phase 1a/1b from `getResourceRoles()` to `getPathRoles()`; add `serverDomainAllowlists` constructor param; add `extractAnnotatedUrls()`, `domainMatchesAllowlist()`, Phase 1c domain check; add `ruleMatches()` domains condition; add resolution pipeline (`resolveForPolicy` → `normalize` → `prepareForPolicy`)
+- `src/trusted-process/policy-engine.ts` -- switch the protected path check and filesystem sandbox containment from `getResourceRoles()` to `getPathRoles()`; add `serverDomainAllowlists` constructor param; add `extractAnnotatedUrls()`, `domainMatchesAllowlist()`, untrusted domain gate; add `ruleMatches()` domains condition; add resolution pipeline (`resolveForPolicy` → `normalize` → `prepareForPolicy`)
 - `src/trusted-process/mcp-proxy-server.ts` -- extract domain allowlists from deserialized `mcp-servers.json` sandbox configs, pass to `PolicyEngine` constructor
 - `src/pipeline/types.ts` -- add `DomainCondition` to `CompiledRuleCondition`
 - `src/pipeline/tool-annotator.ts` -- generate role descriptions from registry in prompt
 - `src/pipeline/constitution-compiler.ts` -- `domains` condition in prompt and response schema
 - `src/pipeline/scenario-generator.ts` -- domain scenarios in prompt
 
-**Tests:** URL normalization, domain extraction, git URL handling, git remote resolution (mock `execFileSync`), category accessors, domain matching, Phase 1c behavior, multi-role evaluation (path + URL), backward compatibility (all existing `policy-engine.test.ts` tests pass unchanged with `getPathRoles()` swap).
+**Tests:** URL normalization, domain extraction, git URL handling, git remote resolution (mock `execFileSync`), category accessors, domain matching, untrusted domain gate behavior, multi-role evaluation (path + URL), backward compatibility (all existing `policy-engine.test.ts` tests pass unchanged with `getPathRoles()` swap).
 
 ### Phase 2: Git Server Integration + User Constitution
 
@@ -560,11 +560,11 @@ These must land together. Adding URL roles with `isResourceIdentifier: true` imm
 
 ### Policy Engine Tests
 
-- Phase 1c escalates when URL domain not in allowlist
-- Phase 1c passes when domain matches (including wildcards)
-- Phase 1c skipped when server has no domain allowlist
-- Phase 1c with named remote resolution (mock)
-- Phase 2 `domains` condition matches/doesn't match
+- Untrusted domain gate escalates when URL domain not in allowlist
+- Untrusted domain gate passes when domain matches (including wildcards)
+- Untrusted domain gate skipped when server has no domain allowlist
+- Untrusted domain gate with named remote resolution (mock)
+- Compiled rule evaluation `domains` condition matches/doesn't match
 - Multi-role: tool with path + URL roles evaluates both independently
 - All existing `policy-engine.test.ts` tests pass without modification
 

@@ -1,16 +1,16 @@
 /**
- * PolicyEngine -- Two-phase declarative policy evaluation.
+ * PolicyEngine -- Two-layer declarative policy evaluation.
  *
- * Phase 1: Hardcoded structural invariants (protected paths, unknown tools).
+ * Structural checks: Hardcoded invariants (protected paths, unknown tools).
  *          These are never overridden by compiled rules. Sandbox containment
  *          is checked per-role: roles whose paths are all within the sandbox
- *          are resolved here and skipped in Phase 2.
+ *          are resolved here and skipped in compiled rule evaluation.
  *
- * Phase 2: Compiled declarative rules loaded from compiled-policy.json.
+ * Compiled rule evaluation: Declarative rules loaded from compiled-policy.json.
  *          Each distinct role from the tool's annotation is evaluated
  *          independently through the rule chain (first-match-wins per role).
  *          The most restrictive result wins: deny > escalate > allow.
- *          Roles already resolved by Phase 1 sandbox containment are skipped.
+ *          Roles already resolved by sandbox containment are skipped.
  */
 
 import type { ToolCallRequest, PolicyDecisionStatus } from '../types/mcp.js';
@@ -108,12 +108,12 @@ function isProtectedPath(resolvedPath: string, protectedPaths: string[]): boolea
 }
 
 /**
- * Result of Phase 1 structural invariant evaluation.
+ * Result of structural invariant evaluation.
  *
  * Three possible outcomes:
  * 1. Final decision (deny for protected paths, allow if all paths in sandbox)
  * 2. Partial sandbox resolution (some roles' paths are all within sandbox)
- * 3. No structural match (empty sandboxResolvedRoles, fall through to Phase 2)
+ * 3. No structural match (empty sandboxResolvedRoles, fall through to compiled rule evaluation)
  */
 interface StructuralResult {
   readonly decision?: EvaluationResult;
@@ -325,21 +325,21 @@ export class PolicyEngine {
   }
 
   evaluate(request: ToolCallRequest): EvaluationResult {
-    // Phase 1: Structural invariants (may resolve some roles via sandbox containment)
+    // Structural checks (may resolve some roles via sandbox containment)
     const structural = this.evaluateStructuralInvariants(request);
     if (structural.decision) return structural.decision;
 
-    // Phase 2: Compiled rules (skipping sandbox-resolved roles)
+    // Compiled rule evaluation (skipping sandbox-resolved roles)
     return this.evaluateCompiledRules(request, structural.sandboxResolvedRoles);
   }
 
   /**
-   * Phase 1: Hardcoded structural invariants.
+   * Hardcoded structural invariants.
    *
-   * 1a. Protected path check (deny)
-   * 1b. Sandbox containment for path-category roles (allow/partial)
-   * 1c. Domain allowlist for url-category roles (escalate)
-   * 1d. Unknown tool denial (deny)
+   * 1. Protected path check (deny)
+   * 2. Filesystem sandbox containment for path-category roles (allow/partial)
+   * 3. Untrusted domain gate for url-category roles (escalate)
+   * 4. Unknown tool denial (deny)
    *
    * Uses the union of heuristic and annotation-based path extraction
    * for defense-in-depth. Returns a StructuralResult with either a
@@ -350,7 +350,7 @@ export class PolicyEngine {
     const heuristicPaths = extractPathsHeuristic(request.arguments);
     const annotation = this.annotationMap.get(`${request.serverName}__${request.toolName}`);
 
-    // Phase 1a/1b use path-category roles only (not URL roles)
+    // Protected path check and sandbox containment use path-category roles only (not URL roles)
     const pathRoles = getPathRoles();
     const annotatedPaths = annotation ? extractAnnotatedPaths(request.arguments, annotation, pathRoles) : [];
 
@@ -358,7 +358,7 @@ export class PolicyEngine {
     const allPaths = [...new Set([...heuristicPaths, ...annotatedPaths])];
     const resolvedPaths = allPaths.map((p) => resolveRealPath(p));
 
-    // Phase 1a: Protected paths -- any match is an immediate deny
+    // Protected path check -- any match is an immediate deny
     for (const rp of resolvedPaths) {
       if (isProtectedPath(rp, this.protectedPaths)) {
         return finalDecision({
@@ -369,21 +369,21 @@ export class PolicyEngine {
       }
     }
 
-    // Phase 1b: Sandbox containment checks (path-category roles)
+    // Filesystem sandbox containment (path-category roles)
     //
     // The sandbox auto-allow decision uses annotated paths when annotations
     // exist (not heuristic paths). An arg annotated as 'none' should not
     // grant sandbox containment even if the value looks like a path.
     // Heuristic paths are only used for defense-in-depth on the deny side
-    // (Phase 1a protected path check).
+    // (protected path check).
     //
     // Only SANDBOX_SAFE_PATH_ROLES (read-path, write-path, delete-path) can
     // be auto-resolved by sandbox containment. Higher-risk path roles like
-    // write-history and delete-history always fall through to Phase 2.
+    // write-history and delete-history always fall through to compiled rule evaluation.
     const sandboxResolvedRoles = new Set<ArgumentRole>();
     const resolvedSandboxPaths = annotation ? annotatedPaths.map((p) => resolveRealPath(p)) : resolvedPaths;
 
-    // Extract URL args once for use in both Phase 1b (fast-path guard) and Phase 1c
+    // Extract URL args once for use in both sandbox containment (fast-path guard) and untrusted domain gate
     const urlArgs = annotation ? extractAnnotatedUrls(request.arguments, annotation, getUrlRoles()) : [];
 
     // Determine if the tool has any non-sandbox-safe path roles
@@ -428,7 +428,7 @@ export class PolicyEngine {
       }
     }
 
-    // Phase 1c: Domain allowlist for URL-category roles
+    // Untrusted domain gate for URL-category roles
     if (urlArgs.length > 0) {
       const allowlist = this.serverDomainAllowlists.get(request.serverName);
 
@@ -448,10 +448,10 @@ export class PolicyEngine {
         // to block structurally." URL roles are NOT marked as resolved;
         // compiled rules still evaluate the operation (e.g. "escalate all git push").
       }
-      // If no allowlist, URL roles are not structurally restricted -- fall through to Phase 2
+      // If no allowlist, URL roles are not structurally restricted -- fall through to compiled rule evaluation
     }
 
-    // Phase 1d: Unknown tool check
+    // Unknown tool denial
     if (!annotation) {
       return finalDecision({
         decision: 'deny',
@@ -464,12 +464,12 @@ export class PolicyEngine {
   }
 
   /**
-   * Phase 2: Evaluate compiled declarative rules.
+   * Compiled rule evaluation: evaluate declarative rules from compiled-policy.json.
    *
    * For tools with multiple roles (e.g., edit_file has read-path + write-path),
    * each role is evaluated independently through the rule chain. The most
    * restrictive result across all roles wins (deny > escalate > allow).
-   * Roles already resolved by Phase 1 sandbox containment are skipped.
+   * Roles already resolved by sandbox containment are skipped.
    *
    * For tools with no roles (e.g., list_allowed_directories), the chain is
    * evaluated once without role filtering.

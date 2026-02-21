@@ -348,7 +348,7 @@ export const testToolAnnotations: ToolAnnotationsFile = {
           args: { path: ['none'], remote: ['git-remote-url'] },
         },
         // History-rewriting operations: path has write-history (not sandbox-safe)
-        // so Phase 1b won't auto-resolve, forcing Phase 2 evaluation
+        // so filesystem sandbox containment won't auto-resolve, forcing compiled rule evaluation
         {
           toolName: 'git_reset',
           serverName: 'git',

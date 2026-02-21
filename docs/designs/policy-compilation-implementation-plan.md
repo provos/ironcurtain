@@ -164,14 +164,14 @@ This is the most important step. It is the architectural pivot point.
 
 3. **`evaluate(request)` implementation:**
 
-   **Phase 1 -- Structural invariants (hardcoded):**
+   **Structural checks -- Structural invariants (hardcoded):**
    - Extract paths from `request.arguments` using BOTH the heuristic (any string starting with `/` or `.`) AND annotation-based role extraction (union of both sets).
    - Resolve all paths via `path.resolve()`.
    - Check each resolved path against `protectedPaths`: a path is protected if it equals a protected path exactly, or starts with `protectedPath + '/'` (directory containment).
    - If any path is protected, return `{ decision: 'deny', rule: 'structural-protected-path', reason: ... }`.
    - If the tool has no annotation entry, return `{ decision: 'deny', rule: 'structural-unknown-tool', reason: ... }`.
 
-   **Phase 2 -- Compiled rules:**
+   **Compiled rule evaluation:**
    - Look up the `ToolAnnotation` for the request.
    - Iterate `compiledPolicy.rules` in order.
    - For each rule, check all conditions in the `if` block:

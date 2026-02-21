@@ -170,7 +170,7 @@ export function loadConfig(): IronCurtainConfig {
  * Extracts domain allowlists from MCP server sandbox network configurations.
  * Returns a map from server name to its list of allowed domains.
  *
- * The `*` wildcard is preserved (not filtered) so that Phase 1c fires
+ * The `*` wildcard is preserved (not filtered) so that the untrusted domain gate fires
  * for servers with `["*"]`. The SSRF structural invariant in
  * `domainMatchesAllowlist()` prevents `*` from matching IP addresses.
  */

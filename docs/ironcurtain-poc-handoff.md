@@ -31,8 +31,8 @@ A Node.js process that acts as an MCP proxy. To the sandbox, it looks like an MC
 
 For each request, the trusted process:
 
-1. Evaluates Phase 1: structural invariants (protected paths, unknown tools) -- hardcoded, never overridden
-2. Evaluates Phase 2: compiled declarative rules (per-role, first-match-wins; most restrictive role wins across deny > escalate > allow)
+1. Evaluates structural checks: structural invariants (protected paths, unknown tools) -- hardcoded, never overridden
+2. Evaluates compiled rule evaluation: compiled declarative rules (per-role, first-match-wins; most restrictive role wins across deny > escalate > allow)
 3. Falls through to default deny if no rule matches
 4. If escalated (in-process mode only), prompts human for approval
 5. If allowed, routes to the appropriate MCP server

@@ -425,14 +425,14 @@ class PolicyEngine {
 
 **Evaluation algorithm:**
 
-**Phase 1 -- Structural invariants (hardcoded, never LLM-generated):**
+**Structural checks -- Structural invariants (hardcoded, never LLM-generated):**
 
 1. Extract ALL paths from request arguments using both role-based extraction (from annotations) and the conservative heuristic (any string value starting with `/` or `.`). Take the union.
 2. Resolve all extracted paths to absolute form via `path.resolve()`.
 3. Check each resolved path against `protectedPaths`. If any path is a protected path or is within a protected directory, return `{ decision: 'deny', rule: 'structural-protected-path', reason: '...' }`.
 4. If the tool has no annotation (unknown tool), return `{ decision: 'deny', rule: 'structural-unknown-tool', reason: '...' }`.
 
-**Phase 2 -- Compiled rules with multi-role evaluation:**
+**Compiled rule evaluation -- Compiled rules with multi-role evaluation:**
 
 5. Look up `ToolAnnotation` for `request.serverName + request.toolName`.
 6. Collect all distinct non-`none` roles from the tool's annotation (e.g., `edit_file` might have `read-path` and `write-path`).

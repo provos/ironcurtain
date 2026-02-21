@@ -79,11 +79,11 @@ The fetch server injects a `User-Agent` header on every request: `IronCurtain/0.
 }
 ```
 
-`allowedDomains: ["*"]` means no OS-level network restriction. The policy engine controls what the agent is ALLOWED to fetch (semantic intent). The sandbox layer controls what the process CAN reach (containment). These are separate concerns — `"*"` at the sandbox level means Phase 1c passes all domain-name URLs through to Phase 2 compiled rules. However, IP-address hostnames are **not** matched by `"*"` (see Section 2.4).
+`allowedDomains: ["*"]` means no OS-level network restriction. The policy engine controls what the agent is ALLOWED to fetch (semantic intent). The sandbox layer controls what the process CAN reach (containment). These are separate concerns — `"*"` at the sandbox level means the untrusted domain gate passes all domain-name URLs through to compiled rule evaluation. However, IP-address hostnames are **not** matched by `"*"` (see Section 2.4).
 
 ### 2.4 SSRF Protection (Structural Invariant)
 
-Raw IP addresses in URLs are treated as a structural invariant in Phase 1c: **any URL whose hostname is an IP address (IPv4 or IPv6) requires explicit allowlist permission**. Domain wildcards like `"*"` do not match IP addresses.
+Raw IP addresses in URLs are treated as a structural invariant in the untrusted domain gate: **any URL whose hostname is an IP address (IPv4 or IPv6) requires explicit allowlist permission**. Domain wildcards like `"*"` do not match IP addresses.
 
 This blocks SSRF attacks targeting internal infrastructure (127.0.0.1, 10.x.x.x, 169.254.169.254, etc.) without maintaining a blocklist. Legitimate IP-based access can be enabled via the server's `allowedDomains` in `mcp-servers.json`:
 
@@ -93,7 +93,7 @@ This blocks SSRF attacks targeting internal infrastructure (127.0.0.1, 10.x.x.x,
 
 **Implementation — two changes to existing code:**
 
-1. **`extractServerDomainAllowlists()`** (`src/config/index.ts`) — stop filtering `*` from the allowlist. Currently, `["*"]` is filtered to `[]` which produces no map entry, causing Phase 1c to be skipped entirely. With this change, `["*"]` produces an allowlist entry of `["*"]` so Phase 1c fires.
+1. **`extractServerDomainAllowlists()`** (`src/config/index.ts`) — stop filtering `*` from the allowlist. Currently, `["*"]` is filtered to `[]` which produces no map entry, causing the untrusted domain gate to be skipped entirely. With this change, `["*"]` produces an allowlist entry of `["*"]` so the untrusted domain gate fires.
 
 2. **`domainMatchesAllowlist()`** (`src/trusted-process/policy-engine.ts`) — when the pattern is `*`, check whether the domain is an IP address. If so, skip the wildcard match:
 
@@ -110,12 +110,12 @@ if (pattern === '*') return !isIpAddress(domain);  // was: return true
 
 | `allowedDomains` | Domain URL | IP URL | IP in explicit list |
 |---|---|---|---|
-| `["*"]` | Phase 1c pass → Phase 2 | **escalate** | n/a |
-| `["*", "192.168.1.100"]` | Phase 1c pass → Phase 2 | **escalate** (unless explicit match) | Phase 1c pass → Phase 2 |
+| `["*"]` | domain gate pass → compiled rules | **escalate** | n/a |
+| `["*", "192.168.1.100"]` | domain gate pass → compiled rules | **escalate** (unless explicit match) | domain gate pass → compiled rules |
 | `["github.com"]` | escalate (unless match) | **escalate** | n/a |
-| not configured | Phase 1c skipped → Phase 2 | Phase 1c skipped → Phase 2 | n/a |
+| not configured | domain gate skipped → compiled rules | domain gate skipped → compiled rules | n/a |
 
-**Note:** Servers with URL-category roles should always have an `allowedDomains` entry to ensure Phase 1c SSRF protection fires. A config-load-time warning is emitted when a server's tools include `fetch-url` or `git-remote-url` roles but no `allowedDomains` is configured.
+**Note:** Servers with URL-category roles should always have an `allowedDomains` entry to ensure the untrusted domain gate SSRF protection fires. A config-load-time warning is emitted when a server's tools include `fetch-url` or `git-remote-url` roles but no `allowedDomains` is configured.
 
 **Known limitation:** DNS rebinding (a domain resolving to a private IP) is not detected at the policy layer. This is a network-layer concern that srt/socat can address in a future enhancement.
 

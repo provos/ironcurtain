@@ -25,11 +25,11 @@ import { resolve, dirname, basename, join } from 'node:path';
 export type RoleCategory = 'path' | 'url' | 'opaque';
 
 export type ArgumentRole =
-  // Path roles -- sandbox-safe (Phase 1b auto-resolves these)
+  // Path roles -- sandbox-safe (filesystem sandbox containment auto-resolves these)
   | 'read-path'
   | 'write-path'
   | 'delete-path'
-  // Path roles -- not sandbox-safe (require Phase 2 evaluation even in sandbox)
+  // Path roles -- not sandbox-safe (require compiled rule evaluation even in sandbox)
   | 'write-history'
   | 'delete-history'
   // URL roles
@@ -396,23 +396,23 @@ export function getRolesByCategory(category: RoleCategory): ArgumentRole[] {
     .map(([role]) => role);
 }
 
-/** Returns path-category roles only. Used by Phase 1a/1b structural invariants. */
+/** Returns path-category roles only. Used by protected path check / filesystem sandbox containment. */
 export function getPathRoles(): ArgumentRole[] {
   return getRolesByCategory('path');
 }
 
-/** Returns url-category roles only. Used by Phase 1c domain checks. */
+/** Returns url-category roles only. Used by untrusted domain gate. */
 export function getUrlRoles(): ArgumentRole[] {
   return getRolesByCategory('url');
 }
 
 /**
- * Path roles that Phase 1b sandbox containment is allowed to auto-resolve.
+ * Path roles that filesystem sandbox containment is allowed to auto-resolve.
  *
  * Basic filesystem operations (read, write, delete) are safe within the
  * sandbox boundary. Higher-risk path roles like `write-history` and
  * `delete-history` are NOT sandbox-safe: even when the repo path is inside
- * the sandbox, these operations require Phase 2 policy evaluation (and
+ * the sandbox, these operations require compiled rule evaluation (and
  * typically human approval) because they can destroy git history.
  */
 export const SANDBOX_SAFE_PATH_ROLES: ReadonlySet<ArgumentRole> = new Set(['read-path', 'write-path', 'delete-path']);
