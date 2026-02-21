@@ -1,24 +1,13 @@
 import { describe, it, expect } from 'vitest';
-import { resolve, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { MockLanguageModelV3 } from 'ai/test';
 import { verifyPolicy, filterStructuralConflicts } from '../src/pipeline/policy-verifier.js';
 import { PolicyEngine } from '../src/trusted-process/policy-engine.js';
 import type { CompiledPolicyFile, TestScenario } from '../src/pipeline/types.js';
 import { getHandwrittenScenarios } from '../src/pipeline/handwritten-scenarios.js';
-import { testCompiledPolicy, testToolAnnotations } from './fixtures/test-policy.js';
+import { testCompiledPolicy, testToolAnnotations, TEST_SANDBOX_DIR, TEST_PROTECTED_PATHS, TEST_DOMAIN_ALLOWLISTS } from './fixtures/test-policy.js';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const projectRoot = resolve(__dirname, '..');
-
-const protectedPaths = [
-  resolve(projectRoot, 'src/config/constitution.md'),
-  resolve(projectRoot, 'src/config/generated'),
-  resolve(projectRoot, 'src/config/mcp-servers.json'),
-  resolve('./audit.jsonl'),
-];
-
-const SANDBOX_DIR = '/tmp/ironcurtain-sandbox';
+const protectedPaths = TEST_PROTECTED_PATHS;
+const SANDBOX_DIR = TEST_SANDBOX_DIR;
 const scenarios = getHandwrittenScenarios(SANDBOX_DIR);
 
 const constitutionText = `# Constitution
@@ -103,6 +92,8 @@ describe('Policy Verifier', () => {
       judge,
       3,
       SANDBOX_DIR,
+      undefined,
+      TEST_DOMAIN_ALLOWLISTS,
     );
 
     expect(result.pass).toBe(true);
@@ -122,6 +113,8 @@ describe('Policy Verifier', () => {
       judge,
       3,
       SANDBOX_DIR,
+      undefined,
+      TEST_DOMAIN_ALLOWLISTS,
     );
 
     const executionResults = result.rounds[0].executionResults;
@@ -145,6 +138,8 @@ describe('Policy Verifier', () => {
       judge,
       3,
       SANDBOX_DIR,
+      undefined,
+      TEST_DOMAIN_ALLOWLISTS,
     );
 
     expect(result.pass).toBe(true);
@@ -200,6 +195,8 @@ describe('Policy Verifier', () => {
       failJudge,
       3,
       SANDBOX_DIR,
+      undefined,
+      TEST_DOMAIN_ALLOWLISTS,
     );
 
     expect(result.pass).toBe(false);
@@ -245,6 +242,8 @@ describe('Policy Verifier', () => {
       infiniteJudge,
       2, // limit to 2 rounds
       SANDBOX_DIR,
+      undefined,
+      TEST_DOMAIN_ALLOWLISTS,
     );
 
     expect(result.rounds).toHaveLength(2);
@@ -252,7 +251,7 @@ describe('Policy Verifier', () => {
 });
 
 describe('filterStructuralConflicts', () => {
-  const engine = new PolicyEngine(testCompiledPolicy, testToolAnnotations, protectedPaths, SANDBOX_DIR);
+  const engine = new PolicyEngine(testCompiledPolicy, testToolAnnotations, protectedPaths, SANDBOX_DIR, TEST_DOMAIN_ALLOWLISTS);
 
   it('discards scenarios that conflict with structural invariants', () => {
     const conflictingScenario: TestScenario = {

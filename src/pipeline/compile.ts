@@ -14,6 +14,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { LanguageModel } from 'ai';
 import chalk from 'chalk';
+import { extractServerDomainAllowlists } from '../config/index.js';
 import { PolicyEngine } from '../trusted-process/policy-engine.js';
 import { resolveRealPath } from '../types/argument-roles.js';
 import { buildCompilerPrompt, compileConstitution, validateCompiledRules } from './constitution-compiler.js';
@@ -332,6 +333,7 @@ async function verifyCompiledPolicy(
   maxRounds: number = 3,
   verbose: boolean = true,
   onProgress?: (message: string) => void,
+  serverDomainAllowlists?: ReadonlyMap<string, readonly string[]>,
 ): Promise<VerificationResult> {
   const result = await verifyPolicy(
     constitutionText,
@@ -343,6 +345,7 @@ async function verifyCompiledPolicy(
     maxRounds,
     allowedDirectory,
     onProgress,
+    serverDomainAllowlists,
   );
 
   if (!result.pass) {
@@ -411,6 +414,9 @@ export async function main(): Promise<void> {
   // Flatten annotations from all servers
   const allAnnotations = Object.values(toolAnnotationsFile.servers)
     .flatMap(server => server.tools);
+
+  // Compute domain allowlists for policy verification
+  const serverDomainAllowlists = extractServerDomainAllowlists(config.mcpServers);
 
   console.error(chalk.bold('Policy Compilation Pipeline'));
   console.error(chalk.bold('==========================='));
@@ -485,6 +491,7 @@ export async function main(): Promise<void> {
         3,
         true,
         (msg) => { spinner.text = `[3/3] Verifying policy — ${msg}`; },
+        serverDomainAllowlists,
       );
     },
     (r, elapsed) => r.pass
@@ -607,6 +614,7 @@ export async function main(): Promise<void> {
             1,
             false,
             (msg) => { spinner.text = `${repairVerifyText} — ${msg}`; },
+            serverDomainAllowlists,
           );
         },
         (r, elapsed) => r.pass
@@ -641,6 +649,7 @@ export async function main(): Promise<void> {
               3,
               true,
               (msg) => { spinner.text = `Final full verification — ${msg}`; },
+              serverDomainAllowlists,
             );
           },
           (r, elapsed) => r.pass

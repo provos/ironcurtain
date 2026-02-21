@@ -1,7 +1,7 @@
 # Security Concerns and Threat Landscape
 
 **Status:** Living Document
-**Last Updated:** 2026-02-17
+**Last Updated:** 2026-02-20
 
 This document outlines the known security concerns, attack vectors, and residual risks for the IronCurtain runtime. It serves as a guide for security researchers, auditors, and developers to understand where the "dragons" live.
 
@@ -69,7 +69,16 @@ This document outlines the known security concerns, attack vectors, and residual
 *   **File Permissions:** Restricting read/write access to the session directories to the user only (`0700`).
 *   **Host Security:** IronCurtain cannot protect against a compromised host OS (root/admin access).
 
-## 8. Supply Chain Attacks (Host Level)
+## 8. Credential Leakage in Logs
+
+**Risk:** User credentials (`serverCredentials` in `~/.ironcurtain/config.json`) are injected as environment variables into MCP server child processes. These values could appear in log output.
+**Vectors:**
+*   **MCP server stderr:** A server might log its environment variables, authentication headers, or connection strings on startup or error. These stderr lines are captured in the session log.
+*   **Tool call arguments:** Theoretically, a credential could enter the LLM context (e.g., echoed in a tool response) and then be passed as an argument to another tool, appearing in the audit log. This is an indirect path that requires the MCP server to echo credentials in responses.
+**Decision:** Inline string replacement on stderr lines before writing to the session log — scan for known credential values and replace with `***REDACTED***`. This is a few lines of code in the proxy, not a dedicated utility. Audit log redaction is **not** implemented because the tool-argument path is indirect and unreliable to catch (the agent could transform or split credential values). A formal `CredentialRedactor` abstraction was considered and rejected as over-engineering for the actual threat surface.
+**Residual risk:** Credentials echoed by MCP servers in tool *responses* enter the LLM context and are not masked. Addressing this requires response filtering, which is a different mechanism and deferred.
+
+## 9. Supply Chain Attacks (Host Level)
 
 **Risk:** The IronCurtain runtime itself depends on npm packages (`@modelcontextprotocol/sdk`, `zod`, `uuid`, etc.).
 **Impact:** A compromised dependency in the host process runs with full user privileges and bypasses all sandbox protections.

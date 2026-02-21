@@ -101,6 +101,18 @@ export const testCompiledPolicy: CompiledPolicyFile = {
       then: 'allow',
       reason: 'Staging and committing within sandbox are safe.',
     },
+    // ── Fetch rules ─────────────────────────────────────────────────
+    {
+      name: 'allow-fetch-get',
+      description: 'Allow HTTP GET from any domain.',
+      principle: 'Least privilege',
+      if: {
+        server: ['fetch'],
+        tool: ['http_fetch'],
+      },
+      then: 'allow',
+      reason: 'HTTP GET for reading web content is allowed.',
+    },
     // ── Filesystem rules ────────────────────────────────────────────
     {
       name: 'deny-delete-outside-permitted-areas',
@@ -367,5 +379,23 @@ export const testToolAnnotations: ToolAnnotationsFile = {
         },
       ],
     },
+    fetch: {
+      inputHash: 'test-fixture',
+      tools: [
+        {
+          toolName: 'http_fetch',
+          serverName: 'fetch',
+          comment: 'Fetches web content via HTTP GET.',
+          sideEffects: true,
+          args: { url: ['fetch-url'], headers: ['none'], max_length: ['none'], raw_html: ['none'] },
+        },
+      ],
+    },
   },
 };
+
+/** Domain allowlists matching the fetch server config (allowedDomains: ["*"]). */
+export const TEST_DOMAIN_ALLOWLISTS = new Map<string, string[]>([
+  ['fetch', ['*']],
+  ['git', ['github.com', '*.github.com', 'gitlab.com', '*.gitlab.com']],
+]);

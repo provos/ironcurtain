@@ -11,25 +11,14 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { resolve, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { PolicyEngine } from '../src/trusted-process/policy-engine.js';
 import { getHandwrittenScenarios } from '../src/pipeline/handwritten-scenarios.js';
-import { testCompiledPolicy, testToolAnnotations } from './fixtures/test-policy.js';
+import { testCompiledPolicy, testToolAnnotations, TEST_SANDBOX_DIR, TEST_PROTECTED_PATHS, TEST_DOMAIN_ALLOWLISTS } from './fixtures/test-policy.js';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const projectRoot = resolve(__dirname, '..');
-const SANDBOX_DIR = '/tmp/ironcurtain-sandbox';
+const SANDBOX_DIR = TEST_SANDBOX_DIR;
 
 describe('Pipeline Integration: hand-crafted artifacts produce correct decisions', () => {
-  const protectedPaths = [
-    resolve(projectRoot, 'src/config/constitution.md'),
-    resolve(projectRoot, 'src/config/generated'),
-    resolve(projectRoot, 'src/config/mcp-servers.json'),
-    resolve('./audit.jsonl'),
-  ];
-
-  const engine = new PolicyEngine(testCompiledPolicy, testToolAnnotations, protectedPaths, SANDBOX_DIR);
+  const engine = new PolicyEngine(testCompiledPolicy, testToolAnnotations, TEST_PROTECTED_PATHS, SANDBOX_DIR, TEST_DOMAIN_ALLOWLISTS);
   const scenarios = getHandwrittenScenarios(SANDBOX_DIR);
 
   it('all handwritten scenarios produce correct decisions', () => {

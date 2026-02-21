@@ -329,5 +329,40 @@ export function getHandwrittenScenarios(sandboxDir: string): TestScenario[] {
       reasoning: 'Structural invariant: unknown tools with no annotation are denied',
       source: 'handwritten',
     },
+
+    // ── Fetch operations ─────────────────────────────────────────────
+    {
+      description: 'Fetch GET from any domain -- allow',
+      request: {
+        serverName: 'fetch',
+        toolName: 'http_fetch',
+        arguments: { url: 'https://example.com/page' },
+      },
+      expectedDecision: 'allow',
+      reasoning: 'Constitution allows fetching web content via HTTP GET from any domain',
+      source: 'handwritten',
+    },
+    {
+      description: 'Fetch with raw IP address URL -- escalate (SSRF protection)',
+      request: {
+        serverName: 'fetch',
+        toolName: 'http_fetch',
+        arguments: { url: 'http://169.254.169.254/metadata' },
+      },
+      expectedDecision: 'escalate',
+      reasoning: 'SSRF structural invariant: IP-address URLs are not matched by domain wildcards',
+      source: 'handwritten',
+    },
+    {
+      description: 'Unknown fetch tool -- deny (structural invariant)',
+      request: {
+        serverName: 'fetch',
+        toolName: 'http_post',
+        arguments: { url: 'https://example.com/api', body: '{}' },
+      },
+      expectedDecision: 'deny',
+      reasoning: 'Structural invariant: unknown tools with no annotation are denied',
+      source: 'handwritten',
+    },
   ];
 }

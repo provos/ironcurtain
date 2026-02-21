@@ -7,7 +7,9 @@ import { getIronCurtainHome, getUserGeneratedDir } from './paths.js';
 import { resolveRealPath } from '../types/argument-roles.js';
 import { loadUserConfig } from './user-config.js';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const isCompiled = __filename.endsWith('.js');
 
 /**
  * Returns the user-local generated dir if it contains compiled-policy.json,
@@ -45,6 +47,66 @@ export function computeProtectedPaths(opts: {
   return paths;
 }
 
+/**
+ * Resolves internal source file paths (./src/*.ts) in MCP server configs
+ * to absolute paths. In compiled mode, rewrites to dist/*.js with node.
+ */
+/**
+ * Resolves all relative paths in MCP server configs to absolute paths.
+ *
+ * Handles two kinds of relative paths:
+ * - `node_modules/...` — walks up from packageRoot to find hoisted packages
+ * - `./src/...ts` — resolves to absolute; in compiled mode, rewrites to dist/*.js
+ *
+ * Must be called before spawning any MCP server process. Both `loadConfig()`
+ * (runtime) and `loadPipelineConfig()` (pipeline) use this.
+ */
+export function resolveMcpServerPaths(
+  mcpServers: Record<string, MCPServerConfig>,
+): void {
+  // packageRoot is two levels up from this file (src/config/ → project root)
+  const packageRoot = resolve(__dirname, '..', '..');
+
+  for (const config of Object.values(mcpServers)) {
+    if (config.command.startsWith('node_modules/')) {
+      config.command = resolveNodeModulesPath(config.command, packageRoot);
+    }
+    for (let i = 0; i < config.args.length; i++) {
+      if (config.args[i].startsWith('node_modules/')) {
+        config.args[i] = resolveNodeModulesPath(config.args[i], packageRoot);
+      }
+    }
+    resolveInternalServerPaths(config, packageRoot, isCompiled);
+  }
+}
+
+function resolveInternalServerPaths(
+  config: MCPServerConfig,
+  packageRoot: string,
+  compiled: boolean,
+): void {
+  for (let i = 0; i < config.args.length; i++) {
+    const arg = config.args[i];
+    if (!arg.startsWith('./src/') || !arg.endsWith('.ts')) continue;
+
+    if (compiled) {
+      // Rewrite ./src/X.ts → <abs>/dist/X.js and use node
+      const distRelative = arg
+        .replace(/^\.\/src\//, 'dist/')
+        .replace(/\.ts$/, '.js');
+      config.args[i] = resolve(packageRoot, distRelative);
+      if (config.command === 'npx') {
+        config.command = 'node';
+        const tsxIdx = config.args.indexOf('tsx');
+        if (tsxIdx !== -1) config.args.splice(tsxIdx, 1);
+      }
+    } else {
+      // Source mode — resolve to absolute path
+      config.args[i] = resolve(packageRoot, arg);
+    }
+  }
+}
+
 export function loadConfig(): IronCurtainConfig {
   const userConfig = loadUserConfig();
 
@@ -72,21 +134,8 @@ export function loadConfig(): IronCurtainConfig {
     }
   }
 
-  // Resolve node_modules/ relative paths to absolute paths.
-  // Bundled MCP servers reference binaries via node_modules/ which only works
-  // from the dev checkout root. After npm install, deps may be hoisted to a
-  // parent node_modules/, so we walk up from the package root to find them.
-  const packageRoot = resolve(__dirname, '..', '..');
-  for (const config of Object.values(mcpServers)) {
-    if (config.command.startsWith('node_modules/')) {
-      config.command = resolveNodeModulesPath(config.command, packageRoot);
-    }
-    for (let i = 0; i < config.args.length; i++) {
-      if (config.args[i].startsWith('node_modules/')) {
-        config.args[i] = resolveNodeModulesPath(config.args[i], packageRoot);
-      }
-    }
-  }
+  // Resolve all relative paths (node_modules/ and ./src/) to absolute paths.
+  resolveMcpServerPaths(mcpServers);
 
   const constitutionPath = resolve(__dirname, 'constitution.md');
   const packageGeneratedDir = resolve(__dirname, 'generated');
@@ -99,6 +148,18 @@ export function loadConfig(): IronCurtainConfig {
     mcpServersPath,
     auditLogPath,
   });
+
+  // Warn if serverCredentials keys don't match any server in mcp-servers.json.
+  // This check requires both configs, so it must happen here rather than in loadUserConfig().
+  const serverNames = new Set(Object.keys(mcpServers));
+  for (const credKey of Object.keys(userConfig.serverCredentials)) {
+    if (!serverNames.has(credKey)) {
+      process.stderr.write(
+        `Warning: serverCredentials["${credKey}"] does not match any server in mcp-servers.json. ` +
+        `Available servers: ${[...serverNames].join(', ')}\n`,
+      );
+    }
+  }
 
   return {
     auditLogPath,
@@ -115,19 +176,23 @@ export function loadConfig(): IronCurtainConfig {
 
 /**
  * Extracts domain allowlists from MCP server sandbox network configurations.
- * Filters out the `*` wildcard since it means "no domain restriction".
- * Returns a map from server name to its list of restricted domains.
+ * Returns a map from server name to its list of allowed domains.
+ *
+ * The `*` wildcard is preserved (not filtered) so that Phase 1c fires
+ * for servers with `["*"]`. The SSRF structural invariant in
+ * `domainMatchesAllowlist()` prevents `*` from matching IP addresses.
  */
 export function extractServerDomainAllowlists(
   mcpServers: Record<string, MCPServerConfig>,
 ): Map<string, string[]> {
   const allowlists = new Map<string, string[]>();
   for (const [serverName, config] of Object.entries(mcpServers)) {
-    if (config.sandbox && typeof config.sandbox === 'object' && config.sandbox.network && typeof config.sandbox.network === 'object') {
-      const domains = config.sandbox.network.allowedDomains.filter(d => d !== '*');
-      if (domains.length > 0) {
-        allowlists.set(serverName, domains);
-      }
+    const sandbox = config.sandbox;
+    if (!sandbox || typeof sandbox !== 'object') continue;
+    const network = sandbox.network;
+    if (!network || typeof network !== 'object') continue;
+    if (network.allowedDomains.length > 0) {
+      allowlists.set(serverName, [...network.allowedDomains]);
     }
   }
   return allowlists;

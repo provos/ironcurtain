@@ -164,6 +164,11 @@ async function disconnectAll(connections: Map<string, ServerConnection>): Promis
 // ---------------------------------------------------------------------------
 
 export async function main(): Promise<void> {
+  // The pipeline only lists tools — it never reads/writes through MCP servers.
+  // Set a valid ALLOWED_DIRECTORY so the filesystem server can start.
+  if (!process.env.ALLOWED_DIRECTORY) {
+    process.env.ALLOWED_DIRECTORY = process.cwd();
+  }
   const config = loadPipelineConfig();
 
   console.error(chalk.bold('Tool Annotation Pipeline'));

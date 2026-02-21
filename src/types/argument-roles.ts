@@ -209,6 +209,7 @@ const registryEntries: [ArgumentRole, RoleDefinition][] = [
       annotationGuidance:
         'Assign to arguments that are filesystem paths the tool will read from. ' +
         'Includes file and directory paths used for input.',
+      serverNames: ['filesystem', 'git'],
     },
   ],
   [
@@ -221,6 +222,7 @@ const registryEntries: [ArgumentRole, RoleDefinition][] = [
       annotationGuidance:
         'Assign to arguments that are filesystem paths the tool will write or create. ' +
         'Includes destination paths for file creation and modification.',
+      serverNames: ['filesystem', 'git'],
     },
   ],
   [
@@ -233,6 +235,7 @@ const registryEntries: [ArgumentRole, RoleDefinition][] = [
       annotationGuidance:
         'Assign to arguments that are filesystem paths the tool will delete or remove. ' +
         'Also assign to the source argument of move operations (source is deleted after copy).',
+      serverNames: ['filesystem', 'git'],
     },
   ],
   [
@@ -274,6 +277,7 @@ const registryEntries: [ArgumentRole, RoleDefinition][] = [
       annotationGuidance:
         'Assign to arguments that are HTTP(S) URLs the tool will fetch. ' +
         'Typically applies to web-fetch server tools.',
+      serverNames: ['fetch'],
     },
   ],
   [

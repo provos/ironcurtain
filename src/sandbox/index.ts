@@ -145,11 +145,17 @@ export class Sandbox {
       timeout: number;
     }> = {};
     for (const serverName of Object.keys(config.mcpServers)) {
+      // Per-server isolation: each proxy only receives its own credentials
+      const serverCreds = config.userConfig.serverCredentials[serverName];
       mcpServers[serverName] = {
         transport: 'stdio',
         command: PROXY_COMMAND,
         args: [...PROXY_ARGS],
-        env: { ...proxyEnv, SERVER_FILTER: serverName },
+        env: {
+          ...proxyEnv,
+          SERVER_FILTER: serverName,
+          ...(serverCreds ? { SERVER_CREDENTIALS: JSON.stringify(serverCreds) } : {}),
+        },
         timeout: timeoutMs,
       };
     }

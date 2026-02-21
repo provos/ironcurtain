@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, statSync, chmodSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { loadUserConfig, USER_CONFIG_DEFAULTS } from '../src/config/user-config.js';
@@ -465,6 +465,85 @@ describe('loadUserConfig', () => {
     mkdirSync(testHome, { recursive: true });
     writeFileSync(resolve(testHome, 'config.json'), content);
   }
+
+  // ── serverCredentials tests ─────────────────────────────────────────
+
+  it('parses serverCredentials from config file', () => {
+    writeConfigFile({
+      serverCredentials: {
+        git: { GH_TOKEN: 'ghp_xxxx' },
+        fetch: { API_KEY: 'key_yyyy' },
+      },
+    });
+
+    const config = loadUserConfig();
+    expect(config.serverCredentials).toEqual({
+      git: { GH_TOKEN: 'ghp_xxxx' },
+      fetch: { API_KEY: 'key_yyyy' },
+    });
+  });
+
+  it('defaults serverCredentials to empty object when absent', () => {
+    writeConfigFile({ agentModelId: 'claude-opus-4-6' });
+
+    const config = loadUserConfig();
+    expect(config.serverCredentials).toEqual({});
+  });
+
+  it('rejects empty credential values', () => {
+    writeConfigFile({
+      serverCredentials: { git: { GH_TOKEN: '' } },
+    });
+
+    expect(() => loadUserConfig()).toThrow();
+  });
+
+  it('does not backfill serverCredentials (in SENSITIVE_FIELDS)', () => {
+    writeConfigFile({ agentModelId: 'claude-opus-4-6' });
+
+    loadUserConfig();
+
+    const content = JSON.parse(readFileSync(resolve(testHome, 'config.json'), 'utf-8'));
+    expect(content.serverCredentials).toBeUndefined();
+  });
+
+  // ── Config file permissions tests ─────────────────────────────────
+
+  it('creates config file with 0o600 permissions', () => {
+    loadUserConfig();
+
+    const configPath = resolve(testHome, 'config.json');
+    const stats = statSync(configPath);
+    expect(stats.mode & 0o777).toBe(0o600);
+  });
+
+  it('warns when config file is group- or world-readable', () => {
+    // Pre-create config with insecure permissions
+    writeConfigFile({ agentModelId: 'claude-opus-4-6' });
+    chmodSync(resolve(testHome, 'config.json'), 0o644);
+
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+
+    loadUserConfig();
+
+    const calls = stderrSpy.mock.calls.map(c => String(c[0]));
+    expect(calls.some(c => c.includes('readable by other users'))).toBe(true);
+    stderrSpy.mockRestore();
+  });
+
+  it('does not warn when config file has 0o600 permissions', () => {
+    // Pre-create config with secure permissions
+    writeConfigFile({ agentModelId: 'claude-opus-4-6' });
+    chmodSync(resolve(testHome, 'config.json'), 0o600);
+
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+
+    loadUserConfig();
+
+    const calls = stderrSpy.mock.calls.map(c => String(c[0]));
+    expect(calls.some(c => c.includes('readable by other users'))).toBe(false);
+    stderrSpy.mockRestore();
+  });
 
   function writeConfigFile(config: Record<string, unknown>): void {
     writeRawConfigFile(JSON.stringify(config, null, 2));

@@ -146,8 +146,9 @@ export async function verifyPolicy(
   maxRounds: number = DEFAULT_MAX_ROUNDS,
   allowedDirectory?: string,
   onProgress?: (message: string) => void,
+  serverDomainAllowlists?: ReadonlyMap<string, readonly string[]>,
 ): Promise<VerificationResult> {
-  const engine = new PolicyEngine(compiledPolicy, toolAnnotations, protectedPaths, allowedDirectory);
+  const engine = new PolicyEngine(compiledPolicy, toolAnnotations, protectedPaths, allowedDirectory, serverDomainAllowlists);
 
   const allAnnotations = Object.values(toolAnnotations.servers).flatMap(s => s.tools);
   const serverNamesList = [...new Set(allAnnotations.map(a => a.serverName))] as [string, ...string[]];

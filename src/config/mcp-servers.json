@@ -18,5 +18,14 @@
         "allowedDomains": ["github.com", "*.github.com", "gitlab.com", "*.gitlab.com"]
       }
     }
+  },
+  "fetch": {
+    "command": "npx",
+    "args": ["tsx", "./src/servers/fetch-server.ts"],
+    "sandbox": {
+      "network": {
+        "allowedDomains": ["*"]
+      }
+    }
   }
 }

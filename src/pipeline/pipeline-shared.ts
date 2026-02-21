@@ -14,7 +14,7 @@ import type { LanguageModel } from 'ai';
 import { wrapLanguageModel } from 'ai';
 import chalk from 'chalk';
 import ora, { type Ora } from 'ora';
-import { computeProtectedPaths } from '../config/index.js';
+import { computeProtectedPaths, resolveMcpServerPaths } from '../config/index.js';
 import { createLanguageModel } from '../config/model-provider.js';
 import { getIronCurtainHome, getUserConstitutionPath, getUserGeneratedDir } from '../config/paths.js';
 import type { MCPServerConfig } from '../config/types.js';
@@ -62,10 +62,23 @@ export function loadPipelineConfig(): PipelineConfig {
   const mcpServers: Record<string, MCPServerConfig> = JSON.parse(
     readFileSync(mcpServersPath, 'utf-8'),
   );
-  const generatedDir = getUserGeneratedDir();
-  const packageGeneratedDir = resolve(configDir, 'generated');
+  resolveMcpServerPaths(mcpServers);
+
   const defaultAllowedDir = resolve(getIronCurtainHome(), 'sandbox');
   const allowedDirectory = process.env.ALLOWED_DIRECTORY ?? defaultAllowedDir;
+
+  // Sync the filesystem server's allowed directory with the configured value
+  const fsServer = mcpServers['filesystem'];
+  if (fsServer) {
+    const defaultDir = '/tmp/ironcurtain-sandbox';
+    const dirIndex = fsServer.args.indexOf(defaultDir);
+    if (dirIndex !== -1) {
+      fsServer.args[dirIndex] = allowedDirectory;
+    }
+  }
+
+  const generatedDir = getUserGeneratedDir();
+  const packageGeneratedDir = resolve(configDir, 'generated');
   const auditLogPath = process.env.AUDIT_LOG_PATH ?? './audit.jsonl';
 
   const protectedPaths = computeProtectedPaths({

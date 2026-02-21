@@ -6,7 +6,7 @@
  * Environment variables override config file values.
  */
 
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { z } from 'zod';
 import { getUserConfigPath } from './paths.js';
@@ -98,6 +98,9 @@ const userConfigSchema = z.object({
   resourceBudget: resourceBudgetSchema,
   autoCompact: autoCompactSchema,
   autoApprove: autoApproveSchema,
+  serverCredentials: z
+    .record(z.string(), z.record(z.string(), z.string().min(1)))
+    .optional(),
 });
 
 /** Parsed config from ~/.ironcurtain/config.json. All fields optional. */
@@ -137,13 +140,14 @@ export interface ResolvedUserConfig {
   readonly resourceBudget: ResolvedResourceBudgetConfig;
   readonly autoCompact: ResolvedAutoCompactConfig;
   readonly autoApprove: ResolvedAutoApproveConfig;
+  readonly serverCredentials: Readonly<Record<string, Readonly<Record<string, string>>>>;
 }
 
 /** Known fields derived from the schema. Used for unknown-field detection. */
 const KNOWN_FIELDS = new Set<string>(Object.keys(userConfigSchema.shape));
 
 /** Fields that must never be backfilled into the config file. */
-const SENSITIVE_FIELDS = new Set(['anthropicApiKey', 'googleApiKey', 'openaiApiKey']);
+const SENSITIVE_FIELDS = new Set(['anthropicApiKey', 'googleApiKey', 'openaiApiKey', 'serverCredentials']);
 
 /** Type guard for non-null, non-array objects. */
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -295,11 +299,29 @@ function describeAddedFields(patch: Record<string, unknown>): string {
 function readOrCreateConfigFile(configPath: string): string {
   if (!existsSync(configPath)) {
     mkdirSync(dirname(configPath), { recursive: true });
-    writeFileSync(configPath, DEFAULT_CONFIG_CONTENT);
+    writeFileSync(configPath, DEFAULT_CONFIG_CONTENT, { mode: 0o600 });
     process.stderr.write(`Created default config at ${configPath}\n`);
     return DEFAULT_CONFIG_CONTENT;
   }
+  warnInsecurePermissions(configPath);
   return readFileSync(configPath, 'utf-8');
+}
+
+/**
+ * Warns if the config file is group- or world-readable.
+ * Config files may contain API keys and server credentials.
+ */
+function warnInsecurePermissions(configPath: string): void {
+  try {
+    const stats = statSync(configPath);
+    // Check for group (0o040) or other (0o004) read bits
+    if (stats.mode & 0o044) {
+      process.stderr.write(
+        `Warning: ${configPath} is readable by other users (mode ${(stats.mode & 0o777).toString(8)}). ` +
+        `Run: chmod 600 ${configPath}\n`,
+      );
+    }
+  } catch { /* ignore stat failures */ }
 }
 
 /**
@@ -380,6 +402,7 @@ function mergeWithDefaults(config: UserConfig): ResolvedUserConfig {
       enabled: a?.enabled ?? approveDefaults.enabled,
       modelId: a?.modelId ?? approveDefaults.modelId,
     },
+    serverCredentials: config.serverCredentials ?? {},
   };
 }
 

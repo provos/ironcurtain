@@ -118,6 +118,20 @@ function extractTextFromContent(content: unknown): string | undefined {
   return texts.length > 0 ? texts.join('\n') : undefined;
 }
 
+/**
+ * Replaces known credential values in a string with `***REDACTED***`.
+ * Prevents credential leakage in session log files.
+ */
+function redactCredentials(text: string, credentials: Record<string, string>): string {
+  let result = text;
+  for (const value of Object.values(credentials)) {
+    if (value.length > 0 && result.includes(value)) {
+      result = result.replaceAll(value, '***REDACTED***');
+    }
+  }
+  return result;
+}
+
 const ESCALATION_POLL_INTERVAL_MS = 500;
 const DEFAULT_ESCALATION_TIMEOUT_SECONDS = 300;
 
@@ -218,6 +232,12 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  // Parse per-server credentials and immediately scrub from process.env
+  // so they are not inherited by child MCP server processes.
+  const serverCredentials: Record<string, string> =
+    process.env.SERVER_CREDENTIALS ? JSON.parse(process.env.SERVER_CREDENTIALS) : {};
+  delete process.env.SERVER_CREDENTIALS;
+
   const sandboxPolicy = (process.env.SANDBOX_POLICY ?? 'warn') as SandboxAvailabilityPolicy;
 
   const allServersConfig: Record<string, MCPServerConfig> = JSON.parse(serversConfigJson);
@@ -311,8 +331,10 @@ async function main(): Promise<void> {
       command: wrapped.command,
       args: wrapped.args,
       // Always pass full process.env -- never rely on getDefaultEnvironment()
-      // which strips vars that srt and MCP servers may need
-      env: { ...(process.env as Record<string, string>), ...(config.env ?? {}) },
+      // which strips vars that srt and MCP servers may need.
+      // Server credentials are merged last so they override both system env
+      // and static mcp-servers.json env values.
+      env: { ...(process.env as Record<string, string>), ...(config.env ?? {}), ...serverCredentials },
       stderr: 'pipe', // Prevent child server stderr from leaking to the terminal
       // Sandboxed servers get the sandbox dir as cwd so relative-path writes
       // (e.g., log files) land inside the writable sandbox instead of failing
@@ -322,15 +344,14 @@ async function main(): Promise<void> {
 
     // Drain the piped stderr to prevent buffer backpressure from blocking
     // the child process. Write output to the session log if configured.
+    // Known credential values are redacted before writing to the log.
     if (transport.stderr) {
       transport.stderr.on('data', (chunk: Buffer) => {
         if (sessionLogPath) {
           const lines = chunk.toString().trimEnd();
           if (lines) {
-            const timestamp = new Date().toISOString();
-            try {
-              appendFileSync(sessionLogPath, `${timestamp} INFO  [mcp:${serverName}] ${lines}\n`);
-            } catch { /* ignore write failures */ }
+            const redacted = redactCredentials(lines, serverCredentials);
+            logToSessionFile(sessionLogPath, `[mcp:${serverName}] ${redacted}`);
           }
         }
       });

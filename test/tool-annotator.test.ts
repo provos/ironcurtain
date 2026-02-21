@@ -7,7 +7,7 @@ import {
   type MCPToolSchema,
 } from '../src/pipeline/tool-annotator.js';
 import type { ToolAnnotation } from '../src/pipeline/types.js';
-import { getRolesForServer, ARGUMENT_ROLE_REGISTRY } from '../src/types/argument-roles.js';
+import { getRolesForServer } from '../src/types/argument-roles.js';
 
 const sampleTools: MCPToolSchema[] = [
   {
@@ -209,7 +209,9 @@ describe('Tool Annotator', () => {
 
   describe('getRolesForServer', () => {
     const gitOnlyRoles = ['git-remote-url', 'branch-name', 'commit-message', 'write-history', 'delete-history'];
-    const universalRoles = ['read-path', 'write-path', 'delete-path', 'fetch-url', 'none'];
+    const filesystemAndGitRoles = ['read-path', 'write-path', 'delete-path'];
+    const fetchOnlyRoles = ['fetch-url'];
+    const universalRoles = ['none'];
 
     it('excludes git-specific roles for filesystem server', () => {
       const roles = getRolesForServer('filesystem');
@@ -228,7 +230,7 @@ describe('Tool Annotator', () => {
     });
 
     it('always includes universal roles', () => {
-      for (const serverName of ['filesystem', 'git', 'unknown-server']) {
+      for (const serverName of ['filesystem', 'git', 'fetch', 'unknown-server']) {
         const roles = getRolesForServer(serverName);
         const roleNames = roles.map(([name]) => name);
         for (const role of universalRoles) {
@@ -237,14 +239,44 @@ describe('Tool Annotator', () => {
       }
     });
 
-    it('returns all roles when no server filtering is needed (git server)', () => {
-      const gitRoles = getRolesForServer('git');
-      expect(gitRoles.length).toBe(ARGUMENT_ROLE_REGISTRY.size);
+    it('includes filesystem/git path roles for both servers', () => {
+      for (const serverName of ['filesystem', 'git']) {
+        const roles = getRolesForServer(serverName);
+        const roleNames = roles.map(([name]) => name);
+        for (const role of filesystemAndGitRoles) {
+          expect(roleNames).toContain(role);
+        }
+      }
     });
 
-    it('returns fewer roles for non-git servers', () => {
+    it('excludes filesystem path roles from fetch server', () => {
+      const roles = getRolesForServer('fetch');
+      const roleNames = roles.map(([name]) => name);
+      for (const role of filesystemAndGitRoles) {
+        expect(roleNames).not.toContain(role);
+      }
+    });
+
+    it('includes fetch-url only for fetch server', () => {
+      const fetchRoles = getRolesForServer('fetch');
+      const fetchRoleNames = fetchRoles.map(([name]) => name);
+      for (const role of fetchOnlyRoles) {
+        expect(fetchRoleNames).toContain(role);
+      }
+
       const fsRoles = getRolesForServer('filesystem');
-      expect(fsRoles.length).toBeLessThan(ARGUMENT_ROLE_REGISTRY.size);
+      const fsRoleNames = fsRoles.map(([name]) => name);
+      for (const role of fetchOnlyRoles) {
+        expect(fsRoleNames).not.toContain(role);
+      }
+    });
+
+    it('git server gets the most roles (path + git-specific + universal)', () => {
+      const gitRoles = getRolesForServer('git');
+      const fsRoles = getRolesForServer('filesystem');
+      const fetchRoles = getRolesForServer('fetch');
+      expect(gitRoles.length).toBeGreaterThan(fsRoles.length);
+      expect(gitRoles.length).toBeGreaterThan(fetchRoles.length);
     });
   });
 

@@ -1,7 +1,9 @@
 import { homedir } from 'node:os';
 import { describe, it, expect } from 'vitest';
 import type { CompiledPolicyFile, ToolAnnotationsFile } from '../src/pipeline/types.js';
-import { PolicyEngine, domainMatchesAllowlist } from '../src/trusted-process/policy-engine.js';
+import { PolicyEngine, domainMatchesAllowlist, isIpAddress } from '../src/trusted-process/policy-engine.js';
+import { extractServerDomainAllowlists } from '../src/config/index.js';
+import type { MCPServerConfig } from '../src/config/types.js';
 import type { ToolCallRequest } from '../src/types/mcp.js';
 import { testCompiledPolicy, testToolAnnotations, TEST_SANDBOX_DIR, TEST_PROTECTED_PATHS } from './fixtures/test-policy.js';
 
@@ -642,6 +644,96 @@ describe('PolicyEngine', () => {
 
     it('returns false for empty allowlist', () => {
       expect(domainMatchesAllowlist('github.com', [])).toBe(false);
+    });
+
+    it('wildcard * does not match IPv4 address (SSRF protection)', () => {
+      expect(domainMatchesAllowlist('127.0.0.1', ['*'])).toBe(false);
+      expect(domainMatchesAllowlist('10.0.0.1', ['*'])).toBe(false);
+      expect(domainMatchesAllowlist('169.254.169.254', ['*'])).toBe(false);
+    });
+
+    it('wildcard * does not match IPv6 address (SSRF protection)', () => {
+      expect(domainMatchesAllowlist('::1', ['*'])).toBe(false);
+      expect(domainMatchesAllowlist('[::1]', ['*'])).toBe(false);
+    });
+
+    it('explicit IP in allowlist matches (SSRF opt-in)', () => {
+      expect(domainMatchesAllowlist('192.168.1.100', ['*', '192.168.1.100'])).toBe(true);
+    });
+
+    it('explicit IP without wildcard matches', () => {
+      expect(domainMatchesAllowlist('192.168.1.100', ['192.168.1.100'])).toBe(true);
+    });
+
+    it('non-matching explicit IP does not match', () => {
+      expect(domainMatchesAllowlist('10.0.0.1', ['192.168.1.100'])).toBe(false);
+    });
+  });
+
+  describe('isIpAddress', () => {
+    it('detects IPv4 addresses', () => {
+      expect(isIpAddress('127.0.0.1')).toBe(true);
+      expect(isIpAddress('10.0.0.1')).toBe(true);
+      expect(isIpAddress('169.254.169.254')).toBe(true);
+      expect(isIpAddress('192.168.1.100')).toBe(true);
+    });
+
+    it('detects IPv6 addresses', () => {
+      expect(isIpAddress('::1')).toBe(true);
+      expect(isIpAddress('[::1]')).toBe(true);
+      expect(isIpAddress('fe80::1')).toBe(true);
+    });
+
+    it('does not match domain names', () => {
+      expect(isIpAddress('github.com')).toBe(false);
+      expect(isIpAddress('api.example.com')).toBe(false);
+      expect(isIpAddress('localhost')).toBe(false);
+    });
+  });
+
+  describe('extractServerDomainAllowlists', () => {
+    it('preserves * wildcard in allowlist', () => {
+      const servers: Record<string, MCPServerConfig> = {
+        fetch: {
+          command: 'node',
+          args: ['server.js'],
+          sandbox: { network: { allowedDomains: ['*'] } },
+        },
+      };
+      const result = extractServerDomainAllowlists(servers);
+      expect(result.get('fetch')).toEqual(['*']);
+    });
+
+    it('preserves * alongside explicit domains', () => {
+      const servers: Record<string, MCPServerConfig> = {
+        fetch: {
+          command: 'node',
+          args: ['server.js'],
+          sandbox: { network: { allowedDomains: ['*', '192.168.1.100'] } },
+        },
+      };
+      const result = extractServerDomainAllowlists(servers);
+      expect(result.get('fetch')).toEqual(['*', '192.168.1.100']);
+    });
+
+    it('skips servers without sandbox config', () => {
+      const servers: Record<string, MCPServerConfig> = {
+        filesystem: { command: 'node', args: ['server.js'] },
+      };
+      const result = extractServerDomainAllowlists(servers);
+      expect(result.has('filesystem')).toBe(false);
+    });
+
+    it('skips servers with empty allowedDomains', () => {
+      const servers: Record<string, MCPServerConfig> = {
+        fetch: {
+          command: 'node',
+          args: ['server.js'],
+          sandbox: { network: { allowedDomains: [] } },
+        },
+      };
+      const result = extractServerDomainAllowlists(servers);
+      expect(result.has('fetch')).toBe(false);
     });
   });
 
