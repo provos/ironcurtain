@@ -25,3 +25,6 @@ Thumbs.db
 
 # IronCurtain runtime
 .ironcurtain/
+
+# Out of repo references
+*-reference
