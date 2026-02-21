@@ -20,6 +20,10 @@
  *   SESSION_LOG_PATH   -- (optional) path for capturing child process stderr
  *   SANDBOX_POLICY     -- (optional) "enforce" | "warn" (default: "warn")
  *   SERVER_FILTER      -- (optional) when set, only connect to this single server name
+ *   AUTO_APPROVE_ENABLED   -- (optional) "true" to enable auto-approval of escalations
+ *   AUTO_APPROVE_MODEL_ID  -- (optional) qualified model ID for auto-approve LLM
+ *   AUTO_APPROVE_API_KEY   -- (optional) API key for the auto-approve model's provider
+ *   AUTO_APPROVE_LLM_LOG_PATH -- (optional) path to JSONL file for auto-approve LLM logging
  */
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -54,6 +58,11 @@ import type { ToolCallRequest } from '../types/mcp.js';
 import type { AuditEntry } from '../types/audit.js';
 import type { McpRoot } from './mcp-client-manager.js';
 import { CallCircuitBreaker } from './call-circuit-breaker.js';
+import { autoApprove, readUserContext } from './auto-approver.js';
+import { createLanguageModelFromEnv } from '../config/model-provider.js';
+import { wrapLanguageModel } from 'ai';
+import { createLlmLoggingMiddleware } from '../pipeline/llm-logger.js';
+import type { LanguageModelV3 } from '@ai-sdk/provider';
 import type { MCPServerConfig, SandboxAvailabilityPolicy } from '../config/types.js';
 
 interface ProxiedTool {
@@ -160,6 +169,36 @@ async function waitForEscalationDecision(
   return 'denied';
 }
 
+/**
+ * Creates the auto-approve LLM model from environment variables.
+ * Returns null when auto-approve is not enabled or env vars are missing.
+ * Wraps with LLM logging middleware when a log path is provided.
+ */
+async function createAutoApproveModel(): Promise<LanguageModelV3 | null> {
+  if (process.env.AUTO_APPROVE_ENABLED !== 'true') return null;
+
+  const modelId = process.env.AUTO_APPROVE_MODEL_ID;
+  if (!modelId) return null;
+
+  const apiKey = process.env.AUTO_APPROVE_API_KEY ?? '';
+
+  try {
+    const baseModel = await createLanguageModelFromEnv(modelId, apiKey);
+
+    const llmLogPath = process.env.AUTO_APPROVE_LLM_LOG_PATH;
+    if (!llmLogPath) return baseModel;
+
+    return wrapLanguageModel({
+      model: baseModel,
+      middleware: createLlmLoggingMiddleware(llmLogPath, { stepName: 'auto-approve' }),
+    }) as LanguageModelV3;
+  } catch {
+    // Model creation failure should not prevent the proxy from starting.
+    // Auto-approve simply won't be available for this session.
+    return null;
+  }
+}
+
 async function main(): Promise<void> {
   const auditLogPath = process.env.AUDIT_LOG_PATH ?? './audit.jsonl';
   const serversConfigJson = process.env.MCP_SERVERS_CONFIG;
@@ -202,6 +241,9 @@ async function main(): Promise<void> {
   const policyEngine = new PolicyEngine(compiledPolicy, toolAnnotations, protectedPaths, allowedDirectory, serverDomainAllowlists);
   const auditLog = new AuditLog(auditLogPath);
   const circuitBreaker = new CallCircuitBreaker();
+
+  // ── Auto-approve model setup (once at startup) ──────────────────────
+  const autoApproveModel = await createAutoApproveModel();
 
   // Compute initial roots from compiled policy for the MCP Roots protocol
   const policyRoots = extractPolicyRoots(compiledPolicy, allowedDirectory ?? '/tmp');
@@ -388,6 +430,9 @@ async function main(): Promise<void> {
     // escalation falls through to the forwarding section below.
     let escalationResult: 'approved' | 'denied' | undefined;
 
+    // Track whether auto-approver handled this escalation
+    let autoApproved = false;
+
     // Look up whether this server is sandboxed for audit logging
     const serverSandboxConfig = resolvedSandboxConfigs.get(toolInfo.serverName);
     const serverIsSandboxed = serverSandboxConfig?.sandboxed === true;
@@ -405,6 +450,7 @@ async function main(): Promise<void> {
         result,
         durationMs,
         sandboxed: serverIsSandboxed || undefined,
+        autoApproved: autoApproved || undefined,
       };
       auditLog.log(entry);
     }
@@ -422,28 +468,52 @@ async function main(): Promise<void> {
         };
       }
 
-      // File-based escalation rendezvous: write request, poll for response
-      const escalationId = uuidv4();
-      const decision = await waitForEscalationDecision(escalationDir, {
-        escalationId,
-        serverName: request.serverName,
-        toolName: request.toolName,
-        arguments: argsForTransport,
-        reason: evaluation.reason,
-      });
+      // Try auto-approve before falling through to human escalation
+      if (autoApproveModel) {
+        const userMessage = readUserContext(escalationDir);
+        if (userMessage) {
+          const autoResult = await autoApprove(
+            {
+              userMessage,
+              toolName: `${toolInfo.serverName}/${toolInfo.name}`,
+              escalationReason: evaluation.reason,
+            },
+            autoApproveModel,
+          );
 
-      if (decision === 'denied') {
-        logAudit({ status: 'denied', error: evaluation.reason }, 0, 'denied');
-        return {
-          content: [{ type: 'text', text: `ESCALATION DENIED: ${evaluation.reason}` }],
-          isError: true,
-        };
+          if (autoResult.decision === 'approve') {
+            autoApproved = true;
+            escalationResult = 'approved';
+            policyDecision.status = 'allow';
+            policyDecision.reason = `Auto-approved: ${autoResult.reasoning}`;
+          }
+        }
       }
 
-      // Approved -- update policy decision and fall through to forward the call
-      escalationResult = 'approved';
-      policyDecision.status = 'allow';
-      policyDecision.reason = 'Approved by human during escalation';
+      if (!autoApproved) {
+        // File-based escalation rendezvous: write request, poll for response
+        const escalationId = uuidv4();
+        const decision = await waitForEscalationDecision(escalationDir, {
+          escalationId,
+          serverName: request.serverName,
+          toolName: request.toolName,
+          arguments: argsForTransport,
+          reason: evaluation.reason,
+        });
+
+        if (decision === 'denied') {
+          logAudit({ status: 'denied', error: evaluation.reason }, 0, 'denied');
+          return {
+            content: [{ type: 'text', text: `ESCALATION DENIED: ${evaluation.reason}` }],
+            isError: true,
+          };
+        }
+
+        // Approved by human -- update policy decision and fall through
+        escalationResult = 'approved';
+        policyDecision.status = 'allow';
+        policyDecision.reason = 'Approved by human during escalation';
+      }
 
       // Expand roots to include target directories so the filesystem
       // server accepts the forwarded call.

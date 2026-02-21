@@ -73,11 +73,8 @@ export function parseModelId(qualifiedId: string): ParsedModelId {
 /**
  * Creates a LanguageModel from a qualified model ID and user config.
  *
- * Provider packages are dynamically imported so that only the packages
- * for providers actually in use need to be installed.
- *
- * API key validation is deferred to the first API call -- the AI SDK
- * providers give better error messages than we could produce here.
+ * Resolves the API key from config based on the model's provider,
+ * then delegates to createLanguageModelFromEnv().
  *
  * @param qualifiedId - Model specifier like "anthropic:claude-sonnet-4-6"
  * @param config - Resolved user config for API key lookup
@@ -87,23 +84,55 @@ export async function createLanguageModel(
   qualifiedId: string,
   config: ResolvedUserConfig,
 ): Promise<LanguageModelV3> {
+  const { provider } = parseModelId(qualifiedId);
+  return createLanguageModelFromEnv(qualifiedId, resolveApiKeyForProvider(provider, config));
+}
+
+/**
+ * Creates a LanguageModel from a qualified model ID and an explicit API key.
+ *
+ * Unlike createLanguageModel(), this does not require a ResolvedUserConfig.
+ * Designed for use in the proxy process, which receives the model ID and
+ * API key via environment variables.
+ *
+ * @param qualifiedId - Model specifier like "anthropic:claude-haiku-4-5"
+ * @param apiKey - Explicit API key for the model's provider (empty string uses env/default)
+ * @returns A LanguageModelV3 instance ready for use with generateText()
+ */
+export async function createLanguageModelFromEnv(
+  qualifiedId: string,
+  apiKey: string,
+): Promise<LanguageModelV3> {
   const { provider, modelId } = parseModelId(qualifiedId);
+  const key = apiKey || undefined;
 
   switch (provider) {
     case 'anthropic': {
       const { createAnthropic } = await import('@ai-sdk/anthropic');
-      const apiKey = config.anthropicApiKey || undefined;
-      return createAnthropic({ apiKey })(modelId);
+      return createAnthropic({ apiKey: key })(modelId);
     }
     case 'google': {
       const { createGoogleGenerativeAI } = await import('@ai-sdk/google');
-      const apiKey = config.googleApiKey || undefined;
-      return createGoogleGenerativeAI({ apiKey })(modelId);
+      return createGoogleGenerativeAI({ apiKey: key })(modelId);
     }
     case 'openai': {
       const { createOpenAI } = await import('@ai-sdk/openai');
-      const apiKey = config.openaiApiKey || undefined;
-      return createOpenAI({ apiKey })(modelId);
+      return createOpenAI({ apiKey: key })(modelId);
     }
+  }
+}
+
+/**
+ * Resolves the API key for a given provider from user config.
+ * Returns empty string when no key is configured.
+ */
+export function resolveApiKeyForProvider(
+  provider: ProviderId,
+  config: ResolvedUserConfig,
+): string {
+  switch (provider) {
+    case 'anthropic': return config.anthropicApiKey;
+    case 'google': return config.googleApiKey;
+    case 'openai': return config.openaiApiKey;
   }
 }

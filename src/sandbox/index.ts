@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 import '@utcp/mcp'; // Register MCP call template type with UTCP SDK
 import { CodeModeUtcpClient } from '@utcp/code-mode';
 import type { IronCurtainConfig } from '../config/types.js';
+import { parseModelId, resolveApiKeyForProvider } from '../config/model-provider.js';
 
 // Detect compiled (.js in dist/) vs source (.ts in src/) mode.
 // In compiled mode, spawn with `node`; in source mode, spawn with `npx tsx`.
@@ -119,6 +120,19 @@ export class Sandbox {
 
     // Pass sandbox availability policy to the proxy process
     proxyEnv.SANDBOX_POLICY = config.sandboxPolicy ?? 'warn';
+
+    // Pass auto-approve config to the proxy when enabled.
+    // The proxy creates its own model instance from these env vars.
+    const autoApprove = config.userConfig.autoApprove;
+    if (autoApprove.enabled) {
+      proxyEnv.AUTO_APPROVE_ENABLED = 'true';
+      proxyEnv.AUTO_APPROVE_MODEL_ID = autoApprove.modelId;
+      const { provider } = parseModelId(autoApprove.modelId);
+      proxyEnv.AUTO_APPROVE_API_KEY = resolveApiKeyForProvider(provider, config.userConfig);
+      if (config.autoApproveLlmLogPath) {
+        proxyEnv.AUTO_APPROVE_LLM_LOG_PATH = config.autoApproveLlmLogPath;
+      }
+    }
 
     // Register one proxy per backend server so UTCP names them cleanly:
     //   tools.<serverName>_<toolName>(...)

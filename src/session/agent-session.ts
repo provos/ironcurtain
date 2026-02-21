@@ -169,6 +169,10 @@ export class AgentSession implements Session {
     try {
       this.messages.push({ role: 'user', content: userMessage });
 
+      // Write user context for the auto-approver in the proxy process.
+      // The file is overwritten each turn. The proxy reads it only on escalation.
+      this.writeUserContext(userMessage);
+
       // Auto-compact older messages if the previous turn exceeded the threshold
       if (this.compactor.shouldCompact()) {
         const compactionResult = await this.compactor.compact(
@@ -466,6 +470,20 @@ export class AgentSession implements Session {
       this.onEscalation?.(request);
     } catch {
       // Directory may not exist yet or be empty -- ignore
+    }
+  }
+
+  /**
+   * Writes the user's message to the escalation directory for the auto-approver.
+   * Silently ignores write failures -- the auto-approver treats a missing file
+   * as "no context" and falls through to human escalation.
+   */
+  private writeUserContext(userMessage: string): void {
+    try {
+      const contextPath = resolve(this.escalationDir, 'user-context.json');
+      writeFileSync(contextPath, JSON.stringify({ userMessage }));
+    } catch {
+      // Escalation directory may not exist yet -- ignore
     }
   }
 

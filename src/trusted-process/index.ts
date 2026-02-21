@@ -1,11 +1,14 @@
+import type { LanguageModelV3 } from '@ai-sdk/provider';
 import type { IronCurtainConfig } from '../config/types.js';
 import type { ToolCallRequest, ToolCallResult, PolicyDecision } from '../types/mcp.js';
 import type { AuditEntry } from '../types/audit.js';
 import { loadGeneratedPolicy, extractServerDomainAllowlists } from '../config/index.js';
+import { createLanguageModel } from '../config/model-provider.js';
 import { PolicyEngine } from './policy-engine.js';
 import { MCPClientManager, type McpRoot } from './mcp-client-manager.js';
 import { AuditLog } from './audit-log.js';
 import { EscalationHandler } from './escalation.js';
+import { autoApprove } from './auto-approver.js';
 import { prepareToolArgs } from './path-utils.js';
 import { extractPolicyRoots, toMcpRoots, directoryForPath } from './policy-roots.js';
 import * as logger from '../logger.js';
@@ -23,6 +26,8 @@ export class TrustedProcess {
   private auditLog: AuditLog;
   private escalation: EscalationHandler;
   private onEscalation?: EscalationPromptFn;
+  private autoApproveModel: LanguageModelV3 | null = null;
+  private lastUserMessage: string | null = null;
 
   constructor(private config: IronCurtainConfig, options?: TrustedProcessOptions) {
     const { compiledPolicy, toolAnnotations } = loadGeneratedPolicy(config.generatedDir);
@@ -39,11 +44,34 @@ export class TrustedProcess {
     this.onEscalation = options?.onEscalation;
   }
 
+  /**
+   * Sets the most recent user message for auto-approval context.
+   * Called by the session layer before each agent turn.
+   */
+  setLastUserMessage(message: string): void {
+    this.lastUserMessage = message;
+  }
+
   async initialize(): Promise<void> {
     for (const [name, serverConfig] of Object.entries(this.config.mcpServers)) {
       logger.info(`Connecting to MCP server: ${name}...`);
       await this.mcpManager.connect(name, serverConfig, this.mcpRoots);
       logger.info(`Connected to MCP server: ${name}`);
+    }
+
+    // Create auto-approve model if enabled
+    const autoApproveConfig = this.config.userConfig.autoApprove;
+    if (autoApproveConfig.enabled) {
+      try {
+        this.autoApproveModel = await createLanguageModel(
+          autoApproveConfig.modelId,
+          this.config.userConfig,
+        );
+      } catch {
+        // Model creation failure should not prevent initialization.
+        // Auto-approve simply won't be available.
+        logger.warn('[auto-approve] Failed to create model; auto-approve disabled');
+      }
     }
   }
 
@@ -77,23 +105,51 @@ export class TrustedProcess {
     };
 
     let escalationResult: 'approved' | 'denied' | undefined;
+    let autoApproved = false;
     let resultContent: unknown;
     let resultStatus: 'success' | 'denied' | 'error';
     let resultError: string | undefined;
 
     try {
-      // Step 2: Handle escalation via human approval
+      // Step 2: Handle escalation -- try auto-approve first, then human
       if (evaluation.decision === 'escalate') {
-        escalationResult = this.onEscalation
-          ? await this.onEscalation(transportRequest, evaluation.reason)
-          : await this.escalation.prompt(transportRequest, evaluation.reason);
+        // Try auto-approve before prompting the human
+        if (this.autoApproveModel && this.lastUserMessage) {
+          const autoResult = await autoApprove(
+            {
+              userMessage: this.lastUserMessage,
+              toolName: `${request.serverName}/${request.toolName}`,
+              escalationReason: evaluation.reason,
+            },
+            this.autoApproveModel,
+          );
 
+          if (autoResult.decision === 'approve') {
+            autoApproved = true;
+            escalationResult = 'approved';
+            policyDecision.status = 'allow';
+            policyDecision.reason = `Auto-approved: ${autoResult.reasoning}`;
+          }
+        }
+
+        // Fall through to human escalation if not auto-approved
+        if (!autoApproved) {
+          escalationResult = this.onEscalation
+            ? await this.onEscalation(transportRequest, evaluation.reason)
+            : await this.escalation.prompt(transportRequest, evaluation.reason);
+
+          if (escalationResult === 'approved') {
+            policyDecision.status = 'allow';
+            policyDecision.reason = 'Approved by human during escalation';
+          } else {
+            policyDecision.status = 'deny';
+            policyDecision.reason = 'Denied by human during escalation';
+          }
+        }
+
+        // Expand roots to include target directories so the filesystem
+        // server accepts the forwarded call (for both auto and human approval).
         if (escalationResult === 'approved') {
-          policyDecision.status = 'allow';
-          policyDecision.reason = 'Approved by human during escalation';
-
-          // Expand roots to include target directories so the filesystem
-          // server accepts the forwarded call.
           const paths = Object.values(transportRequest.arguments).filter(
             (v): v is string => typeof v === 'string',
           );
@@ -104,9 +160,6 @@ export class TrustedProcess {
               name: 'escalation-approved',
             });
           }
-        } else {
-          policyDecision.status = 'deny';
-          policyDecision.reason = 'Denied by human during escalation';
         }
       }
 
@@ -158,6 +211,7 @@ export class TrustedProcess {
         error: resultError,
       },
       durationMs,
+      autoApproved: autoApproved || undefined,
     };
     this.auditLog.log(auditEntry);
 

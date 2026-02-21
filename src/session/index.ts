@@ -15,6 +15,7 @@ import {
   getSessionAuditLogPath,
   getSessionLogPath,
   getSessionLlmLogPath,
+  getSessionAutoApproveLlmLogPath,
 } from '../config/paths.js';
 import * as logger from '../logger.js';
 import { AgentSession } from './agent-session.js';
@@ -67,6 +68,7 @@ export async function createSession(options: SessionOptions = {}): Promise<Sessi
 
   const sessionLogPath = getSessionLogPath(effectiveSessionId);
   const llmLogPath = getSessionLlmLogPath(effectiveSessionId);
+  const autoApproveLlmLogPath = getSessionAutoApproveLlmLogPath(effectiveSessionId);
 
   // Set up session logging -- captures all console output to file
   logger.setup({ logFilePath: sessionLogPath });
@@ -88,6 +90,7 @@ export async function createSession(options: SessionOptions = {}): Promise<Sessi
     escalationDir,
     sessionLogPath,
     llmLogPath,
+    autoApproveLlmLogPath,
     mcpServers: JSON.parse(JSON.stringify(config.mcpServers)),
   };
 

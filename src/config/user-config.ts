@@ -29,6 +29,10 @@ export const USER_CONFIG_DEFAULTS = {
     keepRecentMessages: 10,
     summaryModelId: 'anthropic:claude-haiku-4-5',
   },
+  autoApprove: {
+    enabled: false,
+    modelId: 'anthropic:claude-haiku-4-5',
+  },
 } as const;
 
 const ESCALATION_TIMEOUT_MIN = 30;
@@ -69,6 +73,11 @@ const autoCompactSchema = z.object({
   summaryModelId: qualifiedModelId.optional(),
 }).optional();
 
+const autoApproveSchema = z.object({
+  enabled: z.boolean().optional(),
+  modelId: qualifiedModelId.optional(),
+}).optional();
+
 /**
  * Zod schema for validating user config. All fields optional.
  * Validates types and constraints without applying defaults --
@@ -88,6 +97,7 @@ const userConfigSchema = z.object({
     .optional(),
   resourceBudget: resourceBudgetSchema,
   autoCompact: autoCompactSchema,
+  autoApprove: autoApproveSchema,
 });
 
 /** Parsed config from ~/.ironcurtain/config.json. All fields optional. */
@@ -110,6 +120,12 @@ export interface ResolvedAutoCompactConfig {
   readonly summaryModelId: string;
 }
 
+/** Resolved auto-approve config with all fields present. */
+export interface ResolvedAutoApproveConfig {
+  readonly enabled: boolean;
+  readonly modelId: string;
+}
+
 /** Validated, defaults-applied configuration. All fields present. */
 export interface ResolvedUserConfig {
   readonly agentModelId: string;
@@ -120,6 +136,7 @@ export interface ResolvedUserConfig {
   readonly escalationTimeoutSeconds: number;
   readonly resourceBudget: ResolvedResourceBudgetConfig;
   readonly autoCompact: ResolvedAutoCompactConfig;
+  readonly autoApprove: ResolvedAutoApproveConfig;
 }
 
 /** Known fields derived from the schema. Used for unknown-field detection. */
@@ -141,6 +158,7 @@ const DEFAULT_CONFIG_CONTENT = JSON.stringify(
     escalationTimeoutSeconds: USER_CONFIG_DEFAULTS.escalationTimeoutSeconds,
     resourceBudget: USER_CONFIG_DEFAULTS.resourceBudget,
     autoCompact: USER_CONFIG_DEFAULTS.autoCompact,
+    autoApprove: USER_CONFIG_DEFAULTS.autoApprove,
   },
   null,
   2,
@@ -331,8 +349,10 @@ function validateConfig(parsed: unknown, configPath: string): UserConfig {
 function mergeWithDefaults(config: UserConfig): ResolvedUserConfig {
   const budgetDefaults = USER_CONFIG_DEFAULTS.resourceBudget;
   const compactDefaults = USER_CONFIG_DEFAULTS.autoCompact;
+  const approveDefaults = USER_CONFIG_DEFAULTS.autoApprove;
   const b = config.resourceBudget;
   const c = config.autoCompact;
+  const a = config.autoApprove;
   return {
     agentModelId: config.agentModelId ?? USER_CONFIG_DEFAULTS.agentModelId,
     policyModelId: config.policyModelId ?? USER_CONFIG_DEFAULTS.policyModelId,
@@ -355,6 +375,10 @@ function mergeWithDefaults(config: UserConfig): ResolvedUserConfig {
       thresholdTokens: c?.thresholdTokens ?? compactDefaults.thresholdTokens,
       keepRecentMessages: c?.keepRecentMessages ?? compactDefaults.keepRecentMessages,
       summaryModelId: c?.summaryModelId ?? compactDefaults.summaryModelId,
+    },
+    autoApprove: {
+      enabled: a?.enabled ?? approveDefaults.enabled,
+      modelId: a?.modelId ?? approveDefaults.modelId,
     },
   };
 }

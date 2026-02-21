@@ -45,6 +45,7 @@ function createUserConfig(): ResolvedUserConfig {
       warnThresholdPercent: 80,
     },
     autoCompact: createConfig(),
+    autoApprove: { enabled: false, modelId: 'anthropic:claude-haiku-4-5' },
   };
 }
 

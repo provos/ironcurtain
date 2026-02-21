@@ -42,6 +42,13 @@ function createTestUserConfig(overrides: Partial<ResolvedUserConfig> = {}): Reso
       maxEstimatedCostUsd: 5.00,
       warnThresholdPercent: 80,
     },
+    autoCompact: {
+      enabled: true,
+      thresholdTokens: 160_000,
+      keepRecentMessages: 10,
+      summaryModelId: 'anthropic:claude-haiku-4-5',
+    },
+    autoApprove: { enabled: false, modelId: 'anthropic:claude-haiku-4-5' },
     ...overrides,
   };
 }

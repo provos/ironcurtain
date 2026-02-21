@@ -16,4 +16,9 @@ export interface AuditEntry {
   durationMs: number;
   /** Whether the MCP server process was running inside an OS-level sandbox. */
   sandboxed?: boolean;
+  /**
+   * When true, the escalation was approved by the auto-approver
+   * rather than a human. Only present when escalationResult is 'approved'.
+   */
+  autoApproved?: boolean;
 }

@@ -100,6 +100,7 @@ describe('Integration: TrustedProcess with filesystem MCP server', () => {
           keepRecentMessages: 10,
           summaryModelId: 'anthropic:claude-haiku-4-5',
         },
+        autoApprove: { enabled: false, modelId: 'anthropic:claude-haiku-4-5' },
       },
     };
 

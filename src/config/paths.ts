@@ -76,6 +76,14 @@ export function getSessionLlmLogPath(sessionId: string): string {
 }
 
 /**
+ * Returns the auto-approver LLM interaction log path for a given session:
+ *   {home}/sessions/{sessionId}/auto-approve-llm.jsonl
+ */
+export function getSessionAutoApproveLlmLogPath(sessionId: string): string {
+  return resolve(getSessionDir(sessionId), 'auto-approve-llm.jsonl');
+}
+
+/**
  * Returns the user config file path: {home}/config.json
  */
 export function getUserConfigPath(): string {

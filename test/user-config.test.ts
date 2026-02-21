@@ -386,6 +386,65 @@ describe('loadUserConfig', () => {
     expect(budget.warnThresholdPercent).toBe(USER_CONFIG_DEFAULTS.resourceBudget.warnThresholdPercent);
   });
 
+  // --- autoApprove config ---
+
+  it('default config has autoApprove.enabled === false', () => {
+    const config = loadUserConfig();
+
+    expect(config.autoApprove.enabled).toBe(false);
+    expect(config.autoApprove.modelId).toBe(USER_CONFIG_DEFAULTS.autoApprove.modelId);
+  });
+
+  it('reads autoApprove enabled and modelId from config file', () => {
+    writeConfigFile({
+      autoApprove: { enabled: true, modelId: 'anthropic:claude-haiku-4-5' },
+    });
+
+    const config = loadUserConfig();
+
+    expect(config.autoApprove.enabled).toBe(true);
+    expect(config.autoApprove.modelId).toBe('anthropic:claude-haiku-4-5');
+  });
+
+  it('merges partial autoApprove with defaults', () => {
+    writeConfigFile({
+      autoApprove: { enabled: true },
+    });
+
+    const config = loadUserConfig();
+
+    expect(config.autoApprove.enabled).toBe(true);
+    expect(config.autoApprove.modelId).toBe(USER_CONFIG_DEFAULTS.autoApprove.modelId);
+  });
+
+  it('rejects autoApprove with invalid modelId', () => {
+    writeConfigFile({
+      autoApprove: { enabled: true, modelId: 'unknown:model' },
+    });
+
+    expect(() => loadUserConfig()).toThrow(/provider/i);
+  });
+
+  it('backfills autoApprove section when missing from existing config', () => {
+    writeConfigFile({ agentModelId: 'claude-opus-4-6' });
+
+    loadUserConfig();
+
+    const onDisk = readConfigFromDisk();
+    expect(onDisk.autoApprove).toEqual(USER_CONFIG_DEFAULTS.autoApprove);
+  });
+
+  it('backfills missing sub-fields in existing autoApprove object', () => {
+    writeConfigFile({ autoApprove: { enabled: true } });
+
+    loadUserConfig();
+
+    const onDisk = readConfigFromDisk();
+    const autoApprove = onDisk.autoApprove as Record<string, unknown>;
+    expect(autoApprove.enabled).toBe(true);
+    expect(autoApprove.modelId).toBe(USER_CONFIG_DEFAULTS.autoApprove.modelId);
+  });
+
   it('skips backfill on invalid JSON (file unchanged)', () => {
     const invalidJson = '{ invalid json }';
     writeRawConfigFile(invalidJson);
