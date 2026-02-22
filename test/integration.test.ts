@@ -230,20 +230,31 @@ describe('Integration: TrustedProcess with filesystem MCP server', () => {
   });
 
   it('escalates reading outside the sandbox -- approved by human', async () => {
+    // Create a file in a known-accessible temp directory outside the sandbox
+    const outsideDir = `/tmp/ironcurtain-outside-${process.pid}`;
+    mkdirSync(outsideDir, { recursive: true });
+    writeFileSync(`${outsideDir}/readable.txt`, 'escalation-test-content');
+
     escalationResponse = 'approved';
     lastEscalationRequest = null;
 
-    const result = await trustedProcess.handleToolCall(
-      makeRequest({
-        toolName: 'read_file',
-        arguments: { path: '/etc/hostname' },
-      }),
-    );
+    try {
+      const result = await trustedProcess.handleToolCall(
+        makeRequest({
+          toolName: 'read_file',
+          arguments: { path: `${outsideDir}/readable.txt` },
+        }),
+      );
 
-    expect(lastEscalationRequest).not.toBeNull();
-    expect(lastEscalationRequest!.toolName).toBe('read_file');
-    // The policy engine escalated and the human approved
-    expect(result.policyDecision.reason).toBe('Approved by human during escalation');
+      expect(lastEscalationRequest).not.toBeNull();
+      expect(lastEscalationRequest!.toolName).toBe('read_file');
+      // The policy engine escalated and the human approved
+      expect(result.policyDecision.reason).toBe('Approved by human during escalation');
+      // Root expansion must succeed: the call was forwarded (not denied)
+      expect(result.status).not.toBe('denied');
+    } finally {
+      rmSync(outsideDir, { recursive: true, force: true });
+    }
   });
 
   it('reports error status when MCP server returns isError (e.g. file not found)', async () => {
