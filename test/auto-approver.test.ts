@@ -140,7 +140,7 @@ describe('extractArgsForAutoApprove', () => {
     expect(result).toEqual({ path: '/tmp/repo' });
   });
 
-  it('applies prepareForPolicy for URL roles (extracts domain)', () => {
+  it('extracts domain for URL roles', () => {
     const annotation: ToolAnnotation = {
       ...baseAnnotation,
       toolName: 'fetch',

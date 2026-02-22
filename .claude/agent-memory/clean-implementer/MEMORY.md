@@ -30,9 +30,9 @@
 - **Re-exported from**: `src/pipeline/types.ts` (backward compat: `ArgumentRole`, `isArgumentRole`, `getArgumentRoleValues`)
 - **8 roles**: `read-path`, `write-path`, `delete-path`, `fetch-url`, `git-remote-url`, `branch-name`, `commit-message`, `none`
 - **RoleCategory**: `'path' | 'url' | 'opaque'` -- determines which structural invariant applies
-- **RoleDefinition fields**: `description`, `isResourceIdentifier`, `category`, `normalize`, `prepareForPolicy?`, `resolveForPolicy?`, `annotationGuidance`
+- **RoleDefinition fields**: `description`, `isResourceIdentifier`, `category`, `canonicalize`, `annotationGuidance`
 - **Category accessors**: `getRolesByCategory()`, `getPathRoles()`, `getUrlRoles()`, `getResourceRoles()`
-- **URL normalizers**: `normalizeUrl()`, `extractDomain()`, `normalizeGitUrl()`, `extractGitDomain()`, `resolveGitRemote()`
+- **URL normalizers** (in `src/trusted-process/domain-utils.ts`): `normalizeUrl()`, `extractDomain()`, `normalizeGitUrl()`, `extractGitDomain()`, `resolveGitRemote()`
 - **resolveGitRemote()**: uses `execFileSync` (not `execSync`) for safety; resolves named remotes to URLs via `git remote get-url`
 - **prepareToolArgs()**: in `src/trusted-process/path-utils.ts` -- annotation-driven normalization, returns `{ argsForTransport, argsForPolicy }`
 - **PolicyEngine.getAnnotation()**: public method to look up ToolAnnotation for a tool

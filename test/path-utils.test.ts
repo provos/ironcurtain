@@ -163,7 +163,7 @@ describe('prepareToolArgs', () => {
     expect(argsForPolicy.content).toBe('/etc/passwd');
   });
 
-  it('returns identical argsForTransport and argsForPolicy when no prepareForPolicy defined', () => {
+  it('returns identical argsForTransport and argsForPolicy for path roles', () => {
     const { argsForTransport, argsForPolicy } = prepareToolArgs(
       { path: '~/test/file.txt', content: 'hello' },
       annotation,

@@ -26,6 +26,7 @@ import type { LanguageModelV3 } from '@ai-sdk/provider';
 import { generateText, Output } from 'ai';
 import { z } from 'zod';
 import { getRoleDefinition } from '../types/argument-roles.js';
+import { extractDomainForRole } from './domain-utils.js';
 import type { ToolAnnotation } from '../pipeline/types.js';
 
 // ---------------------------------------------------------------------------
@@ -203,8 +204,8 @@ export function sanitizeForPrompt(value: string): string {
  * Extracts sanitized resource-identifier arguments for the auto-approver prompt.
  *
  * Only arguments whose first role has `isResourceIdentifier: true` are included.
- * URL roles have `prepareForPolicy` applied (extracts domain). All values are
- * sanitized for safe inclusion in an LLM prompt.
+ * URL-category roles have their domain extracted. All values are sanitized for
+ * safe inclusion in an LLM prompt.
  *
  * Returns undefined when no resource-identifier arguments are found.
  */
@@ -220,7 +221,9 @@ export function extractArgsForAutoApprove(
     const roles = annotation.args[argName];
     if (!roles || roles.length === 0) continue;
 
-    // Use the first role assigned to this argument
+    // TODO: only looks at roles[0]; if an argument has mixed-category roles
+    // (e.g., ['read-path', 'fetch-url']), the URL domain extraction may be skipped.
+    // Current annotations never mix categories, but this should be revisited if that changes.
     const roleDef = getRoleDefinition(roles[0]);
     if (!roleDef.isResourceIdentifier) continue;
 
@@ -236,9 +239,9 @@ export function extractArgsForAutoApprove(
       continue;
     }
 
-    // Apply prepareForPolicy if available (e.g., extract domain from URL)
-    if (roleDef.prepareForPolicy) {
-      stringValue = roleDef.prepareForPolicy(stringValue);
+    // Extract domain for URL-category roles (values are already canonicalized)
+    if (roleDef.category === 'url') {
+      stringValue = extractDomainForRole(stringValue, roles[0]);
     }
 
     result[argName] = sanitizeForPrompt(stringValue);

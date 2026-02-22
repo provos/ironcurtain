@@ -13,10 +13,10 @@
  *   - opaque: no structural invariant (semantic meaning only)
  */
 
-import { execFileSync } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { resolve, dirname, basename, join } from 'node:path';
+import { normalizeUrl, normalizeGitUrl } from '../trusted-process/domain-utils.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -45,15 +45,8 @@ export interface RoleDefinition {
   readonly description: string;
   readonly isResourceIdentifier: boolean;
   readonly category: RoleCategory;
-  readonly normalize: (value: string) => string;
-  /** Extract the policy-relevant value (e.g., domain from URL). */
-  readonly prepareForPolicy?: (value: string) => string;
-  /**
-   * Context-aware resolution for values that need sibling arguments.
-   * E.g., resolving named git remote "origin" to its URL using the
-   * `path` argument from the same tool call.
-   */
-  readonly resolveForPolicy?: (value: string, allArgs: Record<string, unknown>) => string;
+  /** Produce canonical form (symlink resolution, URL normalization). Security-critical. */
+  readonly canonicalize: (value: string) => string;
   /**
    * Guidance for the LLM annotation prompt. Built into the prompt
    * dynamically from the registry -- no manual prompt maintenance.
@@ -112,83 +105,6 @@ function identity(value: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// URL normalizers and domain extractors
-// ---------------------------------------------------------------------------
-
-/** Normalizes an HTTP(S) URL to a canonical form. Returns value as-is on parse failure. */
-export function normalizeUrl(value: string): string {
-  try {
-    const url = new URL(value);
-    if (url.pathname === '/') url.pathname = '';
-    return url.toString().replace(/\/$/, '');
-  } catch {
-    return value;
-  }
-}
-
-/** Extracts the hostname from an HTTP(S) URL. Returns value as-is on parse failure. */
-export function extractDomain(value: string): string {
-  try {
-    return new URL(value).hostname;
-  } catch {
-    return value;
-  }
-}
-
-/** Normalizes a git URL (HTTP or SSH format). SSH URLs are returned as-is. */
-export function normalizeGitUrl(value: string): string {
-  // SSH format: git@host:path -- no further normalization needed
-  const sshMatch = value.match(/^(?:[\w.+-]+@)?([^:]+):/);
-  if (sshMatch && !value.includes('://')) return value;
-  return normalizeUrl(value);
-}
-
-/** Extracts the domain from a git URL (HTTP or SSH format). */
-export function extractGitDomain(value: string): string {
-  // SSH format: git@host:path
-  const sshMatch = value.match(/^(?:[\w.+-]+@)?([^:]+):/);
-  if (sshMatch && !value.includes('://')) return sshMatch[1];
-  return extractDomain(value);
-}
-
-/**
- * Resolves a git remote value to a URL for policy evaluation.
- *
- * If the value is already a URL (contains :// or matches SSH pattern),
- * returns it as-is. Otherwise, treats it as a named remote and runs
- * `git remote get-url <name>` in the repository directory (found via
- * the `path` sibling argument).
- *
- * Uses execFileSync (not execSync) to avoid command injection --
- * the value comes from agent-controlled tool call arguments.
- *
- * When resolution fails (repo doesn't exist, remote not found, git
- * not installed), returns the original value. This causes the domain
- * check to escalate (the value won't match any allowed domain),
- * which is the correct behavior -- escalate when we can't verify.
- */
-export function resolveGitRemote(value: string, allArgs: Record<string, unknown>): string {
-  // Already a URL -- return as-is
-  if (value.includes('://') || /^[\w.+-]+@[^:]+:/.test(value)) {
-    return value;
-  }
-
-  // Named remote -- resolve via git (no shell, no injection risk)
-  const rawPath = typeof allArgs.path === 'string' ? allArgs.path : '.';
-  const repoPath = resolve(rawPath);
-  try {
-    return execFileSync('git', ['remote', 'get-url', value], {
-      cwd: repoPath,
-      encoding: 'utf-8',
-      timeout: 5000,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    }).trim();
-  } catch {
-    return value; // Resolution failed -- escalation will catch it
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Registry
 // ---------------------------------------------------------------------------
 
@@ -199,7 +115,7 @@ const registryEntries: [ArgumentRole, RoleDefinition][] = [
       description: 'Filesystem path that will be read',
       isResourceIdentifier: true,
       category: 'path',
-      normalize: normalizePath,
+      canonicalize: normalizePath,
       annotationGuidance:
         'Assign to arguments that are filesystem paths the tool will read from. ' +
         'Includes file and directory paths used for input.',
@@ -212,7 +128,7 @@ const registryEntries: [ArgumentRole, RoleDefinition][] = [
       description: 'Filesystem path that will be written to',
       isResourceIdentifier: true,
       category: 'path',
-      normalize: normalizePath,
+      canonicalize: normalizePath,
       annotationGuidance:
         'Assign to arguments that are filesystem paths the tool will write or create. ' +
         'Includes destination paths for file creation and modification.',
@@ -225,7 +141,7 @@ const registryEntries: [ArgumentRole, RoleDefinition][] = [
       description: 'Filesystem path that will be deleted',
       isResourceIdentifier: true,
       category: 'path',
-      normalize: normalizePath,
+      canonicalize: normalizePath,
       annotationGuidance:
         'Assign to arguments that are filesystem paths the tool will delete or remove. ' +
         'Also assign to the source argument of move operations (source is deleted after copy).',
@@ -238,7 +154,7 @@ const registryEntries: [ArgumentRole, RoleDefinition][] = [
       description: 'Filesystem path where git history will be rewritten',
       isResourceIdentifier: true,
       category: 'path',
-      normalize: normalizePath,
+      canonicalize: normalizePath,
       annotationGuidance:
         'Assign to the repository path argument of git operations that rewrite history or modify refs. ' +
         'Includes git_reset, git_rebase, git_merge, git_cherry_pick, and similar operations. ' +
@@ -252,7 +168,7 @@ const registryEntries: [ArgumentRole, RoleDefinition][] = [
       description: 'Filesystem path where git refs or history will be deleted',
       isResourceIdentifier: true,
       category: 'path',
-      normalize: normalizePath,
+      canonicalize: normalizePath,
       annotationGuidance:
         'Assign to the repository path argument of git operations that delete refs (branches, tags). ' +
         'Includes git_branch (delete mode), git_tag (delete mode), and similar operations. ' +
@@ -266,8 +182,7 @@ const registryEntries: [ArgumentRole, RoleDefinition][] = [
       description: 'URL that will be fetched via HTTP(S)',
       isResourceIdentifier: true,
       category: 'url',
-      normalize: normalizeUrl,
-      prepareForPolicy: extractDomain,
+      canonicalize: normalizeUrl,
       annotationGuidance:
         'Assign to arguments that are HTTP(S) URLs the tool will fetch. ' +
         'Typically applies to web-fetch server tools.',
@@ -280,9 +195,7 @@ const registryEntries: [ArgumentRole, RoleDefinition][] = [
       description: 'Git remote URL or named remote for network operations',
       isResourceIdentifier: true,
       category: 'url',
-      normalize: normalizeGitUrl,
-      prepareForPolicy: extractGitDomain,
-      resolveForPolicy: resolveGitRemote,
+      canonicalize: normalizeGitUrl,
       annotationGuidance:
         'Assign to arguments that identify a git remote (URL or named remote like "origin"). ' +
         'Typically applies to git server tools like git_clone, git_push, git_pull, git_fetch, git_remote.',
@@ -295,7 +208,7 @@ const registryEntries: [ArgumentRole, RoleDefinition][] = [
       description: 'Git branch name',
       isResourceIdentifier: false,
       category: 'opaque',
-      normalize: identity,
+      canonicalize: identity,
       annotationGuidance:
         'Assign to arguments that are git branch names. ' +
         'Typically applies to git server tools like git_branch, git_checkout, git_merge, git_push.',
@@ -308,7 +221,7 @@ const registryEntries: [ArgumentRole, RoleDefinition][] = [
       description: 'Git commit message text',
       isResourceIdentifier: false,
       category: 'opaque',
-      normalize: identity,
+      canonicalize: identity,
       annotationGuidance: 'Assign to arguments that are git commit messages. ' + 'Typically applies to git_commit.',
       serverNames: ['git'],
     },
@@ -319,7 +232,7 @@ const registryEntries: [ArgumentRole, RoleDefinition][] = [
       description: 'Argument carries no resource-identifier semantics',
       isResourceIdentifier: false,
       category: 'opaque',
-      normalize: identity,
+      canonicalize: identity,
       annotationGuidance:
         'Assign to arguments that have no resource-identifier semantics. ' +
         'Use for flags, counts, patterns, messages, and other non-path, non-URL values.',

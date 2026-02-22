@@ -19,13 +19,16 @@ import {
   getRolesByCategory,
   getPathRoles,
   getUrlRoles,
+} from '../src/types/argument-roles.js';
+import type { ArgumentRole } from '../src/types/argument-roles.js';
+import {
   normalizeUrl,
   extractDomain,
+  extractDomainForRole,
   normalizeGitUrl,
   extractGitDomain,
   resolveGitRemote,
-} from '../src/types/argument-roles.js';
-import type { ArgumentRole } from '../src/types/argument-roles.js';
+} from '../src/trusted-process/domain-utils.js';
 
 describe('ARGUMENT_ROLE_REGISTRY', () => {
   it('contains all ten roles', () => {
@@ -198,37 +201,30 @@ describe('normalizers via registry', () => {
     const home = homedir();
     for (const role of ['read-path', 'write-path', 'delete-path'] as ArgumentRole[]) {
       const def = getRoleDefinition(role);
-      expect(def.normalize('~/test')).toBe(`${home}/test`);
-      expect(def.normalize('/tmp/a/../b')).toBe('/tmp/b');
+      expect(def.canonicalize('~/test')).toBe(`${home}/test`);
+      expect(def.canonicalize('/tmp/a/../b')).toBe('/tmp/b');
     }
   });
 
   it('none role uses identity', () => {
     const def = getRoleDefinition('none');
-    expect(def.normalize('~/test')).toBe('~/test');
-    expect(def.normalize('/etc/passwd')).toBe('/etc/passwd');
-    expect(def.normalize('hello world')).toBe('hello world');
+    expect(def.canonicalize('~/test')).toBe('~/test');
+    expect(def.canonicalize('/etc/passwd')).toBe('/etc/passwd');
+    expect(def.canonicalize('hello world')).toBe('hello world');
   });
 
-  it('url roles define prepareForPolicy', () => {
+  it('url roles have url category', () => {
     const fetchDef = getRoleDefinition('fetch-url');
-    expect(fetchDef.prepareForPolicy).toBeDefined();
-    expect(fetchDef.prepareForPolicy!('https://example.com/path')).toBe('example.com');
+    expect(fetchDef.category).toBe('url');
 
     const gitDef = getRoleDefinition('git-remote-url');
-    expect(gitDef.prepareForPolicy).toBeDefined();
-    expect(gitDef.prepareForPolicy!('git@github.com:user/repo.git')).toBe('github.com');
-  });
-
-  it('git-remote-url defines resolveForPolicy', () => {
-    const def = getRoleDefinition('git-remote-url');
-    expect(def.resolveForPolicy).toBeDefined();
+    expect(gitDef.category).toBe('url');
   });
 
   it('opaque roles use identity', () => {
     for (const role of ['branch-name', 'commit-message', 'none'] as ArgumentRole[]) {
       const def = getRoleDefinition(role);
-      expect(def.normalize('anything')).toBe('anything');
+      expect(def.canonicalize('anything')).toBe('anything');
     }
   });
 });
@@ -276,6 +272,20 @@ describe('normalizeGitUrl', () => {
 
   it('returns non-URL strings as-is', () => {
     expect(normalizeGitUrl('origin')).toBe('origin');
+  });
+});
+
+describe('extractDomainForRole', () => {
+  it('uses extractDomain for fetch-url', () => {
+    expect(extractDomainForRole('https://example.com/path', 'fetch-url')).toBe('example.com');
+  });
+
+  it('uses extractGitDomain for git-remote-url with SSH URL', () => {
+    expect(extractDomainForRole('git@github.com:user/repo.git', 'git-remote-url')).toBe('github.com');
+  });
+
+  it('uses extractGitDomain for git-remote-url with HTTPS URL', () => {
+    expect(extractDomainForRole('https://gitlab.com/user/repo.git', 'git-remote-url')).toBe('gitlab.com');
   });
 });
 
