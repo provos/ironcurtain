@@ -32,9 +32,11 @@ The key ideas:
 
 ## Demo
 
-<!-- TODO: Add asciinema recording (https://asciinema.org) -->
+<p align="center">
+  <img src="demo.gif" alt="IronCurtain demo: agent clones a repo, policy escalates git_clone for approval, user approves, then auto-approve handles git push" width="800">
+</p>
 
-> *Coming soon: a terminal recording showing IronCurtain in action — the agent attempts a git push, the policy engine escalates to the user, and the user approves or denies the operation in real time. With [auto-approve](#auto-approve-escalations) enabled, explicit requests like "push my changes" are approved automatically without interrupting the workflow.*
+The agent clones a repository and edits a file. The policy engine escalates `git_clone` for human approval. After the user types `/approve`, the agent completes the task. On the second request ("ok. git push to origin please"), [auto-approve](#auto-approve-escalations) recognizes the explicit intent and approves `git_push` automatically — no interruption needed.
 
 ## Architecture
 
