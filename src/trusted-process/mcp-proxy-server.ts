@@ -97,12 +97,22 @@ async function addRootToClient(state: ClientState, root: McpRoot): Promise<void>
   if (state.roots.some((r) => r.uri === root.uri)) return;
   state.roots.push(root);
 
+  let timer: ReturnType<typeof setTimeout>;
   const refreshed = new Promise<void>((resolve) => {
-    state.rootsRefreshed = resolve;
+    state.rootsRefreshed = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+  });
+  const timeout = new Promise<void>((resolve) => {
+    timer = setTimeout(() => {
+      state.rootsRefreshed = undefined;
+      resolve();
+    }, ROOTS_REFRESH_TIMEOUT_MS);
+    timer.unref();
   });
   await state.client.sendRootsListChanged();
-  // Safety net: proceed after timeout if server doesn't support Roots protocol
-  await Promise.race([refreshed, new Promise<void>((resolve) => setTimeout(resolve, ROOTS_REFRESH_TIMEOUT_MS))]);
+  await Promise.race([refreshed, timeout]);
 }
 
 /** Appends a timestamped line to the session log file. */

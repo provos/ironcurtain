@@ -71,12 +71,22 @@ export class MCPClientManager {
     server.roots.push(root);
 
     // Wait for the server to call roots/list after we notify it.
+    let timer: ReturnType<typeof setTimeout>;
     const refreshed = new Promise<void>((resolve) => {
-      server.rootsRefreshed = resolve;
+      server.rootsRefreshed = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+    });
+    const timeout = new Promise<void>((resolve) => {
+      timer = setTimeout(() => {
+        server.rootsRefreshed = undefined;
+        resolve();
+      }, ROOTS_REFRESH_TIMEOUT_MS);
+      timer.unref();
     });
     await server.client.sendRootsListChanged();
-    // Safety net: proceed after timeout if server doesn't support Roots protocol
-    await Promise.race([refreshed, new Promise<void>((resolve) => setTimeout(resolve, ROOTS_REFRESH_TIMEOUT_MS))]);
+    await Promise.race([refreshed, timeout]);
   }
 
   async listTools(serverName: string): Promise<{ name: string; description?: string; inputSchema: unknown }[]> {

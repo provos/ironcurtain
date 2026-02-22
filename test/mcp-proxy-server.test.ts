@@ -20,11 +20,21 @@ async function addRootToClient(state: MockClientState, root: { uri: string; name
   if (state.roots.some((r) => r.uri === root.uri)) return;
   state.roots.push(root);
 
+  let timer: ReturnType<typeof setTimeout>;
   const refreshed = new Promise<void>((resolve) => {
-    state.rootsRefreshed = resolve;
+    state.rootsRefreshed = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+  });
+  const timeout = new Promise<void>((resolve) => {
+    timer = setTimeout(() => {
+      state.rootsRefreshed = undefined;
+      resolve();
+    }, ROOTS_REFRESH_TIMEOUT_MS);
   });
   state.sendRootsListChangedCalled = true;
-  await Promise.race([refreshed, new Promise<void>((resolve) => setTimeout(resolve, ROOTS_REFRESH_TIMEOUT_MS))]);
+  await Promise.race([refreshed, timeout]);
 }
 
 describe('addRootToClient timeout behavior', () => {
@@ -62,6 +72,20 @@ describe('addRootToClient timeout behavior', () => {
     await promise;
     expect(state.roots).toContainEqual(root);
     expect(state.sendRootsListChangedCalled).toBe(true);
+    // Stale callback is cleared on timeout
+    expect(state.rootsRefreshed).toBeUndefined();
+  });
+
+  it('clears the timeout timer when server responds quickly', async () => {
+    const state: MockClientState = { roots: [], sendRootsListChangedCalled: false };
+    const root = { uri: 'file:///tmp/test', name: 'escalation-approved' };
+
+    const promise = addRootToClient(state, root);
+    state.rootsRefreshed!();
+    await promise;
+
+    // No pending timers should remain
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('stays pending until exactly the timeout elapses', async () => {
