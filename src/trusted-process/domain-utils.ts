@@ -74,6 +74,15 @@ export function normalizeGitUrl(value: string): string {
   return normalizeUrl(value);
 }
 
+/**
+ * Extracts the domain from a URL value, dispatching to the correct
+ * extractor based on role. Use this instead of calling extractDomain
+ * or extractGitDomain directly when the role is available.
+ */
+export function extractDomainForRole(value: string, role: string): string {
+  return role === 'git-remote-url' ? extractGitDomain(value) : extractDomain(value);
+}
+
 /** Extracts the domain from a git URL (HTTP or SSH format). */
 export function extractGitDomain(value: string): string {
   // SSH format: git@host:path

@@ -26,7 +26,7 @@ import type { LanguageModelV3 } from '@ai-sdk/provider';
 import { generateText, Output } from 'ai';
 import { z } from 'zod';
 import { getRoleDefinition } from '../types/argument-roles.js';
-import { extractDomain } from './domain-utils.js';
+import { extractDomainForRole } from './domain-utils.js';
 import type { ToolAnnotation } from '../pipeline/types.js';
 
 // ---------------------------------------------------------------------------
@@ -221,7 +221,9 @@ export function extractArgsForAutoApprove(
     const roles = annotation.args[argName];
     if (!roles || roles.length === 0) continue;
 
-    // Use the first role assigned to this argument
+    // TODO: only looks at roles[0]; if an argument has mixed-category roles
+    // (e.g., ['read-path', 'fetch-url']), the URL domain extraction may be skipped.
+    // Current annotations never mix categories, but this should be revisited if that changes.
     const roleDef = getRoleDefinition(roles[0]);
     if (!roleDef.isResourceIdentifier) continue;
 
@@ -239,7 +241,7 @@ export function extractArgsForAutoApprove(
 
     // Extract domain for URL-category roles (values are already canonicalized)
     if (roleDef.category === 'url') {
-      stringValue = extractDomain(stringValue);
+      stringValue = extractDomainForRole(stringValue, roles[0]);
     }
 
     result[argName] = sanitizeForPrompt(stringValue);

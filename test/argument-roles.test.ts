@@ -24,6 +24,7 @@ import type { ArgumentRole } from '../src/types/argument-roles.js';
 import {
   normalizeUrl,
   extractDomain,
+  extractDomainForRole,
   normalizeGitUrl,
   extractGitDomain,
   resolveGitRemote,
@@ -271,6 +272,20 @@ describe('normalizeGitUrl', () => {
 
   it('returns non-URL strings as-is', () => {
     expect(normalizeGitUrl('origin')).toBe('origin');
+  });
+});
+
+describe('extractDomainForRole', () => {
+  it('uses extractDomain for fetch-url', () => {
+    expect(extractDomainForRole('https://example.com/path', 'fetch-url')).toBe('example.com');
+  });
+
+  it('uses extractGitDomain for git-remote-url with SSH URL', () => {
+    expect(extractDomainForRole('git@github.com:user/repo.git', 'git-remote-url')).toBe('github.com');
+  });
+
+  it('uses extractGitDomain for git-remote-url with HTTPS URL', () => {
+    expect(extractDomainForRole('https://gitlab.com/user/repo.git', 'git-remote-url')).toBe('gitlab.com');
   });
 });
 

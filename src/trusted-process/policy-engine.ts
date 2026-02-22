@@ -35,8 +35,7 @@ import {
   domainMatchesAllowlist,
   isIpAddress,
   resolveGitRemote,
-  extractDomain,
-  extractGitDomain,
+  extractDomainForRole,
 } from './domain-utils.js';
 import { getListMatcher } from '../pipeline/dynamic-list-types.js';
 
@@ -200,7 +199,7 @@ function resolveUrlForDomainCheck(
 ): string {
   const resolved = role === 'git-remote-url' ? resolveGitRemote(value, allArgs) : value;
   const normalized = roleDef.canonicalize(resolved);
-  return role === 'git-remote-url' ? extractGitDomain(normalized) : extractDomain(normalized);
+  return extractDomainForRole(normalized, role);
 }
 
 // Re-export domain utilities for backward compatibility with existing consumers
