@@ -129,6 +129,7 @@ export class Sandbox {
       AUDIT_LOG_PATH: config.auditLogPath,
       MCP_SERVERS_CONFIG: JSON.stringify(config.mcpServers),
       GENERATED_DIR: config.generatedDir,
+      CONSTITUTION_PATH: config.constitutionPath,
       PROTECTED_PATHS: JSON.stringify(config.protectedPaths),
       ALLOWED_DIRECTORY: config.allowedDirectory,
     };

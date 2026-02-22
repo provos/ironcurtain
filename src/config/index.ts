@@ -1,9 +1,11 @@
+import { createHash } from 'node:crypto';
 import { readFileSync, existsSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { IronCurtainConfig, MCPServerConfig } from './types.js';
 import type { CompiledPolicyFile, DynamicListsFile, ToolAnnotationsFile } from '../pipeline/types.js';
 import { getIronCurtainHome, getUserGeneratedDir } from './paths.js';
+import { loadConstitutionText } from '../pipeline/pipeline-shared.js';
 import { resolveRealPath } from '../types/argument-roles.js';
 import { loadUserConfig } from './user-config.js';
 
@@ -188,9 +190,31 @@ export function extractServerDomainAllowlists(mcpServers: Record<string, MCPServ
   return allowlists;
 }
 
+/**
+ * Checks whether the compiled policy matches the current constitution.
+ * Emits a warning to stderr when the constitution has changed since the
+ * last `ironcurtain compile-policy` run.
+ */
+export function checkConstitutionFreshness(compiledPolicy: CompiledPolicyFile, constitutionPath: string): void {
+  try {
+    const constitutionText = loadConstitutionText(constitutionPath);
+    const currentHash = createHash('sha256').update(constitutionText).digest('hex');
+    if (currentHash !== compiledPolicy.constitutionHash) {
+      process.stderr.write(
+        'Warning: constitution has changed since the last policy compilation. ' +
+          'Run `ironcurtain compile-policy` to update the compiled policy.\n',
+      );
+    }
+  } catch {
+    // If the constitution file can't be read, skip the check silently.
+    // This can happen in test environments or when the file is missing.
+  }
+}
+
 export function loadGeneratedPolicy(
   generatedDir: string,
   fallbackDir?: string,
+  constitutionPath?: string,
 ): {
   compiledPolicy: CompiledPolicyFile;
   toolAnnotations: ToolAnnotationsFile;
@@ -203,6 +227,11 @@ export function loadGeneratedPolicy(
     readGeneratedFile(generatedDir, 'tool-annotations.json', fallbackDir),
   );
   const dynamicLists = loadOptionalGeneratedFile<DynamicListsFile>(generatedDir, 'dynamic-lists.json', fallbackDir);
+
+  if (constitutionPath) {
+    checkConstitutionFreshness(compiledPolicy, constitutionPath);
+  }
+
   return { compiledPolicy, toolAnnotations, dynamicLists };
 }
 

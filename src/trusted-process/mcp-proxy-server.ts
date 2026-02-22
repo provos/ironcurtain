@@ -300,7 +300,12 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const { compiledPolicy, toolAnnotations, dynamicLists } = loadGeneratedPolicy(generatedDir);
+  const constitutionPath = process.env.CONSTITUTION_PATH;
+  const { compiledPolicy, toolAnnotations, dynamicLists } = loadGeneratedPolicy(
+    generatedDir,
+    undefined,
+    constitutionPath,
+  );
 
   const serverDomainAllowlists = extractServerDomainAllowlists(serversConfig);
   const policyEngine = new PolicyEngine(

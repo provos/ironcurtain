@@ -37,8 +37,8 @@ npm start "task"       # Run the agent with a task (dev mode, uses tsx)
 Run a single test file or test by name:
 
 ```bash
-npx vitest run test/policy-engine.test.ts
-npx vitest run -t "denies delete_file"
+npm test -- test/policy-engine.test.ts
+npx test -- -t "denies delete_file"
 ```
 
 ### Project Structure

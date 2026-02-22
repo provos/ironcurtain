@@ -34,7 +34,11 @@ export class TrustedProcess {
     private config: IronCurtainConfig,
     options?: TrustedProcessOptions,
   ) {
-    const { compiledPolicy, toolAnnotations, dynamicLists } = loadGeneratedPolicy(config.generatedDir);
+    const { compiledPolicy, toolAnnotations, dynamicLists } = loadGeneratedPolicy(
+      config.generatedDir,
+      undefined,
+      config.constitutionPath,
+    );
 
     const serverDomainAllowlists = extractServerDomainAllowlists(config.mcpServers);
     this.policyEngine = new PolicyEngine(

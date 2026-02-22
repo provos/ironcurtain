@@ -379,8 +379,8 @@ See [docs/SECURITY_CONCERNS.md](docs/SECURITY_CONCERNS.md) for a detailed threat
 
 ```bash
 npm test                                    # Run all tests
-npx vitest run test/policy-engine.test.ts   # Run a single test file
-npx vitest run -t "denies delete_file"      # Run a single test by name
+npm test -- test/policy-engine.test.ts      # Run a single test file
+npx test -- -t "denies delete_file"         # Run a single test by name
 npm run lint                                # Lint
 npm run build                               # TypeScript compilation + asset copy
 ```

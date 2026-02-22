@@ -15,8 +15,8 @@ IronCurtain is a secure agent runtime that mediates between an AI agent and MCP 
 - `ironcurtain refresh-lists [--list <name>] [--with-mcp]` — re-resolve dynamic lists without full recompilation
 - `npm run build` — TypeScript compilation + copy config assets to `dist/`
 - `npm test` — run all tests (vitest)
-- `npx vitest run test/policy-engine.test.ts` — run a single test file
-- `npx vitest run -t "denies delete_file"` — run a single test by name
+- `npm test -- test/policy-engine.test.ts` — run a single test file
+- `npm test -- -t "denies delete_file"` — run a single test by name
 - `npm run lint` — run ESLint
 - `npm run format` — format code with Prettier (`format:check` for CI validation)
 
