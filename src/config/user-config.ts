@@ -456,10 +456,7 @@ export function validateModelId(id: string): string | undefined {
  * For nested objects, merges sub-fields rather than replacing the whole object.
  * Correctly handles null values for nullable budget fields.
  */
-function deepMergeConfig(
-  existing: Record<string, unknown>,
-  changes: Record<string, unknown>,
-): Record<string, unknown> {
+function deepMergeConfig(existing: Record<string, unknown>, changes: Record<string, unknown>): Record<string, unknown> {
   const result = { ...existing };
   for (const [key, value] of Object.entries(changes)) {
     if (value !== undefined && isPlainObject(value) && isPlainObject(result[key])) {
@@ -499,9 +496,7 @@ export function saveUserConfig(changes: UserConfig): void {
   // Validate the merged result (only known fields)
   const result = userConfigSchema.safeParse(merged);
   if (!result.success) {
-    const issues = result.error.issues
-      .map((issue) => `  ${issue.path.join('.')}: ${issue.message}`)
-      .join('\n');
+    const issues = result.error.issues.map((issue) => `  ${issue.path.join('.')}: ${issue.message}`).join('\n');
     throw new Error(`Invalid config after merge:\n${issues}`);
   }
 

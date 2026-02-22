@@ -80,10 +80,7 @@ interface DiffEntry {
   to: unknown;
 }
 
-export function computeDiff(
-  resolved: ResolvedUserConfig,
-  pending: UserConfig,
-): [string, DiffEntry][] {
+export function computeDiff(resolved: ResolvedUserConfig, pending: UserConfig): [string, DiffEntry][] {
   const diffs: [string, DiffEntry][] = [];
 
   const topLevelKeys = ['agentModelId', 'policyModelId', 'escalationTimeoutSeconds'] as const;
@@ -135,7 +132,7 @@ async function promptModelId(message: string, current: string): Promise<string |
     const custom = await p.text({
       message: 'Enter model ID (e.g., "anthropic:model-name"):',
       placeholder: current,
-      validate: (val) => val ? validateModelId(val) : 'Model ID is required',
+      validate: (val) => (val ? validateModelId(val) : 'Model ID is required'),
     });
     handleCancel(custom);
     return custom as string;
@@ -156,7 +153,9 @@ interface NullableNumberOpts {
 async function promptNullableNumber(opts: NullableNumberOpts): Promise<number | null | undefined> {
   const currentDisplay = opts.format
     ? opts.format(opts.current)
-    : (opts.current === null ? 'disabled' : String(opts.current));
+    : opts.current === null
+      ? 'disabled'
+      : String(opts.current);
 
   const action = await p.select({
     message: opts.message,
@@ -187,13 +186,10 @@ async function promptNullableNumber(opts: NullableNumberOpts): Promise<number | 
 
 // ─── Category handlers ───────────────────────────────────────
 
-async function handleModels(
-  resolved: ResolvedUserConfig,
-  pending: UserConfig,
-): Promise<void> {
+async function handleModels(resolved: ResolvedUserConfig, pending: UserConfig): Promise<void> {
   while (true) {
-    const currentAgent = (pending.agentModelId ?? resolved.agentModelId);
-    const currentPolicy = (pending.policyModelId ?? resolved.policyModelId);
+    const currentAgent = pending.agentModelId ?? resolved.agentModelId;
+    const currentPolicy = pending.policyModelId ?? resolved.policyModelId;
 
     const field = await p.select({
       message: 'Models',
@@ -217,10 +213,7 @@ async function handleModels(
   }
 }
 
-async function handleSecurity(
-  resolved: ResolvedUserConfig,
-  pending: UserConfig,
-): Promise<void> {
+async function handleSecurity(resolved: ResolvedUserConfig, pending: UserConfig): Promise<void> {
   while (true) {
     const currentTimeout = pending.escalationTimeoutSeconds ?? resolved.escalationTimeoutSeconds;
     const currentAutoApproveEnabled = pending.autoApprove?.enabled ?? resolved.autoApprove.enabled;
@@ -286,10 +279,7 @@ async function handleSecurity(
   }
 }
 
-async function handleResourceLimits(
-  resolved: ResolvedUserConfig,
-  pending: UserConfig,
-): Promise<void> {
+async function handleResourceLimits(resolved: ResolvedUserConfig, pending: UserConfig): Promise<void> {
   while (true) {
     const budget = { ...resolved.resourceBudget, ...pending.resourceBudget };
 
@@ -297,7 +287,11 @@ async function handleResourceLimits(
       message: 'Resource Limits',
       options: [
         { value: 'maxTotalTokens', label: 'Max tokens', hint: formatTokens(budget.maxTotalTokens) },
-        { value: 'maxSteps', label: 'Max steps', hint: budget.maxSteps === null ? 'disabled' : String(budget.maxSteps) },
+        {
+          value: 'maxSteps',
+          label: 'Max steps',
+          hint: budget.maxSteps === null ? 'disabled' : String(budget.maxSteps),
+        },
         { value: 'maxSessionSeconds', label: 'Session timeout', hint: formatSeconds(budget.maxSessionSeconds) },
         { value: 'maxEstimatedCostUsd', label: 'Cost cap', hint: formatCost(budget.maxEstimatedCostUsd) },
         { value: 'warnThresholdPercent', label: 'Warning threshold', hint: `${budget.warnThresholdPercent}%` },
@@ -326,10 +320,14 @@ async function handleResourceLimits(
       }
     } else {
       const key = field as 'maxTotalTokens' | 'maxSteps' | 'maxSessionSeconds' | 'maxEstimatedCostUsd';
-      const formatFn = key === 'maxTotalTokens' ? formatTokens
-        : key === 'maxSessionSeconds' ? formatSeconds
-        : key === 'maxEstimatedCostUsd' ? formatCost
-        : (n: number | null) => n === null ? 'disabled' : String(n);
+      const formatFn =
+        key === 'maxTotalTokens'
+          ? formatTokens
+          : key === 'maxSessionSeconds'
+            ? formatSeconds
+            : key === 'maxEstimatedCostUsd'
+              ? formatCost
+              : (n: number | null) => (n === null ? 'disabled' : String(n));
 
       const result = await promptNullableNumber({
         message: `${key}:`,
@@ -350,10 +348,7 @@ async function handleResourceLimits(
   }
 }
 
-async function handleAutoCompact(
-  resolved: ResolvedUserConfig,
-  pending: UserConfig,
-): Promise<void> {
+async function handleAutoCompact(resolved: ResolvedUserConfig, pending: UserConfig): Promise<void> {
   while (true) {
     const compact = { ...resolved.autoCompact, ...pending.autoCompact };
 
@@ -471,8 +466,7 @@ export async function runConfigCommand(): Promise<void> {
 
   p.intro('IronCurtain Configuration');
   p.note(
-    `Config path: ${getUserConfigPath()}\n` +
-    'API keys: set via environment variables or edit JSON directly.',
+    `Config path: ${getUserConfigPath()}\n` + 'API keys: set via environment variables or edit JSON directly.',
     'Info',
   );
 
@@ -516,8 +510,7 @@ export async function runConfigCommand(): Promise<void> {
         }
 
         const diffText = diffs
-          .map(([path, { from, to }]) =>
-            `  ${path}: ${formatDiffValue(path, from)} -> ${formatDiffValue(path, to)}`)
+          .map(([path, { from, to }]) => `  ${path}: ${formatDiffValue(path, from)} -> ${formatDiffValue(path, to)}`)
           .join('\n');
         p.note(diffText, 'Pending changes');
 

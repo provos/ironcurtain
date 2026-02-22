@@ -34,7 +34,13 @@ vi.mock('@clack/prompts', () => ({
 }));
 
 // Now import the module under test
-import { runConfigCommand, computeDiff, formatTokens, formatSeconds, formatCost } from '../src/config/config-command.js';
+import {
+  runConfigCommand,
+  computeDiff,
+  formatTokens,
+  formatSeconds,
+  formatCost,
+} from '../src/config/config-command.js';
 import type { ResolvedUserConfig, UserConfig } from '../src/config/user-config.js';
 import { USER_CONFIG_DEFAULTS } from '../src/config/user-config.js';
 
@@ -85,12 +91,11 @@ describe('config-command', () => {
 
     // Script: select Models -> select agentModelId -> pick opus -> Back -> Save -> confirm
     mockSelect
-      .mockResolvedValueOnce('models')      // main menu: Models
+      .mockResolvedValueOnce('models') // main menu: Models
       .mockResolvedValueOnce('agentModelId') // Models sub: agentModelId
       .mockResolvedValueOnce('anthropic:claude-opus-4-6') // model selection
-      .mockResolvedValueOnce('back')         // Models sub: Back
-      .mockResolvedValueOnce('save')         // main menu: Save & Exit
-    ;
+      .mockResolvedValueOnce('back') // Models sub: Back
+      .mockResolvedValueOnce('save'); // main menu: Save & Exit
     mockConfirm.mockResolvedValueOnce(true); // confirm save
 
     await runConfigCommand();
@@ -113,12 +118,11 @@ describe('config-command', () => {
 
     // Script: Resources -> maxSteps -> disable -> Back -> Save -> confirm
     mockSelect
-      .mockResolvedValueOnce('resources')     // main menu: Resources
-      .mockResolvedValueOnce('maxSteps')      // Resource sub: maxSteps
-      .mockResolvedValueOnce('disable')       // 3-way: disable
-      .mockResolvedValueOnce('back')          // Resource sub: Back
-      .mockResolvedValueOnce('save')          // main menu: Save
-    ;
+      .mockResolvedValueOnce('resources') // main menu: Resources
+      .mockResolvedValueOnce('maxSteps') // Resource sub: maxSteps
+      .mockResolvedValueOnce('disable') // 3-way: disable
+      .mockResolvedValueOnce('back') // Resource sub: Back
+      .mockResolvedValueOnce('save'); // main menu: Save
     mockConfirm.mockResolvedValueOnce(true);
 
     await runConfigCommand();
@@ -144,8 +148,7 @@ describe('config-command', () => {
       .mockResolvedValueOnce('agentModelId')
       .mockResolvedValueOnce('anthropic:claude-opus-4-6')
       .mockResolvedValueOnce('back')
-      .mockResolvedValueOnce('cancel')
-    ;
+      .mockResolvedValueOnce('cancel');
 
     await runConfigCommand();
 
@@ -182,9 +185,7 @@ describe('config-command', () => {
     await expect(runConfigCommand()).rejects.toThrow('process.exit');
 
     expect(exitSpy).toHaveBeenCalledWith(1);
-    expect(stderrSpy).toHaveBeenCalledWith(
-      expect.stringContaining('TTY'),
-    );
+    expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining('TTY'));
   });
 
   // --- Helper ---
@@ -211,7 +212,7 @@ describe('computeDiff', () => {
       maxTotalTokens: 1_000_000,
       maxSteps: 200,
       maxSessionSeconds: 1800,
-      maxEstimatedCostUsd: 5.00,
+      maxEstimatedCostUsd: 5.0,
       warnThresholdPercent: 80,
     },
     autoCompact: {
@@ -235,9 +236,7 @@ describe('computeDiff', () => {
       agentModelId: 'anthropic:claude-opus-4-6',
     };
     const diffs = computeDiff(resolved, pending);
-    expect(diffs).toEqual([
-      ['agentModelId', { from: 'anthropic:claude-sonnet-4-6', to: 'anthropic:claude-opus-4-6' }],
-    ]);
+    expect(diffs).toEqual([['agentModelId', { from: 'anthropic:claude-sonnet-4-6', to: 'anthropic:claude-opus-4-6' }]]);
   });
 
   it('detects nested changes', () => {
@@ -245,9 +244,7 @@ describe('computeDiff', () => {
       resourceBudget: { maxSteps: null },
     };
     const diffs = computeDiff(resolved, pending);
-    expect(diffs).toEqual([
-      ['resourceBudget.maxSteps', { from: 200, to: null }],
-    ]);
+    expect(diffs).toEqual([['resourceBudget.maxSteps', { from: 200, to: null }]]);
   });
 
   it('detects multiple changes across categories', () => {
