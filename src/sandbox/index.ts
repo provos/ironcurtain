@@ -11,8 +11,30 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import '@utcp/mcp'; // Register MCP call template type with UTCP SDK
 import { CodeModeUtcpClient } from '@utcp/code-mode';
+import { Protocol } from '@modelcontextprotocol/sdk/shared/protocol.js';
 import type { IronCurtainConfig } from '../config/types.js';
 import { parseModelId, resolveApiKeyForProvider } from '../config/model-provider.js';
+
+// Workaround: UTCP creates MCP SDK Client instances without setting a per-request
+// timeout, so they inherit the SDK's DEFAULT_REQUEST_TIMEOUT_MSEC (60s). This is
+// too short when human escalation approval is pending (up to 300s). The SDK doesn't
+// expose a way to set a client-level default timeout, so we patch Protocol.request()
+// to use our escalation timeout as the default instead of 60s.
+//
+// This must run before any Client instances are created (i.e. before Sandbox.initialize()).
+const DEFAULT_ESCALATION_TIMEOUT_MS = 300 * 1000;
+// eslint-disable-next-line @typescript-eslint/no-unsafe-function-type -- monkey-patch requires untyped apply()
+const originalRequest: Function = Protocol.prototype.request;
+Protocol.prototype.request = function (
+  this: unknown,
+  ...args: [request: unknown, schema: unknown, options?: { timeout?: number }]
+) {
+  const options = args[2] ?? {};
+  if (!options.timeout) {
+    args[2] = { ...options, timeout: DEFAULT_ESCALATION_TIMEOUT_MS };
+  }
+  return originalRequest.apply(this, args);
+} as typeof Protocol.prototype.request;
 
 // Detect compiled (.js in dist/) vs source (.ts in src/) mode.
 // In compiled mode, spawn with `node`; in source mode, spawn with `npx tsx`.
@@ -115,7 +137,7 @@ export class Sandbox {
     // Pass escalation timeout to the proxy process and use it for the sandbox timeout.
     // The sandbox timeout must accommodate human escalation approval time.
     proxyEnv.ESCALATION_TIMEOUT_SECONDS = String(config.escalationTimeoutSeconds);
-    const timeoutMs = config.escalationTimeoutSeconds * 1000;
+    const timeoutSeconds = config.escalationTimeoutSeconds;
 
     // Pass sandbox availability policy to the proxy process
     proxyEnv.SANDBOX_POLICY = config.sandboxPolicy ?? 'warn';
@@ -158,7 +180,7 @@ export class Sandbox {
           SERVER_FILTER: serverName,
           ...(serverCreds ? { SERVER_CREDENTIALS: JSON.stringify(serverCreds) } : {}),
         },
-        timeout: timeoutMs,
+        timeout: timeoutSeconds,
       };
     }
 

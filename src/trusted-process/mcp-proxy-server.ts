@@ -619,6 +619,7 @@ async function main(): Promise<void> {
           arguments: argsForTransport,
         },
         CompatibilityCallToolResultSchema,
+        { timeout: getEscalationTimeoutMs() },
       );
 
       if (result.isError) {
