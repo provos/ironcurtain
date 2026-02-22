@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 
@@ -107,10 +109,44 @@ export function getUserConstitutionPath(): string {
 }
 
 /**
+ * Returns the user-local base constitution path: {home}/constitution.md
+ * When this file exists, it replaces the package-bundled constitution.
+ */
+export function getUserConstitutionBasePath(): string {
+  return resolve(getIronCurtainHome(), 'constitution.md');
+}
+
+/**
  * Returns the user-local generated artifacts directory: {home}/generated/
  * Pipeline commands write here; runtime reads from here first, falling back
  * to the package-bundled defaults in dist/config/generated/.
  */
 export function getUserGeneratedDir(): string {
   return resolve(getIronCurtainHome(), 'generated');
+}
+
+/**
+ * Loads the combined constitution text (base + optional user constitution).
+ * If ~/.ironcurtain/constitution.md exists, it replaces the package-bundled base.
+ * The user extension file (~/.ironcurtain/constitution-user.md), when present,
+ * is appended to whichever base is used.
+ */
+export function loadConstitutionText(packageBasePath: string): string {
+  const userBasePath = getUserConstitutionBasePath();
+  const basePath = existsSync(userBasePath) ? userBasePath : packageBasePath;
+  const base = readFileSync(basePath, 'utf-8');
+  const userPath = getUserConstitutionPath();
+  if (existsSync(userPath)) {
+    const user = readFileSync(userPath, 'utf-8');
+    return `${base}\n\n${user}`;
+  }
+  return base;
+}
+
+/**
+ * Loads the combined constitution and returns its SHA-256 hex digest.
+ */
+export function computeConstitutionHash(basePath: string): string {
+  const text = loadConstitutionText(basePath);
+  return createHash('sha256').update(text).digest('hex');
 }

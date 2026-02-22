@@ -16,7 +16,10 @@ import chalk from 'chalk';
 import ora, { type Ora } from 'ora';
 import { computeProtectedPaths, resolveMcpServerPaths } from '../config/index.js';
 import { createLanguageModel } from '../config/model-provider.js';
-import { getIronCurtainHome, getUserConstitutionPath, getUserGeneratedDir } from '../config/paths.js';
+import { getIronCurtainHome, getUserGeneratedDir, loadConstitutionText } from '../config/paths.js';
+
+// Re-export so existing pipeline callers (loadPipelineConfig) don't need updating.
+export { loadConstitutionText } from '../config/paths.js';
 import type { MCPServerConfig } from '../config/types.js';
 import { loadUserConfig } from '../config/user-config.js';
 import { createLlmLoggingMiddleware, type LlmLogContext } from './llm-logger.js';
@@ -36,21 +39,6 @@ export interface PipelineConfig {
   packageGeneratedDir: string; // fallback for reads (package-bundled)
   allowedDirectory: string;
   protectedPaths: string[];
-}
-
-/**
- * Loads the combined constitution text (base + optional user constitution).
- * The user constitution file is at ~/.ironcurtain/constitution-user.md.
- * When present, it is appended to the base constitution text.
- */
-export function loadConstitutionText(basePath: string): string {
-  const base = readFileSync(basePath, 'utf-8');
-  const userPath = getUserConstitutionPath();
-  if (existsSync(userPath)) {
-    const user = readFileSync(userPath, 'utf-8');
-    return `${base}\n\n${user}`;
-  }
-  return base;
 }
 
 export function loadPipelineConfig(): PipelineConfig {

@@ -191,7 +191,16 @@ This opens an interactive editor for `~/.ironcurtain/config.json` where you can 
 
 ### 3. Write your constitution
 
-Edit `src/config/constitution.md` to express your security policy in plain English. Here's the included example:
+Copy the bundled constitution to your user directory and edit it:
+
+```bash
+cp src/config/constitution.md ~/.ironcurtain/constitution.md
+# edit ~/.ironcurtain/constitution.md to express your security policy
+```
+
+If `~/.ironcurtain/constitution.md` exists, it is used instead of the package-bundled file. You can also add supplementary rules in `~/.ironcurtain/constitution-user.md`, which is appended to whichever base is active.
+
+Here's the included example:
 
 ```markdown
 # Guiding Principles
@@ -259,6 +268,8 @@ IronCurtain stores its configuration and session data in `~/.ironcurtain/`:
 ```
 ~/.ironcurtain/
 ├── config.json              # User configuration
+├── constitution.md          # User-local base constitution (overrides package default)
+├── constitution-user.md     # Supplementary rules (appended to base)
 ├── generated/               # User-compiled policy artifacts (overrides package defaults)
 ├── sessions/
 │   └── {sessionId}/
