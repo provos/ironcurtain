@@ -197,8 +197,8 @@ function resolveUrlForDomainCheck(
   return extractDomainForRole(normalized, role);
 }
 
-// Re-export domain utilities for backward compatibility with existing consumers
-export { domainMatchesAllowlist, isIpAddress };
+// Re-export utilities used by sibling modules (mcp-proxy-server, index)
+export { domainMatchesAllowlist, extractAnnotatedPaths, isIpAddress };
 
 /**
  * Checks whether a rule has role-related conditions (roles, paths, or domains).

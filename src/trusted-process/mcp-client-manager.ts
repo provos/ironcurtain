@@ -4,6 +4,8 @@ import { CompatibilityCallToolResultSchema, ListRootsRequestSchema } from '@mode
 import type { MCPServerConfig } from '../config/types.js';
 import * as logger from '../logger.js';
 
+export const ROOTS_REFRESH_TIMEOUT_MS = 5_000;
+
 export interface McpRoot {
   uri: string;
   name: string;
@@ -69,11 +71,22 @@ export class MCPClientManager {
     server.roots.push(root);
 
     // Wait for the server to call roots/list after we notify it.
+    let timer: ReturnType<typeof setTimeout>;
     const refreshed = new Promise<void>((resolve) => {
-      server.rootsRefreshed = resolve;
+      server.rootsRefreshed = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+    });
+    const timeout = new Promise<void>((resolve) => {
+      timer = setTimeout(() => {
+        server.rootsRefreshed = undefined;
+        resolve();
+      }, ROOTS_REFRESH_TIMEOUT_MS);
+      timer.unref();
     });
     await server.client.sendRootsListChanged();
-    await refreshed;
+    await Promise.race([refreshed, timeout]);
   }
 
   async listTools(serverName: string): Promise<{ name: string; description?: string; inputSchema: unknown }[]> {

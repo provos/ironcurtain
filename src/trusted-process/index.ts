@@ -4,8 +4,9 @@ import type { ToolCallRequest, ToolCallResult, PolicyDecision } from '../types/m
 import type { AuditEntry } from '../types/audit.js';
 import { loadGeneratedPolicy, extractServerDomainAllowlists } from '../config/index.js';
 import { createLanguageModel } from '../config/model-provider.js';
-import { PolicyEngine } from './policy-engine.js';
+import { PolicyEngine, extractAnnotatedPaths } from './policy-engine.js';
 import { MCPClientManager, type McpRoot } from './mcp-client-manager.js';
+import { getPathRoles } from '../types/argument-roles.js';
 import { AuditLog } from './audit-log.js';
 import { EscalationHandler } from './escalation.js';
 import { autoApprove } from './auto-approver.js';
@@ -160,9 +161,9 @@ export class TrustedProcess {
 
         // Expand roots to include target directories so the filesystem
         // server accepts the forwarded call (for both auto and human approval).
-        if (escalationResult === 'approved') {
-          const paths = Object.values(transportRequest.arguments).filter((v): v is string => typeof v === 'string');
-          for (const p of paths) {
+        if (escalationResult === 'approved' && annotation) {
+          const pathValues = extractAnnotatedPaths(transportRequest.arguments, annotation, getPathRoles());
+          for (const p of pathValues) {
             const dir = directoryForPath(p);
             await this.mcpManager.addRoot(transportRequest.serverName, {
               uri: `file://${dir}`,
