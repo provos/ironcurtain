@@ -41,7 +41,8 @@ import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { v4 as uuidv4 } from 'uuid';
 import { loadGeneratedPolicy, extractServerDomainAllowlists } from '../config/index.js';
-import { PolicyEngine } from './policy-engine.js';
+import { PolicyEngine, extractAnnotatedPaths } from './policy-engine.js';
+import { getPathRoles } from '../types/argument-roles.js';
 import { AuditLog } from './audit-log.js';
 import { prepareToolArgs } from './path-utils.js';
 import { extractPolicyRoots, toMcpRoots, directoryForPath } from './policy-roots.js';
@@ -56,7 +57,7 @@ import {
 } from './sandbox-integration.js';
 import type { ToolCallRequest } from '../types/mcp.js';
 import type { AuditEntry } from '../types/audit.js';
-import type { McpRoot } from './mcp-client-manager.js';
+import { ROOTS_REFRESH_TIMEOUT_MS, type McpRoot } from './mcp-client-manager.js';
 import { CallCircuitBreaker } from './call-circuit-breaker.js';
 import { autoApprove, extractArgsForAutoApprove, readUserContext } from './auto-approver.js';
 import { createLanguageModelFromEnv } from '../config/model-provider.js';
@@ -89,6 +90,8 @@ interface ClientState {
 /**
  * Adds a root to a client's root list and waits for the server to
  * fetch the updated list. No-op if the root URI is already present.
+ * Times out after ROOTS_REFRESH_TIMEOUT_MS if the server never requests
+ * the updated list (e.g. servers that don't implement Roots protocol).
  */
 async function addRootToClient(state: ClientState, root: McpRoot): Promise<void> {
   if (state.roots.some((r) => r.uri === root.uri)) return;
@@ -98,7 +101,8 @@ async function addRootToClient(state: ClientState, root: McpRoot): Promise<void>
     state.rootsRefreshed = resolve;
   });
   await state.client.sendRootsListChanged();
-  await refreshed;
+  // Safety net: proceed after timeout if server doesn't support Roots protocol
+  await Promise.race([refreshed, new Promise<void>((resolve) => setTimeout(resolve, ROOTS_REFRESH_TIMEOUT_MS))]);
 }
 
 /** Appends a timestamped line to the session log file. */
@@ -573,16 +577,17 @@ async function main(): Promise<void> {
         policyDecision.reason = 'Approved by human during escalation';
       }
 
-      // Expand roots to include target directories so the filesystem
-      // server accepts the forwarded call.
-      const state = clientStates.get(toolInfo.serverName);
-      if (state) {
-        const paths = Object.values(argsForTransport).filter((v): v is string => typeof v === 'string');
-        for (const p of paths) {
-          await addRootToClient(state, {
-            uri: `file://${directoryForPath(p)}`,
-            name: 'escalation-approved',
-          });
+      // Expand roots for approved path arguments only (skip URLs, opaques)
+      if (annotation) {
+        const state = clientStates.get(toolInfo.serverName);
+        if (state) {
+          const pathValues = extractAnnotatedPaths(argsForTransport, annotation, getPathRoles());
+          for (const p of pathValues) {
+            await addRootToClient(state, {
+              uri: `file://${directoryForPath(p)}`,
+              name: 'escalation-approved',
+            });
+          }
         }
       }
     }
