@@ -138,6 +138,8 @@ describe('Session', () => {
     process.env.IRONCURTAIN_HOME = TEST_HOME;
     mkdirSync(TEST_HOME, { recursive: true });
 
+    // Reset call history so counts don't leak across tests
+    mockGenerateText.mockReset();
     // Default mock: generateText returns a simple text response
     mockGenerateText.mockResolvedValue(createMockGenerateResult());
   });
