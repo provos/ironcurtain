@@ -1,11 +1,14 @@
-import { createHash } from 'node:crypto';
 import { readFileSync, existsSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { IronCurtainConfig, MCPServerConfig } from './types.js';
 import type { CompiledPolicyFile, DynamicListsFile, ToolAnnotationsFile } from '../pipeline/types.js';
-import { getIronCurtainHome, getUserGeneratedDir } from './paths.js';
-import { loadConstitutionText } from '../pipeline/pipeline-shared.js';
+import {
+  computeConstitutionHash,
+  getIronCurtainHome,
+  getUserConstitutionBasePath,
+  getUserGeneratedDir,
+} from './paths.js';
 import { resolveRealPath } from '../types/argument-roles.js';
 import { loadUserConfig } from './user-config.js';
 
@@ -45,6 +48,11 @@ export function computeProtectedPaths(opts: {
   ];
   if (opts.generatedDir !== opts.packageGeneratedDir) {
     paths.push(resolveRealPath(opts.packageGeneratedDir));
+  }
+  // Protect user-local constitution override when it exists
+  const userConstitutionBase = getUserConstitutionBasePath();
+  if (existsSync(userConstitutionBase)) {
+    paths.push(resolveRealPath(userConstitutionBase));
   }
   return paths;
 }
@@ -197,24 +205,24 @@ export function extractServerDomainAllowlists(mcpServers: Record<string, MCPServ
  */
 export function checkConstitutionFreshness(compiledPolicy: CompiledPolicyFile, constitutionPath: string): void {
   try {
-    const constitutionText = loadConstitutionText(constitutionPath);
-    const currentHash = createHash('sha256').update(constitutionText).digest('hex');
+    const currentHash = computeConstitutionHash(constitutionPath);
     if (currentHash !== compiledPolicy.constitutionHash) {
       process.stderr.write(
         'Warning: constitution has changed since the last policy compilation. ' +
           'Run `ironcurtain compile-policy` to update the compiled policy.\n',
       );
     }
-  } catch {
-    // If the constitution file can't be read, skip the check silently.
-    // This can happen in test environments or when the file is missing.
+  } catch (err: unknown) {
+    // Missing constitution file is expected in test environments — skip silently.
+    // Let other errors (permission denied, etc.) propagate.
+    if (err instanceof Error && 'code' in err && (err as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw err;
   }
 }
 
 export function loadGeneratedPolicy(
   generatedDir: string,
   fallbackDir?: string,
-  constitutionPath?: string,
 ): {
   compiledPolicy: CompiledPolicyFile;
   toolAnnotations: ToolAnnotationsFile;
@@ -227,10 +235,6 @@ export function loadGeneratedPolicy(
     readGeneratedFile(generatedDir, 'tool-annotations.json', fallbackDir),
   );
   const dynamicLists = loadOptionalGeneratedFile<DynamicListsFile>(generatedDir, 'dynamic-lists.json', fallbackDir);
-
-  if (constitutionPath) {
-    checkConstitutionFreshness(compiledPolicy, constitutionPath);
-  }
 
   return { compiledPolicy, toolAnnotations, dynamicLists };
 }
