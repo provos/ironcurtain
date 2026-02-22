@@ -198,37 +198,37 @@ describe('normalizers via registry', () => {
     const home = homedir();
     for (const role of ['read-path', 'write-path', 'delete-path'] as ArgumentRole[]) {
       const def = getRoleDefinition(role);
-      expect(def.normalize('~/test')).toBe(`${home}/test`);
-      expect(def.normalize('/tmp/a/../b')).toBe('/tmp/b');
+      expect(def.canonicalize('~/test')).toBe(`${home}/test`);
+      expect(def.canonicalize('/tmp/a/../b')).toBe('/tmp/b');
     }
   });
 
   it('none role uses identity', () => {
     const def = getRoleDefinition('none');
-    expect(def.normalize('~/test')).toBe('~/test');
-    expect(def.normalize('/etc/passwd')).toBe('/etc/passwd');
-    expect(def.normalize('hello world')).toBe('hello world');
+    expect(def.canonicalize('~/test')).toBe('~/test');
+    expect(def.canonicalize('/etc/passwd')).toBe('/etc/passwd');
+    expect(def.canonicalize('hello world')).toBe('hello world');
   });
 
-  it('url roles define prepareForPolicy', () => {
+  it('url roles define extractPolicyValue', () => {
     const fetchDef = getRoleDefinition('fetch-url');
-    expect(fetchDef.prepareForPolicy).toBeDefined();
-    expect(fetchDef.prepareForPolicy!('https://example.com/path')).toBe('example.com');
+    expect(fetchDef.extractPolicyValue).toBeDefined();
+    expect(fetchDef.extractPolicyValue!('https://example.com/path')).toBe('example.com');
 
     const gitDef = getRoleDefinition('git-remote-url');
-    expect(gitDef.prepareForPolicy).toBeDefined();
-    expect(gitDef.prepareForPolicy!('git@github.com:user/repo.git')).toBe('github.com');
+    expect(gitDef.extractPolicyValue).toBeDefined();
+    expect(gitDef.extractPolicyValue!('git@github.com:user/repo.git')).toBe('github.com');
   });
 
-  it('git-remote-url defines resolveForPolicy', () => {
+  it('git-remote-url defines resolveIndirection', () => {
     const def = getRoleDefinition('git-remote-url');
-    expect(def.resolveForPolicy).toBeDefined();
+    expect(def.resolveIndirection).toBeDefined();
   });
 
   it('opaque roles use identity', () => {
     for (const role of ['branch-name', 'commit-message', 'none'] as ArgumentRole[]) {
       const def = getRoleDefinition(role);
-      expect(def.normalize('anything')).toBe('anything');
+      expect(def.canonicalize('anything')).toBe('anything');
     }
   });
 });

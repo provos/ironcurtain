@@ -30,7 +30,7 @@
 - **Re-exported from**: `src/pipeline/types.ts` (backward compat: `ArgumentRole`, `isArgumentRole`, `getArgumentRoleValues`)
 - **8 roles**: `read-path`, `write-path`, `delete-path`, `fetch-url`, `git-remote-url`, `branch-name`, `commit-message`, `none`
 - **RoleCategory**: `'path' | 'url' | 'opaque'` -- determines which structural invariant applies
-- **RoleDefinition fields**: `description`, `isResourceIdentifier`, `category`, `normalize`, `prepareForPolicy?`, `resolveForPolicy?`, `annotationGuidance`
+- **RoleDefinition fields**: `description`, `isResourceIdentifier`, `category`, `canonicalize`, `extractPolicyValue?`, `resolveIndirection?`, `annotationGuidance`
 - **Category accessors**: `getRolesByCategory()`, `getPathRoles()`, `getUrlRoles()`, `getResourceRoles()`
 - **URL normalizers**: `normalizeUrl()`, `extractDomain()`, `normalizeGitUrl()`, `extractGitDomain()`, `resolveGitRemote()`
 - **resolveGitRemote()**: uses `execFileSync` (not `execSync`) for safety; resolves named remotes to URLs via `git remote get-url`

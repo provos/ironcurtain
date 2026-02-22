@@ -45,15 +45,16 @@ export interface RoleDefinition {
   readonly description: string;
   readonly isResourceIdentifier: boolean;
   readonly category: RoleCategory;
-  readonly normalize: (value: string) => string;
-  /** Extract the policy-relevant value (e.g., domain from URL). */
-  readonly prepareForPolicy?: (value: string) => string;
+  /** Produce canonical form (symlink resolution, URL normalization). Security-critical. */
+  readonly canonicalize: (value: string) => string;
+  /** Extract the policy-relevant portion (e.g., domain from URL). */
+  readonly extractPolicyValue?: (value: string) => string;
   /**
-   * Context-aware resolution for values that need sibling arguments.
+   * Resolve an indirect reference to a concrete value.
    * E.g., resolving named git remote "origin" to its URL using the
    * `path` argument from the same tool call.
    */
-  readonly resolveForPolicy?: (value: string, allArgs: Record<string, unknown>) => string;
+  readonly resolveIndirection?: (value: string, allArgs: Record<string, unknown>) => string;
   /**
    * Guidance for the LLM annotation prompt. Built into the prompt
    * dynamically from the registry -- no manual prompt maintenance.
@@ -199,7 +200,7 @@ const registryEntries: [ArgumentRole, RoleDefinition][] = [
       description: 'Filesystem path that will be read',
       isResourceIdentifier: true,
       category: 'path',
-      normalize: normalizePath,
+      canonicalize: normalizePath,
       annotationGuidance:
         'Assign to arguments that are filesystem paths the tool will read from. ' +
         'Includes file and directory paths used for input.',
@@ -212,7 +213,7 @@ const registryEntries: [ArgumentRole, RoleDefinition][] = [
       description: 'Filesystem path that will be written to',
       isResourceIdentifier: true,
       category: 'path',
-      normalize: normalizePath,
+      canonicalize: normalizePath,
       annotationGuidance:
         'Assign to arguments that are filesystem paths the tool will write or create. ' +
         'Includes destination paths for file creation and modification.',
@@ -225,7 +226,7 @@ const registryEntries: [ArgumentRole, RoleDefinition][] = [
       description: 'Filesystem path that will be deleted',
       isResourceIdentifier: true,
       category: 'path',
-      normalize: normalizePath,
+      canonicalize: normalizePath,
       annotationGuidance:
         'Assign to arguments that are filesystem paths the tool will delete or remove. ' +
         'Also assign to the source argument of move operations (source is deleted after copy).',
@@ -238,7 +239,7 @@ const registryEntries: [ArgumentRole, RoleDefinition][] = [
       description: 'Filesystem path where git history will be rewritten',
       isResourceIdentifier: true,
       category: 'path',
-      normalize: normalizePath,
+      canonicalize: normalizePath,
       annotationGuidance:
         'Assign to the repository path argument of git operations that rewrite history or modify refs. ' +
         'Includes git_reset, git_rebase, git_merge, git_cherry_pick, and similar operations. ' +
@@ -252,7 +253,7 @@ const registryEntries: [ArgumentRole, RoleDefinition][] = [
       description: 'Filesystem path where git refs or history will be deleted',
       isResourceIdentifier: true,
       category: 'path',
-      normalize: normalizePath,
+      canonicalize: normalizePath,
       annotationGuidance:
         'Assign to the repository path argument of git operations that delete refs (branches, tags). ' +
         'Includes git_branch (delete mode), git_tag (delete mode), and similar operations. ' +
@@ -266,8 +267,8 @@ const registryEntries: [ArgumentRole, RoleDefinition][] = [
       description: 'URL that will be fetched via HTTP(S)',
       isResourceIdentifier: true,
       category: 'url',
-      normalize: normalizeUrl,
-      prepareForPolicy: extractDomain,
+      canonicalize: normalizeUrl,
+      extractPolicyValue: extractDomain,
       annotationGuidance:
         'Assign to arguments that are HTTP(S) URLs the tool will fetch. ' +
         'Typically applies to web-fetch server tools.',
@@ -280,9 +281,9 @@ const registryEntries: [ArgumentRole, RoleDefinition][] = [
       description: 'Git remote URL or named remote for network operations',
       isResourceIdentifier: true,
       category: 'url',
-      normalize: normalizeGitUrl,
-      prepareForPolicy: extractGitDomain,
-      resolveForPolicy: resolveGitRemote,
+      canonicalize: normalizeGitUrl,
+      extractPolicyValue: extractGitDomain,
+      resolveIndirection: resolveGitRemote,
       annotationGuidance:
         'Assign to arguments that identify a git remote (URL or named remote like "origin"). ' +
         'Typically applies to git server tools like git_clone, git_push, git_pull, git_fetch, git_remote.',
@@ -295,7 +296,7 @@ const registryEntries: [ArgumentRole, RoleDefinition][] = [
       description: 'Git branch name',
       isResourceIdentifier: false,
       category: 'opaque',
-      normalize: identity,
+      canonicalize: identity,
       annotationGuidance:
         'Assign to arguments that are git branch names. ' +
         'Typically applies to git server tools like git_branch, git_checkout, git_merge, git_push.',
@@ -308,7 +309,7 @@ const registryEntries: [ArgumentRole, RoleDefinition][] = [
       description: 'Git commit message text',
       isResourceIdentifier: false,
       category: 'opaque',
-      normalize: identity,
+      canonicalize: identity,
       annotationGuidance: 'Assign to arguments that are git commit messages. ' + 'Typically applies to git_commit.',
       serverNames: ['git'],
     },
@@ -319,7 +320,7 @@ const registryEntries: [ArgumentRole, RoleDefinition][] = [
       description: 'Argument carries no resource-identifier semantics',
       isResourceIdentifier: false,
       category: 'opaque',
-      normalize: identity,
+      canonicalize: identity,
       annotationGuidance:
         'Assign to arguments that have no resource-identifier semantics. ' +
         'Use for flags, counts, patterns, messages, and other non-path, non-URL values.',

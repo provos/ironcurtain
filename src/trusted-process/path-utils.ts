@@ -80,7 +80,7 @@ function resolveAgainstSandbox(value: string, sandboxDir: string): string {
 export interface PreparedToolArgs {
   /** Canonical args sent to the real MCP server. */
   argsForTransport: Record<string, unknown>;
-  /** Args presented to the policy engine (may differ if prepareForPolicy is defined). */
+  /** Args presented to the policy engine (may differ if extractPolicyValue is defined). */
   argsForPolicy: Record<string, unknown>;
 }
 
@@ -114,7 +114,7 @@ function normalizeArgValue(value: unknown, normalize: (v: string) => string): un
  * them against its own CWD, which is the sandbox directory).
  */
 function normalizePathForTransport(value: unknown, def: RoleDefinition): unknown {
-  return normalizeArgValue(value, (v) => (isAbsolutePath(v) ? def.normalize(v) : v));
+  return normalizeArgValue(value, (v) => (isAbsolutePath(v) ? def.canonicalize(v) : v));
 }
 
 /**
@@ -125,7 +125,7 @@ function normalizePathForTransport(value: unknown, def: RoleDefinition): unknown
  */
 function normalizePathForPolicy(value: unknown, def: RoleDefinition, allowedDirectory: string): unknown {
   return normalizeArgValue(value, (v) =>
-    isAbsolutePath(v) ? def.normalize(v) : resolveAgainstSandbox(v, allowedDirectory),
+    isAbsolutePath(v) ? def.canonicalize(v) : resolveAgainstSandbox(v, allowedDirectory),
   );
 }
 
@@ -174,9 +174,9 @@ export function prepareToolArgs(
         argsForPolicy[key] = normalizePathForPolicy(value, def, allowedDirectory);
       } else {
         // Non-path roles (URLs, opaque) or no sandbox: normalize for both
-        const transportValue = normalizeArgValue(value, def.normalize);
+        const transportValue = normalizeArgValue(value, def.canonicalize);
         argsForTransport[key] = transportValue;
-        // Domain extraction (prepareForPolicy) is handled later by
+        // Domain extraction (extractPolicyValue) is handled later by
         // the policy engine's resolveUrlForDomainCheck().
         argsForPolicy[key] = transportValue;
       }

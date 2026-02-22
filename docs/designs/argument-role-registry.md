@@ -21,8 +21,8 @@ export type ArgumentRole = 'read-path' | 'write-path' | 'delete-path' | 'none';
 export interface RoleDefinition {
   readonly description: string;
   readonly isResourceIdentifier: boolean;
-  readonly normalize: (value: string) => string;
-  readonly prepareForPolicy?: (value: string) => string;
+  readonly canonicalize: (value: string) => string;
+  readonly extractPolicyValue?: (value: string) => string;
 }
 
 export const ARGUMENT_ROLE_REGISTRY: ReadonlyMap<ArgumentRole, RoleDefinition>;
@@ -32,8 +32,8 @@ Each role definition provides:
 
 - **`description`** -- Human-readable explanation of the role's security semantics.
 - **`isResourceIdentifier`** -- True if the role tags an argument that names an external resource (filesystem path, URL, etc.). False for `'none'`. Replaces all `role !== 'none'` checks in the codebase.
-- **`normalize`** -- Canonicalizes a string argument value for transport to the MCP server. For path roles: tilde expansion + symlink-aware `resolveRealPath()` (follows symlinks via `realpathSync`, with fallbacks for non-existent paths). For `'none'`: identity function. Must be pure and must not throw.
-- **`prepareForPolicy`** -- Optional. Transforms the already-normalized value into a form suitable for policy evaluation. When absent, the policy engine sees the normalized value directly. When present, the policy engine sees the transformed value while the MCP server still receives the `normalize`-only value. Must be pure and must not throw.
+- **`canonicalize`** -- Canonicalizes a string argument value for transport to the MCP server. For path roles: tilde expansion + symlink-aware `resolveRealPath()` (follows symlinks via `realpathSync`, with fallbacks for non-existent paths). For `'none'`: identity function. Must be pure and must not throw.
+- **`extractPolicyValue`** -- Optional. Transforms the already-canonicalized value into a form suitable for policy evaluation. When absent, the policy engine sees the canonicalized value directly. When present, the policy engine sees the transformed value while the MCP server still receives the `canonicalize`-only value. Must be pure and must not throw.
 
 ### Convenience accessors
 
@@ -57,16 +57,16 @@ A type-level assertion ensures every member of the `ArgumentRole` union has a re
 
 ## Role Definitions
 
-| Role | isResourceIdentifier | normalize | prepareForPolicy | Description |
+| Role | isResourceIdentifier | canonicalize | extractPolicyValue | Description |
 |------|---------------------|-----------|-----------------|-------------|
 | `read-path` | true | tilde expand + `resolveRealPath()` | -- | Filesystem path that will be read |
 | `write-path` | true | tilde expand + `resolveRealPath()` | -- | Filesystem path that will be written to |
 | `delete-path` | true | tilde expand + `resolveRealPath()` | -- | Filesystem path that will be deleted |
 | `none` | false | identity (no-op) | -- | Argument carries no resource-identifier semantics |
 
-For path roles, `normalize` uses `resolveRealPath()` which follows symlinks to produce the canonical real path. This neutralizes both path traversal attacks (via `resolve`) and symlink-escape attacks (via `realpathSync`). The function has a three-tier fallback: (1) `realpathSync(path)` for existing paths, (2) `realpathSync(dirname) + basename` for new files in existing directories, (3) `path.resolve()` for entirely new paths. No `prepareForPolicy` is needed because the resolved real path is the correct form for both.
+For path roles, `canonicalize` uses `resolveRealPath()` which follows symlinks to produce the canonical real path. This neutralizes both path traversal attacks (via `resolve`) and symlink-escape attacks (via `realpathSync`). The function has a three-tier fallback: (1) `realpathSync(path)` for existing paths, (2) `realpathSync(dirname) + basename` for new files in existing directories, (3) `path.resolve()` for entirely new paths. No `extractPolicyValue` is needed because the resolved real path is the correct form for both.
 
-Future roles may use `prepareForPolicy` to diverge the two views. For example, a `content` role might use `normalize = identity` (the MCP server receives the original text) and `prepareForPolicy = stripSpecialChars` (the policy engine evaluates a sanitized version to resist prompt injection from rogue agents).
+Future roles may use `extractPolicyValue` to diverge the two views. For example, a `content` role might use `canonicalize = identity` (the MCP server receives the original text) and `extractPolicyValue = stripSpecialChars` (the policy engine evaluates a sanitized version to resist prompt injection from rogue agents).
 
 ## Annotation-Driven Normalization
 
@@ -78,7 +78,7 @@ For each argument in `args`:
 
 1. Look up `annotation.args[argName]` to get the role array
 2. Find the first role where `getRoleDefinition(role).isResourceIdentifier === true`
-3. If found: apply `normalize` to produce the transport value, then apply `prepareForPolicy` (if defined) to produce the policy value
+3. If found: apply `canonicalize` to produce the transport value, then apply `extractPolicyValue` (if defined) to produce the policy value
 4. If not found (roles are all `'none'`, or argument not in annotation): pass through unchanged to both outputs
 5. If `annotation` is `undefined` (unknown tool): fall back to the heuristic `normalizeToolArgPaths()` for both outputs
 
@@ -88,7 +88,7 @@ The input object is never mutated; new objects are returned.
 interface PreparedToolArgs {
   /** Canonical args sent to the real MCP server. */
   argsForTransport: Record<string, unknown>;
-  /** Args presented to the policy engine (may differ if prepareForPolicy is defined). */
+  /** Args presented to the policy engine (may differ if extractPolicyValue is defined). */
   argsForPolicy: Record<string, unknown>;
 }
 
@@ -98,7 +98,7 @@ function prepareToolArgs(
 ): PreparedToolArgs;
 ```
 
-For the current path roles (no `prepareForPolicy` defined), both outputs are identical -- the resolved absolute path. The dual-output structure is a zero-cost extension point that avoids a breaking interface change when `prepareForPolicy` is needed in the future.
+For the current path roles (no `extractPolicyValue` defined), both outputs are identical -- the resolved absolute path. The dual-output structure is a zero-cost extension point that avoids a breaking interface change when `extractPolicyValue` is needed in the future.
 
 ### Normalization flow
 
@@ -114,9 +114,9 @@ mcp-proxy-server.ts / TrustedProcess.handleToolCall()
      |       |
      |       +-- for each arg: looks up roles from annotation
      |       +-- for first resource-identifier role:
-     |       |     normalize(value)         → argsForTransport[key]
-     |       |     prepareForPolicy?(value) → argsForPolicy[key]
-     |       |     (if no prepareForPolicy, argsForPolicy = argsForTransport)
+     |       |     canonicalize(value)         → argsForTransport[key]
+     |       |     extractPolicyValue?(value) → argsForPolicy[key]
+     |       |     (if no extractPolicyValue, argsForPolicy = argsForTransport)
      |       |
      |       +-- returns { argsForTransport, argsForPolicy }
      |
@@ -195,20 +195,20 @@ All hardcoded role references across the codebase are replaced with registry-der
 Adding a new role (e.g., `'url'`) requires exactly two changes in one file (`src/types/argument-roles.ts`):
 
 1. Add `'url'` to the `ArgumentRole` union
-2. Add an entry to `ARGUMENT_ROLE_REGISTRY` with its normalizer
+2. Add an entry to `ARGUMENT_ROLE_REGISTRY` with its canonicalize function
 3. Add to `_ROLE_COMPLETENESS_CHECK` (compile error if forgotten)
 
 All Zod schemas, validation logic, and normalization flows pick up the new role automatically via registry accessors.
 
 ### Diverging policy and transport views
 
-The `prepareForPolicy` extension point enables roles where the policy engine needs to see a different value than the MCP server. This is designed for future scenarios such as:
+The `extractPolicyValue` extension point enables roles where the policy engine needs to see a different value than the MCP server. This is designed for future scenarios such as:
 
-- **Content sanitization**: A `content` role with `normalize = identity` (MCP server receives original text) and `prepareForPolicy = stripInjectionPatterns` (policy engine evaluates a sanitized version to resist prompt injection from rogue agents).
-- **URL canonicalization**: A `url` role with `normalize = resolveRedirects` (MCP server gets the final URL) and `prepareForPolicy = extractDomain` (policy engine evaluates only the domain for allowlist checks).
-- **Credential redaction**: A `secret` role with `normalize = identity` (MCP server receives the real credential) and `prepareForPolicy = redact` (policy engine never sees the actual secret, only a placeholder).
+- **Content sanitization**: A `content` role with `canonicalize = identity` (MCP server receives original text) and `extractPolicyValue = stripInjectionPatterns` (policy engine evaluates a sanitized version to resist prompt injection from rogue agents).
+- **URL canonicalization**: A `url` role with `canonicalize = resolveRedirects` (MCP server gets the final URL) and `extractPolicyValue = extractDomain` (policy engine evaluates only the domain for allowlist checks).
+- **Credential redaction**: A `secret` role with `canonicalize = identity` (MCP server receives the real credential) and `extractPolicyValue = redact` (policy engine never sees the actual secret, only a placeholder).
 
-The dual-output `prepareToolArgs` function handles this transparently. Callers always receive `{ argsForTransport, argsForPolicy }` and route each to the right destination. When `prepareForPolicy` is not defined on a role, both outputs are identical -- no overhead or behavioral change for existing roles.
+The dual-output `prepareToolArgs` function handles this transparently. Callers always receive `{ argsForTransport, argsForPolicy }` and route each to the right destination. When `extractPolicyValue` is not defined on a role, both outputs are identical -- no overhead or behavioral change for existing roles.
 
 ## Migration Plan
 

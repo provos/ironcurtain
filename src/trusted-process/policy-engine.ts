@@ -179,14 +179,14 @@ function extractAnnotatedUrls(
 
 /**
  * Applies the resolution pipeline for a URL-category value:
- *   1. resolveForPolicy(value, allArgs)  -- resolve named remote to URL
- *   2. normalize(resolvedValue)          -- canonicalize URL format
- *   3. prepareForPolicy(normalizedValue) -- extract domain for allowlist check
+ *   1. resolveIndirection(value, allArgs)  -- resolve named remote to URL
+ *   2. canonicalize(resolvedValue)          -- canonicalize URL format
+ *   3. extractPolicyValue(normalizedValue)  -- extract domain for allowlist check
  */
 function resolveUrlForDomainCheck(value: string, roleDef: RoleDefinition, allArgs: Record<string, unknown>): string {
-  const resolved = roleDef.resolveForPolicy?.(value, allArgs) ?? value;
-  const normalized = roleDef.normalize(resolved);
-  return roleDef.prepareForPolicy?.(normalized) ?? normalized;
+  const resolved = roleDef.resolveIndirection?.(value, allArgs) ?? value;
+  const normalized = roleDef.canonicalize(resolved);
+  return roleDef.extractPolicyValue?.(normalized) ?? normalized;
 }
 
 // Re-export domain utilities for backward compatibility with existing consumers

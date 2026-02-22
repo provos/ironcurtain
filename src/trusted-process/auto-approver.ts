@@ -203,7 +203,7 @@ export function sanitizeForPrompt(value: string): string {
  * Extracts sanitized resource-identifier arguments for the auto-approver prompt.
  *
  * Only arguments whose first role has `isResourceIdentifier: true` are included.
- * URL roles have `prepareForPolicy` applied (extracts domain). All values are
+ * URL roles have `extractPolicyValue` applied (extracts domain). All values are
  * sanitized for safe inclusion in an LLM prompt.
  *
  * Returns undefined when no resource-identifier arguments are found.
@@ -236,9 +236,9 @@ export function extractArgsForAutoApprove(
       continue;
     }
 
-    // Apply prepareForPolicy if available (e.g., extract domain from URL)
-    if (roleDef.prepareForPolicy) {
-      stringValue = roleDef.prepareForPolicy(stringValue);
+    // Apply extractPolicyValue if available (e.g., extract domain from URL)
+    if (roleDef.extractPolicyValue) {
+      stringValue = roleDef.extractPolicyValue(stringValue);
     }
 
     result[argName] = sanitizeForPrompt(stringValue);
