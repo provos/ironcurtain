@@ -7,7 +7,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { PolicyEngine, domainMatchesAllowlist, isIpAddress } from '../src/trusted-process/policy-engine.js';
+import { PolicyEngine, domainMatchesAllowlist } from '../src/trusted-process/policy-engine.js';
 import type {
   CompiledPolicyFile,
   ToolAnnotationsFile,
@@ -1483,6 +1483,7 @@ describe('Argument edge cases', () => {
     const result = engine.evaluate(
       makeRequest({
         toolName: 'read_file',
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         arguments: { path: 42 as any },
       }),
     );
@@ -1494,6 +1495,7 @@ describe('Argument edge cases', () => {
     const result = engine.evaluate(
       makeRequest({
         toolName: 'read_file',
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         arguments: { path: null as any },
       }),
     );
@@ -1516,6 +1518,7 @@ describe('Argument edge cases', () => {
     const result = engine.evaluate(
       makeRequest({
         toolName: 'read_file',
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         arguments: { path: undefined as any },
       }),
     );

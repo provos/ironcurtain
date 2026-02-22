@@ -356,7 +356,7 @@ function parseConfigJson(raw: string, configPath: string): unknown {
     return JSON.parse(raw);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    throw new Error(`Invalid JSON in ${configPath}: ${message}`);
+    throw new Error(`Invalid JSON in ${configPath}: ${message}`, { cause: err });
   }
 }
 
