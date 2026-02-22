@@ -19,13 +19,15 @@ import {
   getRolesByCategory,
   getPathRoles,
   getUrlRoles,
+} from '../src/types/argument-roles.js';
+import type { ArgumentRole } from '../src/types/argument-roles.js';
+import {
   normalizeUrl,
   extractDomain,
   normalizeGitUrl,
   extractGitDomain,
   resolveGitRemote,
-} from '../src/types/argument-roles.js';
-import type { ArgumentRole } from '../src/types/argument-roles.js';
+} from '../src/trusted-process/domain-utils.js';
 
 describe('ARGUMENT_ROLE_REGISTRY', () => {
   it('contains all ten roles', () => {
@@ -210,19 +212,12 @@ describe('normalizers via registry', () => {
     expect(def.canonicalize('hello world')).toBe('hello world');
   });
 
-  it('url roles define extractPolicyValue', () => {
+  it('url roles have url category', () => {
     const fetchDef = getRoleDefinition('fetch-url');
-    expect(fetchDef.extractPolicyValue).toBeDefined();
-    expect(fetchDef.extractPolicyValue!('https://example.com/path')).toBe('example.com');
+    expect(fetchDef.category).toBe('url');
 
     const gitDef = getRoleDefinition('git-remote-url');
-    expect(gitDef.extractPolicyValue).toBeDefined();
-    expect(gitDef.extractPolicyValue!('git@github.com:user/repo.git')).toBe('github.com');
-  });
-
-  it('git-remote-url defines resolveIndirection', () => {
-    const def = getRoleDefinition('git-remote-url');
-    expect(def.resolveIndirection).toBeDefined();
+    expect(gitDef.category).toBe('url');
   });
 
   it('opaque roles use identity', () => {

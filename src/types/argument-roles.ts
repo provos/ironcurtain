@@ -13,10 +13,10 @@
  *   - opaque: no structural invariant (semantic meaning only)
  */
 
-import { execFileSync } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { resolve, dirname, basename, join } from 'node:path';
+import { normalizeUrl, normalizeGitUrl } from '../trusted-process/domain-utils.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -47,14 +47,6 @@ export interface RoleDefinition {
   readonly category: RoleCategory;
   /** Produce canonical form (symlink resolution, URL normalization). Security-critical. */
   readonly canonicalize: (value: string) => string;
-  /** Extract the policy-relevant portion (e.g., domain from URL). */
-  readonly extractPolicyValue?: (value: string) => string;
-  /**
-   * Resolve an indirect reference to a concrete value.
-   * E.g., resolving named git remote "origin" to its URL using the
-   * `path` argument from the same tool call.
-   */
-  readonly resolveIndirection?: (value: string, allArgs: Record<string, unknown>) => string;
   /**
    * Guidance for the LLM annotation prompt. Built into the prompt
    * dynamically from the registry -- no manual prompt maintenance.
@@ -110,83 +102,6 @@ export function normalizePath(value: string): string {
 /** Identity function -- returns the value unchanged. */
 function identity(value: string): string {
   return value;
-}
-
-// ---------------------------------------------------------------------------
-// URL normalizers and domain extractors
-// ---------------------------------------------------------------------------
-
-/** Normalizes an HTTP(S) URL to a canonical form. Returns value as-is on parse failure. */
-export function normalizeUrl(value: string): string {
-  try {
-    const url = new URL(value);
-    if (url.pathname === '/') url.pathname = '';
-    return url.toString().replace(/\/$/, '');
-  } catch {
-    return value;
-  }
-}
-
-/** Extracts the hostname from an HTTP(S) URL. Returns value as-is on parse failure. */
-export function extractDomain(value: string): string {
-  try {
-    return new URL(value).hostname;
-  } catch {
-    return value;
-  }
-}
-
-/** Normalizes a git URL (HTTP or SSH format). SSH URLs are returned as-is. */
-export function normalizeGitUrl(value: string): string {
-  // SSH format: git@host:path -- no further normalization needed
-  const sshMatch = value.match(/^(?:[\w.+-]+@)?([^:]+):/);
-  if (sshMatch && !value.includes('://')) return value;
-  return normalizeUrl(value);
-}
-
-/** Extracts the domain from a git URL (HTTP or SSH format). */
-export function extractGitDomain(value: string): string {
-  // SSH format: git@host:path
-  const sshMatch = value.match(/^(?:[\w.+-]+@)?([^:]+):/);
-  if (sshMatch && !value.includes('://')) return sshMatch[1];
-  return extractDomain(value);
-}
-
-/**
- * Resolves a git remote value to a URL for policy evaluation.
- *
- * If the value is already a URL (contains :// or matches SSH pattern),
- * returns it as-is. Otherwise, treats it as a named remote and runs
- * `git remote get-url <name>` in the repository directory (found via
- * the `path` sibling argument).
- *
- * Uses execFileSync (not execSync) to avoid command injection --
- * the value comes from agent-controlled tool call arguments.
- *
- * When resolution fails (repo doesn't exist, remote not found, git
- * not installed), returns the original value. This causes the domain
- * check to escalate (the value won't match any allowed domain),
- * which is the correct behavior -- escalate when we can't verify.
- */
-export function resolveGitRemote(value: string, allArgs: Record<string, unknown>): string {
-  // Already a URL -- return as-is
-  if (value.includes('://') || /^[\w.+-]+@[^:]+:/.test(value)) {
-    return value;
-  }
-
-  // Named remote -- resolve via git (no shell, no injection risk)
-  const rawPath = typeof allArgs.path === 'string' ? allArgs.path : '.';
-  const repoPath = resolve(rawPath);
-  try {
-    return execFileSync('git', ['remote', 'get-url', value], {
-      cwd: repoPath,
-      encoding: 'utf-8',
-      timeout: 5000,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    }).trim();
-  } catch {
-    return value; // Resolution failed -- escalation will catch it
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -268,7 +183,6 @@ const registryEntries: [ArgumentRole, RoleDefinition][] = [
       isResourceIdentifier: true,
       category: 'url',
       canonicalize: normalizeUrl,
-      extractPolicyValue: extractDomain,
       annotationGuidance:
         'Assign to arguments that are HTTP(S) URLs the tool will fetch. ' +
         'Typically applies to web-fetch server tools.',
@@ -282,8 +196,6 @@ const registryEntries: [ArgumentRole, RoleDefinition][] = [
       isResourceIdentifier: true,
       category: 'url',
       canonicalize: normalizeGitUrl,
-      extractPolicyValue: extractGitDomain,
-      resolveIndirection: resolveGitRemote,
       annotationGuidance:
         'Assign to arguments that identify a git remote (URL or named remote like "origin"). ' +
         'Typically applies to git server tools like git_clone, git_push, git_pull, git_fetch, git_remote.',

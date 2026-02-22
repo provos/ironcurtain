@@ -21,8 +21,8 @@ export type ArgumentRole = 'read-path' | 'write-path' | 'delete-path' | 'none';
 export interface RoleDefinition {
   readonly description: string;
   readonly isResourceIdentifier: boolean;
+  readonly category: RoleCategory;
   readonly canonicalize: (value: string) => string;
-  readonly extractPolicyValue?: (value: string) => string;
 }
 
 export const ARGUMENT_ROLE_REGISTRY: ReadonlyMap<ArgumentRole, RoleDefinition>;

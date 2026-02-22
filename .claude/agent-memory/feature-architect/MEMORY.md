@@ -187,7 +187,7 @@ Both use the same PolicyEngine with compiled artifacts.
 - Custom fetch server: single `fetch` tool with url, method, headers, body, max_length args
 - New `RoleCategory` type: `'path' | 'url' | 'opaque'` groups roles for structural invariant dispatch
 - New roles: `fetch-url`, `git-remote-url`, `branch-name`, `commit-message`
-- Each `RoleDefinition` gains `category` and `annotationGuidance` fields; methods: `canonicalize`, `extractPolicyValue?`, `resolveIndirection?`
+- Each `RoleDefinition` has `category` and `annotationGuidance` fields; method: `canonicalize`
 - URL normalizers: `normalizeUrl()`, `extractDomain()`, `normalizeGitUrl()`, `extractGitDomain()`
 - Policy engine untrusted domain gate: domain allowlist check for url-category roles (escalate, not deny)
 - `serverDomainAllowlists` derived from sandbox network config's `allowedDomains`

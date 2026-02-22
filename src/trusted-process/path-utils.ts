@@ -80,7 +80,7 @@ function resolveAgainstSandbox(value: string, sandboxDir: string): string {
 export interface PreparedToolArgs {
   /** Canonical args sent to the real MCP server. */
   argsForTransport: Record<string, unknown>;
-  /** Args presented to the policy engine (may differ if extractPolicyValue is defined). */
+  /** Args presented to the policy engine (may differ for relative paths when allowedDirectory is set). */
   argsForPolicy: Record<string, unknown>;
 }
 
@@ -176,8 +176,8 @@ export function prepareToolArgs(
         // Non-path roles (URLs, opaque) or no sandbox: normalize for both
         const transportValue = normalizeArgValue(value, def.canonicalize);
         argsForTransport[key] = transportValue;
-        // Domain extraction (extractPolicyValue) is handled later by
-        // the policy engine's resolveUrlForDomainCheck().
+        // Domain extraction is handled later by the policy engine's
+        // resolveUrlForDomainCheck() (uses functions from domain-utils.ts).
         argsForPolicy[key] = transportValue;
       }
     } else {

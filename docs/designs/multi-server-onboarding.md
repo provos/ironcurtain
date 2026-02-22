@@ -79,17 +79,6 @@ export interface RoleDefinition {
   readonly isResourceIdentifier: boolean;
   readonly category: RoleCategory;
   readonly canonicalize: (value: string) => string;
-  /** Extract the policy-relevant portion (e.g., domain from URL). */
-  readonly extractPolicyValue?: (value: string) => string;
-  /**
-   * Resolve an indirect reference to a concrete value.
-   * E.g., resolving named git remote "origin" to its URL using the
-   * `path` argument from the same tool call.
-   */
-  readonly resolveIndirection?: (
-    value: string,
-    allArgs: Record<string, unknown>,
-  ) => string;
   /**
    * Guidance for the LLM annotation prompt. Built into the prompt
    * dynamically from the registry -- no manual prompt maintenance.
@@ -106,7 +95,6 @@ export interface RoleDefinition {
   isResourceIdentifier: true,
   category: 'url',
   canonicalize: normalizeUrl,
-  extractPolicyValue: extractDomain,
   annotationGuidance:
     'Assign to arguments that are HTTP(S) URLs the tool will fetch. ' +
     'Typically applies to web-fetch server tools.',
@@ -117,8 +105,6 @@ export interface RoleDefinition {
   isResourceIdentifier: true,
   category: 'url',
   canonicalize: normalizeGitUrl,
-  extractPolicyValue: extractGitDomain,
-  resolveIndirection: resolveGitRemote,
   annotationGuidance:
     'Assign to arguments that identify a git remote (URL or named remote like "origin"). ' +
     'Typically applies to git server tools like git_clone, git_push, git_pull, git_fetch, git_remote.',
@@ -233,7 +219,7 @@ export function resolveGitRemote(
 }
 ```
 
-The policy engine calls `resolveIndirection` (when defined) before `extractPolicyValue`, giving it the fully resolved URL to extract the domain from.
+The policy engine resolves indirection (e.g., named remote to URL via `resolveGitRemote`) before extracting the domain, giving it the fully resolved URL to extract the domain from.
 
 **Integration point:** Resolution happens inside the policy engine only (the untrusted domain gate and compiled rule evaluation domain condition evaluation), not in `prepareToolArgs()`. This keeps `prepareToolArgs()` unchanged (it only handles path normalization) and co-locates resolution with the domain validation logic that needs it.
 
@@ -299,22 +285,25 @@ Structural Checks
 For URL-category arguments, the policy engine applies a three-step pipeline:
 
 ```
-1. resolveIndirection(value, allArgs)  -- resolve named remote → URL
-2. canonicalize(resolvedValue)          -- canonicalize URL format
-3. extractPolicyValue(normalizedValue)  -- extract domain for allowlist check
+1. Resolve indirection (git-remote-url: named remote → URL via resolveGitRemote)
+2. Canonicalize URL format (roleDef.canonicalize)
+3. Extract domain for allowlist check (extractDomain / extractGitDomain)
 ```
 
 ```typescript
 function resolveUrlForDomainCheck(
   value: string,
+  role: ArgumentRole,
   roleDef: RoleDefinition,
   allArgs: Record<string, unknown>,
 ): string {
-  const resolved = roleDef.resolveIndirection?.(value, allArgs) ?? value;
+  const resolved = role === 'git-remote-url' ? resolveGitRemote(value, allArgs) : value;
   const normalized = roleDef.canonicalize(resolved);
-  return roleDef.extractPolicyValue?.(normalized) ?? normalized;
+  return role === 'git-remote-url' ? extractGitDomain(normalized) : extractDomain(normalized);
 }
 ```
+
+URL-specific functions (`resolveGitRemote`, `extractDomain`, `extractGitDomain`) are imported from `domain-utils.ts` rather than being defined on the `RoleDefinition` interface. Only 2 of 10 roles need URL handling, so the policy engine dispatches by role identity.
 
 ### 4.3 PolicyEngine Constructor Extension
 
@@ -386,7 +375,7 @@ Structural Checks
   |-- Protected path check on path="/sandbox/repo" → not protected, continue
   |-- Filesystem sandbox containment on path="/sandbox/repo" → within sandbox, resolve read-path
   |-- Untrusted domain gate on remote="origin":
-  |       resolveIndirection("origin", {path: "/sandbox/repo"})
+  |       resolveGitRemote("origin", {path: "/sandbox/repo"})
   |         → git remote get-url origin → "git@github.com:user/repo.git"
   |       extractGitDomain("git@github.com:user/repo.git") → "github.com"
   |       domainMatchesAllowlist("github.com", ["github.com", "*.github.com"]) → pass
@@ -522,8 +511,9 @@ Each step has a natural validation gate. The compile-time completeness check on 
 These must land together. Adding URL roles with `isResourceIdentifier: true` immediately breaks the policy engine if the protected path check and filesystem sandbox containment still use `getResourceRoles()` (see Section 3.7). The category-aware accessors and the engine's domain support must be co-committed.
 
 **Files changed:**
-- `src/types/argument-roles.ts` -- add `RoleCategory`, `resolveIndirection`, `annotationGuidance` to `RoleDefinition`; add `category` and `annotationGuidance` to existing role entries; add new roles (`fetch-url`, `git-remote-url`, `branch-name`, `commit-message`); add URL normalizers and `resolveGitRemote`; add `getRolesByCategory()`, `getPathRoles()`, `getUrlRoles()`
-- `src/trusted-process/policy-engine.ts` -- switch the protected path check and filesystem sandbox containment from `getResourceRoles()` to `getPathRoles()`; add `serverDomainAllowlists` constructor param; add `extractAnnotatedUrls()`, `domainMatchesAllowlist()`, untrusted domain gate; add `ruleMatches()` domains condition; add resolution pipeline (`resolveIndirection` → `canonicalize` → `extractPolicyValue`)
+- `src/types/argument-roles.ts` -- add `RoleCategory`, `annotationGuidance` to `RoleDefinition`; add `category` and `annotationGuidance` to existing role entries; add new roles (`fetch-url`, `git-remote-url`, `branch-name`, `commit-message`); add `getRolesByCategory()`, `getPathRoles()`, `getUrlRoles()`
+- `src/trusted-process/domain-utils.ts` -- URL normalizers (`normalizeUrl`, `extractDomain`, `normalizeGitUrl`, `extractGitDomain`) and `resolveGitRemote`
+- `src/trusted-process/policy-engine.ts` -- switch the protected path check and filesystem sandbox containment from `getResourceRoles()` to `getPathRoles()`; add `serverDomainAllowlists` constructor param; add `extractAnnotatedUrls()`, `domainMatchesAllowlist()`, untrusted domain gate; add `ruleMatches()` domains condition; add URL resolution pipeline (resolve indirection, canonicalize, extract domain via `domain-utils.ts` functions)
 - `src/trusted-process/mcp-proxy-server.ts` -- extract domain allowlists from deserialized `mcp-servers.json` sandbox configs, pass to `PolicyEngine` constructor
 - `src/pipeline/types.ts` -- add `DomainCondition` to `CompiledRuleCondition`
 - `src/pipeline/tool-annotator.ts` -- generate role descriptions from registry in prompt
@@ -556,7 +546,7 @@ These must land together. Adding URL roles with `isResourceIdentifier: true` imm
 - `domainMatchesAllowlist()` (exact, wildcard, `*`, no match)
 - `getRolesByCategory()` returns correct roles per category
 - `isArgumentRole()` accepts new roles
-- Resolution pipeline: `resolveIndirection` → `canonicalize` → `extractPolicyValue`
+- Resolution pipeline: resolve indirection → canonicalize → extract domain (via `domain-utils.ts` functions)
 
 ### Policy Engine Tests
 

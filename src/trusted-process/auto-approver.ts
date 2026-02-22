@@ -26,6 +26,7 @@ import type { LanguageModelV3 } from '@ai-sdk/provider';
 import { generateText, Output } from 'ai';
 import { z } from 'zod';
 import { getRoleDefinition } from '../types/argument-roles.js';
+import { extractDomain } from './domain-utils.js';
 import type { ToolAnnotation } from '../pipeline/types.js';
 
 // ---------------------------------------------------------------------------
@@ -203,8 +204,8 @@ export function sanitizeForPrompt(value: string): string {
  * Extracts sanitized resource-identifier arguments for the auto-approver prompt.
  *
  * Only arguments whose first role has `isResourceIdentifier: true` are included.
- * URL roles have `extractPolicyValue` applied (extracts domain). All values are
- * sanitized for safe inclusion in an LLM prompt.
+ * URL-category roles have their domain extracted. All values are sanitized for
+ * safe inclusion in an LLM prompt.
  *
  * Returns undefined when no resource-identifier arguments are found.
  */
@@ -236,9 +237,9 @@ export function extractArgsForAutoApprove(
       continue;
     }
 
-    // Apply extractPolicyValue if available (e.g., extract domain from URL)
-    if (roleDef.extractPolicyValue) {
-      stringValue = roleDef.extractPolicyValue(stringValue);
+    // Extract domain for URL-category roles (values are already canonicalized)
+    if (roleDef.category === 'url') {
+      stringValue = extractDomain(stringValue);
     }
 
     result[argName] = sanitizeForPrompt(stringValue);

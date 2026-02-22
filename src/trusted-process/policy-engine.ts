@@ -31,7 +31,13 @@ import {
   SANDBOX_SAFE_PATH_ROLES,
   type RoleDefinition,
 } from '../types/argument-roles.js';
-import { domainMatchesAllowlist, isIpAddress } from './domain-utils.js';
+import {
+  domainMatchesAllowlist,
+  isIpAddress,
+  resolveGitRemote,
+  extractDomain,
+  extractGitDomain,
+} from './domain-utils.js';
 import { getListMatcher } from '../pipeline/dynamic-list-types.js';
 
 /**
@@ -179,14 +185,22 @@ function extractAnnotatedUrls(
 
 /**
  * Applies the resolution pipeline for a URL-category value:
- *   1. resolveIndirection(value, allArgs)  -- resolve named remote to URL
- *   2. canonicalize(resolvedValue)          -- canonicalize URL format
- *   3. extractPolicyValue(normalizedValue)  -- extract domain for allowlist check
+ *   1. Resolve indirection (git-remote-url: named remote → URL)
+ *   2. Canonicalize URL format
+ *   3. Extract domain for allowlist check
+ *
+ * Uses role identity to dispatch to the correct functions rather than
+ * interface methods -- only 2 of 10 roles need URL-specific handling.
  */
-function resolveUrlForDomainCheck(value: string, roleDef: RoleDefinition, allArgs: Record<string, unknown>): string {
-  const resolved = roleDef.resolveIndirection?.(value, allArgs) ?? value;
+function resolveUrlForDomainCheck(
+  value: string,
+  role: ArgumentRole,
+  roleDef: RoleDefinition,
+  allArgs: Record<string, unknown>,
+): string {
+  const resolved = role === 'git-remote-url' ? resolveGitRemote(value, allArgs) : value;
   const normalized = roleDef.canonicalize(resolved);
-  return roleDef.extractPolicyValue?.(normalized) ?? normalized;
+  return role === 'git-remote-url' ? extractGitDomain(normalized) : extractDomain(normalized);
 }
 
 // Re-export domain utilities for backward compatibility with existing consumers
@@ -433,8 +447,8 @@ export class PolicyEngine {
       const allowlist = this.serverDomainAllowlists.get(request.serverName);
 
       if (allowlist) {
-        for (const { value, roleDef } of urlArgs) {
-          const domain = resolveUrlForDomainCheck(value, roleDef, request.arguments);
+        for (const { value, role, roleDef } of urlArgs) {
+          const domain = resolveUrlForDomainCheck(value, role, roleDef, request.arguments);
           if (!domainMatchesAllowlist(domain, allowlist)) {
             return finalDecision({
               decision: 'escalate',
@@ -680,8 +694,8 @@ export class PolicyEngine {
       // Zero URL args extracted = condition not satisfied, rule does not match
       if (urlArgs.length === 0) return false;
 
-      const allMatch = urlArgs.every(({ value, roleDef }) => {
-        const domain = resolveUrlForDomainCheck(value, roleDef, request.arguments);
+      const allMatch = urlArgs.every(({ value, role, roleDef }) => {
+        const domain = resolveUrlForDomainCheck(value, role, roleDef, request.arguments);
         return domainMatchesAllowlist(domain, cond.domains!.allowed);
       });
       if (!allMatch) return false;
