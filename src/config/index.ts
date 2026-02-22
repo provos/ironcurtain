@@ -7,6 +7,7 @@ import {
   computeConstitutionHash,
   getIronCurtainHome,
   getUserConstitutionBasePath,
+  getUserConstitutionPath,
   getUserGeneratedDir,
 } from './paths.js';
 import { resolveRealPath } from '../types/argument-roles.js';
@@ -49,10 +50,14 @@ export function computeProtectedPaths(opts: {
   if (opts.generatedDir !== opts.packageGeneratedDir) {
     paths.push(resolveRealPath(opts.packageGeneratedDir));
   }
-  // Protect user-local constitution override when it exists
+  // Protect user-local constitution files when they exist
   const userConstitutionBase = getUserConstitutionBasePath();
   if (existsSync(userConstitutionBase)) {
     paths.push(resolveRealPath(userConstitutionBase));
+  }
+  const userConstitutionExt = getUserConstitutionPath();
+  if (existsSync(userConstitutionExt)) {
+    paths.push(resolveRealPath(userConstitutionExt));
   }
   return paths;
 }
