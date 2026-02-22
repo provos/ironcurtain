@@ -11,6 +11,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { resolve } from 'node:path';
+import type { ArgumentRole } from '../types/argument-roles.js';
 
 // ---------------------------------------------------------------------------
 // Domain matching
@@ -79,7 +80,7 @@ export function normalizeGitUrl(value: string): string {
  * extractor based on role. Use this instead of calling extractDomain
  * or extractGitDomain directly when the role is available.
  */
-export function extractDomainForRole(value: string, role: string): string {
+export function extractDomainForRole(value: string, role: ArgumentRole): string {
   return role === 'git-remote-url' ? extractGitDomain(value) : extractDomain(value);
 }
 
