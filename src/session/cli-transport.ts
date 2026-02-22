@@ -86,6 +86,17 @@ export class CliTransport implements Transport {
   }
 
   /**
+   * Returns an onEscalationExpired callback that clears the escalation
+   * banner and notifies the user that the proxy timed out.
+   */
+  createEscalationExpiredHandler(): () => void {
+    return () => {
+      process.stderr.write(chalk.yellow('  Escalation expired (timed out).\n'));
+      this.startSpinner('Processing...');
+    };
+  }
+
+  /**
    * Returns an onEscalation callback that stops the spinner and
    * shows an escalation banner with the readline prompt so the user
    * can type /approve or /deny. The spinner is restarted only after

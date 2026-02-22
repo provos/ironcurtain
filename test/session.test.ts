@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi, type MockInstance } from 'vitest';
-import { mkdirSync, existsSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdirSync, existsSync, readFileSync, writeFileSync, rmSync, unlinkSync } from 'node:fs';
 import { resolve } from 'node:path';
 import * as logger from '../src/logger.js';
 
@@ -126,6 +126,27 @@ async function createTestSession(overrides: Partial<SessionOptions> = {}) {
     sandboxFactory: createMockSandboxFactory(),
     ...overrides,
   });
+}
+
+/** Writes an escalation request file to the given directory and returns paths. */
+function writeEscalationRequest(
+  escalationDir: string,
+  escalationId: string,
+  overrides: Partial<{ toolName: string; serverName: string; arguments: Record<string, unknown>; reason: string }> = {},
+): { requestPath: string; responsePath: string } {
+  const requestPath = resolve(escalationDir, `request-${escalationId}.json`);
+  const responsePath = resolve(escalationDir, `response-${escalationId}.json`);
+  writeFileSync(
+    requestPath,
+    JSON.stringify({
+      escalationId,
+      toolName: overrides.toolName ?? 'read_file',
+      serverName: overrides.serverName ?? 'filesystem',
+      arguments: overrides.arguments ?? { path: '/etc/hostname' },
+      reason: overrides.reason ?? 'Read outside sandbox',
+    }),
+  );
+  return { requestPath, responsePath };
 }
 
 // --- Tests ---
@@ -423,22 +444,9 @@ describe('Session', () => {
       const session = await createTestSession({ onEscalation });
 
       try {
-        const sessionId = session.getInfo().id;
-        const escalationDir = getSessionEscalationDir(sessionId);
-
-        // Simulate what the proxy does: write a request file
+        const escalationDir = getSessionEscalationDir(session.getInfo().id);
         const escalationId = 'test-escalation-123';
-        const requestPath = resolve(escalationDir, `request-${escalationId}.json`);
-        writeFileSync(
-          requestPath,
-          JSON.stringify({
-            escalationId,
-            toolName: 'read_file',
-            serverName: 'filesystem',
-            arguments: { path: '/etc/hostname' },
-            reason: 'Read outside sandbox',
-          }),
-        );
+        const { responsePath } = writeEscalationRequest(escalationDir, escalationId);
 
         // Wait for the polling interval to detect it
         await new Promise((r) => setTimeout(r, 500));
@@ -452,7 +460,6 @@ describe('Session', () => {
         await session.resolveEscalation(escalationId, 'approved');
 
         // Verify response file was written
-        const responsePath = resolve(escalationDir, `response-${escalationId}.json`);
         expect(existsSync(responsePath)).toBe(true);
         const response = JSON.parse(readFileSync(responsePath, 'utf-8'));
         expect(response.decision).toBe('approved');
@@ -486,26 +493,76 @@ describe('Session', () => {
       const session = await createTestSession({ onEscalation });
 
       try {
-        const sessionId = session.getInfo().id;
-        const escalationDir = getSessionEscalationDir(sessionId);
-
+        const escalationDir = getSessionEscalationDir(session.getInfo().id);
         const escalationId = 'callback-test-456';
-        writeFileSync(
-          resolve(escalationDir, `request-${escalationId}.json`),
-          JSON.stringify({
-            escalationId,
-            toolName: 'write_file',
-            serverName: 'filesystem',
-            arguments: { path: '/tmp/outside.txt', content: 'test' },
-            reason: 'Write outside sandbox',
-          }),
-        );
+        writeEscalationRequest(escalationDir, escalationId, {
+          toolName: 'write_file',
+          arguments: { path: '/tmp/outside.txt', content: 'test' },
+          reason: 'Write outside sandbox',
+        });
 
         // Wait for polling to detect
         await new Promise((r) => setTimeout(r, 500));
 
         expect(onEscalation).toHaveBeenCalledOnce();
         expect(session.getPendingEscalation()?.escalationId).toBe(escalationId);
+      } finally {
+        await session.close();
+      }
+    });
+
+    it('clears pending escalation when request file disappears (proxy timeout)', async () => {
+      const onEscalation = vi.fn();
+      const onEscalationExpired = vi.fn();
+      const session = await createTestSession({ onEscalation, onEscalationExpired });
+
+      try {
+        const escalationDir = getSessionEscalationDir(session.getInfo().id);
+        const escalationId = 'expiry-test-789';
+        const { requestPath } = writeEscalationRequest(escalationDir, escalationId);
+
+        // Wait for polling to detect the escalation
+        await new Promise((r) => setTimeout(r, 500));
+        expect(session.getPendingEscalation()?.escalationId).toBe(escalationId);
+
+        // Simulate proxy timeout: delete the request file (no response file exists)
+        unlinkSync(requestPath);
+
+        // Wait for next poll to detect expiry
+        await new Promise((r) => setTimeout(r, 500));
+
+        expect(session.getPendingEscalation()).toBeUndefined();
+        expect(onEscalationExpired).toHaveBeenCalledOnce();
+      } finally {
+        await session.close();
+      }
+    });
+
+    it('does NOT clear pending escalation when response file still exists', async () => {
+      const onEscalation = vi.fn();
+      const onEscalationExpired = vi.fn();
+      const session = await createTestSession({ onEscalation, onEscalationExpired });
+
+      try {
+        const escalationDir = getSessionEscalationDir(session.getInfo().id);
+        const escalationId = 'no-expiry-test-101';
+        const { requestPath, responsePath } = writeEscalationRequest(escalationDir, escalationId);
+
+        // Wait for polling to detect the escalation
+        await new Promise((r) => setTimeout(r, 500));
+        expect(session.getPendingEscalation()?.escalationId).toBe(escalationId);
+
+        // Simulate user approval: write response file, then delete request file
+        // (mimics the window where request is gone but response still exists)
+        writeFileSync(responsePath, JSON.stringify({ decision: 'approved' }));
+        unlinkSync(requestPath);
+
+        // Wait for next poll
+        await new Promise((r) => setTimeout(r, 500));
+
+        // Escalation should NOT be cleared because response file still exists
+        expect(session.getPendingEscalation()?.escalationId).toBe(escalationId);
+        expect(onEscalationExpired).not.toHaveBeenCalled();
       } finally {
         await session.close();
       }

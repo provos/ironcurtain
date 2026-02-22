@@ -16,7 +16,7 @@ import {
 } from 'ai';
 import { createLanguageModel } from '../config/model-provider.js';
 import { z } from 'zod';
-import { readFileSync, writeFileSync, readdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, readdirSync, existsSync } from 'node:fs';
 import { createLlmLoggingMiddleware } from '../pipeline/llm-logger.js';
 import type { LlmLogContext } from '../pipeline/llm-logger.js';
 import { resolve } from 'node:path';
@@ -103,6 +103,7 @@ export class AgentSession implements Session {
 
   /** Callbacks from SessionOptions. */
   private readonly onEscalation?: (request: EscalationRequest) => void;
+  private readonly onEscalationExpired?: () => void;
   private readonly onDiagnostic?: (event: DiagnosticEvent) => void;
 
   constructor(config: IronCurtainConfig, sessionId: SessionId, escalationDir: string, options: SessionOptions = {}) {
@@ -111,6 +112,7 @@ export class AgentSession implements Session {
     this.escalationDir = escalationDir;
     this.sandboxFactory = options.sandboxFactory ?? defaultSandboxFactory;
     this.onEscalation = options.onEscalation;
+    this.onEscalationExpired = options.onEscalationExpired;
     this.onDiagnostic = options.onDiagnostic;
     this.createdAt = new Date().toISOString();
     this.budgetTracker = new ResourceBudgetTracker(config.userConfig.resourceBudget, config.agentModelId);
@@ -426,7 +428,10 @@ export class AgentSession implements Session {
   }
 
   private pollEscalationDirectory(): void {
-    if (this.pendingEscalation) return;
+    if (this.pendingEscalation) {
+      this.checkEscalationExpiry();
+      return;
+    }
 
     try {
       const files = readdirSync(this.escalationDir);
@@ -443,6 +448,21 @@ export class AgentSession implements Session {
       this.onEscalation?.(request);
     } catch {
       // Directory may not exist yet or be empty -- ignore
+    }
+  }
+
+  /**
+   * Detects proxy-side escalation timeout: both request and response files
+   * are gone, meaning the proxy cleaned up after its deadline expired.
+   * When detected, clears the pending escalation and notifies the transport.
+   */
+  private checkEscalationExpiry(): void {
+    const escalationId = this.pendingEscalation!.escalationId;
+    const requestExists = existsSync(resolve(this.escalationDir, `request-${escalationId}.json`));
+    const responseExists = existsSync(resolve(this.escalationDir, `response-${escalationId}.json`));
+    if (!requestExists && !responseExists) {
+      this.pendingEscalation = undefined;
+      this.onEscalationExpired?.();
     }
   }
 

@@ -22,7 +22,14 @@ import { parseModelId, resolveApiKeyForProvider } from '../config/model-provider
 // to use our escalation timeout as the default instead of 60s.
 //
 // This must run before any Client instances are created (i.e. before Sandbox.initialize()).
-const DEFAULT_ESCALATION_TIMEOUT_MS = 300 * 1000;
+// The timeout is mutable so Sandbox.initialize() can update it from the config.
+let escalationTimeoutMs = 300 * 1000; // default fallback
+
+/** Updates the Protocol.request timeout used by UTCP's MCP SDK clients. */
+function setEscalationTimeout(seconds: number): void {
+  escalationTimeoutMs = seconds * 1000;
+}
+
 // eslint-disable-next-line @typescript-eslint/no-unsafe-function-type -- monkey-patch requires untyped apply()
 const originalRequest: Function = Protocol.prototype.request;
 Protocol.prototype.request = function (
@@ -31,7 +38,7 @@ Protocol.prototype.request = function (
 ) {
   const options = args[2] ?? {};
   if (!options.timeout) {
-    args[2] = { ...options, timeout: DEFAULT_ESCALATION_TIMEOUT_MS };
+    args[2] = { ...options, timeout: escalationTimeoutMs };
   }
   return originalRequest.apply(this, args);
 } as typeof Protocol.prototype.request;
@@ -110,6 +117,9 @@ export class Sandbox {
   private interfacePatchSnippet: string = '';
 
   async initialize(config: IronCurtainConfig): Promise<void> {
+    // Update the Protocol.request timeout before any Client instances are created.
+    setEscalationTimeout(config.escalationTimeoutSeconds);
+
     this.client = await CodeModeUtcpClient.create();
 
     // Register the MCP proxy server instead of real MCP servers.
