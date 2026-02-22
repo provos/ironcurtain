@@ -161,6 +161,12 @@ export interface SessionOptions {
   onEscalation?: (request: EscalationRequest) => void;
 
   /**
+   * Callback invoked when a pending escalation expires (proxy timed out).
+   * The transport uses this to clear the escalation banner and notify the user.
+   */
+  onEscalationExpired?: () => void;
+
+  /**
    * Callback invoked during message processing with diagnostic events.
    * Transports use this to display progress (e.g., tool call previews).
    * If not provided, diagnostics are silently dropped.

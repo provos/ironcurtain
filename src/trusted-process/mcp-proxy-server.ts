@@ -149,6 +149,35 @@ function getEscalationTimeoutMs(): number {
   return DEFAULT_ESCALATION_TIMEOUT_SECONDS * 1000;
 }
 
+/** Silently removes a file. Ignores errors (e.g. file already gone). */
+function tryUnlink(path: string): void {
+  try {
+    unlinkSync(path);
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * Removes both escalation IPC files. Request is deleted first so the
+ * session side sees "request gone + response exists" as normal
+ * approval-in-progress rather than an expiry.
+ */
+function cleanupEscalationFiles(requestPath: string, responsePath: string): void {
+  tryUnlink(requestPath);
+  tryUnlink(responsePath);
+}
+
+/**
+ * Reads and parses the escalation response file if it exists.
+ * Returns the decision, or undefined if the file is not present.
+ */
+function readEscalationResponse(responsePath: string): 'approved' | 'denied' | undefined {
+  if (!existsSync(responsePath)) return undefined;
+  const response = JSON.parse(readFileSync(responsePath, 'utf-8')) as { decision: 'approved' | 'denied' };
+  return response.decision;
+}
+
 /**
  * Waits for a human decision via file-based IPC.
  *
@@ -170,31 +199,18 @@ async function waitForEscalationDecision(
   const deadline = Date.now() + getEscalationTimeoutMs();
 
   while (Date.now() < deadline) {
-    if (existsSync(responsePath)) {
-      const response = JSON.parse(readFileSync(responsePath, 'utf-8')) as { decision: 'approved' | 'denied' };
-      // Clean up both files
-      try {
-        unlinkSync(requestPath);
-      } catch {
-        /* ignore */
-      }
-      try {
-        unlinkSync(responsePath);
-      } catch {
-        /* ignore */
-      }
-      return response.decision;
+    const decision = readEscalationResponse(responsePath);
+    if (decision) {
+      cleanupEscalationFiles(requestPath, responsePath);
+      return decision;
     }
     await new Promise((r) => setTimeout(r, ESCALATION_POLL_INTERVAL_MS));
   }
 
-  // Timeout -- clean up request file and treat as denied
-  try {
-    unlinkSync(requestPath);
-  } catch {
-    /* ignore */
-  }
-  return 'denied';
+  // Final check -- response may have arrived between last poll and deadline
+  const lateDecision = readEscalationResponse(responsePath);
+  cleanupEscalationFiles(requestPath, responsePath);
+  return lateDecision ?? 'denied';
 }
 
 /**

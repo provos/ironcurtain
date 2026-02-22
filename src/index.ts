@@ -37,6 +37,7 @@ export async function main(args?: string[]): Promise<void> {
       config,
       resumeSessionId,
       onEscalation: transport.createEscalationHandler(),
+      onEscalationExpired: transport.createEscalationExpiredHandler(),
       onDiagnostic: transport.createDiagnosticHandler(),
     });
   } catch (error) {
