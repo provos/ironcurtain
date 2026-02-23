@@ -356,6 +356,16 @@ export class PolicyEngine {
    * final decision or a set of roles resolved by sandbox containment.
    */
   private evaluateStructuralInvariants(request: ToolCallRequest): StructuralResult {
+    // Introspection tool: list_allowed_directories has no arguments and no
+    // side effects — always allow it without requiring a compiled rule.
+    if (request.toolName === 'list_allowed_directories') {
+      return finalDecision({
+        decision: 'allow',
+        rule: 'structural-introspection-allow',
+        reason: 'Introspection tool with no side effects is always allowed',
+      });
+    }
+
     // Extract paths using both methods for defense-in-depth
     const heuristicPaths = extractPathsHeuristic(request.arguments);
     const annotation = this.annotationMap.get(`${request.serverName}__${request.toolName}`);

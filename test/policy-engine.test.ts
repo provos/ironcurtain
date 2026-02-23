@@ -238,7 +238,7 @@ describe('PolicyEngine', () => {
       expect(result.rule).toBe('structural-sandbox-allow');
     });
 
-    it('allows list_allowed_directories (side-effect-free tool)', () => {
+    it('allows list_allowed_directories (structural introspection)', () => {
       const result = engine.evaluate(
         makeRequest({
           toolName: 'list_allowed_directories',
@@ -246,7 +246,7 @@ describe('PolicyEngine', () => {
         }),
       );
       expect(result.decision).toBe('allow');
-      expect(result.rule).toBe('allow-list-allowed-directories');
+      expect(result.rule).toBe('structural-introspection-allow');
     });
 
     it('escalates read_file outside allowed directory', () => {
@@ -400,7 +400,7 @@ describe('PolicyEngine', () => {
       expect(result.decision).toBe('escalate');
     });
 
-    it('allows list_allowed_directories with no roles (no role iteration needed)', () => {
+    it('allows list_allowed_directories with no roles (structural introspection)', () => {
       const result = engine.evaluate(
         makeRequest({
           toolName: 'list_allowed_directories',
@@ -408,7 +408,7 @@ describe('PolicyEngine', () => {
         }),
       );
       expect(result.decision).toBe('allow');
-      expect(result.rule).toBe('allow-list-allowed-directories');
+      expect(result.rule).toBe('structural-introspection-allow');
     });
   });
 
@@ -421,7 +421,7 @@ describe('PolicyEngine', () => {
         }),
       );
       expect(result.decision).toBe('allow');
-      expect(result.rule).toBe('allow-list-allowed-directories');
+      expect(result.rule).toBe('structural-introspection-allow');
       expect(result.rule).not.toBe('structural-sandbox-allow');
     });
 
