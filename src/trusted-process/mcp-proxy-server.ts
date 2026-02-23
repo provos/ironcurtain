@@ -373,7 +373,8 @@ async function main(): Promise<void> {
   const allTools: ProxiedTool[] = [];
 
   for (const [serverName, config] of Object.entries(serversConfig)) {
-    const resolved = resolvedSandboxConfigs.get(serverName)!;
+    const resolved = resolvedSandboxConfigs.get(serverName);
+    if (!resolved) throw new Error(`Missing sandbox config for server "${serverName}"`);
     const wrapped = wrapServerCommand(serverName, config.command, config.args, resolved, settingsDir);
 
     const transport = new StdioClientTransport({
@@ -479,7 +480,12 @@ async function main(): Promise<void> {
     const annotation = policyEngine.getAnnotation(toolInfo.serverName, toolInfo.name);
     if (!annotation) {
       return {
-        content: [{ type: 'text', text: `Missing annotation for tool: ${toolInfo.serverName}__${toolInfo.name}. Re-run 'ironcurtain annotate-tools' to update.` }],
+        content: [
+          {
+            type: 'text',
+            text: `Missing annotation for tool: ${toolInfo.serverName}__${toolInfo.name}. Re-run 'ironcurtain annotate-tools' to update.`,
+          },
+        ],
         isError: true,
       };
     }
@@ -630,7 +636,13 @@ async function main(): Promise<void> {
     // Policy allows -- forward to the real MCP server with transport args
     const startTime = Date.now();
     try {
-      const client = clientStates.get(toolInfo.serverName)!.client;
+      const clientState = clientStates.get(toolInfo.serverName);
+      if (!clientState) {
+        const err = `Internal error: no client connection for server "${toolInfo.serverName}"`;
+        logAudit({ status: 'denied', error: err }, 0);
+        return { content: [{ type: 'text', text: err }], isError: true };
+      }
+      const client = clientState.client;
 
       // TODO(workaround): Remove once @cyanheads/git-mcp-server fixes outputSchema declarations.
       //

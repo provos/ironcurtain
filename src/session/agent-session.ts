@@ -160,7 +160,7 @@ export class AgentSession implements Session {
     // Wall-clock abort signal (null when wall-clock budget is disabled)
     const remainingMs = this.budgetTracker.getRemainingWallClockMs();
     const abortController = remainingMs !== null ? new AbortController() : null;
-    const abortTimeout = abortController ? setTimeout(() => abortController.abort(), remainingMs!) : null;
+    const abortTimeout = abortController ? setTimeout(() => abortController.abort(), remainingMs ?? 0) : null;
 
     try {
       this.messages.push({ role: 'user', content: userMessage });
@@ -182,8 +182,10 @@ export class AgentSession implements Session {
         }
       }
 
+      if (!this.model) throw new SessionNotReadyError(this.status);
+
       const result = await generateText({
-        model: this.model!,
+        model: this.model,
         system: this.systemPrompt,
         messages: this.cacheStrategy.applyHistoryBreakpoint(this.messages),
         tools: this.tools,
@@ -471,7 +473,8 @@ export class AgentSession implements Session {
    * When detected, clears the pending escalation and notifies the transport.
    */
   private checkEscalationExpiry(): void {
-    const escalationId = this.pendingEscalation!.escalationId;
+    if (!this.pendingEscalation) return;
+    const escalationId = this.pendingEscalation.escalationId;
     const requestExists = existsSync(resolve(this.escalationDir, `request-${escalationId}.json`));
     const responseExists = existsSync(resolve(this.escalationDir, `response-${escalationId}.json`));
     if (!requestExists && !responseExists) {

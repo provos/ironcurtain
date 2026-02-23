@@ -31,7 +31,7 @@ export default tseslint.config(
         'error',
         { ignoreArrowShorthand: true },
       ],
-      '@typescript-eslint/no-non-null-assertion': 'warn',
+      '@typescript-eslint/no-non-null-assertion': 'error',
     },
   },
   // Relaxed rules for test files — mocking patterns, deprecated API testing,
@@ -46,6 +46,7 @@ export default tseslint.config(
       '@typescript-eslint/no-deprecated': 'off',
       '@typescript-eslint/no-dynamic-delete': 'off',
       '@typescript-eslint/unbound-method': 'off',
+      '@typescript-eslint/no-non-null-assertion': 'off',
     },
   },
 );

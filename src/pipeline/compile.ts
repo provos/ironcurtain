@@ -432,7 +432,11 @@ export async function connectMcpServersForLists(
   // otherwise connect only the hinted servers.
   const neededServers = hasUnhintedLists
     ? new Set(Object.keys(mcpServers))
-    : new Set(mcpDefs.map((d) => d.mcpServerHint!));
+    : new Set(
+        mcpDefs
+          .filter((d): d is typeof d & { mcpServerHint: string } => d.mcpServerHint != null)
+          .map((d) => d.mcpServerHint),
+      );
 
   const connections = new Map<string, McpServerConnection>();
   for (const serverName of neededServers) {

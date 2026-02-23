@@ -262,14 +262,15 @@ function expandListReferences(policy: CompiledPolicyFile, lists: DynamicListsFil
 
     // Expand @list-name in domains.allowed
     if (rule.if.domains?.allowed.some((e) => e.startsWith('@'))) {
-      const expandedAllowed = rule.if.domains.allowed.flatMap((entry) =>
+      const ruleDomains = rule.if.domains;
+      const expandedAllowed = ruleDomains.allowed.flatMap((entry) =>
         entry.startsWith('@') ? getEffectiveListValues(entry.slice(1), lists) : [entry],
       );
       expandedRule = {
         ...expandedRule,
         if: {
           ...expandedRule.if,
-          domains: { ...expandedRule.if.domains!, allowed: expandedAllowed },
+          domains: { ...ruleDomains, allowed: expandedAllowed },
         },
       };
     }
@@ -405,6 +406,8 @@ export class PolicyEngine {
       : false;
 
     if (this.allowedDirectory && resolvedSandboxPaths.length > 0) {
+      const sandboxDir = this.allowedDirectory;
+
       // Sandbox containment is only a structural allow for filesystem operations.
       // For other servers, paths are locators (e.g. "which repo dir") — the
       // operation itself needs compiled-rule evaluation regardless of path location.
@@ -412,13 +415,13 @@ export class PolicyEngine {
 
       // Fast path: all annotated paths within sandbox -> auto-allow (filesystem only)
       // Only fires when ALL path roles are sandbox-safe and no URL roles need checking
-      const allWithinSandbox = resolvedSandboxPaths.every((rp) => isWithinDirectory(rp, this.allowedDirectory!));
+      const allWithinSandbox = resolvedSandboxPaths.every((rp) => isWithinDirectory(rp, sandboxDir));
 
       if (isFilesystem && allWithinSandbox && urlArgs.length === 0 && !toolHasUnsafePathRoles) {
         return finalDecision({
           decision: 'allow',
           rule: 'structural-sandbox-allow',
-          reason: `All paths are within the sandbox directory: ${this.allowedDirectory}`,
+          reason: `All paths are within the sandbox directory: ${sandboxDir}`,
         });
       }
 
@@ -430,7 +433,7 @@ export class PolicyEngine {
         for (const role of pathRoles) {
           if (!SANDBOX_SAFE_PATH_ROLES.has(role)) continue;
           const pathsForRole = extractAnnotatedPaths(request.arguments, annotation, [role]);
-          if (pathsForRole.length > 0 && pathsForRole.every((p) => isWithinDirectory(p, this.allowedDirectory!))) {
+          if (pathsForRole.length > 0 && pathsForRole.every((p) => isWithinDirectory(p, sandboxDir))) {
             sandboxResolvedRoles.add(role);
           }
         }
@@ -487,7 +490,10 @@ export class PolicyEngine {
     request: ToolCallRequest,
     sandboxResolvedRoles: ReadonlySet<ArgumentRole>,
   ): EvaluationResult {
-    const annotation = this.annotationMap.get(`${request.serverName}__${request.toolName}`)!;
+    const annotation = this.annotationMap.get(`${request.serverName}__${request.toolName}`);
+    if (!annotation) {
+      throw new Error(`Missing annotation for ${request.serverName}/${request.toolName} in compiled rule evaluation`);
+    }
     const allRoles = collectDistinctRoles(annotation);
 
     // Filter out roles already resolved by sandbox containment
@@ -516,7 +522,10 @@ export class PolicyEngine {
       }
     }
 
-    return mostRestrictive!;
+    if (!mostRestrictive) {
+      throw new Error('unreachable: rolesToEvaluate was non-empty but no result was produced');
+    }
+    return mostRestrictive;
   }
 
   /**
@@ -628,7 +637,10 @@ export class PolicyEngine {
       };
     }
 
-    return mostRestrictive!;
+    if (!mostRestrictive) {
+      throw new Error('unreachable: all paths discharged but no result was produced');
+    }
+    return mostRestrictive;
   }
 
   /**
@@ -642,8 +654,9 @@ export class PolicyEngine {
     const cond = rule.if;
 
     if (cond.roles !== undefined) {
+      const condRoles = cond.roles;
       const toolHasMatchingRole = Object.values(annotation.args).some((argRoles) =>
-        argRoles.some((r) => cond.roles!.includes(r)),
+        argRoles.some((r) => condRoles.includes(r)),
       );
       if (!toolHasMatchingRole) return false;
     }
@@ -672,26 +685,28 @@ export class PolicyEngine {
     // Check paths condition
     const cond = rule.if;
     if (cond.paths !== undefined) {
-      const extracted = extractAnnotatedPaths(request.arguments, annotation, cond.paths.roles);
+      const condPaths = cond.paths;
+      const extracted = extractAnnotatedPaths(request.arguments, annotation, condPaths.roles);
 
       // Zero paths extracted = condition not satisfied, rule does not match
       if (extracted.length === 0) return false;
 
       // isWithinDirectory resolves paths internally, no pre-resolution needed
-      const allWithin = extracted.every((p) => isWithinDirectory(p, cond.paths!.within));
+      const allWithin = extracted.every((p) => isWithinDirectory(p, condPaths.within));
       if (!allWithin) return false;
     }
 
     // Check domains condition
     if (cond.domains !== undefined) {
-      const urlArgs = extractAnnotatedUrls(request.arguments, annotation, cond.domains.roles);
+      const condDomains = cond.domains;
+      const urlArgs = extractAnnotatedUrls(request.arguments, annotation, condDomains.roles);
 
       // Zero URL args extracted = condition not satisfied, rule does not match
       if (urlArgs.length === 0) return false;
 
       const allMatch = urlArgs.every(({ value, role, roleDef }) => {
         const domain = resolveUrlForDomainCheck(value, role, roleDef, request.arguments);
-        return domainMatchesAllowlist(domain, cond.domains!.allowed);
+        return domainMatchesAllowlist(domain, condDomains.allowed);
       });
       if (!allMatch) return false;
     }

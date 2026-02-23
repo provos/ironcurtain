@@ -123,8 +123,9 @@ export class CliTransport implements Transport {
     this.startSpinner('Thinking...');
 
     try {
-      const response = await session.sendMessage(this.initialMessage!);
-      this.spinner!.stop();
+      if (!this.initialMessage) throw new Error('runSingleShot called without initialMessage');
+      const response = await session.sendMessage(this.initialMessage);
+      this.spinner?.stop();
       process.stdout.write('\n');
       process.stdout.write(renderMarkdown(response));
       this.displaySessionSummary(session.getBudgetStatus());
@@ -179,7 +180,7 @@ export class CliTransport implements Transport {
 
       try {
         const response = await session.sendMessage(trimmed);
-        this.spinner!.stop();
+        this.spinner?.stop();
         process.stdout.write('\n');
         process.stdout.write(renderMarkdown(response));
         process.stdout.write('\n');
