@@ -92,15 +92,17 @@ export async function main(args?: string[]): Promise<void> {
     shuttingDown = true;
     process.stderr.write(chalk.dim('\nShutting down...\n'));
     transport.close();
+    // Force exit if cleanup takes too long
+    const forceExitTimeout = setTimeout(() => process.exit(1), 5_000);
+    forceExitTimeout.unref();
     session
       .close()
       .catch(() => {})
       .finally(() => {
+        clearTimeout(forceExitTimeout);
         logger.teardown();
         process.exit(0);
       });
-    // Force exit if cleanup takes too long
-    setTimeout(() => process.exit(1), 5_000).unref();
   };
   process.on('SIGINT', handleSignal);
   process.on('SIGTERM', handleSignal);

@@ -206,7 +206,7 @@ a comprehensive development environment used by GitHub Codespaces:
 
 - **Languages**: Node.js, Python, Java, Go, Ruby, PHP, .NET, Rust, C++
 - **Tools**: git, curl, wget, socat, build-essential, docker CLI, kubectl, terraform
-- **Non-root user**: `vscode` (pre-configured with sudo access)
+- **Non-root user**: `codespace` (pre-configured with sudo access)
 - **Size**: ~6-8GB (one-time download, cached by Docker)
 
 This avoids "missing tool X" surprises — the agent has access to the same development
@@ -219,13 +219,13 @@ FROM mcr.microsoft.com/devcontainers/universal:latest
 # Standard IronCurtain directory structure
 USER root
 RUN mkdir -p /workspace /etc/ironcurtain /run/ironcurtain && \
-    chown vscode:vscode /workspace /etc/ironcurtain /run/ironcurtain
+    chown codespace:codespace /workspace /etc/ironcurtain /run/ironcurtain
 
 WORKDIR /workspace
-USER vscode
+USER codespace
 ```
 
-Note: The `universal` image uses `vscode` as the non-root user (uid 1000).
+Note: The `universal` image uses `codespace` as the non-root user (uid 1000).
 All per-agent images inherit this user.
 
 ### Claude Code Image (Reference)
@@ -237,11 +237,11 @@ FROM ironcurtain-base:latest
 # Install Claude Code CLI (Node.js is already in the base image)
 USER root
 RUN npm install -g @anthropic-ai/claude-code
-USER vscode
+USER codespace
 
 # Create the config directory — settings.json is generated entirely
 # by IronCurtain at runtime and copied in by the entrypoint script.
-RUN mkdir -p /home/vscode/.claude
+RUN mkdir -p /home/codespace/.claude
 
 # The entrypoint script copies runtime-generated config into the right
 # location before the agent is invoked via docker exec.
@@ -259,7 +259,7 @@ ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
 # Merge runtime MCP config into settings.json if provided
 if [ -f /etc/ironcurtain/claude-settings.json ]; then
-  cp /etc/ironcurtain/claude-settings.json /home/vscode/.claude/settings.json
+  cp /etc/ironcurtain/claude-settings.json /home/codespace/.claude/settings.json
 fi
 
 # Idle — agent commands arrive via docker exec
@@ -274,9 +274,9 @@ FROM ironcurtain-base:latest
 
 USER root
 RUN npm install -g @openai/codex
-USER vscode
+USER codespace
 
-RUN mkdir -p /home/vscode/.config/codex
+RUN mkdir -p /home/codespace/.config/codex
 ```
 
 ### Image Build and Caching
@@ -1183,7 +1183,7 @@ This is enforced in `createDockerAgentSession()` before allocating resources.
 
 **1. Agent tries to escape Docker container**
 - Mitigation: Standard Docker containment (namespaces, cgroups, seccomp)
-- The container runs as non-root (`vscode` user from devcontainers base image)
+- The container runs as non-root (`codespace` user from devcontainers base image)
 - No capabilities granted (`--cap-drop=ALL`)
 - No privileged mode
 

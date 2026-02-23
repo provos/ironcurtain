@@ -197,7 +197,9 @@ export class DockerAgentSession implements Session {
     this.status = 'processing';
 
     // Per-turn wall-clock timeout (matches builtin session semantics:
-    // maxSessionSeconds is a per-turn limit, idle time doesn't count)
+    // maxSessionSeconds is a per-turn limit, idle time doesn't count).
+    // When not configured, docker.exec applies its own default timeout
+    // (currently 10 minutes) to prevent runaway processes.
     const maxSeconds = this.config.userConfig.resourceBudget.maxSessionSeconds;
     const execTimeout = maxSeconds != null ? maxSeconds * 1000 : undefined;
 

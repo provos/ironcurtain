@@ -47,6 +47,9 @@ export function createConnectProxy(options: ConnectProxyOptions): ConnectProxy {
 
   server.on('connect', (req: IncomingMessage, clientSocket: Socket, head: Buffer) => {
     const url = req.url ?? '';
+    // Split host:port. Uses lastIndexOf which works for domain names but
+    // not IPv6 literals ([::1]:443). IPv6 is not needed here — the allowlist
+    // only contains domain names (e.g. api.anthropic.com).
     const colonIndex = url.lastIndexOf(':');
     const host = colonIndex > 0 ? url.substring(0, colonIndex) : url;
     const port = colonIndex > 0 ? parseInt(url.substring(colonIndex + 1), 10) : 443;
