@@ -64,8 +64,8 @@ export async function main(args?: string[]): Promise<void> {
 // Only run when executed directly (not when imported by cli.ts)
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   await import('dotenv/config');
-  main().catch((err) => {
-    process.stderr.write(chalk.red(`Fatal error: ${err}\n`));
+  main().catch((err: unknown) => {
+    process.stderr.write(chalk.red(`Fatal error: ${err instanceof Error ? err.message : String(err)}\n`));
     process.exit(1);
   });
 }

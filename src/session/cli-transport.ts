@@ -123,8 +123,9 @@ export class CliTransport implements Transport {
     this.startSpinner('Thinking...');
 
     try {
-      const response = await session.sendMessage(this.initialMessage!);
-      this.spinner!.stop();
+      if (!this.initialMessage) throw new Error('runSingleShot called without initialMessage');
+      const response = await session.sendMessage(this.initialMessage);
+      this.spinner?.stop();
       process.stdout.write('\n');
       process.stdout.write(renderMarkdown(response));
       this.displaySessionSummary(session.getBudgetStatus());
@@ -179,7 +180,7 @@ export class CliTransport implements Transport {
 
       try {
         const response = await session.sendMessage(trimmed);
-        this.spinner!.stop();
+        this.spinner?.stop();
         process.stdout.write('\n');
         process.stdout.write(renderMarkdown(response));
         process.stdout.write('\n');
@@ -193,8 +194,8 @@ export class CliTransport implements Transport {
 
     rl.on('line', (line) => {
       if (running) {
-        processLine(line).catch((err) => {
-          process.stderr.write(chalk.red(`Unexpected error: ${err}\n`));
+        processLine(line).catch((err: unknown) => {
+          process.stderr.write(chalk.red(`Unexpected error: ${err instanceof Error ? err.message : String(err)}\n`));
         });
       }
     });
@@ -286,7 +287,7 @@ export class CliTransport implements Transport {
         // for the proxy to process the escalation result and continue.
         this.startSpinner('Processing...');
       })
-      .catch((err) => {
+      .catch((err: unknown) => {
         process.stderr.write(chalk.red(`  Error: ${err instanceof Error ? err.message : String(err)}\n`));
       });
   }

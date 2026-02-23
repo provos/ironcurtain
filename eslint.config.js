@@ -4,9 +4,49 @@ import prettier from 'eslint-config-prettier';
 
 export default tseslint.config(
   eslint.configs.recommended,
-  ...tseslint.configs.recommended,
+  ...tseslint.configs.strictTypeChecked,
   prettier,
   {
-    ignores: ['dist/', 'node_modules/'],
+    ignores: [
+      'dist/',
+      'node_modules/',
+      'scripts/',
+      'vitest.config.ts',
+      'eslint.config.js',
+    ],
+  },
+  {
+    languageOptions: {
+      parserOptions: {
+        project: './tsconfig.eslint.json',
+        tsconfigRootDir: import.meta.dirname,
+      },
+    },
+    rules: {
+      '@typescript-eslint/restrict-template-expressions': [
+        'error',
+        { allowNumber: true, allowBoolean: true },
+      ],
+      '@typescript-eslint/no-confusing-void-expression': [
+        'error',
+        { ignoreArrowShorthand: true },
+      ],
+      '@typescript-eslint/no-non-null-assertion': 'error',
+    },
+  },
+  // Relaxed rules for test files — mocking patterns, deprecated API testing,
+  // and vitest callbacks make strict unsafe-* rules too noisy.
+  {
+    files: ['test/**/*.ts'],
+    rules: {
+      '@typescript-eslint/require-await': 'off',
+      '@typescript-eslint/no-unsafe-assignment': 'off',
+      '@typescript-eslint/no-unsafe-member-access': 'off',
+      '@typescript-eslint/no-unsafe-return': 'off',
+      '@typescript-eslint/no-deprecated': 'off',
+      '@typescript-eslint/no-dynamic-delete': 'off',
+      '@typescript-eslint/unbound-method': 'off',
+      '@typescript-eslint/no-non-null-assertion': 'off',
+    },
   },
 );

@@ -181,7 +181,7 @@ export async function main(args: string[] = []): Promise<void> {
 // Only run when executed directly (not when imported by cli.ts or tests)
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   await import('dotenv/config');
-  main(process.argv.slice(2)).catch((err) => {
+  main(process.argv.slice(2)).catch((err: unknown) => {
     console.error(chalk.red.bold('List refresh failed:'), err);
     process.exit(1);
   });

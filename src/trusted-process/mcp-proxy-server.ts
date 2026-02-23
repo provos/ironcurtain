@@ -250,7 +250,7 @@ async function createAutoApproveModel(): Promise<LanguageModelV3 | null> {
     return wrapLanguageModel({
       model: baseModel,
       middleware: createLlmLoggingMiddleware(llmLogPath, { stepName: 'auto-approve' }),
-    }) as LanguageModelV3;
+    });
   } catch {
     // Model creation failure should not prevent the proxy from starting.
     // Auto-approve simply won't be available for this session.
@@ -280,14 +280,14 @@ async function main(): Promise<void> {
   // Parse per-server credentials and immediately scrub from process.env
   // so they are not inherited by child MCP server processes.
   const serverCredentials: Record<string, string> = process.env.SERVER_CREDENTIALS
-    ? JSON.parse(process.env.SERVER_CREDENTIALS)
+    ? (JSON.parse(process.env.SERVER_CREDENTIALS) as Record<string, string>)
     : {};
   delete process.env.SERVER_CREDENTIALS;
 
   const sandboxPolicy = (process.env.SANDBOX_POLICY ?? 'warn') as SandboxAvailabilityPolicy;
 
-  const allServersConfig: Record<string, MCPServerConfig> = JSON.parse(serversConfigJson);
-  const protectedPaths: string[] = JSON.parse(protectedPathsJson);
+  const allServersConfig = JSON.parse(serversConfigJson) as Record<string, MCPServerConfig>;
+  const protectedPaths = JSON.parse(protectedPathsJson) as string[];
 
   // When SERVER_FILTER is set, only connect to that single backend server.
   // This allows per-server proxy processes with clean tool naming.
@@ -296,6 +296,7 @@ async function main(): Promise<void> {
     ? { [serverFilter]: allServersConfig[serverFilter] }
     : allServersConfig;
 
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- defensive: Record index may be undefined at runtime
   if (serverFilter && !allServersConfig[serverFilter]) {
     process.stderr.write(`SERVER_FILTER: unknown server "${serverFilter}"\n`);
     process.exit(1);
@@ -372,7 +373,8 @@ async function main(): Promise<void> {
   const allTools: ProxiedTool[] = [];
 
   for (const [serverName, config] of Object.entries(serversConfig)) {
-    const resolved = resolvedSandboxConfigs.get(serverName)!;
+    const resolved = resolvedSandboxConfigs.get(serverName);
+    if (!resolved) throw new Error(`Missing sandbox config for server "${serverName}"`);
     const wrapped = wrapServerCommand(serverName, config.command, config.args, resolved, settingsDir);
 
     const transport = new StdioClientTransport({
@@ -417,7 +419,7 @@ async function main(): Promise<void> {
     // If a rootsRefreshed callback is registered (from escalation-triggered
     // root expansion), resolve it so the caller knows the server has
     // the latest roots.
-    client.setRequestHandler(ListRootsRequestSchema, async () => {
+    client.setRequestHandler(ListRootsRequestSchema, () => {
       if (state.rootsRefreshed) {
         state.rootsRefreshed();
         state.rootsRefreshed = undefined;
@@ -447,10 +449,11 @@ async function main(): Promise<void> {
 
   // Create the proxy MCP server using the low-level Server API
   // so we can pass through raw JSON schemas without Zod conversion
+  // eslint-disable-next-line @typescript-eslint/no-deprecated -- intentional use of low-level Server for raw JSON schema passthrough
   const server = new Server({ name: 'ironcurtain-proxy', version: VERSION }, { capabilities: { tools: {} } });
 
   // Handle tools/list -- return all proxied tool schemas verbatim
-  server.setRequestHandler(ListToolsRequestSchema, async () => {
+  server.setRequestHandler(ListToolsRequestSchema, () => {
     return {
       tools: allTools.map((t) => ({
         name: t.name,
@@ -463,7 +466,7 @@ async function main(): Promise<void> {
   // Handle tools/call -- evaluate policy, then forward or deny
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
     const toolName = req.params.name;
-    const rawArgs = (req.params.arguments ?? {}) as Record<string, unknown>;
+    const rawArgs = req.params.arguments ?? {};
     const toolInfo = toolMap.get(toolName);
 
     if (!toolInfo) {
@@ -475,6 +478,17 @@ async function main(): Promise<void> {
 
     // Annotation-driven normalization: split into transport vs policy args
     const annotation = policyEngine.getAnnotation(toolInfo.serverName, toolInfo.name);
+    if (!annotation) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Missing annotation for tool: ${toolInfo.serverName}__${toolInfo.name}. Re-run 'ironcurtain annotate-tools' to update.`,
+          },
+        ],
+        isError: true,
+      };
+    }
     const { argsForTransport, argsForPolicy } = prepareToolArgs(rawArgs, annotation, allowedDirectory);
 
     const request: ToolCallRequest = {
@@ -589,16 +603,14 @@ async function main(): Promise<void> {
       }
 
       // Expand roots for approved path arguments only (skip URLs, opaques)
-      if (annotation) {
-        const state = clientStates.get(toolInfo.serverName);
-        if (state) {
-          const pathValues = extractAnnotatedPaths(argsForTransport, annotation, getPathRoles());
-          for (const p of pathValues) {
-            await addRootToClient(state, {
-              uri: `file://${directoryForPath(p)}`,
-              name: 'escalation-approved',
-            });
-          }
+      const state = clientStates.get(toolInfo.serverName);
+      if (state) {
+        const pathValues = extractAnnotatedPaths(argsForTransport, annotation, getPathRoles());
+        for (const p of pathValues) {
+          await addRootToClient(state, {
+            uri: `file://${directoryForPath(p)}`,
+            name: 'escalation-approved',
+          });
         }
       }
     }
@@ -624,7 +636,13 @@ async function main(): Promise<void> {
     // Policy allows -- forward to the real MCP server with transport args
     const startTime = Date.now();
     try {
-      const client = clientStates.get(toolInfo.serverName)!.client;
+      const clientState = clientStates.get(toolInfo.serverName);
+      if (!clientState) {
+        const err = `Internal error: no client connection for server "${toolInfo.serverName}"`;
+        logAudit({ status: 'denied', error: err }, 0);
+        return { content: [{ type: 'text', text: err }], isError: true };
+      }
+      const client = clientState.client;
 
       // TODO(workaround): Remove once @cyanheads/git-mcp-server fixes outputSchema declarations.
       //
@@ -698,11 +716,15 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', () => {
+    void shutdown();
+  });
+  process.on('SIGTERM', () => {
+    void shutdown();
+  });
 }
 
-main().catch((err) => {
-  process.stderr.write(`MCP Proxy Server fatal error: ${err}\n`);
+main().catch((err: unknown) => {
+  process.stderr.write(`MCP Proxy Server fatal error: ${String(err)}\n`);
   process.exit(1);
 });

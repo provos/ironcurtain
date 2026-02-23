@@ -228,7 +228,7 @@ export class ResourceBudgetTracker {
 
     this.turnInputTokens += usage.inputTokens ?? 0;
     this.turnOutputTokens += usage.outputTokens ?? 0;
-    this.turnCacheReadTokens += usage.inputTokenDetails?.cacheReadTokens ?? 0;
+    this.turnCacheReadTokens += usage.inputTokenDetails.cacheReadTokens ?? 0;
     this.turnStepCount++;
 
     return this.evaluate();
@@ -386,38 +386,42 @@ export class ResourceBudgetTracker {
   }
 
   private checkWarnings(snapshot: BudgetSnapshot): void {
+    const maxTokens = this.config.maxTotalTokens;
+    const maxSteps = this.config.maxSteps;
+    const maxSeconds = this.config.maxSessionSeconds;
+    const maxCost = this.config.maxEstimatedCostUsd;
+
     this.maybeWarn(
       'tokens',
-      this.config.maxTotalTokens,
+      maxTokens,
       snapshot.totalTokens,
       snapshot,
       (pct) =>
-        `Token usage at ${pct}%: ${snapshot.totalTokens.toLocaleString()} / ${this.config.maxTotalTokens!.toLocaleString()}`,
+        `Token usage at ${pct}%: ${snapshot.totalTokens.toLocaleString()} / ${(maxTokens ?? 0).toLocaleString()}`,
     );
 
     this.maybeWarn(
       'steps',
-      this.config.maxSteps,
+      maxSteps,
       snapshot.stepCount,
       snapshot,
-      (pct) => `Step usage at ${pct}%: ${snapshot.stepCount} / ${this.config.maxSteps!}`,
+      (pct) => `Step usage at ${pct}%: ${snapshot.stepCount} / ${maxSteps ?? 0}`,
     );
 
     this.maybeWarn(
       'wall_clock',
-      this.config.maxSessionSeconds,
+      maxSeconds,
       snapshot.elapsedSeconds,
       snapshot,
-      (pct) => `Time usage at ${pct}%: ${Math.round(snapshot.elapsedSeconds)}s / ${this.config.maxSessionSeconds!}s`,
+      (pct) => `Time usage at ${pct}%: ${Math.round(snapshot.elapsedSeconds)}s / ${maxSeconds ?? 0}s`,
     );
 
     this.maybeWarn(
       'cost',
-      this.config.maxEstimatedCostUsd,
+      maxCost,
       snapshot.estimatedCostUsd,
       snapshot,
-      (pct) =>
-        `Cost at ${pct}%: $${snapshot.estimatedCostUsd.toFixed(2)} / $${this.config.maxEstimatedCostUsd!.toFixed(2)}`,
+      (pct) => `Cost at ${pct}%: $${snapshot.estimatedCostUsd.toFixed(2)} / $${(maxCost ?? 0).toFixed(2)}`,
     );
   }
 

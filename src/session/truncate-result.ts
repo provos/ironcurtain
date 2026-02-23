@@ -64,7 +64,8 @@ export function truncateResult(value: unknown, budget?: number): TruncationResul
   const limit = budget ?? getResultSizeLimit();
 
   const json = JSON.stringify(value);
-  // JSON.stringify returns undefined for undefined input
+  // JSON.stringify returns undefined for undefined input (TS types don't reflect this)
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- runtime: JSON.stringify(undefined) returns undefined
   if (json === undefined) {
     return { value, truncated: false, originalSize: 0, finalSize: 0 };
   }

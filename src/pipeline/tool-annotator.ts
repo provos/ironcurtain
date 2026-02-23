@@ -58,7 +58,7 @@ function buildAnnotationsResponseSchema(serverName: string, tools: MCPToolSchema
         const missingArgs = expectedArgs.filter((name) => !(name in a.args));
         if (missingArgs.length > 0) {
           ctx.addIssue({
-            code: z.ZodIssueCode.custom,
+            code: 'custom',
             path: [i, 'args'],
             message: `Tool "${a.toolName}" is missing role annotations for arguments: ${missingArgs.join(', ')}. Each argument must have a role array (e.g. ["read-path"] or ["none"]).`,
           });
@@ -226,10 +226,10 @@ export function validateAnnotationsHeuristic(
       if (!looksLikePathArgument(argName)) continue;
 
       // Skip non-string arguments (booleans, enums, numbers named "directories" etc.)
-      const argType = argSchema?.['type'];
+      const argType = argSchema['type'];
       if (argType === 'boolean' || argType === 'number' || argType === 'integer') continue;
 
-      const roles = annotation.args[argName];
+      const roles = annotation.args[argName] as ArgumentRole[] | undefined;
       const hasPathRole = roles && roles.some((r) => getRoleDefinition(r).isResourceIdentifier);
 
       if (!hasPathRole) {

@@ -123,8 +123,8 @@ beforeAll(async () => {
 }, 30_000);
 
 afterAll(async () => {
-  await client?.close();
-  httpServer?.close();
+  await client.close();
+  httpServer.close();
 });
 
 /** Extracts the text content from an MCP tool call result. */

@@ -90,7 +90,7 @@ export async function createSession(options: SessionOptions = {}): Promise<Sessi
     sessionLogPath,
     llmLogPath,
     autoApproveLlmLogPath,
-    mcpServers: JSON.parse(JSON.stringify(config.mcpServers)),
+    mcpServers: JSON.parse(JSON.stringify(config.mcpServers)) as typeof config.mcpServers,
   };
 
   // Patch MCP server args to use the session-specific sandbox directory
@@ -122,7 +122,7 @@ function patchMcpServerAllowedDirectory(
   config: { mcpServers: Record<string, { args: string[] }> },
   sandboxDir: string,
 ): void {
-  const fsServer = config.mcpServers['filesystem'];
+  const fsServer = config.mcpServers['filesystem'] as { args: string[] } | undefined;
   if (!fsServer) return;
 
   // Replace any existing allowed directory path in args.

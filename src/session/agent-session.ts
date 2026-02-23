@@ -160,7 +160,7 @@ export class AgentSession implements Session {
     // Wall-clock abort signal (null when wall-clock budget is disabled)
     const remainingMs = this.budgetTracker.getRemainingWallClockMs();
     const abortController = remainingMs !== null ? new AbortController() : null;
-    const abortTimeout = abortController ? setTimeout(() => abortController.abort(), remainingMs!) : null;
+    const abortTimeout = abortController ? setTimeout(() => abortController.abort(), remainingMs ?? 0) : null;
 
     try {
       this.messages.push({ role: 'user', content: userMessage });
@@ -182,14 +182,17 @@ export class AgentSession implements Session {
         }
       }
 
+      if (!this.model) throw new SessionNotReadyError(this.status);
+
       const result = await generateText({
-        model: this.model!,
+        model: this.model,
         system: this.systemPrompt,
         messages: this.cacheStrategy.applyHistoryBreakpoint(this.messages),
         tools: this.tools,
         stopWhen: [stepCountIs(MAX_AGENT_STEPS), this.budgetTracker.createStopCondition()],
         ...(abortController ? { abortSignal: abortController.signal } : {}),
         onStepFinish: (stepResult) => {
+          // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- usage may be undefined at runtime (TS 5.9 type inference vs ESLint disagree)
           this.lastStepInputTokens = stepResult.usage?.inputTokens ?? 0;
           this.emitToolCallDiagnostics(stepResult.toolCalls);
           this.emitTextDiagnostic(stepResult.text);
@@ -254,6 +257,7 @@ export class AgentSession implements Session {
     };
   }
 
+  // eslint-disable-next-line @typescript-eslint/require-await -- must be async to satisfy Session interface
   async resolveEscalation(escalationId: string, decision: 'approved' | 'denied'): Promise<void> {
     if (!this.pendingEscalation || this.pendingEscalation.escalationId !== escalationId) {
       throw new Error(`No pending escalation with ID: ${escalationId}`);
@@ -363,7 +367,8 @@ export class AgentSession implements Session {
   private applyLoopVerdict(code: string, output: Record<string, unknown>): Record<string, unknown> {
     const verdict = this.loopDetector.analyzeStep(code, output);
     if (verdict.action === 'warn' || verdict.action === 'block') {
-      output.warning = output.warning ? `${output.warning} | ${verdict.message}` : verdict.message;
+      const existing = typeof output.warning === 'string' ? output.warning : '';
+      output.warning = existing ? `${existing} | ${verdict.message}` : verdict.message;
       this.emitLoopDetectionDiagnostic(verdict.action, verdict.category, verdict.message);
     }
     return output;
@@ -418,8 +423,8 @@ export class AgentSession implements Session {
         promptTokens: usage.inputTokens ?? 0,
         completionTokens: usage.outputTokens ?? 0,
         totalTokens: usage.totalTokens ?? 0,
-        cacheReadTokens: usage.inputTokenDetails?.cacheReadTokens ?? 0,
-        cacheWriteTokens: usage.inputTokenDetails?.cacheWriteTokens ?? 0,
+        cacheReadTokens: usage.inputTokenDetails.cacheReadTokens ?? 0,
+        cacheWriteTokens: usage.inputTokenDetails.cacheWriteTokens ?? 0,
       },
       timestamp,
     };
@@ -451,7 +456,7 @@ export class AgentSession implements Session {
       if (!requestFile) return;
 
       const requestPath = resolve(this.escalationDir, requestFile);
-      const request: EscalationRequest = JSON.parse(readFileSync(requestPath, 'utf-8'));
+      const request = JSON.parse(readFileSync(requestPath, 'utf-8')) as EscalationRequest;
       this.seenEscalationIds.add(request.escalationId);
       this.pendingEscalation = request;
       this.onEscalation?.(request);
@@ -466,7 +471,8 @@ export class AgentSession implements Session {
    * When detected, clears the pending escalation and notifies the transport.
    */
   private checkEscalationExpiry(): void {
-    const escalationId = this.pendingEscalation!.escalationId;
+    if (!this.pendingEscalation) return;
+    const escalationId = this.pendingEscalation.escalationId;
     const requestExists = existsSync(resolve(this.escalationDir, `request-${escalationId}.json`));
     const responseExists = existsSync(resolve(this.escalationDir, `response-${escalationId}.json`));
     if (!requestExists && !responseExists) {

@@ -205,7 +205,7 @@ export async function main(): Promise<void> {
 // Only run when executed directly (not when imported by cli.ts)
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   await import('dotenv/config');
-  main().catch((err) => {
+  main().catch((err: unknown) => {
     console.error(chalk.red.bold('Tool annotation failed:'), err);
     process.exit(1);
   });

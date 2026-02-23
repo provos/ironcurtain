@@ -127,12 +127,13 @@ export function loadConfig(): IronCurtainConfig {
   const allowedDirectory = process.env.ALLOWED_DIRECTORY ?? defaultAllowedDir;
 
   const mcpServersPath = resolve(__dirname, 'mcp-servers.json');
-  const mcpServers: Record<string, MCPServerConfig> = JSON.parse(readFileSync(mcpServersPath, 'utf-8'));
+  const mcpServers = JSON.parse(readFileSync(mcpServersPath, 'utf-8')) as Record<string, MCPServerConfig>;
 
   // Sync the filesystem server's allowed directory with the configured value.
   // The mcp-servers.json ships with a default path that may differ from
   // the ALLOWED_DIRECTORY environment variable.
   const fsServer = mcpServers['filesystem'];
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- defensive: key may not exist in external JSON
   if (fsServer) {
     const defaultDir = '/tmp/ironcurtain-sandbox';
     const dirIndex = fsServer.args.indexOf(defaultDir);
@@ -233,13 +234,13 @@ export function loadGeneratedPolicy(
   toolAnnotations: ToolAnnotationsFile;
   dynamicLists: DynamicListsFile | undefined;
 } {
-  const compiledPolicy: CompiledPolicyFile = JSON.parse(
+  const compiledPolicy = JSON.parse(
     readGeneratedFile(generatedDir, 'compiled-policy.json', fallbackDir),
-  );
-  const toolAnnotations: ToolAnnotationsFile = JSON.parse(
+  ) as CompiledPolicyFile;
+  const toolAnnotations = JSON.parse(
     readGeneratedFile(generatedDir, 'tool-annotations.json', fallbackDir),
-  );
-  const dynamicLists = loadOptionalGeneratedFile<DynamicListsFile>(generatedDir, 'dynamic-lists.json', fallbackDir);
+  ) as ToolAnnotationsFile;
+  const dynamicLists = loadOptionalGeneratedFile(generatedDir, 'dynamic-lists.json', fallbackDir);
 
   return { compiledPolicy, toolAnnotations, dynamicLists };
 }
@@ -247,15 +248,19 @@ export function loadGeneratedPolicy(
 /**
  * Loads an optional generated artifact file. Returns undefined if not found.
  */
-function loadOptionalGeneratedFile<T>(generatedDir: string, filename: string, fallbackDir?: string): T | undefined {
+function loadOptionalGeneratedFile(
+  generatedDir: string,
+  filename: string,
+  fallbackDir?: string,
+): DynamicListsFile | undefined {
   const primaryPath = resolve(generatedDir, filename);
   if (existsSync(primaryPath)) {
-    return JSON.parse(readFileSync(primaryPath, 'utf-8'));
+    return JSON.parse(readFileSync(primaryPath, 'utf-8')) as DynamicListsFile;
   }
   if (fallbackDir) {
     const fallbackPath = resolve(fallbackDir, filename);
     if (existsSync(fallbackPath)) {
-      return JSON.parse(readFileSync(fallbackPath, 'utf-8'));
+      return JSON.parse(readFileSync(fallbackPath, 'utf-8')) as DynamicListsFile;
     }
   }
   return undefined;

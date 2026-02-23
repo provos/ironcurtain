@@ -7,7 +7,7 @@ vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
   return { ...actual, realpathSync: (p: string) => p };
 });
-import { expandTilde, normalizeToolArgPaths, prepareToolArgs } from '../src/trusted-process/path-utils.js';
+import { expandTilde, prepareToolArgs } from '../src/trusted-process/path-utils.js';
 import type { ToolAnnotation } from '../src/pipeline/types.js';
 
 describe('expandTilde', () => {
@@ -39,79 +39,6 @@ describe('expandTilde', () => {
 
   it('does not expand tilde in the middle of a path', () => {
     expect(expandTilde('/some/~user/path')).toBe('/some/~user/path');
-  });
-});
-
-describe('normalizeToolArgPaths', () => {
-  const home = homedir();
-
-  it('normalizes tilde paths in string values', () => {
-    const result = normalizeToolArgPaths({ path: '~/Downloads' });
-    expect(result.path).toBe(`${home}/Downloads`);
-  });
-
-  it('resolves parent traversals', () => {
-    const result = normalizeToolArgPaths({ path: '/tmp/foo/../bar' });
-    expect(result.path).toBe('/tmp/bar');
-  });
-
-  it('resolves relative paths to absolute', () => {
-    const result = normalizeToolArgPaths({ path: './relative/file.txt' });
-    expect(result.path).toBe(resolve('./relative/file.txt'));
-  });
-
-  it('normalizes absolute paths (no-op for clean absolute paths)', () => {
-    const result = normalizeToolArgPaths({ path: '/tmp/clean/path' });
-    expect(result.path).toBe('/tmp/clean/path');
-  });
-
-  it('normalizes path-like strings in arrays', () => {
-    const result = normalizeToolArgPaths({ paths: ['~/a', '/tmp/b'] });
-    expect(result.paths).toEqual([`${home}/a`, '/tmp/b']);
-  });
-
-  it('preserves non-path string values', () => {
-    const result = normalizeToolArgPaths({ content: 'hello world', name: 'test' });
-    expect(result.content).toBe('hello world');
-    expect(result.name).toBe('test');
-  });
-
-  it('preserves numeric values', () => {
-    const result = normalizeToolArgPaths({ count: 42 });
-    expect(result.count).toBe(42);
-  });
-
-  it('preserves boolean values', () => {
-    const result = normalizeToolArgPaths({ dryRun: false });
-    expect(result.dryRun).toBe(false);
-  });
-
-  it('does not normalize strings that do not look like paths', () => {
-    const result = normalizeToolArgPaths({ path: 'not-a-path' });
-    expect(result.path).toBe('not-a-path');
-  });
-
-  it('handles mixed arrays (normalizes path-like, preserves others)', () => {
-    const result = normalizeToolArgPaths({ items: ['~/a', 'plain', 42, '/tmp/b'] });
-    expect(result.items).toEqual([`${home}/a`, 'plain', 42, '/tmp/b']);
-  });
-
-  it('does not mutate the input object', () => {
-    const input = { path: '~/Downloads', content: 'hello' };
-    const inputCopy = { ...input };
-    normalizeToolArgPaths(input);
-    expect(input).toEqual(inputCopy);
-  });
-
-  it('handles empty arguments', () => {
-    const result = normalizeToolArgPaths({});
-    expect(result).toEqual({});
-  });
-
-  it('handles null and undefined values', () => {
-    const result = normalizeToolArgPaths({ a: null, b: undefined });
-    expect(result.a).toBeNull();
-    expect(result.b).toBeUndefined();
   });
 });
 
@@ -149,18 +76,6 @@ describe('prepareToolArgs', () => {
     // 'path' has resource role -- should be normalized
     expect(argsForTransport.path).toBe('/tmp/file.txt');
     expect(argsForPolicy.path).toBe('/tmp/file.txt');
-  });
-
-  it('falls back to heuristic when annotation is undefined', () => {
-    const { argsForTransport, argsForPolicy } = prepareToolArgs(
-      { path: '~/test/file.txt', content: '/etc/passwd' },
-      undefined,
-    );
-    // Heuristic normalizes both since both look like paths
-    expect(argsForTransport.path).toBe(`${home}/test/file.txt`);
-    expect(argsForTransport.content).toBe('/etc/passwd');
-    expect(argsForPolicy.path).toBe(`${home}/test/file.txt`);
-    expect(argsForPolicy.content).toBe('/etc/passwd');
   });
 
   it('returns identical argsForTransport and argsForPolicy for path roles', () => {
@@ -335,14 +250,7 @@ describe('prepareToolArgs with allowedDirectory (sandbox-aware)', () => {
     expect(argsForPolicy.url).toBe('https://example.com/api');
   });
 
-  it('falls back to heuristic when annotation is undefined (with allowedDirectory)', () => {
-    const { argsForTransport, argsForPolicy } = prepareToolArgs({ path: '~/test/file.txt' }, undefined, sandboxDir);
-    // Heuristic path — allowedDirectory is ignored
-    expect(argsForTransport.path).toBe(`${home}/test/file.txt`);
-    expect(argsForPolicy.path).toBe(`${home}/test/file.txt`);
-  });
-
-  it('without allowedDirectory, normalizes relative paths for both (legacy behavior)', () => {
+  it('without allowedDirectory, normalizes relative paths for both', () => {
     const { argsForTransport, argsForPolicy } = prepareToolArgs(
       { path: './relative/file.txt', content: 'hello' },
       writeAnnotation,

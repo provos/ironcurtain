@@ -10,7 +10,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 function getVersion(): string {
   // Works from both dist/ and src/ since package.json is one level up in either case.
   const packageJsonPath = resolve(__dirname, '..', 'package.json');
-  const pkg = JSON.parse(readFileSync(packageJsonPath, 'utf-8'));
+  const pkg = JSON.parse(readFileSync(packageJsonPath, 'utf-8')) as { version: string };
   return pkg.version;
 }
 

@@ -47,7 +47,7 @@ export function loadPipelineConfig(): PipelineConfig {
   const constitutionText = loadConstitutionText(constitutionPath);
   const constitutionHash = createHash('sha256').update(constitutionText).digest('hex');
   const mcpServersPath = resolve(configDir, 'mcp-servers.json');
-  const mcpServers: Record<string, MCPServerConfig> = JSON.parse(readFileSync(mcpServersPath, 'utf-8'));
+  const mcpServers = JSON.parse(readFileSync(mcpServersPath, 'utf-8')) as Record<string, MCPServerConfig>;
   resolveMcpServerPaths(mcpServers);
 
   const defaultAllowedDir = resolve(getIronCurtainHome(), 'sandbox');
@@ -55,6 +55,7 @@ export function loadPipelineConfig(): PipelineConfig {
 
   // Sync the filesystem server's allowed directory with the configured value
   const fsServer = mcpServers['filesystem'];
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- key may not exist at runtime
   if (fsServer) {
     const defaultDir = '/tmp/ironcurtain-sandbox';
     const dirIndex = fsServer.args.indexOf(defaultDir);
@@ -99,6 +100,7 @@ export function computeHash(...inputs: string[]): string {
   return hash.digest('hex');
 }
 
+// eslint-disable-next-line @typescript-eslint/no-unnecessary-type-parameters -- T provides ergonomic caller-side typing for JSON artifacts
 export function loadExistingArtifact<T>(generatedDir: string, filename: string, fallbackDir?: string): T | undefined {
   const candidates = [resolve(generatedDir, filename)];
   if (fallbackDir) {
@@ -107,7 +109,7 @@ export function loadExistingArtifact<T>(generatedDir: string, filename: string, 
   for (const path of candidates) {
     if (existsSync(path)) {
       try {
-        return JSON.parse(readFileSync(path, 'utf-8'));
+        return JSON.parse(readFileSync(path, 'utf-8')) as T;
       } catch {
         // Corrupt file -- try next candidate
       }

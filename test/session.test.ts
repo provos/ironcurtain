@@ -99,6 +99,15 @@ function createMockSandboxFactory(sandbox?: Sandbox) {
   return vi.fn().mockResolvedValue(mock);
 }
 
+/** Returns a mock per-step usage object matching LanguageModelUsage shape. */
+function mockUsage(inputTokens: number, outputTokens = 50) {
+  return {
+    inputTokens,
+    outputTokens,
+    inputTokenDetails: { cacheReadTokens: 0, cacheWriteTokens: 0 },
+  };
+}
+
 /** Returns a mock generateText result matching AI SDK v6 shape. */
 function createMockGenerateResult(text = 'mock response') {
   return {
@@ -115,6 +124,10 @@ function createMockGenerateResult(text = 'mock response') {
       inputTokens: 100,
       outputTokens: 50,
       totalTokens: 150,
+      inputTokenDetails: {
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+      },
     },
   };
 }
@@ -325,7 +338,7 @@ describe('Session', () => {
     it('records token usage in each turn', async () => {
       mockGenerateText.mockResolvedValueOnce({
         ...createMockGenerateResult(),
-        totalUsage: { inputTokens: 200, outputTokens: 80, totalTokens: 280 },
+        totalUsage: { inputTokens: 200, outputTokens: 80, totalTokens: 280, inputTokenDetails: { cacheReadTokens: 0, cacheWriteTokens: 0 } },
       });
 
       const session = await createTestSession();
@@ -407,7 +420,7 @@ describe('Session', () => {
         // Verify the config passed to the sandbox factory has the session-specific audit path
         const sessionId = config.auditLogPath.split('/sessions/')[1]?.split('/')[0];
         expect(sessionId).toBeTruthy();
-        expect(config.auditLogPath).toBe(getSessionAuditLogPath(sessionId!));
+        expect(config.auditLogPath).toBe(getSessionAuditLogPath(sessionId));
         return createMockSandbox();
       });
 
@@ -727,7 +740,7 @@ describe('Session', () => {
             { role: 'tool', content: [{ type: 'tool-result', result: 'done' }] },
           ],
         },
-        totalUsage: { inputTokens, outputTokens: 50, totalTokens: inputTokens + 50 },
+        totalUsage: { inputTokens, outputTokens: 50, totalTokens: inputTokens + 50, inputTokenDetails: { cacheReadTokens: 0, cacheWriteTokens: 0 } },
       };
     }
 
@@ -757,7 +770,7 @@ describe('Session', () => {
         opts.onStepFinish?.({
           toolCalls: [],
           text,
-          usage: { inputTokens, outputTokens: 50 },
+          usage: mockUsage(inputTokens),
         });
         return createBulkResult(text, inputTokens);
       };
@@ -773,14 +786,14 @@ describe('Session', () => {
         opts.onStepFinish?.({
           toolCalls: [],
           text,
-          usage: { inputTokens, outputTokens: 50 },
+          usage: mockUsage(inputTokens),
         });
         return {
           text,
           response: {
             messages: [{ role: 'assistant', content: [{ type: 'text', text }] }],
           },
-          totalUsage: { inputTokens, outputTokens: 50, totalTokens: inputTokens + 50 },
+          totalUsage: { inputTokens, outputTokens: 50, totalTokens: inputTokens + 50, inputTokenDetails: { cacheReadTokens: 0, cacheWriteTokens: 0 } },
         };
       };
     }
@@ -803,7 +816,7 @@ describe('Session', () => {
           opts.onStepFinish?.({
             toolCalls: [],
             text,
-            usage: { inputTokens, outputTokens: 50 },
+            usage: mockUsage(inputTokens),
           });
           return createBulkResult(text, inputTokens);
         },
