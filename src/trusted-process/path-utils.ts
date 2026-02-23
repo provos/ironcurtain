@@ -39,7 +39,9 @@ export function normalizeToolArgPaths(args: Record<string, unknown>): Record<str
     if (typeof value === 'string' && looksLikePath(value)) {
       result[key] = resolveRealPath(value);
     } else if (Array.isArray(value)) {
-      result[key] = value.map((item) => (typeof item === 'string' && looksLikePath(item) ? resolveRealPath(item) : item));
+      result[key] = value.map((item) =>
+        typeof item === 'string' && looksLikePath(item) ? resolveRealPath(item) : item,
+      );
     } else {
       result[key] = value;
     }

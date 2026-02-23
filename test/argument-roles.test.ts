@@ -203,7 +203,13 @@ describe('resolveRealPath', () => {
 describe('normalizers via registry', () => {
   it('path roles use resolveRealPath', () => {
     const home = homedir();
-    for (const role of ['read-path', 'write-path', 'delete-path', 'write-history', 'delete-history'] as ArgumentRole[]) {
+    for (const role of [
+      'read-path',
+      'write-path',
+      'delete-path',
+      'write-history',
+      'delete-history',
+    ] as ArgumentRole[]) {
       const def = getRoleDefinition(role);
       expect(def.canonicalize('~/test')).toBe(`${home}/test`);
       expect(def.canonicalize('/tmp/a/../b')).toBe('/tmp/b');
