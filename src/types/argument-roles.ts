@@ -82,7 +82,7 @@ export function expandTilde(filePath: string): string {
  * directory inside the sandbox could escape containment checks.
  */
 export function resolveRealPath(filePath: string): string {
-  const absolute = resolve(filePath);
+  const absolute = resolve(expandTilde(filePath));
   try {
     return realpathSync(absolute);
   } catch {
@@ -92,11 +92,6 @@ export function resolveRealPath(filePath: string): string {
       return absolute;
     }
   }
-}
-
-/** Tilde expansion + symlink resolution to produce a canonical real path. */
-export function normalizePath(value: string): string {
-  return resolveRealPath(expandTilde(value));
 }
 
 /** Identity function -- returns the value unchanged. */
@@ -115,7 +110,7 @@ const registryEntries: [ArgumentRole, RoleDefinition][] = [
       description: 'Filesystem path that will be read',
       isResourceIdentifier: true,
       category: 'path',
-      canonicalize: normalizePath,
+      canonicalize: resolveRealPath,
       annotationGuidance:
         'Assign to arguments that are filesystem paths the tool will read from. ' +
         'Includes file and directory paths used for input.',
@@ -128,7 +123,7 @@ const registryEntries: [ArgumentRole, RoleDefinition][] = [
       description: 'Filesystem path that will be written to',
       isResourceIdentifier: true,
       category: 'path',
-      canonicalize: normalizePath,
+      canonicalize: resolveRealPath,
       annotationGuidance:
         'Assign to arguments that are filesystem paths the tool will write or create. ' +
         'Includes destination paths for file creation and modification.',
@@ -141,7 +136,7 @@ const registryEntries: [ArgumentRole, RoleDefinition][] = [
       description: 'Filesystem path that will be deleted',
       isResourceIdentifier: true,
       category: 'path',
-      canonicalize: normalizePath,
+      canonicalize: resolveRealPath,
       annotationGuidance:
         'Assign to arguments that are filesystem paths the tool will delete or remove. ' +
         'Also assign to the source argument of move operations (source is deleted after copy).',
@@ -154,7 +149,7 @@ const registryEntries: [ArgumentRole, RoleDefinition][] = [
       description: 'Filesystem path where git history will be rewritten',
       isResourceIdentifier: true,
       category: 'path',
-      canonicalize: normalizePath,
+      canonicalize: resolveRealPath,
       annotationGuidance:
         'Assign to the repository path argument of git operations that rewrite history or modify refs. ' +
         'Includes git_reset, git_rebase, git_merge, git_cherry_pick, and similar operations. ' +
@@ -168,7 +163,7 @@ const registryEntries: [ArgumentRole, RoleDefinition][] = [
       description: 'Filesystem path where git refs or history will be deleted',
       isResourceIdentifier: true,
       category: 'path',
-      canonicalize: normalizePath,
+      canonicalize: resolveRealPath,
       annotationGuidance:
         'Assign to the repository path argument of git operations that delete refs (branches, tags). ' +
         'Includes git_branch (delete mode), git_tag (delete mode), and similar operations. ' +
