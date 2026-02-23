@@ -1,0 +1,3 @@
+dist/
+*.d.ts
+src/config/generated/
