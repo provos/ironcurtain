@@ -6,7 +6,7 @@
  * handwritten scenarios alongside LLM-generated ones.
  */
 
-import type { LanguageModel } from 'ai';
+import type { LanguageModel, SystemModelMessage } from 'ai';
 import { z } from 'zod';
 import { generateObjectWithRepair } from './generate-with-repair.js';
 import type { ToolAnnotation, TestScenario } from './types.js';
@@ -28,7 +28,12 @@ function buildGeneratorResponseSchema(serverNames: [string, ...string[]], toolNa
   });
 }
 
-export function buildGeneratorPrompt(
+/**
+ * Builds the stable system prompt portion for the scenario generator.
+ * Contains: role preamble, constitution, annotations, system config, and instructions.
+ * This is the cacheable part.
+ */
+export function buildGeneratorSystemPrompt(
   constitutionText: string,
   annotations: ToolAnnotation[],
   sandboxDirectory: string,
@@ -132,22 +137,21 @@ export async function generateScenarios(
   llm: LanguageModel,
   permittedDirectories?: string[],
   onProgress?: (message: string) => void,
+  system?: string | SystemModelMessage,
 ): Promise<TestScenario[]> {
   const serverNames = [...new Set(annotations.map((a) => a.serverName))] as [string, ...string[]];
   const toolNames = [...new Set(annotations.map((a) => a.toolName))] as [string, ...string[]];
   const schema = buildGeneratorResponseSchema(serverNames, toolNames);
-  const prompt = buildGeneratorPrompt(
-    constitutionText,
-    annotations,
-    sandboxDirectory,
-    protectedPaths,
-    permittedDirectories,
-  );
+
+  const effectiveSystem =
+    system ??
+    buildGeneratorSystemPrompt(constitutionText, annotations, sandboxDirectory, protectedPaths, permittedDirectories);
 
   const { output } = await generateObjectWithRepair({
     model: llm,
     schema,
-    prompt,
+    system: effectiveSystem,
+    prompt: 'Generate test scenarios following the instructions above.',
     onProgress,
   });
 

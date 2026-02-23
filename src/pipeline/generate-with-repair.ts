@@ -1,24 +1,60 @@
 /**
  * Multi-turn LLM repair for schema validation failures.
  *
- * Wraps `generateText` with `Output.object`. On schema validation failure
- * (NoObjectGeneratedError), feeds the Zod error back to the LLM in a
- * multi-turn conversation so it can fix its output.
+ * Calls `generateText` and validates the response against a Zod schema.
+ * On validation failure, feeds the error back to the LLM in a multi-turn
+ * conversation so it can fix its output. Up to maxRepairAttempts retries.
+ *
+ * Does NOT use Output.object / structured output because Anthropic's API
+ * rejects several JSON Schema constructs that Zod legitimately produces
+ * (propertyNames from z.record, oneOf from z.discriminatedUnion).  Instead
+ * we rely on prompt instructions for JSON formatting and Zod for validation.
  */
 
-import type { LanguageModel } from 'ai';
-import { generateText, NoObjectGeneratedError, Output } from 'ai';
+import type { LanguageModel, SystemModelMessage } from 'ai';
+import { generateText } from 'ai';
 import type { z } from 'zod';
 
 const DEFAULT_MAX_TOKENS = 8192;
 
-function formatValidationError(cause: unknown): string {
-  return cause instanceof Error ? cause.message : String(cause);
+/** Converts a Zod schema to a JSON Schema string for inclusion in prompts. */
+function schemaToPromptHint(schema: z.ZodType): string {
+  try {
+    const jsonSchema = schema.toJSONSchema({ unrepresentable: 'any' });
+    return `\n\nYour response must be a JSON object matching this schema:\n${JSON.stringify(jsonSchema, null, 2)}`;
+  } catch {
+    // Some schemas (e.g. with transforms) can't be converted to JSON Schema
+    return '\n\nReturn your response as valid JSON.';
+  }
+}
+
+/**
+ * Extracts a JSON object or array from LLM text that may include
+ * markdown fences or surrounding prose.
+ */
+function extractJson(text: string): string {
+  // Try markdown code block first
+  const codeBlock = text.match(/```(?:json)?\s*\n([\s\S]*?)\n\s*```/);
+  if (codeBlock) return codeBlock[1].trim();
+
+  // Find the outermost { ... } or [ ... ]
+  const objStart = text.indexOf('{');
+  const arrStart = text.indexOf('[');
+  if (objStart === -1 && arrStart === -1) return text;
+
+  const start = objStart === -1 ? arrStart : arrStart === -1 ? objStart : Math.min(objStart, arrStart);
+  const openChar = text[start];
+  const closeChar = openChar === '{' ? '}' : ']';
+  const end = text.lastIndexOf(closeChar);
+  if (end === -1) return text;
+
+  return text.slice(start, end + 1);
 }
 
 interface GenerateObjectWithRepairOptions<T extends z.ZodType> {
   model: LanguageModel;
   schema: T;
+  system?: string | SystemModelMessage;
   prompt: string;
   maxRepairAttempts?: number;
   maxOutputTokens?: number;
@@ -28,61 +64,46 @@ interface GenerateObjectWithRepairOptions<T extends z.ZodType> {
 export async function generateObjectWithRepair<T extends z.ZodType>({
   model,
   schema,
+  system,
   prompt,
   maxRepairAttempts = 2,
   maxOutputTokens = DEFAULT_MAX_TOKENS,
   onProgress,
 }: GenerateObjectWithRepairOptions<T>): Promise<{ output: z.infer<T>; repairAttempts: number }> {
-  // First attempt: simple prompt-based call
-  try {
-    const result = await generateText({
-      model,
-      output: Output.object({ schema }),
-      prompt,
-      maxOutputTokens,
-    });
-    return { output: result.output as z.infer<T>, repairAttempts: 0 };
-  } catch (error) {
-    if (!NoObjectGeneratedError.isInstance(error)) throw error;
-    if (maxRepairAttempts <= 0) throw error;
+  const promptWithSchema = prompt + schemaToPromptHint(schema);
+  const messages: Array<{ role: 'user' | 'assistant'; content: string }> = [
+    { role: 'user', content: promptWithSchema },
+  ];
 
-    // Build multi-turn conversation for repair
-    const messages: Array<{ role: 'user' | 'assistant'; content: string }> = [
-      { role: 'user', content: prompt },
-      { role: 'assistant', content: error.text ?? '' },
-      {
-        role: 'user',
-        content: `Your response failed schema validation:\n${formatValidationError(error.cause)}\n\nPlease fix the errors and return valid JSON matching the schema.`,
-      },
-    ];
-
-    let lastError: unknown = error;
-
-    for (let attempt = 0; attempt < maxRepairAttempts; attempt++) {
-      onProgress?.(`Schema repair ${attempt + 1}/${maxRepairAttempts}...`);
-      try {
-        const result = await generateText({
-          model,
-          output: Output.object({ schema }),
-          messages,
-          maxOutputTokens,
-        });
-        return { output: result.output as z.infer<T>, repairAttempts: attempt + 1 };
-      } catch (retryError) {
-        if (!NoObjectGeneratedError.isInstance(retryError)) throw retryError;
-        lastError = retryError;
-
-        // Append the failed response and error for next attempt
-        messages.push(
-          { role: 'assistant', content: retryError.text ?? '' },
-          {
-            role: 'user',
-            content: `Still failing schema validation:\n${formatValidationError(retryError.cause)}\n\nPlease fix the errors and return valid JSON matching the schema.`,
-          },
-        );
-      }
+  for (let attempt = 0; attempt <= maxRepairAttempts; attempt++) {
+    if (attempt > 0) {
+      onProgress?.(`Schema repair ${attempt}/${maxRepairAttempts}...`);
     }
 
-    throw lastError;
+    const result = system
+      ? await generateText({ model, system, messages, maxOutputTokens })
+      : await generateText({ model, messages, maxOutputTokens });
+
+    const text = result.text;
+
+    try {
+      const json: unknown = JSON.parse(extractJson(text));
+      const parsed = schema.parse(json) as z.infer<T>;
+      return { output: parsed, repairAttempts: attempt };
+    } catch (error) {
+      if (attempt === maxRepairAttempts) throw error;
+
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      messages.push(
+        { role: 'assistant', content: text },
+        {
+          role: 'user',
+          content: `Your response failed schema validation:\n${errorMessage}\n\nPlease fix the errors and return valid JSON matching the schema.`,
+        },
+      );
+    }
   }
+
+  // Should never reach here due to the throw in the loop
+  throw new Error('generateObjectWithRepair: exhausted all repair attempts');
 }

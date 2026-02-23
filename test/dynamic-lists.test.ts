@@ -95,11 +95,19 @@ function createCountingModel(valueFactory: (callIndex: number) => string[] = () 
   return { model, getCallCount: () => callCount };
 }
 
-function createPromptCapturingModel(response: unknown): { model: MockLanguageModelV3; getPrompt: () => string } {
+function createPromptCapturingModel(response: unknown): {
+  model: MockLanguageModelV3;
+  getPrompt: () => string;
+  getSystemPrompt: () => string;
+} {
   let capturedPrompt = '';
+  let capturedSystem = '';
   const model = new MockLanguageModelV3({
     doGenerate: async (options) => {
       for (const msg of options.prompt) {
+        if (msg.role === 'system') {
+          capturedSystem = typeof msg.content === 'string' ? msg.content : '';
+        }
         if (msg.role === 'user') {
           for (const part of msg.content) {
             if (part.type === 'text') capturedPrompt = part.text;
@@ -112,7 +120,7 @@ function createPromptCapturingModel(response: unknown): { model: MockLanguageMod
       };
     },
   });
-  return { model, getPrompt: () => capturedPrompt };
+  return { model, getPrompt: () => capturedPrompt, getSystemPrompt: () => capturedSystem };
 }
 
 const fetchAnnotation: ToolAnnotation = {
@@ -432,16 +440,16 @@ describe('Dynamic Lists Compiler Output', () => {
     expect(result.listDefinitions[0].name).toBe('my-contacts');
   });
 
-  it('prompt includes Dynamic Lists section', async () => {
-    const { model, getPrompt } = createPromptCapturingModel({ rules: [] });
+  it('system prompt includes Dynamic Lists section', async () => {
+    const { model, getSystemPrompt } = createPromptCapturingModel({ rules: [] });
 
     await compileConstitution('Allow news sites.', sampleAnnotations, compilerConfig, model);
 
-    const prompt = getPrompt();
-    expect(prompt).toContain('## Dynamic Lists');
-    expect(prompt).toContain('@major-news-sites');
-    expect(prompt).toContain('listDefinitions');
-    expect(prompt).toContain('kebab-case');
+    const system = getSystemPrompt();
+    expect(system).toContain('## Dynamic Lists');
+    expect(system).toContain('@major-news-sites');
+    expect(system).toContain('listDefinitions');
+    expect(system).toContain('kebab-case');
   });
 });
 

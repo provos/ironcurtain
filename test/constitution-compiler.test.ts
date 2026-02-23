@@ -3,8 +3,7 @@ import { MockLanguageModelV3 } from 'ai/test';
 import {
   compileConstitution,
   validateCompiledRules,
-  buildRepairPrompt,
-  buildCompilerPrompt,
+  buildRepairInstructions,
   type CompilerConfig,
 } from '../src/pipeline/constitution-compiler.js';
 import type { ToolAnnotation, CompiledRule, ExecutionResult, RepairContext } from '../src/pipeline/types.js';
@@ -243,9 +242,7 @@ describe('Constitution Compiler', () => {
     });
   });
 
-  describe('buildRepairPrompt', () => {
-    const basePrompt = buildCompilerPrompt(sampleConstitution, sampleAnnotations, compilerConfig);
-
+  describe('buildRepairInstructions', () => {
     const failedScenarios: ExecutionResult[] = [
       {
         scenario: {
@@ -280,8 +277,8 @@ describe('Constitution Compiler', () => {
       attemptNumber: 1,
     };
 
-    it('includes previous rules in the repair prompt', () => {
-      const prompt = buildRepairPrompt(basePrompt, repairContext);
+    it('includes previous rules', () => {
+      const prompt = buildRepairInstructions(repairContext);
 
       expect(prompt).toContain('allow-side-effect-free-tools');
       expect(prompt).toContain('deny-delete-operations');
@@ -289,8 +286,8 @@ describe('Constitution Compiler', () => {
       expect(prompt).toContain('escalate-read-elsewhere');
     });
 
-    it('includes failed scenarios in the repair prompt', () => {
-      const prompt = buildRepairPrompt(basePrompt, repairContext);
+    it('includes failed scenarios', () => {
+      const prompt = buildRepairInstructions(repairContext);
 
       expect(prompt).toContain('Deny delete outside sandbox');
       expect(prompt).toContain('Escalate read outside sandbox');
@@ -298,26 +295,20 @@ describe('Constitution Compiler', () => {
       expect(prompt).toContain('Actual: allow');
     });
 
-    it('includes judge analysis in the repair prompt', () => {
-      const prompt = buildRepairPrompt(basePrompt, repairContext);
+    it('includes judge analysis', () => {
+      const prompt = buildRepairInstructions(repairContext);
 
       expect(prompt).toContain('allow-side-effect-free-tools rule is too broad');
     });
 
-    it('includes attempt number in the repair prompt', () => {
-      const prompt = buildRepairPrompt(basePrompt, repairContext);
+    it('includes attempt number', () => {
+      const prompt = buildRepairInstructions(repairContext);
 
       expect(prompt).toContain('attempt 1');
     });
 
-    it('starts with the base prompt', () => {
-      const prompt = buildRepairPrompt(basePrompt, repairContext);
-
-      expect(prompt.startsWith(basePrompt)).toBe(true);
-    });
-
     it('includes repair instructions section', () => {
-      const prompt = buildRepairPrompt(basePrompt, repairContext);
+      const prompt = buildRepairInstructions(repairContext);
 
       expect(prompt).toContain('REPAIR INSTRUCTIONS');
       expect(prompt).toContain('Do NOT break scenarios that were already passing');

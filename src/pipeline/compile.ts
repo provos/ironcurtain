@@ -12,7 +12,7 @@
 
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { LanguageModel } from 'ai';
+import type { LanguageModel, SystemModelMessage } from 'ai';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import chalk from 'chalk';
@@ -20,7 +20,7 @@ import { extractServerDomainAllowlists } from '../config/index.js';
 import type { MCPServerConfig } from '../config/types.js';
 import { PolicyEngine } from '../trusted-process/policy-engine.js';
 import { resolveRealPath } from '../types/argument-roles.js';
-import { buildCompilerPrompt, compileConstitution, validateCompiledRules } from './constitution-compiler.js';
+import { buildCompilerSystemPrompt, compileConstitution, validateCompiledRules } from './constitution-compiler.js';
 import { getHandwrittenScenarios } from './handwritten-scenarios.js';
 import { resolveAllLists, type McpServerConnection } from './list-resolver.js';
 import {
@@ -34,12 +34,13 @@ import {
 } from './pipeline-shared.js';
 import {
   applyScenarioCorrections,
+  buildJudgeSystemPrompt,
   extractScenarioCorrections,
   filterStructuralConflicts,
   verifyPolicy,
   type DiscardedScenario,
 } from './policy-verifier.js';
-import { buildGeneratorPrompt, generateScenarios } from './scenario-generator.js';
+import { buildGeneratorSystemPrompt, generateScenarios } from './scenario-generator.js';
 import { VERSION } from '../version.js';
 import type {
   CompiledPolicyFile,
@@ -58,41 +59,12 @@ import type {
 // Content-Hash Caching (compile-specific)
 // ---------------------------------------------------------------------------
 
-function computePolicyHash(
-  constitutionText: string,
-  allAnnotations: ToolAnnotation[],
-  protectedPaths: string[],
-): string {
-  const prompt = buildCompilerPrompt(constitutionText, allAnnotations, {
-    protectedPaths,
-  });
-  return computeHash(constitutionText, JSON.stringify(allAnnotations), prompt);
+function computePolicyHash(systemPrompt: string, annotations: ToolAnnotation[]): string {
+  return computeHash(systemPrompt, JSON.stringify(annotations));
 }
 
-function computeScenariosHash(
-  constitutionText: string,
-  annotations: ToolAnnotation[],
-  handwrittenScenarios: TestScenario[],
-  sandboxDirectory: string,
-  protectedPaths: string[],
-  permittedDirectories: string[],
-): string {
-  const prompt = buildGeneratorPrompt(
-    constitutionText,
-    annotations,
-    sandboxDirectory,
-    protectedPaths,
-    permittedDirectories,
-  );
-  return computeHash(
-    prompt,
-    constitutionText,
-    JSON.stringify(annotations),
-    JSON.stringify(handwrittenScenarios),
-    JSON.stringify({ sandboxDirectory }),
-    JSON.stringify(protectedPaths),
-    JSON.stringify(permittedDirectories),
-  );
+function computeScenariosHash(systemPrompt: string, handwrittenScenarios: TestScenario[]): string {
+  return computeHash(systemPrompt, JSON.stringify(handwrittenScenarios));
 }
 
 function extractPermittedDirectories(rules: CompiledRule[]): string[] {
@@ -173,11 +145,12 @@ async function compilePolicyRules(
   constitutionText: string,
   annotations: ToolAnnotation[],
   protectedPaths: string[],
+  inputHash: string,
   existingPolicy: CompiledPolicyFile | undefined,
   llm: LanguageModel,
   stepLabel: string = '[1/3]',
+  system?: string | SystemModelMessage,
 ): Promise<CompilationResult> {
-  const inputHash = computePolicyHash(constitutionText, annotations, protectedPaths);
   const stepText = `${stepLabel} Compiling constitution`;
 
   // Check cache: skip LLM call if inputs haven't changed.
@@ -203,6 +176,7 @@ async function compilePolicyRules(
         (msg) => {
           spinner.text = `${stepText} — ${msg}`;
         },
+        system,
       );
       const rules = resolveRulePaths(output.rules);
       validateRulesOrThrow(rules, output.listDefinitions);
@@ -245,6 +219,7 @@ async function compilePolicyRulesWithRepair(
   repairContext: RepairContext,
   llm: LanguageModel,
   onProgress?: (message: string) => void,
+  system?: string | SystemModelMessage,
 ): Promise<CompilationResult> {
   const output = await compileConstitution(
     constitutionText,
@@ -253,6 +228,7 @@ async function compilePolicyRulesWithRepair(
     llm,
     repairContext,
     onProgress,
+    system,
   );
   const compiledRules = resolveRulePaths(output.rules);
   validateRulesOrThrow(compiledRules, output.listDefinitions);
@@ -296,20 +272,13 @@ async function generateTestScenarios(
   allowedDirectory: string,
   protectedPaths: string[],
   permittedDirectories: string[],
+  inputHash: string,
   existingScenarios: TestScenariosFile | undefined,
   llm: LanguageModel,
   stepLabel: string = '[2/3]',
+  system?: string | SystemModelMessage,
 ): Promise<ScenarioResult> {
   const handwrittenScenarios = getHandwrittenScenarios(allowedDirectory);
-  const inputHash = computeScenariosHash(
-    constitutionText,
-    annotations,
-    handwrittenScenarios,
-    allowedDirectory,
-    protectedPaths,
-    permittedDirectories,
-  );
-
   const stepText = `${stepLabel} Generating test scenarios`;
 
   // Check cache: skip LLM call if inputs haven't changed
@@ -332,6 +301,7 @@ async function generateTestScenarios(
         (msg) => {
           spinner.text = `${stepText} — ${msg}`;
         },
+        system,
       ),
     (scenarios, elapsed) => {
       const generatedCount = scenarios.length - handwrittenScenarios.length;
@@ -359,6 +329,7 @@ async function verifyCompiledPolicy(
   onProgress?: (message: string) => void,
   serverDomainAllowlists?: ReadonlyMap<string, readonly string[]>,
   dynamicLists?: DynamicListsFile,
+  system?: string | SystemModelMessage,
 ): Promise<VerificationResult> {
   const result = await verifyPolicy(
     constitutionText,
@@ -372,6 +343,7 @@ async function verifyCompiledPolicy(
     onProgress,
     serverDomainAllowlists,
     dynamicLists,
+    system,
   );
 
   if (!result.pass) {
@@ -516,7 +488,14 @@ export async function main(): Promise<void> {
   );
   console.error('');
 
-  const { model: llm, logContext, logPath } = await createPipelineLlm(config.generatedDir, 'unknown');
+  const { model: llm, logContext, logPath, cacheStrategy } = await createPipelineLlm(config.generatedDir, 'unknown');
+
+  // Build raw system prompt and derive hash + cache-wrapped version
+  const compilerPrompt = buildCompilerSystemPrompt(config.constitutionText, allAnnotations, {
+    protectedPaths: config.protectedPaths,
+  });
+  const compilerHash = computePolicyHash(compilerPrompt, allAnnotations);
+  const compilerSystem = cacheStrategy.wrapSystemPrompt(compilerPrompt);
 
   // Load existing artifacts for cache comparison
   const existingPolicy = loadExistingArtifact<CompiledPolicyFile>(
@@ -538,9 +517,11 @@ export async function main(): Promise<void> {
     config.constitutionText,
     allAnnotations,
     config.protectedPaths,
+    compilerHash,
     existingPolicy,
     llm,
     '[1/3]',
+    compilerSystem,
   );
 
   // Build and write policy artifact immediately so it's available for
@@ -596,15 +577,26 @@ export async function main(): Promise<void> {
   // Generate test scenarios (LLM-cacheable)
   const scenarioStepLabel = `[${hasLists ? 3 : 2}/${totalSteps}]`;
   logContext.stepName = 'generate-scenarios';
+  const scenarioPrompt = buildGeneratorSystemPrompt(
+    config.constitutionText,
+    allAnnotations,
+    config.allowedDirectory,
+    config.protectedPaths,
+    permittedDirectories,
+  );
+  const scenarioHash = computeScenariosHash(scenarioPrompt, getHandwrittenScenarios(config.allowedDirectory));
+  const scenarioSystem = cacheStrategy.wrapSystemPrompt(scenarioPrompt);
   const scenarioResult = await generateTestScenarios(
     config.constitutionText,
     allAnnotations,
     config.allowedDirectory,
     config.protectedPaths,
     permittedDirectories,
+    scenarioHash,
     existingScenarios,
     llm,
     scenarioStepLabel,
+    scenarioSystem,
   );
 
   // Write scenarios to disk immediately so they're available for
@@ -630,6 +622,10 @@ export async function main(): Promise<void> {
   // Verify compiled policy against scenarios (full depth)
   const verifyStepLabel = `[${totalSteps}/${totalSteps}]`;
   logContext.stepName = 'verify-policy';
+  const allAvailableTools = allAnnotations.map((a) => ({ serverName: a.serverName, toolName: a.toolName }));
+  let verifierSystem = cacheStrategy.wrapSystemPrompt(
+    buildJudgeSystemPrompt(config.constitutionText, compiledPolicyFile, config.protectedPaths, allAvailableTools),
+  );
   const { result: verificationResultInitial } = await withSpinner(
     `${verifyStepLabel} Verifying policy`,
     async (spinner) =>
@@ -648,6 +644,7 @@ export async function main(): Promise<void> {
         },
         serverDomainAllowlists,
         dynamicLists,
+        verifierSystem,
       ),
     (r, elapsed) =>
       r.pass
@@ -741,6 +738,7 @@ export async function main(): Promise<void> {
               (msg) => {
                 spinner.text = `${repairCompileText} — ${msg}`;
               },
+              compilerSystem,
             ),
           (r, elapsed) =>
             `Repair ${attempt}/${MAX_REPAIRS}: Recompiled ${r.rules.length} rules (${elapsed.toFixed(1)}s)`,
@@ -750,6 +748,11 @@ export async function main(): Promise<void> {
         // Write updated policy artifact
         compiledPolicyFile = buildPolicyArtifact(config.constitutionHash, compilationResult);
         writePolicyArtifact(config.generatedDir, compiledPolicyFile);
+
+        // Rebuild verifier system prompt with updated rules
+        verifierSystem = cacheStrategy.wrapSystemPrompt(
+          buildJudgeSystemPrompt(config.constitutionText, compiledPolicyFile, config.protectedPaths, allAvailableTools),
+        );
       } else {
         console.error(`  ${chalk.dim('No rule-blamed failures — skipping recompilation')}`);
       }
@@ -776,6 +779,7 @@ export async function main(): Promise<void> {
             },
             serverDomainAllowlists,
             dynamicLists,
+            verifierSystem,
           ),
         (r, elapsed) =>
           r.pass
@@ -816,6 +820,7 @@ export async function main(): Promise<void> {
               },
               serverDomainAllowlists,
               dynamicLists,
+              verifierSystem,
             ),
           (r, elapsed) =>
             r.pass

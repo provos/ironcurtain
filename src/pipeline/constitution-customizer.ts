@@ -31,8 +31,16 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 export const CustomizerResponseSchema = z.object({
   type: z.enum(['changes', 'question']).describe('Whether this proposes changes or asks a clarifying question'),
   addRules: z.array(z.string()).optional().describe('New policy statements to append (when type is "changes")'),
-  removeRules: z.array(z.string()).optional().describe('Existing policy statements to remove — must match existing lines exactly (when type is "changes")'),
-  summary: z.string().optional().describe('Brief summary of what changed and why, including any permissions already covered (when type is "changes")'),
+  removeRules: z
+    .array(z.string())
+    .optional()
+    .describe('Existing policy statements to remove — must match existing lines exactly (when type is "changes")'),
+  summary: z
+    .string()
+    .optional()
+    .describe(
+      'Brief summary of what changed and why, including any permissions already covered (when type is "changes")',
+    ),
   question: z.string().optional().describe('A clarifying question to ask the user (when type is "question")'),
 });
 
@@ -42,11 +50,7 @@ export type CustomizerResponse = z.infer<typeof CustomizerResponseSchema>;
  * Merges LLM-proposed changes into the current constitution text.
  * Removes lines matching `removeRules`, then appends `addRules`.
  */
-export function applyChanges(
-  current: string,
-  addRules: string[],
-  removeRules: string[],
-): string {
+export function applyChanges(current: string, addRules: string[], removeRules: string[]): string {
   let lines = current.split('\n');
 
   // Remove lines that match removeRules (normalized comparison: strip
@@ -399,13 +403,13 @@ export async function main(): Promise<void> {
   // Load tool annotations
   const annotations = loadAnnotations(generatedDir, packageGeneratedDir);
   const serverCount = new Set(annotations.map((a) => a.serverName)).size;
-  p.log.info(`Loaded tool annotations (${serverCount} server${serverCount !== 1 ? 's' : ''}, ${annotations.length} tools)`);
+  p.log.info(
+    `Loaded tool annotations (${serverCount} server${serverCount !== 1 ? 's' : ''}, ${annotations.length} tools)`,
+  );
 
   // Load base constitution (guiding principles -- read-only context for LLM)
   const constitutionPath = resolve(configDir, 'constitution.md');
-  const baseConstitution = existsSync(constitutionPath)
-    ? readFileSync(constitutionPath, 'utf-8')
-    : '';
+  const baseConstitution = existsSync(constitutionPath) ? readFileSync(constitutionPath, 'utf-8') : '';
 
   // Seed user constitution if it doesn't exist
   let currentConstitution = seedBaseConstitution();
@@ -434,13 +438,13 @@ export async function main(): Promise<void> {
   // Main loop
   // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- interactive loop exited via break
   while (true) {
-    const prompt = hasUnsavedChanges
-      ? 'Anything else? (type "done" to finish)'
-      : 'What do you want the agent to do?';
+    const prompt = hasUnsavedChanges ? 'Anything else? (type "done" to finish)' : 'What do you want the agent to do?';
 
     const userInput = await p.text({
       message: prompt,
-      placeholder: hasUnsavedChanges ? 'describe another task, or "done"' : 'e.g., "fix bugs in my code at ~/src/myapp"',
+      placeholder: hasUnsavedChanges
+        ? 'describe another task, or "done"'
+        : 'e.g., "fix bugs in my code at ~/src/myapp"',
     });
     handleCancel(userInput);
 
@@ -478,11 +482,7 @@ export async function main(): Promise<void> {
     // Handle changes response -- merge, show diff, ask for feedback
     // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- interactive loop exited via break
     while (true) {
-      const proposed = applyChanges(
-        currentConstitution ?? '',
-        response.addRules ?? [],
-        response.removeRules ?? [],
-      );
+      const proposed = applyChanges(currentConstitution ?? '', response.addRules ?? [], response.removeRules ?? []);
       const diff = computeLineDiff(currentConstitution ?? '', proposed);
       const diffText = formatDiff(diff);
       p.note(`${diffText}\n\n${chalk.dim(response.summary ?? '')}`, 'Proposed changes');

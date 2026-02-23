@@ -7,7 +7,7 @@
  * that faithfully implements the non-structural principles.
  */
 
-import type { LanguageModel } from 'ai';
+import type { LanguageModel, SystemModelMessage } from 'ai';
 import { z } from 'zod';
 import { generateObjectWithRepair } from './generate-with-repair.js';
 import type { ToolAnnotation, CompiledRule, RepairContext, ListDefinition } from './types.js';
@@ -72,7 +72,12 @@ function buildCompilerResponseSchema(serverNames: [string, ...string[]], toolNam
   });
 }
 
-export function buildCompilerPrompt(
+/**
+ * Builds the stable system prompt portion for the compiler.
+ * Contains: role preamble, constitution, annotations, structural invariants, and instructions.
+ * This is the cacheable part — it stays the same across repair rounds.
+ */
+export function buildCompilerSystemPrompt(
   constitutionText: string,
   annotations: ToolAnnotation[],
   config: CompilerConfig,
@@ -168,16 +173,15 @@ Examples:
 - "major tech stocks" -> @tech-stock-tickers (type: identifiers, requiresMcp: false)`;
 }
 
-export function buildRepairPrompt(basePrompt: string, repairContext: RepairContext): string {
+/** Builds the repair instructions sent as the user prompt during repair rounds. */
+export function buildRepairInstructions(repairContext: RepairContext): string {
   const rulesText = repairContext.previousRules
     .map((r, i) => `  ${i + 1}. [${r.name}] if: ${JSON.stringify(r.if)} then: ${r.then} -- ${r.reason}`)
     .join('\n');
 
   const failuresText = formatExecutionResults(repairContext.failedScenarios);
 
-  return `${basePrompt}
-
-## REPAIR INSTRUCTIONS (attempt ${repairContext.attemptNumber})
+  return `## REPAIR INSTRUCTIONS (attempt ${repairContext.attemptNumber})
 
 Your previous compilation produced rules that failed verification. You MUST fix these issues.
 
@@ -208,16 +212,21 @@ export async function compileConstitution(
   llm: LanguageModel,
   repairContext?: RepairContext,
   onProgress?: (message: string) => void,
+  system?: string | SystemModelMessage,
 ): Promise<CompilationOutput> {
   const serverNames = [...new Set(annotations.map((a) => a.serverName))] as [string, ...string[]];
   const toolNames = [...new Set(annotations.map((a) => a.toolName))] as [string, ...string[]];
   const schema = buildCompilerResponseSchema(serverNames, toolNames);
-  const basePrompt = buildCompilerPrompt(constitutionText, annotations, config);
-  const prompt = repairContext ? buildRepairPrompt(basePrompt, repairContext) : basePrompt;
+
+  const effectiveSystem = system ?? buildCompilerSystemPrompt(constitutionText, annotations, config);
+  const prompt = repairContext
+    ? buildRepairInstructions(repairContext)
+    : 'Compile the constitution into policy rules following the instructions above.';
 
   const { output } = await generateObjectWithRepair({
     model: llm,
     schema,
+    system: effectiveSystem,
     prompt,
     onProgress,
   });

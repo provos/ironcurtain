@@ -7,7 +7,7 @@
  * additional probe scenarios. Up to maxRounds iterations.
  */
 
-import type { LanguageModel } from 'ai';
+import type { LanguageModel, SystemModelMessage } from 'ai';
 import { z } from 'zod';
 import { generateObjectWithRepair } from './generate-with-repair.js';
 import { PolicyEngine } from '../trusted-process/policy-engine.js';
@@ -61,22 +61,21 @@ export function formatExecutionResults(results: ExecutionResult[]): string {
     .join('\n\n');
 }
 
-function buildJudgePrompt(
+/**
+ * Builds the stable system prompt portion for the verifier judge.
+ * Contains: role preamble, constitution, compiled rules, structural invariants,
+ * decision types, instructions, and available tools.
+ * This is the cacheable part — it stays the same across verification rounds.
+ */
+export function buildJudgeSystemPrompt(
   constitutionText: string,
   compiledPolicy: CompiledPolicyFile,
-  toolAnnotations: ToolAnnotationsFile,
   protectedPaths: string[],
-  executionResults: ExecutionResult[],
-  roundNumber: number,
-  previousAnalysis?: string,
   availableTools?: { serverName: string; toolName: string }[],
 ): string {
   const rulesText = compiledPolicy.rules
     .map((r, i) => `  ${i + 1}. [${r.name}] if: ${JSON.stringify(r.if)} then: ${r.then} -- ${r.reason}`)
     .join('\n');
-
-  const resultsText = formatExecutionResults(executionResults);
-  const previousContext = previousAnalysis ? `\n## Previous Round Analysis\n\n${previousAnalysis}\n` : '';
 
   return `You are a security policy verifier. Analyze whether the compiled policy correctly implements the constitution.
 
@@ -95,10 +94,6 @@ ${rulesText}
 ${protectedPaths.map((p) => `  - ${p}`).join('\n')}
 
 A \`deny\` result for write/delete operations on these paths is correct structural behavior, not a policy gap. Files with similar names inside the sandbox are NOT protected.
-
-## Execution Results (Round ${roundNumber})
-${previousContext}
-${resultsText}
 
 ## Decision Types
 
@@ -134,6 +129,25 @@ ${(availableTools ?? []).map((t) => `- ${t.serverName}/${t.toolName}`).join('\n'
 Be concise. Keep the analysis to 2-3 sentences per issue found. Only generate additional scenarios that test genuinely untested gaps -- do not duplicate existing coverage. Limit additional scenarios to at most 5.`;
 }
 
+/**
+ * Builds the per-round user prompt for the verifier judge.
+ * Contains: execution results, round number, and previous analysis.
+ */
+function buildJudgeUserPrompt(
+  executionResults: ExecutionResult[],
+  roundNumber: number,
+  previousAnalysis?: string,
+): string {
+  const resultsText = formatExecutionResults(executionResults);
+  const previousContext = previousAnalysis ? `\n## Previous Round Analysis\n\n${previousAnalysis}\n` : '';
+
+  return `## Execution Results (Round ${roundNumber})
+${previousContext}
+${resultsText}
+
+Analyze the results and respond following the instructions in the system prompt.`;
+}
+
 export async function verifyPolicy(
   constitutionText: string,
   compiledPolicy: CompiledPolicyFile,
@@ -146,6 +160,7 @@ export async function verifyPolicy(
   onProgress?: (message: string) => void,
   serverDomainAllowlists?: ReadonlyMap<string, readonly string[]>,
   dynamicLists?: DynamicListsFile,
+  system?: string | SystemModelMessage,
 ): Promise<VerificationResult> {
   const engine = new PolicyEngine(
     compiledPolicy,
@@ -214,22 +229,15 @@ export async function verifyPolicy(
     const failures = executionResults.filter((r) => !r.pass);
     allFailedScenarios.push(...failures);
 
-    // Send results to LLM judge
-    const prompt = buildJudgePrompt(
-      constitutionText,
-      compiledPolicy,
-      toolAnnotations,
-      protectedPaths,
-      executionResults,
-      round,
-      previousAnalysis,
-      availableTools,
-    );
+    const userPrompt = buildJudgeUserPrompt(executionResults, round, previousAnalysis);
+    const effectiveSystem =
+      system ?? buildJudgeSystemPrompt(constitutionText, compiledPolicy, protectedPaths, availableTools);
 
     const { output: judgment } = await generateObjectWithRepair({
       model: llm,
       schema: responseSchema,
-      prompt,
+      system: effectiveSystem,
+      prompt: userPrompt,
       onProgress,
     });
 
