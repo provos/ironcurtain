@@ -423,10 +423,8 @@ export class AgentSession implements Session {
         promptTokens: usage.inputTokens ?? 0,
         completionTokens: usage.outputTokens ?? 0,
         totalTokens: usage.totalTokens ?? 0,
-        // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- inputTokenDetails may be undefined at runtime
-        cacheReadTokens: usage.inputTokenDetails?.cacheReadTokens ?? 0,
-        // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- inputTokenDetails may be undefined at runtime
-        cacheWriteTokens: usage.inputTokenDetails?.cacheWriteTokens ?? 0,
+        cacheReadTokens: usage.inputTokenDetails.cacheReadTokens ?? 0,
+        cacheWriteTokens: usage.inputTokenDetails.cacheWriteTokens ?? 0,
       },
       timestamp,
     };
