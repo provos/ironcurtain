@@ -254,6 +254,7 @@ export class AgentSession implements Session {
     return {
       ...this.budgetTracker.getSnapshot(),
       limits: this.config.userConfig.resourceBudget,
+      tokenTrackingAvailable: true,
     };
   }
 

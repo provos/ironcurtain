@@ -19,6 +19,7 @@
  */
 
 import { createInterface } from 'node:readline';
+import type { Readable } from 'node:stream';
 import ora from 'ora';
 import chalk from 'chalk';
 import { marked } from 'marked';
@@ -31,6 +32,8 @@ import type { Session, DiagnosticEvent, EscalationRequest, BudgetStatus } from '
 export interface CliTransportOptions {
   /** If provided, run in single-shot mode with this message. */
   initialMessage?: string;
+  /** Override stdin for testing. Defaults to process.stdin. */
+  input?: Readable;
 }
 
 // Configure marked to render markdown for the terminal.
@@ -39,6 +42,7 @@ marked.use(markedTerminal());
 
 export class CliTransport implements Transport {
   private readonly initialMessage?: string;
+  private readonly input: Readable;
 
   /** The spinner instance, managed across the message lifecycle. */
   private spinner: Ora | null = null;
@@ -48,6 +52,7 @@ export class CliTransport implements Transport {
 
   constructor(options: CliTransportOptions = {}) {
     this.initialMessage = options.initialMessage;
+    this.input = options.input ?? process.stdin;
   }
 
   async run(session: Session): Promise<void> {
@@ -55,6 +60,20 @@ export class CliTransport implements Transport {
       return this.runSingleShot(session);
     }
     return this.runInteractive(session);
+  }
+
+  /**
+   * Signals the transport to stop: closes readline (unblocking runInteractive)
+   * and stops any active spinner.
+   */
+  close(): void {
+    if (this.spinner?.isSpinning) {
+      this.spinner.stop();
+    }
+    if (this.rl) {
+      this.rl.close();
+      this.rl = null;
+    }
   }
 
   /**
@@ -139,7 +158,7 @@ export class CliTransport implements Transport {
 
   private async runInteractive(session: Session): Promise<void> {
     this.rl = createInterface({
-      input: process.stdin,
+      input: this.input,
       output: process.stderr, // Prompts to stderr, responses to stdout
       prompt: chalk.cyan('> '),
     });
@@ -198,6 +217,13 @@ export class CliTransport implements Transport {
           process.stderr.write(chalk.red(`Unexpected error: ${err instanceof Error ? err.message : String(err)}\n`));
         });
       }
+    });
+
+    // When readline is active on a TTY, Ctrl-C is intercepted at the raw
+    // stream level and never reaches process-level SIGINT handlers.
+    // We must re-emit SIGINT so the shutdown handler in index.ts fires.
+    rl.on('SIGINT', () => {
+      process.emit('SIGINT');
     });
 
     await new Promise<void>((resolvePromise) => {
@@ -297,9 +323,13 @@ export class CliTransport implements Transport {
   private displayBudgetStatus(status: BudgetStatus): void {
     const { limits, cumulative } = status;
     process.stderr.write(chalk.cyan('  Current turn budget:\n'));
-    process.stderr.write(
-      formatBudgetLine('Tokens', status.totalTokens, limits.maxTotalTokens, (v) => v.toLocaleString()),
-    );
+    if (status.tokenTrackingAvailable) {
+      process.stderr.write(
+        formatBudgetLine('Tokens', status.totalTokens, limits.maxTotalTokens, (v) => v.toLocaleString()),
+      );
+    } else {
+      process.stderr.write(`    Tokens: N/A\n`);
+    }
     process.stderr.write(formatBudgetLine('Steps', status.stepCount, limits.maxSteps, String));
     process.stderr.write(
       formatBudgetLine('Time', status.elapsedSeconds, limits.maxSessionSeconds, (v) => `${Math.round(v)}s`),
@@ -308,7 +338,11 @@ export class CliTransport implements Transport {
       formatBudgetLine('Est. cost', status.estimatedCostUsd, limits.maxEstimatedCostUsd, (v) => `$${v.toFixed(2)}`),
     );
     process.stderr.write(chalk.cyan('  Session totals:\n'));
-    process.stderr.write(`    Tokens: ${cumulative.totalTokens.toLocaleString()}\n`);
+    if (status.tokenTrackingAvailable) {
+      process.stderr.write(`    Tokens: ${cumulative.totalTokens.toLocaleString()}\n`);
+    } else {
+      process.stderr.write(`    Tokens: N/A\n`);
+    }
     process.stderr.write(`    Steps: ${cumulative.stepCount}\n`);
     process.stderr.write(`    Active time: ${Math.round(cumulative.activeSeconds)}s\n`);
     process.stderr.write(`    Est. cost: $${cumulative.estimatedCostUsd.toFixed(2)}\n`);
@@ -316,10 +350,11 @@ export class CliTransport implements Transport {
 
   private displaySessionSummary(status: BudgetStatus): void {
     const { cumulative } = status;
+    const tokensPart = status.tokenTrackingAvailable ? `${cumulative.totalTokens.toLocaleString()} tokens · ` : '';
     process.stderr.write(
       chalk.dim(
-        `\nSession: ${cumulative.totalTokens.toLocaleString()} tokens` +
-          ` · ${cumulative.stepCount} steps` +
+        `\nSession: ${tokensPart}` +
+          `${cumulative.stepCount} steps` +
           ` · ${Math.round(cumulative.activeSeconds)}s` +
           ` · ~$${cumulative.estimatedCostUsd.toFixed(2)}\n`,
       ),
