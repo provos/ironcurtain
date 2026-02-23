@@ -14,9 +14,9 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import TurndownService from 'turndown';
-import { JSDOM } from 'jsdom';
 import { Readability, isProbablyReaderable } from '@mozilla/readability';
+import { JSDOM } from 'jsdom';
+import TurndownService from 'turndown';
 
 const USER_AGENT = 'IronCurtain/0.1 (AI Agent Runtime)';
 const MAX_RESPONSE_BYTES = 10 * 1024 * 1024; // 10 MB
@@ -24,8 +24,21 @@ const REQUEST_TIMEOUT_MS = 30_000; // 30 seconds
 const MAX_REDIRECTS = 5;
 const DEFAULT_MAX_LENGTH = 5000;
 
+type OutputFormat = 'markdown' | 'text' | 'html';
+const VALID_FORMATS: readonly OutputFormat[] = ['markdown', 'text', 'html'];
+
+function isValidFormat(value: unknown): value is OutputFormat {
+  return typeof value === 'string' && VALID_FORMATS.includes(value as OutputFormat);
+}
+
+/** Tags that carry boilerplate or non-visible content, stripped before conversion. */
+const BOILERPLATE_TAGS = ['script', 'style', 'nav', 'footer', 'aside', 'noscript', 'iframe'] as const;
+
+/** Regex for stripping boilerplate tags and their content (used in regex fallback path). */
+const BOILERPLATE_TAG_RE = new RegExp(`<(${BOILERPLATE_TAGS.join('|')})\\b[^>]*>[\\s\\S]*?<\\/\\1>`, 'gi');
+
 const turndown = new TurndownService({ headingStyle: 'atx' });
-turndown.remove(['script', 'style', 'nav', 'footer', 'aside', 'noscript', 'iframe']);
+turndown.remove([...BOILERPLATE_TAGS]);
 
 /**
  * Performs the actual HTTP GET request with redirect following,
@@ -109,21 +122,34 @@ function htmlToMarkdown(html: string): string {
 }
 
 /**
- * Strips HTML tags and normalizes whitespace to produce plain text.
- * Removes script/style/nav/footer/aside/noscript/iframe elements and their contents first.
+ * Strips boilerplate elements and returns plain text using JSDOM for
+ * reliable entity decoding and element removal.
  */
 function htmlToText(html: string): string {
-  return html
-    .replace(/<(script|style|nav|footer|aside|noscript|iframe)\b[^>]*>[\s\S]*?<\/\1>/gi, '')
-    .replace(/<[^>]+>/g, '')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&nbsp;/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
+  let dom: JSDOM | undefined;
+  try {
+    dom = new JSDOM(html);
+    const doc = dom.window.document;
+    for (const el of doc.querySelectorAll(BOILERPLATE_TAGS.join(','))) {
+      el.remove();
+    }
+    return (doc.body?.textContent ?? '').replace(/\s+/g, ' ').trim();
+  } catch {
+    // Fallback: regex-based stripping with limited entity decoding
+    return html
+      .replace(BOILERPLATE_TAG_RE, '')
+      .replace(/<[^>]+>/g, '')
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/&nbsp;/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  } finally {
+    dom?.window.close();
+  }
 }
 
 interface ReadabilityArticle {
@@ -138,8 +164,9 @@ interface ReadabilityArticle {
  * Returns null if the page is not article-like or extraction fails.
  *
  * Note: Readability.parse() is synchronous and cannot be interrupted,
- * so no timeout is applied here. Malicious HTML could cause slow parsing,
- * but the overall request timeout on doFetch bounds wall-clock time.
+ * and no timeout is applied around this parsing step. Malicious or
+ * pathological HTML could therefore cause slow or stalled parsing and
+ * is a potential CPU DoS vector.
  */
 function extractWithReadability(html: string, url: string): ReadabilityArticle | null {
   let dom: JSDOM | undefined;
@@ -182,7 +209,7 @@ function readabilityMetadataHeader(article: ReadabilityArticle): string {
  * For HTML responses, attempts Readability extraction first, falling back
  * to turndown (markdown) or regex-based tag stripping (text).
  */
-function formatResponseBody(body: string, isHtml: boolean, format: string, url: string): string {
+function formatResponseBody(body: string, isHtml: boolean, format: OutputFormat, url: string): string {
   if (format === 'html' || !isHtml) return body;
 
   const article = extractWithReadability(body, url);
@@ -256,7 +283,19 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 
   const requestHeaders = (args?.headers ?? {}) as Record<string, string>;
   const maxLength = typeof args?.max_length === 'number' ? args.max_length : DEFAULT_MAX_LENGTH;
-  const format = typeof args?.format === 'string' ? args.format : 'markdown';
+  const rawFormat = args?.format;
+  if (rawFormat !== undefined && !isValidFormat(rawFormat)) {
+    return {
+      content: [
+        {
+          type: 'text',
+          text: `Invalid format: ${String(rawFormat)}. Supported formats are: ${VALID_FORMATS.join(', ')}.`,
+        },
+      ],
+      isError: true,
+    };
+  }
+  const format: OutputFormat = rawFormat ?? 'markdown';
   const timeoutSec = typeof args?.timeout === 'number' ? Math.min(60, Math.max(5, args.timeout)) : 30;
 
   try {
