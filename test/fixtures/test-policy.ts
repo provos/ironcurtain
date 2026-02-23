@@ -388,7 +388,7 @@ export const testToolAnnotations: ToolAnnotationsFile = {
           serverName: 'fetch',
           comment: 'Fetches web content via HTTP GET.',
           sideEffects: true,
-          args: { url: ['fetch-url'], headers: ['none'], max_length: ['none'], raw_html: ['none'] },
+          args: { url: ['fetch-url'], headers: ['none'], max_length: ['none'], format: ['none'], timeout: ['none'] },
         },
       ],
     },
