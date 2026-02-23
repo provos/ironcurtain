@@ -1,0 +1,195 @@
+/**
+ * Docker CLI wrapper implementing the DockerManager interface.
+ *
+ * Uses child_process.execFile for all Docker CLI commands.
+ * This keeps the implementation simple and avoids a dependency
+ * on the Docker Engine API or dockerode.
+ */
+
+import { execFile as execFileCb } from 'node:child_process';
+import { promisify } from 'node:util';
+import type { DockerContainerConfig, DockerExecResult, DockerManager } from './types.js';
+
+/** Async exec function signature matching promisified execFile. */
+export type ExecFileFn = (
+  cmd: string,
+  args: readonly string[],
+  opts: { timeout?: number; maxBuffer?: number },
+) => Promise<{ stdout: string; stderr: string }>;
+
+const defaultExecFile: ExecFileFn = async (cmd, args, opts) => {
+  const execFileAsync = promisify(execFileCb);
+  return execFileAsync(cmd, [...args], opts);
+};
+
+/** Default timeout for docker exec commands (10 minutes). */
+const DEFAULT_EXEC_TIMEOUT_MS = 600_000;
+
+/** Grace period for docker stop before SIGKILL. */
+const STOP_TIMEOUT_SECONDS = 10;
+
+/**
+ * Builds the `docker create` argument list from a container config.
+ * Exported for testing.
+ */
+export function buildCreateArgs(config: DockerContainerConfig): string[] {
+  const args = ['create'];
+
+  args.push('--name', config.name);
+  args.push('--network', config.network);
+
+  // Linux needs explicit host.docker.internal mapping (useless with --network=none)
+  if (config.network !== 'none') {
+    args.push('--add-host=host.docker.internal:host-gateway');
+  }
+
+  // Security: drop all capabilities
+  args.push('--cap-drop=ALL');
+
+  if (config.sessionLabel) {
+    args.push('--label', `ironcurtain.session=${config.sessionLabel}`);
+  }
+
+  if (config.resources?.memoryMb) {
+    args.push('--memory', `${config.resources.memoryMb}m`);
+  }
+  if (config.resources?.cpus) {
+    args.push('--cpus', String(config.resources.cpus));
+  }
+
+  for (const mount of config.mounts) {
+    const opts = mount.readonly ? ':ro' : '';
+    args.push('-v', `${mount.source}:${mount.target}${opts}`);
+  }
+
+  for (const [key, value] of Object.entries(config.env)) {
+    args.push('-e', `${key}=${value}`);
+  }
+
+  args.push(config.image);
+  args.push(...config.command);
+
+  return args;
+}
+
+export function createDockerManager(execFileFn?: ExecFileFn): DockerManager {
+  const exec = execFileFn ?? defaultExecFile;
+
+  return {
+    async preflight(image: string): Promise<void> {
+      try {
+        await exec('docker', ['info'], { timeout: 10_000 });
+      } catch {
+        throw new Error('Docker is not available. Ensure Docker daemon is running.');
+      }
+
+      try {
+        await exec('docker', ['image', 'inspect', image], { timeout: 10_000 });
+      } catch {
+        throw new Error(`Docker image not found: ${image}. Build it first.`);
+      }
+    },
+
+    async create(config: DockerContainerConfig): Promise<string> {
+      const args = buildCreateArgs(config);
+      const { stdout } = await exec('docker', args, { timeout: 30_000 });
+      return stdout.trim();
+    },
+
+    async start(containerId: string): Promise<void> {
+      await exec('docker', ['start', containerId], { timeout: 30_000 });
+    },
+
+    async exec(containerId: string, command: readonly string[], timeoutMs?: number): Promise<DockerExecResult> {
+      const timeout = timeoutMs ?? DEFAULT_EXEC_TIMEOUT_MS;
+      try {
+        const { stdout, stderr } = await exec('docker', ['exec', containerId, ...command], {
+          timeout,
+          maxBuffer: 50 * 1024 * 1024,
+        });
+        return { exitCode: 0, stdout, stderr };
+      } catch (err: unknown) {
+        if (isExecError(err)) {
+          return {
+            exitCode: err.code ?? 1,
+            stdout: err.stdout,
+            stderr: err.stderr,
+          };
+        }
+        throw err;
+      }
+    },
+
+    async stop(containerId: string): Promise<void> {
+      try {
+        await exec('docker', ['stop', '-t', String(STOP_TIMEOUT_SECONDS), containerId], {
+          timeout: (STOP_TIMEOUT_SECONDS + 5) * 1000,
+        });
+      } catch {
+        // Container may already be stopped
+      }
+    },
+
+    async remove(containerId: string): Promise<void> {
+      try {
+        await exec('docker', ['rm', '-f', containerId], { timeout: 10_000 });
+      } catch {
+        // Container may already be removed
+      }
+    },
+
+    async isRunning(containerId: string): Promise<boolean> {
+      try {
+        const { stdout } = await exec('docker', ['inspect', '-f', '{{.State.Running}}', containerId], {
+          timeout: 5_000,
+        });
+        return stdout.trim() === 'true';
+      } catch {
+        return false;
+      }
+    },
+
+    async imageExists(image: string): Promise<boolean> {
+      try {
+        await exec('docker', ['image', 'inspect', image], { timeout: 10_000 });
+        return true;
+      } catch {
+        return false;
+      }
+    },
+
+    async buildImage(tag: string, dockerfilePath: string, contextDir: string): Promise<void> {
+      await exec('docker', ['build', '-t', tag, '-f', dockerfilePath, contextDir], {
+        timeout: 600_000,
+        maxBuffer: 50 * 1024 * 1024,
+      });
+    },
+
+    async createNetwork(name: string): Promise<void> {
+      try {
+        await exec('docker', ['network', 'create', name], { timeout: 10_000 });
+      } catch (err: unknown) {
+        if (isExecError(err) && err.stderr.includes('already exists')) return;
+        throw err;
+      }
+    },
+
+    async removeNetwork(name: string): Promise<void> {
+      try {
+        await exec('docker', ['network', 'rm', name], { timeout: 10_000 });
+      } catch {
+        // Ignore errors -- network may already be removed
+      }
+    },
+  };
+}
+
+interface ExecError {
+  code: number | null;
+  stdout: string;
+  stderr: string;
+}
+
+function isExecError(err: unknown): err is ExecError {
+  return typeof err === 'object' && err !== null && 'stdout' in err;
+}

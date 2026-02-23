@@ -2,7 +2,12 @@ import type { LanguageModelV3 } from '@ai-sdk/provider';
 import type { IronCurtainConfig } from '../config/types.js';
 import type { ToolCallRequest, ToolCallResult, PolicyDecision } from '../types/mcp.js';
 import type { AuditEntry } from '../types/audit.js';
-import { loadGeneratedPolicy, extractServerDomainAllowlists, checkConstitutionFreshness } from '../config/index.js';
+import {
+  loadGeneratedPolicy,
+  extractServerDomainAllowlists,
+  checkConstitutionFreshness,
+  getPackageGeneratedDir,
+} from '../config/index.js';
 import { createLanguageModel } from '../config/model-provider.js';
 import { PolicyEngine, extractAnnotatedPaths } from './policy-engine.js';
 import { MCPClientManager, type McpRoot } from './mcp-client-manager.js';
@@ -34,7 +39,10 @@ export class TrustedProcess {
     private config: IronCurtainConfig,
     options?: TrustedProcessOptions,
   ) {
-    const { compiledPolicy, toolAnnotations, dynamicLists } = loadGeneratedPolicy(config.generatedDir);
+    const { compiledPolicy, toolAnnotations, dynamicLists } = loadGeneratedPolicy(
+      config.generatedDir,
+      getPackageGeneratedDir(),
+    );
     checkConstitutionFreshness(compiledPolicy, config.constitutionPath);
 
     const serverDomainAllowlists = extractServerDomainAllowlists(config.mcpServers);

@@ -200,7 +200,7 @@ Both use the same PolicyEngine with compiled artifacts.
 
 ## Auto-Approver Design (designed 2026-02-20)
 - See `auto-approver.md` topic file for details
-- `src/trusted-process/auto-approver.ts` -- stateless `autoApprove()` function
-- `approve | escalate` only, never deny; fail-open to human on any error
-- File-based IPC: `last-user-message.txt` in session dir; proxy reads on escalation
-- Config: `autoApprove: { enabled: false, modelId: 'anthropic:claude-haiku-4-5' }`
+
+## Docker Agent Broker Design (designed 2026-02-23)
+- See `docker-broker.md` topic file for details
+- Design doc: `docs/design/docker-agent-broker.md`

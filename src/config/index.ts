@@ -30,6 +30,14 @@ function resolveGeneratedDir(packageGeneratedDir: string): string {
 }
 
 /**
+ * Returns the package-bundled generated directory.
+ * Used as a fallback when user-local generated artifacts are incomplete.
+ */
+export function getPackageGeneratedDir(): string {
+  return resolve(__dirname, 'generated');
+}
+
+/**
  * Computes the list of protected paths that the policy engine should
  * prevent agents from modifying. When the active generated dir differs
  * from the package-bundled dir, both are protected.

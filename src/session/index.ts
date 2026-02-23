@@ -2,11 +2,12 @@
  * Session module public API.
  *
  * createSession() is the only entry point for session creation.
- * The concrete AgentSession class is not exported -- callers
- * depend on the Session interface only.
+ * The concrete implementations (AgentSession, DockerAgentSession)
+ * are not exported -- callers depend on the Session interface only.
  */
 
 import { existsSync, mkdirSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { loadConfig } from '../config/index.js';
 import {
   getSessionDir,
@@ -17,30 +18,41 @@ import {
   getSessionLlmLogPath,
   getSessionAutoApproveLlmLogPath,
 } from '../config/paths.js';
+import type { IronCurtainConfig } from '../config/types.js';
 import * as logger from '../logger.js';
 import { AgentSession } from './agent-session.js';
 import { SessionError } from './errors.js';
 import { createSessionId } from './types.js';
-import type { Session, SessionOptions } from './types.js';
+import type { Session, SessionId, SessionOptions, SessionMode } from './types.js';
 
 /**
  * Creates and initializes a new session.
  *
  * This is the only public entry point for session creation.
- * The concrete implementation (AgentSession) is not exported --
- * callers depend on the Session interface only.
+ * The concrete implementations are not exported -- callers
+ * depend on the Session interface only.
  *
- * The factory:
- * 1. Resolves config (from options or loadConfig())
- * 2. Generates a SessionId
- * 3. Creates the session directory tree
- * 4. Overrides the config's allowedDirectory and auditLogPath
- * 5. Creates the AgentSession, calls initialize(), returns Session
+ * When mode is 'docker', spawns an external agent in a Docker
+ * container with MCP proxy mediation. Otherwise (default), creates
+ * the built-in AgentSession using UTCP Code Mode + AI SDK.
  *
  * @throws {SessionError} with code SESSION_INIT_FAILED if
  *   sandbox or MCP connection setup fails.
  */
 export async function createSession(options: SessionOptions = {}): Promise<Session> {
+  const mode: SessionMode = options.mode ?? { kind: 'builtin' };
+
+  if (mode.kind === 'docker') {
+    return createDockerSession(mode.agent, options);
+  }
+
+  return createBuiltinSession(options);
+}
+
+/**
+ * Creates the built-in AgentSession (existing behavior).
+ */
+async function createBuiltinSession(options: SessionOptions): Promise<Session> {
   const config = options.config ?? loadConfig();
   const sessionId = createSessionId();
 
@@ -58,6 +70,141 @@ export async function createSession(options: SessionOptions = {}): Promise<Sessi
     }
   }
 
+  const sessionConfig = buildSessionConfig(config, effectiveSessionId, sessionId, options.resumeSessionId);
+
+  const session = new AgentSession(sessionConfig.config, sessionId, sessionConfig.escalationDir, options);
+
+  try {
+    await session.initialize();
+  } catch (error) {
+    // Clean up on init failure
+    await session.close().catch(() => {});
+    logger.teardown();
+    throw new SessionError(
+      `Session initialization failed: ${error instanceof Error ? error.message : String(error)}`,
+      'SESSION_INIT_FAILED',
+    );
+  }
+
+  return session;
+}
+
+/**
+ * Creates a DockerAgentSession that runs an external agent in a container.
+ */
+async function createDockerSession(
+  agentId: import('../docker/agent-adapter.js').AgentId,
+  options: SessionOptions,
+): Promise<Session> {
+  const config = options.config ?? loadConfig();
+  const sessionId = createSessionId();
+  const effectiveSessionId = options.resumeSessionId ?? sessionId;
+
+  const sessionConfig = buildSessionConfig(config, effectiveSessionId, sessionId, options.resumeSessionId);
+
+  // Dynamic imports to avoid loading Docker dependencies for built-in sessions
+  const { registerBuiltinAdapters, getAgent } = await import('../docker/agent-registry.js');
+  const { createManagedProxy } = await import('../docker/managed-proxy.js');
+  const { createConnectProxy } = await import('../docker/connect-proxy.js');
+  const { createDockerManager } = await import('../docker/docker-manager.js');
+  const { DockerAgentSession } = await import('../docker/docker-agent-session.js');
+
+  await registerBuiltinAdapters();
+  const adapter = getAgent(agentId);
+  const socketPath = resolve(sessionConfig.sessionDir, 'proxy.sock');
+
+  // Build the same set of env vars the built-in sandbox passes to the proxy.
+  // See src/sandbox/index.ts for the authoritative list.
+  const proxyEnv: Record<string, string> = {
+    MCP_SERVERS_CONFIG: JSON.stringify(sessionConfig.config.mcpServers),
+    GENERATED_DIR: sessionConfig.config.generatedDir,
+    CONSTITUTION_PATH: sessionConfig.config.constitutionPath,
+    PROTECTED_PATHS: JSON.stringify(sessionConfig.config.protectedPaths),
+    AUDIT_LOG_PATH: sessionConfig.auditLogPath,
+    ALLOWED_DIRECTORY: sessionConfig.sandboxDir,
+    ESCALATION_DIR: sessionConfig.escalationDir,
+    ESCALATION_TIMEOUT_SECONDS: String(config.escalationTimeoutSeconds),
+    SANDBOX_POLICY: sessionConfig.config.sandboxPolicy ?? 'warn',
+  };
+
+  if (sessionConfig.config.sessionLogPath) {
+    proxyEnv.SESSION_LOG_PATH = sessionConfig.config.sessionLogPath;
+  }
+  if (sessionConfig.autoApproveLlmLogPath) {
+    proxyEnv.AUTO_APPROVE_LLM_LOG_PATH = sessionConfig.autoApproveLlmLogPath;
+  }
+
+  const autoApprove = config.userConfig.autoApprove;
+  if (autoApprove.enabled) {
+    const { parseModelId, resolveApiKeyForProvider } = await import('../config/model-provider.js');
+    proxyEnv.AUTO_APPROVE_ENABLED = 'true';
+    proxyEnv.AUTO_APPROVE_MODEL_ID = autoApprove.modelId;
+    const { provider } = parseModelId(autoApprove.modelId);
+    proxyEnv.AUTO_APPROVE_API_KEY = resolveApiKeyForProvider(provider, config.userConfig);
+  }
+
+  const proxy = createManagedProxy({
+    socketPath,
+    env: proxyEnv,
+  });
+
+  const connectProxySocketPath = resolve(sessionConfig.sessionDir, 'connect-proxy.sock');
+  const connectProxy = createConnectProxy({
+    allowedHosts: adapter.getAllowedApiHosts(),
+    socketPath: connectProxySocketPath,
+  });
+  const docker = createDockerManager();
+
+  const session = new DockerAgentSession({
+    config: sessionConfig.config,
+    sessionId,
+    adapter,
+    docker,
+    proxy,
+    connectProxy,
+    sessionDir: sessionConfig.sessionDir,
+    sandboxDir: sessionConfig.sandboxDir,
+    escalationDir: sessionConfig.escalationDir,
+    auditLogPath: sessionConfig.auditLogPath,
+    onEscalation: options.onEscalation,
+    onEscalationExpired: options.onEscalationExpired,
+    onDiagnostic: options.onDiagnostic,
+  });
+
+  try {
+    await session.initialize();
+  } catch (error) {
+    await session.close().catch(() => {});
+    logger.teardown();
+    throw new SessionError(
+      `Docker session initialization failed: ${error instanceof Error ? error.message : String(error)}`,
+      'SESSION_INIT_FAILED',
+    );
+  }
+
+  return session;
+}
+
+/** Paths and patched config produced by buildSessionConfig. */
+interface SessionDirConfig {
+  config: IronCurtainConfig;
+  sessionDir: string;
+  sandboxDir: string;
+  escalationDir: string;
+  auditLogPath: string;
+  autoApproveLlmLogPath: string;
+}
+
+/**
+ * Shared session directory setup and config patching used by both session modes.
+ */
+function buildSessionConfig(
+  config: IronCurtainConfig,
+  effectiveSessionId: string,
+  sessionId: SessionId,
+  resumeSessionId?: string,
+): SessionDirConfig {
+  const sessionDir = getSessionDir(effectiveSessionId);
   const sandboxDir = getSessionSandboxDir(effectiveSessionId);
   const escalationDir = getSessionEscalationDir(effectiveSessionId);
   const auditLogPath = getSessionAuditLogPath(effectiveSessionId);
@@ -76,8 +223,8 @@ export async function createSession(options: SessionOptions = {}): Promise<Sessi
   logger.info(`Escalation dir: ${escalationDir}`);
   logger.info(`Audit log: ${auditLogPath}`);
   logger.info(`LLM log: ${llmLogPath}`);
-  if (options.resumeSessionId) {
-    logger.info(`Resumed from session: ${options.resumeSessionId}`);
+  if (resumeSessionId) {
+    logger.info(`Resumed from session: ${resumeSessionId}`);
   }
 
   // Override config paths for this session's isolated directories.
@@ -96,21 +243,14 @@ export async function createSession(options: SessionOptions = {}): Promise<Sessi
   // Patch MCP server args to use the session-specific sandbox directory
   patchMcpServerAllowedDirectory(sessionConfig, sandboxDir);
 
-  const session = new AgentSession(sessionConfig, sessionId, escalationDir, options);
-
-  try {
-    await session.initialize();
-  } catch (error) {
-    // Clean up on init failure
-    await session.close().catch(() => {});
-    logger.teardown();
-    throw new SessionError(
-      `Session initialization failed: ${error instanceof Error ? error.message : String(error)}`,
-      'SESSION_INIT_FAILED',
-    );
-  }
-
-  return session;
+  return {
+    config: sessionConfig,
+    sessionDir,
+    sandboxDir,
+    escalationDir,
+    auditLogPath,
+    autoApproveLlmLogPath,
+  };
 }
 
 /**
@@ -136,6 +276,7 @@ function patchMcpServerAllowedDirectory(
 // Re-export types needed by callers
 export type {
   Session,
+  SessionMode,
   SessionOptions,
   SessionInfo,
   SessionId,

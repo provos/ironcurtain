@@ -22,4 +22,10 @@ export interface Transport {
    * gracefully (display to user, continue accepting input).
    */
   run(session: Session): Promise<void>;
+
+  /**
+   * Signals the transport to stop accepting input and unblock run().
+   * Called during shutdown so the process can exit cleanly.
+   */
+  close(): void;
 }

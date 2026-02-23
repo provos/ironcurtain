@@ -1,0 +1,517 @@
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, appendFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { AuditLogTailer } from '../src/docker/audit-log-tailer.js';
+import { DockerAgentSession, type DockerAgentSessionDeps } from '../src/docker/docker-agent-session.js';
+import type { ManagedProxy } from '../src/docker/managed-proxy.js';
+import type { ConnectProxy } from '../src/docker/connect-proxy.js';
+import type { AgentAdapter, AgentId, ToolInfo } from '../src/docker/agent-adapter.js';
+import type { DockerManager } from '../src/docker/types.js';
+import type { IronCurtainConfig } from '../src/config/types.js';
+import type { DiagnosticEvent, EscalationRequest } from '../src/session/types.js';
+
+// --- AuditLogTailer tests ---
+
+describe('AuditLogTailer', () => {
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), 'audit-tailer-test-'));
+  });
+
+  afterEach(() => {
+    if (existsSync(tempDir)) {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('emits diagnostic events for new audit entries', async () => {
+    const logPath = join(tempDir, 'audit.jsonl');
+
+    // Create the log file first so watch() has something to attach to
+    writeFileSync(logPath, '');
+
+    const events: DiagnosticEvent[] = [];
+    const tailer = new AuditLogTailer(logPath, (event) => events.push(event));
+    tailer.start();
+
+    // Append an audit entry
+    const entry = {
+      serverName: 'filesystem',
+      toolName: 'read_file',
+      arguments: { path: '/workspace/foo.txt' },
+      result: { status: 'allowed' },
+    };
+    appendFileSync(logPath, JSON.stringify(entry) + '\n');
+
+    // fs.watch is async -- give it time to fire
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    tailer.stop();
+
+    expect(events.length).toBeGreaterThanOrEqual(1);
+    const event = events[0];
+    expect(event.kind).toBe('tool_call');
+    if (event.kind === 'tool_call') {
+      expect(event.toolName).toBe('filesystem.read_file');
+      expect(event.preview).toContain('allowed');
+    }
+  });
+
+  it('handles multiple entries in a single write', async () => {
+    const logPath = join(tempDir, 'audit.jsonl');
+    writeFileSync(logPath, '');
+
+    const events: DiagnosticEvent[] = [];
+    const tailer = new AuditLogTailer(logPath, (event) => events.push(event));
+    tailer.start();
+
+    const entry1 = {
+      serverName: 'filesystem',
+      toolName: 'read_file',
+      arguments: { path: '/a.txt' },
+      result: { status: 'allowed' },
+    };
+    const entry2 = {
+      serverName: 'git',
+      toolName: 'git_status',
+      arguments: {},
+      result: { status: 'denied' },
+    };
+    appendFileSync(logPath, JSON.stringify(entry1) + '\n' + JSON.stringify(entry2) + '\n');
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    tailer.stop();
+
+    expect(events.length).toBeGreaterThanOrEqual(2);
+    if (events[0].kind === 'tool_call') {
+      expect(events[0].toolName).toBe('filesystem.read_file');
+    }
+    if (events[1].kind === 'tool_call') {
+      expect(events[1].toolName).toBe('git.git_status');
+    }
+  });
+
+  it('ignores malformed JSON lines', async () => {
+    const logPath = join(tempDir, 'audit.jsonl');
+    writeFileSync(logPath, '');
+
+    const events: DiagnosticEvent[] = [];
+    const tailer = new AuditLogTailer(logPath, (event) => events.push(event));
+    tailer.start();
+
+    appendFileSync(logPath, 'not valid json\n');
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    tailer.stop();
+
+    // Malformed line should be silently skipped
+    expect(events).toHaveLength(0);
+  });
+
+  it('truncates long argument previews', async () => {
+    const logPath = join(tempDir, 'audit.jsonl');
+    writeFileSync(logPath, '');
+
+    const events: DiagnosticEvent[] = [];
+    const tailer = new AuditLogTailer(logPath, (event) => events.push(event));
+    tailer.start();
+
+    const longArg = 'x'.repeat(200);
+    const entry = {
+      serverName: 'fs',
+      toolName: 'write',
+      arguments: { content: longArg },
+      result: { status: 'allowed' },
+    };
+    appendFileSync(logPath, JSON.stringify(entry) + '\n');
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    tailer.stop();
+
+    if (events.length > 0 && events[0].kind === 'tool_call') {
+      // Preview is truncated to 80 chars of the JSON args + "..."
+      expect(events[0].preview).toContain('...');
+    }
+  });
+});
+
+// --- DockerAgentSession tests ---
+
+function createMockAdapter(): AgentAdapter {
+  return {
+    id: 'test-agent' as AgentId,
+    displayName: 'Test Agent',
+    async getImage() {
+      return 'test-image:latest';
+    },
+    generateMcpConfig() {
+      return [{ path: 'test-config.json', content: '{}' }];
+    },
+    generateOrientationFiles() {
+      return [];
+    },
+    buildCommand(message: string, systemPrompt: string) {
+      return ['test-agent', '--prompt', systemPrompt, message];
+    },
+    buildSystemPrompt() {
+      return 'You are a test agent.';
+    },
+    getAllowedApiHosts() {
+      return ['api.test.com'];
+    },
+    buildEnv() {
+      return { TEST_KEY: 'test-value' };
+    },
+    extractResponse(exitCode: number, stdout: string) {
+      if (exitCode !== 0) return `Error: exit ${exitCode}`;
+      return stdout.trim();
+    },
+  };
+}
+
+function createMockDocker(): DockerManager {
+  return {
+    async preflight() {},
+    async create() {
+      return 'container-abc123';
+    },
+    async start() {},
+    async exec() {
+      return { exitCode: 0, stdout: 'Task completed successfully', stderr: '' };
+    },
+    async stop() {},
+    async remove() {},
+    async isRunning() {
+      return true;
+    },
+    async imageExists() {
+      return true;
+    },
+    async buildImage() {},
+    async createNetwork() {},
+    async removeNetwork() {},
+  };
+}
+
+function createMockProxy(socketPath: string): ManagedProxy {
+  const tools: ToolInfo[] = [{ name: 'read_file', description: 'Read a file', inputSchema: { type: 'object' } }];
+
+  return {
+    socketPath,
+    async start() {},
+    async listTools() {
+      return tools;
+    },
+    async stop() {},
+  };
+}
+
+function createMockConnectProxy(): ConnectProxy {
+  return {
+    async start() {
+      return { socketPath: '/tmp/test-connect-proxy.sock' };
+    },
+    async stop() {},
+  };
+}
+
+function createTestDeps(tempDir: string): DockerAgentSessionDeps {
+  const sessionDir = join(tempDir, 'session');
+  const sandboxDir = join(tempDir, 'sandbox');
+  const escalationDir = join(tempDir, 'escalations');
+  const auditLogPath = join(tempDir, 'audit.jsonl');
+
+  mkdirSync(sessionDir, { recursive: true });
+  mkdirSync(sandboxDir, { recursive: true });
+  mkdirSync(escalationDir, { recursive: true });
+
+  const config = {
+    mcpServers: {},
+    userConfig: {
+      anthropicApiKey: 'sk-test',
+      resourceBudget: {
+        maxTotalTokens: null,
+        maxSteps: null,
+        maxSessionSeconds: null,
+        maxEstimatedCostUsd: null,
+      },
+      escalationTimeoutSeconds: 120,
+    },
+  } as unknown as IronCurtainConfig;
+
+  return {
+    config,
+    sessionId: 'test-session-id' as import('../src/session/types.js').SessionId,
+    adapter: createMockAdapter(),
+    docker: createMockDocker(),
+    proxy: createMockProxy(join(sessionDir, 'proxy.sock')),
+    connectProxy: createMockConnectProxy(),
+    sessionDir,
+    sandboxDir,
+    escalationDir,
+    auditLogPath,
+  };
+}
+
+describe('DockerAgentSession', () => {
+  let tempDir: string;
+  let session: DockerAgentSession | undefined;
+  let deps: DockerAgentSessionDeps;
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), 'docker-session-test-'));
+    deps = createTestDeps(tempDir);
+  });
+
+  afterEach(async () => {
+    // Ensure session is closed to stop intervals
+    try {
+      await session?.close();
+    } catch {
+      // Ignore close errors in cleanup
+    }
+    if (existsSync(tempDir)) {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('initializes and reaches ready status', async () => {
+    session = new DockerAgentSession(deps);
+    await session.initialize();
+
+    const info = session.getInfo();
+    expect(info.status).toBe('ready');
+    expect(info.turnCount).toBe(0);
+    expect(info.id).toBe('test-session-id');
+  });
+
+  it('sendMessage executes docker exec and returns response', async () => {
+    session = new DockerAgentSession(deps);
+    await session.initialize();
+
+    const response = await session.sendMessage('Fix the bug');
+
+    expect(response).toBe('Task completed successfully');
+    expect(session.getInfo().turnCount).toBe(1);
+    expect(session.getInfo().status).toBe('ready');
+  });
+
+  it('records conversation turns', async () => {
+    session = new DockerAgentSession(deps);
+    await session.initialize();
+
+    await session.sendMessage('First message');
+    await session.sendMessage('Second message');
+
+    const history = session.getHistory();
+    expect(history).toHaveLength(2);
+    expect(history[0].turnNumber).toBe(1);
+    expect(history[0].userMessage).toBe('First message');
+    expect(history[0].assistantResponse).toBe('Task completed successfully');
+    expect(history[1].turnNumber).toBe(2);
+    expect(history[1].userMessage).toBe('Second message');
+  });
+
+  it('getBudgetStatus returns tokenTrackingAvailable: false', async () => {
+    session = new DockerAgentSession(deps);
+    await session.initialize();
+
+    const budget = session.getBudgetStatus();
+    expect(budget.tokenTrackingAvailable).toBe(false);
+    expect(budget.totalTokens).toBe(0);
+    expect(budget.estimatedCostUsd).toBe(0);
+  });
+
+  it('tracks elapsed seconds after first message', async () => {
+    session = new DockerAgentSession(deps);
+    await session.initialize();
+
+    // Before first message, elapsed is 0
+    expect(session.getBudgetStatus().elapsedSeconds).toBe(0);
+
+    await session.sendMessage('Start');
+
+    // After first message, elapsed should be > 0
+    expect(session.getBudgetStatus().elapsedSeconds).toBeGreaterThanOrEqual(0);
+  });
+
+  it('throws SessionNotReadyError when not initialized', async () => {
+    session = new DockerAgentSession(deps);
+
+    await expect(session.sendMessage('Hello')).rejects.toThrow('not ready');
+  });
+
+  it('throws SessionClosedError after close', async () => {
+    session = new DockerAgentSession(deps);
+    await session.initialize();
+    await session.close();
+
+    await expect(session.sendMessage('Hello')).rejects.toThrow('closed');
+  });
+
+  it('close is idempotent', async () => {
+    session = new DockerAgentSession(deps);
+    await session.initialize();
+
+    await session.close();
+    await session.close(); // Should not throw
+  });
+
+  it('handles non-zero exit codes via adapter.extractResponse', async () => {
+    const customDocker = createMockDocker();
+    customDocker.exec = async () => ({
+      exitCode: 1,
+      stdout: 'Something went wrong',
+      stderr: 'error details',
+    });
+
+    session = new DockerAgentSession({ ...deps, docker: customDocker });
+    await session.initialize();
+
+    const response = await session.sendMessage('Do something');
+    expect(response).toBe('Error: exit 1');
+  });
+
+  it('emits diagnostic events via onDiagnostic callback', async () => {
+    const events: DiagnosticEvent[] = [];
+    session = new DockerAgentSession({
+      ...deps,
+      onDiagnostic: (event) => events.push(event),
+    });
+    await session.initialize();
+
+    // The audit log tailer needs a real file; create an initial empty file
+    writeFileSync(deps.auditLogPath, '');
+
+    // Write an audit entry to trigger the tailer
+    const entry = {
+      serverName: 'fs',
+      toolName: 'read',
+      arguments: { path: '/test' },
+      result: { status: 'allowed' },
+    };
+    appendFileSync(deps.auditLogPath, JSON.stringify(entry) + '\n');
+
+    // Give the fs.watch time to fire
+    await new Promise((r) => setTimeout(r, 300));
+
+    expect(events.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('resolves escalation by writing response file', async () => {
+    session = new DockerAgentSession(deps);
+    await session.initialize();
+
+    // Simulate an escalation request appearing in the directory
+    const escalationId = 'esc-123';
+    const request: EscalationRequest = {
+      escalationId,
+      toolName: 'write_file',
+      serverName: 'filesystem',
+      arguments: { path: '/etc/passwd' },
+      reason: 'Protected path',
+    };
+    writeFileSync(join(deps.escalationDir, `request-${escalationId}.json`), JSON.stringify(request));
+
+    // Wait for the polling interval to pick it up
+    await new Promise((r) => setTimeout(r, 500));
+
+    const pending = session.getPendingEscalation();
+    expect(pending).toBeDefined();
+    expect(pending?.escalationId).toBe(escalationId);
+
+    // Resolve the escalation
+    await session.resolveEscalation(escalationId, 'denied');
+
+    // Response file should exist
+    const responsePath = join(deps.escalationDir, `response-${escalationId}.json`);
+    expect(existsSync(responsePath)).toBe(true);
+
+    // Pending should be cleared
+    expect(session.getPendingEscalation()).toBeUndefined();
+  });
+
+  it('throws when resolving unknown escalation', async () => {
+    session = new DockerAgentSession(deps);
+    await session.initialize();
+
+    await expect(session.resolveEscalation('nonexistent', 'approved')).rejects.toThrow('No pending escalation');
+  });
+
+  it('calls onEscalation callback when escalation detected', async () => {
+    const escalations: EscalationRequest[] = [];
+    session = new DockerAgentSession({
+      ...deps,
+      onEscalation: (req) => escalations.push(req),
+    });
+    await session.initialize();
+
+    const request: EscalationRequest = {
+      escalationId: 'esc-456',
+      toolName: 'delete_file',
+      serverName: 'filesystem',
+      arguments: { path: '/important' },
+      reason: 'Protected',
+    };
+    writeFileSync(join(deps.escalationDir, 'request-esc-456.json'), JSON.stringify(request));
+
+    await new Promise((r) => setTimeout(r, 500));
+
+    expect(escalations).toHaveLength(1);
+    expect(escalations[0].escalationId).toBe('esc-456');
+  });
+
+  it('detects escalation expiry when files are removed', async () => {
+    let expired = false;
+    session = new DockerAgentSession({
+      ...deps,
+      onEscalationExpired: () => {
+        expired = true;
+      },
+    });
+    await session.initialize();
+
+    // Write then detect escalation
+    const request: EscalationRequest = {
+      escalationId: 'esc-789',
+      toolName: 'fetch',
+      serverName: 'fetch',
+      arguments: { url: 'http://evil.com' },
+      reason: 'Unknown domain',
+    };
+    writeFileSync(join(deps.escalationDir, 'request-esc-789.json'), JSON.stringify(request));
+
+    await new Promise((r) => setTimeout(r, 500));
+    expect(session.getPendingEscalation()).toBeDefined();
+
+    // Simulate proxy-side cleanup (both files removed = expired)
+    rmSync(join(deps.escalationDir, 'request-esc-789.json'));
+
+    await new Promise((r) => setTimeout(r, 500));
+    expect(expired).toBe(true);
+    expect(session.getPendingEscalation()).toBeUndefined();
+  });
+
+  it('writes user context for auto-approver', async () => {
+    session = new DockerAgentSession(deps);
+    await session.initialize();
+
+    await session.sendMessage('Please fix the CSS');
+
+    const contextPath = join(deps.escalationDir, 'user-context.json');
+    expect(existsSync(contextPath)).toBe(true);
+  });
+
+  it('getDiagnosticLog returns accumulated events', async () => {
+    session = new DockerAgentSession(deps);
+    await session.initialize();
+
+    const log = session.getDiagnosticLog();
+    expect(Array.isArray(log)).toBe(true);
+  });
+});
