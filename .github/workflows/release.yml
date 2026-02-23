@@ -20,6 +20,9 @@ jobs:
           cache: npm
           registry-url: https://registry.npmjs.org
 
+      - name: Upgrade npm for OIDC trusted publishing support
+        run: npm install -g npm@latest
+
       - run: npm ci
       - run: npm run format:check
       - run: npm run lint
