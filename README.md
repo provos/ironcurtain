@@ -144,7 +144,7 @@ Any tool call that doesn't match an explicit rule is escalated to a human by def
 
 ### Prerequisites
 
-- Node.js 18+
+- Node.js 20+
 - An API key for at least one supported LLM provider (Anthropic, Google, or OpenAI)
 
 ### Install
