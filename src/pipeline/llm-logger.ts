@@ -34,6 +34,8 @@ export interface LlmLogEntry {
   usage: {
     inputTokens: number | undefined;
     outputTokens: number | undefined;
+    cacheReadTokens: number | undefined;
+    cacheWriteTokens: number | undefined;
   };
   durationMs: number;
 }
@@ -85,6 +87,8 @@ export function createLlmLoggingMiddleware(logPath: string, context: LlmLogConte
         usage: {
           inputTokens: result.usage?.inputTokens?.total,
           outputTokens: result.usage?.outputTokens?.total,
+          cacheReadTokens: result.usage?.inputTokens?.cacheRead,
+          cacheWriteTokens: result.usage?.inputTokens?.cacheWrite,
         },
         durationMs,
       };
