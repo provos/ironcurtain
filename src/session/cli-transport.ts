@@ -323,9 +323,13 @@ export class CliTransport implements Transport {
   private displayBudgetStatus(status: BudgetStatus): void {
     const { limits, cumulative } = status;
     process.stderr.write(chalk.cyan('  Current turn budget:\n'));
-    process.stderr.write(
-      formatBudgetLine('Tokens', status.totalTokens, limits.maxTotalTokens, (v) => v.toLocaleString()),
-    );
+    if (status.tokenTrackingAvailable) {
+      process.stderr.write(
+        formatBudgetLine('Tokens', status.totalTokens, limits.maxTotalTokens, (v) => v.toLocaleString()),
+      );
+    } else {
+      process.stderr.write(`    Tokens: N/A\n`);
+    }
     process.stderr.write(formatBudgetLine('Steps', status.stepCount, limits.maxSteps, String));
     process.stderr.write(
       formatBudgetLine('Time', status.elapsedSeconds, limits.maxSessionSeconds, (v) => `${Math.round(v)}s`),
@@ -334,7 +338,11 @@ export class CliTransport implements Transport {
       formatBudgetLine('Est. cost', status.estimatedCostUsd, limits.maxEstimatedCostUsd, (v) => `$${v.toFixed(2)}`),
     );
     process.stderr.write(chalk.cyan('  Session totals:\n'));
-    process.stderr.write(`    Tokens: ${cumulative.totalTokens.toLocaleString()}\n`);
+    if (status.tokenTrackingAvailable) {
+      process.stderr.write(`    Tokens: ${cumulative.totalTokens.toLocaleString()}\n`);
+    } else {
+      process.stderr.write(`    Tokens: N/A\n`);
+    }
     process.stderr.write(`    Steps: ${cumulative.stepCount}\n`);
     process.stderr.write(`    Active time: ${Math.round(cumulative.activeSeconds)}s\n`);
     process.stderr.write(`    Est. cost: $${cumulative.estimatedCostUsd.toFixed(2)}\n`);
@@ -342,10 +350,11 @@ export class CliTransport implements Transport {
 
   private displaySessionSummary(status: BudgetStatus): void {
     const { cumulative } = status;
+    const tokensPart = status.tokenTrackingAvailable ? `${cumulative.totalTokens.toLocaleString()} tokens · ` : '';
     process.stderr.write(
       chalk.dim(
-        `\nSession: ${cumulative.totalTokens.toLocaleString()} tokens` +
-          ` · ${cumulative.stepCount} steps` +
+        `\nSession: ${tokensPart}` +
+          `${cumulative.stepCount} steps` +
           ` · ${Math.round(cumulative.activeSeconds)}s` +
           ` · ~$${cumulative.estimatedCostUsd.toFixed(2)}\n`,
       ),

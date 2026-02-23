@@ -6,7 +6,7 @@ import { AuditLogTailer } from '../src/docker/audit-log-tailer.js';
 import { DockerAgentSession, type DockerAgentSessionDeps } from '../src/docker/docker-agent-session.js';
 import type { ManagedProxy } from '../src/docker/managed-proxy.js';
 import type { ConnectProxy } from '../src/docker/connect-proxy.js';
-import type { AgentAdapter, AgentId, ToolInfo } from '../src/docker/agent-adapter.js';
+import type { AgentAdapter, AgentId, AgentResponse, ToolInfo } from '../src/docker/agent-adapter.js';
 import type { DockerManager } from '../src/docker/types.js';
 import type { IronCurtainConfig } from '../src/config/types.js';
 import type { DiagnosticEvent, EscalationRequest } from '../src/session/types.js';
@@ -167,9 +167,9 @@ function createMockAdapter(): AgentAdapter {
     buildEnv() {
       return { TEST_KEY: 'test-value' };
     },
-    extractResponse(exitCode: number, stdout: string) {
-      if (exitCode !== 0) return `Error: exit ${exitCode}`;
-      return stdout.trim();
+    extractResponse(exitCode: number, stdout: string): AgentResponse {
+      if (exitCode !== 0) return { text: `Error: exit ${exitCode}` };
+      return { text: stdout.trim() };
     },
   };
 }
@@ -325,6 +325,23 @@ describe('DockerAgentSession', () => {
     expect(budget.tokenTrackingAvailable).toBe(false);
     expect(budget.totalTokens).toBe(0);
     expect(budget.estimatedCostUsd).toBe(0);
+  });
+
+  it('getBudgetStatus reflects cost from adapter response', async () => {
+    const costAdapter = createMockAdapter();
+    costAdapter.extractResponse = (): AgentResponse => ({
+      text: 'Done',
+      costUsd: 0.42,
+    });
+
+    session = new DockerAgentSession({ ...deps, adapter: costAdapter });
+    await session.initialize();
+
+    await session.sendMessage('Do something');
+
+    const budget = session.getBudgetStatus();
+    expect(budget.estimatedCostUsd).toBe(0.42);
+    expect(budget.cumulative.estimatedCostUsd).toBe(0.42);
   });
 
   it('tracks elapsed seconds after first message', async () => {

@@ -8,7 +8,7 @@
  * - --dangerously-skip-permissions (IronCurtain handles security)
  */
 
-import type { AgentAdapter, AgentConfigFile, AgentId, OrientationContext } from '../agent-adapter.js';
+import type { AgentAdapter, AgentConfigFile, AgentId, AgentResponse, OrientationContext } from '../agent-adapter.js';
 import type { IronCurtainConfig } from '../../config/types.js';
 
 const CLAUDE_CODE_IMAGE = 'ironcurtain-claude-code:latest';
@@ -99,7 +99,7 @@ export const claudeCodeAdapter: AgentAdapter = {
       '--continue',
       '--dangerously-skip-permissions',
       '--output-format',
-      'text',
+      'json',
       '--mcp-config',
       '/etc/ironcurtain/claude-mcp-config.json',
       '--append-system-prompt',
@@ -124,10 +124,29 @@ export const claudeCodeAdapter: AgentAdapter = {
     };
   },
 
-  extractResponse(exitCode: number, stdout: string): string {
+  extractResponse(exitCode: number, stdout: string): AgentResponse {
     if (exitCode !== 0) {
-      return `Agent exited with code ${exitCode}.\n\nOutput:\n${stdout}`;
+      return { text: `Agent exited with code ${exitCode}.\n\nOutput:\n${stdout}` };
     }
-    return stdout.trim();
+    return parseClaudeCodeJson(stdout);
   },
 };
+
+/**
+ * Parses Claude Code's `--output-format json` response.
+ * Falls back to raw stdout when the output is not valid JSON.
+ */
+function parseClaudeCodeJson(stdout: string): AgentResponse {
+  try {
+    const parsed: unknown = JSON.parse(stdout);
+    if (parsed && typeof parsed === 'object' && 'result' in parsed) {
+      const obj = parsed as Record<string, unknown>;
+      const text = typeof obj.result === 'string' ? obj.result : stdout.trim();
+      const costUsd = typeof obj.total_cost_usd === 'number' ? obj.total_cost_usd : undefined;
+      return costUsd !== undefined ? { text, costUsd } : { text };
+    }
+  } catch {
+    // JSON parse failed -- fall through to raw text
+  }
+  return { text: stdout.trim() };
+}

@@ -47,7 +47,7 @@ describe('Claude Code Adapter', () => {
     expect(cmd).toContain('--continue');
     expect(cmd).toContain('--dangerously-skip-permissions');
     expect(cmd).toContain('--output-format');
-    expect(cmd).toContain('text');
+    expect(cmd).toContain('json');
     expect(cmd).toContain('--mcp-config');
     expect(cmd).toContain('/etc/ironcurtain/claude-mcp-config.json');
     expect(cmd).toContain('--append-system-prompt');
@@ -82,15 +82,39 @@ describe('Claude Code Adapter', () => {
     expect(env.CLAUDE_CODE_DISABLE_UPDATE_CHECK).toBe('1');
   });
 
-  it('extracts response from successful exit', () => {
-    const response = claudeCodeAdapter.extractResponse(0, '  Task completed\n');
-    expect(response).toBe('Task completed');
+  it('extracts response and cost from valid JSON output', () => {
+    const jsonOutput = JSON.stringify({
+      type: 'result',
+      subtype: 'success',
+      total_cost_usd: 0.0034,
+      is_error: false,
+      duration_ms: 2847,
+      num_turns: 4,
+      result: 'Task completed',
+      session_id: 'abc-123',
+    });
+    const response = claudeCodeAdapter.extractResponse(0, jsonOutput);
+    expect(response.text).toBe('Task completed');
+    expect(response.costUsd).toBe(0.0034);
   });
 
-  it('includes exit code in response on failure', () => {
+  it('falls back to raw stdout when JSON is malformed', () => {
+    const response = claudeCodeAdapter.extractResponse(0, '  Not JSON at all\n');
+    expect(response.text).toBe('Not JSON at all');
+    expect(response.costUsd).toBeUndefined();
+  });
+
+  it('falls back to raw stdout when JSON lacks result field', () => {
+    const response = claudeCodeAdapter.extractResponse(0, JSON.stringify({ type: 'other' }));
+    expect(response.text).toBe(JSON.stringify({ type: 'other' }));
+    expect(response.costUsd).toBeUndefined();
+  });
+
+  it('returns text without costUsd on non-zero exit', () => {
     const response = claudeCodeAdapter.extractResponse(1, 'error message');
-    expect(response).toContain('exited with code 1');
-    expect(response).toContain('error message');
+    expect(response.text).toContain('exited with code 1');
+    expect(response.text).toContain('error message');
+    expect(response.costUsd).toBeUndefined();
   });
 });
 

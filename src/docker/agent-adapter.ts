@@ -9,6 +9,17 @@
 import type { IronCurtainConfig } from '../config/types.js';
 
 /**
+ * Structured response from an agent adapter, carrying both the
+ * text response and optional cost/usage metadata reported by the agent.
+ */
+export interface AgentResponse {
+  /** The agent's text response. */
+  readonly text: string;
+  /** Cumulative session cost in USD, if reported by the agent. */
+  readonly costUsd?: number;
+}
+
+/**
  * Branded agent identifier to prevent mixing with other string types.
  */
 export type AgentId = string & { readonly __brand: 'AgentId' };
@@ -109,10 +120,10 @@ export interface AgentAdapter {
   buildEnv(config: IronCurtainConfig): Readonly<Record<string, string>>;
 
   /**
-   * Parses the agent's output to extract the final response text.
+   * Parses the agent's output to extract the response and optional cost.
    *
    * @param exitCode - the container's exit code
    * @param stdout - captured stdout from the container
    */
-  extractResponse(exitCode: number, stdout: string): string;
+  extractResponse(exitCode: number, stdout: string): AgentResponse;
 }

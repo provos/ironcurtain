@@ -78,7 +78,8 @@ export class DockerAgentSession implements Session {
   private escalationPollInterval: ReturnType<typeof setInterval> | null = null;
 
   private auditTailer: AuditLogTailer | null = null;
-  private sessionStartMs: number | null = null;
+  private cumulativeActiveMs = 0;
+  private cumulativeCostUsd = 0;
 
   private readonly onEscalation?: (request: EscalationRequest) => void;
   private readonly onEscalationExpired?: () => void;
@@ -194,9 +195,14 @@ export class DockerAgentSession implements Session {
     if (!this.containerId) throw new Error('Container not initialized');
 
     this.status = 'processing';
-    if (!this.sessionStartMs) this.sessionStartMs = Date.now();
 
-    const turnStart = new Date().toISOString();
+    // Per-turn wall-clock timeout (matches builtin session semantics:
+    // maxSessionSeconds is a per-turn limit, idle time doesn't count)
+    const maxSeconds = this.config.userConfig.resourceBudget.maxSessionSeconds;
+    const execTimeout = maxSeconds != null ? maxSeconds * 1000 : undefined;
+
+    const turnStartMs = Date.now();
+    const turnStart = new Date(turnStartMs).toISOString();
 
     // Write user context for the auto-approver
     this.writeUserContext(userMessage);
@@ -204,19 +210,25 @@ export class DockerAgentSession implements Session {
     const command = this.adapter.buildCommand(userMessage, this.systemPrompt);
     logger.info(`[docker-agent] exec: ${formatCommand(command)}`);
 
-    const { exitCode, stdout, stderr } = await this.docker.exec(this.containerId, command);
+    const { exitCode, stdout, stderr } = await this.docker.exec(this.containerId, command, execTimeout);
     logger.info(`[docker-agent] exit=${exitCode} stdout=${stdout.length}B stderr=${stderr.length}B`);
 
     if (stderr) {
       logger.info(`[docker-agent] stderr: ${stderr.substring(0, 500)}`);
     }
 
+    this.cumulativeActiveMs += Date.now() - turnStartMs;
+
     const response = this.adapter.extractResponse(exitCode, stdout);
+
+    if (response.costUsd !== undefined) {
+      this.cumulativeCostUsd = response.costUsd;
+    }
 
     const turn: ConversationTurn = {
       turnNumber: this.turns.length + 1,
       userMessage,
-      assistantResponse: response,
+      assistantResponse: response.text,
       usage: {
         promptTokens: 0,
         completionTokens: 0,
@@ -229,7 +241,7 @@ export class DockerAgentSession implements Session {
     this.turns.push(turn);
 
     this.status = 'ready';
-    return response;
+    return response.text;
   }
 
   getHistory(): readonly ConversationTurn[] {
@@ -245,7 +257,7 @@ export class DockerAgentSession implements Session {
   }
 
   getBudgetStatus(): BudgetStatus {
-    const elapsedSeconds = this.sessionStartMs ? (Date.now() - this.sessionStartMs) / 1000 : 0;
+    const elapsedSeconds = this.cumulativeActiveMs / 1000;
 
     return {
       totalInputTokens: 0,
@@ -253,7 +265,7 @@ export class DockerAgentSession implements Session {
       totalTokens: 0,
       stepCount: this.turns.length,
       elapsedSeconds,
-      estimatedCostUsd: 0,
+      estimatedCostUsd: this.cumulativeCostUsd,
       limits: this.config.userConfig.resourceBudget,
       cumulative: {
         totalInputTokens: 0,
@@ -261,7 +273,7 @@ export class DockerAgentSession implements Session {
         totalTokens: 0,
         stepCount: this.turns.length,
         activeSeconds: elapsedSeconds,
-        estimatedCostUsd: 0,
+        estimatedCostUsd: this.cumulativeCostUsd,
       },
       tokenTrackingAvailable: false,
     };
