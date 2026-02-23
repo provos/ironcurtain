@@ -85,6 +85,7 @@ Engine uses concrete filesystem paths with `path.resolve()` and directory contai
 - `src/pipeline/policy-verifier.ts` -- multi-round real engine + LLM judge (accepts dynamicLists)
 - `src/pipeline/handwritten-scenarios.ts` -- 26 mandatory test scenarios (15 filesystem + 11 git)
 - `src/pipeline/compile.ts` -- CLI entry point; dynamic step numbering [1/3] vs [1/4] when lists present
+- `src/pipeline/constitution-customizer.ts` -- LLM-assisted conversational customizer CLI
 - `src/config/index.ts` -- `loadConfig()` and `loadGeneratedPolicy()` (returns dynamicLists)
 
 ## validateCompiledRules Signature
@@ -110,11 +111,25 @@ All moves denied via `deny-delete-operations` rule (move_file source has `delete
 - **loadGeneratedPolicy**: returns `{ compiledPolicy, toolAnnotations, dynamicLists }` -- dynamicLists is optional (backward compatible)
 - **Tests**: `test/dynamic-lists.test.ts` -- 60 tests (Phase 1 validation/compiler + Phase 2 registry/resolver/engine + Phase 3 MCP-backed resolution)
 
+## Constitution Customizer (TB1c)
+- **Module**: `src/pipeline/constitution-customizer.ts` -- LLM-assisted conversational CLI
+- **Base constitution**: `src/config/constitution-user-base.md` -- shipped guiding principles
+- **Path helper**: `getBaseUserConstitutionPath()` in `src/config/paths.ts`
+- **CLI**: `ironcurtain customize-policy` registered in `src/cli.ts`
+- **Schema**: `CustomizerResponseSchema` -- discriminated union: `constitution` or `question`
+- **Exports**: `buildSystemPrompt()`, `buildUserMessage()`, `formatAnnotationsForPrompt()`, `computeLineDiff()`, `formatDiff()`, `writeConstitution()`, `revertConstitution()`, `seedBaseConstitution()`
+- **Diff**: LCS-based line-level diff (`computeLineDiff`), chalk-colorized output (`formatDiff`)
+- **Backup**: `writeConstitution()` copies existing to `.bak`; `revertConstitution()` renames `.bak` back
+- **Caching**: Uses `PromptCacheStrategy` (Anthropic cache breakpoints on system prompt + history)
+- **Build**: `copy-assets.mjs` copies `constitution-user-base.md` to `dist/config/`
+- **Tests**: `test/constitution-customizer.test.ts` -- 39 tests (prompts, annotations, diff, backup/revert, seeding, schema)
+
 ## Design Documents
 - `docs/designs/policy-compilation-pipeline.md` -- pipeline design spec
 - `docs/designs/multi-server-onboarding.md` -- TB1a design spec (role extensibility + git server)
 - `docs/designs/multi-provider-models.md` -- multi-provider model support design
 - `docs/designs/dynamic-lists.md` -- dynamic lists for policy rules (4-phase)
+- `docs/designs/tb1c-constitution-customizer.md` -- LLM-assisted constitution customization
 
 ## TB1a: Domain Allowlists & Sandbox Containment Architecture
 - **Untrusted domain gate**: structural invariant checks URL-role args against `serverDomainAllowlists` -- escalates (not denies) unknown domains
