@@ -338,7 +338,12 @@ describe('Session', () => {
     it('records token usage in each turn', async () => {
       mockGenerateText.mockResolvedValueOnce({
         ...createMockGenerateResult(),
-        totalUsage: { inputTokens: 200, outputTokens: 80, totalTokens: 280, inputTokenDetails: { cacheReadTokens: 0, cacheWriteTokens: 0 } },
+        totalUsage: {
+          inputTokens: 200,
+          outputTokens: 80,
+          totalTokens: 280,
+          inputTokenDetails: { cacheReadTokens: 0, cacheWriteTokens: 0 },
+        },
       });
 
       const session = await createTestSession();
@@ -740,7 +745,12 @@ describe('Session', () => {
             { role: 'tool', content: [{ type: 'tool-result', result: 'done' }] },
           ],
         },
-        totalUsage: { inputTokens, outputTokens: 50, totalTokens: inputTokens + 50, inputTokenDetails: { cacheReadTokens: 0, cacheWriteTokens: 0 } },
+        totalUsage: {
+          inputTokens,
+          outputTokens: 50,
+          totalTokens: inputTokens + 50,
+          inputTokenDetails: { cacheReadTokens: 0, cacheWriteTokens: 0 },
+        },
       };
     }
 
@@ -793,7 +803,12 @@ describe('Session', () => {
           response: {
             messages: [{ role: 'assistant', content: [{ type: 'text', text }] }],
           },
-          totalUsage: { inputTokens, outputTokens: 50, totalTokens: inputTokens + 50, inputTokenDetails: { cacheReadTokens: 0, cacheWriteTokens: 0 } },
+          totalUsage: {
+            inputTokens,
+            outputTokens: 50,
+            totalTokens: inputTokens + 50,
+            inputTokenDetails: { cacheReadTokens: 0, cacheWriteTokens: 0 },
+          },
         };
       };
     }
