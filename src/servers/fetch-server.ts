@@ -23,6 +23,8 @@ const MAX_RESPONSE_BYTES = 10 * 1024 * 1024; // 10 MB
 const REQUEST_TIMEOUT_MS = 30_000; // 30 seconds
 const MAX_REDIRECTS = 5;
 const DEFAULT_MAX_LENGTH = 5000;
+const MAX_READABILITY_BYTES = 1_000_000; // 1 MB — skip DOM parsing above this
+const MAX_READABILITY_ELEMS = 10_000; // bail if document has too many elements
 
 type OutputFormat = 'markdown' | 'text' | 'html';
 const VALID_FORMATS: readonly OutputFormat[] = ['markdown', 'text', 'html'];
@@ -163,20 +165,20 @@ interface ReadabilityArticle {
  * Extracts main article content using Mozilla Readability.
  * Returns null if the page is not article-like or extraction fails.
  *
- * Note: Readability.parse() is synchronous and cannot be interrupted,
- * and no timeout is applied around this parsing step. Malicious or
- * pathological HTML could therefore cause slow or stalled parsing and
- * is a potential CPU DoS vector.
+ * Guards against DoS: skips documents over MAX_READABILITY_BYTES and
+ * uses Readability's maxElemsToParse to bail on high-element-count pages.
  */
 function extractWithReadability(html: string, url: string): ReadabilityArticle | null {
   let dom: JSDOM | undefined;
   try {
+    if (html.length > MAX_READABILITY_BYTES) return null;
+
     dom = new JSDOM(html, { url });
 
     const doc = dom.window.document;
     if (!isProbablyReaderable(doc)) return null;
 
-    const result = new Readability(doc).parse();
+    const result = new Readability(doc, { maxElemsToParse: MAX_READABILITY_ELEMS }).parse();
     if (!result) return null;
 
     return {
@@ -282,7 +284,11 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
   }
 
   const requestHeaders = (args?.headers ?? {}) as Record<string, string>;
-  const maxLength = typeof args?.max_length === 'number' ? args.max_length : DEFAULT_MAX_LENGTH;
+  const rawMaxLength = args?.max_length;
+  const maxLength =
+    typeof rawMaxLength === 'number' && Number.isFinite(rawMaxLength)
+      ? Math.max(0, Math.trunc(rawMaxLength))
+      : DEFAULT_MAX_LENGTH;
   const rawFormat = args?.format;
   if (rawFormat !== undefined && !isValidFormat(rawFormat)) {
     return {
@@ -296,7 +302,8 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
     };
   }
   const format: OutputFormat = rawFormat ?? 'markdown';
-  const timeoutSec = typeof args?.timeout === 'number' ? Math.min(60, Math.max(5, args.timeout)) : 30;
+  const timeoutSec =
+    typeof args?.timeout === 'number' && Number.isFinite(args.timeout) ? Math.min(60, Math.max(5, args.timeout)) : 30;
 
   try {
     const { status, headers, body } = await doFetch(url, requestHeaders, timeoutSec * 1000);

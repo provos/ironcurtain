@@ -81,6 +81,23 @@ beforeAll(async () => {
     } else if (req.url === '/plain') {
       res.writeHead(200, { 'Content-Type': 'text/plain' });
       res.end('Plain text response');
+    } else if (req.url === '/large-html') {
+      // HTML over 1MB — should skip Readability and fall back to Turndown
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      const filler = '<p>' + 'x'.repeat(1000) + '</p>\n';
+      const count = Math.ceil(1_100_000 / filler.length);
+      res.end(
+        `<!DOCTYPE html><html><head><title>Large Page</title></head><body>` +
+          `<article><h1>Large Article</h1>${filler.repeat(count)}</article></body></html>`,
+      );
+    } else if (req.url === '/many-elements') {
+      // HTML with >10,000 elements — should trip maxElemsToParse
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      const spans = Array.from({ length: 11_000 }, (_, i) => `<span>${i}</span>`).join('');
+      res.end(
+        `<!DOCTYPE html><html><head><title>Many Elements</title></head><body>` +
+          `<article><h1>Element Heavy</h1><p>${spans}</p></article></body></html>`,
+      );
     } else if (req.url === '/slow') {
       // Never respond — used to test timeout
       // (request will hang until timeout fires)
@@ -291,6 +308,30 @@ describe('fetch-server', () => {
       const text = resultText(result);
       // Should still work via turndown fallback
       expect(text).toContain('Hello World');
+    });
+
+    it('skips readability for HTML over 1MB and falls back to turndown', async () => {
+      const result = await client.callTool({
+        name: 'http_fetch',
+        arguments: { url: `${baseUrl}/large-html`, max_length: 50000 },
+      });
+      const text = resultText(result);
+      // Content should still be present via turndown fallback
+      expect(text).toContain('Large Article');
+      // No readability metadata header since extraction was skipped
+      expect(text).not.toContain('Title:');
+    });
+
+    it('skips readability when element count exceeds limit', async () => {
+      const result = await client.callTool({
+        name: 'http_fetch',
+        arguments: { url: `${baseUrl}/many-elements`, max_length: 50000 },
+      });
+      const text = resultText(result);
+      // Content should still be present via turndown fallback
+      expect(text).toContain('Element Heavy');
+      // No readability metadata header since maxElemsToParse was exceeded
+      expect(text).not.toContain('Title:');
     });
   });
 });
