@@ -17,8 +17,9 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprot
 import { Readability, isProbablyReaderable } from '@mozilla/readability';
 import { JSDOM } from 'jsdom';
 import TurndownService from 'turndown';
+import { VERSION } from '../version.js';
 
-const USER_AGENT = 'IronCurtain/0.1 (AI Agent Runtime)';
+const USER_AGENT = `IronCurtain/${VERSION} (AI Agent Runtime)`;
 const MAX_RESPONSE_BYTES = 10 * 1024 * 1024; // 10 MB
 const REQUEST_TIMEOUT_MS = 30_000; // 30 seconds
 const MAX_REDIRECTS = 5;
@@ -227,7 +228,7 @@ function formatResponseBody(body: string, isHtml: boolean, format: OutputFormat,
   return header + content;
 }
 
-const server = new Server({ name: 'ironcurtain-fetch', version: '0.1.0' }, { capabilities: { tools: {} } });
+const server = new Server({ name: 'ironcurtain-fetch', version: VERSION }, { capabilities: { tools: {} } });
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [

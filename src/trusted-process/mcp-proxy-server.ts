@@ -65,6 +65,7 @@ import { wrapLanguageModel } from 'ai';
 import { createLlmLoggingMiddleware } from '../pipeline/llm-logger.js';
 import type { LanguageModelV3 } from '@ai-sdk/provider';
 import type { MCPServerConfig, SandboxAvailabilityPolicy } from '../config/types.js';
+import { VERSION } from '../version.js';
 
 interface ProxiedTool {
   serverName: string;
@@ -405,7 +406,7 @@ async function main(): Promise<void> {
     }
 
     const client = new Client(
-      { name: 'ironcurtain-proxy', version: '0.1.0' },
+      { name: 'ironcurtain-proxy', version: VERSION },
       { capabilities: { roots: { listChanged: true } } },
     );
 
@@ -446,7 +447,7 @@ async function main(): Promise<void> {
 
   // Create the proxy MCP server using the low-level Server API
   // so we can pass through raw JSON schemas without Zod conversion
-  const server = new Server({ name: 'ironcurtain-proxy', version: '0.1.0' }, { capabilities: { tools: {} } });
+  const server = new Server({ name: 'ironcurtain-proxy', version: VERSION }, { capabilities: { tools: {} } });
 
   // Handle tools/list -- return all proxied tool schemas verbatim
   server.setRequestHandler(ListToolsRequestSchema, async () => {

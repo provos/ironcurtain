@@ -40,6 +40,7 @@ import {
   type DiscardedScenario,
 } from './policy-verifier.js';
 import { buildGeneratorPrompt, generateScenarios } from './scenario-generator.js';
+import { VERSION } from '../version.js';
 import type {
   CompiledPolicyFile,
   CompiledRule,
@@ -452,7 +453,7 @@ export async function connectMcpServersForLists(
       transport.stderr.on('data', () => {});
     }
 
-    const client = new Client({ name: 'ironcurtain-list-resolver', version: '0.1.0' });
+    const client = new Client({ name: 'ironcurtain-list-resolver', version: VERSION });
     await client.connect(transport);
     const toolsResult = await client.listTools();
 

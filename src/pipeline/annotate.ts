@@ -25,6 +25,7 @@ import {
 } from './pipeline-shared.js';
 import { annotateTools, buildAnnotationPrompt, validateAnnotationsHeuristic } from './tool-annotator.js';
 import type { ToolAnnotation, ToolAnnotationsFile } from './types.js';
+import { VERSION } from '../version.js';
 
 // ---------------------------------------------------------------------------
 // MCP Server Connection & Tool Discovery
@@ -56,7 +57,7 @@ async function connectAndDiscoverTools(
         if (transport.stderr) {
           transport.stderr.on('data', () => {});
         }
-        const client = new Client({ name: 'ironcurtain-annotator', version: '0.1.0' });
+        const client = new Client({ name: 'ironcurtain-annotator', version: VERSION });
         await client.connect(transport);
 
         const toolsResult = await client.listTools();

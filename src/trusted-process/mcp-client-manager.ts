@@ -3,6 +3,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { CompatibilityCallToolResultSchema, ListRootsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import type { MCPServerConfig } from '../config/types.js';
 import * as logger from '../logger.js';
+import { VERSION } from '../version.js';
 
 export const ROOTS_REFRESH_TIMEOUT_MS = 5_000;
 
@@ -29,7 +30,7 @@ export class MCPClientManager {
     });
 
     const client = new Client(
-      { name: 'ironcurtain', version: '0.1.0' },
+      { name: 'ironcurtain', version: VERSION },
       roots ? { capabilities: { roots: { listChanged: true } } } : {},
     );
 
