@@ -336,6 +336,8 @@ describe('Session', () => {
           promptTokens: 200,
           completionTokens: 80,
           totalTokens: 280,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
         });
       } finally {
         await session.close();

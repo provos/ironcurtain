@@ -45,6 +45,8 @@ export interface ConversationTurn {
     promptTokens: number;
     completionTokens: number;
     totalTokens: number;
+    cacheReadTokens: number;
+    cacheWriteTokens: number;
   };
 
   /** ISO 8601 timestamp when this turn started. */

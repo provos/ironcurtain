@@ -5,24 +5,32 @@
  * via createSession() in index.ts.
  */
 
+import { readFileSync, writeFileSync, readdirSync, existsSync } from 'node:fs';
+import { resolve } from 'node:path';
 import {
   generateText,
   stepCountIs,
   tool,
   wrapLanguageModel,
   type LanguageModel,
+  type LanguageModelUsage,
   type ModelMessage,
+  type SystemModelMessage,
   type ToolSet,
 } from 'ai';
-import { createLanguageModel } from '../config/model-provider.js';
 import { z } from 'zod';
-import { readFileSync, writeFileSync, readdirSync, existsSync } from 'node:fs';
-import { createLlmLoggingMiddleware } from '../pipeline/llm-logger.js';
-import type { LlmLogContext } from '../pipeline/llm-logger.js';
-import { resolve } from 'node:path';
+import { createLanguageModel } from '../config/model-provider.js';
+import { createLlmLoggingMiddleware, type LlmLogContext } from '../pipeline/llm-logger.js';
 import type { IronCurtainConfig } from '../config/types.js';
+import * as logger from '../logger.js';
 import type { Sandbox } from '../sandbox/index.js';
+import { SessionNotReadyError, SessionClosedError, BudgetExhaustedError } from './errors.js';
+import { MessageCompactor } from './message-compactor.js';
+import { createCacheStrategy, type PromptCacheStrategy } from './prompt-cache.js';
 import { buildSystemPrompt } from './prompts.js';
+import { ResourceBudgetTracker } from './resource-budget-tracker.js';
+import { StepLoopDetector } from './step-loop-detector.js';
+import { truncateResult, getResultSizeLimit, formatKB } from './truncate-result.js';
 import type {
   Session,
   SessionId,
@@ -35,12 +43,6 @@ import type {
   SandboxFactory,
   BudgetStatus,
 } from './types.js';
-import { SessionNotReadyError, SessionClosedError, BudgetExhaustedError } from './errors.js';
-import { StepLoopDetector } from './step-loop-detector.js';
-import { ResourceBudgetTracker } from './resource-budget-tracker.js';
-import { MessageCompactor } from './message-compactor.js';
-import { truncateResult, getResultSizeLimit, formatKB } from './truncate-result.js';
-import * as logger from '../logger.js';
 
 const MAX_AGENT_STEPS = 100;
 const ESCALATION_POLL_INTERVAL_MS = 300;
@@ -72,7 +74,7 @@ export class AgentSession implements Session {
   private diagnosticLog: DiagnosticEvent[] = [];
 
   /** System prompt, built once after sandbox initialization. */
-  private systemPrompt = '';
+  private systemPrompt: string | SystemModelMessage = '';
 
   /** The tool set, built once after sandbox initialization. */
   private tools: ToolSet = {};
@@ -98,6 +100,9 @@ export class AgentSession implements Session {
   /** Message compactor for auto-summarizing older messages. */
   private readonly compactor: MessageCompactor;
 
+  /** Provider-specific prompt caching strategy. */
+  private readonly cacheStrategy: PromptCacheStrategy;
+
   /** Last step's input token count, used by the compactor to detect threshold. */
   private lastStepInputTokens = 0;
 
@@ -117,6 +122,7 @@ export class AgentSession implements Session {
     this.createdAt = new Date().toISOString();
     this.budgetTracker = new ResourceBudgetTracker(config.userConfig.resourceBudget, config.agentModelId);
     this.compactor = new MessageCompactor(config.userConfig.autoCompact);
+    this.cacheStrategy = createCacheStrategy(config.agentModelId);
   }
 
   /**
@@ -125,8 +131,9 @@ export class AgentSession implements Session {
    */
   async initialize(): Promise<void> {
     this.sandbox = await this.sandboxFactory(this.config);
-    this.systemPrompt = buildSystemPrompt(this.sandbox.getToolInterfaces(), this.config.allowedDirectory);
-    this.tools = this.buildTools();
+    const rawPrompt = buildSystemPrompt(this.sandbox.getToolInterfaces(), this.config.allowedDirectory);
+    this.systemPrompt = this.cacheStrategy.wrapSystemPrompt(rawPrompt);
+    this.tools = this.cacheStrategy.wrapTools(this.buildTools());
     this.model = await this.buildModel();
     this.startEscalationWatcher();
     this.status = 'ready';
@@ -178,7 +185,7 @@ export class AgentSession implements Session {
       const result = await generateText({
         model: this.model!,
         system: this.systemPrompt,
-        messages: this.messages,
+        messages: this.cacheStrategy.applyHistoryBreakpoint(this.messages),
         tools: this.tools,
         stopWhen: [stepCountIs(MAX_AGENT_STEPS), this.budgetTracker.createStopCondition()],
         ...(abortController ? { abortSignal: abortController.signal } : {}),
@@ -400,7 +407,7 @@ export class AgentSession implements Session {
   private recordTurn(
     userMessage: string,
     assistantResponse: string,
-    usage: { inputTokens: number | undefined; outputTokens: number | undefined; totalTokens: number | undefined },
+    usage: LanguageModelUsage,
     timestamp: string,
   ): ConversationTurn {
     return {
@@ -411,6 +418,8 @@ export class AgentSession implements Session {
         promptTokens: usage.inputTokens ?? 0,
         completionTokens: usage.outputTokens ?? 0,
         totalTokens: usage.totalTokens ?? 0,
+        cacheReadTokens: usage.inputTokenDetails?.cacheReadTokens ?? 0,
+        cacheWriteTokens: usage.inputTokenDetails?.cacheWriteTokens ?? 0,
       },
       timestamp,
     };
