@@ -1,7 +1,10 @@
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 /**
  * Returns the IronCurtain home directory.
@@ -114,6 +117,15 @@ export function getUserConstitutionPath(): string {
  */
 export function getUserConstitutionBasePath(): string {
   return resolve(getIronCurtainHome(), 'constitution.md');
+}
+
+/**
+ * Returns the package-bundled base user constitution path.
+ * This file ships with IronCurtain and provides sensible defaults
+ * (guiding principles) that the customizer builds upon.
+ */
+export function getBaseUserConstitutionPath(): string {
+  return resolve(__dirname, 'constitution-user-base.md');
 }
 
 /**

@@ -35,6 +35,7 @@
   "files": [
     "dist/",
     "src/config/constitution.md",
+    "src/config/constitution-user-base.md",
     "src/config/mcp-servers.json",
     "src/config/generated/compiled-policy.json",
     "src/config/generated/tool-annotations.json",
@@ -47,6 +48,7 @@
     "start": "tsx src/cli.ts start",
     "annotate-tools": "tsx src/cli.ts annotate-tools",
     "compile-policy": "tsx src/cli.ts compile-policy",
+    "customize-policy": "tsx src/cli.ts customize-policy",
     "config": "tsx src/cli.ts config",
     "prepublishOnly": "npm run build",
     "test": "vitest run",

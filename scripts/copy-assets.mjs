@@ -15,7 +15,7 @@ const distConfig = resolve(__dirname, '..', 'dist', 'config');
 mkdirSync(resolve(distConfig, 'generated'), { recursive: true });
 
 // Copy static config assets
-for (const file of ['constitution.md', 'mcp-servers.json']) {
+for (const file of ['constitution.md', 'constitution-user-base.md', 'mcp-servers.json']) {
   const src = resolve(srcConfig, file);
   if (existsSync(src)) {
     cpSync(src, resolve(distConfig, file));
