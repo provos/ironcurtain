@@ -131,6 +131,44 @@ describe('PolicyEngine', () => {
     });
   });
 
+  describe('tilde paths in compiled rules', () => {
+    it('matches tool call targeting ~/somedir when rule uses paths.within: "~/somedir"', () => {
+      const home = homedir();
+      const tildePolicy: CompiledPolicyFile = {
+        generatedAt: 'test',
+        constitutionHash: 'test',
+        inputHash: 'test',
+        rules: [
+          {
+            name: 'allow-reads-in-tilde-dir',
+            description: 'Allow reads within ~/somedir',
+            principle: 'test',
+            if: { paths: { roles: ['read-path'], within: '~/somedir' }, server: ['filesystem'] },
+            then: 'allow',
+            reason: 'Reads in ~/somedir are allowed',
+          },
+          {
+            name: 'deny-all',
+            description: 'Deny everything else',
+            principle: 'test',
+            if: {},
+            then: 'deny',
+            reason: 'Default deny',
+          },
+        ],
+      };
+      const tildeEngine = new PolicyEngine(tildePolicy, testToolAnnotations, []);
+      const result = tildeEngine.evaluate(
+        makeRequest({
+          toolName: 'read_file',
+          arguments: { path: `${home}/somedir/file.txt` },
+        }),
+      );
+      expect(result.decision).toBe('allow');
+      expect(result.rule).toBe('allow-reads-in-tilde-dir');
+    });
+  });
+
   describe('delete operations', () => {
     it('allows delete_file in sandbox (structural sandbox invariant fires before unknown-tool check)', () => {
       const result = engine.evaluate(

@@ -15,7 +15,7 @@ import {
   isArgumentRole,
   getArgumentRoleValues,
   expandTilde,
-  normalizePath,
+  resolveRealPath,
   getRolesByCategory,
   getPathRoles,
   getUrlRoles,
@@ -115,6 +115,8 @@ describe('isArgumentRole', () => {
     expect(isArgumentRole('read-path')).toBe(true);
     expect(isArgumentRole('write-path')).toBe(true);
     expect(isArgumentRole('delete-path')).toBe(true);
+    expect(isArgumentRole('write-history')).toBe(true);
+    expect(isArgumentRole('delete-history')).toBe(true);
     expect(isArgumentRole('fetch-url')).toBe(true);
     expect(isArgumentRole('git-remote-url')).toBe(true);
     expect(isArgumentRole('branch-name')).toBe(true);
@@ -135,11 +137,13 @@ describe('getArgumentRoleValues', () => {
     expect(values.length).toBeGreaterThanOrEqual(1);
   });
 
-  it('contains all eight roles', () => {
+  it('contains all ten roles', () => {
     const values = getArgumentRoleValues();
     expect(values).toContain('read-path');
     expect(values).toContain('write-path');
     expect(values).toContain('delete-path');
+    expect(values).toContain('write-history');
+    expect(values).toContain('delete-history');
     expect(values).toContain('fetch-url');
     expect(values).toContain('git-remote-url');
     expect(values).toContain('branch-name');
@@ -176,30 +180,30 @@ describe('expandTilde', () => {
   });
 });
 
-describe('normalizePath', () => {
+describe('resolveRealPath', () => {
   const home = homedir();
 
-  it('expands tilde and resolves', () => {
-    expect(normalizePath('~/Downloads')).toBe(`${home}/Downloads`);
+  it('expands tilde before resolving', () => {
+    expect(resolveRealPath('~/Downloads')).toBe(`${home}/Downloads`);
   });
 
   it('resolves relative paths to absolute', () => {
-    expect(normalizePath('./foo/bar')).toBe(resolve('./foo/bar'));
+    expect(resolveRealPath('./foo/bar')).toBe(resolve('./foo/bar'));
   });
 
   it('collapses parent traversals', () => {
-    expect(normalizePath('/tmp/foo/../bar')).toBe('/tmp/bar');
+    expect(resolveRealPath('/tmp/foo/../bar')).toBe('/tmp/bar');
   });
 
   it('returns absolute paths as-is (modulo normalization)', () => {
-    expect(normalizePath('/tmp/clean')).toBe('/tmp/clean');
+    expect(resolveRealPath('/tmp/clean')).toBe('/tmp/clean');
   });
 });
 
 describe('normalizers via registry', () => {
-  it('path roles use normalizePath', () => {
+  it('path roles use resolveRealPath', () => {
     const home = homedir();
-    for (const role of ['read-path', 'write-path', 'delete-path'] as ArgumentRole[]) {
+    for (const role of ['read-path', 'write-path', 'delete-path', 'write-history', 'delete-history'] as ArgumentRole[]) {
       const def = getRoleDefinition(role);
       expect(def.canonicalize('~/test')).toBe(`${home}/test`);
       expect(def.canonicalize('/tmp/a/../b')).toBe('/tmp/b');

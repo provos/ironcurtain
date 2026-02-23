@@ -19,11 +19,6 @@ function looksLikePath(value: string): boolean {
   return value.startsWith('/') || value.startsWith('.') || value.startsWith('~');
 }
 
-/** Resolves a path-like string to its canonical real path, following symlinks. */
-function normalizePath(value: string): string {
-  return resolveRealPath(expandTilde(value));
-}
-
 /**
  * Returns a new arguments object with all path-like string values
  * fully resolved (tilde expanded, relative resolved, traversals collapsed).
@@ -42,9 +37,9 @@ export function normalizeToolArgPaths(args: Record<string, unknown>): Record<str
 
   for (const [key, value] of Object.entries(args)) {
     if (typeof value === 'string' && looksLikePath(value)) {
-      result[key] = normalizePath(value);
+      result[key] = resolveRealPath(value);
     } else if (Array.isArray(value)) {
-      result[key] = value.map((item) => (typeof item === 'string' && looksLikePath(item) ? normalizePath(item) : item));
+      result[key] = value.map((item) => (typeof item === 'string' && looksLikePath(item) ? resolveRealPath(item) : item));
     } else {
       result[key] = value;
     }
