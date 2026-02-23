@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import chalk from 'chalk';
 import ora from 'ora';
-import { loadConfig } from './config/index.js';
+import { loadConfig, loadGeneratedPolicy, checkConstitutionFreshness } from './config/index.js';
 import * as logger from './logger.js';
 import { CliTransport } from './session/cli-transport.js';
 import { createSession } from './session/index.js';
@@ -21,6 +21,10 @@ export async function main(args?: string[]): Promise<void> {
   const task = positionals.join(' ');
   const resumeSessionId = values.resume as string | undefined;
   const config = loadConfig();
+
+  // Check constitution freshness once here, before any proxy processes are spawned.
+  const { compiledPolicy } = loadGeneratedPolicy(config.generatedDir);
+  checkConstitutionFreshness(compiledPolicy, config.constitutionPath);
 
   // Create the transport first so we can wire its callbacks into the session.
   const transport = new CliTransport({ initialMessage: task || undefined });

@@ -40,7 +40,7 @@ import { appendFileSync, existsSync, mkdtempSync, readFileSync, writeFileSync, u
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { v4 as uuidv4 } from 'uuid';
-import { loadGeneratedPolicy, extractServerDomainAllowlists, checkConstitutionFreshness } from '../config/index.js';
+import { loadGeneratedPolicy, extractServerDomainAllowlists } from '../config/index.js';
 import { PolicyEngine, extractAnnotatedPaths } from './policy-engine.js';
 import { getPathRoles } from '../types/argument-roles.js';
 import { AuditLog } from './audit-log.js';
@@ -300,12 +300,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // Base constitution path — the freshness check also covers the user constitution.
-  const constitutionPath = process.env.CONSTITUTION_PATH;
   const { compiledPolicy, toolAnnotations, dynamicLists } = loadGeneratedPolicy(generatedDir);
-  if (constitutionPath) {
-    checkConstitutionFreshness(compiledPolicy, constitutionPath);
-  }
 
   const serverDomainAllowlists = extractServerDomainAllowlists(serversConfig);
   const policyEngine = new PolicyEngine(
