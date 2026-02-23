@@ -288,3 +288,5 @@ export type {
 } from './types.js';
 export type { Transport } from './transport.js';
 export { SessionError, SessionNotReadyError, SessionClosedError, BudgetExhaustedError } from './errors.js';
+export { resolveSessionMode, PreflightError } from './preflight.js';
+export type { PreflightResult, PreflightOptions } from './preflight.js';

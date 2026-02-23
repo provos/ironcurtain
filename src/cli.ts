@@ -33,10 +33,12 @@ Commands:
 Options:
   -h, --help           Show this help message
   -v, --version        Show version number
-  -a, --agent <name>   Run an external agent in Docker (e.g., claude-code)
+  -a, --agent <name>   Agent mode: builtin or claude-code (Docker)
+                       Auto-detects if omitted: Docker if available, else builtin
   --list-agents        List registered agent adapters
 
 Examples:
+  ironcurtain start "task"                        # Auto-detects Docker or builtin
   ironcurtain start                              # Interactive session
   ironcurtain start "Summarize files in ."       # Single-shot task
   ironcurtain start --resume <session-id>        # Resume a session

@@ -7,7 +7,7 @@ import { loadConfig, loadGeneratedPolicy, checkConstitutionFreshness, getPackage
 import * as logger from './logger.js';
 import { CliTransport } from './session/cli-transport.js';
 import { createSession } from './session/index.js';
-import type { SessionMode } from './session/types.js';
+import { resolveSessionMode } from './session/preflight.js';
 import type { AgentId } from './docker/agent-adapter.js';
 
 export async function main(args?: string[]): Promise<void> {
@@ -38,11 +38,18 @@ export async function main(args?: string[]): Promise<void> {
   const agentName = values.agent as string | undefined;
   const config = loadConfig();
 
-  // Build session mode from --agent flag
-  let mode: SessionMode | undefined;
-  if (agentName) {
-    mode = { kind: 'docker', agent: agentName as AgentId };
+  // Pre-flight: resolve session mode (auto-detect or validate explicit --agent)
+  const preflight = await resolveSessionMode({
+    config,
+    requestedAgent: agentName ? (agentName as AgentId) : undefined,
+  });
+
+  // Log auto-selection reason (skip for explicit --agent)
+  if (!agentName) {
+    process.stderr.write(chalk.dim(`Mode: ${preflight.mode.kind} (${preflight.reason})\n`));
   }
+
+  const mode = preflight.mode;
 
   // Check constitution freshness once here, before any proxy processes are spawned.
   const { compiledPolicy } = loadGeneratedPolicy(config.generatedDir, getPackageGeneratedDir());
@@ -52,7 +59,7 @@ export async function main(args?: string[]): Promise<void> {
   const transport = new CliTransport({ initialMessage: task || undefined });
 
   const initSpinner = ora({
-    text: agentName ? `Initializing Docker session (${agentName})...` : 'Initializing session...',
+    text: mode.kind === 'docker' ? `Initializing Docker session (${mode.agent})...` : 'Initializing session...',
     stream: process.stderr,
     discardStdin: false,
   }).start();
