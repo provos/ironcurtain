@@ -973,7 +973,10 @@
             "max_length": [
               "none"
             ],
-            "raw_html": [
+            "format": [
+              "none"
+            ],
+            "timeout": [
               "none"
             ]
           },
