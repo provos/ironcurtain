@@ -23,9 +23,6 @@ Thumbs.db
 *.swo
 *~
 
-# Claude Code agent memory (per-user, auto-generated)
-.claude/agent-memory/
-
 # IronCurtain runtime
 .ironcurtain/
 
