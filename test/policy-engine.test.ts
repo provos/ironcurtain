@@ -102,7 +102,7 @@ describe('PolicyEngine', () => {
       // A tilde path targeting the home directory should be caught.
       // path.resolve('~/') does NOT expand tilde -- it produces <cwd>/~
       // But the heuristic will extract it, and resolve will produce cwd/~.
-      // The real fix is normalizeToolArgPaths at the proxy layer.
+      // The real fix is prepareToolArgs at the proxy layer.
       // This test verifies the heuristic at least SEES tilde paths.
       const result = engineWithHome.evaluate(
         makeRequest({
@@ -112,14 +112,14 @@ describe('PolicyEngine', () => {
       );
       // The heuristic extracts '~/.ssh/id_rsa' -- resolve produces <cwd>/~/.ssh/id_rsa
       // which won't match homeDir. But this still exercises the code path.
-      // The real protection comes from normalizeToolArgPaths in the proxy/TrustedProcess.
+      // The real protection comes from prepareToolArgs in the proxy/TrustedProcess.
       expect(result.decision).toBeDefined();
     });
 
     it('with pre-normalized tilde path, denies access to protected home directory', () => {
       const homeDir = homedir();
       const engineWithHome = new PolicyEngine(testCompiledPolicy, testToolAnnotations, [homeDir], SANDBOX_DIR);
-      // Simulate what happens AFTER normalizeToolArgPaths has expanded the tilde
+      // Simulate what happens AFTER prepareToolArgs has expanded the tilde
       const result = engineWithHome.evaluate(
         makeRequest({
           toolName: 'read_file',

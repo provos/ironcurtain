@@ -233,7 +233,7 @@ function parseValuesFromText(text: string): string[] {
   const jsonMatch = text.match(/\{[\s\S]*"values"\s*:\s*\[[\s\S]*?\][\s\S]*?\}/);
   if (jsonMatch) {
     const parsed = tryParseJson(jsonMatch[0]);
-    const values = extractStringArray((parsed as { values?: unknown })?.values);
+    const values = extractStringArray((parsed as { values?: unknown } | undefined)?.values);
     if (values) return values;
   }
 

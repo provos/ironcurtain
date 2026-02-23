@@ -18,6 +18,7 @@ import type { EvaluationResult } from './policy-types.js';
 import type {
   CompiledPolicyFile,
   DynamicListsFile,
+  ResolvedList,
   ToolAnnotationsFile,
   ToolAnnotation,
   CompiledRule,
@@ -238,7 +239,7 @@ function ruleRelevantToRole(rule: CompiledRule, role: ArgumentRole): boolean {
  *   effective = (resolved.values + manualAdditions) - manualRemovals
  */
 function getEffectiveListValues(listName: string, lists: DynamicListsFile): string[] {
-  const list = lists.lists[listName];
+  const list = lists.lists[listName] as ResolvedList | undefined;
   if (!list) {
     throw new Error(
       `Dynamic list "@${listName}" referenced in policy but not found in dynamic-lists.json. ` +
@@ -275,7 +276,7 @@ function expandListReferences(policy: CompiledPolicyFile, lists: DynamicListsFil
 
     // Expand @list-name in each lists[] entry
     if (rule.if.lists?.some((lc) => lc.allowed.some((e) => e.startsWith('@')))) {
-      const expandedLists = rule.if.lists!.map((listCond) => {
+      const expandedLists = rule.if.lists.map((listCond) => {
         if (!listCond.allowed.some((e) => e.startsWith('@'))) return listCond;
         const expandedAllowed = listCond.allowed.flatMap((entry) =>
           entry.startsWith('@') ? getEffectiveListValues(entry.slice(1), lists) : [entry],

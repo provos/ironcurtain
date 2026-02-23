@@ -27,7 +27,7 @@ import { generateText, Output } from 'ai';
 import { z } from 'zod';
 import { getRoleDefinition } from '../types/argument-roles.js';
 import { extractDomainForRole } from './domain-utils.js';
-import type { ToolAnnotation } from '../pipeline/types.js';
+import type { ToolAnnotation, ArgumentRole } from '../pipeline/types.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -152,11 +152,12 @@ export async function autoApprove(context: AutoApproveContext, model: LanguageMo
       model,
       system: SYSTEM_PROMPT,
       prompt: buildUserPrompt(context),
-      experimental_output: Output.object({ schema: responseSchema }),
+      output: Output.object({ schema: responseSchema }),
     });
 
-    const parsed = result.experimental_output;
-    if (!parsed || (parsed.decision !== 'approve' && parsed.decision !== 'escalate')) {
+    const parsed = result.output;
+    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- defensive: output may be undefined at runtime if model fails
+    if (!parsed) {
       return {
         decision: 'escalate',
         reasoning: 'Auto-approver returned invalid response; escalating to human',
@@ -218,7 +219,7 @@ export function extractArgsForAutoApprove(
   const result: Record<string, string> = {};
 
   for (const [argName, value] of Object.entries(argsForPolicy)) {
-    const roles = annotation.args[argName];
+    const roles = annotation.args[argName] as ArgumentRole[] | undefined;
     if (!roles || roles.length === 0) continue;
 
     // TODO: only looks at roles[0]; if an argument has mixed-category roles

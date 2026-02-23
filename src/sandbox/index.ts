@@ -30,7 +30,7 @@ function setEscalationTimeout(seconds: number): void {
   escalationTimeoutMs = seconds * 1000;
 }
 
-// eslint-disable-next-line @typescript-eslint/no-unsafe-function-type -- monkey-patch requires untyped apply()
+// eslint-disable-next-line @typescript-eslint/no-unsafe-function-type, @typescript-eslint/unbound-method -- monkey-patch requires untyped apply() and unbound method reference
 const originalRequest: Function = Protocol.prototype.request;
 Protocol.prototype.request = function (
   this: unknown,
@@ -40,6 +40,7 @@ Protocol.prototype.request = function (
   if (!options.timeout) {
     args[2] = { ...options, timeout: escalationTimeoutMs };
   }
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-return -- monkey-patch returns the original method's untyped result
   return originalRequest.apply(this, args);
 } as typeof Protocol.prototype.request;
 
@@ -183,7 +184,7 @@ export class Sandbox {
     > = {};
     for (const serverName of Object.keys(config.mcpServers)) {
       // Per-server isolation: each proxy only receives its own credentials
-      const serverCreds = config.userConfig.serverCredentials[serverName];
+      const serverCreds = config.userConfig.serverCredentials[serverName] as Record<string, string> | undefined;
       mcpServers[serverName] = {
         transport: 'stdio',
         command: PROXY_COMMAND,
@@ -204,7 +205,7 @@ export class Sandbox {
     });
 
     if (!registration.success) {
-      const errors = registration.errors?.join(', ') ?? 'unknown error';
+      const errors = registration.errors.join(', ') || 'unknown error';
       throw new Error(`Failed to register MCP servers: ${errors}`);
     }
 
@@ -257,8 +258,9 @@ export class Sandbox {
     // must be re-applied every time.
     const patchedCode = this.interfacePatchSnippet ? `${this.interfacePatchSnippet}\n${code}` : code;
 
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment -- callToolChain returns { result: any }
     const { result, logs } = await this.client.callToolChain(patchedCode, timeoutMs);
-    return { result, logs: logs ?? [] };
+    return { result, logs };
   }
 
   async shutdown(): Promise<void> {

@@ -515,6 +515,7 @@ describe('Dynamic Lists Backward Compatibility', () => {
 function makeToolAnnotationsFile(tools: ToolAnnotation[]): ToolAnnotationsFile {
   const servers: ToolAnnotationsFile['servers'] = {};
   for (const tool of tools) {
+    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- defensive: building map, key may not exist yet
     if (!servers[tool.serverName]) {
       servers[tool.serverName] = { inputHash: '', tools: [] };
     }

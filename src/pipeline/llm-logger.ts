@@ -85,10 +85,10 @@ export function createLlmLoggingMiddleware(logPath: string, context: LlmLogConte
         promptOffset,
         responseText,
         usage: {
-          inputTokens: result.usage?.inputTokens?.total,
-          outputTokens: result.usage?.outputTokens?.total,
-          cacheReadTokens: result.usage?.inputTokens?.cacheRead,
-          cacheWriteTokens: result.usage?.inputTokens?.cacheWrite,
+          inputTokens: result.usage.inputTokens.total,
+          outputTokens: result.usage.outputTokens.total,
+          cacheReadTokens: result.usage.inputTokens.cacheRead,
+          cacheWriteTokens: result.usage.inputTokens.cacheWrite,
         },
         durationMs,
       };

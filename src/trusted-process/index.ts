@@ -101,6 +101,16 @@ export class TrustedProcess {
 
     // Annotation-driven normalization: split into transport vs policy args
     const annotation = this.policyEngine.getAnnotation(request.serverName, request.toolName);
+    if (!annotation) {
+      const reason = `Missing annotation for tool: ${request.serverName}__${request.toolName}. Re-run 'ironcurtain annotate-tools' to update.`;
+      return {
+        requestId: request.requestId,
+        status: 'denied',
+        content: { denied: true, reason },
+        policyDecision: { status: 'deny', rule: 'missing-annotation', reason },
+        durationMs: Date.now() - startTime,
+      };
+    }
     const { argsForTransport, argsForPolicy } = prepareToolArgs(
       request.arguments,
       annotation,
@@ -162,7 +172,7 @@ export class TrustedProcess {
 
         // Expand roots to include target directories so the filesystem
         // server accepts the forwarded call (for both auto and human approval).
-        if (escalationResult === 'approved' && annotation) {
+        if (escalationResult === 'approved') {
           const pathValues = extractAnnotatedPaths(transportRequest.arguments, annotation, getPathRoles());
           for (const p of pathValues) {
             const dir = directoryForPath(p);

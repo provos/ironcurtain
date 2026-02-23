@@ -266,7 +266,7 @@ export async function verifyPolicy(
   }
 
   // Determine final result based on failed scenarios
-  const lastRound = rounds[rounds.length - 1];
+  const lastRound = rounds[rounds.length - 1] as VerifierRound | undefined;
   const hasFailures = allFailedScenarios.length > 0;
 
   return {

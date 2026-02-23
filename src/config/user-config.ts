@@ -255,7 +255,7 @@ function computeMissingDefaults(fileContent: Record<string, unknown>): Record<st
     // For nested objects, check for missing sub-fields one level deep
     if (!isPlainObject(defaultValue) || !isPlainObject(fileContent[key])) continue;
 
-    const existing = fileContent[key] as Record<string, unknown>;
+    const existing = fileContent[key];
     const subPatch: Record<string, unknown> = {};
     for (const [subKey, subDefault] of Object.entries(defaultValue)) {
       if (!(subKey in existing)) {
@@ -281,7 +281,7 @@ function applyPatchToFileContent(
   const result = { ...fileContent };
   for (const [key, patchValue] of Object.entries(patch)) {
     if (key in result && isPlainObject(result[key])) {
-      const existing = result[key] as Record<string, unknown>;
+      const existing = result[key];
       result[key] = { ...existing, ...(patchValue as Record<string, unknown>) };
     } else {
       result[key] = patchValue;
@@ -305,7 +305,7 @@ function describeAddedFields(patch: Record<string, unknown>): string {
       Object.keys(value).length < Object.keys(defaultValue).length;
 
     if (isSubFieldPatch) {
-      for (const subKey of Object.keys(value as Record<string, unknown>)) {
+      for (const subKey of Object.keys(value)) {
         fields.push(`${key}.${subKey}`);
       }
     } else {
@@ -460,7 +460,7 @@ function deepMergeConfig(existing: Record<string, unknown>, changes: Record<stri
   const result = { ...existing };
   for (const [key, value] of Object.entries(changes)) {
     if (value !== undefined && isPlainObject(value) && isPlainObject(result[key])) {
-      result[key] = { ...(result[key] as Record<string, unknown>), ...value };
+      result[key] = { ...result[key], ...value };
     } else if (value !== undefined) {
       result[key] = value;
     }

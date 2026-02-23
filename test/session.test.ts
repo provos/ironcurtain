@@ -407,7 +407,7 @@ describe('Session', () => {
         // Verify the config passed to the sandbox factory has the session-specific audit path
         const sessionId = config.auditLogPath.split('/sessions/')[1]?.split('/')[0];
         expect(sessionId).toBeTruthy();
-        expect(config.auditLogPath).toBe(getSessionAuditLogPath(sessionId!));
+        expect(config.auditLogPath).toBe(getSessionAuditLogPath(sessionId));
         return createMockSandbox();
       });
 

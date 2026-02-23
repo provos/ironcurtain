@@ -12,7 +12,7 @@ import { testCompiledPolicy, testToolAnnotations } from './fixtures/test-policy.
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(__dirname, '..');
 
-const SANDBOX_DIR = '/tmp/ironcurtain-test-' + process.pid;
+const SANDBOX_DIR = `/tmp/ironcurtain-test-${process.pid}`;
 const AUDIT_LOG_PATH = `/tmp/ironcurtain-test-audit-${process.pid}.jsonl`;
 
 /**
@@ -177,7 +177,7 @@ describe('Integration: TrustedProcess with filesystem MCP server', () => {
 
     expect(result.status).toBe('denied');
     expect(result.policyDecision.status).toBe('deny');
-    expect(result.policyDecision.rule).toBe('structural-unknown-tool');
+    expect(result.policyDecision.rule).toBe('missing-annotation');
   });
 
   it('escalates reading files outside the sandbox', async () => {
@@ -293,7 +293,7 @@ describe('Integration: TrustedProcess with filesystem MCP server', () => {
     const moveEntry = entries.find(
       (e: Record<string, unknown>) =>
         (e as { toolName: string }).toolName === 'move_file' &&
-        ((e as { arguments: { source: string } }).arguments.source as string).includes('does-not-exist'),
+        (e as { arguments: { source: string } }).arguments.source.includes('does-not-exist'),
     );
     expect(moveEntry).toBeDefined();
     expect(moveEntry.result.status).toBe('error');

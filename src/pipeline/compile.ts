@@ -437,6 +437,7 @@ export async function connectMcpServersForLists(
   const connections = new Map<string, McpServerConnection>();
   for (const serverName of neededServers) {
     const serverConfig = mcpServers[serverName];
+    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- serverName may not exist in mcpServers at runtime (from mcpServerHint)
     if (!serverConfig) {
       console.error(`  ${chalk.yellow('Warning:')} MCP server "${serverName}" not configured — skipping`);
       continue;
@@ -676,7 +677,9 @@ export async function main(): Promise<void> {
       console.error('');
 
       // Gather judge analysis and attributions from the most recent verification
-      const lastRound = verificationResult.rounds[verificationResult.rounds.length - 1];
+      const lastRound = verificationResult.rounds[verificationResult.rounds.length - 1] as
+        | (typeof verificationResult.rounds)[number]
+        | undefined;
       const judgeAnalysis = lastRound?.llmAnalysis ?? verificationResult.summary;
       const attributedFailures = lastRound?.attributedFailures ?? [];
 
@@ -870,7 +873,7 @@ export async function main(): Promise<void> {
 // Only run when executed directly (not when imported by cli.ts or tests)
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   await import('dotenv/config');
-  main().catch((err) => {
+  main().catch((err: unknown) => {
     console.error(chalk.red.bold('Policy compilation failed:'), err);
     process.exit(1);
   });

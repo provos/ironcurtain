@@ -224,7 +224,7 @@ export async function compileConstitution(
 
   return {
     rules: output.rules,
-    listDefinitions: output.listDefinitions ?? [],
+    listDefinitions: output.listDefinitions,
   };
 }
 
@@ -255,7 +255,7 @@ export function validateCompiledRules(
     if (rule.if.roles) {
       for (const role of rule.if.roles) {
         if (!isArgumentRole(role)) {
-          errors.push(`Rule "${rule.name}": invalid role "${role}" in roles`);
+          errors.push(`Rule "${rule.name}": invalid role "${String(role)}" in roles`);
         }
       }
     }
@@ -264,7 +264,7 @@ export function validateCompiledRules(
     if (rule.if.paths) {
       for (const role of rule.if.paths.roles) {
         if (!isArgumentRole(role)) {
-          errors.push(`Rule "${rule.name}": invalid role "${role}" in paths.roles`);
+          errors.push(`Rule "${rule.name}": invalid role "${String(role)}" in paths.roles`);
         }
       }
 
@@ -278,7 +278,7 @@ export function validateCompiledRules(
     if (rule.if.domains) {
       for (const role of rule.if.domains.roles) {
         if (!isArgumentRole(role)) {
-          errors.push(`Rule "${rule.name}": invalid role "${role}" in domains.roles`);
+          errors.push(`Rule "${rule.name}": invalid role "${String(role)}" in domains.roles`);
         }
       }
       if (rule.if.domains.allowed.length === 0) {
@@ -312,7 +312,7 @@ export function validateCompiledRules(
       for (const listCond of rule.if.lists) {
         for (const role of listCond.roles) {
           if (!isArgumentRole(role)) {
-            errors.push(`Rule "${rule.name}": invalid role "${role}" in lists[].roles`);
+            errors.push(`Rule "${rule.name}": invalid role "${String(role)}" in lists[].roles`);
           }
         }
 

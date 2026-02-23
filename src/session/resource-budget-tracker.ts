@@ -228,7 +228,7 @@ export class ResourceBudgetTracker {
 
     this.turnInputTokens += usage.inputTokens ?? 0;
     this.turnOutputTokens += usage.outputTokens ?? 0;
-    this.turnCacheReadTokens += usage.inputTokenDetails?.cacheReadTokens ?? 0;
+    this.turnCacheReadTokens += usage.inputTokenDetails.cacheReadTokens ?? 0;
     this.turnStepCount++;
 
     return this.evaluate();

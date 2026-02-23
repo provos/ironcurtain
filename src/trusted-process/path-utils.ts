@@ -1,10 +1,7 @@
 /**
  * Path normalization utilities for the trusted process security boundary.
  *
- * Provides annotation-driven normalization via `prepareToolArgs()` and a
- * legacy heuristic fallback via `normalizeToolArgPaths()`. The heuristic
- * is retained for defense-in-depth and as a fallback when annotations are
- * unavailable.
+ * Provides annotation-driven normalization via `prepareToolArgs()`.
  */
 
 import { resolve } from 'node:path';
@@ -13,42 +10,6 @@ import type { ToolAnnotation, ArgumentRole } from '../pipeline/types.js';
 import type { RoleDefinition } from '../types/argument-roles.js';
 
 export { expandTilde } from '../types/argument-roles.js';
-
-/** Returns true if the string looks like a filesystem path. */
-function looksLikePath(value: string): boolean {
-  return value.startsWith('/') || value.startsWith('.') || value.startsWith('~');
-}
-
-/**
- * Returns a new arguments object with all path-like string values
- * fully resolved (tilde expanded, relative resolved, traversals collapsed).
- *
- * A string value is considered path-like if it starts with `/`, `.`, or `~`.
- * Array values have each string element checked individually.
- * Non-string and non-path values pass through unchanged.
- *
- * The input object is never mutated.
- *
- * @deprecated Use `prepareToolArgs()` with annotation-driven normalization.
- * Retained as a fallback when annotations are unavailable.
- */
-export function normalizeToolArgPaths(args: Record<string, unknown>): Record<string, unknown> {
-  const result: Record<string, unknown> = {};
-
-  for (const [key, value] of Object.entries(args)) {
-    if (typeof value === 'string' && looksLikePath(value)) {
-      result[key] = resolveRealPath(value);
-    } else if (Array.isArray(value)) {
-      result[key] = value.map((item) =>
-        typeof item === 'string' && looksLikePath(item) ? resolveRealPath(item) : item,
-      );
-    } else {
-      result[key] = value;
-    }
-  }
-
-  return result;
-}
 
 // ---------------------------------------------------------------------------
 // Absolute vs relative path detection
@@ -99,7 +60,7 @@ function normalizeArgValue(value: unknown, normalize: (v: string) => string): un
     return normalize(value);
   }
   if (Array.isArray(value)) {
-    return value.map((item) => (typeof item === 'string' ? normalize(item) : item));
+    return (value as unknown[]).map((item: unknown) => (typeof item === 'string' ? normalize(item) : item));
   }
   return value;
 }
@@ -140,26 +101,18 @@ function normalizePathForPolicy(value: unknown, def: RoleDefinition, allowedDire
  *   - Policy: resolved against `allowedDirectory` so the policy engine
  *     has absolute canonical paths for containment checks
  *
- * When `annotation` is undefined (unknown tool), falls back to the
- * heuristic `normalizeToolArgPaths()` for both outputs.
- *
  * The input object is never mutated.
  */
 export function prepareToolArgs(
   args: Record<string, unknown>,
-  annotation: ToolAnnotation | undefined,
+  annotation: ToolAnnotation,
   allowedDirectory?: string,
 ): PreparedToolArgs {
-  if (!annotation) {
-    const fallback = normalizeToolArgPaths(args);
-    return { argsForTransport: fallback, argsForPolicy: fallback };
-  }
-
   const argsForTransport: Record<string, unknown> = {};
   const argsForPolicy: Record<string, unknown> = {};
 
   for (const [key, value] of Object.entries(args)) {
-    const roles = annotation.args[key];
+    const roles = annotation.args[key] as ArgumentRole[] | undefined;
     const resourceRole = roles ? findResourceRole(roles) : undefined;
 
     if (resourceRole) {

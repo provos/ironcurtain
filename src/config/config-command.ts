@@ -96,6 +96,7 @@ export function computeDiff(resolved: ResolvedUserConfig, pending: UserConfig): 
     if (!pendingSection) continue;
     const resolvedSection = resolved[section] as unknown as Record<string, unknown>;
     for (const [subKey, subValue] of Object.entries(pendingSection)) {
+      // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- defensive: runtime data from spread objects
       if (subValue !== undefined && subValue !== resolvedSection[subKey]) {
         diffs.push([`${section}.${subKey}`, { from: resolvedSection[subKey], to: subValue }]);
       }
@@ -112,7 +113,7 @@ function formatDiffValue(key: string, value: unknown): string {
   if (key.includes('Tokens') || key === 'resourceBudget.maxTotalTokens') return formatTokens(value as number);
   if (key.includes('Seconds') || key === 'resourceBudget.maxSessionSeconds') return formatSeconds(value as number);
   if (key.includes('Cost')) return formatCost(value as number);
-  return String(value);
+  return String(value as string | number);
 }
 
 // ─── Model prompt ────────────────────────────────────────────
@@ -187,6 +188,7 @@ async function promptNullableNumber(opts: NullableNumberOpts): Promise<number | 
 // ─── Category handlers ───────────────────────────────────────
 
 async function handleModels(resolved: ResolvedUserConfig, pending: UserConfig): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- interactive loop exited via return
   while (true) {
     const currentAgent = pending.agentModelId ?? resolved.agentModelId;
     const currentPolicy = pending.policyModelId ?? resolved.policyModelId;
@@ -214,6 +216,7 @@ async function handleModels(resolved: ResolvedUserConfig, pending: UserConfig): 
 }
 
 async function handleSecurity(resolved: ResolvedUserConfig, pending: UserConfig): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- interactive loop exited via return
   while (true) {
     const currentTimeout = pending.escalationTimeoutSeconds ?? resolved.escalationTimeoutSeconds;
     const currentAutoApproveEnabled = pending.autoApprove?.enabled ?? resolved.autoApprove.enabled;
@@ -280,6 +283,7 @@ async function handleSecurity(resolved: ResolvedUserConfig, pending: UserConfig)
 }
 
 async function handleResourceLimits(resolved: ResolvedUserConfig, pending: UserConfig): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- interactive loop exited via return
   while (true) {
     const budget = { ...resolved.resourceBudget, ...pending.resourceBudget };
 
@@ -349,6 +353,7 @@ async function handleResourceLimits(resolved: ResolvedUserConfig, pending: UserC
 }
 
 async function handleAutoCompact(resolved: ResolvedUserConfig, pending: UserConfig): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- interactive loop exited via return
   while (true) {
     const compact = { ...resolved.autoCompact, ...pending.autoCompact };
 
@@ -459,7 +464,7 @@ export async function runConfigCommand(): Promise<void> {
   try {
     resolved = loadUserConfig();
   } catch (err) {
-    console.error(`Failed to load config: ${err instanceof Error ? err.message : err}`);
+    console.error(`Failed to load config: ${err instanceof Error ? err.message : String(err)}`);
     console.error(`Check ${getUserConfigPath()} for errors.`);
     process.exit(1);
   }
@@ -472,6 +477,7 @@ export async function runConfigCommand(): Promise<void> {
 
   const pending: UserConfig = {};
 
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- interactive loop exited via return
   while (true) {
     const category = await p.select({
       message: 'Select a category to configure',

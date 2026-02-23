@@ -42,7 +42,7 @@ export class MCPClientManager {
     // If a rootsRefreshed callback is registered (from addRoot),
     // resolve it so the caller knows the server has the latest roots.
     if (mutableRoots) {
-      client.setRequestHandler(ListRootsRequestSchema, async () => {
+      client.setRequestHandler(ListRootsRequestSchema, () => {
         if (managed.rootsRefreshed) {
           managed.rootsRefreshed();
           managed.rootsRefreshed = undefined;
@@ -122,7 +122,7 @@ export class MCPClientManager {
       try {
         await server.client.close();
       } catch (err) {
-        logger.error(`Error closing MCP server "${name}": ${err}`);
+        logger.error(`Error closing MCP server "${name}": ${String(err)}`);
       }
     }
     this.servers.clear();

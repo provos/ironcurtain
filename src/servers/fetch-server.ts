@@ -79,7 +79,7 @@ async function doFetch(
         if (done) break;
         totalBytes += value.byteLength;
         if (totalBytes > MAX_RESPONSE_BYTES) {
-          reader.cancel();
+          void reader.cancel();
           throw new Error(`Response exceeds ${MAX_RESPONSE_BYTES} byte limit`);
         }
         chunks.push(value);
@@ -136,6 +136,7 @@ function htmlToText(html: string): string {
     for (const el of doc.querySelectorAll(BOILERPLATE_TAGS.join(','))) {
       el.remove();
     }
+    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- defensive: DOM body may be null at runtime
     return (doc.body?.textContent ?? '').replace(/\s+/g, ' ').trim();
   } catch {
     // Fallback: regex-based stripping with limited entity decoding
@@ -228,8 +229,10 @@ function formatResponseBody(body: string, isHtml: boolean, format: OutputFormat,
   return header + content;
 }
 
+// eslint-disable-next-line @typescript-eslint/no-deprecated -- intentional use of low-level Server for raw JSON schema passthrough
 const server = new Server({ name: 'ironcurtain-fetch', version: VERSION }, { capabilities: { tools: {} } });
 
+// eslint-disable-next-line @typescript-eslint/require-await -- handler interface requires async
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
@@ -275,7 +278,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
     };
   }
 
-  const args = req.params.arguments as Record<string, unknown> | undefined;
+  const args = req.params.arguments;
   const url = args?.url as string | undefined;
   if (!url || typeof url !== 'string') {
     return {
@@ -296,7 +299,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       content: [
         {
           type: 'text',
-          text: `Invalid format: ${String(rawFormat)}. Supported formats are: ${VALID_FORMATS.join(', ')}.`,
+          text: `Invalid format: ${typeof rawFormat === 'string' ? rawFormat : JSON.stringify(rawFormat)}. Supported formats are: ${VALID_FORMATS.join(', ')}.`,
         },
       ],
       isError: true,
