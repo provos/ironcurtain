@@ -5,8 +5,10 @@ import { tmpdir } from 'node:os';
 import { AuditLogTailer } from '../src/docker/audit-log-tailer.js';
 import { DockerAgentSession, type DockerAgentSessionDeps } from '../src/docker/docker-agent-session.js';
 import type { ManagedProxy } from '../src/docker/managed-proxy.js';
-import type { ConnectProxy } from '../src/docker/connect-proxy.js';
+import type { MitmProxy } from '../src/docker/mitm-proxy.js';
+import type { CertificateAuthority } from '../src/docker/ca.js';
 import type { AgentAdapter, AgentId, AgentResponse, ToolInfo } from '../src/docker/agent-adapter.js';
+import type { ProviderConfig } from '../src/docker/provider-config.js';
 import type { DockerManager } from '../src/docker/types.js';
 import type { IronCurtainConfig } from '../src/config/types.js';
 import type { DiagnosticEvent, EscalationRequest } from '../src/session/types.js';
@@ -142,12 +144,20 @@ describe('AuditLogTailer', () => {
 
 // --- DockerAgentSession tests ---
 
+const testProvider: ProviderConfig = {
+  host: 'api.test.com',
+  displayName: 'Test',
+  allowedEndpoints: [{ method: 'POST', path: '/v1/messages' }],
+  keyInjection: { type: 'header', headerName: 'x-api-key' },
+  fakeKeyPrefix: 'sk-test-',
+};
+
 function createMockAdapter(): AgentAdapter {
   return {
     id: 'test-agent' as AgentId,
     displayName: 'Test Agent',
     async getImage() {
-      return 'test-image:latest';
+      return 'ironcurtain-claude-code:latest';
     },
     generateMcpConfig() {
       return [{ path: 'test-config.json', content: '{}' }];
@@ -161,8 +171,8 @@ function createMockAdapter(): AgentAdapter {
     buildSystemPrompt() {
       return 'You are a test agent.';
     },
-    getAllowedApiHosts() {
-      return ['api.test.com'];
+    getProviders() {
+      return [testProvider];
     },
     buildEnv() {
       return { TEST_KEY: 'test-value' };
@@ -175,6 +185,12 @@ function createMockAdapter(): AgentAdapter {
 }
 
 function createMockDocker(): DockerManager {
+  // Track the build-hash labels stamped during buildImage calls.
+  // getImageLabel returns the most recently stored hash for the image,
+  // which means the first ensureImage() call will build (no hash yet)
+  // and subsequent calls will skip (hash matches).
+  const labels = new Map<string, Record<string, string>>();
+
   return {
     async preflight() {},
     async create() {
@@ -189,10 +205,18 @@ function createMockDocker(): DockerManager {
     async isRunning() {
       return true;
     },
-    async imageExists() {
-      return true;
+    async imageExists(image: string) {
+      // Image "exists" once it has been built (has labels)
+      return labels.has(image);
     },
-    async buildImage() {},
+    async buildImage(_tag: string, _df: string, _ctx: string, buildLabels?: Record<string, string>) {
+      if (buildLabels) {
+        labels.set(_tag, buildLabels);
+      }
+    },
+    async getImageLabel(image: string, label: string) {
+      return labels.get(image)?.[label];
+    },
     async createNetwork() {},
     async removeNetwork() {},
   };
@@ -211,13 +235,23 @@ function createMockProxy(socketPath: string): ManagedProxy {
   };
 }
 
-function createMockConnectProxy(): ConnectProxy {
+function createMockMitmProxy(): MitmProxy {
   return {
     async start() {
-      return { socketPath: '/tmp/test-connect-proxy.sock' };
+      return { socketPath: '/tmp/test-mitm-proxy.sock' };
     },
     async stop() {},
   };
+}
+
+function createMockCA(tempDir: string): CertificateAuthority {
+  const certPem = '-----BEGIN CERTIFICATE-----\nMOCK\n-----END CERTIFICATE-----';
+  const keyPem = '-----BEGIN RSA PRIVATE KEY-----\nMOCK\n-----END RSA PRIVATE KEY-----';
+  const certPath = join(tempDir, 'mock-ca-cert.pem');
+  const keyPath = join(tempDir, 'mock-ca-key.pem');
+  writeFileSync(certPath, certPem);
+  writeFileSync(keyPath, keyPem);
+  return { certPem, keyPem, certPath, keyPath };
 }
 
 function createTestDeps(tempDir: string): DockerAgentSessionDeps {
@@ -250,7 +284,9 @@ function createTestDeps(tempDir: string): DockerAgentSessionDeps {
     adapter: createMockAdapter(),
     docker: createMockDocker(),
     proxy: createMockProxy(join(sessionDir, 'proxy.sock')),
-    connectProxy: createMockConnectProxy(),
+    mitmProxy: createMockMitmProxy(),
+    ca: createMockCA(tempDir),
+    fakeKeys: new Map([['api.test.com', 'sk-test-fake-key']]),
     sessionDir,
     sandboxDir,
     escalationDir,

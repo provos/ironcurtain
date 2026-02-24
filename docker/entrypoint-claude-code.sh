@@ -4,10 +4,10 @@
 # Agent commands are executed via `docker exec`.
 
 # Bridge UDS to local TCP so HTTPS_PROXY works
-CONNECT_SOCK="/run/ironcurtain/connect-proxy.sock"
+MITM_SOCK="/run/ironcurtain/mitm-proxy.sock"
 PROXY_PORT=18080
-if [ -S "$CONNECT_SOCK" ]; then
-  socat TCP-LISTEN:$PROXY_PORT,fork,reuseaddr UNIX-CONNECT:$CONNECT_SOCK &
+if [ -S "$MITM_SOCK" ]; then
+  socat TCP-LISTEN:$PROXY_PORT,fork,reuseaddr UNIX-CONNECT:$MITM_SOCK &
 fi
 
 # Idle — agent commands arrive via docker exec

@@ -86,8 +86,11 @@ export interface DockerManager {
   /** Check if a Docker image exists locally. */
   imageExists(image: string): Promise<boolean>;
 
-  /** Build a Docker image from a Dockerfile. */
-  buildImage(tag: string, dockerfilePath: string, contextDir: string): Promise<void>;
+  /** Build a Docker image from a Dockerfile. Optional labels are stamped on the image. */
+  buildImage(tag: string, dockerfilePath: string, contextDir: string, labels?: Record<string, string>): Promise<void>;
+
+  /** Read a label value from a Docker image. Returns undefined if image or label doesn't exist. */
+  getImageLabel(image: string, label: string): Promise<string | undefined>;
 
   /** Create a Docker network. No-op if it already exists. */
   createNetwork(name: string): Promise<void>;

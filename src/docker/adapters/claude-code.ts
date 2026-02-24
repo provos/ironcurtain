@@ -10,6 +10,8 @@
 
 import type { AgentAdapter, AgentConfigFile, AgentId, AgentResponse, OrientationContext } from '../agent-adapter.js';
 import type { IronCurtainConfig } from '../../config/types.js';
+import type { ProviderConfig } from '../provider-config.js';
+import { anthropicProvider } from '../provider-config.js';
 
 const CLAUDE_CODE_IMAGE = 'ironcurtain-claude-code:latest';
 
@@ -113,14 +115,16 @@ export const claudeCodeAdapter: AgentAdapter = {
     return buildOrientationPrompt(context);
   },
 
-  getAllowedApiHosts(): readonly string[] {
-    return ['api.anthropic.com'];
+  getProviders(): readonly ProviderConfig[] {
+    return [anthropicProvider];
   },
 
-  buildEnv(config: IronCurtainConfig): Record<string, string> {
+  buildEnv(_config: IronCurtainConfig, fakeKeys: ReadonlyMap<string, string>): Record<string, string> {
     return {
-      ANTHROPIC_API_KEY: config.userConfig.anthropicApiKey,
+      ANTHROPIC_API_KEY: fakeKeys.get('api.anthropic.com') ?? '',
       CLAUDE_CODE_DISABLE_UPDATE_CHECK: '1',
+      // Node.js does not use the system CA store -- must set this explicitly
+      NODE_EXTRA_CA_CERTS: '/usr/local/share/ca-certificates/ironcurtain-ca.crt',
     };
   },
 

@@ -158,11 +158,36 @@ export function createDockerManager(execFileFn?: ExecFileFn): DockerManager {
       }
     },
 
-    async buildImage(tag: string, dockerfilePath: string, contextDir: string): Promise<void> {
-      await exec('docker', ['build', '-t', tag, '-f', dockerfilePath, contextDir], {
+    async buildImage(
+      tag: string,
+      dockerfilePath: string,
+      contextDir: string,
+      labels?: Record<string, string>,
+    ): Promise<void> {
+      const args = ['build', '-t', tag, '-f', dockerfilePath];
+      if (labels) {
+        for (const [key, value] of Object.entries(labels)) {
+          args.push('--label', `${key}=${value}`);
+        }
+      }
+      args.push(contextDir);
+      await exec('docker', args, {
         timeout: 600_000,
         maxBuffer: 50 * 1024 * 1024,
       });
+    },
+
+    async getImageLabel(image: string, label: string): Promise<string | undefined> {
+      try {
+        const { stdout } = await exec('docker', ['inspect', '-f', `{{index .Config.Labels "${label}"}}`, image], {
+          timeout: 10_000,
+        });
+        const value = stdout.trim();
+        // docker inspect returns '<no value>' when the label doesn't exist
+        return value && value !== '<no value>' ? value : undefined;
+      } catch {
+        return undefined;
+      }
     },
 
     async createNetwork(name: string): Promise<void> {

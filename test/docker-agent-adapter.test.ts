@@ -67,19 +67,23 @@ describe('Claude Code Adapter', () => {
     expect(prompt).toContain('Policy Enforcement');
   });
 
-  it('returns correct allowed API hosts', () => {
-    const hosts = claudeCodeAdapter.getAllowedApiHosts();
-    expect(hosts).toEqual(['api.anthropic.com']);
+  it('returns providers including anthropic', () => {
+    const providers = claudeCodeAdapter.getProviders();
+    expect(providers).toHaveLength(1);
+    expect(providers[0].host).toBe('api.anthropic.com');
+    expect(providers[0].displayName).toBe('Anthropic');
   });
 
-  it('builds env with ANTHROPIC_API_KEY', () => {
+  it('builds env with fake API key and NODE_EXTRA_CA_CERTS', () => {
     const config = {
       userConfig: { anthropicApiKey: 'sk-test' },
     } as IronCurtainConfig;
 
-    const env = claudeCodeAdapter.buildEnv(config);
-    expect(env.ANTHROPIC_API_KEY).toBe('sk-test');
+    const fakeKeys = new Map([['api.anthropic.com', 'sk-ant-api03-ironcurtain-FAKE']]);
+    const env = claudeCodeAdapter.buildEnv(config, fakeKeys);
+    expect(env.ANTHROPIC_API_KEY).toBe('sk-ant-api03-ironcurtain-FAKE');
     expect(env.CLAUDE_CODE_DISABLE_UPDATE_CHECK).toBe('1');
+    expect(env.NODE_EXTRA_CA_CERTS).toBe('/usr/local/share/ca-certificates/ironcurtain-ca.crt');
   });
 
   it('extracts response and cost from valid JSON output', () => {
