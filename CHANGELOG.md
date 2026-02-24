@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.0] - 2026-02-24
+
+### Features
+
+- TLS-terminating MITM proxy for Docker Agent Mode (#17)
+- Docker agent broker with auto-mode selection (#14)
+- First-start wizard for new installations (#15)
+- Policy customization pipeline and default-deny model
+- Prompt caching (#12)
+- Add show-system-prompt script for MCP server tool listing
+
+### Improvements
+
+- Enable strictTypeChecked ESLint and eliminate non-null assertions (#13)
+
+### Docs
+
+- Update README with customize-policy workflow and current constitution
+- Correct minimum Node.js requirement to 20 (not 18)
+
+### Chores
+
+- Add Semgrep CI and .semgrepignore for build artifacts
+- Rename design docs
+
 ## [0.2.0] - 2026-02-22
 
 ### Features
@@ -65,5 +90,6 @@ Initial public release.
 - CI pipeline with Node 22/24 matrix testing
 - Code of Conduct, Contributing guidelines, Security policy
 
+[0.3.0]: https://github.com/provos/ironcurtain/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/provos/ironcurtain/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/provos/ironcurtain/releases/tag/v0.1.0
