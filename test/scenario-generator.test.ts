@@ -764,12 +764,12 @@ describe('ConstitutionCompilerSession', () => {
     const repairedRules = [
       ...sampleRules,
       {
-        name: 'deny-external-deletes',
-        description: 'Deny deletes outside sandbox',
-        principle: 'No destruction',
-        if: { roles: ['delete-path'] },
-        then: 'deny',
-        reason: 'Forbidden by constitution',
+        name: 'escalate-external-writes',
+        description: 'Escalate writes outside sandbox',
+        principle: 'Human oversight',
+        if: { roles: ['write-path'] },
+        then: 'escalate',
+        reason: 'Writes outside sandbox require human approval',
       },
     ];
 
@@ -787,7 +787,7 @@ describe('ConstitutionCompilerSession', () => {
     await session.compile();
 
     const repairContext: RepairContext = {
-      previousRules: sampleRules as any,
+
       failedScenarios: [
         {
           scenario: {
@@ -833,7 +833,7 @@ describe('ConstitutionCompilerSession', () => {
     expect(session.turnCount).toBe(1);
 
     const repairContext: RepairContext = {
-      previousRules: sampleRules as any,
+
       failedScenarios: [],
       judgeAnalysis: 'Some failures',
       attemptNumber: 1,
@@ -856,7 +856,7 @@ describe('ConstitutionCompilerSession', () => {
 
     await session.compile();
     await session.recompile({
-      previousRules: sampleRules as any,
+
       failedScenarios: [],
       judgeAnalysis: 'test',
       attemptNumber: 1,
@@ -884,7 +884,7 @@ describe('ConstitutionCompilerSession', () => {
     expect(calls[0].messages[0].role).toBe('user');
 
     await session.recompile({
-      previousRules: sampleRules as any,
+
       failedScenarios: [],
       judgeAnalysis: 'test',
       attemptNumber: 1,

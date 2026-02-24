@@ -519,8 +519,9 @@ export class PolicyEngine {
     }
 
     if (rolesToEvaluate.length === 0) {
-      // No resource roles at all (e.g., list_allowed_directories)
-      return this.evaluateRulesForRole(request, annotation, undefined);
+      // No resource roles at all (e.g., list_allowed_directories).
+      // Run a plain first-match-wins scan with no role scoping.
+      return this.evaluateRulesUnscoped(request, annotation);
     }
 
     let mostRestrictive: EvaluationResult | undefined;
@@ -539,33 +540,11 @@ export class PolicyEngine {
   }
 
   /**
-   * Evaluates the rule chain for a single role (or all roles if undefined).
-   *
-   * When evaluatingRole is set, only rules that are either role-agnostic
-   * (no roles/paths conditions) or relevant to the specified role are
-   * considered. First matching rule wins; default escalate if none match.
-   *
-   * For roles with multiple extracted paths, delegates to
-   * evaluateRulesForMultiPaths for per-element evaluation.
+   * Plain first-match-wins rule scan with no role scoping.
+   * Used for tools that have no resource roles (e.g., list_allowed_directories).
    */
-  private evaluateRulesForRole(
-    request: ToolCallRequest,
-    annotation: ToolAnnotation,
-    evaluatingRole: ArgumentRole | undefined,
-  ): EvaluationResult {
-    // Per-element evaluation: when a role has multiple paths, each path
-    // is independently discharged by the first matching rule.
-    if (evaluatingRole !== undefined) {
-      const rolePaths = extractAnnotatedPaths(request.arguments, annotation, [evaluatingRole]);
-      if (rolePaths.length > 1) {
-        return this.evaluateRulesForMultiPaths(request, annotation, evaluatingRole, rolePaths);
-      }
-    }
-
+  private evaluateRulesUnscoped(request: ToolCallRequest, annotation: ToolAnnotation): EvaluationResult {
     for (const rule of this.compiledPolicy.rules) {
-      if (evaluatingRole !== undefined && hasRoleConditions(rule) && !ruleRelevantToRole(rule, evaluatingRole)) {
-        continue;
-      }
       if (this.ruleMatches(rule, request, annotation)) {
         return {
           decision: rule.then,
@@ -576,9 +555,53 @@ export class PolicyEngine {
     }
 
     return {
-      decision: 'escalate',
-      rule: 'default-escalate',
-      reason: 'No matching policy rule -- escalated by default for human review',
+      decision: 'deny',
+      rule: 'default-deny',
+      reason: 'No matching policy rule -- denied by default',
+    };
+  }
+
+  /**
+   * Evaluates the rule chain for a single role.
+   *
+   * Only rules that are either role-agnostic (no roles/paths conditions)
+   * or relevant to the specified role are considered. Path extraction is
+   * scoped to the evaluating role so each role can be independently
+   * discharged by different rules. First matching rule wins; default deny
+   * if none match.
+   *
+   * For roles with multiple extracted paths, delegates to
+   * evaluateRulesForMultiPaths for per-element evaluation.
+   */
+  private evaluateRulesForRole(
+    request: ToolCallRequest,
+    annotation: ToolAnnotation,
+    evaluatingRole: ArgumentRole,
+  ): EvaluationResult {
+    // Per-element evaluation: when a role has multiple paths, each path
+    // is independently discharged by the first matching rule.
+    const rolePaths = extractAnnotatedPaths(request.arguments, annotation, [evaluatingRole]);
+    if (rolePaths.length > 1) {
+      return this.evaluateRulesForMultiPaths(request, annotation, evaluatingRole, rolePaths);
+    }
+
+    for (const rule of this.compiledPolicy.rules) {
+      if (hasRoleConditions(rule) && !ruleRelevantToRole(rule, evaluatingRole)) {
+        continue;
+      }
+      if (this.ruleMatches(rule, request, annotation, evaluatingRole)) {
+        return {
+          decision: rule.then,
+          rule: rule.name,
+          reason: rule.reason,
+        };
+      }
+    }
+
+    return {
+      decision: 'deny',
+      rule: 'default-deny',
+      reason: 'No matching policy rule -- denied by default',
     };
   }
 
@@ -588,7 +611,7 @@ export class PolicyEngine {
    * Each path is independently "discharged" by the first rule whose
    * paths.within contains it. Rules without path conditions match all
    * remaining paths. The most restrictive decision across all discharged
-   * paths wins (deny > escalate > allow). Undischarged paths default-escalate.
+   * paths wins (deny > escalate > allow). Undischarged paths default-deny.
    */
   private evaluateRulesForMultiPaths(
     request: ToolCallRequest,
@@ -638,12 +661,12 @@ export class PolicyEngine {
       }
     }
 
-    // Any undischarged paths -> default-escalate for human review
+    // Any undischarged paths -> default-deny
     if (remainingPaths.size > 0) {
       return {
-        decision: 'escalate',
-        rule: 'default-escalate',
-        reason: 'No matching policy rule -- escalated by default for human review',
+        decision: 'deny',
+        rule: 'default-deny',
+        reason: 'No matching policy rule -- denied by default',
       };
     }
 
@@ -688,15 +711,29 @@ export class PolicyEngine {
 
   /**
    * Checks whether all conditions in a rule's `if` block are satisfied.
+   *
+   * When evaluatingRole is set, path/domain/list extraction is scoped to
+   * just that role. This allows a multi-role tool (e.g., move_file with
+   * read-path + delete-path on source, write-path on destination) to have
+   * each role independently discharged by different rules targeting
+   * different directories.
    */
-  private ruleMatches(rule: CompiledRule, request: ToolCallRequest, annotation: ToolAnnotation): boolean {
+  private ruleMatches(
+    rule: CompiledRule,
+    request: ToolCallRequest,
+    annotation: ToolAnnotation,
+    evaluatingRole?: ArgumentRole,
+  ): boolean {
     if (!this.ruleMatchesNonPathConditions(rule, request, annotation)) return false;
 
     // Check paths condition
     const cond = rule.if;
     if (cond.paths !== undefined) {
       const condPaths = cond.paths;
-      const extracted = extractAnnotatedPaths(request.arguments, annotation, condPaths.roles);
+      // When evaluating a specific role, only extract paths for that role
+      // (intersected with the rule's declared roles). Otherwise extract all.
+      const extractRoles = evaluatingRole ? [evaluatingRole] : condPaths.roles;
+      const extracted = extractAnnotatedPaths(request.arguments, annotation, extractRoles);
 
       // Zero paths extracted = condition not satisfied, rule does not match
       if (extracted.length === 0) return false;
@@ -709,7 +746,8 @@ export class PolicyEngine {
     // Check domains condition
     if (cond.domains !== undefined) {
       const condDomains = cond.domains;
-      const urlArgs = extractAnnotatedUrls(request.arguments, annotation, condDomains.roles);
+      const extractRoles = evaluatingRole ? [evaluatingRole] : condDomains.roles;
+      const urlArgs = extractAnnotatedUrls(request.arguments, annotation, extractRoles);
 
       // Zero URL args extracted = condition not satisfied, rule does not match
       if (urlArgs.length === 0) return false;
@@ -724,7 +762,8 @@ export class PolicyEngine {
     // Check lists conditions (non-domain list matching)
     if (cond.lists !== undefined) {
       for (const listCond of cond.lists) {
-        const extractedValues = extractAnnotatedPaths(request.arguments, annotation, listCond.roles);
+        const extractRoles = evaluatingRole ? [evaluatingRole] : listCond.roles;
+        const extractedValues = extractAnnotatedPaths(request.arguments, annotation, extractRoles);
 
         // Zero values extracted = condition not satisfied, rule does not match
         if (extractedValues.length === 0) return false;

@@ -155,9 +155,9 @@ describe('Role-agnostic rules after structural resolution', () => {
       }),
     );
 
-    // No compiled rule matches git_push → default escalate (no structural sandbox-allow for git)
-    expect(result.decision).toBe('escalate');
-    expect(result.rule).toBe('default-escalate');
+    // No compiled rule matches git_push → default deny (no structural sandbox-allow for git)
+    expect(result.decision).toBe('deny');
+    expect(result.rule).toBe('default-deny');
   });
 
   it('escalates via role-agnostic rule when all roles are sandbox+domain-resolved', () => {
@@ -340,9 +340,9 @@ describe('Role-agnostic rules after structural resolution', () => {
     // The lists condition extracts the raw URL string from git-remote-url,
     // domainMatchesAllowlist('https://github.com/user/repo.git', ['github.com']) → false
     // (lists extraction uses extractAnnotatedPaths which gets the raw value,
-    // not the policy-prepared domain). So rule doesn't match → default escalate.
-    expect(result.decision).toBe('escalate');
-    expect(result.rule).toBe('default-escalate');
+    // not the policy-prepared domain). So rule doesn't match → default deny.
+    expect(result.decision).toBe('deny');
+    expect(result.rule).toBe('default-deny');
   });
 });
 
@@ -888,8 +888,8 @@ describe('Compiled rule evaluation: rule matching', () => {
 
     const engine = new PolicyEngine(policy, annotations, []);
     const result = engine.evaluate(makeRequest({ arguments: { path: '/etc/file.txt' } }));
-    expect(result.decision).toBe('escalate');
-    expect(result.rule).toBe('default-escalate');
+    expect(result.decision).toBe('deny');
+    expect(result.rule).toBe('default-deny');
   });
 });
 
@@ -1102,8 +1102,8 @@ describe('Per-element multi-path evaluation', () => {
         arguments: { paths: ['/tmp/dir-a/f1.txt', '/tmp/unknown/f2.txt'] },
       }),
     );
-    expect(result.decision).toBe('escalate');
-    expect(result.rule).toBe('default-escalate');
+    expect(result.decision).toBe('deny');
+    expect(result.rule).toBe('default-deny');
   });
 
   it('all paths discharged by different rules → most restrictive wins', () => {

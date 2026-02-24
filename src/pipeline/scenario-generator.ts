@@ -120,12 +120,18 @@ Generate diverse test scenarios covering:
 6. **Move operations**: all moves involve a delete-path role on the source argument
 7. **Domain-based operations**: if any tools have URL roles (fetch-url, git-remote-url), generate scenarios for allowed domains, disallowed domains, and named remote resolution
 
-The three possible decisions are:
-- "allow" — explicitly permitted by the constitution
-- "deny" — categorically forbidden by the constitution
-- "escalate" — not explicitly permitted and not forbidden; requires human approval
+The policy uses a default-deny model. Compiled rules only express "allow" or "escalate":
+- "allow" -- explicitly permitted by a compiled rule
+- "escalate" -- routed to a human for judgment by a compiled rule
+- "deny" -- no compiled rule matched; this is the default for anything the constitution
+  prohibits or does not address
 
-**Meta-Rule:** If an operation is outside the sandbox and the Constitution does NOT explicitly forbid it (destruction) and does NOT explicitly allow it, the expected decision MUST be \`escalate\`. Never default to \`deny\` for unknown paths.
+**Meta-Rule:** If an operation is outside the sandbox and the Constitution does NOT
+explicitly permit it and does NOT require human judgment for it, the expected decision
+is "deny" (default-deny). Use "escalate" only when the constitution explicitly indicates
+the operation requires human approval or judgment. Use "deny" for operations the
+constitution categorically forbids (like external deletes) AND for operations the
+constitution simply does not address.
 
 For each scenario provide:
 - description: what the test checks

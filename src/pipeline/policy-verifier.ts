@@ -53,20 +53,21 @@ export function executeScenarios(engine: PolicyEngine, scenarios: TestScenario[]
   });
 }
 
+/** Verbose multi-line format for a single execution result. */
+function formatVerboseResult(r: ExecutionResult, index: number): string {
+  const status = r.pass ? 'PASS' : 'FAIL';
+  return [
+    `[${index}] ${status}: ${r.scenario.description}`,
+    `  Tool: ${r.scenario.request.serverName}/${r.scenario.request.toolName}`,
+    `  Args: ${JSON.stringify(r.scenario.request.arguments)}`,
+    `  Expected: ${r.scenario.expectedDecision}`,
+    `  Actual: ${r.actualDecision} (rule: ${r.matchingRule})`,
+    `  Source: ${r.scenario.source}`,
+  ].join('\n');
+}
+
 export function formatExecutionResults(results: ExecutionResult[]): string {
-  return results
-    .map((r, i) => {
-      const status = r.pass ? 'PASS' : 'FAIL';
-      return [
-        `[${i + 1}] ${status}: ${r.scenario.description}`,
-        `  Tool: ${r.scenario.request.serverName}/${r.scenario.request.toolName}`,
-        `  Args: ${JSON.stringify(r.scenario.request.arguments)}`,
-        `  Expected: ${r.scenario.expectedDecision}`,
-        `  Actual: ${r.actualDecision} (rule: ${r.matchingRule})`,
-        `  Source: ${r.scenario.source}`,
-      ].join('\n');
-    })
-    .join('\n\n');
+  return results.map((r, i) => formatVerboseResult(r, i + 1)).join('\n\n');
 }
 
 /**
@@ -80,14 +81,7 @@ export function formatCompactResults(results: ExecutionResult[]): string {
       if (r.pass) {
         return `[${i + 1}] PASS: ${r.scenario.description} → ${r.actualDecision} (rule: ${r.matchingRule})`;
       }
-      return [
-        `[${i + 1}] FAIL: ${r.scenario.description}`,
-        `  Tool: ${r.scenario.request.serverName}/${r.scenario.request.toolName}`,
-        `  Args: ${JSON.stringify(r.scenario.request.arguments)}`,
-        `  Expected: ${r.scenario.expectedDecision}`,
-        `  Actual: ${r.actualDecision} (rule: ${r.matchingRule})`,
-        `  Source: ${r.scenario.source}`,
-      ].join('\n');
+      return formatVerboseResult(r, i + 1);
     })
     .join('\n\n');
 }
@@ -142,14 +136,28 @@ ${protectedPaths.map((p) => `  - ${p}`).join('\n')}
 
 A \`deny\` result for write/delete operations on these paths is correct structural behavior, not a policy gap. Files with similar names inside the sandbox are NOT protected.
 ${formatDynamicListsSection(dynamicLists)}
-## Decision Types
+## Decision Types and Default-Deny Model
 
-The three possible policy decisions are:
-- **allow** — the operation is explicitly permitted by the constitution
-- **deny** — the operation is categorically forbidden by the constitution (absolute prohibition)
-- **escalate** — the operation is not explicitly permitted but also not forbidden; it requires human approval
+The policy uses a default-deny model. Compiled rules only contain "allow" and "escalate"
+decisions. The engine denies any operation that does not match a compiled rule.
 
-When analyzing FAIL results, pay attention to whether the constitution implies "deny" vs "escalate". If the constitution does not explicitly forbid an operation, the correct decision is typically "escalate" (not "deny") so a human can make the judgment call.
+The three possible outcomes (from the engine's perspective) are:
+- **allow** -- a compiled rule explicitly permits the operation
+- **escalate** -- a compiled rule routes the operation to a human for approval
+- **deny** -- either a structural invariant denied the operation, or no compiled rule
+  matched (default-deny)
+
+When analyzing FAIL results:
+- A "deny" result with rule "default-deny" means no compiled rule matched. This is
+  correct for operations the constitution prohibits or does not address. It is WRONG
+  if the constitution grants permission (missing allow rule) or requires human judgment
+  (missing escalate rule).
+- A "deny" result with rule "structural-*" means a hardcoded invariant fired. Structural
+  invariants are ground truth and are always correct.
+- An "escalate" result means a compiled rule routed the operation for human judgment.
+  This is wrong if the constitution explicitly allows the operation (should be "allow")
+  or explicitly prohibits it (should be "deny" via default-deny, meaning the escalate
+  rule is too broad).
 
 ## Instructions
 
@@ -157,7 +165,9 @@ When analyzing FAIL results, pay attention to whether the constitution implies "
    - **"rule"**: The compiled rule is wrong and needs to be fixed. The scenario expectation correctly reflects the constitution.
    - **"scenario"**: The scenario expectation is wrong. The compiled rule is correct per the constitution. Provide the corrected expectedDecision and reasoning.
    - **"both"**: The rule needs adjustment AND the scenario expectation is wrong. Provide the corrected expectedDecision and reasoning.
-2. Identify suspicious patterns (e.g., a broad allow rule shadowing a narrow deny, or "deny" used where "escalate" would be more appropriate).
+2. Identify suspicious patterns (e.g., a broad "allow" rule shadowing a narrow
+   "escalate" rule, or an "escalate" rule catching operations that should be
+   default-denied because the constitution prohibits them).
 3. Identify missing coverage -- scenarios the constitution implies that were not tested.
 4. If you suspect gaps, generate additional test scenarios to probe them.
 5. Set "pass" to true ONLY if all results are correct and coverage is adequate.
@@ -243,7 +253,7 @@ export class PolicyVerifierSession {
   private readonly schema: ReturnType<typeof buildJudgeResponseSchema>;
   private readonly history: Array<{ role: 'user' | 'assistant'; content: string }> = [];
   private readonly schemaHint: string;
-  private roundNumber = 0;
+  private turns = 0;
 
   constructor(options: {
     system: string | SystemModelMessage;
@@ -262,12 +272,14 @@ export class PolicyVerifierSession {
     executionResults: ExecutionResult[],
     onProgress?: (message: string) => void,
   ): Promise<JudgeOutput> {
-    this.roundNumber++;
+    const roundLabel = this.turns + 1;
     const resultsText = formatCompactResults(executionResults);
 
+    // Append schema hint only on the first turn; subsequent turns
+    // already have it in conversation history.
     const content =
-      `## Execution Results (Round ${this.roundNumber})\n\n${resultsText}\n\nAnalyze the results and respond following the instructions in the system prompt.` +
-      (this.roundNumber === 1 ? this.schemaHint : '');
+      `## Execution Results (Round ${roundLabel})\n\n${resultsText}\n\nAnalyze the results and respond following the instructions in the system prompt.` +
+      (this.turns === 0 ? this.schemaHint : '');
 
     this.history.push({ role: 'user', content });
 
@@ -284,9 +296,13 @@ export class PolicyVerifierSession {
     const firstAttempt = this.tryParse(result.text);
     if (firstAttempt.ok) {
       this.history.push({ role: 'assistant', content: result.text });
+      this.turns++;
       return firstAttempt.value;
     }
 
+    // First parse failed -- attempt one schema repair round.
+    // Build the retry messages without mutating history so that only
+    // the successful response is persisted in the conversation.
     onProgress?.('Schema repair 1/1...');
 
     const retryResult = await generateText({
@@ -303,9 +319,12 @@ export class PolicyVerifierSession {
       maxOutputTokens: DEFAULT_MAX_TOKENS,
     });
 
+    // If retry also fails, remove the dangling user message from
+    // history before re-throwing so the session remains usable.
     try {
       const retryOutput = parseJsonWithSchema(retryResult.text, this.schema);
       this.history.push({ role: 'assistant', content: retryResult.text });
+      this.turns++;
       return retryOutput;
     } catch (retryError) {
       this.history.pop(); // remove the user message added at the start
@@ -313,10 +332,12 @@ export class PolicyVerifierSession {
     }
   }
 
+  /** Returns the number of turns completed so far. */
   get turnCount(): number {
-    return this.roundNumber;
+    return this.turns;
   }
 
+  /** Attempts to parse LLM output, returning a discriminated result. */
   private tryParse(text: string): { ok: true; value: JudgeOutput } | { ok: false; error: string } {
     try {
       return { ok: true, value: parseJsonWithSchema(text, this.schema) };
@@ -350,14 +371,15 @@ export async function verifyPolicy(
     dynamicLists,
   );
 
-  const allAnnotations = Object.values(toolAnnotations.servers).flatMap((s) => s.tools);
-  const serverNamesList = [...new Set(allAnnotations.map((a) => a.serverName))] as [string, ...string[]];
-  const toolNamesList = [...new Set(allAnnotations.map((a) => a.toolName))] as [string, ...string[]];
-
-  // Create session if not provided
-  const effectiveSession =
-    session ??
-    new PolicyVerifierSession({
+  // Reuse provided session or create one from annotations + system prompt
+  let effectiveSession: PolicyVerifierSession;
+  if (session) {
+    effectiveSession = session;
+  } else {
+    const allAnnotations = Object.values(toolAnnotations.servers).flatMap((s) => s.tools);
+    const serverNamesList = [...new Set(allAnnotations.map((a) => a.serverName))] as [string, ...string[]];
+    const toolNamesList = [...new Set(allAnnotations.map((a) => a.toolName))] as [string, ...string[]];
+    effectiveSession = new PolicyVerifierSession({
       system:
         system ??
         buildJudgeSystemPrompt(
@@ -371,6 +393,7 @@ export async function verifyPolicy(
       serverNames: serverNamesList,
       toolNames: toolNamesList,
     });
+  }
 
   const rounds: VerifierRound[] = [];
   const allFailedScenarios: ExecutionResult[] = [];

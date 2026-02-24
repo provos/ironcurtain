@@ -59,16 +59,21 @@ function buildCompilerResponseSchema(serverNames: [string, ...string[]], toolNam
     name: z.string(),
     description: z.string(),
     principle: z.string(),
-    if: z.object({
-      roles: z.array(z.enum(getArgumentRoleValues())).optional(),
-      server: z.array(z.enum(serverNames)).optional(),
-      tool: z.array(z.enum(toolNames)).optional(),
-      sideEffects: z.boolean().optional(),
-      paths: pathConditionSchema.optional(),
-      domains: domainConditionSchema.optional(),
-      lists: z.array(listConditionSchema).optional(),
-    }),
-    then: z.enum(['allow', 'deny', 'escalate']),
+    if: z
+      .object({
+        roles: z.array(z.enum(getArgumentRoleValues())).optional(),
+        server: z.array(z.enum(serverNames)).optional(),
+        tool: z.array(z.enum(toolNames)).optional(),
+        sideEffects: z.boolean().optional(),
+        paths: pathConditionSchema.optional(),
+        domains: domainConditionSchema.optional(),
+        lists: z.array(listConditionSchema).optional(),
+      })
+      // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- runtime check: all fields are optional, Object.values may be all undefined
+      .refine((cond) => Object.values(cond).some((v) => v !== undefined), {
+        message: 'Rule condition must have at least one field — catch-all rules are not allowed',
+      }),
+    then: z.enum(['allow', 'escalate']),
     reason: z.string(),
   });
 
@@ -140,7 +145,9 @@ ${config.protectedPaths.map((p) => `- ${p}`).join('\n')}
 
 2. **Sandbox containment** -- any tool call where ALL paths are within the sandbox directory is automatically allowed. Do NOT generate rules for sandbox-internal operations; the engine handles this at runtime with the dynamically configured sandbox path.
 
-3. **Default escalate** -- if no compiled rule matches, the engine escalates to a human for approval. You do NOT need catch-all escalate rules; any operation not covered by your rules will automatically be routed for human review.
+3. **Default deny** -- if no compiled rule matches, the engine denies the operation.
+   You do NOT need catch-all deny or escalate rules; uncovered operations are
+   automatically denied.
 
 ## Instructions
 
@@ -156,9 +163,12 @@ Produce an ORDERED list of policy rules (first match wins). Each rule has:
   - "paths": path condition with "roles" (which argument roles to extract paths from) and "within" (concrete absolute directory). Rule fires only if ALL extracted paths are within that directory. If zero paths are extracted (tool has no matching path arguments), the condition is NOT satisfied and the rule does NOT match. This implicitly requires matching roles, so top-level "roles" is redundant when "paths" is present.
   - "domains": domain condition with "roles" (which URL argument roles to extract domains from) and "allowed" (list of allowed domain patterns, e.g. ["github.com", "*.github.com"]). Rule fires only if ALL extracted domains match an allowed pattern. Supports exact match, "*.example.com" prefix wildcards, and "*" (any domain). If zero URLs are extracted, the condition is NOT satisfied and the rule does NOT match.
 - "then": the policy decision:
-  - "allow" — the operation is explicitly permitted by the constitution
-  - "deny" — the operation is categorically forbidden by the constitution (absolute prohibition)
-  - "escalate" — the operation is not explicitly permitted but also not forbidden; route to a human for approval
+  - "allow" -- the operation is explicitly permitted by the constitution
+  - "escalate" -- the operation is not explicitly permitted but requires human
+    judgment rather than outright denial (e.g., writes to sensitive-but-not-forbidden
+    areas, operations the constitution says need approval)
+  Note: "deny" is NOT a valid output. Prohibition is implicit -- if no rule matches,
+  the engine denies the call.
 - "reason": human-readable explanation
 
 CRITICAL RULES:
@@ -167,7 +177,10 @@ CRITICAL RULES:
 3. "Outside a directory" semantics: use rule ordering. A rule with "within" matches the inside case; the next rule without "paths" catches everything else as a fallthrough.
 4. The move tool's source argument has both read-path and delete-path roles. A blanket "roles": ["delete-path"] rule will catch all moves.
 5. Order matters: more specific rules before more general ones.
-6. Use all three decision types. Map each constitution principle to the appropriate decision: "allow" for grants, "deny" for prohibitions, and "escalate" for principles that require human judgment or approval. Unmatched operations are automatically escalated by the engine, so only emit explicit rules for operations the constitution addresses.
+6. Only output "allow" and "escalate" rules. Constitutional prohibitions (e.g., "delete
+   operations are never permitted") do NOT need explicit rules because the default deny
+   handles them. Only write rules for things the constitution explicitly allows or
+   requires human judgment on.
 
 Be concise in descriptions and reasons -- one sentence each.
 ${formatGroundTruthSection(handwrittenScenarios)}

@@ -535,6 +535,51 @@ describe('PolicyEngine', () => {
       expect(result.decision).toBe('allow');
     });
 
+    it('allows move between two permitted directories with complementary role coverage', () => {
+      // Rule 1: read-path, write-path, delete-path allowed for Downloads
+      // Rule 2: read-path, write-path allowed for Documents
+      // move_file from Downloads to Documents:
+      //   read-path (source in Downloads) -> allow-downloads
+      //   delete-path (source in Downloads) -> allow-downloads
+      //   write-path (destination in Documents) -> allow-documents
+      const crossDirPolicy: CompiledPolicyFile = {
+        generatedAt: 'test',
+        constitutionHash: 'test',
+        inputHash: 'test',
+        rules: [
+          {
+            name: 'allow-downloads',
+            description: 'Allow read/write/delete in Downloads',
+            principle: 'test',
+            if: { paths: { roles: ['read-path', 'write-path', 'delete-path'], within: '/home/user/Downloads' } },
+            then: 'allow',
+            reason: 'Full access to Downloads',
+          },
+          {
+            name: 'allow-documents',
+            description: 'Allow read/write in Documents',
+            principle: 'test',
+            if: { paths: { roles: ['read-path', 'write-path'], within: '/home/user/Documents' } },
+            then: 'allow',
+            reason: 'Read/write access to Documents',
+          },
+        ],
+      };
+
+      const crossDirEngine = new PolicyEngine(crossDirPolicy, testToolAnnotations, [], SANDBOX_DIR);
+
+      const result = crossDirEngine.evaluate(
+        makeRequest({
+          toolName: 'move_file',
+          arguments: {
+            source: '/home/user/Downloads/report.pdf',
+            destination: '/home/user/Documents/report.pdf',
+          },
+        }),
+      );
+      expect(result.decision).toBe('allow');
+    });
+
     it('does not sandbox-resolve roles when array has paths both inside and outside', () => {
       // read-path extracts both paths; /etc/b.txt is outside sandbox,
       // so the role is NOT sandbox-resolved and falls to compiled rules.
@@ -592,8 +637,8 @@ describe('PolicyEngine', () => {
       expect(result.rule).toBe('allow-reads-within-dir-a');
     });
 
-    it('escalates when one path has no matching rule (default-escalate)', () => {
-      // Custom policy with only one permitted dir and no catch-all escalate
+    it('denies when one path has no matching rule (default-deny)', () => {
+      // Custom policy with only one permitted dir and no catch-all
       const restrictivePolicy: CompiledPolicyFile = {
         generatedAt: 'test',
         constitutionHash: 'test',
@@ -618,10 +663,10 @@ describe('PolicyEngine', () => {
           },
         }),
       );
-      // /tmp/permitted-a/file1.txt -> allow, /tmp/nowhere/file2.txt -> default-escalate
-      // Most restrictive wins: escalate > allow
-      expect(result.decision).toBe('escalate');
-      expect(result.rule).toBe('default-escalate');
+      // /tmp/permitted-a/file1.txt -> allow, /tmp/nowhere/file2.txt -> default-deny
+      // Most restrictive wins: deny > allow
+      expect(result.decision).toBe('deny');
+      expect(result.rule).toBe('default-deny');
     });
   });
 

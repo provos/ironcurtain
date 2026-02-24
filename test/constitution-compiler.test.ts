@@ -56,14 +56,6 @@ const cannedRules: CompiledRule[] = [
     reason: 'Tool has no side effects',
   },
   {
-    name: 'deny-delete-operations',
-    description: 'Block all tools that have delete-path arguments',
-    principle: 'No destruction',
-    if: { roles: ['delete-path'] },
-    then: 'deny',
-    reason: 'Delete operations are never permitted',
-  },
-  {
     name: 'allow-read-in-sandbox',
     description: 'Allow reading files within the sandbox',
     principle: 'Containment',
@@ -142,9 +134,9 @@ describe('Constitution Compiler', () => {
 
       const result = await compileConstitution(sampleConstitution, sampleAnnotations, compilerConfig, mockLLM);
 
-      expect(result.rules).toHaveLength(4);
+      expect(result.rules).toHaveLength(3);
       expect(result.rules[0].name).toBe('allow-side-effect-free-tools');
-      expect(result.rules[1].name).toBe('deny-delete-operations');
+      expect(result.rules[1].name).toBe('allow-read-in-sandbox');
       expect(result.listDefinitions).toEqual([]);
     });
 
@@ -156,7 +148,6 @@ describe('Constitution Compiler', () => {
       const names = result.rules.map((r) => r.name);
       expect(names).toEqual([
         'allow-side-effect-free-tools',
-        'deny-delete-operations',
         'allow-read-in-sandbox',
         'escalate-read-elsewhere',
       ]);
@@ -184,7 +175,7 @@ describe('Constitution Compiler', () => {
     it('catches invalid roles in paths', () => {
       const badRules: CompiledRule[] = [
         {
-          ...cannedRules[2],
+          ...cannedRules[1],
           if: {
             paths: { roles: ['invalid-role' as never], within: '/tmp/sandbox' },
           },
@@ -199,7 +190,7 @@ describe('Constitution Compiler', () => {
     it('catches invalid roles in top-level roles', () => {
       const badRules: CompiledRule[] = [
         {
-          ...cannedRules[1],
+          ...cannedRules[2],
           if: { roles: ['invalid-role' as never] },
         },
       ];
@@ -212,7 +203,7 @@ describe('Constitution Compiler', () => {
     it('catches relative paths in within', () => {
       const badRules: CompiledRule[] = [
         {
-          ...cannedRules[2],
+          ...cannedRules[1],
           if: {
             paths: { roles: ['read-path'], within: './relative/path' },
           },

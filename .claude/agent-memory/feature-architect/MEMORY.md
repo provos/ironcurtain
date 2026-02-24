@@ -200,12 +200,13 @@ Both use the same PolicyEngine with compiled artifacts.
 
 ## Scenario Generator Multi-Turn Design (designed 2026-02-23)
 - See `docs/designs/scenario-generator-multi-turn.md` for full spec
-- `ScenarioGeneratorSession` class: stateful multi-turn wrapper; system prompt fixed at construction (cacheable)
-- `generate()` = turn 1 (initial scenarios); `regenerate(feedback)` = turn 2+ (replacements)
-- `ScenarioFeedback` type: corrections + discardedScenarios + probeScenarios (all optional/readonly)
-- Extract `parseJsonWithSchema()` and `schemaToPromptHint()` from `generate-with-repair.ts`
-- Session calls `generateText()` directly with accumulated messages array (not through `generateObjectWithRepair`)
-- Feedback formatted as user message sections: corrected scenarios, discarded (structural), coverage gaps
-- Merge logic: remove corrected/discarded, deduplicate replacements, keep uncorrected
-- `generateTestScenarios()` returns `{ scenarios, inputHash, session? }` -- session undefined on cache hit
-- `generateObjectWithRepair` unchanged (schema repair within one turn; multi-turn is session's job)
+- `ScenarioGeneratorSession`: multi-turn wrapper; `generate()` then `regenerate(feedback)`
+- `ScenarioFeedback`: corrections + discardedScenarios + probeScenarios
+
+## Deny-Default Policy Design (designed 2026-02-23)
+- See `docs/designs/deny-default-policy.md` for full spec
+- Default fallthrough: `escalate` -> `deny` (policy-engine.ts lines 578, 642)
+- Compiler restricted to `allow | escalate` only (remove `deny` from Zod schema)
+- Engine type `CompiledRule.then` stays `Decision` (3-valued) for backward compat
+- Catch-all escalate rules defeat deny-default; validation should warn about them
+- Existing compiled-policy.json with deny rules still works; recompilation drops them

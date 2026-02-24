@@ -95,8 +95,13 @@ Engine uses concrete filesystem paths with `path.resolve()` and directory contai
 ## Zod v4 Strict Mode
 Zod v4 (^4.3.6) strict by default. Mock response JSON must exactly match Zod schema -- no extra properties.
 
-## Move Operations Policy
-All moves denied via `deny-delete-operations` rule (move_file source has `delete-path` role). No move-specific rules.
+## Deny-Default Policy Model
+- **Engine default**: unmatched operations return `deny` / `default-deny` (not escalate)
+- **Compiler schema**: `then` enum restricted to `['allow', 'escalate']` -- no deny rules emitted
+- **Engine still accepts deny**: `CompiledRule.then` type is `Decision` (includes deny) for backward compat with legacy policy files
+- **Design doc**: `docs/designs/deny-default-policy.md`
+- **Catch-all prevention**: `.refine()` on `if` condition rejects empty conditions (no catch-all rules)
+- **Move operations**: under deny-default, external deletes fall through to default-deny (no explicit deny rule needed)
 
 ## Dynamic Lists (Phase 1-3 complete)
 - **Design**: `docs/designs/dynamic-lists.md` -- full 4-phase spec
