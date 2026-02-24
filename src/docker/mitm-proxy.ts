@@ -50,6 +50,11 @@ export interface ProviderKeyMapping {
   readonly realKey: string;
 }
 
+/** Connection reset errors are routine during proxy shutdown or client disconnect. */
+function isConnectionReset(err: NodeJS.ErrnoException): boolean {
+  return err.code === 'ECONNRESET' || err.code === 'EPIPE';
+}
+
 export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
   // Parse CA cert and key from PEM
   const caCert = forge.pki.certificateFromPem(options.ca.certPem);
@@ -101,6 +106,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
   }
 
   // Connection tracking
+  const activeClientSockets = new Set<Socket>();
   const activeTlsSockets = new Set<tls.TLSSocket>();
   const activeUpstreamRequests = new Set<http.ClientRequest>();
   const socketMetadata = new WeakMap<tls.TLSSocket, { provider: ProviderKeyMapping; host: string; port: number }>();
@@ -108,7 +114,18 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
   let connectionId = 0;
 
   // Inner HTTP server - shared across all decrypted connections
-  const innerServer = http.createServer((clientReq, clientRes) => {
+  const innerServer = http.createServer();
+
+  // Handle HTTP parse errors on decrypted connections
+  innerServer.on('clientError', (err, socket) => {
+    const log = isConnectionReset(err) ? logger.debug : logger.info;
+    log(`[mitm-proxy] client HTTP parse error: ${err.message}`);
+    if (socket.writable) {
+      socket.end('HTTP/1.1 400 Bad Request\r\n\r\n');
+    }
+  });
+
+  innerServer.on('request', (clientReq: http.IncomingMessage, clientRes: http.ServerResponse) => {
     const tlsSock = clientReq.socket as tls.TLSSocket;
     const meta = socketMetadata.get(tlsSock);
     if (!meta) {
@@ -148,6 +165,18 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
         headers: modifiedHeaders,
       },
       (upstreamRes) => {
+        // Handle errors on the upstream response stream (e.g. connection reset mid-body)
+        upstreamRes.on('error', (err) => {
+          const log = isConnectionReset(err) ? logger.debug : logger.info;
+          log(`[mitm-proxy] upstream response error: ${err.message}`);
+          if (!clientRes.headersSent) {
+            clientRes.writeHead(502, { 'Content-Type': 'text/plain' });
+            clientRes.end(`Upstream response error: ${err.message}`);
+          } else {
+            clientRes.socket?.destroy();
+          }
+        });
+
         // 4. Stream response back (SSE passthrough)
         clientRes.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers);
         clientRes.flushHeaders();
@@ -162,7 +191,8 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
 
     // Handle upstream errors
     upstreamReq.on('error', (err) => {
-      logger.info(`[mitm-proxy] upstream error: ${err.message}`);
+      const log = isConnectionReset(err) ? logger.debug : logger.info;
+      log(`[mitm-proxy] upstream error: ${err.message}`);
       activeUpstreamRequests.delete(upstreamReq);
       if (!clientRes.headersSent) {
         clientRes.writeHead(502, { 'Content-Type': 'text/plain' });
@@ -177,6 +207,13 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
       if (!upstreamReq.destroyed) {
         upstreamReq.destroy();
       }
+    });
+
+    // Handle errors on the client request body (e.g. malformed chunked encoding)
+    clientReq.on('error', (err) => {
+      const log = isConnectionReset(err) ? logger.debug : logger.info;
+      log(`[mitm-proxy] client request error: ${err.message}`);
+      upstreamReq.destroy();
     });
 
     // Pipe request body to upstream
@@ -198,6 +235,17 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     const host = colonIndex > 0 ? url.substring(0, colonIndex) : url;
     const port = colonIndex > 0 ? parseInt(url.substring(colonIndex + 1), 10) : 443;
     const connId = ++connectionId;
+
+    // Handle client socket errors early to prevent uncaught 'error' events
+    clientSocket.on('error', (err) => {
+      const log = isConnectionReset(err) ? logger.debug : logger.info;
+      log(`[mitm-proxy] #${connId} client socket error: ${err.message}`);
+      clientSocket.destroy();
+    });
+
+    // Track raw client socket for cleanup during stop()
+    activeClientSockets.add(clientSocket);
+    clientSocket.on('close', () => activeClientSockets.delete(clientSocket));
 
     // 1. Check allowlist
     const provider = providersByHost.get(host);
@@ -240,7 +288,8 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     socketMetadata.set(tlsSocket, { provider, host, port });
 
     tlsSocket.on('error', (err) => {
-      logger.info(`[mitm-proxy] #${connId} TLS error: ${err.message}`);
+      const log = isConnectionReset(err) ? logger.debug : logger.info;
+      log(`[mitm-proxy] #${connId} TLS error: ${err.message}`);
       tlsSocket.destroy();
     });
     tlsSocket.on('close', () => {
@@ -265,10 +314,12 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
       }
 
       return new Promise((resolve, reject) => {
+        const onError = reject;
         outerServer.listen(options.socketPath, () => {
+          outerServer.removeListener('error', onError);
           resolve({ socketPath: options.socketPath });
         });
-        outerServer.once('error', reject);
+        outerServer.once('error', onError);
       });
     },
 
@@ -279,19 +330,29 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
       }
       activeUpstreamRequests.clear();
 
-      // 2. Destroy all active TLS sockets
+      // 2. Destroy all active TLS sockets and raw client sockets.
+      // Must happen before outerServer.close() because the raw sockets
+      // are still tracked by the underlying net.Server, and close()
+      // waits for all TCP connections to end.
       for (const sock of activeTlsSockets) {
         sock.destroy();
       }
       activeTlsSockets.clear();
+      for (const sock of activeClientSockets) {
+        sock.destroy();
+      }
+      activeClientSockets.clear();
 
-      // 3. Close the inner HTTP server
-      innerServer.close();
-
-      // 4. Close the outer UDS server
+      // 3. Close outer server — stop accepting new connections.
+      // closeAllConnections() handles any non-upgraded HTTP connections.
+      outerServer.closeAllConnections();
       await new Promise<void>((resolve) => {
         outerServer.close(() => resolve());
       });
+
+      // 4. Close the inner HTTP server.
+      innerServer.closeAllConnections();
+      innerServer.close();
 
       // 5. Clean up socket file
       try {

@@ -405,4 +405,248 @@ describe('MitmProxy', () => {
     expect(response.statusCode).toBe(403);
     expect(response.body).toContain('does not match expected sentinel');
   });
+
+  // --- P0: Crash prevention ---
+
+  it('survives client destroying socket during TLS handshake', async () => {
+    proxy = createMitmProxy({
+      socketPath,
+      ca,
+      providers: [{ config: testProvider, fakeKey, realKey }],
+    });
+    await proxy.start();
+
+    const { socket } = await sendConnect(socketPath, 'api.test.com', 443);
+    expect(socket).not.toBeNull();
+
+    // Immediately destroy the raw socket before TLS handshake completes.
+    // Without the clientSocket error handler, this would crash the process.
+    socket!.destroy();
+
+    // Give the proxy a moment to process the error
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    // Proxy should still be alive and accepting new connections
+    const { statusCode } = await sendConnect(socketPath, 'api.test.com', 443);
+    expect(statusCode).toBe(200);
+  });
+
+  it('handles upstream response error gracefully', async () => {
+    // Verify the proxy survives when the upstream connection fails.
+    // We make a request to the proxy which will attempt to connect
+    // upstream to api.test.com (which won't resolve correctly), and
+    // the proxy should return a 502 or handle the error gracefully.
+    proxy = createMitmProxy({
+      socketPath,
+      ca,
+      providers: [{ config: testProvider, fakeKey, realKey }],
+    });
+    await proxy.start();
+
+    const { socket } = await sendConnect(socketPath, 'api.test.com', 443);
+    expect(socket).not.toBeNull();
+
+    // Make a request; the real upstream (api.test.com) won't respond
+    // correctly, but what matters is the proxy doesn't crash
+    try {
+      await makeHttpsRequest(socket!, ca, 'api.test.com', {
+        method: 'POST',
+        path: '/v1/messages',
+        headers: { 'x-api-key': fakeKey, 'content-type': 'application/json' },
+        body: '{"test": true}',
+      });
+    } catch {
+      // Connection errors are expected since api.test.com may not resolve
+    }
+
+    // Proxy should still be functional
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const { statusCode } = await sendConnect(socketPath, 'api.test.com', 443);
+    expect(statusCode).toBe(200);
+  });
+
+  // --- P1: Resource leak / cleanup ---
+
+  it('stop() cleanly shuts down with active connections', async () => {
+    proxy = createMitmProxy({
+      socketPath,
+      ca,
+      providers: [{ config: testProvider, fakeKey, realKey }],
+    });
+    await proxy.start();
+
+    // Open several connections to create active sockets
+    const sockets: import('node:net').Socket[] = [];
+    for (let i = 0; i < 3; i++) {
+      const { socket, statusCode } = await sendConnect(socketPath, 'api.test.com', 443);
+      expect(statusCode).toBe(200);
+      sockets.push(socket!);
+    }
+
+    // stop() should complete without hanging or throwing, even with active sockets
+    await proxy.stop();
+    proxy = undefined; // Already stopped
+
+    // All client sockets should be destroyed
+    for (const sock of sockets) {
+      // Give a tick for the destroy to propagate
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(sock.destroyed).toBe(true);
+    }
+  });
+
+  it('returns 400 for malformed HTTP after TLS handshake', async () => {
+    proxy = createMitmProxy({
+      socketPath,
+      ca,
+      providers: [{ config: testProvider, fakeKey, realKey }],
+    });
+    await proxy.start();
+
+    const { socket } = await sendConnect(socketPath, 'api.test.com', 443);
+    expect(socket).not.toBeNull();
+
+    // Perform TLS handshake, then send garbage HTTP
+    const response = await new Promise<string>((resolve) => {
+      const tlsSocket = tls.connect(
+        {
+          socket: socket!,
+          servername: 'api.test.com',
+          ca: ca.certPem,
+        },
+        () => {
+          // Send malformed HTTP that will trigger a clientError
+          tlsSocket.write('NOT VALID HTTP\r\n\r\n');
+
+          let data = '';
+          tlsSocket.on('data', (chunk) => {
+            data += chunk.toString();
+          });
+          tlsSocket.on('end', () => resolve(data));
+          tlsSocket.on('error', () => resolve(data));
+
+          // Timeout fallback in case we get no response
+          setTimeout(() => resolve(data), 2000);
+        },
+      );
+      tlsSocket.on('error', () => resolve(''));
+    });
+
+    // The proxy should respond with 400 Bad Request
+    expect(response).toContain('400');
+  });
+
+  it('tracks and cleans up raw client sockets on stop()', async () => {
+    proxy = createMitmProxy({
+      socketPath,
+      ca,
+      providers: [{ config: testProvider, fakeKey, realKey }],
+    });
+    await proxy.start();
+
+    // Create a connection but don't do TLS handshake — this tests
+    // the gap between CONNECT ack and TLS socket creation
+    const { socket } = await sendConnect(socketPath, 'api.test.com', 443);
+    expect(socket).not.toBeNull();
+    expect(socket!.destroyed).toBe(false);
+
+    // stop() should destroy the raw client socket too
+    await proxy.stop();
+    proxy = undefined;
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(socket!.destroyed).toBe(true);
+  });
+
+  // --- P2: Robustness ---
+
+  it('handles ECONNRESET without crashing', async () => {
+    proxy = createMitmProxy({
+      socketPath,
+      ca,
+      providers: [{ config: testProvider, fakeKey, realKey }],
+    });
+    await proxy.start();
+
+    // Open a CONNECT and do a TLS handshake
+    const { socket } = await sendConnect(socketPath, 'api.test.com', 443);
+    expect(socket).not.toBeNull();
+
+    const tlsSocket = await new Promise<tls.TLSSocket>((resolve, reject) => {
+      const tls_ = tls.connect({ socket: socket!, servername: 'api.test.com', ca: ca.certPem }, () => resolve(tls_));
+      tls_.on('error', reject);
+    });
+
+    // Force-destroy the underlying socket to trigger ECONNRESET on the proxy side
+    tlsSocket.destroy();
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    // Proxy should still accept new connections
+    const { statusCode } = await sendConnect(socketPath, 'api.test.com', 443);
+    expect(statusCode).toBe(200);
+  });
+
+  it('removes stale error listener after successful start', async () => {
+    proxy = createMitmProxy({
+      socketPath,
+      ca,
+      providers: [{ config: testProvider, fakeKey, realKey }],
+    });
+
+    await proxy.start();
+
+    // After successful start, there should be no lingering 'error' listeners
+    // from the start() promise. The server's error listeners should only be
+    // the default Node.js ones, not the reject callback from the promise.
+    // We verify this indirectly: if the stale listener were present and the
+    // server emitted an error, it would reject a long-resolved promise
+    // (which would be an unhandled rejection). Instead, we just verify that
+    // start completed and the proxy is functional.
+    const { statusCode } = await sendConnect(socketPath, 'api.test.com', 443);
+    expect(statusCode).toBe(200);
+  });
+
+  it('handles client request body errors', async () => {
+    proxy = createMitmProxy({
+      socketPath,
+      ca,
+      providers: [{ config: testProvider, fakeKey, realKey }],
+    });
+    await proxy.start();
+
+    const { socket } = await sendConnect(socketPath, 'api.test.com', 443);
+    expect(socket).not.toBeNull();
+
+    // Do TLS handshake then send a request with chunked encoding that
+    // gets cut off mid-stream to trigger an error on clientReq
+    await new Promise<void>((resolve) => {
+      const tlsSocket = tls.connect({ socket: socket!, servername: 'api.test.com', ca: ca.certPem }, () => {
+        // Send a request with Transfer-Encoding: chunked, then destroy mid-body
+        const reqLines = [
+          'POST /v1/messages HTTP/1.1',
+          'host: api.test.com',
+          `x-api-key: ${fakeKey}`,
+          'transfer-encoding: chunked',
+          '',
+          'ff', // claim 255 bytes of chunk data
+          '', // but don't send the data
+        ].join('\r\n');
+        tlsSocket.write(reqLines);
+
+        // Destroy mid-chunk to trigger an error
+        setTimeout(() => {
+          tlsSocket.destroy();
+          resolve();
+        }, 50);
+      });
+      tlsSocket.on('error', () => {});
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    // Proxy should still be alive
+    const { statusCode } = await sendConnect(socketPath, 'api.test.com', 443);
+    expect(statusCode).toBe(200);
+  });
 });
