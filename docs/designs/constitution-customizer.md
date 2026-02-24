@@ -1,14 +1,14 @@
-# TB1c: LLM-Assisted Constitution Customization
+# LLM-Assisted Constitution Customization
 
 **Status:** Proposed
 **Date:** 2026-02-19
 **Updated:** 2026-02-22
 **Author:** IronCurtain Engineering
-**Depends on:** TB1b (Fetch Server & User Credentials)
+**Depends on:** Fetch Server & User Credentials (`fetch-server-credentials.md`)
 
 ## 1. Executive Summary
 
-TB1c adds an LLM-assisted conversational CLI for users to customize their constitution in natural language. This builds on the user constitution file introduced in TB1a (`multi-server-onboarding.md`) and the credential/config infrastructure from TB1b (`tb1b-fetch-credentials-customizer.md`).
+This design adds an LLM-assisted conversational CLI for users to customize their constitution in natural language. It builds on the user constitution file introduced in `multi-server-onboarding.md` and the credential/config infrastructure from `fetch-server-credentials.md`.
 
 ## 2. Overview
 
@@ -289,7 +289,7 @@ The conversation history is maintained across turns so the LLM has context from 
 
 ## 8. Implementation Phase
 
-Phase numbering continues from TB1b (phases 4-5).
+Phase numbering continues from the fetch server design (phases 4-5).
 
 ### Phase 6: Constitution Customizer CLI
 

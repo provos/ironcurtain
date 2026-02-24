@@ -1,4 +1,4 @@
-# TB1b: Fetch Server & User Credentials
+# Fetch Server & User Credentials
 
 **Status:** Proposed
 **Date:** 2026-02-19
@@ -7,9 +7,9 @@
 
 ## 1. Executive Summary
 
-TB1b continues the multi-server buildout started in TB1a (documented in `multi-server-onboarding.md`, phases 1–3). Where TB1a added git server integration with role extensibility and domain-based policy evaluation, TB1b adds two capabilities: (a) a custom HTTP fetch MCP server for retrieving web content with inspectable URL arguments, and (b) per-server user credential configuration so secrets stay out of source-controlled files.
+This continues the multi-server buildout started in `multi-server-onboarding.md` (phases 1–3). Where the initial onboarding added git server integration with role extensibility and domain-based policy evaluation, this design adds two capabilities: (a) a custom HTTP fetch MCP server for retrieving web content with inspectable URL arguments, and (b) per-server user credential configuration so secrets stay out of source-controlled files.
 
-The `fetch-url` role (defined in TB1a) is exercised by the fetch server. User credentials enable token-based auth for git push (deferred from TB1a). Constitution customization is deferred to TB1c.
+The `fetch-url` role (defined in `multi-server-onboarding.md`) is exercised by the fetch server. User credentials enable token-based auth for git push. Constitution customization is covered in `constitution-customizer.md`.
 
 ## 2. Fetch MCP Server
 
