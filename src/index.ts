@@ -1,9 +1,11 @@
+import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import chalk from 'chalk';
 import ora from 'ora';
 import { loadConfig, loadGeneratedPolicy, checkConstitutionFreshness, getPackageGeneratedDir } from './config/index.js';
+import { getUserConfigPath } from './config/paths.js';
 import * as logger from './logger.js';
 import { CliTransport } from './session/cli-transport.js';
 import { createSession } from './session/index.js';
@@ -31,6 +33,12 @@ export async function main(args?: string[]): Promise<void> {
       process.stderr.write(`  ${agent.id}  ${agent.displayName}\n`);
     }
     return;
+  }
+
+  // First-start wizard: run when config file does not exist and stdin is a TTY
+  if (!existsSync(getUserConfigPath()) && process.stdin.isTTY) {
+    const { runFirstStart } = await import('./config/first-start.js');
+    await runFirstStart();
   }
 
   const task = positionals.join(' ');
