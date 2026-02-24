@@ -2,7 +2,7 @@
 
 **Status:** Proposed
 **Date:** 2026-02-19
-**Updated:** 2026-02-21
+**Updated:** 2026-02-22
 **Author:** IronCurtain Engineering
 **Depends on:** TB1b (Fetch Server & User Credentials)
 
@@ -12,7 +12,9 @@ TB1c adds an LLM-assisted conversational CLI for users to customize their consti
 
 ## 2. Overview
 
-Users customize their constitution through a multi-turn conversation with an LLM. The LLM translates user intent into policy statements and validates them through the compile-policy pipeline. A base user constitution ships with IronCurtain to provide sensible defaults; the customizer helps users refine it.
+Users describe what they want the agent to do — in terms of **purposes and tasks**, not individual permissions. An LLM translates these high-level intents into concrete policy statements, inferring which tools, paths, domains, and approval levels are needed. This approach is inspired by Conseca (Tsai & Bagdasarian, 2025), which demonstrates that contextual, purpose-driven policy generation produces better utility and security than static policies.
+
+A base user constitution ships with IronCurtain to provide sensible defaults; the customizer helps users refine it.
 
 ### Prerequisites
 
@@ -29,7 +31,7 @@ This is a subcommand of the `ironcurtain` CLI, following the same pattern as `co
 
 ## 4. Base User Constitution
 
-IronCurtain ships a base user constitution at `src/config/constitution-user-base.md`. This provides sensible default user-level guidance (e.g., common safety rules for web browsing, file access patterns). On first run of `customize-policy`, if no user constitution exists at `~/.ironcurtain/constitution-user.md`, the base is copied there as a starting point.
+IronCurtain ships a base user constitution at `src/config/constitution-user-base.md` containing the guiding principles (least privilege, no destruction, human oversight). On first run of `customize-policy`, if no user constitution exists at `~/.ironcurtain/constitution-user.md`, the base is copied there as a starting point.
 
 The base user constitution is also prepended (as read-only context) to the LLM prompt so the model understands the defaults the user is building on. The user constitution file at `~/.ironcurtain/constitution-user.md` is the only file the customizer writes to.
 
@@ -41,44 +43,124 @@ The base user constitution is also prepended (as read-only context) to the LLM p
 3.  System loads base constitution + current user constitution
 4.  System displays current user constitution (or "no customizations yet")
 5.  Conversational loop begins:
-    a. User types a request in natural language
-       e.g., "I want git push to always require approval,
-              and allow fetching from any .gov domain without approval"
-    b. LLM generates proposed user constitution (complete replacement)
-    c. System shows inline diff (old → new)
+    a. User describes a purpose or task in natural language
+       e.g., "I want my agent to make fixes to my source code in ~/src/myapp"
+    b. LLM returns structured output (constitution or question):
+       - If question: display it, loop back to (a) for user's answer
+       - If constitution: continue to (c)
+    c. System shows inline diff (old → new) plus the LLM's summary
     d. User chooses: accept / reject / refine
-       - accept: proceed to compilation
+       - accept: apply changes in memory, prompt for next request
        - reject: discard changes, prompt for new request
        - refine: user provides follow-up, loop back to (b)
-    e. On accept: continue the conversation or type "done" to finish
+    e. Loop continues until user types "done" or exits
+    Note: changes are held in memory until "done". Ctrl+C discards
+    unsaved changes.
 6.  System writes ~/.ironcurtain/constitution-user.md
     (backs up previous version to constitution-user.md.bak)
-7.  System runs compile-policy to regenerate artifacts
-8.  System shows compilation result (pass/fail)
-9.  On failure: show errors, offer to revert from .bak file
-10. On success: display summary of active policy rules
+7.  System asks (via @clack/prompts confirm): "Compile policy now?"
+    - yes: runs compile-policy, shows result, offers revert on failure
+    - no: reminds user to run `ironcurtain compile-policy` before next session
+8.  On compilation failure: show errors, offer to revert from .bak file
+9.  On compilation success: display summary of active policy rules
 ```
+
+### Example Session
+
+```
+$ ironcurtain customize-policy
+
+┌  IronCurtain Policy Customizer
+│
+◇  Loaded tool annotations (3 servers, 12 tools)
+│
+│  Current User Constitution:
+│  (no customizations yet)
+│
+◆  What do you want the agent to do?
+│  I want my agent to make fixes to my source code in ~/src/myapp
+│
+◇  Here's what I'd add:
+│
+│  + The agent may read and write files within ~/src/myapp without approval.
+│  + The agent may perform git operations (status, diff, log, add, commit)
+│  +   within ~/src/myapp without approval.
+│  + The agent must receive human approval before git push, rebase, or
+│  +   any remote-contacting operation.
+│  + The agent must not modify files outside ~/src/myapp.
+│
+◆  [a]ccept  [r]efine  [r]eject  →  accept
+│
+◆  Anything else? (type "done" to finish)
+│  I also want it to write a daily news dossier for me
+│
+◇  Here's the updated constitution:
+│
+│    The agent may read and write files within ~/src/myapp without approval.
+│    The agent may perform git operations (status, diff, log, add, commit)
+│      within ~/src/myapp without approval.
+│    The agent must receive human approval before git push, rebase, or
+│      any remote-contacting operation.
+│  - The agent must not modify files outside ~/src/myapp.
+│  + The agent must not modify files outside ~/src/myapp and ~/Documents.
+│  + The agent may fetch web content from major news sites without approval.
+│  + The agent may write files in ~/Documents/dossiers without approval.
+│
+◆  [a]ccept  [r]efine  [r]eject  →  refine
+│  I'd like the dossier in ~/Desktop/dossier.md, not in Documents
+│
+◇  Updated:
+│
+│    ...
+│  - The agent must not modify files outside ~/src/myapp and ~/Documents.
+│  + The agent must not modify files outside ~/src/myapp and ~/Desktop.
+│    The agent may fetch web content from major news sites without approval.
+│  - The agent may write files in ~/Documents/dossiers without approval.
+│  + The agent may write files to ~/Desktop/dossier.md without approval.
+│
+◆  [a]ccept  [r]efine  [r]eject  →  accept
+│
+◆  Anything else? (type "done" to finish)
+│  done
+│
+◇  Saved to ~/.ironcurtain/constitution-user.md
+│
+◆  Compile policy now?
+│  ● Yes  ○ No
+│
+└  Done.
+```
+
+The user describes purposes ("make fixes to my source code", "write a daily news dossier") and the LLM infers the concrete permissions: which tools, paths, domains, and what requires approval. Refinements happen at the same purpose level ("put it on Desktop instead"), not at the permission level.
 
 ### Diff Display
 
-Diffs are shown inline in the terminal using a unified diff format, colorized with chalk:
-
-```
-  User Constitution Changes:
-  ─────────────────────────────────────────
-    The agent may read documents in ~/Documents.
-  - The agent may fetch web content from popular news sites.
-  + The agent may fetch web content from popular news sites and *.gov domains without approval.
-  + The agent must receive human approval before any git push operation.
-  ─────────────────────────────────────────
-  [a]ccept  [r]eject  [e]dit  →
-```
-
-Lines prefixed with `-` (red) are removed, `+` (green) are added, and unprefixed lines are unchanged context. This uses a simple line-level diff (e.g., `diff` library from npm or a minimal implementation).
+Diffs are shown inline in the terminal using a unified diff format, colorized with chalk. Lines prefixed with `-` (red) are removed, `+` (green) are added, and unprefixed lines are unchanged context. This uses a simple line-level diff (e.g., `diff` library from npm or a minimal implementation).
 
 ## 6. LLM Prompt
 
 The customizer uses `policyModelId` from user config (same model as compile-policy, defaults to Sonnet).
+
+### Design Rationale
+
+The prompt is designed around **purpose-driven policy generation**: users describe tasks they want the agent to perform, and the LLM infers the necessary permissions. This follows the approach from Conseca (Tsai & Bagdasarian, HOTOS '25), which shows that generating policies from task intent — rather than asking users to enumerate individual permissions — produces both better security (least-privilege scoping) and better utility (the LLM captures permissions the user wouldn't think to specify).
+
+The LLM has access to the tool annotations (what tools exist, what their arguments do) and the base constitution (what guardrails are immovable). From these plus the user's stated purpose, it can generate precise policy statements that the downstream compiler can translate into enforceable rules.
+
+### Structured Output Schema
+
+The LLM returns structured output (via AI SDK's `generateObject()`) so we can programmatically distinguish between a constitution proposal and a clarifying question. Note: Anthropic does not support JSON Schema `oneOf`, so we use a flat object with optional fields rather than a discriminated union:
+
+```typescript
+const CustomizerResponseSchema = z.object({
+  type: z.enum(['constitution', 'question']),
+  constitution: z.string().optional().describe('The complete updated user constitution text (when type is "constitution")'),
+  summary: z.string().optional().describe('Brief summary of what changed and why (when type is "constitution")'),
+  question: z.string().optional().describe('A clarifying question to ask the user (when type is "question")'),
+});
+```
+
+When the response is a `question`, the system displays it and loops back for user input (no diff shown). When it's a `constitution`, the system shows the diff and prompts for accept/refine/reject.
 
 ### System Prompt
 
@@ -91,32 +173,88 @@ function buildSystemPrompt(
 ): string {
   return `You are helping a user customize their IronCurtain security policy.
 
+The user will describe tasks and purposes they want their agent to perform.
+Your job is to infer the specific permissions needed and generate precise,
+enforceable policy statements.
+
 ## Base Constitution (read-only, cannot be modified)
 ${baseConstitution}
 
-## Available Tools
+## Available Tools and Their Capabilities
 ${formatAnnotationsForPrompt(toolAnnotations)}
 
-## Instructions
-You will help the user iteratively refine their personal policy customizations.
-When asked to make changes, generate the COMPLETE updated user constitution section.
+## How to Translate User Intent to Policy
 
-Rules:
-1. Only generate the user customization section, never modify the base constitution.
+When the user describes a purpose (e.g., "fix bugs in my code", "write a news
+dossier"), reason about:
+- Which tools does this task require? (file read/write, git, web fetch, etc.)
+- Which paths or directories are involved?
+- Which domains need to be accessible?
+- What is read-only vs. read-write?
+- What should require human approval vs. be automatic?
+- What is explicitly NOT needed and should remain restricted?
+
+Apply the principle of least privilege: only grant what the stated purpose
+requires. If a task needs web fetching, allow only relevant domains, not all
+web access. If it needs file writes, scope to the relevant directory.
+
+## Using Category References (Dynamic Lists)
+
+When the user's purpose involves a CATEGORY of things (e.g., "finance sites",
+"news sites", "my contacts", "tech companies"), use a descriptive category
+name instead of enumerating specific values. The downstream policy compiler
+resolves these categories into concrete lists automatically.
+
+Examples of good category usage:
+- "The agent may fetch web content from finance news sites" (NOT a list of
+  bloomberg.com, reuters.com, etc.)
+- "The agent may fetch web content from major news sites" (NOT a list of
+  cnn.com, bbc.com, etc.)
+- "The agent may send emails to my contacts" (NOT specific email addresses)
+
+Only enumerate specific values when the user explicitly names them (e.g.,
+"allow access to github.com and gitlab.com").
+
+## Avoiding Redundancy
+
+The user's current constitution is provided in each message. Before generating,
+check what is ALREADY permitted by both the base constitution and the current
+user customizations. Do NOT add rules that duplicate existing permissions.
+If the user asks for something already allowed, mention it in the summary
+rather than adding a redundant rule.
+
+## Response
+
+Respond with either a "constitution" or a "question":
+- Use "constitution" when you have enough information to generate policy.
+  Include the COMPLETE updated user constitution (not just the changes)
+  and a brief summary of what changed.
+- Use "question" when the user's request is ambiguous and you need
+  clarification before generating. For example: "Where is your source
+  code located?" or "Should the agent be able to push to git, or just
+  commit locally?"
+
+## Constitution Rules
+1. Only generate the user customization section, never modify the base.
 2. Each line should be a clear, specific policy statement.
 3. Use concrete terms the policy compiler can translate to rules:
    - "allow" / "deny" / "require approval" (maps to escalate)
-   - Reference specific tools (git push, git commit) or categories (git operations)
+   - Reference specific tools (git push, git commit) or categories
    - Reference domains when relevant (github.com, *.gov)
-   - Reference paths when relevant (~/Documents, ~/Downloads)
+   - Reference paths when relevant (~/Documents, ~/src/myapp)
+   - Reference categories for groups of domains/contacts/identifiers
+     (e.g., "finance news sites", "my contacts") — DO NOT enumerate
 4. Avoid vague statements. "Be careful with git" is not enforceable.
-5. Always return the complete user constitution section (not just the diff).
-6. If the user's request conflicts with the base constitution, explain the conflict
-   and suggest an alternative that works within the base constraints.
-7. If the user's request is ambiguous, ask a clarifying question before generating.
+5. Always return the complete user constitution (not just the changes).
+6. If the user's request conflicts with the base constitution, explain the
+   conflict in the summary and suggest an alternative within base constraints.
 `;
 }
 ```
+
+### Tool Annotation Formatting
+
+`formatAnnotationsForPrompt()` produces a compact summary of available tools — tool name, one-line description, and argument roles — not the full JSON. For the current 43 tools this is roughly 2-3KB of prompt text. The formatter should stay concise to avoid bloating the prompt if many MCP servers are configured; if the formatted output exceeds a threshold (e.g., 8KB), consider summarizing by server or omitting `none`-role arguments.
 
 ### Per-Turn User Message
 
@@ -146,7 +284,8 @@ The conversation history is maintained across turns so the LLM has context from 
 - Compilation is invoked programmatically (importing `compile.ts`'s `main()`), not via subprocess.
 - Constitution versioning: user constitution only adds guidance, never modifies base principles. If a base update conflicts, compile-policy fails, alerting the user.
 - LLM interactions logged to `llm-interactions.jsonl` in the generated directory (via pipeline logging middleware).
-- Terminal input uses Node.js `readline` for the conversational loop.
+- Uses `PromptCacheStrategy` from `src/session/prompt-cache.ts` to mark the system prompt and conversation history with cache breakpoints. The system prompt (base constitution + tool annotations) is large and stable across turns, making it ideal for Anthropic's prompt caching. This significantly reduces token costs for multi-turn refinement sessions.
+- Terminal UI uses `@clack/prompts` (already a dependency, used by `config-command.ts`) for confirm/select prompts. Conversational text input uses `p.text()`. Follows existing `handleCancel()` pattern for clean Ctrl+C exits.
 
 ## 8. Implementation Phase
 
@@ -168,6 +307,7 @@ Phase numbering continues from TB1b (phases 4-5).
 
 **Prompt construction:**
 - `buildSystemPrompt()` includes base constitution and tool annotations
+- `buildSystemPrompt()` includes purpose-driven reasoning instructions
 - `buildUserMessage()` includes current user constitution when present
 - `buildUserMessage()` handles missing user constitution gracefully
 
@@ -190,7 +330,7 @@ Phase numbering continues from TB1b (phases 4-5).
 ### Integration Tests (`test/constitution-customizer-integration.test.ts`)
 
 **End-to-end flow (with mocked LLM):**
-- Mock LLM returns valid constitution text → written to disk → compile-policy succeeds
+- Purpose-driven request ("fix bugs in my code at ~/src/myapp") → LLM generates scoped permissions → written to disk
 - Mock LLM returns constitution that causes compile failure → revert offered → `.bak` restored
 - Multi-turn refinement: first response rejected, second accepted
 - User constitution is correctly merged with base for compilation
@@ -199,3 +339,7 @@ Phase numbering continues from TB1b (phases 4-5).
 - Generated user constitution compiles without errors via real compile-policy pipeline (may require LLM, so guarded behind `INTEGRATION_TEST` flag)
 - Combined hash changes when user constitution changes
 - Compilation cache invalidated after customizer writes new constitution
+
+## 10. References
+
+- Tsai, L. & Bagdasarian, E. (2025). "Contextual Agent Security: A Policy for Every Purpose." HOTOS '25. — Demonstrates purpose-driven, contextual policy generation for agent systems. Key insights applied here: users specify tasks not permissions; LLM infers least-privilege constraints from task intent; deterministic enforcement of generated policies.

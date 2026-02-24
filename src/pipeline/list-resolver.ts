@@ -97,6 +97,18 @@ function postProcess(rawValues: string[], definition: ListDefinition, existing?:
     ),
   ];
 
+  // For domain lists, auto-add *.domain wildcards for bare apex domains
+  // so that subdomains (e.g., www.nytimes.com) are matched automatically.
+  if (definition.type === 'domains') {
+    const expanded = new Set(validValues);
+    for (const v of validValues) {
+      if (!v.startsWith('*.')) {
+        expanded.add(`*.${v}`);
+      }
+    }
+    validValues.splice(0, validValues.length, ...expanded);
+  }
+
   // Apply manual overrides from existing resolution
   const manualAdditions = existing?.manualAdditions ?? [];
   const removals = new Set(existing?.manualRemovals ?? []);

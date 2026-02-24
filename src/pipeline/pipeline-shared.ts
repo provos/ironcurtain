@@ -23,6 +23,7 @@ export { loadConstitutionText } from '../config/paths.js';
 import type { MCPServerConfig } from '../config/types.js';
 import { loadUserConfig } from '../config/user-config.js';
 import { createLlmLoggingMiddleware, type LlmLogContext } from './llm-logger.js';
+import { createCacheStrategy, type PromptCacheStrategy } from '../session/prompt-cache.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -170,6 +171,7 @@ export interface PipelineLlm {
   model: LanguageModel;
   logContext: LlmLogContext;
   logPath: string;
+  cacheStrategy: PromptCacheStrategy;
 }
 
 /**
@@ -185,5 +187,6 @@ export async function createPipelineLlm(generatedDir: string, initialStepName: s
     model: baseLlm,
     middleware: createLlmLoggingMiddleware(logPath, logContext),
   });
-  return { model, logContext, logPath };
+  const cacheStrategy = createCacheStrategy(userConfig.policyModelId);
+  return { model, logContext, logPath, cacheStrategy };
 }

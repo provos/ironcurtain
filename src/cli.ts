@@ -28,6 +28,7 @@ Commands:
   annotate-tools       Classify MCP tool arguments via LLM
   compile-policy       Compile constitution into enforceable policy rules
   refresh-lists        Re-resolve dynamic lists without full recompilation
+  customize-policy     Customize your policy via LLM-assisted conversation
   config               Edit configuration interactively
   help                 Show this help message
 
@@ -50,6 +51,7 @@ Examples:
   ironcurtain refresh-lists                      # Refresh all dynamic lists
   ironcurtain refresh-lists --list major-news    # Refresh a single list
   ironcurtain refresh-lists --with-mcp           # Include MCP-backed lists
+  ironcurtain customize-policy                   # Customize policy interactively
 `.trim(),
   );
 }
@@ -95,6 +97,11 @@ switch (subcommand) {
   case 'refresh-lists': {
     const { main } = await import('./pipeline/refresh-lists.js');
     await main(process.argv.slice(3));
+    break;
+  }
+  case 'customize-policy': {
+    const { main } = await import('./pipeline/constitution-customizer.js');
+    await main();
     break;
   }
   case 'config': {

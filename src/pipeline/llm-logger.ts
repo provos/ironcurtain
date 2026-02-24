@@ -54,9 +54,19 @@ export interface LlmLogContext {
  * @param logPath - Absolute path to the output JSONL file.
  * @param context - Mutable context object. Set `context.stepName` before each
  *   pipeline phase to label the log entries.
+ * @param options.deltaLogging - When true, only log new messages since the
+ *   last call (suitable for a single long-running conversation like the agent
+ *   session). When false, log the full prompt every call (suitable for the
+ *   pipeline where each step starts a fresh conversation). Defaults to false.
  */
-export function createLlmLoggingMiddleware(logPath: string, context: LlmLogContext): LanguageModelMiddleware {
+export function createLlmLoggingMiddleware(
+  logPath: string,
+  context: LlmLogContext,
+  options?: { deltaLogging?: boolean },
+): LanguageModelMiddleware {
   initLogFile(logPath);
+
+  const deltaLogging = options?.deltaLogging ?? false;
 
   // Track how many prompt items were logged so far to enable delta logging.
   let previousPromptLength = 0;
@@ -70,12 +80,15 @@ export function createLlmLoggingMiddleware(logPath: string, context: LlmLogConte
 
       const responseText = extractTextFromContent(result.content);
 
-      // Only log new messages since the last entry (delta logging).
+      // Delta logging: only log new messages since the last entry.
+      // Full logging: log the entire prompt every call.
       const fullPrompt = params.prompt;
       const promptArray = Array.isArray(fullPrompt) ? fullPrompt : [fullPrompt];
-      const promptOffset = previousPromptLength;
+      const promptOffset = deltaLogging ? previousPromptLength : 0;
       const newMessages = promptArray.slice(promptOffset);
-      previousPromptLength = promptArray.length;
+      if (deltaLogging) {
+        previousPromptLength = promptArray.length;
+      }
 
       const entry: LlmLogEntry = {
         timestamp: new Date().toISOString(),

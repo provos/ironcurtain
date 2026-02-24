@@ -76,15 +76,17 @@ Integration tests use dynamic sandbox dirs (`/tmp/ironcurtain-test-<pid>`). The 
 Engine uses concrete filesystem paths with `path.resolve()` and directory containment. Test paths must use actual project paths like `resolve(projectRoot, 'src/config/constitution.md')`.
 
 ## Key File Inventory (post-pipeline)
-- `src/pipeline/types.ts` -- all shared types (ListDefinition, ResolvedList, DynamicListsFile, ListCondition, ListType)
+- `src/pipeline/types.ts` -- all shared types (ListDefinition, ResolvedList, DynamicListsFile, ListCondition, ListType, DiscardedScenario, ScenarioFeedback)
 - `src/pipeline/tool-annotator.ts` -- LLM tool classification
 - `src/pipeline/constitution-compiler.ts` -- LLM rule compilation (emits listDefinitions)
+- `src/pipeline/generate-with-repair.ts` -- `generateObjectWithRepair()`, `parseJsonWithSchema()`, `extractJson()`, `schemaToPromptHint()` (all exported)
 - `src/pipeline/dynamic-list-types.ts` -- LIST_TYPE_REGISTRY, ListTypeDef, getListMatcher()
 - `src/pipeline/list-resolver.ts` -- resolveList(), resolveAllLists()
-- `src/pipeline/scenario-generator.ts` -- LLM test generation
-- `src/pipeline/policy-verifier.ts` -- multi-round real engine + LLM judge (accepts dynamicLists)
+- `src/pipeline/scenario-generator.ts` -- LLM test generation + `ScenarioGeneratorSession` (multi-turn) + `formatFeedbackMessage()`
+- `src/pipeline/policy-verifier.ts` -- multi-round real engine + LLM judge (re-exports DiscardedScenario from types)
 - `src/pipeline/handwritten-scenarios.ts` -- 26 mandatory test scenarios (15 filesystem + 11 git)
-- `src/pipeline/compile.ts` -- CLI entry point; dynamic step numbering [1/3] vs [1/4] when lists present
+- `src/pipeline/compile.ts` -- CLI entry point; `mergeReplacements()` exported; uses ScenarioGeneratorSession in repair loop
+- `src/pipeline/constitution-customizer.ts` -- LLM-assisted conversational customizer CLI
 - `src/config/index.ts` -- `loadConfig()` and `loadGeneratedPolicy()` (returns dynamicLists)
 
 ## validateCompiledRules Signature
@@ -93,8 +95,13 @@ Engine uses concrete filesystem paths with `path.resolve()` and directory contai
 ## Zod v4 Strict Mode
 Zod v4 (^4.3.6) strict by default. Mock response JSON must exactly match Zod schema -- no extra properties.
 
-## Move Operations Policy
-All moves denied via `deny-delete-operations` rule (move_file source has `delete-path` role). No move-specific rules.
+## Deny-Default Policy Model
+- **Engine default**: unmatched operations return `deny` / `default-deny` (not escalate)
+- **Compiler schema**: `then` enum restricted to `['allow', 'escalate']` -- no deny rules emitted
+- **Engine still accepts deny**: `CompiledRule.then` type is `Decision` (includes deny) for backward compat with legacy policy files
+- **Design doc**: `docs/designs/deny-default-policy.md`
+- **Catch-all prevention**: `.refine()` on `if` condition rejects empty conditions (no catch-all rules)
+- **Move operations**: under deny-default, external deletes fall through to default-deny (no explicit deny rule needed)
 
 ## Dynamic Lists (Phase 1-3 complete)
 - **Design**: `docs/designs/dynamic-lists.md` -- full 4-phase spec
@@ -110,11 +117,36 @@ All moves denied via `deny-delete-operations` rule (move_file source has `delete
 - **loadGeneratedPolicy**: returns `{ compiledPolicy, toolAnnotations, dynamicLists }` -- dynamicLists is optional (backward compatible)
 - **Tests**: `test/dynamic-lists.test.ts` -- 60 tests (Phase 1 validation/compiler + Phase 2 registry/resolver/engine + Phase 3 MCP-backed resolution)
 
+## Constitution Customizer (TB1c)
+- **Module**: `src/pipeline/constitution-customizer.ts` -- LLM-assisted conversational CLI
+- **Base constitution**: `src/config/constitution-user-base.md` -- shipped guiding principles
+- **Path helper**: `getBaseUserConstitutionPath()` in `src/config/paths.ts`
+- **CLI**: `ironcurtain customize-policy` registered in `src/cli.ts`
+- **Schema**: `CustomizerResponseSchema` -- discriminated union: `constitution` or `question`
+- **Exports**: `buildSystemPrompt()`, `buildUserMessage()`, `formatAnnotationsForPrompt()`, `computeLineDiff()`, `formatDiff()`, `writeConstitution()`, `revertConstitution()`, `seedBaseConstitution()`
+- **Diff**: LCS-based line-level diff (`computeLineDiff`), chalk-colorized output (`formatDiff`)
+- **Backup**: `writeConstitution()` copies existing to `.bak`; `revertConstitution()` renames `.bak` back
+- **Caching**: Uses `PromptCacheStrategy` (Anthropic cache breakpoints on system prompt + history)
+- **Build**: `copy-assets.mjs` copies `constitution-user-base.md` to `dist/config/`
+- **Tests**: `test/constitution-customizer.test.ts` -- 39 tests (prompts, annotations, diff, backup/revert, seeding, schema)
+
+## Multi-Turn Scenario Generator Session
+- **ScenarioGeneratorSession**: `src/pipeline/scenario-generator.ts` -- stateful multi-turn wrapper
+- **Pattern**: stable system prompt (cacheable) + growing message history; `generate()` for turn 1, `regenerate(feedback)` for turn 2+
+- **ScenarioFeedback**: `src/pipeline/types.ts` -- corrections + discardedScenarios + probeScenarios
+- **formatFeedbackMessage()**: exported from scenario-generator.ts; formats feedback as markdown sections
+- **mergeReplacements()**: exported from compile.ts; removes corrected/discarded, adds unique replacements
+- **DiscardedScenario**: moved to `src/pipeline/types.ts` (was in policy-verifier.ts); re-exported from policy-verifier for backward compat
+- **parseJsonWithSchema()**: exported from generate-with-repair.ts; shared extraction+validation for session and generateObjectWithRepair
+- **Design**: `docs/designs/scenario-generator-multi-turn.md`
+
 ## Design Documents
 - `docs/designs/policy-compilation-pipeline.md` -- pipeline design spec
 - `docs/designs/multi-server-onboarding.md` -- TB1a design spec (role extensibility + git server)
 - `docs/designs/multi-provider-models.md` -- multi-provider model support design
 - `docs/designs/dynamic-lists.md` -- dynamic lists for policy rules (4-phase)
+- `docs/designs/tb1c-constitution-customizer.md` -- LLM-assisted constitution customization
+- `docs/designs/scenario-generator-multi-turn.md` -- multi-turn scenario generation with prompt caching
 
 ## TB1a: Domain Allowlists & Sandbox Containment Architecture
 - **Untrusted domain gate**: structural invariant checks URL-role args against `serverDomainAllowlists` -- escalates (not denies) unknown domains

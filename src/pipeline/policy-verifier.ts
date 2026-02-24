@@ -7,13 +7,16 @@
  * additional probe scenarios. Up to maxRounds iterations.
  */
 
-import type { LanguageModel } from 'ai';
+import type { LanguageModel, SystemModelMessage } from 'ai';
+import { generateText } from 'ai';
 import { z } from 'zod';
-import { generateObjectWithRepair } from './generate-with-repair.js';
+import { DEFAULT_MAX_TOKENS, parseJsonWithSchema, schemaToPromptHint } from './generate-with-repair.js';
 import { PolicyEngine } from '../trusted-process/policy-engine.js';
 import type { ToolCallRequest } from '../types/mcp.js';
+import { formatDynamicListsSection } from './scenario-generator.js';
 import type {
   CompiledPolicyFile,
+  DiscardedScenario,
   DynamicListsFile,
   ToolAnnotationsFile,
   TestScenario,
@@ -23,6 +26,7 @@ import type {
   AttributedFailure,
   ScenarioCorrection,
 } from './types.js';
+export type { DiscardedScenario };
 
 const DEFAULT_MAX_ROUNDS = 3;
 
@@ -45,38 +49,69 @@ export function executeScenarios(engine: PolicyEngine, scenarios: TestScenario[]
   });
 }
 
+/** Verbose multi-line format for a single execution result. */
+function formatVerboseResult(r: ExecutionResult, index: number): string {
+  const status = r.pass ? 'PASS' : 'FAIL';
+  return [
+    `[${index}] ${status}: ${r.scenario.description}`,
+    `  Tool: ${r.scenario.request.serverName}/${r.scenario.request.toolName}`,
+    `  Args: ${JSON.stringify(r.scenario.request.arguments)}`,
+    `  Expected: ${r.scenario.expectedDecision}`,
+    `  Actual: ${r.actualDecision} (rule: ${r.matchingRule})`,
+    `  Source: ${r.scenario.source}`,
+  ].join('\n');
+}
+
 export function formatExecutionResults(results: ExecutionResult[]): string {
+  return results.map((r, i) => formatVerboseResult(r, i + 1)).join('\n\n');
+}
+
+/**
+ * Compact format for verifier prompts: passes are one-liners,
+ * fails get full verbose format with tool/args/source details.
+ * This reduces token usage ~70% for the common case where most scenarios pass.
+ */
+export function formatCompactResults(results: ExecutionResult[]): string {
   return results
     .map((r, i) => {
-      const status = r.pass ? 'PASS' : 'FAIL';
-      return [
-        `[${i + 1}] ${status}: ${r.scenario.description}`,
-        `  Tool: ${r.scenario.request.serverName}/${r.scenario.request.toolName}`,
-        `  Args: ${JSON.stringify(r.scenario.request.arguments)}`,
-        `  Expected: ${r.scenario.expectedDecision}`,
-        `  Actual: ${r.actualDecision} (rule: ${r.matchingRule})`,
-        `  Source: ${r.scenario.source}`,
-      ].join('\n');
+      if (r.pass) {
+        return `[${i + 1}] PASS: ${r.scenario.description} → ${r.actualDecision} (rule: ${r.matchingRule})`;
+      }
+      return formatVerboseResult(r, i + 1);
     })
     .join('\n\n');
 }
 
-function buildJudgePrompt(
+/**
+ * Compact failure-only format for repair instructions.
+ * Omits Tool, Args, Source, and PASS/FAIL prefix — the compiler already
+ * knows tool signatures from its system prompt, and only failures are sent.
+ */
+export function formatFailedResults(results: ExecutionResult[]): string {
+  return results
+    .map(
+      (r, i) =>
+        `[${i + 1}] ${r.scenario.description}\n  Expected: ${r.scenario.expectedDecision}, Got: ${r.actualDecision} (rule: ${r.matchingRule})`,
+    )
+    .join('\n');
+}
+
+/**
+ * Builds the stable system prompt portion for the verifier judge.
+ * Contains: role preamble, constitution, compiled rules, structural invariants,
+ * decision types, instructions, and available tools.
+ * This is the cacheable part — it stays the same across verification rounds.
+ */
+export function buildJudgeSystemPrompt(
   constitutionText: string,
   compiledPolicy: CompiledPolicyFile,
-  toolAnnotations: ToolAnnotationsFile,
   protectedPaths: string[],
-  executionResults: ExecutionResult[],
-  roundNumber: number,
-  previousAnalysis?: string,
   availableTools?: { serverName: string; toolName: string }[],
+  dynamicLists?: DynamicListsFile,
 ): string {
   const rulesText = compiledPolicy.rules
     .map((r, i) => `  ${i + 1}. [${r.name}] if: ${JSON.stringify(r.if)} then: ${r.then} -- ${r.reason}`)
     .join('\n');
-
-  const resultsText = formatExecutionResults(executionResults);
-  const previousContext = previousAnalysis ? `\n## Previous Round Analysis\n\n${previousAnalysis}\n` : '';
 
   return `You are a security policy verifier. Analyze whether the compiled policy correctly implements the constitution.
 
@@ -91,23 +126,34 @@ ${rulesText}
 ## Structural Invariants (hardcoded, evaluated before compiled rules)
 
 - Unknown tools (no annotation): denied
+- Introspection tools (list_allowed_directories): always allowed
 - Protected paths (any write/delete targeting these is automatically denied):
 ${protectedPaths.map((p) => `  - ${p}`).join('\n')}
 
 A \`deny\` result for write/delete operations on these paths is correct structural behavior, not a policy gap. Files with similar names inside the sandbox are NOT protected.
+${formatDynamicListsSection(dynamicLists)}
+## Decision Types and Default-Deny Model
 
-## Execution Results (Round ${roundNumber})
-${previousContext}
-${resultsText}
+The policy uses a default-deny model. Compiled rules only contain "allow" and "escalate"
+decisions. The engine denies any operation that does not match a compiled rule.
 
-## Decision Types
+The three possible outcomes (from the engine's perspective) are:
+- **allow** -- a compiled rule explicitly permits the operation
+- **escalate** -- a compiled rule routes the operation to a human for approval
+- **deny** -- either a structural invariant denied the operation, or no compiled rule
+  matched (default-deny)
 
-The three possible policy decisions are:
-- **allow** — the operation is explicitly permitted by the constitution
-- **deny** — the operation is categorically forbidden by the constitution (absolute prohibition)
-- **escalate** — the operation is not explicitly permitted but also not forbidden; it requires human approval
-
-When analyzing FAIL results, pay attention to whether the constitution implies "deny" vs "escalate". If the constitution does not explicitly forbid an operation, the correct decision is typically "escalate" (not "deny") so a human can make the judgment call.
+When analyzing FAIL results:
+- A "deny" result with rule "default-deny" means no compiled rule matched. This is
+  correct for operations the constitution prohibits or does not address. It is WRONG
+  if the constitution grants permission (missing allow rule) or requires human judgment
+  (missing escalate rule).
+- A "deny" result with rule "structural-*" means a hardcoded invariant fired. Structural
+  invariants are ground truth and are always correct.
+- An "escalate" result means a compiled rule routed the operation for human judgment.
+  This is wrong if the constitution explicitly allows the operation (should be "allow")
+  or explicitly prohibits it (should be "deny" via default-deny, meaning the escalate
+  rule is too broad).
 
 ## Instructions
 
@@ -115,7 +161,9 @@ When analyzing FAIL results, pay attention to whether the constitution implies "
    - **"rule"**: The compiled rule is wrong and needs to be fixed. The scenario expectation correctly reflects the constitution.
    - **"scenario"**: The scenario expectation is wrong. The compiled rule is correct per the constitution. Provide the corrected expectedDecision and reasoning.
    - **"both"**: The rule needs adjustment AND the scenario expectation is wrong. Provide the corrected expectedDecision and reasoning.
-2. Identify suspicious patterns (e.g., a broad allow rule shadowing a narrow deny, or "deny" used where "escalate" would be more appropriate).
+2. Identify suspicious patterns (e.g., a broad "allow" rule shadowing a narrow
+   "escalate" rule, or an "escalate" rule catching operations that should be
+   default-denied because the constitution prohibits them).
 3. Identify missing coverage -- scenarios the constitution implies that were not tested.
 4. If you suspect gaps, generate additional test scenarios to probe them.
 5. Set "pass" to true ONLY if all results are correct and coverage is adequate.
@@ -126,6 +174,7 @@ For additional scenarios, use concrete paths matching the directories in the com
 ## Available Tools
 
 IMPORTANT: Only use these exact server/tool combinations in additional scenarios. Do NOT invent tool names.
+ALL tools listed here are known/annotated — the "unknown tool → deny" structural invariant CANNOT apply to any of them. NEVER generate scenarios expecting "deny" due to the unknown tool invariant.
 
 ${(availableTools ?? []).map((t) => `- ${t.serverName}/${t.toolName}`).join('\n')}
 
@@ -134,33 +183,11 @@ ${(availableTools ?? []).map((t) => `- ${t.serverName}/${t.toolName}`).join('\n'
 Be concise. Keep the analysis to 2-3 sentences per issue found. Only generate additional scenarios that test genuinely untested gaps -- do not duplicate existing coverage. Limit additional scenarios to at most 5.`;
 }
 
-export async function verifyPolicy(
-  constitutionText: string,
-  compiledPolicy: CompiledPolicyFile,
-  toolAnnotations: ToolAnnotationsFile,
-  protectedPaths: string[],
-  scenarios: TestScenario[],
-  llm: LanguageModel,
-  maxRounds: number = DEFAULT_MAX_ROUNDS,
-  allowedDirectory?: string,
-  onProgress?: (message: string) => void,
-  serverDomainAllowlists?: ReadonlyMap<string, readonly string[]>,
-  dynamicLists?: DynamicListsFile,
-): Promise<VerificationResult> {
-  const engine = new PolicyEngine(
-    compiledPolicy,
-    toolAnnotations,
-    protectedPaths,
-    allowedDirectory,
-    serverDomainAllowlists,
-    dynamicLists,
-  );
+// ---------------------------------------------------------------------------
+// Response Schema + Session
+// ---------------------------------------------------------------------------
 
-  const allAnnotations = Object.values(toolAnnotations.servers).flatMap((s) => s.tools);
-  const serverNamesList = [...new Set(allAnnotations.map((a) => a.serverName))] as [string, ...string[]];
-  const toolNamesList = [...new Set(allAnnotations.map((a) => a.toolName))] as [string, ...string[]];
-  const availableTools = allAnnotations.map((a) => ({ serverName: a.serverName, toolName: a.toolName }));
-
+function buildJudgeResponseSchema(serverNames: [string, ...string[]], toolNames: [string, ...string[]]) {
   const blameSchema = z.discriminatedUnion('kind', [
     z.object({
       kind: z.literal('rule'),
@@ -180,7 +207,7 @@ export async function verifyPolicy(
     }),
   ]);
 
-  const responseSchema = z.object({
+  return z.object({
     analysis: z.string(),
     pass: z.boolean(),
     failureAttributions: z.array(
@@ -193,8 +220,8 @@ export async function verifyPolicy(
       z.object({
         description: z.string(),
         request: z.object({
-          serverName: z.enum(serverNamesList),
-          toolName: z.enum(toolNamesList),
+          serverName: z.enum(serverNames),
+          toolName: z.enum(toolNames),
           arguments: z.record(z.string(), z.unknown()),
         }),
         expectedDecision: z.enum(['allow', 'deny', 'escalate']),
@@ -202,11 +229,165 @@ export async function verifyPolicy(
       }),
     ),
   });
+}
+
+type JudgeOutput = z.infer<ReturnType<typeof buildJudgeResponseSchema>>;
+
+/**
+ * Multi-turn verifier session. Maintains conversation history across
+ * verification rounds so the LLM has context from prior analysis without
+ * re-serializing previousAnalysis and schema hints each round.
+ *
+ * Follows the same pattern as ConstitutionCompilerSession.
+ */
+export class PolicyVerifierSession {
+  private readonly systemPrompt: string | SystemModelMessage;
+  private readonly model: LanguageModel;
+  private readonly schema: ReturnType<typeof buildJudgeResponseSchema>;
+  private readonly history: Array<{ role: 'user' | 'assistant'; content: string }> = [];
+  private readonly schemaHint: string;
+  private turns = 0;
+
+  constructor(options: {
+    system: string | SystemModelMessage;
+    model: LanguageModel;
+    serverNames: [string, ...string[]];
+    toolNames: [string, ...string[]];
+  }) {
+    this.systemPrompt = options.system;
+    this.model = options.model;
+    this.schema = buildJudgeResponseSchema(options.serverNames, options.toolNames);
+    this.schemaHint = schemaToPromptHint(this.schema);
+  }
+
+  /** Execute a judge round with compact results formatting. */
+  async judgeRound(executionResults: ExecutionResult[], onProgress?: (message: string) => void): Promise<JudgeOutput> {
+    const roundLabel = this.turns + 1;
+    const resultsText = formatCompactResults(executionResults);
+
+    // Append schema hint only on the first turn; subsequent turns
+    // already have it in conversation history.
+    const content =
+      `## Execution Results (Round ${roundLabel})\n\n${resultsText}\n\nAnalyze the results and respond following the instructions in the system prompt.` +
+      (this.turns === 0 ? this.schemaHint : '');
+
+    this.history.push({ role: 'user', content });
+
+    onProgress?.('Judging...');
+
+    const result = await generateText({
+      model: this.model,
+      system: this.systemPrompt,
+      messages: this.history,
+      maxOutputTokens: DEFAULT_MAX_TOKENS,
+    });
+
+    // Try to parse; on schema failure, do one internal retry
+    const firstAttempt = this.tryParse(result.text);
+    if (firstAttempt.ok) {
+      this.history.push({ role: 'assistant', content: result.text });
+      this.turns++;
+      return firstAttempt.value;
+    }
+
+    // First parse failed -- attempt one schema repair round.
+    // Build the retry messages without mutating history so that only
+    // the successful response is persisted in the conversation.
+    onProgress?.('Schema repair 1/1...');
+
+    const retryResult = await generateText({
+      model: this.model,
+      system: this.systemPrompt,
+      messages: [
+        ...this.history,
+        { role: 'assistant' as const, content: result.text },
+        {
+          role: 'user' as const,
+          content: `Your response failed schema validation:\n${firstAttempt.error}\n\nPlease fix the errors and return valid JSON matching the schema.`,
+        },
+      ],
+      maxOutputTokens: DEFAULT_MAX_TOKENS,
+    });
+
+    // If retry also fails, remove the dangling user message from
+    // history before re-throwing so the session remains usable.
+    try {
+      const retryOutput = parseJsonWithSchema(retryResult.text, this.schema);
+      this.history.push({ role: 'assistant', content: retryResult.text });
+      this.turns++;
+      return retryOutput;
+    } catch (retryError) {
+      this.history.pop(); // remove the user message added at the start
+      throw retryError;
+    }
+  }
+
+  /** Returns the number of turns completed so far. */
+  get turnCount(): number {
+    return this.turns;
+  }
+
+  /** Attempts to parse LLM output, returning a discriminated result. */
+  private tryParse(text: string): { ok: true; value: JudgeOutput } | { ok: false; error: string } {
+    try {
+      return { ok: true, value: parseJsonWithSchema(text, this.schema) };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+}
+
+export async function verifyPolicy(
+  constitutionText: string,
+  compiledPolicy: CompiledPolicyFile,
+  toolAnnotations: ToolAnnotationsFile,
+  protectedPaths: string[],
+  scenarios: TestScenario[],
+  llm: LanguageModel,
+  maxRounds: number = DEFAULT_MAX_ROUNDS,
+  allowedDirectory?: string,
+  onProgress?: (message: string) => void,
+  serverDomainAllowlists?: ReadonlyMap<string, readonly string[]>,
+  dynamicLists?: DynamicListsFile,
+  system?: string | SystemModelMessage,
+  session?: PolicyVerifierSession,
+): Promise<VerificationResult> {
+  const engine = new PolicyEngine(
+    compiledPolicy,
+    toolAnnotations,
+    protectedPaths,
+    allowedDirectory,
+    serverDomainAllowlists,
+    dynamicLists,
+  );
+
+  // Reuse provided session or create one from annotations + system prompt
+  let effectiveSession: PolicyVerifierSession;
+  if (session) {
+    effectiveSession = session;
+  } else {
+    const allAnnotations = Object.values(toolAnnotations.servers).flatMap((s) => s.tools);
+    const serverNamesList = [...new Set(allAnnotations.map((a) => a.serverName))] as [string, ...string[]];
+    const toolNamesList = [...new Set(allAnnotations.map((a) => a.toolName))] as [string, ...string[]];
+    effectiveSession = new PolicyVerifierSession({
+      system:
+        system ??
+        buildJudgeSystemPrompt(
+          constitutionText,
+          compiledPolicy,
+          protectedPaths,
+          allAnnotations.map((a) => ({ serverName: a.serverName, toolName: a.toolName })),
+          dynamicLists,
+        ),
+      model: llm,
+      serverNames: serverNamesList,
+      toolNames: toolNamesList,
+    });
+  }
 
   const rounds: VerifierRound[] = [];
   const allFailedScenarios: ExecutionResult[] = [];
   let currentScenarios = scenarios;
-  let previousAnalysis: string | undefined;
 
   for (let round = 1; round <= maxRounds; round++) {
     // Execute scenarios against the real engine
@@ -214,24 +395,7 @@ export async function verifyPolicy(
     const failures = executionResults.filter((r) => !r.pass);
     allFailedScenarios.push(...failures);
 
-    // Send results to LLM judge
-    const prompt = buildJudgePrompt(
-      constitutionText,
-      compiledPolicy,
-      toolAnnotations,
-      protectedPaths,
-      executionResults,
-      round,
-      previousAnalysis,
-      availableTools,
-    );
-
-    const { output: judgment } = await generateObjectWithRepair({
-      model: llm,
-      schema: responseSchema,
-      prompt,
-      onProgress,
-    });
+    const judgment = await effectiveSession.judgeRound(executionResults, onProgress);
 
     const newScenarios: TestScenario[] = judgment.additionalScenarios.map((s) => ({
       ...s,
@@ -245,8 +409,6 @@ export async function verifyPolicy(
       newScenarios,
       attributedFailures: judgment.failureAttributions,
     });
-
-    previousAnalysis = judgment.analysis;
 
     // If judge says pass and no new scenarios, we are done
     if (judgment.pass && newScenarios.length === 0) {
@@ -280,12 +442,6 @@ export async function verifyPolicy(
 // ---------------------------------------------------------------------------
 // Structural Conflict Filtering
 // ---------------------------------------------------------------------------
-
-export interface DiscardedScenario {
-  scenario: TestScenario;
-  actual: ExecutionResult['actualDecision'];
-  rule: string;
-}
 
 /**
  * Filters out scenarios whose expected decision conflicts with a structural

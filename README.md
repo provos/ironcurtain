@@ -138,7 +138,7 @@ compiles into deterministic JSON rules:
 ]
 ```
 
-Any tool call that doesn't match an explicit rule is escalated to a human by default — the system is deny-by-default with human review as the fallback.
+Any tool call that doesn't match an explicit allow or escalate rule is **denied by default**. Rules define what is permitted or needs human judgment; everything else is blocked.
 
 ## Getting Started
 

@@ -340,7 +340,7 @@ export class AgentSession implements Session {
     const logContext: LlmLogContext = { stepName: 'agent' };
     return wrapLanguageModel({
       model: baseModel,
-      middleware: createLlmLoggingMiddleware(this.config.llmLogPath, logContext),
+      middleware: createLlmLoggingMiddleware(this.config.llmLogPath, logContext, { deltaLogging: true }),
     });
   }
 

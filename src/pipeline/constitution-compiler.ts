@@ -7,12 +7,18 @@
  * that faithfully implements the non-structural principles.
  */
 
-import type { LanguageModel } from 'ai';
+import type { LanguageModel, SystemModelMessage } from 'ai';
+import { generateText } from 'ai';
 import { z } from 'zod';
-import { generateObjectWithRepair } from './generate-with-repair.js';
-import type { ToolAnnotation, CompiledRule, RepairContext, ListDefinition } from './types.js';
+import {
+  DEFAULT_MAX_TOKENS,
+  generateObjectWithRepair,
+  parseJsonWithSchema,
+  schemaToPromptHint,
+} from './generate-with-repair.js';
+import type { ToolAnnotation, CompiledRule, RepairContext, ListDefinition, TestScenario } from './types.js';
 import { isArgumentRole, getArgumentRoleValues } from '../types/argument-roles.js';
-import { formatExecutionResults } from './policy-verifier.js';
+import { formatFailedResults } from './policy-verifier.js';
 
 export interface CompilerConfig {
   protectedPaths: string[];
@@ -53,16 +59,21 @@ function buildCompilerResponseSchema(serverNames: [string, ...string[]], toolNam
     name: z.string(),
     description: z.string(),
     principle: z.string(),
-    if: z.object({
-      roles: z.array(z.enum(getArgumentRoleValues())).optional(),
-      server: z.array(z.enum(serverNames)).optional(),
-      tool: z.array(z.enum(toolNames)).optional(),
-      sideEffects: z.boolean().optional(),
-      paths: pathConditionSchema.optional(),
-      domains: domainConditionSchema.optional(),
-      lists: z.array(listConditionSchema).optional(),
-    }),
-    then: z.enum(['allow', 'deny', 'escalate']),
+    if: z
+      .object({
+        roles: z.array(z.enum(getArgumentRoleValues())).optional(),
+        server: z.array(z.enum(serverNames)).optional(),
+        tool: z.array(z.enum(toolNames)).optional(),
+        sideEffects: z.boolean().optional(),
+        paths: pathConditionSchema.optional(),
+        domains: domainConditionSchema.optional(),
+        lists: z.array(listConditionSchema).optional(),
+      })
+      // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- runtime check: all fields are optional, Object.values may be all undefined
+      .refine((cond) => Object.values(cond).some((v) => v !== undefined), {
+        message: 'Rule condition must have at least one field — catch-all rules are not allowed',
+      }),
+    then: z.enum(['allow', 'escalate']),
     reason: z.string(),
   });
 
@@ -72,10 +83,37 @@ function buildCompilerResponseSchema(serverNames: [string, ...string[]], toolNam
   });
 }
 
-export function buildCompilerPrompt(
+/**
+ * Formats handwritten scenarios as ground truth constraints for the compiler LLM.
+ */
+function formatGroundTruthSection(scenarios?: TestScenario[]): string {
+  if (!scenarios || scenarios.length === 0) return '';
+
+  const lines = scenarios.map(
+    (s, i) =>
+      `${i + 1}. ${s.request.serverName}/${s.request.toolName} ${JSON.stringify(s.request.arguments)} → ${s.expectedDecision}\n   ${s.reasoning}`,
+  );
+
+  return `
+## Ground Truth Constraints
+
+These test scenarios represent required policy outcomes. Your compiled rules
+MUST produce these exact decisions:
+
+${lines.join('\n\n')}
+`;
+}
+
+/**
+ * Builds the stable system prompt portion for the compiler.
+ * Contains: role preamble, constitution, annotations, structural invariants, and instructions.
+ * This is the cacheable part — it stays the same across repair rounds.
+ */
+export function buildCompilerSystemPrompt(
   constitutionText: string,
   annotations: ToolAnnotation[],
   config: CompilerConfig,
+  handwrittenScenarios?: TestScenario[],
 ): string {
   const annotationsSummary = annotations
     .map((a) => {
@@ -107,6 +145,10 @@ ${config.protectedPaths.map((p) => `- ${p}`).join('\n')}
 
 2. **Sandbox containment** -- any tool call where ALL paths are within the sandbox directory is automatically allowed. Do NOT generate rules for sandbox-internal operations; the engine handles this at runtime with the dynamically configured sandbox path.
 
+3. **Default deny** -- if no compiled rule matches, the engine denies the operation.
+   You do NOT need catch-all deny or escalate rules; uncovered operations are
+   automatically denied.
+
 ## Instructions
 
 Produce an ORDERED list of policy rules (first match wins). Each rule has:
@@ -121,9 +163,12 @@ Produce an ORDERED list of policy rules (first match wins). Each rule has:
   - "paths": path condition with "roles" (which argument roles to extract paths from) and "within" (concrete absolute directory). Rule fires only if ALL extracted paths are within that directory. If zero paths are extracted (tool has no matching path arguments), the condition is NOT satisfied and the rule does NOT match. This implicitly requires matching roles, so top-level "roles" is redundant when "paths" is present.
   - "domains": domain condition with "roles" (which URL argument roles to extract domains from) and "allowed" (list of allowed domain patterns, e.g. ["github.com", "*.github.com"]). Rule fires only if ALL extracted domains match an allowed pattern. Supports exact match, "*.example.com" prefix wildcards, and "*" (any domain). If zero URLs are extracted, the condition is NOT satisfied and the rule does NOT match.
 - "then": the policy decision:
-  - "allow" — the operation is explicitly permitted by the constitution
-  - "deny" — the operation is categorically forbidden by the constitution (absolute prohibition)
-  - "escalate" — the operation is not explicitly permitted but also not forbidden; route to a human for approval
+  - "allow" -- the operation is explicitly permitted by the constitution
+  - "escalate" -- the operation is not explicitly permitted but requires human
+    judgment rather than outright denial (e.g., writes to sensitive-but-not-forbidden
+    areas, operations the constitution says need approval)
+  Note: "deny" is NOT a valid output. Prohibition is implicit -- if no rule matches,
+  the engine denies the call.
 - "reason": human-readable explanation
 
 CRITICAL RULES:
@@ -132,11 +177,13 @@ CRITICAL RULES:
 3. "Outside a directory" semantics: use rule ordering. A rule with "within" matches the inside case; the next rule without "paths" catches everything else as a fallthrough.
 4. The move tool's source argument has both read-path and delete-path roles. A blanket "roles": ["delete-path"] rule will catch all moves.
 5. Order matters: more specific rules before more general ones.
-6. Use all three decision types. Map each constitution principle to the appropriate decision: "allow" for grants, "deny" for prohibitions, and "escalate" for principles that require human judgment or approval. If the constitution does not explicitly forbid an operation, prefer "escalate" over "deny" so a human can decide.
-7. The rule chain must cover all operation types with appropriate fallthrough rules. Do not leave gaps — every combination of argument roles should eventually match a rule.
+6. Only output "allow" and "escalate" rules. Constitutional prohibitions (e.g., "delete
+   operations are never permitted") do NOT need explicit rules because the default deny
+   handles them. Only write rules for things the constitution explicitly allows or
+   requires human judgment on.
 
 Be concise in descriptions and reasons -- one sentence each.
-
+${formatGroundTruthSection(handwrittenScenarios)}
 ## Dynamic Lists
 
 When the constitution references a CATEGORY of things (e.g., "major news sites",
@@ -168,22 +215,27 @@ Examples:
 - "major tech stocks" -> @tech-stock-tickers (type: identifiers, requiresMcp: false)`;
 }
 
-export function buildRepairPrompt(basePrompt: string, repairContext: RepairContext): string {
-  const rulesText = repairContext.previousRules
-    .map((r, i) => `  ${i + 1}. [${r.name}] if: ${JSON.stringify(r.if)} then: ${r.then} -- ${r.reason}`)
-    .join('\n');
+/** Builds the repair instructions sent as the user prompt during repair rounds. */
+export function buildRepairInstructions(repairContext: RepairContext): string {
+  const failuresText = formatFailedResults(repairContext.failedScenarios);
 
-  const failuresText = formatExecutionResults(repairContext.failedScenarios);
+  let existingListsText = '';
+  if (repairContext.existingListDefinitions && repairContext.existingListDefinitions.length > 0) {
+    const listLines = repairContext.existingListDefinitions.map((d) => `- @${d.name} (type: ${d.type})`).join('\n');
+    existingListsText = `
 
-  return `${basePrompt}
+### Available Dynamic Lists
 
-## REPAIR INSTRUCTIONS (attempt ${repairContext.attemptNumber})
+The following dynamic lists have already been resolved and are available for use in rules.
+You MUST use these exact names — do NOT rename or create new lists:
 
-Your previous compilation produced rules that failed verification. You MUST fix these issues.
+${listLines}
+`;
+  }
 
-### Previous Rules
+  return `## REPAIR INSTRUCTIONS (attempt ${repairContext.attemptNumber})
 
-${rulesText}
+Your previous rules (in your last response above) failed verification. You MUST fix these issues.
 
 ### Failed Scenarios
 
@@ -192,13 +244,14 @@ ${failuresText}
 ### Judge Analysis
 
 ${repairContext.judgeAnalysis}
-
+${existingListsText}
 ### Requirements
 
 1. Fix the rule ordering, conditions, or add missing rules to make ALL failed scenarios pass.
 2. Do NOT break scenarios that were already passing — only fix the failures.
 3. Pay close attention to the judge analysis for specific guidance on what went wrong.
-4. Return a complete, corrected rule set (not just the changed rules).`;
+4. Return a complete, corrected rule set (not just the changed rules).
+${formatGroundTruthSection(repairContext.handwrittenScenarios)}`;
 }
 
 export async function compileConstitution(
@@ -208,16 +261,21 @@ export async function compileConstitution(
   llm: LanguageModel,
   repairContext?: RepairContext,
   onProgress?: (message: string) => void,
+  system?: string | SystemModelMessage,
 ): Promise<CompilationOutput> {
   const serverNames = [...new Set(annotations.map((a) => a.serverName))] as [string, ...string[]];
   const toolNames = [...new Set(annotations.map((a) => a.toolName))] as [string, ...string[]];
   const schema = buildCompilerResponseSchema(serverNames, toolNames);
-  const basePrompt = buildCompilerPrompt(constitutionText, annotations, config);
-  const prompt = repairContext ? buildRepairPrompt(basePrompt, repairContext) : basePrompt;
+
+  const effectiveSystem = system ?? buildCompilerSystemPrompt(constitutionText, annotations, config);
+  const prompt = repairContext
+    ? buildRepairInstructions(repairContext)
+    : 'Compile the constitution into policy rules following the instructions above.';
 
   const { output } = await generateObjectWithRepair({
     model: llm,
     schema,
+    system: effectiveSystem,
     prompt,
     onProgress,
   });
@@ -226,6 +284,136 @@ export async function compileConstitution(
     rules: output.rules,
     listDefinitions: output.listDefinitions,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Multi-Turn Constitution Compiler Session
+// ---------------------------------------------------------------------------
+
+const INITIAL_COMPILE_MESSAGE = 'Compile the constitution into policy rules following the instructions above.';
+
+/**
+ * A stateful multi-turn wrapper around the constitution compiler.
+ *
+ * Maintains a conversation history so that repair feedback (failed scenarios,
+ * judge analysis) can be communicated to the LLM in follow-up turns with
+ * full context of its prior output. The system prompt is fixed at construction
+ * and never changes, enabling prompt caching.
+ *
+ * Lifecycle:
+ *   1. Construct with system prompt, model, and annotations (once per pipeline run)
+ *   2. Call compile() for the initial rule set
+ *   3. After verification, call recompile(repairContext) with failure feedback
+ *   4. Session is GC'd when the pipeline finishes (no explicit close needed)
+ */
+export class ConstitutionCompilerSession {
+  private readonly systemPrompt: string | SystemModelMessage;
+  private readonly model: LanguageModel;
+  private readonly schema: ReturnType<typeof buildCompilerResponseSchema>;
+  private readonly history: Array<{ role: 'user' | 'assistant'; content: string }> = [];
+  private readonly schemaHint: string;
+  private turns = 0;
+
+  constructor(options: { system: string | SystemModelMessage; model: LanguageModel; annotations: ToolAnnotation[] }) {
+    this.systemPrompt = options.system;
+    this.model = options.model;
+
+    const serverNames = [...new Set(options.annotations.map((a) => a.serverName))] as [string, ...string[]];
+    const toolNames = [...new Set(options.annotations.map((a) => a.toolName))] as [string, ...string[]];
+    this.schema = buildCompilerResponseSchema(serverNames, toolNames);
+    this.schemaHint = schemaToPromptHint(this.schema);
+  }
+
+  /**
+   * Initial compilation: sends the first user message and returns compiled rules.
+   * Semantically equivalent to the existing single-shot compileConstitution().
+   */
+  async compile(onProgress?: (message: string) => void): Promise<CompilationOutput> {
+    return this.callAndParse(INITIAL_COMPILE_MESSAGE, onProgress);
+  }
+
+  /**
+   * Follow-up compilation: feeds back repair context (failed scenarios + judge
+   * analysis) and requests corrected rules. The LLM sees its previous output
+   * and the failure feedback in the conversation history.
+   */
+  async recompile(repairContext: RepairContext, onProgress?: (message: string) => void): Promise<CompilationOutput> {
+    return this.callAndParse(buildRepairInstructions(repairContext), onProgress);
+  }
+
+  /** Returns the number of turns completed so far. */
+  get turnCount(): number {
+    return this.turns;
+  }
+
+  private async callAndParse(userMessage: string, onProgress?: (message: string) => void): Promise<CompilationOutput> {
+    // Append the full schema hint only on the first turn; subsequent
+    // turns already have it in conversation history.
+    const content = this.turns === 0 ? userMessage + this.schemaHint : userMessage;
+    this.history.push({ role: 'user', content });
+
+    onProgress?.('Compiling...');
+
+    const result = await generateText({
+      model: this.model,
+      system: this.systemPrompt,
+      messages: this.history,
+      maxOutputTokens: DEFAULT_MAX_TOKENS,
+    });
+
+    // Try to parse; on schema failure, do one internal retry
+    const firstAttempt = this.tryParse(result.text);
+    if (firstAttempt.ok) {
+      this.history.push({ role: 'assistant', content: result.text });
+      this.turns++;
+      return firstAttempt.value;
+    }
+
+    // First parse failed -- attempt one schema repair round.
+    // Build the retry messages without mutating history so that only
+    // the successful response is persisted in the conversation.
+    onProgress?.('Schema repair 1/1...');
+
+    const retryResult = await generateText({
+      model: this.model,
+      system: this.systemPrompt,
+      messages: [
+        ...this.history,
+        { role: 'assistant' as const, content: result.text },
+        {
+          role: 'user' as const,
+          content: `Your response failed schema validation:\n${firstAttempt.error}\n\nPlease fix the errors and return valid JSON matching the schema.`,
+        },
+      ],
+      maxOutputTokens: DEFAULT_MAX_TOKENS,
+    });
+
+    // If retry also fails, remove the dangling user message from
+    // history before re-throwing so the session remains usable.
+    try {
+      const retryOutput = this.parseOutput(retryResult.text);
+      this.history.push({ role: 'assistant', content: retryResult.text });
+      this.turns++;
+      return retryOutput;
+    } catch (retryError) {
+      this.history.pop(); // remove the user message added at the start
+      throw retryError;
+    }
+  }
+
+  /** Attempts to parse LLM output, returning a discriminated result. */
+  private tryParse(text: string): { ok: true; value: CompilationOutput } | { ok: false; error: string } {
+    try {
+      return { ok: true, value: this.parseOutput(text) };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  private parseOutput(text: string): CompilationOutput {
+    const parsed = parseJsonWithSchema(text, this.schema);
+    return { rules: parsed.rules, listDefinitions: parsed.listDefinitions };
+  }
 }
 
 // -----------------------------------------------------------------------

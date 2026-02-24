@@ -7,6 +7,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { MockLanguageModelV3 } from 'ai/test';
 import {
+  buildRepairInstructions,
   compileConstitution,
   validateCompiledRules,
   type CompilerConfig,
@@ -18,12 +19,15 @@ import {
   type McpServerConnection,
   type ListResolverConfig,
 } from '../src/pipeline/list-resolver.js';
+import { buildGeneratorSystemPrompt, formatDynamicListsSection } from '../src/pipeline/scenario-generator.js';
+import { buildJudgeSystemPrompt } from '../src/pipeline/policy-verifier.js';
 import { PolicyEngine } from '../src/trusted-process/policy-engine.js';
 import type {
   CompiledPolicyFile,
   CompiledRule,
   DynamicListsFile,
   ListDefinition,
+  RepairContext,
   ResolvedList,
   ToolAnnotation,
   ToolAnnotationsFile,
@@ -95,11 +99,19 @@ function createCountingModel(valueFactory: (callIndex: number) => string[] = () 
   return { model, getCallCount: () => callCount };
 }
 
-function createPromptCapturingModel(response: unknown): { model: MockLanguageModelV3; getPrompt: () => string } {
+function createPromptCapturingModel(response: unknown): {
+  model: MockLanguageModelV3;
+  getPrompt: () => string;
+  getSystemPrompt: () => string;
+} {
   let capturedPrompt = '';
+  let capturedSystem = '';
   const model = new MockLanguageModelV3({
     doGenerate: async (options) => {
       for (const msg of options.prompt) {
+        if (msg.role === 'system') {
+          capturedSystem = typeof msg.content === 'string' ? msg.content : '';
+        }
         if (msg.role === 'user') {
           for (const part of msg.content) {
             if (part.type === 'text') capturedPrompt = part.text;
@@ -112,7 +124,7 @@ function createPromptCapturingModel(response: unknown): { model: MockLanguageMod
       };
     },
   });
-  return { model, getPrompt: () => capturedPrompt };
+  return { model, getPrompt: () => capturedPrompt, getSystemPrompt: () => capturedSystem };
 }
 
 const fetchAnnotation: ToolAnnotation = {
@@ -432,16 +444,16 @@ describe('Dynamic Lists Compiler Output', () => {
     expect(result.listDefinitions[0].name).toBe('my-contacts');
   });
 
-  it('prompt includes Dynamic Lists section', async () => {
-    const { model, getPrompt } = createPromptCapturingModel({ rules: [] });
+  it('system prompt includes Dynamic Lists section', async () => {
+    const { model, getSystemPrompt } = createPromptCapturingModel({ rules: [] });
 
     await compileConstitution('Allow news sites.', sampleAnnotations, compilerConfig, model);
 
-    const prompt = getPrompt();
-    expect(prompt).toContain('## Dynamic Lists');
-    expect(prompt).toContain('@major-news-sites');
-    expect(prompt).toContain('listDefinitions');
-    expect(prompt).toContain('kebab-case');
+    const system = getSystemPrompt();
+    expect(system).toContain('## Dynamic Lists');
+    expect(system).toContain('@major-news-sites');
+    expect(system).toContain('listDefinitions');
+    expect(system).toContain('kebab-case');
   });
 });
 
@@ -681,7 +693,12 @@ describe('List Resolver', () => {
 
     const result = await resolveList(newsListDef, { model: mockLLM });
 
-    expect(result.values).toEqual(['cnn.com', 'bbc.com']);
+    expect(result.values).toContain('cnn.com');
+    expect(result.values).toContain('bbc.com');
+    expect(result.values).toContain('*.cnn.com');
+    expect(result.values).toContain('*.bbc.com');
+    // No extra entries beyond apex + wildcard pairs
+    expect(result.values).toHaveLength(4);
   });
 
   it('preserves manualAdditions from existing resolution', async () => {
@@ -1434,5 +1451,175 @@ describe('resolveAllLists bypassCache', () => {
 
     expect(getCallCount()).toBe(1); // No additional LLM call
     expect(result.lists['tech-stock-tickers'].values).toContain('AAPL');
+  });
+});
+
+// ===========================================================================
+// Phase 5: Dynamic list values in prompts
+// ===========================================================================
+
+describe('Dynamic List Values in Prompts', () => {
+  const testDynamicLists = makeDynamicLists({
+    'major-news-sites': { values: ['cnn.com', 'bbc.com', 'nytimes.com'] },
+    'financial-sites': { values: ['bloomberg.com', 'wsj.com'] },
+  });
+
+  describe('formatDynamicListsSection', () => {
+    it('formats resolved list values into a markdown section', () => {
+      const section = formatDynamicListsSection(testDynamicLists);
+
+      expect(section).toContain('## Dynamic List Values');
+      expect(section).toContain('@major-news-sites');
+      expect(section).toContain('cnn.com, bbc.com, nytimes.com');
+      expect(section).toContain('@financial-sites');
+      expect(section).toContain('bloomberg.com, wsj.com');
+      expect(section).toContain('obviously unrelated');
+    });
+
+    it('truncates lists longer than 5 values', () => {
+      const longLists = makeDynamicLists({
+        'many-sites': {
+          values: ['a.com', 'b.com', 'c.com', 'd.com', 'e.com', 'f.com', 'g.com'],
+        },
+      });
+      const section = formatDynamicListsSection(longLists);
+
+      expect(section).toContain('a.com, b.com, c.com, d.com, e.com');
+      expect(section).toContain('... (7 total)');
+      expect(section).not.toContain('f.com');
+    });
+
+    it('returns empty string when dynamicLists is undefined', () => {
+      expect(formatDynamicListsSection(undefined)).toBe('');
+    });
+
+    it('returns empty string when dynamicLists has no lists', () => {
+      expect(formatDynamicListsSection({ generatedAt: '', lists: {} })).toBe('');
+    });
+  });
+
+  describe('buildGeneratorSystemPrompt', () => {
+    it('includes dynamic list values when provided', () => {
+      const prompt = buildGeneratorSystemPrompt(
+        'Allow news sites.',
+        sampleAnnotations,
+        '/tmp/sandbox',
+        [],
+        testDynamicLists,
+      );
+
+      expect(prompt).toContain('## Dynamic List Values');
+      expect(prompt).toContain('@major-news-sites');
+      expect(prompt).toContain('cnn.com, bbc.com, nytimes.com');
+      expect(prompt).toContain('@financial-sites');
+      expect(prompt).toContain('bloomberg.com, wsj.com');
+    });
+
+    it('omits dynamic list section when dynamicLists is undefined', () => {
+      const prompt = buildGeneratorSystemPrompt('Allow news sites.', sampleAnnotations, '/tmp/sandbox');
+
+      expect(prompt).not.toContain('## Dynamic List Values');
+    });
+  });
+
+  describe('buildJudgeSystemPrompt', () => {
+    const compiledPolicy = makePolicyFile([plainReadRule], [newsListDef]);
+
+    it('includes dynamic list values when provided', () => {
+      const prompt = buildJudgeSystemPrompt(
+        'Allow news sites.',
+        compiledPolicy,
+        ['/etc/ironcurtain'],
+        [],
+        testDynamicLists,
+      );
+
+      expect(prompt).toContain('## Dynamic List Values');
+      expect(prompt).toContain('@major-news-sites');
+      expect(prompt).toContain('cnn.com, bbc.com, nytimes.com');
+      expect(prompt).toContain('@financial-sites');
+    });
+
+    it('omits dynamic list section when dynamicLists is undefined', () => {
+      const prompt = buildJudgeSystemPrompt('Allow news sites.', compiledPolicy, ['/etc/ironcurtain']);
+
+      expect(prompt).not.toContain('## Dynamic List Values');
+    });
+  });
+});
+
+// ===========================================================================
+// Phase 6: Repair instructions include existing list names
+// ===========================================================================
+
+describe('Repair Instructions with Existing Lists', () => {
+  it('includes existing list definitions in repair instructions', () => {
+    const repairContext: RepairContext = {
+      failedScenarios: [],
+      judgeAnalysis: 'Some analysis',
+      attemptNumber: 1,
+      existingListDefinitions: [newsListDef, stocksListDef],
+    };
+
+    const instructions = buildRepairInstructions(repairContext);
+
+    expect(instructions).toContain('### Available Dynamic Lists');
+    expect(instructions).toContain('@major-news-sites (type: domains)');
+    expect(instructions).toContain('@tech-stock-tickers (type: identifiers)');
+    expect(instructions).toContain('MUST use these exact names');
+    expect(instructions).toContain('do NOT rename or create new lists');
+  });
+
+  it('includes handwritten scenarios as ground truth in repair instructions', () => {
+    const repairContext: RepairContext = {
+      failedScenarios: [],
+      judgeAnalysis: 'Some analysis',
+      attemptNumber: 1,
+      handwrittenScenarios: [
+        {
+          description: 'Delete file outside sandbox -- deny',
+          request: {
+            serverName: 'filesystem',
+            toolName: 'delete_file',
+            arguments: { path: '/etc/important.txt' },
+          },
+          expectedDecision: 'deny',
+          reasoning: 'No destruction principle',
+          source: 'handwritten',
+        },
+      ],
+    };
+
+    const instructions = buildRepairInstructions(repairContext);
+
+    expect(instructions).toContain('## Ground Truth Constraints');
+    expect(instructions).toContain('filesystem/delete_file');
+    expect(instructions).toContain('deny');
+    expect(instructions).toContain('No destruction principle');
+  });
+
+  it('omits dynamic lists section when no list definitions exist', () => {
+    const repairContext: RepairContext = {
+      failedScenarios: [],
+      judgeAnalysis: 'Some analysis',
+      attemptNumber: 1,
+    };
+
+    const instructions = buildRepairInstructions(repairContext);
+
+    expect(instructions).not.toContain('### Available Dynamic Lists');
+  });
+
+  it('omits dynamic lists section when list definitions array is empty', () => {
+    const repairContext: RepairContext = {
+      failedScenarios: [],
+      judgeAnalysis: 'Some analysis',
+      attemptNumber: 1,
+      existingListDefinitions: [],
+    };
+
+    const instructions = buildRepairInstructions(repairContext);
+
+    expect(instructions).not.toContain('### Available Dynamic Lists');
   });
 });

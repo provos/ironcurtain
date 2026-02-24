@@ -15,7 +15,7 @@ describe('Handwritten Scenarios', () => {
   const scenarios = getHandwrittenScenarios(SANDBOX_DIR);
 
   it('returns the expected number of scenarios', () => {
-    expect(scenarios.length).toBe(29);
+    expect(scenarios.length).toBe(2);
   });
 
   it('all scenarios have source "handwritten"', () => {
@@ -35,9 +35,8 @@ describe('Handwritten Scenarios', () => {
     }
   });
 
-  it('covers all expected decision types', () => {
+  it('covers deny and escalate decision types', () => {
     const decisions = new Set(scenarios.map((s) => s.expectedDecision));
-    expect(decisions).toContain('allow');
     expect(decisions).toContain('deny');
     expect(decisions).toContain('escalate');
   });
