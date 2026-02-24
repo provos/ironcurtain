@@ -787,7 +787,6 @@ describe('ConstitutionCompilerSession', () => {
     await session.compile();
 
     const repairContext: RepairContext = {
-
       failedScenarios: [
         {
           scenario: {
@@ -817,10 +816,7 @@ describe('ConstitutionCompilerSession', () => {
   });
 
   it('turnCount tracks the number of completed turns', async () => {
-    const { model } = createCallTrackingMockModel([
-      compilerResponseNoLists,
-      compilerResponseNoLists,
-    ]);
+    const { model } = createCallTrackingMockModel([compilerResponseNoLists, compilerResponseNoLists]);
 
     const session = new ConstitutionCompilerSession({
       system: 'Test prompt',
@@ -833,7 +829,6 @@ describe('ConstitutionCompilerSession', () => {
     expect(session.turnCount).toBe(1);
 
     const repairContext: RepairContext = {
-
       failedScenarios: [],
       judgeAnalysis: 'Some failures',
       attemptNumber: 1,
@@ -843,10 +838,7 @@ describe('ConstitutionCompilerSession', () => {
   });
 
   it('system prompt is identical across all turns', async () => {
-    const { model, calls } = createCallTrackingMockModel([
-      compilerResponseNoLists,
-      compilerResponseNoLists,
-    ]);
+    const { model, calls } = createCallTrackingMockModel([compilerResponseNoLists, compilerResponseNoLists]);
 
     const session = new ConstitutionCompilerSession({
       system: 'Stable compiler system prompt for caching',
@@ -856,7 +848,6 @@ describe('ConstitutionCompilerSession', () => {
 
     await session.compile();
     await session.recompile({
-
       failedScenarios: [],
       judgeAnalysis: 'test',
       attemptNumber: 1,
@@ -867,10 +858,7 @@ describe('ConstitutionCompilerSession', () => {
   });
 
   it('message history grows across turns', async () => {
-    const { model, calls } = createCallTrackingMockModel([
-      compilerResponseNoLists,
-      compilerResponseNoLists,
-    ]);
+    const { model, calls } = createCallTrackingMockModel([compilerResponseNoLists, compilerResponseNoLists]);
 
     const session = new ConstitutionCompilerSession({
       system: 'Test prompt',
@@ -884,7 +872,6 @@ describe('ConstitutionCompilerSession', () => {
     expect(calls[0].messages[0].role).toBe('user');
 
     await session.recompile({
-
       failedScenarios: [],
       judgeAnalysis: 'test',
       attemptNumber: 1,
@@ -901,10 +888,7 @@ describe('ConstitutionCompilerSession', () => {
     const model = new MockLanguageModelV3({
       doGenerate: async () => {
         callIndex++;
-        const text =
-          callIndex === 1
-            ? 'not valid json at all'
-            : JSON.stringify(compilerResponseNoLists);
+        const text = callIndex === 1 ? 'not valid json at all' : JSON.stringify(compilerResponseNoLists);
 
         return {
           content: [{ type: 'text' as const, text }],

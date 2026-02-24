@@ -146,11 +146,7 @@ describe('Constitution Compiler', () => {
       const result = await compileConstitution(sampleConstitution, sampleAnnotations, compilerConfig, mockLLM);
 
       const names = result.rules.map((r) => r.name);
-      expect(names).toEqual([
-        'allow-side-effect-free-tools',
-        'allow-read-in-sandbox',
-        'escalate-read-elsewhere',
-      ]);
+      expect(names).toEqual(['allow-side-effect-free-tools', 'allow-read-in-sandbox', 'escalate-read-elsewhere']);
     });
 
     it('each rule has principle linking back to constitution', async () => {

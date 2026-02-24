@@ -10,11 +10,7 @@
 import type { LanguageModel, SystemModelMessage } from 'ai';
 import { generateText } from 'ai';
 import { z } from 'zod';
-import {
-  DEFAULT_MAX_TOKENS,
-  parseJsonWithSchema,
-  schemaToPromptHint,
-} from './generate-with-repair.js';
+import { DEFAULT_MAX_TOKENS, parseJsonWithSchema, schemaToPromptHint } from './generate-with-repair.js';
 import { PolicyEngine } from '../trusted-process/policy-engine.js';
 import type { ToolCallRequest } from '../types/mcp.js';
 import { formatDynamicListsSection } from './scenario-generator.js';
@@ -191,10 +187,7 @@ Be concise. Keep the analysis to 2-3 sentences per issue found. Only generate ad
 // Response Schema + Session
 // ---------------------------------------------------------------------------
 
-function buildJudgeResponseSchema(
-  serverNames: [string, ...string[]],
-  toolNames: [string, ...string[]],
-) {
+function buildJudgeResponseSchema(serverNames: [string, ...string[]], toolNames: [string, ...string[]]) {
   const blameSchema = z.discriminatedUnion('kind', [
     z.object({
       kind: z.literal('rule'),
@@ -268,10 +261,7 @@ export class PolicyVerifierSession {
   }
 
   /** Execute a judge round with compact results formatting. */
-  async judgeRound(
-    executionResults: ExecutionResult[],
-    onProgress?: (message: string) => void,
-  ): Promise<JudgeOutput> {
+  async judgeRound(executionResults: ExecutionResult[], onProgress?: (message: string) => void): Promise<JudgeOutput> {
     const roundLabel = this.turns + 1;
     const resultsText = formatCompactResults(executionResults);
 
