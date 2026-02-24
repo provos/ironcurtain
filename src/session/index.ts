@@ -300,16 +300,25 @@ function patchMcpServerAllowedDirectory(
  * Resolves the real API key for a provider host from config.
  */
 function resolveRealApiKey(host: string, config: IronCurtainConfig): string {
+  let key: string;
   switch (host) {
     case 'api.anthropic.com':
-      return config.userConfig.anthropicApiKey;
+      key = config.userConfig.anthropicApiKey;
+      break;
     case 'api.openai.com':
-      return config.userConfig.openaiApiKey;
+      key = config.userConfig.openaiApiKey;
+      break;
     case 'generativelanguage.googleapis.com':
-      return config.userConfig.googleApiKey;
+      key = config.userConfig.googleApiKey;
+      break;
     default:
+      logger.warn(`No API key mapping for unknown provider host: ${host}`);
       return '';
   }
+  if (!key) {
+    logger.warn(`No API key configured for provider host: ${host}`);
+  }
+  return key;
 }
 
 // Re-export types needed by callers
