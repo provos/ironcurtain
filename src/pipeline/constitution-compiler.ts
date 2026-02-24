@@ -140,6 +140,8 @@ ${config.protectedPaths.map((p) => `- ${p}`).join('\n')}
 
 2. **Sandbox containment** -- any tool call where ALL paths are within the sandbox directory is automatically allowed. Do NOT generate rules for sandbox-internal operations; the engine handles this at runtime with the dynamically configured sandbox path.
 
+3. **Default escalate** -- if no compiled rule matches, the engine escalates to a human for approval. You do NOT need catch-all escalate rules; any operation not covered by your rules will automatically be routed for human review.
+
 ## Instructions
 
 Produce an ORDERED list of policy rules (first match wins). Each rule has:
@@ -165,8 +167,7 @@ CRITICAL RULES:
 3. "Outside a directory" semantics: use rule ordering. A rule with "within" matches the inside case; the next rule without "paths" catches everything else as a fallthrough.
 4. The move tool's source argument has both read-path and delete-path roles. A blanket "roles": ["delete-path"] rule will catch all moves.
 5. Order matters: more specific rules before more general ones.
-6. Use all three decision types. Map each constitution principle to the appropriate decision: "allow" for grants, "deny" for prohibitions, and "escalate" for principles that require human judgment or approval. If the constitution does not explicitly forbid an operation, prefer "escalate" over "deny" so a human can decide.
-7. The rule chain must cover all operation types with appropriate fallthrough rules. Do not leave gaps — every combination of argument roles should eventually match a rule.
+6. Use all three decision types. Map each constitution principle to the appropriate decision: "allow" for grants, "deny" for prohibitions, and "escalate" for principles that require human judgment or approval. Unmatched operations are automatically escalated by the engine, so only emit explicit rules for operations the constitution addresses.
 
 Be concise in descriptions and reasons -- one sentence each.
 ${formatGroundTruthSection(handwrittenScenarios)}

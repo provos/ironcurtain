@@ -543,7 +543,7 @@ export class PolicyEngine {
    *
    * When evaluatingRole is set, only rules that are either role-agnostic
    * (no roles/paths conditions) or relevant to the specified role are
-   * considered. First matching rule wins; default deny if none match.
+   * considered. First matching rule wins; default escalate if none match.
    *
    * For roles with multiple extracted paths, delegates to
    * evaluateRulesForMultiPaths for per-element evaluation.
@@ -576,9 +576,9 @@ export class PolicyEngine {
     }
 
     return {
-      decision: 'deny',
-      rule: 'default-deny',
-      reason: 'No matching policy rule -- denied by default',
+      decision: 'escalate',
+      rule: 'default-escalate',
+      reason: 'No matching policy rule -- escalated by default for human review',
     };
   }
 
@@ -588,7 +588,7 @@ export class PolicyEngine {
    * Each path is independently "discharged" by the first rule whose
    * paths.within contains it. Rules without path conditions match all
    * remaining paths. The most restrictive decision across all discharged
-   * paths wins (deny > escalate > allow). Undischarged paths default-deny.
+   * paths wins (deny > escalate > allow). Undischarged paths default-escalate.
    */
   private evaluateRulesForMultiPaths(
     request: ToolCallRequest,
@@ -638,12 +638,12 @@ export class PolicyEngine {
       }
     }
 
-    // Any undischarged paths -> default-deny (deny is the most restrictive decision)
+    // Any undischarged paths -> default-escalate for human review
     if (remainingPaths.size > 0) {
       return {
-        decision: 'deny',
-        rule: 'default-deny',
-        reason: 'No matching policy rule -- denied by default',
+        decision: 'escalate',
+        rule: 'default-escalate',
+        reason: 'No matching policy rule -- escalated by default for human review',
       };
     }
 

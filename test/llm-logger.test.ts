@@ -143,7 +143,7 @@ describe('LLM Logger Middleware', () => {
     const mockModel = createMockModel({ ok: true });
     const wrappedModel = wrapLanguageModel({
       model: mockModel,
-      middleware: createLlmLoggingMiddleware(LOG_PATH, context),
+      middleware: createLlmLoggingMiddleware(LOG_PATH, context, { deltaLogging: true }),
     });
 
     // Simulate the agent pattern: each call sends the full growing history,

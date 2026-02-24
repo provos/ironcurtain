@@ -125,6 +125,8 @@ The three possible decisions are:
 - "deny" — categorically forbidden by the constitution
 - "escalate" — not explicitly permitted and not forbidden; requires human approval
 
+**Meta-Rule:** If an operation is outside the sandbox and the Constitution does NOT explicitly forbid it (destruction) and does NOT explicitly allow it, the expected decision MUST be \`escalate\`. Never default to \`deny\` for unknown paths.
+
 For each scenario provide:
 - description: what the test checks
 - request: { serverName, toolName, arguments } with concrete paths

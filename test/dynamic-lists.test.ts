@@ -1054,9 +1054,9 @@ describe('ListCondition Evaluation', () => {
       arguments: { path: '/tmp/file.txt' },
       timestamp: '',
     });
-    // Rule should not match (zero extraction), falls through to default deny
-    expect(result.decision).toBe('deny');
-    expect(result.rule).toBe('default-deny');
+    // Rule should not match (zero extraction), falls through to default escalate
+    expect(result.decision).toBe('escalate');
+    expect(result.rule).toBe('default-escalate');
   });
 
   it('requires ALL list conditions to be satisfied (AND semantics)', () => {

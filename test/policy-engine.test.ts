@@ -592,7 +592,7 @@ describe('PolicyEngine', () => {
       expect(result.rule).toBe('allow-reads-within-dir-a');
     });
 
-    it('denies when one path has no matching rule (default-deny)', () => {
+    it('escalates when one path has no matching rule (default-escalate)', () => {
       // Custom policy with only one permitted dir and no catch-all escalate
       const restrictivePolicy: CompiledPolicyFile = {
         generatedAt: 'test',
@@ -618,10 +618,10 @@ describe('PolicyEngine', () => {
           },
         }),
       );
-      // /tmp/permitted-a/file1.txt -> allow, /tmp/nowhere/file2.txt -> default-deny
-      // Most restrictive wins: deny > allow
-      expect(result.decision).toBe('deny');
-      expect(result.rule).toBe('default-deny');
+      // /tmp/permitted-a/file1.txt -> allow, /tmp/nowhere/file2.txt -> default-escalate
+      // Most restrictive wins: escalate > allow
+      expect(result.decision).toBe('escalate');
+      expect(result.rule).toBe('default-escalate');
     });
   });
 
