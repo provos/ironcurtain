@@ -12,8 +12,10 @@ import { z } from 'zod';
 import { generateObjectWithRepair } from './generate-with-repair.js';
 import { PolicyEngine } from '../trusted-process/policy-engine.js';
 import type { ToolCallRequest } from '../types/mcp.js';
+import { formatDynamicListsSection } from './scenario-generator.js';
 import type {
   CompiledPolicyFile,
+  DiscardedScenario,
   DynamicListsFile,
   ToolAnnotationsFile,
   TestScenario,
@@ -23,6 +25,7 @@ import type {
   AttributedFailure,
   ScenarioCorrection,
 } from './types.js';
+export type { DiscardedScenario };
 
 const DEFAULT_MAX_ROUNDS = 3;
 
@@ -72,6 +75,7 @@ export function buildJudgeSystemPrompt(
   compiledPolicy: CompiledPolicyFile,
   protectedPaths: string[],
   availableTools?: { serverName: string; toolName: string }[],
+  dynamicLists?: DynamicListsFile,
 ): string {
   const rulesText = compiledPolicy.rules
     .map((r, i) => `  ${i + 1}. [${r.name}] if: ${JSON.stringify(r.if)} then: ${r.then} -- ${r.reason}`)
@@ -90,11 +94,12 @@ ${rulesText}
 ## Structural Invariants (hardcoded, evaluated before compiled rules)
 
 - Unknown tools (no annotation): denied
+- Introspection tools (list_allowed_directories): always allowed
 - Protected paths (any write/delete targeting these is automatically denied):
 ${protectedPaths.map((p) => `  - ${p}`).join('\n')}
 
 A \`deny\` result for write/delete operations on these paths is correct structural behavior, not a policy gap. Files with similar names inside the sandbox are NOT protected.
-
+${formatDynamicListsSection(dynamicLists)}
 ## Decision Types
 
 The three possible policy decisions are:
@@ -121,6 +126,7 @@ For additional scenarios, use concrete paths matching the directories in the com
 ## Available Tools
 
 IMPORTANT: Only use these exact server/tool combinations in additional scenarios. Do NOT invent tool names.
+ALL tools listed here are known/annotated — the "unknown tool → deny" structural invariant CANNOT apply to any of them. NEVER generate scenarios expecting "deny" due to the unknown tool invariant.
 
 ${(availableTools ?? []).map((t) => `- ${t.serverName}/${t.toolName}`).join('\n')}
 
@@ -231,7 +237,7 @@ export async function verifyPolicy(
 
     const userPrompt = buildJudgeUserPrompt(executionResults, round, previousAnalysis);
     const effectiveSystem =
-      system ?? buildJudgeSystemPrompt(constitutionText, compiledPolicy, protectedPaths, availableTools);
+      system ?? buildJudgeSystemPrompt(constitutionText, compiledPolicy, protectedPaths, availableTools, dynamicLists);
 
     const { output: judgment } = await generateObjectWithRepair({
       model: llm,
@@ -288,12 +294,6 @@ export async function verifyPolicy(
 // ---------------------------------------------------------------------------
 // Structural Conflict Filtering
 // ---------------------------------------------------------------------------
-
-export interface DiscardedScenario {
-  scenario: TestScenario;
-  actual: ExecutionResult['actualDecision'];
-  rule: string;
-}
 
 /**
  * Filters out scenarios whose expected decision conflicts with a structural

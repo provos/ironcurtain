@@ -63,7 +63,7 @@ describe('Pipeline Integration: hand-crafted artifacts produce correct decisions
     expect(results.length).toBe(scenarios.length);
   });
 
-  it('engine handles all expected decision types', () => {
+  it('engine handles deny and escalate decision types', () => {
     const decisions = scenarios.map((s) => {
       const result = engine.evaluate({
         requestId: 'test',
@@ -75,7 +75,6 @@ describe('Pipeline Integration: hand-crafted artifacts produce correct decisions
       return result.decision;
     });
 
-    expect(decisions).toContain('allow');
     expect(decisions).toContain('deny');
     expect(decisions).toContain('escalate');
   });

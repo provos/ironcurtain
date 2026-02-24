@@ -15,10 +15,10 @@ import type { LanguageModel, SystemModelMessage } from 'ai';
 import { generateText } from 'ai';
 import type { z } from 'zod';
 
-const DEFAULT_MAX_TOKENS = 8192;
+export const DEFAULT_MAX_TOKENS = 8192;
 
 /** Converts a Zod schema to a JSON Schema string for inclusion in prompts. */
-function schemaToPromptHint(schema: z.ZodType): string {
+export function schemaToPromptHint(schema: z.ZodType): string {
   try {
     const jsonSchema = schema.toJSONSchema({ unrepresentable: 'any' });
     return `\n\nYour response must be a JSON object matching this schema:\n${JSON.stringify(jsonSchema, null, 2)}`;
@@ -32,7 +32,7 @@ function schemaToPromptHint(schema: z.ZodType): string {
  * Extracts a JSON object or array from LLM text that may include
  * markdown fences or surrounding prose.
  */
-function extractJson(text: string): string {
+export function extractJson(text: string): string {
   // Try markdown code block first
   const codeBlock = text.match(/```(?:json)?\s*\n([\s\S]*?)\n\s*```/);
   if (codeBlock) return codeBlock[1].trim();
@@ -49,6 +49,18 @@ function extractJson(text: string): string {
   if (end === -1) return text;
 
   return text.slice(start, end + 1);
+}
+
+/**
+ * Extracts and validates JSON from LLM text output against a Zod schema.
+ * Handles markdown fences, surrounding prose, and schema validation.
+ *
+ * Exported for use by ScenarioGeneratorSession which manages its own
+ * message history but needs the same extraction+validation logic.
+ */
+export function parseJsonWithSchema<T extends z.ZodType>(text: string, schema: T): z.infer<T> {
+  const json: unknown = JSON.parse(extractJson(text));
+  return schema.parse(json) as z.infer<T>;
 }
 
 interface GenerateObjectWithRepairOptions<T extends z.ZodType> {
@@ -87,8 +99,7 @@ export async function generateObjectWithRepair<T extends z.ZodType>({
     const text = result.text;
 
     try {
-      const json: unknown = JSON.parse(extractJson(text));
-      const parsed = schema.parse(json) as z.infer<T>;
+      const parsed = parseJsonWithSchema(text, schema);
       return { output: parsed, repairAttempts: attempt };
     } catch (error) {
       if (attempt === maxRepairAttempts) throw error;

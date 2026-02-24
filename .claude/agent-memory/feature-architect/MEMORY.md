@@ -33,13 +33,6 @@ Both use the same PolicyEngine with compiled artifacts.
 2. Compiled declarative rules (per-role evaluation, most-restrictive-wins)
 3. Default deny
 
-## Current Constitution Principles
-1. Least privilege
-2. No destruction
-3. Sandbox freedom
-4. Transparency
-5. Human oversight
-
 ## Key Design Decisions (implemented)
 - `effect` field was dropped from ToolAnnotation; rules use `roles` matching instead
 - Only `list_allowed_directories` gets `sideEffects: false`; all path-taking tools are `sideEffects: true`
@@ -204,3 +197,15 @@ Both use the same PolicyEngine with compiled artifacts.
 - `approve | escalate` only, never deny; fail-open to human on any error
 - File-based IPC: `last-user-message.txt` in session dir; proxy reads on escalation
 - Config: `autoApprove: { enabled: false, modelId: 'anthropic:claude-haiku-4-5' }`
+
+## Scenario Generator Multi-Turn Design (designed 2026-02-23)
+- See `docs/designs/scenario-generator-multi-turn.md` for full spec
+- `ScenarioGeneratorSession` class: stateful multi-turn wrapper; system prompt fixed at construction (cacheable)
+- `generate()` = turn 1 (initial scenarios); `regenerate(feedback)` = turn 2+ (replacements)
+- `ScenarioFeedback` type: corrections + discardedScenarios + probeScenarios (all optional/readonly)
+- Extract `parseJsonWithSchema()` and `schemaToPromptHint()` from `generate-with-repair.ts`
+- Session calls `generateText()` directly with accumulated messages array (not through `generateObjectWithRepair`)
+- Feedback formatted as user message sections: corrected scenarios, discarded (structural), coverage gaps
+- Merge logic: remove corrected/discarded, deduplicate replacements, keep uncorrected
+- `generateTestScenarios()` returns `{ scenarios, inputHash, session? }` -- session undefined on cache hit
+- `generateObjectWithRepair` unchanged (schema repair within one turn; multi-turn is session's job)

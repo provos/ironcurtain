@@ -8,9 +8,15 @@
  */
 
 import type { LanguageModel, SystemModelMessage } from 'ai';
+import { generateText } from 'ai';
 import { z } from 'zod';
-import { generateObjectWithRepair } from './generate-with-repair.js';
-import type { ToolAnnotation, CompiledRule, RepairContext, ListDefinition } from './types.js';
+import {
+  DEFAULT_MAX_TOKENS,
+  generateObjectWithRepair,
+  parseJsonWithSchema,
+  schemaToPromptHint,
+} from './generate-with-repair.js';
+import type { ToolAnnotation, CompiledRule, RepairContext, ListDefinition, TestScenario } from './types.js';
 import { isArgumentRole, getArgumentRoleValues } from '../types/argument-roles.js';
 import { formatExecutionResults } from './policy-verifier.js';
 
@@ -73,6 +79,27 @@ function buildCompilerResponseSchema(serverNames: [string, ...string[]], toolNam
 }
 
 /**
+ * Formats handwritten scenarios as ground truth constraints for the compiler LLM.
+ */
+function formatGroundTruthSection(scenarios?: TestScenario[]): string {
+  if (!scenarios || scenarios.length === 0) return '';
+
+  const lines = scenarios.map(
+    (s, i) =>
+      `${i + 1}. ${s.request.serverName}/${s.request.toolName} ${JSON.stringify(s.request.arguments)} → ${s.expectedDecision}\n   ${s.reasoning}`,
+  );
+
+  return `
+## Ground Truth Constraints
+
+These test scenarios represent required policy outcomes. Your compiled rules
+MUST produce these exact decisions:
+
+${lines.join('\n\n')}
+`;
+}
+
+/**
  * Builds the stable system prompt portion for the compiler.
  * Contains: role preamble, constitution, annotations, structural invariants, and instructions.
  * This is the cacheable part — it stays the same across repair rounds.
@@ -81,6 +108,7 @@ export function buildCompilerSystemPrompt(
   constitutionText: string,
   annotations: ToolAnnotation[],
   config: CompilerConfig,
+  handwrittenScenarios?: TestScenario[],
 ): string {
   const annotationsSummary = annotations
     .map((a) => {
@@ -141,7 +169,7 @@ CRITICAL RULES:
 7. The rule chain must cover all operation types with appropriate fallthrough rules. Do not leave gaps — every combination of argument roles should eventually match a rule.
 
 Be concise in descriptions and reasons -- one sentence each.
-
+${formatGroundTruthSection(handwrittenScenarios)}
 ## Dynamic Lists
 
 When the constitution references a CATEGORY of things (e.g., "major news sites",
@@ -181,6 +209,20 @@ export function buildRepairInstructions(repairContext: RepairContext): string {
 
   const failuresText = formatExecutionResults(repairContext.failedScenarios);
 
+  let existingListsText = '';
+  if (repairContext.existingListDefinitions && repairContext.existingListDefinitions.length > 0) {
+    const listLines = repairContext.existingListDefinitions.map((d) => `- @${d.name} (type: ${d.type})`).join('\n');
+    existingListsText = `
+
+### Available Dynamic Lists
+
+The following dynamic lists have already been resolved and are available for use in rules.
+You MUST use these exact names — do NOT rename or create new lists:
+
+${listLines}
+`;
+  }
+
   return `## REPAIR INSTRUCTIONS (attempt ${repairContext.attemptNumber})
 
 Your previous compilation produced rules that failed verification. You MUST fix these issues.
@@ -196,13 +238,14 @@ ${failuresText}
 ### Judge Analysis
 
 ${repairContext.judgeAnalysis}
-
+${existingListsText}
 ### Requirements
 
 1. Fix the rule ordering, conditions, or add missing rules to make ALL failed scenarios pass.
 2. Do NOT break scenarios that were already passing — only fix the failures.
 3. Pay close attention to the judge analysis for specific guidance on what went wrong.
-4. Return a complete, corrected rule set (not just the changed rules).`;
+4. Return a complete, corrected rule set (not just the changed rules).
+${formatGroundTruthSection(repairContext.handwrittenScenarios)}`;
 }
 
 export async function compileConstitution(
@@ -235,6 +278,134 @@ export async function compileConstitution(
     rules: output.rules,
     listDefinitions: output.listDefinitions,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Multi-Turn Constitution Compiler Session
+// ---------------------------------------------------------------------------
+
+const INITIAL_COMPILE_MESSAGE = 'Compile the constitution into policy rules following the instructions above.';
+
+/**
+ * A stateful multi-turn wrapper around the constitution compiler.
+ *
+ * Maintains a conversation history so that repair feedback (failed scenarios,
+ * judge analysis) can be communicated to the LLM in follow-up turns with
+ * full context of its prior output. The system prompt is fixed at construction
+ * and never changes, enabling prompt caching.
+ *
+ * Lifecycle:
+ *   1. Construct with system prompt, model, and annotations (once per pipeline run)
+ *   2. Call compile() for the initial rule set
+ *   3. After verification, call recompile(repairContext) with failure feedback
+ *   4. Session is GC'd when the pipeline finishes (no explicit close needed)
+ */
+export class ConstitutionCompilerSession {
+  private readonly systemPrompt: string | SystemModelMessage;
+  private readonly model: LanguageModel;
+  private readonly schema: ReturnType<typeof buildCompilerResponseSchema>;
+  private readonly history: Array<{ role: 'user' | 'assistant'; content: string }> = [];
+  private readonly schemaHint: string;
+  private turns = 0;
+
+  constructor(options: { system: string | SystemModelMessage; model: LanguageModel; annotations: ToolAnnotation[] }) {
+    this.systemPrompt = options.system;
+    this.model = options.model;
+
+    const serverNames = [...new Set(options.annotations.map((a) => a.serverName))] as [string, ...string[]];
+    const toolNames = [...new Set(options.annotations.map((a) => a.toolName))] as [string, ...string[]];
+    this.schema = buildCompilerResponseSchema(serverNames, toolNames);
+    this.schemaHint = schemaToPromptHint(this.schema);
+  }
+
+  /**
+   * Initial compilation: sends the first user message and returns compiled rules.
+   * Semantically equivalent to the existing single-shot compileConstitution().
+   */
+  async compile(onProgress?: (message: string) => void): Promise<CompilationOutput> {
+    return this.callAndParse(INITIAL_COMPILE_MESSAGE, onProgress);
+  }
+
+  /**
+   * Follow-up compilation: feeds back repair context (failed scenarios + judge
+   * analysis) and requests corrected rules. The LLM sees its previous output
+   * and the failure feedback in the conversation history.
+   */
+  async recompile(repairContext: RepairContext, onProgress?: (message: string) => void): Promise<CompilationOutput> {
+    return this.callAndParse(buildRepairInstructions(repairContext), onProgress);
+  }
+
+  /** Returns the number of turns completed so far. */
+  get turnCount(): number {
+    return this.turns;
+  }
+
+  private async callAndParse(userMessage: string, onProgress?: (message: string) => void): Promise<CompilationOutput> {
+    const messageWithSchema = userMessage + this.schemaHint;
+    this.history.push({ role: 'user', content: messageWithSchema });
+
+    onProgress?.('Compiling...');
+
+    const result = await generateText({
+      model: this.model,
+      system: this.systemPrompt,
+      messages: this.history,
+      maxOutputTokens: DEFAULT_MAX_TOKENS,
+    });
+
+    // Try to parse; on schema failure, do one internal retry
+    const firstAttempt = this.tryParse(result.text);
+    if (firstAttempt.ok) {
+      this.history.push({ role: 'assistant', content: result.text });
+      this.turns++;
+      return firstAttempt.value;
+    }
+
+    // First parse failed -- attempt one schema repair round.
+    // Build the retry messages without mutating history so that only
+    // the successful response is persisted in the conversation.
+    onProgress?.('Schema repair 1/1...');
+
+    const retryResult = await generateText({
+      model: this.model,
+      system: this.systemPrompt,
+      messages: [
+        ...this.history,
+        { role: 'assistant' as const, content: result.text },
+        {
+          role: 'user' as const,
+          content: `Your response failed schema validation:\n${firstAttempt.error}\n\nPlease fix the errors and return valid JSON matching the schema.`,
+        },
+      ],
+      maxOutputTokens: DEFAULT_MAX_TOKENS,
+    });
+
+    // If retry also fails, remove the dangling user message from
+    // history before re-throwing so the session remains usable.
+    try {
+      const retryOutput = this.parseOutput(retryResult.text);
+      this.history.push({ role: 'assistant', content: retryResult.text });
+      this.turns++;
+      return retryOutput;
+    } catch (retryError) {
+      this.history.pop(); // remove the user message added at the start
+      throw retryError;
+    }
+  }
+
+  /** Attempts to parse LLM output, returning a discriminated result. */
+  private tryParse(text: string): { ok: true; value: CompilationOutput } | { ok: false; error: string } {
+    try {
+      return { ok: true, value: this.parseOutput(text) };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  private parseOutput(text: string): CompilationOutput {
+    const parsed = parseJsonWithSchema(text, this.schema);
+    return { rules: parsed.rules, listDefinitions: parsed.listDefinitions };
+  }
 }
 
 // -----------------------------------------------------------------------

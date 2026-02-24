@@ -20,7 +20,12 @@ import { extractServerDomainAllowlists } from '../config/index.js';
 import type { MCPServerConfig } from '../config/types.js';
 import { PolicyEngine } from '../trusted-process/policy-engine.js';
 import { resolveRealPath } from '../types/argument-roles.js';
-import { buildCompilerSystemPrompt, compileConstitution, validateCompiledRules } from './constitution-compiler.js';
+import {
+  buildCompilerSystemPrompt,
+  compileConstitution,
+  ConstitutionCompilerSession,
+  validateCompiledRules,
+} from './constitution-compiler.js';
 import { getHandwrittenScenarios } from './handwritten-scenarios.js';
 import { resolveAllLists, type McpServerConnection } from './list-resolver.js';
 import {
@@ -38,16 +43,17 @@ import {
   extractScenarioCorrections,
   filterStructuralConflicts,
   verifyPolicy,
-  type DiscardedScenario,
 } from './policy-verifier.js';
-import { buildGeneratorSystemPrompt, generateScenarios } from './scenario-generator.js';
+import { buildGeneratorSystemPrompt, ScenarioGeneratorSession } from './scenario-generator.js';
 import { VERSION } from '../version.js';
 import type {
   CompiledPolicyFile,
   CompiledRule,
+  DiscardedScenario,
   DynamicListsFile,
   ListDefinition,
   RepairContext,
+  ScenarioFeedback,
   TestScenario,
   TestScenariosFile,
   ToolAnnotation,
@@ -102,6 +108,33 @@ function filterAndLogStructuralConflicts(
 }
 
 // ---------------------------------------------------------------------------
+// Scenario Merge (multi-turn regeneration)
+// ---------------------------------------------------------------------------
+
+/**
+ * Merges replacement scenarios from the regeneration session into the
+ * scenario list. Removes corrected and discarded scenarios, then adds
+ * unique replacements that don't duplicate any remaining scenario.
+ */
+export function mergeReplacements(
+  scenarios: TestScenario[],
+  replacements: TestScenario[],
+  corrections: ReadonlyArray<{ scenarioDescription: string }>,
+  discardedScenarios: ReadonlyArray<DiscardedScenario>,
+): TestScenario[] {
+  const removedDescriptions = new Set([
+    ...corrections.map((c) => c.scenarioDescription),
+    ...discardedScenarios.filter((d) => d.scenario.source !== 'handwritten').map((d) => d.scenario.description),
+  ]);
+
+  const kept = scenarios.filter((s) => !removedDescriptions.has(s.description));
+  const keptDescriptions = new Set(kept.map((s) => s.description));
+  const uniqueReplacements = replacements.filter((r) => !keptDescriptions.has(r.description));
+
+  return [...kept, ...uniqueReplacements];
+}
+
+// ---------------------------------------------------------------------------
 // Path Resolution (post-LLM normalization)
 // ---------------------------------------------------------------------------
 
@@ -139,6 +172,8 @@ interface CompilationResult {
   rules: CompiledRule[];
   listDefinitions: ListDefinition[];
   inputHash: string;
+  /** The session used for compilation; undefined when cache hit. */
+  session?: ConstitutionCompilerSession;
 }
 
 async function compilePolicyRules(
@@ -164,20 +199,18 @@ async function compilePolicyRules(
     };
   }
 
+  const session = new ConstitutionCompilerSession({
+    system: system ?? buildCompilerSystemPrompt(constitutionText, annotations, { protectedPaths }),
+    model: llm,
+    annotations,
+  });
+
   const { result: compilationOutput } = await withSpinner(
     stepText,
     async (spinner) => {
-      const output = await compileConstitution(
-        constitutionText,
-        annotations,
-        { protectedPaths },
-        llm,
-        undefined,
-        (msg) => {
-          spinner.text = `${stepText} — ${msg}`;
-        },
-        system,
-      );
+      const output = await session.compile((msg) => {
+        spinner.text = `${stepText} — ${msg}`;
+      });
       const rules = resolveRulePaths(output.rules);
       validateRulesOrThrow(rules, output.listDefinitions);
       return { rules, listDefinitions: output.listDefinitions };
@@ -189,6 +222,7 @@ async function compilePolicyRules(
     rules: compilationOutput.rules,
     listDefinitions: compilationOutput.listDefinitions,
     inputHash,
+    session,
   };
 }
 
@@ -220,16 +254,22 @@ async function compilePolicyRulesWithRepair(
   llm: LanguageModel,
   onProgress?: (message: string) => void,
   system?: string | SystemModelMessage,
+  session?: ConstitutionCompilerSession,
 ): Promise<CompilationResult> {
-  const output = await compileConstitution(
-    constitutionText,
-    annotations,
-    { protectedPaths },
-    llm,
-    repairContext,
-    onProgress,
-    system,
-  );
+  let output;
+  if (session) {
+    output = await session.recompile(repairContext, onProgress);
+  } else {
+    output = await compileConstitution(
+      constitutionText,
+      annotations,
+      { protectedPaths },
+      llm,
+      repairContext,
+      onProgress,
+      system,
+    );
+  }
   const compiledRules = resolveRulePaths(output.rules);
   validateRulesOrThrow(compiledRules, output.listDefinitions);
 
@@ -237,6 +277,7 @@ async function compilePolicyRulesWithRepair(
     rules: compiledRules,
     listDefinitions: output.listDefinitions,
     inputHash: `${baseInputHash}-repair`,
+    session,
   };
 }
 
@@ -264,13 +305,14 @@ function buildPolicyArtifact(constitutionHash: string, compilationResult: Compil
 interface ScenarioResult {
   scenarios: TestScenario[];
   inputHash: string;
+  /** The session used for generation; undefined when cache hit. */
+  session?: ScenarioGeneratorSession;
 }
 
 async function generateTestScenarios(
   constitutionText: string,
   annotations: ToolAnnotation[],
   allowedDirectory: string,
-  protectedPaths: string[],
   permittedDirectories: string[],
   inputHash: string,
   existingScenarios: TestScenariosFile | undefined,
@@ -287,29 +329,27 @@ async function generateTestScenarios(
     return { scenarios: existingScenarios.scenarios, inputHash };
   }
 
+  // Create a multi-turn session so the repair loop can feed corrections back
+  const session = new ScenarioGeneratorSession({
+    system: system ?? buildGeneratorSystemPrompt(constitutionText, annotations, allowedDirectory, permittedDirectories),
+    model: llm,
+    annotations,
+    handwrittenScenarios,
+  });
+
   const { result: scenarios } = await withSpinner(
     stepText,
     async (spinner) =>
-      generateScenarios(
-        constitutionText,
-        annotations,
-        handwrittenScenarios,
-        allowedDirectory,
-        protectedPaths,
-        llm,
-        permittedDirectories,
-        (msg) => {
-          spinner.text = `${stepText} — ${msg}`;
-        },
-        system,
-      ),
+      session.generate((msg) => {
+        spinner.text = `${stepText} — ${msg}`;
+      }),
     (scenarios, elapsed) => {
       const generatedCount = scenarios.length - handwrittenScenarios.length;
       return `${stepText}: ${scenarios.length} scenarios (${handwrittenScenarios.length} handwritten + ${generatedCount} generated) (${elapsed.toFixed(1)}s)`;
     },
   );
 
-  return { scenarios, inputHash };
+  return { scenarios, inputHash, session };
 }
 
 // ---------------------------------------------------------------------------
@@ -491,9 +531,13 @@ export async function main(): Promise<void> {
   const { model: llm, logContext, logPath, cacheStrategy } = await createPipelineLlm(config.generatedDir, 'unknown');
 
   // Build raw system prompt and derive hash + cache-wrapped version
-  const compilerPrompt = buildCompilerSystemPrompt(config.constitutionText, allAnnotations, {
-    protectedPaths: config.protectedPaths,
-  });
+  const handwrittenScenarios = getHandwrittenScenarios(config.allowedDirectory);
+  const compilerPrompt = buildCompilerSystemPrompt(
+    config.constitutionText,
+    allAnnotations,
+    { protectedPaths: config.protectedPaths },
+    handwrittenScenarios,
+  );
   const compilerHash = computePolicyHash(compilerPrompt, allAnnotations);
   const compilerSystem = cacheStrategy.wrapSystemPrompt(compilerPrompt);
 
@@ -581,8 +625,8 @@ export async function main(): Promise<void> {
     config.constitutionText,
     allAnnotations,
     config.allowedDirectory,
-    config.protectedPaths,
     permittedDirectories,
+    dynamicLists,
   );
   const scenarioHash = computeScenariosHash(scenarioPrompt, getHandwrittenScenarios(config.allowedDirectory));
   const scenarioSystem = cacheStrategy.wrapSystemPrompt(scenarioPrompt);
@@ -590,7 +634,6 @@ export async function main(): Promise<void> {
     config.constitutionText,
     allAnnotations,
     config.allowedDirectory,
-    config.protectedPaths,
     permittedDirectories,
     scenarioHash,
     existingScenarios,
@@ -624,7 +667,13 @@ export async function main(): Promise<void> {
   logContext.stepName = 'verify-policy';
   const allAvailableTools = allAnnotations.map((a) => ({ serverName: a.serverName, toolName: a.toolName }));
   let verifierSystem = cacheStrategy.wrapSystemPrompt(
-    buildJudgeSystemPrompt(config.constitutionText, compiledPolicyFile, config.protectedPaths, allAvailableTools),
+    buildJudgeSystemPrompt(
+      config.constitutionText,
+      compiledPolicyFile,
+      config.protectedPaths,
+      allAvailableTools,
+      dynamicLists,
+    ),
   );
   const { result: verificationResultInitial } = await withSpinner(
     `${verifyStepLabel} Verifying policy`,
@@ -699,11 +748,41 @@ export async function main(): Promise<void> {
         accumulatedProbes.splice(0, accumulatedProbes.length, ...correctedProbes);
         scenarioCorrectionsApplied += corrections.length;
         console.error(`  ${chalk.dim(`Corrected ${corrections.length} scenario expectation(s)`)}`);
-
-        // Re-filter after corrections (a corrected expected decision might
-        // now match a structural invariant result, making it valid)
-        ({ valid: filteredScenarios } = filterAndLogStructuralConflicts(filterEngine, scenarioResult.scenarios));
       }
+
+      // Feed corrections back to the scenario generator session so it can
+      // produce better replacement scenarios that avoid the same mistakes.
+      const { session } = scenarioResult;
+      if (session && (corrections.length > 0 || discardedScenarios.length > 0 || accumulatedProbes.length > 0)) {
+        const feedback: ScenarioFeedback = {
+          corrections,
+          discardedScenarios,
+          probeScenarios: accumulatedProbes,
+        };
+
+        logContext.stepName = `repair-regenerate-${attempt}`;
+        const regenText = `Repair ${attempt}/${MAX_REPAIRS}: Regenerating scenarios`;
+        const { result: replacements } = await withSpinner(
+          regenText,
+          async (spinner) =>
+            session.regenerate(feedback, (msg) => {
+              spinner.text = `${regenText} — ${msg}`;
+            }),
+          (r, elapsed) => `${regenText}: ${r.length} replacement(s) (${elapsed.toFixed(1)}s)`,
+        );
+
+        // Merge: remove corrected/discarded scenarios and add unique replacements
+        scenarioResult.scenarios = mergeReplacements(
+          scenarioResult.scenarios,
+          replacements,
+          corrections,
+          discardedScenarios,
+        );
+      }
+
+      // Re-filter after corrections/regeneration (a corrected expected decision
+      // might now match a structural invariant result, making it valid)
+      ({ valid: filteredScenarios } = filterAndLogStructuralConflicts(filterEngine, scenarioResult.scenarios));
 
       // Determine which failures need rule recompilation:
       // - no attribution or blamed on 'rule'/'both' (conservative default)
@@ -721,6 +800,9 @@ export async function main(): Promise<void> {
           failedScenarios: allRuleBlamedFailures,
           judgeAnalysis,
           attemptNumber: attempt,
+          existingListDefinitions:
+            compilationResult.listDefinitions.length > 0 ? compilationResult.listDefinitions : undefined,
+          handwrittenScenarios,
         };
 
         logContext.stepName = `repair-compile-${attempt}`;
@@ -739,11 +821,36 @@ export async function main(): Promise<void> {
                 spinner.text = `${repairCompileText} — ${msg}`;
               },
               compilerSystem,
+              compilationResult.session,
             ),
           (r, elapsed) =>
             `Repair ${attempt}/${MAX_REPAIRS}: Recompiled ${r.rules.length} rules (${elapsed.toFixed(1)}s)`,
         );
         compilationResult = repairCompileResult;
+
+        // Re-resolve dynamic lists if repair introduced new list definitions
+        if (dynamicLists && compilationResult.listDefinitions.length > 0) {
+          const currentLists = dynamicLists;
+          const newListDefs = compilationResult.listDefinitions.filter((def) => !(def.name in currentLists.lists));
+          if (newListDefs.length > 0) {
+            const mcpRequired = newListDefs.filter((d) => d.requiresMcp);
+            if (mcpRequired.length > 0) {
+              console.error(
+                `  ${chalk.yellow('Warning:')} Repair introduced ${mcpRequired.length} new MCP-requiring list(s) — skipping resolution`,
+              );
+            }
+            const knowledgeDefs = newListDefs.filter((d) => !d.requiresMcp);
+            if (knowledgeDefs.length > 0) {
+              console.error(`  ${chalk.dim(`Resolving ${knowledgeDefs.length} new list(s) from repair...`)}`);
+              const resolved = await resolveAllLists(knowledgeDefs, { model: llm }, currentLists);
+              dynamicLists = {
+                ...resolved,
+                lists: { ...currentLists.lists, ...resolved.lists },
+              };
+              writeArtifact(config.generatedDir, 'dynamic-lists.json', dynamicLists);
+            }
+          }
+        }
 
         // Write updated policy artifact
         compiledPolicyFile = buildPolicyArtifact(config.constitutionHash, compilationResult);
@@ -751,7 +858,13 @@ export async function main(): Promise<void> {
 
         // Rebuild verifier system prompt with updated rules
         verifierSystem = cacheStrategy.wrapSystemPrompt(
-          buildJudgeSystemPrompt(config.constitutionText, compiledPolicyFile, config.protectedPaths, allAvailableTools),
+          buildJudgeSystemPrompt(
+            config.constitutionText,
+            compiledPolicyFile,
+            config.protectedPaths,
+            allAvailableTools,
+            dynamicLists,
+          ),
         );
       } else {
         console.error(`  ${chalk.dim('No rule-blamed failures — skipping recompilation')}`);
@@ -773,7 +886,7 @@ export async function main(): Promise<void> {
             llm,
             config.allowedDirectory,
             1,
-            false,
+            true,
             (msg) => {
               spinner.text = `${repairVerifyText} — ${msg}`;
             },
@@ -839,6 +952,11 @@ export async function main(): Promise<void> {
         break;
       }
     }
+  }
+
+  // Re-write scenarios artifact if the repair loop modified them
+  if (repairAttempts > 0) {
+    writeScenariosArtifact(config.generatedDir, config.constitutionHash, scenarioResult);
   }
 
   // Deduplicate accumulated probes by description
