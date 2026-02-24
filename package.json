@@ -48,6 +48,7 @@
     "annotate-tools": "tsx src/cli.ts annotate-tools",
     "compile-policy": "tsx src/cli.ts compile-policy",
     "config": "tsx src/cli.ts config",
+    "setup": "tsx src/cli.ts setup",
     "prepublishOnly": "npm run build",
     "test": "vitest run",
     "test:watch": "vitest",

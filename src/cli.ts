@@ -24,6 +24,7 @@ Usage:
 
 Commands:
   start [task]         Run the agent (interactive or single-shot)
+  setup                Run the first-start wizard (always runs)
   annotate-tools       Classify MCP tool arguments via LLM
   compile-policy       Compile constitution into enforceable policy rules
   refresh-lists        Re-resolve dynamic lists without full recompilation
@@ -99,6 +100,11 @@ switch (subcommand) {
   case 'config': {
     const { runConfigCommand } = await import('./config/config-command.js');
     await runConfigCommand();
+    break;
+  }
+  case 'setup': {
+    const { runFirstStart } = await import('./config/first-start.js');
+    await runFirstStart();
     break;
   }
   default:
