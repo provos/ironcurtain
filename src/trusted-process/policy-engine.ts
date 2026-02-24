@@ -356,7 +356,6 @@ export class PolicyEngine {
    * final decision or a set of roles resolved by sandbox containment.
    */
   private evaluateStructuralInvariants(request: ToolCallRequest): StructuralResult {
-
     // Extract paths using both methods for defense-in-depth
     const heuristicPaths = extractPathsHeuristic(request.arguments);
     const annotation = this.annotationMap.get(`${request.serverName}__${request.toolName}`);
