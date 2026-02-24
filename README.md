@@ -40,6 +40,13 @@ The agent clones a repository and edits a file. The policy engine escalates `git
 
 ## Architecture
 
+IronCurtain supports two session modes with different trust models:
+
+- **Builtin Agent (Code Mode)** — IronCurtain's own LLM agent writes TypeScript snippets that execute in a V8 sandbox. IronCurtain controls the agent, the sandbox, and the policy engine.
+- **Docker Agent Mode** — An external agent (Claude Code, Goose, etc.) runs inside a Docker container with no network access. IronCurtain doesn't control the agent — it only mediates the agent's external access through policy-enforced proxies.
+
+### Builtin Agent (Code Mode)
+
 ```
 ┌─────────────────────────────────────────────┐
 │              Agent (LLM)                    │
@@ -139,6 +146,44 @@ compiles into deterministic JSON rules:
 ```
 
 Any tool call that doesn't match an explicit allow or escalate rule is **denied by default**. Rules define what is permitted or needs human judgment; everything else is blocked.
+
+### Docker Agent Mode
+
+In Docker mode, IronCurtain runs an external agent — not its own. The agent (Claude Code, Goose, etc.) already has its own LLM loop, tool-calling mechanism, and execution model. IronCurtain's role is to **mediate external access**: every LLM API call and every MCP tool call must pass through host-side proxies that enforce policy.
+
+```
+┌──────────────────────────────────────────────┐
+│     Docker Container (--network=none)        │
+│                                              │
+│  ┌────────────────────────────────────────┐  │
+│  │         External Agent                 │  │
+│  │    (Claude Code, Goose, etc.)          │  │
+│  │    Own LLM loop, tools, execution      │  │
+│  └──────┬──────────────────┬──────────────┘  │
+│         │ LLM API calls    │ MCP tool calls  │
+│         ▼                  ▼                 │
+│      [UDS]              [UDS]                │
+└─────────┬──────────────────┬─────────────────┘
+          │                  │
+          ▼                  ▼
+┌──────────────────┐  ┌─────────────────────────┐
+│  MITM Proxy      │  │  MCP Proxy              │
+│  (host process)  │  │  (host process)         │
+│                  │  │                         │
+│  Host allowlist  │  │  Policy Engine          │
+│  Endpoint filter │  │  allow / deny /         │
+│  Fake→real key   │  │  escalate               │
+│  swap            │  │                         │
+└────────┬─────────┘  └────────────┬────────────┘
+         │                         │
+         ▼                         ▼
+   LLM Provider            MCP Servers
+   (Anthropic, etc.)       (filesystem, git, etc.)
+```
+
+The key difference from Code Mode: IronCurtain does **not** control the agent's execution. The agent has its own tool-calling mechanism (Claude Code uses its own tools internally). IronCurtain only sees the external effects — LLM API calls and MCP tool calls — and enforces policy on those boundaries.
+
+See [SANDBOXING.md](SANDBOXING.md) for the full sandboxing architecture.
 
 ## Getting Started
 
