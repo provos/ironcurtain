@@ -1,0 +1,18 @@
+FROM ironcurtain-base:latest
+
+# Install Claude Code CLI (Node.js is already in the base image)
+USER root
+RUN npm install -g @anthropic-ai/claude-code
+
+# The entrypoint script copies runtime-generated config into the right
+# location before the agent is invoked via docker exec.
+COPY entrypoint-claude-code.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+USER codespace
+
+# Create the config directory — settings.json is generated entirely
+# by IronCurtain at runtime and copied in by the entrypoint script.
+RUN mkdir -p /home/codespace/.claude
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

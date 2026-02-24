@@ -249,6 +249,8 @@ ironcurtain start "Summarize the files in the current directory"
 
 Or with npm scripts during development: `npm start` / `npm start "task"`.
 
+When Docker is available and `ANTHROPIC_API_KEY` is set, `ironcurtain start` automatically selects Docker mode (claude-code agent). Otherwise it falls back to the builtin agent silently. The selected mode is logged to stderr. Use `--agent builtin` or `--agent claude-code` to force a specific agent; explicit selection fails fast with a clear error if prerequisites are missing.
+
 ### Session Commands
 
 During an interactive session:

@@ -3,6 +3,7 @@ import type { IronCurtainConfig } from '../config/types.js';
 import type { Sandbox } from '../sandbox/index.js';
 import type { ResolvedResourceBudgetConfig } from '../config/user-config.js';
 import type { CumulativeBudgetSnapshot } from './resource-budget-tracker.js';
+import type { AgentId } from '../docker/agent-adapter.js';
 
 /**
  * Unique identifier for a session. Branded to prevent accidental
@@ -25,6 +26,15 @@ export function createSessionId(): SessionId {
  * - closed: resources released, no more messages accepted
  */
 export type SessionStatus = 'initializing' | 'ready' | 'processing' | 'closed';
+
+/**
+ * Selects the session implementation.
+ *
+ * 'builtin' creates the existing AgentSession (UTCP Code Mode + AI SDK).
+ * 'docker' creates a DockerAgentSession that spawns an external agent
+ * inside a Docker container with MCP proxy mediation.
+ */
+export type SessionMode = { readonly kind: 'builtin' } | { readonly kind: 'docker'; readonly agent: AgentId };
 
 /**
  * A single turn in the conversation. Captures what the user said,
@@ -95,6 +105,9 @@ export interface BudgetStatus {
   readonly estimatedCostUsd: number;
   readonly limits: ResolvedResourceBudgetConfig;
   readonly cumulative: CumulativeBudgetSnapshot;
+
+  /** False for Docker sessions where token usage is not observable. */
+  readonly tokenTrackingAvailable: boolean;
 }
 
 /**
@@ -136,6 +149,12 @@ export interface EscalationRequest {
 export interface SessionOptions {
   /** Base configuration. If omitted, loaded from environment. */
   config?: IronCurtainConfig;
+
+  /**
+   * Session mode selection. Defaults to 'builtin' for backward compatibility.
+   * When 'docker', the agent field specifies which external agent to run.
+   */
+  mode?: SessionMode;
 
   /** If provided, reuses the sandbox from this previous session via symlink. */
   resumeSessionId?: string;

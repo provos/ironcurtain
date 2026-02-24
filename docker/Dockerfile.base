@@ -1,0 +1,11 @@
+FROM mcr.microsoft.com/devcontainers/universal:latest
+
+# Standard IronCurtain directory structure
+# The universal image uses 'codespace' as the non-root user (uid 1000).
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends socat && rm -rf /var/lib/apt/lists/*
+RUN mkdir -p /workspace /etc/ironcurtain /run/ironcurtain && \
+    chown codespace:codespace /workspace /etc/ironcurtain /run/ironcurtain
+
+WORKDIR /workspace
+USER codespace

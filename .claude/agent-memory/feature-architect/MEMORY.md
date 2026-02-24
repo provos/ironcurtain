@@ -193,6 +193,7 @@ Both use the same PolicyEngine with compiled artifacts.
 
 ## Auto-Approver Design (designed 2026-02-20)
 - See `auto-approver.md` topic file for details
+<<<<<<< HEAD
 - `src/trusted-process/auto-approver.ts` -- stateless `autoApprove()` function
 - `approve | escalate` only, never deny; fail-open to human on any error
 - File-based IPC: `last-user-message.txt` in session dir; proxy reads on escalation
@@ -210,3 +211,7 @@ Both use the same PolicyEngine with compiled artifacts.
 - Engine type `CompiledRule.then` stays `Decision` (3-valued) for backward compat
 - Catch-all escalate rules defeat deny-default; validation should warn about them
 - Existing compiled-policy.json with deny rules still works; recompilation drops them
+
+## Docker Agent Broker Design (designed 2026-02-23)
+- See `docker-broker.md` topic file for details
+- Design doc: `docs/design/docker-agent-broker.md`

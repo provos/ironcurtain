@@ -213,6 +213,23 @@ When mocking `generateText` for session tests:
 - **Tests**: `test/user-config.test.ts` and `test/model-provider.test.ts` -- uses `IRONCURTAIN_HOME` temp dirs for isolation
 - **Zod validation**: unknown fields warn to stderr, invalid types/values throw
 
+## Docker Agent Broker (Phase 1-4 complete)
+- **Design**: `docs/design/docker-agent-broker.md` -- full design spec
+- **Session mode**: `SessionMode` in `src/session/types.ts` -- `{ kind: 'builtin' }` or `{ kind: 'docker', agent: AgentId }`
+- **Session factory**: `createSession({ mode })` in `src/session/index.ts` -- delegates to `createBuiltinSession` or `createDockerSession`
+- **Docker session**: `src/docker/docker-agent-session.ts` -- `DockerAgentSession` implements `Session`; `getBudgetStatus().tokenTrackingAvailable = false`
+- **Agent adapter**: `src/docker/agent-adapter.ts` -- `AgentAdapter` interface, `AgentId` branded type, `ToolInfo`, `OrientationContext`
+- **Agent registry**: `src/docker/agent-registry.ts` -- `registerAgent()`, `getAgent()`, `listAgents()`, `registerBuiltinAdapters()`
+- **Claude Code adapter**: `src/docker/adapters/claude-code.ts` -- reference adapter; no self-registration (test compat)
+- **Docker manager**: `src/docker/docker-manager.ts` -- `createDockerManager(execFileFn?)` with DI for testability
+- **UDS transport**: `src/trusted-process/uds-server-transport.ts` -- MCP SDK server transport over Unix domain sockets
+- **Managed proxy**: `src/docker/managed-proxy.ts` -- spawns MCP proxy with `PROXY_SOCKET_PATH`, polls socket readiness, `UdsClientTransport` for tool listing
+- **CONNECT proxy**: `src/docker/connect-proxy.ts` -- domain-allowlisted HTTP CONNECT tunneling for LLM API access
+- **Audit tailer**: `src/docker/audit-log-tailer.ts` -- tails JSONL audit log via `fs.watch()`, emits `DiagnosticEvent`s; file must exist before `start()`
+- **Orientation**: `src/docker/orientation.ts` -- `prepareSession()` (sync), `extractAllowedDomains()`
+- **CLI**: `--agent <name>` flag in `src/index.ts`, `--list-agents` to show registered adapters
+- **Tests**: `test/docker-session.test.ts` (20), `test/docker-agent-adapter.test.ts` (15), `test/docker-manager.test.ts` (18), `test/connect-proxy.test.ts` (6), `test/uds-server-transport.test.ts` (8)
+
 ## Subsystems (see subsystems.md for details)
 - **Session Logging**: `src/logger.ts` -- singleton with `setup()`/`teardown()`; test gotcha: must call `teardown()` in `afterEach`
 - **Execution Containment**: `src/trusted-process/sandbox-integration.ts` -- wraps MCP servers in `srt` processes

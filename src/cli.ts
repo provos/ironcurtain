@@ -24,6 +24,7 @@ Usage:
 
 Commands:
   start [task]         Run the agent (interactive or single-shot)
+  setup                Run the first-start wizard (always runs)
   annotate-tools       Classify MCP tool arguments via LLM
   compile-policy       Compile constitution into enforceable policy rules
   refresh-lists        Re-resolve dynamic lists without full recompilation
@@ -34,11 +35,17 @@ Commands:
 Options:
   -h, --help           Show this help message
   -v, --version        Show version number
+  -a, --agent <name>   Agent mode: builtin or claude-code (Docker)
+                       Auto-detects if omitted: Docker if available, else builtin
+  --list-agents        List registered agent adapters
 
 Examples:
+  ironcurtain start "task"                        # Auto-detects Docker or builtin
   ironcurtain start                              # Interactive session
   ironcurtain start "Summarize files in ."       # Single-shot task
   ironcurtain start --resume <session-id>        # Resume a session
+  ironcurtain start --agent claude-code "task"   # Docker: Claude Code
+  ironcurtain start --list-agents                # List available agents
   ironcurtain annotate-tools                     # Classify tool arguments
   ironcurtain compile-policy                     # Compile policy from constitution
   ironcurtain refresh-lists                      # Refresh all dynamic lists
@@ -100,6 +107,11 @@ switch (subcommand) {
   case 'config': {
     const { runConfigCommand } = await import('./config/config-command.js');
     await runConfigCommand();
+    break;
+  }
+  case 'setup': {
+    const { runFirstStart } = await import('./config/first-start.js');
+    await runFirstStart();
     break;
   }
   default:

@@ -28,6 +28,7 @@
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { UdsServerTransport } from './uds-server-transport.js';
 import {
   CallToolRequestSchema,
   CompatibilityCallToolResultSchema,
@@ -40,7 +41,7 @@ import { appendFileSync, existsSync, mkdtempSync, readFileSync, writeFileSync, u
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { v4 as uuidv4 } from 'uuid';
-import { loadGeneratedPolicy, extractServerDomainAllowlists } from '../config/index.js';
+import { loadGeneratedPolicy, extractServerDomainAllowlists, getPackageGeneratedDir } from '../config/index.js';
 import { PolicyEngine, extractAnnotatedPaths } from './policy-engine.js';
 import { getPathRoles } from '../types/argument-roles.js';
 import { AuditLog } from './audit-log.js';
@@ -302,7 +303,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const { compiledPolicy, toolAnnotations, dynamicLists } = loadGeneratedPolicy(generatedDir);
+  const { compiledPolicy, toolAnnotations, dynamicLists } = loadGeneratedPolicy(generatedDir, getPackageGeneratedDir());
 
   const serverDomainAllowlists = extractServerDomainAllowlists(serversConfig);
   const policyEngine = new PolicyEngine(
@@ -392,13 +393,18 @@ async function main(): Promise<void> {
       ...(resolved.sandboxed && allowedDirectory ? { cwd: allowedDirectory } : {}),
     });
 
+    // Capture stderr per-server for diagnostic output on connection failure
+    let serverStderr = '';
+
     // Drain the piped stderr to prevent buffer backpressure from blocking
     // the child process. Write output to the session log if configured.
     // Known credential values are redacted before writing to the log.
     if (transport.stderr) {
       transport.stderr.on('data', (chunk: Buffer) => {
+        const text = chunk.toString();
+        serverStderr += text;
         if (sessionLogPath) {
-          const lines = chunk.toString().trimEnd();
+          const lines = text.trimEnd();
           if (lines) {
             const redacted = redactCredentials(lines, serverCredentials);
             logToSessionFile(sessionLogPath, `[mcp:${serverName}] ${redacted}`);
@@ -427,7 +433,16 @@ async function main(): Promise<void> {
       return { roots: state.roots };
     });
 
-    await client.connect(transport);
+    try {
+      await client.connect(transport);
+    } catch (err) {
+      const cmd = `${wrapped.command} ${wrapped.args.join(' ')}`;
+      const stderrSnippet = serverStderr ? `\nServer stderr: ${serverStderr.substring(0, 1000)}` : '';
+      throw new Error(
+        `Failed to connect to MCP server "${serverName}" (${cmd}): ${err instanceof Error ? err.message : String(err)}${stderrSnippet}`,
+        { cause: err },
+      );
+    }
     clientStates.set(serverName, state);
 
     const result = await client.listTools();
@@ -692,8 +707,9 @@ async function main(): Promise<void> {
     }
   });
 
-  // Start on stdio
-  const transport = new StdioServerTransport();
+  // Select transport: UDS for Docker agent sessions, stdio otherwise
+  const proxySocketPath = process.env.PROXY_SOCKET_PATH;
+  const transport = proxySocketPath ? new UdsServerTransport(proxySocketPath) : new StdioServerTransport();
   await server.connect(transport);
 
   // Clean shutdown -- handle both SIGINT and SIGTERM since this process
