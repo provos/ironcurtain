@@ -34,6 +34,7 @@
   "main": "dist/index.js",
   "files": [
     "dist/",
+    "docker/",
     "src/config/constitution.md",
     "src/config/constitution-user-base.md",
     "src/config/mcp-servers.json",
