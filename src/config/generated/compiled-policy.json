@@ -1,57 +1,29 @@
 {
-  "generatedAt": "2026-02-21T18:52:47.808Z",
+  "generatedAt": "2026-02-24T06:09:20.644Z",
   "constitutionHash": "dbebe147dfac369859c5d1cca2ed2fb1753f605a9d5db65ee73c4cc95908fe77",
-  "inputHash": "2dfd79f9ee07392d6e48b879d3aa127129cbe13ad954ff37e8fcbd16db600207-repair",
+  "inputHash": "bfb5da6dad59ef18fc9fe45eb809215d6b075b1353b77f2b73941b5274991159",
   "rules": [
     {
-      "name": "allow-downloads-read",
-      "description": "Allows reading files within the Downloads folder.",
-      "principle": "Least privilege: The agent is allowed to read, write and delete content in the Downloads folder.",
+      "name": "allow-downloads-read-write-delete",
+      "description": "Allow reading, writing, and deleting content in the Downloads folder.",
+      "principle": "The agent is allowed to read, write and delete content in the Downloads folder.",
       "if": {
         "paths": {
           "roles": [
-            "read-path"
-          ],
-          "within": "~/Downloads"
-        }
-      },
-      "then": "allow",
-      "reason": "Constitution explicitly permits read access to the Downloads folder."
-    },
-    {
-      "name": "allow-downloads-write",
-      "description": "Allows writing files within the Downloads folder.",
-      "principle": "Least privilege: The agent is allowed to read, write and delete content in the Downloads folder.",
-      "if": {
-        "paths": {
-          "roles": [
-            "write-path"
-          ],
-          "within": "~/Downloads"
-        }
-      },
-      "then": "allow",
-      "reason": "Constitution explicitly permits write access to the Downloads folder."
-    },
-    {
-      "name": "allow-downloads-delete",
-      "description": "Allows deleting files within the Downloads folder.",
-      "principle": "No destruction: The agent is allowed to read, write and delete content in the Downloads folder (explicit exception).",
-      "if": {
-        "paths": {
-          "roles": [
+            "read-path",
+            "write-path",
             "delete-path"
           ],
           "within": "~/Downloads"
         }
       },
       "then": "allow",
-      "reason": "Constitution explicitly permits delete access to the Downloads folder."
+      "reason": "Constitution explicitly permits all read, write, and delete operations within the Downloads folder."
     },
     {
       "name": "allow-documents-read",
-      "description": "Allows reading documents within the Users document folder.",
-      "principle": "Least privilege: The agent is allowed to read documents in the Users document folder.",
+      "description": "Allow reading documents in the Users document folder.",
+      "principle": "The agent is allowed to read documents in the Users document folder.",
       "if": {
         "paths": {
           "roles": [
@@ -64,51 +36,82 @@
       "reason": "Constitution explicitly permits read access to the Users document folder."
     },
     {
-      "name": "escalate-documents-write",
-      "description": "Escalates write operations within the Documents folder for human approval.",
-      "principle": "Human oversight: Constitution only grants read access to the Documents folder; writes require human approval.",
+      "name": "allow-git-readonly",
+      "description": "Allow read-only git operations within the sandbox.",
+      "principle": "The agent may perform read-only git operations (status, diff, log, show, blame) within the sandbox without approval.",
       "if": {
-        "paths": {
-          "roles": [
-            "write-path"
-          ],
-          "within": "~/Documents"
-        }
-      },
-      "then": "escalate",
-      "reason": "Constitution only grants read access to Documents; writes are not explicitly permitted and require human review."
-    },
-    {
-      "name": "escalate-documents-delete",
-      "description": "Escalates delete operations within the Documents folder for human approval.",
-      "principle": "Human oversight: Constitution only grants read access to the Documents folder; deletes require human approval.",
-      "if": {
-        "paths": {
-          "roles": [
-            "delete-path"
-          ],
-          "within": "~/Documents"
-        }
-      },
-      "then": "escalate",
-      "reason": "Constitution only grants read access to Documents; deletes are not explicitly permitted and require human review."
-    },
-    {
-      "name": "deny-delete-outside-allowed",
-      "description": "Denies all delete operations outside explicitly permitted directories.",
-      "principle": "No destruction: Delete operations outside the sandbox are never permitted.",
-      "if": {
-        "roles": [
-          "delete-path"
+        "tool": [
+          "git_status",
+          "git_diff",
+          "git_log",
+          "git_show",
+          "git_blame",
+          "git_reflog",
+          "git_changelog_analyze"
         ]
       },
-      "then": "deny",
-      "reason": "Constitution prohibits delete operations outside explicitly permitted directories (Downloads, Documents, and the sandbox handled by invariants)."
+      "then": "allow",
+      "reason": "Constitution explicitly allows read-only git operations without approval."
+    },
+    {
+      "name": "allow-git-stage-commit",
+      "description": "Allow git stage (add) and commit operations within the sandbox.",
+      "principle": "The agent may stage files (git add) and commit within the sandbox without approval.",
+      "if": {
+        "tool": [
+          "git_add",
+          "git_commit"
+        ]
+      },
+      "then": "allow",
+      "reason": "Constitution explicitly allows staging and committing without approval."
+    },
+    {
+      "name": "escalate-git-remote-operations",
+      "description": "Require human approval for git push, pull, fetch, and any remote-contacting operations.",
+      "principle": "The agent must receive human approval before git push, git pull, git fetch, or any remote-contacting operation.",
+      "if": {
+        "tool": [
+          "git_push",
+          "git_pull",
+          "git_fetch",
+          "git_clone"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Constitution requires human approval before any remote-contacting git operations."
+    },
+    {
+      "name": "escalate-git-history-rewrite",
+      "description": "Require human approval for git reset, rebase, merge, or any history-rewriting operation.",
+      "principle": "The agent must receive human approval before git reset, git rebase, git merge, or any history-rewriting operation.",
+      "if": {
+        "tool": [
+          "git_reset",
+          "git_rebase",
+          "git_merge",
+          "git_cherry_pick"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Constitution requires human approval before history-rewriting git operations."
+    },
+    {
+      "name": "escalate-git-branch-delete-force",
+      "description": "Require human approval for git branch deletion or force operations.",
+      "principle": "The agent must receive human approval before git branch deletion or force operations.",
+      "if": {
+        "roles": [
+          "delete-history"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Constitution requires human approval before branch deletion or force operations."
     },
     {
       "name": "allow-fetch-news-sites",
-      "description": "Allows fetching web content from popular news sites.",
-      "principle": "Least privilege: The agent may fetch web content from popular news sites.",
+      "description": "Allow fetching web content from popular news sites.",
+      "principle": "The agent may fetch web content from popular news sites.",
       "if": {
         "domains": {
           "roles": [
@@ -120,195 +123,43 @@
         }
       },
       "then": "allow",
-      "reason": "Constitution explicitly permits fetching from popular news sites."
+      "reason": "Constitution explicitly permits fetching content from popular news sites."
     },
     {
       "name": "escalate-fetch-other-urls",
-      "description": "Escalates fetch requests to domains not on the popular news sites list.",
-      "principle": "Human oversight: Operations outside explicitly permitted domains require human approval.",
+      "description": "Escalate fetching content from non-news URLs for human approval.",
+      "principle": "Human oversight: operations outside the sandbox require explicit human approval.",
       "if": {
         "roles": [
           "fetch-url"
         ]
       },
       "then": "escalate",
-      "reason": "Fetching from domains not on the popular news sites list is not explicitly permitted and requires human approval."
+      "reason": "Fetching from URLs not on the approved news sites list requires human judgment."
     },
     {
-      "name": "escalate-git-remote-url",
-      "description": "Escalates any git operation involving a remote URL for human approval.",
-      "principle": "Human oversight: The agent must receive human approval before any remote-contacting operation.",
-      "if": {
-        "roles": [
-          "git-remote-url"
-        ]
-      },
-      "then": "escalate",
-      "reason": "Any operation involving a remote git URL may contact external systems and requires human approval."
-    },
-    {
-      "name": "allow-git-readonly",
-      "description": "Allows read-only git operations without human approval.",
-      "principle": "Least privilege: The agent may perform read-only git operations within the sandbox without approval.",
-      "if": {
-        "tool": [
-          "git_status",
-          "git_diff",
-          "git_log",
-          "git_show",
-          "git_blame"
-        ]
-      },
-      "then": "allow",
-      "reason": "Constitution explicitly permits read-only git operations without approval."
-    },
-    {
-      "name": "allow-git-stage-commit",
-      "description": "Allows staging files and committing within the sandbox without human approval.",
-      "principle": "Least privilege: The agent may stage files and commit within the sandbox without approval.",
-      "if": {
-        "tool": [
-          "git_add",
-          "git_commit"
-        ]
-      },
-      "then": "allow",
-      "reason": "Constitution explicitly permits git add and git commit without approval."
-    },
-    {
-      "name": "escalate-git-remote-operations",
-      "description": "Escalates remote-contacting git operations for human approval.",
-      "principle": "Human oversight: The agent must receive human approval before git push, pull, fetch, or any remote-contacting operation.",
-      "if": {
-        "tool": [
-          "git_push",
-          "git_pull",
-          "git_fetch",
-          "git_clone"
-        ]
-      },
-      "then": "escalate",
-      "reason": "Constitution requires human approval before any remote-contacting git operation."
-    },
-    {
-      "name": "escalate-git-history-rewrite",
-      "description": "Escalates history-rewriting git operations for human approval.",
-      "principle": "Human oversight: The agent must receive human approval before git reset, rebase, merge, or any history-rewriting operation.",
-      "if": {
-        "tool": [
-          "git_reset",
-          "git_rebase",
-          "git_merge",
-          "git_cherry_pick"
-        ]
-      },
-      "then": "escalate",
-      "reason": "Constitution requires human approval before any history-rewriting git operation."
-    },
-    {
-      "name": "escalate-git-history-role",
-      "description": "Escalates any git tool annotated with write-history or delete-history roles.",
-      "principle": "Human oversight: Operations that modify or delete git history require human approval.",
-      "if": {
-        "roles": [
-          "write-history",
-          "delete-history"
-        ]
-      },
-      "then": "escalate",
-      "reason": "Any tool annotated with write-history or delete-history may rewrite git history and needs human approval."
-    },
-    {
-      "name": "escalate-git-branch",
-      "description": "Escalates all git_branch operations for human review.",
-      "principle": "Human oversight: The agent must receive human approval before git branch deletion or force operations.",
-      "if": {
-        "tool": [
-          "git_branch"
-        ]
-      },
-      "then": "escalate",
-      "reason": "git_branch can delete or force-update branches; escalate all uses for human review per constitution."
-    },
-    {
-      "name": "escalate-git-other",
-      "description": "Escalates other git operations with side effects not explicitly permitted.",
-      "principle": "Human oversight: Operations not explicitly permitted require human approval.",
-      "if": {
-        "tool": [
-          "git_reflog",
-          "git_changelog_analyze",
-          "git_stash",
-          "git_tag",
-          "git_worktree",
-          "git_wrapup_instructions",
-          "git_set_working_dir",
-          "git_clear_working_dir",
-          "git_remote",
-          "git_clean",
-          "git_checkout",
-          "git_init"
-        ]
-      },
-      "then": "escalate",
-      "reason": "These git operations have side effects or are not explicitly permitted; route to human for approval."
-    },
-    {
-      "name": "allow-filesystem-no-side-effects",
-      "description": "Allows side-effect-free filesystem operations.",
-      "principle": "Least privilege: Side-effect-free operations pose no risk and are implicitly permitted.",
-      "if": {
-        "server": [
-          "filesystem"
-        ],
-        "sideEffects": false
-      },
-      "then": "allow",
-      "reason": "Side-effect-free filesystem operations pose no risk and are implicitly permitted."
-    },
-    {
-      "name": "escalate-write-outside-allowed",
-      "description": "Escalates write operations outside explicitly permitted directories.",
-      "principle": "Human oversight: Writes outside permitted directories require human approval.",
+      "name": "escalate-write-outside-permitted",
+      "description": "Escalate write operations outside explicitly permitted directories.",
+      "principle": "Human oversight: operations outside the sandbox require explicit human approval.",
       "if": {
         "roles": [
           "write-path"
         ]
       },
       "then": "escalate",
-      "reason": "Writes outside explicitly permitted directories are not authorized without human approval."
+      "reason": "Write operations outside the sandbox or Downloads folder require human approval."
     },
     {
-      "name": "escalate-read-outside-restricted",
-      "description": "Escalates read operations outside explicitly permitted directories.",
-      "principle": "Human oversight: Reads outside permitted directories require human approval.",
-      "if": {
-        "roles": [
-          "read-path"
-        ]
-      },
-      "then": "escalate",
-      "reason": "Reads outside explicitly permitted directories are not authorized without human approval."
-    },
-    {
-      "name": "escalate-remaining-git",
-      "description": "Escalates any uncovered git operation for human review.",
-      "principle": "Human oversight: Any uncovered git operation should be reviewed by a human.",
+      "name": "escalate-git-other",
+      "description": "Escalate other git operations not explicitly allowed or denied.",
+      "principle": "Human oversight: operations outside the sandbox require explicit human approval.",
       "if": {
         "server": [
           "git"
         ]
       },
       "then": "escalate",
-      "reason": "Any uncovered git operation should be reviewed by a human before execution."
-    },
-    {
-      "name": "escalate-all-remaining",
-      "description": "Catch-all escalation for any operation not covered by prior rules.",
-      "principle": "Human oversight: Operations outside the sandbox require explicit human approval.",
-      "if": {},
-      "then": "escalate",
-      "reason": "Catch-all escalation ensures no operation proceeds without explicit authorization."
+      "reason": "Git operations not explicitly permitted require human oversight."
     }
   ],
   "listDefinitions": [
@@ -316,7 +167,7 @@
       "name": "popular-news-sites",
       "type": "domains",
       "principle": "The agent may fetch web content from popular news sites.",
-      "generationPrompt": "List approximately 50 of the most popular and widely recognized news websites and media outlets worldwide, including major national newspapers, international news agencies, and top online news platforms.",
+      "generationPrompt": "List the domains of approximately 50 popular news websites from around the world, including major national newspapers, international wire services, and widely-read online news outlets.",
       "requiresMcp": false
     }
   ]
