@@ -42,6 +42,7 @@ import {
   buildJudgeSystemPrompt,
   extractScenarioCorrections,
   filterStructuralConflicts,
+  PolicyVerifierSession,
   verifyPolicy,
 } from './policy-verifier.js';
 import { buildGeneratorSystemPrompt, ScenarioGeneratorSession } from './scenario-generator.js';
@@ -370,6 +371,7 @@ async function verifyCompiledPolicy(
   serverDomainAllowlists?: ReadonlyMap<string, readonly string[]>,
   dynamicLists?: DynamicListsFile,
   system?: string | SystemModelMessage,
+  session?: PolicyVerifierSession,
 ): Promise<VerificationResult> {
   const result = await verifyPolicy(
     constitutionText,
@@ -384,6 +386,7 @@ async function verifyCompiledPolicy(
     serverDomainAllowlists,
     dynamicLists,
     system,
+    session,
   );
 
   if (!result.pass) {
@@ -666,6 +669,8 @@ export async function main(): Promise<void> {
   const verifyStepLabel = `[${totalSteps}/${totalSteps}]`;
   logContext.stepName = 'verify-policy';
   const allAvailableTools = allAnnotations.map((a) => ({ serverName: a.serverName, toolName: a.toolName }));
+  const serverNamesList = [...new Set(allAnnotations.map((a) => a.serverName))] as [string, ...string[]];
+  const toolNamesList = [...new Set(allAnnotations.map((a) => a.toolName))] as [string, ...string[]];
   let verifierSystem = cacheStrategy.wrapSystemPrompt(
     buildJudgeSystemPrompt(
       config.constitutionText,
@@ -675,6 +680,12 @@ export async function main(): Promise<void> {
       dynamicLists,
     ),
   );
+  let verifierSession = new PolicyVerifierSession({
+    system: verifierSystem,
+    model: llm,
+    serverNames: serverNamesList,
+    toolNames: toolNamesList,
+  });
   const { result: verificationResultInitial } = await withSpinner(
     `${verifyStepLabel} Verifying policy`,
     async (spinner) =>
@@ -694,6 +705,7 @@ export async function main(): Promise<void> {
         serverDomainAllowlists,
         dynamicLists,
         verifierSystem,
+        verifierSession,
       ),
     (r, elapsed) =>
       r.pass
@@ -796,7 +808,6 @@ export async function main(): Promise<void> {
       if (allRuleBlamedFailures.length > 0) {
         // Recompile with failure feedback (always calls LLM, no cache)
         const repairContext: RepairContext = {
-          previousRules: compilationResult.rules,
           failedScenarios: allRuleBlamedFailures,
           judgeAnalysis,
           attemptNumber: attempt,
@@ -856,7 +867,7 @@ export async function main(): Promise<void> {
         compiledPolicyFile = buildPolicyArtifact(config.constitutionHash, compilationResult);
         writePolicyArtifact(config.generatedDir, compiledPolicyFile);
 
-        // Rebuild verifier system prompt with updated rules
+        // Rebuild verifier system prompt and session with updated rules
         verifierSystem = cacheStrategy.wrapSystemPrompt(
           buildJudgeSystemPrompt(
             config.constitutionText,
@@ -866,6 +877,12 @@ export async function main(): Promise<void> {
             dynamicLists,
           ),
         );
+        verifierSession = new PolicyVerifierSession({
+          system: verifierSystem,
+          model: llm,
+          serverNames: serverNamesList,
+          toolNames: toolNamesList,
+        });
       } else {
         console.error(`  ${chalk.dim('No rule-blamed failures — skipping recompilation')}`);
       }
@@ -893,6 +910,7 @@ export async function main(): Promise<void> {
             serverDomainAllowlists,
             dynamicLists,
             verifierSystem,
+            verifierSession,
           ),
         (r, elapsed) =>
           r.pass
@@ -915,6 +933,13 @@ export async function main(): Promise<void> {
         // Run final full verification with all accumulated scenarios
         logContext.stepName = 'final-verify';
         const finalScenarios = [...filteredScenarios, ...accumulatedProbes];
+        // New session for final verification (fresh history for clean evaluation)
+        const finalSession = new PolicyVerifierSession({
+          system: verifierSystem,
+          model: llm,
+          serverNames: serverNamesList,
+          toolNames: toolNamesList,
+        });
         const { result: finalVerifyResult } = await withSpinner(
           'Final full verification',
           async (spinner) =>
@@ -934,6 +959,7 @@ export async function main(): Promise<void> {
               serverDomainAllowlists,
               dynamicLists,
               verifierSystem,
+              finalSession,
             ),
           (r, elapsed) =>
             r.pass

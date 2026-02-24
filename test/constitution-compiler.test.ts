@@ -271,28 +271,28 @@ describe('Constitution Compiler', () => {
     ];
 
     const repairContext: RepairContext = {
-      previousRules: cannedRules,
       failedScenarios,
       judgeAnalysis: 'The allow-side-effect-free-tools rule is too broad and matches before more specific rules.',
       attemptNumber: 1,
     };
 
-    it('includes previous rules', () => {
+    it('references previous rules without re-serializing them', () => {
       const prompt = buildRepairInstructions(repairContext);
 
-      expect(prompt).toContain('allow-side-effect-free-tools');
-      expect(prompt).toContain('deny-delete-operations');
-      expect(prompt).toContain('allow-read-in-sandbox');
-      expect(prompt).toContain('escalate-read-elsewhere');
+      expect(prompt).toContain('Your previous rules (in your last response above) failed verification');
+      expect(prompt).not.toContain('### Previous Rules');
     });
 
-    it('includes failed scenarios', () => {
+    it('includes failed scenarios in compact format', () => {
       const prompt = buildRepairInstructions(repairContext);
 
       expect(prompt).toContain('Deny delete outside sandbox');
       expect(prompt).toContain('Escalate read outside sandbox');
-      expect(prompt).toContain('Expected: deny');
-      expect(prompt).toContain('Actual: allow');
+      expect(prompt).toContain('Expected: deny, Got: allow');
+      // Compact format omits verbose fields
+      expect(prompt).not.toContain('Tool: filesystem/delete_file');
+      expect(prompt).not.toContain('Args:');
+      expect(prompt).not.toContain('Source:');
     });
 
     it('includes judge analysis', () => {
@@ -321,7 +321,6 @@ describe('Constitution Compiler', () => {
       const { model, getPrompt } = createPromptCapturingModel({ rules: cannedRules });
 
       const repairContext: RepairContext = {
-        previousRules: cannedRules,
         failedScenarios: [
           {
             scenario: {

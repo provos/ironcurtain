@@ -1555,7 +1555,6 @@ describe('Dynamic List Values in Prompts', () => {
 describe('Repair Instructions with Existing Lists', () => {
   it('includes existing list definitions in repair instructions', () => {
     const repairContext: RepairContext = {
-      previousRules: [plainReadRule],
       failedScenarios: [],
       judgeAnalysis: 'Some analysis',
       attemptNumber: 1,
@@ -1573,7 +1572,6 @@ describe('Repair Instructions with Existing Lists', () => {
 
   it('includes handwritten scenarios as ground truth in repair instructions', () => {
     const repairContext: RepairContext = {
-      previousRules: [plainReadRule],
       failedScenarios: [],
       judgeAnalysis: 'Some analysis',
       attemptNumber: 1,
@@ -1602,7 +1600,6 @@ describe('Repair Instructions with Existing Lists', () => {
 
   it('omits dynamic lists section when no list definitions exist', () => {
     const repairContext: RepairContext = {
-      previousRules: [plainReadRule],
       failedScenarios: [],
       judgeAnalysis: 'Some analysis',
       attemptNumber: 1,
@@ -1615,7 +1612,6 @@ describe('Repair Instructions with Existing Lists', () => {
 
   it('omits dynamic lists section when list definitions array is empty', () => {
     const repairContext: RepairContext = {
-      previousRules: [plainReadRule],
       failedScenarios: [],
       judgeAnalysis: 'Some analysis',
       attemptNumber: 1,

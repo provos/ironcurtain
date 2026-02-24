@@ -18,7 +18,7 @@ import {
 } from './generate-with-repair.js';
 import type { ToolAnnotation, CompiledRule, RepairContext, ListDefinition, TestScenario } from './types.js';
 import { isArgumentRole, getArgumentRoleValues } from '../types/argument-roles.js';
-import { formatExecutionResults } from './policy-verifier.js';
+import { formatFailedResults } from './policy-verifier.js';
 
 export interface CompilerConfig {
   protectedPaths: string[];
@@ -204,11 +204,7 @@ Examples:
 
 /** Builds the repair instructions sent as the user prompt during repair rounds. */
 export function buildRepairInstructions(repairContext: RepairContext): string {
-  const rulesText = repairContext.previousRules
-    .map((r, i) => `  ${i + 1}. [${r.name}] if: ${JSON.stringify(r.if)} then: ${r.then} -- ${r.reason}`)
-    .join('\n');
-
-  const failuresText = formatExecutionResults(repairContext.failedScenarios);
+  const failuresText = formatFailedResults(repairContext.failedScenarios);
 
   let existingListsText = '';
   if (repairContext.existingListDefinitions && repairContext.existingListDefinitions.length > 0) {
@@ -226,11 +222,7 @@ ${listLines}
 
   return `## REPAIR INSTRUCTIONS (attempt ${repairContext.attemptNumber})
 
-Your previous compilation produced rules that failed verification. You MUST fix these issues.
-
-### Previous Rules
-
-${rulesText}
+Your previous rules (in your last response above) failed verification. You MUST fix these issues.
 
 ### Failed Scenarios
 
@@ -342,8 +334,10 @@ export class ConstitutionCompilerSession {
   }
 
   private async callAndParse(userMessage: string, onProgress?: (message: string) => void): Promise<CompilationOutput> {
-    const messageWithSchema = userMessage + this.schemaHint;
-    this.history.push({ role: 'user', content: messageWithSchema });
+    // Append the full schema hint only on the first turn; subsequent
+    // turns already have it in conversation history.
+    const content = this.turns === 0 ? userMessage + this.schemaHint : userMessage;
+    this.history.push({ role: 'user', content });
 
     onProgress?.('Compiling...');
 

@@ -329,7 +329,8 @@ export class ScenarioGeneratorSession {
    * for merging these into the full scenario set.
    */
   async regenerate(feedback: ScenarioFeedback, onProgress?: (message: string) => void): Promise<TestScenario[]> {
-    const feedbackMessage = formatFeedbackMessage(feedback) + this.schemaHint;
+    // Schema hint is already in the conversation history from generate().
+    const feedbackMessage = formatFeedbackMessage(feedback);
     this.history.push({ role: 'user', content: feedbackMessage });
 
     onProgress?.(`Regenerating scenarios (turn ${this.turns + 1})...`);

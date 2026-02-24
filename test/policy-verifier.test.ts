@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { MockLanguageModelV3 } from 'ai/test';
-import { verifyPolicy, filterStructuralConflicts } from '../src/pipeline/policy-verifier.js';
+import { verifyPolicy, filterStructuralConflicts, formatCompactResults } from '../src/pipeline/policy-verifier.js';
 import { PolicyEngine } from '../src/trusted-process/policy-engine.js';
-import type { CompiledPolicyFile, TestScenario } from '../src/pipeline/types.js';
+import type { CompiledPolicyFile, ExecutionResult, TestScenario } from '../src/pipeline/types.js';
 import { getHandwrittenScenarios } from '../src/pipeline/handwritten-scenarios.js';
 import {
   testCompiledPolicy,
@@ -387,5 +387,63 @@ describe('filterStructuralConflicts', () => {
     expect(valid).toHaveLength(0);
     expect(discarded).toHaveLength(1);
     expect(discarded[0].scenario.source).toBe('handwritten');
+  });
+});
+
+describe('formatCompactResults', () => {
+  const passingResult: ExecutionResult = {
+    scenario: {
+      description: 'Read file in sandbox',
+      request: { serverName: 'filesystem', toolName: 'read_file', arguments: { path: '/sandbox/test.txt' } },
+      expectedDecision: 'allow',
+      reasoning: 'Sandbox reads allowed',
+      source: 'generated',
+    },
+    actualDecision: 'allow',
+    matchingRule: 'structural-sandbox',
+    pass: true,
+  };
+
+  const failingResult: ExecutionResult = {
+    scenario: {
+      description: 'Write outside sandbox',
+      request: { serverName: 'filesystem', toolName: 'write_file', arguments: { path: '/etc/hosts', content: 'x' } },
+      expectedDecision: 'deny',
+      reasoning: 'Outside writes denied',
+      source: 'generated',
+    },
+    actualDecision: 'allow',
+    matchingRule: 'allow-all-writes',
+    pass: false,
+  };
+
+  it('renders passing scenarios as compact one-liners', () => {
+    const output = formatCompactResults([passingResult]);
+    expect(output).toContain('PASS: Read file in sandbox');
+    expect(output).toContain('structural-sandbox');
+    // Should NOT contain verbose fields
+    expect(output).not.toContain('Tool:');
+    expect(output).not.toContain('Args:');
+    expect(output).not.toContain('Source:');
+  });
+
+  it('renders failing scenarios with full verbose details', () => {
+    const output = formatCompactResults([failingResult]);
+    expect(output).toContain('FAIL: Write outside sandbox');
+    expect(output).toContain('Tool: filesystem/write_file');
+    expect(output).toContain('Args:');
+    expect(output).toContain('Expected: deny');
+    expect(output).toContain('Actual: allow');
+    expect(output).toContain('Source: generated');
+  });
+
+  it('mixes compact passes and verbose fails', () => {
+    const output = formatCompactResults([passingResult, failingResult]);
+    const lines = output.split('\n');
+    // First entry is a one-liner pass
+    expect(lines[0]).toMatch(/^\[1\] PASS:/);
+    // Second entry is a multi-line fail
+    expect(output).toContain('[2] FAIL:');
+    expect(output).toContain('Tool:');
   });
 });

@@ -281,7 +281,6 @@ export interface ScenarioFeedback {
 // ---------------------------------------------------------------------------
 
 export interface RepairContext {
-  previousRules: CompiledRule[];
   failedScenarios: ExecutionResult[];
   judgeAnalysis: string;
   attemptNumber: number;
