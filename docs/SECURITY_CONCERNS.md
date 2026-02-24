@@ -1,7 +1,7 @@
 # Security Concerns and Threat Landscape
 
 **Status:** Living Document
-**Last Updated:** 2026-02-20
+**Last Updated:** 2026-02-24
 
 This document outlines the known security concerns, attack vectors, and residual risks for the IronCurtain runtime. It serves as a guide for security researchers, auditors, and developers to understand where the "dragons" live.
 
@@ -78,7 +78,19 @@ This document outlines the known security concerns, attack vectors, and residual
 **Decision:** Inline string replacement on stderr lines before writing to the session log — scan for known credential values and replace with `***REDACTED***`. This is a few lines of code in the proxy, not a dedicated utility. Audit log redaction is **not** implemented because the tool-argument path is indirect and unreliable to catch (the agent could transform or split credential values). A formal `CredentialRedactor` abstraction was considered and rejected as over-engineering for the actual threat surface.
 **Residual risk:** Credentials echoed by MCP servers in tool *responses* enter the LLM context and are not masked. Addressing this requires response filtering, which is a different mechanism and deferred.
 
-## 9. Supply Chain Attacks (Host Level)
+## 9. MITM Proxy and API Key Protection (Docker Agent Mode)
+
+**Risk:** The TLS-terminating MITM proxy (`mitm-proxy.ts`) handles real API keys and terminates TLS for traffic from untrusted Docker containers.
+**Vectors:**
+*   **Response header leakage:** If an upstream API server echoes the real API key in response headers (diagnostic headers, redirect URLs), the key could leak to the container. Current LLM API providers do not exhibit this behavior, but it is a fragile assumption.
+*   **Endpoint filter bypass:** The `isEndpointAllowed()` function performs strict string matching without URL normalization. While this is conservative (encoded variants are blocked, not allowed through), a parser differential between the proxy and the upstream server could theoretically allow bypass.
+**Mitigation:**
+*   **Key never enters the container:** The agent receives a fake sentinel key (192 bits of entropy). The real key exists only in the host process memory. The MITM proxy validates the fake key and swaps it before forwarding upstream.
+*   **Strict endpoint allowlist:** Only specific method+path combinations are permitted (e.g., `POST /v1/messages` for Anthropic). All other requests are blocked with 403.
+*   **No network access:** Containers run with `--network=none`, eliminating network-based attack vectors entirely.
+**Residual risk:** A compromised agent can make excessive LLM API calls via the MITM proxy, incurring costs. Mitigated by per-session resource budgets and API key spending limits.
+
+## 10. Supply Chain Attacks (Host Level)
 
 **Risk:** The IronCurtain runtime itself depends on npm packages (`@modelcontextprotocol/sdk`, `zod`, `uuid`, etc.).
 **Impact:** A compromised dependency in the host process runs with full user privileges and bypasses all sandbox protections.

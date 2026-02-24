@@ -105,7 +105,9 @@ async function createDockerSession(
   // Dynamic imports to avoid loading Docker dependencies for built-in sessions
   const { registerBuiltinAdapters, getAgent } = await import('../docker/agent-registry.js');
   const { createManagedProxy } = await import('../docker/managed-proxy.js');
-  const { createConnectProxy } = await import('../docker/connect-proxy.js');
+  const { createMitmProxy } = await import('../docker/mitm-proxy.js');
+  const { loadOrCreateCA } = await import('../docker/ca.js');
+  const { generateFakeKey } = await import('../docker/fake-keys.js');
   const { createDockerManager } = await import('../docker/docker-manager.js');
   const { DockerAgentSession } = await import('../docker/docker-agent-session.js');
 
@@ -148,10 +150,29 @@ async function createDockerSession(
     env: proxyEnv,
   });
 
-  const connectProxySocketPath = resolve(sessionConfig.sessionDir, 'connect-proxy.sock');
-  const connectProxy = createConnectProxy({
-    allowedHosts: adapter.getAllowedApiHosts(),
-    socketPath: connectProxySocketPath,
+  // Load or generate the IronCurtain CA for TLS termination
+  const { getIronCurtainHome } = await import('../config/paths.js');
+  const caDir = resolve(getIronCurtainHome(), 'ca');
+  const ca = loadOrCreateCA(caDir);
+
+  // Generate fake keys and build provider key mappings
+  const providers = adapter.getProviders();
+  const fakeKeys = new Map<string, string>();
+  const providerMappings: import('../docker/mitm-proxy.js').ProviderKeyMapping[] = [];
+  for (const providerConfig of providers) {
+    const fakeKey = generateFakeKey(providerConfig.fakeKeyPrefix);
+    fakeKeys.set(providerConfig.host, fakeKey);
+
+    // Resolve real API key from config
+    const realKey = resolveRealApiKey(providerConfig.host, config);
+    providerMappings.push({ config: providerConfig, fakeKey, realKey });
+  }
+
+  const mitmProxySocketPath = resolve(sessionConfig.sessionDir, 'mitm-proxy.sock');
+  const mitmProxy = createMitmProxy({
+    socketPath: mitmProxySocketPath,
+    ca,
+    providers: providerMappings,
   });
   const docker = createDockerManager();
 
@@ -161,7 +182,9 @@ async function createDockerSession(
     adapter,
     docker,
     proxy,
-    connectProxy,
+    mitmProxy,
+    ca,
+    fakeKeys,
     sessionDir: sessionConfig.sessionDir,
     sandboxDir: sessionConfig.sandboxDir,
     escalationDir: sessionConfig.escalationDir,
@@ -271,6 +294,31 @@ function patchMcpServerAllowedDirectory(
   if (lastArgIndex >= 0) {
     fsServer.args[lastArgIndex] = sandboxDir;
   }
+}
+
+/**
+ * Resolves the real API key for a provider host from config.
+ */
+function resolveRealApiKey(host: string, config: IronCurtainConfig): string {
+  let key: string;
+  switch (host) {
+    case 'api.anthropic.com':
+      key = config.userConfig.anthropicApiKey;
+      break;
+    case 'api.openai.com':
+      key = config.userConfig.openaiApiKey;
+      break;
+    case 'generativelanguage.googleapis.com':
+      key = config.userConfig.googleApiKey;
+      break;
+    default:
+      logger.warn(`No API key mapping for unknown provider host: ${host}`);
+      return '';
+  }
+  if (!key) {
+    logger.warn(`No API key configured for provider host: ${host}`);
+  }
+  return key;
 }
 
 // Re-export types needed by callers

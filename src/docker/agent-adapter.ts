@@ -7,6 +7,7 @@
  */
 
 import type { IronCurtainConfig } from '../config/types.js';
+import type { ProviderConfig } from './provider-config.js';
 
 /**
  * Structured response from an agent adapter, carrying both the
@@ -108,16 +109,20 @@ export interface AgentAdapter {
   buildSystemPrompt(context: OrientationContext): string;
 
   /**
-   * Returns hostnames the agent needs direct HTTPS access to for LLM API calls.
-   * These are allowlisted in the per-session CONNECT proxy.
+   * Returns LLM provider configurations for this agent.
+   * The MITM proxy uses these to build the host allowlist,
+   * generate fake API keys, swap keys in requests, and filter endpoints.
    */
-  getAllowedApiHosts(): readonly string[];
+  getProviders(): readonly ProviderConfig[];
 
   /**
    * Constructs environment variables for the container.
-   * Includes API keys and agent-specific configuration.
+   * Receives fake keys instead of real keys -- the real keys never
+   * enter the container.
+   *
+   * @param fakeKeys - map of provider host -> fake sentinel key
    */
-  buildEnv(config: IronCurtainConfig): Readonly<Record<string, string>>;
+  buildEnv(config: IronCurtainConfig, fakeKeys: ReadonlyMap<string, string>): Readonly<Record<string, string>>;
 
   /**
    * Parses the agent's output to extract the response and optional cost.

@@ -4,6 +4,12 @@ FROM mcr.microsoft.com/devcontainers/universal:latest
 # The universal image uses 'codespace' as the non-root user (uid 1000).
 USER root
 RUN apt-get update && apt-get install -y --no-install-recommends socat && rm -rf /var/lib/apt/lists/*
+
+# IronCurtain CA (for MITM proxy trust)
+# This file is copied into a temporary build context by ensureImage().
+COPY ironcurtain-ca-cert.pem /usr/local/share/ca-certificates/ironcurtain-ca.crt
+RUN update-ca-certificates
+
 RUN mkdir -p /workspace /etc/ironcurtain /run/ironcurtain && \
     chown codespace:codespace /workspace /etc/ironcurtain /run/ironcurtain
 

@@ -7,12 +7,12 @@ IronCurtain currently runs a built-in agent loop (Vercel AI SDK + UTCP Code Mode
 The core insight is that IronCurtain's value is not the agent loop itself but the **policy-mediated MCP proxy** sitting between the agent and the outside world. By decoupling the agent from the policy enforcement layer, we can run any MCP-native agent inside a sandboxed Docker container where:
 
 - The agent has **free reign within its per-session sandbox directory** (volume-mounted)
-- The agent has **no general network access** — only LLM API calls are allowed, via a domain-allowlisting CONNECT proxy
+- The agent has **no network access** (`--network=none`) — only LLM API calls are allowed, via a TLS-terminating MITM proxy on a Unix domain socket
 - All other external operations (filesystem outside sandbox, git, network fetch, etc.) are mediated through **MCP tools exposed via IronCurtain's policy engine**
 - Per-agent **orientation files** teach the agent about the MCP-mediated environment
 
 This architecture creates a two-layer defense:
-1. **Docker + CONNECT proxy** sandboxes the entire agent process (network restricted to allowlisted LLM API domains, filesystem isolation, process isolation)
+1. **Docker + MITM proxy** sandboxes the entire agent process (no network access, LLM API calls filtered and key-swapped by TLS-terminating proxy, filesystem isolation, process isolation)
 2. **IronCurtain's policy engine** mediates every external operation at the MCP protocol level
 
 The built-in agent loop remains as a first-class option. The Docker broker is an alternative session type that implements the same `Session` interface.
@@ -41,33 +41,39 @@ The built-in agent loop remains as a first-class option. The Docker broker is an
                          |          +-- MCP Proxy Server        |
                          |          |     (per-session, UDS)    |
                          |          |                           |
-                         |          +-- CONNECT Proxy           |
-                         |          |     (per-session, TCP)    |
-                         |          |     LLM API allowlist     |
+                         |          +-- MITM Proxy              |
+                         |          |     (per-session, UDS)    |
+                         |          |     TLS-terminating,      |
+                         |          |     endpoint filtering,   |
+                         |          |     API key swap          |
                          |          |                           |
                          |          +-- Escalation Watcher      |
                          |          +-- Result Collector        |
                          |                                      |
                          +--------------------------------------+
                               |                          |
-               Unix Domain Socket              TCP (CONNECT proxy)
-               (MCP tool calls)                (LLM API calls only)
+               Unix Domain Socket              Unix Domain Socket
+               (MCP tool calls)                (MITM proxy)
                               |                          |
                          +--------------------------------------+
                          |  Docker Container (per-session)      |
-                         |  network: ironcurtain-agents         |
-                         |  (can only reach host)               |
+                         |  --network=none                      |
+                         |  (no external network access)        |
                          |                                      |
                          |  /workspace/  (volume: sandbox dir)  |
                          |  /etc/ironcurtain/  (orientation)    |
                          |  /run/ironcurtain/proxy.sock  (UDS)  |
+                         |  /run/ironcurtain/mitm-proxy.sock    |
                          |                                      |
-                         |  HTTPS_PROXY=http://host:port        |
+                         |  HTTPS_PROXY=http://127.0.0.1:18080  |
+                         |  (socat bridges TCP→UDS internally)  |
                          |                                      |
                          |  Agent Process                       |
                          |    (Claude Code / Goose / etc.)      |
                          |    MCP tools via UDS proxy           |
-                         |    LLM API via CONNECT proxy         |
+                         |    LLM API via MITM proxy            |
+                         |    (fake sentinel API key, never     |
+                         |     sees real credentials)           |
                          +--------------------------------------+
 ```
 
@@ -196,8 +202,8 @@ Agent installation is a **build-time** concern — pre-baked into per-agent Dock
 This separation means:
 - No network needed at container startup for installation
 - First-run interactive prompts are suppressed during image build
-- Per-session config (API keys, MCP settings, orientation) is injected dynamically
-- API keys are **never** written to the image — only passed via `docker create -e`
+- Per-session config (MCP settings, orientation) is injected dynamically
+- **Real API keys never enter the container** — the agent receives a fake sentinel key; the MITM proxy swaps it for the real key on the host side
 
 ### Base Image
 
@@ -340,158 +346,86 @@ Every agent container gets three mounts:
 
 Note: The session directory is mounted (not the socket file directly) because Docker bind-mounts are set up at `docker create` time. If we mounted `proxy.sock` directly and it didn't exist yet, Docker would create a directory at that path, breaking the socket. By mounting the parent directory, the socket file appears naturally when the MCP proxy starts listening.
 
-### Network Isolation via Allowlisting CONNECT Proxy
+### Network Isolation via TLS-Terminating MITM Proxy
 
-Agents need direct HTTPS access to their LLM provider's API (e.g., `api.anthropic.com`). These are not MCP tool calls — they are the agent's own inference requests. A pure `--network=none` container would make agents non-functional.
+Agents need HTTPS access to their LLM provider's API (e.g., `api.anthropic.com`). These are not MCP tool calls — they are the agent's own inference requests. The container runs with `--network=none` (zero network access) and all HTTPS traffic is routed through a **TLS-terminating MITM proxy** on a Unix domain socket.
 
-The solution is a **per-session HTTP CONNECT proxy** built into IronCurtain that allowlists specific domains:
+This design achieves two critical properties that a simple CONNECT tunnel cannot:
+1. **Real API keys never enter the container.** The agent receives a fake sentinel key; the proxy swaps it for the real key before forwarding upstream.
+2. **Endpoint-level filtering.** The proxy inspects decrypted HTTP requests and blocks any endpoint not on the allowlist (e.g., only `POST /v1/messages` for Anthropic).
 
 ```
-Docker Container                        Host
-+------------------+                    +---------------------------+
-| Agent process    |                    |                           |
-|   HTTPS_PROXY=   |--- CONNECT -----→ | IronCurtain CONNECT Proxy |
-|   http://host:P  |   api.anthropic   |   Allowlist check (SNI)   |
-|                  |      .com:443     |   ✓ → tunnel raw TCP      |
-|                  |                    |   ✗ → 403 Forbidden       |
-|                  |--- CONNECT -----→ |                           |
-|                  |   evil.com:443    |   ✗ → 403 Forbidden       |
-+------------------+                    +---------------------------+
-                                                    |
-                                              (raw TCP tunnel)
-                                                    ↓
-                                           api.anthropic.com:443
+Docker Container (--network=none)         Host Process
++------------------------------------+    +--------------------------------+
+| Agent process                      |    |                                |
+|   HTTPS_PROXY=http://127.0.0.1:   |    |  IronCurtain MITM Proxy (UDS) |
+|     18080                          |    |                                |
+|   ANTHROPIC_API_KEY=sk-ant-api03-  |    |  1. CONNECT host check         |
+|     ironcurtain-<fake>             |    |     ✓ allowlisted provider     |
+|                                    |    |     ✗ 403 Forbidden            |
+|   socat bridges TCP:18080 → UDS ---|----→  2. TLS termination            |
+|                                    |    |     (per-host cert from CA)    |
+|   NODE_EXTRA_CA_CERTS=             |    |  3. Endpoint filter            |
+|     ironcurtain-ca.crt             |    |     ✓ POST /v1/messages        |
++------------------------------------+    |     ✗ 403 Blocked              |
+                                          |  4. Fake key → real key swap   |
+                                          |  5. Forward to upstream API    |
+                                          +--------------------------------+
+                                                        |
+                                                  (real HTTPS)
+                                                        ↓
+                                               api.anthropic.com:443
 ```
 
 **How it works:**
 
-1. IronCurtain spawns a lightweight HTTP CONNECT proxy on the host, listening on a per-session port (OS-assigned). The proxy is built into IronCurtain — no external dependency.
-2. The proxy handles only `CONNECT` requests. For each request, it checks the target hostname against the agent adapter's domain allowlist.
-3. Allowed: the proxy opens a raw TCP connection to the target and tunnels bytes bidirectionally. **No TLS termination** — the proxy never sees plaintext. It relies on the hostname from the CONNECT request.
-4. Denied: the proxy responds with `403 Forbidden` and closes the connection.
-5. The container runs on a custom Docker bridge network where the only reachable host is the Docker host. `HTTP_PROXY` and `HTTPS_PROXY` environment variables point the agent at the proxy.
+1. IronCurtain generates a self-signed CA (`~/.ironcurtain/ca/`) on first run. The CA certificate (not the key) is baked into the Docker base image via `update-ca-certificates`.
+2. For each provider, IronCurtain generates a random fake sentinel API key (192 bits of entropy) and passes it to the container as an environment variable.
+3. The MITM proxy listens on a Unix domain socket, bind-mounted into the container. Inside the container, `socat` bridges `TCP:127.0.0.1:18080` to the UDS so that `HTTPS_PROXY` works.
+4. When the agent makes an HTTPS request, the proxy handles the `CONNECT` and checks the target hostname against the provider allowlist. Denied hosts get `403`.
+5. For allowed hosts, the proxy terminates TLS using a dynamically generated leaf certificate signed by the IronCurtain CA (cached per hostname).
+6. The proxy inspects the decrypted HTTP request: checks the method+path against the provider's endpoint allowlist, validates the fake sentinel key, swaps it for the real key, and forwards to the upstream API.
+7. Responses are streamed back (SSE passthrough with `flushHeaders()` + `setNoDelay(true)`).
 
 **What this achieves:**
 
-- Agents can make LLM API calls transparently (all HTTP clients respect `HTTPS_PROXY`)
-- No other outbound network access is possible — the container can only reach the host, and the host proxy rejects non-allowlisted domains
-- MCP tool calls for general network access (fetch, git, etc.) still go through the MCP proxy and policy engine as before
-- No TLS termination, no certificate manipulation, no MITM
-
-**CONNECT Proxy Implementation:**
-
-```typescript
-// src/docker/connect-proxy.ts
-
-import { createServer, type IncomingMessage, type Socket } from 'node:http';
-import { connect as netConnect } from 'node:net';
-
-/**
- * A minimal HTTP CONNECT proxy that only tunnels to allowlisted hostnames.
- *
- * - Handles CONNECT method only (all other methods get 405)
- * - Validates target hostname against a static allowlist
- * - No TLS termination — tunnels raw TCP bytes
- * - Listens on an OS-assigned port on the host
- */
-export interface ConnectProxy {
-  /** Start listening. Resolves with the assigned host:port. */
-  start(): Promise<{ host: string; port: number }>;
-
-  /** Stop the proxy and close all active tunnels. */
-  stop(): Promise<void>;
-}
-
-export interface ConnectProxyOptions {
-  /**
-   * Hostnames allowed for CONNECT tunneling.
-   * Exact match only (no wildcards). Example: ['api.anthropic.com']
-   */
-  readonly allowedHosts: readonly string[];
-}
-
-export function createConnectProxy(options: ConnectProxyOptions): ConnectProxy {
-  const allowed = new Set(options.allowedHosts);
-
-  const server = createServer((_req, res) => {
-    // Only CONNECT is supported; reject everything else
-    res.writeHead(405);
-    res.end();
-  });
-
-  server.on('connect', (req: IncomingMessage, clientSocket: Socket, head: Buffer) => {
-    const [host, portStr] = (req.url ?? '').split(':');
-    const port = parseInt(portStr ?? '443', 10);
-
-    if (!allowed.has(host)) {
-      clientSocket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
-      clientSocket.destroy();
-      return;
-    }
-
-    const serverSocket = netConnect(port, host, () => {
-      clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
-      if (head.length > 0) serverSocket.write(head);
-      serverSocket.pipe(clientSocket);
-      clientSocket.pipe(serverSocket);
-    });
-
-    serverSocket.on('error', () => clientSocket.destroy());
-    clientSocket.on('error', () => serverSocket.destroy());
-  });
-
-  return {
-    async start() {
-      return new Promise((resolve, reject) => {
-        server.listen(0, '0.0.0.0', () => {
-          const addr = server.address();
-          if (addr && typeof addr === 'object') {
-            resolve({ host: 'host.docker.internal', port: addr.port });
-          } else {
-            reject(new Error('Failed to get server address'));
-          }
-        });
-      });
-    },
-    async stop() {
-      return new Promise<void>((resolve) => server.close(() => resolve()));
-    },
-  };
-}
-```
+- **API keys are protected.** The real key exists only in the host process memory. The container never sees it. Even if the agent is compromised, it can only exfiltrate the fake sentinel key, which is useless outside the MITM proxy.
+- **Endpoint-level filtering.** Unlike a passthrough CONNECT proxy, the MITM proxy sees decrypted traffic and can enforce per-endpoint allowlists (e.g., block telemetry or admin endpoints).
+- **Zero network attack surface.** The container has `--network=none` — no IP connectivity at all. The only communication channel is the UDS.
+- MCP tool calls for general network access (fetch, git, etc.) still go through the MCP proxy and policy engine as before.
 
 **Agent Adapter Integration:**
 
-Each agent adapter provides its required LLM API domains:
+Each agent adapter declares its required LLM API providers:
 
 ```typescript
 export interface AgentAdapter {
   // ... existing methods ...
 
-  /**
-   * Returns the set of hostnames the agent needs direct HTTPS access to
-   * for LLM API calls. These are allowlisted in the per-session CONNECT proxy.
-   *
-   * Example: ['api.anthropic.com'] for Claude Code
-   * Example: ['api.openai.com'] for OpenAI-based agents
-   */
-  getAllowedApiHosts(): readonly string[];
+  /** Returns provider configs for LLM APIs this agent needs. */
+  getProviders(): readonly ProviderConfig[];
+
+  /** Build environment variables. Receives fake keys keyed by provider host. */
+  buildEnv(config: IronCurtainConfig, fakeKeys: ReadonlyMap<string, string>): Record<string, string>;
 }
 ```
 
 The `DockerAgentSession` lifecycle becomes:
 
 ```
-1. Start MCP proxy server (UDS) — for tool calls
-2. Start CONNECT proxy (TCP) — for LLM API calls
-3. Create Docker network (if not exists)
-4. Start container with:
-   - HTTPS_PROXY=http://host.docker.internal:{connectProxyPort}
-   - HTTP_PROXY=http://host.docker.internal:{connectProxyPort}
-5. ... agent runs ...
-6. Stop container
-7. Stop CONNECT proxy
-8. Stop MCP proxy server
+1. Load/create CA certificate
+2. Generate fake sentinel keys for each provider
+3. Start MCP proxy server (UDS) — for tool calls
+4. Start MITM proxy (UDS) — for LLM API calls
+5. Start container (--network=none) with:
+   - Fake API key in env (e.g., ANTHROPIC_API_KEY=sk-ant-api03-ironcurtain-<random>)
+   - HTTPS_PROXY=http://127.0.0.1:18080
+   - NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/ironcurtain-ca.crt
+   - MITM proxy UDS bind-mounted
+6. ... agent runs ...
+7. Stop container
+8. Stop MITM proxy
+9. Stop MCP proxy server
 ```
 
 **Docker Network Setup:**
@@ -500,13 +434,13 @@ Each session gets its own isolated Docker bridge network. This prevents inter-co
 
 ```bash
 # Created during session initialization
-docker network create ironcurtain-{sessionId-short}
+docker create --network=none ...
 
 # Removed during session cleanup
-docker network rm ironcurtain-{sessionId-short}
+docker rm -f ironcurtain-{sessionId-short}
 ```
 
-The container connects to its per-session network. `host.docker.internal` is available on Docker for Mac by default; on Linux, it requires `--add-host=host.docker.internal:host-gateway` on the container.
+The container runs with `--network=none` — no IP connectivity. All communication with the host happens via bind-mounted Unix domain sockets (MCP proxy and MITM proxy).
 
 ## 5. MCP Proxy Transport
 
@@ -815,7 +749,8 @@ export const claudeCodeAdapter: AgentAdapter = {
 
   buildEnv(config: IronCurtainConfig): Record<string, string> {
     return {
-      ANTHROPIC_API_KEY: config.userConfig.anthropicApiKey,
+      ANTHROPIC_API_KEY: fakeKeys.get('api.anthropic.com') ?? '',
+      NODE_EXTRA_CA_CERTS: '/usr/local/share/ca-certificates/ironcurtain-ca.crt',
       // Disable Claude Code's update checks
       CLAUDE_CODE_DISABLE_UPDATE_CHECK: '1',
     };
@@ -980,10 +915,10 @@ createSession({ mode: { kind: 'docker', agent: 'claude-code' } })
      - Connects to real MCP servers (filesystem, git, fetch, etc.)
      - PolicyEngine loaded with compiled rules
   |
-  5. Start CONNECT Proxy (host process)
-     - Allowlist from adapter.getAllowedApiHosts()
-     - Listens on OS-assigned port
-     - Tunnels only to allowlisted LLM API domains
+  5. Start MITM Proxy (host process, UDS)
+     - Providers from adapter.getProviders()
+     - Fake sentinel keys generated per provider
+     - TLS-terminating with endpoint filtering and key swap
   |
   6. Query MCP proxy for available tools (tools/list)
   |
@@ -991,14 +926,13 @@ createSession({ mode: { kind: 'docker', agent: 'claude-code' } })
      - Write CLAUDE.md (or equivalent) to sandbox/
      - Write MCP client config to orientation/
   |
-  8. Create per-session Docker network:
-     docker network create ironcurtain-{sessionId-short}
+  8. Ensure Docker image exists (build with CA cert if needed)
   |
   9. Start Docker container with idle entrypoint:
      docker create \
        --name ironcurtain-{sessionId-short} \
-       --network ironcurtain-{sessionId-short} \
-       --add-host=host.docker.internal:host-gateway \
+       --network none \
+       \
        --cap-drop=ALL \
        --label ironcurtain.session={sessionId} \
        --memory 4g \
@@ -1006,9 +940,11 @@ createSession({ mode: { kind: 'docker', agent: 'claude-code' } })
        -v {sessionDir}:/run/ironcurtain \
        -v {sandboxDir}:/workspace \
        -v {orientationDir}:/etc/ironcurtain:ro \
-       -e ANTHROPIC_API_KEY=... \
-       -e HTTPS_PROXY=http://host.docker.internal:{connectProxyPort} \
-       -e HTTP_PROXY=http://host.docker.internal:{connectProxyPort} \
+       -e ANTHROPIC_API_KEY=sk-ant-api03-ironcurtain-<fake> \
+       -e ANTHROPIC_API_KEY=sk-ant-api03-ironcurtain-<fake> \
+       -e HTTPS_PROXY=http://127.0.0.1:18080 \
+       -e HTTP_PROXY=http://127.0.0.1:18080 \
+       -e NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/ironcurtain-ca.crt \
        {agent-image} \
        sleep infinity
      docker start {containerId}
@@ -1083,7 +1019,7 @@ session.close()
   1. Stop Docker container (docker stop, graceful SIGTERM then SIGKILL)
   2. Remove Docker container (docker rm)
   3. Remove per-session Docker network (docker network rm)
-  4. Stop CONNECT proxy (close TCP listener, tear down active tunnels)
+  4. Stop MITM proxy (close UDS listener, tear down active connections)
   5. Stop MCP proxy server (close UDS listener)
   6. Close MCP client connections to backend servers
   7. Close audit log
@@ -1116,7 +1052,7 @@ Each session is fully isolated:
 | MCP proxy server | Separate OS process per session |
 | Docker network | Per-session bridge: `ironcurtain-{id-short}` |
 | Docker container | Separate container per session |
-| CONNECT proxy | Per-session port on host |
+| MITM proxy | Per-session UDS on host |
 | Audit log | Per-session file: `sessions/{id}/audit.jsonl` |
 | Escalation IPC | Per-session directory: `sessions/{id}/escalations/` |
 | Policy engine | Separate instance per proxy (loaded from same compiled artifacts) |
@@ -1130,7 +1066,7 @@ Concurrent sessions consume:
 | Component | Per-Session Cost |
 |-----------|-----------------|
 | MCP proxy server | ~50-100 MB (Node.js process) |
-| CONNECT proxy | Negligible (runs in IronCurtain process) |
+| MITM proxy | Negligible (runs in IronCurtain process) |
 | Docker container | ~200-500 MB (depends on agent) |
 | MCP server connections | ~30-50 MB per server (shared across proxy) |
 | UDS socket | Negligible |
@@ -1172,7 +1108,7 @@ This is enforced in `createDockerAgentSession()` before allocating resources.
 - Use CPU and memory within container resource limits
 
 **What the agent CANNOT do:**
-- Access arbitrary network destinations (only allowlisted LLM API domains via CONNECT proxy)
+- Access arbitrary network destinations (container has `--network=none`; only allowlisted LLM API endpoints via MITM proxy)
 - Access the host filesystem outside the sandbox (Docker volume isolation)
 - Modify IronCurtain's policy, config, or audit logs (not mounted)
 - Bypass policy evaluation for MCP tool calls (all calls go through proxy)
@@ -1188,11 +1124,11 @@ This is enforced in `createDockerAgentSession()` before allocating resources.
 - No privileged mode
 
 **2. Agent tries to access arbitrary network destinations**
-- Mitigation: Container is on an isolated Docker bridge network (`ironcurtain-agents`) where the only reachable endpoint is the Docker host
-- `HTTP_PROXY`/`HTTPS_PROXY` route all HTTPS traffic through IronCurtain's CONNECT proxy
-- The CONNECT proxy rejects any hostname not on the agent adapter's allowlist (e.g., only `api.anthropic.com` for Claude Code)
-- No TLS termination — the proxy validates the hostname from the CONNECT request and tunnels raw TCP
-- The agent could theoretically make direct TCP connections to the host IP, but no services are listening except the CONNECT proxy and MCP proxy (UDS)
+- Mitigation: Container runs with `--network=none` — zero IP connectivity
+- The only communication channels are bind-mounted Unix domain sockets (MCP proxy and MITM proxy)
+- The MITM proxy rejects CONNECT requests to any hostname not in the provider allowlist
+- Endpoint-level filtering blocks requests to non-allowlisted API paths even on allowed hosts
+- The agent cannot make direct TCP connections to any host — there is no network interface
 
 **3. Agent tries to exploit the MCP proxy via malformed requests**
 - Mitigation: The MCP SDK handles JSON-RPC parsing and schema validation
@@ -1211,14 +1147,15 @@ This is enforced in `createDockerAgentSession()` before allocating resources.
 
 **6. Agent tries to communicate with other containers**
 - Mitigation: Each session has its own isolated Docker bridge network — containers from different sessions cannot see each other
-- Each container has its own UDS socket and CONNECT proxy (not shared)
+- Each container has its own UDS sockets and MITM proxy (not shared)
 - Docker's default seccomp profile prevents most IPC mechanisms
 
 ### Defense in Depth
 
 ```
-Layer 1: Docker Container + CONNECT Proxy
-  - Network restricted to allowlisted LLM API domains via CONNECT proxy
+Layer 1: Docker Container + MITM Proxy
+  - No network access (--network=none); LLM API calls via TLS-terminating MITM proxy
+  - Real API keys never enter the container (fake key swap)
   - Filesystem limited to mounts
   - Non-root, no capabilities
   - Resource limits (memory, CPU)
@@ -1279,7 +1216,7 @@ export class DockerAgentSession implements Session {
   private readonly socketPath: string;
 
   private proxy: ManagedProxy | null = null;
-  private connectProxy: ConnectProxy | null = null;
+  private mitmProxy: MitmProxy | null = null;
   private docker: DockerManager | null = null;
   private containerId: string | null = null;
   private turnCount = 0;  // tracks first turn vs continuation
@@ -1554,21 +1491,21 @@ ironcurtain start --list-agents                   # List available agents
 
 ### Phase 1: UDS Transport and CONNECT Proxy
 
-**Goal:** The existing MCP proxy server can listen on a Unix domain socket instead of stdio. A lightweight CONNECT proxy can allowlist outbound HTTPS domains.
+**Goal:** The existing MCP proxy server can listen on a Unix domain socket instead of stdio. A TLS-terminating MITM proxy handles LLM API calls with endpoint filtering and key swap.
 
 **Changes:**
 1. Create `src/trusted-process/uds-server-transport.ts` -- MCP SDK server transport over UDS
 2. Add `PROXY_SOCKET_PATH` env var handling to `mcp-proxy-server.ts`
-3. Create `src/docker/connect-proxy.ts` -- HTTP CONNECT proxy with domain allowlist
+3. Create `src/docker/mitm-proxy.ts` -- TLS-terminating MITM proxy with endpoint filtering and key swap
 4. Unit tests: UDS transport connects, handles JSON-RPC messages, cleans up socket on close
-5. Unit tests: CONNECT proxy allows/rejects domains, tunnels bytes correctly
+5. Unit tests: MITM proxy allows/rejects hosts, filters endpoints, swaps keys correctly
 6. Integration test: start proxy on UDS, connect MCP client, call tools/list
 
 **No behavioral change** to existing stdio-based sessions.
 
 **Files:**
 - New: `src/trusted-process/uds-server-transport.ts`
-- New: `src/docker/connect-proxy.ts`
+- New: `src/docker/mitm-proxy.ts`, `src/docker/ca.ts`, `src/docker/provider-config.ts`, `src/docker/fake-keys.ts`
 - Modified: `src/trusted-process/mcp-proxy-server.ts` (transport selection)
 
 ### Phase 2: Docker Manager and Container Lifecycle
@@ -1653,21 +1590,20 @@ Each adapter is independent and can be added without modifying existing code (th
 
 ## 14. Accepted Security Trade-offs
 
-### API Key Exposure to Agent Process
+### API Key Protection via MITM Proxy
 
-The agent process inside the container can read its own API key (passed via `docker create -e`). A compromised or jailbroken agent could attempt to exfiltrate the key via the CONNECT proxy, since it has access to the LLM API endpoint. This is an inherent trade-off — the agent needs the key to function.
+**Real API keys never enter the container.** The agent receives a randomly generated fake sentinel key (192 bits of entropy). The TLS-terminating MITM proxy on the host validates the fake key and swaps it for the real key before forwarding to the upstream API. This eliminates the key exfiltration trade-off from the original CONNECT proxy design.
 
-**Mitigations:**
-- The CONNECT proxy limits where the key can be sent (only the allowlisted LLM API domain)
-- Users should use scoped/limited API keys with spending limits
-- The key is never persisted to disk — not in the image, not in mounted volumes, only in the container's process environment
-- The key is destroyed when the container is removed
+**Residual risk:** A compromised agent could make excessive LLM API calls (running up costs) using the fake key via the MITM proxy. This is mitigated by:
+- Per-session resource budgets (wall-clock timeout, step limits)
+- Endpoint-level filtering (only completion endpoints, not admin APIs)
+- Users should still configure spending limits on their API keys as defense-in-depth
 
 ## 15. Open Questions
 
 1. **Agent output collection.** Different agents produce output differently. Claude Code with `--output-format text` writes to stdout. Other agents may write to files. The `extractResponse()` method on the adapter handles this, but we may need a more structured result format (e.g., a JSON file with response text, modified files list, and status).
 
-2. **API key routing.** Claude Code needs `ANTHROPIC_API_KEY`. Codex needs `OPENAI_API_KEY`. Goose might use either. The adapter's `buildEnv()` method handles this, but we follow the principle of least privilege — only inject the key the agent actually needs. The adapter's `getAllowedApiHosts()` and `buildEnv()` must be kept in sync.
+2. **API key routing.** Claude Code needs `ANTHROPIC_API_KEY`. Codex needs `OPENAI_API_KEY`. Goose might use either. The adapter's `getProviders()` and `buildEnv()` methods handle this. Each provider gets its own fake sentinel key; the MITM proxy maps each fake key to the corresponding real key. Only the providers declared by the adapter are configured.
 
 3. **Docker image management.** The hybrid approach uses pre-baked per-agent images with the agent CLI pre-installed and first-run setup completed. Who builds these images? Options: (a) user runs `ironcurtain build-images` manually, (b) `createSession()` builds on first use with caching, (c) pre-built images on a registry. For the PoC, option (b) with caching is simplest. The Dockerfile per agent lives in `docker/` in the IronCurtain repo.
 

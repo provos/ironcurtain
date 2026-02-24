@@ -12,8 +12,11 @@
  * 3. close() -- stop container, stop proxies, clean up
  */
 
-import { mkdirSync, readdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, writeFileSync, existsSync, copyFileSync, rmSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import type {
   Session,
@@ -29,7 +32,8 @@ import type { IronCurtainConfig } from '../config/types.js';
 import type { AgentAdapter } from './agent-adapter.js';
 import type { DockerManager } from './types.js';
 import type { ManagedProxy } from './managed-proxy.js';
-import type { ConnectProxy } from './connect-proxy.js';
+import type { MitmProxy } from './mitm-proxy.js';
+import type { CertificateAuthority } from './ca.js';
 import { AuditLogTailer } from './audit-log-tailer.js';
 import { prepareSession } from './orientation.js';
 import { SessionNotReadyError, SessionClosedError } from '../session/errors.js';
@@ -43,7 +47,9 @@ export interface DockerAgentSessionDeps {
   readonly adapter: AgentAdapter;
   readonly docker: DockerManager;
   readonly proxy: ManagedProxy;
-  readonly connectProxy: ConnectProxy;
+  readonly mitmProxy: MitmProxy;
+  readonly ca: CertificateAuthority;
+  readonly fakeKeys: ReadonlyMap<string, string>;
   readonly sessionDir: string;
   readonly sandboxDir: string;
   readonly escalationDir: string;
@@ -59,7 +65,9 @@ export class DockerAgentSession implements Session {
   private readonly adapter: AgentAdapter;
   private readonly docker: DockerManager;
   private readonly proxy: ManagedProxy;
-  private readonly connectProxy: ConnectProxy;
+  private readonly mitmProxy: MitmProxy;
+  private readonly ca: CertificateAuthority;
+  private readonly fakeKeys: ReadonlyMap<string, string>;
   private readonly sessionDir: string;
   private readonly sandboxDir: string;
   private readonly escalationDir: string;
@@ -91,7 +99,9 @@ export class DockerAgentSession implements Session {
     this.adapter = deps.adapter;
     this.docker = deps.docker;
     this.proxy = deps.proxy;
-    this.connectProxy = deps.connectProxy;
+    this.mitmProxy = deps.mitmProxy;
+    this.ca = deps.ca;
+    this.fakeKeys = deps.fakeKeys;
     this.sessionDir = deps.sessionDir;
     this.sandboxDir = deps.sandboxDir;
     this.escalationDir = deps.escalationDir;
@@ -105,10 +115,10 @@ export class DockerAgentSession implements Session {
   /**
    * Initialize the Docker agent session:
    * 1. Start MCP proxy (UDS)
-   * 2. Start CONNECT proxy (UDS)
+   * 2. Start MITM proxy (UDS)
    * 3. Query proxy for available tools
    * 4. Generate orientation files
-   * 5. Ensure Docker image exists
+   * 5. Ensure Docker image exists (with CA cert baked in)
    * 6. Create and start container (--network=none)
    * 7. Start escalation watcher and audit log tailer
    */
@@ -121,9 +131,9 @@ export class DockerAgentSession implements Session {
     await this.proxy.start();
     logger.info(`MCP proxy listening on ${this.proxy.socketPath}`);
 
-    // 2. Start CONNECT proxy (UDS)
-    const connectAddr = await this.connectProxy.start();
-    logger.info(`CONNECT proxy listening on ${connectAddr.socketPath}`);
+    // 2. Start MITM proxy (UDS)
+    const mitmAddr = await this.mitmProxy.start();
+    logger.info(`MITM proxy listening on ${mitmAddr.socketPath}`);
 
     // 3. Query proxy for available tools
     const tools = await this.proxy.listTools();
@@ -133,15 +143,15 @@ export class DockerAgentSession implements Session {
     const { systemPrompt } = prepareSession(this.adapter, tools, this.sessionDir, this.config, this.sandboxDir);
     this.systemPrompt = systemPrompt;
 
-    // 5. Ensure Docker image exists (build if needed)
+    // 5. Ensure Docker image exists (build if needed, with CA cert)
     const image = await this.adapter.getImage();
     await this.ensureImage(image);
 
-    // 6. Create and start container (--network=none + UDS for CONNECT proxy)
+    // 6. Create and start container (--network=none + UDS for MITM proxy)
     const shortId = this.sessionId.substring(0, 12);
 
     const env = {
-      ...this.adapter.buildEnv(this.config),
+      ...this.adapter.buildEnv(this.config, this.fakeKeys),
       HTTPS_PROXY: 'http://127.0.0.1:18080',
       HTTP_PROXY: 'http://127.0.0.1:18080',
     };
@@ -155,7 +165,7 @@ export class DockerAgentSession implements Session {
         { source: this.sandboxDir, target: '/workspace', readonly: false },
         { source: this.sessionDir, target: '/run/ironcurtain', readonly: false },
         { source: orientationDir, target: '/etc/ironcurtain', readonly: true },
-        { source: connectAddr.socketPath, target: '/run/ironcurtain/connect-proxy.sock', readonly: true },
+        { source: mitmAddr.socketPath, target: '/run/ironcurtain/mitm-proxy.sock', readonly: true },
       ],
       env,
       command: ['sleep', 'infinity'],
@@ -306,7 +316,7 @@ export class DockerAgentSession implements Session {
     }
 
     // Stop proxies
-    await this.connectProxy.stop();
+    await this.mitmProxy.stop();
     await this.proxy.stop();
   }
 
@@ -379,34 +389,109 @@ export class DockerAgentSession implements Session {
   }
 
   /**
-   * Ensures the Docker image exists, building it (and the base image) if needed.
-   * Dockerfiles live in the `docker/` directory relative to the package root.
+   * Ensures the Docker image exists and is up-to-date, building it
+   * (and the base image) if needed.
+   *
+   * Staleness detection uses a content hash of all build inputs
+   * (Dockerfiles, entrypoint scripts, CA certificate) stored as
+   * Docker image labels.
    */
   private async ensureImage(image: string): Promise<void> {
-    if (await this.docker.imageExists(image)) return;
-
     const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
     const dockerDir = resolve(packageRoot, 'docker');
 
-    // Build base image first if it doesn't exist
+    // Build base image with CA cert baked in (if stale or missing)
     const baseImage = 'ironcurtain-base:latest';
-    if (!(await this.docker.imageExists(baseImage))) {
-      logger.info('Building base Docker image (this may take a while on first run)...');
-      await this.docker.buildImage(baseImage, resolve(dockerDir, 'Dockerfile.base'), dockerDir);
-      logger.info('Base Docker image built successfully');
-    }
+    const baseBuildHash = this.computeBuildHash(dockerDir, ['Dockerfile.base']);
+    const baseRebuilt = await this.ensureBaseImage(baseImage, dockerDir, baseBuildHash);
 
-    // Build the agent-specific image
-    // Image name format: ironcurtain-{agent}:latest -> Dockerfile.{agent}
+    // Build the agent-specific image (if stale, missing, or base was rebuilt)
     const agentName = image.replace('ironcurtain-', '').replace(':latest', '');
-    const dockerfile = resolve(dockerDir, `Dockerfile.${agentName}`);
-    if (!existsSync(dockerfile)) {
-      throw new Error(`Dockerfile not found for agent "${agentName}": ${dockerfile}`);
+    const dockerfile = `Dockerfile.${agentName}`;
+    const agentDockerfilePath = resolve(dockerDir, dockerfile);
+    if (!existsSync(agentDockerfilePath)) {
+      throw new Error(`Dockerfile not found for agent "${agentName}": ${agentDockerfilePath}`);
     }
 
-    logger.info(`Building Docker image ${image}...`);
-    await this.docker.buildImage(image, dockerfile, dockerDir);
-    logger.info(`Docker image ${image} built successfully`);
+    const agentBuildHash = this.computeBuildHash(dockerDir, [dockerfile], baseBuildHash);
+    const needsAgentBuild = baseRebuilt || (await this.isImageStale(image, agentBuildHash));
+
+    if (needsAgentBuild) {
+      logger.info(`Building Docker image ${image}...`);
+      await this.docker.buildImage(image, agentDockerfilePath, dockerDir, {
+        'ironcurtain.build-hash': agentBuildHash,
+      });
+      logger.info(`Docker image ${image} built successfully`);
+    }
+  }
+
+  /**
+   * Ensures the base image exists and is up-to-date.
+   * Returns true if the base image was (re)built.
+   */
+  private async ensureBaseImage(baseImage: string, dockerDir: string, buildHash: string): Promise<boolean> {
+    if (!(await this.isImageStale(baseImage, buildHash))) return false;
+
+    logger.info('Building base Docker image (this may take a while on first run)...');
+
+    // Create temporary build context with CA cert
+    const tmpContext = mkdtempSync(resolve(tmpdir(), 'ironcurtain-build-'));
+    try {
+      // Copy Dockerfile and entrypoint scripts
+      for (const file of readdirSync(dockerDir)) {
+        copyFileSync(resolve(dockerDir, file), resolve(tmpContext, file));
+      }
+      // Copy CA cert into build context
+      copyFileSync(this.ca.certPath, resolve(tmpContext, 'ironcurtain-ca-cert.pem'));
+
+      await this.docker.buildImage(baseImage, resolve(tmpContext, 'Dockerfile.base'), tmpContext, {
+        'ironcurtain.build-hash': buildHash,
+      });
+    } finally {
+      rmSync(tmpContext, { recursive: true, force: true });
+    }
+    logger.info('Base Docker image built successfully');
+    return true;
+  }
+
+  /**
+   * Checks if an image needs (re)building by comparing the stored
+   * build hash label against the expected hash.
+   */
+  private async isImageStale(image: string, expectedHash: string): Promise<boolean> {
+    if (!(await this.docker.imageExists(image))) return true;
+    const storedHash = await this.docker.getImageLabel(image, 'ironcurtain.build-hash');
+    return storedHash !== expectedHash;
+  }
+
+  /**
+   * Computes a SHA-256 content hash of all files in the docker directory
+   * plus the CA certificate. This captures changes to Dockerfiles,
+   * entrypoint scripts, and the CA cert.
+   */
+  private computeBuildHash(dockerDir: string, dockerfiles: string[], parentHash?: string): string {
+    const hash = createHash('sha256');
+
+    // Hash specified Dockerfiles and all entrypoint scripts
+    const files = readdirSync(dockerDir).sort();
+    for (const file of files) {
+      // Include requested Dockerfiles and all entrypoint/script files
+      if (dockerfiles.includes(file) || file.endsWith('.sh')) {
+        hash.update(`file:${file}\n`);
+        hash.update(readFileSync(resolve(dockerDir, file)));
+      }
+    }
+
+    // Hash CA certificate content
+    hash.update('ca-cert\n');
+    hash.update(this.ca.certPem);
+
+    // Chain parent hash for agent images (so base rebuild triggers agent rebuild)
+    if (parentHash) {
+      hash.update(`parent:${parentHash}\n`);
+    }
+
+    return hash.digest('hex');
   }
 }
 

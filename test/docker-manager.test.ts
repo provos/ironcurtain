@@ -282,6 +282,61 @@ describe('DockerManager', () => {
     });
   });
 
+  describe('buildImage', () => {
+    it('passes labels as --label flags', async () => {
+      mock.setResponse('');
+      const manager = createDockerManager(mock.mockExec);
+
+      await manager.buildImage('my-image:latest', '/path/to/Dockerfile', '/context', {
+        'ironcurtain.build-hash': 'abc123',
+        'ironcurtain.ca-hash': 'def456',
+      });
+
+      const args = mock.calls[0].args;
+      expect(args).toContain('--label');
+      expect(args).toContain('ironcurtain.build-hash=abc123');
+      expect(args).toContain('ironcurtain.ca-hash=def456');
+      expect(args[args.length - 1]).toBe('/context');
+    });
+
+    it('builds without labels when none provided', async () => {
+      mock.setResponse('');
+      const manager = createDockerManager(mock.mockExec);
+
+      await manager.buildImage('my-image:latest', '/path/to/Dockerfile', '/context');
+
+      const args = mock.calls[0].args;
+      expect(args).not.toContain('--label');
+    });
+  });
+
+  describe('getImageLabel', () => {
+    it('returns label value from docker inspect', async () => {
+      mock.setResponse('abc123\n');
+      const manager = createDockerManager(mock.mockExec);
+
+      const value = await manager.getImageLabel('my-image:latest', 'ironcurtain.build-hash');
+      expect(value).toBe('abc123');
+      expect(mock.calls[0].args).toContain('my-image:latest');
+    });
+
+    it('returns undefined for missing label', async () => {
+      mock.setResponse('<no value>\n');
+      const manager = createDockerManager(mock.mockExec);
+
+      const value = await manager.getImageLabel('my-image:latest', 'nonexistent');
+      expect(value).toBeUndefined();
+    });
+
+    it('returns undefined when image does not exist', async () => {
+      mock.setError(1, '', 'No such image');
+      const manager = createDockerManager(mock.mockExec);
+
+      const value = await manager.getImageLabel('missing:latest', 'ironcurtain.build-hash');
+      expect(value).toBeUndefined();
+    });
+  });
+
   describe('removeNetwork', () => {
     it('removes a Docker network', async () => {
       mock.setResponse('');
