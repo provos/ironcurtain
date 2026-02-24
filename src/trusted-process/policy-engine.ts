@@ -356,15 +356,6 @@ export class PolicyEngine {
    * final decision or a set of roles resolved by sandbox containment.
    */
   private evaluateStructuralInvariants(request: ToolCallRequest): StructuralResult {
-    // Introspection tool: list_allowed_directories has no arguments and no
-    // side effects — always allow it without requiring a compiled rule.
-    if (request.toolName === 'list_allowed_directories') {
-      return finalDecision({
-        decision: 'allow',
-        rule: 'structural-introspection-allow',
-        reason: 'Introspection tool with no side effects is always allowed',
-      });
-    }
 
     // Extract paths using both methods for defense-in-depth
     const heuristicPaths = extractPathsHeuristic(request.arguments);
@@ -387,6 +378,24 @@ export class PolicyEngine {
           reason: `Access to protected path is forbidden: ${rp}`,
         });
       }
+    }
+
+    // Introspection tool: allow list_allowed_directories from the filesystem
+    // server when it has no side effects and no arguments. Placed after the
+    // protected-path check and scoped to server + annotation to prevent a
+    // different server's tool with the same name from being auto-allowed.
+    if (
+      request.toolName === 'list_allowed_directories' &&
+      request.serverName === 'filesystem' &&
+      annotation &&
+      !annotation.sideEffects &&
+      Object.keys(request.arguments).length === 0
+    ) {
+      return finalDecision({
+        decision: 'allow',
+        rule: 'structural-introspection-allow',
+        reason: 'Introspection tool with no side effects is always allowed',
+      });
     }
 
     // Filesystem sandbox containment (path-category roles)
