@@ -71,7 +71,7 @@ export function toCallableName(toolName: string): string {
  * Extracts required parameter names from a tool's JSON Schema inputs
  * to show inline in the catalog, e.g. "{ path }" or "{ path, content }".
  */
-function extractRequiredParams(inputs?: { properties?: Record<string, unknown>; required?: string[] }): string {
+export function extractRequiredParams(inputs?: { properties?: Record<string, unknown>; required?: string[] }): string {
   if (!inputs?.required?.length) return '';
   return `{ ${inputs.required.join(', ')} }`;
 }
