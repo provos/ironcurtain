@@ -91,6 +91,20 @@ const autoApproveSchema = z
 export const WEB_SEARCH_PROVIDERS = ['brave', 'tavily', 'serpapi'] as const;
 export type WebSearchProvider = (typeof WEB_SEARCH_PROVIDERS)[number];
 
+/** Human-readable labels for web search providers. */
+export const WEB_SEARCH_PROVIDER_LABELS: Readonly<Record<WebSearchProvider, string>> = {
+  brave: 'Brave Search',
+  tavily: 'Tavily',
+  serpapi: 'SerpAPI',
+};
+
+/** Signup URLs for web search providers. */
+export const WEB_SEARCH_PROVIDER_URLS: Readonly<Record<WebSearchProvider, string>> = {
+  brave: 'https://brave.com/search/api/',
+  tavily: 'https://tavily.com/',
+  serpapi: 'https://serpapi.com/',
+};
+
 const webSearchSchema = z
   .object({
     provider: z.enum(WEB_SEARCH_PROVIDERS).optional(),

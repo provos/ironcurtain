@@ -14,6 +14,8 @@ import {
   ESCALATION_TIMEOUT_MIN,
   ESCALATION_TIMEOUT_MAX,
   WEB_SEARCH_PROVIDERS,
+  WEB_SEARCH_PROVIDER_LABELS,
+  WEB_SEARCH_PROVIDER_URLS,
   type UserConfig,
   type ResolvedUserConfig,
   type WebSearchProvider,
@@ -453,23 +455,11 @@ async function handleAutoCompact(resolved: ResolvedUserConfig, pending: UserConf
 
 // ─── Web Search ──────────────────────────────────────────────
 
-const PROVIDER_LABELS: Record<WebSearchProvider, string> = {
-  brave: 'Brave Search',
-  tavily: 'Tavily',
-  serpapi: 'SerpAPI',
-};
-
-const PROVIDER_SIGNUP_HINTS: Record<WebSearchProvider, string> = {
-  brave: 'Get a free API key at https://brave.com/search/api/',
-  tavily: 'Get an API key at https://tavily.com/',
-  serpapi: 'Get an API key at https://serpapi.com/',
-};
-
 async function handleWebSearch(resolved: ResolvedUserConfig, pending: UserConfig): Promise<void> {
   // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- interactive loop exited via return
   while (true) {
     const currentProvider = pending.webSearch?.provider ?? resolved.webSearch.provider;
-    const currentLabel = currentProvider ? PROVIDER_LABELS[currentProvider] : 'not configured';
+    const currentLabel = currentProvider ? WEB_SEARCH_PROVIDER_LABELS[currentProvider] : 'not configured';
 
     const action = await p.select({
       message: 'Web Search',
@@ -490,7 +480,7 @@ async function handleWebSearch(resolved: ResolvedUserConfig, pending: UserConfig
     // Select provider
     const providerOptions = WEB_SEARCH_PROVIDERS.map((prov) => ({
       value: prov,
-      label: PROVIDER_LABELS[prov],
+      label: WEB_SEARCH_PROVIDER_LABELS[prov],
       hint: prov === currentProvider ? '(current)' : undefined,
     }));
 
@@ -501,11 +491,11 @@ async function handleWebSearch(resolved: ResolvedUserConfig, pending: UserConfig
     if (isCancelled(selected)) continue;
     const provider = selected as WebSearchProvider;
 
-    p.note(PROVIDER_SIGNUP_HINTS[provider], PROVIDER_LABELS[provider]);
+    p.note(`Get an API key at ${WEB_SEARCH_PROVIDER_URLS[provider]}`, WEB_SEARCH_PROVIDER_LABELS[provider]);
 
     const currentKey = resolved.webSearch[provider]?.apiKey;
     const apiKey = await p.text({
-      message: `${PROVIDER_LABELS[provider]} API key:`,
+      message: `${WEB_SEARCH_PROVIDER_LABELS[provider]} API key:`,
       placeholder: currentKey ? '(keep current)' : 'Enter API key',
       validate: (val) => {
         if (!val && !currentKey) return 'API key is required';
@@ -547,7 +537,7 @@ function autoCompactHint(resolved: ResolvedUserConfig, pending: UserConfig): str
 
 function webSearchHint(resolved: ResolvedUserConfig, pending: UserConfig): string {
   const provider = pending.webSearch?.provider ?? resolved.webSearch.provider;
-  return provider ? PROVIDER_LABELS[provider] : 'not configured';
+  return provider ? WEB_SEARCH_PROVIDER_LABELS[provider] : 'not configured';
 }
 
 function changeCount(resolved: ResolvedUserConfig, pending: UserConfig): string {

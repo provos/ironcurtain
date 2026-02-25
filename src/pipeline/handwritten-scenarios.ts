@@ -12,7 +12,6 @@
 
 import type { TestScenario } from './types.js';
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
 export function getHandwrittenScenarios(sandboxDir: string): TestScenario[] {
   return [
     // Move from outside sandbox carries delete-path on source — must not be allowed
