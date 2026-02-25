@@ -436,7 +436,7 @@ See [docs/SECURITY_CONCERNS.md](docs/SECURITY_CONCERNS.md) for a detailed threat
 | **Missing API key** | Set the environment variable (`ANTHROPIC_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`, or `OPENAI_API_KEY`) or add the corresponding key to `~/.ironcurtain/config.json`. |
 | **Sandbox unavailable** | OS-level sandboxing requires `bubblewrap` and `socat`. Install both, or set `"sandboxPolicy": "warn"` in your MCP server config for development. |
 | **Budget exhausted** | Adjust limits in `~/.ironcurtain/config.json` under `resourceBudget`. Set any individual limit to `null` to disable it. |
-| **Node version errors** | Minimum Node.js 18.3.0 required. Node 20+ is recommended. |
+| **Node version errors** | Node.js 22+ is required (`isolated-vm` needs `>=22.0.0`). Maximum supported is Node 25 (`<26`). |
 | **Policy doesn't match intent** | Review `compiled-policy.json` to see the generated rules. Run `ironcurtain customize-policy` to refine your constitution, then `ironcurtain compile-policy` to recompile. Specific wording produces better rules — vague phrasing leads to vague policy. |
 | **Auto-approve not triggering** | The auto-approver only approves when the user's message explicitly authorizes the action (e.g., "push to origin" for `git_push`). Vague messages like "go ahead" always escalate to human review. Verify `autoApprove.enabled` is `true` in `config.json`. |
 
