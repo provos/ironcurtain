@@ -154,42 +154,45 @@ describe('Escalation scenarios — policy engine validation', () => {
 // Suite B: Auto-Approver Integration (live LLM)
 // ---------------------------------------------------------------------------
 
-describe.skipIf(!process.env.LLM_INTEGRATION_TEST)('Escalation scenarios — auto-approver integration (live LLM)', () => {
-  let model: LanguageModelV3;
+describe.skipIf(!process.env.LLM_INTEGRATION_TEST)(
+  'Escalation scenarios — auto-approver integration (live LLM)',
+  () => {
+    let model: LanguageModelV3;
 
-  beforeAll(async () => {
-    const apiKey = process.env.ANTHROPIC_API_KEY ?? '';
-    if (!apiKey) {
-      throw new Error('ANTHROPIC_API_KEY must be set to run auto-approver integration tests');
+    beforeAll(async () => {
+      const apiKey = process.env.ANTHROPIC_API_KEY ?? '';
+      if (!apiKey) {
+        throw new Error('ANTHROPIC_API_KEY must be set to run auto-approver integration tests');
+      }
+      model = await createLanguageModelFromEnv('anthropic:claude-haiku-4-5', apiKey);
+    });
+
+    for (const scenario of scenarios) {
+      it(`[${scenario.category}] ${scenario.expectedAutoApprove}s: ${scenario.label}`, async () => {
+        const annotation = getAnnotation(scenario);
+        const extracted = extractArgsForAutoApprove(scenario.request.arguments, annotation);
+
+        // Build the escalation reason from the policy engine
+        const policyResult = engine.evaluate({
+          requestId: 'test',
+          serverName: scenario.request.serverName,
+          toolName: scenario.request.toolName,
+          arguments: scenario.request.arguments,
+          timestamp: new Date().toISOString(),
+        });
+
+        const context: AutoApproveContext = {
+          userMessage: scenario.userMessage,
+          toolName: `${scenario.request.serverName}/${scenario.request.toolName}`,
+          escalationReason: policyResult.reason,
+          arguments: extracted,
+        };
+
+        const result = await autoApprove(context, model);
+
+        expect(result.decision).toBe(scenario.expectedAutoApprove);
+        expect(result.reasoning.length).toBeGreaterThan(0);
+      }, 30_000);
     }
-    model = await createLanguageModelFromEnv('anthropic:claude-haiku-4-5', apiKey);
-  });
-
-  for (const scenario of scenarios) {
-    it(`[${scenario.category}] ${scenario.expectedAutoApprove}s: ${scenario.label}`, async () => {
-      const annotation = getAnnotation(scenario);
-      const extracted = extractArgsForAutoApprove(scenario.request.arguments, annotation);
-
-      // Build the escalation reason from the policy engine
-      const policyResult = engine.evaluate({
-        requestId: 'test',
-        serverName: scenario.request.serverName,
-        toolName: scenario.request.toolName,
-        arguments: scenario.request.arguments,
-        timestamp: new Date().toISOString(),
-      });
-
-      const context: AutoApproveContext = {
-        userMessage: scenario.userMessage,
-        toolName: `${scenario.request.serverName}/${scenario.request.toolName}`,
-        escalationReason: policyResult.reason,
-        arguments: extracted,
-      };
-
-      const result = await autoApprove(context, model);
-
-      expect(result.decision).toBe(scenario.expectedAutoApprove);
-      expect(result.reasoning.length).toBeGreaterThan(0);
-    }, 30_000);
-  }
-});
+  },
+);
