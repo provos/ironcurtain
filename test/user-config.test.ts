@@ -453,16 +453,55 @@ describe('loadUserConfig', () => {
     expect(raw).toBe(invalidJson);
   });
 
-  // --- Test helpers ---
+  // ── webSearch tests ────────────────────────────────────────────────
 
-  function readConfigFromDisk(): Record<string, unknown> {
-    return JSON.parse(readFileSync(resolve(testHome, 'config.json'), 'utf-8'));
-  }
+  it('valid webSearch parses correctly', () => {
+    writeConfigFile({
+      webSearch: {
+        provider: 'brave',
+        brave: { apiKey: 'test-brave-key' },
+      },
+    });
 
-  function writeRawConfigFile(content: string): void {
-    mkdirSync(testHome, { recursive: true });
-    writeFileSync(resolve(testHome, 'config.json'), content);
-  }
+    const config = loadUserConfig();
+    expect(config.webSearch.provider).toBe('brave');
+    expect(config.webSearch.brave).toEqual({ apiKey: 'test-brave-key' });
+  });
+
+  it('invalid webSearch provider is rejected', () => {
+    writeRawConfigFile(JSON.stringify({ webSearch: { provider: 'bing' } }, null, 2));
+
+    expect(() => loadUserConfig()).toThrow();
+  });
+
+  it('empty webSearch API key is rejected', () => {
+    writeConfigFile({
+      webSearch: {
+        provider: 'brave',
+        brave: { apiKey: '' },
+      },
+    });
+
+    expect(() => loadUserConfig()).toThrow();
+  });
+
+  it('webSearch not backfilled (in SENSITIVE_FIELDS)', () => {
+    writeConfigFile({ agentModelId: 'claude-opus-4-6' });
+
+    loadUserConfig();
+
+    const onDisk = readConfigFromDisk();
+    expect(onDisk.webSearch).toBeUndefined();
+  });
+
+  it('webSearch defaults produce provider: null', () => {
+    const config = loadUserConfig();
+
+    expect(config.webSearch.provider).toBeNull();
+    expect(config.webSearch.brave).toBeNull();
+    expect(config.webSearch.tavily).toBeNull();
+    expect(config.webSearch.serpapi).toBeNull();
+  });
 
   // ── serverCredentials tests ─────────────────────────────────────────
 
@@ -542,6 +581,17 @@ describe('loadUserConfig', () => {
     expect(calls.some((c) => c.includes('readable by other users'))).toBe(false);
     stderrSpy.mockRestore();
   });
+
+  // --- Test helpers ---
+
+  function readConfigFromDisk(): Record<string, unknown> {
+    return JSON.parse(readFileSync(resolve(testHome, 'config.json'), 'utf-8'));
+  }
+
+  function writeRawConfigFile(content: string): void {
+    mkdirSync(testHome, { recursive: true });
+    writeFileSync(resolve(testHome, 'config.json'), content);
+  }
 
   function writeConfigFile(config: Record<string, unknown>): void {
     writeRawConfigFile(JSON.stringify(config, null, 2));

@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-02-21T01:04:59.938Z",
+  "generatedAt": "2026-02-25T01:54:51.064Z",
   "servers": {
     "filesystem": {
       "inputHash": "3a47c5b52d421b6f14fa1f556c87bac43f98adc1a0cf7519527b32cff9cdaae4",
@@ -957,11 +957,11 @@
       ]
     },
     "fetch": {
-      "inputHash": "138112ca64cddfa558ead08f30d6c41153821ee1b7c92a14b3f80ecf04ae9def",
+      "inputHash": "baaaafea944156876e9c2c8abfd33546228fbfc8eb74da0eb316cdefb0ba8dd9",
       "tools": [
         {
           "toolName": "http_fetch",
-          "comment": "Fetches content from a specified URL via HTTP GET, returning the response body as markdown or raw HTML.",
+          "comment": "Fetches content from a specified URL via HTTP GET and returns it in a configurable format.",
           "sideEffects": true,
           "args": {
             "url": [
@@ -977,6 +977,20 @@
               "none"
             ],
             "timeout": [
+              "none"
+            ]
+          },
+          "serverName": "fetch"
+        },
+        {
+          "toolName": "web_search",
+          "comment": "Searches the web using a configured search provider and returns a list of results for the given query.",
+          "sideEffects": true,
+          "args": {
+            "query": [
+              "none"
+            ],
+            "max_results": [
               "none"
             ]
           },

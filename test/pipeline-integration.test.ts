@@ -47,7 +47,10 @@ describe('Pipeline Integration: hand-crafted artifacts produce correct decisions
         expected: scenario.expectedDecision,
         actual: result.decision,
         rule: result.rule,
-        pass: result.decision === scenario.expectedDecision,
+        pass:
+          scenario.expectedDecision === 'not-allow'
+            ? result.decision !== 'allow'
+            : result.decision === scenario.expectedDecision,
       };
     });
 

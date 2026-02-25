@@ -40,6 +40,7 @@ import {
   formatTokens,
   formatSeconds,
   formatCost,
+  maskApiKey,
 } from '../src/config/config-command.js';
 import type { ResolvedUserConfig, UserConfig } from '../src/config/user-config.js';
 import { USER_CONFIG_DEFAULTS } from '../src/config/user-config.js';
@@ -174,6 +175,59 @@ describe('config-command', () => {
     expect(mockOutro).toHaveBeenCalledWith('No changes to save.');
   });
 
+  it('Web Search section appears in main menu', async () => {
+    writeConfigFile({
+      agentModelId: 'anthropic:claude-sonnet-4-6',
+      policyModelId: 'anthropic:claude-sonnet-4-6',
+      escalationTimeoutSeconds: 300,
+      resourceBudget: USER_CONFIG_DEFAULTS.resourceBudget,
+      autoCompact: USER_CONFIG_DEFAULTS.autoCompact,
+      autoApprove: USER_CONFIG_DEFAULTS.autoApprove,
+    });
+
+    // Script: select Web Search -> Back -> Save
+    mockSelect
+      .mockResolvedValueOnce('websearch') // main menu: Web Search
+      .mockResolvedValueOnce('back') // Web Search sub: Back
+      .mockResolvedValueOnce('save'); // main menu: Save
+
+    await runConfigCommand();
+
+    // Verify the main menu select was called with websearch option
+    const firstCall = mockSelect.mock.calls[0][0] as { options: { value: string; label: string }[] };
+    expect(firstCall.options.some((o: { value: string }) => o.value === 'websearch')).toBe(true);
+    expect(mockOutro).toHaveBeenCalledWith('No changes to save.');
+  });
+
+  it('Web Search provider selection stores in pending', async () => {
+    writeConfigFile({
+      agentModelId: 'anthropic:claude-sonnet-4-6',
+      policyModelId: 'anthropic:claude-sonnet-4-6',
+      escalationTimeoutSeconds: 300,
+      resourceBudget: USER_CONFIG_DEFAULTS.resourceBudget,
+      autoCompact: USER_CONFIG_DEFAULTS.autoCompact,
+      autoApprove: USER_CONFIG_DEFAULTS.autoApprove,
+    });
+
+    // Script: Web Search -> Select provider -> brave -> enter API key -> Back -> Save -> confirm
+    mockSelect
+      .mockResolvedValueOnce('websearch') // main menu: Web Search
+      .mockResolvedValueOnce('select') // Web Search: Select provider
+      .mockResolvedValueOnce('brave') // Provider: brave
+      .mockResolvedValueOnce('back') // Web Search: Back
+      .mockResolvedValueOnce('save'); // main menu: Save
+    mockText.mockResolvedValueOnce('test-brave-key-123'); // API key
+    mockConfirm.mockResolvedValueOnce(true); // confirm save
+
+    await runConfigCommand();
+
+    const onDisk = readConfigFromDisk();
+    expect(onDisk.webSearch).toBeDefined();
+    const ws = onDisk.webSearch as Record<string, unknown>;
+    expect(ws.provider).toBe('brave');
+    expect(ws.brave).toEqual({ apiKey: 'test-brave-key-123' });
+  });
+
   it('non-TTY exits with error', async () => {
     Object.defineProperty(process.stdin, 'isTTY', { value: false, configurable: true });
 
@@ -225,6 +279,13 @@ describe('computeDiff', () => {
       enabled: false,
       modelId: 'anthropic:claude-haiku-4-5',
     },
+    webSearch: {
+      provider: null,
+      brave: null,
+      tavily: null,
+      serpapi: null,
+    },
+    serverCredentials: {},
   };
 
   it('returns empty array when no changes', () => {
@@ -263,6 +324,40 @@ describe('computeDiff', () => {
       agentModelId: 'anthropic:claude-sonnet-4-6', // same as resolved
     };
     expect(computeDiff(resolved, pending)).toEqual([]);
+  });
+
+  it('detects webSearch provider change', () => {
+    const pending: UserConfig = {
+      webSearch: { provider: 'brave', brave: { apiKey: 'test-key-12345' } },
+    };
+    const diffs = computeDiff(resolved, pending);
+    expect(diffs.some(([path]) => path === 'webSearch.provider')).toBe(true);
+    expect(diffs.some(([path]) => path === 'webSearch.brave.apiKey')).toBe(true);
+  });
+
+  it('masks API keys in webSearch diff', () => {
+    const diffs = computeDiff(resolved, {
+      webSearch: { provider: 'brave', brave: { apiKey: 'abcdefghijklmnop' } },
+    });
+    const apiKeyDiff = diffs.find(([p]) => p === 'webSearch.brave.apiKey');
+    expect(apiKeyDiff).toBeDefined();
+    expect(apiKeyDiff![1].to).toBe('abc...nop');
+  });
+});
+
+describe('maskApiKey', () => {
+  it('returns "none" for undefined or null', () => {
+    expect(maskApiKey(undefined)).toBe('none');
+    expect(maskApiKey(null)).toBe('none');
+  });
+
+  it('returns "***" for short keys', () => {
+    expect(maskApiKey('abc')).toBe('***');
+    expect(maskApiKey('abcdef')).toBe('***');
+  });
+
+  it('masks long keys showing first 3 and last 3', () => {
+    expect(maskApiKey('abcdefghijklmnop')).toBe('abc...nop');
   });
 });
 

@@ -44,7 +44,10 @@ export function executeScenarios(engine: PolicyEngine, scenarios: TestScenario[]
       scenario,
       actualDecision: result.decision,
       matchingRule: result.rule,
-      pass: result.decision === scenario.expectedDecision,
+      pass:
+        scenario.expectedDecision === 'not-allow'
+          ? result.decision !== 'allow'
+          : result.decision === scenario.expectedDecision,
     };
   });
 }
@@ -108,6 +111,7 @@ export function buildJudgeSystemPrompt(
   protectedPaths: string[],
   availableTools?: { serverName: string; toolName: string }[],
   dynamicLists?: DynamicListsFile,
+  sandboxDirectory?: string,
 ): string {
   const rulesText = compiledPolicy.rules
     .map((r, i) => `  ${i + 1}. [${r.name}] if: ${JSON.stringify(r.if)} then: ${r.then} -- ${r.reason}`)
@@ -129,6 +133,7 @@ ${rulesText}
 - Introspection tools (list_allowed_directories): always allowed
 - Protected paths (any write/delete targeting these is automatically denied):
 ${protectedPaths.map((p) => `  - ${p}`).join('\n')}
+- Sandbox containment: any tool call where ALL paths are within the sandbox directory${sandboxDirectory ? ` (\`${sandboxDirectory}\`)` : ''} is automatically allowed BEFORE compiled rules are evaluated. An "allow" result for sandbox-internal paths is always correct — do NOT flag it as a failure or generate scenarios to test it.
 
 A \`deny\` result for write/delete operations on these paths is correct structural behavior, not a policy gap. Files with similar names inside the sandbox are NOT protected.
 ${formatDynamicListsSection(dynamicLists)}
@@ -169,7 +174,7 @@ When analyzing FAIL results:
 5. Set "pass" to true ONLY if all results are correct and coverage is adequate.
 6. Return a "failureAttributions" entry for EVERY FAIL result. The scenarioDescription must exactly match the FAIL scenario's description.
 
-For additional scenarios, use concrete paths matching the directories in the compiled rules. Note: sandbox containment is handled by a structural invariant before compiled rules run — any tool call where all paths are within the sandbox directory is automatically allowed.
+For additional scenarios, use concrete paths matching the directories in the compiled rules. Do NOT generate additional scenarios with paths inside the sandbox directory${sandboxDirectory ? ` (\`${sandboxDirectory}\`)` : ''} — sandbox containment is handled by a structural invariant before compiled rules run and is always correct. Only generate scenarios for paths OUTSIDE the sandbox.
 
 ## Available Tools
 
@@ -378,6 +383,7 @@ export async function verifyPolicy(
           protectedPaths,
           allAnnotations.map((a) => ({ serverName: a.serverName, toolName: a.toolName })),
           dynamicLists,
+          allowedDirectory,
         ),
       model: llm,
       serverNames: serverNamesList,

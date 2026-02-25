@@ -678,6 +678,7 @@ export async function main(): Promise<void> {
       config.protectedPaths,
       allAvailableTools,
       dynamicLists,
+      config.allowedDirectory,
     ),
   );
   let verifierSession = new PolicyVerifierSession({
@@ -875,6 +876,7 @@ export async function main(): Promise<void> {
             config.protectedPaths,
             allAvailableTools,
             dynamicLists,
+            config.allowedDirectory,
           ),
         );
         verifierSession = new PolicyVerifierSession({

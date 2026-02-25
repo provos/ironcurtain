@@ -13,8 +13,10 @@ import {
   validateModelId,
   ESCALATION_TIMEOUT_MIN,
   ESCALATION_TIMEOUT_MAX,
+  WEB_SEARCH_PROVIDERS,
   type UserConfig,
   type ResolvedUserConfig,
+  type WebSearchProvider,
 } from './user-config.js';
 import { getUserConfigPath } from './paths.js';
 
@@ -31,12 +33,9 @@ const KNOWN_MODELS: { value: string; label: string }[] = [
 
 const CUSTOM_MODEL_SENTINEL = '__custom__';
 
-/** Checks if a prompt result was cancelled and exits cleanly. */
-function handleCancel(value: unknown): void {
-  if (p.isCancel(value)) {
-    p.cancel('Configuration cancelled.');
-    process.exit(0);
-  }
+/** Returns true if the user pressed ESC / Ctrl-C on a prompt. */
+function isCancelled(value: unknown): boolean {
+  return p.isCancel(value);
 }
 
 // ─── Formatters ──────────────────────────────────────────────
@@ -66,6 +65,12 @@ export function formatSeconds(n: number | null): string {
 export function formatCost(n: number | null): string {
   if (n === null) return 'disabled';
   return `$${n.toFixed(2)}`;
+}
+
+export function maskApiKey(key: string | undefined | null): string {
+  if (!key) return 'none';
+  if (key.length <= 6) return '***';
+  return key.slice(0, 3) + '...' + key.slice(-3);
 }
 
 function formatModelShort(id: string): string {
@@ -103,6 +108,27 @@ export function computeDiff(resolved: ResolvedUserConfig, pending: UserConfig): 
     }
   }
 
+  // webSearch — compare provider and per-provider blocks
+  if (pending.webSearch) {
+    const pw = pending.webSearch;
+    const rw = resolved.webSearch;
+    if (pw.provider !== undefined && pw.provider !== rw.provider) {
+      diffs.push(['webSearch.provider', { from: rw.provider ?? 'none', to: pw.provider ?? 'none' }]);
+    }
+    // Show API key changes as masked values
+    for (const prov of ['brave', 'tavily', 'serpapi'] as const) {
+      const pendingBlock = pw[prov];
+      if (!pendingBlock) continue;
+      const resolvedBlock = rw[prov];
+      if ('apiKey' in pendingBlock && pendingBlock.apiKey !== resolvedBlock?.apiKey) {
+        diffs.push([
+          `webSearch.${prov}.apiKey`,
+          { from: maskApiKey(resolvedBlock?.apiKey), to: maskApiKey(pendingBlock.apiKey) },
+        ]);
+      }
+    }
+  }
+
   return diffs;
 }
 
@@ -127,7 +153,7 @@ async function promptModelId(message: string, current: string): Promise<string |
   options.push({ value: CUSTOM_MODEL_SENTINEL, label: 'Custom...', hint: undefined });
 
   const selected = await p.select({ message, options, initialValue: current });
-  handleCancel(selected);
+  if (isCancelled(selected)) return undefined;
 
   if (selected === CUSTOM_MODEL_SENTINEL) {
     const custom = await p.text({
@@ -135,7 +161,7 @@ async function promptModelId(message: string, current: string): Promise<string |
       placeholder: current,
       validate: (val) => (val ? validateModelId(val) : 'Model ID is required'),
     });
-    handleCancel(custom);
+    if (isCancelled(custom)) return undefined;
     return custom as string;
   }
 
@@ -166,7 +192,7 @@ async function promptNullableNumber(opts: NullableNumberOpts): Promise<number | 
       { value: 'keep', label: 'Keep current', hint: currentDisplay },
     ],
   });
-  handleCancel(action);
+  if (isCancelled(action)) return undefined;
 
   if (action === 'keep') return undefined;
   if (action === 'disable') return null;
@@ -181,7 +207,7 @@ async function promptNullableNumber(opts: NullableNumberOpts): Promise<number | 
       return opts.validate?.(n);
     },
   });
-  handleCancel(input);
+  if (isCancelled(input)) return undefined;
   return Number(input);
 }
 
@@ -201,8 +227,7 @@ async function handleModels(resolved: ResolvedUserConfig, pending: UserConfig): 
         { value: 'back', label: 'Back' },
       ],
     });
-    handleCancel(field);
-    if (field === 'back') return;
+    if (isCancelled(field) || field === 'back') return;
 
     const current = field === 'agentModelId' ? currentAgent : currentPolicy;
     const newValue = await promptModelId(
@@ -243,8 +268,7 @@ async function handleSecurity(resolved: ResolvedUserConfig, pending: UserConfig)
         { value: 'back', label: 'Back' },
       ],
     });
-    handleCancel(field);
-    if (field === 'back') return;
+    if (isCancelled(field) || field === 'back') return;
 
     if (field === 'timeout') {
       const input = await p.text({
@@ -259,7 +283,7 @@ async function handleSecurity(resolved: ResolvedUserConfig, pending: UserConfig)
           return undefined;
         },
       });
-      handleCancel(input);
+      if (isCancelled(input)) continue;
       const newTimeout = Number(input);
       if (newTimeout !== currentTimeout) {
         pending.escalationTimeoutSeconds = newTimeout;
@@ -269,7 +293,7 @@ async function handleSecurity(resolved: ResolvedUserConfig, pending: UserConfig)
         message: 'Enable auto-approve for escalations?',
         initialValue: currentAutoApproveEnabled,
       });
-      handleCancel(enabled);
+      if (isCancelled(enabled)) continue;
       if (enabled !== currentAutoApproveEnabled) {
         pending.autoApprove = { ...pending.autoApprove, enabled: enabled as boolean };
       }
@@ -302,8 +326,7 @@ async function handleResourceLimits(resolved: ResolvedUserConfig, pending: UserC
         { value: 'back', label: 'Back' },
       ],
     });
-    handleCancel(field);
-    if (field === 'back') return;
+    if (isCancelled(field) || field === 'back') return;
 
     if (field === 'warnThresholdPercent') {
       const input = await p.text({
@@ -317,21 +340,28 @@ async function handleResourceLimits(resolved: ResolvedUserConfig, pending: UserC
           return undefined;
         },
       });
-      handleCancel(input);
+      if (isCancelled(input)) continue;
       const newVal = Number(input);
       if (newVal !== budget.warnThresholdPercent) {
         pending.resourceBudget = { ...pending.resourceBudget, warnThresholdPercent: newVal };
       }
     } else {
       const key = field as 'maxTotalTokens' | 'maxSteps' | 'maxSessionSeconds' | 'maxEstimatedCostUsd';
-      const formatFn =
-        key === 'maxTotalTokens'
-          ? formatTokens
-          : key === 'maxSessionSeconds'
-            ? formatSeconds
-            : key === 'maxEstimatedCostUsd'
-              ? formatCost
-              : (n: number | null) => (n === null ? 'disabled' : String(n));
+      let formatFn: (n: number | null) => string;
+      switch (key) {
+        case 'maxTotalTokens':
+          formatFn = formatTokens;
+          break;
+        case 'maxSessionSeconds':
+          formatFn = formatSeconds;
+          break;
+        case 'maxEstimatedCostUsd':
+          formatFn = formatCost;
+          break;
+        default:
+          formatFn = (n) => (n === null ? 'disabled' : String(n));
+          break;
+      }
 
       const result = await promptNullableNumber({
         message: `${key}:`,
@@ -367,15 +397,14 @@ async function handleAutoCompact(resolved: ResolvedUserConfig, pending: UserConf
         { value: 'back', label: 'Back' },
       ],
     });
-    handleCancel(field);
-    if (field === 'back') return;
+    if (isCancelled(field) || field === 'back') return;
 
     if (field === 'enabled') {
       const enabled = await p.confirm({
         message: 'Enable auto-compaction?',
         initialValue: compact.enabled,
       });
-      handleCancel(enabled);
+      if (isCancelled(enabled)) continue;
       if (enabled !== compact.enabled) {
         pending.autoCompact = { ...pending.autoCompact, enabled: enabled as boolean };
       }
@@ -391,7 +420,7 @@ async function handleAutoCompact(resolved: ResolvedUserConfig, pending: UserConf
           return undefined;
         },
       });
-      handleCancel(input);
+      if (isCancelled(input)) continue;
       const newVal = Number(input);
       if (newVal !== compact.thresholdTokens) {
         pending.autoCompact = { ...pending.autoCompact, thresholdTokens: newVal };
@@ -408,7 +437,7 @@ async function handleAutoCompact(resolved: ResolvedUserConfig, pending: UserConf
           return undefined;
         },
       });
-      handleCancel(input);
+      if (isCancelled(input)) continue;
       const newVal = Number(input);
       if (newVal !== compact.keepRecentMessages) {
         pending.autoCompact = { ...pending.autoCompact, keepRecentMessages: newVal };
@@ -419,6 +448,76 @@ async function handleAutoCompact(resolved: ResolvedUserConfig, pending: UserConf
         pending.autoCompact = { ...pending.autoCompact, summaryModelId: newModel };
       }
     }
+  }
+}
+
+// ─── Web Search ──────────────────────────────────────────────
+
+const PROVIDER_LABELS: Record<WebSearchProvider, string> = {
+  brave: 'Brave Search',
+  tavily: 'Tavily',
+  serpapi: 'SerpAPI',
+};
+
+const PROVIDER_SIGNUP_HINTS: Record<WebSearchProvider, string> = {
+  brave: 'Get a free API key at https://brave.com/search/api/',
+  tavily: 'Get an API key at https://tavily.com/',
+  serpapi: 'Get an API key at https://serpapi.com/',
+};
+
+async function handleWebSearch(resolved: ResolvedUserConfig, pending: UserConfig): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- interactive loop exited via return
+  while (true) {
+    const currentProvider = pending.webSearch?.provider ?? resolved.webSearch.provider;
+    const currentLabel = currentProvider ? PROVIDER_LABELS[currentProvider] : 'not configured';
+
+    const action = await p.select({
+      message: 'Web Search',
+      options: [
+        { value: 'select', label: 'Select provider', hint: currentLabel },
+        { value: 'disable', label: 'Disable web search' },
+        { value: 'back', label: 'Back' },
+      ],
+    });
+    if (isCancelled(action) || action === 'back') return;
+
+    if (action === 'disable') {
+      // Clear all webSearch fields by setting provider to undefined (removes from config)
+      pending.webSearch = {};
+      return;
+    }
+
+    // Select provider
+    const providerOptions = WEB_SEARCH_PROVIDERS.map((prov) => ({
+      value: prov,
+      label: PROVIDER_LABELS[prov],
+      hint: prov === currentProvider ? '(current)' : undefined,
+    }));
+
+    const selected = await p.select({
+      message: 'Select search provider:',
+      options: providerOptions,
+    });
+    if (isCancelled(selected)) continue;
+    const provider = selected as WebSearchProvider;
+
+    p.note(PROVIDER_SIGNUP_HINTS[provider], PROVIDER_LABELS[provider]);
+
+    const currentKey = resolved.webSearch[provider]?.apiKey;
+    const apiKey = await p.text({
+      message: `${PROVIDER_LABELS[provider]} API key:`,
+      placeholder: currentKey ? '(keep current)' : 'Enter API key',
+      validate: (val) => {
+        if (!val && !currentKey) return 'API key is required';
+        return undefined;
+      },
+    });
+    if (isCancelled(apiKey)) continue;
+
+    pending.webSearch = {
+      provider,
+      [provider]: { apiKey: (apiKey as string) || currentKey || '' },
+    };
   }
 }
 
@@ -444,6 +543,11 @@ function resourceHint(resolved: ResolvedUserConfig, pending: UserConfig): string
 function autoCompactHint(resolved: ResolvedUserConfig, pending: UserConfig): string {
   const c = { ...resolved.autoCompact, ...pending.autoCompact };
   return c.enabled ? `on, threshold: ${formatTokens(c.thresholdTokens)}` : 'off';
+}
+
+function webSearchHint(resolved: ResolvedUserConfig, pending: UserConfig): string {
+  const provider = pending.webSearch?.provider ?? resolved.webSearch.provider;
+  return provider ? PROVIDER_LABELS[provider] : 'not configured';
 }
 
 function changeCount(resolved: ResolvedUserConfig, pending: UserConfig): string {
@@ -486,11 +590,15 @@ export async function runConfigCommand(): Promise<void> {
         { value: 'security', label: 'Security', hint: securityHint(resolved, pending) },
         { value: 'resources', label: 'Resource Limits', hint: resourceHint(resolved, pending) },
         { value: 'compact', label: 'Auto-Compact', hint: autoCompactHint(resolved, pending) },
+        { value: 'websearch', label: 'Web Search', hint: webSearchHint(resolved, pending) },
         { value: 'save', label: 'Save & Exit', hint: changeCount(resolved, pending) },
         { value: 'cancel', label: 'Cancel', hint: 'discard all changes' },
       ],
     });
-    handleCancel(category);
+    if (isCancelled(category)) {
+      p.cancel('Changes discarded.');
+      return;
+    }
 
     switch (category) {
       case 'models':
@@ -504,6 +612,9 @@ export async function runConfigCommand(): Promise<void> {
         break;
       case 'compact':
         await handleAutoCompact(resolved, pending);
+        break;
+      case 'websearch':
+        await handleWebSearch(resolved, pending);
         break;
       case 'cancel':
         p.cancel('Changes discarded.');
@@ -524,7 +635,7 @@ export async function runConfigCommand(): Promise<void> {
           message: 'Save these changes?',
           initialValue: true,
         });
-        handleCancel(confirmed);
+        if (isCancelled(confirmed)) continue;
 
         if (confirmed) {
           saveUserConfig(pending);
