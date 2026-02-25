@@ -193,25 +193,17 @@ Both use the same PolicyEngine with compiled artifacts.
 
 ## Auto-Approver Design (designed 2026-02-20)
 - See `auto-approver.md` topic file for details
-<<<<<<< HEAD
 - `src/trusted-process/auto-approver.ts` -- stateless `autoApprove()` function
 - `approve | escalate` only, never deny; fail-open to human on any error
 - File-based IPC: `last-user-message.txt` in session dir; proxy reads on escalation
 - Config: `autoApprove: { enabled: false, modelId: 'anthropic:claude-haiku-4-5' }`
 
-## Scenario Generator Multi-Turn Design (designed 2026-02-23)
-- See `docs/designs/scenario-generator-multi-turn.md` for full spec
-- `ScenarioGeneratorSession`: multi-turn wrapper; `generate()` then `regenerate(feedback)`
-- `ScenarioFeedback`: corrections + discardedScenarios + probeScenarios
-
-## Deny-Default Policy Design (designed 2026-02-23)
-- See `docs/designs/deny-default-policy.md` for full spec
-- Default fallthrough: `escalate` -> `deny` (policy-engine.ts lines 578, 642)
-- Compiler restricted to `allow | escalate` only (remove `deny` from Zod schema)
-- Engine type `CompiledRule.then` stays `Decision` (3-valued) for backward compat
-- Catch-all escalate rules defeat deny-default; validation should warn about them
-- Existing compiled-policy.json with deny rules still works; recompilation drops them
-
-## Docker Agent Broker Design (designed 2026-02-23)
-- See `docker-broker.md` topic file for details
-- Design doc: `docs/design/docker-agent-broker.md`
+## Signal Transport Design (designed 2026-02-24)
+- See `docs/designs/signal-transport.md` for full spec
+- `src/signal/` module: signal-container.ts, signal-transport.ts, setup-signal.ts, markdown-to-signal.ts, signal-config.ts
+- Docker-managed signal-cli-rest-api container with persistent data volume at `~/.ironcurtain/signal-data/`
+- WebSocket receive + REST send; `MODE=json-rpc` container mode
+- Onboarding: `ironcurtain setup-signal` (register new number or link device)
+- Config: `signal: { botNumber, recipientNumber, container: { image, port } }` in config.json
+- Text-based escalation (no inline buttons); "approve"/"deny" text replies
+- Markdown-to-Signal converter: positional `start:length:STYLE` annotations via marked lexer

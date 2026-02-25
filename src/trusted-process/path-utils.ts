@@ -88,6 +88,43 @@ function normalizePathForPolicy(value: unknown, def: RoleDefinition, allowedDire
 }
 
 /**
+ * Rewrites a container-internal path to the corresponding host path.
+ *
+ * When Docker agent mode bind-mounts the host sandbox at `/workspace`
+ * inside the container, the agent sends paths like `/workspace/foo`.
+ * These must be translated to `{allowedDirectory}/foo` before reaching
+ * host-side MCP servers.
+ *
+ * Only rewrites paths that exactly match or have a `/` after the prefix
+ * (i.e. `/workspace` and `/workspace/...` but NOT `/workspacefoo`).
+ * Relative paths and non-matching absolute paths pass through unchanged.
+ */
+function rewriteContainerPath(value: string, containerDir: string, hostDir: string): string {
+  if (value === containerDir) return hostDir;
+  const prefix = containerDir.endsWith('/') ? containerDir : containerDir + '/';
+  if (value.startsWith(prefix)) return hostDir + '/' + value.slice(prefix.length);
+  return value;
+}
+
+/**
+ * Applies container-to-host path rewriting to a value (string or string array).
+ * Non-string values pass through unchanged.
+ */
+function rewriteContainerPaths(
+  value: unknown,
+  containerDir: string,
+  hostDir: string,
+): unknown {
+  if (typeof value === 'string') return rewriteContainerPath(value, containerDir, hostDir);
+  if (Array.isArray(value)) {
+    return (value as unknown[]).map((item: unknown) =>
+      typeof item === 'string' ? rewriteContainerPath(item, containerDir, hostDir) : item,
+    );
+  }
+  return value;
+}
+
+/**
  * Annotation-driven normalization of tool call arguments.
  *
  * For each argument, looks up its annotated roles and applies the
@@ -101,12 +138,17 @@ function normalizePathForPolicy(value: unknown, def: RoleDefinition, allowedDire
  *   - Policy: resolved against `allowedDirectory` so the policy engine
  *     has absolute canonical paths for containment checks
  *
+ * When `containerWorkspaceDir` is set (Docker agent mode), path arguments
+ * starting with that prefix are rewritten to host paths under
+ * `allowedDirectory` before any other normalization.
+ *
  * The input object is never mutated.
  */
 export function prepareToolArgs(
   args: Record<string, unknown>,
   annotation: ToolAnnotation,
   allowedDirectory?: string,
+  containerWorkspaceDir?: string,
 ): PreparedToolArgs {
   const argsForTransport: Record<string, unknown> = {};
   const argsForPolicy: Record<string, unknown> = {};
@@ -118,13 +160,19 @@ export function prepareToolArgs(
     if (resourceRole) {
       const def = getRoleDefinition(resourceRole);
 
+      // Rewrite container paths to host paths before normalization
+      const rewritten =
+        def.category === 'path' && containerWorkspaceDir && allowedDirectory
+          ? rewriteContainerPaths(value, containerWorkspaceDir, allowedDirectory)
+          : value;
+
       if (def.category === 'path' && allowedDirectory) {
         // Path roles with sandbox context: split relative vs absolute
-        argsForTransport[key] = normalizePathForTransport(value, def);
-        argsForPolicy[key] = normalizePathForPolicy(value, def, allowedDirectory);
+        argsForTransport[key] = normalizePathForTransport(rewritten, def);
+        argsForPolicy[key] = normalizePathForPolicy(rewritten, def, allowedDirectory);
       } else {
         // Non-path roles (URLs, opaque) or no sandbox: normalize for both
-        const transportValue = normalizeArgValue(value, def.canonicalize);
+        const transportValue = normalizeArgValue(rewritten, def.canonicalize);
         argsForTransport[key] = transportValue;
         // Domain extraction is handled later by the policy engine's
         // resolveUrlForDomainCheck() (uses functions from domain-utils.ts).

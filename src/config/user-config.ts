@@ -7,7 +7,8 @@
  */
 
 import { readFileSync, writeFileSync, mkdirSync, existsSync, statSync, chmodSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { homedir } from 'node:os';
+import { dirname, resolve } from 'node:path';
 import { z } from 'zod';
 import { getUserConfigPath } from './paths.js';
 import { parseModelId } from './model-provider.js';
@@ -114,6 +115,28 @@ const webSearchSchema = z
   })
   .optional();
 
+const signalContainerSchema = z
+  .object({
+    image: z.string().min(1).optional(),
+    port: z.number().int().min(1024).max(65535).optional(),
+  })
+  .optional();
+
+const signalSchema = z
+  .object({
+    botNumber: z
+      .string()
+      .regex(/^\+\d{7,15}$/, 'Must be E.164 format: +<country><number>')
+      .optional(),
+    recipientNumber: z
+      .string()
+      .regex(/^\+\d{7,15}$/, 'Must be E.164 format: +<country><number>')
+      .optional(),
+    recipientIdentityKey: z.string().min(1).optional(),
+    container: signalContainerSchema,
+  })
+  .optional();
+
 /**
  * Zod schema for validating user config. All fields optional.
  * Validates types and constraints without applying defaults --
@@ -136,6 +159,7 @@ export const userConfigSchema = z.object({
   autoApprove: autoApproveSchema,
   webSearch: webSearchSchema,
   serverCredentials: z.record(z.string(), z.record(z.string(), z.string().min(1))).optional(),
+  signal: signalSchema,
 });
 
 /** Parsed config from ~/.ironcurtain/config.json. All fields optional. */
@@ -185,13 +209,22 @@ export interface ResolvedUserConfig {
   readonly autoApprove: ResolvedAutoApproveConfig;
   readonly webSearch: ResolvedWebSearchConfig;
   readonly serverCredentials: Readonly<Record<string, Readonly<Record<string, string>>>>;
+  /** Signal transport config. Null when Signal is not set up. */
+  readonly signal: import('../signal/signal-config.js').ResolvedSignalConfig | null;
 }
 
 /** Known fields derived from the schema. Used for unknown-field detection. */
 const KNOWN_FIELDS = new Set<string>(Object.keys(userConfigSchema.shape));
 
 /** Fields that must never be backfilled into the config file. */
-const SENSITIVE_FIELDS = new Set(['anthropicApiKey', 'googleApiKey', 'openaiApiKey', 'serverCredentials', 'webSearch']);
+const SENSITIVE_FIELDS = new Set([
+  'anthropicApiKey',
+  'googleApiKey',
+  'openaiApiKey',
+  'serverCredentials',
+  'webSearch',
+  'signal', // Contains phone numbers and identity key fingerprints
+]);
 
 /** Owner-only read/write permissions for the config file (may contain API keys). */
 const CONFIG_FILE_MODE = 0o600;
@@ -467,6 +500,34 @@ function mergeWithDefaults(config: UserConfig): ResolvedUserConfig {
       serpapi: config.webSearch?.serpapi ?? null,
     },
     serverCredentials: config.serverCredentials ?? {},
+    signal: resolveSignalFromUserConfig(config),
+  };
+}
+
+/**
+ * Resolves Signal config inline to avoid circular imports.
+ * signal-config.ts re-exports a richer version; this is the minimal
+ * resolution needed by mergeWithDefaults().
+ */
+function resolveSignalFromUserConfig(
+  config: UserConfig,
+): import('../signal/signal-config.js').ResolvedSignalConfig | null {
+  if (!config.signal) return null;
+  if (!config.signal.botNumber || !config.signal.recipientNumber || !config.signal.recipientIdentityKey) {
+    return null;
+  }
+
+  const home = process.env.IRONCURTAIN_HOME ?? resolve(homedir(), '.ironcurtain');
+  return {
+    botNumber: config.signal.botNumber,
+    recipientNumber: config.signal.recipientNumber,
+    recipientIdentityKey: config.signal.recipientIdentityKey,
+    container: {
+      image: config.signal.container?.image ?? 'bbernhard/signal-cli-rest-api:latest',
+      port: config.signal.container?.port ?? 18080,
+      dataDir: resolve(home, 'signal-data'),
+      containerName: 'ironcurtain-signal',
+    },
   };
 }
 
