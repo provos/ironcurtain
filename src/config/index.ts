@@ -68,11 +68,9 @@ export function computeProtectedPaths(opts: {
   if (existsSync(userConstitutionExt)) {
     paths.push(resolveRealPath(userConstitutionExt));
   }
-  // Protect .env file (contains API keys)
-  const dotenvPath = resolve('.env');
-  if (existsSync(dotenvPath)) {
-    paths.push(resolveRealPath(dotenvPath));
-  }
+  // Protect .env file unconditionally — even if it doesn't exist yet, an agent
+  // must not be able to create one that would be loaded on subsequent runs.
+  paths.push(resolveRealPath(resolve('.env')));
   // Protect user config (may contain serverCredentials)
   paths.push(resolveRealPath(getUserConfigPath()));
   return paths;
