@@ -6,6 +6,7 @@ import type { CompiledPolicyFile, DynamicListsFile, ToolAnnotationsFile } from '
 import {
   computeConstitutionHash,
   getIronCurtainHome,
+  getUserConfigPath,
   getUserConstitutionBasePath,
   getUserConstitutionPath,
   getUserGeneratedDir,
@@ -67,6 +68,13 @@ export function computeProtectedPaths(opts: {
   if (existsSync(userConstitutionExt)) {
     paths.push(resolveRealPath(userConstitutionExt));
   }
+  // Protect .env file (contains API keys)
+  const dotenvPath = resolve('.env');
+  if (existsSync(dotenvPath)) {
+    paths.push(resolveRealPath(dotenvPath));
+  }
+  // Protect user config (may contain serverCredentials)
+  paths.push(resolveRealPath(getUserConfigPath()));
   return paths;
 }
 
