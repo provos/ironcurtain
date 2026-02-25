@@ -7,9 +7,24 @@
  */
 
 /**
- * Configuration for an LLM API provider, describing how the MITM proxy
- * should handle traffic to this provider's API.
+ * Result from a RequestBodyRewriter when modifications were made.
  */
+export interface RewriteResult {
+  /** The modified request body object. */
+  readonly modified: Record<string, unknown>;
+  /** Human-readable descriptions of what was stripped (for logging). */
+  readonly stripped: string[];
+}
+
+/**
+ * A function that inspects and optionally modifies a parsed JSON request body.
+ * Returns a RewriteResult if the body was modified, or null if no changes needed.
+ */
+export type RequestBodyRewriter = (
+  body: Record<string, unknown>,
+  context: { method: string; path: string },
+) => RewriteResult | null;
+
 export interface ProviderConfig {
   /** Hostname of the API endpoint (e.g., 'api.anthropic.com'). */
   readonly host: string;
@@ -34,6 +49,18 @@ export interface ProviderConfig {
    * Example: 'sk-ant-api03-' for Anthropic.
    */
   readonly fakeKeyPrefix: string;
+
+  /**
+   * Optional function to inspect and modify request bodies before forwarding.
+   * Only called for endpoints listed in rewriteEndpoints.
+   */
+  readonly requestRewriter?: RequestBodyRewriter;
+
+  /**
+   * Paths for which the proxy should buffer and rewrite request bodies.
+   * Only applies to POST requests. Requires requestRewriter to be set.
+   */
+  readonly rewriteEndpoints?: readonly string[];
 }
 
 export interface EndpointPattern {
@@ -82,6 +109,69 @@ export function isEndpointAllowed(
   });
 }
 
+// --- Request body rewriters ---
+
+/**
+ * Returns the server-side tool type string if the tool entry is a
+ * server-side tool, or null if it is a custom/MCP-bridged tool.
+ *
+ * Server-side tools have a `type` field that is not "custom".
+ * Custom tools either have no `type` field or `type: "custom"`.
+ */
+function getServerSideToolType(tool: unknown): string | null {
+  if (typeof tool !== 'object' || tool === null || !('type' in tool)) return null;
+  const { type } = tool as Record<string, unknown>;
+  if (typeof type === 'string' && type !== 'custom') return type;
+  return null;
+}
+
+/**
+ * Strips server-side tools from the Anthropic Messages API `tools` array.
+ *
+ * Server-side tools (e.g. web_search_20250305, computer_20250124) have a
+ * `type` field that is not "custom". Custom/MCP-bridged tools either have
+ * no `type` field or `type: "custom"`.
+ */
+export function stripServerSideTools(body: Record<string, unknown>): RewriteResult | null {
+  const tools = body.tools;
+  if (!Array.isArray(tools) || tools.length === 0) return null;
+
+  const stripped: string[] = [];
+  const kept: unknown[] = [];
+
+  for (const tool of tools) {
+    const serverType = getServerSideToolType(tool);
+    if (serverType) {
+      stripped.push(serverType);
+    } else {
+      kept.push(tool);
+    }
+  }
+
+  if (stripped.length === 0) return null;
+
+  return {
+    modified: { ...body, tools: kept },
+    stripped,
+  };
+}
+
+/**
+ * Returns true if this request should have its body buffered and rewritten.
+ * Only matches POST requests to paths listed in the provider's rewriteEndpoints.
+ */
+export function shouldRewriteBody(
+  config: ProviderConfig,
+  method: string | undefined,
+  path: string | undefined,
+): boolean {
+  if (!config.requestRewriter || !config.rewriteEndpoints) return false;
+  if (!method || method.toUpperCase() !== 'POST') return false;
+  if (!path) return false;
+  const cleanPath = path.split('?')[0];
+  return config.rewriteEndpoints.includes(cleanPath);
+}
+
 // --- Built-in providers ---
 
 export const anthropicProvider: ProviderConfig = {
@@ -102,6 +192,8 @@ export const anthropicProvider: ProviderConfig = {
   ],
   keyInjection: { type: 'header', headerName: 'x-api-key' },
   fakeKeyPrefix: 'sk-ant-api03-ironcurtain-',
+  requestRewriter: stripServerSideTools,
+  rewriteEndpoints: ['/v1/messages'],
 };
 
 export const openaiProvider: ProviderConfig = {

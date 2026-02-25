@@ -20,7 +20,12 @@ import type { Socket } from 'node:net';
 import { existsSync, unlinkSync } from 'node:fs';
 import forge from 'node-forge';
 import { randomSerialNumber, type CertificateAuthority } from './ca.js';
-import { isEndpointAllowed, type ProviderConfig } from './provider-config.js';
+import {
+  isEndpointAllowed,
+  shouldRewriteBody,
+  type ProviderConfig,
+  type RequestBodyRewriter,
+} from './provider-config.js';
 import * as logger from '../logger.js';
 
 export interface MitmProxy {
@@ -53,6 +58,30 @@ export interface ProviderKeyMapping {
 /** Connection reset errors are routine during proxy shutdown or client disconnect. */
 function isConnectionReset(err: NodeJS.ErrnoException): boolean {
   return err.code === 'ECONNRESET' || err.code === 'EPIPE';
+}
+
+const MAX_REWRITE_BODY_BYTES = 10 * 1024 * 1024; // 10 MB
+
+/**
+ * Buffers the entire request body into a single Buffer.
+ * Rejects if the body exceeds maxBytes.
+ */
+function bufferRequestBody(req: http.IncomingMessage, maxBytes: number): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    req.on('data', (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > maxBytes) {
+        req.destroy();
+        reject(new Error(`Request body exceeds ${maxBytes} bytes`));
+      } else {
+        chunks.push(chunk);
+      }
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
 }
 
 export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
@@ -148,78 +177,117 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     // 2. Fake key validation + swap
     const modifiedHeaders = { ...headers };
     if (!validateAndSwapApiKey(modifiedHeaders, provider)) {
-      logger.info(`[mitm-proxy] REJECTED ${method} ${targetHost}${path} — invalid API key`);
+      logger.info(`[mitm-proxy] REJECTED ${method} ${targetHost}${path} - invalid API key`);
       clientRes.writeHead(403, { 'Content-Type': 'text/plain' });
       clientRes.end('Rejected: API key does not match expected sentinel.');
       return;
     }
     modifiedHeaders.host = targetHost;
 
-    // 3. Forward to real API
-    const upstreamReq = https.request(
-      {
-        hostname: targetHost,
-        port: targetPort,
-        method,
-        path,
-        headers: modifiedHeaders,
-      },
-      (upstreamRes) => {
-        // Handle errors on the upstream response stream (e.g. connection reset mid-body)
-        upstreamRes.on('error', (err) => {
+    // 3. Forward to real API - either direct pipe or buffer+rewrite
+    const needsRewrite = shouldRewriteBody(provider.config, method, path);
+
+    function forwardRequest(bodyOverride?: Buffer): void {
+      logger.info(`[mitm-proxy] ${method} ${targetHost}${path} → FORWARDED`);
+
+      const finalHeaders = { ...modifiedHeaders };
+      if (bodyOverride) {
+        finalHeaders['content-length'] = bodyOverride.length.toString();
+      }
+
+      const upstreamReq = https.request(
+        {
+          hostname: targetHost,
+          port: targetPort,
+          method,
+          path,
+          headers: finalHeaders,
+        },
+        (upstreamRes) => {
+          upstreamRes.on('error', (err) => {
+            const log = isConnectionReset(err) ? logger.debug : logger.info;
+            log(`[mitm-proxy] upstream response error: ${err.message}`);
+            if (!clientRes.headersSent) {
+              clientRes.writeHead(502, { 'Content-Type': 'text/plain' });
+              clientRes.end(`Upstream response error: ${err.message}`);
+            } else {
+              clientRes.socket?.destroy();
+            }
+          });
+
+          clientRes.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers);
+          clientRes.flushHeaders();
+          clientRes.socket?.setNoDelay(true);
+          upstreamRes.pipe(clientRes);
+        },
+      );
+
+      activeUpstreamRequests.add(upstreamReq);
+      upstreamReq.on('close', () => activeUpstreamRequests.delete(upstreamReq));
+
+      upstreamReq.on('error', (err) => {
+        const log = isConnectionReset(err) ? logger.debug : logger.info;
+        log(`[mitm-proxy] upstream error: ${err.message}`);
+        activeUpstreamRequests.delete(upstreamReq);
+        if (!clientRes.headersSent) {
+          clientRes.writeHead(502, { 'Content-Type': 'text/plain' });
+          clientRes.end(`Upstream error: ${err.message}`);
+        } else {
+          clientRes.socket?.destroy();
+        }
+      });
+
+      clientRes.on('close', () => {
+        if (!upstreamReq.destroyed) {
+          upstreamReq.destroy();
+        }
+      });
+
+      if (bodyOverride) {
+        upstreamReq.end(bodyOverride);
+      } else {
+        clientReq.on('error', (err) => {
           const log = isConnectionReset(err) ? logger.debug : logger.info;
-          log(`[mitm-proxy] upstream response error: ${err.message}`);
+          log(`[mitm-proxy] client request error: ${err.message}`);
+          upstreamReq.destroy();
+        });
+        clientReq.pipe(upstreamReq);
+      }
+    }
+
+    if (needsRewrite) {
+      // shouldRewriteBody guarantees requestRewriter, method, and path are defined
+      const rewriter = provider.config.requestRewriter as RequestBodyRewriter;
+      const reqMethod = method as string;
+      const reqPath = path as string;
+
+      bufferRequestBody(clientReq, MAX_REWRITE_BODY_BYTES)
+        .then((rawBody) => {
+          let finalBody = rawBody;
+          try {
+            const parsed = JSON.parse(rawBody.toString()) as Record<string, unknown>;
+            const result = rewriter(parsed, { method: reqMethod, path: reqPath });
+            if (result) {
+              finalBody = Buffer.from(JSON.stringify(result.modified));
+              logger.info(
+                `[mitm-proxy] POST ${targetHost}${path} - stripped server-side tools: ${result.stripped.join(', ')}`,
+              );
+            }
+          } catch {
+            logger.info(`[mitm-proxy] POST ${targetHost}${path} - failed to parse request body, forwarding as-is`);
+          }
+          forwardRequest(finalBody);
+        })
+        .catch((err: unknown) => {
+          const message = err instanceof Error ? err.message : 'Request body too large';
           if (!clientRes.headersSent) {
-            clientRes.writeHead(502, { 'Content-Type': 'text/plain' });
-            clientRes.end(`Upstream response error: ${err.message}`);
-          } else {
-            clientRes.socket?.destroy();
+            clientRes.writeHead(413, { 'Content-Type': 'text/plain' });
+            clientRes.end(message);
           }
         });
-
-        // 4. Stream response back (SSE passthrough)
-        clientRes.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers);
-        clientRes.flushHeaders();
-        clientRes.socket?.setNoDelay(true);
-        upstreamRes.pipe(clientRes);
-      },
-    );
-
-    // Track upstream request for cleanup on stop()
-    activeUpstreamRequests.add(upstreamReq);
-    upstreamReq.on('close', () => activeUpstreamRequests.delete(upstreamReq));
-
-    // Handle upstream errors
-    upstreamReq.on('error', (err) => {
-      const log = isConnectionReset(err) ? logger.debug : logger.info;
-      log(`[mitm-proxy] upstream error: ${err.message}`);
-      activeUpstreamRequests.delete(upstreamReq);
-      if (!clientRes.headersSent) {
-        clientRes.writeHead(502, { 'Content-Type': 'text/plain' });
-        clientRes.end(`Upstream error: ${err.message}`);
-      } else {
-        clientRes.socket?.destroy();
-      }
-    });
-
-    // If the client disconnects mid-request, abort the upstream request
-    clientRes.on('close', () => {
-      if (!upstreamReq.destroyed) {
-        upstreamReq.destroy();
-      }
-    });
-
-    // Handle errors on the client request body (e.g. malformed chunked encoding)
-    clientReq.on('error', (err) => {
-      const log = isConnectionReset(err) ? logger.debug : logger.info;
-      log(`[mitm-proxy] client request error: ${err.message}`);
-      upstreamReq.destroy();
-    });
-
-    // Pipe request body to upstream
-    clientReq.pipe(upstreamReq);
-
-    logger.info(`[mitm-proxy] ${method} ${targetHost}${path} → FORWARDED`);
+    } else {
+      forwardRequest();
+    }
   });
 
   // Outer server - UDS listener, handles CONNECT
@@ -275,7 +343,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
       },
     });
 
-    // 5. TLS handshake timeout — if the handshake completes, the 'secure'
+    // 5. TLS handshake timeout - if the handshake completes, the 'secure'
     //    event clears this timer. If it fires, the handshake never completed.
     const handshakeTimeout = setTimeout(() => {
       logger.info(`[mitm-proxy] #${connId} TLS handshake timeout`);
@@ -343,7 +411,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
       }
       activeClientSockets.clear();
 
-      // 3. Close outer server — stop accepting new connections.
+      // 3. Close outer server - stop accepting new connections.
       // closeAllConnections() handles any non-upgraded HTTP connections.
       outerServer.closeAllConnections();
       await new Promise<void>((resolve) => {
