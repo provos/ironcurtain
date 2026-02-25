@@ -94,7 +94,9 @@ describe.skipIf(!process.env.INTEGRATION_TEST)('Network isolation (--network=non
     });
     await proxy.start();
 
-    // Create and start --network=none container
+    // Create and start --network=none container.
+    // Mount the parent directory (not the socket file) so the UDS is accessible
+    // on both Linux and macOS Docker Desktop (VirtioFS can't share socket files).
     containerId = await docker(
       'create',
       '--name',
@@ -103,7 +105,7 @@ describe.skipIf(!process.env.INTEGRATION_TEST)('Network isolation (--network=non
       'none',
       '--cap-drop=ALL',
       '-v',
-      `${socketPath}:/run/ironcurtain/mitm-proxy.sock:ro`,
+      `${tempDir}:/run/ironcurtain`,
       '-e',
       'HTTPS_PROXY=http://127.0.0.1:18080',
       '-e',
