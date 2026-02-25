@@ -134,10 +134,26 @@ function resultText(result: Awaited<ReturnType<typeof client.callTool>>): string
 
 describe('fetch-server', () => {
   describe('tool schema', () => {
+    it('lists both http_fetch and web_search tools', async () => {
+      const { tools } = await client.listTools();
+      expect(tools).toHaveLength(2);
+      expect(tools.map((t) => t.name)).toContain('http_fetch');
+      expect(tools.map((t) => t.name)).toContain('web_search');
+    });
+
+    it('web_search has query and max_results parameters', async () => {
+      const { tools } = await client.listTools();
+      const webSearch = tools.find((t) => t.name === 'web_search')!;
+      const schema = webSearch.inputSchema as { properties: Record<string, unknown>; required: string[] };
+      expect(schema.properties).toHaveProperty('query');
+      expect(schema.properties).toHaveProperty('max_results');
+      expect(schema.required).toContain('query');
+    });
+
     it('exposes format enum and timeout parameter', async () => {
       const { tools } = await client.listTools();
-      expect(tools).toHaveLength(1);
-      const schema = tools[0].inputSchema as { properties: Record<string, unknown> };
+      const httpFetch = tools.find((t) => t.name === 'http_fetch')!;
+      const schema = httpFetch.inputSchema as { properties: Record<string, unknown> };
 
       expect(schema.properties).toHaveProperty('format');
       const format = schema.properties.format as Record<string, unknown>;
@@ -332,6 +348,28 @@ describe('fetch-server', () => {
       expect(text).toContain('Element Heavy');
       // No readability metadata header since maxElemsToParse was exceeded
       expect(text).not.toContain('Title:');
+    });
+  });
+
+  describe('web_search tool', () => {
+    it('returns helpful error when no provider configured', async () => {
+      // The test fetch server is spawned without WEB_SEARCH_PROVIDER env var
+      const result = await client.callTool({
+        name: 'web_search',
+        arguments: { query: 'test query' },
+      });
+      expect(result.isError).toBe(true);
+      const text = resultText(result);
+      expect(text).toContain('not configured');
+    });
+
+    it('returns error when query is missing', async () => {
+      const result = await client.callTool({
+        name: 'web_search',
+        arguments: {},
+      });
+      expect(result.isError).toBe(true);
+      expect(resultText(result)).toContain('Missing required parameter: query');
     });
   });
 });

@@ -10,7 +10,14 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as p from '@clack/prompts';
-import { USER_CONFIG_DEFAULTS } from './user-config.js';
+import {
+  USER_CONFIG_DEFAULTS,
+  WEB_SEARCH_PROVIDERS,
+  WEB_SEARCH_PROVIDER_LABELS,
+  WEB_SEARCH_PROVIDER_URLS,
+  saveUserConfig,
+  type WebSearchProvider,
+} from './user-config.js';
 import { parseModelId, type ProviderId } from './model-provider.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -111,7 +118,39 @@ export async function runFirstStart(): Promise<void> {
     p.log.info('All required API keys are configured.');
   }
 
-  // Step 4: Suggest customization
+  // Step 4: Optional web search provider
+  p.log.info(
+    'Web search lets the agent look up documentation, error messages, and current\n' +
+      'information. This is optional but makes the agent significantly more helpful.',
+  );
+  const providerOptions = WEB_SEARCH_PROVIDERS.map((prov) => ({
+    value: prov,
+    label: WEB_SEARCH_PROVIDER_LABELS[prov],
+    hint: WEB_SEARCH_PROVIDER_URLS[prov],
+  }));
+  const setupSearch = await p.select({
+    message: 'Set up a web search provider?',
+    options: [
+      ...providerOptions,
+      { value: 'skip' as const, label: 'Skip for now', hint: 'configure later via ironcurtain config' },
+    ],
+  });
+  handleCancel(setupSearch);
+
+  if (setupSearch !== 'skip') {
+    const provider = setupSearch as WebSearchProvider;
+    const apiKey = await p.text({
+      message: `Enter your ${provider} API key:`,
+      validate: (val) => (!val ? 'API key is required' : undefined),
+    });
+    handleCancel(apiKey);
+    saveUserConfig({
+      webSearch: { provider, [provider]: { apiKey: apiKey as string } },
+    });
+    p.log.success(`Web search configured with ${provider}.`);
+  }
+
+  // Step 5: Suggest customization
   p.note(
     'You can customize IronCurtain to fit your workflow:\n\n' +
       '  ironcurtain config             — change models, resource limits, and other settings\n' +
@@ -121,6 +160,6 @@ export async function runFirstStart(): Promise<void> {
     'Customization',
   );
 
-  // Step 5: Outro
+  // Step 6: Outro
   p.outro('Run `ironcurtain start` to begin.');
 }

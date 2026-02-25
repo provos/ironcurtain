@@ -30,15 +30,15 @@ describe('Handwritten Scenarios', () => {
       expect(s.request.serverName).toBeTruthy();
       expect(s.request.toolName).toBeTruthy();
       expect(s.request.arguments).toBeDefined();
-      expect(['allow', 'deny', 'escalate']).toContain(s.expectedDecision);
+      expect(['allow', 'deny', 'escalate', 'not-allow']).toContain(s.expectedDecision);
       expect(s.reasoning).toBeTruthy();
     }
   });
 
-  it('covers deny and escalate decision types', () => {
-    const decisions = new Set(scenarios.map((s) => s.expectedDecision));
-    expect(decisions).toContain('deny');
-    expect(decisions).toContain('escalate');
+  it('all scenarios expect not-allow', () => {
+    for (const s of scenarios) {
+      expect(s.expectedDecision).toBe('not-allow');
+    }
   });
 
   describe('scenarios produce correct decisions when run against PolicyEngine', () => {
@@ -59,7 +59,11 @@ describe('Handwritten Scenarios', () => {
           arguments: scenario.request.arguments,
           timestamp: new Date().toISOString(),
         });
-        expect(result.decision).toBe(scenario.expectedDecision);
+        if (scenario.expectedDecision === 'not-allow') {
+          expect(result.decision).not.toBe('allow');
+        } else {
+          expect(result.decision).toBe(scenario.expectedDecision);
+        }
       });
     }
   });

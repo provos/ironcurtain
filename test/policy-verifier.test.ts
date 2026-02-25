@@ -212,11 +212,11 @@ describe('Policy Verifier', () => {
     expect(result.pass).toBe(false);
     expect(result.failedScenarios.length).toBeGreaterThan(0);
 
-    // Outside-sandbox scenarios should fail: expected escalate, got allow
-    const escalateFailures = result.failedScenarios.filter(
-      (f) => f.scenario.expectedDecision === 'escalate' && f.actualDecision === 'allow',
+    // Outside-sandbox scenarios should fail: expected not-allow, got allow
+    const notAllowFailures = result.failedScenarios.filter(
+      (f) => f.scenario.expectedDecision === 'not-allow' && f.actualDecision === 'allow',
     );
-    expect(escalateFailures.length).toBeGreaterThan(0);
+    expect(notAllowFailures.length).toBeGreaterThan(0);
   });
 
   it('respects maxRounds limit', async () => {

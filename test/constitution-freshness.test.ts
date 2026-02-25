@@ -37,9 +37,12 @@ describe('checkConstitutionFreshness', () => {
 
   it('emits no warning when hash matches', () => {
     const constitutionPath = resolve(tmpDir, 'constitution.md');
-    const text = '# My constitution\nBe nice.';
-    writeFileSync(constitutionPath, text);
-    const hash = createHash('sha256').update(text).digest('hex');
+    writeFileSync(constitutionPath, '# My constitution\nBe nice.');
+    // User constitution must also exist for the combined hash
+    const userPath = resolve(tmpDir, 'constitution-user.md');
+    writeFileSync(userPath, 'user rules');
+    const combined = '# My constitution\nBe nice.\n\nuser rules';
+    const hash = createHash('sha256').update(combined).digest('hex');
     const policy = makePolicy(hash);
 
     const spy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
@@ -51,6 +54,8 @@ describe('checkConstitutionFreshness', () => {
   it('emits warning to stderr when hash mismatches', () => {
     const constitutionPath = resolve(tmpDir, 'constitution.md');
     writeFileSync(constitutionPath, '# Updated constitution');
+    const userPath = resolve(tmpDir, 'constitution-user.md');
+    writeFileSync(userPath, 'user rules');
     const policy = makePolicy('stale-hash');
 
     const spy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
@@ -60,14 +65,11 @@ describe('checkConstitutionFreshness', () => {
     spy.mockRestore();
   });
 
-  it('silently skips when constitution file is missing (ENOENT)', () => {
+  it('throws when base constitution file is missing', () => {
     const missingPath = resolve(tmpDir, 'nonexistent.md');
     const policy = makePolicy('any-hash');
 
-    const spy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
-    expect(() => checkConstitutionFreshness(policy, missingPath)).not.toThrow();
-    expect(spy).not.toHaveBeenCalled();
-    spy.mockRestore();
+    expect(() => checkConstitutionFreshness(policy, missingPath)).toThrow('Base constitution not found');
   });
 });
 
@@ -89,11 +91,14 @@ describe('loadConstitutionText user-local override', () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it('uses package base when no user-local constitution exists', () => {
+  it('uses package base with bundled user constitution when no user-local files exist', () => {
     const packagePath = resolve(tmpDir, 'package-constitution.md');
     writeFileSync(packagePath, 'package base');
 
-    expect(loadConstitutionText(packagePath)).toBe('package base');
+    // No user files in tmpDir — falls back to bundled constitution-user-base.md
+    const result = loadConstitutionText(packagePath);
+    expect(result).toMatch(/^package base\n\n/);
+    expect(result).toContain('User Policy Customizations');
   });
 
   it('uses user-local constitution.md instead of package base when it exists', () => {
@@ -104,7 +109,10 @@ describe('loadConstitutionText user-local override', () => {
     const userBasePath = resolve(tmpDir, 'constitution.md');
     writeFileSync(userBasePath, 'user override base');
 
-    expect(loadConstitutionText(packagePath)).toBe('user override base');
+    // No constitution-user.md in tmpDir — falls back to bundled user base
+    const result = loadConstitutionText(packagePath);
+    expect(result).toMatch(/^user override base\n\n/);
+    expect(result).toContain('User Policy Customizations');
   });
 
   it('appends constitution-user.md to user-local base', () => {

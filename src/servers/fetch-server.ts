@@ -1,8 +1,9 @@
 /**
- * Minimal HTTP fetch MCP server.
+ * HTTP fetch and web search MCP server.
  *
- * Exposes a single `http_fetch` tool (GET-only) that retrieves web content.
- * HTML responses are converted to markdown via turndown by default.
+ * Exposes two tools:
+ * - `http_fetch` (GET-only) retrieves web content, converting HTML to markdown by default.
+ * - `web_search` queries a configured search provider (Brave, Tavily, or SerpAPI).
  *
  * Security:
  * - SSRF protection is handled by the policy engine (IP addresses blocked structurally)
@@ -18,6 +19,7 @@ import { Readability, isProbablyReaderable } from '@mozilla/readability';
 import { JSDOM } from 'jsdom';
 import TurndownService from 'turndown';
 import { VERSION } from '../version.js';
+import { createSearchProvider, formatSearchResults } from './search-providers.js';
 
 const USER_AGENT = `IronCurtain/${VERSION} (AI Agent Runtime)`;
 const MAX_RESPONSE_BYTES = 10 * 1024 * 1024; // 10 MB
@@ -42,6 +44,8 @@ const BOILERPLATE_TAG_RE = new RegExp(`<(${BOILERPLATE_TAGS.join('|')})\\b[^>]*>
 
 const turndown = new TurndownService({ headingStyle: 'atx' });
 turndown.remove([...BOILERPLATE_TAGS]);
+
+const searchProvider = createSearchProvider(process.env);
 
 /**
  * Performs the actual HTTP GET request with redirect following,
@@ -267,18 +271,42 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ['url'],
       },
     },
+    {
+      name: 'web_search',
+      description: 'Search the web for information using a configured search provider',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          query: { type: 'string', description: 'The search query' },
+          max_results: {
+            type: 'number',
+            default: 5,
+            description: 'Maximum number of results to return (1–20)',
+          },
+        },
+        required: ['query'],
+      },
+    },
   ],
 }));
 
 server.setRequestHandler(CallToolRequestSchema, async (req) => {
-  if (req.params.name !== 'http_fetch') {
-    return {
-      content: [{ type: 'text', text: `Unknown tool: ${req.params.name}` }],
-      isError: true,
-    };
+  switch (req.params.name) {
+    case 'http_fetch':
+      return handleHttpFetch(req.params.arguments);
+    case 'web_search':
+      return handleWebSearch(req.params.arguments);
+    default:
+      return {
+        content: [{ type: 'text', text: `Unknown tool: ${req.params.name}` }],
+        isError: true,
+      };
   }
+});
 
-  const args = req.params.arguments;
+async function handleHttpFetch(
+  args: Record<string, unknown> | undefined,
+): Promise<{ content: { type: string; text: string }[]; isError?: boolean }> {
   const url = args?.url as string | undefined;
   if (!url || typeof url !== 'string') {
     return {
@@ -331,7 +359,51 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       isError: true,
     };
   }
-});
+}
+
+async function handleWebSearch(
+  args: Record<string, unknown> | undefined,
+): Promise<{ content: { type: string; text: string }[]; isError?: boolean }> {
+  const query = args?.query as string | undefined;
+  if (!query || typeof query !== 'string') {
+    return {
+      content: [{ type: 'text', text: 'Missing required parameter: query' }],
+      isError: true,
+    };
+  }
+
+  if (!searchProvider) {
+    return {
+      content: [
+        {
+          type: 'text',
+          text:
+            'Web search is not configured. Set a search provider in ~/.ironcurtain/config.json ' +
+            'using "ironcurtain config" or by adding a webSearch section with provider and API key.',
+        },
+      ],
+      isError: true,
+    };
+  }
+
+  const rawMaxResults = args?.max_results;
+  const maxResults =
+    typeof rawMaxResults === 'number' && Number.isFinite(rawMaxResults)
+      ? Math.min(20, Math.max(1, Math.trunc(rawMaxResults)))
+      : 5;
+
+  try {
+    const results = await searchProvider.search(query, maxResults);
+    const formatted = formatSearchResults(query, results);
+    return { content: [{ type: 'text', text: formatted }] };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      content: [{ type: 'text', text: `Search error: ${message}` }],
+      isError: true,
+    };
+  }
+}
 
 const transport = new StdioServerTransport();
 await server.connect(transport);

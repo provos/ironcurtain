@@ -146,13 +146,19 @@ export function getUserGeneratedDir(): string {
 export function loadConstitutionText(packageBasePath: string): string {
   const userBasePath = getUserConstitutionBasePath();
   const basePath = existsSync(userBasePath) ? userBasePath : packageBasePath;
-  const base = readFileSync(basePath, 'utf-8');
-  const userPath = getUserConstitutionPath();
-  if (existsSync(userPath)) {
-    const user = readFileSync(userPath, 'utf-8');
-    return `${base}\n\n${user}`;
+  if (!existsSync(basePath)) {
+    throw new Error(`Base constitution not found: tried ${userBasePath} and ${packageBasePath}`);
   }
-  return base;
+  const base = readFileSync(basePath, 'utf-8');
+
+  const userPath = getUserConstitutionPath();
+  const userFallbackPath = getBaseUserConstitutionPath();
+  const effectiveUserPath = existsSync(userPath) ? userPath : existsSync(userFallbackPath) ? userFallbackPath : null;
+  if (!effectiveUserPath) {
+    throw new Error(`User constitution not found: tried ${userPath} and ${userFallbackPath}`);
+  }
+  const user = readFileSync(effectiveUserPath, 'utf-8');
+  return `${base}\n\n${user}`;
 }
 
 /**

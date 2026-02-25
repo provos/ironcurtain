@@ -88,6 +88,32 @@ const autoApproveSchema = z
   })
   .optional();
 
+export const WEB_SEARCH_PROVIDERS = ['brave', 'tavily', 'serpapi'] as const;
+export type WebSearchProvider = (typeof WEB_SEARCH_PROVIDERS)[number];
+
+/** Human-readable labels for web search providers. */
+export const WEB_SEARCH_PROVIDER_LABELS: Readonly<Record<WebSearchProvider, string>> = {
+  brave: 'Brave Search',
+  tavily: 'Tavily',
+  serpapi: 'SerpAPI',
+};
+
+/** Signup URLs for web search providers. */
+export const WEB_SEARCH_PROVIDER_URLS: Readonly<Record<WebSearchProvider, string>> = {
+  brave: 'https://brave.com/search/api/',
+  tavily: 'https://tavily.com/',
+  serpapi: 'https://serpapi.com/',
+};
+
+const webSearchSchema = z
+  .object({
+    provider: z.enum(WEB_SEARCH_PROVIDERS).optional(),
+    brave: z.object({ apiKey: z.string().min(1) }).optional(),
+    tavily: z.object({ apiKey: z.string().min(1) }).optional(),
+    serpapi: z.object({ apiKey: z.string().min(1) }).optional(),
+  })
+  .optional();
+
 /**
  * Zod schema for validating user config. All fields optional.
  * Validates types and constraints without applying defaults --
@@ -108,6 +134,7 @@ export const userConfigSchema = z.object({
   resourceBudget: resourceBudgetSchema,
   autoCompact: autoCompactSchema,
   autoApprove: autoApproveSchema,
+  webSearch: webSearchSchema,
   serverCredentials: z.record(z.string(), z.record(z.string(), z.string().min(1))).optional(),
 });
 
@@ -137,6 +164,14 @@ export interface ResolvedAutoApproveConfig {
   readonly modelId: string;
 }
 
+/** Resolved web search config with all fields present. */
+export interface ResolvedWebSearchConfig {
+  readonly provider: WebSearchProvider | null;
+  readonly brave: { readonly apiKey: string } | null;
+  readonly tavily: { readonly apiKey: string } | null;
+  readonly serpapi: { readonly apiKey: string } | null;
+}
+
 /** Validated, defaults-applied configuration. All fields present. */
 export interface ResolvedUserConfig {
   readonly agentModelId: string;
@@ -148,6 +183,7 @@ export interface ResolvedUserConfig {
   readonly resourceBudget: ResolvedResourceBudgetConfig;
   readonly autoCompact: ResolvedAutoCompactConfig;
   readonly autoApprove: ResolvedAutoApproveConfig;
+  readonly webSearch: ResolvedWebSearchConfig;
   readonly serverCredentials: Readonly<Record<string, Readonly<Record<string, string>>>>;
 }
 
@@ -155,7 +191,7 @@ export interface ResolvedUserConfig {
 const KNOWN_FIELDS = new Set<string>(Object.keys(userConfigSchema.shape));
 
 /** Fields that must never be backfilled into the config file. */
-const SENSITIVE_FIELDS = new Set(['anthropicApiKey', 'googleApiKey', 'openaiApiKey', 'serverCredentials']);
+const SENSITIVE_FIELDS = new Set(['anthropicApiKey', 'googleApiKey', 'openaiApiKey', 'serverCredentials', 'webSearch']);
 
 /** Owner-only read/write permissions for the config file (may contain API keys). */
 const CONFIG_FILE_MODE = 0o600;
@@ -424,6 +460,12 @@ function mergeWithDefaults(config: UserConfig): ResolvedUserConfig {
       enabled: a?.enabled ?? approveDefaults.enabled,
       modelId: a?.modelId ?? approveDefaults.modelId,
     },
+    webSearch: {
+      provider: config.webSearch?.provider ?? null,
+      brave: config.webSearch?.brave ?? null,
+      tavily: config.webSearch?.tavily ?? null,
+      serpapi: config.webSearch?.serpapi ?? null,
+    },
     serverCredentials: config.serverCredentials ?? {},
   };
 }
@@ -455,17 +497,26 @@ export function validateModelId(id: string): string | undefined {
  * Deep-merges changes into an existing config object one level deep.
  * For nested objects, merges sub-fields rather than replacing the whole object.
  * Correctly handles null values for nullable budget fields.
+ * An empty object ({}) signals "delete this section" — used by the config
+ * editor's "Disable" action (e.g., disabling webSearch).
  */
 function deepMergeConfig(existing: Record<string, unknown>, changes: Record<string, unknown>): Record<string, unknown> {
+  // Start with existing, then collect keys to remove (empty-object sentinel)
+  const keysToRemove = new Set<string>();
   const result = { ...existing };
   for (const [key, value] of Object.entries(changes)) {
-    if (value !== undefined && isPlainObject(value) && isPlainObject(result[key])) {
+    if (value !== undefined && isPlainObject(value) && Object.keys(value).length === 0) {
+      // Empty object = delete this section
+      keysToRemove.add(key);
+    } else if (value !== undefined && isPlainObject(value) && isPlainObject(result[key])) {
       result[key] = { ...result[key], ...value };
     } else if (value !== undefined) {
       result[key] = value;
     }
   }
-  return result;
+  // Build final object excluding removed keys
+  if (keysToRemove.size === 0) return result;
+  return Object.fromEntries(Object.entries(result).filter(([k]) => !keysToRemove.has(k)));
 }
 
 /**

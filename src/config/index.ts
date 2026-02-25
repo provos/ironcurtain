@@ -11,7 +11,7 @@ import {
   getUserGeneratedDir,
 } from './paths.js';
 import { resolveRealPath } from '../types/argument-roles.js';
-import { loadUserConfig } from './user-config.js';
+import { loadUserConfig, type ResolvedWebSearchConfig } from './user-config.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -124,6 +124,30 @@ function resolveInternalServerPaths(config: MCPServerConfig, packageRoot: string
   }
 }
 
+/**
+ * Translates the typed webSearch config into flat env vars for the fetch server.
+ */
+function computeWebSearchCredentials(webSearch: ResolvedWebSearchConfig): Record<string, string> {
+  const creds: Record<string, string> = {};
+  if (!webSearch.provider) return creds;
+
+  creds.WEB_SEARCH_PROVIDER = webSearch.provider;
+
+  switch (webSearch.provider) {
+    case 'brave':
+      if (webSearch.brave) creds.BRAVE_API_KEY = webSearch.brave.apiKey;
+      break;
+    case 'tavily':
+      if (webSearch.tavily) creds.TAVILY_API_KEY = webSearch.tavily.apiKey;
+      break;
+    case 'serpapi':
+      if (webSearch.serpapi) creds.SERPAPI_API_KEY = webSearch.serpapi.apiKey;
+      break;
+  }
+
+  return creds;
+}
+
 export function loadConfig(): IronCurtainConfig {
   const userConfig = loadUserConfig();
 
@@ -177,6 +201,20 @@ export function loadConfig(): IronCurtainConfig {
     }
   }
 
+  // Inject web search credentials into the fetch server's credential block.
+  const webSearchCreds = computeWebSearchCredentials(userConfig.webSearch);
+  let finalUserConfig = userConfig;
+  if (Object.keys(webSearchCreds).length > 0) {
+    const existingFetch =
+      (userConfig.serverCredentials as Record<string, Record<string, string> | undefined>).fetch ?? {};
+    const mergedCredentials: Record<string, Record<string, string>> = {};
+    for (const [k, v] of Object.entries(userConfig.serverCredentials)) {
+      mergedCredentials[k] = { ...v };
+    }
+    mergedCredentials.fetch = { ...existingFetch, ...webSearchCreds };
+    finalUserConfig = { ...userConfig, serverCredentials: mergedCredentials };
+  }
+
   return {
     auditLogPath,
     allowedDirectory,
@@ -184,9 +222,9 @@ export function loadConfig(): IronCurtainConfig {
     protectedPaths,
     generatedDir,
     constitutionPath,
-    agentModelId: userConfig.agentModelId,
-    escalationTimeoutSeconds: userConfig.escalationTimeoutSeconds,
-    userConfig,
+    agentModelId: finalUserConfig.agentModelId,
+    escalationTimeoutSeconds: finalUserConfig.escalationTimeoutSeconds,
+    userConfig: finalUserConfig,
   };
 }
 
@@ -218,19 +256,12 @@ export function extractServerDomainAllowlists(mcpServers: Record<string, MCPServ
  * last `ironcurtain compile-policy` run.
  */
 export function checkConstitutionFreshness(compiledPolicy: CompiledPolicyFile, constitutionPath: string): void {
-  try {
-    const currentHash = computeConstitutionHash(constitutionPath);
-    if (currentHash !== compiledPolicy.constitutionHash) {
-      process.stderr.write(
-        'Warning: constitution has changed since the last policy compilation. ' +
-          'Run `ironcurtain compile-policy` to update the compiled policy.\n',
-      );
-    }
-  } catch (err: unknown) {
-    // Missing constitution file is expected in test environments — skip silently.
-    // Let other errors (permission denied, etc.) propagate.
-    if (err instanceof Error && 'code' in err && (err as NodeJS.ErrnoException).code === 'ENOENT') return;
-    throw err;
+  const currentHash = computeConstitutionHash(constitutionPath);
+  if (currentHash !== compiledPolicy.constitutionHash) {
+    process.stderr.write(
+      'Warning: constitution has changed since the last policy compilation. ' +
+        'Run `ironcurtain compile-policy` to update the compiled policy.\n',
+    );
   }
 }
 

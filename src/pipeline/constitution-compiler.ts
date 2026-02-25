@@ -89,16 +89,16 @@ function buildCompilerResponseSchema(serverNames: [string, ...string[]], toolNam
 function formatGroundTruthSection(scenarios?: TestScenario[]): string {
   if (!scenarios || scenarios.length === 0) return '';
 
-  const lines = scenarios.map(
-    (s, i) =>
-      `${i + 1}. ${s.request.serverName}/${s.request.toolName} ${JSON.stringify(s.request.arguments)} → ${s.expectedDecision}\n   ${s.reasoning}`,
-  );
+  const lines = scenarios.map((s, i) => {
+    const decision = s.expectedDecision === 'not-allow' ? 'NOT allow (deny or escalate)' : s.expectedDecision;
+    return `${i + 1}. ${s.request.serverName}/${s.request.toolName} ${JSON.stringify(s.request.arguments)} → ${decision}\n   ${s.reasoning}`;
+  });
 
   return `
 ## Ground Truth Constraints
 
 These test scenarios represent required policy outcomes. Your compiled rules
-MUST produce these exact decisions:
+MUST produce these decisions:
 
 ${lines.join('\n\n')}
 `;

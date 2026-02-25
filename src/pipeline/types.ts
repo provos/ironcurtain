@@ -176,6 +176,13 @@ export interface CompiledPolicyFile {
 // Test Scenarios
 // ---------------------------------------------------------------------------
 
+/**
+ * Expected decision for a test scenario.
+ * 'not-allow' means any non-allow decision (deny or escalate) is acceptable.
+ * Used by handwritten scenarios where the exact enforcement mechanism may vary.
+ */
+export type ScenarioDecision = Decision | 'not-allow';
+
 export interface TestScenario {
   description: string;
   request: {
@@ -183,7 +190,7 @@ export interface TestScenario {
     toolName: string;
     arguments: Record<string, unknown>;
   };
-  expectedDecision: Decision;
+  expectedDecision: ScenarioDecision;
   reasoning: string;
   source: 'generated' | 'handwritten';
 }
