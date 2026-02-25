@@ -261,3 +261,163 @@ describe('prepareToolArgs with allowedDirectory (sandbox-aware)', () => {
     expect(argsForPolicy.path).toBe(expected);
   });
 });
+
+describe('prepareToolArgs with containerWorkspaceDir (Docker agent mode)', () => {
+  const sandboxDir = '/home/user/.ironcurtain/sessions/abc/sandbox';
+  const containerDir = '/workspace';
+
+  const writeAnnotation: ToolAnnotation = {
+    toolName: 'write_file',
+    serverName: 'filesystem',
+    comment: 'Writes a file',
+    sideEffects: true,
+    args: {
+      path: ['write-path'],
+      content: ['none'],
+    },
+  };
+
+  const readAnnotation: ToolAnnotation = {
+    toolName: 'git_add',
+    serverName: 'git',
+    comment: 'Stages files',
+    sideEffects: true,
+    args: {
+      files: ['read-path'],
+      message: ['none'],
+    },
+  };
+
+  const urlAnnotation: ToolAnnotation = {
+    toolName: 'fetch',
+    serverName: 'web',
+    comment: 'Fetches a URL',
+    sideEffects: false,
+    args: { url: ['fetch-url'] },
+  };
+
+  it('rewrites /workspace/foo to sandboxDir/foo for transport and policy', () => {
+    const { argsForTransport, argsForPolicy } = prepareToolArgs(
+      { path: '/workspace/activ8te.astro', content: 'hello' },
+      writeAnnotation,
+      sandboxDir,
+      containerDir,
+    );
+    expect(argsForTransport.path).toBe(`${sandboxDir}/activ8te.astro`);
+    expect(argsForPolicy.path).toBe(`${sandboxDir}/activ8te.astro`);
+  });
+
+  it('rewrites exact /workspace to sandboxDir', () => {
+    const { argsForTransport, argsForPolicy } = prepareToolArgs(
+      { path: '/workspace', content: 'hello' },
+      writeAnnotation,
+      sandboxDir,
+      containerDir,
+    );
+    expect(argsForTransport.path).toBe(sandboxDir);
+    expect(argsForPolicy.path).toBe(sandboxDir);
+  });
+
+  it('rewrites deeply nested container paths', () => {
+    const { argsForTransport } = prepareToolArgs(
+      { path: '/workspace/src/components/Header.tsx', content: 'code' },
+      writeAnnotation,
+      sandboxDir,
+      containerDir,
+    );
+    expect(argsForTransport.path).toBe(`${sandboxDir}/src/components/Header.tsx`);
+  });
+
+  it('rewrites /workspace/ (trailing slash) to sandboxDir', () => {
+    const { argsForTransport, argsForPolicy } = prepareToolArgs(
+      { path: '/workspace/', content: 'hello' },
+      writeAnnotation,
+      sandboxDir,
+      containerDir,
+    );
+    expect(argsForTransport.path).toBe(sandboxDir);
+    expect(argsForPolicy.path).toBe(sandboxDir);
+  });
+
+  it('handles containerDir with trailing slash', () => {
+    const { argsForTransport } = prepareToolArgs(
+      { path: '/workspace/file.txt', content: 'hello' },
+      writeAnnotation,
+      sandboxDir,
+      '/workspace/',
+    );
+    expect(argsForTransport.path).toBe(`${sandboxDir}/file.txt`);
+  });
+
+  it('does NOT rewrite /workspacefoo (no boundary match)', () => {
+    const { argsForTransport } = prepareToolArgs(
+      { path: '/workspacefoo', content: 'hello' },
+      writeAnnotation,
+      sandboxDir,
+      containerDir,
+    );
+    expect(argsForTransport.path).toBe('/workspacefoo');
+  });
+
+  it('does not rewrite non-matching absolute paths', () => {
+    const { argsForTransport } = prepareToolArgs(
+      { path: '/tmp/output.txt', content: 'hello' },
+      writeAnnotation,
+      sandboxDir,
+      containerDir,
+    );
+    expect(argsForTransport.path).toBe('/tmp/output.txt');
+  });
+
+  it('does not rewrite relative paths', () => {
+    const { argsForTransport } = prepareToolArgs(
+      { files: ['src/index.ts', 'README.md'], message: 'test' },
+      readAnnotation,
+      sandboxDir,
+      containerDir,
+    );
+    // Relative paths pass through for transport
+    expect(argsForTransport.files).toEqual(['src/index.ts', 'README.md']);
+  });
+
+  it('rewrites string arrays containing container paths', () => {
+    const { argsForTransport } = prepareToolArgs(
+      { files: ['/workspace/a.ts', '/workspace/b.ts'], message: 'test' },
+      readAnnotation,
+      sandboxDir,
+      containerDir,
+    );
+    expect(argsForTransport.files).toEqual([`${sandboxDir}/a.ts`, `${sandboxDir}/b.ts`]);
+  });
+
+  it('does not rewrite non-path roles (URLs)', () => {
+    const { argsForTransport } = prepareToolArgs(
+      { url: 'https://example.com/workspace/api' },
+      urlAnnotation,
+      sandboxDir,
+      containerDir,
+    );
+    expect(argsForTransport.url).toBe('https://example.com/workspace/api');
+  });
+
+  it('does not rewrite none-role arguments', () => {
+    const { argsForTransport } = prepareToolArgs(
+      { path: '/workspace/file.txt', content: '/workspace/not-a-path' },
+      writeAnnotation,
+      sandboxDir,
+      containerDir,
+    );
+    expect(argsForTransport.content).toBe('/workspace/not-a-path');
+  });
+
+  it('skips rewriting when containerWorkspaceDir is undefined (builtin mode)', () => {
+    const { argsForTransport } = prepareToolArgs(
+      { path: '/workspace/file.txt', content: 'hello' },
+      writeAnnotation,
+      sandboxDir,
+      undefined,
+    );
+    // Without container rewriting, /workspace/file.txt is treated as a normal absolute path
+    expect(argsForTransport.path).toBe('/workspace/file.txt');
+  });
+});
