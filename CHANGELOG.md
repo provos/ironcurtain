@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.1] - 2026-02-25
+
+### Features
+
+- Web search tool with multi-provider support (Brave, Tavily, SerpAPI)
+- Web search configuration in interactive editor and first-start wizard
+- CONFIG.md documenting all configuration options
+
+### Improvements
+
+- Strip server-side injected tools from Anthropic API requests
+- Fix constitution loading to fall back to bundled user constitution base
+- Thread sandbox directory path to policy verifier for accurate scenario generation
+- Add `not-allow` scenario decision type for flexible handwritten scenario verification
+- Fix `deepMergeConfig` to support section removal via empty object sentinel
+- Improve MITM proxy request filtering for Docker Agent Mode
+
+### Docs
+
+- Consolidate design docs into single directory
+
 ## [0.3.0] - 2026-02-24
 
 ### Features
@@ -90,6 +111,7 @@ Initial public release.
 - CI pipeline with Node 22/24 matrix testing
 - Code of Conduct, Contributing guidelines, Security policy
 
+[0.3.1]: https://github.com/provos/ironcurtain/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/provos/ironcurtain/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/provos/ironcurtain/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/provos/ironcurtain/releases/tag/v0.1.0
