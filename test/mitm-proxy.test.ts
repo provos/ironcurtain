@@ -292,6 +292,19 @@ describe('MitmProxy', () => {
     fakeKeyPrefix: 'sk-test-',
   };
 
+  const rewriteProvider: ProviderConfig = {
+    host: 'api.rewrite-test.com',
+    displayName: 'Rewrite Test',
+    allowedEndpoints: [{ method: 'POST', path: '/v1/messages' }],
+    keyInjection: { type: 'header', headerName: 'x-api-key' },
+    fakeKeyPrefix: 'sk-rw-',
+    requestRewriter: stripServerSideTools,
+    rewriteEndpoints: ['/v1/messages'],
+  };
+
+  const rewriteFakeKey = 'sk-rw-fake-key-for-testing';
+  const rewriteRealKey = 'sk-rw-real-key-secret';
+
   const fakeKey = 'sk-test-fake-key-for-testing';
   const realKey = 'sk-real-api-key-secret';
 
@@ -712,6 +725,32 @@ describe('MitmProxy', () => {
     // start completed and the proxy is functional.
     const { statusCode } = await sendConnect(socketPath, 'api.test.com', 443);
     expect(statusCode).toBe(200);
+  });
+
+  it('rejects requests with Content-Encoding on rewrite endpoints', async () => {
+    proxy = createMitmProxy({
+      socketPath,
+      ca,
+      providers: [{ config: rewriteProvider, fakeKey: rewriteFakeKey, realKey: rewriteRealKey }],
+    });
+    await proxy.start();
+
+    const { socket } = await sendConnect(socketPath, 'api.rewrite-test.com', 443);
+    expect(socket).not.toBeNull();
+
+    const response = await makeHttpsRequest(socket!, ca, 'api.rewrite-test.com', {
+      method: 'POST',
+      path: '/v1/messages',
+      headers: {
+        'x-api-key': rewriteFakeKey,
+        'content-type': 'application/json',
+        'content-encoding': 'gzip',
+      },
+      body: 'compressed-bytes-here',
+    });
+
+    expect(response.statusCode).toBe(415);
+    expect(response.body).toContain('Unsupported Content-Encoding');
   });
 
   it('handles client request body errors', async () => {
