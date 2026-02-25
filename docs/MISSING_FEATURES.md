@@ -61,11 +61,8 @@ Terminal UI (`src/config/config-command.ts`) using `@clack/prompts` for viewing 
 ### Conversation Logging
 Write structured conversation logs capturing user prompts and agent responses alongside the existing audit log (which only records tool calls and policy decisions). This provides a complete record of what was asked and what was produced — useful for debugging, accountability, and replaying sessions. Could share the JSONL format of the audit log or use a separate file per session.
 
-### Messaging / UI Integration
-Connect IronCurtain to messaging platforms or a web UI so users can interact without the command line. This requires a richer escalation system (see below) and multi-turn conversation support.
-
-### Secure Remote Transport (Signal / E2E Encrypted Messaging)
-Enable interaction with the agent from a mobile phone or remote location via an end-to-end encrypted transport like Signal. This would let users submit tasks, receive results, and approve escalations away from their workstation. The agent runs at home; the user communicates securely from anywhere. Requires a bridge between the escalation system and a messaging protocol, plus authentication to prevent unauthorized access.
+### Remote Access / Messaging Integration
+Enable interaction with the agent beyond the local terminal — via a web UI, mobile app, or end-to-end encrypted messaging (e.g., Signal). The agent runs on the user's workstation; the user submits tasks, receives results, and approves escalations from anywhere. Requires a pluggable transport layer bridging the escalation system to external messaging protocols, plus authentication to prevent unauthorized access. An E2E encrypted transport like Signal would be ideal for security-sensitive use cases.
 
 ### Richer Escalation System — *Partial*
 CLI readline escalation and LLM-based auto-approver (`src/trusted-process/auto-approver.ts`) are implemented. Callback-based escalation handlers are available in session options. Still missing: pluggable backends beyond CLI/callbacks, escalation queue, context enrichment (conversation history, agent intent).
