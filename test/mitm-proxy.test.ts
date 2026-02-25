@@ -6,7 +6,12 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { loadOrCreateCA, type CertificateAuthority } from '../src/docker/ca.js';
 import { createMitmProxy, type MitmProxy } from '../src/docker/mitm-proxy.js';
-import { isEndpointAllowed, type ProviderConfig } from '../src/docker/provider-config.js';
+import {
+  isEndpointAllowed,
+  stripServerSideTools,
+  shouldRewriteBody,
+  type ProviderConfig,
+} from '../src/docker/provider-config.js';
 import { generateFakeKey } from '../src/docker/fake-keys.js';
 
 // --- Test helpers ---
@@ -151,6 +156,108 @@ describe('isEndpointAllowed', () => {
   it('returns false for undefined method or path', () => {
     expect(isEndpointAllowed(config, undefined, '/v1/messages')).toBe(false);
     expect(isEndpointAllowed(config, 'POST', undefined)).toBe(false);
+  });
+});
+
+describe('stripServerSideTools', () => {
+  it('returns null when body has no tools field', () => {
+    expect(stripServerSideTools({ model: 'claude-3', messages: [] })).toBeNull();
+  });
+
+  it('returns null when tools array is empty', () => {
+    expect(stripServerSideTools({ tools: [] })).toBeNull();
+  });
+
+  it('returns null when all tools are custom (no type field)', () => {
+    const body = {
+      tools: [
+        { name: 'read_file', input_schema: {} },
+        { name: 'write_file', input_schema: {} },
+      ],
+    };
+    expect(stripServerSideTools(body)).toBeNull();
+  });
+
+  it('returns null when all tools have type "custom"', () => {
+    const body = {
+      tools: [{ name: 'read_file', type: 'custom', input_schema: {} }],
+    };
+    expect(stripServerSideTools(body)).toBeNull();
+  });
+
+  it('strips server-side tools and keeps custom tools', () => {
+    const body = {
+      model: 'claude-3',
+      tools: [
+        { name: 'read_file', input_schema: {} },
+        { type: 'web_search_20250305' },
+        { name: 'write_file', type: 'custom', input_schema: {} },
+        { type: 'computer_20250124', display_width: 1024 },
+      ],
+    };
+    const result = stripServerSideTools(body);
+    expect(result).not.toBeNull();
+    expect(result!.modified.tools).toEqual([
+      { name: 'read_file', input_schema: {} },
+      { name: 'write_file', type: 'custom', input_schema: {} },
+    ]);
+    expect(result!.stripped).toEqual(['web_search_20250305', 'computer_20250124']);
+    expect(result!.modified.model).toBe('claude-3');
+  });
+
+  it('returns empty tools array when all tools are server-side', () => {
+    const body = {
+      tools: [{ type: 'web_search_20250305' }, { type: 'computer_20250124' }],
+    };
+    const result = stripServerSideTools(body);
+    expect(result).not.toBeNull();
+    expect(result!.modified.tools).toEqual([]);
+    expect(result!.stripped).toEqual(['web_search_20250305', 'computer_20250124']);
+  });
+});
+
+describe('shouldRewriteBody', () => {
+  const configWithRewriter: ProviderConfig = {
+    host: 'api.anthropic.com',
+    displayName: 'Anthropic',
+    allowedEndpoints: [{ method: 'POST', path: '/v1/messages' }],
+    keyInjection: { type: 'header', headerName: 'x-api-key' },
+    fakeKeyPrefix: 'sk-ant-',
+    requestRewriter: stripServerSideTools,
+    rewriteEndpoints: ['/v1/messages'],
+  };
+
+  const configWithoutRewriter: ProviderConfig = {
+    host: 'api.openai.com',
+    displayName: 'OpenAI',
+    allowedEndpoints: [{ method: 'POST', path: '/v1/chat/completions' }],
+    keyInjection: { type: 'bearer' },
+    fakeKeyPrefix: 'sk-',
+  };
+
+  it('returns false when provider has no rewriter', () => {
+    expect(shouldRewriteBody(configWithoutRewriter, 'POST', '/v1/chat/completions')).toBe(false);
+  });
+
+  it('returns false for GET requests', () => {
+    expect(shouldRewriteBody(configWithRewriter, 'GET', '/v1/messages')).toBe(false);
+  });
+
+  it('returns false for non-rewrite paths', () => {
+    expect(shouldRewriteBody(configWithRewriter, 'POST', '/v1/messages/count_tokens')).toBe(false);
+  });
+
+  it('returns true for POST /v1/messages with Anthropic config', () => {
+    expect(shouldRewriteBody(configWithRewriter, 'POST', '/v1/messages')).toBe(true);
+  });
+
+  it('returns true with query string in path', () => {
+    expect(shouldRewriteBody(configWithRewriter, 'POST', '/v1/messages?beta=true')).toBe(true);
+  });
+
+  it('returns false for undefined method or path', () => {
+    expect(shouldRewriteBody(configWithRewriter, undefined, '/v1/messages')).toBe(false);
+    expect(shouldRewriteBody(configWithRewriter, 'POST', undefined)).toBe(false);
   });
 });
 
