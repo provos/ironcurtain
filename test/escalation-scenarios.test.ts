@@ -5,12 +5,12 @@
  * Suite A (always runs): Confirms every scenario produces 'escalate' from the
  * PolicyEngine, validates arg extraction and sanitization.
  *
- * Suite B (INTEGRATION_TEST=true): Runs the auto-approver with a live LLM
+ * Suite B (LLM_INTEGRATION_TEST=true): Runs the auto-approver with a live LLM
  * and verifies approve/escalate decisions match expectations.
  *
  * Usage:
  *   npx vitest run test/escalation-scenarios.test.ts
- *   INTEGRATION_TEST=true npx vitest run test/escalation-scenarios.test.ts
+ *   LLM_INTEGRATION_TEST=true npx vitest run test/escalation-scenarios.test.ts
  */
 
 import 'dotenv/config';
@@ -154,7 +154,7 @@ describe('Escalation scenarios — policy engine validation', () => {
 // Suite B: Auto-Approver Integration (live LLM)
 // ---------------------------------------------------------------------------
 
-describe.skipIf(!process.env.INTEGRATION_TEST)('Escalation scenarios — auto-approver integration (live LLM)', () => {
+describe.skipIf(!process.env.LLM_INTEGRATION_TEST)('Escalation scenarios — auto-approver integration (live LLM)', () => {
   let model: LanguageModelV3;
 
   beforeAll(async () => {

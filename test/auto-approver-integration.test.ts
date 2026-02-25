@@ -1,11 +1,11 @@
 /**
  * Integration test for the auto-approver against a live LLM.
  *
- * Skipped by default -- runs only when INTEGRATION_TEST=true.
+ * Skipped by default -- runs only when LLM_INTEGRATION_TEST=true.
  * Requires ANTHROPIC_API_KEY in the environment (or .env file).
  *
  * Usage:
- *   INTEGRATION_TEST=true npx vitest run test/auto-approver-integration.test.ts
+ *   LLM_INTEGRATION_TEST=true npx vitest run test/auto-approver-integration.test.ts
  */
 
 import 'dotenv/config';
@@ -268,7 +268,7 @@ const ALL_SCENARIOS: Scenario[] = [...approveScenarios, ...escalateScenarios];
 // Test suite
 // ---------------------------------------------------------------------------
 
-describe.skipIf(!process.env.INTEGRATION_TEST)('Auto-approver integration (live LLM)', () => {
+describe.skipIf(!process.env.LLM_INTEGRATION_TEST)('Auto-approver integration (live LLM)', () => {
   let model: LanguageModelV3;
 
   // Create the model once for all scenarios.

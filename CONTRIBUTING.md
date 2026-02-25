@@ -41,6 +41,8 @@ npm test -- test/policy-engine.test.ts
 npx test -- -t "denies delete_file"
 ```
 
+See [TESTING.md](TESTING.md) for the full testing guide, including environment flags for LLM and Docker integration tests.
+
 ### Project Structure
 
 ```

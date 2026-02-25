@@ -2,7 +2,7 @@
  * Integration test: --network=none + UDS MITM proxy isolation.
  *
  * Requires Docker and the ironcurtain-base:latest image to be built.
- * Skipped unless INTEGRATION_TEST=1 is set.
+ * Skipped unless INTEGRATION_TEST=1 is set (Docker/infrastructure integration).
  *
  * Run:  INTEGRATION_TEST=1 npm test -- test/network-isolation.integration.test.ts
  */

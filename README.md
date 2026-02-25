@@ -450,6 +450,8 @@ npm run lint                                # Lint
 npm run build                               # TypeScript compilation + asset copy
 ```
 
+See [TESTING.md](TESTING.md) for the full testing guide, including integration test flags and conventions.
+
 ### Project Structure
 
 ```
