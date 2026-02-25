@@ -113,11 +113,7 @@ function rewriteContainerPath(value: string, containerDir: string, hostDir: stri
  * Applies container-to-host path rewriting to a value (string or string array).
  * Non-string values pass through unchanged.
  */
-function rewriteContainerPaths(
-  value: unknown,
-  containerDir: string,
-  hostDir: string,
-): unknown {
+function rewriteContainerPaths(value: unknown, containerDir: string, hostDir: string): unknown {
   if (typeof value === 'string') return rewriteContainerPath(value, containerDir, hostDir);
   if (Array.isArray(value)) {
     return (value as unknown[]).map((item: unknown) =>

@@ -508,9 +508,7 @@ export class SignalBotDaemon {
     try {
       // Use the all-identities endpoint and filter by recipient number.
       // The per-recipient endpoint is not available in all versions.
-      const resp = await fetch(
-        `${this.baseUrl}/v1/identities/${encodeURIComponent(this.config.botNumber)}`,
-      );
+      const resp = await fetch(`${this.baseUrl}/v1/identities/${encodeURIComponent(this.config.botNumber)}`);
       if (!resp.ok) {
         // Fail closed: treat API errors as unverifiable
         logger.error(

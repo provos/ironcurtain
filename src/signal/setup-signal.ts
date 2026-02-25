@@ -89,7 +89,10 @@ function resolveContainerConfig(): SignalContainerConfig {
   };
 }
 
-async function startContainer(manager: SignalContainerManager, containerConfig: SignalContainerConfig): Promise<string> {
+async function startContainer(
+  manager: SignalContainerManager,
+  containerConfig: SignalContainerConfig,
+): Promise<string> {
   const startSpinner = p.spinner();
   startSpinner.start('Starting signal-cli container (pulling image if needed)...');
   try {
