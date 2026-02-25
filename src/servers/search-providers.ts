@@ -134,6 +134,10 @@ interface SerpApiResult {
 /**
  * Creates a search provider from environment variables.
  * Returns null if no provider is configured or credentials are missing.
+ *
+ * Base URL overrides (e.g. BRAVE_API_BASE_URL) are used for testing against
+ * local mock servers. These env vars are injected by the trusted process via
+ * serverCredentials — if that layer is compromised, all bets are off regardless.
  */
 export function createSearchProvider(env: Record<string, string | undefined>): SearchProvider | null {
   const provider = env.WEB_SEARCH_PROVIDER;

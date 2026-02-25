@@ -716,6 +716,20 @@ describe('saveUserConfig', () => {
     expect(mode).toBe(0o600);
   });
 
+  it('removes a section when saved with empty object (disable pattern)', () => {
+    writeConfigFile({
+      agentModelId: 'anthropic:claude-sonnet-4-6',
+      webSearch: { provider: 'brave', brave: { apiKey: 'test-key' } },
+    });
+
+    // Empty object signals "delete this section" (used by config editor's Disable action)
+    saveUserConfig({ webSearch: {} });
+
+    const onDisk = readConfigFromDisk();
+    expect(onDisk.webSearch).toBeUndefined();
+    expect(onDisk.agentModelId).toBe('anthropic:claude-sonnet-4-6');
+  });
+
   function readConfigFromDisk(): Record<string, unknown> {
     return JSON.parse(readFileSync(resolve(testHome, 'config.json'), 'utf-8'));
   }

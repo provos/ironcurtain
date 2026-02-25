@@ -483,17 +483,26 @@ export function validateModelId(id: string): string | undefined {
  * Deep-merges changes into an existing config object one level deep.
  * For nested objects, merges sub-fields rather than replacing the whole object.
  * Correctly handles null values for nullable budget fields.
+ * An empty object ({}) signals "delete this section" — used by the config
+ * editor's "Disable" action (e.g., disabling webSearch).
  */
 function deepMergeConfig(existing: Record<string, unknown>, changes: Record<string, unknown>): Record<string, unknown> {
+  // Start with existing, then collect keys to remove (empty-object sentinel)
+  const keysToRemove = new Set<string>();
   const result = { ...existing };
   for (const [key, value] of Object.entries(changes)) {
-    if (value !== undefined && isPlainObject(value) && isPlainObject(result[key])) {
+    if (value !== undefined && isPlainObject(value) && Object.keys(value).length === 0) {
+      // Empty object = delete this section
+      keysToRemove.add(key);
+    } else if (value !== undefined && isPlainObject(value) && isPlainObject(result[key])) {
       result[key] = { ...result[key], ...value };
     } else if (value !== undefined) {
       result[key] = value;
     }
   }
-  return result;
+  // Build final object excluding removed keys
+  if (keysToRemove.size === 0) return result;
+  return Object.fromEntries(Object.entries(result).filter(([k]) => !keysToRemove.has(k)));
 }
 
 /**
