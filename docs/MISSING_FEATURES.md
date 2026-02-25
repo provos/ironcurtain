@@ -19,6 +19,9 @@ Two-layer loop detection: `StepLoopDetector` at the agent level (2x2 progress ma
 ### Resource Budget Enforcement — **IMPLEMENTED**
 Per-session limits on tokens, steps, wall-clock time, and estimated cost via `ResourceBudgetTracker` in `src/session/resource-budget-tracker.ts`. Three enforcement points: StopCondition (between steps), AbortSignal (wall-clock timeout), and pre-check in `execute_code`. Configured via `resourceBudget` in `~/.ironcurtain/config.json`. Defaults: 1M tokens, 200 steps, 30min, $5.
 
+### Docker Agent Mode — **IMPLEMENTED**
+Runs external agents (Claude Code, etc.) in Docker containers with `--network=none`. IronCurtain mediates all external access through host-side MITM and MCP proxies. Real API keys never enter the container — fake sentinel keys are swapped host-side. Supports auto-mode selection via agent registry. See `src/docker/` and `docs/designs/docker-agent-broker.md`.
+
 ## Operational Confidence
 
 ### Agent Testing / Adversarial Harness
@@ -27,35 +30,50 @@ The agent loop and sandbox have zero test coverage today. Build a test harness t
 ### Audit Log Analysis
 The audit log is currently write-only — data goes in, nothing comes out. Build a CLI command (`npm run audit-report`) that produces summaries: decisions by type, most-used tools, denied attempts, escalation patterns, timing stats. This makes the transparency principle actionable rather than just data collection.
 
-### Runtime Integrity Checks
-At startup, verify that `constitution.md` hash matches the `constitutionHash` in `compiled-policy.json`. If they diverge, the policy is stale. Simple, high-value, and prevents silent drift between the constitution and enforced rules.
+### Runtime Integrity Checks — **IMPLEMENTED**
+`checkConstitutionFreshness()` in `src/config/index.ts` verifies that the constitution hash matches `constitutionHash` in `compiled-policy.json` at startup. Warns when the constitution has changed since last compilation. Called from `src/index.ts` before session creation.
 
 ## Extensibility
 
-### Easy MCP Server Onboarding
-Create a streamlined system for adding new MCP servers: add the server config, automatically generate tool annotations and new roles, and recompile policy. Adding a new MCP server should be straightforward and well-documented, with validation that the new server's tools are properly annotated and covered by policy rules.
+### Easy MCP Server Onboarding — *Partial*
+The building blocks exist (`ironcurtain annotate-tools` for LLM-based argument classification, `ironcurtain compile-policy` for recompilation), but there is no unified "add server" workflow. MCP servers are manually added to `mcp-servers.json`. A streamlined onboarding command that adds server config, auto-annotates, and recompiles in one step is still missing.
 
-### Multiple Permitted Directories
-Extend the constitution and config to support multiple permitted directories with different access levels (e.g., sandbox with full read/write, a documents folder with read-only). The engine already supports multiple `within` paths in different rules; this needs config and constitution changes.
+### Web Search — **IMPLEMENTED**
+Multi-provider web search (Brave, Tavily, SerpAPI) via the fetch server's `web_search` tool. Provider abstraction in `src/servers/search-providers.ts`, credential injection through `serverCredentials`, configurable via interactive editor and first-start wizard.
 
-### Configuration Validation
-Add Zod schema validation for `mcp-servers.json`, compiled artifacts, and the `IronCurtainConfig`. Fail fast with clear error messages on malformed configuration rather than encountering cryptic runtime errors.
+### Multiple Permitted Directories — **IMPLEMENTED**
+The policy compiler generates separate rules for each directory with distinct access levels (e.g., sandbox with full read/write, Downloads with read/write/delete, Documents with read-only + escalate on write). The user constitution specifies directory permissions in natural language and the compiler produces the corresponding `within` path rules. See `compiled-policy.json` for examples.
+
+### Configuration Validation — *Partial*
+Zod schema validation exists for user config (`src/config/user-config.ts`) and pipeline artifacts (constitution-compiler, scenario-generator, policy-verifier schemas). Missing: `mcp-servers.json` is still loaded with bare `JSON.parse()` and compiled policy artifacts lack explicit schema validation on load.
 
 ## User Experience
 
 ### Multi-Turn Conversational Agent — **IMPLEMENTED**
 Session-based multi-turn agent with per-session sandboxes, file-based escalation IPC, and conversation history. See `docs/multi-turn-session-design.md`.
 
+### First-Start Wizard — **IMPLEMENTED**
+Interactive onboarding wizard (`src/config/first-start.ts`) runs automatically when `~/.ironcurtain/config.json` doesn't exist. Educates users on the security model, displays the constitution, validates API keys, and offers web search provider setup. Also accessible via `ironcurtain setup`.
+
+### Interactive Config Editor — **IMPLEMENTED**
+Terminal UI (`src/config/config-command.ts`) using `@clack/prompts` for viewing and modifying `~/.ironcurtain/config.json`. Covers models, security settings, resource budgets, auto-compaction, and web search. Diff tracking with save confirmation. Accessible via `ironcurtain config`.
+
+### Conversation Logging
+Write structured conversation logs capturing user prompts and agent responses alongside the existing audit log (which only records tool calls and policy decisions). This provides a complete record of what was asked and what was produced — useful for debugging, accountability, and replaying sessions. Could share the JSONL format of the audit log or use a separate file per session.
+
 ### Messaging / UI Integration
 Connect IronCurtain to messaging platforms or a web UI so users can interact without the command line. This requires a richer escalation system (see below) and multi-turn conversation support.
 
-### Richer Escalation System
-Replace the CLI readline with something pluggable: configurable timeout-to-deny, a queue of pending escalations, callback-based approval. Add context enrichment — what the agent was trying to accomplish, the conversation history. This is a prerequisite for both messaging/UI integration and multi-agent support.
+### Secure Remote Transport (Signal / E2E Encrypted Messaging)
+Enable interaction with the agent from a mobile phone or remote location via an end-to-end encrypted transport like Signal. This would let users submit tasks, receive results, and approve escalations away from their workstation. The agent runs at home; the user communicates securely from anywhere. Requires a bridge between the escalation system and a messaging protocol, plus authentication to prevent unauthorized access.
+
+### Richer Escalation System — *Partial*
+CLI readline escalation and LLM-based auto-approver (`src/trusted-process/auto-approver.ts`) are implemented. Callback-based escalation handlers are available in session options. Still missing: pluggable backends beyond CLI/callbacks, escalation queue, context enrichment (conversation history, agent intent).
 
 ## Scale
 
-### Multiple Concurrent Agents
-Support multiple concurrent agent sessions with independent policies, audit logs, and escalation queues. Add session isolation and per-session resource budgets. Enable different constitution profiles for different use cases.
+### Multiple Concurrent Agents — *Partial*
+Per-session isolation exists (each session gets its own sandbox at `~/.ironcurtain/sessions/{sessionId}/sandbox/`), per-session resource budgets are enforced, and session resumption is supported. Still missing: true concurrent multi-agent execution (current architecture is single-agent-per-process) and per-session constitution profiles.
 
 ### Compilation Feedback Loop — **IMPLEMENTED**
 Compile-verify-repair loop in `src/pipeline/compile.ts` feeds verification failures + judge analysis back to the compiler for targeted repair (up to 2 attempts). Incremental recompilation when only one server's tools change is still planned.
