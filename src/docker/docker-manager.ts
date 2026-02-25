@@ -43,8 +43,21 @@ export function buildCreateArgs(config: DockerContainerConfig): string[] {
     args.push('--add-host=host.docker.internal:host-gateway');
   }
 
-  // Security: drop all capabilities
+  // Security: drop all capabilities, then selectively re-add
   args.push('--cap-drop=ALL');
+  for (const cap of config.capAdd ?? []) {
+    args.push('--cap-add', cap);
+  }
+
+  // Port bindings (service containers only)
+  for (const port of config.ports ?? []) {
+    args.push('-p', port);
+  }
+
+  // Restart policy (service containers only)
+  if (config.restartPolicy) {
+    args.push('--restart', config.restartPolicy);
+  }
 
   if (config.sessionLabel) {
     args.push('--label', `ironcurtain.session=${config.sessionLabel}`);
@@ -96,14 +109,14 @@ export function createDockerManager(execFileFn?: ExecFileFn): DockerManager {
       return stdout.trim();
     },
 
-    async start(containerId: string): Promise<void> {
-      await exec('docker', ['start', containerId], { timeout: 30_000 });
+    async start(nameOrId: string): Promise<void> {
+      await exec('docker', ['start', nameOrId], { timeout: 30_000 });
     },
 
-    async exec(containerId: string, command: readonly string[], timeoutMs?: number): Promise<DockerExecResult> {
+    async exec(nameOrId: string, command: readonly string[], timeoutMs?: number): Promise<DockerExecResult> {
       const timeout = timeoutMs ?? DEFAULT_EXEC_TIMEOUT_MS;
       try {
-        const { stdout, stderr } = await exec('docker', ['exec', containerId, ...command], {
+        const { stdout, stderr } = await exec('docker', ['exec', nameOrId, ...command], {
           timeout,
           maxBuffer: 50 * 1024 * 1024,
         });
@@ -120,9 +133,9 @@ export function createDockerManager(execFileFn?: ExecFileFn): DockerManager {
       }
     },
 
-    async stop(containerId: string): Promise<void> {
+    async stop(nameOrId: string): Promise<void> {
       try {
-        await exec('docker', ['stop', '-t', String(STOP_TIMEOUT_SECONDS), containerId], {
+        await exec('docker', ['stop', '-t', String(STOP_TIMEOUT_SECONDS), nameOrId], {
           timeout: (STOP_TIMEOUT_SECONDS + 5) * 1000,
         });
       } catch {
@@ -130,17 +143,17 @@ export function createDockerManager(execFileFn?: ExecFileFn): DockerManager {
       }
     },
 
-    async remove(containerId: string): Promise<void> {
+    async remove(nameOrId: string): Promise<void> {
       try {
-        await exec('docker', ['rm', '-f', containerId], { timeout: 10_000 });
+        await exec('docker', ['rm', '-f', nameOrId], { timeout: 10_000 });
       } catch {
         // Container may already be removed
       }
     },
 
-    async isRunning(containerId: string): Promise<boolean> {
+    async isRunning(nameOrId: string): Promise<boolean> {
       try {
-        const { stdout } = await exec('docker', ['inspect', '-f', '{{.State.Running}}', containerId], {
+        const { stdout } = await exec('docker', ['inspect', '-f', '{{.State.Running}}', nameOrId], {
           timeout: 5_000,
         });
         return stdout.trim() === 'true';
@@ -204,6 +217,36 @@ export function createDockerManager(execFileFn?: ExecFileFn): DockerManager {
         await exec('docker', ['network', 'rm', name], { timeout: 10_000 });
       } catch {
         // Ignore errors -- network may already be removed
+      }
+    },
+
+    async pullImage(image: string): Promise<void> {
+      await exec('docker', ['pull', image], {
+        timeout: 300_000, // 5 minutes for large images
+        maxBuffer: 50 * 1024 * 1024,
+      });
+    },
+
+    async getImageId(nameOrId: string): Promise<string | undefined> {
+      try {
+        const { stdout } = await exec('docker', ['inspect', '-f', '{{.Image}}', nameOrId], {
+          timeout: 5_000,
+        });
+        const id = stdout.trim();
+        return id || undefined;
+      } catch {
+        return undefined;
+      }
+    },
+
+    async containerExists(nameOrId: string): Promise<boolean> {
+      try {
+        // docker inspect succeeds for both running and stopped containers,
+        // fails only when the container does not exist.
+        await exec('docker', ['inspect', nameOrId], { timeout: 5_000 });
+        return true;
+      } catch {
+        return false;
       }
     },
   };
