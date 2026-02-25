@@ -261,7 +261,9 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
       // as-is, bypassing the rewriter while the upstream decompresses it.
       const contentEncoding = (modifiedHeaders['content-encoding'] as string | undefined)?.toLowerCase();
       if (contentEncoding && contentEncoding !== 'identity') {
-        logger.info(`[mitm-proxy] REJECTED ${method} ${targetHost}${path} - unsupported Content-Encoding: ${contentEncoding}`);
+        logger.info(
+          `[mitm-proxy] REJECTED ${method} ${targetHost}${path} - unsupported Content-Encoding: ${contentEncoding}`,
+        );
         clientRes.writeHead(415, { 'Content-Type': 'text/plain' });
         clientRes.end(`Unsupported Content-Encoding for this endpoint: ${contentEncoding}`);
         return;
