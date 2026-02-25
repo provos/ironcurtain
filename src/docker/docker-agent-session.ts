@@ -163,9 +163,10 @@ export class DockerAgentSession implements Session {
       network: 'none',
       mounts: [
         { source: this.sandboxDir, target: '/workspace', readonly: false },
+        // Session dir contains proxy.sock and mitm-proxy.sock — directory mount
+        // exposes both to the container (file mounts for UDS don't work on macOS Docker Desktop).
         { source: this.sessionDir, target: '/run/ironcurtain', readonly: false },
         { source: orientationDir, target: '/etc/ironcurtain', readonly: true },
-        { source: mitmAddr.socketPath, target: '/run/ironcurtain/mitm-proxy.sock', readonly: true },
       ],
       env,
       command: ['sleep', 'infinity'],

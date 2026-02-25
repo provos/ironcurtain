@@ -100,8 +100,11 @@ function normalizePathForPolicy(value: unknown, def: RoleDefinition, allowedDire
  * Relative paths and non-matching absolute paths pass through unchanged.
  */
 function rewriteContainerPath(value: string, containerDir: string, hostDir: string): string {
-  if (value === containerDir) return hostDir;
-  const prefix = containerDir.endsWith('/') ? containerDir : containerDir + '/';
+  // Normalize trailing slashes so '/workspace' and '/workspace/' are equivalent.
+  const normContainer = containerDir !== '/' && containerDir.endsWith('/') ? containerDir.slice(0, -1) : containerDir;
+  const normValue = value !== '/' && value.endsWith('/') ? value.slice(0, -1) : value;
+  if (normValue === normContainer) return hostDir;
+  const prefix = normContainer + '/';
   if (value.startsWith(prefix)) return hostDir + '/' + value.slice(prefix.length);
   return value;
 }
