@@ -328,6 +328,27 @@ describe('prepareToolArgs with containerWorkspaceDir (Docker agent mode)', () =>
     expect(argsForTransport.path).toBe(`${sandboxDir}/src/components/Header.tsx`);
   });
 
+  it('rewrites /workspace/ (trailing slash) to sandboxDir', () => {
+    const { argsForTransport, argsForPolicy } = prepareToolArgs(
+      { path: '/workspace/', content: 'hello' },
+      writeAnnotation,
+      sandboxDir,
+      containerDir,
+    );
+    expect(argsForTransport.path).toBe(sandboxDir);
+    expect(argsForPolicy.path).toBe(sandboxDir);
+  });
+
+  it('handles containerDir with trailing slash', () => {
+    const { argsForTransport } = prepareToolArgs(
+      { path: '/workspace/file.txt', content: 'hello' },
+      writeAnnotation,
+      sandboxDir,
+      '/workspace/',
+    );
+    expect(argsForTransport.path).toBe(`${sandboxDir}/file.txt`);
+  });
+
   it('does NOT rewrite /workspacefoo (no boundary match)', () => {
     const { argsForTransport } = prepareToolArgs(
       { path: '/workspacefoo', content: 'hello' },
