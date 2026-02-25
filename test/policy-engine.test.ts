@@ -80,6 +80,28 @@ describe('PolicyEngine', () => {
       expect(result.rule).toBe('structural-protected-path');
     });
 
+    it('denies access to .env file', () => {
+      const result = engine.evaluate(
+        makeRequest({
+          toolName: 'read_file',
+          arguments: { path: protectedPaths[4] },
+        }),
+      );
+      expect(result.decision).toBe('deny');
+      expect(result.rule).toBe('structural-protected-path');
+    });
+
+    it('denies access to user config file', () => {
+      const result = engine.evaluate(
+        makeRequest({
+          toolName: 'read_file',
+          arguments: { path: protectedPaths[5] },
+        }),
+      );
+      expect(result.decision).toBe('deny');
+      expect(result.rule).toBe('structural-protected-path');
+    });
+
     it('denies unknown tools', () => {
       const result = engine.evaluate(
         makeRequest({

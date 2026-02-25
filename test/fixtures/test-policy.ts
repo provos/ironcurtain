@@ -11,6 +11,7 @@
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { CompiledPolicyFile, ToolAnnotationsFile } from '../../src/pipeline/types.js';
+import { getUserConfigPath } from '../../src/config/paths.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(__dirname, '..', '..');
@@ -22,6 +23,8 @@ export const TEST_PROTECTED_PATHS = [
   resolve(projectRoot, 'src/config/generated'),
   resolve(projectRoot, 'src/config/mcp-servers.json'),
   resolve('./audit.jsonl'),
+  resolve('.env'),
+  getUserConfigPath(),
 ];
 
 /**
