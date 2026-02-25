@@ -138,13 +138,7 @@ describe.skipIf(!process.env.INTEGRATION_TEST)('Docker UDS socket mount strategi
       await docker('start', containerId);
 
       // Try to connect to the mounted socket from inside the container
-      const result = await dockerExec(
-        containerId,
-        'socat',
-        '-T2',
-        'STDOUT',
-        'UNIX-CONNECT:/run/test.sock',
-      );
+      const result = await dockerExec(containerId, 'socat', '-T2', 'STDOUT', 'UNIX-CONNECT:/run/test.sock');
 
       // On Linux: should succeed with "PONG"
       // On macOS Docker Desktop: socat will fail (connection refused / not a socket)
@@ -195,13 +189,7 @@ describe.skipIf(!process.env.INTEGRATION_TEST)('Docker UDS socket mount strategi
       await docker('start', containerId);
 
       // Try to connect to the socket via the mounted directory
-      const result = await dockerExec(
-        containerId,
-        'socat',
-        '-T2',
-        'STDOUT',
-        'UNIX-CONNECT:/run/testdir/test.sock',
-      );
+      const result = await dockerExec(containerId, 'socat', '-T2', 'STDOUT', 'UNIX-CONNECT:/run/testdir/test.sock');
 
       const succeeded = result.exitCode === 0 && result.stdout.includes('PONG');
       console.log(
@@ -250,13 +238,7 @@ describe.skipIf(!process.env.INTEGRATION_TEST)('Docker UDS socket mount strategi
       // Small delay to let filesystem sync propagate (especially on macOS VirtioFS)
       await new Promise((r) => setTimeout(r, 500));
 
-      const result = await dockerExec(
-        containerId,
-        'socat',
-        '-T2',
-        'STDOUT',
-        'UNIX-CONNECT:/run/testdir/late.sock',
-      );
+      const result = await dockerExec(containerId, 'socat', '-T2', 'STDOUT', 'UNIX-CONNECT:/run/testdir/late.sock');
 
       const succeeded = result.exitCode === 0 && result.stdout.includes('PONG');
       console.log(
