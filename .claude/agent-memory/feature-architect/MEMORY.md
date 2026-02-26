@@ -206,4 +206,4 @@ Both use the same PolicyEngine with compiled artifacts.
 - Onboarding: `ironcurtain setup-signal` (register new number or link device)
 - Config: `signal: { botNumber, recipientNumber, container: { image, port } }` in config.json
 - Text-based escalation (no inline buttons); "approve"/"deny" text replies
-- Markdown-to-Signal converter: positional `start:length:STYLE` annotations via marked lexer
+- Markdown-to-Signal converter: inline Signal markup (**bold**, `code`, ~strike~) via marked lexer
