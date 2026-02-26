@@ -20,9 +20,10 @@ concurrency:
 
 jobs:
   ci:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       matrix:
+        os: [ubuntu-latest, macos-latest]
         node-version: [22, 24]
     steps:
       - uses: actions/checkout@v6
