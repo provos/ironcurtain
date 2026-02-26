@@ -37,12 +37,23 @@ every call is evaluated against security rules and recorded in the audit log.
 Your built-in file tools cannot reach the host filesystem.
 
 ### Network
-The container has NO network access (--network=none). All HTTP requests and
+${
+  context.networkMode === 'none'
+    ? `The container has NO network access (--network=none). All HTTP requests and
 git operations MUST go through the MCP tools below.
 
 Your built-in web search and web fetch tools route through the Anthropic API
 and will work, but they bypass IronCurtain's audit log. Prefer the MCP fetch
-tool when an auditable record of network access is required.
+tool when an auditable record of network access is required.`
+    : `The container's outbound network is restricted to IronCurtain's host-side
+proxies. Direct internet access is blocked by firewall rules. All HTTP
+requests and git operations MUST go through the MCP tools below.
+
+Your built-in web search and web fetch tools route through the Anthropic API
+via the MITM proxy and will work, but they bypass IronCurtain's audit log.
+Prefer the MCP fetch tool when an auditable record of network access is
+required.`
+}
 
 ### Available MCP Tools
 ${toolList}
@@ -72,12 +83,14 @@ export const claudeCodeAdapter: AgentAdapter = {
   },
 
   // Generates MCP config file passed via --mcp-config on the command line.
+  // socketPath is either a UDS path or a TCP host:port address.
   generateMcpConfig(socketPath: string): AgentConfigFile[] {
+    const isTcp = socketPath.includes(':');
     const mcpConfig = {
       mcpServers: {
         ironcurtain: {
           command: 'socat',
-          args: ['STDIO', `UNIX-CONNECT:${socketPath}`],
+          args: isTcp ? ['STDIO', `TCP:${socketPath}`] : ['STDIO', `UNIX-CONNECT:${socketPath}`],
         },
       },
     };

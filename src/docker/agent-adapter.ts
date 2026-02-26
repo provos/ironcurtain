@@ -56,6 +56,8 @@ export interface OrientationContext {
   readonly tools: ToolInfo[];
   /** Domains the agent may access via fetch MCP tool. */
   readonly allowedDomains: string[];
+  /** Container network mode: 'none' (Linux UDS) or 'bridge' (macOS TCP). */
+  readonly networkMode: 'none' | 'bridge';
 }
 
 /**

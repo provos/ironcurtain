@@ -1,6 +1,6 @@
 /**
  * Tails a JSONL audit log file and emits DiagnosticEvent callbacks
- * for each new entry. Uses fs.watch() for change notification and
+ * for each new entry. Uses fs.watchFile() for change notification and
  * tracks the file read offset to parse only new lines.
  */
 

@@ -53,6 +53,7 @@ export function prepareSession(
   sessionDir: string,
   config: IronCurtainConfig,
   hostSandboxDir: string,
+  proxyAddress?: string,
 ): { systemPrompt: string } {
   const orientationDir = resolve(sessionDir, 'orientation');
   mkdirSync(orientationDir, { recursive: true });
@@ -62,9 +63,12 @@ export function prepareSession(
     hostSandboxDir,
     tools: proxyTools,
     allowedDomains: extractAllowedDomains(config),
+    networkMode: proxyAddress ? 'bridge' : 'none',
   };
 
-  writeConfigFiles(orientationDir, adapter.generateMcpConfig('/run/ironcurtain/proxy.sock', proxyTools));
+  // proxyAddress is either a TCP host:port (macOS) or defaults to the UDS path (Linux)
+  const address = proxyAddress ?? '/run/ironcurtain/proxy.sock';
+  writeConfigFiles(orientationDir, adapter.generateMcpConfig(address, proxyTools));
   writeConfigFiles(orientationDir, adapter.generateOrientationFiles(context));
 
   const systemPrompt = adapter.buildSystemPrompt(context);

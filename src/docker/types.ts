@@ -25,6 +25,9 @@ export interface DockerContainerConfig {
   /** IronCurtain session label for stale container detection. */
   readonly sessionLabel?: string;
 
+  /** Extra --add-host entries (e.g. ["host.docker.internal:172.30.0.1"]). When set, suppresses the default host-gateway mapping. */
+  readonly extraHosts?: readonly string[];
+
   /** Optional resource limits. */
   readonly resources?: {
     readonly memoryMb?: number;
@@ -123,7 +126,7 @@ export interface DockerManager {
   getImageLabel(image: string, label: string): Promise<string | undefined>;
 
   /** Create a Docker network. No-op if it already exists. */
-  createNetwork(name: string): Promise<void>;
+  createNetwork(name: string, options?: { internal?: boolean; subnet?: string; gateway?: string }): Promise<void>;
 
   /** Remove a Docker network. Ignores errors (e.g., already removed). */
   removeNetwork(name: string): Promise<void>;

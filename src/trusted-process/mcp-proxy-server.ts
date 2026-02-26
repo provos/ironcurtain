@@ -29,6 +29,8 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { UdsServerTransport } from './uds-server-transport.js';
+import { TcpServerTransport } from './tcp-server-transport.js';
+import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import {
   CallToolRequestSchema,
   CompatibilityCallToolResultSchema,
@@ -713,9 +715,36 @@ async function main(): Promise<void> {
     }
   });
 
-  // Select transport: UDS for Docker agent sessions, stdio otherwise
+  // Select transport: TCP or UDS for Docker agent sessions, stdio otherwise
   const proxySocketPath = process.env.PROXY_SOCKET_PATH;
-  const transport = proxySocketPath ? new UdsServerTransport(proxySocketPath) : new StdioServerTransport();
+  const proxyTcpPort = process.env.PROXY_TCP_PORT;
+  let transport: Transport;
+  if (proxyTcpPort) {
+    const parsedPort = parseInt(proxyTcpPort, 10);
+    if (!Number.isFinite(parsedPort) || parsedPort < 0 || parsedPort > 65535) {
+      throw new Error(`Invalid PROXY_TCP_PORT value "${proxyTcpPort}". Expected an integer between 0 and 65535.`);
+    }
+    // Bind to 0.0.0.0: Docker Desktop's VM needs to reach the proxy on
+    // the host, so loopback-only (127.0.0.1) would not be reachable from
+    // inside the container. Network-level egress restriction (--internal
+    // Docker network) limits which peers can connect.
+    const tcpTransport = new TcpServerTransport('0.0.0.0', parsedPort);
+    transport = tcpTransport;
+    // start() must be called before connect() to bind the port
+    await tcpTransport.start();
+    // Write the actual port to a file so the parent process can discover it
+    const portFilePath = process.env.PROXY_PORT_FILE;
+    if (portFilePath) {
+      writeFileSync(portFilePath, String(tcpTransport.port));
+    }
+    if (sessionLogPath) {
+      logToSessionFile(sessionLogPath, `MCP proxy listening on 127.0.0.1:${tcpTransport.port}`);
+    }
+  } else if (proxySocketPath) {
+    transport = new UdsServerTransport(proxySocketPath);
+  } else {
+    transport = new StdioServerTransport();
+  }
   await server.connect(transport);
 
   // Clean shutdown -- handle both SIGINT and SIGTERM since this process

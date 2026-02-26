@@ -1,0 +1,23 @@
+FROM node:22-bookworm
+
+# Replicate the 'codespace' user (uid 1000) from the devcontainers/universal
+# image so Dockerfile.claude-code works unchanged on both platforms.
+# node:22-bookworm already has node:node at uid/gid 1000 — rename it.
+RUN usermod -l codespace -d /home/codespace -m node && \
+    groupmod -n codespace node
+
+USER root
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends git socat ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+# IronCurtain CA (for MITM proxy trust)
+# This file is copied into a temporary build context by ensureImage().
+COPY ironcurtain-ca-cert.pem /usr/local/share/ca-certificates/ironcurtain-ca.crt
+RUN update-ca-certificates
+
+RUN mkdir -p /workspace /etc/ironcurtain /run/ironcurtain && \
+    chown codespace:codespace /workspace /etc/ironcurtain /run/ironcurtain
+
+WORKDIR /workspace
+USER codespace

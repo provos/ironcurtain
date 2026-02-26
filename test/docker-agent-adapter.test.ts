@@ -18,6 +18,7 @@ const sampleContext: OrientationContext = {
   hostSandboxDir: '/home/user/.ironcurtain/sessions/test/sandbox',
   tools: sampleTools,
   allowedDomains: ['example.com'],
+  networkMode: 'none',
 };
 
 describe('Claude Code Adapter', () => {
