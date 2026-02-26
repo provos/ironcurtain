@@ -12,11 +12,7 @@ import type { ProviderConfig } from '../src/docker/provider-config.js';
 import type { DockerManager } from '../src/docker/types.js';
 import type { IronCurtainConfig } from '../src/config/types.js';
 import type { DiagnosticEvent, EscalationRequest } from '../src/session/types.js';
-import {
-  INTERNAL_NETWORK_NAME,
-  INTERNAL_NETWORK_SUBNET,
-  INTERNAL_NETWORK_GATEWAY,
-} from '../src/docker/platform.js';
+import { INTERNAL_NETWORK_NAME, INTERNAL_NETWORK_SUBNET, INTERNAL_NETWORK_GATEWAY } from '../src/docker/platform.js';
 
 // --- AuditLogTailer tests ---
 
