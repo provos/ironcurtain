@@ -505,12 +505,7 @@ async function main(): Promise<void> {
         isError: true,
       };
     }
-    const { argsForTransport, argsForPolicy } = prepareToolArgs(
-      rawArgs,
-      annotation,
-      allowedDirectory,
-      containerWorkspaceDir,
-    );
+    const { argsForTransport, argsForPolicy } = prepareToolArgs(rawArgs, annotation, allowedDirectory, containerWorkspaceDir);
 
     const request: ToolCallRequest = {
       requestId: uuidv4(),

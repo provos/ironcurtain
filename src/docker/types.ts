@@ -30,36 +30,6 @@ export interface DockerContainerConfig {
     readonly memoryMb?: number;
     readonly cpus?: number;
   };
-
-  /**
-   * Port bindings in 'hostPort:containerPort' format.
-   * Optional. Defaults to no ports exposed.
-   *
-   * SECURITY NOTE: Agent containers must NEVER expose ports.
-   * This field exists solely for service containers (e.g., signal-cli)
-   * that need to expose a local API. Only bind to 127.0.0.1 in practice
-   * (e.g., '127.0.0.1:18080:8080').
-   */
-  readonly ports?: readonly string[];
-
-  /**
-   * Docker restart policy (e.g., 'unless-stopped', 'on-failure:3').
-   * Optional. Defaults to no restart policy (container stops when stopped).
-   *
-   * Agent containers must NEVER set a restart policy - they are
-   * ephemeral per-session containers managed by session lifecycle.
-   */
-  readonly restartPolicy?: string;
-
-  /**
-   * Linux capabilities to re-add after --cap-drop=ALL.
-   * Optional. Defaults to none (fully unprivileged).
-   *
-   * Third-party service containers may need specific capabilities
-   * for their entrypoints (e.g., CHOWN, SETUID). Agent containers
-   * must NEVER set this field.
-   */
-  readonly capAdd?: readonly string[];
 }
 
 /** A volume mount for a Docker container. */
@@ -94,7 +64,7 @@ export interface DockerManager {
   create(config: DockerContainerConfig): Promise<string>;
 
   /** Start a created container. */
-  start(nameOrId: string): Promise<void>;
+  start(containerId: string): Promise<void>;
 
   /**
    * Execute a command inside a running container via `docker exec`.
@@ -102,16 +72,16 @@ export interface DockerManager {
    *
    * @param timeoutMs - kill the exec process after this many ms.
    */
-  exec(nameOrId: string, command: readonly string[], timeoutMs?: number): Promise<DockerExecResult>;
+  exec(containerId: string, command: readonly string[], timeoutMs?: number): Promise<DockerExecResult>;
 
   /** Stop a running container (SIGTERM, then SIGKILL after grace period). */
-  stop(nameOrId: string): Promise<void>;
+  stop(containerId: string): Promise<void>;
 
   /** Remove a container (must be stopped). */
-  remove(nameOrId: string): Promise<void>;
+  remove(containerId: string): Promise<void>;
 
   /** Check if a container is running. */
-  isRunning(nameOrId: string): Promise<boolean>;
+  isRunning(containerId: string): Promise<boolean>;
 
   /** Check if a Docker image exists locally. */
   imageExists(image: string): Promise<boolean>;
@@ -127,16 +97,4 @@ export interface DockerManager {
 
   /** Remove a Docker network. Ignores errors (e.g., already removed). */
   removeNetwork(name: string): Promise<void>;
-
-  /** Pull a Docker image from a registry. */
-  pullImage(image: string): Promise<void>;
-
-  /**
-   * Check if a container exists (running or stopped).
-   * Unlike isRunning(), returns true for stopped containers.
-   */
-  containerExists(nameOrId: string): Promise<boolean>;
-
-  /** Returns the image ID (sha256 digest) for a container or image. undefined if not found. */
-  getImageId(nameOrId: string): Promise<string | undefined>;
 }

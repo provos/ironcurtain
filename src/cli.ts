@@ -24,10 +24,7 @@ Usage:
 
 Commands:
   start [task]         Run the agent (interactive or single-shot)
-  bot                  Run the Signal messaging transport daemon
   setup                Run the first-start wizard (always runs)
-  setup-signal         Interactive Signal transport onboarding
-                       --re-trust: re-verify a changed identity key
   annotate-tools       Classify MCP tool arguments via LLM
   compile-policy       Compile constitution into enforceable policy rules
   refresh-lists        Re-resolve dynamic lists without full recompilation
@@ -115,18 +112,6 @@ switch (subcommand) {
   case 'setup': {
     const { runFirstStart } = await import('./config/first-start.js');
     await runFirstStart();
-    break;
-  }
-  case 'bot': {
-    const agentName = values.agent as string | undefined;
-    const { runBot } = await import('./signal/bot-command.js');
-    await runBot({ agent: agentName });
-    break;
-  }
-  case 'setup-signal': {
-    const reTrust = process.argv.includes('--re-trust');
-    const { runSignalSetup } = await import('./signal/setup-signal.js');
-    await runSignalSetup({ reTrust });
     break;
   }
   default:
