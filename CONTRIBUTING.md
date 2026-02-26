@@ -18,7 +18,13 @@ Thank you for your interest in contributing to IronCurtain! This is an early-sta
    echo "ANTHROPIC_API_KEY=sk-ant-..." > .env
    ```
 
-3. Run the tests to verify your setup:
+3. Install the pre-commit hook (runs `format:check` and `lint` before each commit):
+
+   ```bash
+   npm run setup-hooks
+   ```
+
+4. Run the tests to verify your setup:
 
    ```bash
    npm test
@@ -63,12 +69,30 @@ src/
 - `stderr` for diagnostic output, `stdout` for agent responses
 - Integration tests spawn real MCP server processes and need ~30s timeout
 
+## Pre-commit Hook
+
+The project includes a pre-commit hook that automatically runs `format:check` and `lint` before each commit. Install it with:
+
+```bash
+npm run setup-hooks
+```
+
+This copies `.hooks/pre-commit` into `.git/hooks/`. The hook prevents commits that have formatting or lint errors. To bypass it in exceptional cases, use `git commit --no-verify` (not recommended).
+
+If the hook blocks your commit, fix the issues first:
+
+```bash
+npm run format     # Auto-fix formatting
+npm run lint       # Check lint errors (fix manually)
+```
+
 ## Submitting Changes
 
 1. Create a feature branch from `main`.
 2. Make your changes. Add tests for new functionality.
-3. Ensure all tests pass (`npm test`), lint is clean (`npm run lint`), and code is formatted (`npm run format:check`).
-4. Submit a pull request with a clear description of the change and its motivation.
+3. Ensure the pre-commit hook is installed (`npm run setup-hooks`).
+4. Ensure all tests pass (`npm test`), lint is clean (`npm run lint`), and code is formatted (`npm run format:check`).
+5. Submit a pull request with a clear description of the change and its motivation.
 
 ## Areas Where Help is Welcome
 

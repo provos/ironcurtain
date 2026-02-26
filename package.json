@@ -58,7 +58,8 @@
     "test:watch": "vitest",
     "lint": "eslint src/ test/",
     "format": "prettier --log-level=warn --write 'src/**/*.ts' 'test/**/*.ts'",
-    "format:check": "prettier --check 'src/**/*.ts' 'test/**/*.ts'"
+    "format:check": "prettier --check 'src/**/*.ts' 'test/**/*.ts'",
+    "setup-hooks": "cp .hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit && echo 'Pre-commit hook installed.'"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.44",

@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Pre-commit hook: runs format check and lint before each commit.
+# Install: cp .hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+# Or:      npm run setup-hooks
+
+set -euo pipefail
+
+echo "Running format:check..."
+npm run format:check
+
+echo "Running lint..."
+npm run lint
+
+echo "Pre-commit checks passed."

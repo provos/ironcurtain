@@ -72,6 +72,16 @@ npm test -- --watch test/policy-engine.test.ts
 - `*.test.ts` — standard tests (unit, component, integration with mocked dependencies)
 - `*.integration.test.ts` — tests requiring external infrastructure (Docker, real network)
 
+## Pre-commit Hook
+
+A pre-commit hook runs `format:check` and `lint` before every commit, catching issues early. Install it once after cloning:
+
+```bash
+npm run setup-hooks
+```
+
+This copies the hook from `.hooks/pre-commit` into `.git/hooks/`. See [CONTRIBUTING.md](CONTRIBUTING.md#pre-commit-hook) for details on fixing blocked commits.
+
 ## CI
 
 GitHub Actions runs `npm test` on every push and PR. This executes all unit, component, and MCP integration tests. LLM integration tests (`LLM_INTEGRATION_TEST`) and Docker integration tests (`INTEGRATION_TEST`) are **not** run in CI — they require API keys and Docker infrastructure that aren't available in the CI environment.
