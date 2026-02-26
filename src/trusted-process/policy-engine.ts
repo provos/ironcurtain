@@ -32,6 +32,7 @@ import {
   SANDBOX_SAFE_PATH_ROLES,
   type RoleDefinition,
 } from '../types/argument-roles.js';
+import { getSessionsDir } from '../config/paths.js';
 import { domainMatchesAllowlist, isIpAddress, resolveGitRemote, extractDomainForRole } from './domain-utils.js';
 import { getListMatcher } from '../pipeline/dynamic-list-types.js';
 
@@ -95,16 +96,25 @@ function isWithinDirectory(targetPath: string, directory: string): boolean {
 }
 
 /**
- * Checks whether a resolved path matches any protected path.
+ * Checks whether a resolved path matches any protected path,
+ * excluding paths that match any exclusion.
  * A path is protected if it equals a protected path exactly
  * or is contained within a protected directory.
  * Both sides are resolved through symlinks for accurate comparison.
  */
-function isProtectedPath(resolvedPath: string, protectedPaths: string[]): boolean {
+function isProtectedPath(resolvedPath: string, protectedPaths: string[], exclusions: string[] = []): boolean {
   const realPath = resolveRealPath(resolvedPath);
-  return protectedPaths.some((pp) => {
+
+  const matchesProtected = protectedPaths.some((pp) => {
     const resolvedPP = resolveRealPath(pp);
     return realPath === resolvedPP || realPath.startsWith(resolvedPP + '/');
+  });
+  if (!matchesProtected) return false;
+
+  // Check if the path is excluded from protection
+  return !exclusions.some((ex) => {
+    const resolvedEx = resolveRealPath(ex);
+    return realPath === resolvedEx || realPath.startsWith(resolvedEx + '/');
   });
 }
 
@@ -300,6 +310,7 @@ export class PolicyEngine {
   private annotationMap: Map<string, ToolAnnotation>;
   private compiledPolicy: CompiledPolicyFile;
   private protectedPaths: string[];
+  private protectedPathExclusions: string[];
   private allowedDirectory?: string;
   private serverDomainAllowlists: ReadonlyMap<string, readonly string[]>;
 
@@ -313,6 +324,7 @@ export class PolicyEngine {
   ) {
     this.compiledPolicy = dynamicLists ? expandListReferences(compiledPolicy, dynamicLists) : compiledPolicy;
     this.protectedPaths = protectedPaths;
+    this.protectedPathExclusions = [resolveRealPath(getSessionsDir())];
     this.allowedDirectory = allowedDirectory;
     this.serverDomainAllowlists = serverDomainAllowlists ?? new Map();
     this.annotationMap = this.buildAnnotationMap(toolAnnotations);
@@ -368,21 +380,10 @@ export class PolicyEngine {
     const allPaths = [...new Set([...heuristicPaths, ...annotatedPaths])];
     const resolvedPaths = allPaths.map((p) => resolveRealPath(p));
 
-    // Protected path check -- any match is an immediate deny
-    for (const rp of resolvedPaths) {
-      if (isProtectedPath(rp, this.protectedPaths)) {
-        return finalDecision({
-          decision: 'deny',
-          rule: 'structural-protected-path',
-          reason: `Access to protected path is forbidden: ${rp}`,
-        });
-      }
-    }
-
     // Introspection tool: allow list_allowed_directories from the filesystem
-    // server when it has no side effects and no arguments. Placed after the
-    // protected-path check and scoped to server + annotation to prevent a
-    // different server's tool with the same name from being auto-allowed.
+    // server when it has no side effects and no arguments. Scoped to
+    // server + annotation to prevent a different server's tool with the
+    // same name from being auto-allowed.
     if (
       request.toolName === 'list_allowed_directories' &&
       request.serverName === 'filesystem' &&
@@ -411,49 +412,53 @@ export class PolicyEngine {
     const sandboxResolvedRoles = new Set<ArgumentRole>();
     const resolvedSandboxPaths = annotation ? annotatedPaths.map((p) => resolveRealPath(p)) : resolvedPaths;
 
-    // Extract URL args once for use in both sandbox containment (fast-path guard) and untrusted domain gate
+    // Extract URL args once for use in untrusted domain gate below
     const urlArgs = annotation ? extractAnnotatedUrls(request.arguments, annotation, getUrlRoles()) : [];
 
-    // Determine if the tool has any non-sandbox-safe path roles
-    const toolHasUnsafePathRoles = annotation
-      ? pathRoles.some(
-          (role) =>
-            !SANDBOX_SAFE_PATH_ROLES.has(role) &&
-            Object.values(annotation.args).some((argRoles) => argRoles.includes(role)),
-        )
-      : false;
+    // Sandbox containment is only a structural allow for filesystem operations.
+    // For other servers, paths are locators (e.g. "which repo dir") — the
+    // operation itself needs compiled-rule evaluation regardless of path location.
+    // The filesystem server only has sandbox-safe path roles (read-path,
+    // write-path, delete-path) and no URL roles, so no additional guards are
+    // needed here. If that ever changes, see the note in argument-roles.ts.
+    const isFilesystem = request.serverName === 'filesystem';
 
-    if (this.allowedDirectory && resolvedSandboxPaths.length > 0) {
+    // Fast path: all annotated paths within sandbox -> auto-allow (filesystem only)
+    if (this.allowedDirectory && isFilesystem && resolvedSandboxPaths.length > 0) {
       const sandboxDir = this.allowedDirectory;
-
-      // Sandbox containment is only a structural allow for filesystem operations.
-      // For other servers, paths are locators (e.g. "which repo dir") — the
-      // operation itself needs compiled-rule evaluation regardless of path location.
-      const isFilesystem = request.serverName === 'filesystem';
-
-      // Fast path: all annotated paths within sandbox -> auto-allow (filesystem only)
-      // Only fires when ALL path roles are sandbox-safe and no URL roles need checking
       const allWithinSandbox = resolvedSandboxPaths.every((rp) => isWithinDirectory(rp, sandboxDir));
 
-      if (isFilesystem && allWithinSandbox && urlArgs.length === 0 && !toolHasUnsafePathRoles) {
+      if (allWithinSandbox) {
         return finalDecision({
           decision: 'allow',
           rule: 'structural-sandbox-allow',
           reason: `All paths are within the sandbox directory: ${sandboxDir}`,
         });
       }
+    }
 
-      // Partial sandbox resolution (filesystem only): check each path role
-      // independently. A role is "sandbox-resolved" if every path for that
-      // role is within the sandbox. Only sandbox-safe roles can be resolved.
-      // Roles with zero extracted paths are not resolved.
-      if (isFilesystem && annotation) {
-        for (const role of pathRoles) {
-          if (!SANDBOX_SAFE_PATH_ROLES.has(role)) continue;
-          const pathsForRole = extractAnnotatedPaths(request.arguments, annotation, [role]);
-          if (pathsForRole.length > 0 && pathsForRole.every((p) => isWithinDirectory(p, sandboxDir))) {
-            sandboxResolvedRoles.add(role);
-          }
+    // Protected path check -- any match is an immediate deny
+    for (const rp of resolvedPaths) {
+      if (isProtectedPath(rp, this.protectedPaths, this.protectedPathExclusions)) {
+        return finalDecision({
+          decision: 'deny',
+          rule: 'structural-protected-path',
+          reason: `Access to protected path is forbidden: ${rp}`,
+        });
+      }
+    }
+
+    // Partial sandbox resolution (filesystem only): check each path role
+    // independently. A role is "sandbox-resolved" if every path for that
+    // role is within the sandbox. Only sandbox-safe roles can be resolved.
+    // Roles with zero extracted paths are not resolved.
+    if (this.allowedDirectory && isFilesystem && annotation) {
+      const sandboxDir = this.allowedDirectory;
+      for (const role of pathRoles) {
+        if (!SANDBOX_SAFE_PATH_ROLES.has(role)) continue;
+        const pathsForRole = extractAnnotatedPaths(request.arguments, annotation, [role]);
+        if (pathsForRole.length > 0 && pathsForRole.every((p) => isWithinDirectory(p, sandboxDir))) {
+          sandboxResolvedRoles.add(role);
         }
       }
     }

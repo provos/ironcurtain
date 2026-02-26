@@ -1,5 +1,5 @@
 import { homedir } from 'node:os';
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import type { CompiledPolicyFile, ToolAnnotationsFile } from '../src/pipeline/types.js';
 import { PolicyEngine, domainMatchesAllowlist, isIpAddress } from '../src/trusted-process/policy-engine.js';
 import { extractServerDomainAllowlists } from '../src/config/index.js';
@@ -448,19 +448,18 @@ describe('PolicyEngine', () => {
       expect(result.rule).not.toBe('structural-sandbox-allow');
     });
 
-    it('protected path inside sandbox is still denied', () => {
-      // Create an engine where a protected path is inside the sandbox
-      const sandboxProtectedPath = `${SANDBOX_DIR}/secret.txt`;
+    it('protected path outside sandbox is denied', () => {
+      const protectedPath = '/etc/shadow';
       const engineWithProtected = new PolicyEngine(
         testCompiledPolicy,
         testToolAnnotations,
-        [sandboxProtectedPath],
+        [protectedPath],
         SANDBOX_DIR,
       );
       const result = engineWithProtected.evaluate(
         makeRequest({
           toolName: 'read_file',
-          arguments: { path: `${SANDBOX_DIR}/secret.txt` },
+          arguments: { path: protectedPath },
         }),
       );
       expect(result.decision).toBe('deny');
@@ -1415,6 +1414,74 @@ describe('PolicyEngine', () => {
       );
       // write-path → allow, git-remote-url → escalate, most restrictive wins
       expect(result.decision).toBe('escalate');
+    });
+  });
+
+  describe('protected path exclusions', () => {
+    // Point IRONCURTAIN_HOME at a temp directory so getSessionsDir() returns
+    // a path under our control. The PolicyEngine constructor computes the
+    // sessions exclusion internally via getSessionsDir().
+    const ironcurtainHome = `${REAL_TMP}/fake-ironcurtain-home`;
+    const sessionsDir = `${ironcurtainHome}/sessions`;
+    const sessionSandbox = `${sessionsDir}/test-session/sandbox`;
+
+    const exclusionProtectedPaths = [ironcurtainHome];
+
+    let savedHome: string | undefined;
+    let exclusionEngine: PolicyEngine;
+
+    beforeAll(() => {
+      savedHome = process.env.IRONCURTAIN_HOME;
+      process.env.IRONCURTAIN_HOME = ironcurtainHome;
+      exclusionEngine = new PolicyEngine(
+        testCompiledPolicy,
+        testToolAnnotations,
+        exclusionProtectedPaths,
+        sessionSandbox,
+      );
+    });
+
+    afterAll(() => {
+      if (savedHome === undefined) {
+        delete process.env.IRONCURTAIN_HOME;
+      } else {
+        process.env.IRONCURTAIN_HOME = savedHome;
+      }
+    });
+
+    it('denies access to file within protected parent directory (not in exclusion)', () => {
+      const result = exclusionEngine.evaluate(
+        makeRequest({
+          toolName: 'read_file',
+          arguments: { path: `${ironcurtainHome}/config.json` },
+        }),
+      );
+      expect(result.decision).toBe('deny');
+      expect(result.rule).toBe('structural-protected-path');
+    });
+
+    it('allows access within excluded subdirectory when path is in sandbox', () => {
+      const result = exclusionEngine.evaluate(
+        makeRequest({
+          toolName: 'read_file',
+          arguments: { path: `${sessionSandbox}/test.txt` },
+        }),
+      );
+      expect(result.decision).toBe('allow');
+      expect(result.rule).toBe('structural-sandbox-allow');
+    });
+
+    it('falls through to compiled rules for excluded path outside sandbox', () => {
+      // Path is in sessions/ (excluded from protection) but NOT in sandbox,
+      // so it should not be structurally denied — it falls to compiled rules.
+      const result = exclusionEngine.evaluate(
+        makeRequest({
+          toolName: 'read_file',
+          arguments: { path: `${sessionsDir}/other-session/audit.jsonl` },
+        }),
+      );
+      // Not structural-protected-path deny — instead falls to compiled rules
+      expect(result.rule).not.toBe('structural-protected-path');
     });
   });
 });
