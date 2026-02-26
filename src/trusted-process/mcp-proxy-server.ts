@@ -724,6 +724,10 @@ async function main(): Promise<void> {
     if (!Number.isFinite(parsedPort) || parsedPort < 0 || parsedPort > 65535) {
       throw new Error(`Invalid PROXY_TCP_PORT value "${proxyTcpPort}". Expected an integer between 0 and 65535.`);
     }
+    // Bind to 0.0.0.0: Docker Desktop's VM needs to reach the proxy on
+    // the host, so loopback-only (127.0.0.1) would not be reachable from
+    // inside the container. Network-level egress restriction (--internal
+    // Docker network) limits which peers can connect.
     const tcpTransport = new TcpServerTransport('0.0.0.0', parsedPort);
     transport = tcpTransport;
     // start() must be called before connect() to bind the port

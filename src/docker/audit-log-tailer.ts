@@ -27,7 +27,10 @@ export class AuditLogTailer {
     const dir = dirname(this.auditLogPath);
     const filename = basename(this.auditLogPath);
     this.watcher = watch(dir, (_eventType, watchedFilename) => {
-      if (watchedFilename === filename) {
+      // Some platforms omit the filename or return a Buffer; conservatively
+      // assume the audit log may have changed in those cases.
+      const changed = typeof watchedFilename === 'string' ? watchedFilename : (watchedFilename?.toString() ?? null);
+      if (!changed || changed === filename) {
         this.readNewEntries();
       }
     });

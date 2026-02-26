@@ -385,6 +385,9 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
   });
 
   const useTcp = options.listenPort !== undefined;
+  if (!useTcp && !options.socketPath) {
+    throw new Error('MitmProxyOptions: either socketPath or listenPort must be provided');
+  }
 
   return {
     async start() {

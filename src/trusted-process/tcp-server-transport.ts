@@ -1,13 +1,14 @@
 /**
  * TCP server transport for the MCP SDK.
  *
- * Listens on a TCP port (127.0.0.1, OS-assigned) and bridges each
+ * Listens on a configurable TCP host and port and bridges each
  * connection to the MCP SDK's Transport interface. Uses the same
  * newline-delimited JSON framing as StdioServerTransport.
  *
  * This is the TCP equivalent of UdsServerTransport, used on macOS
  * where Docker Desktop's VirtioFS does not support Unix domain
- * sockets in bind mounts.
+ * sockets in bind mounts. The caller controls the bind address:
+ * 127.0.0.1 for loopback-only or 0.0.0.0 for all interfaces.
  *
  * Only one concurrent client is expected (the agent in the container).
  * If a new connection arrives while one is active, the old connection

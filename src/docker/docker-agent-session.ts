@@ -407,7 +407,7 @@ export class DockerAgentSession implements Session {
   private async checkInternalNetworkConnectivity(containerId: string, mcpPort: number): Promise<void> {
     const result = await this.docker.exec(
       containerId,
-      ['sh', '-c', `echo | socat - TCP:host.docker.internal:${mcpPort},connect-timeout=5`],
+      ['socat', '-u', '/dev/null', `TCP:host.docker.internal:${mcpPort},connect-timeout=5`],
       10_000,
     );
 
