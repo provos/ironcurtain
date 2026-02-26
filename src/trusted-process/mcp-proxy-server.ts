@@ -738,7 +738,7 @@ async function main(): Promise<void> {
       writeFileSync(portFilePath, String(tcpTransport.port));
     }
     if (sessionLogPath) {
-      logToSessionFile(sessionLogPath, `MCP proxy listening on 127.0.0.1:${tcpTransport.port}`);
+      logToSessionFile(sessionLogPath, `MCP proxy listening on 0.0.0.0:${tcpTransport.port}`);
     }
   } else if (proxySocketPath) {
     transport = new UdsServerTransport(proxySocketPath);

@@ -462,7 +462,7 @@ describe('DockerAgentSession', () => {
     };
     writeFileSync(join(deps.escalationDir, `request-${escalationId}.json`), JSON.stringify(request));
 
-    // Wait for the polling interval to pick it up (macOS timers may be less precise)
+    // Wait long enough for the polling interval to detect the request to avoid timing-related test flakiness
     await new Promise((r) => setTimeout(r, 1000));
 
     const pending = session.getPendingEscalation();

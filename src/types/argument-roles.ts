@@ -91,8 +91,8 @@ export function resolveRealPath(filePath: string): string {
     // but the intermediate directory doesn't exist yet.
     let current = absolute;
     const tail: string[] = [];
-    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- loop exits via return
-    while (true) {
+    const MAX_DEPTH = 64;
+    for (let i = 0; i < MAX_DEPTH; i++) {
       const parent = dirname(current);
       tail.unshift(basename(current));
       if (parent === current) {
@@ -106,6 +106,9 @@ export function resolveRealPath(filePath: string): string {
         // Continue walking up
       }
     }
+    // TODO: revisit whether falling back to the unresolved path has security
+    // implications in the policy engine (symlink-based sandbox escapes).
+    return absolute;
   }
 }
 

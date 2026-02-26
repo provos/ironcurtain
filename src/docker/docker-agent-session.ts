@@ -202,7 +202,7 @@ export class DockerAgentSession implements Session {
 
       mounts = [
         { source: this.sandboxDir, target: '/workspace', readonly: false },
-        // No session dir mount needed -- sockets are replaced by TCP
+        // No session dir mount needed for sockets (TCP mode) -- only orientation subdir is mounted
         { source: orientationDir, target: '/etc/ironcurtain', readonly: true },
       ];
     } else {
@@ -413,7 +413,8 @@ export class DockerAgentSession implements Session {
     const result = await this.docker.exec(
       containerId,
       ['socat', '-u', '/dev/null', `TCP:host.docker.internal:${mcpPort},connect-timeout=5`],
-      10_000,
+      // Allow a small buffer above socat's 5s connect-timeout for docker exec/process startup overhead.
+      6_000,
     );
 
     if (result.exitCode !== 0) {
