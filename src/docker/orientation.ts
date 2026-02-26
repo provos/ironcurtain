@@ -63,6 +63,7 @@ export function prepareSession(
     hostSandboxDir,
     tools: proxyTools,
     allowedDomains: extractAllowedDomains(config),
+    networkMode: proxyAddress ? 'bridge' : 'none',
   };
 
   // proxyAddress is either a TCP host:port (macOS) or defaults to the UDS path (Linux)

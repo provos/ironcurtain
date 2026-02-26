@@ -714,7 +714,11 @@ async function main(): Promise<void> {
   const proxyTcpPort = process.env.PROXY_TCP_PORT;
   let transport: Transport;
   if (proxyTcpPort) {
-    const tcpTransport = new TcpServerTransport('127.0.0.1', parseInt(proxyTcpPort, 10));
+    const parsedPort = parseInt(proxyTcpPort, 10);
+    if (!Number.isFinite(parsedPort) || parsedPort < 0 || parsedPort > 65535) {
+      throw new Error(`Invalid PROXY_TCP_PORT value "${proxyTcpPort}". Expected an integer between 0 and 65535.`);
+    }
+    const tcpTransport = new TcpServerTransport('127.0.0.1', parsedPort);
     transport = tcpTransport;
     // start() must be called before connect() to bind the port
     await tcpTransport.start();

@@ -7,7 +7,7 @@
  */
 
 import { fork, type ChildProcess } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, unlinkSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -187,6 +187,16 @@ export function createManagedProxy(options: ManagedProxyOptions): ManagedProxy {
     },
 
     async start(): Promise<void> {
+      // Remove stale port file from a prior crashed run to prevent
+      // false readiness during polling.
+      if (useTcp) {
+        try {
+          unlinkSync(portFilePath);
+        } catch {
+          /* file may not exist */
+        }
+      }
+
       const modulePath = getProxyModulePath();
       const isTsSource = modulePath.endsWith('.ts');
 
@@ -197,9 +207,14 @@ export function createManagedProxy(options: ManagedProxyOptions): ManagedProxy {
       };
 
       if (useTcp) {
+        // Ensure UDS-specific env vars do not leak from the parent environment
+        delete env.PROXY_SOCKET_PATH;
         env.PROXY_TCP_PORT = '0'; // OS-assigned port
         env.PROXY_PORT_FILE = portFilePath;
       } else {
+        // Ensure TCP-specific env vars do not leak from the parent environment
+        delete env.PROXY_TCP_PORT;
+        delete env.PROXY_PORT_FILE;
         env.PROXY_SOCKET_PATH = options.socketPath;
       }
 
@@ -259,7 +274,12 @@ export function createManagedProxy(options: ManagedProxyOptions): ManagedProxy {
 
       // In TCP mode, read the port from the file
       if (useTcp && portFilePath) {
-        resolvedPort = parseInt(readFileSync(portFilePath, 'utf-8').trim(), 10);
+        const rawPort = readFileSync(portFilePath, 'utf-8').trim();
+        const parsedPort = parseInt(rawPort, 10);
+        if (!Number.isInteger(parsedPort) || parsedPort <= 0 || parsedPort > 65535) {
+          throw new Error(`Invalid TCP port "${rawPort}" read from ${portFilePath}.`);
+        }
+        resolvedPort = parsedPort;
       }
     },
 

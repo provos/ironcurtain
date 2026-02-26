@@ -47,8 +47,12 @@ export class TcpServerTransport implements Transport {
   /**
    * Starts listening on the TCP port.
    * Resolves once the server is bound and ready for connections.
+   * Idempotent: subsequent calls are no-ops (the MCP SDK's
+   * server.connect() calls start() internally).
    */
   async start(): Promise<void> {
+    if (this.server) return;
+
     const server = createServer((socket) => this.handleConnection(socket));
     this.server = server;
 

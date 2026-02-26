@@ -154,9 +154,7 @@ export class DockerAgentSession implements Session {
     // 4. Generate orientation
     // In TCP mode, the container reaches the MCP proxy via host.docker.internal
     const proxyAddress =
-      this.useTcp && this.proxy.port !== undefined
-        ? `host.docker.internal:${this.proxy.port}`
-        : undefined;
+      this.useTcp && this.proxy.port !== undefined ? `host.docker.internal:${this.proxy.port}` : undefined;
     const { systemPrompt } = prepareSession(
       this.adapter,
       tools,
@@ -449,9 +447,10 @@ export class DockerAgentSession implements Session {
 
     // On arm64 hosts (Apple Silicon), use the lightweight arm64-native Dockerfile
     // instead of the amd64-only devcontainers/universal image.
-    const baseDockerfile = arch() === 'arm64' && existsSync(resolve(dockerDir, 'Dockerfile.base.arm64'))
-      ? 'Dockerfile.base.arm64'
-      : 'Dockerfile.base';
+    const baseDockerfile =
+      arch() === 'arm64' && existsSync(resolve(dockerDir, 'Dockerfile.base.arm64'))
+        ? 'Dockerfile.base.arm64'
+        : 'Dockerfile.base';
 
     // Build base image with CA cert baked in (if stale or missing)
     const baseImage = 'ironcurtain-base:latest';
