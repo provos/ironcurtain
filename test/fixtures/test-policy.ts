@@ -9,6 +9,7 @@
  */
 
 import { resolve, dirname } from 'node:path';
+import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { CompiledPolicyFile, ToolAnnotationsFile } from '../../src/pipeline/types.js';
 import { getUserConfigPath } from '../../src/config/paths.js';
@@ -16,7 +17,10 @@ import { getUserConfigPath } from '../../src/config/paths.js';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(__dirname, '..', '..');
 
-export const TEST_SANDBOX_DIR = '/tmp/ironcurtain-sandbox';
+// Use realpathSync so the sandbox dir matches resolved paths on macOS
+// where /tmp is a symlink to /private/tmp.
+export const REAL_TMP = realpathSync('/tmp');
+export const TEST_SANDBOX_DIR = `${REAL_TMP}/ironcurtain-sandbox`;
 
 export const TEST_PROTECTED_PATHS = [
   resolve(projectRoot, 'src/config/constitution.md'),
@@ -145,7 +149,7 @@ export const testCompiledPolicy: CompiledPolicyFile = {
       description: 'Allow read-path within /tmp/permitted-a.',
       principle: 'Least privilege',
       if: {
-        paths: { roles: ['read-path'], within: '/tmp/permitted-a' },
+        paths: { roles: ['read-path'], within: `${REAL_TMP}/permitted-a` },
         server: ['filesystem'],
       },
       then: 'allow',
@@ -156,7 +160,7 @@ export const testCompiledPolicy: CompiledPolicyFile = {
       description: 'Allow read-path within /tmp/permitted-b.',
       principle: 'Least privilege',
       if: {
-        paths: { roles: ['read-path'], within: '/tmp/permitted-b' },
+        paths: { roles: ['read-path'], within: `${REAL_TMP}/permitted-b` },
         server: ['filesystem'],
       },
       then: 'allow',

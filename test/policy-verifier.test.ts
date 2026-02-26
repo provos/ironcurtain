@@ -69,7 +69,7 @@ function createMultiRoundJudge(): MockLanguageModelV3 {
                 request: {
                   serverName: 'filesystem',
                   toolName: 'read_file',
-                  arguments: { path: '/tmp/ironcurtain-sandbox/deep/nested/file.txt' },
+                  arguments: { path: `${TEST_SANDBOX_DIR}/deep/nested/file.txt` },
                 },
                 expectedDecision: 'allow' as const,
                 reasoning: 'Nested path within sandbox should be allowed',

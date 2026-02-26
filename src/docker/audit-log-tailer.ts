@@ -4,13 +4,13 @@
  * tracks the file read offset to parse only new lines.
  */
 
-import { openSync, readSync, fstatSync, closeSync, watch, type FSWatcher } from 'node:fs';
+import { openSync, readSync, fstatSync, closeSync, watchFile, unwatchFile } from 'node:fs';
 import type { DiagnosticEvent } from '../session/types.js';
 import type { AuditEntry } from '../types/audit.js';
 
 export class AuditLogTailer {
   private offset = 0;
-  private watcher: FSWatcher | null = null;
+  private watching = false;
   private readonly auditLogPath: string;
   private readonly onDiagnostic: (event: DiagnosticEvent) => void;
 
@@ -20,17 +20,19 @@ export class AuditLogTailer {
   }
 
   start(): void {
-    this.watcher = watch(this.auditLogPath, () => this.readNewEntries());
+    this.watching = true;
+    watchFile(this.auditLogPath, { interval: 100 }, () => this.readNewEntries());
   }
 
   stop(): void {
-    if (this.watcher) {
-      this.watcher.close();
-      this.watcher = null;
+    if (this.watching) {
+      unwatchFile(this.auditLogPath);
+      this.watching = false;
     }
   }
 
-  private readNewEntries(): void {
+  /** Read and process any new entries appended since the last read. */
+  readNewEntries(): void {
     let fd: number;
     try {
       fd = openSync(this.auditLogPath, 'r');

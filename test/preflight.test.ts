@@ -3,16 +3,18 @@ import { resolveSessionMode, PreflightError } from '../src/session/preflight.js'
 import type { IronCurtainConfig } from '../src/config/types.js';
 import type { AgentId } from '../src/docker/agent-adapter.js';
 
+import { TEST_SANDBOX_DIR, REAL_TMP } from './fixtures/test-policy.js';
+
 function createTestConfig(overrides: { anthropicApiKey?: string } = {}): IronCurtainConfig {
   return {
     auditLogPath: './audit.jsonl',
-    allowedDirectory: '/tmp/ironcurtain-sandbox',
+    allowedDirectory: `${TEST_SANDBOX_DIR}`,
     mcpServers: {
       filesystem: { command: 'echo', args: ['test'] },
     },
     protectedPaths: [],
-    generatedDir: '/tmp/test-generated',
-    constitutionPath: '/tmp/test-constitution.md',
+    generatedDir: `${REAL_TMP}/test-generated`,
+    constitutionPath: `${REAL_TMP}/test-constitution.md`,
     agentModelId: 'anthropic:claude-sonnet-4-6',
     escalationTimeoutSeconds: 300,
     userConfig: {
