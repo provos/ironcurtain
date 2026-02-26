@@ -61,7 +61,7 @@ const cannedRules: CompiledRule[] = [
     description: 'Allow reading files within the sandbox',
     principle: 'Containment',
     if: {
-      paths: { roles: ['read-path'], within: `${TEST_SANDBOX_DIR}` },
+      paths: { roles: ['read-path'], within: TEST_SANDBOX_DIR },
     },
     then: 'allow',
     reason: 'Read within sandbox directory',

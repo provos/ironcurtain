@@ -8,7 +8,7 @@ import { TEST_SANDBOX_DIR, REAL_TMP } from './fixtures/test-policy.js';
 function createTestConfig(overrides: { anthropicApiKey?: string } = {}): IronCurtainConfig {
   return {
     auditLogPath: './audit.jsonl',
-    allowedDirectory: `${TEST_SANDBOX_DIR}`,
+    allowedDirectory: TEST_SANDBOX_DIR,
     mcpServers: {
       filesystem: { command: 'echo', args: ['test'] },
     },

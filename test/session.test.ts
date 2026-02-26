@@ -50,7 +50,7 @@ const TEST_HOME = `/tmp/ironcurtain-test-${process.pid}`;
 function createTestConfig(): IronCurtainConfig {
   return {
     auditLogPath: './audit.jsonl',
-    allowedDirectory: `${TEST_SANDBOX_DIR}`,
+    allowedDirectory: TEST_SANDBOX_DIR,
     mcpServers: {
       filesystem: {
         command: 'echo',

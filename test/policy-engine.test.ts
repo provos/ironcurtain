@@ -243,7 +243,7 @@ describe('PolicyEngine', () => {
       const result = engine.evaluate(
         makeRequest({
           toolName: 'list_directory',
-          arguments: { path: `${SANDBOX_DIR}` },
+          arguments: { path: SANDBOX_DIR },
         }),
       );
       expect(result.decision).toBe('allow');
@@ -254,7 +254,7 @@ describe('PolicyEngine', () => {
       const result = engine.evaluate(
         makeRequest({
           toolName: 'search_files',
-          arguments: { path: `${SANDBOX_DIR}`, pattern: '*.txt' },
+          arguments: { path: SANDBOX_DIR, pattern: '*.txt' },
         }),
       );
       expect(result.decision).toBe('allow');
