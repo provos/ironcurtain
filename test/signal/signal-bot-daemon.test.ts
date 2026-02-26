@@ -516,6 +516,33 @@ describe('SignalBotDaemon', () => {
     await startPromise;
   });
 
+  it('retries identity check on next message after API failure (no TTL caching of failures)', async () => {
+    mockApi.setIdentityEndpointDown(true);
+
+    const daemon = createDaemon();
+    const startPromise = daemon.start();
+    await new Promise((r) => setTimeout(r, 200));
+
+    // First message: rejected (API down)
+    mockApi.simulateIncomingMessage('+15559876543', 'first attempt');
+    await new Promise((r) => setTimeout(r, 500));
+
+    // Restore API and send second message - should succeed (not cached as "ok")
+    mockApi.setIdentityEndpointDown(false);
+    mockApi.setIdentities([{ number: '+15559876543', fingerprint: 'test-identity-key-abc123' }]);
+
+    const countBefore = mockApi.sentMessages.length;
+    mockApi.simulateIncomingMessage('+15559876543', 'second attempt');
+    await new Promise((r) => setTimeout(r, 500));
+
+    // Should create a session since identity API is back and key matches
+    const messagesAfter = mockApi.sentMessages.slice(countBefore);
+    expect(messagesAfter.some((m) => m.message.includes('Started a new session'))).toBe(true);
+
+    await daemon.shutdown();
+    await startPromise;
+  });
+
   // --- Escalation handling ---
 
   it('handles escalation approve reply', async () => {

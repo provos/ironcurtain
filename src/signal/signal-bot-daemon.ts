@@ -503,14 +503,14 @@ export class SignalBotDaemon {
     if (now - this.lastIdentityCheckMs < IDENTITY_CHECK_INTERVAL_MS) {
       return false; // Within TTL, skip API call
     }
-    this.lastIdentityCheckMs = now;
 
     try {
       // Use the all-identities endpoint and filter by recipient number.
       // The per-recipient endpoint is not available in all versions.
       const resp = await fetch(`${this.baseUrl}/v1/identities/${encodeURIComponent(this.config.botNumber)}`);
       if (!resp.ok) {
-        // Fail closed: treat API errors as unverifiable
+        // Fail closed: treat API errors as unverifiable.
+        // Don't update lastIdentityCheckMs so the next message retries.
         logger.error(
           `[Signal Daemon] Identity check API returned ${resp.status}. ` +
             'Rejecting message (fail-closed). Check signal-cli container health.',
@@ -529,8 +529,11 @@ export class SignalBotDaemon {
         );
         return true;
       }
+      // Only cache success - failures will retry on the next message
+      this.lastIdentityCheckMs = now;
     } catch {
-      // Fail closed: reject message when we cannot verify identity
+      // Fail closed: reject message when we cannot verify identity.
+      // Don't update lastIdentityCheckMs so the next message retries.
       logger.error(
         '[Signal Daemon] Identity check API unavailable. ' +
           'Rejecting message (fail-closed). Check signal-cli container health.',

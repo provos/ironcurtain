@@ -228,6 +228,18 @@ export function createDockerManager(execFileFn?: ExecFileFn): DockerManager {
     },
 
     async getImageId(nameOrId: string): Promise<string | undefined> {
+      // Try as image first (returns the image's own ID)
+      try {
+        const { stdout } = await exec('docker', ['image', 'inspect', '-f', '{{.Id}}', nameOrId], {
+          timeout: 5_000,
+        });
+        const id = stdout.trim();
+        if (id) return id;
+      } catch {
+        // Not an image - fall through to container inspection
+      }
+
+      // Try as container (returns the image ID the container was created from)
       try {
         const { stdout } = await exec('docker', ['inspect', '-f', '{{.Image}}', nameOrId], {
           timeout: 5_000,
