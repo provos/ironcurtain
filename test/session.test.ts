@@ -3,6 +3,8 @@ import { mkdirSync, existsSync, readFileSync, writeFileSync, rmSync, unlinkSync 
 import { resolve } from 'node:path';
 import * as logger from '../src/logger.js';
 
+import { TEST_SANDBOX_DIR, REAL_TMP } from './fixtures/test-policy.js';
+
 // Mock external dependencies before importing session modules.
 // The AgentSession uses generateText from 'ai', anthropic from '@ai-sdk/anthropic',
 // and CodeModeUtcpClient from '@utcp/code-mode'. All must be mocked to avoid
@@ -48,7 +50,7 @@ const TEST_HOME = `/tmp/ironcurtain-test-${process.pid}`;
 function createTestConfig(): IronCurtainConfig {
   return {
     auditLogPath: './audit.jsonl',
-    allowedDirectory: '/tmp/ironcurtain-sandbox',
+    allowedDirectory: TEST_SANDBOX_DIR,
     mcpServers: {
       filesystem: {
         command: 'echo',
@@ -56,8 +58,8 @@ function createTestConfig(): IronCurtainConfig {
       },
     },
     protectedPaths: [],
-    generatedDir: '/tmp/test-generated',
-    constitutionPath: '/tmp/test-constitution.md',
+    generatedDir: `${REAL_TMP}/test-generated`,
+    constitutionPath: `${REAL_TMP}/test-constitution.md`,
     agentModelId: 'anthropic:claude-sonnet-4-6',
     escalationTimeoutSeconds: 300,
     userConfig: {
@@ -517,7 +519,7 @@ describe('Session', () => {
         const escalationId = 'callback-test-456';
         writeEscalationRequest(escalationDir, escalationId, {
           toolName: 'write_file',
-          arguments: { path: '/tmp/outside.txt', content: 'test' },
+          arguments: { path: `${REAL_TMP}/outside.txt`, content: 'test' },
           reason: 'Write outside sandbox',
         });
 

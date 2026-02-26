@@ -439,7 +439,6 @@ describe.skipIf(!sandboxAvailable)('sandbox integration (requires bubblewrap+soc
   let sandboxDir: string;
 
   beforeEach(() => {
-    // Use realpathSync to resolve macOS symlinks (/var → /private/var, /tmp → /private/tmp)
     settingsDir = realpathSync(mkdtempSync(join(tmpdir(), 'test-srt-int-settings-')));
     sandboxDir = realpathSync(mkdtempSync(join(tmpdir(), 'test-srt-int-sandbox-')));
   });
@@ -511,46 +510,50 @@ describe.skipIf(!sandboxAvailable)('sandbox integration (requires bubblewrap+soc
     }
   }, 30000);
 
-  it('sandbox blocks writes outside allowWrite', async () => {
-    const serverPath = findServerFilesystem();
-    if (!serverPath) {
-      console.warn('Skipping: @modelcontextprotocol/server-filesystem not found');
-      return;
-    }
-
-    // On macOS, sandboxDir (from tmpdir()) may be under /private/var/folders/
-    // while /tmp resolves to /private/tmp. Serve both so the MCP server can
-    // access the sandbox dir AND an area outside it for the blocked-write test.
-    const resolvedTmp = realpathSync('/tmp');
-    const config = defaultSandboxParams();
-    const client = await connectSandboxedClient('filesystem', config, [serverPath, resolvedTmp, sandboxDir]);
-
-    try {
-      // Write outside sandbox should be blocked by srt
-      const outsidePath = join(resolvedTmp, `srt-test-outside-${Date.now()}.txt`);
-      const writeResult = await client.callTool({
-        name: 'write_file',
-        arguments: { path: outsidePath, content: 'should not work' },
-      });
-      expect(writeResult.isError).toBe(true);
-      const errorText = JSON.stringify(writeResult.content);
-      expect(errorText).toMatch(/EACCES|EPERM|Permission denied|Read-only|Access denied/i);
-
-      // Write inside sandbox should work
-      const insidePath = join(sandboxDir, 'test-inside.txt');
-      const insideResult = await client.callTool({
-        name: 'write_file',
-        arguments: { path: insidePath, content: 'inside sandbox' },
-      });
-      expect(insideResult.isError).toBeFalsy();
-    } finally {
-      try {
-        await client.close();
-      } catch {
-        /* ignore */
+  // macOS sandbox-exec auto-whitelists the TMPDIR parent (/var/folders/XX/YYY) for writes,
+  // so temp-dir-based "outside sandbox" paths are unrestricted. Linux bubblewrap enforces this.
+  it.skipIf(process.platform !== 'linux')(
+    'sandbox blocks writes outside allowWrite',
+    async () => {
+      const serverPath = findServerFilesystem();
+      if (!serverPath) {
+        console.warn('Skipping: @modelcontextprotocol/server-filesystem not found');
+        return;
       }
-    }
-  }, 30000);
+
+      const config = defaultSandboxParams();
+      // Serve the parent of sandboxDir so server can see both inside and outside paths
+      const serveDir = resolve(sandboxDir, '..');
+      const client = await connectSandboxedClient('filesystem', config, [serverPath, serveDir]);
+
+      try {
+        // Write outside sandbox (but inside serveDir) should be blocked by srt
+        const outsidePath = join(serveDir, `srt-test-outside-${Date.now()}.txt`);
+        const writeResult = await client.callTool({
+          name: 'write_file',
+          arguments: { path: outsidePath, content: 'should not work' },
+        });
+        expect(writeResult.isError).toBe(true);
+        const errorText = JSON.stringify(writeResult.content);
+        expect(errorText).toMatch(/EACCES|EPERM|Permission denied|Read-only|Access denied/i);
+
+        // Write inside sandbox should work
+        const insidePath = join(sandboxDir, 'test-inside.txt');
+        const insideResult = await client.callTool({
+          name: 'write_file',
+          arguments: { path: insidePath, content: 'inside sandbox' },
+        });
+        expect(insideResult.isError).toBeFalsy();
+      } finally {
+        try {
+          await client.close();
+        } catch {
+          /* ignore */
+        }
+      }
+    },
+    30000,
+  );
 
   it('two srt processes with different settings coexist', async () => {
     const serverPath = findServerFilesystem();

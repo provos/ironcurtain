@@ -7,6 +7,7 @@ import {
   type CompilerConfig,
 } from '../src/pipeline/constitution-compiler.js';
 import type { ToolAnnotation, CompiledRule, ExecutionResult, RepairContext } from '../src/pipeline/types.js';
+import { TEST_SANDBOX_DIR, REAL_TMP } from './fixtures/test-policy.js';
 
 const sampleAnnotations: ToolAnnotation[] = [
   {
@@ -60,7 +61,7 @@ const cannedRules: CompiledRule[] = [
     description: 'Allow reading files within the sandbox',
     principle: 'Containment',
     if: {
-      paths: { roles: ['read-path'], within: '/tmp/ironcurtain-sandbox' },
+      paths: { roles: ['read-path'], within: TEST_SANDBOX_DIR },
     },
     then: 'allow',
     reason: 'Read within sandbox directory',
@@ -173,7 +174,7 @@ describe('Constitution Compiler', () => {
         {
           ...cannedRules[1],
           if: {
-            paths: { roles: ['invalid-role' as never], within: '/tmp/sandbox' },
+            paths: { roles: ['invalid-role' as never], within: `${REAL_TMP}/sandbox` },
           },
         },
       ];

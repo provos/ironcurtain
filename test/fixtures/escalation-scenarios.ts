@@ -12,6 +12,8 @@
  * - vague-intent: ambiguous user message WITH arguments → expect escalate
  */
 
+import { REAL_TMP } from './test-policy.js';
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -111,7 +113,7 @@ export function getEscalationScenarios(sandboxDir: string): EscalationScenario[]
       request: {
         serverName: 'filesystem',
         toolName: 'move_file',
-        arguments: { source: `${sandboxDir}/backup.tar`, destination: '/tmp/archive/backup.tar' },
+        arguments: { source: `${sandboxDir}/backup.tar`, destination: `${REAL_TMP}/archive/backup.tar` },
       },
       expectedAutoApprove: 'approve',
       reasoning: 'User explicitly requests move to /tmp/archive; destination matches.',

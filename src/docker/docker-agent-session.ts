@@ -332,6 +332,11 @@ export class DockerAgentSession implements Session {
     return this.diagnosticLog;
   }
 
+  /** Process any new audit log entries immediately (useful for tests). */
+  flushAuditLog(): void {
+    this.auditTailer?.readNewEntries();
+  }
+
   getPendingEscalation(): EscalationRequest | undefined {
     return this.pendingEscalation;
   }

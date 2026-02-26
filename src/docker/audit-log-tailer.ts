@@ -1,17 +1,16 @@
 /**
  * Tails a JSONL audit log file and emits DiagnosticEvent callbacks
- * for each new entry. Uses fs.watch() for change notification and
+ * for each new entry. Uses fs.watchFile() for change notification and
  * tracks the file read offset to parse only new lines.
  */
 
-import { openSync, readSync, fstatSync, closeSync, watch, type FSWatcher } from 'node:fs';
-import { dirname, basename } from 'node:path';
+import { openSync, readSync, fstatSync, closeSync, watchFile, unwatchFile } from 'node:fs';
 import type { DiagnosticEvent } from '../session/types.js';
 import type { AuditEntry } from '../types/audit.js';
 
 export class AuditLogTailer {
   private offset = 0;
-  private watcher: FSWatcher | null = null;
+  private watching = false;
   private readonly auditLogPath: string;
   private readonly onDiagnostic: (event: DiagnosticEvent) => void;
 
@@ -21,29 +20,19 @@ export class AuditLogTailer {
   }
 
   start(): void {
-    // Watch the parent directory rather than the file directly.
-    // On macOS, fs.watch() on a file uses kqueue which can miss events;
-    // watching the directory via FSEvents is more reliable cross-platform.
-    const dir = dirname(this.auditLogPath);
-    const filename = basename(this.auditLogPath);
-    this.watcher = watch(dir, (_eventType, watchedFilename) => {
-      // Some platforms omit the filename or return a Buffer; conservatively
-      // assume the audit log may have changed in those cases.
-      const changed = typeof watchedFilename === 'string' ? watchedFilename : (watchedFilename?.toString() ?? null);
-      if (!changed || changed === filename) {
-        this.readNewEntries();
-      }
-    });
+    this.watching = true;
+    watchFile(this.auditLogPath, { interval: 100 }, () => this.readNewEntries());
   }
 
   stop(): void {
-    if (this.watcher) {
-      this.watcher.close();
-      this.watcher = null;
+    if (this.watching) {
+      unwatchFile(this.auditLogPath);
+      this.watching = false;
     }
   }
 
-  private readNewEntries(): void {
+  /** Read and process any new entries appended since the last read. */
+  readNewEntries(): void {
     let fd: number;
     try {
       fd = openSync(this.auditLogPath, 'r');

@@ -29,20 +29,13 @@ describe('AuditLogTailer', () => {
     }
   });
 
-  it('emits diagnostic events for new audit entries', async () => {
+  it('emits diagnostic events for new audit entries', () => {
     const logPath = join(tempDir, 'audit.jsonl');
-
-    // Create the log file first so watch() has something to attach to
     writeFileSync(logPath, '');
 
     const events: DiagnosticEvent[] = [];
     const tailer = new AuditLogTailer(logPath, (event) => events.push(event));
-    tailer.start();
 
-    // Give the directory watcher a moment to initialize before writing
-    await new Promise((resolve) => setTimeout(resolve, 50));
-
-    // Append an audit entry
     const entry = {
       serverName: 'filesystem',
       toolName: 'read_file',
@@ -51,31 +44,26 @@ describe('AuditLogTailer', () => {
     };
     appendFileSync(logPath, JSON.stringify(entry) + '\n');
 
-    // Poll until the event arrives (macOS FSEvents can have variable latency)
-    for (let i = 0; i < 20 && events.length === 0; i++) {
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-    tailer.stop();
+    // Call readNewEntries directly to avoid fs notification timing issues
+    tailer.readNewEntries();
 
-    expect(events.length).toBeGreaterThanOrEqual(1);
+    expect(events).toHaveLength(1);
     const event = events[0];
     expect(event.kind).toBe('tool_call');
     if (event.kind === 'tool_call') {
       expect(event.toolName).toBe('filesystem.read_file');
       expect(event.preview).toContain('allowed');
     }
+
+    tailer.stop();
   });
 
-  it('handles multiple entries in a single write', async () => {
+  it('handles multiple entries in a single write', () => {
     const logPath = join(tempDir, 'audit.jsonl');
     writeFileSync(logPath, '');
 
     const events: DiagnosticEvent[] = [];
     const tailer = new AuditLogTailer(logPath, (event) => events.push(event));
-    tailer.start();
-
-    // Give the directory watcher a moment to initialize before writing
-    await new Promise((resolve) => setTimeout(resolve, 50));
 
     const entry1 = {
       serverName: 'filesystem',
@@ -91,46 +79,42 @@ describe('AuditLogTailer', () => {
     };
     appendFileSync(logPath, JSON.stringify(entry1) + '\n' + JSON.stringify(entry2) + '\n');
 
-    // Poll until both events arrive (macOS FSEvents can have variable latency)
-    for (let i = 0; i < 20 && events.length < 2; i++) {
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-    tailer.stop();
+    tailer.readNewEntries();
 
-    expect(events.length).toBeGreaterThanOrEqual(2);
+    expect(events).toHaveLength(2);
     if (events[0].kind === 'tool_call') {
       expect(events[0].toolName).toBe('filesystem.read_file');
     }
     if (events[1].kind === 'tool_call') {
       expect(events[1].toolName).toBe('git.git_status');
     }
+
+    tailer.stop();
   });
 
-  it('ignores malformed JSON lines', async () => {
+  it('ignores malformed JSON lines', () => {
     const logPath = join(tempDir, 'audit.jsonl');
     writeFileSync(logPath, '');
 
     const events: DiagnosticEvent[] = [];
     const tailer = new AuditLogTailer(logPath, (event) => events.push(event));
-    tailer.start();
 
     appendFileSync(logPath, 'not valid json\n');
 
-    // Wait long enough for any potential watch event to fire and be processed
-    await new Promise((resolve) => setTimeout(resolve, 500));
-    tailer.stop();
+    tailer.readNewEntries();
 
     // Malformed line should be silently skipped
     expect(events).toHaveLength(0);
+
+    tailer.stop();
   });
 
-  it('truncates long argument previews', async () => {
+  it('truncates long argument previews', () => {
     const logPath = join(tempDir, 'audit.jsonl');
     writeFileSync(logPath, '');
 
     const events: DiagnosticEvent[] = [];
     const tailer = new AuditLogTailer(logPath, (event) => events.push(event));
-    tailer.start();
 
     const longArg = 'x'.repeat(200);
     const entry = {
@@ -141,16 +125,15 @@ describe('AuditLogTailer', () => {
     };
     appendFileSync(logPath, JSON.stringify(entry) + '\n');
 
-    // Poll until the event arrives (macOS kqueue can have variable latency)
-    for (let i = 0; i < 20 && events.length === 0; i++) {
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-    tailer.stop();
+    tailer.readNewEntries();
 
-    if (events.length > 0 && events[0].kind === 'tool_call') {
+    expect(events).toHaveLength(1);
+    if (events[0].kind === 'tool_call') {
       // Preview is truncated to 80 chars of the JSON args + "..."
       expect(events[0].preview).toContain('...');
     }
+
+    tailer.stop();
   });
 });
 
@@ -451,11 +434,7 @@ describe('DockerAgentSession', () => {
     });
     await session.initialize();
 
-    // Give the directory watcher a moment to initialize before writing
-    await new Promise((r) => setTimeout(r, 50));
-
-    // initialize() already creates the audit log file and starts the tailer.
-    // Write an audit entry to trigger the tailer.
+    // Write an audit entry and flush the tailer
     const entry = {
       serverName: 'fs',
       toolName: 'read',
@@ -463,11 +442,7 @@ describe('DockerAgentSession', () => {
       result: { status: 'allowed' },
     };
     appendFileSync(deps.auditLogPath, JSON.stringify(entry) + '\n');
-
-    // Poll until the event arrives (macOS kqueue can have variable latency)
-    for (let i = 0; i < 20 && events.length === 0; i++) {
-      await new Promise((r) => setTimeout(r, 100));
-    }
+    session.flushAuditLog();
 
     expect(events.length).toBeGreaterThanOrEqual(1);
   });

@@ -15,12 +15,13 @@ import type {
   ToolAnnotation,
 } from '../src/pipeline/types.js';
 import type { ToolCallRequest } from '../src/types/mcp.js';
+import { TEST_SANDBOX_DIR, REAL_TMP } from './fixtures/test-policy.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-const SANDBOX_DIR = '/tmp/ironcurtain-sandbox';
+const SANDBOX_DIR = TEST_SANDBOX_DIR;
 
 function makeRequest(overrides: Partial<ToolCallRequest> = {}): ToolCallRequest {
   return {
@@ -777,7 +778,7 @@ describe('Compiled rule evaluation: rule matching', () => {
         name: 'allow-reads-in-dir',
         description: 'Allow reads in /tmp/permitted',
         principle: 'test',
-        if: { paths: { roles: ['read-path'], within: '/tmp/permitted' } },
+        if: { paths: { roles: ['read-path'], within: `${REAL_TMP}/permitted` } },
         then: 'allow',
         reason: 'In permitted dir',
       },
@@ -793,10 +794,10 @@ describe('Compiled rule evaluation: rule matching', () => {
 
     const engine = new PolicyEngine(policy, annotations, []);
 
-    const inDir = engine.evaluate(makeRequest({ arguments: { path: '/tmp/permitted/deep/nested/file.txt' } }));
+    const inDir = engine.evaluate(makeRequest({ arguments: { path: `${REAL_TMP}/permitted/deep/nested/file.txt` } }));
     expect(inDir.decision).toBe('allow');
 
-    const outDir = engine.evaluate(makeRequest({ arguments: { path: '/tmp/other/file.txt' } }));
+    const outDir = engine.evaluate(makeRequest({ arguments: { path: `${REAL_TMP}/other/file.txt` } }));
     expect(outDir.decision).toBe('deny');
   });
 
@@ -943,7 +944,7 @@ describe('Multi-role evaluation', () => {
     const result = engine.evaluate(
       makeRequest({
         toolName: 'complex_op',
-        arguments: { source: '/etc/a.txt', destination: '/tmp/b.txt' },
+        arguments: { source: '/etc/a.txt', destination: `${REAL_TMP}/b.txt` },
       }),
     );
     expect(result.decision).toBe('deny');
@@ -1033,7 +1034,7 @@ describe('Multi-role evaluation', () => {
     const result = engine.evaluate(
       makeRequest({
         toolName: 'complex_op',
-        arguments: { source: '/etc/a.txt', destination: '/tmp/b.txt' },
+        arguments: { source: '/etc/a.txt', destination: `${REAL_TMP}/b.txt` },
       }),
     );
     expect(result.decision).toBe('deny');
@@ -1059,7 +1060,7 @@ describe('Per-element multi-path evaluation', () => {
         name: 'allow-dir-a',
         description: 'Allow reads in dir-a',
         principle: 'test',
-        if: { paths: { roles: ['read-path'], within: '/tmp/dir-a' } },
+        if: { paths: { roles: ['read-path'], within: `${REAL_TMP}/dir-a` } },
         then: 'allow',
         reason: 'In dir-a',
       },
@@ -1067,7 +1068,7 @@ describe('Per-element multi-path evaluation', () => {
         name: 'escalate-dir-b',
         description: 'Escalate reads in dir-b',
         principle: 'test',
-        if: { paths: { roles: ['read-path'], within: '/tmp/dir-b' } },
+        if: { paths: { roles: ['read-path'], within: `${REAL_TMP}/dir-b` } },
         then: 'escalate',
         reason: 'In dir-b',
       },
@@ -1077,7 +1078,7 @@ describe('Per-element multi-path evaluation', () => {
     const result = engine.evaluate(
       makeRequest({
         toolName: 'read_multiple_files',
-        arguments: { paths: ['/tmp/dir-a/f1.txt', '/tmp/dir-b/f2.txt'] },
+        arguments: { paths: [`${REAL_TMP}/dir-a/f1.txt`, `${REAL_TMP}/dir-b/f2.txt`] },
       }),
     );
     expect(result.decision).toBe('escalate');
@@ -1089,7 +1090,7 @@ describe('Per-element multi-path evaluation', () => {
         name: 'allow-dir-a',
         description: 'Allow reads in dir-a',
         principle: 'test',
-        if: { paths: { roles: ['read-path'], within: '/tmp/dir-a' } },
+        if: { paths: { roles: ['read-path'], within: `${REAL_TMP}/dir-a` } },
         then: 'allow',
         reason: 'In dir-a',
       },
@@ -1099,7 +1100,7 @@ describe('Per-element multi-path evaluation', () => {
     const result = engine.evaluate(
       makeRequest({
         toolName: 'read_multiple_files',
-        arguments: { paths: ['/tmp/dir-a/f1.txt', '/tmp/unknown/f2.txt'] },
+        arguments: { paths: [`${REAL_TMP}/dir-a/f1.txt`, `${REAL_TMP}/unknown/f2.txt`] },
       }),
     );
     expect(result.decision).toBe('deny');
@@ -1112,7 +1113,7 @@ describe('Per-element multi-path evaluation', () => {
         name: 'allow-dir-a',
         description: 'Allow reads in dir-a',
         principle: 'test',
-        if: { paths: { roles: ['read-path'], within: '/tmp/dir-a' } },
+        if: { paths: { roles: ['read-path'], within: `${REAL_TMP}/dir-a` } },
         then: 'allow',
         reason: 'In dir-a',
       },
@@ -1120,7 +1121,7 @@ describe('Per-element multi-path evaluation', () => {
         name: 'allow-dir-b',
         description: 'Allow reads in dir-b',
         principle: 'test',
-        if: { paths: { roles: ['read-path'], within: '/tmp/dir-b' } },
+        if: { paths: { roles: ['read-path'], within: `${REAL_TMP}/dir-b` } },
         then: 'allow',
         reason: 'In dir-b',
       },
@@ -1128,7 +1129,7 @@ describe('Per-element multi-path evaluation', () => {
         name: 'escalate-dir-c',
         description: 'Escalate reads in dir-c',
         principle: 'test',
-        if: { paths: { roles: ['read-path'], within: '/tmp/dir-c' } },
+        if: { paths: { roles: ['read-path'], within: `${REAL_TMP}/dir-c` } },
         then: 'escalate',
         reason: 'In dir-c',
       },
@@ -1139,7 +1140,7 @@ describe('Per-element multi-path evaluation', () => {
       makeRequest({
         toolName: 'read_multiple_files',
         arguments: {
-          paths: ['/tmp/dir-a/f1.txt', '/tmp/dir-b/f2.txt', '/tmp/dir-c/f3.txt'],
+          paths: [`${REAL_TMP}/dir-a/f1.txt`, `${REAL_TMP}/dir-b/f2.txt`, `${REAL_TMP}/dir-c/f3.txt`],
         },
       }),
     );
@@ -1153,7 +1154,7 @@ describe('Per-element multi-path evaluation', () => {
         name: 'allow-dir-a',
         description: 'Allow reads in dir-a',
         principle: 'test',
-        if: { paths: { roles: ['read-path'], within: '/tmp/dir-a' } },
+        if: { paths: { roles: ['read-path'], within: `${REAL_TMP}/dir-a` } },
         then: 'allow',
         reason: 'In dir-a',
       },
@@ -1171,7 +1172,7 @@ describe('Per-element multi-path evaluation', () => {
     const result = engine.evaluate(
       makeRequest({
         toolName: 'read_file',
-        arguments: { path: '/tmp/dir-a/file.txt' },
+        arguments: { path: `${REAL_TMP}/dir-a/file.txt` },
       }),
     );
     expect(result.decision).toBe('allow');
@@ -1184,7 +1185,7 @@ describe('Per-element multi-path evaluation', () => {
         name: 'allow-dir-a',
         description: 'Allow in dir-a',
         principle: 'test',
-        if: { paths: { roles: ['read-path'], within: '/tmp/dir-a' } },
+        if: { paths: { roles: ['read-path'], within: `${REAL_TMP}/dir-a` } },
         then: 'allow',
         reason: 'In dir-a',
       },
@@ -1202,7 +1203,7 @@ describe('Per-element multi-path evaluation', () => {
     const result = engine.evaluate(
       makeRequest({
         toolName: 'read_multiple_files',
-        arguments: { paths: ['/tmp/dir-a/f1.txt', '/tmp/unknown/f2.txt'] },
+        arguments: { paths: [`${REAL_TMP}/dir-a/f1.txt`, `${REAL_TMP}/unknown/f2.txt`] },
       }),
     );
     expect(result.decision).toBe('escalate');
@@ -1507,7 +1508,7 @@ describe('Argument edge cases', () => {
     const result = engine.evaluate(
       makeRequest({
         toolName: 'read_multiple_files',
-        arguments: { paths: ['/etc/file.txt', 42, null, '/tmp/other.txt'] },
+        arguments: { paths: ['/etc/file.txt', 42, null, `${REAL_TMP}/other.txt`] },
       }),
     );
     expect(result.decision).toBe('escalate');

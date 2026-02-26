@@ -10,6 +10,7 @@ import {
   testToolAnnotations,
   TEST_SANDBOX_DIR,
   TEST_PROTECTED_PATHS,
+  REAL_TMP,
 } from './fixtures/test-policy.js';
 
 const protectedPaths = TEST_PROTECTED_PATHS;
@@ -20,7 +21,7 @@ function makeRequest(overrides: Partial<ToolCallRequest> = {}): ToolCallRequest 
     requestId: 'test-id',
     serverName: 'filesystem',
     toolName: 'read_file',
-    arguments: { path: '/tmp/ironcurtain-sandbox/test.txt' },
+    arguments: { path: `${SANDBOX_DIR}/test.txt` },
     timestamp: new Date().toISOString(),
     ...overrides,
   };
@@ -196,7 +197,7 @@ describe('PolicyEngine', () => {
       const result = engine.evaluate(
         makeRequest({
           toolName: 'delete_file',
-          arguments: { path: '/tmp/ironcurtain-sandbox/test.txt' },
+          arguments: { path: `${SANDBOX_DIR}/test.txt` },
         }),
       );
       expect(result.decision).toBe('allow');
@@ -207,7 +208,7 @@ describe('PolicyEngine', () => {
       const result = engine.evaluate(
         makeRequest({
           toolName: 'delete_directory',
-          arguments: { path: '/tmp/ironcurtain-sandbox/subdir' },
+          arguments: { path: `${SANDBOX_DIR}/subdir` },
         }),
       );
       expect(result.decision).toBe('allow');
@@ -231,7 +232,7 @@ describe('PolicyEngine', () => {
       const result = engine.evaluate(
         makeRequest({
           toolName: 'read_file',
-          arguments: { path: '/tmp/ironcurtain-sandbox/test.txt' },
+          arguments: { path: `${SANDBOX_DIR}/test.txt` },
         }),
       );
       expect(result.decision).toBe('allow');
@@ -242,7 +243,7 @@ describe('PolicyEngine', () => {
       const result = engine.evaluate(
         makeRequest({
           toolName: 'list_directory',
-          arguments: { path: '/tmp/ironcurtain-sandbox' },
+          arguments: { path: SANDBOX_DIR },
         }),
       );
       expect(result.decision).toBe('allow');
@@ -253,7 +254,7 @@ describe('PolicyEngine', () => {
       const result = engine.evaluate(
         makeRequest({
           toolName: 'search_files',
-          arguments: { path: '/tmp/ironcurtain-sandbox', pattern: '*.txt' },
+          arguments: { path: SANDBOX_DIR, pattern: '*.txt' },
         }),
       );
       expect(result.decision).toBe('allow');
@@ -286,7 +287,7 @@ describe('PolicyEngine', () => {
       const result = engine.evaluate(
         makeRequest({
           toolName: 'read_file',
-          arguments: { path: '/tmp/ironcurtain-sandbox/../../../etc/passwd' },
+          arguments: { path: `${SANDBOX_DIR}/../../../etc/passwd` },
         }),
       );
       expect(result.decision).toBe('escalate');
@@ -299,7 +300,7 @@ describe('PolicyEngine', () => {
       const result = engine.evaluate(
         makeRequest({
           toolName: 'write_file',
-          arguments: { path: '/tmp/ironcurtain-sandbox/output.txt', content: 'hello' },
+          arguments: { path: `${SANDBOX_DIR}/output.txt`, content: 'hello' },
         }),
       );
       expect(result.decision).toBe('allow');
@@ -310,7 +311,7 @@ describe('PolicyEngine', () => {
       const result = engine.evaluate(
         makeRequest({
           toolName: 'create_directory',
-          arguments: { path: '/tmp/ironcurtain-sandbox/newdir' },
+          arguments: { path: `${SANDBOX_DIR}/newdir` },
         }),
       );
       expect(result.decision).toBe('allow');
@@ -335,8 +336,8 @@ describe('PolicyEngine', () => {
         makeRequest({
           toolName: 'move_file',
           arguments: {
-            source: '/tmp/ironcurtain-sandbox/a.txt',
-            destination: '/tmp/ironcurtain-sandbox/b.txt',
+            source: `${SANDBOX_DIR}/a.txt`,
+            destination: `${SANDBOX_DIR}/b.txt`,
           },
         }),
       );
@@ -349,8 +350,8 @@ describe('PolicyEngine', () => {
         makeRequest({
           toolName: 'move_file',
           arguments: {
-            source: '/tmp/ironcurtain-sandbox/a.txt',
-            destination: '/tmp/outside/b.txt',
+            source: `${SANDBOX_DIR}/a.txt`,
+            destination: `${REAL_TMP}/outside/b.txt`,
           },
         }),
       );
@@ -366,7 +367,7 @@ describe('PolicyEngine', () => {
           toolName: 'move_file',
           arguments: {
             source: '/etc/important.txt',
-            destination: '/tmp/ironcurtain-sandbox/important.txt',
+            destination: `${SANDBOX_DIR}/important.txt`,
           },
         }),
       );
@@ -383,7 +384,7 @@ describe('PolicyEngine', () => {
           toolName: 'move_file',
           arguments: {
             source: '/etc/a.txt',
-            destination: '/tmp/outside/b.txt',
+            destination: `${REAL_TMP}/outside/b.txt`,
           },
         }),
       );
@@ -398,7 +399,7 @@ describe('PolicyEngine', () => {
         makeRequest({
           toolName: 'edit_file',
           arguments: {
-            path: '/tmp/ironcurtain-sandbox/test.txt',
+            path: `${SANDBOX_DIR}/test.txt`,
             edits: [{ oldText: 'a', newText: 'b' }],
             dryRun: false,
           },
@@ -449,7 +450,7 @@ describe('PolicyEngine', () => {
 
     it('protected path inside sandbox is still denied', () => {
       // Create an engine where a protected path is inside the sandbox
-      const sandboxProtectedPath = '/tmp/ironcurtain-sandbox/secret.txt';
+      const sandboxProtectedPath = `${SANDBOX_DIR}/secret.txt`;
       const engineWithProtected = new PolicyEngine(
         testCompiledPolicy,
         testToolAnnotations,
@@ -459,7 +460,7 @@ describe('PolicyEngine', () => {
       const result = engineWithProtected.evaluate(
         makeRequest({
           toolName: 'read_file',
-          arguments: { path: '/tmp/ironcurtain-sandbox/secret.txt' },
+          arguments: { path: `${SANDBOX_DIR}/secret.txt` },
         }),
       );
       expect(result.decision).toBe('deny');
@@ -497,7 +498,7 @@ describe('PolicyEngine', () => {
       const result = noSandboxEngine.evaluate(
         makeRequest({
           toolName: 'read_file',
-          arguments: { path: '/tmp/ironcurtain-sandbox/test.txt' },
+          arguments: { path: `${SANDBOX_DIR}/test.txt` },
         }),
       );
       expect(result.rule).not.toBe('structural-sandbox-allow');
@@ -550,7 +551,7 @@ describe('PolicyEngine', () => {
           toolName: 'move_file',
           arguments: {
             source: '/home/user/Downloads/file.zip',
-            destination: '/tmp/ironcurtain-sandbox/file.zip',
+            destination: `${SANDBOX_DIR}/file.zip`,
           },
         }),
       );
@@ -609,7 +610,7 @@ describe('PolicyEngine', () => {
         makeRequest({
           toolName: 'read_multiple_files',
           arguments: {
-            paths: ['/tmp/ironcurtain-sandbox/a.txt', '/etc/b.txt'],
+            paths: [`${SANDBOX_DIR}/a.txt`, '/etc/b.txt'],
           },
         }),
       );
@@ -624,7 +625,7 @@ describe('PolicyEngine', () => {
         makeRequest({
           toolName: 'read_multiple_files',
           arguments: {
-            paths: ['/tmp/permitted-a/file1.txt', '/tmp/permitted-b/file2.txt'],
+            paths: [`${REAL_TMP}/permitted-a/file1.txt`, `${REAL_TMP}/permitted-b/file2.txt`],
           },
         }),
       );
@@ -636,7 +637,7 @@ describe('PolicyEngine', () => {
         makeRequest({
           toolName: 'read_multiple_files',
           arguments: {
-            paths: ['/tmp/permitted-a/file1.txt', '/etc/some-file.txt'],
+            paths: [`${REAL_TMP}/permitted-a/file1.txt`, '/etc/some-file.txt'],
           },
         }),
       );
@@ -651,7 +652,7 @@ describe('PolicyEngine', () => {
         makeRequest({
           toolName: 'read_multiple_files',
           arguments: {
-            paths: ['/tmp/permitted-a/file1.txt', '/tmp/permitted-a/file2.txt'],
+            paths: [`${REAL_TMP}/permitted-a/file1.txt`, `${REAL_TMP}/permitted-a/file2.txt`],
           },
         }),
       );
@@ -670,7 +671,7 @@ describe('PolicyEngine', () => {
             name: 'allow-reads-dir-a',
             description: 'Allow reads within dir-a',
             principle: 'test',
-            if: { paths: { roles: ['read-path'], within: '/tmp/permitted-a' }, server: ['filesystem'] },
+            if: { paths: { roles: ['read-path'], within: `${REAL_TMP}/permitted-a` }, server: ['filesystem'] },
             then: 'allow',
             reason: 'Allowed in dir-a',
           },
@@ -681,7 +682,7 @@ describe('PolicyEngine', () => {
         makeRequest({
           toolName: 'read_multiple_files',
           arguments: {
-            paths: ['/tmp/permitted-a/file1.txt', '/tmp/nowhere/file2.txt'],
+            paths: [`${REAL_TMP}/permitted-a/file1.txt`, `${REAL_TMP}/nowhere/file2.txt`],
           },
         }),
       );
@@ -979,7 +980,7 @@ describe('PolicyEngine', () => {
         makeRequest({
           serverName: 'git',
           toolName: 'git_clone',
-          arguments: { url: 'https://evil.com/repo.git', path: '/tmp/ironcurtain-sandbox/repo' },
+          arguments: { url: 'https://evil.com/repo.git', path: `${SANDBOX_DIR}/repo` },
         }),
       );
       expect(result.decision).toBe('escalate');
@@ -994,7 +995,7 @@ describe('PolicyEngine', () => {
         makeRequest({
           serverName: 'git',
           toolName: 'git_clone',
-          arguments: { url: 'https://github.com/user/repo.git', path: '/tmp/ironcurtain-sandbox/repo' },
+          arguments: { url: 'https://github.com/user/repo.git', path: `${SANDBOX_DIR}/repo` },
         }),
       );
       // Domain passes structural check, but sandbox-allow is filesystem-only
@@ -1027,7 +1028,7 @@ describe('PolicyEngine', () => {
         makeRequest({
           serverName: 'git',
           toolName: 'git_clone',
-          arguments: { url: 'https://api.github.com/user/repo.git', path: '/tmp/ironcurtain-sandbox/repo' },
+          arguments: { url: 'https://api.github.com/user/repo.git', path: `${SANDBOX_DIR}/repo` },
         }),
       );
       expect(result.rule).not.toBe('structural-domain-escalate');
@@ -1041,7 +1042,7 @@ describe('PolicyEngine', () => {
         makeRequest({
           serverName: 'git',
           toolName: 'git_clone',
-          arguments: { url: 'https://evil.com/repo.git', path: '/tmp/ironcurtain-sandbox/repo' },
+          arguments: { url: 'https://evil.com/repo.git', path: `${SANDBOX_DIR}/repo` },
         }),
       );
       // No structural domain check, falls through to compiled rule evaluation
@@ -1056,7 +1057,7 @@ describe('PolicyEngine', () => {
         makeRequest({
           serverName: 'git',
           toolName: 'git_clone',
-          arguments: { url: 'git@github.com:user/repo.git', path: '/tmp/ironcurtain-sandbox/repo' },
+          arguments: { url: 'git@github.com:user/repo.git', path: `${SANDBOX_DIR}/repo` },
         }),
       );
       // SSH URL → domain github.com → passes allowlist
@@ -1071,7 +1072,7 @@ describe('PolicyEngine', () => {
         makeRequest({
           serverName: 'git',
           toolName: 'git_status',
-          arguments: { path: '/tmp/ironcurtain-sandbox/repo' },
+          arguments: { path: `${SANDBOX_DIR}/repo` },
         }),
       );
       // git_status has only read-path args, no URL args → untrusted domain gate skipped.
@@ -1259,7 +1260,7 @@ describe('PolicyEngine', () => {
         makeRequest({
           serverName: 'git',
           toolName: 'git_reset',
-          arguments: { path: '/tmp/ironcurtain-sandbox/repo', mode: 'hard' },
+          arguments: { path: `${SANDBOX_DIR}/repo`, mode: 'hard' },
         }),
       );
       expect(result.decision).toBe('escalate');
@@ -1271,7 +1272,7 @@ describe('PolicyEngine', () => {
         makeRequest({
           serverName: 'git',
           toolName: 'git_merge',
-          arguments: { path: '/tmp/ironcurtain-sandbox/repo', branch: 'feature' },
+          arguments: { path: `${SANDBOX_DIR}/repo`, branch: 'feature' },
         }),
       );
       expect(result.decision).toBe('escalate');
@@ -1283,7 +1284,7 @@ describe('PolicyEngine', () => {
         makeRequest({
           serverName: 'git',
           toolName: 'git_rebase',
-          arguments: { path: '/tmp/ironcurtain-sandbox/repo', branch: 'main' },
+          arguments: { path: `${SANDBOX_DIR}/repo`, branch: 'main' },
         }),
       );
       expect(result.decision).toBe('escalate');
@@ -1295,7 +1296,7 @@ describe('PolicyEngine', () => {
         makeRequest({
           serverName: 'git',
           toolName: 'git_branch',
-          arguments: { path: '/tmp/ironcurtain-sandbox/repo', name: 'old-branch', delete: true },
+          arguments: { path: `${SANDBOX_DIR}/repo`, name: 'old-branch', delete: true },
         }),
       );
       expect(result.decision).toBe('escalate');
@@ -1307,7 +1308,7 @@ describe('PolicyEngine', () => {
         makeRequest({
           serverName: 'git',
           toolName: 'git_status',
-          arguments: { path: '/tmp/ironcurtain-sandbox/repo' },
+          arguments: { path: `${SANDBOX_DIR}/repo` },
         }),
       );
       // Sandbox structural allow is filesystem-only; git falls through
@@ -1321,7 +1322,7 @@ describe('PolicyEngine', () => {
         makeRequest({
           serverName: 'git',
           toolName: 'git_add',
-          arguments: { path: '/tmp/ironcurtain-sandbox/repo', files: ['test.txt'] },
+          arguments: { path: `${SANDBOX_DIR}/repo`, files: ['test.txt'] },
         }),
       );
       expect(result.decision).toBe('allow');
@@ -1333,7 +1334,7 @@ describe('PolicyEngine', () => {
         makeRequest({
           serverName: 'git',
           toolName: 'git_commit',
-          arguments: { path: '/tmp/ironcurtain-sandbox/repo', message: 'test commit' },
+          arguments: { path: `${SANDBOX_DIR}/repo`, message: 'test commit' },
         }),
       );
       expect(result.decision).toBe('allow');
@@ -1348,7 +1349,7 @@ describe('PolicyEngine', () => {
         makeRequest({
           serverName: 'git',
           toolName: 'git_reset',
-          arguments: { path: '/tmp/ironcurtain-sandbox/repo', mode: 'soft' },
+          arguments: { path: `${SANDBOX_DIR}/repo`, mode: 'soft' },
         }),
       );
       // Falls to compiled rule evaluation with write-history unresolved → hits escalate rule
