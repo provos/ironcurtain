@@ -91,6 +91,7 @@ export function resolveRealPath(filePath: string): string {
     // but the intermediate directory doesn't exist yet.
     let current = absolute;
     const tail: string[] = [];
+    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- loop exits via return
     while (true) {
       const parent = dirname(current);
       tail.unshift(basename(current));
