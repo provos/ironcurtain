@@ -384,7 +384,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
         // TCP mode: listen on host:port
         return new Promise((resolve, reject) => {
           const onError = reject;
-          outerServer.listen(options.listenPort, '127.0.0.1', () => {
+          outerServer.listen(options.listenPort, '0.0.0.0', () => {
             outerServer.removeListener('error', onError);
             const addr = outerServer.address();
             const port = addr && typeof addr === 'object' ? addr.port : (options.listenPort ?? 0);

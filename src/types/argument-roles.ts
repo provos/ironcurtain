@@ -86,10 +86,24 @@ export function resolveRealPath(filePath: string): string {
   try {
     return realpathSync(absolute);
   } catch {
-    try {
-      return join(realpathSync(dirname(absolute)), basename(absolute));
-    } catch {
-      return absolute;
+    // Walk up to find the deepest existing ancestor, resolve it, then reattach the tail.
+    // This handles cases like /tmp/nonexistent/file.txt on macOS where /tmp → /private/tmp
+    // but the intermediate directory doesn't exist yet.
+    let current = absolute;
+    const tail: string[] = [];
+    while (true) {
+      const parent = dirname(current);
+      tail.unshift(basename(current));
+      if (parent === current) {
+        // Reached filesystem root without finding an existing path
+        return absolute;
+      }
+      current = parent;
+      try {
+        return join(realpathSync(current), ...tail);
+      } catch {
+        // Continue walking up
+      }
     }
   }
 }

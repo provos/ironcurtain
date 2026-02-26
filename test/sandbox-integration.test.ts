@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, readFileSync, readdirSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, existsSync, rmSync, realpathSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir, homedir } from 'node:os';
 import {
@@ -439,8 +439,9 @@ describe.skipIf(!sandboxAvailable)('sandbox integration (requires bubblewrap+soc
   let sandboxDir: string;
 
   beforeEach(() => {
-    settingsDir = mkdtempSync(join(tmpdir(), 'test-srt-int-settings-'));
-    sandboxDir = mkdtempSync(join(tmpdir(), 'test-srt-int-sandbox-'));
+    // Use realpathSync to resolve macOS symlinks (/var → /private/var, /tmp → /private/tmp)
+    settingsDir = realpathSync(mkdtempSync(join(tmpdir(), 'test-srt-int-settings-')));
+    sandboxDir = realpathSync(mkdtempSync(join(tmpdir(), 'test-srt-int-sandbox-')));
   });
 
   afterEach(() => {
@@ -517,20 +518,23 @@ describe.skipIf(!sandboxAvailable)('sandbox integration (requires bubblewrap+soc
       return;
     }
 
+    // On macOS, sandboxDir (from tmpdir()) may be under /private/var/folders/
+    // while /tmp resolves to /private/tmp. Serve both so the MCP server can
+    // access the sandbox dir AND an area outside it for the blocked-write test.
+    const resolvedTmp = realpathSync('/tmp');
     const config = defaultSandboxParams();
-    // Serve /tmp so server can see outside paths
-    const client = await connectSandboxedClient('filesystem', config, [serverPath, '/tmp']);
+    const client = await connectSandboxedClient('filesystem', config, [serverPath, resolvedTmp, sandboxDir]);
 
     try {
-      // Write outside sandbox should be blocked
-      const outsidePath = join(tmpdir(), `srt-test-outside-${Date.now()}.txt`);
+      // Write outside sandbox should be blocked by srt
+      const outsidePath = join(resolvedTmp, `srt-test-outside-${Date.now()}.txt`);
       const writeResult = await client.callTool({
         name: 'write_file',
         arguments: { path: outsidePath, content: 'should not work' },
       });
       expect(writeResult.isError).toBe(true);
       const errorText = JSON.stringify(writeResult.content);
-      expect(errorText).toMatch(/EACCES|EPERM|Permission denied|Read-only/i);
+      expect(errorText).toMatch(/EACCES|EPERM|Permission denied|Read-only|Access denied/i);
 
       // Write inside sandbox should work
       const insidePath = join(sandboxDir, 'test-inside.txt');

@@ -53,6 +53,14 @@ The agent process runs inside a Docker container with strong isolation:
 
 The only way the agent can communicate with the outside world is through two bind-mounted Unix domain sockets: the MCP proxy (for tool calls) and the MITM proxy (for LLM API calls).
 
+#### macOS Limitation: Weaker Network Isolation
+
+On macOS, Docker Desktop's VirtioFS does not support Unix domain sockets in bind mounts. IronCurtain falls back to TCP transport: the MCP and MITM proxies listen on TCP ports on the host, and the container connects via `host.docker.internal`. To prevent unrestricted internet access, the container runs on a Docker `--internal` bridge network, which blocks all internet egress at the iptables/routing level (no default route, DROP rules on traffic leaving the bridge subnet). The container cannot override this without `CAP_NET_ADMIN`, which is not granted.
+
+However, the container can still reach host services that listen on `0.0.0.0` via the bridge gateway IP. This means a compromised agent could probe or attack other services running on the macOS host -- a weaker isolation guarantee than Linux's `--network=none`, where the container has zero network access. There is no more secure alternative on macOS Docker Desktop given the UDS limitation; `--internal` is the strongest network restriction that still allows the container to reach the host-side proxies.
+
+If the `--internal` network connectivity check fails at startup (e.g., Docker Desktop does not forward gateway traffic to the host), IronCurtain aborts session initialization rather than falling back to a less secure network configuration.
+
 ### Layer 2: TLS-Terminating MITM Proxy *(Docker Agent Mode only)*
 
 The agent needs to call its LLM provider's API (e.g., Anthropic's `/v1/messages`). Since the container has no network, these requests go through a MITM proxy running on the host.

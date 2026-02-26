@@ -12,6 +12,11 @@ import type { ProviderConfig } from '../src/docker/provider-config.js';
 import type { DockerManager } from '../src/docker/types.js';
 import type { IronCurtainConfig } from '../src/config/types.js';
 import type { DiagnosticEvent, EscalationRequest } from '../src/session/types.js';
+import {
+  INTERNAL_NETWORK_NAME,
+  INTERNAL_NETWORK_SUBNET,
+  INTERNAL_NETWORK_GATEWAY,
+} from '../src/docker/platform.js';
 
 // --- AuditLogTailer tests ---
 
@@ -38,6 +43,9 @@ describe('AuditLogTailer', () => {
     const tailer = new AuditLogTailer(logPath, (event) => events.push(event));
     tailer.start();
 
+    // Give the directory watcher a moment to initialize before writing
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
     // Append an audit entry
     const entry = {
       serverName: 'filesystem',
@@ -47,9 +55,10 @@ describe('AuditLogTailer', () => {
     };
     appendFileSync(logPath, JSON.stringify(entry) + '\n');
 
-    // fs.watch is async -- give it time to fire
-    await new Promise((resolve) => setTimeout(resolve, 200));
-
+    // Poll until the event arrives (macOS FSEvents can have variable latency)
+    for (let i = 0; i < 20 && events.length === 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
     tailer.stop();
 
     expect(events.length).toBeGreaterThanOrEqual(1);
@@ -69,6 +78,9 @@ describe('AuditLogTailer', () => {
     const tailer = new AuditLogTailer(logPath, (event) => events.push(event));
     tailer.start();
 
+    // Give the directory watcher a moment to initialize before writing
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
     const entry1 = {
       serverName: 'filesystem',
       toolName: 'read_file',
@@ -83,8 +95,10 @@ describe('AuditLogTailer', () => {
     };
     appendFileSync(logPath, JSON.stringify(entry1) + '\n' + JSON.stringify(entry2) + '\n');
 
-    await new Promise((resolve) => setTimeout(resolve, 200));
-
+    // Poll until both events arrive (macOS FSEvents can have variable latency)
+    for (let i = 0; i < 20 && events.length < 2; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
     tailer.stop();
 
     expect(events.length).toBeGreaterThanOrEqual(2);
@@ -106,8 +120,8 @@ describe('AuditLogTailer', () => {
 
     appendFileSync(logPath, 'not valid json\n');
 
-    await new Promise((resolve) => setTimeout(resolve, 200));
-
+    // Wait long enough for any potential watch event to fire and be processed
+    await new Promise((resolve) => setTimeout(resolve, 500));
     tailer.stop();
 
     // Malformed line should be silently skipped
@@ -131,8 +145,10 @@ describe('AuditLogTailer', () => {
     };
     appendFileSync(logPath, JSON.stringify(entry) + '\n');
 
-    await new Promise((resolve) => setTimeout(resolve, 200));
-
+    // Poll until the event arrives (macOS kqueue can have variable latency)
+    for (let i = 0; i < 20 && events.length === 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
     tailer.stop();
 
     if (events.length > 0 && events[0].kind === 'tool_call') {
@@ -222,11 +238,12 @@ function createMockDocker(): DockerManager {
   };
 }
 
-function createMockProxy(socketPath: string): ManagedProxy {
+function createMockProxy(socketPath: string, port?: number): ManagedProxy {
   const tools: ToolInfo[] = [{ name: 'read_file', description: 'Read a file', inputSchema: { type: 'object' } }];
 
   return {
     socketPath,
+    port,
     async start() {},
     async listTools() {
       return tools;
@@ -438,10 +455,11 @@ describe('DockerAgentSession', () => {
     });
     await session.initialize();
 
-    // The audit log tailer needs a real file; create an initial empty file
-    writeFileSync(deps.auditLogPath, '');
+    // Give the directory watcher a moment to initialize before writing
+    await new Promise((r) => setTimeout(r, 50));
 
-    // Write an audit entry to trigger the tailer
+    // initialize() already creates the audit log file and starts the tailer.
+    // Write an audit entry to trigger the tailer.
     const entry = {
       serverName: 'fs',
       toolName: 'read',
@@ -450,8 +468,10 @@ describe('DockerAgentSession', () => {
     };
     appendFileSync(deps.auditLogPath, JSON.stringify(entry) + '\n');
 
-    // Give the fs.watch time to fire
-    await new Promise((r) => setTimeout(r, 300));
+    // Poll until the event arrives (macOS kqueue can have variable latency)
+    for (let i = 0; i < 20 && events.length === 0; i++) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
 
     expect(events.length).toBeGreaterThanOrEqual(1);
   });
@@ -471,8 +491,8 @@ describe('DockerAgentSession', () => {
     };
     writeFileSync(join(deps.escalationDir, `request-${escalationId}.json`), JSON.stringify(request));
 
-    // Wait for the polling interval to pick it up
-    await new Promise((r) => setTimeout(r, 500));
+    // Wait for the polling interval to pick it up (macOS timers may be less precise)
+    await new Promise((r) => setTimeout(r, 1000));
 
     const pending = session.getPendingEscalation();
     expect(pending).toBeDefined();
@@ -513,7 +533,7 @@ describe('DockerAgentSession', () => {
     };
     writeFileSync(join(deps.escalationDir, 'request-esc-456.json'), JSON.stringify(request));
 
-    await new Promise((r) => setTimeout(r, 500));
+    await new Promise((r) => setTimeout(r, 1000));
 
     expect(escalations).toHaveLength(1);
     expect(escalations[0].escalationId).toBe('esc-456');
@@ -539,13 +559,13 @@ describe('DockerAgentSession', () => {
     };
     writeFileSync(join(deps.escalationDir, 'request-esc-789.json'), JSON.stringify(request));
 
-    await new Promise((r) => setTimeout(r, 500));
+    await new Promise((r) => setTimeout(r, 1000));
     expect(session.getPendingEscalation()).toBeDefined();
 
     // Simulate proxy-side cleanup (both files removed = expired)
     rmSync(join(deps.escalationDir, 'request-esc-789.json'));
 
-    await new Promise((r) => setTimeout(r, 500));
+    await new Promise((r) => setTimeout(r, 1000));
     expect(expired).toBe(true);
     expect(session.getPendingEscalation()).toBeUndefined();
   });
@@ -566,5 +586,106 @@ describe('DockerAgentSession', () => {
 
     const log = session.getDiagnosticLog();
     expect(Array.isArray(log)).toBe(true);
+  });
+
+  describe('TCP mode with internal network', () => {
+    function createTcpDeps(tempDir: string): DockerAgentSessionDeps {
+      const baseDeps = createTestDeps(tempDir);
+      return {
+        ...baseDeps,
+        useTcp: true,
+        proxy: createMockProxy(join(tempDir, 'session', 'proxy.sock'), 9123),
+        mitmProxy: {
+          async start() {
+            return { port: 8443 };
+          },
+          async stop() {},
+        },
+      };
+    }
+
+    it('creates internal network and passes extraHosts in TCP mode', async () => {
+      const tcpDeps = createTcpDeps(tempDir);
+      const createNetworkCalls: Array<{ name: string; options?: Record<string, unknown> }> = [];
+      const createCalls: Array<Record<string, unknown>> = [];
+
+      const docker = {
+        ...tcpDeps.docker,
+        async createNetwork(name: string, options?: { internal?: boolean; subnet?: string; gateway?: string }) {
+          createNetworkCalls.push({ name, options });
+        },
+        async create(config: Record<string, unknown>) {
+          createCalls.push(config);
+          return 'container-tcp-123';
+        },
+        // Connectivity check succeeds
+        async exec() {
+          return { exitCode: 0, stdout: '', stderr: '' };
+        },
+      } as unknown as DockerManager;
+
+      session = new DockerAgentSession({ ...tcpDeps, docker });
+      await session.initialize();
+
+      // Verify internal network was created
+      expect(createNetworkCalls).toHaveLength(1);
+      expect(createNetworkCalls[0].name).toBe(INTERNAL_NETWORK_NAME);
+      expect(createNetworkCalls[0].options).toEqual({
+        internal: true,
+        subnet: INTERNAL_NETWORK_SUBNET,
+        gateway: INTERNAL_NETWORK_GATEWAY,
+      });
+
+      // Verify container was created with internal network and extraHosts
+      expect(createCalls).toHaveLength(1);
+      expect(createCalls[0].network).toBe(INTERNAL_NETWORK_NAME);
+      expect(createCalls[0].extraHosts).toEqual([`host.docker.internal:${INTERNAL_NETWORK_GATEWAY}`]);
+    });
+
+    it('throws when connectivity check fails', async () => {
+      const tcpDeps = createTcpDeps(tempDir);
+
+      const docker = {
+        ...tcpDeps.docker,
+        async createNetwork() {},
+        async create() {
+          return 'container-fail';
+        },
+        async start() {},
+        async stop() {},
+        async remove() {},
+        async exec() {
+          return { exitCode: 1, stdout: '', stderr: 'Connection refused' };
+        },
+      } as unknown as DockerManager;
+
+      session = new DockerAgentSession({ ...tcpDeps, docker });
+      await expect(session.initialize()).rejects.toThrow('Internal network connectivity check failed');
+    });
+
+    it('removes internal network on close', async () => {
+      const tcpDeps = createTcpDeps(tempDir);
+      const removedNetworks: string[] = [];
+
+      const docker = {
+        ...tcpDeps.docker,
+        async createNetwork() {},
+        async create() {
+          return 'container-cleanup';
+        },
+        async exec() {
+          return { exitCode: 0, stdout: '', stderr: '' };
+        },
+        async removeNetwork(name: string) {
+          removedNetworks.push(name);
+        },
+      } as unknown as DockerManager;
+
+      session = new DockerAgentSession({ ...tcpDeps, docker });
+      await session.initialize();
+      await session.close();
+
+      expect(removedNetworks).toContain(INTERNAL_NETWORK_NAME);
+    });
   });
 });

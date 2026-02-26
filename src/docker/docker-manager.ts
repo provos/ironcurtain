@@ -38,8 +38,13 @@ export function buildCreateArgs(config: DockerContainerConfig): string[] {
   args.push('--name', config.name);
   args.push('--network', config.network);
 
-  // Linux needs explicit host.docker.internal mapping (useless with --network=none)
-  if (config.network !== 'none') {
+  // Custom host mappings override the default host-gateway mapping
+  if (config.extraHosts && config.extraHosts.length > 0) {
+    for (const entry of config.extraHosts) {
+      args.push(`--add-host=${entry}`);
+    }
+  } else if (config.network !== 'none') {
+    // Linux needs explicit host.docker.internal mapping (useless with --network=none)
     args.push('--add-host=host.docker.internal:host-gateway');
   }
 
@@ -190,9 +195,17 @@ export function createDockerManager(execFileFn?: ExecFileFn): DockerManager {
       }
     },
 
-    async createNetwork(name: string): Promise<void> {
+    async createNetwork(
+      name: string,
+      options?: { internal?: boolean; subnet?: string; gateway?: string },
+    ): Promise<void> {
       try {
-        await exec('docker', ['network', 'create', name], { timeout: 10_000 });
+        const args = ['network', 'create'];
+        if (options?.internal) args.push('--internal');
+        if (options?.subnet) args.push('--subnet', options.subnet);
+        if (options?.gateway) args.push('--gateway', options.gateway);
+        args.push(name);
+        await exec('docker', args, { timeout: 10_000 });
       } catch (err: unknown) {
         if (isExecError(err) && err.stderr.includes('already exists')) return;
         throw err;

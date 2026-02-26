@@ -147,6 +147,39 @@ describe('DockerManager', () => {
       expect(args).toContain('ironcurtain-claude-code:latest');
       expect(args.slice(-2)).toEqual(['sleep', 'infinity']);
     });
+
+    it('uses extraHosts instead of default host-gateway when provided', () => {
+      const config: DockerContainerConfig = {
+        ...sampleConfig,
+        extraHosts: ['host.docker.internal:172.30.0.1'],
+      };
+      const args = buildCreateArgs(config);
+
+      expect(args).toContain('--add-host=host.docker.internal:172.30.0.1');
+      expect(args).not.toContain('--add-host=host.docker.internal:host-gateway');
+    });
+
+    it('supports multiple extraHosts entries', () => {
+      const config: DockerContainerConfig = {
+        ...sampleConfig,
+        extraHosts: ['host.docker.internal:172.30.0.1', 'other-host:10.0.0.1'],
+      };
+      const args = buildCreateArgs(config);
+
+      expect(args).toContain('--add-host=host.docker.internal:172.30.0.1');
+      expect(args).toContain('--add-host=other-host:10.0.0.1');
+      expect(args).not.toContain('--add-host=host.docker.internal:host-gateway');
+    });
+
+    it('uses default host-gateway when extraHosts is empty array', () => {
+      const config: DockerContainerConfig = {
+        ...sampleConfig,
+        extraHosts: [],
+      };
+      const args = buildCreateArgs(config);
+
+      expect(args).toContain('--add-host=host.docker.internal:host-gateway');
+    });
   });
 
   describe('preflight', () => {
@@ -279,6 +312,37 @@ describe('DockerManager', () => {
       const manager = createDockerManager(mock.mockExec);
 
       await expect(manager.createNetwork('ironcurtain-abc')).resolves.toBeUndefined();
+    });
+
+    it('passes --internal, --subnet, and --gateway options', async () => {
+      mock.setResponse('');
+      const manager = createDockerManager(mock.mockExec);
+
+      await manager.createNetwork('ironcurtain-internal', {
+        internal: true,
+        subnet: '172.30.0.0/24',
+        gateway: '172.30.0.1',
+      });
+
+      const args = mock.calls[0].args;
+      expect(args).toContain('--internal');
+      expect(args).toContain('--subnet');
+      expect(args[args.indexOf('--subnet') + 1]).toBe('172.30.0.0/24');
+      expect(args).toContain('--gateway');
+      expect(args[args.indexOf('--gateway') + 1]).toBe('172.30.0.1');
+      expect(args[args.length - 1]).toBe('ironcurtain-internal');
+    });
+
+    it('omits flags when options are not provided', async () => {
+      mock.setResponse('');
+      const manager = createDockerManager(mock.mockExec);
+
+      await manager.createNetwork('test-net', {});
+
+      const args = mock.calls[0].args;
+      expect(args).not.toContain('--internal');
+      expect(args).not.toContain('--subnet');
+      expect(args).not.toContain('--gateway');
     });
   });
 

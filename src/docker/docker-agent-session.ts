@@ -36,6 +36,7 @@ import type { MitmProxy } from './mitm-proxy.js';
 import type { CertificateAuthority } from './ca.js';
 import { AuditLogTailer } from './audit-log-tailer.js';
 import { prepareSession } from './orientation.js';
+import { INTERNAL_NETWORK_NAME, INTERNAL_NETWORK_SUBNET, INTERNAL_NETWORK_GATEWAY } from './platform.js';
 import { SessionNotReadyError, SessionClosedError } from '../session/errors.js';
 import * as logger from '../logger.js';
 
@@ -80,6 +81,7 @@ export class DockerAgentSession implements Session {
   private readonly createdAt: string;
 
   private containerId: string | null = null;
+  private networkName: string | null = null;
   private systemPrompt = '';
 
   private turns: ConversationTurn[] = [];
@@ -177,17 +179,30 @@ export class DockerAgentSession implements Session {
     let network: string;
     let mounts: { source: string; target: string; readonly: boolean }[];
 
+    let extraHosts: string[] | undefined;
+
     if (this.useTcp && mitmAddr.port !== undefined) {
-      // macOS TCP mode: bridge network, MITM proxy via host.docker.internal
+      // macOS TCP mode: internal bridge network blocks egress,
+      // container reaches host proxies via gateway IP
       env = {
         ...this.adapter.buildEnv(this.config, this.fakeKeys),
         HTTPS_PROXY: `http://host.docker.internal:${mitmAddr.port}`,
         HTTP_PROXY: `http://host.docker.internal:${mitmAddr.port}`,
       };
-      network = 'bridge';
+
+      // Create an --internal Docker network that blocks internet egress
+      // but allows container-to-gateway (host) connectivity for the proxies.
+      await this.docker.createNetwork(INTERNAL_NETWORK_NAME, {
+        internal: true,
+        subnet: INTERNAL_NETWORK_SUBNET,
+        gateway: INTERNAL_NETWORK_GATEWAY,
+      });
+      network = INTERNAL_NETWORK_NAME;
+      extraHosts = [`host.docker.internal:${INTERNAL_NETWORK_GATEWAY}`];
+
       mounts = [
         { source: this.sandboxDir, target: '/workspace', readonly: false },
-        // No session dir mount needed — sockets are replaced by TCP
+        // No session dir mount needed -- sockets are replaced by TCP
         { source: orientationDir, target: '/etc/ironcurtain', readonly: true },
       ];
     } else {
@@ -200,7 +215,7 @@ export class DockerAgentSession implements Session {
       network = 'none';
       mounts = [
         { source: this.sandboxDir, target: '/workspace', readonly: false },
-        // Session dir contains proxy.sock and mitm-proxy.sock — directory mount
+        // Session dir contains proxy.sock and mitm-proxy.sock -- directory mount
         // exposes both to the container (file mounts for UDS don't work on macOS Docker Desktop).
         { source: this.sessionDir, target: '/run/ironcurtain', readonly: false },
         { source: orientationDir, target: '/etc/ironcurtain', readonly: true },
@@ -216,10 +231,18 @@ export class DockerAgentSession implements Session {
       command: ['sleep', 'infinity'],
       sessionLabel: this.sessionId,
       resources: { memoryMb: 4096, cpus: 2 },
+      extraHosts,
     });
 
     await this.docker.start(this.containerId);
+    this.networkName = network;
     logger.info(`Container started: ${this.containerId.substring(0, 12)}`);
+
+    // Connectivity check: verify the container can reach host proxies
+    // through the internal network. Abort if unreachable.
+    if (this.useTcp && network === INTERNAL_NETWORK_NAME && this.proxy.port !== undefined) {
+      await this.checkInternalNetworkConnectivity(this.containerId, this.proxy.port);
+    }
 
     // 7. Start watchers
     this.startEscalationWatcher();
@@ -360,6 +383,11 @@ export class DockerAgentSession implements Session {
       await this.docker.remove(this.containerId);
     }
 
+    // Remove internal network (ignore errors -- other sessions may use it)
+    if (this.networkName === INTERNAL_NETWORK_NAME) {
+      await this.docker.removeNetwork(INTERNAL_NETWORK_NAME);
+    }
+
     // Stop proxies
     await this.mitmProxy.stop();
     await this.proxy.stop();
@@ -370,6 +398,26 @@ export class DockerAgentSession implements Session {
   private emitDiagnostic(event: DiagnosticEvent): void {
     this.diagnosticLog.push(event);
     this.onDiagnostic?.(event);
+  }
+
+  /**
+   * Checks whether the container can reach host-side proxies via the
+   * internal Docker network. Throws if connectivity fails.
+   */
+  private async checkInternalNetworkConnectivity(containerId: string, mcpPort: number): Promise<void> {
+    const result = await this.docker.exec(
+      containerId,
+      ['sh', '-c', `echo | socat - TCP:host.docker.internal:${mcpPort},connect-timeout=5`],
+      10_000,
+    );
+
+    if (result.exitCode !== 0) {
+      throw new Error(
+        `Internal network connectivity check failed (exit=${result.exitCode}). ` +
+          `The container cannot reach host-side proxies on the --internal Docker network. ` +
+          `This may indicate that Docker Desktop does not forward bridge gateway traffic to the host.`,
+      );
+    }
   }
 
   private startEscalationWatcher(): void {

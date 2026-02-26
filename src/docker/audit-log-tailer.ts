@@ -5,6 +5,7 @@
  */
 
 import { openSync, readSync, fstatSync, closeSync, watch, type FSWatcher } from 'node:fs';
+import { dirname, basename } from 'node:path';
 import type { DiagnosticEvent } from '../session/types.js';
 import type { AuditEntry } from '../types/audit.js';
 
@@ -20,7 +21,16 @@ export class AuditLogTailer {
   }
 
   start(): void {
-    this.watcher = watch(this.auditLogPath, () => this.readNewEntries());
+    // Watch the parent directory rather than the file directly.
+    // On macOS, fs.watch() on a file uses kqueue which can miss events;
+    // watching the directory via FSEvents is more reliable cross-platform.
+    const dir = dirname(this.auditLogPath);
+    const filename = basename(this.auditLogPath);
+    this.watcher = watch(dir, (_eventType, watchedFilename) => {
+      if (watchedFilename === filename) {
+        this.readNewEntries();
+      }
+    });
   }
 
   stop(): void {
