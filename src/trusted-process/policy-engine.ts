@@ -32,7 +32,6 @@ import {
   SANDBOX_SAFE_PATH_ROLES,
   type RoleDefinition,
 } from '../types/argument-roles.js';
-import { getSessionsDir } from '../config/paths.js';
 import { domainMatchesAllowlist, isIpAddress, resolveGitRemote, extractDomainForRole } from './domain-utils.js';
 import { getListMatcher } from '../pipeline/dynamic-list-types.js';
 
@@ -324,8 +323,8 @@ export class PolicyEngine {
   ) {
     this.compiledPolicy = dynamicLists ? expandListReferences(compiledPolicy, dynamicLists) : compiledPolicy;
     this.protectedPaths = protectedPaths;
-    this.protectedPathExclusions = [resolveRealPath(getSessionsDir())];
     this.allowedDirectory = allowedDirectory;
+    this.protectedPathExclusions = allowedDirectory ? [resolveRealPath(allowedDirectory)] : [];
     this.serverDomainAllowlists = serverDomainAllowlists ?? new Map();
     this.annotationMap = this.buildAnnotationMap(toolAnnotations);
   }
