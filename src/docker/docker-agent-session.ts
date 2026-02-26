@@ -15,7 +15,7 @@
 import { mkdirSync, readdirSync, readFileSync, writeFileSync, existsSync, copyFileSync, rmSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tmpdir, arch } from 'node:os';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import type {
@@ -54,6 +54,8 @@ export interface DockerAgentSessionDeps {
   readonly sandboxDir: string;
   readonly escalationDir: string;
   readonly auditLogPath: string;
+  /** Use TCP transport instead of UDS (macOS Docker Desktop). */
+  readonly useTcp?: boolean;
   readonly onEscalation?: (request: EscalationRequest) => void;
   readonly onEscalationExpired?: () => void;
   readonly onDiagnostic?: (event: DiagnosticEvent) => void;
@@ -72,6 +74,7 @@ export class DockerAgentSession implements Session {
   private readonly sandboxDir: string;
   private readonly escalationDir: string;
   private readonly auditLogPath: string;
+  private readonly useTcp: boolean;
 
   private status: SessionStatus = 'initializing';
   private readonly createdAt: string;
@@ -106,6 +109,7 @@ export class DockerAgentSession implements Session {
     this.sandboxDir = deps.sandboxDir;
     this.escalationDir = deps.escalationDir;
     this.auditLogPath = deps.auditLogPath;
+    this.useTcp = deps.useTcp ?? false;
     this.onEscalation = deps.onEscalation;
     this.onEscalationExpired = deps.onEscalationExpired;
     this.onDiagnostic = deps.onDiagnostic;
@@ -129,45 +133,87 @@ export class DockerAgentSession implements Session {
 
     // 1. Start MCP proxy
     await this.proxy.start();
-    logger.info(`MCP proxy listening on ${this.proxy.socketPath}`);
+    if (this.useTcp && this.proxy.port !== undefined) {
+      logger.info(`MCP proxy listening on 127.0.0.1:${this.proxy.port}`);
+    } else {
+      logger.info(`MCP proxy listening on ${this.proxy.socketPath}`);
+    }
 
-    // 2. Start MITM proxy (UDS)
+    // 2. Start MITM proxy
     const mitmAddr = await this.mitmProxy.start();
-    logger.info(`MITM proxy listening on ${mitmAddr.socketPath}`);
+    if (mitmAddr.port !== undefined) {
+      logger.info(`MITM proxy listening on 127.0.0.1:${mitmAddr.port}`);
+    } else {
+      logger.info(`MITM proxy listening on ${mitmAddr.socketPath}`);
+    }
 
     // 3. Query proxy for available tools
     const tools = await this.proxy.listTools();
     logger.info(`Available tools: ${tools.map((t) => t.name).join(', ')}`);
 
     // 4. Generate orientation
-    const { systemPrompt } = prepareSession(this.adapter, tools, this.sessionDir, this.config, this.sandboxDir);
+    // In TCP mode, the container reaches the MCP proxy via host.docker.internal
+    const proxyAddress =
+      this.useTcp && this.proxy.port !== undefined
+        ? `host.docker.internal:${this.proxy.port}`
+        : undefined;
+    const { systemPrompt } = prepareSession(
+      this.adapter,
+      tools,
+      this.sessionDir,
+      this.config,
+      this.sandboxDir,
+      proxyAddress,
+    );
     this.systemPrompt = systemPrompt;
 
     // 5. Ensure Docker image exists (build if needed, with CA cert)
     const image = await this.adapter.getImage();
     await this.ensureImage(image);
 
-    // 6. Create and start container (--network=none + UDS for MITM proxy)
+    // 6. Create and start container
     const shortId = this.sessionId.substring(0, 12);
-
-    const env = {
-      ...this.adapter.buildEnv(this.config, this.fakeKeys),
-      HTTPS_PROXY: 'http://127.0.0.1:18080',
-      HTTP_PROXY: 'http://127.0.0.1:18080',
-    };
-
     const orientationDir = resolve(this.sessionDir, 'orientation');
-    this.containerId = await this.docker.create({
-      image,
-      name: `ironcurtain-${shortId}`,
-      network: 'none',
-      mounts: [
+
+    let env: Record<string, string>;
+    let network: string;
+    let mounts: { source: string; target: string; readonly: boolean }[];
+
+    if (this.useTcp && mitmAddr.port !== undefined) {
+      // macOS TCP mode: bridge network, MITM proxy via host.docker.internal
+      env = {
+        ...this.adapter.buildEnv(this.config, this.fakeKeys),
+        HTTPS_PROXY: `http://host.docker.internal:${mitmAddr.port}`,
+        HTTP_PROXY: `http://host.docker.internal:${mitmAddr.port}`,
+      };
+      network = 'bridge';
+      mounts = [
+        { source: this.sandboxDir, target: '/workspace', readonly: false },
+        // No session dir mount needed — sockets are replaced by TCP
+        { source: orientationDir, target: '/etc/ironcurtain', readonly: true },
+      ];
+    } else {
+      // Linux UDS mode: --network=none, session dir with sockets mounted
+      env = {
+        ...this.adapter.buildEnv(this.config, this.fakeKeys),
+        HTTPS_PROXY: 'http://127.0.0.1:18080',
+        HTTP_PROXY: 'http://127.0.0.1:18080',
+      };
+      network = 'none';
+      mounts = [
         { source: this.sandboxDir, target: '/workspace', readonly: false },
         // Session dir contains proxy.sock and mitm-proxy.sock — directory mount
         // exposes both to the container (file mounts for UDS don't work on macOS Docker Desktop).
         { source: this.sessionDir, target: '/run/ironcurtain', readonly: false },
         { source: orientationDir, target: '/etc/ironcurtain', readonly: true },
-      ],
+      ];
+    }
+
+    this.containerId = await this.docker.create({
+      image,
+      name: `ironcurtain-${shortId}`,
+      network,
+      mounts,
       env,
       command: ['sleep', 'infinity'],
       sessionLabel: this.sessionId,
@@ -401,10 +447,16 @@ export class DockerAgentSession implements Session {
     const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
     const dockerDir = resolve(packageRoot, 'docker');
 
+    // On arm64 hosts (Apple Silicon), use the lightweight arm64-native Dockerfile
+    // instead of the amd64-only devcontainers/universal image.
+    const baseDockerfile = arch() === 'arm64' && existsSync(resolve(dockerDir, 'Dockerfile.base.arm64'))
+      ? 'Dockerfile.base.arm64'
+      : 'Dockerfile.base';
+
     // Build base image with CA cert baked in (if stale or missing)
     const baseImage = 'ironcurtain-base:latest';
-    const baseBuildHash = this.computeBuildHash(dockerDir, ['Dockerfile.base']);
-    const baseRebuilt = await this.ensureBaseImage(baseImage, dockerDir, baseBuildHash);
+    const baseBuildHash = this.computeBuildHash(dockerDir, [baseDockerfile]);
+    const baseRebuilt = await this.ensureBaseImage(baseImage, dockerDir, baseDockerfile, baseBuildHash);
 
     // Build the agent-specific image (if stale, missing, or base was rebuilt)
     const agentName = image.replace('ironcurtain-', '').replace(':latest', '');
@@ -430,7 +482,12 @@ export class DockerAgentSession implements Session {
    * Ensures the base image exists and is up-to-date.
    * Returns true if the base image was (re)built.
    */
-  private async ensureBaseImage(baseImage: string, dockerDir: string, buildHash: string): Promise<boolean> {
+  private async ensureBaseImage(
+    baseImage: string,
+    dockerDir: string,
+    dockerfile: string,
+    buildHash: string,
+  ): Promise<boolean> {
     if (!(await this.isImageStale(baseImage, buildHash))) return false;
 
     logger.info('Building base Docker image (this may take a while on first run)...');
@@ -445,7 +502,7 @@ export class DockerAgentSession implements Session {
       // Copy CA cert into build context
       copyFileSync(this.ca.certPath, resolve(tmpContext, 'ironcurtain-ca-cert.pem'));
 
-      await this.docker.buildImage(baseImage, resolve(tmpContext, 'Dockerfile.base'), tmpContext, {
+      await this.docker.buildImage(baseImage, resolve(tmpContext, dockerfile), tmpContext, {
         'ironcurtain.build-hash': buildHash,
       });
     } finally {

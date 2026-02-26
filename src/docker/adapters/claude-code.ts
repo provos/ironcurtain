@@ -72,12 +72,14 @@ export const claudeCodeAdapter: AgentAdapter = {
   },
 
   // Generates MCP config file passed via --mcp-config on the command line.
+  // socketPath is either a UDS path or a TCP host:port address.
   generateMcpConfig(socketPath: string): AgentConfigFile[] {
+    const isTcp = socketPath.includes(':');
     const mcpConfig = {
       mcpServers: {
         ironcurtain: {
           command: 'socat',
-          args: ['STDIO', `UNIX-CONNECT:${socketPath}`],
+          args: isTcp ? ['STDIO', `TCP:${socketPath}`] : ['STDIO', `UNIX-CONNECT:${socketPath}`],
         },
       },
     };

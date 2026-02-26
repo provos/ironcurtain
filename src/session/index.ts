@@ -110,9 +110,11 @@ async function createDockerSession(
   const { generateFakeKey } = await import('../docker/fake-keys.js');
   const { createDockerManager } = await import('../docker/docker-manager.js');
   const { DockerAgentSession } = await import('../docker/docker-agent-session.js');
+  const { useTcpTransport } = await import('../docker/platform.js');
 
   await registerBuiltinAdapters();
   const adapter = getAgent(agentId);
+  const useTcp = useTcpTransport();
   const socketPath = resolve(sessionConfig.sessionDir, 'proxy.sock');
 
   // Build the same set of env vars the built-in sandbox passes to the proxy.
@@ -148,6 +150,7 @@ async function createDockerSession(
   const proxy = createManagedProxy({
     socketPath,
     env: proxyEnv,
+    listenMode: useTcp ? 'tcp' : 'uds',
   });
 
   // Load or generate the IronCurtain CA for TLS termination
@@ -168,12 +171,17 @@ async function createDockerSession(
     providerMappings.push({ config: providerConfig, fakeKey, realKey });
   }
 
-  const mitmProxySocketPath = resolve(sessionConfig.sessionDir, 'mitm-proxy.sock');
-  const mitmProxy = createMitmProxy({
-    socketPath: mitmProxySocketPath,
-    ca,
-    providers: providerMappings,
-  });
+  const mitmProxy = useTcp
+    ? createMitmProxy({
+        listenPort: 0,
+        ca,
+        providers: providerMappings,
+      })
+    : createMitmProxy({
+        socketPath: resolve(sessionConfig.sessionDir, 'mitm-proxy.sock'),
+        ca,
+        providers: providerMappings,
+      });
   const docker = createDockerManager();
 
   const session = new DockerAgentSession({
@@ -189,6 +197,7 @@ async function createDockerSession(
     sandboxDir: sessionConfig.sandboxDir,
     escalationDir: sessionConfig.escalationDir,
     auditLogPath: sessionConfig.auditLogPath,
+    useTcp,
     onEscalation: options.onEscalation,
     onEscalationExpired: options.onEscalationExpired,
     onDiagnostic: options.onDiagnostic,

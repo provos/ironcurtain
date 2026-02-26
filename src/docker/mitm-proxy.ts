@@ -29,15 +29,17 @@ import {
 import * as logger from '../logger.js';
 
 export interface MitmProxy {
-  /** Start listening on the UDS. Pre-warms cert cache for all providers. */
-  start(): Promise<{ socketPath: string }>;
+  /** Start listening on the UDS or TCP port. Pre-warms cert cache for all providers. */
+  start(): Promise<{ socketPath?: string; port?: number }>;
   /** Stop the proxy and close all connections. */
   stop(): Promise<void>;
 }
 
 export interface MitmProxyOptions {
-  /** Absolute path for the Unix domain socket. */
-  readonly socketPath: string;
+  /** Absolute path for the Unix domain socket (UDS mode). Omit for TCP mode. */
+  readonly socketPath?: string;
+  /** TCP port to listen on (0 for OS-assigned). Omit for UDS mode. */
+  readonly listenPort?: number;
   /** CA certificate and key for signing per-host certs. */
   readonly ca: CertificateAuthority;
   /**
@@ -369,23 +371,40 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     innerServer.emit('connection', tlsSocket);
   });
 
+  const useTcp = options.listenPort !== undefined;
+
   return {
     async start() {
-      // Clean up stale socket file from a previous run
-      if (existsSync(options.socketPath)) {
-        unlinkSync(options.socketPath);
-      }
-
       // Pre-warm cert cache for all configured providers
       for (const mapping of options.providers) {
         getOrCreateSecureContext(mapping.config.host);
       }
 
+      if (useTcp) {
+        // TCP mode: listen on host:port
+        return new Promise((resolve, reject) => {
+          const onError = reject;
+          outerServer.listen(options.listenPort, '127.0.0.1', () => {
+            outerServer.removeListener('error', onError);
+            const addr = outerServer.address();
+            const port = addr && typeof addr === 'object' ? addr.port : (options.listenPort ?? 0);
+            resolve({ port });
+          });
+          outerServer.once('error', onError);
+        });
+      }
+
+      // UDS mode: listen on socket path
+      const socketPath = options.socketPath ?? '';
+      if (existsSync(socketPath)) {
+        unlinkSync(socketPath);
+      }
+
       return new Promise((resolve, reject) => {
         const onError = reject;
-        outerServer.listen(options.socketPath, () => {
+        outerServer.listen(socketPath, () => {
           outerServer.removeListener('error', onError);
-          resolve({ socketPath: options.socketPath });
+          resolve({ socketPath });
         });
         outerServer.once('error', onError);
       });
@@ -422,13 +441,15 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
       innerServer.closeAllConnections();
       innerServer.close();
 
-      // 5. Clean up socket file
-      try {
-        if (existsSync(options.socketPath)) {
-          unlinkSync(options.socketPath);
+      // 5. Clean up socket file (UDS mode only)
+      if (!useTcp && options.socketPath) {
+        try {
+          if (existsSync(options.socketPath)) {
+            unlinkSync(options.socketPath);
+          }
+        } catch {
+          // Ignore cleanup errors
         }
-      } catch {
-        // Ignore cleanup errors
       }
     },
   };
