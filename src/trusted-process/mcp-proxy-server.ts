@@ -268,6 +268,7 @@ async function main(): Promise<void> {
   const protectedPathsJson = process.env.PROTECTED_PATHS ?? '[]';
   const sessionLogPath = process.env.SESSION_LOG_PATH;
   const allowedDirectory = process.env.ALLOWED_DIRECTORY;
+  const containerWorkspaceDir = process.env.CONTAINER_WORKSPACE_DIR;
   const escalationDir = process.env.ESCALATION_DIR;
 
   if (!serversConfigJson) {
@@ -506,7 +507,12 @@ async function main(): Promise<void> {
         isError: true,
       };
     }
-    const { argsForTransport, argsForPolicy } = prepareToolArgs(rawArgs, annotation, allowedDirectory);
+    const { argsForTransport, argsForPolicy } = prepareToolArgs(
+      rawArgs,
+      annotation,
+      allowedDirectory,
+      containerWorkspaceDir,
+    );
 
     const request: ToolCallRequest = {
       requestId: uuidv4(),

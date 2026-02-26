@@ -129,6 +129,7 @@ async function createDockerSession(
     ESCALATION_DIR: sessionConfig.escalationDir,
     ESCALATION_TIMEOUT_SECONDS: String(config.escalationTimeoutSeconds),
     SANDBOX_POLICY: sessionConfig.config.sandboxPolicy ?? 'warn',
+    CONTAINER_WORKSPACE_DIR: '/workspace',
   };
 
   if (sessionConfig.config.sessionLogPath) {

@@ -258,6 +258,19 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     }
 
     if (needsRewrite) {
+      // Reject requests with content-encoding we cannot parse (e.g. gzip).
+      // Without this, a compressed body would fail JSON.parse and be forwarded
+      // as-is, bypassing the rewriter while the upstream decompresses it.
+      const contentEncoding = clientReq.headers['content-encoding']?.toLowerCase();
+      if (contentEncoding && contentEncoding !== 'identity') {
+        logger.info(
+          `[mitm-proxy] REJECTED ${method} ${targetHost}${path} - unsupported Content-Encoding: ${contentEncoding}`,
+        );
+        clientRes.writeHead(415, { 'Content-Type': 'text/plain' });
+        clientRes.end(`Unsupported Content-Encoding for this endpoint: ${contentEncoding}`);
+        return;
+      }
+
       // shouldRewriteBody guarantees requestRewriter, method, and path are defined
       const rewriter = provider.config.requestRewriter as RequestBodyRewriter;
       const reqMethod = method as string;
