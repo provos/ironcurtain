@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { createServer, type Server as HttpServer } from 'node:http';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { stripHtmlFallback } from '../src/servers/fetch-server.js';
 
 const TEST_HTML = `<!DOCTYPE html>
 <html><head><title>Test Page</title></head>
@@ -371,5 +372,46 @@ describe('fetch-server', () => {
       expect(result.isError).toBe(true);
       expect(resultText(result)).toContain('Missing required parameter: query');
     });
+  });
+});
+
+describe('stripHtmlFallback', () => {
+  it('strips simple boilerplate tags and their content', () => {
+    const html = '<p>Hello</p><script>alert(1)</script><p>World</p>';
+    expect(stripHtmlFallback(html)).toBe('HelloWorld');
+  });
+
+  it('handles nested script tag bypass attempt', () => {
+    // After one pass: "<script>alert(1)</script>" — the loop catches this
+    const html = '<scri<script>inner</script>pt>alert(1)</script>';
+    const result = stripHtmlFallback(html);
+    expect(result).not.toContain('<script');
+    expect(result).not.toContain('alert(1)');
+  });
+
+  it('handles nested style tag bypass attempt', () => {
+    const html = '<sty<style>.x{}</style>le>body{display:none}</style><p>visible</p>';
+    const result = stripHtmlFallback(html);
+    expect(result).not.toContain('<style');
+    expect(result).not.toContain('display:none');
+    expect(result).toContain('visible');
+  });
+
+  it('handles nested iframe tag bypass attempt', () => {
+    const html = '<ifra<iframe src="x"></iframe>me src="evil"></iframe><p>safe</p>';
+    const result = stripHtmlFallback(html);
+    expect(result).not.toContain('<iframe');
+    expect(result).not.toContain('evil');
+    expect(result).toContain('safe');
+  });
+
+  it('decodes HTML entities', () => {
+    const html = '<p>A &amp; B &lt; C &gt; D &quot;E&quot; &#39;F&#39;</p>';
+    expect(stripHtmlFallback(html)).toBe('A & B < C > D "E" \'F\'');
+  });
+
+  it('collapses whitespace', () => {
+    const html = '<p>  lots   of   space  </p>';
+    expect(stripHtmlFallback(html)).toBe('lots of space');
   });
 });

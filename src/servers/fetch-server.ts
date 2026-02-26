@@ -129,6 +129,30 @@ function htmlToMarkdown(html: string): string {
 }
 
 /**
+ * Regex-based HTML-to-text fallback. Loops boilerplate tag removal until
+ * stable to prevent nested-tag bypasses (e.g. "<scri<script>...</script>pt>"
+ * reconstructing after a single pass), then strips all remaining tags.
+ */
+export function stripHtmlFallback(html: string): string {
+  let stripped = html;
+  let prev: string;
+  do {
+    prev = stripped;
+    stripped = stripped.replace(BOILERPLATE_TAG_RE, '');
+  } while (stripped !== prev);
+  return stripped
+    .replace(/<[^>]+>/g, '')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&nbsp;/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
  * Strips boilerplate elements and returns plain text using JSDOM for
  * reliable entity decoding and element removal.
  */
@@ -143,18 +167,7 @@ function htmlToText(html: string): string {
     // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- defensive: DOM body may be null at runtime
     return (doc.body?.textContent ?? '').replace(/\s+/g, ' ').trim();
   } catch {
-    // Fallback: regex-based stripping with limited entity decoding
-    return html
-      .replace(BOILERPLATE_TAG_RE, '')
-      .replace(/<[^>]+>/g, '')
-      .replace(/&amp;/g, '&')
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>')
-      .replace(/&quot;/g, '"')
-      .replace(/&#39;/g, "'")
-      .replace(/&nbsp;/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
+    return stripHtmlFallback(html);
   } finally {
     dom?.window.close();
   }
