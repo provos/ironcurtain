@@ -28,3 +28,6 @@ Thumbs.db
 
 # Out of repo references
 *-reference
+
+# Test Coverage
+coverage/

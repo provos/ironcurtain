@@ -41,6 +41,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { appendFileSync, existsSync, mkdtempSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { v4 as uuidv4 } from 'uuid';
 import { loadGeneratedPolicy, extractServerDomainAllowlists, getPackageGeneratedDir } from '../config/index.js';
@@ -58,7 +59,7 @@ import {
   annotateSandboxViolation,
   type ResolvedSandboxConfig,
 } from './sandbox-integration.js';
-import type { ToolCallRequest } from '../types/mcp.js';
+import type { ToolCallRequest, PolicyDecision } from '../types/mcp.js';
 import type { AuditEntry } from '../types/audit.js';
 import { ROOTS_REFRESH_TIMEOUT_MS, type McpRoot } from './mcp-client-manager.js';
 import { CallCircuitBreaker } from './call-circuit-breaker.js';
@@ -70,7 +71,7 @@ import type { LanguageModelV3 } from '@ai-sdk/provider';
 import type { MCPServerConfig, SandboxAvailabilityPolicy } from '../config/types.js';
 import { VERSION } from '../version.js';
 
-interface ProxiedTool {
+export interface ProxiedTool {
   serverName: string;
   name: string;
   description?: string;
@@ -85,7 +86,7 @@ interface EscalationFileRequest {
   reason: string;
 }
 
-interface ClientState {
+export interface ClientState {
   client: Client;
   roots: McpRoot[];
   rootsRefreshed?: () => void;
@@ -261,7 +262,55 @@ async function createAutoApproveModel(): Promise<LanguageModelV3 | null> {
   }
 }
 
-async function main(): Promise<void> {
+// ── Exported types for extracted functions ─────────────────────────────
+
+/** Parsed environment configuration for the proxy server. */
+export interface ProxyEnvConfig {
+  auditLogPath: string;
+  serversConfig: Record<string, MCPServerConfig>;
+  generatedDir: string;
+  protectedPaths: string[];
+  sessionLogPath: string | undefined;
+  allowedDirectory: string | undefined;
+  containerWorkspaceDir: string | undefined;
+  escalationDir: string | undefined;
+  serverCredentials: Record<string, string>;
+  sandboxPolicy: SandboxAvailabilityPolicy;
+}
+
+/** Result of sandbox availability validation. */
+export interface SandboxValidationResult {
+  sandboxAvailable: boolean;
+}
+
+/** MCP tool call response shape returned by handleCallTool. */
+export interface ToolCallResponse {
+  content: unknown;
+  isError?: boolean;
+  [key: string]: unknown;
+}
+
+/** Dependencies injected into handleCallTool for testability. */
+export interface CallToolDeps {
+  toolMap: Map<string, ProxiedTool>;
+  policyEngine: PolicyEngine;
+  auditLog: AuditLog;
+  circuitBreaker: CallCircuitBreaker;
+  clientStates: Map<string, ClientState>;
+  resolvedSandboxConfigs: Map<string, ResolvedSandboxConfig>;
+  allowedDirectory: string | undefined;
+  containerWorkspaceDir: string | undefined;
+  escalationDir: string | undefined;
+  autoApproveModel: LanguageModelV3 | null;
+}
+
+// ── Extracted functions ────────────────────────────────────────────────
+
+/**
+ * Reads and validates proxy environment variables.
+ * Returns a typed config object or calls process.exit(1) on missing required vars.
+ */
+export function parseProxyEnvConfig(): ProxyEnvConfig {
   const auditLogPath = process.env.AUDIT_LOG_PATH ?? './audit.jsonl';
   const serversConfigJson = process.env.MCP_SERVERS_CONFIG;
   const generatedDir = process.env.GENERATED_DIR;
@@ -294,7 +343,6 @@ async function main(): Promise<void> {
   const protectedPaths = JSON.parse(protectedPathsJson) as string[];
 
   // When SERVER_FILTER is set, only connect to that single backend server.
-  // This allows per-server proxy processes with clean tool naming.
   const serverFilter = process.env.SERVER_FILTER;
   const serversConfig: Record<string, MCPServerConfig> = serverFilter
     ? { [serverFilter]: allServersConfig[serverFilter] }
@@ -305,6 +353,389 @@ async function main(): Promise<void> {
     process.stderr.write(`SERVER_FILTER: unknown server "${serverFilter}"\n`);
     process.exit(1);
   }
+
+  return {
+    auditLogPath,
+    serversConfig,
+    generatedDir,
+    protectedPaths,
+    sessionLogPath,
+    allowedDirectory,
+    containerWorkspaceDir,
+    escalationDir,
+    serverCredentials,
+    sandboxPolicy,
+  };
+}
+
+/**
+ * Validates sandbox availability against the configured policy.
+ * Logs warnings to session log. Throws when enforce mode is active
+ * but sandboxing is unavailable.
+ */
+export function validateSandboxAvailability(
+  sandboxPolicy: SandboxAvailabilityPolicy,
+  sessionLogPath: string | undefined,
+  platform: string,
+): SandboxValidationResult {
+  const { platformSupported, errors: depErrors, warnings: depWarnings } = checkSandboxAvailability();
+
+  if (sessionLogPath) {
+    for (const warning of depWarnings) {
+      logToSessionFile(sessionLogPath, `[sandbox] WARNING: ${warning}`);
+    }
+  }
+
+  if (sandboxPolicy === 'enforce' && (!platformSupported || depErrors.length > 0)) {
+    const reasons = !platformSupported ? [`Platform ${platform} not supported`] : depErrors;
+    throw new Error(
+      `[sandbox] FATAL: sandboxPolicy is "enforce" but sandboxing is unavailable:\n` +
+        reasons.map((r) => `  - ${r}`).join('\n') +
+        '\n' +
+        `Install with: sudo apt-get install -y bubblewrap socat`,
+    );
+  }
+
+  const sandboxAvailable = platformSupported && depErrors.length === 0;
+
+  if (!sandboxAvailable && sessionLogPath) {
+    const missing = depErrors.length > 0 ? depErrors.join(', ') : `platform ${platform}`;
+    logToSessionFile(
+      sessionLogPath,
+      `[sandbox] WARNING: OS-level sandboxing unavailable (${missing}). ` +
+        `Servers will run without OS containment. ` +
+        `Set SANDBOX_POLICY=enforce to require sandboxing.`,
+    );
+  }
+
+  return { sandboxAvailable };
+}
+
+/**
+ * Resolves per-server sandbox configurations and writes srt settings
+ * files for sandboxed servers. Returns the config map and the temp
+ * settings directory path.
+ */
+export function resolveServerSandboxConfigs(
+  serversConfig: Record<string, MCPServerConfig>,
+  allowedDirectory: string | undefined,
+  sandboxAvailable: boolean,
+  sandboxPolicy: SandboxAvailabilityPolicy,
+): { resolvedSandboxConfigs: Map<string, ResolvedSandboxConfig>; settingsDir: string } {
+  const resolvedSandboxConfigs = new Map<string, ResolvedSandboxConfig>();
+  const settingsDir = mkdtempSync(join(tmpdir(), 'ironcurtain-srt-'));
+
+  for (const [serverName, config] of Object.entries(serversConfig)) {
+    const resolved = resolveSandboxConfig(config, allowedDirectory ?? '/tmp', sandboxAvailable, sandboxPolicy);
+    resolvedSandboxConfigs.set(serverName, resolved);
+
+    if (resolved.sandboxed) {
+      writeServerSettings(serverName, resolved.config, settingsDir);
+    }
+  }
+
+  return { resolvedSandboxConfigs, settingsDir };
+}
+
+/** Builds a lookup map from tool name to ProxiedTool for routing. */
+export function buildToolMap(allTools: ProxiedTool[]): Map<string, ProxiedTool> {
+  const toolMap = new Map<string, ProxiedTool>();
+  for (const tool of allTools) {
+    toolMap.set(tool.name, tool);
+  }
+  return toolMap;
+}
+
+/**
+ * Creates an audit entry and logs it. Extracted so the audit shape
+ * construction is testable independently.
+ */
+export function buildAuditEntry(
+  request: ToolCallRequest,
+  argsForTransport: Record<string, unknown>,
+  policyDecision: PolicyDecision,
+  result: AuditEntry['result'],
+  durationMs: number,
+  options: {
+    escalationResult?: 'approved' | 'denied';
+    sandboxed?: boolean;
+    autoApproved?: boolean;
+  },
+): AuditEntry {
+  return {
+    timestamp: request.timestamp,
+    requestId: request.requestId,
+    serverName: request.serverName,
+    toolName: request.toolName,
+    arguments: argsForTransport,
+    policyDecision,
+    escalationResult: options.escalationResult,
+    result,
+    durationMs,
+    sandboxed: options.sandboxed || undefined,
+    autoApproved: options.autoApproved || undefined,
+  };
+}
+
+/**
+ * Handles a single tool call request: policy evaluation, escalation,
+ * circuit breaker check, and forwarding to the real MCP server.
+ *
+ * This is the core security logic extracted from the CallTool handler
+ * for independent unit testing.
+ */
+export async function handleCallTool(
+  toolName: string,
+  rawArgs: Record<string, unknown>,
+  deps: CallToolDeps,
+): Promise<ToolCallResponse> {
+  const toolInfo = deps.toolMap.get(toolName);
+
+  if (!toolInfo) {
+    return {
+      content: [{ type: 'text', text: `Unknown tool: ${toolName}` }],
+      isError: true,
+    };
+  }
+
+  // Annotation-driven normalization: split into transport vs policy args
+  const annotation = deps.policyEngine.getAnnotation(toolInfo.serverName, toolInfo.name);
+  if (!annotation) {
+    return {
+      content: [
+        {
+          type: 'text',
+          text: `Missing annotation for tool: ${toolInfo.serverName}__${toolInfo.name}. Re-run 'ironcurtain annotate-tools' to update.`,
+        },
+      ],
+      isError: true,
+    };
+  }
+  const { argsForTransport, argsForPolicy } = prepareToolArgs(
+    rawArgs,
+    annotation,
+    deps.allowedDirectory,
+    deps.containerWorkspaceDir,
+  );
+
+  const request: ToolCallRequest = {
+    requestId: uuidv4(),
+    serverName: toolInfo.serverName,
+    toolName: toolInfo.name,
+    arguments: argsForPolicy,
+    timestamp: new Date().toISOString(),
+  };
+
+  const evaluation = deps.policyEngine.evaluate(request);
+  const policyDecision: PolicyDecision = {
+    status: evaluation.decision,
+    rule: evaluation.rule,
+    reason: evaluation.reason,
+  };
+
+  let escalationResult: 'approved' | 'denied' | undefined;
+  let autoApproved = false;
+
+  const serverSandboxConfig = deps.resolvedSandboxConfigs.get(toolInfo.serverName);
+  const serverIsSandboxed = serverSandboxConfig?.sandboxed === true;
+
+  function logAudit(
+    result: AuditEntry['result'],
+    durationMs: number,
+    overrideEscalation?: 'approved' | 'denied',
+  ): void {
+    const entry = buildAuditEntry(request, argsForTransport, policyDecision, result, durationMs, {
+      escalationResult: overrideEscalation ?? escalationResult,
+      sandboxed: serverIsSandboxed,
+      autoApproved,
+    });
+    deps.auditLog.log(entry);
+  }
+
+  if (evaluation.decision === 'escalate') {
+    if (!deps.escalationDir) {
+      logAudit({ status: 'denied', error: evaluation.reason }, 0, 'denied');
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `ESCALATION REQUIRED: ${evaluation.reason}. Action denied (no escalation handler).`,
+          },
+        ],
+        isError: true,
+      };
+    }
+
+    // Try auto-approve before falling through to human escalation
+    if (deps.autoApproveModel) {
+      const userMessage = readUserContext(deps.escalationDir);
+      if (userMessage) {
+        const autoResult = await autoApprove(
+          {
+            userMessage,
+            toolName: `${toolInfo.serverName}/${toolInfo.name}`,
+            escalationReason: evaluation.reason,
+            arguments: extractArgsForAutoApprove(argsForPolicy, annotation),
+          },
+          deps.autoApproveModel,
+        );
+
+        if (autoResult.decision === 'approve') {
+          autoApproved = true;
+          escalationResult = 'approved';
+          policyDecision.status = 'allow';
+          policyDecision.reason = `Auto-approved: ${autoResult.reasoning}`;
+        }
+      }
+    }
+
+    if (!autoApproved) {
+      const escalationId = uuidv4();
+      const decision = await waitForEscalationDecision(deps.escalationDir, {
+        escalationId,
+        serverName: request.serverName,
+        toolName: request.toolName,
+        arguments: argsForTransport,
+        reason: evaluation.reason,
+      });
+
+      if (decision === 'denied') {
+        logAudit({ status: 'denied', error: evaluation.reason }, 0, 'denied');
+        return {
+          content: [{ type: 'text', text: `ESCALATION DENIED: ${evaluation.reason}` }],
+          isError: true,
+        };
+      }
+
+      escalationResult = 'approved';
+      policyDecision.status = 'allow';
+      policyDecision.reason = 'Approved by human during escalation';
+    }
+
+    // Expand roots for approved path arguments only (skip URLs, opaques)
+    const state = deps.clientStates.get(toolInfo.serverName);
+    if (state) {
+      const pathValues = extractAnnotatedPaths(argsForTransport, annotation, getPathRoles());
+      for (const p of pathValues) {
+        await addRootToClient(state, {
+          uri: `file://${directoryForPath(p)}`,
+          name: 'escalation-approved',
+        });
+      }
+    }
+  }
+
+  if (evaluation.decision === 'deny') {
+    logAudit({ status: 'denied', error: evaluation.reason }, 0);
+    return {
+      content: [{ type: 'text', text: `DENIED: ${evaluation.reason}` }],
+      isError: true,
+    };
+  }
+
+  // Circuit breaker: deny if the same tool+args is called too many times
+  const cbVerdict = deps.circuitBreaker.check(toolInfo.name, argsForTransport);
+  if (!cbVerdict.allowed) {
+    logAudit({ status: 'denied', error: cbVerdict.reason }, 0);
+    return {
+      content: [{ type: 'text', text: cbVerdict.reason }],
+      isError: true,
+    };
+  }
+
+  // Policy allows -- forward to the real MCP server with transport args
+  const startTime = Date.now();
+  try {
+    const clientState = deps.clientStates.get(toolInfo.serverName);
+    if (!clientState) {
+      const err = `Internal error: no client connection for server "${toolInfo.serverName}"`;
+      logAudit({ status: 'denied', error: err }, 0);
+      return { content: [{ type: 'text', text: err }], isError: true };
+    }
+    const client = clientState.client;
+
+    // TODO(workaround): Remove once @cyanheads/git-mcp-server fixes outputSchema declarations.
+    // Uses CompatibilityCallToolResultSchema for permissive response parsing.
+    const result = await client.callTool(
+      {
+        name: toolInfo.name,
+        arguments: argsForTransport,
+      },
+      CompatibilityCallToolResultSchema,
+      { timeout: getEscalationTimeoutMs() },
+    );
+
+    if (result.isError) {
+      const errorText = extractTextFromContent(result.content) ?? 'Unknown tool error';
+      const errorMessage = annotateSandboxViolation(errorText, serverIsSandboxed);
+      logAudit({ status: 'error', error: errorMessage }, Date.now() - startTime);
+      return { content: result.content, isError: true };
+    }
+
+    logAudit({ status: 'success' }, Date.now() - startTime);
+    return { content: result.content };
+  } catch (err) {
+    const rawError = err instanceof Error ? err.message : String(err);
+    const errorMessage = annotateSandboxViolation(rawError, serverIsSandboxed);
+    logAudit({ status: 'error', error: errorMessage }, Date.now() - startTime);
+    return {
+      content: [{ type: 'text', text: `Error: ${errorMessage}` }],
+      isError: true,
+    };
+  }
+}
+
+/**
+ * Selects and validates the proxy transport based on environment variables.
+ * Returns 'tcp', 'uds', or 'stdio' along with the transport options.
+ */
+export function selectTransportConfig():
+  | {
+      kind: 'tcp';
+      port: number;
+      portFilePath: string | undefined;
+    }
+  | {
+      kind: 'uds';
+      socketPath: string;
+    }
+  | {
+      kind: 'stdio';
+    } {
+  const proxyTcpPort = process.env.PROXY_TCP_PORT;
+  const proxySocketPath = process.env.PROXY_SOCKET_PATH;
+
+  if (proxyTcpPort) {
+    const parsedPort = parseInt(proxyTcpPort, 10);
+    if (!Number.isFinite(parsedPort) || parsedPort < 0 || parsedPort > 65535) {
+      throw new Error(`Invalid PROXY_TCP_PORT value "${proxyTcpPort}". Expected an integer between 0 and 65535.`);
+    }
+    return { kind: 'tcp', port: parsedPort, portFilePath: process.env.PROXY_PORT_FILE };
+  }
+
+  if (proxySocketPath) {
+    return { kind: 'uds', socketPath: proxySocketPath };
+  }
+
+  return { kind: 'stdio' };
+}
+
+// ── main() -- thin orchestrator ────────────────────────────────────────
+
+async function main(): Promise<void> {
+  const envConfig = parseProxyEnvConfig();
+  const {
+    auditLogPath,
+    serversConfig,
+    generatedDir,
+    protectedPaths,
+    sessionLogPath,
+    allowedDirectory,
+    containerWorkspaceDir,
+    escalationDir,
+    serverCredentials,
+    sandboxPolicy,
+  } = envConfig;
 
   const { compiledPolicy, toolAnnotations, dynamicLists } = loadGeneratedPolicy(generatedDir, getPackageGeneratedDir());
 
@@ -320,60 +751,22 @@ async function main(): Promise<void> {
   const auditLog = new AuditLog(auditLogPath);
   const circuitBreaker = new CallCircuitBreaker();
 
-  // ── Auto-approve model setup (once at startup) ──────────────────────
   const autoApproveModel = await createAutoApproveModel();
 
-  // Compute initial roots from compiled policy for the MCP Roots protocol
   const policyRoots = extractPolicyRoots(compiledPolicy, allowedDirectory ?? '/tmp');
   const mcpRoots = toMcpRoots(policyRoots);
 
-  // ── Sandbox availability check (once for all servers) ──────────────
-  const { platformSupported, errors: depErrors, warnings: depWarnings } = checkSandboxAvailability();
+  // ── Sandbox availability & config resolution ──────────────────────
+  const { sandboxAvailable } = validateSandboxAvailability(sandboxPolicy, sessionLogPath, process.platform);
+  const { resolvedSandboxConfigs, settingsDir } = resolveServerSandboxConfigs(
+    serversConfig,
+    allowedDirectory,
+    sandboxAvailable,
+    sandboxPolicy,
+  );
 
-  if (sessionLogPath) {
-    for (const warning of depWarnings) {
-      logToSessionFile(sessionLogPath, `[sandbox] WARNING: ${warning}`);
-    }
-  }
-
-  if (sandboxPolicy === 'enforce' && (!platformSupported || depErrors.length > 0)) {
-    const reasons = !platformSupported ? [`Platform ${process.platform} not supported`] : depErrors;
-    throw new Error(
-      `[sandbox] FATAL: sandboxPolicy is "enforce" but sandboxing is unavailable:\n` +
-        reasons.map((r) => `  - ${r}`).join('\n') +
-        '\n' +
-        `Install with: sudo apt-get install -y bubblewrap socat`,
-    );
-  }
-
-  const sandboxAvailable = platformSupported && depErrors.length === 0;
-
-  if (!sandboxAvailable && sessionLogPath) {
-    const missing = depErrors.length > 0 ? depErrors.join(', ') : `platform ${process.platform}`;
-    logToSessionFile(
-      sessionLogPath,
-      `[sandbox] WARNING: OS-level sandboxing unavailable (${missing}). ` +
-        `Servers will run without OS containment. ` +
-        `Set SANDBOX_POLICY=enforce to require sandboxing.`,
-    );
-  }
-
-  // ── Resolve sandbox configs and write per-server srt settings ─────
-  const resolvedSandboxConfigs = new Map<string, ResolvedSandboxConfig>();
-  const settingsDir = mkdtempSync(join(tmpdir(), 'ironcurtain-srt-'));
-
-  for (const [serverName, config] of Object.entries(serversConfig)) {
-    const resolved = resolveSandboxConfig(config, allowedDirectory ?? '/tmp', sandboxAvailable, sandboxPolicy);
-    resolvedSandboxConfigs.set(serverName, resolved);
-
-    if (resolved.sandboxed) {
-      writeServerSettings(serverName, resolved.config, settingsDir);
-    }
-  }
-
+  // ── Connect to real MCP servers ───────────────────────────────────
   const clientStates = new Map<string, ClientState>();
-
-  // Connect to real MCP servers as clients, wrapping sandboxed ones with srt
   const allTools: ProxiedTool[] = [];
 
   for (const [serverName, config] of Object.entries(serversConfig)) {
@@ -384,24 +777,12 @@ async function main(): Promise<void> {
     const transport = new StdioClientTransport({
       command: wrapped.command,
       args: wrapped.args,
-      // Always pass full process.env -- never rely on getDefaultEnvironment()
-      // which strips vars that srt and MCP servers may need.
-      // Server credentials are merged last so they override both system env
-      // and static mcp-servers.json env values.
       env: { ...(process.env as Record<string, string>), ...(config.env ?? {}), ...serverCredentials },
-      stderr: 'pipe', // Prevent child server stderr from leaking to the terminal
-      // Sandboxed servers get the sandbox dir as cwd so relative-path writes
-      // (e.g., log files) land inside the writable sandbox instead of failing
-      // with EROFS on the read-only host filesystem.
+      stderr: 'pipe',
       ...(resolved.sandboxed && allowedDirectory ? { cwd: allowedDirectory } : {}),
     });
 
-    // Capture stderr per-server for diagnostic output on connection failure
     let serverStderr = '';
-
-    // Drain the piped stderr to prevent buffer backpressure from blocking
-    // the child process. Write output to the session log if configured.
-    // Known credential values are redacted before writing to the log.
     if (transport.stderr) {
       transport.stderr.on('data', (chunk: Buffer) => {
         const text = chunk.toString();
@@ -421,13 +802,8 @@ async function main(): Promise<void> {
       { capabilities: { roots: { listChanged: true } } },
     );
 
-    // Mutable copy per client -- root expansion pushes to this array
     const state: ClientState = { client, roots: [...mcpRoots] };
 
-    // When the server asks for roots, return the current set.
-    // If a rootsRefreshed callback is registered (from escalation-triggered
-    // root expansion), resolve it so the caller knows the server has
-    // the latest roots.
     client.setRequestHandler(ListRootsRequestSchema, () => {
       if (state.rootsRefreshed) {
         state.rootsRefreshed();
@@ -459,18 +835,12 @@ async function main(): Promise<void> {
     }
   }
 
-  // Build a lookup map for routing tool calls
-  const toolMap = new Map<string, ProxiedTool>();
-  for (const tool of allTools) {
-    toolMap.set(tool.name, tool);
-  }
+  const toolMap = buildToolMap(allTools);
 
-  // Create the proxy MCP server using the low-level Server API
-  // so we can pass through raw JSON schemas without Zod conversion
+  // ── Create the proxy MCP server ───────────────────────────────────
   // eslint-disable-next-line @typescript-eslint/no-deprecated -- intentional use of low-level Server for raw JSON schema passthrough
   const server = new Server({ name: 'ironcurtain-proxy', version: VERSION }, { capabilities: { tools: {} } });
 
-  // Handle tools/list -- return all proxied tool schemas verbatim
   server.setRequestHandler(ListToolsRequestSchema, () => {
     return {
       tools: allTools.map((t) => ({
@@ -481,274 +851,44 @@ async function main(): Promise<void> {
     };
   });
 
-  // Handle tools/call -- evaluate policy, then forward or deny
+  const callToolDeps: CallToolDeps = {
+    toolMap,
+    policyEngine,
+    auditLog,
+    circuitBreaker,
+    clientStates,
+    resolvedSandboxConfigs,
+    allowedDirectory,
+    containerWorkspaceDir,
+    escalationDir,
+    autoApproveModel,
+  };
+
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
-    const toolName = req.params.name;
-    const rawArgs = req.params.arguments ?? {};
-    const toolInfo = toolMap.get(toolName);
-
-    if (!toolInfo) {
-      return {
-        content: [{ type: 'text', text: `Unknown tool: ${toolName}` }],
-        isError: true,
-      };
-    }
-
-    // Annotation-driven normalization: split into transport vs policy args
-    const annotation = policyEngine.getAnnotation(toolInfo.serverName, toolInfo.name);
-    if (!annotation) {
-      return {
-        content: [
-          {
-            type: 'text',
-            text: `Missing annotation for tool: ${toolInfo.serverName}__${toolInfo.name}. Re-run 'ironcurtain annotate-tools' to update.`,
-          },
-        ],
-        isError: true,
-      };
-    }
-    const { argsForTransport, argsForPolicy } = prepareToolArgs(
-      rawArgs,
-      annotation,
-      allowedDirectory,
-      containerWorkspaceDir,
-    );
-
-    const request: ToolCallRequest = {
-      requestId: uuidv4(),
-      serverName: toolInfo.serverName,
-      toolName: toolInfo.name,
-      arguments: argsForPolicy,
-      timestamp: new Date().toISOString(),
-    };
-
-    const evaluation = policyEngine.evaluate(request);
-    const policyDecision = {
-      status: evaluation.decision,
-      rule: evaluation.rule,
-      reason: evaluation.reason,
-    };
-
-    // Tracks the escalation outcome for audit logging when an approved
-    // escalation falls through to the forwarding section below.
-    let escalationResult: 'approved' | 'denied' | undefined;
-
-    // Track whether auto-approver handled this escalation
-    let autoApproved = false;
-
-    // Look up whether this server is sandboxed for audit logging
-    const serverSandboxConfig = resolvedSandboxConfigs.get(toolInfo.serverName);
-    const serverIsSandboxed = serverSandboxConfig?.sandboxed === true;
-
-    // Audit log records argsForTransport (what was actually sent to the MCP server)
-    function logAudit(
-      result: AuditEntry['result'],
-      durationMs: number,
-      overrideEscalation?: 'approved' | 'denied',
-    ): void {
-      const entry: AuditEntry = {
-        timestamp: request.timestamp,
-        requestId: request.requestId,
-        serverName: request.serverName,
-        toolName: request.toolName,
-        arguments: argsForTransport,
-        policyDecision,
-        escalationResult: overrideEscalation ?? escalationResult,
-        result,
-        durationMs,
-        sandboxed: serverIsSandboxed || undefined,
-        autoApproved: autoApproved || undefined,
-      };
-      auditLog.log(entry);
-    }
-
-    if (evaluation.decision === 'escalate') {
-      if (!escalationDir) {
-        // No escalation directory configured -- auto-deny (backward compatible)
-        logAudit({ status: 'denied', error: evaluation.reason }, 0, 'denied');
-        return {
-          content: [
-            {
-              type: 'text',
-              text: `ESCALATION REQUIRED: ${evaluation.reason}. Action denied (no escalation handler).`,
-            },
-          ],
-          isError: true,
-        };
-      }
-
-      // Try auto-approve before falling through to human escalation
-      if (autoApproveModel) {
-        const userMessage = readUserContext(escalationDir);
-        if (userMessage) {
-          const autoResult = await autoApprove(
-            {
-              userMessage,
-              toolName: `${toolInfo.serverName}/${toolInfo.name}`,
-              escalationReason: evaluation.reason,
-              arguments: extractArgsForAutoApprove(argsForPolicy, annotation),
-            },
-            autoApproveModel,
-          );
-
-          if (autoResult.decision === 'approve') {
-            autoApproved = true;
-            escalationResult = 'approved';
-            policyDecision.status = 'allow';
-            policyDecision.reason = `Auto-approved: ${autoResult.reasoning}`;
-          }
-        }
-      }
-
-      if (!autoApproved) {
-        // File-based escalation rendezvous: write request, poll for response
-        const escalationId = uuidv4();
-        const decision = await waitForEscalationDecision(escalationDir, {
-          escalationId,
-          serverName: request.serverName,
-          toolName: request.toolName,
-          arguments: argsForTransport,
-          reason: evaluation.reason,
-        });
-
-        if (decision === 'denied') {
-          logAudit({ status: 'denied', error: evaluation.reason }, 0, 'denied');
-          return {
-            content: [{ type: 'text', text: `ESCALATION DENIED: ${evaluation.reason}` }],
-            isError: true,
-          };
-        }
-
-        // Approved by human -- update policy decision and fall through
-        escalationResult = 'approved';
-        policyDecision.status = 'allow';
-        policyDecision.reason = 'Approved by human during escalation';
-      }
-
-      // Expand roots for approved path arguments only (skip URLs, opaques)
-      const state = clientStates.get(toolInfo.serverName);
-      if (state) {
-        const pathValues = extractAnnotatedPaths(argsForTransport, annotation, getPathRoles());
-        for (const p of pathValues) {
-          await addRootToClient(state, {
-            uri: `file://${directoryForPath(p)}`,
-            name: 'escalation-approved',
-          });
-        }
-      }
-    }
-
-    if (evaluation.decision === 'deny') {
-      logAudit({ status: 'denied', error: evaluation.reason }, 0);
-      return {
-        content: [{ type: 'text', text: `DENIED: ${evaluation.reason}` }],
-        isError: true,
-      };
-    }
-
-    // Circuit breaker: deny if the same tool+args is called too many times
-    const cbVerdict = circuitBreaker.check(toolInfo.name, argsForTransport);
-    if (!cbVerdict.allowed) {
-      logAudit({ status: 'denied', error: cbVerdict.reason }, 0);
-      return {
-        content: [{ type: 'text', text: cbVerdict.reason }],
-        isError: true,
-      };
-    }
-
-    // Policy allows -- forward to the real MCP server with transport args
-    const startTime = Date.now();
-    try {
-      const clientState = clientStates.get(toolInfo.serverName);
-      if (!clientState) {
-        const err = `Internal error: no client connection for server "${toolInfo.serverName}"`;
-        logAudit({ status: 'denied', error: err }, 0);
-        return { content: [{ type: 'text', text: err }], isError: true };
-      }
-      const client = clientState.client;
-
-      // TODO(workaround): Remove once @cyanheads/git-mcp-server fixes outputSchema declarations.
-      //
-      // WHY: The git MCP server v2.8.4 declares outputSchema for tools like git_add and
-      // git_commit, but the structuredContent it actually returns does not match those schemas.
-      // The MCP SDK v1.26.0 Client.callTool() validates responses client-side against the
-      // declared outputSchema and throws McpError(-32602, "Structured content does not match
-      // the tool's output schema: ...") when there is a mismatch.
-      //
-      // WHAT: git_add declares required properties {success, stagedFiles, totalFiles, status}
-      // in its outputSchema, but actual responses (especially errors) are missing these and
-      // include additional undeclared properties. git_commit similarly requires {success,
-      // commitHash, author, timestamp, committedFiles, status} but returns different shapes.
-      //
-      // FIX: Passing CompatibilityCallToolResultSchema instead of the default
-      // CallToolResultSchema makes the response parsing more permissive, which avoids the
-      // client-side validation failure.
-      //
-      // CONSEQUENCE: By using CompatibilityCallToolResultSchema we lose client-side output
-      // validation for ALL MCP servers proxied through this path, not just the git server.
-      const result = await client.callTool(
-        {
-          name: toolInfo.name,
-          arguments: argsForTransport,
-        },
-        CompatibilityCallToolResultSchema,
-        { timeout: getEscalationTimeoutMs() },
-      );
-
-      if (result.isError) {
-        const errorText = extractTextFromContent(result.content) ?? 'Unknown tool error';
-        const errorMessage = annotateSandboxViolation(errorText, serverIsSandboxed);
-        logAudit({ status: 'error', error: errorMessage }, Date.now() - startTime);
-        return { content: result.content, isError: true };
-      }
-
-      logAudit({ status: 'success' }, Date.now() - startTime);
-      return { content: result.content };
-    } catch (err) {
-      const rawError = err instanceof Error ? err.message : String(err);
-      const errorMessage = annotateSandboxViolation(rawError, serverIsSandboxed);
-      logAudit({ status: 'error', error: errorMessage }, Date.now() - startTime);
-      return {
-        content: [{ type: 'text', text: `Error: ${errorMessage}` }],
-        isError: true,
-      };
-    }
+    return handleCallTool(req.params.name, req.params.arguments ?? {}, callToolDeps);
   });
 
-  // Select transport: TCP or UDS for Docker agent sessions, stdio otherwise
-  const proxySocketPath = process.env.PROXY_SOCKET_PATH;
-  const proxyTcpPort = process.env.PROXY_TCP_PORT;
+  // ── Transport selection ───────────────────────────────────────────
+  const transportConfig = selectTransportConfig();
   let transport: Transport;
-  if (proxyTcpPort) {
-    const parsedPort = parseInt(proxyTcpPort, 10);
-    if (!Number.isFinite(parsedPort) || parsedPort < 0 || parsedPort > 65535) {
-      throw new Error(`Invalid PROXY_TCP_PORT value "${proxyTcpPort}". Expected an integer between 0 and 65535.`);
-    }
-    // Bind to 0.0.0.0: Docker Desktop's VM needs to reach the proxy on
-    // the host, so loopback-only (127.0.0.1) would not be reachable from
-    // inside the container. Network-level egress restriction (--internal
-    // Docker network) limits which peers can connect.
-    const tcpTransport = new TcpServerTransport('0.0.0.0', parsedPort);
+  if (transportConfig.kind === 'tcp') {
+    const tcpTransport = new TcpServerTransport('0.0.0.0', transportConfig.port);
     transport = tcpTransport;
-    // start() must be called before connect() to bind the port
     await tcpTransport.start();
-    // Write the actual port to a file so the parent process can discover it
-    const portFilePath = process.env.PROXY_PORT_FILE;
-    if (portFilePath) {
-      writeFileSync(portFilePath, String(tcpTransport.port));
+    if (transportConfig.portFilePath) {
+      writeFileSync(transportConfig.portFilePath, String(tcpTransport.port));
     }
     if (sessionLogPath) {
       logToSessionFile(sessionLogPath, `MCP proxy listening on 0.0.0.0:${tcpTransport.port}`);
     }
-  } else if (proxySocketPath) {
-    transport = new UdsServerTransport(proxySocketPath);
+  } else if (transportConfig.kind === 'uds') {
+    transport = new UdsServerTransport(transportConfig.socketPath);
   } else {
     transport = new StdioServerTransport();
   }
   await server.connect(transport);
 
-  // Clean shutdown -- handle both SIGINT and SIGTERM since this process
-  // is spawned as a child by Code Mode and may receive either signal.
+  // ── Shutdown handler ──────────────────────────────────────────────
   async function shutdown(): Promise<void> {
     for (const state of clientStates.values()) {
       try {
@@ -775,7 +915,10 @@ async function main(): Promise<void> {
   });
 }
 
-main().catch((err: unknown) => {
-  process.stderr.write(`MCP Proxy Server fatal error: ${String(err)}\n`);
-  process.exit(1);
-});
+// Only run main() when this module is the entry point (not when imported for testing)
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((err: unknown) => {
+    process.stderr.write(`MCP Proxy Server fatal error: ${String(err)}\n`);
+    process.exit(1);
+  });
+}

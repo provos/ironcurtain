@@ -96,6 +96,7 @@
     "@types/shell-quote": "^1.7.5",
     "@types/turndown": "^5.0.6",
     "@types/ws": "^8.18.1",
+    "@vitest/coverage-v8": "^4.0.18",
     "eslint": "^10.0.1",
     "eslint-config-prettier": "^10.1.8",
     "prettier": "^3.8.1",
