@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.0] - 2026-02-25
+
+### Features
+
+- Signal messaging transport -- run IronCurtain sessions via Signal messages (#27)
+- macOS Docker Desktop support for Docker Agent Mode via TCP proxy transport, ARM64 base image, and `--internal` network egress restriction (#24, #25, #28)
+- Content-Encoding filtering in MITM proxy to reject unsupported encodings
+
+### Improvements
+
+- Protect `.env` and user config from agent access (#23)
+- Cross-platform reliability fixes for audit log tailing and sandbox path resolution
+- Pin Node 22 LTS and cap engines below Node 26 (#20)
+
+### Docs
+
+- Design doc for TCP mode network egress restriction with macOS test plan
+- Signal messaging transport design and brainstorm docs
+
 ## [0.3.1] - 2026-02-25
 
 ### Features
@@ -111,6 +130,7 @@ Initial public release.
 - CI pipeline with Node 22/24 matrix testing
 - Code of Conduct, Contributing guidelines, Security policy
 
+[0.4.0]: https://github.com/provos/ironcurtain/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/provos/ironcurtain/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/provos/ironcurtain/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/provos/ironcurtain/compare/v0.1.0...v0.2.0
