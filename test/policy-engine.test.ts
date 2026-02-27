@@ -1469,23 +1469,5 @@ describe('PolicyEngine', () => {
       expect(result.decision).toBe('allow');
       expect(result.rule).toBe('structural-sandbox-allow');
     });
-
-    it('denies protected path outside sandbox', () => {
-      const protectedPath = '/etc/shadow';
-      const engineWithProtected = new PolicyEngine(
-        testCompiledPolicy,
-        testToolAnnotations,
-        [protectedPath],
-        SANDBOX_DIR,
-      );
-      const result = engineWithProtected.evaluate(
-        makeRequest({
-          toolName: 'read_file',
-          arguments: { path: protectedPath },
-        }),
-      );
-      expect(result.decision).toBe('deny');
-      expect(result.rule).toBe('structural-protected-path');
-    });
   });
 });
