@@ -8,8 +8,9 @@
 
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
-import type { AgentAdapter, AgentConfigFile, ToolInfo, OrientationContext } from './agent-adapter.js';
+import type { AgentAdapter, AgentConfigFile, OrientationContext } from './agent-adapter.js';
 import type { IronCurtainConfig } from '../config/types.js';
+import type { ServerListing } from '../session/prompts.js';
 
 /**
  * Extracts allowed domains from MCP server configurations.
@@ -49,7 +50,7 @@ function writeConfigFiles(baseDir: string, files: AgentConfigFile[]): void {
  */
 export function prepareSession(
   adapter: AgentAdapter,
-  proxyTools: ToolInfo[],
+  serverListings: ServerListing[],
   sessionDir: string,
   config: IronCurtainConfig,
   hostSandboxDir: string,
@@ -61,14 +62,14 @@ export function prepareSession(
   const context: OrientationContext = {
     workspaceDir: '/workspace',
     hostSandboxDir,
-    tools: proxyTools,
+    serverListings,
     allowedDomains: extractAllowedDomains(config),
     networkMode: proxyAddress ? 'bridge' : 'none',
   };
 
   // proxyAddress is either a TCP host:port (macOS) or defaults to the UDS path (Linux)
   const address = proxyAddress ?? '/run/ironcurtain/proxy.sock';
-  writeConfigFiles(orientationDir, adapter.generateMcpConfig(address, proxyTools));
+  writeConfigFiles(orientationDir, adapter.generateMcpConfig(address));
   writeConfigFiles(orientationDir, adapter.generateOrientationFiles(context));
 
   const systemPrompt = adapter.buildSystemPrompt(context);

@@ -12,7 +12,7 @@ import { toCallableName, extractRequiredParams } from '../src/sandbox/index.js';
 import { buildSystemPrompt } from '../src/session/prompts.js';
 import { claudeCodeAdapter } from '../src/docker/adapters/claude-code.js';
 import { extractAllowedDomains } from '../src/docker/orientation.js';
-import type { ToolInfo, OrientationContext } from '../src/docker/agent-adapter.js';
+import type { OrientationContext } from '../src/docker/agent-adapter.js';
 import { discoverTools, buildServerListings } from './mcp-discovery.js';
 
 async function main(): Promise<void> {
@@ -36,17 +36,12 @@ async function main(): Promise<void> {
   const toolCatalog = catalogLines.length > 0 ? catalogLines.join('\n') : 'No tools available';
 
   // --- Docker agent session prompt (Claude Code adapter) ---
-  const dockerTools: ToolInfo[] = allTools.map((t) => ({
-    name: t.name,
-    description: t.description,
-    inputSchema: (t.inputSchema as Record<string, unknown>) ?? {},
-  }));
-
   const orientationContext: OrientationContext = {
     workspaceDir: '/workspace',
     hostSandboxDir: config.allowedDirectory,
-    tools: dockerTools,
+    serverListings,
     allowedDomains: extractAllowedDomains(config),
+    networkMode: 'none',
   };
   const dockerPrompt = claudeCodeAdapter.buildSystemPrompt(orientationContext);
 

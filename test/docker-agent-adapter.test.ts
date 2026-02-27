@@ -5,18 +5,16 @@ import { tmpdir } from 'node:os';
 import { claudeCodeAdapter } from '../src/docker/adapters/claude-code.js';
 import { registerAgent, getAgent, listAgents } from '../src/docker/agent-registry.js';
 import { prepareSession, extractAllowedDomains } from '../src/docker/orientation.js';
-import type { AgentId, ToolInfo, OrientationContext } from '../src/docker/agent-adapter.js';
+import type { AgentId, OrientationContext } from '../src/docker/agent-adapter.js';
+import type { ServerListing } from '../src/session/prompts.js';
 import type { IronCurtainConfig } from '../src/config/types.js';
 
-const sampleTools: ToolInfo[] = [
-  { name: 'read_file', description: 'Read a file', inputSchema: { type: 'object' } },
-  { name: 'write_file', description: 'Write a file', inputSchema: { type: 'object' } },
-];
+const sampleServerListings: ServerListing[] = [{ name: 'filesystem', description: 'Read, write, and manage files' }];
 
 const sampleContext: OrientationContext = {
   workspaceDir: '/workspace',
   hostSandboxDir: '/home/user/.ironcurtain/sessions/test/sandbox',
-  tools: sampleTools,
+  serverListings: sampleServerListings,
   allowedDomains: ['example.com'],
   networkMode: 'none',
 };
@@ -28,7 +26,7 @@ describe('Claude Code Adapter', () => {
   });
 
   it('generates MCP config with socat bridge', () => {
-    const files = claudeCodeAdapter.generateMcpConfig('/run/ironcurtain/proxy.sock', sampleTools);
+    const files = claudeCodeAdapter.generateMcpConfig('/run/ironcurtain/proxy.sock');
 
     expect(files).toHaveLength(1);
     expect(files[0].path).toBe('claude-mcp-config.json');
@@ -57,12 +55,16 @@ describe('Claude Code Adapter', () => {
     expect(cmd).toContain('Fix the bug');
   });
 
-  it('builds system prompt with tool listing', () => {
+  it('builds system prompt with Code Mode + Docker layers', () => {
     const prompt = claudeCodeAdapter.buildSystemPrompt(sampleContext);
 
+    // Code Mode layer
+    expect(prompt).toContain('help.help');
+    expect(prompt).toContain('filesystem');
+    expect(prompt).toContain('synchronous');
+
+    // Docker environment layer
     expect(prompt).toContain('/workspace');
-    expect(prompt).toContain('read_file');
-    expect(prompt).toContain('write_file');
     expect(prompt).toContain('NO network access');
     expect(prompt).toContain('Host Filesystem');
     expect(prompt).toContain('Policy Enforcement');
@@ -166,7 +168,13 @@ describe('prepareSession', () => {
       userConfig: { anthropicApiKey: 'sk-test' },
     } as IronCurtainConfig;
 
-    const { systemPrompt } = prepareSession(claudeCodeAdapter, sampleTools, sessionDir, config, '/host/sandbox');
+    const { systemPrompt } = prepareSession(
+      claudeCodeAdapter,
+      sampleServerListings,
+      sessionDir,
+      config,
+      '/host/sandbox',
+    );
 
     // Check that orientation dir was created with config file
     const orientationDir = join(sessionDir, 'orientation');

@@ -8,6 +8,7 @@
 
 import type { IronCurtainConfig } from '../config/types.js';
 import type { ProviderConfig } from './provider-config.js';
+import type { ServerListing } from '../session/prompts.js';
 
 /**
  * Structured response from an agent adapter, carrying both the
@@ -36,15 +37,6 @@ export interface AgentConfigFile {
 }
 
 /**
- * Information about a single MCP tool, used for orientation content.
- */
-export interface ToolInfo {
-  readonly name: string;
-  readonly description?: string;
-  readonly inputSchema: Record<string, unknown>;
-}
-
-/**
  * Context passed to the adapter for generating orientation content.
  */
 export interface OrientationContext {
@@ -52,8 +44,8 @@ export interface OrientationContext {
   readonly workspaceDir: string;
   /** The host-side path that is bind-mounted as workspaceDir. */
   readonly hostSandboxDir: string;
-  /** List of available MCP tools with descriptions. */
-  readonly tools: ToolInfo[];
+  /** Server listings for progressive tool disclosure. */
+  readonly serverListings: ServerListing[];
   /** Domains the agent may access via fetch MCP tool. */
   readonly allowedDomains: string[];
   /** Container network mode: 'none' (Linux UDS) or 'bridge' (macOS TCP). */
@@ -87,9 +79,8 @@ export interface AgentAdapter {
    * the agent how to connect to IronCurtain's proxy.
    *
    * @param socketPath - container-side UDS path (e.g., /run/ironcurtain/proxy.sock)
-   * @param tools - list of available MCP tools for documentation
    */
-  generateMcpConfig(socketPath: string, tools: ToolInfo[]): AgentConfigFile[];
+  generateMcpConfig(socketPath: string): AgentConfigFile[];
 
   /**
    * Generates orientation documents that teach the agent about

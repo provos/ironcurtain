@@ -6,21 +6,22 @@
  * - System prompt injection via --append-system-prompt
  * - --continue for session resume across turns
  * - --dangerously-skip-permissions (IronCurtain handles security)
+ *
+ * The system prompt composes two layers:
+ * 1. Code Mode instructions (from session/prompts.ts) for tool discovery
+ * 2. Docker environment context explaining workspace, host access, and policy
  */
 
 import type { AgentAdapter, AgentConfigFile, AgentId, AgentResponse, OrientationContext } from '../agent-adapter.js';
 import type { IronCurtainConfig } from '../../config/types.js';
 import type { ProviderConfig } from '../provider-config.js';
 import { anthropicProvider } from '../provider-config.js';
+import { buildSystemPrompt } from '../../session/prompts.js';
 
 const CLAUDE_CODE_IMAGE = 'ironcurtain-claude-code:latest';
 
-function buildOrientationPrompt(context: OrientationContext): string {
-  const toolList = context.tools.map((t) => `- \`${t.name}\` -- ${t.description ?? 'no description'}`).join('\n');
-
-  return `You are running inside a sandboxed Docker container managed by IronCurtain.
-
-## Environment Constraints
+function buildDockerEnvironmentPrompt(context: OrientationContext): string {
+  return `## Docker Environment
 
 ### Workspace (\`${context.workspaceDir}\`)
 This is YOUR local workspace inside the container. Use your normal built-in
@@ -31,42 +32,40 @@ Files you create at \`${context.workspaceDir}/foo.txt\` are visible to MCP tools
 at \`${context.hostSandboxDir}/foo.txt\` and vice versa.
 
 ### Host Filesystem
-To read or modify files on the host operating system you MUST use the MCP
-tools listed below. These tools are mediated by IronCurtain's policy engine:
-every call is evaluated against security rules and recorded in the audit log.
+To read or modify files on the host operating system you MUST use the
+\`execute_code\` MCP tool with the sandbox tools listed above. These tools are
+mediated by IronCurtain's policy engine: every call is evaluated against
+security rules and recorded in the audit log.
 Your built-in file tools cannot reach the host filesystem.
 
 ### Network
 ${
   context.networkMode === 'none'
     ? `The container has NO network access (--network=none). All HTTP requests and
-git operations MUST go through the MCP tools below.
+git operations MUST go through the sandbox tools via \`execute_code\`.
 
 Your built-in web search and web fetch tools route through the Anthropic API
-and will work, but they bypass IronCurtain's audit log. Prefer the MCP fetch
-tool when an auditable record of network access is required.`
+and will work, but they bypass IronCurtain's audit log. Prefer the sandbox
+fetch tool when an auditable record of network access is required.`
     : `The container's outbound network is restricted to IronCurtain's host-side
 proxies. Direct internet access is blocked by firewall rules. All HTTP
-requests and git operations MUST go through the MCP tools below.
+requests and git operations MUST go through the sandbox tools via \`execute_code\`.
 
 Your built-in web search and web fetch tools route through the Anthropic API
 via the MITM proxy and will work, but they bypass IronCurtain's audit log.
-Prefer the MCP fetch tool when an auditable record of network access is
+Prefer the sandbox fetch tool when an auditable record of network access is
 required.`
 }
 
-### Available MCP Tools
-${toolList}
-
 ### Policy Enforcement
-Every MCP tool call is evaluated against security policy rules:
+Every tool call through \`execute_code\` is evaluated against security policy rules:
 - **Allowed**: proceeds automatically
 - **Denied**: blocked -- do NOT retry denied operations
 - **Escalated**: requires human approval -- you will receive the result once approved
 
 ### Best Practices
 1. Use your built-in tools for work inside ${context.workspaceDir}
-2. Use MCP tools for anything on the host filesystem or network
+2. Use \`execute_code\` for anything on the host filesystem or network
 3. Batch external operations to minimize escalation prompts
 4. If an operation is denied, explain the denial and suggest alternatives
 5. Do not attempt to bypass the sandbox
@@ -125,7 +124,13 @@ export const claudeCodeAdapter: AgentAdapter = {
   },
 
   buildSystemPrompt(context: OrientationContext): string {
-    return buildOrientationPrompt(context);
+    // Layer 1: Code Mode instructions (tool discovery, sync calls, return semantics)
+    const codeModePrompt = buildSystemPrompt(context.serverListings, context.hostSandboxDir);
+
+    // Layer 2: Docker environment specifics (workspace, host access, policy)
+    const dockerPrompt = buildDockerEnvironmentPrompt(context);
+
+    return `${codeModePrompt}\n${dockerPrompt}`;
   },
 
   getProviders(): readonly ProviderConfig[] {
@@ -159,8 +164,10 @@ function parseClaudeCodeJson(stdout: string): AgentResponse {
     if (parsed && typeof parsed === 'object' && 'result' in parsed) {
       const obj = parsed as Record<string, unknown>;
       const text = typeof obj.result === 'string' ? obj.result : stdout.trim();
-      const costUsd = typeof obj.total_cost_usd === 'number' ? obj.total_cost_usd : undefined;
-      return costUsd !== undefined ? { text, costUsd } : { text };
+      if (typeof obj.total_cost_usd === 'number') {
+        return { text, costUsd: obj.total_cost_usd };
+      }
+      return { text };
     }
   } catch {
     // JSON parse failed -- fall through to raw text

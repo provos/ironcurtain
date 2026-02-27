@@ -4,10 +4,10 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { AuditLogTailer } from '../src/docker/audit-log-tailer.js';
 import { DockerAgentSession, type DockerAgentSessionDeps } from '../src/docker/docker-agent-session.js';
-import type { ManagedProxy } from '../src/docker/managed-proxy.js';
+import type { DockerProxy } from '../src/docker/code-mode-proxy.js';
 import type { MitmProxy } from '../src/docker/mitm-proxy.js';
 import type { CertificateAuthority } from '../src/docker/ca.js';
-import type { AgentAdapter, AgentId, AgentResponse, ToolInfo } from '../src/docker/agent-adapter.js';
+import type { AgentAdapter, AgentId, AgentResponse } from '../src/docker/agent-adapter.js';
 import type { ProviderConfig } from '../src/docker/provider-config.js';
 import type { DockerManager } from '../src/docker/types.js';
 import type { IronCurtainConfig } from '../src/config/types.js';
@@ -217,15 +217,18 @@ function createMockDocker(): DockerManager {
   };
 }
 
-function createMockProxy(socketPath: string, port?: number): ManagedProxy {
-  const tools: ToolInfo[] = [{ name: 'read_file', description: 'Read a file', inputSchema: { type: 'object' } }];
-
+function createMockProxy(socketPath: string, port?: number): DockerProxy {
   return {
     socketPath,
     port,
     async start() {},
-    async listTools() {
-      return tools;
+    getHelpData() {
+      return {
+        serverDescriptions: { filesystem: 'Read, write, and manage files' },
+        toolsByServer: {
+          filesystem: [{ callableName: 'tools.filesystem_read_file', params: '{ path }' }],
+        },
+      };
     },
     async stop() {},
   };

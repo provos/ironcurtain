@@ -104,7 +104,7 @@ async function createDockerSession(
 
   // Dynamic imports to avoid loading Docker dependencies for built-in sessions
   const { registerBuiltinAdapters, getAgent } = await import('../docker/agent-registry.js');
-  const { createManagedProxy } = await import('../docker/managed-proxy.js');
+  const { createCodeModeProxy } = await import('../docker/code-mode-proxy.js');
   const { createMitmProxy } = await import('../docker/mitm-proxy.js');
   const { loadOrCreateCA } = await import('../docker/ca.js');
   const { generateFakeKey } = await import('../docker/fake-keys.js');
@@ -117,40 +117,9 @@ async function createDockerSession(
   const useTcp = useTcpTransport();
   const socketPath = resolve(sessionConfig.sessionDir, 'proxy.sock');
 
-  // Build the same set of env vars the built-in sandbox passes to the proxy.
-  // See src/sandbox/index.ts for the authoritative list.
-  const proxyEnv: Record<string, string> = {
-    MCP_SERVERS_CONFIG: JSON.stringify(sessionConfig.config.mcpServers),
-    GENERATED_DIR: sessionConfig.config.generatedDir,
-    CONSTITUTION_PATH: sessionConfig.config.constitutionPath,
-    PROTECTED_PATHS: JSON.stringify(sessionConfig.config.protectedPaths),
-    AUDIT_LOG_PATH: sessionConfig.auditLogPath,
-    ALLOWED_DIRECTORY: sessionConfig.sandboxDir,
-    ESCALATION_DIR: sessionConfig.escalationDir,
-    ESCALATION_TIMEOUT_SECONDS: String(config.escalationTimeoutSeconds),
-    SANDBOX_POLICY: sessionConfig.config.sandboxPolicy ?? 'warn',
-    CONTAINER_WORKSPACE_DIR: '/workspace',
-  };
-
-  if (sessionConfig.config.sessionLogPath) {
-    proxyEnv.SESSION_LOG_PATH = sessionConfig.config.sessionLogPath;
-  }
-  if (sessionConfig.autoApproveLlmLogPath) {
-    proxyEnv.AUTO_APPROVE_LLM_LOG_PATH = sessionConfig.autoApproveLlmLogPath;
-  }
-
-  const autoApprove = config.userConfig.autoApprove;
-  if (autoApprove.enabled) {
-    const { parseModelId, resolveApiKeyForProvider } = await import('../config/model-provider.js');
-    proxyEnv.AUTO_APPROVE_ENABLED = 'true';
-    proxyEnv.AUTO_APPROVE_MODEL_ID = autoApprove.modelId;
-    const { provider } = parseModelId(autoApprove.modelId);
-    proxyEnv.AUTO_APPROVE_API_KEY = resolveApiKeyForProvider(provider, config.userConfig);
-  }
-
-  const proxy = createManagedProxy({
+  const proxy = createCodeModeProxy({
     socketPath,
-    env: proxyEnv,
+    config: sessionConfig.config,
     listenMode: useTcp ? 'tcp' : 'uds',
   });
 
