@@ -343,8 +343,8 @@ export function getUrlRoles(): ArgumentRole[] {
  *
  * NOTE: The policy engine's filesystem sandbox fast path
  * (structural-sandbox-allow in policy-engine.ts) assumes that the
- * filesystem server only has sandbox-safe path roles and no URL roles.
- * If a non-sandbox-safe path role or URL role is ever added with
+ * filesystem server only has sandbox-safe path roles and no other roles.
+ * If a non-sandbox-safe path role is ever added with
  * serverNames including 'filesystem', the fast path must be updated
  * to check for those roles before auto-allowing.
  */

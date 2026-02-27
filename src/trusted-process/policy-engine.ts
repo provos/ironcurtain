@@ -381,10 +381,6 @@ export class PolicyEngine {
     const resolvedPaths = allPaths.map((p) => resolveRealPath(p));
 
     // Protected path check -- any match is an immediate deny.
-    // Must be checked BEFORE sandbox containment so that no protected
-    // path can be bypassed by placing it inside the sandbox directory.
-    // The allowedDirectory (sandbox) is excluded from protection so
-    // normal sandbox operations are not blocked.
     for (const rp of resolvedPaths) {
       if (isProtectedPath(rp, this.protectedPaths, this.protectedPathExclusions)) {
         return finalDecision({
