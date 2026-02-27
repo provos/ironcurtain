@@ -53,13 +53,19 @@ The agent process runs inside a Docker container with strong isolation:
 
 The only way the agent can communicate with the outside world is through two bind-mounted Unix domain sockets: the MCP proxy (for tool calls) and the MITM proxy (for LLM API calls).
 
-#### macOS Limitation: Weaker Network Isolation
+#### macOS: Sidecar-Based Network Isolation
 
-On macOS, Docker Desktop's VirtioFS does not support Unix domain sockets in bind mounts. IronCurtain falls back to TCP transport: the MCP and MITM proxies listen on TCP ports on the host, and the container connects via `host.docker.internal`. To prevent unrestricted internet access, the container runs on a Docker `--internal` bridge network, which blocks all internet egress at the iptables/routing level (no default route, DROP rules on traffic leaving the bridge subnet). The container cannot override this without `CAP_NET_ADMIN`, which is not granted.
+On macOS, Docker Desktop's VirtioFS does not support Unix domain sockets in bind mounts. IronCurtain falls back to TCP transport: the MCP and MITM proxies listen on TCP ports on the host.
 
-However, the container can still reach host services that listen on `0.0.0.0` via the bridge gateway IP. This means a compromised agent could probe or attack other services running on the macOS host -- a weaker isolation guarantee than Linux's `--network=none`, where the container has zero network access. There is no more secure alternative on macOS Docker Desktop given the UDS limitation; `--internal` is the strongest network restriction that still allows the container to reach the host-side proxies.
+To maintain network isolation equivalent to Linux's `--network=none`, IronCurtain uses a socat sidecar container:
 
-If the `--internal` network connectivity check fails at startup (e.g., Docker Desktop does not forward gateway traffic to the host), IronCurtain aborts session initialization rather than falling back to a less secure network configuration.
+1. The agent container runs on a Docker `--internal` bridge network with no default route and iptables DROP rules — no internet egress is possible.
+2. A lightweight socat sidecar connects to both the default `bridge` network (host-reachable) and the `--internal` network (app-facing). It forwards only the two required proxy ports (MCP and MITM).
+3. The agent container resolves `host.docker.internal` to the sidecar's IP on the internal network, so proxy traffic routes through the sidecar while all other connectivity is blocked.
+
+The agent cannot reach the host gateway or any host service directly — it can only reach the two proxy ports forwarded by the sidecar. This provides the same security guarantee as Linux's `--network=none`: the only way out is through IronCurtain's proxies.
+
+If the connectivity check fails at startup, IronCurtain aborts session initialization rather than falling back to a less secure network configuration.
 
 ### Layer 2: TLS-Terminating MITM Proxy *(Docker Agent Mode only)*
 

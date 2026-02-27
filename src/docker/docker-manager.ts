@@ -84,6 +84,10 @@ export function buildCreateArgs(config: DockerContainerConfig): string[] {
     args.push('-e', `${key}=${value}`);
   }
 
+  if (config.entrypoint !== undefined) {
+    args.push('--entrypoint', config.entrypoint);
+  }
+
   args.push(config.image);
   args.push(...config.command);
 
@@ -262,6 +266,29 @@ export function createDockerManager(execFileFn?: ExecFileFn): DockerManager {
       } catch {
         return undefined;
       }
+    },
+
+    async connectNetwork(networkName: string, containerId: string): Promise<void> {
+      await exec('docker', ['network', 'connect', networkName, containerId], { timeout: 10_000 });
+    },
+
+    async getContainerIp(containerId: string, network: string): Promise<string> {
+      // Docker may not assign the IP immediately after `network connect`.
+      // Retry a few times with a short delay.
+      const maxAttempts = 5;
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        const { stdout } = await exec('docker', ['inspect', '-f', '{{json .NetworkSettings.Networks}}', containerId], {
+          timeout: 10_000,
+        });
+        const networks = JSON.parse(stdout.trim()) as Partial<Record<string, { IPAddress?: string }>>;
+        const ip = networks[network]?.IPAddress;
+        if (ip) return ip;
+
+        if (attempt < maxAttempts) {
+          await new Promise((r) => setTimeout(r, 200));
+        }
+      }
+      throw new Error(`No IP address found for container ${containerId} on network ${network}`);
     },
 
     async containerExists(nameOrId: string): Promise<boolean> {

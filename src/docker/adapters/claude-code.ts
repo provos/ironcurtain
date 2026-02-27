@@ -45,8 +45,8 @@ git operations MUST go through the MCP tools below.
 Your built-in web search and web fetch tools route through the Anthropic API
 and will work, but they bypass IronCurtain's audit log. Prefer the MCP fetch
 tool when an auditable record of network access is required.`
-    : `The container's outbound network is restricted to IronCurtain's host-side
-proxies. Direct internet access is blocked by firewall rules. All HTTP
+    : `The container has NO direct internet access. Network connectivity is limited
+to IronCurtain's host-side proxies via an isolated internal network. All HTTP
 requests and git operations MUST go through the MCP tools below.
 
 Your built-in web search and web fetch tools route through the Anthropic API

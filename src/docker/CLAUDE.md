@@ -1,6 +1,6 @@
 # Docker Agent Mode (`src/docker/`)
 
-An alternative session type that runs external coding agents (Claude Code, etc.) inside Docker containers with `--network=none`. The agent communicates with IronCurtain via two Unix domain sockets: an MCP proxy (for tool calls) and a MITM proxy (for LLM API calls).
+An alternative session type that runs external coding agents (Claude Code, etc.) inside Docker containers with no network egress. On Linux, containers use `--network=none` with UDS-mounted proxies. On macOS, containers run on a Docker `--internal` network with a socat sidecar that forwards only the MCP and MITM proxy ports to the host — the agent cannot reach the internet or arbitrary host services.
 
 **Key files:**
 - `docker-agent-session.ts` - Session implementation. Manages container lifecycle, starts proxies, handles escalations. `ensureImage()` uses content-hash labels for staleness detection.
