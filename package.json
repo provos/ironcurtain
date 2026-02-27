@@ -59,6 +59,7 @@
     "lint": "eslint src/ test/",
     "format": "prettier --log-level=warn --write 'src/**/*.ts' 'test/**/*.ts'",
     "format:check": "prettier --check 'src/**/*.ts' 'test/**/*.ts'",
+    "pre-commit": "lint-staged",
     "setup-hooks": "cp .hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit && echo 'Pre-commit hook installed.'"
   },
   "dependencies": {
@@ -89,6 +90,12 @@
   "overrides": {
     "minimatch": "^10.2.1"
   },
+  "lint-staged": {
+    "*.ts": [
+      "prettier --check",
+      "eslint"
+    ]
+  },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/jsdom": "^27.0.0",
@@ -100,6 +107,7 @@
     "@vitest/coverage-v8": "^4.0.18",
     "eslint": "^10.0.1",
     "eslint-config-prettier": "^10.1.8",
+    "lint-staged": "^16.2.7",
     "prettier": "^3.8.1",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
