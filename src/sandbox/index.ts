@@ -45,13 +45,17 @@ Protocol.prototype.request = function (
 } as typeof Protocol.prototype.request;
 
 // Detect compiled (.js in dist/) vs source (.ts in src/) mode.
-// In compiled mode, spawn with `node`; in source mode, spawn with `npx tsx`.
+// In compiled mode, spawn with `node`; in source mode, spawn with `tsx` directly.
+// We resolve the tsx binary from node_modules/.bin instead of going through `npx`
+// because npx spawns an intermediate `sh -c` process that doesn't forward SIGTERM,
+// leaving orphaned child processes when the MCP SDK tries to shut down the transport.
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const isCompiled = __filename.endsWith('.js');
 const proxyServerPath = resolve(__dirname, `../trusted-process/mcp-proxy-server.${isCompiled ? 'js' : 'ts'}`);
-const PROXY_COMMAND = isCompiled ? 'node' : 'npx';
-const PROXY_ARGS = isCompiled ? [proxyServerPath] : ['tsx', proxyServerPath];
+const tsxBin = resolve(__dirname, '../../node_modules/.bin/tsx');
+const PROXY_COMMAND = isCompiled ? 'node' : tsxBin;
+const PROXY_ARGS = [proxyServerPath];
 
 /**
  * Transforms a UTCP tool name (dotted) into the actual callable function name
