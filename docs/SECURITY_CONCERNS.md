@@ -37,11 +37,10 @@ IronCurtain has two session modes with different containment models. Both rely o
 **Risk:** External agents (Claude Code, etc.) run in Docker containers. The agent controls its own execution loop — IronCurtain only mediates external access through host-side proxies.
 **Vectors:**
 *   **Container Escapes:** A vulnerability in the Docker runtime or kernel could allow the agent to break out of the container.
-*   **macOS Network Isolation Gap:** On Linux, containers run with `--network=none` for complete network isolation. On macOS, Docker does not support `--network=none` with host file mounts, so containers use `--network=internal` (a custom bridge network). A rogue agent on macOS can make network connections to the Docker gateway (host) on arbitrary ports, potentially reaching host-side services that are not hardened against local access.
 *   **Resource Exhaustion:** A malicious agent could consume excessive CPU, memory, or disk within the container.
 **Mitigation:**
 *   **No Network Egress (Linux):** `--network=none` eliminates all network-based attack vectors. All external communication goes through UDS-mounted proxies.
-*   **Internal Bridge (macOS):** The agent can only reach the gateway IP (172.30.0.1) where IronCurtain's proxies listen. Default Docker routing is blocked, but host services bound to all interfaces are reachable.
+*   **No Network Egress (macOS):** The container runs on a Docker `--internal` bridge network with no default route and iptables DROP rules. A socat sidecar container bridges only the MCP and MITM proxy ports between the internal network and the host. The agent container cannot reach the host gateway or any host service directly — it can only reach the sidecar's forwarded ports.
 *   **Fake API Keys:** Real API keys never enter the container. The MITM proxy swaps 192-bit sentinel keys for real keys host-side.
 *   **Resource Limits:** Containers are created with memory (4 GB) and CPU (2 cores) limits.
 *   **Endpoint Filtering:** The MITM proxy only allows specific method+path combinations (e.g., `POST /v1/messages`), blocking arbitrary API usage.
@@ -114,8 +113,8 @@ IronCurtain has two session modes with different containment models. Both rely o
 **Mitigation:**
 *   **Key never enters the container:** The agent receives a fake sentinel key (192 bits of entropy). The real key exists only in the host process memory. The MITM proxy validates the fake key and swaps it before forwarding upstream.
 *   **Strict endpoint allowlist:** Only specific method+path combinations are permitted (e.g., `POST /v1/messages` for Anthropic). All other requests are blocked with 403.
-*   **No network access:** Containers run with `--network=none`, eliminating network-based attack vectors entirely.
-**Residual risk:** A compromised agent can make excessive LLM API calls via the MITM proxy, incurring costs. Mitigated by the per-session ResourceBudgetTracker which enforces limits on estimated cost, tokens, steps, and wall-clock time — this applies in Docker Agent Mode as well as Code Mode. See also §2b for broader Docker container isolation concerns including the macOS network isolation gap.
+*   **No network access:** On Linux, containers run with `--network=none`. On macOS, containers run on an `--internal` network with only proxy ports forwarded via a sidecar. In both cases, the container has no direct internet access.
+**Residual risk:** A compromised agent can make excessive LLM API calls via the MITM proxy, incurring costs. Mitigated by the per-session ResourceBudgetTracker which enforces limits on estimated cost, tokens, steps, and wall-clock time — this applies in Docker Agent Mode as well as Code Mode.
 
 ## 10. Supply Chain Attacks (Host Level)
 

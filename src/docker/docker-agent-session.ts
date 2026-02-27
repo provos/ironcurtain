@@ -16,6 +16,7 @@ import { mkdirSync, readdirSync, readFileSync, writeFileSync, existsSync, copyFi
 import { resolve, dirname } from 'node:path';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir, arch } from 'node:os';
+import { quote } from 'shell-quote';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import type {
@@ -81,6 +82,7 @@ export class DockerAgentSession implements Session {
   private readonly createdAt: string;
 
   private containerId: string | null = null;
+  private sidecarContainerId: string | null = null;
   private networkName: string | null = null;
   private systemPrompt = '';
 
@@ -185,24 +187,58 @@ export class DockerAgentSession implements Session {
 
     let extraHosts: string[] | undefined;
 
-    if (this.useTcp && mitmAddr.port !== undefined) {
-      // macOS TCP mode: internal bridge network blocks egress,
-      // container reaches host proxies via gateway IP
+    if (this.useTcp && mitmAddr.port !== undefined && this.proxy.port !== undefined) {
+      // macOS TCP mode: internal bridge network blocks egress.
+      // A socat sidecar bridges the internal network to the host
+      // because Docker Desktop VMs don't forward gateway traffic.
+      const mcpPort = this.proxy.port;
+      const mitmPort = mitmAddr.port;
+
       env = {
         ...this.adapter.buildEnv(this.config, this.fakeKeys),
-        HTTPS_PROXY: `http://host.docker.internal:${mitmAddr.port}`,
-        HTTP_PROXY: `http://host.docker.internal:${mitmAddr.port}`,
+        HTTPS_PROXY: `http://host.docker.internal:${mitmPort}`,
+        HTTP_PROXY: `http://host.docker.internal:${mitmPort}`,
       };
 
       // Create an --internal Docker network that blocks internet egress
-      // but allows container-to-gateway (host) connectivity for the proxies.
       await this.docker.createNetwork(INTERNAL_NETWORK_NAME, {
         internal: true,
         subnet: INTERNAL_NETWORK_SUBNET,
         gateway: INTERNAL_NETWORK_GATEWAY,
       });
       network = INTERNAL_NETWORK_NAME;
-      extraHosts = [`host.docker.internal:${INTERNAL_NETWORK_GATEWAY}`];
+
+      // Ensure the socat image is available
+      const socatImage = 'alpine/socat';
+      if (!(await this.docker.imageExists(socatImage))) {
+        logger.info(`Pulling ${socatImage}...`);
+        await this.docker.pullImage(socatImage);
+      }
+
+      // Create socat sidecar on the default bridge (can reach host.docker.internal)
+      const sidecarName = `ironcurtain-sidecar-${shortId}`;
+      this.sidecarContainerId = await this.docker.create({
+        image: socatImage,
+        name: sidecarName,
+        network: 'bridge',
+        mounts: [],
+        env: {},
+        entrypoint: '/bin/sh',
+        command: [
+          '-c',
+          quote(['socat', `TCP-LISTEN:${mcpPort},fork,reuseaddr`, `TCP:host.docker.internal:${mcpPort}`]) +
+            ' & ' +
+            quote(['socat', `TCP-LISTEN:${mitmPort},fork,reuseaddr`, `TCP:host.docker.internal:${mitmPort}`]) +
+            ' & wait',
+        ],
+      });
+      await this.docker.start(this.sidecarContainerId);
+
+      // Connect sidecar to the internal network so the app container can reach it
+      await this.docker.connectNetwork(INTERNAL_NETWORK_NAME, this.sidecarContainerId);
+      const sidecarIp = await this.docker.getContainerIp(this.sidecarContainerId, INTERNAL_NETWORK_NAME);
+      extraHosts = [`host.docker.internal:${sidecarIp}`];
+      logger.info(`Sidecar ${sidecarName} bridging ports ${mcpPort},${mitmPort} at ${sidecarIp}`);
 
       mounts = [
         { source: this.sandboxDir, target: '/workspace', readonly: false },
@@ -226,26 +262,36 @@ export class DockerAgentSession implements Session {
       ];
     }
 
-    this.containerId = await this.docker.create({
-      image,
-      name: `ironcurtain-${shortId}`,
-      network,
-      mounts,
-      env,
-      command: ['sleep', 'infinity'],
-      sessionLabel: this.sessionId,
-      resources: { memoryMb: 4096, cpus: 2 },
-      extraHosts,
-    });
+    try {
+      this.containerId = await this.docker.create({
+        image,
+        name: `ironcurtain-${shortId}`,
+        network,
+        mounts,
+        env,
+        command: ['sleep', 'infinity'],
+        sessionLabel: this.sessionId,
+        resources: { memoryMb: 4096, cpus: 2 },
+        extraHosts,
+      });
 
-    await this.docker.start(this.containerId);
-    this.networkName = network;
-    logger.info(`Container started: ${this.containerId.substring(0, 12)}`);
+      await this.docker.start(this.containerId);
+      this.networkName = network;
+      logger.info(`Container started: ${this.containerId.substring(0, 12)}`);
 
-    // Connectivity check: verify the container can reach host proxies
-    // through the internal network. Abort if unreachable.
-    if (this.useTcp && network === INTERNAL_NETWORK_NAME && this.proxy.port !== undefined) {
-      await this.checkInternalNetworkConnectivity(this.containerId, this.proxy.port);
+      // Connectivity check: verify the container can reach host proxies
+      // through the internal network. Abort if unreachable.
+      if (this.useTcp && network === INTERNAL_NETWORK_NAME && this.proxy.port !== undefined) {
+        await this.checkInternalNetworkConnectivity(this.containerId, this.proxy.port);
+      }
+    } catch (err) {
+      // Clean up sidecar if app container setup fails
+      if (this.sidecarContainerId) {
+        await this.docker.stop(this.sidecarContainerId);
+        await this.docker.remove(this.sidecarContainerId);
+        this.sidecarContainerId = null;
+      }
+      throw err;
     }
 
     // 7. Start watchers
@@ -392,6 +438,12 @@ export class DockerAgentSession implements Session {
       await this.docker.remove(this.containerId);
     }
 
+    // Stop and remove sidecar container
+    if (this.sidecarContainerId) {
+      await this.docker.stop(this.sidecarContainerId);
+      await this.docker.remove(this.sidecarContainerId);
+    }
+
     // Remove internal network (ignore errors -- other sessions may use it)
     if (this.networkName === INTERNAL_NETWORK_NAME) {
       await this.docker.removeNetwork(INTERNAL_NETWORK_NAME);
@@ -411,7 +463,7 @@ export class DockerAgentSession implements Session {
 
   /**
    * Checks whether the container can reach host-side proxies via the
-   * internal Docker network. Throws if connectivity fails.
+   * socat sidecar on the internal Docker network. Throws if connectivity fails.
    */
   private async checkInternalNetworkConnectivity(containerId: string, mcpPort: number): Promise<void> {
     const result = await this.docker.exec(
@@ -424,8 +476,8 @@ export class DockerAgentSession implements Session {
     if (result.exitCode !== 0) {
       throw new Error(
         `Internal network connectivity check failed (exit=${result.exitCode}). ` +
-          `The container cannot reach host-side proxies on the --internal Docker network. ` +
-          `This may indicate that Docker Desktop does not forward bridge gateway traffic to the host.`,
+          `The container cannot reach host-side proxies via the socat sidecar on the --internal Docker network. ` +
+          `Check that the sidecar container is running and connected to the internal network.`,
       );
     }
   }

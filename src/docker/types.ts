@@ -19,13 +19,20 @@ export interface DockerContainerConfig {
   /** Environment variables passed to the container. */
   readonly env: Readonly<Record<string, string>>;
 
-  /** Command to execute as the container entrypoint. */
+  /** Command to execute (CMD). */
   readonly command: readonly string[];
+
+  /**
+   * Override the image's ENTRYPOINT.
+   * Optional. When set, uses `--entrypoint` flag on `docker create`.
+   * Needed for images like `alpine/socat` that set ENTRYPOINT to a binary.
+   */
+  readonly entrypoint?: string;
 
   /** IronCurtain session label for stale container detection. */
   readonly sessionLabel?: string;
 
-  /** Extra --add-host entries (e.g. ["host.docker.internal:172.30.0.1"]). When set, suppresses the default host-gateway mapping. */
+  /** Extra --add-host entries (e.g. ["host.docker.internal:172.30.0.3"]). When set, suppresses the default host-gateway mapping. */
   readonly extraHosts?: readonly string[];
 
   /** Optional resource limits. */
@@ -142,4 +149,10 @@ export interface DockerManager {
 
   /** Returns the image ID (sha256 digest) for a container or image. undefined if not found. */
   getImageId(nameOrId: string): Promise<string | undefined>;
+
+  /** Connect an existing container to a Docker network. */
+  connectNetwork(networkName: string, containerId: string): Promise<void>;
+
+  /** Get a container's IP address on a specific network. */
+  getContainerIp(containerId: string, network: string): Promise<string>;
 }

@@ -201,9 +201,12 @@ function createMockDocker(): DockerManager {
       return true;
     },
     async imageExists(image: string) {
-      // Image "exists" once it has been built (has labels)
+      // alpine/socat is always "available" (no build needed)
+      if (image === 'alpine/socat') return true;
+      // Other images "exist" once they have been built (have labels)
       return labels.has(image);
     },
+    async pullImage() {},
     async buildImage(_tag: string, _df: string, _ctx: string, buildLabels?: Record<string, string>) {
       if (buildLabels) {
         labels.set(_tag, buildLabels);
@@ -214,6 +217,10 @@ function createMockDocker(): DockerManager {
     },
     async createNetwork() {},
     async removeNetwork() {},
+    async connectNetwork() {},
+    async getContainerIp() {
+      return '172.30.0.3';
+    },
   };
 }
 
@@ -578,25 +585,54 @@ describe('DockerAgentSession', () => {
       };
     }
 
-    it('creates internal network and passes extraHosts in TCP mode', async () => {
+    /**
+     * Creates a mock DockerManager for TCP mode tests.
+     * Returns the sidecar ID on the first `create()` call, and the app
+     * container ID on the second. Overrides can replace any method.
+     */
+    function createTcpMockDocker(
+      sidecarId: string,
+      appId: string,
+      overrides?: Partial<DockerManager>,
+    ): { docker: DockerManager; createCount: () => number } {
+      let createCount = 0;
+      const docker = {
+        ...createMockDocker(),
+        async createNetwork() {},
+        async connectNetwork() {},
+        async getContainerIp() {
+          return '172.30.0.3';
+        },
+        async create() {
+          createCount++;
+          return createCount === 1 ? sidecarId : appId;
+        },
+        async exec() {
+          return { exitCode: 0, stdout: '', stderr: '' };
+        },
+        ...overrides,
+      } as unknown as DockerManager;
+      return { docker, createCount: () => createCount };
+    }
+
+    it('creates sidecar and routes via sidecar IP in TCP mode', async () => {
       const tcpDeps = createTcpDeps(tempDir);
       const createNetworkCalls: Array<{ name: string; options?: Record<string, unknown> }> = [];
       const createCalls: Array<Record<string, unknown>> = [];
+      const connectNetworkCalls: Array<{ network: string; container: string }> = [];
 
-      const docker = {
-        ...tcpDeps.docker,
+      const { docker } = createTcpMockDocker('sidecar-123', 'container-tcp-123', {
         async createNetwork(name: string, options?: { internal?: boolean; subnet?: string; gateway?: string }) {
           createNetworkCalls.push({ name, options });
         },
         async create(config: Record<string, unknown>) {
           createCalls.push(config);
-          return 'container-tcp-123';
+          return createCalls.length === 1 ? 'sidecar-123' : 'container-tcp-123';
         },
-        // Connectivity check succeeds
-        async exec() {
-          return { exitCode: 0, stdout: '', stderr: '' };
+        async connectNetwork(network: string, container: string) {
+          connectNetworkCalls.push({ network, container });
         },
-      } as unknown as DockerManager;
+      } as unknown as Partial<DockerManager>);
 
       session = new DockerAgentSession({ ...tcpDeps, docker });
       await session.initialize();
@@ -610,55 +646,78 @@ describe('DockerAgentSession', () => {
         gateway: INTERNAL_NETWORK_GATEWAY,
       });
 
-      // Verify container was created with internal network and extraHosts
-      expect(createCalls).toHaveLength(1);
-      expect(createCalls[0].network).toBe(INTERNAL_NETWORK_NAME);
-      expect(createCalls[0].extraHosts).toEqual([`host.docker.internal:${INTERNAL_NETWORK_GATEWAY}`]);
+      // Verify two containers created: sidecar first, then app
+      expect(createCalls).toHaveLength(2);
+
+      // Sidecar: created on bridge network with socat command
+      const sidecarConfig = createCalls[0];
+      expect(sidecarConfig.image).toBe('alpine/socat');
+      expect(sidecarConfig.network).toBe('bridge');
+
+      // Sidecar connected to internal network
+      expect(connectNetworkCalls).toHaveLength(1);
+      expect(connectNetworkCalls[0].network).toBe(INTERNAL_NETWORK_NAME);
+      expect(connectNetworkCalls[0].container).toBe('sidecar-123');
+
+      // App container: created on internal network with sidecar IP as host
+      const appConfig = createCalls[1];
+      expect(appConfig.network).toBe(INTERNAL_NETWORK_NAME);
+      expect(appConfig.extraHosts).toEqual(['host.docker.internal:172.30.0.3']);
     });
 
-    it('throws when connectivity check fails', async () => {
+    it('throws when connectivity check fails and cleans up sidecar', async () => {
       const tcpDeps = createTcpDeps(tempDir);
+      const stoppedContainers: string[] = [];
+      const removedContainers: string[] = [];
 
-      const docker = {
-        ...tcpDeps.docker,
-        async createNetwork() {},
-        async create() {
-          return 'container-fail';
-        },
+      const { docker } = createTcpMockDocker('sidecar-fail', 'container-fail', {
         async start() {},
-        async stop() {},
-        async remove() {},
+        async stop(id: string) {
+          stoppedContainers.push(id);
+        },
+        async remove(id: string) {
+          removedContainers.push(id);
+        },
         async exec() {
           return { exitCode: 1, stdout: '', stderr: 'Connection refused' };
         },
-      } as unknown as DockerManager;
+      });
 
       session = new DockerAgentSession({ ...tcpDeps, docker });
       await expect(session.initialize()).rejects.toThrow('Internal network connectivity check failed');
+
+      // Sidecar should have been cleaned up on failure
+      expect(stoppedContainers).toContain('sidecar-fail');
+      expect(removedContainers).toContain('sidecar-fail');
     });
 
-    it('removes internal network on close', async () => {
+    it('removes sidecar and internal network on close', async () => {
       const tcpDeps = createTcpDeps(tempDir);
       const removedNetworks: string[] = [];
+      const stoppedContainers: string[] = [];
+      const removedContainers: string[] = [];
 
-      const docker = {
-        ...tcpDeps.docker,
-        async createNetwork() {},
-        async create() {
-          return 'container-cleanup';
+      const { docker } = createTcpMockDocker('sidecar-cleanup', 'container-cleanup', {
+        async stop(id: string) {
+          stoppedContainers.push(id);
         },
-        async exec() {
-          return { exitCode: 0, stdout: '', stderr: '' };
+        async remove(id: string) {
+          removedContainers.push(id);
         },
         async removeNetwork(name: string) {
           removedNetworks.push(name);
         },
-      } as unknown as DockerManager;
+      });
 
       session = new DockerAgentSession({ ...tcpDeps, docker });
       await session.initialize();
       await session.close();
 
+      // Both app container and sidecar should be stopped and removed
+      expect(stoppedContainers).toContain('container-cleanup');
+      expect(stoppedContainers).toContain('sidecar-cleanup');
+      expect(removedContainers).toContain('container-cleanup');
+      expect(removedContainers).toContain('sidecar-cleanup');
       expect(removedNetworks).toContain(INTERNAL_NETWORK_NAME);
     });
   });

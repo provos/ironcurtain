@@ -401,6 +401,40 @@ describe('DockerManager', () => {
     });
   });
 
+  describe('connectNetwork', () => {
+    it('connects a container to a network', async () => {
+      mock.setResponse('');
+      const manager = createDockerManager(mock.mockExec);
+
+      await manager.connectNetwork('ironcurtain-internal', 'container-123');
+      expect(mock.calls[0].args).toEqual(['network', 'connect', 'ironcurtain-internal', 'container-123']);
+    });
+  });
+
+  describe('getContainerIp', () => {
+    it('returns IP address from docker inspect JSON', async () => {
+      mock.setResponse(JSON.stringify({ 'ironcurtain-internal': { IPAddress: '172.30.0.3' } }) + '\n');
+      const manager = createDockerManager(mock.mockExec);
+
+      const ip = await manager.getContainerIp('container-123', 'ironcurtain-internal');
+      expect(ip).toBe('172.30.0.3');
+    });
+
+    it('throws when network is not found', async () => {
+      mock.setResponse(JSON.stringify({ bridge: { IPAddress: '172.17.0.2' } }) + '\n');
+      const manager = createDockerManager(mock.mockExec);
+
+      await expect(manager.getContainerIp('container-123', 'ironcurtain-internal')).rejects.toThrow('No IP address');
+    });
+
+    it('throws when IP is empty', async () => {
+      mock.setResponse(JSON.stringify({ 'ironcurtain-internal': { IPAddress: '' } }) + '\n');
+      const manager = createDockerManager(mock.mockExec);
+
+      await expect(manager.getContainerIp('container-123', 'ironcurtain-internal')).rejects.toThrow('No IP address');
+    });
+  });
+
   describe('removeNetwork', () => {
     it('removes a Docker network', async () => {
       mock.setResponse('');
