@@ -204,10 +204,17 @@ export class DockerAgentSession implements Session {
       });
       network = INTERNAL_NETWORK_NAME;
 
+      // Ensure the socat image is available
+      const socatImage = 'alpine/socat';
+      if (!(await this.docker.imageExists(socatImage))) {
+        logger.info(`Pulling ${socatImage}...`);
+        await this.docker.pullImage(socatImage);
+      }
+
       // Create socat sidecar on the default bridge (can reach host.docker.internal)
       const sidecarName = `ironcurtain-sidecar-${shortId}`;
       this.sidecarContainerId = await this.docker.create({
-        image: 'alpine/socat',
+        image: socatImage,
         name: sidecarName,
         network: 'bridge',
         mounts: [],
@@ -217,7 +224,8 @@ export class DockerAgentSession implements Session {
           '-c',
           quote(['socat', `TCP-LISTEN:${mcpPort},fork,reuseaddr`, `TCP:host.docker.internal:${mcpPort}`]) +
             ' & ' +
-            quote(['socat', `TCP-LISTEN:${mitmPort},fork,reuseaddr`, `TCP:host.docker.internal:${mitmPort}`]),
+            quote(['socat', `TCP-LISTEN:${mitmPort},fork,reuseaddr`, `TCP:host.docker.internal:${mitmPort}`]) +
+            ' & wait',
         ],
       });
       await this.docker.start(this.sidecarContainerId);
@@ -250,26 +258,36 @@ export class DockerAgentSession implements Session {
       ];
     }
 
-    this.containerId = await this.docker.create({
-      image,
-      name: `ironcurtain-${shortId}`,
-      network,
-      mounts,
-      env,
-      command: ['sleep', 'infinity'],
-      sessionLabel: this.sessionId,
-      resources: { memoryMb: 4096, cpus: 2 },
-      extraHosts,
-    });
+    try {
+      this.containerId = await this.docker.create({
+        image,
+        name: `ironcurtain-${shortId}`,
+        network,
+        mounts,
+        env,
+        command: ['sleep', 'infinity'],
+        sessionLabel: this.sessionId,
+        resources: { memoryMb: 4096, cpus: 2 },
+        extraHosts,
+      });
 
-    await this.docker.start(this.containerId);
-    this.networkName = network;
-    logger.info(`Container started: ${this.containerId.substring(0, 12)}`);
+      await this.docker.start(this.containerId);
+      this.networkName = network;
+      logger.info(`Container started: ${this.containerId.substring(0, 12)}`);
 
-    // Connectivity check: verify the container can reach host proxies
-    // through the internal network. Abort if unreachable.
-    if (this.useTcp && network === INTERNAL_NETWORK_NAME && this.proxy.port !== undefined) {
-      await this.checkInternalNetworkConnectivity(this.containerId, this.proxy.port);
+      // Connectivity check: verify the container can reach host proxies
+      // through the internal network. Abort if unreachable.
+      if (this.useTcp && network === INTERNAL_NETWORK_NAME && this.proxy.port !== undefined) {
+        await this.checkInternalNetworkConnectivity(this.containerId, this.proxy.port);
+      }
+    } catch (err) {
+      // Clean up sidecar if app container setup fails
+      if (this.sidecarContainerId) {
+        await this.docker.stop(this.sidecarContainerId);
+        await this.docker.remove(this.sidecarContainerId);
+        this.sidecarContainerId = null;
+      }
+      throw err;
     }
 
     // 7. Start watchers

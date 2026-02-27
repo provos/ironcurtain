@@ -201,9 +201,12 @@ function createMockDocker(): DockerManager {
       return true;
     },
     async imageExists(image: string) {
-      // Image "exists" once it has been built (has labels)
+      // alpine/socat is always "available" (no build needed)
+      if (image === 'alpine/socat') return true;
+      // Other images "exist" once they have been built (have labels)
       return labels.has(image);
     },
+    async pullImage() {},
     async buildImage(_tag: string, _df: string, _ctx: string, buildLabels?: Record<string, string>) {
       if (buildLabels) {
         labels.set(_tag, buildLabels);
@@ -659,13 +662,19 @@ describe('DockerAgentSession', () => {
       expect(appConfig.extraHosts).toEqual(['host.docker.internal:172.30.0.3']);
     });
 
-    it('throws when connectivity check fails', async () => {
+    it('throws when connectivity check fails and cleans up sidecar', async () => {
       const tcpDeps = createTcpDeps(tempDir);
+      const stoppedContainers: string[] = [];
+      const removedContainers: string[] = [];
 
       const { docker } = createTcpMockDocker('sidecar-fail', 'container-fail', {
         async start() {},
-        async stop() {},
-        async remove() {},
+        async stop(id: string) {
+          stoppedContainers.push(id);
+        },
+        async remove(id: string) {
+          removedContainers.push(id);
+        },
         async exec() {
           return { exitCode: 1, stdout: '', stderr: 'Connection refused' };
         },
@@ -673,6 +682,10 @@ describe('DockerAgentSession', () => {
 
       session = new DockerAgentSession({ ...tcpDeps, docker });
       await expect(session.initialize()).rejects.toThrow('Internal network connectivity check failed');
+
+      // Sidecar should have been cleaned up on failure
+      expect(stoppedContainers).toContain('sidecar-fail');
+      expect(removedContainers).toContain('sidecar-fail');
     });
 
     it('removes sidecar and internal network on close', async () => {
