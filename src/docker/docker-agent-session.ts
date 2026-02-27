@@ -16,6 +16,7 @@ import { mkdirSync, readdirSync, readFileSync, writeFileSync, existsSync, copyFi
 import { resolve, dirname } from 'node:path';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir, arch } from 'node:os';
+import { quote } from 'shell-quote';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import type {
@@ -214,8 +215,9 @@ export class DockerAgentSession implements Session {
         entrypoint: '/bin/sh',
         command: [
           '-c',
-          `socat TCP-LISTEN:${mcpPort},fork,reuseaddr TCP:host.docker.internal:${mcpPort} & ` +
-            `socat TCP-LISTEN:${mitmPort},fork,reuseaddr TCP:host.docker.internal:${mitmPort}`,
+          quote(['socat', `TCP-LISTEN:${mcpPort},fork,reuseaddr`, `TCP:host.docker.internal:${mcpPort}`]) +
+            ' & ' +
+            quote(['socat', `TCP-LISTEN:${mitmPort},fork,reuseaddr`, `TCP:host.docker.internal:${mitmPort}`]),
         ],
       });
       await this.docker.start(this.sidecarContainerId);
