@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.1] - 2026-02-27
+
+### Features
+
+- Progressive tool disclosure for Docker agent mode — replace the full inline tool catalog (~3,150 tokens) with compact server-names-only listing (~770 tokens, 75% reduction) and on-demand `help.help()` discovery (#31)
+- Protect entire `~/.ironcurtain/` directory with scoped sandbox exclusion, preventing new files (e.g. CA certs) from being unprotected (#30)
+
+### Fixes
+
+- Fix Docker agent web search — the MITM proxy strips server-side tools but the prompt incorrectly told the agent they would work, causing hallucinated results; now directs the agent to use the MCP `web_search` tool with concrete examples
+- Fix macOS Docker Desktop connectivity via socat sidecar — containers on `--internal` networks cannot reach the host, so a sidecar bridges the internal network to host-side proxies (#32)
+- Loop boilerplate tag removal in fetch server to prevent nested-tag bypass (CWE-116)
+- Bound `resolveRealPath` ancestor walk with explicit depth limit
+
+### Improvements
+
+- Refactor MCP proxy server main function into smaller, purpose-oriented utilities
+- Nix development shell via flake.nix (#29)
+- Run CI on macOS in addition to Linux
+
+### Docs
+
+- Update SECURITY_CONCERNS to document socat sidecar isolation as equivalent to Linux `--network=none`
+- Enhance CONTRIBUTING and TESTING documentation with pre-commit hook setup
+
 ## [0.4.0] - 2026-02-25
 
 ### Features
@@ -130,6 +155,7 @@ Initial public release.
 - CI pipeline with Node 22/24 matrix testing
 - Code of Conduct, Contributing guidelines, Security policy
 
+[0.4.1]: https://github.com/provos/ironcurtain/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/provos/ironcurtain/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/provos/ironcurtain/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/provos/ironcurtain/compare/v0.2.0...v0.3.0
