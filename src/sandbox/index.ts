@@ -145,8 +145,9 @@ export function buildHelpSnippet(helpData: HelpData): string {
         help: function(serverName) {
           if (!serverName) {
             var lines = ['Available tool servers:'];
-            for (var name in _serverDescs) {
-              lines.push('  ' + name + ' - ' + _serverDescs[name]);
+            var names = Object.keys(_serverDescs);
+            for (var i = 0; i < names.length; i++) {
+              lines.push('  ' + names[i] + ' - ' + _serverDescs[names[i]]);
             }
             lines.push('');
             lines.push("Call help.help('serverName') to list tools in a server.");

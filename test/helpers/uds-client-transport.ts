@@ -23,7 +23,11 @@ export class UdsClientTransport implements Transport {
 
   async start(): Promise<void> {
     return new Promise<void>((resolve, reject) => {
-      this.socket = netConnect(this.socketPath, () => resolve());
+      this.socket = netConnect(this.socketPath, () => {
+        this.socket?.removeListener('error', reject);
+        this.socket?.on('error', (err: Error) => this.onerror?.(err));
+        resolve();
+      });
       this.socket.on('error', reject);
       this.socket.on('data', (chunk: Buffer) => {
         this.readBuffer.append(chunk);
