@@ -65,7 +65,7 @@ describe('Claude Code Adapter', () => {
 
     // Docker environment layer
     expect(prompt).toContain('/workspace');
-    expect(prompt).toContain('NO network access');
+    expect(prompt).toContain('NO direct internet access');
     expect(prompt).toContain('Host Filesystem');
     expect(prompt).toContain('Policy Enforcement');
   });
