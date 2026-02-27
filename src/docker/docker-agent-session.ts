@@ -439,7 +439,7 @@ export class DockerAgentSession implements Session {
 
   /**
    * Checks whether the container can reach host-side proxies via the
-   * internal Docker network. Throws if connectivity fails.
+   * socat sidecar on the internal Docker network. Throws if connectivity fails.
    */
   private async checkInternalNetworkConnectivity(containerId: string, mcpPort: number): Promise<void> {
     const result = await this.docker.exec(
@@ -452,8 +452,8 @@ export class DockerAgentSession implements Session {
     if (result.exitCode !== 0) {
       throw new Error(
         `Internal network connectivity check failed (exit=${result.exitCode}). ` +
-          `The container cannot reach host-side proxies on the --internal Docker network. ` +
-          `This may indicate that Docker Desktop does not forward bridge gateway traffic to the host.`,
+          `The container cannot reach host-side proxies via the socat sidecar on the --internal Docker network. ` +
+          `Check that the sidecar container is running and connected to the internal network.`,
       );
     }
   }

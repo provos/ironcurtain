@@ -32,7 +32,7 @@ export interface DockerContainerConfig {
   /** IronCurtain session label for stale container detection. */
   readonly sessionLabel?: string;
 
-  /** Extra --add-host entries (e.g. ["host.docker.internal:172.30.0.1"]). When set, suppresses the default host-gateway mapping. */
+  /** Extra --add-host entries (e.g. ["host.docker.internal:172.30.0.3"]). When set, suppresses the default host-gateway mapping. */
   readonly extraHosts?: readonly string[];
 
   /** Optional resource limits. */
