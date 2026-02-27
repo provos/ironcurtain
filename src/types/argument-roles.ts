@@ -340,5 +340,12 @@ export function getUrlRoles(): ArgumentRole[] {
  * `delete-history` are NOT sandbox-safe: even when the repo path is inside
  * the sandbox, these operations require compiled rule evaluation (and
  * typically human approval) because they can destroy git history.
+ *
+ * NOTE: The policy engine's filesystem sandbox fast path
+ * (structural-sandbox-allow in policy-engine.ts) assumes that the
+ * filesystem server only has sandbox-safe path roles and no other roles.
+ * If a non-sandbox-safe path role is ever added with
+ * serverNames including 'filesystem', the fast path must be updated
+ * to check for those roles before auto-allowing.
  */
 export const SANDBOX_SAFE_PATH_ROLES: ReadonlySet<ArgumentRole> = new Set(['read-path', 'write-path', 'delete-path']);

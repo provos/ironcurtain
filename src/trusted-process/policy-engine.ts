@@ -95,16 +95,25 @@ function isWithinDirectory(targetPath: string, directory: string): boolean {
 }
 
 /**
- * Checks whether a resolved path matches any protected path.
+ * Checks whether a resolved path matches any protected path,
+ * excluding paths that match any exclusion.
  * A path is protected if it equals a protected path exactly
  * or is contained within a protected directory.
  * Both sides are resolved through symlinks for accurate comparison.
  */
-function isProtectedPath(resolvedPath: string, protectedPaths: string[]): boolean {
+function isProtectedPath(resolvedPath: string, protectedPaths: string[], exclusions: string[] = []): boolean {
   const realPath = resolveRealPath(resolvedPath);
-  return protectedPaths.some((pp) => {
+
+  const matchesProtected = protectedPaths.some((pp) => {
     const resolvedPP = resolveRealPath(pp);
     return realPath === resolvedPP || realPath.startsWith(resolvedPP + '/');
+  });
+  if (!matchesProtected) return false;
+
+  // Check if the path is excluded from protection
+  return !exclusions.some((ex) => {
+    const resolvedEx = resolveRealPath(ex);
+    return realPath === resolvedEx || realPath.startsWith(resolvedEx + '/');
   });
 }
 
@@ -300,6 +309,7 @@ export class PolicyEngine {
   private annotationMap: Map<string, ToolAnnotation>;
   private compiledPolicy: CompiledPolicyFile;
   private protectedPaths: string[];
+  private protectedPathExclusions: string[];
   private allowedDirectory?: string;
   private serverDomainAllowlists: ReadonlyMap<string, readonly string[]>;
 
@@ -314,6 +324,7 @@ export class PolicyEngine {
     this.compiledPolicy = dynamicLists ? expandListReferences(compiledPolicy, dynamicLists) : compiledPolicy;
     this.protectedPaths = protectedPaths;
     this.allowedDirectory = allowedDirectory;
+    this.protectedPathExclusions = allowedDirectory ? [resolveRealPath(allowedDirectory)] : [];
     this.serverDomainAllowlists = serverDomainAllowlists ?? new Map();
     this.annotationMap = this.buildAnnotationMap(toolAnnotations);
   }
@@ -346,7 +357,8 @@ export class PolicyEngine {
   /**
    * Hardcoded structural invariants.
    *
-   * 1. Protected path check (deny)
+   * The evaluation order is security-critical and must not be reordered:
+   * 1. Protected path check (deny) -- must be first
    * 2. Filesystem sandbox containment for path-category roles (allow/partial)
    * 3. Untrusted domain gate for url-category roles (escalate)
    * 4. Unknown tool denial (deny)
@@ -368,9 +380,9 @@ export class PolicyEngine {
     const allPaths = [...new Set([...heuristicPaths, ...annotatedPaths])];
     const resolvedPaths = allPaths.map((p) => resolveRealPath(p));
 
-    // Protected path check -- any match is an immediate deny
+    // Protected path check -- any match is an immediate deny.
     for (const rp of resolvedPaths) {
-      if (isProtectedPath(rp, this.protectedPaths)) {
+      if (isProtectedPath(rp, this.protectedPaths, this.protectedPathExclusions)) {
         return finalDecision({
           decision: 'deny',
           rule: 'structural-protected-path',

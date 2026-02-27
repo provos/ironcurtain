@@ -51,6 +51,12 @@ export function computeProtectedPaths(opts: {
   auditLogPath: string;
 }): string[] {
   const paths = [
+    // Protect the entire IronCurtain home directory (~/.ironcurtain/).
+    // Individual subpaths (config, constitution files, user generated dir) are
+    // covered by this directory-level protection. The PolicyEngine excludes
+    // the allowedDirectory (session sandbox) from protected path checks so
+    // agent sandboxes remain writable.
+    resolveRealPath(getIronCurtainHome()),
     resolveRealPath(opts.constitutionPath),
     resolveRealPath(opts.generatedDir),
     resolveRealPath(opts.mcpServersPath),
