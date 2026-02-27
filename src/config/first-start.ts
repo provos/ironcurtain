@@ -17,6 +17,7 @@ import {
   WEB_SEARCH_PROVIDER_URLS,
   loadUserConfig,
   saveUserConfig,
+  type UserConfig,
   type WebSearchProvider,
 } from './user-config.js';
 import { parseModelId, type ProviderId } from './model-provider.js';
@@ -89,8 +90,19 @@ export async function runFirstStart(): Promise<void> {
     process.exit(0);
   }
 
-  // Load existing config after user confirms (avoids creating config.json on cancel)
-  const existingConfig = loadUserConfig();
+  // Load existing config without creating or modifying config.json
+  let existingConfig;
+  try {
+    existingConfig = loadUserConfig({ readOnly: true });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    p.log.error(`Error loading config: ${message}`);
+    p.log.info('Fix the config file or delete it and re-run setup.');
+    process.exit(1);
+  }
+
+  // Accumulate all wizard choices, saved once at the end
+  const pending: UserConfig = {};
 
   // Step 2: Show the default constitution
   const constitutionPath = resolve(__dirname, 'constitution.md');
@@ -149,16 +161,14 @@ export async function runFirstStart(): Promise<void> {
     if (existingKey) {
       // Re-selected a provider that already has an API key — preserve it
       p.log.success(`Existing ${provider} API key preserved.`);
-      saveUserConfig({ webSearch: { provider } });
+      pending.webSearch = { provider };
     } else {
       const apiKey = await p.text({
         message: `Enter your ${provider} API key:`,
         validate: (val) => (!val ? 'API key is required' : undefined),
       });
       handleCancel(apiKey);
-      saveUserConfig({
-        webSearch: { provider, [provider]: { apiKey: apiKey as string } },
-      });
+      pending.webSearch = { provider, [provider]: { apiKey: apiKey as string } };
       p.log.success(`Web search configured with ${provider}.`);
     }
   }
@@ -175,7 +185,10 @@ export async function runFirstStart(): Promise<void> {
     initialValue: existingConfig.autoApprove.enabled,
   });
   handleCancel(enableAutoApprove);
-  saveUserConfig({ autoApprove: { enabled: enableAutoApprove as boolean } });
+  pending.autoApprove = { enabled: enableAutoApprove as boolean };
+
+  // Persist all wizard choices in a single write
+  saveUserConfig(pending);
 
   // Step 6: Suggest customization
   p.note(

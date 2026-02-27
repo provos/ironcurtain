@@ -75,3 +75,8 @@ export function readConfig(testHome: string): ConfigOnDisk {
   expect(existsSync(configPath)).toBe(true);
   return JSON.parse(readFileSync(configPath, 'utf-8'));
 }
+
+/** Returns true if config.json exists in the test home directory. */
+export function configExists(testHome: string): boolean {
+  return existsSync(resolve(testHome, 'config.json'));
+}

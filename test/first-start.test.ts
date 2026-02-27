@@ -5,6 +5,7 @@ import {
   teardownConfigEnv,
   seedConfig,
   readConfig,
+  configExists,
 } from './helpers/config-test-setup.js';
 
 // Mocks must be defined via vi.hoisted() so they're available when vi.mock() runs
@@ -99,6 +100,31 @@ describe('first-start wizard', () => {
     await expect(runFirstStart()).rejects.toThrow('process.exit');
 
     expect(exitSpy).toHaveBeenCalledWith(0);
+  });
+
+  it('cancel at auto-approve does not write config', async () => {
+    mocks.confirm.mockResolvedValueOnce(true);
+    mocks.select.mockResolvedValueOnce('skip');
+    mocks.confirm.mockResolvedValueOnce(Symbol.for('cancel'));
+    mocks.isCancel.mockImplementation((v: unknown) => typeof v === 'symbol');
+
+    await expect(runFirstStart()).rejects.toThrow('process.exit');
+
+    expect(configExists(env.testHome)).toBe(false);
+  });
+
+  it('exits cleanly on broken config file', async () => {
+    const { writeFileSync, mkdirSync } = await import('node:fs');
+    const { resolve } = await import('node:path');
+    mkdirSync(env.testHome, { recursive: true });
+    writeFileSync(resolve(env.testHome, 'config.json'), 'not valid json');
+
+    mocks.confirm.mockResolvedValueOnce(true);
+
+    await expect(runFirstStart()).rejects.toThrow('process.exit');
+
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(mocks.log.error).toHaveBeenCalled();
   });
 
   describe('re-run safety', () => {

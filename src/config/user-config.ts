@@ -270,8 +270,18 @@ const DEFAULT_CONFIG_CONTENT =
  *
  * @throws Error on invalid JSON or schema validation failure
  */
-export function loadUserConfig(): ResolvedUserConfig {
+export function loadUserConfig(options?: { readOnly?: boolean }): ResolvedUserConfig {
   const configPath = getUserConfigPath();
+  if (options?.readOnly) {
+    // Read-only mode: return defaults if file doesn't exist, never write to disk
+    if (!existsSync(configPath)) {
+      return applyEnvOverrides(mergeWithDefaults({}));
+    }
+    const raw = readFileSync(configPath, 'utf-8');
+    const parsed = parseConfigJson(raw, configPath);
+    const validated = validateConfig(parsed, configPath);
+    return applyEnvOverrides(mergeWithDefaults(validated));
+  }
   let raw = readOrCreateConfigFile(configPath);
   raw = backfillMissingFields(configPath, raw);
   const parsed = parseConfigJson(raw, configPath);
