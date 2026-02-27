@@ -421,8 +421,13 @@ export function resolveServerSandboxConfigs(
   allowedDirectory: string | undefined,
   sandboxAvailable: boolean,
   sandboxPolicy: SandboxAvailabilityPolicy,
-): { resolvedSandboxConfigs: Map<string, ResolvedSandboxConfig>; settingsDir: string } {
+): {
+  resolvedSandboxConfigs: Map<string, ResolvedSandboxConfig>;
+  settingsDir: string;
+  serverCwdPaths: Map<string, string>;
+} {
   const resolvedSandboxConfigs = new Map<string, ResolvedSandboxConfig>();
+  const serverCwdPaths = new Map<string, string>();
   const settingsDir = mkdtempSync(join(tmpdir(), 'ironcurtain-srt-'));
 
   for (const [serverName, config] of Object.entries(serversConfig)) {
@@ -430,11 +435,12 @@ export function resolveServerSandboxConfigs(
     resolvedSandboxConfigs.set(serverName, resolved);
 
     if (resolved.sandboxed) {
-      writeServerSettings(serverName, resolved.config, settingsDir);
+      const { cwdPath } = writeServerSettings(serverName, resolved.config, settingsDir);
+      serverCwdPaths.set(serverName, cwdPath);
     }
   }
 
-  return { resolvedSandboxConfigs, settingsDir };
+  return { resolvedSandboxConfigs, settingsDir, serverCwdPaths };
 }
 
 /** Builds a lookup map from tool name to ProxiedTool for routing. */
@@ -758,7 +764,7 @@ async function main(): Promise<void> {
 
   // ── Sandbox availability & config resolution ──────────────────────
   const { sandboxAvailable } = validateSandboxAvailability(sandboxPolicy, sessionLogPath, process.platform);
-  const { resolvedSandboxConfigs, settingsDir } = resolveServerSandboxConfigs(
+  const { resolvedSandboxConfigs, settingsDir, serverCwdPaths } = resolveServerSandboxConfigs(
     serversConfig,
     allowedDirectory,
     sandboxAvailable,
@@ -779,7 +785,9 @@ async function main(): Promise<void> {
       args: wrapped.args,
       env: { ...(process.env as Record<string, string>), ...(config.env ?? {}), ...serverCredentials },
       stderr: 'pipe',
-      ...(resolved.sandboxed && allowedDirectory ? { cwd: allowedDirectory } : {}),
+      // Sandboxed servers use a per-server temp dir as CWD (not the sandbox)
+      // to prevent srt/bwrap ghost dotfiles from polluting the sandbox directory.
+      ...(resolved.sandboxed && serverCwdPaths.has(serverName) ? { cwd: serverCwdPaths.get(serverName) } : {}),
     });
 
     let serverStderr = '';

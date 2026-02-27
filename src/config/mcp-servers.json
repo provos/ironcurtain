@@ -1,10 +1,12 @@
 {
   "filesystem": {
+    "description": "Read, write, search, and manage files and directories",
     "command": "npx",
     "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp/ironcurtain-sandbox"],
     "sandbox": false
   },
   "git": {
+    "description": "Git version control operations (commits, branches, diffs, etc.)",
     "command": "node",
     "args": ["node_modules/.bin/git-mcp-server"],
     "env": {
@@ -20,6 +22,7 @@
     }
   },
   "fetch": {
+    "description": "HTTP requests and web search",
     "command": "tsx",
     "args": ["./src/servers/fetch-server.ts"],
     "sandbox": false,
