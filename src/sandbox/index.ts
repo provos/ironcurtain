@@ -81,6 +81,18 @@ export interface CodeExecutionResult {
   logs: string[];
 }
 
+/** A single tool entry for help discovery. */
+export interface HelpToolEntry {
+  callableName: string;
+  params: string;
+}
+
+/** Structured help data for progressive tool disclosure. */
+export interface HelpData {
+  serverDescriptions: Record<string, string>;
+  toolsByServer: Record<string, HelpToolEntry[]>;
+}
+
 /**
  * Builds a JavaScript snippet that patches __getToolInterface inside the
  * sandbox isolate so that callable names (with underscores) resolve to
@@ -112,10 +124,58 @@ function buildInterfacePatchSnippet(callableToRawMap: Record<string, string>): s
   `;
 }
 
+/**
+ * Builds a JavaScript snippet that injects `global.help = { help: fn }` into the
+ * V8 sandbox isolate. This is a pure in-isolate function — no MCP request is
+ * created, so the policy engine and audit log never see help calls.
+ *
+ * - `help.help()` with no args lists all servers with descriptions.
+ * - `help.help('filesystem')` lists that server's tools as `callableName(params)`.
+ * - Unknown server returns an error message suggesting `help.help()`.
+ */
+export function buildHelpSnippet(helpData: HelpData): string {
+  const descriptionsJson = JSON.stringify(helpData.serverDescriptions);
+  const toolsJson = JSON.stringify(helpData.toolsByServer);
+
+  return `
+    (function() {
+      var _serverDescs = ${descriptionsJson};
+      var _toolsByServer = ${toolsJson};
+      global.help = {
+        help: function(serverName) {
+          if (!serverName) {
+            var lines = ['Available tool servers:'];
+            var names = Object.keys(_serverDescs);
+            for (var i = 0; i < names.length; i++) {
+              lines.push('  ' + names[i] + ' - ' + _serverDescs[names[i]]);
+            }
+            lines.push('');
+            lines.push("Call help.help('serverName') to list tools in a server.");
+            return lines.join('\\n');
+          }
+          var tools = _toolsByServer[serverName];
+          if (!tools) {
+            var known = Object.keys(_serverDescs).join(', ');
+            return 'Unknown server: ' + serverName + '. Available servers: ' + known + ". Call help.help() to list all.";
+          }
+          var lines = ['Tools in ' + serverName + ':'];
+          for (var i = 0; i < tools.length; i++) {
+            var t = tools[i];
+            lines.push('  ' + t.callableName + '(' + t.params + ')');
+          }
+          return lines.join('\\n');
+        }
+      };
+    })();
+  `;
+}
+
 export class Sandbox {
   private client: CodeModeUtcpClient | null = null;
   private toolCatalog: string = '';
   private interfacePatchSnippet: string = '';
+  private helpSnippet: string = '';
+  private helpData: HelpData = { serverDescriptions: {}, toolsByServer: {} };
 
   async initialize(config: IronCurtainConfig): Promise<void> {
     // Update the Protocol.request timeout before any Client instances are created.
@@ -209,26 +269,34 @@ export class Sandbox {
       throw new Error(`Failed to register MCP servers: ${errors}`);
     }
 
-    const { catalog, patchSnippet } = await this.buildToolCatalogAndPatch();
+    const { catalog, patchSnippet, helpData } = await this.buildToolCatalogAndPatch(config);
     this.toolCatalog = catalog;
     this.interfacePatchSnippet = patchSnippet;
+    this.helpData = helpData;
+    this.helpSnippet = buildHelpSnippet(helpData);
   }
 
   /**
-   * Builds the tool catalog and the __getToolInterface patch in one pass.
+   * Builds the tool catalog, the __getToolInterface patch, and help data in one pass.
    *
    * The catalog is a compact one-line-per-tool listing using callable names.
    * The patch snippet maps callable names back to raw UTCP names so that
    * __getToolInterface works with either naming convention.
+   * The help data groups tools by server for progressive disclosure.
    */
-  private async buildToolCatalogAndPatch(): Promise<{ catalog: string; patchSnippet: string }> {
+  private async buildToolCatalogAndPatch(
+    config: IronCurtainConfig,
+  ): Promise<{ catalog: string; patchSnippet: string; helpData: HelpData }> {
     if (!this.client) throw new Error('Sandbox not initialized');
+    const emptyHelp: HelpData = { serverDescriptions: {}, toolsByServer: {} };
 
     const tools = await this.client.getTools();
-    if (tools.length === 0) return { catalog: 'No tools available', patchSnippet: '' };
+    if (tools.length === 0) return { catalog: 'No tools available', patchSnippet: '', helpData: emptyHelp };
 
     const callableToRaw: Record<string, string> = {};
     const catalogLines: string[] = [];
+    const toolsByServer: Record<string, HelpToolEntry[]> = {};
+    const serverDescriptions: Record<string, string> = {};
 
     for (const t of tools) {
       const callableName = toCallableName(t.name);
@@ -239,24 +307,41 @@ export class Sandbox {
       if (callableName !== t.name) {
         callableToRaw[callableName] = t.name;
       }
+
+      // Extract server name from the UTCP name: tools.<server>.<tool>
+      const segments = t.name.split('.');
+      const serverName = segments.length >= 2 ? segments[1] : segments[0];
+      if (!(serverName in toolsByServer)) {
+        toolsByServer[serverName] = [];
+        // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- defensive: Record index may be undefined at runtime
+        serverDescriptions[serverName] = config.mcpServers[serverName]?.description ?? serverName;
+      }
+      toolsByServer[serverName].push({ callableName, params });
     }
 
     const patchSnippet = Object.keys(callableToRaw).length > 0 ? buildInterfacePatchSnippet(callableToRaw) : '';
+    const helpData: HelpData = { serverDescriptions, toolsByServer };
 
-    return { catalog: catalogLines.join('\n'), patchSnippet };
+    return { catalog: catalogLines.join('\n'), patchSnippet, helpData };
   }
 
   getToolInterfaces(): string {
     return this.toolCatalog;
   }
 
+  getHelpData(): HelpData {
+    return this.helpData;
+  }
+
   async executeCode(code: string, timeoutMs = 300000): Promise<CodeExecutionResult> {
     if (!this.client) throw new Error('Sandbox not initialized');
 
-    // Prepend the interface patch so __getToolInterface accepts callable names.
-    // Each callToolChain invocation creates a fresh V8 isolate, so the patch
-    // must be re-applied every time.
-    const patchedCode = this.interfacePatchSnippet ? `${this.interfacePatchSnippet}\n${code}` : code;
+    // Prepend the interface patch and help snippet. Each callToolChain
+    // invocation creates a fresh V8 isolate, so both must be re-applied.
+    let preamble = '';
+    if (this.interfacePatchSnippet) preamble += this.interfacePatchSnippet + '\n';
+    if (this.helpSnippet) preamble += this.helpSnippet + '\n';
+    const patchedCode = preamble ? `${preamble}${code}` : code;
 
     // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment -- callToolChain returns { result: any }
     const { result, logs } = await this.client.callToolChain(patchedCode, timeoutMs);

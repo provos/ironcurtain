@@ -202,7 +202,7 @@ describe('writeServerSettings', () => {
   });
 
   it('writes valid JSON at the expected path', () => {
-    const path = writeServerSettings(
+    const { settingsPath, cwdPath } = writeServerSettings(
       'exec',
       {
         allowWrite: ['/sandbox'],
@@ -213,16 +213,18 @@ describe('writeServerSettings', () => {
       settingsDir,
     );
 
-    expect(path).toBe(join(settingsDir, 'exec.srt-settings.json'));
-    expect(existsSync(path)).toBe(true);
+    expect(settingsPath).toBe(join(settingsDir, 'exec.srt-settings.json'));
+    expect(existsSync(settingsPath)).toBe(true);
+    expect(cwdPath).toBe(join(settingsDir, 'exec.cwd'));
+    expect(existsSync(cwdPath)).toBe(true);
 
-    const content = JSON.parse(readFileSync(path, 'utf-8'));
+    const content = JSON.parse(readFileSync(settingsPath, 'utf-8'));
     expect(content).toHaveProperty('network');
     expect(content).toHaveProperty('filesystem');
   });
 
   it('maps network: false to empty allowedDomains', () => {
-    const path = writeServerSettings(
+    const { settingsPath } = writeServerSettings(
       'exec',
       {
         allowWrite: ['/sandbox'],
@@ -233,7 +235,7 @@ describe('writeServerSettings', () => {
       settingsDir,
     );
 
-    const content = JSON.parse(readFileSync(path, 'utf-8'));
+    const content = JSON.parse(readFileSync(settingsPath, 'utf-8'));
     expect(content.network).toEqual({
       allowedDomains: [],
       deniedDomains: [],
@@ -241,7 +243,7 @@ describe('writeServerSettings', () => {
   });
 
   it('passes through allowedDomains and deniedDomains', () => {
-    const path = writeServerSettings(
+    const { settingsPath } = writeServerSettings(
       'git',
       {
         allowWrite: ['/sandbox'],
@@ -255,13 +257,13 @@ describe('writeServerSettings', () => {
       settingsDir,
     );
 
-    const content = JSON.parse(readFileSync(path, 'utf-8'));
+    const content = JSON.parse(readFileSync(settingsPath, 'utf-8'));
     expect(content.network.allowedDomains).toEqual(['github.com', '*.github.com']);
     expect(content.network.deniedDomains).toEqual(['evil.com']);
   });
 
-  it('writes correct filesystem config', () => {
-    const path = writeServerSettings(
+  it('writes correct filesystem config including cwd path', () => {
+    const { settingsPath, cwdPath } = writeServerSettings(
       'test',
       {
         allowWrite: ['/sandbox', '/sandbox/.git'],
@@ -272,8 +274,8 @@ describe('writeServerSettings', () => {
       settingsDir,
     );
 
-    const content = JSON.parse(readFileSync(path, 'utf-8'));
-    expect(content.filesystem.allowWrite).toEqual(['/sandbox', '/sandbox/.git']);
+    const content = JSON.parse(readFileSync(settingsPath, 'utf-8'));
+    expect(content.filesystem.allowWrite).toEqual(['/sandbox', '/sandbox/.git', cwdPath]);
     expect(content.filesystem.denyRead).toEqual(['~/.ssh', '~/.gnupg']);
     expect(content.filesystem.denyWrite).toEqual(['/var/log']);
   });

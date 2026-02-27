@@ -81,6 +81,17 @@ describe('resolveSessionMode', () => {
       await expect(promise).rejects.toThrow(/ANTHROPIC_API_KEY/);
     });
 
+    it('selects builtin mode when --agent builtin is specified', async () => {
+      const result = await resolveSessionMode({
+        config: createTestConfig(),
+        requestedAgent: 'builtin' as AgentId,
+        isDockerAvailable: dockerUnavailable,
+      });
+
+      expect(result.mode).toEqual({ kind: 'builtin' });
+      expect(result.reason).toBe('Explicit --agent builtin');
+    });
+
     it('checks Docker before API key (Docker error shown first)', async () => {
       await expect(
         resolveSessionMode({

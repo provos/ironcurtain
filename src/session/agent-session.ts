@@ -27,7 +27,7 @@ import type { Sandbox } from '../sandbox/index.js';
 import { SessionNotReadyError, SessionClosedError, BudgetExhaustedError } from './errors.js';
 import { MessageCompactor } from './message-compactor.js';
 import { createCacheStrategy, type PromptCacheStrategy } from './prompt-cache.js';
-import { buildSystemPrompt } from './prompts.js';
+import { buildSystemPrompt, type ServerListing } from './prompts.js';
 import { ResourceBudgetTracker } from './resource-budget-tracker.js';
 import { StepLoopDetector } from './step-loop-detector.js';
 import { truncateResult, getResultSizeLimit, formatKB } from './truncate-result.js';
@@ -131,7 +131,12 @@ export class AgentSession implements Session {
    */
   async initialize(): Promise<void> {
     this.sandbox = await this.sandboxFactory(this.config);
-    const rawPrompt = buildSystemPrompt(this.sandbox.getToolInterfaces(), this.config.allowedDirectory);
+    const helpData = this.sandbox.getHelpData();
+    const serverListings: ServerListing[] = Object.entries(helpData.serverDescriptions).map(([name, description]) => ({
+      name,
+      description,
+    }));
+    const rawPrompt = buildSystemPrompt(serverListings, this.config.allowedDirectory);
     this.systemPrompt = this.cacheStrategy.wrapSystemPrompt(rawPrompt);
     this.tools = this.cacheStrategy.wrapTools(this.buildTools());
     this.model = await this.buildModel();
@@ -285,11 +290,10 @@ export class AgentSession implements Session {
     return {
       execute_code: tool({
         description:
-          'Execute TypeScript code in a secure sandbox with access to filesystem tools. ' +
-          'Write code that calls tool functions like filesystem.filesystem_read_file({ path }), ' +
-          'filesystem.filesystem_list_directory({ path }), etc. ' +
+          'Execute TypeScript code in a secure sandbox with access to MCP tool servers. ' +
+          "Call help.help() to list servers, help.help('serverName') to discover tools. " +
           'Tools are synchronous — no await needed. Use return to provide results. ' +
-          "Call __getToolInterface('tool.name') to discover the full type signature of any tool.",
+          "Call __getToolInterface('tool.name') to inspect a tool's full type signature.",
         inputSchema: z.object({
           code: z.string().describe('TypeScript code to execute in the sandbox'),
         }),

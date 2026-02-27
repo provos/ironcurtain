@@ -91,6 +91,12 @@ function createMockSandbox(): Sandbox {
   return {
     initialize: vi.fn().mockResolvedValue(undefined),
     getToolInterfaces: vi.fn().mockReturnValue('mock tool interfaces'),
+    getHelpData: vi.fn().mockReturnValue({
+      serverDescriptions: { filesystem: 'Read, write, search, and manage files and directories' },
+      toolsByServer: {
+        filesystem: [{ callableName: 'filesystem.filesystem_read_file', params: '{ path }' }],
+      },
+    }),
     executeCode: vi.fn().mockResolvedValue({ result: 'mock result', logs: [] }),
     shutdown: vi.fn().mockResolvedValue(undefined),
   } as unknown as Sandbox;

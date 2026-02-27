@@ -11,7 +11,7 @@
  */
 
 import { SandboxManager } from '@anthropic-ai/sandbox-runtime';
-import { writeFileSync, rmSync, existsSync } from 'node:fs';
+import { writeFileSync, mkdirSync, rmSync, existsSync } from 'node:fs';
 import { join, resolve, dirname, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { quote } from 'shell-quote';
@@ -131,15 +131,25 @@ export function resolveSandboxConfig(
 }
 
 /**
- * Writes a per-server srt settings JSON file.
+ * Writes a per-server srt settings JSON file and creates a per-server
+ * CWD directory for bwrap ghost dotfiles.
  *
  * Each sandboxed server gets its own settings file at
- * `{settingsDir}/{serverName}.srt-settings.json`.
+ * `{settingsDir}/{serverName}.srt-settings.json` and a CWD directory at
+ * `{settingsDir}/{serverName}.cwd/`. The CWD directory is added to
+ * `allowWrite` so the sandboxed process can write logs there. This keeps
+ * bwrap ghost dotfiles out of the user-visible sandbox directory.
  *
- * Returns the absolute path to the written file.
+ * Returns `{ settingsPath, cwdPath }`.
  */
-export function writeServerSettings(serverName: string, config: ResolvedSandboxParams, settingsDir: string): string {
+export function writeServerSettings(
+  serverName: string,
+  config: ResolvedSandboxParams,
+  settingsDir: string,
+): { settingsPath: string; cwdPath: string } {
   const settingsPath = join(settingsDir, `${serverName}.srt-settings.json`);
+  const cwdPath = join(settingsDir, `${serverName}.cwd`);
+  mkdirSync(cwdPath, { recursive: true });
 
   const network =
     config.network === false
@@ -150,13 +160,13 @@ export function writeServerSettings(serverName: string, config: ResolvedSandboxP
     network,
     filesystem: {
       denyRead: config.denyRead,
-      allowWrite: config.allowWrite,
+      allowWrite: [...config.allowWrite, cwdPath],
       denyWrite: config.denyWrite,
     },
   };
 
   writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
-  return settingsPath;
+  return { settingsPath, cwdPath };
 }
 
 /**
@@ -179,7 +189,7 @@ export function wrapServerCommand(
 
   const settingsPath = join(settingsDir, `${serverName}.srt-settings.json`);
   // Resolve relative paths in args to absolute so the command works when
-  // the proxy sets cwd to the sandbox directory.
+  // the proxy sets cwd to the per-server temp directory.
   const resolvedArgs = args.map((a) => (!isAbsolute(a) && !a.startsWith('-') ? resolve(a) : a));
   const cmdString = quote([command, ...resolvedArgs]);
 

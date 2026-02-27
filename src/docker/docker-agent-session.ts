@@ -32,7 +32,7 @@ import type {
 import type { IronCurtainConfig } from '../config/types.js';
 import type { AgentAdapter } from './agent-adapter.js';
 import type { DockerManager } from './types.js';
-import type { ManagedProxy } from './managed-proxy.js';
+import type { DockerProxy } from './code-mode-proxy.js';
 import type { MitmProxy } from './mitm-proxy.js';
 import type { CertificateAuthority } from './ca.js';
 import { AuditLogTailer } from './audit-log-tailer.js';
@@ -48,7 +48,7 @@ export interface DockerAgentSessionDeps {
   readonly sessionId: SessionId;
   readonly adapter: AgentAdapter;
   readonly docker: DockerManager;
-  readonly proxy: ManagedProxy;
+  readonly proxy: DockerProxy;
   readonly mitmProxy: MitmProxy;
   readonly ca: CertificateAuthority;
   readonly fakeKeys: ReadonlyMap<string, string>;
@@ -68,7 +68,7 @@ export class DockerAgentSession implements Session {
   private readonly config: IronCurtainConfig;
   private readonly adapter: AgentAdapter;
   private readonly docker: DockerManager;
-  private readonly proxy: ManagedProxy;
+  private readonly proxy: DockerProxy;
   private readonly mitmProxy: MitmProxy;
   private readonly ca: CertificateAuthority;
   private readonly fakeKeys: ReadonlyMap<string, string>;
@@ -122,9 +122,9 @@ export class DockerAgentSession implements Session {
 
   /**
    * Initialize the Docker agent session:
-   * 1. Start MCP proxy (UDS)
-   * 2. Start MITM proxy (UDS)
-   * 3. Query proxy for available tools
+   * 1. Start Code Mode proxy (UDS/TCP)
+   * 2. Start MITM proxy (UDS/TCP)
+   * 3. Build server listings from sandbox help data
    * 4. Generate orientation files
    * 5. Ensure Docker image exists (with CA cert baked in)
    * 6. Create and start container (--network=none)
@@ -135,12 +135,12 @@ export class DockerAgentSession implements Session {
     mkdirSync(this.sandboxDir, { recursive: true });
     mkdirSync(this.escalationDir, { recursive: true });
 
-    // 1. Start MCP proxy
+    // 1. Start Code Mode proxy
     await this.proxy.start();
     if (this.useTcp && this.proxy.port !== undefined) {
-      logger.info(`MCP proxy listening on 127.0.0.1:${this.proxy.port}`);
+      logger.info(`Code Mode proxy listening on 127.0.0.1:${this.proxy.port}`);
     } else {
-      logger.info(`MCP proxy listening on ${this.proxy.socketPath}`);
+      logger.info(`Code Mode proxy listening on ${this.proxy.socketPath}`);
     }
 
     // 2. Start MITM proxy
@@ -151,9 +151,13 @@ export class DockerAgentSession implements Session {
       logger.info(`MITM proxy listening on ${mitmAddr.socketPath}`);
     }
 
-    // 3. Query proxy for available tools
-    const tools = await this.proxy.listTools();
-    logger.info(`Available tools: ${tools.map((t) => t.name).join(', ')}`);
+    // 3. Build server listings from sandbox help data
+    const helpData = this.proxy.getHelpData();
+    const serverListings = Object.entries(helpData.serverDescriptions).map(([name, description]) => ({
+      name,
+      description,
+    }));
+    logger.info(`Available servers: ${serverListings.map((s) => s.name).join(', ')}`);
 
     // 4. Generate orientation
     // In TCP mode, the container reaches the MCP proxy via host.docker.internal
@@ -161,7 +165,7 @@ export class DockerAgentSession implements Session {
       this.useTcp && this.proxy.port !== undefined ? `host.docker.internal:${this.proxy.port}` : undefined;
     const { systemPrompt } = prepareSession(
       this.adapter,
-      tools,
+      serverListings,
       this.sessionDir,
       this.config,
       this.sandboxDir,

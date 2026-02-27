@@ -85,6 +85,13 @@ async function resolveExplicit(
   config: IronCurtainConfig,
   isDockerAvailable: () => Promise<boolean>,
 ): Promise<PreflightResult> {
+  if (agent === 'builtin') {
+    return {
+      mode: { kind: 'builtin' },
+      reason: 'Explicit --agent builtin',
+    };
+  }
+
   const dockerOk = await isDockerAvailable();
   if (!dockerOk) {
     throw new PreflightError(

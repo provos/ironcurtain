@@ -57,6 +57,8 @@ export interface MCPServerConfig {
   command: string;
   args: string[];
   env?: Record<string, string>;
+  /** Human-readable one-line description for tool discovery. */
+  description?: string;
   /** OS-level sandbox configuration. Omit for restrictive defaults, `false` to opt out. */
   sandbox?: ServerSandboxConfig;
 }
