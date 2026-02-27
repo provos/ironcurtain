@@ -65,6 +65,14 @@ export function getSessionAuditLogPath(sessionId: string): string {
 }
 
 /**
+ * Returns the interaction log path for a given session:
+ *   {home}/sessions/{sessionId}/interactions.jsonl
+ */
+export function getSessionInteractionLogPath(sessionId: string): string {
+  return resolve(getSessionDir(sessionId), 'interactions.jsonl');
+}
+
+/**
  * Returns the session log path for a given session:
  *   {home}/sessions/{sessionId}/session.log
  */

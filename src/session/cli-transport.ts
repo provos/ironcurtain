@@ -25,7 +25,7 @@ import chalk from 'chalk';
 import { marked } from 'marked';
 import { markedTerminal } from 'marked-terminal';
 import type { Ora } from 'ora';
-import type { Transport } from './transport.js';
+import { BaseTransport } from './base-transport.js';
 import type { Session, DiagnosticEvent, EscalationRequest, BudgetStatus } from './types.js';
 
 /** Options for constructing a CliTransport. */
@@ -40,7 +40,7 @@ export interface CliTransportOptions {
 // This is module-level since marked is a singleton.
 marked.use(markedTerminal());
 
-export class CliTransport implements Transport {
+export class CliTransport extends BaseTransport {
   private readonly initialMessage?: string;
   private readonly input: Readable;
 
@@ -51,11 +51,12 @@ export class CliTransport implements Transport {
   private rl: ReturnType<typeof createInterface> | null = null;
 
   constructor(options: CliTransportOptions = {}) {
+    super();
     this.initialMessage = options.initialMessage;
     this.input = options.input ?? process.stdin;
   }
 
-  async run(session: Session): Promise<void> {
+  protected async runSession(session: Session): Promise<void> {
     if (this.initialMessage) {
       return this.runSingleShot(session);
     }
@@ -143,7 +144,7 @@ export class CliTransport implements Transport {
 
     try {
       if (!this.initialMessage) throw new Error('runSingleShot called without initialMessage');
-      const response = await session.sendMessage(this.initialMessage);
+      const response = await this.sendAndLog(session, this.initialMessage);
       this.spinner?.stop();
       process.stdout.write('\n');
       process.stdout.write(renderMarkdown(response));
@@ -198,7 +199,7 @@ export class CliTransport implements Transport {
       this.startSpinner('Thinking...');
 
       try {
-        const response = await session.sendMessage(trimmed);
+        const response = await this.sendAndLog(session, trimmed);
         this.spinner?.stop();
         process.stdout.write('\n');
         process.stdout.write(renderMarkdown(response));

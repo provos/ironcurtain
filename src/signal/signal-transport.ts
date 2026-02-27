@@ -9,26 +9,26 @@
  * 2. Create callback factories that bridge session events to the daemon
  */
 
-import type { Transport } from '../session/transport.js';
+import { BaseTransport } from '../session/base-transport.js';
 import type { Session, DiagnosticEvent, EscalationRequest } from '../session/types.js';
 import type { SignalBotDaemon } from './signal-bot-daemon.js';
 import { formatEscalationBanner } from './format.js';
 
-export class SignalSessionTransport implements Transport {
+export class SignalSessionTransport extends BaseTransport {
   private session: Session | null = null;
   private readonly daemon: SignalBotDaemon;
   private exitResolve: (() => void) | null = null;
 
   constructor(daemon: SignalBotDaemon) {
+    super();
     this.daemon = daemon;
   }
 
   /**
-   * Starts the transport. The returned promise resolves when
+   * Implements the session lifecycle. The returned promise resolves when
    * close() is called, which signals that the session is done.
-   * This follows the same contract as CliTransport.run().
    */
-  async run(session: Session): Promise<void> {
+  protected async runSession(session: Session): Promise<void> {
     this.session = session;
     return new Promise<void>((resolve) => {
       this.exitResolve = resolve;
@@ -44,6 +44,17 @@ export class SignalSessionTransport implements Transport {
     this.session = null;
     this.exitResolve?.();
     this.exitResolve = null;
+  }
+
+  /**
+   * Forwards a message through the transport's sendAndLog() pipeline.
+   * Called by the daemon to route user messages through the transport layer.
+   */
+  async forwardMessage(text: string): Promise<string> {
+    if (!this.session) {
+      throw new Error('No active session');
+    }
+    return this.sendAndLog(this.session, text);
   }
 
   // --- Callback factories (wired into SessionOptions by the daemon) ---

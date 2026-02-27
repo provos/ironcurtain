@@ -276,11 +276,12 @@ export class SignalBotDaemon {
     }
 
     const session = this.activeSession;
-    if (!session) return;
+    const transport = this.activeTransport;
+    if (!session || !transport) return;
 
     this.messageInFlight = true;
     try {
-      const response = await session.sendMessage(text);
+      const response = await transport.forwardMessage(text);
       const styledText = markdownToSignal(response);
       await this.sendSignalMessage(styledText);
     } catch (error) {
