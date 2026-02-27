@@ -1,36 +1,34 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
-import { resolve } from 'node:path';
-import { tmpdir } from 'node:os';
+import {
+  type ConfigTestEnv,
+  setupConfigEnv,
+  teardownConfigEnv,
+  seedConfig,
+  readConfig,
+} from './helpers/config-test-setup.js';
 
-/** Env var names that need save/restore between tests. */
-const ENV_VARS_TO_ISOLATE = [
-  'IRONCURTAIN_HOME',
-  'ANTHROPIC_API_KEY',
-  'GOOGLE_GENERATIVE_AI_API_KEY',
-  'OPENAI_API_KEY',
-] as const;
-
-// Mock @clack/prompts before importing anything that uses it
-const mockSelect = vi.fn();
-const mockConfirm = vi.fn();
-const mockText = vi.fn();
-const mockIntro = vi.fn();
-const mockOutro = vi.fn();
-const mockNote = vi.fn();
-const mockCancel = vi.fn();
-const mockIsCancel = vi.fn().mockReturnValue(false);
-
+// Mocks must be defined via vi.hoisted() so they're available when vi.mock() runs
+const mocks = vi.hoisted(() => ({
+  select: vi.fn(),
+  confirm: vi.fn(),
+  text: vi.fn(),
+  intro: vi.fn(),
+  outro: vi.fn(),
+  note: vi.fn(),
+  cancel: vi.fn(),
+  isCancel: vi.fn(),
+  log: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), success: vi.fn() },
+}));
 vi.mock('@clack/prompts', () => ({
-  select: (...args: unknown[]) => mockSelect(...args),
-  confirm: (...args: unknown[]) => mockConfirm(...args),
-  text: (...args: unknown[]) => mockText(...args),
-  intro: (...args: unknown[]) => mockIntro(...args),
-  outro: (...args: unknown[]) => mockOutro(...args),
-  note: (...args: unknown[]) => mockNote(...args),
-  cancel: (...args: unknown[]) => mockCancel(...args),
-  isCancel: (...args: unknown[]) => mockIsCancel(...args),
-  log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+  select: (...args: unknown[]) => mocks.select(...args),
+  confirm: (...args: unknown[]) => mocks.confirm(...args),
+  text: (...args: unknown[]) => mocks.text(...args),
+  intro: (...args: unknown[]) => mocks.intro(...args),
+  outro: (...args: unknown[]) => mocks.outro(...args),
+  note: (...args: unknown[]) => mocks.note(...args),
+  cancel: (...args: unknown[]) => mocks.cancel(...args),
+  isCancel: (...args: unknown[]) => mocks.isCancel(...args),
+  log: mocks.log,
 }));
 
 // Now import the module under test
@@ -46,42 +44,26 @@ import type { ResolvedUserConfig, UserConfig } from '../src/config/user-config.j
 import { USER_CONFIG_DEFAULTS } from '../src/config/user-config.js';
 
 describe('config-command', () => {
-  let testHome: string;
-  const savedEnv: Record<string, string | undefined> = {};
+  let env: ConfigTestEnv;
   let savedIsTTY: boolean | undefined;
 
   beforeEach(() => {
-    testHome = mkdtempSync(resolve(tmpdir(), 'ironcurtain-configcmd-'));
-    for (const key of ENV_VARS_TO_ISOLATE) {
-      savedEnv[key] = process.env[key];
-      delete process.env[key];
-    }
-    process.env.IRONCURTAIN_HOME = testHome;
+    env = setupConfigEnv('configcmd');
     savedIsTTY = process.stdin.isTTY;
-    // Default to TTY for tests
     Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
-    // Reset mocks
     vi.clearAllMocks();
-    mockIsCancel.mockReturnValue(false);
-    // Suppress stderr from loadUserConfig
+    mocks.isCancel.mockReturnValue(false);
     vi.spyOn(process.stderr, 'write').mockReturnValue(true);
   });
 
   afterEach(() => {
-    for (const key of ENV_VARS_TO_ISOLATE) {
-      if (savedEnv[key] !== undefined) {
-        process.env[key] = savedEnv[key];
-      } else {
-        delete process.env[key];
-      }
-    }
     Object.defineProperty(process.stdin, 'isTTY', { value: savedIsTTY, configurable: true });
-    rmSync(testHome, { recursive: true, force: true });
+    teardownConfigEnv(env);
     vi.restoreAllMocks();
   });
 
   it('model change flows through to disk', async () => {
-    writeConfigFile({
+    seedConfig(env.testHome, {
       agentModelId: 'anthropic:claude-sonnet-4-6',
       policyModelId: 'anthropic:claude-sonnet-4-6',
       escalationTimeoutSeconds: 300,
@@ -91,24 +73,24 @@ describe('config-command', () => {
     });
 
     // Script: select Models -> select agentModelId -> pick opus -> Back -> Save -> confirm
-    mockSelect
+    mocks.select
       .mockResolvedValueOnce('models') // main menu: Models
       .mockResolvedValueOnce('agentModelId') // Models sub: agentModelId
       .mockResolvedValueOnce('anthropic:claude-opus-4-6') // model selection
       .mockResolvedValueOnce('back') // Models sub: Back
       .mockResolvedValueOnce('save'); // main menu: Save & Exit
-    mockConfirm.mockResolvedValueOnce(true); // confirm save
+    mocks.confirm.mockResolvedValueOnce(true); // confirm save
 
     await runConfigCommand();
 
-    const onDisk = readConfigFromDisk();
+    const onDisk = readConfig(env.testHome);
     expect(onDisk.agentModelId).toBe('anthropic:claude-opus-4-6');
     // policyModelId should be unchanged
     expect(onDisk.policyModelId).toBe('anthropic:claude-sonnet-4-6');
   });
 
   it('nullable budget field set to null', async () => {
-    writeConfigFile({
+    seedConfig(env.testHome, {
       agentModelId: 'anthropic:claude-sonnet-4-6',
       policyModelId: 'anthropic:claude-sonnet-4-6',
       escalationTimeoutSeconds: 300,
@@ -118,23 +100,23 @@ describe('config-command', () => {
     });
 
     // Script: Resources -> maxSteps -> disable -> Back -> Save -> confirm
-    mockSelect
+    mocks.select
       .mockResolvedValueOnce('resources') // main menu: Resources
       .mockResolvedValueOnce('maxSteps') // Resource sub: maxSteps
       .mockResolvedValueOnce('disable') // 3-way: disable
       .mockResolvedValueOnce('back') // Resource sub: Back
       .mockResolvedValueOnce('save'); // main menu: Save
-    mockConfirm.mockResolvedValueOnce(true);
+    mocks.confirm.mockResolvedValueOnce(true);
 
     await runConfigCommand();
 
-    const onDisk = readConfigFromDisk();
+    const onDisk = readConfig(env.testHome);
     const budget = onDisk.resourceBudget as Record<string, unknown>;
     expect(budget.maxSteps).toBeNull();
   });
 
   it('cancel discards all changes', async () => {
-    writeConfigFile({
+    seedConfig(env.testHome, {
       agentModelId: 'anthropic:claude-sonnet-4-6',
       policyModelId: 'anthropic:claude-sonnet-4-6',
       escalationTimeoutSeconds: 300,
@@ -144,7 +126,7 @@ describe('config-command', () => {
     });
 
     // Script: select Models -> change agent -> Back -> Cancel
-    mockSelect
+    mocks.select
       .mockResolvedValueOnce('models')
       .mockResolvedValueOnce('agentModelId')
       .mockResolvedValueOnce('anthropic:claude-opus-4-6')
@@ -153,13 +135,13 @@ describe('config-command', () => {
 
     await runConfigCommand();
 
-    const onDisk = readConfigFromDisk();
+    const onDisk = readConfig(env.testHome);
     expect(onDisk.agentModelId).toBe('anthropic:claude-sonnet-4-6');
-    expect(mockCancel).toHaveBeenCalledWith('Changes discarded.');
+    expect(mocks.cancel).toHaveBeenCalledWith('Changes discarded.');
   });
 
   it('save with no changes shows appropriate message', async () => {
-    writeConfigFile({
+    seedConfig(env.testHome, {
       agentModelId: 'anthropic:claude-sonnet-4-6',
       policyModelId: 'anthropic:claude-sonnet-4-6',
       escalationTimeoutSeconds: 300,
@@ -168,15 +150,15 @@ describe('config-command', () => {
       autoApprove: USER_CONFIG_DEFAULTS.autoApprove,
     });
 
-    mockSelect.mockResolvedValueOnce('save'); // main menu: Save immediately
+    mocks.select.mockResolvedValueOnce('save'); // main menu: Save immediately
 
     await runConfigCommand();
 
-    expect(mockOutro).toHaveBeenCalledWith('No changes to save.');
+    expect(mocks.outro).toHaveBeenCalledWith('No changes to save.');
   });
 
   it('Web Search section appears in main menu', async () => {
-    writeConfigFile({
+    seedConfig(env.testHome, {
       agentModelId: 'anthropic:claude-sonnet-4-6',
       policyModelId: 'anthropic:claude-sonnet-4-6',
       escalationTimeoutSeconds: 300,
@@ -186,7 +168,7 @@ describe('config-command', () => {
     });
 
     // Script: select Web Search -> Back -> Save
-    mockSelect
+    mocks.select
       .mockResolvedValueOnce('websearch') // main menu: Web Search
       .mockResolvedValueOnce('back') // Web Search sub: Back
       .mockResolvedValueOnce('save'); // main menu: Save
@@ -194,13 +176,13 @@ describe('config-command', () => {
     await runConfigCommand();
 
     // Verify the main menu select was called with websearch option
-    const firstCall = mockSelect.mock.calls[0][0] as { options: { value: string; label: string }[] };
+    const firstCall = mocks.select.mock.calls[0][0] as { options: { value: string; label: string }[] };
     expect(firstCall.options.some((o: { value: string }) => o.value === 'websearch')).toBe(true);
-    expect(mockOutro).toHaveBeenCalledWith('No changes to save.');
+    expect(mocks.outro).toHaveBeenCalledWith('No changes to save.');
   });
 
   it('Web Search provider selection stores in pending', async () => {
-    writeConfigFile({
+    seedConfig(env.testHome, {
       agentModelId: 'anthropic:claude-sonnet-4-6',
       policyModelId: 'anthropic:claude-sonnet-4-6',
       escalationTimeoutSeconds: 300,
@@ -210,18 +192,18 @@ describe('config-command', () => {
     });
 
     // Script: Web Search -> Select provider -> brave -> enter API key -> Back -> Save -> confirm
-    mockSelect
+    mocks.select
       .mockResolvedValueOnce('websearch') // main menu: Web Search
       .mockResolvedValueOnce('select') // Web Search: Select provider
       .mockResolvedValueOnce('brave') // Provider: brave
       .mockResolvedValueOnce('back') // Web Search: Back
       .mockResolvedValueOnce('save'); // main menu: Save
-    mockText.mockResolvedValueOnce('test-brave-key-123'); // API key
-    mockConfirm.mockResolvedValueOnce(true); // confirm save
+    mocks.text.mockResolvedValueOnce('test-brave-key-123'); // API key
+    mocks.confirm.mockResolvedValueOnce(true); // confirm save
 
     await runConfigCommand();
 
-    const onDisk = readConfigFromDisk();
+    const onDisk = readConfig(env.testHome);
     expect(onDisk.webSearch).toBeDefined();
     const ws = onDisk.webSearch as Record<string, unknown>;
     expect(ws.provider).toBe('brave');
@@ -241,17 +223,6 @@ describe('config-command', () => {
     expect(exitSpy).toHaveBeenCalledWith(1);
     expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining('TTY'));
   });
-
-  // --- Helper ---
-
-  function readConfigFromDisk(): Record<string, unknown> {
-    return JSON.parse(readFileSync(resolve(testHome, 'config.json'), 'utf-8'));
-  }
-
-  function writeConfigFile(config: Record<string, unknown>): void {
-    mkdirSync(testHome, { recursive: true });
-    writeFileSync(resolve(testHome, 'config.json'), JSON.stringify(config, null, 2));
-  }
 });
 
 describe('computeDiff', () => {

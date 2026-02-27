@@ -15,6 +15,7 @@ import {
   WEB_SEARCH_PROVIDERS,
   WEB_SEARCH_PROVIDER_LABELS,
   WEB_SEARCH_PROVIDER_URLS,
+  loadUserConfig,
   saveUserConfig,
   type WebSearchProvider,
 } from './user-config.js';
@@ -88,6 +89,9 @@ export async function runFirstStart(): Promise<void> {
     process.exit(0);
   }
 
+  // Load existing config after user confirms (avoids creating config.json on cancel)
+  const existingConfig = loadUserConfig();
+
   // Step 2: Show the default constitution
   const constitutionPath = resolve(__dirname, 'constitution.md');
   let constitutionText: string;
@@ -123,10 +127,11 @@ export async function runFirstStart(): Promise<void> {
     'Web search lets the agent look up documentation, error messages, and current\n' +
       'information. This is optional but makes the agent significantly more helpful.',
   );
+  const existingProvider = existingConfig.webSearch.provider;
   const providerOptions = WEB_SEARCH_PROVIDERS.map((prov) => ({
     value: prov,
     label: WEB_SEARCH_PROVIDER_LABELS[prov],
-    hint: WEB_SEARCH_PROVIDER_URLS[prov],
+    hint: prov === existingProvider ? `${WEB_SEARCH_PROVIDER_URLS[prov]} (configured)` : WEB_SEARCH_PROVIDER_URLS[prov],
   }));
   const setupSearch = await p.select({
     message: 'Set up a web search provider?',
@@ -134,23 +139,45 @@ export async function runFirstStart(): Promise<void> {
       ...providerOptions,
       { value: 'skip' as const, label: 'Skip for now', hint: 'configure later via ironcurtain config' },
     ],
+    initialValue: existingProvider || undefined,
   });
   handleCancel(setupSearch);
 
   if (setupSearch !== 'skip') {
     const provider = setupSearch as WebSearchProvider;
-    const apiKey = await p.text({
-      message: `Enter your ${provider} API key:`,
-      validate: (val) => (!val ? 'API key is required' : undefined),
-    });
-    handleCancel(apiKey);
-    saveUserConfig({
-      webSearch: { provider, [provider]: { apiKey: apiKey as string } },
-    });
-    p.log.success(`Web search configured with ${provider}.`);
+    const existingKey = existingConfig.webSearch[provider]?.apiKey;
+    if (existingKey) {
+      // Re-selected a provider that already has an API key — preserve it
+      p.log.success(`Existing ${provider} API key preserved.`);
+      saveUserConfig({ webSearch: { provider } });
+    } else {
+      const apiKey = await p.text({
+        message: `Enter your ${provider} API key:`,
+        validate: (val) => (!val ? 'API key is required' : undefined),
+      });
+      handleCancel(apiKey);
+      saveUserConfig({
+        webSearch: { provider, [provider]: { apiKey: apiKey as string } },
+      });
+      p.log.success(`Web search configured with ${provider}.`);
+    }
   }
 
-  // Step 5: Suggest customization
+  // Step 5: Auto-approve for escalations
+  p.log.info(
+    'When the policy engine escalates a tool call, you are asked to approve or deny it.\n' +
+      'Auto-approve uses a small LLM to approve calls that clearly match your explicit request.\n' +
+      'It is conservative: any ambiguity is escalated to you for manual review.\n' +
+      'The conservative choice is to leave it off and approve all escalations manually.',
+  );
+  const enableAutoApprove = await p.confirm({
+    message: 'Enable auto-approve for escalations?',
+    initialValue: existingConfig.autoApprove.enabled,
+  });
+  handleCancel(enableAutoApprove);
+  saveUserConfig({ autoApprove: { enabled: enableAutoApprove as boolean } });
+
+  // Step 6: Suggest customization
   p.note(
     'You can customize IronCurtain to fit your workflow:\n\n' +
       '  ironcurtain config             — change models, resource limits, and other settings\n' +
@@ -160,6 +187,6 @@ export async function runFirstStart(): Promise<void> {
     'Customization',
   );
 
-  // Step 6: Outro
+  // Step 7: Outro
   p.outro('Run `ironcurtain start` to begin.');
 }
