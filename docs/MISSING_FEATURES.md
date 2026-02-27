@@ -61,14 +61,14 @@ Interactive onboarding wizard (`src/config/first-start.ts`) runs automatically w
 ### Interactive Config Editor — **IMPLEMENTED**
 Terminal UI (`src/config/config-command.ts`) using `@clack/prompts` for viewing and modifying `~/.ironcurtain/config.json`. Covers models, security settings, resource budgets, auto-compaction, and web search. Diff tracking with save confirmation. Accessible via `ironcurtain config`.
 
-### Conversation Logging
-Write structured conversation logs capturing user prompts and agent responses alongside the existing audit log (which only records tool calls and policy decisions). This provides a complete record of what was asked and what was produced — useful for debugging, accountability, and replaying sessions. Could share the JSONL format of the audit log or use a separate file per session.
+### Conversation Logging — **IMPLEMENTED**
+Interaction log in `BaseTransport` (`src/session/base-transport.ts`) captures user prompts and assistant responses as JSONL alongside the existing audit log (which records tool calls and policy decisions). Provides a complete record of what was asked and what was produced — useful for debugging, accountability, and replaying sessions.
 
-### Remote Access / Messaging Integration
-Enable interaction with the agent beyond the local terminal — via a web UI, mobile app, or end-to-end encrypted messaging (e.g., Signal). The agent runs on the user's workstation; the user submits tasks, receives results, and approves escalations from anywhere. Requires a pluggable transport layer bridging the escalation system to external messaging protocols, plus authentication to prevent unauthorized access. An E2E encrypted transport like Signal would be ideal for security-sensitive use cases.
+### Remote Access / Messaging Integration — **IMPLEMENTED**
+Signal transport (`src/signal/`) enables E2E encrypted interaction beyond the local terminal. The agent runs on the user's workstation; the user submits tasks via Signal, receives formatted results, and approves escalations by replying "approve"/"deny". Architecture: `SignalBotDaemon` (persistent WebSocket listener) manages session lifecycle, `SignalSessionTransport` adapts sessions to the pluggable `Transport` interface, Docker-managed `signal-cli-rest-api` container handles Signal protocol. Includes fail-closed identity verification (Signal identity keys), message deduplication, markdown-to-Signal-styles conversion, and interactive setup wizard (`ironcurtain setup-signal`). Start with `ironcurtain bot`.
 
 ### Richer Escalation System — *Partial*
-CLI readline escalation and LLM-based auto-approver (`src/trusted-process/auto-approver.ts`) are implemented. Callback-based escalation handlers are available in session options. Still missing: pluggable backends beyond CLI/callbacks, escalation queue, context enrichment (conversation history, agent intent).
+CLI readline escalation, LLM-based auto-approver (`src/trusted-process/auto-approver.ts`), and Signal-based escalation (text-based approve/deny with race condition prevention) are implemented. Callback-based escalation handlers are available in session options. Still missing: escalation queue, context enrichment (conversation history, agent intent).
 
 ## Scale
 

@@ -92,10 +92,10 @@ Each tracer bullet is an independently shippable thin slice. Each builds infrast
 ```
 DevOps Use Case (immediate)          Second Brain (future)
          |                                    |
-    TB0: Execution Containment -------------- |
+    TB0: Execution Containment ✓ ------------ |
     TB1: Multi-Server ----------------------- |
-    TB2: Resource Budgets ------------------- |
-    TB3: Messaging Transport ---------------- |
+    TB2: Resource Budgets ✓ ----------------- |
+    TB3: Messaging Transport (Signal) ✓ ----- |
     TB4: Per-Task Policy -------------------- |
     TB5: LLM Assessment -------------------- |
                                               |
@@ -218,24 +218,33 @@ The only path to persist work outside the sandbox is through Tier 1 tools (git p
 
 **Dependencies:** None (can be done in parallel with TB1).
 
-### TB3: Messaging Transport (Telegram)
+### TB3: Messaging Transport (Signal) — **IMPLEMENTED**
 
-**From:** MISSING_FEATURES.md — "Messaging / UI Integration"
+**From:** MISSING_FEATURES.md — "Remote Access / Messaging Integration"
 
-**Goal:** Implement a `TelegramTransport` alongside `CliTransport`.
+**Goal:** ~~Implement a `TelegramTransport` alongside `CliTransport`.~~ Implemented as `SignalSessionTransport` with a persistent `SignalBotDaemon`.
 
-**Why Telegram:**
-- Simple bot API (no OAuth flow for the transport itself)
-- Rich formatting (markdown)
-- Inline buttons for escalation approve/deny
-- Enables the "Mobile Dev" scenario directly
+**Why Signal over Telegram:** End-to-end encryption aligns with IronCurtain's security ethos. No centralized bot API means no third-party trust dependency for message content. The brainstorm originally proposed Telegram for simplicity, but Signal was chosen for stronger security guarantees.
 
-**What this proves:**
-- The Transport interface design actually works for non-CLI targets
-- Escalation UX translates to messaging platforms
-- Remote interaction is viable
+**What was built:**
+- **Pluggable Transport abstraction** (`src/session/transport.ts`) — `Transport` interface with `run(session)` / `close()`, used by both `CliTransport` and `SignalSessionTransport`
+- **Signal bot daemon** (`src/signal/signal-bot-daemon.ts`) — persistent WebSocket listener, session lifecycle management, escalation state machine, control commands (`/quit`, `/new`, `/budget`, `/help`)
+- **Signal session transport** (`src/signal/signal-transport.ts`) — ephemeral adapter implementing `Transport`, 1:1 with a Session
+- **Docker-managed signal-cli** (`src/signal/signal-container.ts`) — `signal-cli-rest-api` container with health checks, auto-restart, persistent registration data
+- **Markdown-to-Signal conversion** (`src/signal/markdown-to-signal.ts`) — converts agent markdown to Signal's styled text (bold, italic, monospace, strikethrough)
+- **Escalation over Signal** — formatted banners with text-based approve/deny, race condition prevention, expiration handling
+- **Identity verification** — fail-closed approach checking Signal identity keys to prevent SIM swap attacks, TTL-based proactive checks
+- **Message splitting** — long responses split at paragraph boundaries (Signal's 2,000-char limit)
+- **Interactive setup wizard** (`ironcurtain setup-signal`) — registration or device linking, captcha handling, identity key capture
+- **CLI entry point** (`ironcurtain bot`) — starts the persistent daemon
 
-**Demo:** Developer sends "run the tests in payment-api" via Telegram, receives formatted results, approves a `git push` via inline button.
+**What this proved:**
+- The Transport interface design works for non-CLI targets
+- Escalation UX translates to messaging (text-based approve/deny, no inline buttons needed)
+- Remote interaction is viable and secure with E2E encryption
+- Session lifecycle can be managed remotely (create/destroy via commands)
+
+**Demo:** Developer sends a task via Signal, receives formatted results, approves a `git push` by replying "approve" — all E2E encrypted.
 
 **Dependencies:** TB1 (needs exec/git servers to be useful for DevOps scenario).
 
@@ -352,7 +361,7 @@ Since sandbox-runtime is a singleton per process, each sandboxed MCP server is a
 
 - **Git MCP server?** Build a custom git server with structured arguments, or use an existing community server? Custom gives better policy engine integration; community saves development time.
 - **Exec MCP server?** Minimal custom server wrapping `child_process.spawn`, or an existing community shell server? The server itself is simple — the sandbox does the heavy lifting.
-- **Telegram vs Discord vs Matrix?** Telegram is simplest, but Discord has a larger developer audience. Matrix is self-hostable (aligns with security ethos).
+- ~~**Telegram vs Discord vs Matrix?**~~ **Resolved: Signal.** E2E encryption aligns with security ethos. Implemented via `signal-cli-rest-api` Docker container with identity verification. See `src/signal/`.
 - **Per-task policy granularity?** Full LLM-generated rule chain vs. simpler "tool whitelist + path scope" per task.
 - **Budget defaults?** What are sensible default token/cost/time limits for a session?
 - **sandbox-runtime stability?** It's a "research preview" — do we vendor it, pin a version, or build our own thin wrapper over the same OS primitives?
