@@ -12,19 +12,26 @@ Thank you for your interest in contributing to IronCurtain! This is an early-sta
    npm install
    ```
 
-2. Create a `.env` file with your LLM API key:
+2. (Recommended) Install [Aikido Safe Chain](https://github.com/AikidoSec/safe-chain) to protect against supply chain attacks during development. It intercepts package installations and validates them against a threat intelligence database in real-time:
+
+   ```bash
+   npm install -g @aikidosec/safe-chain
+   safe-chain setup
+   ```
+
+3. Create a `.env` file with your LLM API key:
 
    ```bash
    echo "ANTHROPIC_API_KEY=sk-ant-..." > .env
    ```
 
-3. Install the pre-commit hook (runs `format:check` and `lint` before each commit):
+4. Install the pre-commit hook (runs `format:check` and `lint` before each commit):
 
    ```bash
    npm run setup-hooks
    ```
 
-4. Run the tests to verify your setup:
+5. Run the tests to verify your setup:
 
    ```bash
    npm test
