@@ -39,23 +39,18 @@ security rules and recorded in the audit log.
 Your built-in file tools cannot reach the host filesystem.
 
 ### Network
-${
-  context.networkMode === 'none'
-    ? `The container has NO network access (--network=none). All HTTP requests and
+The container has NO direct internet access. All HTTP requests and
 git operations MUST go through the sandbox tools via \`execute_code\`.
 
-Your built-in web search and web fetch tools route through the Anthropic API
-and will work, but they bypass IronCurtain's audit log. Prefer the sandbox
-fetch tool when an auditable record of network access is required.`
-    : `The container has NO direct internet access. Network connectivity is limited
-to IronCurtain's host-side proxies via an isolated internal network. All HTTP
-requests and git operations MUST go through the sandbox tools via \`execute_code\`.
+IMPORTANT: Your built-in server-side web search tool (WebSearch) is DISABLED
+and will NOT work — it is stripped by the security proxy. You MUST use the
+sandbox tools via \`execute_code\` instead. Do NOT attempt to use your
+built-in WebSearch or WebFetch tools.
 
-Your built-in web search and web fetch tools route through the Anthropic API
-via the MITM proxy and will work, but they bypass IronCurtain's audit log.
-Prefer the sandbox fetch tool when an auditable record of network access is
-required.`
-}
+To search the web:
+  \`const results = tools.fetch_web_search({ query: "search terms" });\`
+To fetch a URL:
+  \`const page = tools.fetch_http_fetch({ url: "https://example.com" });\`
 
 ### Policy Enforcement
 Every tool call through \`execute_code\` is evaluated against security policy rules:
