@@ -1,7 +1,7 @@
 /**
  * Shared test helpers for config-related tests (first-start, config-command).
  *
- * Provides environment isolation, config file read/write, and clack mock factory.
+ * Provides environment isolation and config file read/write helpers.
  * vi.mock() must remain in each test file due to vitest hoisting constraints.
  */
 

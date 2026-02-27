@@ -262,11 +262,15 @@ const DEFAULT_CONFIG_CONTENT =
 /**
  * Loads user configuration from ~/.ironcurtain/config.json.
  *
- * Behavior:
+ * Default behavior:
  * 1. If file does not exist: create with defaults, log to stderr
- * 2. If file exists: parse JSON, validate with Zod, merge with defaults
+ * 2. If file exists: parse JSON, validate with Zod, backfill missing fields, merge with defaults
  * 3. Apply env var overrides (ANTHROPIC_API_KEY overrides anthropicApiKey)
  * 4. Return ResolvedUserConfig with all fields present
+ *
+ * With `readOnly: true`: never creates or writes the config file.
+ * Returns defaults merged with env overrides if the file does not exist.
+ * Skips backfilling and unknown-field warnings.
  *
  * @throws Error on invalid JSON or schema validation failure
  */
