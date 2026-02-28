@@ -377,6 +377,14 @@ describe('SignalBotDaemon', () => {
   afterEach(async () => {
     await mockApi.stop();
     createdMockSessions.length = 0;
+
+    // Restore default createSession mock in case a test overrode it
+    const { createSession } = await import('../../src/session/index.js');
+    vi.mocked(createSession).mockImplementation((options?: { onEscalation?: MockSessionRecord['onEscalation'] }) => {
+      const session = createMockSession();
+      createdMockSessions.push({ session, onEscalation: options?.onEscalation });
+      return Promise.resolve(session);
+    });
   });
 
   function createDaemon(configOverrides?: Partial<ResolvedSignalConfig>): SignalBotDaemon {

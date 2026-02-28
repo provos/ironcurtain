@@ -115,6 +115,9 @@ export function getLogsDir(): string {
  * E.g., getDaemonLogPath('signal-bot') → {home}/logs/signal-bot.log
  */
 export function getDaemonLogPath(name: string): string {
+  if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
+    throw new Error(`Invalid daemon log name: ${name}`);
+  }
   return resolve(getLogsDir(), `${name}.log`);
 }
 

@@ -80,28 +80,29 @@ export class SignalSessionTransport extends BaseTransport {
   }
 
   createEscalationHandler(): (request: EscalationRequest) => void {
-    const createdForLabel = this.sessionLabel;
+    const label = this.sessionLabel;
     return (request) => {
-      const invokedLabel = this.sessionLabel;
-      if (invokedLabel !== createdForLabel) {
+      const currentLabel = this.sessionLabel;
+      if (currentLabel !== label) {
         logger.error(
-          `[Signal Transport] LABEL MISMATCH: escalation handler created for #${createdForLabel} ` +
-            `but this.sessionLabel is now #${invokedLabel} (escalationId=${request.escalationId})`,
+          `[Signal Transport] LABEL MISMATCH: escalation handler created for #${label} ` +
+            `but this.sessionLabel is now #${currentLabel} (escalationId=${request.escalationId})`,
         );
       }
       logger.info(
-        `[Signal Transport] Escalation fired on session #${invokedLabel} ` +
+        `[Signal Transport] Escalation fired on session #${label} ` +
           `(tool=${request.serverName}/${request.toolName}, id=${request.escalationId})`,
       );
-      this.daemon.setPendingEscalation(this.sessionLabel, request.escalationId);
-      const banner = formatEscalationBanner(request, this.sessionLabel);
+      this.daemon.setPendingEscalation(label, request.escalationId);
+      const banner = formatEscalationBanner(request, label);
       this.daemon.sendSignalMessage(banner).catch(() => {});
     };
   }
 
   createEscalationExpiredHandler(): () => void {
+    const label = this.sessionLabel;
     return () => {
-      this.daemon.clearPendingEscalation(this.sessionLabel);
+      this.daemon.clearPendingEscalation(label);
       this.daemon.sendSignalMessage('Escalation expired (timed out).').catch(() => {});
     };
   }

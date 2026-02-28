@@ -128,7 +128,9 @@ export class SignalBotDaemon {
    * Operations are chained to prevent interleaving.
    */
   private scheduleSessionOp(op: () => Promise<void>): void {
-    this.sessionOpInProgress = this.sessionOpInProgress.then(op).catch(() => {});
+    this.sessionOpInProgress = this.sessionOpInProgress.then(op).catch((err: unknown) => {
+      logger.error(`[Signal Daemon] Session operation failed: ${String(err)}`);
+    });
   }
 
   /**
@@ -299,10 +301,25 @@ export class SignalBotDaemon {
     // before routing, so we see the updated currentLabel.
     await this.sessionOpInProgress;
 
-    // Create session on demand if none exists
+    // Create session on demand if none exists.
+    // Serialize through scheduleSessionOp so concurrent messages don't
+    // race to create multiple sessions.
     if (this.currentLabel === null) {
+      const createOp = new Promise<void>((resolve, reject) => {
+        this.scheduleSessionOp(async () => {
+          try {
+            // Re-check after serialization — another message may have created one
+            if (this.currentLabel === null) {
+              await this.startNewSession();
+            }
+            resolve();
+          } catch (err) {
+            reject(err instanceof Error ? err : new Error(String(err)));
+          }
+        });
+      });
       try {
-        await this.startNewSession();
+        await createOp;
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         await this.sendSignalMessage(`Failed to create session: ${msg}`);
@@ -570,10 +587,13 @@ export class SignalBotDaemon {
       } else if (!this.sessions.has(label)) {
         this.sendSignalMessage(`No session #${label}.`).catch(() => {});
       } else {
+        const wasCurrent = label === this.currentLabel;
         this.scheduleSessionOp(async () => {
           await this.endSession(label);
-          if (this.sessions.size > 0 && this.currentLabel !== null) {
+          if (wasCurrent && this.sessions.size > 0 && this.currentLabel !== null) {
             await this.sendSignalMessage(`Session #${label} ended. Switched to #${this.currentLabel}.`);
+          } else if (this.sessions.size > 0) {
+            await this.sendSignalMessage(`Session #${label} ended.`);
           } else {
             await this.sendSignalMessage('Session ended. Send a message to start a new one.');
           }
@@ -614,12 +634,14 @@ export class SignalBotDaemon {
     const switchMatch = lower.match(/^\/switch\s+#?(\d+)$/);
     if (switchMatch) {
       const label = parseInt(switchMatch[1], 10);
-      if (!this.sessions.has(label)) {
-        this.sendSignalMessage(`No session #${label}.`).catch(() => {});
-      } else {
-        this.currentLabel = label;
-        this.sendSignalMessage(`Switched to session #${label}.`).catch(() => {});
-      }
+      this.scheduleSessionOp(async () => {
+        if (!this.sessions.has(label)) {
+          await this.sendSignalMessage(`No session #${label}.`);
+        } else {
+          this.currentLabel = label;
+          await this.sendSignalMessage(`Switched to session #${label}.`);
+        }
+      });
       return true;
     }
 
