@@ -271,6 +271,7 @@ const DEFAULT_CONFIG_CONTENT =
       resourceBudget: USER_CONFIG_DEFAULTS.resourceBudget,
       autoCompact: USER_CONFIG_DEFAULTS.autoCompact,
       autoApprove: USER_CONFIG_DEFAULTS.autoApprove,
+      auditRedaction: USER_CONFIG_DEFAULTS.auditRedaction,
     },
     null,
     2,
