@@ -695,37 +695,43 @@ export class SignalBotDaemon {
     // /budget [N]
     const budgetMatch = lower.match(/^\/budget(?:\s+#?(\d+))?$/);
     if (budgetMatch) {
-      const label = budgetMatch[1] ? parseInt(budgetMatch[1], 10) : this.currentLabel;
-      const managed = label !== null ? this.sessions.get(label) : undefined;
+      const explicitBudgetLabel = budgetMatch[1] ? parseInt(budgetMatch[1], 10) : null;
+      this.scheduleSessionOp(async () => {
+        const label = explicitBudgetLabel ?? this.currentLabel;
+        const managed = label !== null ? this.sessions.get(label) : undefined;
 
-      if (label === null) {
-        this.sendSignalMessage('No active session.').catch(() => {});
-      } else if (!managed) {
-        this.sendSignalMessage(`No session #${label}.`).catch(() => {});
-      } else {
-        const status = managed.session.getBudgetStatus();
-        this.sendSignalMessage(prefixWithLabel(formatBudgetMessage(status), label, this.sessions.size)).catch(() => {});
-      }
+        if (label === null) {
+          await this.sendSignalMessage('No active session.');
+        } else if (!managed) {
+          await this.sendSignalMessage(`No session #${label}.`);
+        } else {
+          const status = managed.session.getBudgetStatus();
+          await this.sendSignalMessage(prefixWithLabel(formatBudgetMessage(status), label, this.sessions.size));
+        }
+      });
       return true;
     }
 
     // /help
     if (lower === '/help') {
-      const sessionLine = this.currentLabel !== null ? `Current session: #${this.currentLabel}` : 'No active session.';
-      this.sendSignalMessage(
-        sessionLine +
-          '\n\n' +
-          'Commands:\n' +
-          '  /new - start a new session\n' +
-          '  /sessions - list active sessions\n' +
-          '  /switch N - switch to session #N\n' +
-          '  #N <message> - send to session #N without switching\n' +
-          '  /quit [N] - end session (current or #N)\n' +
-          '  /budget [N] - show resource usage\n' +
-          '  /help - show this message\n' +
-          '  approve [#N] - approve pending escalation\n' +
-          '  deny [#N] - deny pending escalation',
-      ).catch(() => {});
+      this.scheduleSessionOp(async () => {
+        const sessionLine =
+          this.currentLabel !== null ? `Current session: #${this.currentLabel}` : 'No active session.';
+        await this.sendSignalMessage(
+          sessionLine +
+            '\n\n' +
+            'Commands:\n' +
+            '  /new - start a new session\n' +
+            '  /sessions - list active sessions\n' +
+            '  /switch N - switch to session #N\n' +
+            '  #N <message> - send to session #N without switching\n' +
+            '  /quit [N] - end session (current or #N)\n' +
+            '  /budget [N] - show resource usage\n' +
+            '  /help - show this message\n' +
+            '  approve [#N] - approve pending escalation\n' +
+            '  deny [#N] - deny pending escalation',
+        );
+      });
       return true;
     }
 
@@ -895,7 +901,7 @@ export interface HashPrefixResult {
  * E.g., `#2 do something` -> { targetLabel: 2, messageText: 'do something' }
  */
 export function parseHashPrefix(text: string): HashPrefixResult {
-  const match = text.match(/^#(\d+)\s(.*)$/s);
+  const match = text.match(/^#(\d+) (.*)$/s);
   if (!match) return { targetLabel: null, messageText: text };
   return { targetLabel: parseInt(match[1], 10), messageText: match[2] };
 }

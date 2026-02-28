@@ -104,7 +104,7 @@ export class SignalSessionTransport extends BaseTransport {
     const label = this.sessionLabel;
     return () => {
       this.daemon.clearPendingEscalation(label);
-      this.daemon.sendSignalMessage('Escalation expired (timed out).').catch(() => {});
+      this.daemon.sendSignalMessage(`[#${label}] Escalation expired (timed out).`).catch(() => {});
     };
   }
 }
