@@ -13,10 +13,12 @@
 // ── Pattern definitions ────────────────────────────────────────────────
 
 /**
- * Credit card: 13–19 digits possibly separated by spaces or dashes.
+ * Credit card: 13–19 digits possibly separated by single spaces or dashes.
+ * Each repetition matches exactly one digit + optional separator, avoiding
+ * nested quantifiers that cause exponential backtracking (ReDoS).
  * Validated with Luhn checksum after extraction.
  */
-const CREDIT_CARD_RE = /\b(?:\d[ -]*?){13,19}\b/g;
+const CREDIT_CARD_RE = /\b\d(?:[ -]?\d){12,18}\b/g;
 
 /** US Social Security Number: 3-2-4 digit groups. */
 const SSN_RE = /\b(\d{3})[- ]?(\d{2})[- ]?(\d{4})\b/g;
