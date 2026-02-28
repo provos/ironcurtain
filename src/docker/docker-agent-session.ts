@@ -253,11 +253,15 @@ export class DockerAgentSession implements Session {
         HTTP_PROXY: 'http://127.0.0.1:18080',
       };
       network = 'none';
+      // Mount only the sockets subdirectory into the container -- not the full
+      // session dir. This prevents the container from accessing escalation files,
+      // audit logs, or other session data. proxy.sock and mitm-proxy.sock are
+      // created in this directory by the host-side proxy setup.
+      const socketsDir = resolve(this.sessionDir, 'sockets');
+      mkdirSync(socketsDir, { recursive: true });
       mounts = [
         { source: this.sandboxDir, target: '/workspace', readonly: false },
-        // Session dir contains proxy.sock and mitm-proxy.sock -- directory mount
-        // exposes both to the container (file mounts for UDS don't work on macOS Docker Desktop).
-        { source: this.sessionDir, target: '/run/ironcurtain', readonly: false },
+        { source: socketsDir, target: '/run/ironcurtain', readonly: false },
         { source: orientationDir, target: '/etc/ironcurtain', readonly: true },
       ];
     }

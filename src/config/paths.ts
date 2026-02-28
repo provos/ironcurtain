@@ -97,6 +97,18 @@ export function getSessionAutoApproveLlmLogPath(sessionId: string): string {
 }
 
 /**
+ * Returns the sockets directory for a given session:
+ *   {home}/sessions/{sessionId}/sockets/
+ *
+ * This directory is bind-mounted into Docker containers as
+ * /run/ironcurtain/ for UDS-based proxy communication.
+ * Only this subdirectory is mounted -- not the full session dir.
+ */
+export function getSessionSocketsDir(sessionId: string): string {
+  return resolve(getSessionDir(sessionId), 'sockets');
+}
+
+/**
  * Returns the user config file path: {home}/config.json
  */
 export function getUserConfigPath(): string {

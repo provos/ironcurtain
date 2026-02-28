@@ -17,6 +17,8 @@ import {
   getSessionLogPath,
   getSessionLlmLogPath,
   getSessionAutoApproveLlmLogPath,
+  getSessionSocketsDir,
+  getIronCurtainHome,
 } from '../config/paths.js';
 import type { IronCurtainConfig } from '../config/types.js';
 import * as logger from '../logger.js';
@@ -117,7 +119,12 @@ async function createDockerSession(
   await registerBuiltinAdapters();
   const adapter = getAgent(agentId);
   const useTcp = useTcpTransport();
-  const socketPath = resolve(sessionConfig.sessionDir, 'proxy.sock');
+
+  // Create sockets subdirectory for proxy UDS -- only this dir is mounted into containers
+  const socketsDir = getSessionSocketsDir(effectiveSessionId);
+  mkdirSync(socketsDir, { recursive: true });
+
+  const socketPath = resolve(socketsDir, 'proxy.sock');
 
   const proxy = createCodeModeProxy({
     socketPath,
@@ -126,7 +133,6 @@ async function createDockerSession(
   });
 
   // Load or generate the IronCurtain CA for TLS termination
-  const { getIronCurtainHome } = await import('../config/paths.js');
   const caDir = resolve(getIronCurtainHome(), 'ca');
   const ca = loadOrCreateCA(caDir);
 
@@ -150,7 +156,7 @@ async function createDockerSession(
         providers: providerMappings,
       })
     : createMitmProxy({
-        socketPath: resolve(sessionConfig.sessionDir, 'mitm-proxy.sock'),
+        socketPath: resolve(socketsDir, 'mitm-proxy.sock'),
         ca,
         providers: providerMappings,
       });
