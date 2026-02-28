@@ -103,7 +103,7 @@ export function computeDiff(resolved: ResolvedUserConfig, pending: UserConfig): 
     }
   }
 
-  const nestedSections = ['resourceBudget', 'autoCompact', 'autoApprove'] as const;
+  const nestedSections = ['resourceBudget', 'autoCompact', 'autoApprove', 'auditRedaction'] as const;
   for (const section of nestedSections) {
     const pendingSection = pending[section];
     if (!pendingSection) continue;

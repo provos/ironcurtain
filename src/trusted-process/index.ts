@@ -59,7 +59,9 @@ export class TrustedProcess {
     this.mcpRoots = toMcpRoots(policyRoots);
 
     this.mcpManager = new MCPClientManager();
-    this.auditLog = new AuditLog(config.auditLogPath);
+    this.auditLog = new AuditLog(config.auditLogPath, {
+      redact: config.userConfig.auditRedaction.enabled,
+    });
     this.escalation = new EscalationHandler();
     this.onEscalation = options?.onEscalation;
   }

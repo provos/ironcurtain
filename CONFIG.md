@@ -52,6 +52,14 @@ Controls automatic context compaction when the conversation approaches token lim
 | `autoCompact.keepRecentMessages` | integer | `10` | Number of recent messages preserved during compaction. |
 | `autoCompact.summaryModelId` | string | `anthropic:claude-haiku-4-5` | Model used to generate the summary. |
 
+## Audit Redaction
+
+Controls automatic redaction of sensitive data in audit log entries.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `auditRedaction.enabled` | boolean | `true` | Redact credit cards, SSNs, and API keys in `audit.jsonl` entries before writing to disk. |
+
 ## Web Search
 
 Configure a web search provider so the agent can search the web via the `web_search` tool.
@@ -121,6 +129,9 @@ The config file is created with `0600` (owner-only read/write) permissions. A wa
   "autoApprove": {
     "enabled": false,
     "modelId": "anthropic:claude-haiku-4-5"
+  },
+  "auditRedaction": {
+    "enabled": true
   },
   "webSearch": {
     "provider": "brave",

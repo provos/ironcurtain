@@ -375,6 +375,10 @@ By default, all escalations require manual `/approve` or `/deny`. You can option
 
 The auto-approver is conservative — it only approves when intent is unambiguous (e.g., "push my changes to origin" clearly authorizes `git_push`). Vague messages like "go ahead" or "fix the tests" always fall through to human approval. It can never deny — only approve or escalate. All auto-approved actions are recorded in the audit log with `autoApproved: true`.
 
+### Audit Redaction
+
+Audit log entries may contain sensitive data passed through tool arguments or results. By default, recognized patterns (credit card numbers, SSNs, API keys) are automatically redacted before entries are written to `audit.jsonl`. Disable with `"auditRedaction": { "enabled": false }` in `config.json` for full forensic logging.
+
 ### Multi-Provider Support
 
 IronCurtain supports multiple LLM providers. Use the `provider:model-name` format in config and provide the API key for each provider you use:

@@ -34,6 +34,9 @@ export const USER_CONFIG_DEFAULTS = {
     enabled: false,
     modelId: 'anthropic:claude-haiku-4-5',
   },
+  auditRedaction: {
+    enabled: true,
+  },
 } as const;
 
 export const ESCALATION_TIMEOUT_MIN = 30;
@@ -86,6 +89,12 @@ const autoApproveSchema = z
   .object({
     enabled: z.boolean().optional(),
     modelId: qualifiedModelId.optional(),
+  })
+  .optional();
+
+const auditRedactionSchema = z
+  .object({
+    enabled: z.boolean().optional(),
   })
   .optional();
 
@@ -158,6 +167,7 @@ export const userConfigSchema = z.object({
   resourceBudget: resourceBudgetSchema,
   autoCompact: autoCompactSchema,
   autoApprove: autoApproveSchema,
+  auditRedaction: auditRedactionSchema,
   webSearch: webSearchSchema,
   serverCredentials: z.record(z.string(), z.record(z.string(), z.string().min(1))).optional(),
   signal: signalSchema,
@@ -189,6 +199,11 @@ export interface ResolvedAutoApproveConfig {
   readonly modelId: string;
 }
 
+/** Resolved audit redaction config with all fields present. */
+export interface ResolvedAuditRedactionConfig {
+  readonly enabled: boolean;
+}
+
 /** Resolved web search config with all fields present. */
 export interface ResolvedWebSearchConfig {
   readonly provider: WebSearchProvider | null;
@@ -208,6 +223,7 @@ export interface ResolvedUserConfig {
   readonly resourceBudget: ResolvedResourceBudgetConfig;
   readonly autoCompact: ResolvedAutoCompactConfig;
   readonly autoApprove: ResolvedAutoApproveConfig;
+  readonly auditRedaction: ResolvedAuditRedactionConfig;
   readonly webSearch: ResolvedWebSearchConfig;
   readonly serverCredentials: Readonly<Record<string, Readonly<Record<string, string>>>>;
   /** Signal transport config. Null when Signal is not set up. */
@@ -255,6 +271,7 @@ const DEFAULT_CONFIG_CONTENT =
       resourceBudget: USER_CONFIG_DEFAULTS.resourceBudget,
       autoCompact: USER_CONFIG_DEFAULTS.autoCompact,
       autoApprove: USER_CONFIG_DEFAULTS.autoApprove,
+      auditRedaction: USER_CONFIG_DEFAULTS.auditRedaction,
     },
     null,
     2,
@@ -478,9 +495,11 @@ function mergeWithDefaults(config: UserConfig): ResolvedUserConfig {
   const budgetDefaults = USER_CONFIG_DEFAULTS.resourceBudget;
   const compactDefaults = USER_CONFIG_DEFAULTS.autoCompact;
   const approveDefaults = USER_CONFIG_DEFAULTS.autoApprove;
+  const redactionDefaults = USER_CONFIG_DEFAULTS.auditRedaction;
   const b = config.resourceBudget;
   const c = config.autoCompact;
   const a = config.autoApprove;
+  const r = config.auditRedaction;
   return {
     agentModelId: config.agentModelId ?? USER_CONFIG_DEFAULTS.agentModelId,
     policyModelId: config.policyModelId ?? USER_CONFIG_DEFAULTS.policyModelId,
@@ -507,6 +526,9 @@ function mergeWithDefaults(config: UserConfig): ResolvedUserConfig {
     autoApprove: {
       enabled: a?.enabled ?? approveDefaults.enabled,
       modelId: a?.modelId ?? approveDefaults.modelId,
+    },
+    auditRedaction: {
+      enabled: r?.enabled ?? redactionDefaults.enabled,
     },
     webSearch: {
       provider: config.webSearch?.provider ?? null,

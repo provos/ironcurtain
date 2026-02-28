@@ -20,4 +20,4 @@ The security kernel. Two modes of operation:
 
 **MCPClientManager** (`mcp-client-manager.ts`) - manages stdio-based MCP client connections. Connection failures are graceful: unavailable servers (e.g., Docker not running for the GitHub server) are logged as warnings and skipped, allowing the session to proceed with whatever servers connected successfully.
 
-**AuditLog** (`audit-log.ts`) - append-only JSONL logging.
+**AuditLog** (`audit-log.ts`) - append-only JSONL logging with optional PII/credential redaction (`audit-redactor.ts`). When `auditRedaction.enabled` is true, masks credit cards, SSNs, and API keys in tool arguments and results before writing.
