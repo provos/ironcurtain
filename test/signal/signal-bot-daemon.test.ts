@@ -1115,7 +1115,7 @@ describe('SignalBotDaemon', () => {
 
     // Step 5: The escalation banner for session #2 should say [#2], NOT [#1]
     messages = mockApi.messageTexts;
-    const banner2 = messages.find((m) => m.includes('ESCALATION') && m.includes('provos.github.io'));
+    const banner2 = messages.find((m) => m.includes('ESCALATION') && m.includes('provos/provos.github.io'));
     expect(banner2).toBeDefined();
     expect(banner2).toContain('[#2]');
     expect(banner2).not.toContain('[#1]');
@@ -1208,7 +1208,7 @@ describe('SignalBotDaemon', () => {
 
     // The escalation banner must say [#2], not [#1]
     const messages = mockApi.messageTexts;
-    const banner = messages.find((m) => m.includes('ESCALATION') && m.includes('provos.github.io'));
+    const banner = messages.find((m) => m.includes('ESCALATION') && m.includes('provos/provos.github.io'));
     expect(banner).toBeDefined();
     expect(banner).toContain('[#2]');
     expect(banner).not.toContain('ESCALATION [#1]');
@@ -1310,7 +1310,7 @@ describe('SignalBotDaemon', () => {
 
     // THE KEY ASSERTION: session #2's escalation banner must say [#2]
     messages = mockApi.messageTexts;
-    const banner2 = messages.find((m) => m.includes('ESCALATION') && m.includes('provos.github.io'));
+    const banner2 = messages.find((m) => m.includes('ESCALATION') && m.includes('provos/provos.github.io'));
     expect(banner2).toBeDefined();
     expect(banner2).toContain('[#2]');
     expect(banner2).not.toContain('ESCALATION [#1]');
