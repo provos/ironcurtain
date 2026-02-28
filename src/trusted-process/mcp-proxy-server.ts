@@ -340,7 +340,7 @@ export function parseProxyEnvConfig(): ProxyEnvConfig {
   delete process.env.SERVER_CREDENTIALS;
 
   const sandboxPolicy = (process.env.SANDBOX_POLICY ?? 'warn') as SandboxAvailabilityPolicy;
-  const auditRedaction = process.env.AUDIT_REDACTION !== 'false';
+  const auditRedaction = process.env.AUDIT_REDACTION === 'true';
 
   const allServersConfig = JSON.parse(serversConfigJson) as Record<string, MCPServerConfig>;
   const protectedPaths = JSON.parse(protectedPathsJson) as string[];
