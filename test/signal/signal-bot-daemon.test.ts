@@ -4,6 +4,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import {
   SignalBotDaemon,
   parseSignalEnvelope,
+  parseHashPrefix,
   isAuthorizedSender,
   normalizePhoneNumber,
 } from '../../src/signal/signal-bot-daemon.js';
@@ -369,6 +370,44 @@ describe('isAuthorizedSender', () => {
   it('handles number normalization (spaces)', () => {
     const env = { sourceNumber: '+1 555 123 4567' };
     expect(isAuthorizedSender(env, '+15551234567')).toBe(true);
+  });
+});
+
+describe('parseHashPrefix', () => {
+  it('parses #N prefix with space', () => {
+    const result = parseHashPrefix('#2 list the directory');
+    expect(result.targetLabel).toBe(2);
+    expect(result.messageText).toBe('list the directory');
+  });
+
+  it('returns null targetLabel when no prefix', () => {
+    const result = parseHashPrefix('regular message');
+    expect(result.targetLabel).toBeNull();
+    expect(result.messageText).toBe('regular message');
+  });
+
+  it('parses multi-digit labels', () => {
+    const result = parseHashPrefix('#12 do something');
+    expect(result.targetLabel).toBe(12);
+    expect(result.messageText).toBe('do something');
+  });
+
+  it('does not match # in the middle of text', () => {
+    const result = parseHashPrefix('issue #2 is broken');
+    expect(result.targetLabel).toBeNull();
+    expect(result.messageText).toBe('issue #2 is broken');
+  });
+
+  it('requires a space after the label', () => {
+    const result = parseHashPrefix('#2');
+    expect(result.targetLabel).toBeNull();
+    expect(result.messageText).toBe('#2');
+  });
+
+  it('preserves multiline message text', () => {
+    const result = parseHashPrefix('#1 line one\nline two');
+    expect(result.targetLabel).toBe(1);
+    expect(result.messageText).toBe('line one\nline two');
   });
 });
 
@@ -1288,5 +1327,97 @@ describe('SignalBotDaemon', () => {
 
     await daemon.shutdown();
     await startPromise;
+  });
+
+  // --- #N prefix routing tests ---
+
+  it('#N prefix routes message to specified session without switching', async () => {
+    await withDaemon(async () => {
+      // Create session #1 (auto-created)
+      mockApi.simulateIncomingMessage('+15559876543', 'Hello agent');
+      await wait(500);
+
+      // Create session #2
+      mockApi.simulateIncomingMessage('+15559876543', '/new');
+      await wait(500);
+
+      // Current session is #2. Route to #1 via prefix.
+      mockApi.simulateIncomingMessage('+15559876543', '#1 list the directory');
+      await wait(500);
+
+      // Message should have been sent to session #1
+      expect(vi.mocked(createdMockSessions[0].session.sendMessage)).toHaveBeenCalledWith('list the directory');
+      // Session #2 should NOT have received this message
+      expect(vi.mocked(createdMockSessions[1].session.sendMessage)).not.toHaveBeenCalledWith('list the directory');
+
+      // currentLabel should still be #2: send a plain message and verify it goes to #2
+      vi.mocked(createdMockSessions[1].session.sendMessage).mockClear();
+      mockApi.simulateIncomingMessage('+15559876543', 'follow up');
+      await wait(500);
+
+      expect(vi.mocked(createdMockSessions[1].session.sendMessage)).toHaveBeenCalledWith('follow up');
+    });
+  });
+
+  it('#N prefix to non-existent session shows error', async () => {
+    await withDaemon(async () => {
+      mockApi.simulateIncomingMessage('+15559876543', 'Hello agent');
+      await wait(500);
+
+      mockApi.simulateIncomingMessage('+15559876543', '#5 do something');
+      await wait(300);
+
+      expect(mockApi.messageTexts.some((m) => m.includes('No session #5'))).toBe(true);
+    });
+  });
+
+  it('#N prefix strips only the prefix from the forwarded message', async () => {
+    await withDaemon(async () => {
+      mockApi.simulateIncomingMessage('+15559876543', 'Hello agent');
+      await wait(500);
+
+      mockApi.simulateIncomingMessage('+15559876543', '#1 check #2 issue');
+      await wait(500);
+
+      expect(vi.mocked(createdMockSessions[0].session.sendMessage)).toHaveBeenCalledWith('check #2 issue');
+    });
+  });
+
+  // --- /help with current session ---
+
+  it('/help shows current session label', async () => {
+    await withDaemon(async () => {
+      // Create a session first
+      mockApi.simulateIncomingMessage('+15559876543', 'Hello agent');
+      await wait(500);
+
+      mockApi.simulateIncomingMessage('+15559876543', '/help');
+      await wait(200);
+
+      const helpMsg = mockApi.messageTexts.find((m) => m.includes('Commands:'));
+      expect(helpMsg).toBeDefined();
+      expect(helpMsg).toContain('Current session: #1');
+    });
+  });
+
+  it('/help shows no active session when none exists', async () => {
+    await withDaemon(async () => {
+      mockApi.simulateIncomingMessage('+15559876543', '/help');
+      await wait(200);
+
+      const helpMsg = mockApi.messageTexts.find((m) => m.includes('Commands:'));
+      expect(helpMsg).toBeDefined();
+      expect(helpMsg).toContain('No active session.');
+    });
+  });
+
+  it('/help includes #N prefix routing documentation', async () => {
+    await withDaemon(async () => {
+      mockApi.simulateIncomingMessage('+15559876543', '/help');
+      await wait(200);
+
+      const helpMsg = mockApi.messageTexts.find((m) => m.includes('Commands:'));
+      expect(helpMsg).toContain('#N <message>');
+    });
   });
 });

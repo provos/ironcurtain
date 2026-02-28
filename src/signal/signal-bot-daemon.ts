@@ -302,11 +302,28 @@ export class SignalBotDaemon {
    * Routes a user message to the current session. Creates a new
    * session if none exists. Handles BudgetExhaustedError by ending
    * the exhausted session and notifying the user.
+   *
+   * Supports one-shot `#N` prefix routing: `#2 do something` routes
+   * "do something" to session #2 without changing currentLabel.
    */
   private async routeToSession(text: string): Promise<void> {
     // Wait for any pending session operation (/new, /quit) to complete
     // before routing, so we see the updated currentLabel.
     await this.sessionOpInProgress;
+
+    // Parse optional #N prefix for one-shot routing
+    const { targetLabel, messageText } = parseHashPrefix(text);
+
+    // If #N prefix was used, route directly to that session (no auto-create)
+    if (targetLabel !== null) {
+      const managed = this.sessions.get(targetLabel);
+      if (!managed) {
+        await this.sendSignalMessage(`No session #${targetLabel}.`);
+        return;
+      }
+      await this.forwardToSession(managed, messageText);
+      return;
+    }
 
     // Create session on demand if none exists.
     // Serialize through scheduleSessionOp so concurrent messages don't
@@ -338,6 +355,14 @@ export class SignalBotDaemon {
     const managed = this.sessions.get(this.currentLabel);
     if (!managed) return;
 
+    await this.forwardToSession(managed, messageText);
+  }
+
+  /**
+   * Forwards a message to a specific managed session. Handles
+   * in-flight guards, BudgetExhaustedError, and response formatting.
+   */
+  private async forwardToSession(managed: ManagedSession, text: string): Promise<void> {
     logger.info(
       `[Signal Daemon] Routing message to session #${managed.label} ` +
         `(currentLabel=${this.currentLabel}, sessions=${[...this.sessions.keys()].join(',')}, ` +
@@ -676,11 +701,15 @@ export class SignalBotDaemon {
 
     // /help
     if (lower === '/help') {
+      const sessionLine = this.currentLabel !== null ? `Current session: #${this.currentLabel}` : 'No active session.';
       this.sendSignalMessage(
-        'Commands:\n' +
+        sessionLine +
+          '\n\n' +
+          'Commands:\n' +
           '  /new - start a new session\n' +
           '  /sessions - list active sessions\n' +
           '  /switch N - switch to session #N\n' +
+          '  #N <message> - send to session #N without switching\n' +
           '  /quit [N] - end session (current or #N)\n' +
           '  /budget [N] - show resource usage\n' +
           '  /help - show this message\n' +
@@ -839,4 +868,24 @@ export function isAuthorizedSender(envelope: SignalEnvelope, recipientNumber: st
   const sender = envelope.sourceNumber ?? envelope.source;
   if (!sender) return false;
   return normalizePhoneNumber(sender) === normalizePhoneNumber(recipientNumber);
+}
+
+// --- Message prefix parsing ---
+
+export interface HashPrefixResult {
+  /** The session label from the #N prefix, or null if no prefix was found. */
+  targetLabel: number | null;
+  /** The message text with the #N prefix stripped (or the original text if no prefix). */
+  messageText: string;
+}
+
+/**
+ * Parses an optional `#N` prefix from a message for one-shot session routing.
+ * Pattern: `#N ` at the start, where N is one or more digits, followed by a space.
+ * E.g., `#2 do something` -> { targetLabel: 2, messageText: 'do something' }
+ */
+export function parseHashPrefix(text: string): HashPrefixResult {
+  const match = text.match(/^#(\d+)\s(.*)$/s);
+  if (!match) return { targetLabel: null, messageText: text };
+  return { targetLabel: parseInt(match[1], 10), messageText: match[2] };
 }
