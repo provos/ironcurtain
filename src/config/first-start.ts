@@ -204,7 +204,8 @@ export async function runFirstStart(): Promise<void> {
     const tokenValue = (ghToken as string) || existingGhToken;
     if (tokenValue) {
       pending.serverCredentials = {
-        github: { GITHUB_PERSONAL_ACCESS_TOKEN: tokenValue },
+        ...pending.serverCredentials,
+        github: { ...(githubCreds ?? {}), GITHUB_PERSONAL_ACCESS_TOKEN: tokenValue },
       };
     }
   }

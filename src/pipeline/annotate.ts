@@ -48,6 +48,7 @@ async function connectAndDiscoverTools(
 
       for (const [serverName, config] of Object.entries(mcpServers)) {
         spinner.text = `[1/2] Connecting to MCP server: ${serverName}...`;
+        let client: Client | undefined;
         try {
           const transport = new StdioClientTransport({
             command: config.command,
@@ -59,7 +60,7 @@ async function connectAndDiscoverTools(
           if (transport.stderr) {
             transport.stderr.on('data', () => {});
           }
-          const client = new Client({ name: 'ironcurtain-annotator', version: VERSION });
+          client = new Client({ name: 'ironcurtain-annotator', version: VERSION });
           await client.connect(transport);
 
           const toolsResult = await client.listTools();
@@ -67,6 +68,14 @@ async function connectAndDiscoverTools(
 
           connections.set(serverName, { client, tools: toolsResult.tools });
         } catch (err) {
+          // Clean up connected client to avoid leaking subprocess
+          if (client) {
+            try {
+              await client.close();
+            } catch {
+              // Best-effort cleanup
+            }
+          }
           const msg = err instanceof Error ? err.message : String(err);
           skipped.push({ name: serverName, reason: msg });
         }

@@ -607,9 +607,10 @@ async function handleServerCredentials(resolved: ResolvedUserConfig, pending: Us
         if (isCancelled(input)) break;
         const value = (input as string) || currentValue;
         if (value) {
+          const existingServerCreds = resolved.serverCredentials[serverName] ?? {};
           pending.serverCredentials = {
             ...pending.serverCredentials,
-            [serverName]: { ...pending.serverCredentials?.[serverName], [hint.envVar]: value },
+            [serverName]: { ...existingServerCreds, ...pending.serverCredentials?.[serverName], [hint.envVar]: value },
           };
         }
       }
@@ -636,9 +637,14 @@ async function handleServerCredentials(resolved: ResolvedUserConfig, pending: Us
       });
       if (isCancelled(value)) continue;
 
+      const existingServerCreds = resolved.serverCredentials[serverName] ?? {};
       pending.serverCredentials = {
         ...pending.serverCredentials,
-        [serverName]: { ...pending.serverCredentials?.[serverName], [envVar as string]: value as string },
+        [serverName]: {
+          ...existingServerCreds,
+          ...pending.serverCredentials?.[serverName],
+          [envVar as string]: value as string,
+        },
       };
     }
   }
