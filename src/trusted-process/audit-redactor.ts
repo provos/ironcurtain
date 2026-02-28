@@ -5,9 +5,9 @@
  * sensitive data patterns (credit cards, SSNs, API keys) and replaces
  * them with masked versions before writing to the JSONL audit log.
  *
- * Redaction is opt-in via the `auditRedaction.enabled` user config flag.
- * When disabled, entries pass through unchanged (preserving full
- * forensic logging).
+ * Redaction is enabled by default via the `auditRedaction.enabled` user
+ * config flag. When disabled, entries pass through unchanged (preserving
+ * full forensic logging).
  */
 
 // ── Pattern definitions ────────────────────────────────────────────────
