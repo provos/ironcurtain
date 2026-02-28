@@ -220,6 +220,11 @@ export class Sandbox {
     // Pass sandbox availability policy to the proxy process
     proxyEnv.SANDBOX_POLICY = config.sandboxPolicy ?? 'warn';
 
+    // Pass audit redaction config to the proxy process
+    if (config.userConfig.auditRedaction.enabled) {
+      proxyEnv.AUDIT_REDACTION = 'true';
+    }
+
     // Pass auto-approve config to the proxy when enabled.
     // The proxy creates its own model instance from these env vars.
     const autoApprove = config.userConfig.autoApprove;

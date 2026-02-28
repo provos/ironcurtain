@@ -83,6 +83,7 @@ function createTestConfig(): IronCurtainConfig {
         summaryModelId: 'anthropic:claude-haiku-4-5',
       },
       autoApprove: { enabled: false, modelId: 'anthropic:claude-haiku-4-5' },
+      auditRedaction: { enabled: true },
     },
   };
 }

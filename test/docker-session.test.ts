@@ -281,6 +281,7 @@ function createTestDeps(tempDir: string): DockerAgentSessionDeps {
         maxEstimatedCostUsd: null,
       },
       escalationTimeoutSeconds: 120,
+      auditRedaction: { enabled: true },
     },
   } as unknown as IronCurtainConfig;
 

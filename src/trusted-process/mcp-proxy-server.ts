@@ -19,6 +19,7 @@
  *   ESCALATION_DIR     -- (optional) directory for file-based escalation IPC
  *   SESSION_LOG_PATH   -- (optional) path for capturing child process stderr
  *   SANDBOX_POLICY     -- (optional) "enforce" | "warn" (default: "warn")
+ *   AUDIT_REDACTION    -- (optional) "true" to redact PII/credentials in audit log entries
  *   SERVER_FILTER      -- (optional) when set, only connect to this single server name
  *   AUTO_APPROVE_ENABLED   -- (optional) "true" to enable auto-approval of escalations
  *   AUTO_APPROVE_MODEL_ID  -- (optional) qualified model ID for auto-approve LLM
@@ -276,6 +277,7 @@ export interface ProxyEnvConfig {
   escalationDir: string | undefined;
   serverCredentials: Record<string, string>;
   sandboxPolicy: SandboxAvailabilityPolicy;
+  auditRedaction: boolean;
 }
 
 /** Result of sandbox availability validation. */
@@ -338,6 +340,7 @@ export function parseProxyEnvConfig(): ProxyEnvConfig {
   delete process.env.SERVER_CREDENTIALS;
 
   const sandboxPolicy = (process.env.SANDBOX_POLICY ?? 'warn') as SandboxAvailabilityPolicy;
+  const auditRedaction = process.env.AUDIT_REDACTION !== 'false';
 
   const allServersConfig = JSON.parse(serversConfigJson) as Record<string, MCPServerConfig>;
   const protectedPaths = JSON.parse(protectedPathsJson) as string[];
@@ -365,6 +368,7 @@ export function parseProxyEnvConfig(): ProxyEnvConfig {
     escalationDir,
     serverCredentials,
     sandboxPolicy,
+    auditRedaction,
   };
 }
 
@@ -741,6 +745,7 @@ async function main(): Promise<void> {
     escalationDir,
     serverCredentials,
     sandboxPolicy,
+    auditRedaction,
   } = envConfig;
 
   const { compiledPolicy, toolAnnotations, dynamicLists } = loadGeneratedPolicy(generatedDir, getPackageGeneratedDir());
@@ -754,7 +759,7 @@ async function main(): Promise<void> {
     serverDomainAllowlists,
     dynamicLists,
   );
-  const auditLog = new AuditLog(auditLogPath);
+  const auditLog = new AuditLog(auditLogPath, { redact: auditRedaction });
   const circuitBreaker = new CallCircuitBreaker();
 
   const autoApproveModel = await createAutoApproveModel();
