@@ -73,8 +73,15 @@ export async function main(args?: string[]): Promise<void> {
       process.exit(1);
     }
 
+    if (task) {
+      process.stderr.write(
+        chalk.red('PTY mode is interactive -- do not provide a task message. Type your commands in the PTY.\n'),
+      );
+      process.exit(1);
+    }
+
     const { runPtySession } = await import('./docker/pty-session.js');
-    await runPtySession({ config, mode, task });
+    await runPtySession({ config, mode });
     return;
   }
 

@@ -6,7 +6,11 @@
  * and the PTY session module.
  */
 
-import { resolve } from 'node:path';
+import { resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { existsSync, readdirSync, readFileSync, copyFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { arch, tmpdir } from 'node:os';
+import { createHash } from 'node:crypto';
 import type { IronCurtainConfig } from '../config/types.js';
 import type { SessionMode } from '../session/types.js';
 import type { AgentAdapter } from './agent-adapter.js';
@@ -139,8 +143,9 @@ export async function prepareDockerInfrastructure(
   const proxyAddress = useTcp && proxy.port !== undefined ? `host.docker.internal:${proxy.port}` : undefined;
   const { systemPrompt } = prepareSession(adapter, serverListings, sessionDir, config, sandboxDir, proxyAddress);
 
-  // Ensure Docker image
+  // Ensure Docker image is built and up-to-date
   const image = await adapter.getImage();
+  await ensureImage(image, docker, ca);
 
   const orientationDir = resolve(sessionDir, 'orientation');
 
@@ -188,4 +193,102 @@ function resolveRealApiKey(host: string, config: IronCurtainConfig): string {
     logger.warn(`No API key configured for provider host: ${host}`);
   }
   return key;
+}
+
+/**
+ * Ensures the Docker image exists and is up-to-date, building it
+ * (and the base image) if needed.
+ *
+ * Extracted from DockerAgentSession.ensureImage() so both standard
+ * and PTY paths can use it.
+ */
+async function ensureImage(image: string, docker: DockerManager, ca: CertificateAuthority): Promise<void> {
+  const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
+  const dockerDir = resolve(packageRoot, 'docker');
+
+  // On arm64 hosts (Apple Silicon), use the lightweight arm64-native Dockerfile
+  const baseDockerfile =
+    arch() === 'arm64' && existsSync(resolve(dockerDir, 'Dockerfile.base.arm64'))
+      ? 'Dockerfile.base.arm64'
+      : 'Dockerfile.base';
+
+  // Build base image with CA cert baked in (if stale or missing)
+  const baseImage = 'ironcurtain-base:latest';
+  const baseBuildHash = computeBuildHash(dockerDir, [baseDockerfile], ca.certPem);
+  const baseRebuilt = await ensureBaseImage(baseImage, docker, ca, dockerDir, baseDockerfile, baseBuildHash);
+
+  // Build the agent-specific image (if stale, missing, or base was rebuilt)
+  const agentName = image.replace('ironcurtain-', '').replace(':latest', '');
+  const dockerfile = `Dockerfile.${agentName}`;
+  const agentDockerfilePath = resolve(dockerDir, dockerfile);
+  if (!existsSync(agentDockerfilePath)) {
+    throw new Error(`Dockerfile not found for agent "${agentName}": ${agentDockerfilePath}`);
+  }
+
+  const agentBuildHash = computeBuildHash(dockerDir, [dockerfile], ca.certPem, baseBuildHash);
+  const needsAgentBuild = baseRebuilt || (await isImageStale(image, docker, agentBuildHash));
+
+  if (needsAgentBuild) {
+    logger.info(`Building Docker image ${image}...`);
+    await docker.buildImage(image, agentDockerfilePath, dockerDir, {
+      'ironcurtain.build-hash': agentBuildHash,
+    });
+    logger.info(`Docker image ${image} built successfully`);
+  }
+}
+
+async function ensureBaseImage(
+  baseImage: string,
+  docker: DockerManager,
+  ca: CertificateAuthority,
+  dockerDir: string,
+  dockerfile: string,
+  buildHash: string,
+): Promise<boolean> {
+  if (!(await isImageStale(baseImage, docker, buildHash))) return false;
+
+  logger.info('Building base Docker image (this may take a while on first run)...');
+
+  const tmpContext = mkdtempSync(resolve(tmpdir(), 'ironcurtain-build-'));
+  try {
+    for (const file of readdirSync(dockerDir)) {
+      copyFileSync(resolve(dockerDir, file), resolve(tmpContext, file));
+    }
+    copyFileSync(ca.certPath, resolve(tmpContext, 'ironcurtain-ca-cert.pem'));
+
+    await docker.buildImage(baseImage, resolve(tmpContext, dockerfile), tmpContext, {
+      'ironcurtain.build-hash': buildHash,
+    });
+  } finally {
+    rmSync(tmpContext, { recursive: true, force: true });
+  }
+  logger.info('Base Docker image built successfully');
+  return true;
+}
+
+async function isImageStale(image: string, docker: DockerManager, expectedHash: string): Promise<boolean> {
+  if (!(await docker.imageExists(image))) return true;
+  const storedHash = await docker.getImageLabel(image, 'ironcurtain.build-hash');
+  return storedHash !== expectedHash;
+}
+
+function computeBuildHash(dockerDir: string, dockerfiles: string[], caCertPem: string, parentHash?: string): string {
+  const hash = createHash('sha256');
+
+  const files = readdirSync(dockerDir).sort();
+  for (const file of files) {
+    if (dockerfiles.includes(file) || file.endsWith('.sh')) {
+      hash.update(`file:${file}\n`);
+      hash.update(readFileSync(resolve(dockerDir, file)));
+    }
+  }
+
+  hash.update('ca-cert\n');
+  hash.update(caCertPem);
+
+  if (parentHash) {
+    hash.update(`parent:${parentHash}\n`);
+  }
+
+  return hash.digest('hex');
 }

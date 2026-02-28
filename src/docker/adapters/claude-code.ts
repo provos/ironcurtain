@@ -159,17 +159,16 @@ export const claudeCodeAdapter: AgentAdapter = {
       ? `UNIX-LISTEN:${ptySockPath},fork` // Linux UDS
       : `TCP-LISTEN:${ptyPort},reuseaddr`; // macOS TCP
 
-    // message and systemPrompt are written to files in the orientation dir
-    // by the PTY session module before container start -- not embedded in shell strings
-    return [
-      'socat',
-      listenArg,
-      'EXEC:claude --dangerously-skip-permissions' +
-        ' --mcp-config /etc/ironcurtain/claude-mcp-config.json' +
-        ' --append-system-prompt-file /etc/ironcurtain/system-prompt.txt' +
-        ' -p-file /etc/ironcurtain/initial-message.txt' +
-        ',pty,setsid,ctty,stderr',
-    ];
+    // Interactive mode: claude runs without -p so the user can interact via PTY.
+    // System prompt is read from a file via shell substitution to avoid quoting issues.
+    // The initial task message is NOT passed here -- it will be injected into the
+    // PTY stream by the host after connection, or typed by the user.
+    const claudeCmd =
+      'claude --dangerously-skip-permissions' +
+      ' --mcp-config /etc/ironcurtain/claude-mcp-config.json' +
+      ' --append-system-prompt "$(cat /etc/ironcurtain/system-prompt.txt)"';
+
+    return ['socat', listenArg, `EXEC:${claudeCmd},pty,setsid,ctty,stderr`];
   },
 };
 

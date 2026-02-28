@@ -47,7 +47,6 @@ import * as logger from '../logger.js';
 export interface PtySessionOptions {
   readonly config: IronCurtainConfig;
   readonly mode: SessionMode & { kind: 'docker' };
-  readonly task: string;
 }
 
 /** Maximum time to wait for the PTY socket to appear (ms). */
@@ -111,16 +110,15 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
     throw new Error(`Agent ${adapter.id} does not support PTY mode.`);
   }
 
-  // Write system prompt and initial message to files for shell-injection-safe PTY command
+  // Write system prompt to file for shell-injection-safe PTY command
   writeFileSync(resolve(orientationDir, 'system-prompt.txt'), systemPrompt);
-  writeFileSync(resolve(orientationDir, 'initial-message.txt'), options.task || '');
 
   // Determine PTY connection target
   const ptySockPath = useTcp ? undefined : `/run/ironcurtain/${PTY_SOCK_NAME}`;
   const ptyPort = useTcp ? DEFAULT_PTY_PORT : undefined;
 
   // Build the PTY command
-  const ptyCommand = adapter.buildPtyCommand(options.task, systemPrompt, ptySockPath, ptyPort);
+  const ptyCommand = adapter.buildPtyCommand('', systemPrompt, ptySockPath, ptyPort);
 
   // Build container configuration
   const shortId = sessionId.substring(0, 12);
@@ -244,16 +242,11 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
     logger.info(`PTY container started: ${containerId.substring(0, 12)}`);
 
     // Write session registration for the escalation listener
-    registrationPath = writeRegistration(sessionId, escalationDir, adapter.displayName, options.task);
+    registrationPath = writeRegistration(sessionId, escalationDir, adapter.displayName);
 
     // Keystroke buffer for LLM-based user context reconstruction.
     // Captures trusted host->container input for auto-approver support.
     const keystrokeBuffer = new KeystrokeBuffer();
-
-    // Write initial task as user context (before any keystrokes)
-    if (options.task) {
-      writeUserContext(escalationDir, options.task);
-    }
 
     // Start escalation file watcher (reconstructs user context + emits BEL)
     escalationFileWatcher = createEscalationWatcher(escalationDir, {
@@ -470,14 +463,14 @@ function tryConnect(target: string | { host: string; port: number }): Promise<bo
  * Writes a PTY session registration file to the registry directory.
  * Returns the absolute path of the registration file.
  */
-function writeRegistration(sessionId: string, escalationDir: string, adapterDisplayName: string, task: string): string {
+function writeRegistration(sessionId: string, escalationDir: string, adapterDisplayName: string): string {
   const registryDir = getPtyRegistryDir();
   mkdirSync(registryDir, { recursive: true, mode: 0o700 });
 
   const registration: PtySessionRegistration = {
     sessionId,
     escalationDir,
-    label: `${adapterDisplayName} - ${task.substring(0, 60) || '(interactive)'}`,
+    label: `${adapterDisplayName} (interactive)`,
     startedAt: new Date().toISOString(),
     pid: process.pid,
   };
