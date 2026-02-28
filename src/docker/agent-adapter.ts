@@ -124,4 +124,23 @@ export interface AgentAdapter {
    * @param stdout - captured stdout from the container
    */
   extractResponse(exitCode: number, stdout: string): AgentResponse;
+
+  /**
+   * Returns the Docker container command for PTY mode.
+   * When provided, the container runs this command directly instead of
+   * `sleep infinity`, and the host attaches via a PTY proxy.
+   *
+   * Adapters that do not implement this method do not support PTY mode.
+   *
+   * @param message - the initial task message (written to a file, not embedded in shell)
+   * @param systemPrompt - the orientation prompt (written to a file, not embedded in shell)
+   * @param ptySockPath - the UDS path for the PTY listener (Linux), or undefined for TCP mode
+   * @param ptyPort - the TCP port for the PTY listener (macOS), or undefined for UDS mode
+   */
+  buildPtyCommand?(
+    message: string,
+    systemPrompt: string,
+    ptySockPath: string | undefined,
+    ptyPort: number | undefined,
+  ): readonly string[];
 }

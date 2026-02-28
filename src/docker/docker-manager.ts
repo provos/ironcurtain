@@ -88,6 +88,10 @@ export function buildCreateArgs(config: DockerContainerConfig): string[] {
     args.push('--entrypoint', config.entrypoint);
   }
 
+  if (config.tty) {
+    args.push('-t');
+  }
+
   args.push(config.image);
   args.push(...config.command);
 

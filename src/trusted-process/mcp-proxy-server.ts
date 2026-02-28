@@ -41,6 +41,7 @@ import {
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { appendFileSync, existsSync, mkdtempSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
+import { atomicWriteJsonSync } from '../escalation/escalation-watcher.js';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -214,7 +215,7 @@ async function waitForEscalationDecision(
   const requestPath = resolve(escalationDir, `request-${request.escalationId}.json`);
   const responsePath = resolve(escalationDir, `response-${request.escalationId}.json`);
 
-  writeFileSync(requestPath, JSON.stringify(request));
+  atomicWriteJsonSync(requestPath, request);
 
   const deadline = Date.now() + getEscalationTimeoutMs();
 

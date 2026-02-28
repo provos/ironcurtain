@@ -147,6 +147,30 @@ export const claudeCodeAdapter: AgentAdapter = {
     }
     return parseClaudeCodeJson(stdout);
   },
+
+  buildPtyCommand(
+    _message: string,
+    _systemPrompt: string,
+    ptySockPath: string | undefined,
+    ptyPort: number | undefined,
+  ): readonly string[] {
+    // The socat listener target depends on platform
+    const listenArg = ptySockPath
+      ? `UNIX-LISTEN:${ptySockPath},fork` // Linux UDS
+      : `TCP-LISTEN:${ptyPort},reuseaddr`; // macOS TCP
+
+    // message and systemPrompt are written to files in the orientation dir
+    // by the PTY session module before container start -- not embedded in shell strings
+    return [
+      'socat',
+      listenArg,
+      'EXEC:claude --dangerously-skip-permissions' +
+        ' --mcp-config /etc/ironcurtain/claude-mcp-config.json' +
+        ' --append-system-prompt-file /etc/ironcurtain/system-prompt.txt' +
+        ' -p-file /etc/ironcurtain/initial-message.txt' +
+        ',pty,setsid,ctty,stderr',
+    ];
+  },
 };
 
 /**
