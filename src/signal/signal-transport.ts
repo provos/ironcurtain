@@ -64,16 +64,17 @@ export class SignalSessionTransport extends BaseTransport {
   // --- Callback factories (wired into SessionOptions by the daemon) ---
 
   createDiagnosticHandler(): (event: DiagnosticEvent) => void {
+    const label = this.sessionLabel;
     return (event) => {
       switch (event.kind) {
         case 'tool_call':
           // Don't send every tool call - too noisy for messaging
           break;
         case 'budget_warning':
-          this.daemon.sendSignalMessage(`[Budget warning] ${event.message}`).catch(() => {});
+          this.daemon.sendSignalMessage(`[#${label}] [Budget warning] ${event.message}`).catch(() => {});
           break;
         case 'budget_exhausted':
-          this.daemon.sendSignalMessage(`[Budget exhausted] ${event.message}`).catch(() => {});
+          this.daemon.sendSignalMessage(`[#${label}] [Budget exhausted] ${event.message}`).catch(() => {});
           break;
       }
     };

@@ -553,7 +553,9 @@ export class SignalBotDaemon {
     }
 
     if (target.escalationResolving) {
-      this.sendSignalMessage('Escalation is being resolved, please wait...').catch(() => {});
+      this.sendSignalMessage(
+        prefixWithLabel('Escalation is being resolved, please wait...', target.label, this.sessions.size),
+      ).catch(() => {});
       return true;
     }
 
@@ -626,7 +628,13 @@ export class SignalBotDaemon {
         }
 
         const wasCurrent = labelToEnd === this.currentLabel;
-        await this.endSession(labelToEnd);
+        try {
+          await this.endSession(labelToEnd);
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          await this.sendSignalMessage(`Failed to end session #${labelToEnd}: ${msg}`);
+          return;
+        }
 
         if (wasCurrent && this.sessions.size > 0 && this.currentLabel !== null) {
           await this.sendSignalMessage(`Session #${labelToEnd} ended. Switched to #${this.currentLabel}.`);
@@ -654,16 +662,18 @@ export class SignalBotDaemon {
 
     // /sessions
     if (lower === '/sessions') {
-      const entries: SessionListEntry[] = Array.from(this.sessions.values(), (managed) => {
-        const budget = managed.session.getBudgetStatus();
-        const maxTokens = budget.limits.maxTotalTokens;
-        return {
-          label: managed.label,
-          turnCount: managed.session.getInfo().turnCount,
-          budgetPercent: maxTokens ? Math.round((budget.totalTokens / maxTokens) * 100) : 0,
-        };
+      this.scheduleSessionOp(async () => {
+        const entries: SessionListEntry[] = Array.from(this.sessions.values(), (managed) => {
+          const budget = managed.session.getBudgetStatus();
+          const maxTokens = budget.limits.maxTotalTokens;
+          return {
+            label: managed.label,
+            turnCount: managed.session.getInfo().turnCount,
+            budgetPercent: maxTokens ? Math.round((budget.totalTokens / maxTokens) * 100) : 0,
+          };
+        });
+        await this.sendSignalMessage(formatSessionList(entries, this.currentLabel));
       });
-      this.sendSignalMessage(formatSessionList(entries, this.currentLabel)).catch(() => {});
       return true;
     }
 
