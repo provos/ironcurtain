@@ -158,11 +158,18 @@ export class SignalBotDaemon {
     this.closed = true;
     await this.sendSignalMessage('IronCurtain bot is shutting down. Goodbye.').catch(() => {});
 
-    // End all sessions
+    // Wait for any in-flight session operations (e.g., /new) to complete
+    await this.sessionOpInProgress.catch(() => {});
+
+    // End all sessions without letting a single failure abort shutdown
     const labels = [...this.sessions.keys()];
-    for (const label of labels) {
-      await this.endSession(label);
-    }
+    await Promise.allSettled(
+      labels.map((label) =>
+        this.endSession(label).catch((err: unknown) => {
+          logger.error(`[Signal Daemon] Failed to end session #${label} during shutdown: ${String(err)}`);
+        }),
+      ),
+    );
 
     if (this.ws) {
       this.ws.close();
@@ -581,24 +588,30 @@ export class SignalBotDaemon {
     // /quit [N] or /exit [N]
     const quitMatch = lower.match(/^\/(quit|exit)(?:\s+#?(\d+))?$/);
     if (quitMatch) {
-      const label = quitMatch[2] ? parseInt(quitMatch[2], 10) : this.currentLabel;
-      if (label === null) {
-        this.sendSignalMessage('No active session.').catch(() => {});
-      } else if (!this.sessions.has(label)) {
-        this.sendSignalMessage(`No session #${label}.`).catch(() => {});
-      } else {
-        const wasCurrent = label === this.currentLabel;
-        this.scheduleSessionOp(async () => {
-          await this.endSession(label);
-          if (wasCurrent && this.sessions.size > 0 && this.currentLabel !== null) {
-            await this.sendSignalMessage(`Session #${label} ended. Switched to #${this.currentLabel}.`);
-          } else if (this.sessions.size > 0) {
-            await this.sendSignalMessage(`Session #${label} ended.`);
-          } else {
-            await this.sendSignalMessage('Session ended. Send a message to start a new one.');
-          }
-        });
-      }
+      const explicitLabel = quitMatch[2] ? parseInt(quitMatch[2], 10) : null;
+      this.scheduleSessionOp(async () => {
+        const labelToEnd = explicitLabel ?? this.currentLabel;
+
+        if (labelToEnd === null) {
+          await this.sendSignalMessage('No active session.');
+          return;
+        }
+        if (!this.sessions.has(labelToEnd)) {
+          await this.sendSignalMessage(`No session #${labelToEnd}.`);
+          return;
+        }
+
+        const wasCurrent = labelToEnd === this.currentLabel;
+        await this.endSession(labelToEnd);
+
+        if (wasCurrent && this.sessions.size > 0 && this.currentLabel !== null) {
+          await this.sendSignalMessage(`Session #${labelToEnd} ended. Switched to #${this.currentLabel}.`);
+        } else if (this.sessions.size > 0) {
+          await this.sendSignalMessage(`Session #${labelToEnd} ended.`);
+        } else {
+          await this.sendSignalMessage('Session ended. Send a message to start a new one.');
+        }
+      });
       return true;
     }
 

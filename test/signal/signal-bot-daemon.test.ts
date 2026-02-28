@@ -185,12 +185,15 @@ interface MockSessionRecord {
 const createdMockSessions: MockSessionRecord[] = [];
 
 function createMockSession() {
+  const sessionId = `test-session-${createdMockSessions.length}`;
+  const createdAt = new Date().toISOString();
+
   return {
     getInfo: () => ({
-      id: `test-session-${createdMockSessions.length}`,
+      id: sessionId,
       status: 'ready',
       turnCount: 0,
-      createdAt: new Date().toISOString(),
+      createdAt,
     }),
     sendMessage: vi.fn().mockResolvedValue('Agent response text'),
     getHistory: () => [],
