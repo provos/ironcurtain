@@ -52,6 +52,19 @@ Runs external agents in Docker containers with `--network=none`, communicating v
 ### Types (`src/types/`)
 Shared types: `ToolCallRequest`/`ToolCallResult`/`PolicyDecision` in `mcp.ts`, `AuditEntry` in `audit.ts`. Policy decisions have three outcomes: `allow`, `deny`, `escalate`. The engine can produce all three, but compiled rules only use `allow` and `escalate` - `deny` comes from the default fallthrough when no rule matches.
 
+## Onboarding a New MCP Server
+
+Adding a new MCP server requires changes across configuration, policy, and tests:
+
+1. **`src/config/mcp-servers.json`** — Add server entry with `command`, `args`, and `sandbox` config. For Docker-based servers, use `"sandbox": false` (Docker provides isolation). Credential env vars use `-e VAR_NAME` (no `=value`) so Docker forwards from the host environment.
+2. **`src/config/user-config.ts`** / **`src/config/config-command.ts`** — If the server needs credentials (API tokens), add a `SERVER_CREDENTIAL_HINTS` entry in `config-command.ts` for guided setup, and add a prompt step in `first-start.ts`. Credentials go in `serverCredentials.<serverName>.<ENV_VAR>` in `~/.ironcurtain/config.json`.
+3. **`src/types/argument-roles.ts`** — Extend `serverNames` on any existing roles that apply to the new server (e.g., `branch-name` for GitHub). Add new roles only if the server introduces new resource-identifier semantics.
+4. **`src/config/constitution.md`** — Add guiding principles for the new server's tools (e.g., read-only operations are safe, mutations require approval).
+5. **`src/pipeline/handwritten-scenarios.ts`** — Add ground-truth scenarios for critical policy decisions involving the new server.
+6. **`test/fixtures/test-policy.ts`** — Add representative tools to `testToolAnnotations.servers` and corresponding rules to `testCompiledPolicy.rules`.
+7. **`test/policy-engine.test.ts`** — Add unit tests verifying the new server's tools are correctly allowed/escalated/denied.
+8. **Run the pipeline** — `npm run annotate-tools` (generates annotations), then `npm run compile-policy` (compiles policy rules). Both commands gracefully skip servers that fail to connect (e.g., Docker not available).
+
 ## Key Conventions
 
 - ESM modules throughout (`.js` extensions in imports, `"type": "module"` in package.json)

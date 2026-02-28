@@ -22,7 +22,7 @@ import { normalizeUrl, normalizeGitUrl } from '../trusted-process/domain-utils.j
 // Types
 // ---------------------------------------------------------------------------
 
-export type RoleCategory = 'path' | 'url' | 'opaque';
+export type RoleCategory = 'path' | 'url' | 'identifier' | 'opaque';
 
 export type ArgumentRole =
   // Path roles -- sandbox-safe (filesystem sandbox containment auto-resolves these)
@@ -35,6 +35,8 @@ export type ArgumentRole =
   // URL roles
   | 'fetch-url'
   | 'git-remote-url'
+  // Identifier roles (case-insensitive allowlist-checked identifiers)
+  | 'github-owner'
   // Opaque roles (semantic meaning but not resource identifiers)
   | 'branch-name'
   | 'commit-message'
@@ -115,6 +117,11 @@ export function resolveRealPath(filePath: string): string {
 /** Identity function -- returns the value unchanged. */
 function identity(value: string): string {
   return value;
+}
+
+/** Lowercases the value for case-insensitive matching. */
+function lowercase(value: string): string {
+  return value.toLowerCase();
 }
 
 // ---------------------------------------------------------------------------
@@ -216,6 +223,19 @@ const registryEntries: [ArgumentRole, RoleDefinition][] = [
     },
   ],
   [
+    'github-owner',
+    {
+      description: 'GitHub user or organization name that owns the target resource',
+      isResourceIdentifier: true,
+      category: 'identifier',
+      canonicalize: lowercase,
+      annotationGuidance:
+        'Assign to arguments that identify a GitHub user or organization that owns the target resource. ' +
+        'Typically the "owner" or "org" parameter on GitHub API tools.',
+      serverNames: ['github'],
+    },
+  ],
+  [
     'branch-name',
     {
       description: 'Git branch name',
@@ -224,8 +244,9 @@ const registryEntries: [ArgumentRole, RoleDefinition][] = [
       canonicalize: identity,
       annotationGuidance:
         'Assign to arguments that are git branch names. ' +
-        'Typically applies to git server tools like git_branch, git_checkout, git_merge, git_push.',
-      serverNames: ['git'],
+        'Typically applies to git server tools like git_branch, git_checkout, git_merge, git_push, ' +
+        'and GitHub tools like create_pull_request (head/base branch arguments).',
+      serverNames: ['git', 'github'],
     },
   ],
   [
@@ -268,6 +289,7 @@ const _ROLE_COMPLETENESS_CHECK: Record<ArgumentRole, true> = {
   'delete-history': true,
   'fetch-url': true,
   'git-remote-url': true,
+  'github-owner': true,
   'branch-name': true,
   'commit-message': true,
   none: true,
@@ -330,6 +352,11 @@ export function getPathRoles(): ArgumentRole[] {
 /** Returns url-category roles only. Used by untrusted domain gate. */
 export function getUrlRoles(): ArgumentRole[] {
   return getRolesByCategory('url');
+}
+
+/** Returns identifier-category roles only. Used by owner allowlist check. */
+export function getIdentifierRoles(): ArgumentRole[] {
+  return getRolesByCategory('identifier');
 }
 
 /**

@@ -31,8 +31,8 @@ import {
 } from '../src/trusted-process/domain-utils.js';
 
 describe('ARGUMENT_ROLE_REGISTRY', () => {
-  it('contains all ten roles', () => {
-    expect(ARGUMENT_ROLE_REGISTRY.size).toBe(10);
+  it('contains all eleven roles', () => {
+    expect(ARGUMENT_ROLE_REGISTRY.size).toBe(11);
   });
 
   it('has entries for all known roles', () => {
@@ -44,6 +44,7 @@ describe('ARGUMENT_ROLE_REGISTRY', () => {
       'delete-history',
       'fetch-url',
       'git-remote-url',
+      'github-owner',
       'branch-name',
       'commit-message',
       'none',
@@ -105,8 +106,8 @@ describe('getResourceRoles', () => {
     expect(roles).not.toContain('commit-message');
   });
 
-  it('returns exactly seven roles', () => {
-    expect(getResourceRoles()).toHaveLength(7);
+  it('returns exactly eight roles', () => {
+    expect(getResourceRoles()).toHaveLength(8);
   });
 });
 
@@ -119,6 +120,7 @@ describe('isArgumentRole', () => {
     expect(isArgumentRole('delete-history')).toBe(true);
     expect(isArgumentRole('fetch-url')).toBe(true);
     expect(isArgumentRole('git-remote-url')).toBe(true);
+    expect(isArgumentRole('github-owner')).toBe(true);
     expect(isArgumentRole('branch-name')).toBe(true);
     expect(isArgumentRole('commit-message')).toBe(true);
     expect(isArgumentRole('none')).toBe(true);
@@ -137,7 +139,7 @@ describe('getArgumentRoleValues', () => {
     expect(values.length).toBeGreaterThanOrEqual(1);
   });
 
-  it('contains all ten roles', () => {
+  it('contains all eleven roles', () => {
     const values = getArgumentRoleValues();
     expect(values).toContain('read-path');
     expect(values).toContain('write-path');
@@ -146,6 +148,7 @@ describe('getArgumentRoleValues', () => {
     expect(values).toContain('delete-history');
     expect(values).toContain('fetch-url');
     expect(values).toContain('git-remote-url');
+    expect(values).toContain('github-owner');
     expect(values).toContain('branch-name');
     expect(values).toContain('commit-message');
     expect(values).toContain('none');

@@ -19,6 +19,8 @@ import { z } from 'zod';
 import { getBaseUserConstitutionPath, getUserConstitutionPath, getUserGeneratedDir } from '../config/paths.js';
 import { loadUserConfig } from '../config/user-config.js';
 import { createCacheStrategy } from '../session/prompt-cache.js';
+import type { GitHubIdentity } from './github-identity.js';
+import { discoverGitHubIdentity, resolveGitHubToken } from './github-identity.js';
 import { createPipelineLlm, loadExistingArtifact } from './pipeline-shared.js';
 import type { ToolAnnotation, ToolAnnotationsFile } from './types.js';
 
@@ -116,8 +118,12 @@ export function formatAnnotationsForPrompt(annotations: ToolAnnotation[]): strin
 // Prompt Construction
 // ---------------------------------------------------------------------------
 
-export function buildSystemPrompt(baseConstitution: string, toolAnnotations: ToolAnnotation[]): string {
-  return `You are helping a user customize their IronCurtain security policy.
+export function buildSystemPrompt(
+  baseConstitution: string,
+  toolAnnotations: ToolAnnotation[],
+  githubIdentity?: GitHubIdentity | null,
+): string {
+  let prompt = `You are helping a user customize their IronCurtain security policy.
 
 The user will describe tasks and purposes they want their agent to perform.
 Your job is to infer the specific permissions needed and generate precise,
@@ -191,6 +197,27 @@ Respond with either "changes" or a "question":
 4. If the user's request conflicts with the base constitution, explain the
    conflict in the summary and suggest an alternative within base constraints.
 `;
+
+  if (githubIdentity) {
+    const orgsLine =
+      githubIdentity.orgs.length > 0
+        ? `\nThey belong to these organizations: ${githubIdentity.orgs.map((o) => `**${o}**`).join(', ')}.`
+        : '';
+
+    prompt += `
+## GitHub Identity Context
+The user is authenticated as **${githubIdentity.login}** on GitHub.${orgsLine}
+
+When the user's request involves GitHub operations, use this context to:
+- Suggest policy rules scoped to their username and/or organizations
+- Ask which of their organizations (if any) the agent should have access to
+- Generate precise owner names in policy statements (e.g., "The agent may \
+interact with GitHub repositories owned by ${githubIdentity.login}")
+- Do NOT automatically grant access to all organizations -- ask the user \
+which ones are relevant to their task`;
+  }
+
+  return prompt;
 }
 
 export function buildUserMessage(currentUserConstitution: string | undefined, userRequest: string): string {
@@ -407,6 +434,21 @@ export async function main(): Promise<void> {
     `Loaded tool annotations (${serverCount} server${serverCount !== 1 ? 's' : ''}, ${annotations.length} tools)`,
   );
 
+  // Discover GitHub identity (best-effort enrichment)
+  const ghToken = resolveGitHubToken(userConfig.serverCredentials);
+  let ghIdentity: GitHubIdentity | null = null;
+  if (ghToken) {
+    const spinner = p.spinner();
+    spinner.start('Discovering GitHub identity...');
+    ghIdentity = await discoverGitHubIdentity(ghToken);
+    if (ghIdentity) {
+      const owners = [ghIdentity.login, ...ghIdentity.orgs].join(', ');
+      spinner.stop(`GitHub identity: ${owners}`);
+    } else {
+      spinner.stop('GitHub identity discovery failed (continuing without it)');
+    }
+  }
+
   // Load base constitution (guiding principles -- read-only context for LLM)
   const constitutionPath = resolve(configDir, 'constitution.md');
   const baseConstitution = existsSync(constitutionPath) ? readFileSync(constitutionPath, 'utf-8') : '';
@@ -426,7 +468,7 @@ export async function main(): Promise<void> {
   logContext.stepName = 'customize-policy';
 
   // Build system prompt (stable across turns -- ideal for caching)
-  const rawSystemPrompt = buildSystemPrompt(baseConstitution, annotations);
+  const rawSystemPrompt = buildSystemPrompt(baseConstitution, annotations, ghIdentity);
   const systemPrompt = cacheStrategy.wrapSystemPrompt(rawSystemPrompt);
 
   // Conversation history for multi-turn context

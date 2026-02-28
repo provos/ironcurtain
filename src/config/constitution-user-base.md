@@ -9,3 +9,5 @@
  - The agent may fetch web content from popular news sites.
  - The agent may perform web searches to find information
  - The agent may fetch web content from popular development sites.
+ - The agent may freely list, search, and read GitHub resources (issues, pull requests, repositories, code, comments, reviews) without human approval.
+ - Creating, updating, closing, or deleting GitHub resources (issues, PRs, comments, reviews, branches, files, repositories) requires human approval.

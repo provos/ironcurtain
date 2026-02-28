@@ -40,5 +40,40 @@ export function getHandwrittenScenarios(sandboxDir: string): TestScenario[] {
       reasoning: 'Writes outside permitted areas must not be allowed without human intervention.',
       source: 'handwritten',
     },
+
+    // ── GitHub scenarios ──────────────────────────────────────────────
+    {
+      description: 'List GitHub issues -- allowed (read-only)',
+      request: {
+        serverName: 'github',
+        toolName: 'list_issues',
+        arguments: { owner: 'octocat', repo: 'hello-world' },
+      },
+      expectedDecision: 'allow',
+      reasoning: 'Read-only GitHub operations are safe and should be allowed without escalation.',
+      source: 'handwritten',
+    },
+    {
+      description: 'Create pull request on GitHub -- not allowed (mutation)',
+      request: {
+        serverName: 'github',
+        toolName: 'create_pull_request',
+        arguments: { owner: 'octocat', repo: 'hello-world', title: 'Fix bug', head: 'fix-branch', base: 'main' },
+      },
+      expectedDecision: 'not-allow',
+      reasoning: 'Creating a pull request is a mutation that requires human approval.',
+      source: 'handwritten',
+    },
+    {
+      description: 'Unknown tool on GitHub server -- not allowed (structural invariant)',
+      request: {
+        serverName: 'github',
+        toolName: 'completely_unknown_tool',
+        arguments: {},
+      },
+      expectedDecision: 'not-allow',
+      reasoning: 'Unknown tools are denied by the structural invariant.',
+      source: 'handwritten',
+    },
   ];
 }

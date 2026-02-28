@@ -108,6 +108,29 @@ export const testCompiledPolicy: CompiledPolicyFile = {
       then: 'allow',
       reason: 'Staging and committing within sandbox are safe.',
     },
+    // ── GitHub rules ────────────────────────────────────────────────
+    {
+      name: 'allow-github-read-ops',
+      description: 'Allow read-only GitHub operations.',
+      principle: 'Read-only GitHub operations are safe',
+      if: {
+        server: ['github'],
+        sideEffects: false,
+      },
+      then: 'allow',
+      reason: 'Read-only GitHub operations are safe.',
+    },
+    {
+      name: 'escalate-github-mutations',
+      description: 'Escalate GitHub mutations to human.',
+      principle: 'GitHub mutations require approval',
+      if: {
+        server: ['github'],
+        sideEffects: true,
+      },
+      then: 'escalate',
+      reason: 'GitHub mutations require human approval.',
+    },
     // ── Fetch rules ─────────────────────────────────────────────────
     {
       name: 'allow-fetch-get',
@@ -181,9 +204,10 @@ export const testCompiledPolicy: CompiledPolicyFile = {
 };
 
 /**
- * Tool annotations for the filesystem and git MCP servers.
+ * Tool annotations for the filesystem, git, GitHub, and fetch MCP servers.
  * Filesystem: matches the stable tool set from @modelcontextprotocol/server-filesystem.
  * Git: covers the tools referenced by handwritten git scenarios.
+ * GitHub: covers read-only and mutation tools for policy engine tests.
  */
 export const testToolAnnotations: ToolAnnotationsFile = {
   generatedAt: 'test-fixture',
@@ -384,6 +408,59 @@ export const testToolAnnotations: ToolAnnotationsFile = {
           comment: 'Creates, lists, or deletes branches.',
           sideEffects: true,
           args: { path: ['read-path', 'write-history', 'delete-history'], name: ['branch-name'], delete: ['none'] },
+        },
+      ],
+    },
+    github: {
+      inputHash: 'test-fixture',
+      tools: [
+        {
+          toolName: 'list_issues',
+          serverName: 'github',
+          comment: 'Lists issues in a repository.',
+          sideEffects: false,
+          args: { owner: ['github-owner'], repo: ['none'] },
+        },
+        {
+          toolName: 'get_issue',
+          serverName: 'github',
+          comment: 'Gets a single issue.',
+          sideEffects: false,
+          args: { owner: ['github-owner'], repo: ['none'], issue_number: ['none'] },
+        },
+        {
+          toolName: 'search_code',
+          serverName: 'github',
+          comment: 'Searches code across repositories.',
+          sideEffects: false,
+          args: { q: ['none'] },
+        },
+        {
+          toolName: 'create_issue',
+          serverName: 'github',
+          comment: 'Creates an issue in a repository.',
+          sideEffects: true,
+          args: { owner: ['github-owner'], repo: ['none'], title: ['none'], body: ['none'] },
+        },
+        {
+          toolName: 'create_pull_request',
+          serverName: 'github',
+          comment: 'Creates a pull request.',
+          sideEffects: true,
+          args: {
+            owner: ['github-owner'],
+            repo: ['none'],
+            title: ['none'],
+            head: ['branch-name'],
+            base: ['branch-name'],
+          },
+        },
+        {
+          toolName: 'merge_pull_request',
+          serverName: 'github',
+          comment: 'Merges a pull request.',
+          sideEffects: true,
+          args: { owner: ['github-owner'], repo: ['none'], pull_number: ['none'] },
         },
       ],
     },

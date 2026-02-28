@@ -160,6 +160,40 @@ describe('buildSystemPrompt', () => {
     expect(result).toContain('clear, specific policy statement');
     expect(result).toContain('principle of least privilege');
   });
+
+  it('does not include GitHub Identity Context when no identity provided', () => {
+    const result = buildSystemPrompt(sampleBaseConstitution, sampleAnnotations);
+    expect(result).not.toContain('GitHub Identity Context');
+  });
+
+  it('does not include GitHub Identity Context when identity is null', () => {
+    const result = buildSystemPrompt(sampleBaseConstitution, sampleAnnotations, null);
+    expect(result).not.toContain('GitHub Identity Context');
+  });
+
+  it('includes GitHub Identity Context with login and orgs', () => {
+    const identity = { login: 'provos', orgs: ['my-org', 'acme-corp'] };
+    const result = buildSystemPrompt(sampleBaseConstitution, sampleAnnotations, identity);
+    expect(result).toContain('## GitHub Identity Context');
+    expect(result).toContain('**provos**');
+    expect(result).toContain('**my-org**');
+    expect(result).toContain('**acme-corp**');
+    expect(result).toContain('Do NOT automatically grant access to all organizations');
+  });
+
+  it('includes GitHub Identity Context without orgs section when orgs are empty', () => {
+    const identity = { login: 'solo-dev', orgs: [] as string[] };
+    const result = buildSystemPrompt(sampleBaseConstitution, sampleAnnotations, identity);
+    expect(result).toContain('## GitHub Identity Context');
+    expect(result).toContain('**solo-dev**');
+    expect(result).not.toContain('They belong to these organizations');
+  });
+
+  it('includes login in example policy statement', () => {
+    const identity = { login: 'testuser', orgs: [] as string[] };
+    const result = buildSystemPrompt(sampleBaseConstitution, sampleAnnotations, identity);
+    expect(result).toContain('repositories owned by testuser');
+  });
 });
 
 describe('buildUserMessage', () => {

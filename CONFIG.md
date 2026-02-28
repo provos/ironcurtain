@@ -76,7 +76,7 @@ Per-server environment variables injected securely at runtime. The proxy strips 
 ```json
 {
   "serverCredentials": {
-    "git": { "GH_TOKEN": "ghp_xxxx" },
+    "github": { "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_xxxx" },
     "fetch": { "API_KEY": "key_yyyy" }
   }
 }

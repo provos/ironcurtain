@@ -27,5 +27,15 @@
     "args": ["./src/servers/fetch-server.ts"],
     "sandbox": false,
     "_comment": "sandbox: false because srt's network sandbox (seccomp/bubblewrap) blocks Unix domain sockets needed by tsx in dev mode and cannot selectively allow network while restricting filesystem. The policy engine handles URL-level security (SSRF blocking, domain allowlists) independently."
+  },
+  "github": {
+    "description": "GitHub API operations (issues, pull requests, repos, search)",
+    "command": "docker",
+    "args": [
+      "run", "-i", "--rm",
+      "-e", "GITHUB_PERSONAL_ACCESS_TOKEN",
+      "ghcr.io/github/github-mcp-server"
+    ],
+    "sandbox": false
   }
 }

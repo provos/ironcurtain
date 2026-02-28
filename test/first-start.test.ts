@@ -55,11 +55,12 @@ describe('first-start wizard', () => {
     vi.restoreAllMocks();
   });
 
-  /** Sets up mocks for a basic wizard flow: confirm setup, skip web search, choose auto-approve. */
+  /** Sets up mocks for a basic wizard flow: confirm setup, skip web search, skip GitHub token, choose auto-approve. */
   function setupBasicFlow(autoApprove: boolean): void {
-    mocks.confirm.mockResolvedValueOnce(true);
-    mocks.select.mockResolvedValueOnce('skip');
-    mocks.confirm.mockResolvedValueOnce(autoApprove);
+    mocks.confirm.mockResolvedValueOnce(true); // Step 1: continue with setup
+    mocks.select.mockResolvedValueOnce('skip'); // Step 4: web search provider
+    mocks.confirm.mockResolvedValueOnce(false); // Step 5: skip GitHub token
+    mocks.confirm.mockResolvedValueOnce(autoApprove); // Step 6: auto-approve
   }
 
   it('full flow with auto-approve enabled writes config', async () => {
@@ -82,8 +83,9 @@ describe('first-start wizard', () => {
   });
 
   it('cancel at auto-approve step exits', async () => {
-    mocks.confirm.mockResolvedValueOnce(true);
-    mocks.select.mockResolvedValueOnce('skip');
+    mocks.confirm.mockResolvedValueOnce(true); // continue with setup
+    mocks.select.mockResolvedValueOnce('skip'); // skip web search
+    mocks.confirm.mockResolvedValueOnce(false); // skip GitHub token
     mocks.confirm.mockResolvedValueOnce(Symbol.for('cancel'));
     mocks.isCancel.mockImplementation((v: unknown) => typeof v === 'symbol');
 
@@ -103,8 +105,9 @@ describe('first-start wizard', () => {
   });
 
   it('cancel at auto-approve does not write config', async () => {
-    mocks.confirm.mockResolvedValueOnce(true);
-    mocks.select.mockResolvedValueOnce('skip');
+    mocks.confirm.mockResolvedValueOnce(true); // continue with setup
+    mocks.select.mockResolvedValueOnce('skip'); // skip web search
+    mocks.confirm.mockResolvedValueOnce(false); // skip GitHub token
     mocks.confirm.mockResolvedValueOnce(Symbol.for('cancel'));
     mocks.isCancel.mockImplementation((v: unknown) => typeof v === 'symbol');
 
@@ -133,9 +136,10 @@ describe('first-start wizard', () => {
         webSearch: { provider: 'brave', brave: { apiKey: 'existing-brave-key' } },
       });
 
-      mocks.confirm.mockResolvedValueOnce(true);
-      mocks.select.mockResolvedValueOnce('brave');
-      mocks.confirm.mockResolvedValueOnce(false);
+      mocks.confirm.mockResolvedValueOnce(true); // continue with setup
+      mocks.select.mockResolvedValueOnce('brave'); // re-select brave
+      mocks.confirm.mockResolvedValueOnce(false); // skip GitHub token
+      mocks.confirm.mockResolvedValueOnce(false); // auto-approve
 
       await runFirstStart();
 
@@ -150,10 +154,11 @@ describe('first-start wizard', () => {
         webSearch: { provider: 'brave', brave: { apiKey: 'existing-brave-key' } },
       });
 
-      mocks.confirm.mockResolvedValueOnce(true);
-      mocks.select.mockResolvedValueOnce('tavily');
-      mocks.text.mockResolvedValueOnce('new-tavily-key');
-      mocks.confirm.mockResolvedValueOnce(false);
+      mocks.confirm.mockResolvedValueOnce(true); // continue with setup
+      mocks.select.mockResolvedValueOnce('tavily'); // switch to tavily
+      mocks.text.mockResolvedValueOnce('new-tavily-key'); // enter key
+      mocks.confirm.mockResolvedValueOnce(false); // skip GitHub token
+      mocks.confirm.mockResolvedValueOnce(false); // auto-approve
 
       await runFirstStart();
 
@@ -170,7 +175,7 @@ describe('first-start wizard', () => {
 
       await runFirstStart();
 
-      const autoApproveCall = mocks.confirm.mock.calls[1][0] as { initialValue?: boolean };
+      const autoApproveCall = mocks.confirm.mock.calls[2][0] as { initialValue?: boolean };
       expect(autoApproveCall.initialValue).toBe(true);
     });
   });
