@@ -24,9 +24,7 @@ let originalConsole: {
 // --- Lifecycle ---
 
 export function setup(options: LoggerOptions): void {
-  if (logFilePath !== null) {
-    throw new Error('Logger already set up. Call teardown() first.');
-  }
+  if (logFilePath !== null) return; // Already active — idempotent
 
   logFilePath = options.logFilePath;
 

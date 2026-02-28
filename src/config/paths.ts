@@ -111,6 +111,17 @@ export function getLogsDir(): string {
 }
 
 /**
+ * Returns a log file path within the logs directory for a named daemon/process.
+ * E.g., getDaemonLogPath('signal-bot') → {home}/logs/signal-bot.log
+ */
+export function getDaemonLogPath(name: string): string {
+  if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
+    throw new Error(`Invalid daemon log name: ${name}`);
+  }
+  return resolve(getLogsDir(), `${name}.log`);
+}
+
+/**
  * Returns the user constitution file path: {home}/constitution-user.md
  * User policy customizations live in this file, separate from the
  * base constitution (which is version-controlled).
@@ -161,8 +172,12 @@ export function loadConstitutionText(packageBasePath: string): string {
 
   const userPath = getUserConstitutionPath();
   const userFallbackPath = getBaseUserConstitutionPath();
-  const effectiveUserPath = existsSync(userPath) ? userPath : existsSync(userFallbackPath) ? userFallbackPath : null;
-  if (!effectiveUserPath) {
+  let effectiveUserPath: string;
+  if (existsSync(userPath)) {
+    effectiveUserPath = userPath;
+  } else if (existsSync(userFallbackPath)) {
+    effectiveUserPath = userFallbackPath;
+  } else {
     throw new Error(`User constitution not found: tried ${userPath} and ${userFallbackPath}`);
   }
   const user = readFileSync(effectiveUserPath, 'utf-8');

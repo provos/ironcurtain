@@ -61,9 +61,15 @@ describe('Logger', () => {
     logger.error('neither does this');
   });
 
-  it('throws if setup() called twice without teardown()', () => {
+  it('is idempotent when setup() called twice without teardown()', () => {
     logger.setup({ logFilePath: logFile });
-    expect(() => logger.setup({ logFilePath: logFile })).toThrow('Logger already set up');
+    // Second call should be a no-op, not throw
+    logger.setup({ logFilePath: logFile });
+    logger.info('after double setup');
+    logger.teardown();
+
+    const content = readFileSync(logFile, 'utf-8');
+    expect(content).toContain('after double setup');
   });
 
   it('teardown() is idempotent', () => {

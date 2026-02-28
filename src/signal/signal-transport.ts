@@ -13,11 +13,15 @@ import { BaseTransport } from '../session/base-transport.js';
 import type { Session, DiagnosticEvent, EscalationRequest } from '../session/types.js';
 import type { SignalBotDaemon } from './signal-bot-daemon.js';
 import { formatEscalationBanner } from './format.js';
+import * as logger from '../logger.js';
 
 export class SignalSessionTransport extends BaseTransport {
   private session: Session | null = null;
   private readonly daemon: SignalBotDaemon;
   private exitResolve: (() => void) | null = null;
+
+  /** Session label assigned by the daemon after construction. */
+  sessionLabel = 0;
 
   constructor(daemon: SignalBotDaemon) {
     super();
@@ -37,8 +41,8 @@ export class SignalSessionTransport extends BaseTransport {
 
   /**
    * Signals the transport to stop. Resolves the run() promise.
-   * Does NOT call daemon.endCurrentSession() - the daemon owns
-   * session lifecycle and calls this method, not the other way around.
+   * Does NOT call daemon.endSession() - the daemon owns session
+   * lifecycle and calls this method, not the other way around.
    */
   close(): void {
     this.session = null;
@@ -60,33 +64,47 @@ export class SignalSessionTransport extends BaseTransport {
   // --- Callback factories (wired into SessionOptions by the daemon) ---
 
   createDiagnosticHandler(): (event: DiagnosticEvent) => void {
+    const label = this.sessionLabel;
     return (event) => {
       switch (event.kind) {
         case 'tool_call':
           // Don't send every tool call - too noisy for messaging
           break;
         case 'budget_warning':
-          this.daemon.sendSignalMessage(`[Budget warning] ${event.message}`).catch(() => {});
+          this.daemon.sendSignalMessage(`[#${label}] [Budget warning] ${event.message}`).catch(() => {});
           break;
         case 'budget_exhausted':
-          this.daemon.sendSignalMessage(`[Budget exhausted] ${event.message}`).catch(() => {});
+          this.daemon.sendSignalMessage(`[#${label}] [Budget exhausted] ${event.message}`).catch(() => {});
           break;
       }
     };
   }
 
   createEscalationHandler(): (request: EscalationRequest) => void {
+    const label = this.sessionLabel;
     return (request) => {
-      this.daemon.setPendingEscalation(request.escalationId);
-      const banner = formatEscalationBanner(request);
+      const currentLabel = this.sessionLabel;
+      if (currentLabel !== label) {
+        logger.error(
+          `[Signal Transport] LABEL MISMATCH: escalation handler created for #${label} ` +
+            `but this.sessionLabel is now #${currentLabel} (escalationId=${request.escalationId})`,
+        );
+      }
+      logger.info(
+        `[Signal Transport] Escalation fired on session #${label} ` +
+          `(tool=${request.serverName}/${request.toolName}, id=${request.escalationId})`,
+      );
+      this.daemon.setPendingEscalation(label, request.escalationId);
+      const banner = formatEscalationBanner(request, label);
       this.daemon.sendSignalMessage(banner).catch(() => {});
     };
   }
 
   createEscalationExpiredHandler(): () => void {
+    const label = this.sessionLabel;
     return () => {
-      this.daemon.clearPendingEscalation();
-      this.daemon.sendSignalMessage('Escalation expired (timed out).').catch(() => {});
+      this.daemon.clearPendingEscalation(label);
+      this.daemon.sendSignalMessage(`[#${label}] Escalation expired (timed out).`).catch(() => {});
     };
   }
 }
