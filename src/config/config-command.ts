@@ -7,6 +7,9 @@
  */
 
 import * as p from '@clack/prompts';
+import { readFileSync } from 'node:fs';
+import { resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   loadUserConfig,
   saveUserConfig,
@@ -21,6 +24,9 @@ import {
   type WebSearchProvider,
 } from './user-config.js';
 import { getUserConfigPath } from './paths.js';
+import type { MCPServerConfig } from './types.js';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 /** Known model options for selection prompts. */
 const KNOWN_MODELS: { value: string; label: string }[] = [
@@ -106,6 +112,21 @@ export function computeDiff(resolved: ResolvedUserConfig, pending: UserConfig): 
       // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- defensive: runtime data from spread objects
       if (subValue !== undefined && subValue !== resolvedSection[subKey]) {
         diffs.push([`${section}.${subKey}`, { from: resolvedSection[subKey], to: subValue }]);
+      }
+    }
+  }
+
+  // serverCredentials — compare per-server credential blocks
+  if (pending.serverCredentials) {
+    for (const [server, creds] of Object.entries(pending.serverCredentials)) {
+      const resolvedCreds = resolved.serverCredentials[server] ?? {};
+      for (const [envVar, value] of Object.entries(creds)) {
+        if (value !== resolvedCreds[envVar]) {
+          diffs.push([
+            `serverCredentials.${server}.${envVar}`,
+            { from: maskApiKey(resolvedCreds[envVar]), to: maskApiKey(value) },
+          ]);
+        }
       }
     }
   }
@@ -511,6 +532,118 @@ async function handleWebSearch(resolved: ResolvedUserConfig, pending: UserConfig
   }
 }
 
+// ─── Server Credentials ──────────────────────────────────────
+
+/** Loads server names from mcp-servers.json for the credential editor. */
+function loadServerNames(): string[] {
+  try {
+    const mcpServersPath = resolve(__dirname, 'mcp-servers.json');
+    const mcpServers = JSON.parse(readFileSync(mcpServersPath, 'utf-8')) as Record<string, MCPServerConfig>;
+    return Object.keys(mcpServers);
+  } catch {
+    return [];
+  }
+}
+
+interface CredentialHint {
+  envVar: string;
+  description: string;
+  signupUrl?: string;
+}
+
+/** Known credential env vars per server -- guides the user on what to configure. */
+const SERVER_CREDENTIAL_HINTS: Partial<Record<string, CredentialHint[]>> = {
+  github: [
+    {
+      envVar: 'GITHUB_PERSONAL_ACCESS_TOKEN',
+      description: 'GitHub personal access token',
+      signupUrl: 'https://github.com/settings/tokens/new (classic token required)',
+    },
+  ],
+};
+
+async function handleServerCredentials(resolved: ResolvedUserConfig, pending: UserConfig): Promise<void> {
+  const serverNames = loadServerNames();
+
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- interactive loop exited via return
+  while (true) {
+    const currentCreds: Record<string, Record<string, string> | undefined> = {
+      ...resolved.serverCredentials,
+      ...pending.serverCredentials,
+    };
+    const options = serverNames.map((name) => {
+      const creds = currentCreds[name];
+      const count = creds ? Object.keys(creds).length : 0;
+      return {
+        value: name,
+        label: name,
+        hint: count > 0 ? `${count} credential${count > 1 ? 's' : ''} configured` : 'none',
+      };
+    });
+    options.push({ value: 'back', label: 'Back', hint: '' });
+
+    const selected = await p.select({ message: 'Server Credentials', options });
+    if (isCancelled(selected) || selected === 'back') return;
+
+    const serverName = selected as string;
+    const hints = SERVER_CREDENTIAL_HINTS[serverName];
+    const existingCreds = currentCreds[serverName] ?? {};
+
+    if (hints) {
+      // Guided flow for known servers
+      for (const hint of hints) {
+        const currentValue = existingCreds[hint.envVar];
+        if (hint.signupUrl) {
+          p.note(`Get a token at ${hint.signupUrl}`, hint.description);
+        }
+        const input = await p.text({
+          message: `${hint.envVar}:`,
+          placeholder: currentValue ? '(keep current)' : `Enter ${hint.description}`,
+          validate: (val) => {
+            if (!val && !currentValue) return `${hint.envVar} is required`;
+            return undefined;
+          },
+        });
+        if (isCancelled(input)) break;
+        const value = (input as string) || currentValue;
+        if (value) {
+          pending.serverCredentials = {
+            ...pending.serverCredentials,
+            [serverName]: { ...pending.serverCredentials?.[serverName], [hint.envVar]: value },
+          };
+        }
+      }
+    } else {
+      // Generic flow for unknown servers
+      const action = await p.select({
+        message: `Credentials for ${serverName}`,
+        options: [
+          { value: 'add', label: 'Add credential' },
+          { value: 'back', label: 'Back' },
+        ],
+      });
+      if (isCancelled(action) || action === 'back') continue;
+
+      const envVar = await p.text({
+        message: 'Environment variable name:',
+        validate: (val) => (!val ? 'Name is required' : undefined),
+      });
+      if (isCancelled(envVar)) continue;
+
+      const value = await p.text({
+        message: `Value for ${envVar as string}:`,
+        validate: (val) => (!val ? 'Value is required' : undefined),
+      });
+      if (isCancelled(value)) continue;
+
+      pending.serverCredentials = {
+        ...pending.serverCredentials,
+        [serverName]: { ...pending.serverCredentials?.[serverName], [envVar as string]: value as string },
+      };
+    }
+  }
+}
+
 // ─── Menu descriptions ───────────────────────────────────────
 
 function modelsHint(resolved: ResolvedUserConfig, pending: UserConfig): string {
@@ -538,6 +671,13 @@ function autoCompactHint(resolved: ResolvedUserConfig, pending: UserConfig): str
 function webSearchHint(resolved: ResolvedUserConfig, pending: UserConfig): string {
   const provider = pending.webSearch?.provider ?? resolved.webSearch.provider;
   return provider ? WEB_SEARCH_PROVIDER_LABELS[provider] : 'not configured';
+}
+
+function serverCredentialsHint(resolved: ResolvedUserConfig, pending: UserConfig): string {
+  const creds = { ...resolved.serverCredentials, ...pending.serverCredentials };
+  const configured = Object.entries(creds).filter(([, v]) => Object.keys(v).length > 0);
+  if (configured.length === 0) return 'none';
+  return configured.map(([name]) => name).join(', ');
 }
 
 function changeCount(resolved: ResolvedUserConfig, pending: UserConfig): string {
@@ -576,11 +716,12 @@ export async function runConfigCommand(): Promise<void> {
     const category = await p.select({
       message: 'Select a category to configure',
       options: [
-        { value: 'models', label: 'Models', hint: modelsHint(resolved, pending) },
-        { value: 'security', label: 'Security', hint: securityHint(resolved, pending) },
-        { value: 'resources', label: 'Resource Limits', hint: resourceHint(resolved, pending) },
-        { value: 'compact', label: 'Auto-Compact', hint: autoCompactHint(resolved, pending) },
-        { value: 'websearch', label: 'Web Search', hint: webSearchHint(resolved, pending) },
+        { value: 'models', label: `Models (${modelsHint(resolved, pending)})` },
+        { value: 'security', label: `Security (${securityHint(resolved, pending)})` },
+        { value: 'resources', label: `Resource Limits (${resourceHint(resolved, pending)})` },
+        { value: 'compact', label: `Auto-Compact (${autoCompactHint(resolved, pending)})` },
+        { value: 'websearch', label: `Web Search (${webSearchHint(resolved, pending)})` },
+        { value: 'credentials', label: `Server Credentials (${serverCredentialsHint(resolved, pending)})` },
         { value: 'save', label: 'Save & Exit', hint: changeCount(resolved, pending) },
         { value: 'cancel', label: 'Cancel', hint: 'discard all changes' },
       ],
@@ -605,6 +746,9 @@ export async function runConfigCommand(): Promise<void> {
         break;
       case 'websearch':
         await handleWebSearch(resolved, pending);
+        break;
+      case 'credentials':
+        await handleServerCredentials(resolved, pending);
         break;
       case 'cancel':
         p.cancel('Changes discarded.');

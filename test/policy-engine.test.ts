@@ -1417,6 +1417,92 @@ describe('PolicyEngine', () => {
     });
   });
 
+  describe('GitHub tools', () => {
+    it('allows read-only GitHub tools (sideEffects: false)', () => {
+      const result = engine.evaluate(
+        makeRequest({
+          serverName: 'github',
+          toolName: 'list_issues',
+          arguments: { owner: 'octocat', repo: 'hello-world' },
+        }),
+      );
+      expect(result.decision).toBe('allow');
+      expect(result.rule).toBe('allow-github-read-ops');
+    });
+
+    it('allows get_issue (read-only)', () => {
+      const result = engine.evaluate(
+        makeRequest({
+          serverName: 'github',
+          toolName: 'get_issue',
+          arguments: { owner: 'octocat', repo: 'hello-world', issue_number: 1 },
+        }),
+      );
+      expect(result.decision).toBe('allow');
+      expect(result.rule).toBe('allow-github-read-ops');
+    });
+
+    it('allows search_code (read-only)', () => {
+      const result = engine.evaluate(
+        makeRequest({
+          serverName: 'github',
+          toolName: 'search_code',
+          arguments: { q: 'console.log repo:octocat/hello-world' },
+        }),
+      );
+      expect(result.decision).toBe('allow');
+      expect(result.rule).toBe('allow-github-read-ops');
+    });
+
+    it('escalates create_issue (mutation)', () => {
+      const result = engine.evaluate(
+        makeRequest({
+          serverName: 'github',
+          toolName: 'create_issue',
+          arguments: { owner: 'octocat', repo: 'hello-world', title: 'Bug', body: 'Details' },
+        }),
+      );
+      expect(result.decision).toBe('escalate');
+      expect(result.rule).toBe('escalate-github-mutations');
+    });
+
+    it('escalates create_pull_request (mutation)', () => {
+      const result = engine.evaluate(
+        makeRequest({
+          serverName: 'github',
+          toolName: 'create_pull_request',
+          arguments: { owner: 'octocat', repo: 'hello-world', title: 'Fix', head: 'fix', base: 'main' },
+        }),
+      );
+      expect(result.decision).toBe('escalate');
+      expect(result.rule).toBe('escalate-github-mutations');
+    });
+
+    it('escalates merge_pull_request (mutation)', () => {
+      const result = engine.evaluate(
+        makeRequest({
+          serverName: 'github',
+          toolName: 'merge_pull_request',
+          arguments: { owner: 'octocat', repo: 'hello-world', pull_number: 42 },
+        }),
+      );
+      expect(result.decision).toBe('escalate');
+      expect(result.rule).toBe('escalate-github-mutations');
+    });
+
+    it('denies unknown GitHub tool (structural invariant)', () => {
+      const result = engine.evaluate(
+        makeRequest({
+          serverName: 'github',
+          toolName: 'completely_unknown_tool',
+          arguments: {},
+        }),
+      );
+      expect(result.decision).toBe('deny');
+      expect(result.rule).toBe('structural-unknown-tool');
+    });
+  });
+
   describe('protected path exclusions', () => {
     // The PolicyEngine excludes allowedDirectory (the sandbox) from protected
     // path checks. This means the sandbox can live under a protected directory

@@ -173,7 +173,43 @@ export async function runFirstStart(): Promise<void> {
     }
   }
 
-  // Step 5: Auto-approve for escalations
+  // Step 5: Optional GitHub personal access token
+  p.log.info(
+    'The GitHub MCP server lets the agent interact with GitHub (issues, PRs, code search).\n' +
+      'This requires a personal access token. You can skip this and configure it later\n' +
+      'via `ironcurtain config` or by editing config.json directly.',
+  );
+  const githubCreds = existingConfig.serverCredentials.github as Record<string, string> | undefined;
+  const existingGhToken = githubCreds?.GITHUB_PERSONAL_ACCESS_TOKEN;
+  const setupGithub = await p.confirm({
+    message: existingGhToken ? 'Update GitHub personal access token?' : 'Configure GitHub personal access token?',
+    initialValue: false,
+  });
+  handleCancel(setupGithub);
+
+  if (setupGithub) {
+    p.note(
+      'Create a classic token at https://github.com/settings/tokens/new\n' + 'Required scopes: repo, read:org',
+      'GitHub Token',
+    );
+    const ghToken = await p.text({
+      message: 'GitHub personal access token:',
+      placeholder: existingGhToken ? '(keep current)' : 'ghp_...',
+      validate: (val) => {
+        if (!val && !existingGhToken) return 'Token is required';
+        return undefined;
+      },
+    });
+    handleCancel(ghToken);
+    const tokenValue = (ghToken as string) || existingGhToken;
+    if (tokenValue) {
+      pending.serverCredentials = {
+        github: { GITHUB_PERSONAL_ACCESS_TOKEN: tokenValue },
+      };
+    }
+  }
+
+  // Step 6: Auto-approve for escalations
   p.log.info(
     'When the policy engine escalates a tool call, you are asked to approve or deny it.\n' +
       'Auto-approve uses a small LLM to approve calls that clearly match your explicit request.\n' +
@@ -190,7 +226,7 @@ export async function runFirstStart(): Promise<void> {
   // Persist all wizard choices in a single write
   saveUserConfig(pending);
 
-  // Step 6: Suggest customization
+  // Step 7: Suggest customization
   p.note(
     'You can customize IronCurtain to fit your workflow:\n\n' +
       '  ironcurtain config             — change models, resource limits, and other settings\n' +
@@ -200,6 +236,6 @@ export async function runFirstStart(): Promise<void> {
     'Customization',
   );
 
-  // Step 7: Outro
+  // Step 8: Outro
   p.outro('Run `ironcurtain start` to begin.');
 }

@@ -43,32 +43,42 @@ async function connectAndDiscoverTools(
     '[1/2] Connecting to MCP servers',
     async (spinner) => {
       const connections = new Map<string, ServerConnection>();
+      const skipped: { name: string; reason: string }[] = [];
       let totalTools = 0;
 
       for (const [serverName, config] of Object.entries(mcpServers)) {
         spinner.text = `[1/2] Connecting to MCP server: ${serverName}...`;
-        const transport = new StdioClientTransport({
-          command: config.command,
-          args: config.args,
-          env: config.env ? { ...(process.env as Record<string, string>), ...config.env } : undefined,
-          stderr: 'pipe',
-        });
-        // Drain piped stderr to prevent backpressure (logs are discarded)
-        if (transport.stderr) {
-          transport.stderr.on('data', () => {});
+        try {
+          const transport = new StdioClientTransport({
+            command: config.command,
+            args: config.args,
+            env: { ...(process.env as Record<string, string>), ...config.env },
+            stderr: 'pipe',
+          });
+          // Drain piped stderr to prevent backpressure (logs are discarded)
+          if (transport.stderr) {
+            transport.stderr.on('data', () => {});
+          }
+          const client = new Client({ name: 'ironcurtain-annotator', version: VERSION });
+          await client.connect(transport);
+
+          const toolsResult = await client.listTools();
+          totalTools += toolsResult.tools.length;
+
+          connections.set(serverName, { client, tools: toolsResult.tools });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          skipped.push({ name: serverName, reason: msg });
         }
-        const client = new Client({ name: 'ironcurtain-annotator', version: VERSION });
-        await client.connect(transport);
-
-        const toolsResult = await client.listTools();
-        totalTools += toolsResult.tools.length;
-
-        connections.set(serverName, { client, tools: toolsResult.tools });
       }
-      return { connections, totalTools };
+      return { connections, totalTools, skipped };
     },
     (r, elapsed) => `[1/2] Found ${r.totalTools} tools (${elapsed.toFixed(1)}s)`,
   );
+
+  for (const { name, reason } of result.skipped) {
+    console.error(chalk.yellow(`  ⚠ Skipped server '${name}': ${reason}`));
+  }
 
   return result.connections;
 }

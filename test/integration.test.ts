@@ -29,6 +29,30 @@ function writeTestArtifacts(
   writeFileSync(resolve(dir, 'tool-annotations.json'), JSON.stringify(toolAnnotations));
 }
 
+/** Shared userConfig for integration tests (no API keys, auto-features off). */
+const TEST_USER_CONFIG: IronCurtainConfig['userConfig'] = {
+  agentModelId: 'anthropic:claude-sonnet-4-6',
+  policyModelId: 'anthropic:claude-sonnet-4-6',
+  anthropicApiKey: '',
+  googleApiKey: '',
+  openaiApiKey: '',
+  escalationTimeoutSeconds: 300,
+  resourceBudget: {
+    maxTotalTokens: null,
+    maxSteps: null,
+    maxSessionSeconds: null,
+    maxEstimatedCostUsd: null,
+    warnThresholdPercent: 80,
+  },
+  autoCompact: {
+    enabled: false,
+    thresholdTokens: 80_000,
+    keepRecentMessages: 10,
+    summaryModelId: 'anthropic:claude-haiku-4-5',
+  },
+  autoApprove: { enabled: false, modelId: 'anthropic:claude-haiku-4-5' },
+};
+
 function makeRequest(overrides: Partial<ToolCallRequest> = {}): ToolCallRequest {
   return {
     requestId: uuidv4(),
@@ -80,28 +104,7 @@ describe('Integration: TrustedProcess with filesystem MCP server', () => {
       constitutionPath: resolve(projectRoot, 'src/config/constitution.md'),
       agentModelId: 'anthropic:claude-sonnet-4-6',
       escalationTimeoutSeconds: 300,
-      userConfig: {
-        agentModelId: 'anthropic:claude-sonnet-4-6',
-        policyModelId: 'anthropic:claude-sonnet-4-6',
-        anthropicApiKey: '',
-        googleApiKey: '',
-        openaiApiKey: '',
-        escalationTimeoutSeconds: 300,
-        resourceBudget: {
-          maxTotalTokens: 1_000_000,
-          maxSteps: 200,
-          maxSessionSeconds: 1800,
-          maxEstimatedCostUsd: 5.0,
-          warnThresholdPercent: 80,
-        },
-        autoCompact: {
-          enabled: false,
-          thresholdTokens: 80_000,
-          keepRecentMessages: 10,
-          summaryModelId: 'anthropic:claude-haiku-4-5',
-        },
-        autoApprove: { enabled: false, modelId: 'anthropic:claude-haiku-4-5' },
-      },
+      userConfig: TEST_USER_CONFIG,
     };
 
     trustedProcess = new TrustedProcess(config, { onEscalation: mockEscalation });
@@ -318,5 +321,104 @@ describe('Integration: TrustedProcess with filesystem MCP server', () => {
         expect(entry).toHaveProperty('durationMs');
       }
     }
+  });
+});
+
+describe('Integration: graceful degradation when MCP server fails to connect', () => {
+  let trustedProcess: TrustedProcess;
+
+  const sandboxDir = `/tmp/ironcurtain-degrade-${process.pid}`;
+  const auditLogPath = `/tmp/ironcurtain-degrade-audit-${process.pid}.jsonl`;
+  const generatedDir = `/tmp/ironcurtain-degrade-generated-${process.pid}`;
+
+  beforeAll(async () => {
+    mkdirSync(sandboxDir, { recursive: true });
+    writeFileSync(`${sandboxDir}/hello.txt`, 'still here');
+    writeTestArtifacts(generatedDir, testCompiledPolicy, testToolAnnotations);
+
+    const config: IronCurtainConfig = {
+      auditLogPath,
+      allowedDirectory: sandboxDir,
+      mcpServers: {
+        // A server that will fail to connect (bogus command)
+        bogus: {
+          command: 'nonexistent-binary-that-does-not-exist',
+          args: [],
+        },
+        // GitHub MCP server -- will fail without Docker or token, exercising graceful degradation
+        github: {
+          command: 'docker',
+          args: ['run', '-i', '--rm', '-e', 'GITHUB_PERSONAL_ACCESS_TOKEN', 'ghcr.io/github/github-mcp-server'],
+        },
+        // The real filesystem server should still work
+        filesystem: {
+          command: 'npx',
+          args: ['-y', '@modelcontextprotocol/server-filesystem', sandboxDir],
+        },
+      },
+      protectedPaths: [],
+      generatedDir,
+      constitutionPath: resolve(projectRoot, 'src/config/constitution.md'),
+      agentModelId: 'anthropic:claude-sonnet-4-6',
+      escalationTimeoutSeconds: 300,
+      userConfig: TEST_USER_CONFIG,
+    };
+
+    trustedProcess = new TrustedProcess(config, {
+      onEscalation: async () => 'denied',
+    });
+    // initialize() must not throw even though one server fails
+    await trustedProcess.initialize();
+  }, 30000);
+
+  afterAll(async () => {
+    await trustedProcess.shutdown();
+    rmSync(sandboxDir, { recursive: true, force: true });
+    rmSync(auditLogPath, { force: true });
+    rmSync(generatedDir, { recursive: true, force: true });
+  });
+
+  it('lists tools from the surviving filesystem server', async () => {
+    const tools = await trustedProcess.listTools('filesystem');
+    expect(tools.length).toBeGreaterThan(0);
+    const toolNames = tools.map((t) => t.name);
+    expect(toolNames).toContain('read_file');
+    expect(toolNames).toContain('write_file');
+  });
+
+  it('can still call tools on the surviving server', async () => {
+    const result = await trustedProcess.handleToolCall(
+      makeRequest({
+        toolName: 'read_file',
+        arguments: { path: `${sandboxDir}/hello.txt` },
+      }),
+    );
+    expect(result.status).toBe('success');
+    expect(result.policyDecision.status).toBe('allow');
+  });
+
+  it('rejects tool calls targeting the failed bogus server', async () => {
+    const result = await trustedProcess.handleToolCall({
+      requestId: 'test-bogus',
+      serverName: 'bogus',
+      toolName: 'some_tool',
+      arguments: {},
+      timestamp: new Date().toISOString(),
+    });
+    // Failed servers produce 'denied' (missing annotation) or 'error' (server disconnected)
+    expect(result.status).not.toBe('success');
+  });
+
+  it('rejects tool calls targeting the failed github server', async () => {
+    const result = await trustedProcess.handleToolCall({
+      requestId: 'test-github',
+      serverName: 'github',
+      toolName: 'list_issues',
+      arguments: { owner: 'octocat', repo: 'hello-world' },
+      timestamp: new Date().toISOString(),
+    });
+    // Docker may be available but token is missing — server connects then exits.
+    // Either way, tool calls must not succeed.
+    expect(result.status).not.toBe('success');
   });
 });

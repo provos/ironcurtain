@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-02-25T01:54:51.064Z",
+  "generatedAt": "2026-02-28T00:45:15.199Z",
   "servers": {
     "filesystem": {
       "inputHash": "3a47c5b52d421b6f14fa1f556c87bac43f98adc1a0cf7519527b32cff9cdaae4",
@@ -195,11 +195,11 @@
       ]
     },
     "git": {
-      "inputHash": "fce7e0e9b5b5d026863feddac8817f8cb9f4e33c3d2048eeba393c3b947288ac",
+      "inputHash": "bdf9963bc2444302690ac8f62879dd949f7246f253a8f47eaa24b57c278ce026",
       "tools": [
         {
           "toolName": "git_add",
-          "comment": "Stages specified files or all changes in the working tree to the git index in preparation for a commit.",
+          "comment": "Stages specified files in the working directory for the next commit.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -222,7 +222,7 @@
         },
         {
           "toolName": "git_blame",
-          "comment": "Shows line-by-line authorship information for a file, revealing who last modified each line and when.",
+          "comment": "Shows line-by-line authorship information for a file, revealing who last modified each line.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -245,11 +245,12 @@
         },
         {
           "toolName": "git_branch",
-          "comment": "Lists, creates, deletes, renames, or shows the current git branch in a repository.",
+          "comment": "Lists, creates, deletes, or renames git branches in the repository.",
           "sideEffects": true,
           "args": {
             "path": [
               "read-path",
+              "write-history",
               "delete-history"
             ],
             "operation": [
@@ -284,7 +285,7 @@
         },
         {
           "toolName": "git_changelog_analyze",
-          "comment": "Gathers git history context (commits, tags) and structured instructions to support LLM-driven changelog analysis.",
+          "comment": "Gathers git history context and structured review instructions to support LLM-driven changelog analysis.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -307,12 +308,12 @@
         },
         {
           "toolName": "git_checkout",
-          "comment": "Switches branches, creates new branches, or restores specific working tree files to a given state.",
+          "comment": "Switches branches, restores working tree files, or creates a new branch in the repository.",
           "sideEffects": true,
           "args": {
             "path": [
               "read-path",
-              "write-path"
+              "write-history"
             ],
             "target": [
               "branch-name"
@@ -335,7 +336,7 @@
         },
         {
           "toolName": "git_cherry_pick",
-          "comment": "Applies one or more specific commits from other branches onto the current branch, rewriting local history.",
+          "comment": "Applies specific commits from other branches onto the current branch.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -368,7 +369,7 @@
         },
         {
           "toolName": "git_clean",
-          "comment": "Removes untracked (and optionally ignored) files and directories from the working tree.",
+          "comment": "Removes untracked files (and optionally directories) from the working directory.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -392,7 +393,7 @@
         },
         {
           "toolName": "git_clear_working_dir",
-          "comment": "Clears the session-level working directory setting, requiring subsequent git operations to supply an explicit path.",
+          "comment": "Clears the session working directory setting, requiring explicit paths for subsequent git operations.",
           "sideEffects": false,
           "args": {
             "confirm": [
@@ -403,7 +404,7 @@
         },
         {
           "toolName": "git_clone",
-          "comment": "Clones a remote git repository to a local filesystem path, optionally with shallow history or a specific branch.",
+          "comment": "Clones a remote git repository to a local path, optionally with shallow cloning or specific branch.",
           "sideEffects": true,
           "args": {
             "url": [
@@ -429,7 +430,7 @@
         },
         {
           "toolName": "git_commit",
-          "comment": "Creates a new commit recording staged changes to the repository with a given commit message.",
+          "comment": "Creates a new commit with staged changes and a commit message in the repository.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -465,7 +466,7 @@
         },
         {
           "toolName": "git_diff",
-          "comment": "Shows differences between commits, branches, the staging area, or the working tree in unified diff format.",
+          "comment": "Shows differences between commits, branches, or the working tree in unified diff format.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -500,7 +501,7 @@
         },
         {
           "toolName": "git_fetch",
-          "comment": "Downloads objects and refs from a remote repository without integrating them into the local working tree.",
+          "comment": "Fetches updates from a remote repository, downloading objects and refs without merging.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -523,7 +524,7 @@
         },
         {
           "toolName": "git_init",
-          "comment": "Initializes a new git repository at the specified path, creating the .git directory and initial branch.",
+          "comment": "Initializes a new git repository at the specified path, creating the .git directory.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -540,7 +541,7 @@
         },
         {
           "toolName": "git_log",
-          "comment": "Displays the commit history of a repository with optional filtering by author, date, file path, or message pattern.",
+          "comment": "Views commit history with optional filtering by author, date range, file path, or message pattern.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -587,7 +588,7 @@
         },
         {
           "toolName": "git_merge",
-          "comment": "Merges another branch into the current branch, integrating its history with optional strategies and commit messages.",
+          "comment": "Merges another branch into the current branch with optional merge strategies.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -617,7 +618,7 @@
         },
         {
           "toolName": "git_pull",
-          "comment": "Fetches changes from a remote repository and integrates them into the current local branch via merge or rebase.",
+          "comment": "Fetches and integrates changes from a remote repository into the current branch.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -641,7 +642,7 @@
         },
         {
           "toolName": "git_push",
-          "comment": "Uploads local commits and refs to a remote repository, optionally force-pushing or deleting remote branches.",
+          "comment": "Uploads local commits to a remote repository branch, with options for force push and branch deletion.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -682,7 +683,7 @@
         },
         {
           "toolName": "git_rebase",
-          "comment": "Reapplies commits from the current branch on top of another base tip, rewriting commit history.",
+          "comment": "Reapplies commits on top of another base tip to produce a cleaner linear history.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -693,7 +694,7 @@
               "none"
             ],
             "upstream": [
-              "branch-name"
+              "none"
             ],
             "branch": [
               "branch-name"
@@ -712,7 +713,7 @@
         },
         {
           "toolName": "git_reflog",
-          "comment": "Displays the reference log showing when branch tips and other refs were updated, useful for recovering lost commits.",
+          "comment": "Views the reference logs to track when branch tips and other refs were updated, useful for recovering lost commits.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -729,7 +730,7 @@
         },
         {
           "toolName": "git_remote",
-          "comment": "Manages git remote configurations: listing, adding, removing, renaming remotes, or getting/setting remote URLs.",
+          "comment": "Manages remote repositories by listing, adding, removing, renaming, or updating remote URLs.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -739,7 +740,7 @@
               "none"
             ],
             "name": [
-              "none"
+              "git-remote-url"
             ],
             "url": [
               "git-remote-url"
@@ -755,7 +756,7 @@
         },
         {
           "toolName": "git_reset",
-          "comment": "Resets the current HEAD to a specified state, optionally discarding staged changes or all working tree modifications.",
+          "comment": "Resets the current HEAD to a specified state, optionally discarding staged or working tree changes.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -769,8 +770,7 @@
               "none"
             ],
             "paths": [
-              "read-path",
-              "write-path"
+              "read-path"
             ],
             "confirmed": [
               "none"
@@ -780,7 +780,7 @@
         },
         {
           "toolName": "git_set_working_dir",
-          "comment": "Sets the session-level default working directory so subsequent git operations can omit the path parameter.",
+          "comment": "Sets the session working directory so subsequent git commands can omit the path parameter.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -823,11 +823,12 @@
         },
         {
           "toolName": "git_stash",
-          "comment": "Manages the stash stack: saves, lists, applies, pops, drops, or clears stashed working tree changes.",
+          "comment": "Manages stashes by listing, saving, restoring, or removing stashed working directory changes.",
           "sideEffects": true,
           "args": {
             "path": [
-              "read-path"
+              "read-path",
+              "write-history"
             ],
             "mode": [
               "none"
@@ -849,7 +850,7 @@
         },
         {
           "toolName": "git_status",
-          "comment": "Shows the current working tree status, listing staged, unstaged, and untracked file changes.",
+          "comment": "Shows the working tree status including staged, unstaged, and untracked files.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -863,11 +864,12 @@
         },
         {
           "toolName": "git_tag",
-          "comment": "Manages git tags: lists, creates (lightweight or annotated), or deletes tags that mark specific points in history.",
+          "comment": "Manages tags by listing, creating, or deleting tags that mark specific points in history.",
           "sideEffects": true,
           "args": {
             "path": [
               "read-path",
+              "write-history",
               "delete-history"
             ],
             "mode": [
@@ -899,7 +901,7 @@
         },
         {
           "toolName": "git_worktree",
-          "comment": "Manages multiple git working trees: listing, adding, removing, moving, or pruning worktrees for parallel development.",
+          "comment": "Manages multiple git working trees by listing, adding, removing, moving, or pruning worktrees.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -939,8 +941,8 @@
         },
         {
           "toolName": "git_wrapup_instructions",
-          "comment": "Returns the user's configured git wrap-up workflow instructions and current repository status to guide commit and documentation actions.",
-          "sideEffects": true,
+          "comment": "Returns the user's desired git wrap-up workflow instructions along with current repository status to guide next commit actions.",
+          "sideEffects": false,
           "args": {
             "acknowledgement": [
               "none"
@@ -995,6 +997,986 @@
             ]
           },
           "serverName": "fetch"
+        }
+      ]
+    },
+    "github": {
+      "inputHash": "e63a2416f2a750f6b629701f9898ab8fe6144111c5ec921ae18e354ec25a3cfb",
+      "tools": [
+        {
+          "toolName": "add_comment_to_pending_review",
+          "comment": "Adds a review comment to the requester's latest pending pull request review on a specific file path.",
+          "sideEffects": true,
+          "args": {
+            "body": [
+              "none"
+            ],
+            "line": [
+              "none"
+            ],
+            "owner": [
+              "github-owner"
+            ],
+            "path": [
+              "none"
+            ],
+            "pullNumber": [
+              "none"
+            ],
+            "repo": [
+              "none"
+            ],
+            "side": [
+              "none"
+            ],
+            "startLine": [
+              "none"
+            ],
+            "startSide": [
+              "none"
+            ],
+            "subjectType": [
+              "none"
+            ]
+          },
+          "serverName": "github"
+        },
+        {
+          "toolName": "add_issue_comment",
+          "comment": "Adds a comment to a specific issue or pull request in a GitHub repository.",
+          "sideEffects": true,
+          "args": {
+            "body": [
+              "none"
+            ],
+            "issue_number": [
+              "none"
+            ],
+            "owner": [
+              "github-owner"
+            ],
+            "repo": [
+              "none"
+            ]
+          },
+          "serverName": "github"
+        },
+        {
+          "toolName": "add_reply_to_pull_request_comment",
+          "comment": "Adds a reply to an existing pull request comment, creating a threaded response.",
+          "sideEffects": true,
+          "args": {
+            "body": [
+              "none"
+            ],
+            "commentId": [
+              "none"
+            ],
+            "owner": [
+              "github-owner"
+            ],
+            "pullNumber": [
+              "none"
+            ],
+            "repo": [
+              "none"
+            ]
+          },
+          "serverName": "github"
+        },
+        {
+          "toolName": "assign_copilot_to_issue",
+          "comment": "Assigns GitHub Copilot to work on a specific issue, potentially resulting in an auto-generated pull request.",
+          "sideEffects": true,
+          "args": {
+            "base_ref": [
+              "branch-name"
+            ],
+            "custom_instructions": [
+              "none"
+            ],
+            "issue_number": [
+              "none"
+            ],
+            "owner": [
+              "github-owner"
+            ],
+            "repo": [
+              "none"
+            ]
+          },
+          "serverName": "github"
+        },
+        {
+          "toolName": "create_branch",
+          "comment": "Creates a new branch in a GitHub repository, optionally from a specified source branch.",
+          "sideEffects": true,
+          "args": {
+            "branch": [
+              "branch-name"
+            ],
+            "from_branch": [
+              "branch-name"
+            ],
+            "owner": [
+              "github-owner"
+            ],
+            "repo": [
+              "none"
+            ]
+          },
+          "serverName": "github"
+        },
+        {
+          "toolName": "create_or_update_file",
+          "comment": "Creates or updates a single file in a GitHub repository on a specified branch.",
+          "sideEffects": true,
+          "args": {
+            "branch": [
+              "branch-name"
+            ],
+            "content": [
+              "none"
+            ],
+            "message": [
+              "none"
+            ],
+            "owner": [
+              "github-owner"
+            ],
+            "path": [
+              "none"
+            ],
+            "repo": [
+              "none"
+            ],
+            "sha": [
+              "none"
+            ]
+          },
+          "serverName": "github"
+        },
+        {
+          "toolName": "create_pull_request",
+          "comment": "Creates a new pull request in a GitHub repository from a head branch into a base branch.",
+          "sideEffects": true,
+          "args": {
+            "base": [
+              "branch-name"
+            ],
+            "body": [
+              "none"
+            ],
+            "draft": [
+              "none"
+            ],
+            "head": [
+              "branch-name"
+            ],
+            "maintainer_can_modify": [
+              "none"
+            ],
+            "owner": [
+              "github-owner"
+            ],
+            "repo": [
+              "none"
+            ],
+            "title": [
+              "none"
+            ]
+          },
+          "serverName": "github"
+        },
+        {
+          "toolName": "create_repository",
+          "comment": "Creates a new GitHub repository in the authenticated user's account or a specified organization.",
+          "sideEffects": true,
+          "args": {
+            "autoInit": [
+              "none"
+            ],
+            "description": [
+              "none"
+            ],
+            "name": [
+              "none"
+            ],
+            "organization": [
+              "github-owner"
+            ],
+            "private": [
+              "none"
+            ]
+          },
+          "serverName": "github"
+        },
+        {
+          "toolName": "delete_file",
+          "comment": "Deletes a file from a specified branch in a GitHub repository.",
+          "sideEffects": true,
+          "args": {
+            "branch": [
+              "branch-name"
+            ],
+            "message": [
+              "none"
+            ],
+            "owner": [
+              "github-owner"
+            ],
+            "path": [
+              "none"
+            ],
+            "repo": [
+              "none"
+            ]
+          },
+          "serverName": "github"
+        },
+        {
+          "toolName": "fork_repository",
+          "comment": "Forks a GitHub repository to the authenticated user's account or a specified organization.",
+          "sideEffects": true,
+          "args": {
+            "organization": [
+              "github-owner"
+            ],
+            "owner": [
+              "github-owner"
+            ],
+            "repo": [
+              "none"
+            ]
+          },
+          "serverName": "github"
+        },
+        {
+          "toolName": "get_commit",
+          "comment": "Retrieves details for a specific commit from a GitHub repository, optionally including diffs.",
+          "sideEffects": true,
+          "args": {
+            "include_diff": [
+              "none"
+            ],
+            "owner": [
+              "github-owner"
+            ],
+            "page": [
+              "none"
+            ],
+            "perPage": [
+              "none"
+            ],
+            "repo": [
+              "none"
+            ],
+            "sha": [
+              "none"
+            ]
+          },
+          "serverName": "github"
+        },
+        {
+          "toolName": "get_file_contents",
+          "comment": "Retrieves the contents of a file or directory from a GitHub repository at an optional ref or SHA.",
+          "sideEffects": true,
+          "args": {
+            "owner": [
+              "github-owner"
+            ],
+            "path": [
+              "none"
+            ],
+            "ref": [
+              "none"
+            ],
+            "repo": [
+              "none"
+            ],
+            "sha": [
+              "none"
+            ]
+          },
+          "serverName": "github"
+        },
+        {
+          "toolName": "get_label",
+          "comment": "Retrieves details of a specific label from a GitHub repository.",
+          "sideEffects": true,
+          "args": {
+            "name": [
+              "none"
+            ],
+            "owner": [
+              "github-owner"
+            ],
+            "repo": [
+              "none"
+            ]
+          },
+          "serverName": "github"
+        },
+        {
+          "toolName": "get_latest_release",
+          "comment": "Retrieves the latest release from a GitHub repository.",
+          "sideEffects": true,
+          "args": {
+            "owner": [
+              "github-owner"
+            ],
+            "repo": [
+              "none"
+            ]
+          },
+          "serverName": "github"
+        },
+        {
+          "toolName": "get_me",
+          "comment": "Retrieves profile details of the currently authenticated GitHub user.",
+          "sideEffects": true,
+          "args": {},
+          "serverName": "github"
+        },
+        {
+          "toolName": "get_release_by_tag",
+          "comment": "Retrieves a specific release identified by its tag name from a GitHub repository.",
+          "sideEffects": true,
+          "args": {
+            "owner": [
+              "github-owner"
+            ],
+            "repo": [
+              "none"
+            ],
+            "tag": [
+              "none"
+            ]
+          },
+          "serverName": "github"
+        },
+        {
+          "toolName": "get_tag",
+          "comment": "Retrieves details about a specific git tag in a GitHub repository.",
+          "sideEffects": true,
+          "args": {
+            "owner": [
+              "github-owner"
+            ],
+            "repo": [
+              "none"
+            ],
+            "tag": [
+              "none"
+            ]
+          },
+          "serverName": "github"
+        },
+        {
+          "toolName": "get_team_members",
+          "comment": "Retrieves the member usernames of a specific team within a GitHub organization.",
+          "sideEffects": true,
+          "args": {
+            "org": [
+              "github-owner"
+            ],
+            "team_slug": [
+              "none"
+            ]
+          },
+          "serverName": "github"
+        },
+        {
+          "toolName": "get_teams",
+          "comment": "Retrieves the teams the authenticated user (or a specified user) is a member of.",
+          "sideEffects": true,
+          "args": {
+            "user": [
+              "none"
+            ]
+          },
+          "serverName": "github"
+        },
+        {
+          "toolName": "issue_read",
+          "comment": "Reads information about a specific GitHub issue, including details, comments, sub-issues, or labels.",
+          "sideEffects": true,
+          "args": {
+            "issue_number": [
+              "none"
+            ],
+            "method": [
+              "none"
+            ],
+            "owner": [
+              "github-owner"
+            ],
+            "page": [
+              "none"
+            ],
+            "perPage": [
+              "none"
+            ],
+            "repo": [
+              "none"
+            ]
+          },
+          "serverName": "github"
+        },
+        {
+          "toolName": "issue_write",
+          "comment": "Creates a new issue or updates an existing issue in a GitHub repository.",
+          "sideEffects": true,
+          "args": {
+            "assignees": [
+              "none"
+            ],
+            "body": [
+              "none"
+            ],
+            "duplicate_of": [
+              "none"
+            ],
+            "issue_number": [
+              "none"
+            ],
+            "labels": [
+              "none"
+            ],
+            "method": [
+              "none"
+            ],
+            "milestone": [
+              "none"
+            ],
+            "owner": [
+              "github-owner"
+            ],
+            "repo": [
+              "none"
+            ],
+            "state": [
+              "none"
+            ],
+            "state_reason": [
+              "none"
+            ],
+            "title": [
+              "none"
+            ],
+            "type": [
+              "none"
+            ]
+          },
+          "serverName": "github"
+        },
+        {
+          "toolName": "list_branches",
+          "comment": "Lists all branches in a GitHub repository.",
+          "sideEffects": true,
+          "args": {
+            "owner": [
+              "github-owner"
+            ],
+            "page": [
+              "none"
+            ],
+            "perPage": [
+              "none"
+            ],
+            "repo": [
+              "none"
+            ]
+          },
+          "serverName": "github"
+        },
+        {
+          "toolName": "list_commits",
+          "comment": "Lists commits on a branch or up to a specific SHA in a GitHub repository.",
+          "sideEffects": true,
+          "args": {
+            "author": [
+              "none"
+            ],
+            "owner": [
+              "github-owner"
+            ],
+            "page": [
+              "none"
+            ],
+            "perPage": [
+              "none"
+            ],
+            "repo": [
+              "none"
+            ],
+            "sha": [
+              "none"
+            ]
+          },
+          "serverName": "github"
+        },
+        {
+          "toolName": "list_issue_types",
+          "comment": "Lists the supported issue types configured for a GitHub organization.",
+          "sideEffects": true,
+          "args": {
+            "owner": [
+              "github-owner"
+            ]
+          },
+          "serverName": "github"
+        },
+        {
+          "toolName": "list_issues",
+          "comment": "Lists issues in a GitHub repository with optional filtering by state, labels, or date.",
+          "sideEffects": true,
+          "args": {
+            "after": [
+              "none"
+            ],
+            "direction": [
+              "none"
+            ],
+            "labels": [
+              "none"
+            ],
+            "orderBy": [
+              "none"
+            ],
+            "owner": [
+              "github-owner"
+            ],
+            "perPage": [
+              "none"
+            ],
+            "repo": [
+              "none"
+            ],
+            "since": [
+              "none"
+            ],
+            "state": [
+              "none"
+            ]
+          },
+          "serverName": "github"
+        },
+        {
+          "toolName": "list_pull_requests",
+          "comment": "Lists pull requests in a GitHub repository with optional filtering by state, head, and base branch.",
+          "sideEffects": true,
+          "args": {
+            "base": [
+              "branch-name"
+            ],
+            "direction": [
+              "none"
+            ],
+            "head": [
+              "branch-name"
+            ],
+            "owner": [
+              "github-owner"
+            ],
+            "page": [
+              "none"
+            ],
+            "perPage": [
+              "none"
+            ],
+            "repo": [
+              "none"
+            ],
+            "sort": [
+              "none"
+            ],
+            "state": [
+              "none"
+            ]
+          },
+          "serverName": "github"
+        },
+        {
+          "toolName": "list_releases",
+          "comment": "Lists all releases in a GitHub repository.",
+          "sideEffects": true,
+          "args": {
+            "owner": [
+              "github-owner"
+            ],
+            "page": [
+              "none"
+            ],
+            "perPage": [
+              "none"
+            ],
+            "repo": [
+              "none"
+            ]
+          },
+          "serverName": "github"
+        },
+        {
+          "toolName": "list_tags",
+          "comment": "Lists all git tags in a GitHub repository.",
+          "sideEffects": true,
+          "args": {
+            "owner": [
+              "github-owner"
+            ],
+            "page": [
+              "none"
+            ],
+            "perPage": [
+              "none"
+            ],
+            "repo": [
+              "none"
+            ]
+          },
+          "serverName": "github"
+        },
+        {
+          "toolName": "merge_pull_request",
+          "comment": "Merges a pull request in a GitHub repository using a specified merge method.",
+          "sideEffects": true,
+          "args": {
+            "commit_message": [
+              "none"
+            ],
+            "commit_title": [
+              "none"
+            ],
+            "merge_method": [
+              "none"
+            ],
+            "owner": [
+              "github-owner"
+            ],
+            "pullNumber": [
+              "none"
+            ],
+            "repo": [
+              "none"
+            ]
+          },
+          "serverName": "github"
+        },
+        {
+          "toolName": "pull_request_read",
+          "comment": "Retrieves information about a specific pull request, including details, diffs, status, files, comments, or reviews.",
+          "sideEffects": true,
+          "args": {
+            "method": [
+              "none"
+            ],
+            "owner": [
+              "github-owner"
+            ],
+            "page": [
+              "none"
+            ],
+            "perPage": [
+              "none"
+            ],
+            "pullNumber": [
+              "none"
+            ],
+            "repo": [
+              "none"
+            ]
+          },
+          "serverName": "github"
+        },
+        {
+          "toolName": "pull_request_review_write",
+          "comment": "Creates, submits, or deletes a pull request review on a GitHub repository.",
+          "sideEffects": true,
+          "args": {
+            "body": [
+              "none"
+            ],
+            "commitID": [
+              "none"
+            ],
+            "event": [
+              "none"
+            ],
+            "method": [
+              "none"
+            ],
+            "owner": [
+              "github-owner"
+            ],
+            "pullNumber": [
+              "none"
+            ],
+            "repo": [
+              "none"
+            ]
+          },
+          "serverName": "github"
+        },
+        {
+          "toolName": "push_files",
+          "comment": "Pushes multiple files to a GitHub repository branch in a single commit.",
+          "sideEffects": true,
+          "args": {
+            "branch": [
+              "branch-name"
+            ],
+            "files": [
+              "none"
+            ],
+            "message": [
+              "none"
+            ],
+            "owner": [
+              "github-owner"
+            ],
+            "repo": [
+              "none"
+            ]
+          },
+          "serverName": "github"
+        },
+        {
+          "toolName": "request_copilot_review",
+          "comment": "Requests an automated GitHub Copilot code review for a specified pull request.",
+          "sideEffects": true,
+          "args": {
+            "owner": [
+              "github-owner"
+            ],
+            "pullNumber": [
+              "none"
+            ],
+            "repo": [
+              "none"
+            ]
+          },
+          "serverName": "github"
+        },
+        {
+          "toolName": "search_code",
+          "comment": "Searches for code across GitHub repositories using GitHub's native code search syntax.",
+          "sideEffects": true,
+          "args": {
+            "order": [
+              "none"
+            ],
+            "page": [
+              "none"
+            ],
+            "perPage": [
+              "none"
+            ],
+            "query": [
+              "none"
+            ],
+            "sort": [
+              "none"
+            ]
+          },
+          "serverName": "github"
+        },
+        {
+          "toolName": "search_issues",
+          "comment": "Searches for issues across GitHub repositories using GitHub's issue search syntax.",
+          "sideEffects": true,
+          "args": {
+            "order": [
+              "none"
+            ],
+            "owner": [
+              "github-owner"
+            ],
+            "page": [
+              "none"
+            ],
+            "perPage": [
+              "none"
+            ],
+            "query": [
+              "none"
+            ],
+            "repo": [
+              "none"
+            ],
+            "sort": [
+              "none"
+            ]
+          },
+          "serverName": "github"
+        },
+        {
+          "toolName": "search_pull_requests",
+          "comment": "Searches for pull requests across GitHub repositories using GitHub's pull request search syntax.",
+          "sideEffects": true,
+          "args": {
+            "order": [
+              "none"
+            ],
+            "owner": [
+              "github-owner"
+            ],
+            "page": [
+              "none"
+            ],
+            "perPage": [
+              "none"
+            ],
+            "query": [
+              "none"
+            ],
+            "repo": [
+              "none"
+            ],
+            "sort": [
+              "none"
+            ]
+          },
+          "serverName": "github"
+        },
+        {
+          "toolName": "search_repositories",
+          "comment": "Searches for GitHub repositories by name, description, topics, or other metadata.",
+          "sideEffects": true,
+          "args": {
+            "minimal_output": [
+              "none"
+            ],
+            "order": [
+              "none"
+            ],
+            "page": [
+              "none"
+            ],
+            "perPage": [
+              "none"
+            ],
+            "query": [
+              "none"
+            ],
+            "sort": [
+              "none"
+            ]
+          },
+          "serverName": "github"
+        },
+        {
+          "toolName": "search_users",
+          "comment": "Searches for GitHub users by username, name, or other profile information.",
+          "sideEffects": true,
+          "args": {
+            "order": [
+              "none"
+            ],
+            "page": [
+              "none"
+            ],
+            "perPage": [
+              "none"
+            ],
+            "query": [
+              "none"
+            ],
+            "sort": [
+              "none"
+            ]
+          },
+          "serverName": "github"
+        },
+        {
+          "toolName": "sub_issue_write",
+          "comment": "Adds, removes, or reprioritizes a sub-issue within a parent issue in a GitHub repository.",
+          "sideEffects": true,
+          "args": {
+            "after_id": [
+              "none"
+            ],
+            "before_id": [
+              "none"
+            ],
+            "issue_number": [
+              "none"
+            ],
+            "method": [
+              "none"
+            ],
+            "owner": [
+              "github-owner"
+            ],
+            "replace_parent": [
+              "none"
+            ],
+            "repo": [
+              "none"
+            ],
+            "sub_issue_id": [
+              "none"
+            ]
+          },
+          "serverName": "github"
+        },
+        {
+          "toolName": "update_pull_request",
+          "comment": "Updates an existing pull request's metadata such as title, body, state, base branch, or reviewers.",
+          "sideEffects": true,
+          "args": {
+            "base": [
+              "branch-name"
+            ],
+            "body": [
+              "none"
+            ],
+            "draft": [
+              "none"
+            ],
+            "maintainer_can_modify": [
+              "none"
+            ],
+            "owner": [
+              "github-owner"
+            ],
+            "pullNumber": [
+              "none"
+            ],
+            "repo": [
+              "none"
+            ],
+            "reviewers": [
+              "none"
+            ],
+            "state": [
+              "none"
+            ],
+            "title": [
+              "none"
+            ]
+          },
+          "serverName": "github"
+        },
+        {
+          "toolName": "update_pull_request_branch",
+          "comment": "Updates a pull request's branch with the latest changes from its base branch.",
+          "sideEffects": true,
+          "args": {
+            "expectedHeadSha": [
+              "none"
+            ],
+            "owner": [
+              "github-owner"
+            ],
+            "pullNumber": [
+              "none"
+            ],
+            "repo": [
+              "none"
+            ]
+          },
+          "serverName": "github"
         }
       ]
     }

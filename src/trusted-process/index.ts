@@ -73,10 +73,20 @@ export class TrustedProcess {
   }
 
   async initialize(): Promise<void> {
+    const failedServers: string[] = [];
     for (const [name, serverConfig] of Object.entries(this.config.mcpServers)) {
       logger.info(`Connecting to MCP server: ${name}...`);
-      await this.mcpManager.connect(name, serverConfig, this.mcpRoots);
-      logger.info(`Connected to MCP server: ${name}`);
+      try {
+        await this.mcpManager.connect(name, serverConfig, this.mcpRoots);
+        logger.info(`Connected to MCP server: ${name}`);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.warn(`Failed to connect to MCP server '${name}': ${msg} — skipping`);
+        failedServers.push(name);
+      }
+    }
+    if (failedServers.length > 0) {
+      logger.warn(`Unavailable MCP servers: ${failedServers.join(', ')}. Their tools will not be available.`);
     }
 
     // Create auto-approve model if enabled

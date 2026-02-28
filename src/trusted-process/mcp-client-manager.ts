@@ -26,7 +26,7 @@ export class MCPClientManager {
     const transport = new StdioClientTransport({
       command: config.command,
       args: config.args,
-      env: config.env ? { ...(process.env as Record<string, string>), ...config.env } : undefined,
+      env: { ...(process.env as Record<string, string>), ...config.env },
     });
 
     const client = new Client(

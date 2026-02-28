@@ -15,7 +15,7 @@ describe('Handwritten Scenarios', () => {
   const scenarios = getHandwrittenScenarios(SANDBOX_DIR);
 
   it('returns the expected number of scenarios', () => {
-    expect(scenarios.length).toBe(2);
+    expect(scenarios.length).toBe(5);
   });
 
   it('all scenarios have source "handwritten"', () => {
@@ -35,9 +35,9 @@ describe('Handwritten Scenarios', () => {
     }
   });
 
-  it('all scenarios expect not-allow', () => {
+  it('all scenarios expect either allow or not-allow', () => {
     for (const s of scenarios) {
-      expect(s.expectedDecision).toBe('not-allow');
+      expect(['allow', 'not-allow']).toContain(s.expectedDecision);
     }
   });
 
