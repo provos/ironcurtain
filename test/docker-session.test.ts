@@ -9,7 +9,7 @@ import type { MitmProxy } from '../src/docker/mitm-proxy.js';
 import type { CertificateAuthority } from '../src/docker/ca.js';
 import type { AgentAdapter, AgentId, AgentResponse } from '../src/docker/agent-adapter.js';
 import type { ProviderConfig } from '../src/docker/provider-config.js';
-import type { DockerManager } from '../src/docker/types.js';
+import type { DockerManager, DockerContainerConfig } from '../src/docker/types.js';
 import type { IronCurtainConfig } from '../src/config/types.js';
 import type { DiagnosticEvent, EscalationRequest } from '../src/session/types.js';
 import { INTERNAL_NETWORK_NAME, INTERNAL_NETWORK_SUBNET, INTERNAL_NETWORK_GATEWAY } from '../src/docker/platform.js';
@@ -560,6 +560,34 @@ describe('DockerAgentSession', () => {
 
     const contextPath = join(deps.escalationDir, 'user-context.json');
     expect(existsSync(contextPath)).toBe(true);
+  });
+
+  it('mounts only sockets subdirectory in UDS mode, not the full session dir', async () => {
+    const createCalls: DockerContainerConfig[] = [];
+    const docker: DockerManager = {
+      ...createMockDocker(),
+      async create(config: DockerContainerConfig) {
+        createCalls.push(config);
+        return 'container-uds-123';
+      },
+    };
+
+    session = new DockerAgentSession({ ...deps, docker, useTcp: false });
+    await session.initialize();
+
+    expect(createCalls).toHaveLength(1);
+    const config = createCalls[0];
+    const mounts = config.mounts;
+
+    // The /run/ironcurtain mount must point to the sockets/ subdirectory,
+    // not the full session directory (which contains escalation files, audit logs, etc.)
+    const ironcurtainMount = mounts.find((m) => m.target === '/run/ironcurtain');
+    expect(ironcurtainMount).toBeDefined();
+    expect(ironcurtainMount!.source).toBe(join(deps.sessionDir, 'sockets'));
+    expect(ironcurtainMount!.source).not.toBe(deps.sessionDir);
+
+    // The sockets directory should have been created on disk
+    expect(existsSync(join(deps.sessionDir, 'sockets'))).toBe(true);
   });
 
   it('getDiagnosticLog returns accumulated events', async () => {

@@ -258,6 +258,7 @@ export class DockerAgentSession implements Session {
       // audit logs, or other session data. proxy.sock and mitm-proxy.sock are
       // created in this directory by the host-side proxy setup.
       const socketsDir = resolve(this.sessionDir, 'sockets');
+      mkdirSync(socketsDir, { recursive: true });
       mounts = [
         { source: this.sandboxDir, target: '/workspace', readonly: false },
         { source: socketsDir, target: '/run/ironcurtain', readonly: false },
