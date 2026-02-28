@@ -346,10 +346,11 @@ describe('Integration: graceful degradation when MCP server fails to connect', (
           command: 'nonexistent-binary-that-does-not-exist',
           args: [],
         },
-        // GitHub MCP server -- will fail without Docker or token, exercising graceful degradation
+        // Second failing server -- exercises graceful degradation with multiple failures.
+        // Uses a bogus command instead of Docker to avoid slow image pulls in CI.
         github: {
-          command: 'docker',
-          args: ['run', '-i', '--rm', '-e', 'GITHUB_PERSONAL_ACCESS_TOKEN', 'ghcr.io/github/github-mcp-server'],
+          command: 'nonexistent-github-server-binary',
+          args: [],
         },
         // The real filesystem server should still work
         filesystem: {

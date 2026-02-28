@@ -51,7 +51,17 @@ export class MCPClientManager {
       });
     }
 
-    await client.connect(transport);
+    try {
+      await client.connect(transport);
+    } catch (err) {
+      // Clean up the spawned subprocess so it doesn't leak.
+      try {
+        await client.close();
+      } catch {
+        // best-effort
+      }
+      throw err;
+    }
     this.servers.set(name, managed);
   }
 

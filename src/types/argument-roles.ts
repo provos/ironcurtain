@@ -10,6 +10,7 @@
  * invariant applies in the policy engine:
  *   - path: filesystem path containment checks
  *   - url: domain allowlist checks
+ *   - identifier: case-insensitive allowlist checks (e.g., GitHub owner)
  *   - opaque: no structural invariant (semantic meaning only)
  */
 

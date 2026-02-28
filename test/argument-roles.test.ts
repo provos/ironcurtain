@@ -234,6 +234,13 @@ describe('normalizers via registry', () => {
     expect(gitDef.category).toBe('url');
   });
 
+  it('identifier roles use lowercase canonicalization', () => {
+    const def = getRoleDefinition('github-owner');
+    expect(def.canonicalize('OctoCat')).toBe('octocat');
+    expect(def.canonicalize('My-Org')).toBe('my-org');
+    expect(def.canonicalize('already-lower')).toBe('already-lower');
+  });
+
   it('opaque roles use identity', () => {
     for (const role of ['branch-name', 'commit-message', 'none'] as ArgumentRole[]) {
       const def = getRoleDefinition(role);
