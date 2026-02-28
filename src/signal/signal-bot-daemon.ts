@@ -472,14 +472,16 @@ export class SignalBotDaemon {
     const managed = this.sessions.get(label);
     if (!managed) return;
 
+    // Close transport first (resolves run() promise), then session.
+    // Only remove from the map after successful close so the session
+    // remains trackable (and retryable) if session.close() fails.
+    managed.transport.close();
+    await managed.session.close();
+
     this.sessions.delete(label);
     if (this.currentLabel === label) {
       this.autoSwitchCurrent();
     }
-
-    // Close transport first (resolves run() promise), then session
-    managed.transport.close();
-    await managed.session.close();
   }
 
   /**
