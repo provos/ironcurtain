@@ -177,6 +177,7 @@ function resolveRealApiKey(host: string, config: IronCurtainConfig): string {
   let key: string;
   switch (host) {
     case 'api.anthropic.com':
+    case 'platform.claude.com':
       key = config.userConfig.anthropicApiKey;
       break;
     case 'api.openai.com':

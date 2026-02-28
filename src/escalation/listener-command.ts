@@ -43,6 +43,7 @@ export async function main(): Promise<void> {
 
   let state = createInitialState();
   let running = true;
+  let lastRenderedContent = '';
 
   // Set up readline for command input
   const rl = createInterface({
@@ -51,8 +52,23 @@ export async function main(): Promise<void> {
     terminal: true,
   });
 
+  /**
+   * Renders the dashboard only if the content has actually changed.
+   * Uses cursor repositioning (move to home) instead of screen clear
+   * to avoid destroying readline's input buffer.
+   */
   const render = (): void => {
-    renderDashboard(state);
+    const content = buildDashboard(state);
+    if (content === lastRenderedContent) return;
+    lastRenderedContent = content;
+
+    // Move cursor to home position and clear from cursor to end of screen.
+    // This preserves readline's internal line buffer (the characters the user
+    // has typed so far) — readline will re-display them after we write.
+    process.stderr.write('\x1b[H' + content + '\x1b[J');
+
+    // Force readline to redisplay its prompt + current input buffer
+    rl.prompt(true);
   };
 
   // Poll for new/removed sessions
@@ -60,6 +76,8 @@ export async function main(): Promise<void> {
     const registrations = readActiveRegistrations(registryDir);
     const currentIds = new Set(registrations.map((r) => r.sessionId));
     const stateIds = new Set(state.sessions.keys());
+
+    let changed = false;
 
     // Add new sessions
     for (const reg of registrations) {
@@ -74,6 +92,7 @@ export async function main(): Promise<void> {
         );
         state = addSession(state, reg, watcher);
         watcher.start();
+        changed = true;
       }
     }
 
@@ -83,13 +102,16 @@ export async function main(): Promise<void> {
         const session = state.sessions.get(id);
         session?.watcher.stop();
         state = removeSession(state, id);
+        changed = true;
       }
     }
 
-    render();
+    if (changed) render();
   }, REGISTRY_POLL_INTERVAL_MS);
 
-  // Initial render
+  // Initial render: clear screen once, then use repositioning from now on
+  rl.setPrompt('  > ');
+  process.stderr.write('\x1b[2J');
   render();
 
   // Handle commands
@@ -103,17 +125,26 @@ export async function main(): Promise<void> {
     const result = handleCommand(trimmed, state);
     state = result.state;
 
-    if (result.message) {
-      process.stderr.write(result.message + '\n');
-    }
-
     if (result.quit) {
+      if (result.message) {
+        process.stderr.write(result.message + '\n');
+      }
       running = false;
       rl.close();
       return;
     }
 
-    render();
+    // Force a re-render by invalidating the cache
+    lastRenderedContent = '';
+
+    if (result.message) {
+      // Render first so the message appears below the dashboard
+      render();
+      process.stderr.write(result.message + '\n');
+      rl.prompt(true);
+    } else {
+      render();
+    }
   });
 
   rl.on('close', () => {
@@ -339,87 +370,87 @@ function formatSessionDetails(state: ListenerState): string {
 // --- Rendering ---
 
 /**
- * Renders the full dashboard to stderr.
- * Clears the screen and redraws everything.
+ * Builds the dashboard content as a string.
+ * Pure function — no side effects. The caller handles writing to the terminal
+ * and coordinating with readline's prompt.
  */
-function renderDashboard(state: ListenerState): void {
-  // Move cursor to top and clear screen
-  process.stderr.write('\x1b[2J\x1b[H');
-
+function buildDashboard(state: ListenerState): string {
+  const lines: string[] = [];
   const sessionCount = state.sessions.size;
   const pendingCount = state.pendingEscalations.size;
 
   // Header
-  process.stderr.write(
+  lines.push(
     chalk.bold.cyan('  IronCurtain Escalation Listener') +
-      chalk.dim(`              ${sessionCount} session${sessionCount !== 1 ? 's' : ''} active\n`),
+      chalk.dim(`              ${sessionCount} session${sessionCount !== 1 ? 's' : ''} active`),
   );
-  process.stderr.write(chalk.dim('  ' + '\u2500'.repeat(60) + '\n'));
+  lines.push(chalk.dim('  ' + '\u2500'.repeat(60)));
 
   // Active Sessions
-  process.stderr.write('\n' + chalk.bold('  Active Sessions:\n'));
+  lines.push('');
+  lines.push(chalk.bold('  Active Sessions:'));
   if (sessionCount === 0) {
-    process.stderr.write(chalk.dim('    Waiting for PTY sessions...\n'));
+    lines.push(chalk.dim('    Waiting for PTY sessions...'));
   } else {
     for (const session of state.sessions.values()) {
       const reg = session.registration;
       const ago = formatTimeAgo(new Date(reg.startedAt));
       const sessionPending = countPendingForSession(state, reg.sessionId);
       const pendingLabel = sessionPending > 0 ? chalk.yellow(` ${sessionPending} pending`) : chalk.dim(' 0 pending');
-      process.stderr.write(
+      lines.push(
         `    [${chalk.bold(String(session.displayNumber))}] ` +
           `${reg.sessionId.substring(0, 8)}  ` +
           `${reg.label.substring(0, 40)}  ` +
           chalk.dim(ago) +
-          pendingLabel +
-          '\n',
+          pendingLabel,
       );
     }
   }
 
   // Pending Escalations
-  process.stderr.write('\n' + chalk.dim('  ' + '\u2500'.repeat(60) + '\n'));
-  process.stderr.write(
-    '\n' + chalk.bold('  Pending Escalations:') + (pendingCount === 0 ? chalk.dim(' (none)') : '') + '\n',
-  );
+  lines.push('');
+  lines.push(chalk.dim('  ' + '\u2500'.repeat(60)));
+  lines.push('');
+  lines.push(chalk.bold('  Pending Escalations:') + (pendingCount === 0 ? chalk.dim(' (none)') : ''));
 
   if (pendingCount > 0) {
     const sorted = [...state.pendingEscalations.values()].sort((a, b) => a.displayNumber - b.displayNumber);
     for (const esc of sorted) {
-      process.stderr.write('\n');
-      process.stderr.write(
+      lines.push('');
+      lines.push(
         `    [${chalk.bold.yellow(String(esc.displayNumber))}] ` +
-          `Session #${esc.sessionDisplayNumber} (${esc.sessionId.substring(0, 8)})\n`,
+          `Session #${esc.sessionDisplayNumber} (${esc.sessionId.substring(0, 8)})`,
       );
-      process.stderr.write(`        Tool:    ${chalk.cyan(esc.request.serverName + '/' + esc.request.toolName)}\n`);
+      lines.push(`        Tool:    ${chalk.cyan(esc.request.serverName + '/' + esc.request.toolName)}`);
 
-      // Show key arguments
       const argPreview = formatArgPreview(esc.request.arguments);
       if (argPreview) {
-        process.stderr.write(`        Args:    ${argPreview}\n`);
+        lines.push(`        Args:    ${argPreview}`);
       }
-      process.stderr.write(`        Reason:  ${esc.request.reason}\n`);
+      lines.push(`        Reason:  ${esc.request.reason}`);
     }
   }
 
   // History
   if (state.history.length > 0) {
-    process.stderr.write('\n' + chalk.dim('  ' + '\u2500'.repeat(60) + '\n'));
-    process.stderr.write('\n' + chalk.bold('  History (last 10):\n'));
+    lines.push('');
+    lines.push(chalk.dim('  ' + '\u2500'.repeat(60)));
+    lines.push('');
+    lines.push(chalk.bold('  History (last 10):'));
     const recent = state.history.slice(0, 10);
     for (const entry of recent) {
       const time = entry.resolvedAt.toLocaleTimeString();
       const decisionLabel = entry.decision === 'approved' ? chalk.green('APPROVED') : chalk.red('DENIED');
-      process.stderr.write(
-        `    [${chalk.dim(time)}] ` + `${entry.serverName}/${entry.toolName}  ` + decisionLabel + '\n',
-      );
+      lines.push(`    [${chalk.dim(time)}] ` + `${entry.serverName}/${entry.toolName}  ` + decisionLabel);
     }
   }
 
-  // Command prompt
-  process.stderr.write('\n' + chalk.dim('  ' + '\u2500'.repeat(60) + '\n'));
-  process.stderr.write(chalk.dim('  /approve N | /deny N | /approve all | /deny all | /quit\n'));
-  process.stderr.write('  > ');
+  // Command hint (prompt itself is handled by readline)
+  lines.push('');
+  lines.push(chalk.dim('  ' + '\u2500'.repeat(60)));
+  lines.push(chalk.dim('  /approve N | /deny N | /approve all | /deny all | /quit'));
+
+  return lines.join('\n') + '\n';
 }
 
 // --- Helpers ---

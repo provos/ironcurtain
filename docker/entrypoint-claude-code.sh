@@ -11,5 +11,44 @@ if [ -S "$MITM_SOCK" ]; then
   socat TCP-LISTEN:$PROXY_PORT,fork,reuseaddr UNIX-CONNECT:$MITM_SOCK &
 fi
 
+# Pre-seed .claude.json so Claude Code skips onboarding, trusts /workspace,
+# and doesn't prompt for API key approval.
+cat > "$HOME/.claude.json" <<'EOJSON'
+{
+  "hasCompletedOnboarding": true,
+  "numStartups": 1,
+  "projects": {
+    "/workspace": {
+      "allowedTools": [],
+      "hasTrustDialogAccepted": true
+    }
+  }
+}
+EOJSON
+
+# Configure settings.json:
+# - apiKeyHelper: feeds the API key via helper so Claude Code skips the
+#   custom API key approval dialog entirely
+# - skipDangerousModePermissionPrompt: suppresses the bypass-permissions warning
+mkdir -p "$HOME/.claude"
+cat > "$HOME/.claude/settings.json" <<'EOSETTINGS'
+{
+  "permissions": {
+    "allow": [],
+    "deny": [],
+    "additionalDirectories": [],
+    "defaultMode": "bypassPermissions"
+  },
+  "apiKeyHelper": "echo $IRONCURTAIN_API_KEY",
+  "skipDangerousModePermissionPrompt": true
+}
+EOSETTINGS
+
+# Load system prompt into env var so socat/bash -c doesn't have quoting issues
+if [ -f /etc/ironcurtain/system-prompt.txt ]; then
+  export IRONCURTAIN_SYSTEM_PROMPT
+  IRONCURTAIN_SYSTEM_PROMPT=$(cat /etc/ironcurtain/system-prompt.txt)
+fi
+
 # Hand off to CMD (sleep infinity for non-PTY, socat PTY command for PTY mode)
 exec "$@"

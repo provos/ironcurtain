@@ -15,7 +15,7 @@
 import type { AgentAdapter, AgentConfigFile, AgentId, AgentResponse, OrientationContext } from '../agent-adapter.js';
 import type { IronCurtainConfig } from '../../config/types.js';
 import type { ProviderConfig } from '../provider-config.js';
-import { anthropicProvider } from '../provider-config.js';
+import { anthropicProvider, claudePlatformProvider } from '../provider-config.js';
 import { buildSystemPrompt } from '../../session/prompts.js';
 
 const CLAUDE_CODE_IMAGE = 'ironcurtain-claude-code:latest';
@@ -98,8 +98,15 @@ export const claudeCodeAdapter: AgentAdapter = {
   },
 
   generateOrientationFiles(): AgentConfigFile[] {
-    // Orientation is delivered via --append-system-prompt, not files
-    return [];
+    // Wrapper script for PTY mode — avoids shell quoting issues by reading
+    // the system prompt from $IRONCURTAIN_SYSTEM_PROMPT (set by entrypoint).
+    const startScript =
+      '#!/bin/bash\n' +
+      'exec claude --dangerously-skip-permissions \\\n' +
+      '  --mcp-config /etc/ironcurtain/claude-mcp-config.json \\\n' +
+      '  --append-system-prompt "$IRONCURTAIN_SYSTEM_PROMPT"\n';
+
+    return [{ path: 'start-claude.sh', content: startScript, mode: 0o755 }];
   },
 
   buildCommand(message: string, systemPrompt: string): readonly string[] {
@@ -129,12 +136,14 @@ export const claudeCodeAdapter: AgentAdapter = {
   },
 
   getProviders(): readonly ProviderConfig[] {
-    return [anthropicProvider];
+    return [anthropicProvider, claudePlatformProvider];
   },
 
   buildEnv(_config: IronCurtainConfig, fakeKeys: ReadonlyMap<string, string>): Record<string, string> {
     return {
-      ANTHROPIC_API_KEY: fakeKeys.get('api.anthropic.com') ?? '',
+      // Pass the fake key via a non-Claude env var; apiKeyHelper in
+      // settings.json echoes it so Claude Code never prompts for approval.
+      IRONCURTAIN_API_KEY: fakeKeys.get('api.anthropic.com') ?? '',
       CLAUDE_CODE_DISABLE_UPDATE_CHECK: '1',
       // Node.js does not use the system CA store -- must set this explicitly
       NODE_EXTRA_CA_CERTS: '/usr/local/share/ca-certificates/ironcurtain-ca.crt',
@@ -159,16 +168,10 @@ export const claudeCodeAdapter: AgentAdapter = {
       ? `UNIX-LISTEN:${ptySockPath},fork` // Linux UDS
       : `TCP-LISTEN:${ptyPort},reuseaddr`; // macOS TCP
 
-    // Interactive mode: claude runs without -p so the user can interact via PTY.
-    // System prompt is read from a file via shell substitution to avoid quoting issues.
-    // The initial task message is NOT passed here -- it will be injected into the
-    // PTY stream by the host after connection, or typed by the user.
-    const claudeCmd =
-      'claude --dangerously-skip-permissions' +
-      ' --mcp-config /etc/ironcurtain/claude-mcp-config.json' +
-      ' --append-system-prompt "$(cat /etc/ironcurtain/system-prompt.txt)"';
-
-    return ['socat', listenArg, `EXEC:${claudeCmd},pty,setsid,ctty,stderr`];
+    // Interactive mode: claude runs via a wrapper script that reads the system
+    // prompt from an env var set by the entrypoint. This avoids shell quoting
+    // issues that occur when embedding large prompts in socat EXEC: strings.
+    return ['socat', listenArg, 'EXEC:/etc/ironcurtain/start-claude.sh,pty,setsid,ctty,stderr'];
   },
 };
 

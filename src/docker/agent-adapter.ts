@@ -34,6 +34,8 @@ export interface AgentConfigFile {
   readonly path: string;
   /** File content. */
   readonly content: string;
+  /** Optional file mode (e.g. 0o755 for executable scripts). */
+  readonly mode?: number;
 }
 
 /**

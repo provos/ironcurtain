@@ -18,6 +18,7 @@ import { execFile } from 'node:child_process';
 import { existsSync, mkdirSync, writeFileSync, unlinkSync } from 'node:fs';
 import { resolve } from 'node:path';
 import chalk from 'chalk';
+import ora from 'ora';
 
 import type { IronCurtainConfig } from '../config/types.js';
 import type { SessionMode } from '../session/types.js';
@@ -93,6 +94,12 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
     mcpServers: JSON.parse(JSON.stringify(options.config.mcpServers)) as typeof options.config.mcpServers,
   };
 
+  const initSpinner = ora({
+    text: `Initializing PTY session (${options.mode.agent})...`,
+    stream: process.stderr,
+    discardStdin: false,
+  }).start();
+
   const infra = await prepareDockerInfrastructure(
     sessionConfig,
     options.mode,
@@ -129,6 +136,7 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
   let sidecarContainerId: string | null = null;
   let escalationFileWatcher: EscalationWatcher | null = null;
   let registrationPath: string | null = null;
+  let shutdownSpinner: ReturnType<typeof ora> | null = null;
 
   // Terminal safety: ensure raw mode is restored on any exit
   const restoreTerminal = (): void => {
@@ -270,6 +278,9 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
 
     await waitForPtyReady(ptyTarget);
 
+    initSpinner.succeed(chalk.dim('PTY session ready'));
+    process.stderr.write('\n');
+
     // Attach terminal via Node.js PTY proxy
     const exitCode = await attachPty({
       target: ptyTarget,
@@ -277,12 +288,25 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
       onInput: (data) => keystrokeBuffer.append(data),
     });
 
-    // Print diagnostic info after PTY disconnects
+    // PTY disconnected -- restore terminal and show shutdown progress
     restoreTerminal();
+    process.stderr.write('\n');
+
+    shutdownSpinner = ora({
+      text: 'Shutting down PTY session...',
+      stream: process.stderr,
+      discardStdin: false,
+    }).start();
+
     if (exitCode !== 0) {
-      process.stderr.write(chalk.yellow(`\nPTY session exited with code ${exitCode}\n`));
+      process.stderr.write(chalk.yellow(`PTY session exited with code ${exitCode}\n`));
     }
   } finally {
+    // Stop spinner if still running (e.g. error during setup)
+    if (initSpinner.isSpinning) {
+      initSpinner.fail(chalk.red('PTY session failed'));
+    }
+
     restoreTerminal();
     process.off('exit', restoreTerminal);
     process.off('SIGTERM', handleSigterm);
@@ -320,6 +344,9 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
 
     logger.info(`PTY session ${sessionId} ended`);
     logger.teardown();
+
+    // shutdownSpinner is declared inside try but accessible here via closure
+    shutdownSpinner?.succeed(chalk.dim('PTY session ended'));
   }
 }
 
@@ -373,16 +400,20 @@ function attachPty(options: PtyProxyOptions): Promise<number> {
       onResize();
 
       // Host -> Container (trusted input, tapped for keystroke recording)
-      stdin.on('data', (data: Buffer) => {
+      const onData = (data: Buffer): void => {
         conn.write(data);
         options.onInput?.(data);
-      });
+      };
+      stdin.on('data', onData);
 
       // Container -> Host (untrusted output, displayed directly)
       conn.pipe(stdout);
 
       const cleanup = (): void => {
         stdout.removeListener('resize', onResize);
+        stdin.removeListener('data', onData);
+        conn.unpipe(stdout);
+        stdin.pause();
       };
 
       conn.on('close', () => {

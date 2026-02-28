@@ -485,12 +485,14 @@ function validateAndSwapApiKey(
     case 'header': {
       const headerName = keyInjection.headerName.toLowerCase();
       const currentValue = headers[headerName];
+      if (currentValue === undefined) return true; // no key sent — unauthenticated endpoint
       if (currentValue !== provider.fakeKey) return false;
       headers[headerName] = provider.realKey;
       return true;
     }
     case 'bearer': {
       const authHeader = headers['authorization'];
+      if (authHeader === undefined) return true; // no key sent — unauthenticated endpoint
       if (authHeader !== `Bearer ${provider.fakeKey}`) return false;
       headers['authorization'] = `Bearer ${provider.realKey}`;
       return true;

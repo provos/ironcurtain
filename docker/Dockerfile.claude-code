@@ -11,8 +11,13 @@ RUN chmod +x /usr/local/bin/entrypoint.sh
 
 USER codespace
 
-# Create the config directory — settings.json is generated entirely
-# by IronCurtain at runtime and copied in by the entrypoint script.
-RUN mkdir -p /home/codespace/.claude
+# Pre-seed Claude Code config so it skips interactive prompts:
+# - .claude.json: marks onboarding complete (skips login flow)
+# - .claude/settings.json: accepts bypass-permissions mode (skips confirmation dialog)
+RUN mkdir -p /home/codespace/.claude && \
+    echo '{"hasCompletedOnboarding":true,"numStartups":1,"projects":{"/workspace":{"allowedTools":[],"hasTrustDialogAccepted":true}}}' \
+      > /home/codespace/.claude.json && \
+    echo '{"permissions":{"allow":[],"deny":[]},"skipDangerousModePermissionPrompt":true}' \
+      > /home/codespace/.claude/settings.json
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

@@ -147,6 +147,14 @@ Zod v4 (^4.3.6) strict by default. Mock response JSON must exactly match Zod sch
 - `docs/designs/dynamic-lists.md` -- dynamic lists for policy rules (4-phase)
 - `docs/designs/tb1c-constitution-customizer.md` -- LLM-assisted constitution customization
 - `docs/designs/scenario-generator-multi-turn.md` -- multi-turn scenario generation with prompt caching
+- `docs/designs/pty-escalation-listener.md` -- PTY mode + escalation listener (see `pty-escalation.md`)
+
+## PTY Session & Escalation (see pty-escalation.md for details)
+- **Shared infra**: `src/docker/docker-infrastructure.ts` -- `prepareDockerInfrastructure()` used by both createDockerSession() and runPtySession()
+- **preBuiltInfrastructure**: DockerAgentSessionDeps field; skips proxy/orientation/image when set
+- **Keystroke buffer**: `src/docker/keystroke-reconstructor.ts` -- KeystrokeBuffer (32KB cap) + LLM reconstruction
+- **Escalation watcher**: `src/escalation/escalation-watcher.ts` -- shared module for polling + response writing
+- **AI SDK v6**: use `maxOutputTokens` not `maxTokens` in generateText()
 
 ## TB1a: Domain Allowlists & Sandbox Containment Architecture
 - **Untrusted domain gate**: structural invariant checks URL-role args against `serverDomainAllowlists` -- escalates (not denies) unknown domains

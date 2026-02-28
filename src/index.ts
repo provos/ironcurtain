@@ -82,7 +82,7 @@ export async function main(args?: string[]): Promise<void> {
 
     const { runPtySession } = await import('./docker/pty-session.js');
     await runPtySession({ config, mode });
-    return;
+    process.exit(0);
   }
 
   // Create the transport first so we can wire its callbacks into the session.
