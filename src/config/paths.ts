@@ -172,8 +172,12 @@ export function loadConstitutionText(packageBasePath: string): string {
 
   const userPath = getUserConstitutionPath();
   const userFallbackPath = getBaseUserConstitutionPath();
-  const effectiveUserPath = existsSync(userPath) ? userPath : existsSync(userFallbackPath) ? userFallbackPath : null;
-  if (!effectiveUserPath) {
+  let effectiveUserPath: string;
+  if (existsSync(userPath)) {
+    effectiveUserPath = userPath;
+  } else if (existsSync(userFallbackPath)) {
+    effectiveUserPath = userFallbackPath;
+  } else {
     throw new Error(`User constitution not found: tried ${userPath} and ${userFallbackPath}`);
   }
   const user = readFileSync(effectiveUserPath, 'utf-8');

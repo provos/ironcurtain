@@ -533,8 +533,7 @@ export class SignalBotDaemon {
     }
 
     const decision = isApprove ? ('approved' as const) : ('denied' as const);
-    const escalationId = target.pendingEscalationId as string; // guarded by early returns above
-    // Capture in a const so TypeScript narrows inside async closures below
+    const escalationId = target.pendingEscalationId as string;
     const managed = target;
     managed.escalationResolving = true;
 
@@ -662,18 +661,15 @@ export class SignalBotDaemon {
     const budgetMatch = lower.match(/^\/budget(?:\s+#?(\d+))?$/);
     if (budgetMatch) {
       const label = budgetMatch[1] ? parseInt(budgetMatch[1], 10) : this.currentLabel;
+      const managed = label !== null ? this.sessions.get(label) : undefined;
+
       if (label === null) {
         this.sendSignalMessage('No active session.').catch(() => {});
+      } else if (!managed) {
+        this.sendSignalMessage(`No session #${label}.`).catch(() => {});
       } else {
-        const managed = this.sessions.get(label);
-        if (!managed) {
-          this.sendSignalMessage(`No session #${label}.`).catch(() => {});
-        } else {
-          const status = managed.session.getBudgetStatus();
-          this.sendSignalMessage(prefixWithLabel(formatBudgetMessage(status), label, this.sessions.size)).catch(
-            () => {},
-          );
-        }
+        const status = managed.session.getBudgetStatus();
+        this.sendSignalMessage(prefixWithLabel(formatBudgetMessage(status), label, this.sessions.size)).catch(() => {});
       }
       return true;
     }
@@ -827,16 +823,14 @@ export function parseSignalEnvelope(data: string): SignalEnvelope | null {
   try {
     const parsed: unknown = JSON.parse(data);
     if (typeof parsed !== 'object' || parsed === null) return null;
-    // json-rpc mode wraps the envelope
     const record = parsed as Record<string, unknown>;
-    const envelope = (record.envelope ?? parsed) as SignalEnvelope;
-    return envelope;
+    // json-rpc mode wraps the envelope; fall back to the raw object
+    return (record.envelope ?? parsed) as SignalEnvelope;
   } catch {
     return null;
   }
 }
 
-/** Normalize a phone number by stripping spaces. */
 export function normalizePhoneNumber(number: string): string {
   return number.replace(/\s+/g, '');
 }
