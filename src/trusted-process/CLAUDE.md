@@ -18,6 +18,6 @@ The security kernel. Two modes of operation:
 
 **EscalationHandler** (`escalation.ts`) - CLI-based human approval for escalated requests. Can be overridden via `onEscalation` callback (used in tests).
 
-**MCPClientManager** (`mcp-client-manager.ts`) - manages stdio-based MCP client connections.
+**MCPClientManager** (`mcp-client-manager.ts`) - manages stdio-based MCP client connections. Connection failures are graceful: unavailable servers (e.g., Docker not running for the GitHub server) are logged as warnings and skipped, allowing the session to proceed with whatever servers connected successfully.
 
 **AuditLog** (`audit-log.ts`) - append-only JSONL logging.

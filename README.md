@@ -232,7 +232,7 @@ Environment variables take precedence over config file values. Supported provide
 ironcurtain config
 ```
 
-This opens an interactive editor for `~/.ironcurtain/config.json` where you can configure models, security settings, resource budgets, and auto-compaction. API keys should be set via environment variables.
+This opens an interactive editor for `~/.ironcurtain/config.json` where you can configure models, security settings, resource budgets, server credentials (e.g., GitHub token), and auto-compaction. API keys should be set via environment variables.
 
 ### 3. Customize your policy
 
@@ -283,7 +283,7 @@ Or with npm scripts during development: `npm run annotate-tools` / `npm run comp
 
 Tool annotation connects to your MCP servers and classifies each tool's arguments via LLM. This only needs re-running when you add or change MCP servers. Policy compilation translates your constitution into deterministic rules, generates test scenarios, and verifies them. The compiled artifacts are written to `~/.ironcurtain/generated/`. Review the generated `compiled-policy.json` -- these are the rules that will be enforced at runtime. (The package ships with pre-compiled defaults so you can run immediately without compiling.)
 
-IronCurtain ships with pre-configured MCP servers for filesystem and git operations. See [Adding MCP Servers](#adding-mcp-servers) for how to extend this.
+IronCurtain ships with pre-configured MCP servers for filesystem, git, fetch, and GitHub operations. See [Adding MCP Servers](#adding-mcp-servers) for how to extend this.
 
 ### 5. Run the agent
 
@@ -399,7 +399,7 @@ Environment variables take precedence over config file values.
 
 ### Adding MCP Servers
 
-IronCurtain ships with filesystem and git MCP servers pre-configured. Adding a new server is a developer-level task that may involve changes across several files:
+IronCurtain ships with filesystem, git, fetch, and GitHub MCP servers pre-configured. Adding a new server is a developer-level task that may involve changes across several files:
 
 1. **Register the server** in `src/config/mcp-servers.json` with its command, arguments, and optional environment variables or sandbox settings.
 2. **Extend the argument role registry** in `src/types/argument-roles.ts` if the new server's tools have argument semantics not covered by existing roles (e.g., `read-path`, `write-path`, `fetch-url`). Each role defines how values are normalized and evaluated by the policy engine.
@@ -411,13 +411,15 @@ After compilation, review the updated `tool-annotations.json` and `compiled-poli
 
 ## Built-in Capabilities
 
-IronCurtain ships with three pre-configured MCP servers. All tool calls are governed by your compiled policy.
+IronCurtain ships with four pre-configured MCP servers. All tool calls are governed by your compiled policy.
 
 **Filesystem** (14 tools) — `read_file`, `read_multiple_files`, `write_file`, `edit_file`, `create_directory`, `list_directory`, `directory_tree`, `move_file`, `search_files`, `get_file_info`, `list_allowed_directories`, `file_exists`, `read_file_lines`, `calculate_diff`.
 
 **Git** (27 tools) — Full git workflow: `git_status`, `git_diff_staged`, `git_diff_unstaged`, `git_diff`, `git_log`, `git_show`, `git_add`, `git_reset`, `git_commit`, `git_checkout`, `git_create_branch`, `git_list_branches`, `git_push`, `git_pull`, `git_fetch`, `git_merge`, `git_rebase`, `git_cherry_pick`, `git_stash`, `git_stash_pop`, `git_stash_list`, `git_tag`, `git_list_tags`, `git_remote`, `git_clone`, `git_init`, `git_blame`.
 
 **Fetch** (1 tool) — `fetch` retrieves content from URLs with automatic HTML-to-markdown conversion.
+
+**GitHub** (41 tools) — GitHub API operations via Docker (`ghcr.io/github/github-mcp-server`). Issues, pull requests, repos, code search, reviews, and more. Requires a GitHub personal access token configured via `ironcurtain config` or the first-start wizard. Read-only operations are allowed by default policy; mutations require human approval.
 
 ## Security Model
 
