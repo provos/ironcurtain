@@ -13,11 +13,15 @@ import { BaseTransport } from '../session/base-transport.js';
 import type { Session, DiagnosticEvent, EscalationRequest } from '../session/types.js';
 import type { SignalBotDaemon } from './signal-bot-daemon.js';
 import { formatEscalationBanner } from './format.js';
+import * as logger from '../logger.js';
 
 export class SignalSessionTransport extends BaseTransport {
   private session: Session | null = null;
   private readonly daemon: SignalBotDaemon;
   private exitResolve: (() => void) | null = null;
+
+  /** Session label assigned by the daemon after construction. */
+  sessionLabel = 0;
 
   constructor(daemon: SignalBotDaemon) {
     super();
@@ -37,8 +41,8 @@ export class SignalSessionTransport extends BaseTransport {
 
   /**
    * Signals the transport to stop. Resolves the run() promise.
-   * Does NOT call daemon.endCurrentSession() - the daemon owns
-   * session lifecycle and calls this method, not the other way around.
+   * Does NOT call daemon.endSession() - the daemon owns session
+   * lifecycle and calls this method, not the other way around.
    */
   close(): void {
     this.session = null;
@@ -76,16 +80,28 @@ export class SignalSessionTransport extends BaseTransport {
   }
 
   createEscalationHandler(): (request: EscalationRequest) => void {
+    const createdForLabel = this.sessionLabel;
     return (request) => {
-      this.daemon.setPendingEscalation(request.escalationId);
-      const banner = formatEscalationBanner(request);
+      const invokedLabel = this.sessionLabel;
+      if (invokedLabel !== createdForLabel) {
+        logger.error(
+          `[Signal Transport] LABEL MISMATCH: escalation handler created for #${createdForLabel} ` +
+            `but this.sessionLabel is now #${invokedLabel} (escalationId=${request.escalationId})`,
+        );
+      }
+      logger.info(
+        `[Signal Transport] Escalation fired on session #${invokedLabel} ` +
+          `(tool=${request.serverName}/${request.toolName}, id=${request.escalationId})`,
+      );
+      this.daemon.setPendingEscalation(this.sessionLabel, request.escalationId);
+      const banner = formatEscalationBanner(request, this.sessionLabel);
       this.daemon.sendSignalMessage(banner).catch(() => {});
     };
   }
 
   createEscalationExpiredHandler(): () => void {
     return () => {
-      this.daemon.clearPendingEscalation();
+      this.daemon.clearPendingEscalation(this.sessionLabel);
       this.daemon.sendSignalMessage('Escalation expired (timed out).').catch(() => {});
     };
   }

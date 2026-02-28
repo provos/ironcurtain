@@ -70,6 +70,7 @@ async function createBuiltinSession(options: SessionOptions): Promise<Session> {
     }
   }
 
+  const loggerWasActive = logger.isActive();
   const sessionConfig = buildSessionConfig(config, effectiveSessionId, sessionId, options.resumeSessionId);
 
   const session = new AgentSession(sessionConfig.config, sessionId, sessionConfig.escalationDir, options);
@@ -79,7 +80,7 @@ async function createBuiltinSession(options: SessionOptions): Promise<Session> {
   } catch (error) {
     // Clean up on init failure
     await session.close().catch(() => {});
-    logger.teardown();
+    if (!loggerWasActive) logger.teardown();
     throw new SessionError(
       `Session initialization failed: ${error instanceof Error ? error.message : String(error)}`,
       'SESSION_INIT_FAILED',
@@ -100,6 +101,7 @@ async function createDockerSession(
   const sessionId = createSessionId();
   const effectiveSessionId = options.resumeSessionId ?? sessionId;
 
+  const loggerWasActive = logger.isActive();
   const sessionConfig = buildSessionConfig(config, effectiveSessionId, sessionId, options.resumeSessionId);
 
   // Dynamic imports to avoid loading Docker dependencies for built-in sessions
@@ -177,7 +179,7 @@ async function createDockerSession(
     await session.initialize();
   } catch (error) {
     await session.close().catch(() => {});
-    logger.teardown();
+    if (!loggerWasActive) logger.teardown();
     throw new SessionError(
       `Docker session initialization failed: ${error instanceof Error ? error.message : String(error)}`,
       'SESSION_INIT_FAILED',

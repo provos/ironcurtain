@@ -9,6 +9,7 @@
 
 import { loadConfig } from '../config/index.js';
 import { loadUserConfig } from '../config/user-config.js';
+import { getDaemonLogPath } from '../config/paths.js';
 import { createDockerManager } from '../docker/docker-manager.js';
 import { resolveSessionMode } from '../session/preflight.js';
 import { SignalBotDaemon } from './signal-bot-daemon.js';
@@ -30,6 +31,11 @@ export async function runBot(options: BotOptions = {}): Promise<void> {
     process.stderr.write('Signal is not configured. Run: ironcurtain setup-signal\n');
     process.exit(1);
   }
+
+  // Set up daemon-wide logger before creating sessions.
+  // Individual session creations will call logger.setup() too,
+  // but it's now idempotent — subsequent calls are no-ops.
+  logger.setup({ logFilePath: getDaemonLogPath('signal-bot') });
 
   const config = loadConfig();
 

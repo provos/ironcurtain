@@ -15,10 +15,14 @@ export const SIGNAL_MAX_MESSAGE_LENGTH = 2000;
  * Formats an escalation request as a styled text banner.
  * Includes tool name, arguments, reason, and instructions
  * for the user to reply "approve" or "deny".
+ *
+ * When sessionLabel is provided, includes `[#N]` in the header
+ * so the user knows which session is escalating.
  */
-export function formatEscalationBanner(request: EscalationRequest): string {
+export function formatEscalationBanner(request: EscalationRequest, sessionLabel?: number): string {
   const separator = '\u2501'.repeat(30); // box drawing heavy horizontal
-  const header = '**ESCALATION: Human approval required**';
+  const labelTag = sessionLabel != null ? ` [#${sessionLabel}]` : '';
+  const header = `**ESCALATION${labelTag}: Human approval required**`;
   const toolLine = `Tool: \`${request.serverName}/${request.toolName}\``;
   const argsLine = `Arguments: \`${JSON.stringify(request.arguments)}\``;
   const reasonLine = `Reason: *${request.reason}*`;
@@ -106,6 +110,38 @@ export function splitMessage(text: string, maxLength: number): string[] {
   }
 
   return chunks;
+}
+
+/**
+ * Information about a managed session for display purposes.
+ */
+export interface SessionListEntry {
+  readonly label: number;
+  readonly turnCount: number;
+  readonly budgetPercent: number;
+}
+
+/**
+ * Formats the /sessions command output.
+ * Marks the current session with `>`.
+ */
+export function formatSessionList(sessions: SessionListEntry[], currentLabel: number | null): string {
+  if (sessions.length === 0) return 'No active sessions.';
+
+  const lines = ['**Active sessions:**'];
+  for (const s of sessions) {
+    const marker = s.label === currentLabel ? '>' : ' ';
+    lines.push(`${marker} #${s.label}  turns: ${s.turnCount}  budget: ${s.budgetPercent}%`);
+  }
+  return lines.join('\n');
+}
+
+/**
+ * Prefixes a message with `[#N]` when multiple sessions are active.
+ */
+export function prefixWithLabel(text: string, label: number, sessionCount: number): string {
+  if (sessionCount <= 1) return text;
+  return `[#${label}] ${text}`;
 }
 
 // --- Private helpers ---

@@ -27,6 +27,8 @@ export interface SignalConfig {
     /** Host port for REST API. Default: 18080 */
     port?: number;
   };
+  /** Maximum number of concurrent sessions. Default: 3 */
+  maxConcurrentSessions?: number;
 }
 
 /** Resolved Signal config with all fields present. */
@@ -40,12 +42,14 @@ export interface ResolvedSignalConfig {
     readonly dataDir: string;
     readonly containerName: string;
   };
+  readonly maxConcurrentSessions: number;
 }
 
 export const SIGNAL_DEFAULTS = {
   image: 'bbernhard/signal-cli-rest-api:latest',
   port: 18080,
   containerName: 'ironcurtain-signal',
+  maxConcurrentSessions: 3,
 } as const;
 
 /** Returns the host directory for signal-cli persistent data. */
@@ -95,5 +99,6 @@ export function resolveSignalConfig(config: HasSignalConfig): ResolvedSignalConf
       dataDir: getSignalDataDir(),
       containerName: SIGNAL_DEFAULTS.containerName,
     },
+    maxConcurrentSessions: raw.maxConcurrentSessions ?? SIGNAL_DEFAULTS.maxConcurrentSessions,
   };
 }

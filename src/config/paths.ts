@@ -111,6 +111,14 @@ export function getLogsDir(): string {
 }
 
 /**
+ * Returns a log file path within the logs directory for a named daemon/process.
+ * E.g., getDaemonLogPath('signal-bot') → {home}/logs/signal-bot.log
+ */
+export function getDaemonLogPath(name: string): string {
+  return resolve(getLogsDir(), `${name}.log`);
+}
+
+/**
  * Returns the user constitution file path: {home}/constitution-user.md
  * User policy customizations live in this file, separate from the
  * base constitution (which is version-controlled).

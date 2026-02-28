@@ -134,6 +134,7 @@ const signalSchema = z
       .optional(),
     recipientIdentityKey: z.string().min(1).optional(),
     container: signalContainerSchema,
+    maxConcurrentSessions: z.number().int().min(1).max(10).optional(),
   })
   .optional();
 
@@ -542,6 +543,7 @@ function resolveSignalFromUserConfig(
       dataDir: resolve(home, 'signal-data'),
       containerName: 'ironcurtain-signal',
     },
+    maxConcurrentSessions: config.signal.maxConcurrentSessions ?? 3,
   };
 }
 
