@@ -62,10 +62,11 @@ export async function main(): Promise<void> {
     if (content === lastRenderedContent) return;
     lastRenderedContent = content;
 
-    // Move cursor to home position and clear from cursor to end of screen.
-    // This preserves readline's internal line buffer (the characters the user
-    // has typed so far) — readline will re-display them after we write.
-    process.stderr.write('\x1b[H' + content + '\x1b[J');
+    // Move cursor to home position, write content with per-line clearing,
+    // then clear any remaining lines below. The per-line \x1b[K (clear to
+    // end of line) is needed because shorter new lines would otherwise leave
+    // leftover characters from the previous (longer) dashboard render.
+    process.stderr.write('\x1b[H' + content.replace(/\n/g, '\x1b[K\n') + '\x1b[J');
 
     // Force readline to redisplay its prompt + current input buffer
     rl.prompt(true);
