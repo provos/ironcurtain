@@ -106,7 +106,32 @@ export const claudeCodeAdapter: AgentAdapter = {
       '  --mcp-config /etc/ironcurtain/claude-mcp-config.json \\\n' +
       '  --append-system-prompt "$IRONCURTAIN_SYSTEM_PROMPT"\n';
 
-    return [{ path: 'start-claude.sh', content: startScript, mode: 0o755 }];
+    // Helper script to resize the PTY that Claude Code is actually running on.
+    // docker exec stty targets a transient exec session PTY, not socat's PTY.
+    const resizeScript =
+      '#!/bin/bash\n' +
+      '# resize-pty.sh — resize the PTY that Claude Code is running on.\n' +
+      '# Called from the host via: docker exec <cid> /etc/ironcurtain/resize-pty.sh <cols> <rows>\n' +
+      'COLS=$1\n' +
+      'ROWS=$2\n' +
+      '# Find the claude process (start-claude.sh execs into claude, so it is the direct child of socat)\n' +
+      'CLAUDE_PID=$(pgrep -f "claude --dangerously" | head -1)\n' +
+      'if [ -z "$CLAUDE_PID" ]; then\n' +
+      '  exit 0  # claude not started yet; resize will be retried\n' +
+      'fi\n' +
+      '# Get the PTY device from the process stdin\n' +
+      'PTS=$(readlink /proc/$CLAUDE_PID/fd/0 2>/dev/null)\n' +
+      'if [ -z "$PTS" ]; then\n' +
+      '  exit 0\n' +
+      'fi\n' +
+      '# Set the window size on the actual PTY device, then signal claude\n' +
+      'stty -F "$PTS" cols "$COLS" rows "$ROWS" 2>/dev/null\n' +
+      'kill -WINCH "$CLAUDE_PID" 2>/dev/null\n';
+
+    return [
+      { path: 'start-claude.sh', content: startScript, mode: 0o755 },
+      { path: 'resize-pty.sh', content: resizeScript, mode: 0o755 },
+    ];
   },
 
   buildCommand(message: string, systemPrompt: string): readonly string[] {

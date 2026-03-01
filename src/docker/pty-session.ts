@@ -387,7 +387,7 @@ function attachPty(options: PtyProxyOptions): Promise<number> {
         if (columns && rows) {
           execFile(
             'docker',
-            ['exec', options.containerId, 'stty', 'cols', String(columns), 'rows', String(rows)],
+            ['exec', options.containerId, '/etc/ironcurtain/resize-pty.sh', String(columns), String(rows)],
             { timeout: 5000 },
             () => {
               /* best effort */
