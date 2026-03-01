@@ -11,6 +11,11 @@ import type { CliTransport as CliTransportType } from '../src/session/cli-transp
  * The transport must re-emit SIGINT so the shutdown handler fires.
  */
 
+/** Yields to the event loop so async setup (readline init, etc.) can complete. */
+function flushAsync(): Promise<void> {
+  return new Promise((r) => setImmediate(r));
+}
+
 /** Minimal mock session for transport tests. */
 function createMockSession(overrides: Partial<Session> = {}): Session {
   const defaultBudget: BudgetStatus = {
@@ -82,7 +87,7 @@ describe('CliTransport shutdown', () => {
     const runPromise = transport.run(session);
 
     // Give readline time to initialize
-    await new Promise((r) => setTimeout(r, 50));
+    await flushAsync();
 
     transport.close();
 
@@ -101,11 +106,11 @@ describe('CliTransport shutdown', () => {
     });
 
     const runPromise = transport.run(session);
-    await new Promise((r) => setTimeout(r, 50));
+    await flushAsync();
 
     // Send a message to trigger the in-flight sendMessage
     stdinMock.write('hello\n');
-    await new Promise((r) => setTimeout(r, 50));
+    await flushAsync();
 
     // Simulate shutdown: close transport, then reject the blocked sendMessage
     transport.close();
@@ -122,7 +127,7 @@ describe('CliTransport shutdown', () => {
     process.on('SIGINT', sigintReceived);
 
     const runPromise = transport.run(session);
-    await new Promise((r) => setTimeout(r, 50));
+    await flushAsync();
 
     // Simulate Ctrl-C reaching readline: emit 'SIGINT' on the readline interface.
     // With a real TTY, readline intercepts raw Ctrl-C and emits 'SIGINT' on itself
@@ -153,7 +158,7 @@ describe('CliTransport shutdown', () => {
     });
 
     const runPromise = transport.run(session);
-    await new Promise((r) => setTimeout(r, 50));
+    await flushAsync();
 
     transport.close();
     rejectSendMessage(new Error('Session closed'));
@@ -174,7 +179,7 @@ describe('CliTransport shutdown', () => {
     });
 
     const runPromise = transport.run(session);
-    await new Promise((r) => setTimeout(r, 50));
+    await flushAsync();
 
     // Simulate the full shutdown sequence from index.ts:
     // 1. transport.close() unblocks run()

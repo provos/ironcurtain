@@ -16,6 +16,33 @@ import { generateFakeKey } from '../src/docker/fake-keys.js';
 
 // --- Test helpers ---
 
+/**
+ * Waits for a condition to become true by polling on the microtask queue.
+ * Much faster than a fixed setTimeout when waiting for async events to propagate.
+ */
+function waitFor(
+  condition: () => boolean,
+  { timeoutMs = 500, intervalMs = 1 }: { timeoutMs?: number; intervalMs?: number } = {},
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (condition()) {
+      resolve();
+      return;
+    }
+    const deadline = Date.now() + timeoutMs;
+    const check = (): void => {
+      if (condition()) {
+        resolve();
+      } else if (Date.now() > deadline) {
+        reject(new Error(`waitFor timed out after ${timeoutMs}ms`));
+      } else {
+        setTimeout(check, intervalMs);
+      }
+    };
+    setTimeout(check, intervalMs);
+  });
+}
+
 /** Sends a CONNECT request to the proxy via UDS, returns client socket + status. */
 function sendConnect(
   socketPath: string,
@@ -544,8 +571,8 @@ describe('MitmProxy', () => {
     // Without the clientSocket error handler, this would crash the process.
     socket!.destroy();
 
-    // Give the proxy a moment to process the error
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    // Wait for the proxy to process the socket destruction event
+    await waitFor(() => socket!.destroyed);
 
     // Proxy should still be alive and accepting new connections
     const { statusCode } = await sendConnect(socketPath, 'api.test.com', 443);
@@ -580,8 +607,8 @@ describe('MitmProxy', () => {
       // Connection errors are expected since api.test.com may not resolve
     }
 
-    // Proxy should still be functional
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    // Proxy should still be functional -- no delay needed; the upstream error
+    // is handled synchronously in the proxy's error callback.
     const { statusCode } = await sendConnect(socketPath, 'api.test.com', 443);
     expect(statusCode).toBe(200);
   });
@@ -609,9 +636,8 @@ describe('MitmProxy', () => {
     proxy = undefined; // Already stopped
 
     // All client sockets should be destroyed
+    await waitFor(() => sockets.every((sock) => sock.destroyed));
     for (const sock of sockets) {
-      // Give a tick for the destroy to propagate
-      await new Promise((resolve) => setTimeout(resolve, 10));
       expect(sock.destroyed).toBe(true);
     }
   });
@@ -647,7 +673,7 @@ describe('MitmProxy', () => {
           tlsSocket.on('error', () => resolve(data));
 
           // Timeout fallback in case we get no response
-          setTimeout(() => resolve(data), 2000);
+          setTimeout(() => resolve(data), 200);
         },
       );
       tlsSocket.on('error', () => resolve(''));
@@ -675,7 +701,7 @@ describe('MitmProxy', () => {
     await proxy.stop();
     proxy = undefined;
 
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await waitFor(() => socket!.destroyed);
     expect(socket!.destroyed).toBe(true);
   });
 
@@ -701,7 +727,8 @@ describe('MitmProxy', () => {
     // Force-destroy the underlying socket to trigger ECONNRESET on the proxy side
     tlsSocket.destroy();
 
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    // Wait for the socket destruction to propagate
+    await waitFor(() => tlsSocket.destroyed);
 
     // Proxy should still accept new connections
     const { statusCode } = await sendConnect(socketPath, 'api.test.com', 443);
@@ -785,12 +812,13 @@ describe('MitmProxy', () => {
         setTimeout(() => {
           tlsSocket.destroy();
           resolve();
-        }, 50);
+        }, 5);
       });
       tlsSocket.on('error', () => {});
     });
 
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    // Wait for the socket destruction to propagate before checking proxy health
+    await waitFor(() => socket!.destroyed);
 
     // Proxy should still be alive
     const { statusCode } = await sendConnect(socketPath, 'api.test.com', 443);

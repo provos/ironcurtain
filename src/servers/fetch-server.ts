@@ -278,7 +278,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           timeout: {
             type: 'number',
             default: 30,
-            description: 'Request timeout in seconds (5–60)',
+            description: 'Request timeout in seconds (1–60)',
           },
         },
         required: ['url'],
@@ -348,7 +348,7 @@ async function handleHttpFetch(
   }
   const format: OutputFormat = rawFormat ?? 'markdown';
   const timeoutSec =
-    typeof args?.timeout === 'number' && Number.isFinite(args.timeout) ? Math.min(60, Math.max(5, args.timeout)) : 30;
+    typeof args?.timeout === 'number' && Number.isFinite(args.timeout) ? Math.min(60, Math.max(1, args.timeout)) : 30;
 
   try {
     const { status, headers, body } = await doFetch(url, requestHeaders, timeoutSec * 1000);

@@ -44,6 +44,36 @@ function readMessage(socket: Socket): Promise<JSONRPCMessage> {
   });
 }
 
+/**
+ * Collects messages from a transport's onmessage callback.
+ * Returns the array (filled by side-effect) and a function
+ * that waits until at least `count` messages have arrived.
+ */
+function createMessageCollector(transport: UdsServerTransport) {
+  const messages: JSONRPCMessage[] = [];
+  transport.onmessage = (msg) => messages.push(msg);
+
+  function waitForMessages(count: number): Promise<void> {
+    return new Promise((resolve) => {
+      const check = () => {
+        if (messages.length >= count) {
+          resolve();
+        } else {
+          setImmediate(check);
+        }
+      };
+      check();
+    });
+  }
+
+  return { messages, waitForMessages };
+}
+
+/** Yields control to allow the event loop to process pending I/O callbacks. */
+function nextTick(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
 describe('UdsServerTransport', () => {
   let transport: UdsServerTransport | undefined;
   let clientSocket: Socket | null = null;
@@ -77,8 +107,7 @@ describe('UdsServerTransport', () => {
     socketPath = createTempSocketPath();
     transport = new UdsServerTransport(socketPath);
 
-    const receivedMessages: JSONRPCMessage[] = [];
-    transport.onmessage = (msg) => receivedMessages.push(msg);
+    const { messages, waitForMessages } = createMessageCollector(transport);
 
     await transport.start();
     clientSocket = await connectToSocket(socketPath);
@@ -91,11 +120,10 @@ describe('UdsServerTransport', () => {
 
     sendMessage(clientSocket, testMessage);
 
-    // Wait for the message to be processed
-    await new Promise((r) => setTimeout(r, 50));
+    await waitForMessages(1);
 
-    expect(receivedMessages).toHaveLength(1);
-    expect(receivedMessages[0]).toEqual(testMessage);
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toEqual(testMessage);
   });
 
   it('sends JSON-RPC messages to the connected client', async () => {
@@ -105,8 +133,8 @@ describe('UdsServerTransport', () => {
 
     clientSocket = await connectToSocket(socketPath);
 
-    // Small delay to allow connection handler to register
-    await new Promise((r) => setTimeout(r, 20));
+    // Allow event loop to process the server-side connection callback
+    await nextTick();
 
     const responseMessage: JSONRPCMessage = {
       jsonrpc: '2.0',
@@ -124,8 +152,7 @@ describe('UdsServerTransport', () => {
     socketPath = createTempSocketPath();
     transport = new UdsServerTransport(socketPath);
 
-    const receivedMessages: JSONRPCMessage[] = [];
-    transport.onmessage = (msg) => receivedMessages.push(msg);
+    const { messages, waitForMessages } = createMessageCollector(transport);
 
     await transport.start();
     clientSocket = await connectToSocket(socketPath);
@@ -138,10 +165,10 @@ describe('UdsServerTransport', () => {
       });
     }
 
-    await new Promise((r) => setTimeout(r, 100));
+    await waitForMessages(3);
 
-    expect(receivedMessages).toHaveLength(3);
-    expect(receivedMessages.map((m) => ('id' in m ? m.id : null))).toEqual([1, 2, 3]);
+    expect(messages).toHaveLength(3);
+    expect(messages.map((m) => ('id' in m ? m.id : null))).toEqual([1, 2, 3]);
   });
 
   it('cleans up socket file on close', async () => {

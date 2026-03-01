@@ -240,11 +240,11 @@ describe('fetch-server', () => {
     it('times out with short timeout on slow endpoint', async () => {
       const result = await client.callTool({
         name: 'http_fetch',
-        arguments: { url: `${baseUrl}/slow`, timeout: 5 },
+        arguments: { url: `${baseUrl}/slow`, timeout: 1 },
       });
       expect(result.isError).toBe(true);
       expect(resultText(result)).toMatch(/Fetch error:.*abort/i);
-    }, 15_000);
+    }, 10_000);
   });
 
   describe('boilerplate stripping', () => {

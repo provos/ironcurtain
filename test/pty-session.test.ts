@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -61,12 +61,14 @@ describe('escalation BEL notification', () => {
   let escalationDir: string;
 
   beforeEach(() => {
+    vi.useFakeTimers();
     tempDir = mkdtempSync(join(tmpdir(), 'pty-bel-test-'));
     escalationDir = join(tempDir, 'escalations');
     mkdirSync(escalationDir, { recursive: true });
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     if (existsSync(tempDir)) {
       rmSync(tempDir, { recursive: true, force: true });
     }
@@ -95,7 +97,7 @@ describe('escalation BEL notification', () => {
     };
     writeFileSync(join(escalationDir, 'request-esc-bel-1.json'), JSON.stringify(request));
 
-    await new Promise((r) => setTimeout(r, 200));
+    vi.advanceTimersByTime(60);
 
     expect(escalations).toHaveLength(1);
     expect(escalations[0].escalationId).toBe('esc-bel-1');

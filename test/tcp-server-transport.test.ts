@@ -36,6 +36,36 @@ function readMessage(socket: Socket): Promise<JSONRPCMessage> {
   });
 }
 
+/**
+ * Collects messages from a transport's onmessage callback.
+ * Returns the array (filled by side-effect) and a function
+ * that waits until at least `count` messages have arrived.
+ */
+function createMessageCollector(transport: TcpServerTransport) {
+  const messages: JSONRPCMessage[] = [];
+  transport.onmessage = (msg) => messages.push(msg);
+
+  function waitForMessages(count: number): Promise<void> {
+    return new Promise((resolve) => {
+      const check = () => {
+        if (messages.length >= count) {
+          resolve();
+        } else {
+          setImmediate(check);
+        }
+      };
+      check();
+    });
+  }
+
+  return { messages, waitForMessages };
+}
+
+/** Yields control to allow the event loop to process pending I/O callbacks. */
+function nextTick(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
 describe('TcpServerTransport', () => {
   let transport: TcpServerTransport | undefined;
   let clientSocket: Socket | null = null;
@@ -64,8 +94,7 @@ describe('TcpServerTransport', () => {
 
   it('accepts connections and receives messages', async () => {
     transport = new TcpServerTransport('127.0.0.1', 0);
-    const receivedMessages: JSONRPCMessage[] = [];
-    transport.onmessage = (msg) => receivedMessages.push(msg);
+    const { messages, waitForMessages } = createMessageCollector(transport);
 
     await transport.start();
     clientSocket = await connectToTcp('127.0.0.1', transport.port);
@@ -78,10 +107,10 @@ describe('TcpServerTransport', () => {
 
     sendMessage(clientSocket, testMessage);
 
-    await new Promise((r) => setTimeout(r, 50));
+    await waitForMessages(1);
 
-    expect(receivedMessages).toHaveLength(1);
-    expect(receivedMessages[0]).toEqual(testMessage);
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toEqual(testMessage);
   });
 
   it('sends messages to the connected client', async () => {
@@ -90,8 +119,8 @@ describe('TcpServerTransport', () => {
 
     clientSocket = await connectToTcp('127.0.0.1', transport.port);
 
-    // Small delay to allow connection handler to register
-    await new Promise((r) => setTimeout(r, 20));
+    // Allow event loop to process the server-side connection callback
+    await nextTick();
 
     const responseMessage: JSONRPCMessage = {
       jsonrpc: '2.0',
@@ -107,8 +136,7 @@ describe('TcpServerTransport', () => {
 
   it('handles multiple messages in sequence', async () => {
     transport = new TcpServerTransport('127.0.0.1', 0);
-    const receivedMessages: JSONRPCMessage[] = [];
-    transport.onmessage = (msg) => receivedMessages.push(msg);
+    const { messages, waitForMessages } = createMessageCollector(transport);
 
     await transport.start();
     clientSocket = await connectToTcp('127.0.0.1', transport.port);
@@ -121,10 +149,10 @@ describe('TcpServerTransport', () => {
       });
     }
 
-    await new Promise((r) => setTimeout(r, 100));
+    await waitForMessages(3);
 
-    expect(receivedMessages).toHaveLength(3);
-    expect(receivedMessages.map((m) => ('id' in m ? m.id : null))).toEqual([1, 2, 3]);
+    expect(messages).toHaveLength(3);
+    expect(messages.map((m) => ('id' in m ? m.id : null))).toEqual([1, 2, 3]);
   });
 
   it('invokes onclose callback when closed', async () => {
@@ -170,18 +198,17 @@ describe('TcpServerTransport', () => {
 
   it('replaces old connection when a new client connects', async () => {
     transport = new TcpServerTransport('127.0.0.1', 0);
-    const receivedMessages: JSONRPCMessage[] = [];
-    transport.onmessage = (msg) => receivedMessages.push(msg);
+    const { messages, waitForMessages } = createMessageCollector(transport);
 
     await transport.start();
 
     // First client
     const firstClient = await connectToTcp('127.0.0.1', transport.port);
-    await new Promise((r) => setTimeout(r, 20));
+    await nextTick();
 
     // Second client replaces the first
     clientSocket = await connectToTcp('127.0.0.1', transport.port);
-    await new Promise((r) => setTimeout(r, 20));
+    await nextTick();
 
     // Message from second client should be received
     sendMessage(clientSocket, {
@@ -190,10 +217,10 @@ describe('TcpServerTransport', () => {
       method: 'test',
     });
 
-    await new Promise((r) => setTimeout(r, 50));
+    await waitForMessages(1);
 
-    expect(receivedMessages).toHaveLength(1);
-    expect(receivedMessages[0]).toEqual({
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toEqual({
       jsonrpc: '2.0',
       id: 42,
       method: 'test',

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -55,12 +55,14 @@ describe('createEscalationWatcher', () => {
   let escalationDir: string;
 
   beforeEach(() => {
+    vi.useFakeTimers();
     tempDir = mkdtempSync(join(tmpdir(), 'escalation-watcher-test-'));
     escalationDir = join(tempDir, 'escalations');
     mkdirSync(escalationDir, { recursive: true });
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     if (existsSync(tempDir)) {
       rmSync(tempDir, { recursive: true, force: true });
     }
@@ -78,7 +80,12 @@ describe('createEscalationWatcher', () => {
     writeFileSync(join(escalationDir, `request-${escalationId}.json`), JSON.stringify(full));
   }
 
-  it('detects new escalation request via polling', async () => {
+  /** Advance fake timers enough to trigger at least one poll cycle. */
+  function advancePastPoll(): void {
+    vi.advanceTimersByTime(60);
+  }
+
+  it('detects new escalation request via polling', () => {
     const escalations: EscalationRequest[] = [];
     const events: EscalationWatcherEvents = {
       onEscalation: (req) => escalations.push(req),
@@ -90,8 +97,7 @@ describe('createEscalationWatcher', () => {
 
     writeRequest('esc-001');
 
-    // Wait for poll to detect the file
-    await new Promise((r) => setTimeout(r, 200));
+    advancePastPoll();
 
     expect(escalations).toHaveLength(1);
     expect(escalations[0].escalationId).toBe('esc-001');
@@ -100,7 +106,7 @@ describe('createEscalationWatcher', () => {
     watcher.stop();
   });
 
-  it('does not emit the same escalation twice', async () => {
+  it('does not emit the same escalation twice', () => {
     const escalations: EscalationRequest[] = [];
     const events: EscalationWatcherEvents = {
       onEscalation: (req) => escalations.push(req),
@@ -111,11 +117,11 @@ describe('createEscalationWatcher', () => {
     watcher.start();
 
     writeRequest('esc-002');
-    await new Promise((r) => setTimeout(r, 200));
+    advancePastPoll();
 
     // Resolve the escalation so the watcher can look for new ones
     watcher.resolve('esc-002', 'approved');
-    await new Promise((r) => setTimeout(r, 200));
+    advancePastPoll();
 
     // The same request file is still there but should not be emitted again
     expect(escalations).toHaveLength(1);
@@ -123,7 +129,7 @@ describe('createEscalationWatcher', () => {
     watcher.stop();
   });
 
-  it('resolves escalation by writing response file atomically', async () => {
+  it('resolves escalation by writing response file atomically', () => {
     const events: EscalationWatcherEvents = {
       onEscalation: () => {},
       onEscalationExpired: () => {},
@@ -133,7 +139,7 @@ describe('createEscalationWatcher', () => {
     watcher.start();
 
     writeRequest('esc-003');
-    await new Promise((r) => setTimeout(r, 200));
+    advancePastPoll();
 
     expect(watcher.getPending()?.escalationId).toBe('esc-003');
 
@@ -154,7 +160,7 @@ describe('createEscalationWatcher', () => {
     watcher.stop();
   });
 
-  it('resolve writes response file and returns true when request exists', async () => {
+  it('resolve writes response file and returns true when request exists', () => {
     const events: EscalationWatcherEvents = {
       onEscalation: () => {},
       onEscalationExpired: () => {},
@@ -164,7 +170,7 @@ describe('createEscalationWatcher', () => {
     watcher.start();
 
     writeRequest('esc-004');
-    await new Promise((r) => setTimeout(r, 200));
+    advancePastPoll();
 
     expect(watcher.getPending()).toBeDefined();
     const accepted = watcher.resolve('esc-004', 'denied');
@@ -185,7 +191,7 @@ describe('createEscalationWatcher', () => {
     watcher.stop();
   });
 
-  it('resolve returns false when request has been cleaned up (expired)', async () => {
+  it('resolve returns false when request has been cleaned up (expired)', () => {
     const events: EscalationWatcherEvents = {
       onEscalation: () => {},
       onEscalationExpired: () => {},
@@ -195,7 +201,7 @@ describe('createEscalationWatcher', () => {
     watcher.start();
 
     writeRequest('esc-005');
-    await new Promise((r) => setTimeout(r, 200));
+    advancePastPoll();
 
     // Simulate proxy timeout cleanup: remove the request file
     rmSync(join(escalationDir, 'request-esc-005.json'));
@@ -216,7 +222,7 @@ describe('createEscalationWatcher', () => {
     expect(() => watcher.resolve('nonexistent', 'approved')).toThrow('No pending escalation');
   });
 
-  it('detects escalation expiry when files are removed', async () => {
+  it('detects escalation expiry when files are removed', () => {
     const expiredIds: string[] = [];
     const events: EscalationWatcherEvents = {
       onEscalation: () => {},
@@ -227,14 +233,14 @@ describe('createEscalationWatcher', () => {
     watcher.start();
 
     writeRequest('esc-006');
-    await new Promise((r) => setTimeout(r, 200));
+    advancePastPoll();
 
     expect(watcher.getPending()).toBeDefined();
 
     // Simulate proxy-side cleanup (both files removed = expired)
     rmSync(join(escalationDir, 'request-esc-006.json'));
 
-    await new Promise((r) => setTimeout(r, 200));
+    advancePastPoll();
 
     expect(expiredIds).toContain('esc-006');
     expect(watcher.getPending()).toBeUndefined();
@@ -242,7 +248,7 @@ describe('createEscalationWatcher', () => {
     watcher.stop();
   });
 
-  it('does not detect expiry when response file exists', async () => {
+  it('does not detect expiry when response file exists', () => {
     const expiredIds: string[] = [];
     const events: EscalationWatcherEvents = {
       onEscalation: () => {},
@@ -253,13 +259,13 @@ describe('createEscalationWatcher', () => {
     watcher.start();
 
     writeRequest('esc-007');
-    await new Promise((r) => setTimeout(r, 200));
+    advancePastPoll();
 
     // Remove request but leave a response (not expired -- response was written)
     rmSync(join(escalationDir, 'request-esc-007.json'));
     writeFileSync(join(escalationDir, 'response-esc-007.json'), JSON.stringify({ decision: 'approved' }));
 
-    await new Promise((r) => setTimeout(r, 200));
+    advancePastPoll();
 
     // Should NOT be considered expired because response exists
     expect(expiredIds).toHaveLength(0);
@@ -292,7 +298,7 @@ describe('createEscalationWatcher', () => {
     watcher.stop(); // Should not throw
   });
 
-  it('handles missing escalation directory gracefully', async () => {
+  it('handles missing escalation directory gracefully', () => {
     const nonExistentDir = join(tempDir, 'does-not-exist');
     const events: EscalationWatcherEvents = {
       onEscalation: () => {},
@@ -303,13 +309,13 @@ describe('createEscalationWatcher', () => {
     watcher.start();
 
     // Should not throw during polling
-    await new Promise((r) => setTimeout(r, 200));
+    advancePastPoll();
 
     expect(watcher.getPending()).toBeUndefined();
     watcher.stop();
   });
 
-  it('picks up next escalation after resolving previous', async () => {
+  it('picks up next escalation after resolving previous', () => {
     const escalations: EscalationRequest[] = [];
     const events: EscalationWatcherEvents = {
       onEscalation: (req) => escalations.push(req),
@@ -320,13 +326,13 @@ describe('createEscalationWatcher', () => {
     watcher.start();
 
     writeRequest('esc-008');
-    await new Promise((r) => setTimeout(r, 200));
+    advancePastPoll();
 
     watcher.resolve('esc-008', 'approved');
 
     // Write a second escalation
     writeRequest('esc-009', { toolName: 'delete_file' });
-    await new Promise((r) => setTimeout(r, 200));
+    advancePastPoll();
 
     expect(escalations).toHaveLength(2);
     expect(escalations[1].escalationId).toBe('esc-009');

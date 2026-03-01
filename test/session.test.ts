@@ -468,6 +468,21 @@ describe('Session', () => {
   });
 
   describe('escalation', () => {
+    // Escalation detection relies on setInterval polling (300ms). Use fake
+    // timers so tests advance time instantly instead of waiting real seconds.
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    /** Advance fake time past the 300ms poll interval so the watcher fires. */
+    async function advancePastPoll(): Promise<void> {
+      await vi.advanceTimersByTimeAsync(350);
+    }
+
     it('resolveEscalation writes response file to escalation directory', async () => {
       const onEscalation = vi.fn();
       const session = await createTestSession({ onEscalation });
@@ -477,8 +492,8 @@ describe('Session', () => {
         const escalationId = 'test-escalation-123';
         const { responsePath } = writeEscalationRequest(escalationDir, escalationId);
 
-        // Wait for the polling interval to detect it
-        await new Promise((r) => setTimeout(r, 500));
+        // Advance fake time to trigger the polling interval
+        await advancePastPoll();
 
         expect(onEscalation).toHaveBeenCalledTimes(1);
         const escalationReq: EscalationRequest = onEscalation.mock.calls[0][0];
@@ -530,8 +545,8 @@ describe('Session', () => {
           reason: 'Write outside sandbox',
         });
 
-        // Wait for polling to detect
-        await new Promise((r) => setTimeout(r, 500));
+        // Advance fake time to trigger the polling interval
+        await advancePastPoll();
 
         expect(onEscalation).toHaveBeenCalledOnce();
         expect(session.getPendingEscalation()?.escalationId).toBe(escalationId);
@@ -550,15 +565,15 @@ describe('Session', () => {
         const escalationId = 'expiry-test-789';
         const { requestPath } = writeEscalationRequest(escalationDir, escalationId);
 
-        // Wait for polling to detect the escalation
-        await new Promise((r) => setTimeout(r, 500));
+        // Advance fake time to detect the escalation
+        await advancePastPoll();
         expect(session.getPendingEscalation()?.escalationId).toBe(escalationId);
 
         // Simulate proxy timeout: delete the request file (no response file exists)
         unlinkSync(requestPath);
 
-        // Wait for next poll to detect expiry
-        await new Promise((r) => setTimeout(r, 500));
+        // Advance fake time again to detect expiry
+        await advancePastPoll();
 
         expect(session.getPendingEscalation()).toBeUndefined();
         expect(onEscalationExpired).toHaveBeenCalledOnce();
@@ -577,8 +592,8 @@ describe('Session', () => {
         const escalationId = 'no-expiry-test-101';
         const { requestPath, responsePath } = writeEscalationRequest(escalationDir, escalationId);
 
-        // Wait for polling to detect the escalation
-        await new Promise((r) => setTimeout(r, 500));
+        // Advance fake time to detect the escalation
+        await advancePastPoll();
         expect(session.getPendingEscalation()?.escalationId).toBe(escalationId);
 
         // Simulate user approval: write response file, then delete request file
@@ -586,8 +601,8 @@ describe('Session', () => {
         writeFileSync(responsePath, JSON.stringify({ decision: 'approved' }));
         unlinkSync(requestPath);
 
-        // Wait for next poll
-        await new Promise((r) => setTimeout(r, 500));
+        // Advance fake time for next poll
+        await advancePastPoll();
 
         // Escalation should NOT be cleared because response file still exists
         expect(session.getPendingEscalation()?.escalationId).toBe(escalationId);

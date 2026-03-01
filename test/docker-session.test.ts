@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -312,6 +312,8 @@ describe('DockerAgentSession', () => {
   });
 
   afterEach(async () => {
+    // Restore real timers before cleanup so async operations in close() work
+    vi.useRealTimers();
     // Ensure session is closed to stop intervals
     try {
       await session?.close();
@@ -459,6 +461,8 @@ describe('DockerAgentSession', () => {
   });
 
   it('resolves escalation by writing response file', async () => {
+    vi.useFakeTimers();
+
     session = new DockerAgentSession(deps);
     await session.initialize();
 
@@ -473,8 +477,8 @@ describe('DockerAgentSession', () => {
     };
     writeFileSync(join(deps.escalationDir, `request-${escalationId}.json`), JSON.stringify(request));
 
-    // Wait long enough for the polling interval to detect the request to avoid timing-related test flakiness
-    await new Promise((r) => setTimeout(r, 1000));
+    // Advance fake timers to trigger the escalation watcher's polling interval (300ms default)
+    vi.advanceTimersByTime(350);
 
     const pending = session.getPendingEscalation();
     expect(pending).toBeDefined();
@@ -489,6 +493,8 @@ describe('DockerAgentSession', () => {
 
     // Pending should be cleared
     expect(session.getPendingEscalation()).toBeUndefined();
+
+    vi.useRealTimers();
   });
 
   it('throws when resolving unknown escalation', async () => {
@@ -499,6 +505,8 @@ describe('DockerAgentSession', () => {
   });
 
   it('calls onEscalation callback when escalation detected', async () => {
+    vi.useFakeTimers();
+
     const escalations: EscalationRequest[] = [];
     session = new DockerAgentSession({
       ...deps,
@@ -515,13 +523,17 @@ describe('DockerAgentSession', () => {
     };
     writeFileSync(join(deps.escalationDir, 'request-esc-456.json'), JSON.stringify(request));
 
-    await new Promise((r) => setTimeout(r, 1000));
+    vi.advanceTimersByTime(350);
 
     expect(escalations).toHaveLength(1);
     expect(escalations[0].escalationId).toBe('esc-456');
+
+    vi.useRealTimers();
   });
 
   it('detects escalation expiry when files are removed', async () => {
+    vi.useFakeTimers();
+
     let expired = false;
     session = new DockerAgentSession({
       ...deps,
@@ -541,15 +553,17 @@ describe('DockerAgentSession', () => {
     };
     writeFileSync(join(deps.escalationDir, 'request-esc-789.json'), JSON.stringify(request));
 
-    await new Promise((r) => setTimeout(r, 1000));
+    vi.advanceTimersByTime(350);
     expect(session.getPendingEscalation()).toBeDefined();
 
     // Simulate proxy-side cleanup (both files removed = expired)
     rmSync(join(deps.escalationDir, 'request-esc-789.json'));
 
-    await new Promise((r) => setTimeout(r, 1000));
+    vi.advanceTimersByTime(350);
     expect(expired).toBe(true);
     expect(session.getPendingEscalation()).toBeUndefined();
+
+    vi.useRealTimers();
   });
 
   it('writes user context for auto-approver', async () => {

@@ -149,6 +149,35 @@ function wait(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+/**
+ * Polls a predicate every 5ms and resolves as soon as it returns true.
+ * Falls back to a timeout (default 5s) to avoid hanging forever.
+ */
+async function waitFor(predicate: () => boolean, timeoutMs = 5000): Promise<void> {
+  const start = Date.now();
+  while (!predicate()) {
+    if (Date.now() - start > timeoutMs) {
+      throw new Error(`waitFor timed out after ${timeoutMs}ms`);
+    }
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
+
+/** Waits until mockApi.sentMessages has at least `count` entries. */
+function waitForMessages(mockApi: MockSignalApi, count: number, timeoutMs = 5000): Promise<void> {
+  return waitFor(() => mockApi.sentMessages.length >= count, timeoutMs);
+}
+
+/** Waits until mockApi.messageTexts contains a message matching the predicate. */
+function waitForMessage(mockApi: MockSignalApi, predicate: (text: string) => boolean, timeoutMs = 5000): Promise<void> {
+  return waitFor(() => mockApi.messageTexts.some(predicate), timeoutMs);
+}
+
+/** Waits until the given mock function has been called at least `count` times. */
+function waitForCalls(fn: ReturnType<typeof vi.fn>, count: number, timeoutMs = 5000): Promise<void> {
+  return waitFor(() => fn.mock.calls.length >= count, timeoutMs);
+}
+
 function createMockContainerManager(port: number): SignalContainerManager {
   return {
     async ensureRunning() {
@@ -459,7 +488,8 @@ describe('SignalBotDaemon', () => {
   ): Promise<void> {
     const daemon = createDaemon(configOverrides);
     const startPromise = daemon.start();
-    await wait(200);
+    // Wait for the "online" message to be sent (daemon is ready)
+    await waitForMessages(mockApi, 1);
     try {
       await body(daemon);
     } finally {
@@ -478,7 +508,7 @@ describe('SignalBotDaemon', () => {
   it('routes authorized messages to session', async () => {
     await withDaemon(async () => {
       mockApi.simulateIncomingMessage('+15559876543', 'Hello agent');
-      await wait(500);
+      await waitForMessage(mockApi, (m) => m.includes('Started a new session'));
 
       expect(mockApi.messageTexts.some((m) => m.includes('Started a new session'))).toBe(true);
     });
@@ -488,7 +518,7 @@ describe('SignalBotDaemon', () => {
     await withDaemon(async () => {
       const countBefore = mockApi.sentMessages.length;
       mockApi.simulateIncomingMessage('+19999999999', 'I am a stranger');
-      await wait(200);
+      await wait(50);
 
       expect(mockApi.sentMessages.length).toBe(countBefore);
     });
@@ -497,7 +527,7 @@ describe('SignalBotDaemon', () => {
   it('handles /help control command', async () => {
     await withDaemon(async () => {
       mockApi.simulateIncomingMessage('+15559876543', '/help');
-      await wait(200);
+      await waitForMessage(mockApi, (m) => m.includes('Commands:'));
 
       const messages = mockApi.messageTexts;
       expect(messages.some((m) => m.includes('Commands:'))).toBe(true);
@@ -510,7 +540,7 @@ describe('SignalBotDaemon', () => {
   it('handles /budget command with no active session', async () => {
     await withDaemon(async () => {
       mockApi.simulateIncomingMessage('+15559876543', '/budget');
-      await wait(200);
+      await waitForMessage(mockApi, (m) => m.includes('No active session'));
 
       expect(mockApi.messageTexts.some((m) => m.includes('No active session'))).toBe(true);
     });
@@ -527,7 +557,7 @@ describe('SignalBotDaemon', () => {
   it('sends goodbye message on shutdown', async () => {
     const daemon = createDaemon();
     const startPromise = daemon.start();
-    await wait(200);
+    await waitForMessages(mockApi, 1);
 
     await daemon.shutdown();
     await startPromise;
@@ -541,7 +571,7 @@ describe('SignalBotDaemon', () => {
     await withDaemon(async () => {
       const countBefore = mockApi.sentMessages.length;
       mockApi.simulateUntrustedIdentity('+15559876543', 'should be rejected');
-      await wait(200);
+      await wait(50);
 
       const messagesAfter = mockApi.sentMessages.slice(countBefore);
       expect(messagesAfter.every((m) => !m.message.includes('session'))).toBe(true);
@@ -554,7 +584,7 @@ describe('SignalBotDaemon', () => {
     await withDaemon(async () => {
       const countBefore = mockApi.sentMessages.length;
       mockApi.simulateIncomingMessage('+15559876543', 'should be rejected');
-      await wait(500);
+      await wait(50);
 
       const messagesAfter = mockApi.sentMessages.slice(countBefore);
       expect(messagesAfter.every((m) => !m.message.includes('Started a new session'))).toBe(true);
@@ -567,7 +597,7 @@ describe('SignalBotDaemon', () => {
     await withDaemon(async () => {
       const countBefore = mockApi.sentMessages.length;
       mockApi.simulateIncomingMessage('+15559876543', 'should be rejected');
-      await wait(500);
+      await wait(50);
 
       const messagesAfter = mockApi.sentMessages.slice(countBefore);
       expect(messagesAfter.every((m) => !m.message.includes('Started a new session'))).toBe(true);
@@ -580,18 +610,16 @@ describe('SignalBotDaemon', () => {
     await withDaemon(async () => {
       // First message: rejected (API down)
       mockApi.simulateIncomingMessage('+15559876543', 'first attempt');
-      await wait(500);
+      await wait(50);
 
       // Restore API and send second message
       mockApi.setIdentityEndpointDown(false);
       mockApi.setIdentities([{ number: '+15559876543', fingerprint: 'test-identity-key-abc123' }]);
 
-      const countBefore = mockApi.sentMessages.length;
       mockApi.simulateIncomingMessage('+15559876543', 'second attempt');
-      await wait(500);
+      await waitForMessage(mockApi, (m) => m.includes('Started a new session'));
 
-      const messagesAfter = mockApi.sentMessages.slice(countBefore);
-      expect(messagesAfter.some((m) => m.message.includes('Started a new session'))).toBe(true);
+      expect(mockApi.messageTexts.some((m) => m.includes('Started a new session'))).toBe(true);
     });
   });
 
@@ -600,11 +628,11 @@ describe('SignalBotDaemon', () => {
   it('handles escalation approve reply', async () => {
     await withDaemon(async (daemon) => {
       mockApi.simulateIncomingMessage('+15559876543', 'Hello agent');
-      await wait(500);
+      await waitForMessage(mockApi, (m) => m.includes('Started a new session'));
 
       daemon.setPendingEscalation(1, 'esc-123');
       mockApi.simulateIncomingMessage('+15559876543', 'approve');
-      await wait(300);
+      await waitForMessage(mockApi, (m) => m.includes('approved'));
 
       expect(mockApi.messageTexts.some((m) => m.includes('approved'))).toBe(true);
     });
@@ -613,11 +641,11 @@ describe('SignalBotDaemon', () => {
   it('handles escalation deny reply', async () => {
     await withDaemon(async (daemon) => {
       mockApi.simulateIncomingMessage('+15559876543', 'Hello agent');
-      await wait(500);
+      await waitForMessage(mockApi, (m) => m.includes('Started a new session'));
 
       daemon.setPendingEscalation(1, 'esc-456');
       mockApi.simulateIncomingMessage('+15559876543', '/deny');
-      await wait(300);
+      await waitForMessage(mockApi, (m) => m.includes('denied'));
 
       expect(mockApi.messageTexts.some((m) => m.includes('denied'))).toBe(true);
     });
@@ -626,14 +654,14 @@ describe('SignalBotDaemon', () => {
   it('rejects concurrent escalation replies', async () => {
     await withDaemon(async (daemon) => {
       mockApi.simulateIncomingMessage('+15559876543', 'Hello agent');
-      await wait(500);
+      await waitForMessage(mockApi, (m) => m.includes('Started a new session'));
 
       daemon.setPendingEscalation(1, 'esc-789');
 
       // Send two rapid replies (second should be blocked)
       mockApi.simulateIncomingMessage('+15559876543', 'approve');
       mockApi.simulateIncomingMessage('+15559876543', 'deny');
-      await wait(500);
+      await waitForMessage(mockApi, (m) => m.includes('approved'));
 
       const messages = mockApi.messageTexts;
       const hasResolving = messages.some((m) => m.includes('being resolved'));
@@ -647,10 +675,10 @@ describe('SignalBotDaemon', () => {
   it('handles /quit command by ending session', async () => {
     await withDaemon(async () => {
       mockApi.simulateIncomingMessage('+15559876543', 'Hello agent');
-      await wait(500);
+      await waitForMessage(mockApi, (m) => m.includes('Started a new session'));
 
       mockApi.simulateIncomingMessage('+15559876543', '/quit');
-      await wait(300);
+      await waitForMessage(mockApi, (m) => m.includes('Session ended'));
 
       expect(mockApi.messageTexts.some((m) => m.includes('Session ended'))).toBe(true);
     });
@@ -661,10 +689,10 @@ describe('SignalBotDaemon', () => {
   it('creates two concurrent sessions via /new', async () => {
     await withDaemon(async () => {
       mockApi.simulateIncomingMessage('+15559876543', 'Hello agent');
-      await wait(500);
+      await waitForMessage(mockApi, (m) => m.includes('Started a new session'));
 
       mockApi.simulateIncomingMessage('+15559876543', '/new');
-      await wait(500);
+      await waitFor(() => mockApi.messageTexts.filter((m) => m.includes('Started a new session')).length >= 2);
 
       const startedCount = mockApi.messageTexts.filter((m) => m.includes('Started a new session')).length;
       expect(startedCount).toBe(2);
@@ -674,12 +702,12 @@ describe('SignalBotDaemon', () => {
   it('/sessions lists all active sessions', async () => {
     await withDaemon(async () => {
       mockApi.simulateIncomingMessage('+15559876543', 'Hello agent');
-      await wait(500);
+      await waitForMessage(mockApi, (m) => m.includes('Started a new session'));
       mockApi.simulateIncomingMessage('+15559876543', '/new');
-      await wait(500);
+      await waitFor(() => mockApi.messageTexts.filter((m) => m.includes('Started a new session')).length >= 2);
 
       mockApi.simulateIncomingMessage('+15559876543', '/sessions');
-      await wait(300);
+      await waitForMessage(mockApi, (m) => m.includes('Active sessions'));
 
       const sessionList = mockApi.messageTexts.find((m) => m.includes('Active sessions'));
       expect(sessionList).toBeDefined();
@@ -692,12 +720,12 @@ describe('SignalBotDaemon', () => {
   it('/switch changes which session receives messages', async () => {
     await withDaemon(async () => {
       mockApi.simulateIncomingMessage('+15559876543', 'Hello agent');
-      await wait(500);
+      await waitForMessage(mockApi, (m) => m.includes('Started a new session'));
       mockApi.simulateIncomingMessage('+15559876543', '/new');
-      await wait(500);
+      await waitFor(() => mockApi.messageTexts.filter((m) => m.includes('Started a new session')).length >= 2);
 
       mockApi.simulateIncomingMessage('+15559876543', '/switch 1');
-      await wait(300);
+      await waitForMessage(mockApi, (m) => m.includes('Switched to session #1'));
 
       expect(mockApi.messageTexts.some((m) => m.includes('Switched to session #1'))).toBe(true);
     });
@@ -706,12 +734,12 @@ describe('SignalBotDaemon', () => {
   it('/quit ends current and auto-switches', async () => {
     await withDaemon(async () => {
       mockApi.simulateIncomingMessage('+15559876543', 'Hello agent');
-      await wait(500);
+      await waitForMessage(mockApi, (m) => m.includes('Started a new session'));
       mockApi.simulateIncomingMessage('+15559876543', '/new');
-      await wait(500);
+      await waitFor(() => mockApi.messageTexts.filter((m) => m.includes('Started a new session')).length >= 2);
 
       mockApi.simulateIncomingMessage('+15559876543', '/quit');
-      await wait(300);
+      await waitForMessage(mockApi, (m) => m.includes('Switched to #1'));
 
       expect(mockApi.messageTexts.some((m) => m.includes('Switched to #1'))).toBe(true);
     });
@@ -720,12 +748,12 @@ describe('SignalBotDaemon', () => {
   it('/quit N ends a specific session', async () => {
     await withDaemon(async () => {
       mockApi.simulateIncomingMessage('+15559876543', 'Hello agent');
-      await wait(500);
+      await waitForMessage(mockApi, (m) => m.includes('Started a new session'));
       mockApi.simulateIncomingMessage('+15559876543', '/new');
-      await wait(500);
+      await waitFor(() => mockApi.messageTexts.filter((m) => m.includes('Started a new session')).length >= 2);
 
       mockApi.simulateIncomingMessage('+15559876543', '/quit 1');
-      await wait(300);
+      await waitForMessage(mockApi, (m) => m.includes('Session #1 ended'));
 
       expect(mockApi.messageTexts.some((m) => m.includes('Session #1 ended'))).toBe(true);
     });
@@ -734,13 +762,13 @@ describe('SignalBotDaemon', () => {
   it('escalation auto-routes to session with pending escalation', async () => {
     await withDaemon(async (daemon) => {
       mockApi.simulateIncomingMessage('+15559876543', 'Hello agent');
-      await wait(500);
+      await waitForMessage(mockApi, (m) => m.includes('Started a new session'));
       mockApi.simulateIncomingMessage('+15559876543', '/new');
-      await wait(500);
+      await waitFor(() => mockApi.messageTexts.filter((m) => m.includes('Started a new session')).length >= 2);
 
       daemon.setPendingEscalation(1, 'esc-auto');
       mockApi.simulateIncomingMessage('+15559876543', 'approve');
-      await wait(300);
+      await waitForMessage(mockApi, (m) => m.includes('approved'));
 
       expect(mockApi.messageTexts.some((m) => m.includes('approved'))).toBe(true);
     });
@@ -749,14 +777,14 @@ describe('SignalBotDaemon', () => {
   it('escalation disambiguation when multiple pending', async () => {
     await withDaemon(async (daemon) => {
       mockApi.simulateIncomingMessage('+15559876543', 'Hello agent');
-      await wait(500);
+      await waitForMessage(mockApi, (m) => m.includes('Started a new session'));
       mockApi.simulateIncomingMessage('+15559876543', '/new');
-      await wait(500);
+      await waitFor(() => mockApi.messageTexts.filter((m) => m.includes('Started a new session')).length >= 2);
 
       daemon.setPendingEscalation(1, 'esc-a');
       daemon.setPendingEscalation(2, 'esc-b');
       mockApi.simulateIncomingMessage('+15559876543', 'approve');
-      await wait(300);
+      await waitForMessage(mockApi, (m) => m.includes('Multiple escalations pending'));
 
       expect(mockApi.messageTexts.some((m) => m.includes('Multiple escalations pending'))).toBe(true);
     });
@@ -765,14 +793,14 @@ describe('SignalBotDaemon', () => {
   it('escalation with explicit label routes directly', async () => {
     await withDaemon(async (daemon) => {
       mockApi.simulateIncomingMessage('+15559876543', 'Hello agent');
-      await wait(500);
+      await waitForMessage(mockApi, (m) => m.includes('Started a new session'));
       mockApi.simulateIncomingMessage('+15559876543', '/new');
-      await wait(500);
+      await waitFor(() => mockApi.messageTexts.filter((m) => m.includes('Started a new session')).length >= 2);
 
       daemon.setPendingEscalation(1, 'esc-x');
       daemon.setPendingEscalation(2, 'esc-y');
       mockApi.simulateIncomingMessage('+15559876543', 'approve #1');
-      await wait(300);
+      await waitForMessage(mockApi, (m) => m.includes('approved'));
 
       expect(mockApi.messageTexts.some((m) => m.includes('approved'))).toBe(true);
     });
@@ -782,12 +810,12 @@ describe('SignalBotDaemon', () => {
     await withDaemon(
       async () => {
         mockApi.simulateIncomingMessage('+15559876543', 'Hello agent');
-        await wait(500);
+        await waitForMessage(mockApi, (m) => m.includes('Started a new session'));
         mockApi.simulateIncomingMessage('+15559876543', '/new');
-        await wait(500);
+        await waitFor(() => mockApi.messageTexts.filter((m) => m.includes('Started a new session')).length >= 2);
 
         mockApi.simulateIncomingMessage('+15559876543', '/new');
-        await wait(300);
+        await waitForMessage(mockApi, (m) => m.includes('Session limit reached'));
 
         expect(mockApi.messageTexts.some((m) => m.includes('Session limit reached'))).toBe(true);
       },
@@ -798,7 +826,7 @@ describe('SignalBotDaemon', () => {
   it('/sessions shows no active sessions when none exist', async () => {
     await withDaemon(async () => {
       mockApi.simulateIncomingMessage('+15559876543', '/sessions');
-      await wait(200);
+      await waitForMessage(mockApi, (m) => m.includes('No active sessions'));
 
       expect(mockApi.messageTexts.some((m) => m.includes('No active sessions'))).toBe(true);
     });
@@ -807,7 +835,7 @@ describe('SignalBotDaemon', () => {
   it('/switch to non-existent session shows error', async () => {
     await withDaemon(async () => {
       mockApi.simulateIncomingMessage('+15559876543', '/switch 5');
-      await wait(200);
+      await waitForMessage(mockApi, (m) => m.includes('No session #5'));
 
       expect(mockApi.messageTexts.some((m) => m.includes('No session #5'))).toBe(true);
     });
@@ -816,10 +844,10 @@ describe('SignalBotDaemon', () => {
   it('/budget N shows budget for specific session', async () => {
     await withDaemon(async () => {
       mockApi.simulateIncomingMessage('+15559876543', 'Hello agent');
-      await wait(500);
+      await waitForMessage(mockApi, (m) => m.includes('Started a new session'));
 
       mockApi.simulateIncomingMessage('+15559876543', '/budget 1');
-      await wait(300);
+      await waitForMessage(mockApi, (m) => m.includes('budget'));
 
       expect(mockApi.messageTexts.some((m) => m.includes('budget'))).toBe(true);
     });
@@ -830,19 +858,19 @@ describe('SignalBotDaemon', () => {
   it('approving one escalation leaves the other still pending', async () => {
     await withDaemon(async (daemon) => {
       mockApi.simulateIncomingMessage('+15559876543', 'Hello agent');
-      await wait(500);
+      await waitForMessage(mockApi, (m) => m.includes('Started a new session'));
       mockApi.simulateIncomingMessage('+15559876543', '/new');
-      await wait(500);
+      await waitFor(() => mockApi.messageTexts.filter((m) => m.includes('Started a new session')).length >= 2);
 
       daemon.setPendingEscalation(1, 'esc-a');
       daemon.setPendingEscalation(2, 'esc-b');
 
       mockApi.simulateIncomingMessage('+15559876543', 'approve #1');
-      await wait(300);
+      await waitForMessage(mockApi, (m) => m.includes('approved'));
 
       // Bare approve should auto-route to #2 (only one remaining)
       mockApi.simulateIncomingMessage('+15559876543', 'approve');
-      await wait(300);
+      await waitFor(() => mockApi.messageTexts.filter((m) => m.includes('approved')).length >= 2);
 
       const messages = mockApi.messageTexts;
       expect(messages.filter((m) => m.includes('approved')).length).toBe(2);
@@ -853,15 +881,15 @@ describe('SignalBotDaemon', () => {
   it('deny with explicit label targets the correct session', async () => {
     await withDaemon(async (daemon) => {
       mockApi.simulateIncomingMessage('+15559876543', 'Hello agent');
-      await wait(500);
+      await waitForMessage(mockApi, (m) => m.includes('Started a new session'));
       mockApi.simulateIncomingMessage('+15559876543', '/new');
-      await wait(500);
+      await waitFor(() => mockApi.messageTexts.filter((m) => m.includes('Started a new session')).length >= 2);
 
       daemon.setPendingEscalation(1, 'esc-d1');
       daemon.setPendingEscalation(2, 'esc-d2');
 
       mockApi.simulateIncomingMessage('+15559876543', 'deny #2');
-      await wait(300);
+      await waitForMessage(mockApi, (m) => m.includes('denied'));
 
       expect(mockApi.messageTexts.some((m) => m.includes('denied'))).toBe(true);
       expect(createdMockSessions[1].session.resolveEscalation).toHaveBeenCalledWith('esc-d2', 'denied');
@@ -872,26 +900,26 @@ describe('SignalBotDaemon', () => {
   it('full flow: disambiguate then approve one then deny the other', async () => {
     await withDaemon(async (daemon) => {
       mockApi.simulateIncomingMessage('+15559876543', 'Hello agent');
-      await wait(500);
+      await waitForMessage(mockApi, (m) => m.includes('Started a new session'));
       mockApi.simulateIncomingMessage('+15559876543', '/new');
-      await wait(500);
+      await waitFor(() => mockApi.messageTexts.filter((m) => m.includes('Started a new session')).length >= 2);
 
       daemon.setPendingEscalation(1, 'esc-flow-1');
       daemon.setPendingEscalation(2, 'esc-flow-2');
 
       // Step 1: bare approve triggers disambiguation
       mockApi.simulateIncomingMessage('+15559876543', 'approve');
-      await wait(300);
+      await waitForMessage(mockApi, (m) => m.includes('Multiple escalations pending'));
       expect(mockApi.messageTexts.some((m) => m.includes('Multiple escalations pending'))).toBe(true);
 
       // Step 2: approve #1 with label
       mockApi.simulateIncomingMessage('+15559876543', 'approve #1');
-      await wait(300);
+      await waitForMessage(mockApi, (m) => m.includes('approved'));
       expect(createdMockSessions[0].session.resolveEscalation).toHaveBeenCalledWith('esc-flow-1', 'approved');
 
       // Step 3: deny #2 (now only one pending, bare deny should work)
       mockApi.simulateIncomingMessage('+15559876543', 'deny');
-      await wait(300);
+      await waitForMessage(mockApi, (m) => m.includes('denied'));
       expect(createdMockSessions[1].session.resolveEscalation).toHaveBeenCalledWith('esc-flow-2', 'denied');
     });
   });
@@ -899,13 +927,13 @@ describe('SignalBotDaemon', () => {
   it('approve #N where N has no pending escalation shows error', async () => {
     await withDaemon(async (daemon) => {
       mockApi.simulateIncomingMessage('+15559876543', 'Hello agent');
-      await wait(500);
+      await waitForMessage(mockApi, (m) => m.includes('Started a new session'));
       mockApi.simulateIncomingMessage('+15559876543', '/new');
-      await wait(500);
+      await waitFor(() => mockApi.messageTexts.filter((m) => m.includes('Started a new session')).length >= 2);
 
       daemon.setPendingEscalation(1, 'esc-only-1');
       mockApi.simulateIncomingMessage('+15559876543', 'approve #2');
-      await wait(300);
+      await waitForMessage(mockApi, (m) => m.includes('no pending escalation'));
 
       expect(mockApi.messageTexts.some((m) => m.includes('no pending escalation'))).toBe(true);
       expect(createdMockSessions[0].session.resolveEscalation).not.toHaveBeenCalled();
@@ -920,9 +948,9 @@ describe('SignalBotDaemon', () => {
   it('escalation via callback chain labels banner with correct session', async () => {
     await withDaemon(async () => {
       mockApi.simulateIncomingMessage('+15559876543', 'Hello agent');
-      await wait(500);
+      await waitForMessage(mockApi, (m) => m.includes('Started a new session'));
       mockApi.simulateIncomingMessage('+15559876543', '/new');
-      await wait(500);
+      await waitFor(() => mockApi.messageTexts.filter((m) => m.includes('Started a new session')).length >= 2);
 
       expect(createdMockSessions[1].onEscalation).toBeDefined();
       createdMockSessions[1].onEscalation!({
@@ -932,7 +960,7 @@ describe('SignalBotDaemon', () => {
         arguments: { url: 'https://example.com' },
         reason: 'test escalation',
       });
-      await wait(200);
+      await waitForMessage(mockApi, (m) => m.includes('ESCALATION'));
 
       const banner = mockApi.messageTexts.find((m) => m.includes('ESCALATION'));
       expect(banner).toBeDefined();
@@ -944,9 +972,9 @@ describe('SignalBotDaemon', () => {
   it('escalation via callback from session #1 labels banner with #1', async () => {
     await withDaemon(async () => {
       mockApi.simulateIncomingMessage('+15559876543', 'Hello agent');
-      await wait(500);
+      await waitForMessage(mockApi, (m) => m.includes('Started a new session'));
       mockApi.simulateIncomingMessage('+15559876543', '/new');
-      await wait(500);
+      await waitFor(() => mockApi.messageTexts.filter((m) => m.includes('Started a new session')).length >= 2);
 
       expect(createdMockSessions[0].onEscalation).toBeDefined();
       createdMockSessions[0].onEscalation!({
@@ -956,7 +984,7 @@ describe('SignalBotDaemon', () => {
         arguments: { path: '/etc/passwd' },
         reason: 'protected path',
       });
-      await wait(200);
+      await waitForMessage(mockApi, (m) => m.includes('ESCALATION'));
 
       const banner = mockApi.messageTexts.find((m) => m.includes('ESCALATION'));
       expect(banner).toBeDefined();
@@ -967,9 +995,9 @@ describe('SignalBotDaemon', () => {
   it('approve routes to correct session when escalation was set via callback', async () => {
     await withDaemon(async () => {
       mockApi.simulateIncomingMessage('+15559876543', 'Hello agent');
-      await wait(500);
+      await waitForMessage(mockApi, (m) => m.includes('Started a new session'));
       mockApi.simulateIncomingMessage('+15559876543', '/new');
-      await wait(500);
+      await waitFor(() => mockApi.messageTexts.filter((m) => m.includes('Started a new session')).length >= 2);
 
       createdMockSessions[1].onEscalation!({
         escalationId: 'esc-cb-resolve',
@@ -978,10 +1006,10 @@ describe('SignalBotDaemon', () => {
         arguments: {},
         reason: 'test',
       });
-      await wait(200);
+      await waitForMessage(mockApi, (m) => m.includes('ESCALATION'));
 
       mockApi.simulateIncomingMessage('+15559876543', 'approve');
-      await wait(300);
+      await waitForMessage(mockApi, (m) => m.includes('approved'));
 
       expect(createdMockSessions[1].session.resolveEscalation).toHaveBeenCalledWith('esc-cb-resolve', 'approved');
       expect(createdMockSessions[0].session.resolveEscalation).not.toHaveBeenCalled();
@@ -991,9 +1019,9 @@ describe('SignalBotDaemon', () => {
   it('concurrent callback escalations on both sessions require disambiguation', async () => {
     await withDaemon(async () => {
       mockApi.simulateIncomingMessage('+15559876543', 'Hello agent');
-      await wait(500);
+      await waitForMessage(mockApi, (m) => m.includes('Started a new session'));
       mockApi.simulateIncomingMessage('+15559876543', '/new');
-      await wait(500);
+      await waitFor(() => mockApi.messageTexts.filter((m) => m.includes('Started a new session')).length >= 2);
 
       createdMockSessions[0].onEscalation!({
         escalationId: 'esc-both-1',
@@ -1009,7 +1037,7 @@ describe('SignalBotDaemon', () => {
         arguments: {},
         reason: 'delete requires approval',
       });
-      await wait(200);
+      await waitFor(() => mockApi.messageTexts.filter((m) => m.includes('ESCALATION')).length >= 2);
 
       const banners = mockApi.messageTexts.filter((m) => m.includes('ESCALATION'));
       expect(banners.length).toBe(2);
@@ -1018,14 +1046,14 @@ describe('SignalBotDaemon', () => {
 
       // Bare approve should require disambiguation
       mockApi.simulateIncomingMessage('+15559876543', 'approve');
-      await wait(300);
+      await waitForMessage(mockApi, (m) => m.includes('Multiple escalations pending'));
       expect(mockApi.messageTexts.some((m) => m.includes('Multiple escalations pending'))).toBe(true);
 
       // Approve #2 explicitly, then deny #1
       mockApi.simulateIncomingMessage('+15559876543', 'approve #2');
-      await wait(300);
+      await waitForMessage(mockApi, (m) => m.includes('approved'));
       mockApi.simulateIncomingMessage('+15559876543', 'deny');
-      await wait(300);
+      await waitForMessage(mockApi, (m) => m.includes('denied'));
 
       expect(createdMockSessions[1].session.resolveEscalation).toHaveBeenCalledWith('esc-both-2', 'approved');
       expect(createdMockSessions[0].session.resolveEscalation).toHaveBeenCalledWith('esc-both-1', 'denied');
@@ -1061,8 +1089,8 @@ describe('SignalBotDaemon', () => {
             arguments: { url: 'https://github.com/provos/ironcurtain.web' },
             reason: 'Remote git operations require approval',
           });
-          // Wait for the escalation to be resolved before returning
-          await wait(800);
+          // Yield to let escalation be processed before returning
+          await wait(10);
           return 'Repository cloned successfully.';
         });
       } else if (callCount === 2) {
@@ -1075,7 +1103,7 @@ describe('SignalBotDaemon', () => {
             arguments: { url: 'https://github.com/provos/provos.github.io' },
             reason: 'Remote git operations require approval',
           });
-          await wait(800);
+          await wait(10);
           return 'Clone operation was blocked.';
         });
       }
@@ -1086,11 +1114,11 @@ describe('SignalBotDaemon', () => {
 
     const daemon = createDaemon();
     const startPromise = daemon.start();
-    await wait(200);
+    await waitForMessages(mockApi, 1);
 
     // Step 1: Send message to create session #1 and trigger its escalation
     mockApi.simulateIncomingMessage('+15559876543', 'clone ironcurtain.web');
-    await wait(300);
+    await waitForMessage(mockApi, (m) => m.includes('ESCALATION') && m.includes('ironcurtain.web'));
 
     // Session #1 should be processing and have escalated
     let messages = mockApi.messageTexts;
@@ -1100,7 +1128,7 @@ describe('SignalBotDaemon', () => {
 
     // Step 2: Approve session #1's escalation
     mockApi.simulateIncomingMessage('+15559876543', 'approve');
-    await wait(1000);
+    await waitForMessage(mockApi, (m) => m.includes('Repository cloned successfully'));
 
     // Session #1 should have responded
     messages = mockApi.messageTexts;
@@ -1108,11 +1136,11 @@ describe('SignalBotDaemon', () => {
 
     // Step 3: /new creates session #2
     mockApi.simulateIncomingMessage('+15559876543', '/new');
-    await wait(500);
+    await waitFor(() => mockApi.messageTexts.filter((m) => m.includes('Started a new session')).length >= 2);
 
     // Step 4: Send message to session #2 (current), which triggers escalation
     mockApi.simulateIncomingMessage('+15559876543', 'clone provos.github.io');
-    await wait(300);
+    await waitForMessage(mockApi, (m) => m.includes('ESCALATION') && m.includes('provos/provos.github.io'));
 
     // Step 5: The escalation banner for session #2 should say [#2], NOT [#1]
     messages = mockApi.messageTexts;
@@ -1123,7 +1151,7 @@ describe('SignalBotDaemon', () => {
 
     // Step 6: Deny and verify it resolves on session #2
     mockApi.simulateIncomingMessage('+15559876543', 'deny');
-    await wait(1000);
+    await waitForMessage(mockApi, (m) => m.includes('Clone operation was blocked'));
 
     messages = mockApi.messageTexts;
     // The deny confirmation should reference session #2
@@ -1143,7 +1171,7 @@ describe('SignalBotDaemon', () => {
   it('race: message sent immediately after /new is routed to the new session', async () => {
     await withDaemon(async () => {
       mockApi.simulateIncomingMessage('+15559876543', 'hello', 1000);
-      await wait(500);
+      await waitForMessage(mockApi, (m) => m.includes('Started a new session'));
       expect(createdMockSessions).toHaveLength(1);
       const session1 = createdMockSessions[0].session;
       vi.mocked(session1.sendMessage).mockClear();
@@ -1151,7 +1179,8 @@ describe('SignalBotDaemon', () => {
       // Send /new immediately followed by a message (same tick)
       mockApi.simulateIncomingMessage('+15559876543', '/new', 2000);
       mockApi.simulateIncomingMessage('+15559876543', 'work on provos.github.io', 2001);
-      await wait(800);
+      await waitFor(() => createdMockSessions.length >= 2);
+      await waitForCalls(vi.mocked(createdMockSessions[1].session.sendMessage), 1);
 
       expect(createdMockSessions).toHaveLength(2);
       const session2 = createdMockSessions[1].session;
@@ -1184,7 +1213,7 @@ describe('SignalBotDaemon', () => {
             arguments: { url: 'https://github.com/provos/provos.github.io' },
             reason: 'approval required',
           });
-          await wait(300);
+          await wait(10);
           return 'Clone blocked.';
         });
       }
@@ -1195,17 +1224,17 @@ describe('SignalBotDaemon', () => {
 
     const daemon = createDaemon();
     const startPromise = daemon.start();
-    await wait(200);
+    await waitForMessages(mockApi, 1);
 
     // Create session #1
     mockApi.simulateIncomingMessage('+15559876543', 'hello', 3000);
-    await wait(500);
+    await waitForMessage(mockApi, (m) => m.includes('Started a new session'));
     expect(createdMockSessions).toHaveLength(1);
 
     // Send /new + message in rapid succession
     mockApi.simulateIncomingMessage('+15559876543', '/new', 4000);
     mockApi.simulateIncomingMessage('+15559876543', 'clone provos.github.io', 4001);
-    await wait(600);
+    await waitForMessage(mockApi, (m) => m.includes('ESCALATION') && m.includes('provos/provos.github.io'));
 
     // The escalation banner must say [#2], not [#1]
     const messages = mockApi.messageTexts;
@@ -1216,7 +1245,7 @@ describe('SignalBotDaemon', () => {
 
     // Deny and verify correct routing
     mockApi.simulateIncomingMessage('+15559876543', 'deny', 5000);
-    await wait(800);
+    await waitForMessage(mockApi, (m) => m.includes('denied') && m.includes('[#2]'));
 
     const allMessages = mockApi.messageTexts;
     // Deny confirmation should reference #2
@@ -1261,7 +1290,7 @@ describe('SignalBotDaemon', () => {
           });
         });
       } else if (callCount === 2) {
-        // Session #2: sendMessage triggers escalation, resolves after delay
+        // Session #2: sendMessage triggers escalation, resolves after yield
         session.sendMessage = vi.fn().mockImplementation(async () => {
           options?.onEscalation?.({
             escalationId: 'esc-concurrent-s2',
@@ -1270,7 +1299,7 @@ describe('SignalBotDaemon', () => {
             arguments: { url: 'https://github.com/provos/provos.github.io' },
             reason: 'approval required',
           });
-          await wait(500);
+          await wait(10);
           return 'Clone blocked.';
         });
       }
@@ -1281,11 +1310,11 @@ describe('SignalBotDaemon', () => {
 
     const daemon = createDaemon();
     const startPromise = daemon.start();
-    await wait(200);
+    await waitForMessages(mockApi, 1);
 
     // Step 1: Message creates session #1 and starts processing (blocks)
     mockApi.simulateIncomingMessage('+15559876543', 'clone ironcurtain.web');
-    await wait(300);
+    await waitForMessage(mockApi, (m) => m.includes('ESCALATION') && m.includes('ironcurtain.web'));
 
     // Session #1 has escalated but its forwardMessage is still blocked
     let messages = mockApi.messageTexts;
@@ -1294,20 +1323,20 @@ describe('SignalBotDaemon', () => {
 
     // Step 2: Approve session #1's escalation
     mockApi.simulateIncomingMessage('+15559876543', 'approve');
-    await wait(200);
+    await waitForMessage(mockApi, (m) => m.includes('approved'));
 
     // Now resolve session #1's message so it finishes
     expect(resolveSession1Message).not.toBeNull();
     resolveSession1Message!('Repository cloned.');
-    await wait(300);
+    await waitForMessage(mockApi, (m) => m.includes('Repository cloned'));
 
     // Step 3: /new while nothing is in-flight anymore
     mockApi.simulateIncomingMessage('+15559876543', '/new');
-    await wait(500);
+    await waitFor(() => mockApi.messageTexts.filter((m) => m.includes('Started a new session')).length >= 2);
 
     // Step 4: Message to session #2 triggers escalation
     mockApi.simulateIncomingMessage('+15559876543', 'clone provos.github.io');
-    await wait(300);
+    await waitForMessage(mockApi, (m) => m.includes('ESCALATION') && m.includes('provos/provos.github.io'));
 
     // THE KEY ASSERTION: session #2's escalation banner must say [#2]
     messages = mockApi.messageTexts;
@@ -1318,7 +1347,7 @@ describe('SignalBotDaemon', () => {
 
     // Deny and verify correct routing
     mockApi.simulateIncomingMessage('+15559876543', 'deny');
-    await wait(800);
+    await waitForMessage(mockApi, (m) => m.includes('Clone blocked'));
 
     messages = mockApi.messageTexts;
     // Deny confirmation should reference #2
@@ -1336,15 +1365,17 @@ describe('SignalBotDaemon', () => {
     await withDaemon(async () => {
       // Create session #1 (auto-created)
       mockApi.simulateIncomingMessage('+15559876543', 'Hello agent');
-      await wait(500);
+      await waitForMessage(mockApi, (m) => m.includes('Started a new session'));
 
       // Create session #2
       mockApi.simulateIncomingMessage('+15559876543', '/new');
-      await wait(500);
+      await waitFor(() => mockApi.messageTexts.filter((m) => m.includes('Started a new session')).length >= 2);
 
       // Current session is #2. Route to #1 via prefix.
+      // sendMessage on session #1 was already called once for "Hello agent"
+      const callsBefore = vi.mocked(createdMockSessions[0].session.sendMessage).mock.calls.length;
       mockApi.simulateIncomingMessage('+15559876543', '#1 list the directory');
-      await wait(500);
+      await waitForCalls(vi.mocked(createdMockSessions[0].session.sendMessage), callsBefore + 1);
 
       // Message should have been sent to session #1
       expect(vi.mocked(createdMockSessions[0].session.sendMessage)).toHaveBeenCalledWith('list the directory');
@@ -1354,7 +1385,7 @@ describe('SignalBotDaemon', () => {
       // currentLabel should still be #2: send a plain message and verify it goes to #2
       vi.mocked(createdMockSessions[1].session.sendMessage).mockClear();
       mockApi.simulateIncomingMessage('+15559876543', 'follow up');
-      await wait(500);
+      await waitForCalls(vi.mocked(createdMockSessions[1].session.sendMessage), 1);
 
       expect(vi.mocked(createdMockSessions[1].session.sendMessage)).toHaveBeenCalledWith('follow up');
     });
@@ -1363,10 +1394,10 @@ describe('SignalBotDaemon', () => {
   it('#N prefix to non-existent session shows error', async () => {
     await withDaemon(async () => {
       mockApi.simulateIncomingMessage('+15559876543', 'Hello agent');
-      await wait(500);
+      await waitForMessage(mockApi, (m) => m.includes('Started a new session'));
 
       mockApi.simulateIncomingMessage('+15559876543', '#5 do something');
-      await wait(300);
+      await waitForMessage(mockApi, (m) => m.includes('No session #5'));
 
       expect(mockApi.messageTexts.some((m) => m.includes('No session #5'))).toBe(true);
     });
@@ -1375,10 +1406,12 @@ describe('SignalBotDaemon', () => {
   it('#N prefix strips only the prefix from the forwarded message', async () => {
     await withDaemon(async () => {
       mockApi.simulateIncomingMessage('+15559876543', 'Hello agent');
-      await wait(500);
+      await waitForMessage(mockApi, (m) => m.includes('Started a new session'));
 
+      // sendMessage was already called once for "Hello agent"
+      const callsBefore = vi.mocked(createdMockSessions[0].session.sendMessage).mock.calls.length;
       mockApi.simulateIncomingMessage('+15559876543', '#1 check #2 issue');
-      await wait(500);
+      await waitForCalls(vi.mocked(createdMockSessions[0].session.sendMessage), callsBefore + 1);
 
       expect(vi.mocked(createdMockSessions[0].session.sendMessage)).toHaveBeenCalledWith('check #2 issue');
     });
@@ -1390,10 +1423,10 @@ describe('SignalBotDaemon', () => {
     await withDaemon(async () => {
       // Create a session first
       mockApi.simulateIncomingMessage('+15559876543', 'Hello agent');
-      await wait(500);
+      await waitForMessage(mockApi, (m) => m.includes('Started a new session'));
 
       mockApi.simulateIncomingMessage('+15559876543', '/help');
-      await wait(200);
+      await waitForMessage(mockApi, (m) => m.includes('Commands:'));
 
       const helpMsg = mockApi.messageTexts.find((m) => m.includes('Commands:'));
       expect(helpMsg).toBeDefined();
@@ -1404,7 +1437,7 @@ describe('SignalBotDaemon', () => {
   it('/help shows no active session when none exists', async () => {
     await withDaemon(async () => {
       mockApi.simulateIncomingMessage('+15559876543', '/help');
-      await wait(200);
+      await waitForMessage(mockApi, (m) => m.includes('Commands:'));
 
       const helpMsg = mockApi.messageTexts.find((m) => m.includes('Commands:'));
       expect(helpMsg).toBeDefined();
@@ -1415,7 +1448,7 @@ describe('SignalBotDaemon', () => {
   it('/help includes #N prefix routing documentation', async () => {
     await withDaemon(async () => {
       mockApi.simulateIncomingMessage('+15559876543', '/help');
-      await wait(200);
+      await waitForMessage(mockApi, (m) => m.includes('Commands:'));
 
       const helpMsg = mockApi.messageTexts.find((m) => m.includes('Commands:'));
       expect(helpMsg).toContain('#N <message>');
