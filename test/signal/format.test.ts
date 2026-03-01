@@ -94,6 +94,21 @@ describe('formatEscalationBanner', () => {
     const result = formatEscalationBanner(request);
     expect(result).toContain('/etc/hosts');
   });
+
+  it('includes context lines when present', () => {
+    const requestWithContext: EscalationRequest = {
+      ...request,
+      context: { 'Working directory': '/home/user/repo' },
+    };
+    const result = formatEscalationBanner(requestWithContext);
+    expect(result).toContain('Working directory');
+    expect(result).toContain('/home/user/repo');
+  });
+
+  it('omits context lines when absent', () => {
+    const result = formatEscalationBanner(request);
+    expect(result).not.toContain('Working directory');
+  });
 });
 
 describe('formatBudgetMessage', () => {

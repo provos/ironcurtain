@@ -140,6 +140,7 @@ export interface EscalationRequest {
   readonly serverName: string;
   readonly arguments: Record<string, unknown>;
   readonly reason: string;
+  readonly context?: Readonly<Record<string, string>>;
 }
 
 /**

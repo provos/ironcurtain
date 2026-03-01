@@ -69,6 +69,8 @@ import { autoApprove, extractArgsForAutoApprove, readUserContext } from './auto-
 import { createLanguageModelFromEnv } from '../config/model-provider.js';
 import { wrapLanguageModel } from 'ai';
 import { createLlmLoggingMiddleware } from '../pipeline/llm-logger.js';
+import { extractMcpErrorMessage } from './mcp-error-utils.js';
+import { type ServerContextMap, updateServerContext, formatServerContext } from './server-context.js';
 import type { LanguageModelV3 } from '@ai-sdk/provider';
 import type { MCPServerConfig, SandboxAvailabilityPolicy } from '../config/types.js';
 import { VERSION } from '../version.js';
@@ -86,6 +88,7 @@ interface EscalationFileRequest {
   toolName: string;
   arguments: Record<string, unknown>;
   reason: string;
+  context?: Record<string, string>;
 }
 
 export interface ClientState {
@@ -305,6 +308,7 @@ export interface CallToolDeps {
   containerWorkspaceDir: string | undefined;
   escalationDir: string | undefined;
   autoApproveModel: LanguageModelV3 | null;
+  serverContextMap: ServerContextMap;
 }
 
 // ── Extracted functions ────────────────────────────────────────────────
@@ -608,6 +612,7 @@ export async function handleCallTool(
         toolName: request.toolName,
         arguments: argsForTransport,
         reason: evaluation.reason,
+        context: formatServerContext(deps.serverContextMap, toolInfo.serverName),
       });
 
       if (decision === 'denied') {
@@ -683,10 +688,11 @@ export async function handleCallTool(
       return { content: result.content, isError: true };
     }
 
+    updateServerContext(deps.serverContextMap, toolInfo.serverName, toolInfo.name, argsForTransport);
     logAudit({ status: 'success' }, Date.now() - startTime);
     return { content: result.content };
   } catch (err) {
-    const rawError = err instanceof Error ? err.message : String(err);
+    const rawError = extractMcpErrorMessage(err);
     const errorMessage = annotateSandboxViolation(rawError, serverIsSandboxed);
     logAudit({ status: 'error', error: errorMessage }, Date.now() - startTime);
     return {
@@ -865,6 +871,8 @@ async function main(): Promise<void> {
     };
   });
 
+  const serverContextMap: ServerContextMap = new Map();
+
   const callToolDeps: CallToolDeps = {
     toolMap,
     policyEngine,
@@ -876,6 +884,7 @@ async function main(): Promise<void> {
     containerWorkspaceDir,
     escalationDir,
     autoApproveModel,
+    serverContextMap,
   };
 
   server.setRequestHandler(CallToolRequestSchema, async (req) => {

@@ -9,6 +9,7 @@ import {
   wrapServerCommand,
   cleanupSettingsFiles,
   annotateSandboxViolation,
+  resolveNodeModulesBin,
   type ResolvedSandboxConfig,
   type ResolvedSandboxParams,
 } from '../src/trusted-process/sandbox-integration.js';
@@ -285,7 +286,7 @@ describe('writeServerSettings', () => {
 
 describe('wrapServerCommand', () => {
   const settingsDir = '/tmp/test-settings';
-  const srtBin = resolve('node_modules/.bin/srt');
+  const srtBin = resolveNodeModulesBin('srt', resolve('.'));
 
   it('passes through unsandboxed servers (opt-out)', () => {
     const result = wrapServerCommand(

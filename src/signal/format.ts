@@ -25,10 +25,22 @@ export function formatEscalationBanner(request: EscalationRequest, sessionLabel?
   const header = `**ESCALATION${labelTag}: Human approval required**`;
   const toolLine = `Tool: \`${request.serverName}/${request.toolName}\``;
   const argsLine = `Arguments: \`${JSON.stringify(request.arguments)}\``;
+  const contextLines = request.context ? Object.entries(request.context).map(([k, v]) => `${k}: \`${v}\``) : [];
   const reasonLine = `Reason: *${request.reason}*`;
   const instructions = '**Reply "approve" or "deny"**';
 
-  return [separator, header, separator, toolLine, argsLine, reasonLine, separator, instructions, separator].join('\n');
+  return [
+    separator,
+    header,
+    separator,
+    toolLine,
+    argsLine,
+    ...contextLines,
+    reasonLine,
+    separator,
+    instructions,
+    separator,
+  ].join('\n');
 }
 
 /**

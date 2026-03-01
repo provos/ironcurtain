@@ -392,6 +392,7 @@ export class CliTransport extends BaseTransport {
       border,
       chalk.yellow(`  Tool:      ${request.serverName}/${request.toolName}`),
       chalk.yellow(`  Arguments: ${JSON.stringify(request.arguments, null, 2)}`),
+      ...(request.context ? Object.entries(request.context).map(([k, v]) => chalk.yellow(`  ${k}: ${v}`)) : []),
       chalk.yellow(`  Reason:    ${request.reason}`),
       border,
       chalk.yellow.bold('  Type /approve or /deny'),
