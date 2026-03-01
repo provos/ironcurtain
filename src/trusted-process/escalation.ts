@@ -14,7 +14,11 @@ export class EscalationHandler {
     return this.rl;
   }
 
-  async prompt(request: ToolCallRequest, reason: string): Promise<'approved' | 'denied'> {
+  async prompt(
+    request: ToolCallRequest,
+    reason: string,
+    context?: Readonly<Record<string, string>>,
+  ): Promise<'approved' | 'denied'> {
     const rl = this.getReadline();
 
     process.stderr.write('\n========================================\n');
@@ -22,6 +26,11 @@ export class EscalationHandler {
     process.stderr.write('========================================\n');
     process.stderr.write(`  Tool:      ${request.serverName}/${request.toolName}\n`);
     process.stderr.write(`  Arguments: ${JSON.stringify(request.arguments, null, 2)}\n`);
+    if (context) {
+      for (const [k, v] of Object.entries(context)) {
+        process.stderr.write(`  ${k}: ${v}\n`);
+      }
+    }
     process.stderr.write(`  Reason:    ${reason}\n`);
     process.stderr.write('========================================\n');
 

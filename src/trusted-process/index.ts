@@ -18,6 +18,7 @@ import { autoApprove } from './auto-approver.js';
 import { prepareToolArgs } from './path-utils.js';
 import { extractPolicyRoots, toMcpRoots, directoryForPath } from './policy-roots.js';
 import * as logger from '../logger.js';
+import { extractMcpErrorMessage } from './mcp-error-utils.js';
 
 export type EscalationPromptFn = (request: ToolCallRequest, reason: string) => Promise<'approved' | 'denied'>;
 
@@ -231,7 +232,7 @@ export class TrustedProcess {
       }
     } catch (err) {
       resultStatus = 'error';
-      resultError = err instanceof Error ? err.message : String(err);
+      resultError = extractMcpErrorMessage(err);
       resultContent = { error: resultError };
     }
 

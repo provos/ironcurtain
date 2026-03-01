@@ -12,6 +12,7 @@ import {
   type ClientState,
 } from '../src/trusted-process/mcp-proxy-server.js';
 import { checkSandboxAvailability, type ResolvedSandboxConfig } from '../src/trusted-process/sandbox-integration.js';
+import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 
 // ── Mock modules ───────────────────────────────────────────────────────
 
@@ -549,6 +550,7 @@ describe('handleCallTool', () => {
       containerWorkspaceDir: undefined,
       escalationDir: undefined,
       autoApproveModel: null,
+      serverContextMap: new Map(),
       ...overrides,
     };
   }
@@ -704,6 +706,51 @@ describe('handleCallTool', () => {
 
     const loggedEntry = vi.mocked(deps.auditLog.log).mock.calls[0][0];
     expect(loggedEntry.sandboxed).toBe(true);
+  });
+
+  it('extracts meaningful message from McpError with data', async () => {
+    const deps = createMockDeps();
+    const clientState = deps.clientStates.get('fs')!;
+    vi.mocked((clientState.client as unknown as { callTool: ReturnType<typeof vi.fn> }).callTool).mockRejectedValue(
+      new McpError(ErrorCode.InvalidParams, 'Structured content does not match', 'No session working directory set'),
+    );
+
+    const result = await handleCallTool('read_file', { path: '/tmp/foo' }, deps);
+
+    expect(result.isError).toBe(true);
+    const content = result.content as Array<{ type: string; text: string }>;
+    expect(content[0].text).toBe('Error: No session working directory set');
+  });
+
+  it('tracks server context after successful tool call', async () => {
+    const deps = createMockDeps();
+    // Add git server with git_set_working_dir tool
+    const gitTool: ProxiedTool = { serverName: 'git', name: 'git_set_working_dir', inputSchema: { type: 'object' } };
+    deps.toolMap.set('git_set_working_dir', gitTool);
+    const gitAnnotation = {
+      toolName: 'git_set_working_dir',
+      serverName: 'git',
+      comment: 'Sets working dir',
+      sideEffects: false,
+      args: { path: ['opaque'] },
+    };
+    vi.mocked(deps.policyEngine.getAnnotation).mockReturnValue(gitAnnotation);
+
+    const mockGitClient = {
+      callTool: vi.fn().mockResolvedValue({
+        content: [{ type: 'text', text: 'Working directory set' }],
+        isError: false,
+      }),
+    };
+    deps.clientStates.set('git', {
+      client: mockGitClient as unknown as ClientState['client'],
+      roots: [],
+    });
+    deps.resolvedSandboxConfigs.set('git', { sandboxed: false, reason: 'opt-out' });
+
+    await handleCallTool('git_set_working_dir', { path: '/home/user/repo' }, deps);
+
+    expect(deps.serverContextMap.get('git')?.workingDirectory).toBe('/home/user/repo');
   });
 });
 
