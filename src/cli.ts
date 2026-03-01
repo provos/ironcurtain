@@ -42,8 +42,8 @@ Options:
   -a, --agent <name>   Agent mode: builtin or claude-code (Docker)
                        Auto-detects if omitted: Docker if available, else builtin
   --pty                Attach terminal directly to agent PTY (Docker mode only)
-                       Ctrl-\\ (SIGQUIT) is the emergency exit; run 'reset' to
-                       recover the terminal if killed ungracefully
+                       Ctrl-\\ is the emergency exit; run 'reset' to recover
+                       the terminal if killed ungracefully
   --list-agents        List registered agent adapters
 
 Examples:

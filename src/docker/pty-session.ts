@@ -70,9 +70,9 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
   const auditLogPath = getSessionAuditLogPath(sessionId);
   const socketsDir = getSessionSocketsDir(sessionId);
 
-  mkdirSync(sandboxDir, { recursive: true });
-  mkdirSync(escalationDir, { recursive: true });
-  mkdirSync(socketsDir, { recursive: true });
+  mkdirSync(sandboxDir, { recursive: true, mode: 0o700 });
+  mkdirSync(escalationDir, { recursive: true, mode: 0o700 });
+  mkdirSync(socketsDir, { recursive: true, mode: 0o700 });
 
   // Set up session logging
   const sessionLogPath = getSessionLogPath(sessionId);
@@ -100,38 +100,6 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
     discardStdin: false,
   }).start();
 
-  const infra = await prepareDockerInfrastructure(
-    sessionConfig,
-    options.mode,
-    sessionDir,
-    sandboxDir,
-    escalationDir,
-    auditLogPath,
-    sessionId,
-  );
-
-  const { adapter, docker, proxy, mitmProxy, fakeKeys, orientationDir, systemPrompt, image, useTcp, mitmAddr } = infra;
-
-  // Validate adapter supports PTY mode
-  if (!adapter.buildPtyCommand) {
-    throw new Error(`Agent ${adapter.id} does not support PTY mode.`);
-  }
-
-  // Write system prompt to file for shell-injection-safe PTY command
-  writeFileSync(resolve(orientationDir, 'system-prompt.txt'), systemPrompt);
-
-  // Determine PTY connection target
-  const ptySockPath = useTcp ? undefined : `/run/ironcurtain/${PTY_SOCK_NAME}`;
-  const ptyPort = useTcp ? DEFAULT_PTY_PORT : undefined;
-
-  // Build the PTY command
-  const ptyCommand = adapter.buildPtyCommand(systemPrompt, ptySockPath, ptyPort);
-
-  // Build container configuration
-  const shortId = sessionId.substring(0, 12);
-  const { INTERNAL_NETWORK_NAME, INTERNAL_NETWORK_SUBNET, INTERNAL_NETWORK_GATEWAY } = await import('./platform.js');
-  const { quote } = await import('shell-quote');
-
   let containerId: string | null = null;
   let sidecarContainerId: string | null = null;
   let escalationFileWatcher: EscalationWatcher | null = null;
@@ -158,7 +126,45 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
   };
   process.on('SIGTERM', handleSigterm);
 
+  // Infra variables set inside try, used in finally for cleanup
+  let proxy: Awaited<ReturnType<typeof prepareDockerInfrastructure>>['proxy'] | null = null;
+  let mitmProxy: Awaited<ReturnType<typeof prepareDockerInfrastructure>>['mitmProxy'] | null = null;
+  let docker: Awaited<ReturnType<typeof prepareDockerInfrastructure>>['docker'] | null = null;
+  let useTcp = false;
+
   try {
+    const infra = await prepareDockerInfrastructure(
+      sessionConfig,
+      options.mode,
+      sessionDir,
+      sandboxDir,
+      escalationDir,
+      auditLogPath,
+      sessionId,
+    );
+
+    ({ docker, proxy, mitmProxy, useTcp } = infra);
+    const { adapter, fakeKeys, orientationDir, systemPrompt, image, mitmAddr } = infra;
+
+    // Validate adapter supports PTY mode
+    if (!adapter.buildPtyCommand) {
+      throw new Error(`Agent ${adapter.id} does not support PTY mode.`);
+    }
+
+    // Write system prompt to file for shell-injection-safe PTY command
+    writeFileSync(resolve(orientationDir, 'system-prompt.txt'), systemPrompt);
+
+    // Determine PTY connection target
+    const ptySockPath = useTcp ? undefined : `/run/ironcurtain/${PTY_SOCK_NAME}`;
+    const ptyPort = useTcp ? DEFAULT_PTY_PORT : undefined;
+
+    // Build the PTY command
+    const ptyCommand = adapter.buildPtyCommand(systemPrompt, ptySockPath, ptyPort);
+
+    // Build container configuration
+    const shortId = sessionId.substring(0, 12);
+    const { INTERNAL_NETWORK_NAME, INTERNAL_NETWORK_SUBNET, INTERNAL_NETWORK_GATEWAY } = await import('./platform.js');
+    const { quote } = await import('shell-quote');
     let env: Record<string, string>;
     let network: string;
     let mounts: { source: string; target: string; readonly: boolean }[];
@@ -324,23 +330,24 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
     }
 
     // Stop and remove containers
-    if (containerId) {
+    if (docker && containerId) {
       await docker.stop(containerId).catch(() => {});
       await docker.remove(containerId).catch(() => {});
     }
-    if (sidecarContainerId) {
+    if (docker && sidecarContainerId) {
       await docker.stop(sidecarContainerId).catch(() => {});
       await docker.remove(sidecarContainerId).catch(() => {});
     }
 
     // Remove internal network if used
-    if (useTcp) {
+    if (docker && useTcp) {
+      const { INTERNAL_NETWORK_NAME } = await import('./platform.js');
       await docker.removeNetwork(INTERNAL_NETWORK_NAME).catch(() => {});
     }
 
     // Stop proxies
-    await mitmProxy.stop().catch(() => {});
-    await proxy.stop().catch(() => {});
+    await mitmProxy?.stop().catch(() => {});
+    await proxy?.stop().catch(() => {});
 
     logger.info(`PTY session ${sessionId} ended`);
     logger.teardown();
@@ -407,7 +414,16 @@ function attachPty(options: PtyProxyOptions): Promise<number> {
       onResize();
 
       // Host -> Container (trusted input, tapped for keystroke recording)
+      // Ctrl-\ (0x1c) is intercepted as an emergency exit since raw mode
+      // disables normal signal generation for SIGQUIT.
+      const CTRL_BACKSLASH = 0x1c;
       const onData = (data: Buffer): void => {
+        if (data.length === 1 && data[0] === CTRL_BACKSLASH) {
+          cleanup();
+          conn.destroy();
+          resolvePromise(0);
+          return;
+        }
         conn.write(data);
         options.onInput?.(data);
       };

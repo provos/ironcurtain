@@ -123,28 +123,34 @@ describe('createEscalationWatcher', () => {
     watcher.stop();
   });
 
-  it('resolves escalation by writing response file atomically', () => {
+  it('resolves escalation by writing response file atomically', async () => {
     const events: EscalationWatcherEvents = {
       onEscalation: () => {},
       onEscalationExpired: () => {},
     };
 
-    const watcher = createEscalationWatcher(escalationDir, events);
-
-    // Manually simulate the watcher having detected a pending escalation
-    // by writing a request and triggering a poll cycle
-    writeRequest('esc-003');
-
-    // Start and give it time to poll
+    const watcher = createEscalationWatcher(escalationDir, events, { pollIntervalMs: 50 });
     watcher.start();
-    // Synchronous approach: just wait briefly
-    const startTime = Date.now();
-    while (!watcher.getPending() && Date.now() - startTime < 2000) {
-      // busy wait for poll to fire (short interval)
-    }
 
-    // Now we should have a pending escalation -- but since we used setInterval
-    // we need an async approach. Let's use a different test pattern.
+    writeRequest('esc-003');
+    await new Promise((r) => setTimeout(r, 200));
+
+    expect(watcher.getPending()?.escalationId).toBe('esc-003');
+
+    const accepted = watcher.resolve('esc-003', 'approved');
+    expect(accepted).toBe(true);
+
+    // Response file was written atomically (no leftover .tmp)
+    const responsePath = join(escalationDir, 'response-esc-003.json');
+    expect(existsSync(responsePath)).toBe(true);
+    expect(existsSync(`${responsePath}.tmp`)).toBe(false);
+
+    const response = JSON.parse(readFileSync(responsePath, 'utf-8'));
+    expect(response.decision).toBe('approved');
+
+    // Pending cleared after resolve
+    expect(watcher.getPending()).toBeUndefined();
+
     watcher.stop();
   });
 

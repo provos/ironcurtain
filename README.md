@@ -315,7 +315,7 @@ ironcurtain escalation-listener
 
 The `--pty` flag attaches your terminal directly to Claude Code running inside the Docker container. You get Claude Code's full TUI (spinners, diffs, file previews) while IronCurtain still mediates every tool call through its policy engine. Escalations are handled in a separate terminal via the escalation listener, which aggregates notifications across all active PTY sessions. Use `/approve N` or `/deny N` to resolve escalations.
 
-Use `Ctrl-\` (SIGQUIT) as an emergency exit if the session becomes unresponsive. If the process is killed ungracefully, run `reset` to restore your terminal.
+Press `Ctrl-\` for an emergency exit if the session becomes unresponsive. If the process is killed ungracefully, run `reset` to restore your terminal.
 
 ### 6. Signal messaging transport (optional)
 
