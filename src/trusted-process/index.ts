@@ -21,7 +21,11 @@ import * as logger from '../logger.js';
 import { extractMcpErrorMessage } from './mcp-error-utils.js';
 import { type ServerContextMap, updateServerContext, formatServerContext } from './server-context.js';
 
-export type EscalationPromptFn = (request: ToolCallRequest, reason: string) => Promise<'approved' | 'denied'>;
+export type EscalationPromptFn = (
+  request: ToolCallRequest,
+  reason: string,
+  context?: Readonly<Record<string, string>>,
+) => Promise<'approved' | 'denied'>;
 
 export interface TrustedProcessOptions {
   onEscalation?: EscalationPromptFn;
@@ -182,7 +186,7 @@ export class TrustedProcess {
         if (!autoApproved) {
           const escalationContext = formatServerContext(this.serverContextMap, transportRequest.serverName);
           escalationResult = this.onEscalation
-            ? await this.onEscalation(transportRequest, evaluation.reason)
+            ? await this.onEscalation(transportRequest, evaluation.reason, escalationContext)
             : await this.escalation.prompt(transportRequest, evaluation.reason, escalationContext);
 
           if (escalationResult === 'approved') {

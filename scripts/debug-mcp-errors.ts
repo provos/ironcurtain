@@ -2,7 +2,7 @@
 /**
  * Debug script: demonstrates MCP error message extraction.
  *
- * Spawns a tiny mock MCP server that throws realistic errors
+ * Uses in-memory mock clients that throw realistic MCP errors
  * (matching what the git MCP server produces), then sends
  * tool calls through `handleCallTool` and prints the results.
  *
