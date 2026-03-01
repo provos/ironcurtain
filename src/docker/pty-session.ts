@@ -15,7 +15,7 @@
 
 import { createConnection } from 'node:net';
 import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, writeFileSync, unlinkSync } from 'node:fs';
+import { mkdirSync, writeFileSync, unlinkSync } from 'node:fs';
 import { resolve } from 'node:path';
 import chalk from 'chalk';
 import ora from 'ora';
@@ -239,7 +239,7 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
       network,
       mounts,
       env,
-      command: [...ptyCommand],
+      command: ptyCommand,
       sessionLabel: sessionId,
       resources: { memoryMb: 4096, cpus: 2 },
       extraHosts,
@@ -352,13 +352,23 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
 
 // --- PTY proxy ---
 
+/** UDS path (Linux) or { host, port } (macOS). */
+type PtyTarget = string | { host: string; port: number };
+
+/** Creates a net.Socket connection to the PTY target (UDS or TCP). */
+function connectToTarget(target: PtyTarget): ReturnType<typeof createConnection> {
+  if (typeof target === 'string') {
+    return createConnection({ path: target });
+  }
+  return createConnection({ host: target.host, port: target.port });
+}
+
 interface PtyProxyOptions {
-  /** UDS path (Linux) or { host, port } (macOS). */
-  target: string | { host: string; port: number };
+  readonly target: PtyTarget;
   /** Docker container ID (for SIGWINCH forwarding). */
-  containerId: string;
+  readonly containerId: string;
   /** Callback for recording host->container bytes (trusted input). */
-  onInput?: (data: Buffer) => void;
+  readonly onInput?: (data: Buffer) => void;
 }
 
 /**
@@ -366,10 +376,7 @@ interface PtyProxyOptions {
  * Returns a promise that resolves with the exit code when the connection closes.
  */
 function attachPty(options: PtyProxyOptions): Promise<number> {
-  const conn =
-    typeof options.target === 'string'
-      ? createConnection({ path: options.target })
-      : createConnection({ host: options.target.host, port: options.target.port });
+  const conn = connectToTarget(options.target);
 
   const { stdin, stdout } = process;
 
@@ -437,22 +444,12 @@ function attachPty(options: PtyProxyOptions): Promise<number> {
 /**
  * Waits for the PTY socket/port to become connectable.
  */
-async function waitForPtyReady(target: string | { host: string; port: number }): Promise<void> {
+async function waitForPtyReady(target: PtyTarget): Promise<void> {
   const deadline = Date.now() + PTY_READINESS_TIMEOUT_MS;
 
   while (Date.now() < deadline) {
-    if (typeof target === 'string') {
-      // UDS mode: check if socket file exists
-      if (existsSync(target)) {
-        // Try connecting to verify it's actually listening
-        const connected = await tryConnect(target);
-        if (connected) return;
-      }
-    } else {
-      // TCP mode: try connecting
-      const connected = await tryConnect(target);
-      if (connected) return;
-    }
+    const connected = await tryConnect(target);
+    if (connected) return;
 
     await new Promise((r) => setTimeout(r, PTY_READINESS_POLL_MS));
   }
@@ -463,12 +460,9 @@ async function waitForPtyReady(target: string | { host: string; port: number }):
 /**
  * Tries to connect to a target. Returns true if the connection succeeds.
  */
-function tryConnect(target: string | { host: string; port: number }): Promise<boolean> {
+function tryConnect(target: PtyTarget): Promise<boolean> {
   return new Promise((resolve) => {
-    const conn =
-      typeof target === 'string'
-        ? createConnection({ path: target })
-        : createConnection({ host: target.host, port: target.port });
+    const conn = connectToTarget(target);
 
     const timer = setTimeout(() => {
       conn.destroy();

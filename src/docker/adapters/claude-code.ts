@@ -98,35 +98,34 @@ export const claudeCodeAdapter: AgentAdapter = {
   },
 
   generateOrientationFiles(): AgentConfigFile[] {
-    // Wrapper script for PTY mode — avoids shell quoting issues by reading
+    // Wrapper script for PTY mode -- avoids shell quoting issues by reading
     // the system prompt from $IRONCURTAIN_SYSTEM_PROMPT (set by entrypoint).
-    const startScript =
-      '#!/bin/bash\n' +
-      'exec claude --dangerously-skip-permissions \\\n' +
-      '  --mcp-config /etc/ironcurtain/claude-mcp-config.json \\\n' +
-      '  --append-system-prompt "$IRONCURTAIN_SYSTEM_PROMPT"\n';
+    const startScript = `#!/bin/bash
+exec claude --dangerously-skip-permissions \\
+  --mcp-config /etc/ironcurtain/claude-mcp-config.json \\
+  --append-system-prompt "$IRONCURTAIN_SYSTEM_PROMPT"
+`;
 
     // Helper script to resize the PTY that Claude Code is actually running on.
     // docker exec stty targets a transient exec session PTY, not socat's PTY.
-    const resizeScript =
-      '#!/bin/bash\n' +
-      '# resize-pty.sh — resize the PTY that Claude Code is running on.\n' +
-      '# Called from the host via: docker exec <cid> /etc/ironcurtain/resize-pty.sh <cols> <rows>\n' +
-      'COLS=$1\n' +
-      'ROWS=$2\n' +
-      '# Find the claude process (start-claude.sh execs into claude, so it is the direct child of socat)\n' +
-      'CLAUDE_PID=$(pgrep -f "claude --dangerously" | head -1)\n' +
-      'if [ -z "$CLAUDE_PID" ]; then\n' +
-      '  exit 0  # claude not started yet; resize will be retried\n' +
-      'fi\n' +
-      '# Get the PTY device from the process stdin\n' +
-      'PTS=$(readlink /proc/$CLAUDE_PID/fd/0 2>/dev/null)\n' +
-      'if [ -z "$PTS" ]; then\n' +
-      '  exit 0\n' +
-      'fi\n' +
-      '# Set the window size on the actual PTY device, then signal claude\n' +
-      'stty -F "$PTS" cols "$COLS" rows "$ROWS" 2>/dev/null\n' +
-      'kill -WINCH "$CLAUDE_PID" 2>/dev/null\n';
+    const resizeScript = `#!/bin/bash
+# Called from the host via: docker exec <cid> /etc/ironcurtain/resize-pty.sh <cols> <rows>
+COLS=$1
+ROWS=$2
+
+CLAUDE_PID=$(pgrep -f "claude --dangerously" | head -1)
+if [ -z "$CLAUDE_PID" ]; then
+  exit 0  # claude not started yet; resize will be retried
+fi
+
+PTS=$(readlink /proc/$CLAUDE_PID/fd/0 2>/dev/null)
+if [ -z "$PTS" ]; then
+  exit 0
+fi
+
+stty -F "$PTS" cols "$COLS" rows "$ROWS" 2>/dev/null
+kill -WINCH "$CLAUDE_PID" 2>/dev/null
+`;
 
     return [
       { path: 'start-claude.sh', content: startScript, mode: 0o755 },
