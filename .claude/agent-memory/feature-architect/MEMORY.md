@@ -200,20 +200,21 @@ Both use the same PolicyEngine with compiled artifacts.
 
 ## Signal Transport (designed 2026-02-24)
 - See `docs/designs/signal-transport.md` for full spec; `src/signal/` module
-- Multi-session via SignalBotDaemon: ManagedSession map, session labels, escalation per-session
 
-## Docker Agent Mode Key Facts
-- `src/docker/docker-agent-session.ts` -- Session impl, container lifecycle, escalation polling
-- `src/docker/agent-adapter.ts` -- AgentAdapter interface; `buildCommand()`, `buildEnv()`, `extractResponse()`
-- `src/docker/platform.ts` -- `useTcpTransport()` returns true on macOS (VirtioFS no UDS)
-- macOS: socat sidecar on bridge network forwards MCP+MITM ports to host.docker.internal
-- Linux: `--network=none`, session dir bind-mounted for UDS access
-- Container runs `sleep infinity`; agent commands via `docker exec`
-- Escalation: file-based IPC in `~/.ironcurtain/sessions/{id}/escalations/`
+## Docker Agent Mode -- see `docker-agent.md` topic file for details
+- Key files: `docker-agent-session.ts`, `agent-adapter.ts`, `mitm-proxy.ts`, `provider-config.ts`, `fake-keys.ts`
+- Security invariant: real API keys/tokens NEVER enter the container
+- Fake-key-swap pattern: container gets sentinel key, MITM proxy swaps for real on host side
+- `ProviderKeyMapping { config, fakeKey, realKey }` -- MITM matches fake, injects real
+- `KeyInjection`: `{ type: 'header', headerName }` or `{ type: 'bearer' }`
+- `resolveRealApiKey()` in docker-infrastructure.ts maps host to config.userConfig key
 
-## PTY + Escalation Listener Design (designed 2026-02-27)
-- See `docs/designs/pty-escalation-listener.md` for full spec
-- `--pty` flag on start: attaches user terminal to Claude Code PTY via socat bridge
-- `escalation-listener` command: TUI dashboard (ink) aggregating escalations from all PTY sessions
-- Shared escalation watcher module: `src/escalation/escalation-watcher.ts`
-- Session notification: file-based registration in `~/.ironcurtain/pty-registry/`
+## OAuth Docker Support (designed 2026-02-28)
+- See `docs/designs/oauth-docker-support.md` for full spec
+- Claude Code OAuth: `~/.claude/.credentials.json` has `claudeAiOauth.{accessToken,refreshToken,expiresAt}`
+- OAuth uses `Authorization: Bearer` + `anthropic-beta: oauth-2025-04-20` (not x-api-key)
+- Account metadata in `~/.claude.json` `oauthAccount` field (non-sensitive)
+- Design: fake OAuth tokens injected into container, MITM swaps bearer token
+- Preference: OAuth > API key (matches Claude Code behavior)
+- Token refresh: host-side only at session start; mid-session 401s require restart
+- Refresh token rotation: each refresh invalidates old token (known race condition issue)

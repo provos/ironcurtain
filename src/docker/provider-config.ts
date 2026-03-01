@@ -182,6 +182,7 @@ export const anthropicProvider: ProviderConfig = {
     { method: 'POST', path: '/v1/messages' },
     { method: 'POST', path: '/v1/messages/count_tokens' },
     // Claude Code internal endpoints
+    { method: 'GET', path: '/api/oauth/usage' },
     { method: 'GET', path: '/api/hello' },
     { method: 'GET', path: '/api/claude_code/settings' },
     { method: 'GET', path: '/api/claude_code/policy_limits' },
@@ -214,6 +215,24 @@ export const openaiProvider: ProviderConfig = {
   ],
   keyInjection: { type: 'bearer' },
   fakeKeyPrefix: 'sk-ironcurtain-',
+};
+
+export const anthropicOAuthProvider: ProviderConfig = {
+  host: 'api.anthropic.com',
+  displayName: 'Anthropic (OAuth)',
+  allowedEndpoints: anthropicProvider.allowedEndpoints,
+  keyInjection: { type: 'bearer' },
+  fakeKeyPrefix: 'sk-ant-oat01-ironcurtain-',
+  requestRewriter: stripServerSideTools,
+  rewriteEndpoints: ['/v1/messages'],
+};
+
+export const claudePlatformOAuthProvider: ProviderConfig = {
+  host: 'platform.claude.com',
+  displayName: 'Claude Platform (OAuth)',
+  allowedEndpoints: claudePlatformProvider.allowedEndpoints,
+  keyInjection: { type: 'bearer' },
+  fakeKeyPrefix: 'sk-ant-oat01-ironcurtain-',
 };
 
 export const googleProvider: ProviderConfig = {

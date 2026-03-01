@@ -15,7 +15,12 @@
 import type { AgentAdapter, AgentConfigFile, AgentId, AgentResponse, OrientationContext } from '../agent-adapter.js';
 import type { IronCurtainConfig } from '../../config/types.js';
 import type { ProviderConfig } from '../provider-config.js';
-import { anthropicProvider, claudePlatformProvider } from '../provider-config.js';
+import {
+  anthropicProvider,
+  claudePlatformProvider,
+  anthropicOAuthProvider,
+  claudePlatformOAuthProvider,
+} from '../provider-config.js';
 import { buildSystemPrompt } from '../../session/prompts.js';
 
 const CLAUDE_CODE_IMAGE = 'ironcurtain-claude-code:latest';
@@ -159,19 +164,36 @@ kill -WINCH "$CLAUDE_PID" 2>/dev/null
     return `${codeModePrompt}\n${dockerPrompt}`;
   },
 
-  getProviders(): readonly ProviderConfig[] {
+  getProviders(authKind?: 'oauth' | 'apikey'): readonly ProviderConfig[] {
+    if (authKind === 'oauth') {
+      return [anthropicOAuthProvider, claudePlatformOAuthProvider];
+    }
     return [anthropicProvider, claudePlatformProvider];
   },
 
-  buildEnv(_config: IronCurtainConfig, fakeKeys: ReadonlyMap<string, string>): Record<string, string> {
-    return {
-      // Pass the fake key via a non-Claude env var; apiKeyHelper in
-      // settings.json echoes it so Claude Code never prompts for approval.
-      IRONCURTAIN_API_KEY: fakeKeys.get('api.anthropic.com') ?? '',
+  buildEnv(config: IronCurtainConfig, fakeKeys: ReadonlyMap<string, string>): Record<string, string> {
+    const env: Record<string, string> = {
       CLAUDE_CODE_DISABLE_UPDATE_CHECK: '1',
       // Node.js does not use the system CA store -- must set this explicitly
       NODE_EXTRA_CA_CERTS: '/usr/local/share/ca-certificates/ironcurtain-ca.crt',
     };
+
+    const fakeKey = fakeKeys.get('api.anthropic.com');
+    if (!fakeKey) {
+      throw new Error('No fake key generated for api.anthropic.com — cannot configure Claude Code authentication');
+    }
+
+    if (config.dockerAuth?.kind === 'oauth') {
+      // OAuth mode: pass fake token via Claude Code's native env var.
+      // Claude Code reads CLAUDE_CODE_OAUTH_TOKEN as its highest-priority auth.
+      env.CLAUDE_CODE_OAUTH_TOKEN = fakeKey;
+    } else {
+      // API key mode: pass the fake key via a non-Claude env var; apiKeyHelper
+      // in settings.json echoes it so Claude Code never prompts for approval.
+      env.IRONCURTAIN_API_KEY = fakeKey;
+    }
+
+    return env;
   },
 
   extractResponse(exitCode: number, stdout: string): AgentResponse {

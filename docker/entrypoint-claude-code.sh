@@ -27,19 +27,28 @@ cat > "$HOME/.claude.json" <<'EOJSON'
 EOJSON
 
 # Configure settings.json:
-# - apiKeyHelper: feeds the API key via helper so Claude Code skips the
-#   custom API key approval dialog entirely
 # - skipDangerousModePermissionPrompt: suppresses the bypass-permissions warning
+# Auth mode determines how Claude Code gets its API credentials:
+# - OAuth mode (CLAUDE_CODE_OAUTH_TOKEN set): Claude Code reads the token from
+#   this env var directly -- no apiKeyHelper needed.
+# - API key mode: apiKeyHelper echoes the fake key so Claude Code skips the
+#   custom API key approval dialog entirely.
 mkdir -p "$HOME/.claude"
-cat > "$HOME/.claude/settings.json" <<'EOSETTINGS'
+
+API_KEY_HELPER_LINE=""
+if [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
+  API_KEY_HELPER_LINE='
+  "apiKeyHelper": "echo $IRONCURTAIN_API_KEY",'
+fi
+
+cat > "$HOME/.claude/settings.json" <<EOSETTINGS
 {
   "permissions": {
     "allow": [],
     "deny": [],
     "additionalDirectories": [],
     "defaultMode": "bypassPermissions"
-  },
-  "apiKeyHelper": "echo $IRONCURTAIN_API_KEY",
+  },${API_KEY_HELPER_LINE}
   "skipDangerousModePermissionPrompt": true
 }
 EOSETTINGS
