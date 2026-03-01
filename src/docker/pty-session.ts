@@ -424,20 +424,20 @@ function attachPty(options: PtyProxyOptions): Promise<number> {
       // Container -> Host (untrusted output, displayed directly)
       conn.pipe(stdout);
 
-      const cleanup = (): void => {
+      // Use function declarations (hoisted) so cleanup and onAbort can
+      // reference each other without temporal dead zone issues.
+      function cleanup(): void {
         stdout.removeListener('resize', onResize);
         stdin.removeListener('data', onData);
         conn.unpipe(stdout);
         stdin.pause();
         options.signal?.removeEventListener('abort', onAbort);
-      };
-
-      // Graceful shutdown via abort signal (e.g., SIGTERM)
-      const onAbort = (): void => {
+      }
+      function onAbort(): void {
         cleanup();
         conn.destroy();
         settle(0);
-      };
+      }
       if (options.signal?.aborted) {
         onAbort();
         return;

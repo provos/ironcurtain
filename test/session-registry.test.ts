@@ -24,7 +24,7 @@ describe('readActiveRegistrations', () => {
   function writeRegistration(sessionId: string, overrides: Partial<PtySessionRegistration> = {}): void {
     const registration: PtySessionRegistration = {
       sessionId,
-      escalationDir: `/tmp/sessions/${sessionId}/escalations`,
+      escalationDir: join(tmpdir(), 'sessions', sessionId, 'escalations'),
       label: `Agent - task ${sessionId}`,
       startedAt: new Date().toISOString(),
       pid: process.pid, // Current process is alive

@@ -66,7 +66,7 @@ export async function main(): Promise<void> {
     // then clear any remaining lines below. The per-line \x1b[K (clear to
     // end of line) is needed because shorter new lines would otherwise leave
     // leftover characters from the previous (longer) dashboard render.
-    process.stderr.write('\x1b[H' + content.replace(/\n/g, '\x1b[K\n') + '\x1b[J');
+    process.stderr.write('\x1b[H\x1b[K' + content.replace(/\n/g, '\x1b[K\n') + '\x1b[J');
 
     // Force readline to redisplay its prompt + current input buffer
     rl.prompt(true);
