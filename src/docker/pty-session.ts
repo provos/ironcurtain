@@ -32,7 +32,6 @@ import {
   getSessionSandboxDir,
   getSessionEscalationDir,
   getSessionAuditLogPath,
-  getSessionSocketsDir,
   getSessionLogPath,
   getSessionLlmLogPath,
   getPtyRegistryDir,
@@ -62,7 +61,7 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
   const sandboxDir = getSessionSandboxDir(sessionId);
   const escalationDir = getSessionEscalationDir(sessionId);
   const auditLogPath = getSessionAuditLogPath(sessionId);
-  const socketsDir = getSessionSocketsDir(sessionId);
+  const socketsDir = resolve(sessionDir, 'sockets');
 
   mkdirSync(sandboxDir, { recursive: true, mode: 0o700 });
   mkdirSync(escalationDir, { recursive: true, mode: 0o700 });

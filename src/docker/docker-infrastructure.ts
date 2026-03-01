@@ -68,7 +68,7 @@ export async function prepareDockerInfrastructure(
   const { generateFakeKey } = await import('./fake-keys.js');
   const { createDockerManager } = await import('./docker-manager.js');
   const { useTcpTransport } = await import('./platform.js');
-  const { getIronCurtainHome, getSessionSocketsDir } = await import('../config/paths.js');
+  const { getIronCurtainHome } = await import('../config/paths.js');
   const { prepareSession } = await import('./orientation.js');
   const { mkdirSync } = await import('node:fs');
 
@@ -76,7 +76,10 @@ export async function prepareDockerInfrastructure(
   const adapter = getAgent(mode.agent);
   const useTcp = useTcpTransport();
 
-  const socketsDir = getSessionSocketsDir(sessionId);
+  // Derive socketsDir from the passed sessionDir rather than sessionId so
+  // that resumed sessions (where sessionDir is based on effectiveSessionId)
+  // place sockets in the correct directory.
+  const socketsDir = resolve(sessionDir, 'sockets');
   mkdirSync(socketsDir, { recursive: true });
 
   const socketPath = resolve(socketsDir, 'proxy.sock');
@@ -132,42 +135,50 @@ export async function prepareDockerInfrastructure(
     logger.info(`MITM proxy listening on ${mitmAddr.socketPath}`);
   }
 
-  // Build orientation
-  const helpData = proxy.getHelpData();
-  const serverListings = Object.entries(helpData.serverDescriptions).map(([name, description]) => ({
-    name,
-    description,
-  }));
-  logger.info(`Available servers: ${serverListings.map((s) => s.name).join(', ')}`);
+  // Remaining setup steps can fail -- clean up started proxies on error.
+  try {
+    // Build orientation
+    const helpData = proxy.getHelpData();
+    const serverListings = Object.entries(helpData.serverDescriptions).map(([name, description]) => ({
+      name,
+      description,
+    }));
+    logger.info(`Available servers: ${serverListings.map((s) => s.name).join(', ')}`);
 
-  const proxyAddress = useTcp && proxy.port !== undefined ? `host.docker.internal:${proxy.port}` : undefined;
-  const { systemPrompt } = prepareSession(adapter, serverListings, sessionDir, config, sandboxDir, proxyAddress);
+    const proxyAddress = useTcp && proxy.port !== undefined ? `host.docker.internal:${proxy.port}` : undefined;
+    const { systemPrompt } = prepareSession(adapter, serverListings, sessionDir, config, sandboxDir, proxyAddress);
 
-  // Ensure Docker image is built and up-to-date
-  const image = await adapter.getImage();
-  await ensureImage(image, docker, ca);
+    // Ensure Docker image is built and up-to-date
+    const image = await adapter.getImage();
+    await ensureImage(image, docker, ca);
 
-  const orientationDir = resolve(sessionDir, 'orientation');
+    const orientationDir = resolve(sessionDir, 'orientation');
 
-  return {
-    sessionId,
-    sessionDir,
-    sandboxDir,
-    escalationDir,
-    auditLogPath,
-    proxy,
-    mitmProxy,
-    docker,
-    adapter,
-    ca,
-    fakeKeys,
-    orientationDir,
-    systemPrompt,
-    image,
-    useTcp,
-    socketsDir,
-    mitmAddr,
-  };
+    return {
+      sessionId,
+      sessionDir,
+      sandboxDir,
+      escalationDir,
+      auditLogPath,
+      proxy,
+      mitmProxy,
+      docker,
+      adapter,
+      ca,
+      fakeKeys,
+      orientationDir,
+      systemPrompt,
+      image,
+      useTcp,
+      socketsDir,
+      mitmAddr,
+    };
+  } catch (error) {
+    // Best-effort cleanup of proxies started above
+    await mitmProxy.stop().catch(() => {});
+    await proxy.stop().catch(() => {});
+    throw error;
+  }
 }
 
 /**
