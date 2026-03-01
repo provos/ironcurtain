@@ -69,7 +69,7 @@ Terminal 1 (PTY session)              Terminal 2 (PTY session)
 
 ### Data Flow
 
-1. **PTY session startup**: `ironcurtain start --pty "task"` creates a session (Code Mode Proxy + MCP proxy + MITM proxy), starts the Docker container with a PTY-enabled process, and uses `socat` on the host to bridge the user's terminal to the container's PTY via a forwarded port or UDS.
+1. **PTY session startup**: `ironcurtain start --pty` creates a session (Code Mode Proxy + MCP proxy + MITM proxy), starts the Docker container with a PTY-enabled process, and uses `socat` on the host to bridge the user's terminal to the container's PTY via a forwarded port or UDS.
 
 2. **Session registration**: On startup, the PTY session notifies the escalation listener (if running) by writing a registration file to a well-known host-side directory. On shutdown, it writes a deregistration file.
 
@@ -518,10 +518,11 @@ When a new escalation arrives, the listener writes `\x07` (BEL) to the terminal.
 Added to the `start` subcommand. Only valid when the session mode is Docker.
 
 ```
-ironcurtain start --pty "Fix the login bug"
-ironcurtain start --pty --agent claude-code "Write unit tests"
 ironcurtain start --pty                     # Interactive: Claude Code prompts for input
+ironcurtain start --pty --agent claude-code # Explicit agent selection
 ```
+
+**Note**: PTY mode is always interactive -- task arguments are not accepted. Provide instructions directly in the Claude Code TUI.
 
 **Validation**:
 - `--pty` with builtin mode: error with message "PTY mode requires Docker agent mode. Use `--agent claude-code` or ensure Docker is available."
@@ -919,7 +920,7 @@ export interface ListenerState {
 - **Modified**: `docker/entrypoint-claude-code.sh` -- change to `exec "$@"` pattern
 - **New**: `test/pty-session.test.ts` -- unit tests with mocked Docker manager
 
-**Verification**: Manual test on Linux: `ironcurtain start --pty "hello"` attaches to Claude Code's terminal with working resize.
+**Verification**: Manual test on Linux: `ironcurtain start --pty` attaches to Claude Code's terminal with working resize.
 
 ### Phase 3: CLI Integration for `--pty`
 
@@ -929,7 +930,7 @@ export interface ListenerState {
 - **Modified**: `src/index.ts` -- add `--pty` flag parsing and validation
 - **Modified**: `src/cli.ts` -- update help text
 
-**Verification**: `ironcurtain start --pty "task"` works end-to-end. `--pty` without Docker mode shows clear error.
+**Verification**: `ironcurtain start --pty` works end-to-end. `--pty` without Docker mode shows clear error.
 
 ### Phase 4: Session Notification Protocol
 

@@ -52,7 +52,7 @@ Examples:
   ironcurtain start "Summarize files in ."       # Single-shot task
   ironcurtain start --resume <session-id>        # Resume a session
   ironcurtain start --agent claude-code "task"   # Docker: Claude Code
-  ironcurtain start --pty "task"                 # PTY mode: interactive Docker terminal
+  ironcurtain start --pty                        # PTY mode: interactive Docker terminal
   ironcurtain start --list-agents                # List available agents
   ironcurtain annotate-tools                     # Classify tool arguments
   ironcurtain compile-policy                     # Compile policy from constitution

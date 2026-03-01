@@ -125,7 +125,7 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
   const ptyPort = useTcp ? DEFAULT_PTY_PORT : undefined;
 
   // Build the PTY command
-  const ptyCommand = adapter.buildPtyCommand('', systemPrompt, ptySockPath, ptyPort);
+  const ptyCommand = adapter.buildPtyCommand(systemPrompt, ptySockPath, ptyPort);
 
   // Build container configuration
   const shortId = sessionId.substring(0, 12);

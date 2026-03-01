@@ -182,7 +182,6 @@ kill -WINCH "$CLAUDE_PID" 2>/dev/null
   },
 
   buildPtyCommand(
-    _message: string,
     _systemPrompt: string,
     ptySockPath: string | undefined,
     ptyPort: number | undefined,

@@ -134,13 +134,11 @@ export interface AgentAdapter {
    *
    * Adapters that do not implement this method do not support PTY mode.
    *
-   * @param message - the initial task message (written to a file, not embedded in shell)
    * @param systemPrompt - the orientation prompt (written to a file, not embedded in shell)
    * @param ptySockPath - the UDS path for the PTY listener (Linux), or undefined for TCP mode
    * @param ptyPort - the TCP port for the PTY listener (macOS), or undefined for UDS mode
    */
   buildPtyCommand?(
-    message: string,
     systemPrompt: string,
     ptySockPath: string | undefined,
     ptyPort: number | undefined,
