@@ -80,7 +80,7 @@ export async function prepareDockerInfrastructure(
   // that resumed sessions (where sessionDir is based on effectiveSessionId)
   // place sockets in the correct directory.
   const socketsDir = resolve(sessionDir, 'sockets');
-  mkdirSync(socketsDir, { recursive: true });
+  mkdirSync(socketsDir, { recursive: true, mode: 0o700 });
 
   const socketPath = resolve(socketsDir, 'proxy.sock');
 

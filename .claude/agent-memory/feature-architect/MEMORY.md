@@ -216,4 +216,4 @@ Both use the same PolicyEngine with compiled artifacts.
 - `--pty` flag on start: attaches user terminal to Claude Code PTY via socat bridge
 - `escalation-listener` command: TUI dashboard (ink) aggregating escalations from all PTY sessions
 - Shared escalation watcher module: `src/escalation/escalation-watcher.ts`
-- Session notification: file-based registration in `~/.ironcurtain/pty-sessions/`
+- Session notification: file-based registration in `~/.ironcurtain/pty-registry/`

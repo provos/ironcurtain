@@ -113,9 +113,12 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
 
   process.on('exit', restoreTerminal);
 
+  // SIGTERM triggers graceful shutdown by aborting the PTY connection.
+  // This causes attachPty() to resolve, which then falls through to the
+  // finally block for full async cleanup (containers, proxies, files).
+  const shutdownController = new AbortController();
   const handleSigterm = (): void => {
-    restoreTerminal();
-    process.exit(128 + 15);
+    shutdownController.abort();
   };
   process.on('SIGTERM', handleSigterm);
 
@@ -274,6 +277,7 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
     const exitCode = await attachPty({
       target: ptyTarget,
       containerId,
+      signal: shutdownController.signal,
     });
 
     // PTY disconnected -- restore terminal and show shutdown progress
@@ -356,11 +360,13 @@ interface PtyProxyOptions {
   readonly target: PtyTarget;
   /** Docker container ID (for SIGWINCH forwarding). */
   readonly containerId: string;
+  /** Abort signal for graceful shutdown (e.g., SIGTERM). */
+  readonly signal?: AbortSignal;
 }
 
 /**
  * Attaches the user's terminal to the container PTY via a Node.js socket.
- * Returns a promise that resolves with the exit code when the connection closes.
+ * Returns a promise that resolves with 0 on normal close, 1 on error.
  */
 function attachPty(options: PtyProxyOptions): Promise<number> {
   const conn = connectToTarget(options.target);
@@ -368,7 +374,14 @@ function attachPty(options: PtyProxyOptions): Promise<number> {
   const { stdin, stdout } = process;
 
   return new Promise((resolvePromise) => {
-    conn.on('connect', () => {
+    let resolved = false;
+    const settle = (code: number): void => {
+      if (resolved) return;
+      resolved = true;
+      resolvePromise(code);
+    };
+
+    conn.once('connect', () => {
       // Put terminal in raw mode
       if (stdin.isTTY) {
         stdin.setRawMode(true);
@@ -401,7 +414,7 @@ function attachPty(options: PtyProxyOptions): Promise<number> {
         if (data.length === 1 && data[0] === CTRL_BACKSLASH) {
           cleanup();
           conn.destroy();
-          resolvePromise(0);
+          settle(0);
           return;
         }
         conn.write(data);
@@ -416,20 +429,33 @@ function attachPty(options: PtyProxyOptions): Promise<number> {
         stdin.removeListener('data', onData);
         conn.unpipe(stdout);
         stdin.pause();
+        options.signal?.removeEventListener('abort', onAbort);
       };
 
-      conn.on('close', () => {
+      // Graceful shutdown via abort signal (e.g., SIGTERM)
+      const onAbort = (): void => {
         cleanup();
-        resolvePromise(0);
+        conn.destroy();
+        settle(0);
+      };
+      if (options.signal?.aborted) {
+        onAbort();
+        return;
+      }
+      options.signal?.addEventListener('abort', onAbort, { once: true });
+
+      conn.once('close', () => {
+        cleanup();
+        settle(0);
       });
-      conn.on('error', () => {
+      conn.once('error', () => {
         cleanup();
-        resolvePromise(1);
+        settle(1);
       });
     });
 
-    conn.on('error', () => {
-      resolvePromise(1);
+    conn.once('error', () => {
+      settle(1);
     });
   });
 }
