@@ -14,6 +14,7 @@ import { CodeModeUtcpClient } from '@utcp/code-mode';
 import { Protocol } from '@modelcontextprotocol/sdk/shared/protocol.js';
 import type { IronCurtainConfig } from '../config/types.js';
 import { parseModelId, resolveApiKeyForProvider } from '../config/model-provider.js';
+import { resolveNodeModulesBin } from '../trusted-process/sandbox-integration.js';
 
 // Workaround: UTCP creates MCP SDK Client instances without setting a per-request
 // timeout, so they inherit the SDK's DEFAULT_REQUEST_TIMEOUT_MSEC (60s). This is
@@ -53,7 +54,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const isCompiled = __filename.endsWith('.js');
 const proxyServerPath = resolve(__dirname, `../trusted-process/mcp-proxy-server.${isCompiled ? 'js' : 'ts'}`);
-const tsxBin = resolve(__dirname, '../../node_modules/.bin/tsx');
+const tsxBin = resolveNodeModulesBin('tsx', resolve(__dirname, '..', '..'));
 const PROXY_COMMAND = isCompiled ? 'node' : tsxBin;
 const PROXY_ARGS = [proxyServerPath];
 

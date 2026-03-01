@@ -732,7 +732,7 @@ describe('handleCallTool', () => {
       serverName: 'git',
       comment: 'Sets working dir',
       sideEffects: false,
-      args: { path: ['opaque'] },
+      args: { path: ['none'] },
     };
     vi.mocked(deps.policyEngine.getAnnotation).mockReturnValue(gitAnnotation);
 

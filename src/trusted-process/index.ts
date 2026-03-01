@@ -19,6 +19,7 @@ import { prepareToolArgs } from './path-utils.js';
 import { extractPolicyRoots, toMcpRoots, directoryForPath } from './policy-roots.js';
 import * as logger from '../logger.js';
 import { extractMcpErrorMessage } from './mcp-error-utils.js';
+import { type ServerContextMap, updateServerContext, formatServerContext } from './server-context.js';
 
 export type EscalationPromptFn = (request: ToolCallRequest, reason: string) => Promise<'approved' | 'denied'>;
 
@@ -35,6 +36,7 @@ export class TrustedProcess {
   private onEscalation?: EscalationPromptFn;
   private autoApproveModel: LanguageModelV3 | null = null;
   private lastUserMessage: string | null = null;
+  private serverContextMap: ServerContextMap = new Map();
 
   constructor(
     private config: IronCurtainConfig,
@@ -178,9 +180,10 @@ export class TrustedProcess {
 
         // Fall through to human escalation if not auto-approved
         if (!autoApproved) {
+          const escalationContext = formatServerContext(this.serverContextMap, transportRequest.serverName);
           escalationResult = this.onEscalation
             ? await this.onEscalation(transportRequest, evaluation.reason)
-            : await this.escalation.prompt(transportRequest, evaluation.reason);
+            : await this.escalation.prompt(transportRequest, evaluation.reason, escalationContext);
 
           if (escalationResult === 'approved') {
             policyDecision.status = 'allow';
@@ -225,6 +228,12 @@ export class TrustedProcess {
           }
         } else {
           resultStatus = 'success';
+          updateServerContext(
+            this.serverContextMap,
+            transportRequest.serverName,
+            transportRequest.toolName,
+            transportRequest.arguments,
+          );
         }
       } else {
         resultContent = { denied: true, reason: policyDecision.reason };

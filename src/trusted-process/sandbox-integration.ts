@@ -253,7 +253,7 @@ function resolveNetworkConfig(config: false | SandboxNetworkConfig | undefined):
  * Resolves a binary name in node_modules/.bin/ by walking up from startDir.
  * Handles npm's dependency hoisting where bins may live in a parent node_modules/.bin/.
  */
-function resolveNodeModulesBin(binName: string, startDir: string): string {
+export function resolveNodeModulesBin(binName: string, startDir: string): string {
   let dir = startDir;
   for (;;) {
     const candidate = join(dir, 'node_modules', '.bin', binName);
