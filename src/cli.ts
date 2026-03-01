@@ -24,6 +24,7 @@ Usage:
 
 Commands:
   start [task]         Run the agent (interactive or single-shot)
+  escalation-listener  Aggregate escalation notifications from PTY sessions
   bot                  Run the Signal messaging transport daemon
   setup                Run the first-start wizard (always runs)
   setup-signal         Interactive Signal transport onboarding
@@ -40,6 +41,9 @@ Options:
   -v, --version        Show version number
   -a, --agent <name>   Agent mode: builtin or claude-code (Docker)
                        Auto-detects if omitted: Docker if available, else builtin
+  --pty                Attach terminal directly to agent PTY (Docker mode only)
+                       Ctrl-\\ is the emergency exit; run 'reset' to recover
+                       the terminal if killed ungracefully
   --list-agents        List registered agent adapters
 
 Examples:
@@ -48,6 +52,7 @@ Examples:
   ironcurtain start "Summarize files in ."       # Single-shot task
   ironcurtain start --resume <session-id>        # Resume a session
   ironcurtain start --agent claude-code "task"   # Docker: Claude Code
+  ironcurtain start --pty                        # PTY mode: interactive Docker terminal
   ironcurtain start --list-agents                # List available agents
   ironcurtain annotate-tools                     # Classify tool arguments
   ironcurtain compile-policy                     # Compile policy from constitution
@@ -121,6 +126,11 @@ switch (subcommand) {
     const agentName = values.agent as string | undefined;
     const { runBot } = await import('./signal/bot-command.js');
     await runBot({ agent: agentName });
+    break;
+  }
+  case 'escalation-listener': {
+    const { main: listenerMain } = await import('./escalation/listener-command.js');
+    await listenerMain();
     break;
   }
   case 'setup-signal': {

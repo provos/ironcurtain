@@ -18,6 +18,7 @@ export async function main(args?: string[]): Promise<void> {
     options: {
       resume: { type: 'string', short: 'r' },
       agent: { type: 'string', short: 'a' },
+      pty: { type: 'boolean' },
       'list-agents': { type: 'boolean' },
     },
     allowPositionals: true,
@@ -62,6 +63,27 @@ export async function main(args?: string[]): Promise<void> {
   // Check constitution freshness once here, before any proxy processes are spawned.
   const { compiledPolicy } = loadGeneratedPolicy(config.generatedDir, getPackageGeneratedDir());
   checkConstitutionFreshness(compiledPolicy, config.constitutionPath);
+
+  // PTY mode: attach terminal directly to Claude Code in a Docker container
+  if (values.pty) {
+    if (mode.kind !== 'docker') {
+      process.stderr.write(
+        chalk.red('PTY mode requires Docker agent mode. Use --agent claude-code or ensure Docker is available.\n'),
+      );
+      process.exit(1);
+    }
+
+    if (task) {
+      process.stderr.write(
+        chalk.red('PTY mode is interactive -- do not provide a task message. Type your commands in the PTY.\n'),
+      );
+      process.exit(1);
+    }
+
+    const { runPtySession } = await import('./docker/pty-session.js');
+    await runPtySession({ config, mode });
+    process.exit(0);
+  }
 
   // Create the transport first so we can wire its callbacks into the session.
   const transport = new CliTransport({ initialMessage: task || undefined });

@@ -109,6 +109,24 @@ export function getSessionSocketsDir(sessionId: string): string {
 }
 
 /**
+ * Returns the PTY session registry directory:
+ *   {home}/pty-registry/
+ *
+ * PTY sessions write registration files here for the escalation listener.
+ */
+export function getPtyRegistryDir(): string {
+  return resolve(getIronCurtainHome(), 'pty-registry');
+}
+
+/**
+ * Returns the escalation listener lock file path:
+ *   {home}/escalation-listener.lock
+ */
+export function getListenerLockPath(): string {
+  return resolve(getIronCurtainHome(), 'escalation-listener.lock');
+}
+
+/**
  * Returns the user config file path: {home}/config.json
  */
 export function getUserConfigPath(): string {

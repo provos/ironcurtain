@@ -38,7 +38,7 @@ function writeConfigFiles(baseDir: string, files: AgentConfigFile[]): void {
   for (const file of files) {
     const targetPath = resolve(baseDir, file.path);
     mkdirSync(dirname(targetPath), { recursive: true });
-    writeFileSync(targetPath, file.content);
+    writeFileSync(targetPath, file.content, { mode: file.mode });
   }
 }
 

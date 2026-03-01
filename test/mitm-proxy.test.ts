@@ -460,7 +460,7 @@ describe('MitmProxy', () => {
     expect(response.body).toContain('does not match expected sentinel');
   });
 
-  it('rejects requests with missing API key', async () => {
+  it('forwards requests with no API key header (unauthenticated endpoint)', async () => {
     proxy = createMitmProxy({
       socketPath,
       ca,
@@ -477,8 +477,9 @@ describe('MitmProxy', () => {
       headers: {},
     });
 
-    expect(response.statusCode).toBe(403);
-    expect(response.body).toContain('does not match expected sentinel');
+    // No API key header → treated as unauthenticated, forwarded upstream
+    // (502 because no real upstream exists in the test)
+    expect(response.statusCode).toBe(502);
   });
 
   it('stop() cleans up socket file', async () => {

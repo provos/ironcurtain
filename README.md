@@ -303,6 +303,20 @@ Or with npm scripts during development: `npm start` / `npm start "task"`.
 
 When Docker is available and `ANTHROPIC_API_KEY` is set, `ironcurtain start` automatically selects Docker mode (claude-code agent). Otherwise it falls back to the builtin agent silently. The selected mode is logged to stderr. Use `--agent builtin` or `--agent claude-code` to force a specific agent; explicit selection fails fast with a clear error if prerequisites are missing.
 
+**PTY mode** (interactive Docker terminal with native Claude Code UI):
+
+```bash
+# Terminal 1: run Claude Code interactively via PTY
+ironcurtain start --pty
+
+# Terminal 2: handle escalation approvals from all PTY sessions
+ironcurtain escalation-listener
+```
+
+The `--pty` flag attaches your terminal directly to Claude Code running inside the Docker container. You get Claude Code's full TUI (spinners, diffs, file previews) while IronCurtain still mediates every tool call through its policy engine. Escalations are handled in a separate terminal via the escalation listener, which aggregates notifications across all active PTY sessions. Use `/approve N` or `/deny N` to resolve escalations.
+
+Press `Ctrl-\` for an emergency exit if the session becomes unresponsive. If the process is killed ungracefully, run `reset` to restore your terminal.
+
 ### 6. Signal messaging transport (optional)
 
 IronCurtain includes a Signal messaging transport that lets you interact with agent sessions from your phone. All communication is end-to-end encrypted via the Signal protocol.
@@ -320,13 +334,13 @@ See [TRANSPORT.md](TRANSPORT.md) for the full setup guide, architecture details,
 
 During an interactive session:
 
-| Command | Description |
-|---------|-------------|
-| `/approve` | Approve a pending escalation request |
-| `/deny` | Deny a pending escalation request |
-| `/budget` | Show resource consumption (tokens, steps, cost) |
-| `/logs` | Display diagnostic events |
-| `/quit` | End the session |
+| Command    | Description                                     |
+| ---------- | ----------------------------------------------- |
+| `/approve` | Approve a pending escalation request            |
+| `/deny`    | Deny a pending escalation request               |
+| `/budget`  | Show resource consumption (tokens, steps, cost) |
+| `/logs`    | Display diagnostic events                       |
+| `/quit`    | End the session                                 |
 
 ## Configuration
 
@@ -351,12 +365,12 @@ IronCurtain stores its configuration and session data in `~/.ironcurtain/`:
 
 Sessions enforce configurable limits to prevent runaway agents:
 
-| Limit | Default | Config Key |
-|-------|---------|------------|
-| Max tokens | 1,000,000 | `resourceBudget.maxTotalTokens` |
-| Max steps | 200 | `resourceBudget.maxSteps` |
-| Session timeout | 30 minutes | `resourceBudget.maxSessionSeconds` |
-| Cost cap | $5.00 | `resourceBudget.maxEstimatedCostUsd` |
+| Limit           | Default    | Config Key                           |
+| --------------- | ---------- | ------------------------------------ |
+| Max tokens      | 1,000,000  | `resourceBudget.maxTotalTokens`      |
+| Max steps       | 200        | `resourceBudget.maxSteps`            |
+| Session timeout | 30 minutes | `resourceBudget.maxSessionSeconds`   |
+| Cost cap        | $5.00      | `resourceBudget.maxEstimatedCostUsd` |
 
 Set any limit to `null` in `config.json` to disable it.
 
@@ -393,11 +407,11 @@ IronCurtain supports multiple LLM providers. Use the `provider:model-name` forma
 
 Each provider has its own API key field in the config (and corresponding environment variable):
 
-| Provider | Config Key | Environment Variable |
-|----------|-----------|---------------------|
-| Anthropic | `anthropicApiKey` | `ANTHROPIC_API_KEY` |
-| Google | `googleApiKey` | `GOOGLE_GENERATIVE_AI_API_KEY` |
-| OpenAI | `openaiApiKey` | `OPENAI_API_KEY` |
+| Provider  | Config Key        | Environment Variable           |
+| --------- | ----------------- | ------------------------------ |
+| Anthropic | `anthropicApiKey` | `ANTHROPIC_API_KEY`            |
+| Google    | `googleApiKey`    | `GOOGLE_GENERATIVE_AI_API_KEY` |
+| OpenAI    | `openaiApiKey`    | `OPENAI_API_KEY`               |
 
 Environment variables take precedence over config file values.
 
@@ -451,15 +465,15 @@ See [docs/SECURITY_CONCERNS.md](docs/SECURITY_CONCERNS.md) for a detailed threat
 
 ## Troubleshooting
 
-| Issue | Guidance |
-|-------|---------|
-| **Missing API key** | Set the environment variable (`ANTHROPIC_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`, or `OPENAI_API_KEY`) or add the corresponding key to `~/.ironcurtain/config.json`. |
-| **Sandbox unavailable** | OS-level sandboxing requires `bubblewrap` and `socat`. Install both, or set `"sandboxPolicy": "warn"` in your MCP server config for development. |
-| **Budget exhausted** | Adjust limits in `~/.ironcurtain/config.json` under `resourceBudget`. Set any individual limit to `null` to disable it. |
-| **Node version errors** | Node.js 22+ is required (`isolated-vm` needs `>=22.0.0`). Maximum supported is Node 25 (`<26`). |
-| **Policy doesn't match intent** | Review `compiled-policy.json` to see the generated rules. Run `ironcurtain customize-policy` to refine your constitution, then `ironcurtain compile-policy` to recompile. Specific wording produces better rules — vague phrasing leads to vague policy. |
+| Issue                           | Guidance                                                                                                                                                                                                                                                   |
+| ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Missing API key**             | Set the environment variable (`ANTHROPIC_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`, or `OPENAI_API_KEY`) or add the corresponding key to `~/.ironcurtain/config.json`.                                                                                      |
+| **Sandbox unavailable**         | OS-level sandboxing requires `bubblewrap` and `socat`. Install both, or set `"sandboxPolicy": "warn"` in your MCP server config for development.                                                                                                           |
+| **Budget exhausted**            | Adjust limits in `~/.ironcurtain/config.json` under `resourceBudget`. Set any individual limit to `null` to disable it.                                                                                                                                    |
+| **Node version errors**         | Node.js 22+ is required (`isolated-vm` needs `>=22.0.0`). Maximum supported is Node 25 (`<26`).                                                                                                                                                            |
+| **Policy doesn't match intent** | Review `compiled-policy.json` to see the generated rules. Run `ironcurtain customize-policy` to refine your constitution, then `ironcurtain compile-policy` to recompile. Specific wording produces better rules — vague phrasing leads to vague policy.   |
 | **Auto-approve not triggering** | The auto-approver only approves when the user's message explicitly authorizes the action (e.g., "push to origin" for `git_push`). Vague messages like "go ahead" always escalate to human review. Verify `autoApprove.enabled` is `true` in `config.json`. |
-| **Signal bot not responding** | Verify the signal-cli container is running (`docker ps \| grep ironcurtain-signal`). Check that Signal is configured (`ironcurtain setup-signal`). See [TRANSPORT.md](TRANSPORT.md) for detailed troubleshooting. |
+| **Signal bot not responding**   | Verify the signal-cli container is running (`docker ps \| grep ironcurtain-signal`). Check that Signal is configured (`ironcurtain setup-signal`). See [TRANSPORT.md](TRANSPORT.md) for detailed troubleshooting.                                          |
 
 ## Development
 

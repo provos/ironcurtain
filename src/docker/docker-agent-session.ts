@@ -39,9 +39,9 @@ import { AuditLogTailer } from './audit-log-tailer.js';
 import { prepareSession } from './orientation.js';
 import { INTERNAL_NETWORK_NAME, INTERNAL_NETWORK_SUBNET, INTERNAL_NETWORK_GATEWAY } from './platform.js';
 import { SessionNotReadyError, SessionClosedError } from '../session/errors.js';
+import { createEscalationWatcher, atomicWriteJsonSync } from '../escalation/escalation-watcher.js';
+import type { EscalationWatcher } from '../escalation/escalation-watcher.js';
 import * as logger from '../logger.js';
-
-const ESCALATION_POLL_INTERVAL_MS = 300;
 
 export interface DockerAgentSessionDeps {
   readonly config: IronCurtainConfig;
@@ -61,6 +61,16 @@ export interface DockerAgentSessionDeps {
   readonly onEscalation?: (request: EscalationRequest) => void;
   readonly onEscalationExpired?: () => void;
   readonly onDiagnostic?: (event: DiagnosticEvent) => void;
+  /**
+   * When set, proxies are already started, orientation is built, and
+   * the image name is resolved. initialize() skips those steps and
+   * proceeds directly to container creation + watchers.
+   */
+  readonly preBuiltInfrastructure?: {
+    readonly systemPrompt: string;
+    readonly image: string;
+    readonly mitmAddr: { socketPath?: string; port?: number };
+  };
 }
 
 export class DockerAgentSession implements Session {
@@ -88,9 +98,7 @@ export class DockerAgentSession implements Session {
 
   private turns: ConversationTurn[] = [];
   private diagnosticLog: DiagnosticEvent[] = [];
-  private pendingEscalation: EscalationRequest | undefined;
-  private seenEscalationIds = new Set<string>();
-  private escalationPollInterval: ReturnType<typeof setInterval> | null = null;
+  private escalationWatcher: EscalationWatcher | null = null;
 
   private auditTailer: AuditLogTailer | null = null;
   private cumulativeActiveMs = 0;
@@ -99,6 +107,7 @@ export class DockerAgentSession implements Session {
   private readonly onEscalation?: (request: EscalationRequest) => void;
   private readonly onEscalationExpired?: () => void;
   private readonly onDiagnostic?: (event: DiagnosticEvent) => void;
+  private readonly preBuiltInfrastructure?: DockerAgentSessionDeps['preBuiltInfrastructure'];
 
   constructor(deps: DockerAgentSessionDeps) {
     this.sessionId = deps.sessionId;
@@ -117,6 +126,7 @@ export class DockerAgentSession implements Session {
     this.onEscalation = deps.onEscalation;
     this.onEscalationExpired = deps.onEscalationExpired;
     this.onDiagnostic = deps.onDiagnostic;
+    this.preBuiltInfrastructure = deps.preBuiltInfrastructure;
     this.createdAt = new Date().toISOString();
   }
 
@@ -135,47 +145,59 @@ export class DockerAgentSession implements Session {
     mkdirSync(this.sandboxDir, { recursive: true });
     mkdirSync(this.escalationDir, { recursive: true });
 
-    // 1. Start Code Mode proxy
-    await this.proxy.start();
-    if (this.useTcp && this.proxy.port !== undefined) {
-      logger.info(`Code Mode proxy listening on 127.0.0.1:${this.proxy.port}`);
+    let mitmAddr: { socketPath?: string; port?: number };
+    let image: string;
+
+    if (this.preBuiltInfrastructure) {
+      // Infrastructure already prepared by prepareDockerInfrastructure() --
+      // proxies are started, orientation is built, image name is resolved.
+      this.systemPrompt = this.preBuiltInfrastructure.systemPrompt;
+      image = this.preBuiltInfrastructure.image;
+      mitmAddr = this.preBuiltInfrastructure.mitmAddr;
     } else {
-      logger.info(`Code Mode proxy listening on ${this.proxy.socketPath}`);
+      // Legacy path: start everything from scratch.
+      // 1. Start Code Mode proxy
+      await this.proxy.start();
+      if (this.useTcp && this.proxy.port !== undefined) {
+        logger.info(`Code Mode proxy listening on 127.0.0.1:${this.proxy.port}`);
+      } else {
+        logger.info(`Code Mode proxy listening on ${this.proxy.socketPath}`);
+      }
+
+      // 2. Start MITM proxy
+      mitmAddr = await this.mitmProxy.start();
+      if (mitmAddr.port !== undefined) {
+        logger.info(`MITM proxy listening on 127.0.0.1:${mitmAddr.port}`);
+      } else {
+        logger.info(`MITM proxy listening on ${mitmAddr.socketPath}`);
+      }
+
+      // 3. Build server listings from sandbox help data
+      const helpData = this.proxy.getHelpData();
+      const serverListings = Object.entries(helpData.serverDescriptions).map(([name, description]) => ({
+        name,
+        description,
+      }));
+      logger.info(`Available servers: ${serverListings.map((s) => s.name).join(', ')}`);
+
+      // 4. Generate orientation
+      // In TCP mode, the container reaches the MCP proxy via host.docker.internal
+      const proxyAddress =
+        this.useTcp && this.proxy.port !== undefined ? `host.docker.internal:${this.proxy.port}` : undefined;
+      const { systemPrompt } = prepareSession(
+        this.adapter,
+        serverListings,
+        this.sessionDir,
+        this.config,
+        this.sandboxDir,
+        proxyAddress,
+      );
+      this.systemPrompt = systemPrompt;
+
+      // 5. Ensure Docker image exists (build if needed, with CA cert)
+      image = await this.adapter.getImage();
+      await this.ensureImage(image);
     }
-
-    // 2. Start MITM proxy
-    const mitmAddr = await this.mitmProxy.start();
-    if (mitmAddr.port !== undefined) {
-      logger.info(`MITM proxy listening on 127.0.0.1:${mitmAddr.port}`);
-    } else {
-      logger.info(`MITM proxy listening on ${mitmAddr.socketPath}`);
-    }
-
-    // 3. Build server listings from sandbox help data
-    const helpData = this.proxy.getHelpData();
-    const serverListings = Object.entries(helpData.serverDescriptions).map(([name, description]) => ({
-      name,
-      description,
-    }));
-    logger.info(`Available servers: ${serverListings.map((s) => s.name).join(', ')}`);
-
-    // 4. Generate orientation
-    // In TCP mode, the container reaches the MCP proxy via host.docker.internal
-    const proxyAddress =
-      this.useTcp && this.proxy.port !== undefined ? `host.docker.internal:${this.proxy.port}` : undefined;
-    const { systemPrompt } = prepareSession(
-      this.adapter,
-      serverListings,
-      this.sessionDir,
-      this.config,
-      this.sandboxDir,
-      proxyAddress,
-    );
-    this.systemPrompt = systemPrompt;
-
-    // 5. Ensure Docker image exists (build if needed, with CA cert)
-    const image = await this.adapter.getImage();
-    await this.ensureImage(image);
 
     // 6. Create and start container
     const shortId = this.sessionId.substring(0, 12);
@@ -299,7 +321,11 @@ export class DockerAgentSession implements Session {
     }
 
     // 7. Start watchers
-    this.startEscalationWatcher();
+    this.escalationWatcher = createEscalationWatcher(this.escalationDir, {
+      onEscalation: (request) => this.onEscalation?.(request),
+      onEscalationExpired: () => this.onEscalationExpired?.(),
+    });
+    this.escalationWatcher.start();
 
     // Create the audit log file so fs.watch() can attach to it.
     // The proxy process appends entries; we create the empty file upfront.
@@ -392,7 +418,7 @@ export class DockerAgentSession implements Session {
   }
 
   getPendingEscalation(): EscalationRequest | undefined {
-    return this.pendingEscalation;
+    return this.escalationWatcher?.getPending();
   }
 
   getBudgetStatus(): BudgetStatus {
@@ -420,20 +446,17 @@ export class DockerAgentSession implements Session {
 
   // eslint-disable-next-line @typescript-eslint/require-await -- must be async to satisfy Session interface
   async resolveEscalation(escalationId: string, decision: 'approved' | 'denied'): Promise<void> {
-    if (!this.pendingEscalation || this.pendingEscalation.escalationId !== escalationId) {
+    if (!this.escalationWatcher) {
       throw new Error(`No pending escalation with ID: ${escalationId}`);
     }
-
-    const responsePath = resolve(this.escalationDir, `response-${escalationId}.json`);
-    writeFileSync(responsePath, JSON.stringify({ decision }));
-    this.pendingEscalation = undefined;
+    this.escalationWatcher.resolve(escalationId, decision);
   }
 
   async close(): Promise<void> {
     if (this.status === 'closed') return;
     this.status = 'closed';
 
-    this.stopEscalationWatcher();
+    this.escalationWatcher?.stop();
     this.auditTailer?.stop();
 
     // Stop and remove container
@@ -486,65 +509,13 @@ export class DockerAgentSession implements Session {
     }
   }
 
-  private startEscalationWatcher(): void {
-    this.escalationPollInterval = setInterval(() => {
-      this.pollEscalationDirectory();
-    }, ESCALATION_POLL_INTERVAL_MS);
-  }
-
-  private stopEscalationWatcher(): void {
-    if (this.escalationPollInterval) {
-      clearInterval(this.escalationPollInterval);
-      this.escalationPollInterval = null;
-    }
-  }
-
-  private pollEscalationDirectory(): void {
-    if (this.pendingEscalation) {
-      this.checkEscalationExpiry();
-      return;
-    }
-
-    try {
-      const files = readdirSync(this.escalationDir);
-      const requestFile = files.find(
-        (f) =>
-          f.startsWith('request-') && f.endsWith('.json') && !this.seenEscalationIds.has(this.extractEscalationId(f)),
-      );
-      if (!requestFile) return;
-
-      const requestPath = resolve(this.escalationDir, requestFile);
-      const request = JSON.parse(readFileSync(requestPath, 'utf-8')) as EscalationRequest;
-      this.seenEscalationIds.add(request.escalationId);
-      this.pendingEscalation = request;
-      this.onEscalation?.(request);
-    } catch {
-      // Directory may not exist yet or be empty
-    }
-  }
-
-  private checkEscalationExpiry(): void {
-    if (!this.pendingEscalation) return;
-    const escalationId = this.pendingEscalation.escalationId;
-    const requestExists = existsSync(resolve(this.escalationDir, `request-${escalationId}.json`));
-    const responseExists = existsSync(resolve(this.escalationDir, `response-${escalationId}.json`));
-    if (!requestExists && !responseExists) {
-      this.pendingEscalation = undefined;
-      this.onEscalationExpired?.();
-    }
-  }
-
   private writeUserContext(userMessage: string): void {
     try {
       const contextPath = resolve(this.escalationDir, 'user-context.json');
-      writeFileSync(contextPath, JSON.stringify({ userMessage }));
+      atomicWriteJsonSync(contextPath, { userMessage });
     } catch {
       // Ignore write failures
     }
-  }
-
-  private extractEscalationId(filename: string): string {
-    return filename.replace(/^request-/, '').replace(/\.json$/, '');
   }
 
   /**

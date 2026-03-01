@@ -15,7 +15,7 @@
 import type { AgentAdapter, AgentConfigFile, AgentId, AgentResponse, OrientationContext } from '../agent-adapter.js';
 import type { IronCurtainConfig } from '../../config/types.js';
 import type { ProviderConfig } from '../provider-config.js';
-import { anthropicProvider } from '../provider-config.js';
+import { anthropicProvider, claudePlatformProvider } from '../provider-config.js';
 import { buildSystemPrompt } from '../../session/prompts.js';
 
 const CLAUDE_CODE_IMAGE = 'ironcurtain-claude-code:latest';
@@ -98,8 +98,39 @@ export const claudeCodeAdapter: AgentAdapter = {
   },
 
   generateOrientationFiles(): AgentConfigFile[] {
-    // Orientation is delivered via --append-system-prompt, not files
-    return [];
+    // Wrapper script for PTY mode -- avoids shell quoting issues by reading
+    // the system prompt from $IRONCURTAIN_SYSTEM_PROMPT (set by entrypoint).
+    const startScript = `#!/bin/bash
+exec claude --dangerously-skip-permissions \\
+  --mcp-config /etc/ironcurtain/claude-mcp-config.json \\
+  --append-system-prompt "$IRONCURTAIN_SYSTEM_PROMPT"
+`;
+
+    // Helper script to resize the PTY that Claude Code is actually running on.
+    // docker exec stty targets a transient exec session PTY, not socat's PTY.
+    const resizeScript = `#!/bin/bash
+# Called from the host via: docker exec <cid> /etc/ironcurtain/resize-pty.sh <cols> <rows>
+COLS=$1
+ROWS=$2
+
+CLAUDE_PID=$(pgrep -f "claude --dangerously" | head -1)
+if [ -z "$CLAUDE_PID" ]; then
+  exit 0  # claude not started yet; resize will be retried
+fi
+
+PTS=$(readlink /proc/$CLAUDE_PID/fd/0 2>/dev/null)
+if [ -z "$PTS" ]; then
+  exit 0
+fi
+
+stty -F "$PTS" cols "$COLS" rows "$ROWS" 2>/dev/null
+kill -WINCH "$CLAUDE_PID" 2>/dev/null
+`;
+
+    return [
+      { path: 'start-claude.sh', content: startScript, mode: 0o755 },
+      { path: 'resize-pty.sh', content: resizeScript, mode: 0o755 },
+    ];
   },
 
   buildCommand(message: string, systemPrompt: string): readonly string[] {
@@ -129,12 +160,14 @@ export const claudeCodeAdapter: AgentAdapter = {
   },
 
   getProviders(): readonly ProviderConfig[] {
-    return [anthropicProvider];
+    return [anthropicProvider, claudePlatformProvider];
   },
 
   buildEnv(_config: IronCurtainConfig, fakeKeys: ReadonlyMap<string, string>): Record<string, string> {
     return {
-      ANTHROPIC_API_KEY: fakeKeys.get('api.anthropic.com') ?? '',
+      // Pass the fake key via a non-Claude env var; apiKeyHelper in
+      // settings.json echoes it so Claude Code never prompts for approval.
+      IRONCURTAIN_API_KEY: fakeKeys.get('api.anthropic.com') ?? '',
       CLAUDE_CODE_DISABLE_UPDATE_CHECK: '1',
       // Node.js does not use the system CA store -- must set this explicitly
       NODE_EXTRA_CA_CERTS: '/usr/local/share/ca-certificates/ironcurtain-ca.crt',
@@ -146,6 +179,22 @@ export const claudeCodeAdapter: AgentAdapter = {
       return { text: `Agent exited with code ${exitCode}.\n\nOutput:\n${stdout}` };
     }
     return parseClaudeCodeJson(stdout);
+  },
+
+  buildPtyCommand(
+    _systemPrompt: string,
+    ptySockPath: string | undefined,
+    ptyPort: number | undefined,
+  ): readonly string[] {
+    // The socat listener target depends on platform
+    const listenArg = ptySockPath
+      ? `UNIX-LISTEN:${ptySockPath},fork` // Linux UDS
+      : `TCP-LISTEN:${ptyPort},reuseaddr`; // macOS TCP
+
+    // Interactive mode: claude runs via a wrapper script that reads the system
+    // prompt from an env var set by the entrypoint. This avoids shell quoting
+    // issues that occur when embedding large prompts in socat EXEC: strings.
+    return ['socat', listenArg, 'EXEC:/etc/ironcurtain/start-claude.sh,pty,setsid,ctty,stderr'];
   },
 };
 

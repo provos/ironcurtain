@@ -7,7 +7,6 @@
  */
 
 import { existsSync, mkdirSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { loadConfig } from '../config/index.js';
 import {
   getSessionDir,
@@ -17,8 +16,6 @@ import {
   getSessionLogPath,
   getSessionLlmLogPath,
   getSessionAutoApproveLlmLogPath,
-  getSessionSocketsDir,
-  getIronCurtainHome,
 } from '../config/paths.js';
 import type { IronCurtainConfig } from '../config/types.js';
 import * as logger from '../logger.js';
@@ -94,6 +91,10 @@ async function createBuiltinSession(options: SessionOptions): Promise<Session> {
 
 /**
  * Creates a DockerAgentSession that runs an external agent in a container.
+ *
+ * Uses prepareDockerInfrastructure() for shared Docker setup (proxies,
+ * orientation, image resolution), then creates the session with pre-built
+ * infrastructure so initialize() only does container creation + watchers.
  */
 async function createDockerSession(
   agentId: import('../docker/agent-adapter.js').AgentId,
@@ -106,79 +107,41 @@ async function createDockerSession(
   const loggerWasActive = logger.isActive();
   const sessionConfig = buildSessionConfig(config, effectiveSessionId, sessionId, options.resumeSessionId);
 
-  // Dynamic imports to avoid loading Docker dependencies for built-in sessions
-  const { registerBuiltinAdapters, getAgent } = await import('../docker/agent-registry.js');
-  const { createCodeModeProxy } = await import('../docker/code-mode-proxy.js');
-  const { createMitmProxy } = await import('../docker/mitm-proxy.js');
-  const { loadOrCreateCA } = await import('../docker/ca.js');
-  const { generateFakeKey } = await import('../docker/fake-keys.js');
-  const { createDockerManager } = await import('../docker/docker-manager.js');
+  const { prepareDockerInfrastructure } = await import('../docker/docker-infrastructure.js');
   const { DockerAgentSession } = await import('../docker/docker-agent-session.js');
-  const { useTcpTransport } = await import('../docker/platform.js');
 
-  await registerBuiltinAdapters();
-  const adapter = getAgent(agentId);
-  const useTcp = useTcpTransport();
-
-  // Create sockets subdirectory for proxy UDS -- only this dir is mounted into containers
-  const socketsDir = getSessionSocketsDir(effectiveSessionId);
-  mkdirSync(socketsDir, { recursive: true });
-
-  const socketPath = resolve(socketsDir, 'proxy.sock');
-
-  const proxy = createCodeModeProxy({
-    socketPath,
-    config: sessionConfig.config,
-    listenMode: useTcp ? 'tcp' : 'uds',
-  });
-
-  // Load or generate the IronCurtain CA for TLS termination
-  const caDir = resolve(getIronCurtainHome(), 'ca');
-  const ca = loadOrCreateCA(caDir);
-
-  // Generate fake keys and build provider key mappings
-  const providers = adapter.getProviders();
-  const fakeKeys = new Map<string, string>();
-  const providerMappings: import('../docker/mitm-proxy.js').ProviderKeyMapping[] = [];
-  for (const providerConfig of providers) {
-    const fakeKey = generateFakeKey(providerConfig.fakeKeyPrefix);
-    fakeKeys.set(providerConfig.host, fakeKey);
-
-    // Resolve real API key from config
-    const realKey = resolveRealApiKey(providerConfig.host, config);
-    providerMappings.push({ config: providerConfig, fakeKey, realKey });
-  }
-
-  const mitmProxy = useTcp
-    ? createMitmProxy({
-        listenPort: 0,
-        ca,
-        providers: providerMappings,
-      })
-    : createMitmProxy({
-        socketPath: resolve(socketsDir, 'mitm-proxy.sock'),
-        ca,
-        providers: providerMappings,
-      });
-  const docker = createDockerManager();
+  const infra = await prepareDockerInfrastructure(
+    sessionConfig.config,
+    { kind: 'docker', agent: agentId },
+    sessionConfig.sessionDir,
+    sessionConfig.sandboxDir,
+    sessionConfig.escalationDir,
+    sessionConfig.auditLogPath,
+    sessionId,
+  );
 
   const session = new DockerAgentSession({
     config: sessionConfig.config,
     sessionId,
-    adapter,
-    docker,
-    proxy,
-    mitmProxy,
-    ca,
-    fakeKeys,
+    adapter: infra.adapter,
+    docker: infra.docker,
+    proxy: infra.proxy,
+    mitmProxy: infra.mitmProxy,
+    ca: infra.ca,
+    fakeKeys: infra.fakeKeys,
     sessionDir: sessionConfig.sessionDir,
     sandboxDir: sessionConfig.sandboxDir,
     escalationDir: sessionConfig.escalationDir,
     auditLogPath: sessionConfig.auditLogPath,
-    useTcp,
+    useTcp: infra.useTcp,
     onEscalation: options.onEscalation,
     onEscalationExpired: options.onEscalationExpired,
     onDiagnostic: options.onDiagnostic,
+    preBuiltInfrastructure: {
+      systemPrompt: infra.systemPrompt,
+      image: infra.image,
+      mitmAddr: infra.mitmAddr,
+    },
   });
 
   try {
@@ -281,31 +244,6 @@ function patchMcpServerAllowedDirectory(
   if (lastArgIndex >= 0) {
     fsServer.args[lastArgIndex] = sandboxDir;
   }
-}
-
-/**
- * Resolves the real API key for a provider host from config.
- */
-function resolveRealApiKey(host: string, config: IronCurtainConfig): string {
-  let key: string;
-  switch (host) {
-    case 'api.anthropic.com':
-      key = config.userConfig.anthropicApiKey;
-      break;
-    case 'api.openai.com':
-      key = config.userConfig.openaiApiKey;
-      break;
-    case 'generativelanguage.googleapis.com':
-      key = config.userConfig.googleApiKey;
-      break;
-    default:
-      logger.warn(`No API key mapping for unknown provider host: ${host}`);
-      return '';
-  }
-  if (!key) {
-    logger.warn(`No API key configured for provider host: ${host}`);
-  }
-  return key;
 }
 
 // Re-export types needed by callers

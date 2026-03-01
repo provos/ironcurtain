@@ -198,12 +198,22 @@ Both use the same PolicyEngine with compiled artifacts.
 - File-based IPC: `last-user-message.txt` in session dir; proxy reads on escalation
 - Config: `autoApprove: { enabled: false, modelId: 'anthropic:claude-haiku-4-5' }`
 
-## Signal Transport Design (designed 2026-02-24)
-- See `docs/designs/signal-transport.md` for full spec
-- `src/signal/` module: signal-container.ts, signal-transport.ts, setup-signal.ts, markdown-to-signal.ts, signal-config.ts
-- Docker-managed signal-cli-rest-api container with persistent data volume at `~/.ironcurtain/signal-data/`
-- WebSocket receive + REST send; `MODE=json-rpc` container mode
-- Onboarding: `ironcurtain setup-signal` (register new number or link device)
-- Config: `signal: { botNumber, recipientNumber, container: { image, port } }` in config.json
-- Text-based escalation (no inline buttons); "approve"/"deny" text replies
-- Markdown-to-Signal converter: inline Signal markup (**bold**, `code`, ~strike~) via marked lexer
+## Signal Transport (designed 2026-02-24)
+- See `docs/designs/signal-transport.md` for full spec; `src/signal/` module
+- Multi-session via SignalBotDaemon: ManagedSession map, session labels, escalation per-session
+
+## Docker Agent Mode Key Facts
+- `src/docker/docker-agent-session.ts` -- Session impl, container lifecycle, escalation polling
+- `src/docker/agent-adapter.ts` -- AgentAdapter interface; `buildCommand()`, `buildEnv()`, `extractResponse()`
+- `src/docker/platform.ts` -- `useTcpTransport()` returns true on macOS (VirtioFS no UDS)
+- macOS: socat sidecar on bridge network forwards MCP+MITM ports to host.docker.internal
+- Linux: `--network=none`, session dir bind-mounted for UDS access
+- Container runs `sleep infinity`; agent commands via `docker exec`
+- Escalation: file-based IPC in `~/.ironcurtain/sessions/{id}/escalations/`
+
+## PTY + Escalation Listener Design (designed 2026-02-27)
+- See `docs/designs/pty-escalation-listener.md` for full spec
+- `--pty` flag on start: attaches user terminal to Claude Code PTY via socat bridge
+- `escalation-listener` command: TUI dashboard (ink) aggregating escalations from all PTY sessions
+- Shared escalation watcher module: `src/escalation/escalation-watcher.ts`
+- Session notification: file-based registration in `~/.ironcurtain/pty-registry/`

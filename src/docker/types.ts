@@ -70,6 +70,13 @@ export interface DockerContainerConfig {
    * must NEVER set this field.
    */
   readonly capAdd?: readonly string[];
+
+  /**
+   * Allocate a pseudo-TTY for the container (-t flag).
+   * Required for PTY mode where the container runs an interactive process.
+   * Optional. Defaults to false (no TTY allocated).
+   */
+  readonly tty?: boolean;
 }
 
 /** A volume mount for a Docker container. */
