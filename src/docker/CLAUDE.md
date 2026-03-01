@@ -16,7 +16,6 @@ An alternative session type that runs external coding agents (Claude Code, etc.)
 - `pty-session.ts` - PTY session orchestration. Node.js PTY proxy bridges the user's terminal to Claude Code inside the container via a socket (UDS on Linux, TCP on macOS). Handles terminal raw mode enter/exit, SIGWINCH forwarding for resize, BEL on escalation, and registration file lifecycle.
 - `pty-types.ts` - Type definitions for PTY sessions (`PtySessionRegistration`, socket/port constants).
 - `docker-infrastructure.ts` - Shared `prepareDockerInfrastructure()` helper used by both `createDockerSession()` and `runPtySession()`. Sets up proxies, orientation, CA, fake keys, and image resolution.
-- `keystroke-reconstructor.ts` - Rolling keystroke buffer (`KeystrokeBuffer`) and LLM-based reconstruction. Captures trusted host-to-container input and reconstructs the user's most recent message on demand (lazily, on escalation) for `user-context.json`.
 
 **PTY transport:** On Linux, the container-side socat listens on a UDS in the bind-mounted `sockets/` directory. On macOS, it uses TCP through the socat sidecar. Only the `sockets/` subdirectory is mounted into the container -- not the full session directory -- so the container cannot access escalation files, audit logs, or other session data.
 

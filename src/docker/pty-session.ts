@@ -28,12 +28,6 @@ import type { PtySessionRegistration } from './pty-types.js';
 import { createEscalationWatcher, atomicWriteJsonSync } from '../escalation/escalation-watcher.js';
 import type { EscalationWatcher } from '../escalation/escalation-watcher.js';
 import {
-  KeystrokeBuffer,
-  reconstructUserInput,
-  writeUserContext,
-  DEFAULT_RECONSTRUCT_MODEL_ID,
-} from './keystroke-reconstructor.js';
-import {
   getSessionDir,
   getSessionSandboxDir,
   getSessionEscalationDir,
@@ -258,19 +252,9 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
     // Write session registration for the escalation listener
     registrationPath = writeRegistration(sessionId, escalationDir, adapter.displayName);
 
-    // Keystroke buffer for LLM-based user context reconstruction.
-    // Captures trusted host->container input for auto-approver support.
-    const keystrokeBuffer = new KeystrokeBuffer();
-
-    // Start escalation file watcher (reconstructs user context + emits BEL)
+    // Start escalation file watcher (emits BEL to alert user)
     escalationFileWatcher = createEscalationWatcher(escalationDir, {
       onEscalation: () => {
-        // Lazily reconstruct the user's most recent message from keystrokes
-        // and write it to user-context.json for the auto-approver.
-        reconstructAndWriteContext(keystrokeBuffer, escalationDir, options.config).catch((err: unknown) => {
-          logger.warn(`User context reconstruction failed: ${err instanceof Error ? err.message : String(err)}`);
-        });
-        // Alert user to check the escalation listener
         process.stderr.write('\x07'); // BEL character
       },
       onEscalationExpired: () => {},
@@ -291,7 +275,6 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
     const exitCode = await attachPty({
       target: ptyTarget,
       containerId,
-      onInput: (data) => keystrokeBuffer.append(data),
     });
 
     // PTY disconnected -- restore terminal and show shutdown progress
@@ -374,8 +357,6 @@ interface PtyProxyOptions {
   readonly target: PtyTarget;
   /** Docker container ID (for SIGWINCH forwarding). */
   readonly containerId: string;
-  /** Callback for recording host->container bytes (trusted input). */
-  readonly onInput?: (data: Buffer) => void;
 }
 
 /**
@@ -413,7 +394,7 @@ function attachPty(options: PtyProxyOptions): Promise<number> {
       // Send initial size
       onResize();
 
-      // Host -> Container (trusted input, tapped for keystroke recording)
+      // Host -> Container
       // Ctrl-\ (0x1c) is intercepted as an emergency exit since raw mode
       // disables normal signal generation for SIGQUIT.
       const CTRL_BACKSLASH = 0x1c;
@@ -425,7 +406,6 @@ function attachPty(options: PtyProxyOptions): Promise<number> {
           return;
         }
         conn.write(data);
-        options.onInput?.(data);
       };
       stdin.on('data', onData);
 
@@ -519,28 +499,4 @@ function writeRegistration(sessionId: string, escalationDir: string, adapterDisp
   const registrationPath = resolve(registryDir, `session-${sessionId}.json`);
   atomicWriteJsonSync(registrationPath, registration);
   return registrationPath;
-}
-
-// --- Keystroke reconstruction ---
-
-/**
- * Reconstructs user input from the keystroke buffer and writes user-context.json.
- * Called lazily when an escalation is detected.
- */
-async function reconstructAndWriteContext(
-  buffer: KeystrokeBuffer,
-  escalationDir: string,
-  config: IronCurtainConfig,
-): Promise<void> {
-  const contents = buffer.getContents();
-  if (contents.length === 0) return;
-
-  const { createLanguageModel } = await import('../config/model-provider.js');
-  const modelId = config.userConfig.autoApprove.modelId || DEFAULT_RECONSTRUCT_MODEL_ID;
-  const model = await createLanguageModel(modelId, config.userConfig);
-  const reconstructed = await reconstructUserInput(contents, model);
-
-  if (reconstructed) {
-    writeUserContext(escalationDir, reconstructed);
-  }
 }
