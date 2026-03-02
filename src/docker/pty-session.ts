@@ -23,6 +23,7 @@ import ora from 'ora';
 import type { IronCurtainConfig } from '../config/types.js';
 import type { SessionMode } from '../session/types.js';
 import { createSessionId } from '../session/types.js';
+import { CONTAINER_WORKSPACE_DIR } from './agent-adapter.js';
 import { PTY_SOCK_NAME, DEFAULT_PTY_PORT } from './pty-types.js';
 import type { PtySessionRegistration } from './pty-types.js';
 import { createEscalationWatcher, atomicWriteJsonSync } from '../escalation/escalation-watcher.js';
@@ -216,7 +217,7 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
       extraHosts = [`host.docker.internal:${sidecarIp}`];
 
       mounts = [
-        { source: sandboxDir, target: '/workspace', readonly: false },
+        { source: sandboxDir, target: CONTAINER_WORKSPACE_DIR, readonly: false },
         { source: orientationDir, target: '/etc/ironcurtain', readonly: true },
       ];
     } else {
@@ -228,7 +229,7 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
       };
       network = 'none';
       mounts = [
-        { source: sandboxDir, target: '/workspace', readonly: false },
+        { source: sandboxDir, target: CONTAINER_WORKSPACE_DIR, readonly: false },
         { source: socketsDir, target: '/run/ironcurtain', readonly: false },
         { source: orientationDir, target: '/etc/ironcurtain', readonly: true },
       ];

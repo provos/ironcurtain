@@ -7,7 +7,7 @@ vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
   return { ...actual, realpathSync: (p: string) => p };
 });
-import { expandTilde, prepareToolArgs } from '../src/trusted-process/path-utils.js';
+import { expandTilde, prepareToolArgs, rewriteResultContent } from '../src/trusted-process/path-utils.js';
 import type { ToolAnnotation } from '../src/pipeline/types.js';
 
 describe('expandTilde', () => {
@@ -419,5 +419,74 @@ describe('prepareToolArgs with containerWorkspaceDir (Docker agent mode)', () =>
     );
     // Without container rewriting, /workspace/file.txt is treated as a normal absolute path
     expect(argsForTransport.path).toBe('/workspace/file.txt');
+  });
+});
+
+describe('rewriteResultContent', () => {
+  const hostDir = '/home/user/.ironcurtain/sessions/abc/sandbox';
+  const containerDir = '/workspace';
+
+  it('rewrites host paths in text content blocks', () => {
+    const content = [{ type: 'text', text: `File at ${hostDir}/src/index.ts` }];
+    const result = rewriteResultContent(content, hostDir, containerDir);
+    expect(result).toEqual([{ type: 'text', text: 'File at /workspace/src/index.ts' }]);
+  });
+
+  it('rewrites multiple occurrences in a single text block', () => {
+    const content = [{ type: 'text', text: `${hostDir}/a.ts\n${hostDir}/b.ts` }];
+    const result = rewriteResultContent(content, hostDir, containerDir);
+    expect(result).toEqual([{ type: 'text', text: '/workspace/a.ts\n/workspace/b.ts' }]);
+  });
+
+  it('rewrites across multiple text blocks', () => {
+    const content = [
+      { type: 'text', text: `Reading ${hostDir}/file.txt` },
+      { type: 'text', text: `Error in ${hostDir}/other.txt` },
+    ];
+    const result = rewriteResultContent(content, hostDir, containerDir);
+    expect(result).toEqual([
+      { type: 'text', text: 'Reading /workspace/file.txt' },
+      { type: 'text', text: 'Error in /workspace/other.txt' },
+    ]);
+  });
+
+  it('leaves non-text blocks unchanged', () => {
+    const imageBlock = { type: 'image', data: 'base64...', mimeType: 'image/png' };
+    const content = [imageBlock, { type: 'text', text: `${hostDir}/file.txt` }];
+    const result = rewriteResultContent(content, hostDir, containerDir) as unknown[];
+    expect(result[0]).toBe(imageBlock); // same reference — not cloned
+    expect(result[1]).toEqual({ type: 'text', text: '/workspace/file.txt' });
+  });
+
+  it('returns non-array content unchanged', () => {
+    expect(rewriteResultContent('string', hostDir, containerDir)).toBe('string');
+    expect(rewriteResultContent(null, hostDir, containerDir)).toBe(null);
+    expect(rewriteResultContent(undefined, hostDir, containerDir)).toBe(undefined);
+    expect(rewriteResultContent(42, hostDir, containerDir)).toBe(42);
+  });
+
+  it('does not mutate the original content array', () => {
+    const original = [{ type: 'text', text: `${hostDir}/file.txt` }];
+    const originalText = original[0].text;
+    rewriteResultContent(original, hostDir, containerDir);
+    expect(original[0].text).toBe(originalText);
+  });
+
+  it('returns blocks unchanged when no host paths are present', () => {
+    const content = [{ type: 'text', text: 'No paths here' }];
+    const result = rewriteResultContent(content, hostDir, containerDir) as unknown[];
+    expect(result[0]).toBe(content[0]); // same reference — no needless clone
+  });
+
+  it('handles hostDir with trailing slash', () => {
+    const content = [{ type: 'text', text: `${hostDir}/file.txt` }];
+    const result = rewriteResultContent(content, hostDir + '/', containerDir);
+    expect(result).toEqual([{ type: 'text', text: '/workspace/file.txt' }]);
+  });
+
+  it('rewrites bare hostDir (exact match without trailing path)', () => {
+    const content = [{ type: 'text', text: `Directory: ${hostDir}` }];
+    const result = rewriteResultContent(content, hostDir, containerDir);
+    expect(result).toEqual([{ type: 'text', text: 'Directory: /workspace' }]);
   });
 });

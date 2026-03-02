@@ -12,7 +12,7 @@ import { toCallableName, extractRequiredParams } from '../src/sandbox/index.js';
 import { buildSystemPrompt } from '../src/session/prompts.js';
 import { claudeCodeAdapter } from '../src/docker/adapters/claude-code.js';
 import { extractAllowedDomains } from '../src/docker/orientation.js';
-import type { OrientationContext } from '../src/docker/agent-adapter.js';
+import { CONTAINER_WORKSPACE_DIR, type OrientationContext } from '../src/docker/agent-adapter.js';
 import { discoverTools, buildServerListings } from './mcp-discovery.js';
 
 async function main(): Promise<void> {
@@ -37,7 +37,7 @@ async function main(): Promise<void> {
 
   // --- Docker agent session prompt (Claude Code adapter) ---
   const orientationContext: OrientationContext = {
-    workspaceDir: '/workspace',
+    workspaceDir: CONTAINER_WORKSPACE_DIR,
     hostSandboxDir: config.allowedDirectory,
     serverListings,
     allowedDomains: extractAllowedDomains(config),

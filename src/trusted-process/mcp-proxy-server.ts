@@ -50,7 +50,8 @@ import { loadGeneratedPolicy, extractServerDomainAllowlists, getPackageGenerated
 import { PolicyEngine, extractAnnotatedPaths } from './policy-engine.js';
 import { getPathRoles } from '../types/argument-roles.js';
 import { AuditLog } from './audit-log.js';
-import { prepareToolArgs } from './path-utils.js';
+import { prepareToolArgs, rewriteResultContent } from './path-utils.js';
+import { CONTAINER_WORKSPACE_DIR } from '../docker/agent-adapter.js';
 import { extractPolicyRoots, toMcpRoots, directoryForPath } from './policy-roots.js';
 import {
   checkSandboxAvailability,
@@ -296,7 +297,6 @@ export interface ProxyEnvConfig {
   protectedPaths: string[];
   sessionLogPath: string | undefined;
   allowedDirectory: string | undefined;
-  containerWorkspaceDir: string | undefined;
   escalationDir: string | undefined;
   serverCredentials: Record<string, string>;
   sandboxPolicy: SandboxAvailabilityPolicy;
@@ -324,7 +324,6 @@ export interface CallToolDeps {
   clientStates: Map<string, ClientState>;
   resolvedSandboxConfigs: Map<string, ResolvedSandboxConfig>;
   allowedDirectory: string | undefined;
-  containerWorkspaceDir: string | undefined;
   escalationDir: string | undefined;
   autoApproveModel: LanguageModelV3 | null;
   serverContextMap: ServerContextMap;
@@ -343,7 +342,6 @@ export function parseProxyEnvConfig(): ProxyEnvConfig {
   const protectedPathsJson = process.env.PROTECTED_PATHS ?? '[]';
   const sessionLogPath = process.env.SESSION_LOG_PATH;
   const allowedDirectory = process.env.ALLOWED_DIRECTORY;
-  const containerWorkspaceDir = process.env.CONTAINER_WORKSPACE_DIR;
   const escalationDir = process.env.ESCALATION_DIR;
 
   if (!serversConfigJson) {
@@ -388,7 +386,6 @@ export function parseProxyEnvConfig(): ProxyEnvConfig {
     protectedPaths,
     sessionLogPath,
     allowedDirectory,
-    containerWorkspaceDir,
     escalationDir,
     serverCredentials,
     sandboxPolicy,
@@ -549,7 +546,7 @@ export async function handleCallTool(
     rawArgs,
     annotation,
     deps.allowedDirectory,
-    deps.containerWorkspaceDir,
+    CONTAINER_WORKSPACE_DIR,
   );
 
   const request: ToolCallRequest = {
@@ -700,22 +697,30 @@ export async function handleCallTool(
       { timeout: getEscalationTimeoutMs() },
     );
 
+    // Reverse-rewrite host sandbox paths to container workspace paths in results
+    const rewrittenContent = deps.allowedDirectory
+      ? rewriteResultContent(result.content, deps.allowedDirectory, CONTAINER_WORKSPACE_DIR)
+      : result.content;
+
     if (result.isError) {
-      const errorText = extractTextFromContent(result.content) ?? 'Unknown tool error';
+      const errorText = extractTextFromContent(rewrittenContent) ?? 'Unknown tool error';
       const errorMessage = annotateSandboxViolation(errorText, serverIsSandboxed);
       logAudit({ status: 'error', error: errorMessage }, Date.now() - startTime);
-      return { content: result.content, isError: true };
+      return { content: rewrittenContent, isError: true };
     }
 
     updateServerContext(deps.serverContextMap, toolInfo.serverName, toolInfo.name, argsForTransport);
     logAudit({ status: 'success' }, Date.now() - startTime);
-    return { content: result.content };
+    return { content: rewrittenContent };
   } catch (err) {
     const rawError = extractMcpErrorMessage(err);
     const errorMessage = annotateSandboxViolation(rawError, serverIsSandboxed);
     logAudit({ status: 'error', error: errorMessage }, Date.now() - startTime);
+    const errorContent = [{ type: 'text', text: `Error: ${errorMessage}` }];
     return {
-      content: [{ type: 'text', text: `Error: ${errorMessage}` }],
+      content: deps.allowedDirectory
+        ? rewriteResultContent(errorContent, deps.allowedDirectory, CONTAINER_WORKSPACE_DIR)
+        : errorContent,
       isError: true,
     };
   }
@@ -767,7 +772,6 @@ async function main(): Promise<void> {
     protectedPaths,
     sessionLogPath,
     allowedDirectory,
-    containerWorkspaceDir,
     escalationDir,
     serverCredentials,
     sandboxPolicy,
@@ -910,7 +914,6 @@ async function main(): Promise<void> {
     clientStates,
     resolvedSandboxConfigs,
     allowedDirectory,
-    containerWorkspaceDir,
     escalationDir,
     autoApproveModel,
     serverContextMap,

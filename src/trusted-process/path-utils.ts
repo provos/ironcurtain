@@ -123,6 +123,47 @@ function rewriteContainerPaths(value: unknown, containerDir: string, hostDir: st
   return value;
 }
 
+// ---------------------------------------------------------------------------
+// Reverse path rewriting: host sandbox → container workspace in results
+// ---------------------------------------------------------------------------
+
+/**
+ * Rewrites host sandbox paths back to container workspace paths in MCP
+ * result content blocks.
+ *
+ * When Docker agent mode bind-mounts the host sandbox at `/workspace`
+ * inside the container, MCP server results may contain host-internal
+ * paths (e.g. in `read_file` output, error messages, `list_directory`
+ * results). This function replaces those paths so the agent sees
+ * `/workspace/...` paths it can actually use.
+ *
+ * Only rewrites `text` fields in content blocks with `type: 'text'`.
+ * Non-text blocks (images, resources) pass through unchanged.
+ * The original content array is never mutated.
+ */
+export function rewriteResultContent(content: unknown, hostDir: string, containerDir: string): unknown {
+  if (!Array.isArray(content)) return content;
+
+  // Normalize trailing slash on hostDir so both `/foo` and `/foo/` match
+  const normHost = hostDir !== '/' && hostDir.endsWith('/') ? hostDir.slice(0, -1) : hostDir;
+  if (!normHost) return content;
+
+  return content.map((block: unknown) => {
+    if (
+      typeof block === 'object' &&
+      block !== null &&
+      (block as Record<string, unknown>).type === 'text' &&
+      typeof (block as Record<string, unknown>).text === 'string'
+    ) {
+      const text = (block as Record<string, unknown>).text as string;
+      const replaced = text.replaceAll(normHost, containerDir);
+      if (replaced === text) return block;
+      return { ...block, text: replaced };
+    }
+    return block;
+  });
+}
+
 /**
  * Annotation-driven normalization of tool call arguments.
  *

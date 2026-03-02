@@ -40,6 +40,7 @@ vi.mock('../src/trusted-process/path-utils.js', () => ({
     argsForTransport: { ...args },
     argsForPolicy: { ...args },
   })),
+  rewriteResultContent: vi.fn((content: unknown) => content),
 }));
 
 vi.mock('../src/trusted-process/policy-engine.js', () => ({
@@ -214,7 +215,6 @@ describe('parseProxyEnvConfig', () => {
     process.env.PROTECTED_PATHS = JSON.stringify(['/etc/passwd']);
     process.env.SESSION_LOG_PATH = '/tmp/session.log';
     process.env.ALLOWED_DIRECTORY = '/tmp/sandbox';
-    process.env.CONTAINER_WORKSPACE_DIR = '/workspace';
     process.env.ESCALATION_DIR = '/tmp/escalation';
     process.env.SANDBOX_POLICY = 'enforce';
 
@@ -225,7 +225,6 @@ describe('parseProxyEnvConfig', () => {
     expect(config.protectedPaths).toEqual(['/etc/passwd']);
     expect(config.sessionLogPath).toBe('/tmp/session.log');
     expect(config.allowedDirectory).toBe('/tmp/sandbox');
-    expect(config.containerWorkspaceDir).toBe('/workspace');
     expect(config.escalationDir).toBe('/tmp/escalation');
     expect(config.sandboxPolicy).toBe('enforce');
     expect(config.serversConfig).toEqual(servers);
@@ -242,7 +241,6 @@ describe('parseProxyEnvConfig', () => {
     expect(config.protectedPaths).toEqual([]);
     expect(config.sessionLogPath).toBeUndefined();
     expect(config.allowedDirectory).toBeUndefined();
-    expect(config.containerWorkspaceDir).toBeUndefined();
     expect(config.escalationDir).toBeUndefined();
     expect(config.sandboxPolicy).toBe('warn');
     expect(config.serverCredentials).toEqual({});
@@ -547,7 +545,6 @@ describe('handleCallTool', () => {
       clientStates,
       resolvedSandboxConfigs,
       allowedDirectory: '/tmp/sandbox',
-      containerWorkspaceDir: undefined,
       escalationDir: undefined,
       autoApproveModel: null,
       serverContextMap: new Map(),

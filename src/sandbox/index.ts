@@ -13,6 +13,7 @@ import '@utcp/mcp'; // Register MCP call template type with UTCP SDK
 import { CodeModeUtcpClient } from '@utcp/code-mode';
 import { Protocol } from '@modelcontextprotocol/sdk/shared/protocol.js';
 import type { IronCurtainConfig } from '../config/types.js';
+import { CONTAINER_WORKSPACE_DIR } from '../docker/agent-adapter.js';
 import { parseModelId, resolveApiKeyForProvider } from '../config/model-provider.js';
 import { resolveNodeModulesBin } from '../trusted-process/sandbox-integration.js';
 
@@ -200,6 +201,7 @@ export class Sandbox {
       CONSTITUTION_PATH: config.constitutionPath,
       PROTECTED_PATHS: JSON.stringify(config.protectedPaths),
       ALLOWED_DIRECTORY: config.allowedDirectory,
+      CONTAINER_WORKSPACE_DIR,
     };
 
     // Pass the escalation directory to the proxy when configured.
