@@ -29,14 +29,40 @@ export interface MuxInputHandler {
 }
 
 /** terminal-kit key names for special keys. */
-const CTRL_A = '\x01';
+const CTRL_A = 'CTRL_A';
 const ENTER = 'ENTER';
 const ESCAPE = 'ESCAPE';
-const CTRL_C = '\x03';
+const CTRL_C = 'CTRL_C';
 const BACKSPACE = 'BACKSPACE';
 const DELETE = 'DELETE';
 const LEFT = 'LEFT';
 const RIGHT = 'RIGHT';
+
+/**
+ * Maps terminal-kit key names to raw escape sequences for the PTY.
+ * terminal-kit emits human-readable names (e.g. 'ENTER'), but the
+ * child PTY expects raw bytes (e.g. '\r').
+ */
+const KEY_TO_SEQUENCE: Record<string, string> = {
+  ENTER: '\r',
+  BACKSPACE: '\x7f',
+  ESCAPE: '\x1b',
+  DELETE: '\x1b[3~',
+  TAB: '\t',
+  UP: '\x1b[A',
+  DOWN: '\x1b[B',
+  RIGHT: '\x1b[C',
+  LEFT: '\x1b[D',
+  HOME: '\x1b[H',
+  END: '\x1b[F',
+  PAGE_UP: '\x1b[5~',
+  PAGE_DOWN: '\x1b[6~',
+  INSERT: '\x1b[2~',
+  // Ctrl keys -> raw bytes
+  ...Object.fromEntries(
+    Array.from({ length: 26 }, (_, i) => [`CTRL_${String.fromCharCode(65 + i)}`, String.fromCharCode(i + 1)]),
+  ),
+};
 
 /**
  * Creates a new MuxInputHandler.
@@ -62,7 +88,7 @@ export function createMuxInputHandler(): MuxInputHandler {
     }
 
     _lastKeyWasCtrlA = false;
-    return { kind: 'write-pty', data: key };
+    return { kind: 'write-pty', data: KEY_TO_SEQUENCE[key] ?? key };
   }
 
   function handleCommandKey(key: string): MuxAction {

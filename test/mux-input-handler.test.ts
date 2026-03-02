@@ -16,22 +16,22 @@ describe('MuxInputHandler', () => {
 
     it('Ctrl-A enters command mode', () => {
       const handler = createMuxInputHandler();
-      const action = handler.handleKey('\x01');
+      const action = handler.handleKey('CTRL_A');
       expect(action).toEqual({ kind: 'enter-command-mode' });
       expect(handler.mode).toBe('command');
     });
 
     it('Ctrl-A Ctrl-A sends literal Ctrl-A to PTY', () => {
       const handler = createMuxInputHandler();
-      handler.handleKey('\x01'); // enter command mode
+      handler.handleKey('CTRL_A'); // enter command mode
       expect(handler.mode).toBe('command');
 
       // Create a new handler and test the Ctrl-A Ctrl-A sequence in PTY mode
       const handler2 = createMuxInputHandler();
-      handler2.handleKey('\x01'); // first Ctrl-A -> command mode
+      handler2.handleKey('CTRL_A'); // first Ctrl-A -> command mode
 
       // Second Ctrl-A in command mode returns to PTY mode
-      const action = handler2.handleKey('\x01');
+      const action = handler2.handleKey('CTRL_A');
       expect(action).toEqual({ kind: 'enter-pty-mode' });
     });
 
@@ -40,12 +40,24 @@ describe('MuxInputHandler', () => {
       const action = handler.handleKey('\x1c'); // Ctrl-backslash
       expect(action).toEqual({ kind: 'write-pty', data: '\x1c' });
     });
+
+    it('translates terminal-kit key names to raw sequences for PTY', () => {
+      const handler = createMuxInputHandler();
+      expect(handler.handleKey('ENTER')).toEqual({ kind: 'write-pty', data: '\r' });
+      expect(handler.handleKey('BACKSPACE')).toEqual({ kind: 'write-pty', data: '\x7f' });
+      expect(handler.handleKey('ESCAPE')).toEqual({ kind: 'write-pty', data: '\x1b' });
+      expect(handler.handleKey('UP')).toEqual({ kind: 'write-pty', data: '\x1b[A' });
+      expect(handler.handleKey('DOWN')).toEqual({ kind: 'write-pty', data: '\x1b[B' });
+      expect(handler.handleKey('LEFT')).toEqual({ kind: 'write-pty', data: '\x1b[D' });
+      expect(handler.handleKey('RIGHT')).toEqual({ kind: 'write-pty', data: '\x1b[C' });
+      expect(handler.handleKey('CTRL_C')).toEqual({ kind: 'write-pty', data: '\x03' });
+    });
   });
 
   describe('command mode', () => {
     function enterCommandMode() {
       const handler = createMuxInputHandler();
-      handler.handleKey('\x01'); // Ctrl-A enters command mode
+      handler.handleKey('CTRL_A'); // Ctrl-A enters command mode
       return handler;
     }
 
@@ -111,14 +123,14 @@ describe('MuxInputHandler', () => {
       const handler = enterCommandMode();
       handler.handleKey('a');
       handler.handleKey('b');
-      const action = handler.handleKey('\x03');
+      const action = handler.handleKey('CTRL_C');
       expect(action).toEqual({ kind: 'redraw-input' });
       expect(handler.inputBuffer).toBe('');
     });
 
     it('Ctrl-A in command mode returns to PTY mode', () => {
       const handler = enterCommandMode();
-      const action = handler.handleKey('\x01');
+      const action = handler.handleKey('CTRL_A');
       expect(action).toEqual({ kind: 'enter-pty-mode' });
       expect(handler.mode).toBe('pty');
     });
