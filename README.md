@@ -42,155 +42,21 @@ The agent clones a repository and edits a file. The policy engine escalates `git
 
 IronCurtain supports two session modes with different trust models:
 
-- **Builtin Agent (Code Mode)** — IronCurtain's own LLM agent writes TypeScript snippets that execute in a V8 sandbox. IronCurtain controls the agent, the sandbox, and the policy engine.
-- **Docker Agent Mode** — An external agent (Claude Code, Goose, etc.) runs inside a Docker container with no network access. IronCurtain doesn't control the agent — it only mediates the agent's external access through policy-enforced proxies.
+- **Builtin Agent (Code Mode)** — IronCurtain's own LLM agent writes TypeScript snippets that execute in a V8 sandbox. IronCurtain controls the agent, the sandbox, and the policy engine. Every tool call exits the sandbox as a structured MCP request, passes through the policy engine (allow / deny / escalate), and only then reaches the real MCP server.
 
-### Builtin Agent (Code Mode)
+- **Docker Agent Mode** — An external agent (Claude Code, Goose, etc.) runs inside a Docker container with no network access. IronCurtain mediates the external effects: LLM API calls pass through a TLS-terminating MITM proxy (host allowlist, fake-to-real key swap), and MCP tool calls pass through the same policy engine used by Code Mode.
 
-```
-┌─────────────────────────────────────────────┐
-│              Agent (LLM)                    │
-│  Generates TypeScript to accomplish tasks   │
-└──────────────────┬──────────────────────────┘
-                   │ TypeScript code
-                   ▼
-┌─────────────────────────────────────────────┐
-│         V8 Isolated Sandbox                 │
-│  Code executes in isolation.                │
-│  Only interface to the world: typed         │
-│  function stubs that produce MCP requests.  │
-│                                             │
-│  filesystem.read_file({path: '...'})        │
-│  git.status({repo_path: '...'})             │
-└──────────────────┬──────────────────────────┘
-                   │ MCP tool-call requests
-                   ▼
-┌─────────────────────────────────────────────┐
-│     Trusted Process (MCP Proxy)             │
-│                                             │
-│  ┌───────────────────────────────────────┐  │
-│  │  Policy Engine                        │  │
-│  │  1. Structural invariants (hardcoded) │  │
-│  │  2. Compiled constitution rules       │  │
-│  │  → allow / deny / escalate            │  │
-│  └───────────────────────────────────────┘  │
-│  ┌──────────────┐  ┌─────────────────────┐  │
-│  │  Audit Log   │  │ Escalation Handler  │  │
-│  │  (JSONL)     │  │ (human approval)    │  │
-│  └──────────────┘  └─────────────────────┘  │
-└──────────────────┬──────────────────────────┘
-                   │ approved calls only
-                   ▼
-┌──────────┐ ┌──────────┐ ┌──────────┐
-│Filesystem│ │   Git    │ │  Other   │
-│MCP Server│ │MCP Server│ │MCP Server│
-└──────────┘ └──────────┘ └──────────┘
-```
+In both modes, the agent is **untrusted**. Security does not depend on the model following instructions — it is enforced at the boundary.
 
-**Four layers, strict trust boundaries:**
+See [SANDBOXING.md](SANDBOXING.md) for the full architecture with diagrams, layer-by-layer trust analysis, and macOS platform notes.
 
-1. **Agent** -- An LLM (Claude, GPT, Gemini) that writes TypeScript to accomplish user tasks. It has no direct access to the system.
-2. **Sandbox** -- A V8 isolate ([UTCP Code Mode](https://utcp.dev/)) that executes the agent's TypeScript. The only way to interact with the outside world is through typed function stubs that produce structured MCP requests.
-3. **Trusted Process** -- The security kernel. Every MCP request from the sandbox passes through a two-phase policy engine before reaching any real server. Structural checks enforce hardcoded invariants (protected paths, unknown tool denial). Compiled rule evaluation evaluates the compiled constitution rules. Denied calls are blocked; escalated calls are presented to the user for approval.
-4. **MCP Servers** -- Standard [Model Context Protocol](https://modelcontextprotocol.io/) servers that provide filesystem access, git operations, and other capabilities. Only approved requests reach them.
-
-## Policy Compilation Pipeline
-
-The constitution is compiled into enforceable policy through a four-stage LLM pipeline:
-
-```
-constitution.md → [Annotate] → [Compile] → [Resolve Lists] → [Generate Scenarios] → [Verify & Repair]
-                      │              │              │                  │                     │
-                      ▼              ▼              ▼                  ▼                     ▼
-              tool-annotations  compiled-policy  dynamic-lists   test-scenarios       verified policy
-                  .json            .json            .json            .json          (or build failure)
-```
-
-1. **Annotate** -- Classify each MCP tool's arguments by role (read-path, write-path, delete-path, none).
-2. **Compile** -- Translate the English constitution into deterministic if/then rules. Categorical references ("major news sites", "my contacts") are emitted as `@list-name` symbolic references with list definitions.
-3. **Resolve Lists** -- Resolve dynamic list definitions to concrete values via LLM knowledge or MCP tool-use (e.g., querying a contacts database). Resolved values are written to `dynamic-lists.json` and can be user-inspected/edited. Skipped when no lists are present.
-4. **Generate Scenarios** -- Create test scenarios from the constitution, combined with mandatory handwritten invariant tests.
-5. **Verify & Repair** -- Execute scenarios against the real policy engine. An LLM judge analyzes failures and generates targeted repairs (up to 2 rounds). The build fails if the policy cannot be verified.
-
-All artifacts are content-hash cached -- only changed inputs trigger recompilation.
-
-### What compiled rules look like
-
-A constitution like:
-
-```markdown
-- The agent may perform read-only git operations (status, diff, log) within the sandbox without approval.
-- The agent must receive human approval before git push, pull, fetch, or any remote-contacting operation.
-```
-
-compiles into deterministic JSON rules:
-
-```json
-[
-  {
-    "tool": "git_status",
-    "decision": "allow",
-    "condition": { "directory": { "within": "$SANDBOX" } }
-  },
-  {
-    "tool": "git_diff",
-    "decision": "allow",
-    "condition": { "directory": { "within": "$SANDBOX" } }
-  },
-  {
-    "tool": "git_push",
-    "decision": "escalate",
-    "reason": "Remote-contacting git operations require human approval"
-  }
-]
-```
-
-Any tool call that doesn't match an explicit allow or escalate rule is **denied by default**. Rules define what is permitted or needs human judgment; everything else is blocked.
-
-### Docker Agent Mode
-
-In Docker mode, IronCurtain runs an external agent — not its own. The agent (Claude Code, Goose, etc.) already has its own LLM loop, tool-calling mechanism, and execution model. IronCurtain's role is to **mediate external access**: every LLM API call and every MCP tool call must pass through host-side proxies that enforce policy.
-
-```
-┌──────────────────────────────────────────────┐
-│     Docker Container (--network=none)        │
-│                                              │
-│  ┌────────────────────────────────────────┐  │
-│  │         External Agent                 │  │
-│  │    (Claude Code, Goose, etc.)          │  │
-│  │    Own LLM loop, tools, execution      │  │
-│  └──────┬──────────────────┬──────────────┘  │
-│         │ LLM API calls    │ MCP tool calls  │
-│         ▼                  ▼                 │
-│      [UDS]              [UDS]                │
-└─────────┬──────────────────┬─────────────────┘
-          │                  │
-          ▼                  ▼
-┌──────────────────┐  ┌─────────────────────────┐
-│  MITM Proxy      │  │  MCP Proxy              │
-│  (host process)  │  │  (host process)         │
-│                  │  │                         │
-│  Host allowlist  │  │  Policy Engine          │
-│  Endpoint filter │  │  allow / deny /         │
-│  Fake→real key   │  │  escalate               │
-│  swap            │  │                         │
-└────────┬─────────┘  └────────────┬────────────┘
-         │                         │
-         ▼                         ▼
-   LLM Provider            MCP Servers
-   (Anthropic, etc.)       (filesystem, git, etc.)
-```
-
-The key difference from Code Mode: IronCurtain does **not** control the agent's execution. The agent has its own tool-calling mechanism (Claude Code uses its own tools internally). IronCurtain only sees the external effects — LLM API calls and MCP tool calls — and enforces policy on those boundaries.
-
-See [SANDBOXING.md](SANDBOXING.md) for the full sandboxing architecture.
-
-## Getting Started
+## Quick Start
 
 ### Prerequisites
 
-- Node.js 20+
-- An API key for at least one supported LLM provider (Anthropic, Google, or OpenAI), or OAuth credentials via `claude login`
+- Node.js 22+ (required by `isolated-vm`; maximum Node 25)
+- Docker (required for Docker Agent Mode and PTY mode)
+- An API key for at least one LLM provider (Anthropic, Google, or OpenAI)
 
 ### Install
 
@@ -208,145 +74,215 @@ cd ironcurtain
 npm install
 ```
 
-### 1. Configure your API key
+### One-time setup
 
-Set your LLM provider API key via environment variable:
+**1. Set your API key:**
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-Or add it to `~/.ironcurtain/config.json` (auto-created on first run with defaults):
+Or add it to `~/.ironcurtain/config.json` via `ironcurtain config`. Environment variables take precedence. Supported: `ANTHROPIC_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`, `OPENAI_API_KEY`.
 
-```json
-{
-  "anthropicApiKey": "sk-ant-..."
-}
-```
-
-Environment variables take precedence over config file values. Supported providers: `ANTHROPIC_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`, `OPENAI_API_KEY`.
-
-In Docker mode, IronCurtain also auto-detects OAuth credentials from `~/.claude/.credentials.json` (created by `claude login`) and prefers them over API keys.
-
-### 2. Configure settings
+**2. Run the first-start wizard** (runs automatically on first `ironcurtain start`, or explicitly):
 
 ```bash
-ironcurtain config
+ironcurtain setup
 ```
 
-This opens an interactive editor for `~/.ironcurtain/config.json` where you can configure models, security settings, resource budgets, server credentials (e.g., GitHub token), and auto-compaction. API keys should be set via environment variables.
+Walks you through GitHub token setup, web search provider, model selection, and other settings. Creates `~/.ironcurtain/config.json` with your choices.
 
-### 3. Customize your policy
-
-Run the interactive policy customizer to create a constitution tailored to your workflow:
+**3. Customize your policy** (optional but recommended):
 
 ```bash
 ironcurtain customize-policy
 ```
 
-The customizer walks you through an LLM-assisted conversation about what your agent should and shouldn't be able to do, then generates a constitution file at `~/.ironcurtain/constitution-user.md`. This file is appended to the base constitution, which defines the guiding principles:
+An LLM-assisted conversation that generates a constitution tailored to your workflow, saved to `~/.ironcurtain/constitution-user.md`. You can also edit this file directly.
 
-```markdown
-# IronCurtain Constitution
-
-## Guiding Principles
-
-1. **Least privilege**: The agent may only access resources explicitly permitted by policy.
-2. **No destruction**: Delete operations outside the sandbox are never permitted,
-   unless an explicit exception is granted by the user guidance.
-3. **Human oversight**: Operations outside the sandbox require explicit human approval.
-```
-
-The customizer produces concrete guidance like:
-
-```markdown
-# User Policy Customizations
-
-## Concrete Guidance
-
-- The agent is allowed to read, write and delete content in the Downloads folder
-- The agent is allowed to read documents in the Users document folder.
-- The agent is allowed to perform all local read and write git operations within the sandbox
-- The agent must ask for human approval for all other git operations
-- The agent may fetch web content from popular news sites.
-```
-
-You can also edit `~/.ironcurtain/constitution-user.md` directly. If you need to override the base principles, place a full constitution at `~/.ironcurtain/constitution.md` — it replaces the package-bundled base entirely.
-
-### 4. Annotate tools and compile the policy
+**4. Compile the policy:**
 
 ```bash
-ironcurtain annotate-tools   # classify MCP tool arguments (developer task)
-ironcurtain compile-policy   # compile constitution into enforceable rules (user task)
-ironcurtain refresh-lists    # re-resolve dynamic lists without full recompilation
+ironcurtain compile-policy
 ```
 
-Or with npm scripts during development: `npm run annotate-tools` / `npm run compile-policy`.
+Translates your constitution into deterministic rules, generates test scenarios, and verifies them. Compiled artifacts go to `~/.ironcurtain/generated/`. The package ships with pre-compiled defaults — skip this step until you customize.
 
-Tool annotation connects to your MCP servers and classifies each tool's arguments via LLM. This only needs re-running when you add or change MCP servers. Policy compilation translates your constitution into deterministic rules, generates test scenarios, and verifies them. The compiled artifacts are written to `~/.ironcurtain/generated/`. Review the generated `compiled-policy.json` -- these are the rules that will be enforced at runtime. (The package ships with pre-compiled defaults so you can run immediately without compiling.)
+## Running Modes
 
-IronCurtain ships with pre-configured MCP servers for filesystem, git, fetch, and GitHub operations. See [Adding MCP Servers](#adding-mcp-servers) for how to extend this.
+### Interactive mode
 
-### 5. Run the agent
-
-**Interactive mode** (multi-turn session with human escalation support):
+A multi-turn session where you type tasks and the agent responds:
 
 ```bash
 ironcurtain start
 ```
 
-**Single-shot mode** (send one task, get a response):
+Escalated tool calls pause the agent and prompt you with `/approve` or `/deny`.
+
+### Single-shot mode
+
+Send one task and exit when the agent finishes:
 
 ```bash
 ironcurtain start "Summarize the files in the current directory"
 ```
 
-Or with npm scripts during development: `npm start` / `npm start "task"`.
+### Session resume
 
-When Docker is available and Anthropic credentials exist (OAuth token or API key), `ironcurtain start` automatically selects Docker mode (claude-code agent). Otherwise it falls back to the builtin agent silently. The selected mode is logged to stderr. Use `--agent builtin` or `--agent claude-code` to force a specific agent; explicit selection fails fast with a clear error if prerequisites are missing.
-
-**PTY mode** (interactive Docker terminal with native Claude Code UI):
+Resume a previous session's conversation history:
 
 ```bash
-# Terminal 1: run Claude Code interactively via PTY
+ironcurtain start --resume <session-id>
+```
+
+Session IDs are printed on session start and stored under `~/.ironcurtain/sessions/`.
+
+### PTY mode and the escalation listener
+
+PTY mode attaches your terminal directly to Claude Code running inside the Docker container. You get Claude Code's full interactive TUI — spinners, diffs, file previews, slash commands — while IronCurtain still mediates every tool call through its policy engine.
+
+```bash
+ironcurtain start --pty
+```
+
+**Why a separate escalation listener?** In PTY mode your terminal is fully occupied by Claude Code's raw TTY — there is no channel left to inject escalation prompts inline. Each PTY session registers itself in `~/.ironcurtain/pty-registry/` and a separate companion process handles approvals:
+
+```bash
+# Terminal 1 — interactive Claude Code session
 ironcurtain start --pty
 
-# Terminal 2: handle escalation approvals from all PTY sessions
+# Terminal 2 — approve or deny escalations from all active PTY sessions
 ironcurtain escalation-listener
 ```
 
-The `--pty` flag attaches your terminal directly to Claude Code running inside the Docker container. You get Claude Code's full TUI (spinners, diffs, file previews) while IronCurtain still mediates every tool call through its policy engine. Escalations are handled in a separate terminal via the escalation listener, which aggregates notifications across all active PTY sessions. Use `/approve N` or `/deny N` to resolve escalations.
+**How session discovery works:**
 
-Press `Ctrl-\` for an emergency exit if the session becomes unresponsive. If the process is killed ungracefully, run `reset` to restore your terminal.
+1. When `--pty` starts, it writes a registration file to `~/.ironcurtain/pty-registry/session-<id>.json` containing the session ID, escalation directory path, display label, and process PID.
+2. The escalation listener polls `pty-registry/` every second. It discovers new sessions, attaches an escalation watcher to each one, and detaches watchers when sessions end. Stale registrations (process PID no longer alive) are removed automatically, so a crashed PTY session doesn't leave phantom entries.
 
-### 6. Signal messaging transport (optional)
+**The escalation flow:**
 
-IronCurtain includes a Signal messaging transport that lets you interact with agent sessions from your phone. All communication is end-to-end encrypted via the Signal protocol.
+When a tool call is escalated, the PTY session emits a **BEL character** (`\x07`) — your terminal bell or visual flash signals that attention is needed. Switch to the listener terminal. The listener TUI re-renders in place: active sessions are listed with sequential display numbers, and each pending escalation shows the tool name, arguments, and the policy reason for the escalation.
+
+**Listener commands:**
+
+| Command        | Description                               |
+| -------------- | ----------------------------------------- |
+| `/approve N`   | Approve escalation #N                     |
+| `/deny N`      | Deny escalation #N                        |
+| `/approve all` | Approve all pending escalations           |
+| `/deny all`    | Deny all pending escalations              |
+| `/sessions`    | Show detailed session information         |
+| `/quit`        | Exit the listener                         |
+
+Escalation numbers are sequential across all sessions. If you have two active PTY sessions, their escalations share a single numbered list in the dashboard — escalation #3 might be from session [1] and #4 from session [2]. Use the number shown in the dashboard to resolve them.
+
+**Multiple concurrent sessions:** The listener aggregates escalations from all active PTY sessions in one dashboard. Each session is assigned a display number (e.g., `Claude Code [1]`, `Claude Code [2]`) when it first appears.
+
+**Single-instance lock:** Only one escalation listener may run at a time, enforced via a PID-checked lock file at `~/.ironcurtain/escalation-listener.lock`. A stale lock from a crashed process is cleaned up automatically on the next start.
+
+**Emergency exit and terminal recovery:** Press `Ctrl-\` to trigger a graceful shutdown of the PTY session (stops containers, proxies, and performs async cleanup). If the process is killed ungracefully (e.g., `kill -9`), run `reset` in that terminal to restore normal terminal mode.
+
+### Signal messaging transport
+
+Run IronCurtain sessions via Signal messages — send tasks, receive responses, and approve or deny escalations from your phone. All communication is end-to-end encrypted via the Signal protocol.
 
 ```bash
-ironcurtain setup-signal       # Interactive setup wizard (one-time)
-ironcurtain bot                # Start the Signal bot daemon
+ironcurtain setup-signal    # One-time setup wizard
+ironcurtain bot             # Start the Signal bot daemon
 ```
 
-Once running, send messages from the Signal app to control agent sessions, receive responses, and approve or deny escalations — all from your phone.
+See [TRANSPORT.md](TRANSPORT.md) for setup instructions, architecture details, and why we chose Signal over alternatives like Telegram.
 
-See [TRANSPORT.md](TRANSPORT.md) for the full setup guide, architecture details, and why we chose Signal over alternatives like Telegram.
+## Session Commands
 
-### Session Commands
+Commands available during an **interactive** or **single-shot** session:
 
-During an interactive session:
+| Command    | Description                                      |
+| ---------- | ------------------------------------------------ |
+| `/approve` | Approve the pending escalation                   |
+| `/deny`    | Deny the pending escalation                      |
+| `/budget`  | Show resource consumption (tokens, steps, cost)  |
+| `/logs`    | Display diagnostic events                        |
+| `/quit`    | End the session                                  |
 
-| Command    | Description                                     |
-| ---------- | ----------------------------------------------- |
-| `/approve` | Approve a pending escalation request            |
-| `/deny`    | Deny a pending escalation request               |
-| `/budget`  | Show resource consumption (tokens, steps, cost) |
-| `/logs`    | Display diagnostic events                       |
-| `/quit`    | End the session                                 |
+In **PTY mode**, use the escalation listener instead (see above) — the PTY terminal is occupied by Claude Code's TUI.
+
+## Policy: Constitution → Enforcement
+
+You write intent in plain English; IronCurtain compiles it into deterministic rules:
+
+```
+constitution.md → [Annotate] → [Compile] → [Resolve Lists] → [Generate Scenarios] → [Verify & Repair]
+                      │              │              │                  │                     │
+                      ▼              ▼              ▼                  ▼                     ▼
+              tool-annotations  compiled-policy  dynamic-lists   test-scenarios       verified policy
+                  .json            .json            .json            .json          (or build failure)
+```
+
+1. **Annotate** — Classify each MCP tool's arguments by role (read-path, write-path, delete-path, none).
+2. **Compile** — Translate the English constitution into deterministic if/then rules. Categorical references ("major news sites", "my contacts") are emitted as `@list-name` symbolic references.
+3. **Resolve Lists** — Resolve symbolic lists to concrete values via LLM knowledge or MCP tool-use (e.g., querying a contacts database). Written to `dynamic-lists.json`, user-editable. Skipped when no lists are present.
+4. **Generate Scenarios** — Create test scenarios from the constitution plus mandatory handwritten invariant tests.
+5. **Verify & Repair** — Run scenarios against the real policy engine. An LLM judge analyzes failures and generates targeted repairs (up to 2 rounds). Build fails if the policy cannot be verified.
+
+All artifacts are content-hash cached — only changed inputs trigger recompilation.
+
+### What compiled rules look like
+
+A constitution clause like:
+
+```markdown
+- The agent may perform read-only git operations (status, diff, log) within the sandbox without approval.
+- The agent must receive human approval before git push, pull, fetch, or any remote-contacting operation.
+```
+
+compiles to:
+
+```json
+[
+  { "tool": "git_status", "decision": "allow",    "condition": { "directory": { "within": "$SANDBOX" } } },
+  { "tool": "git_diff",   "decision": "allow",    "condition": { "directory": { "within": "$SANDBOX" } } },
+  { "tool": "git_push",   "decision": "escalate", "reason": "Remote-contacting git operations require human approval" }
+]
+```
+
+Any call that doesn't match an explicit `allow` or `escalate` rule is **denied by default**.
+
+```bash
+ironcurtain annotate-tools                      # Classify MCP tool arguments (re-run when servers change)
+ironcurtain compile-policy                      # Compile constitution into rules and verify
+ironcurtain refresh-lists                       # Re-resolve dynamic lists without full recompilation
+ironcurtain refresh-lists --list major-news     # Refresh a single list
+```
+
+Review the generated `~/.ironcurtain/generated/compiled-policy.json` — these are the exact rules enforced at runtime.
+
+## Web Search
+
+IronCurtain's fetch server includes a `web_search` tool backed by your choice of provider. Configure via `ironcurtain config` → **Web Search**, or directly in `~/.ironcurtain/config.json`:
+
+```json
+{
+  "webSearch": {
+    "provider": "brave",
+    "brave": { "apiKey": "BSA..." }
+  }
+}
+```
+
+| Provider | `provider` value | API key field              | Sign up                       |
+| -------- | ---------------- | -------------------------- | ----------------------------- |
+| Brave    | `"brave"`        | `webSearch.brave.apiKey`   | https://brave.com/search/api/ |
+| Tavily   | `"tavily"`       | `webSearch.tavily.apiKey`  | https://tavily.com/           |
+| SerpAPI  | `"serpapi"`      | `webSearch.serpapi.apiKey` | https://serpapi.com/          |
+
+`web_search` is available in both builtin and Docker Agent modes. If no provider is configured, calls to `web_search` return an error explaining how to set one up via `ironcurtain config`.
 
 ## Configuration
 
-IronCurtain stores its configuration and session data in `~/.ironcurtain/`:
+IronCurtain stores configuration and session data in `~/.ironcurtain/`:
 
 ```
 ~/.ironcurtain/
@@ -355,6 +291,7 @@ IronCurtain stores its configuration and session data in `~/.ironcurtain/`:
 ├── constitution-user.md     # Your policy customizations (generated by customize-policy)
 ├── generated/               # User-compiled policy artifacts (overrides package defaults)
 ├── signal-data/             # Signal transport persistent data (registration keys)
+├── pty-registry/            # Active PTY session registrations (auto-managed)
 ├── sessions/
 │   └── {sessionId}/
 │       ├── sandbox/         # Per-session filesystem sandbox
@@ -362,6 +299,14 @@ IronCurtain stores its configuration and session data in `~/.ironcurtain/`:
 │       ├── audit.jsonl      # Per-session audit log
 │       └── session.log      # Diagnostics
 ```
+
+Edit configuration interactively:
+
+```bash
+ironcurtain config
+```
+
+See [CONFIG.md](CONFIG.md) for the full configuration reference covering all fields, defaults, and environment variable overrides.
 
 ### Resource Budgets
 
@@ -389,7 +334,7 @@ By default, all escalations require manual `/approve` or `/deny`. You can option
 }
 ```
 
-The auto-approver is conservative — it only approves when intent is unambiguous (e.g., "push my changes to origin" clearly authorizes `git_push`). Vague messages like "go ahead" or "fix the tests" always fall through to human approval. It can never deny — only approve or escalate. All auto-approved actions are recorded in the audit log with `autoApproved: true`.
+The auto-approver is conservative — it only approves when intent is unambiguous (e.g., "push my changes to origin" clearly authorizes `git_push`). Vague messages like "go ahead" or "fix the tests" always fall through to human review. It can never deny — only approve or escalate. All auto-approved actions are recorded in the audit log with `autoApproved: true`.
 
 ### Audit Redaction
 
@@ -407,8 +352,6 @@ IronCurtain supports multiple LLM providers. Use the `provider:model-name` forma
 }
 ```
 
-Each provider has its own API key field in the config (and corresponding environment variable):
-
 | Provider  | Config Key        | Environment Variable           |
 | --------- | ----------------- | ------------------------------ |
 | Anthropic | `anthropicApiKey` | `ANTHROPIC_API_KEY`            |
@@ -419,13 +362,13 @@ Environment variables take precedence over config file values.
 
 ### Adding MCP Servers
 
-IronCurtain ships with filesystem, git, fetch, and GitHub MCP servers pre-configured. Adding a new server is a developer-level task that may involve changes across several files:
+IronCurtain ships with filesystem, git, fetch, and GitHub MCP servers pre-configured. Adding a new server is a developer-level task:
 
 1. **Register the server** in `src/config/mcp-servers.json` with its command, arguments, and optional environment variables or sandbox settings.
-2. **Extend the argument role registry** in `src/types/argument-roles.ts` if the new server's tools have argument semantics not covered by existing roles (e.g., `read-path`, `write-path`, `fetch-url`). Each role defines how values are normalized and evaluated by the policy engine.
+2. **Extend the argument role registry** in `src/types/argument-roles.ts` if the new server's tools have argument semantics not covered by existing roles (e.g., `read-path`, `write-path`, `fetch-url`).
 3. **Update the constitution** in `src/config/constitution.md` to cover the new server's capabilities.
-4. **Re-run `ironcurtain annotate-tools`** (or `npm run annotate-tools`) to classify the new server's tool arguments by role.
-5. **Re-run `ironcurtain compile-policy`** (or `npm run compile-policy`) to compile policy rules from your constitution. The verification stage will flag gaps.
+4. **Re-run `ironcurtain annotate-tools`** to classify the new server's tool arguments by role.
+5. **Re-run `ironcurtain compile-policy`** to compile policy rules from your constitution. The verification stage will flag gaps.
 
 After compilation, review the updated `tool-annotations.json` and `compiled-policy.json` to verify the new tools are correctly classified and covered by policy.
 
@@ -433,13 +376,14 @@ After compilation, review the updated `tool-annotations.json` and `compiled-poli
 
 IronCurtain ships with four pre-configured MCP servers. All tool calls are governed by your compiled policy.
 
-**Filesystem** (14 tools) — `read_file`, `read_multiple_files`, `write_file`, `edit_file`, `create_directory`, `list_directory`, `directory_tree`, `move_file`, `search_files`, `get_file_info`, `list_allowed_directories`, `file_exists`, `read_file_lines`, `calculate_diff`.
+| Server         | Tools | Key capabilities                                                                               |
+| -------------- | ----- | ---------------------------------------------------------------------------------------------- |
+| **Filesystem** | 14    | Read, write, edit, search files; directory tree; move; diff calculation                        |
+| **Git**        | 27    | Full git workflow: status, diff, log, commit, branch, push/pull/fetch, clone, stash, blame     |
+| **Fetch**      | 2     | HTTP GET with HTML-to-markdown conversion; `web_search` (see [Web Search](#web-search))        |
+| **GitHub**     | 41    | Issues, PRs, code search, reviews via `ghcr.io/github/github-mcp-server`; requires a GitHub personal access token |
 
-**Git** (27 tools) — Full git workflow: `git_status`, `git_diff_staged`, `git_diff_unstaged`, `git_diff`, `git_log`, `git_show`, `git_add`, `git_reset`, `git_commit`, `git_checkout`, `git_create_branch`, `git_list_branches`, `git_push`, `git_pull`, `git_fetch`, `git_merge`, `git_rebase`, `git_cherry_pick`, `git_stash`, `git_stash_pop`, `git_stash_list`, `git_tag`, `git_list_tags`, `git_remote`, `git_clone`, `git_init`, `git_blame`.
-
-**Fetch** (1 tool) — `fetch` retrieves content from URLs with automatic HTML-to-markdown conversion.
-
-**GitHub** (41 tools) — GitHub API operations via Docker (`ghcr.io/github/github-mcp-server`). Issues, pull requests, repos, code search, reviews, and more. Requires a GitHub personal access token configured via `ironcurtain config` or the first-start wizard. Read-only operations are allowed by default policy; mutations require human approval.
+Read-only operations are allowed by default policy; mutations (writes, pushes, PR creation) escalate for human approval.
 
 ## Security Model
 
@@ -447,43 +391,44 @@ IronCurtain is designed around a specific threat model: **the LLM goes rogue.** 
 
 ### What IronCurtain enforces
 
-- **Filesystem containment** -- Path-based policy with symlink-aware resolution prevents path traversal and symlink-escape attacks.
-- **Per-tool policy** -- Each MCP tool call is evaluated against compiled rules. The policy engine classifies tool arguments by role (read-path, write-path, delete-path) to make fine-grained decisions.
-- **Structural invariants** -- Certain protections are hardcoded and cannot be overridden by the constitution: the agent can never modify its own policy files, audit logs, or configuration.
-- **Credential isolation** -- In Docker mode, real credentials (API keys or OAuth tokens) never enter the container. The MITM proxy swaps fake sentinel keys for real credentials on the host side.
-- **Human escalation** -- When policy says "escalate," the agent pauses and the user must explicitly `/approve` or `/deny` the action. Optionally, an [LLM-based auto-approver](#auto-approve-escalations) can approve actions that clearly match the user's most recent request — it can never deny, only approve or fall through to human review.
-- **Audit trail** -- Every tool call and policy decision is logged to an append-only JSONL audit log.
-- **Resource limits** -- Token, step, time, and cost budgets prevent runaway sessions.
+- **Filesystem containment** — Symlink-aware path resolution prevents path traversal and symlink-escape attacks.
+- **Per-tool policy** — Each MCP tool call is evaluated against compiled rules. The policy engine classifies tool arguments by role (read-path, write-path, delete-path) to make fine-grained decisions.
+- **Structural invariants** — Certain protections are hardcoded and cannot be overridden by the constitution: the agent can never modify its own policy files, audit logs, or configuration.
+- **Human escalation** — When policy says "escalate," the agent pauses and the user must explicitly approve or deny. Optionally, an [LLM-based auto-approver](#auto-approve-escalations) handles unambiguous cases.
+- **Audit trail** — Every tool call and policy decision is logged to an append-only JSONL audit log.
+- **Resource limits** — Token, step, time, and cost budgets prevent runaway sessions.
 
 ### Known limitations
 
 This is a research prototype. Known gaps include:
 
-- **Policy compilation fidelity** -- The LLM-based compiler can misinterpret constitution intent. The verification pipeline catches many errors but is not exhaustive. Always review the compiled `compiled-policy.json`.
-- **V8 isolate boundaries** -- The sandbox uses V8 isolates, not OS-level virtualization. A V8 zero-day could allow escape (though the agent has no knowledge of how to exploit one).
-- **No outbound content inspection** -- An agent allowed to write files could encode sensitive data to bypass content-level controls. Planned: LLM-based intelligibility checks on outbound content.
-- **Escalation fatigue** -- Too many false-positive escalations can lead to habitual approval. Tune your constitution to minimize unnecessary prompts.
+- **Policy compilation fidelity** — The LLM-based compiler can misinterpret constitution intent. The verification pipeline catches many errors but is not exhaustive. Always review the compiled `compiled-policy.json`.
+- **V8 isolate boundaries** — Code Mode uses V8 isolates, not OS-level virtualization. A V8 zero-day could allow escape.
+- **No outbound content inspection** — An agent allowed to write files could encode sensitive data to bypass content-level controls. Planned: LLM-based intelligibility checks on outbound content.
+- **Escalation fatigue** — Too many false-positive escalations can lead to habitual approval. Tune your constitution to minimize unnecessary prompts.
 
 See [docs/SECURITY_CONCERNS.md](docs/SECURITY_CONCERNS.md) for a detailed threat analysis.
 
 ## Troubleshooting
 
-| Issue                           | Guidance                                                                                                                                                                                                                                                   |
-| ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Missing API key**             | Set the environment variable (`ANTHROPIC_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`, or `OPENAI_API_KEY`), add the corresponding key to `~/.ironcurtain/config.json`, or run `claude login` for OAuth (Docker mode only).                                                                                      |
-| **Sandbox unavailable**         | OS-level sandboxing requires `bubblewrap` and `socat`. Install both, or set `"sandboxPolicy": "warn"` in your MCP server config for development.                                                                                                           |
-| **Budget exhausted**            | Adjust limits in `~/.ironcurtain/config.json` under `resourceBudget`. Set any individual limit to `null` to disable it.                                                                                                                                    |
-| **Node version errors**         | Node.js 22+ is required (`isolated-vm` needs `>=22.0.0`). Maximum supported is Node 25 (`<26`).                                                                                                                                                            |
-| **Policy doesn't match intent** | Review `compiled-policy.json` to see the generated rules. Run `ironcurtain customize-policy` to refine your constitution, then `ironcurtain compile-policy` to recompile. Specific wording produces better rules — vague phrasing leads to vague policy.   |
-| **Auto-approve not triggering** | The auto-approver only approves when the user's message explicitly authorizes the action (e.g., "push to origin" for `git_push`). Vague messages like "go ahead" always escalate to human review. Verify `autoApprove.enabled` is `true` in `config.json`. |
-| **Signal bot not responding**   | Verify the signal-cli container is running (`docker ps \| grep ironcurtain-signal`). Check that Signal is configured (`ironcurtain setup-signal`). See [TRANSPORT.md](TRANSPORT.md) for detailed troubleshooting.                                          |
+| Issue                                       | Guidance                                                                                                                                                                                                                                              |
+| ------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Missing API key**                         | Set the environment variable (`ANTHROPIC_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`, or `OPENAI_API_KEY`) or add the corresponding key to `~/.ironcurtain/config.json`.                                                                                 |
+| **Sandbox unavailable**                     | OS-level sandboxing requires `bubblewrap` and `socat`. Install both, or set `"sandboxPolicy": "warn"` in your MCP server config for development.                                                                                                      |
+| **Budget exhausted**                        | Adjust limits in `~/.ironcurtain/config.json` under `resourceBudget`. Set any individual limit to `null` to disable it.                                                                                                                               |
+| **Node version errors**                     | Node.js 22+ is required (`isolated-vm` needs `>=22.0.0`). Maximum supported is Node 25 (`<26`).                                                                                                                                                       |
+| **Policy doesn't match intent**             | Review `compiled-policy.json` to see the generated rules. Run `ironcurtain customize-policy` to refine your constitution, then `ironcurtain compile-policy` to recompile. Specific wording produces better rules — vague phrasing leads to vague policy. |
+| **Auto-approve not triggering**             | The auto-approver only approves when the user's message explicitly authorizes the action (e.g., "push to origin" for `git_push`). Vague messages always escalate to human review. Verify `autoApprove.enabled` is `true` in `config.json`.             |
+| **PTY terminal garbled after exit**         | Run `reset` in the PTY terminal to restore normal mode. This is needed when the process is killed ungracefully and raw mode is not restored.                                                                                                           |
+| **Escalation listener: "already running"** | Another listener holds the lock at `~/.ironcurtain/escalation-listener.lock`. The lock is auto-cleared if the previous process is dead. If it persists, check the PID in the lock file.                                                               |
+| **Signal bot not responding**               | Verify the signal-cli container is running (`docker ps \| grep ironcurtain-signal`). Check that Signal is configured (`ironcurtain setup-signal`). See [TRANSPORT.md](TRANSPORT.md) for detailed troubleshooting.                                     |
 
 ## Development
 
 ```bash
 npm test                                    # Run all tests
 npm test -- test/policy-engine.test.ts      # Run a single test file
-npx test -- -t "denies delete_file"         # Run a single test by name
+npm test -- -t "denies delete_file"         # Run a single test by name
 npm run lint                                # Lint
 npm run build                               # TypeScript compilation + asset copy
 ```
@@ -495,16 +440,19 @@ See [TESTING.md](TESTING.md) for the full testing guide, including integration t
 ```
 src/
 ├── index.ts                    # Entry point
+├── cli.ts                      # CLI command dispatcher
 ├── config/                     # Configuration loading, constitution, MCP server definitions
-│   ├── constitution.md         # Your security policy in plain English
+│   ├── constitution.md         # Base security policy in plain English
 │   ├── mcp-servers.json        # MCP server definitions
 │   └── generated/              # Compiled policy artifacts (do not edit manually)
 ├── session/                    # Multi-turn session management, budgets, loop detection
 ├── sandbox/                    # V8 isolated execution environment
-├── trusted-process/            # Policy engine, MCP proxy, audit log, escalation
+├── trusted-process/            # Policy engine, MCP proxy, audit log, escalation handler
 ├── pipeline/                   # Constitution → policy compilation pipeline
+├── escalation/                 # Escalation listener: session registry, TUI dashboard, state
 ├── signal/                     # Signal messaging transport (bot daemon, setup, formatting)
-├── docker/                     # Docker agent mode, container management
+├── docker/                     # Docker agent mode, PTY session, MITM proxy, adapters
+├── servers/                    # Built-in MCP servers (fetch, web search providers)
 └── types/                      # Shared type definitions
 ```
 
