@@ -12,6 +12,89 @@ IronCurtain supports two session modes that share the same policy engine but dif
 
 The layers below apply differently depending on the session mode. Layers 1 and 2 are Docker Agent Mode only. Layer 3 applies to both modes. Layer 4 applies to MCP servers in both modes.
 
+### Builtin Agent (Code Mode)
+
+```
+┌─────────────────────────────────────────────┐
+│              Agent (LLM)                    │
+│  Generates TypeScript to accomplish tasks   │
+└──────────────────┬──────────────────────────┘
+                   │ TypeScript code
+                   ▼
+┌─────────────────────────────────────────────┐
+│         V8 Isolated Sandbox                 │
+│  Code executes in isolation.                │
+│  Only interface to the world: typed         │
+│  function stubs that produce MCP requests.  │
+│                                             │
+│  filesystem.read_file({path: '...'})        │
+│  git.status({repo_path: '...'})             │
+└──────────────────┬──────────────────────────┘
+                   │ MCP tool-call requests
+                   ▼
+┌─────────────────────────────────────────────┐
+│     Trusted Process (MCP Proxy)             │
+│                                             │
+│  ┌───────────────────────────────────────┐  │
+│  │  Policy Engine                        │  │
+│  │  1. Structural invariants (hardcoded) │  │
+│  │  2. Compiled constitution rules       │  │
+│  │  → allow / deny / escalate            │  │
+│  └───────────────────────────────────────┘  │
+│  ┌──────────────┐  ┌─────────────────────┐  │
+│  │  Audit Log   │  │ Escalation Handler  │  │
+│  │  (JSONL)     │  │ (human approval)    │  │
+│  └──────────────┘  └─────────────────────┘  │
+└──────────────────┬──────────────────────────┘
+                   │ approved calls only
+                   ▼
+┌──────────┐ ┌──────────┐ ┌──────────┐
+│Filesystem│ │   Git    │ │  Other   │
+│MCP Server│ │MCP Server│ │MCP Server│
+└──────────┘ └──────────┘ └──────────┘
+```
+
+**Four layers, strict trust boundaries:**
+
+1. **Agent** -- An LLM (Claude, GPT, Gemini) that writes TypeScript to accomplish user tasks. It has no direct access to the system.
+2. **Sandbox** -- A V8 isolate ([UTCP Code Mode](https://utcp.dev/)) that executes the agent's TypeScript. The only way to interact with the outside world is through typed function stubs that produce structured MCP requests.
+3. **Trusted Process** -- The security kernel. Every MCP request from the sandbox passes through a two-phase policy engine before reaching any real server. Structural checks enforce hardcoded invariants (protected paths, unknown tool denial). Compiled rule evaluation evaluates the compiled constitution rules. Denied calls are blocked; escalated calls are presented to the user for approval.
+4. **MCP Servers** -- Standard [Model Context Protocol](https://modelcontextprotocol.io/) servers that provide filesystem access, git operations, and other capabilities. Only approved requests reach them.
+
+### Docker Agent Mode
+
+```
+┌──────────────────────────────────────────────┐
+│     Docker Container (--network=none)        │
+│                                              │
+│  ┌────────────────────────────────────────┐  │
+│  │         External Agent                 │  │
+│  │    (Claude Code, Goose, etc.)          │  │
+│  │    Own LLM loop, tools, execution      │  │
+│  └──────┬──────────────────┬──────────────┘  │
+│         │ LLM API calls    │ MCP tool calls  │
+│         ▼                  ▼                 │
+│      [UDS]              [UDS]                │
+└─────────┬──────────────────┬─────────────────┘
+          │                  │
+          ▼                  ▼
+┌──────────────────┐  ┌─────────────────────────┐
+│  MITM Proxy      │  │  MCP Proxy              │
+│  (host process)  │  │  (host process)         │
+│                  │  │                         │
+│  Host allowlist  │  │  Policy Engine          │
+│  Endpoint filter │  │  allow / deny /         │
+│  Fake→real key   │  │  escalate               │
+│  swap            │  │                         │
+└────────┬─────────┘  └────────────┬────────────┘
+         │                         │
+         ▼                         ▼
+   LLM Provider            MCP Servers
+   (Anthropic, etc.)       (filesystem, git, etc.)
+```
+
+IronCurtain does **not** control the agent's execution in Docker mode. The agent has its own tool-calling mechanism; IronCurtain only sees the external effects — LLM API calls and MCP tool calls — and enforces policy on those boundaries.
+
 ## The Threat Model
 
 The AI agent is **untrusted**. It may be compromised via prompt injection, multi-turn drift, or adversarial inputs from external sources (emails, web pages, code). IronCurtain assumes the worst and enforces security boundaries that the agent cannot bypass regardless of its intent.
@@ -25,24 +108,24 @@ The AI agent is **untrusted**. It may be compromised via prompt injection, multi
 │                                                          │
 │  ┌────────────────────────────────────────────────────┐  │
 │  │  Layer 2: TLS-Terminating MITM Proxy               │  │
-│  │  Credential protection, endpoint filtering         │  │
-│  │  Real credentials never enter the container        │  │
+│  │  API key protection, endpoint filtering             │  │
+│  │  Real keys never enter the container                │  │
 │  └────────────────────────────────────────────────────┘  │
 │                                                          │
 │  ┌────────────────────────────────────────────────────┐  │
 │  │  Layer 3: MCP Policy Engine                        │  │
-│  │  Per-tool-call allow/deny/escalate decisions       │  │
-│  │  Compiled from human-readable constitution         │  │
+│  │  Per-tool-call allow/deny/escalate decisions        │  │
+│  │  Compiled from human-readable constitution          │  │
 │  └────────────────────────────────────────────────────┘  │
 │                                                          │
 │  ┌────────────────────────────────────────────────────┐  │
 │  │  Layer 4: OS-Level Sandbox (bubblewrap/srt)        │  │
-│  │  Per-MCP-server filesystem and network isolation   │  │
+│  │  Per-MCP-server filesystem and network isolation    │  │
 │  └────────────────────────────────────────────────────┘  │
 └──────────────────────────────────────────────────────────┘
 ```
 
-### Layer 1: Docker Container _(Docker Agent Mode only)_
+### Layer 1: Docker Container *(Docker Agent Mode only)*
 
 The agent process runs inside a Docker container with strong isolation:
 
@@ -67,11 +150,11 @@ The agent cannot reach the host gateway or any host service directly — it can 
 
 If the connectivity check fails at startup, IronCurtain aborts session initialization rather than falling back to a less secure network configuration.
 
-### Layer 2: TLS-Terminating MITM Proxy _(Docker Agent Mode only)_
+### Layer 2: TLS-Terminating MITM Proxy *(Docker Agent Mode only)*
 
 The agent needs to call its LLM provider's API (e.g., Anthropic's `/v1/messages`). Since the container has no network, these requests go through a MITM proxy running on the host.
 
-**Credential protection:** Real credentials (API keys or OAuth tokens) never enter the container. The agent receives a randomly generated fake sentinel key. The MITM proxy validates the fake key and swaps it for the real credential before forwarding upstream. Even if the agent is fully compromised, it cannot exfiltrate the real credentials because it never has access to them.
+**API key protection:** Real API keys never enter the container. The agent receives a randomly generated fake sentinel key. The MITM proxy validates the fake key and swaps it for the real key before forwarding upstream. Even if the agent is fully compromised, it cannot exfiltrate the real API key because it never has access to it.
 
 **How it works:**
 
@@ -85,20 +168,18 @@ The agent needs to call its LLM provider's API (e.g., Anthropic's `/v1/messages`
    - Forwards the request to the upstream API and streams the response back
 
 **What this blocks:**
-
 - Requests to non-allowlisted hosts (403 at CONNECT)
 - Requests to non-allowlisted endpoints on allowed hosts (403 at HTTP layer)
 - Requests with wrong or missing fake keys (403)
 - Any attempt to extract the real API key (it exists only in host process memory)
 
-### Layer 3: MCP Policy Engine _(both modes)_
+### Layer 3: MCP Policy Engine *(both modes)*
 
 All external operations beyond LLM API calls -- filesystem access, git operations, network fetch, etc. -- go through MCP (Model Context Protocol) tool calls. Every tool call passes through a policy engine before reaching the real MCP server.
 
 The policy is compiled from a human-readable **constitution** -- a short document describing what the agent is and isn't allowed to do. The compilation pipeline translates English intent into deterministic JSON rules that are enforced without further LLM involvement at runtime.
 
 Policy decisions are:
-
 - **Allow** -- The tool call proceeds.
 - **Deny** -- The tool call is blocked (default when no rule matches).
 - **Escalate** -- The user is prompted for approval before proceeding.
@@ -107,7 +188,7 @@ Structural invariants are enforced regardless of compiled rules: protected syste
 
 See the [README](README.md) for details on the policy compilation pipeline.
 
-### Layer 4: OS-Level Sandbox (bubblewrap/srt) _(both modes)_
+### Layer 4: OS-Level Sandbox (bubblewrap/srt) *(both modes)*
 
 MCP server processes themselves can be sandboxed using `@anthropic-ai/sandbox-runtime` (`srt`). Each sandboxed MCP server runs in its own `srt` process with independent:
 
@@ -123,15 +204,15 @@ See [docs/designs/execution-containment.md](docs/designs/execution-containment.m
 
 Each layer addresses a different class of threat:
 
-| Threat                            | Layer 1 (Docker) | Layer 2 (MITM)  | Layer 3 (Policy)  | Layer 4 (srt) |
-| --------------------------------- | :--------------: | :-------------: | :---------------: | :-----------: |
-| Network exfiltration              |     Blocked      |    Filtered     |        N/A        |    Blocked    |
-| Credential theft                  |       N/A        |    Prevented    |        N/A        |      N/A      |
-| Unauthorized file access          |    Contained     |       N/A       |      Blocked      |   Contained   |
-| Unauthorized git operations       |       N/A        |       N/A       | Blocked/Escalated |      N/A      |
-| Compromised MCP server            |       N/A        |       N/A       |        N/A        |   Contained   |
-| Prompt injection → bad tool calls |       N/A        |       N/A       | Blocked/Escalated |      N/A      |
-| Excessive API spending            |       N/A        | Endpoint filter |   Budget limits   |      N/A      |
+| Threat | Layer 1 (Docker) | Layer 2 (MITM) | Layer 3 (Policy) | Layer 4 (srt) |
+|--------|:-:|:-:|:-:|:-:|
+| Network exfiltration | Blocked | Filtered | N/A | Blocked |
+| API key theft | N/A | Prevented | N/A | N/A |
+| Unauthorized file access | Contained | N/A | Blocked | Contained |
+| Unauthorized git operations | N/A | N/A | Blocked/Escalated | N/A |
+| Compromised MCP server | N/A | N/A | N/A | Contained |
+| Prompt injection → bad tool calls | N/A | N/A | Blocked/Escalated | N/A |
+| Excessive API spending | N/A | Endpoint filter | Budget limits | N/A |
 
 No single layer handles everything. A prompt-injected agent might try to exfiltrate data via an API call, but Layer 2 blocks non-allowlisted endpoints. It might try to read sensitive files, but Layer 3 enforces the policy. It might try to exploit an MCP server, but Layer 4 contains the blast radius.
 
