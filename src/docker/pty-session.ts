@@ -85,6 +85,7 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
     escalationDir,
     sessionLogPath,
     llmLogPath,
+    isPtySession: true,
     mcpServers: JSON.parse(JSON.stringify(options.config.mcpServers)) as typeof options.config.mcpServers,
   };
 

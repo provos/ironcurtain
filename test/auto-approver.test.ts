@@ -419,7 +419,26 @@ describe('readUserContext', () => {
   it('reads user message from valid user-context.json', () => {
     writeFileSync(resolve(tempDir, 'user-context.json'), JSON.stringify({ userMessage: 'push to origin' }));
 
-    expect(readUserContext(tempDir)).toBe('push to origin');
+    const result = readUserContext(tempDir);
+    expect(result).toEqual({ userMessage: 'push to origin', source: undefined, timestamp: undefined });
+  });
+
+  it('reads source and timestamp from user-context.json', () => {
+    writeFileSync(
+      resolve(tempDir, 'user-context.json'),
+      JSON.stringify({
+        userMessage: 'push to origin',
+        source: 'mux-trusted-input',
+        timestamp: '2026-03-02T12:00:00.000Z',
+      }),
+    );
+
+    const result = readUserContext(tempDir);
+    expect(result).toEqual({
+      userMessage: 'push to origin',
+      source: 'mux-trusted-input',
+      timestamp: '2026-03-02T12:00:00.000Z',
+    });
   });
 
   it('returns null when file does not exist', () => {

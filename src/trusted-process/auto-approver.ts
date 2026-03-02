@@ -270,18 +270,33 @@ Reason for escalation: ${context.escalationReason}`;
 }
 
 /**
+ * Parsed user context from user-context.json.
+ */
+export interface UserContext {
+  readonly userMessage: string;
+  readonly source?: string;
+  readonly timestamp?: string;
+}
+
+/**
  * Reads the user context file from the escalation directory.
  *
- * Returns the user's most recent message, or null if the file is
- * missing, malformed, or empty. Fail-open: any error results in null,
- * causing the caller to skip auto-approval and fall through to human.
+ * Returns a UserContext object with the message and optional source/timestamp,
+ * or null if the file is missing, malformed, or empty. Fail-open: any error
+ * results in null, causing the caller to skip auto-approval and fall through
+ * to human.
  */
-export function readUserContext(escalationDir: string): string | null {
+export function readUserContext(escalationDir: string): UserContext | null {
   try {
     const contextPath = resolve(escalationDir, 'user-context.json');
     const data = JSON.parse(readFileSync(contextPath, 'utf-8')) as Record<string, unknown>;
-    const { userMessage } = data;
-    return typeof userMessage === 'string' && userMessage.trim() ? userMessage : null;
+    const { userMessage, source, timestamp } = data;
+    if (typeof userMessage !== 'string' || !userMessage.trim()) return null;
+    return {
+      userMessage,
+      source: typeof source === 'string' ? source : undefined,
+      timestamp: typeof timestamp === 'string' ? timestamp : undefined,
+    };
   } catch {
     return null;
   }

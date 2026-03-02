@@ -1,0 +1,435 @@
+/**
+ * MuxApp -- top-level orchestrator for the terminal multiplexer.
+ *
+ * Creates and owns all child components. Handles MuxAction dispatch,
+ * tab lifecycle, resize events, trusted input flow, and cleanup.
+ */
+
+/* eslint-disable @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-assignment */
+
+import { createPtyBridge } from './pty-bridge.js';
+import { createMuxInputHandler, type MuxInputHandler } from './mux-input-handler.js';
+import { createMuxEscalationManager, type MuxEscalationManager } from './mux-escalation-manager.js';
+import { createMuxRenderer, type MuxRenderer } from './mux-renderer.js';
+import { writeTrustedUserContext } from './trusted-input.js';
+import type { MuxTab, MuxAction } from './types.js';
+import * as logger from '../logger.js';
+
+export interface MuxApp {
+  /** Starts the multiplexer (enters fullscreen, spawns initial session). */
+  start(): Promise<void>;
+  /** Graceful shutdown: kills all child processes, restores terminal. */
+  shutdown(): Promise<void>;
+}
+
+export interface MuxAppOptions {
+  /** Agent to use for PTY sessions. Defaults to 'claude-code'. */
+  readonly agent?: string;
+  /** Whether to auto-spawn an initial session. Default: true. */
+  readonly autoSpawn?: boolean;
+}
+
+/**
+ * Creates and returns a MuxApp.
+ */
+export function createMuxApp(options: MuxAppOptions): MuxApp {
+  const agent = options.agent ?? 'claude-code';
+  const autoSpawn = options.autoSpawn ?? true;
+
+  const tabs: MuxTab[] = [];
+  let activeTabIndex = 0;
+  let nextTabNumber = 1;
+  let running = false;
+
+  // Components (initialized in start())
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let term: any;
+  let inputHandler!: MuxInputHandler;
+  let escalationManager!: MuxEscalationManager;
+  let renderer!: MuxRenderer;
+
+  function getActiveTab(): MuxTab | undefined {
+    return tabs[activeTabIndex];
+  }
+
+  function resolveIroncurtainBin(): { bin: string; prefixArgs: string[] } {
+    const script = process.argv[1];
+    // If the entry point is a .ts file, we're running via tsx/ts-node --
+    // spawn the child through the same runtime. process.execArgv contains
+    // the loader flags (e.g. --import tsx/loader) that make .ts imports work.
+    if (script && script.endsWith('.ts')) {
+      return { bin: process.argv[0], prefixArgs: [...process.execArgv, script] };
+    }
+    // If running a compiled JS file or via an installed bin, use it directly
+    return { bin: script ?? 'ironcurtain', prefixArgs: [] };
+  }
+
+  async function spawnSession(): Promise<MuxTab> {
+    const { columns } = process.stdout;
+    const ptyRows = renderer.layout.ptyViewportRows;
+    const ptyCols = columns || 80;
+
+    const { bin, prefixArgs } = resolveIroncurtainBin();
+    const bridge = await createPtyBridge({
+      cols: ptyCols,
+      rows: ptyRows,
+      ironcurtainBin: bin,
+      prefixArgs,
+      agent,
+    });
+
+    const tab: MuxTab = {
+      number: nextTabNumber++,
+      bridge,
+      label: agent,
+      status: 'running',
+      escalationAvailable: false,
+    };
+
+    tabs.push(tab);
+
+    // Wire bridge events
+    bridge.onOutput(() => {
+      if (getActiveTab() === tab) {
+        renderer.scheduleRedraw();
+      }
+    });
+
+    bridge.onExit((exitCode: number) => {
+      tab.status = 'exited';
+      tab.exitCode = exitCode;
+
+      if (bridge.sessionId) {
+        escalationManager.removeSession(bridge.sessionId);
+      }
+
+      renderer.redrawTabBar();
+
+      if (getActiveTab() === tab) {
+        showMessage(`Session #${tab.number} exited with code ${exitCode}`);
+      }
+
+      process.stderr.write('\x07');
+    });
+
+    bridge.onSessionDiscovered((registration) => {
+      if (registration) {
+        tab.escalationAvailable = true;
+        escalationManager.addSession(registration.sessionId, registration.escalationDir, registration.label);
+        tab.label = registration.label;
+        renderer.redrawTabBar();
+      } else {
+        logger.warn(`Could not discover session registration for tab #${tab.number}`);
+        tab.escalationAvailable = false;
+      }
+    });
+
+    return tab;
+  }
+
+  function switchTab(index: number): void {
+    if (index < 0 || index >= tabs.length) return;
+    activeTabIndex = index;
+    renderer.fullRedraw();
+  }
+
+  function closeTab(tabNumber: number): void {
+    const index = tabs.findIndex((t) => t.number === tabNumber);
+    if (index === -1) {
+      showMessage(`No tab #${tabNumber}`);
+      return;
+    }
+
+    const tab = tabs[index];
+    tab.bridge.kill();
+
+    if (tab.bridge.sessionId) {
+      escalationManager.removeSession(tab.bridge.sessionId);
+    }
+
+    tabs.splice(index, 1);
+
+    if (tabs.length === 0) {
+      doShutdown();
+      return;
+    }
+
+    if (activeTabIndex >= tabs.length) {
+      activeTabIndex = tabs.length - 1;
+    }
+    renderer.fullRedraw();
+  }
+
+  function showMessage(message: string): void {
+    logger.info(message);
+  }
+
+  async function handleAction(action: MuxAction): Promise<void> {
+    switch (action.kind) {
+      case 'none':
+        break;
+
+      case 'write-pty': {
+        const active = getActiveTab();
+        if (active && active.bridge.alive) {
+          active.bridge.write(action.data);
+        }
+        break;
+      }
+
+      case 'enter-command-mode':
+        renderer.fullRedraw();
+        break;
+
+      case 'enter-pty-mode':
+        renderer.fullRedraw();
+        break;
+
+      case 'command':
+        await handleCommand(action.command, action.args);
+        break;
+
+      case 'trusted-input': {
+        const active = getActiveTab();
+        if (active && active.bridge.alive && active.bridge.escalationDir) {
+          writeTrustedUserContext(active.bridge.escalationDir, action.text);
+          active.bridge.write(action.text + '\n');
+        } else if (active && active.bridge.alive) {
+          active.bridge.write(action.text + '\n');
+        }
+        // Return to PTY mode after sending trusted input
+        inputHandler.handleKey('\x01');
+        renderer.fullRedraw();
+        break;
+      }
+
+      case 'redraw-input':
+        renderer.redrawCommandArea();
+        break;
+
+      case 'quit':
+        doShutdown();
+        break;
+    }
+  }
+
+  async function handleCommand(command: string, args: string[]): Promise<void> {
+    switch (command) {
+      case 'approve': {
+        const arg = args[0];
+        if (!arg) {
+          showMessage('Usage: /approve <number> or /approve all');
+          break;
+        }
+        let message: string;
+        if (arg === 'all') {
+          message = escalationManager.resolveAll('approved');
+        } else {
+          const num = parseInt(arg, 10);
+          if (isNaN(num)) {
+            showMessage('Invalid escalation number');
+            break;
+          }
+          message = escalationManager.resolve(num, 'approved');
+        }
+        showMessage(message);
+        renderer.redrawTabBar();
+        renderer.redrawCommandArea();
+        break;
+      }
+
+      case 'deny': {
+        const arg = args[0];
+        if (!arg) {
+          showMessage('Usage: /deny <number> or /deny all');
+          break;
+        }
+        let message: string;
+        if (arg === 'all') {
+          message = escalationManager.resolveAll('denied');
+        } else {
+          const num = parseInt(arg, 10);
+          if (isNaN(num)) {
+            showMessage('Invalid escalation number');
+            break;
+          }
+          message = escalationManager.resolve(num, 'denied');
+        }
+        showMessage(message);
+        renderer.redrawTabBar();
+        renderer.redrawCommandArea();
+        break;
+      }
+
+      case 'new': {
+        const tab = await spawnSession();
+        activeTabIndex = tabs.length - 1;
+        showMessage(`Spawned session #${tab.number}`);
+        renderer.fullRedraw();
+        break;
+      }
+
+      case 'tab': {
+        const num = parseInt(args[0], 10);
+        if (isNaN(num)) {
+          showMessage('Usage: /tab <number>');
+          break;
+        }
+        const index = tabs.findIndex((t) => t.number === num);
+        if (index === -1) {
+          showMessage(`No tab #${num}`);
+          break;
+        }
+        switchTab(index);
+        break;
+      }
+
+      case 'close': {
+        const num = args[0] ? parseInt(args[0], 10) : getActiveTab()?.number;
+        if (num === undefined || isNaN(num)) {
+          showMessage('Usage: /close [number]');
+          break;
+        }
+        closeTab(num);
+        break;
+      }
+
+      case 'sessions': {
+        const sessionInfo = [...escalationManager.state.sessions.values()]
+          .map(
+            (s) =>
+              `  [${s.displayNumber}] ${s.registration.sessionId.substring(0, 8)} ${s.registration.label}`,
+          )
+          .join('\n');
+        showMessage(sessionInfo || 'No active sessions');
+        break;
+      }
+
+      case 'quit':
+      case 'q':
+        doShutdown();
+        break;
+
+      default:
+        showMessage(`Unknown command: /${command}`);
+    }
+  }
+
+  function doShutdown(): void {
+    if (!running) return;
+    running = false;
+
+    for (const tab of tabs) {
+      if (tab.bridge.alive) {
+        tab.bridge.kill();
+      }
+    }
+
+    escalationManager.stop();
+
+    if (term) {
+      term.grabInput(false);
+      term.hideCursor(false);
+      term.fullscreen(false);
+      term.styleReset();
+      term.processExit(0);
+    }
+
+    renderer.destroy();
+  }
+
+  return {
+    async start(): Promise<void> {
+      running = true;
+
+      const terminalKit = (await import('terminal-kit')) as any;
+      term = terminalKit.default?.terminal ?? terminalKit.terminal;
+
+      term.fullscreen(true);
+      term.hideCursor(true);
+      term.grabInput({ mouse: false });
+
+      inputHandler = createMuxInputHandler();
+      escalationManager = createMuxEscalationManager();
+
+      const { columns, rows } = process.stdout;
+      const cols = columns || 80;
+      const totalRows = rows || 24;
+
+      renderer = createMuxRenderer(term, cols, totalRows, {
+        getActiveTab,
+        getTabs: () => tabs,
+        getActiveTabIndex: () => activeTabIndex,
+        getMode: () => inputHandler.mode,
+        getInputBuffer: () => inputHandler.inputBuffer,
+        getCursorPos: () => inputHandler.cursorPos,
+        getEscalationState: () => escalationManager.state,
+        getPendingCount: () => escalationManager.pendingCount,
+      });
+
+      term.on('key', (key: string) => {
+        if (!running) return;
+        const action = inputHandler.handleKey(key);
+        void handleAction(action);
+      });
+
+      process.stdout.on('resize', () => {
+        const { columns: newCols, rows: newRows } = process.stdout;
+        if (!newCols || !newRows) return;
+
+        renderer.resize(newCols, newRows);
+
+        const layout = renderer.layout;
+        for (const tab of tabs) {
+          if (tab.bridge.alive) {
+            tab.bridge.resize(newCols, layout.ptyViewportRows);
+          }
+        }
+
+        renderer.fullRedraw();
+      });
+
+      escalationManager.onChange(() => {
+        renderer.redrawTabBar();
+        if (inputHandler.mode === 'command') {
+          renderer.redrawCommandArea();
+        }
+      });
+
+      escalationManager.startRegistryPolling();
+
+      const handleSignal = (): void => {
+        doShutdown();
+      };
+      process.on('SIGINT', handleSignal);
+      process.on('SIGTERM', handleSignal);
+      process.on('SIGHUP', handleSignal);
+
+      process.on('exit', () => {
+        if (term) {
+          term.grabInput(false);
+        }
+      });
+
+      if (autoSpawn) {
+        await spawnSession();
+      }
+
+      renderer.fullRedraw();
+
+      await new Promise<void>((resolve) => {
+        const checkInterval = setInterval(() => {
+          if (!running) {
+            clearInterval(checkInterval);
+            resolve();
+          }
+        }, 100);
+      });
+    },
+
+    // eslint-disable-next-line @typescript-eslint/require-await
+    async shutdown(): Promise<void> {
+      doShutdown();
+    },
+  };
+}

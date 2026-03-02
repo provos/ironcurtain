@@ -9,7 +9,7 @@
  */
 
 import { createInterface } from 'node:readline';
-import { existsSync, mkdirSync, writeSync, readFileSync, unlinkSync, openSync, closeSync, constants } from 'node:fs';
+import { mkdirSync } from 'node:fs';
 import chalk from 'chalk';
 
 import { getPtyRegistryDir, getListenerLockPath } from '../config/paths.js';
@@ -17,6 +17,7 @@ import { readActiveRegistrations } from './session-registry.js';
 import { createEscalationWatcher } from './escalation-watcher.js';
 import type { EscalationWatcher } from './escalation-watcher.js';
 import type { PtySessionRegistration } from '../docker/pty-types.js';
+import { acquireLock, releaseLock } from './listener-lock.js';
 import {
   createInitialState,
   addSession,
@@ -168,61 +169,6 @@ export async function main(): Promise<void> {
     session.watcher.stop();
   }
   releaseLock(lockPath);
-}
-
-// --- Lock management ---
-
-/**
- * Acquires the listener lock file using O_EXCL for atomicity.
- * Returns true if the lock was acquired, false if another instance holds it.
- */
-function acquireLock(lockPath: string): boolean {
-  if (existsSync(lockPath)) {
-    // Check if the PID in the lock file is still alive
-    try {
-      const content = readFileSync(lockPath, 'utf-8');
-      const pid = parseInt(content.trim(), 10);
-      if (!isNaN(pid) && isPidAlive(pid)) {
-        return false; // Another instance is running
-      }
-      // Stale lock -- remove and try again
-      unlinkSync(lockPath);
-    } catch {
-      // If we can't read the lock, try to recreate it
-      try {
-        unlinkSync(lockPath);
-      } catch {
-        return false;
-      }
-    }
-  }
-
-  try {
-    const fd = openSync(lockPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
-    const content = Buffer.from(String(process.pid));
-    writeSync(fd, content);
-    closeSync(fd);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function releaseLock(lockPath: string): void {
-  try {
-    unlinkSync(lockPath);
-  } catch {
-    /* best effort */
-  }
-}
-
-function isPidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 // --- Watcher creation ---

@@ -241,6 +241,11 @@ export class Sandbox {
       }
     }
 
+    // Mark PTY sessions so the proxy requires trusted input source for auto-approval
+    if (config.isPtySession) {
+      proxyEnv.IRONCURTAIN_PTY_SESSION = '1';
+    }
+
     // Register one proxy per backend server so UTCP names them cleanly:
     //   tools.<serverName>_<toolName>(...)
     // Each proxy gets a SERVER_FILTER env var to connect only to its server.

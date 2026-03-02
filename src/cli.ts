@@ -24,6 +24,7 @@ Usage:
 
 Commands:
   start [task]         Run the agent (interactive or single-shot)
+  mux                  Terminal multiplexer for PTY sessions (requires node-pty)
   escalation-listener  Aggregate escalation notifications from PTY sessions
   bot                  Run the Signal messaging transport daemon
   setup                Run the first-start wizard (always runs)
@@ -126,6 +127,11 @@ switch (subcommand) {
     const agentName = values.agent as string | undefined;
     const { runBot } = await import('./signal/bot-command.js');
     await runBot({ agent: agentName });
+    break;
+  }
+  case 'mux': {
+    const { main: muxMain } = await import('./mux/mux-command.js');
+    await muxMain(process.argv.slice(3));
     break;
   }
   case 'escalation-listener': {

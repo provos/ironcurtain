@@ -599,23 +599,39 @@ export async function handleCallTool(
 
     // Try auto-approve before falling through to human escalation
     if (deps.autoApproveModel) {
-      const userMessage = readUserContext(deps.escalationDir);
-      if (userMessage) {
-        const autoResult = await autoApprove(
-          {
-            userMessage,
-            toolName: `${toolInfo.serverName}/${toolInfo.name}`,
-            escalationReason: evaluation.reason,
-            arguments: extractArgsForAutoApprove(argsForPolicy, annotation),
-          },
-          deps.autoApproveModel,
-        );
+      const userContext = readUserContext(deps.escalationDir);
+      if (userContext) {
+        // For PTY sessions, require trusted source from the mux
+        const isPtySession = process.env.IRONCURTAIN_PTY_SESSION === '1';
+        const sourceValid = !isPtySession || userContext.source === 'mux-trusted-input';
 
-        if (autoResult.decision === 'approve') {
-          autoApproved = true;
-          escalationResult = 'approved';
-          policyDecision.status = 'allow';
-          policyDecision.reason = `Auto-approved: ${autoResult.reasoning}`;
+        // Staleness check: reject trusted input older than 120 seconds
+        const TRUSTED_INPUT_STALENESS_MS = 120_000;
+        let stale = false;
+        if (userContext.timestamp) {
+          const age = Date.now() - new Date(userContext.timestamp).getTime();
+          if (age > TRUSTED_INPUT_STALENESS_MS) {
+            stale = true;
+          }
+        }
+
+        if (sourceValid && !stale) {
+          const autoResult = await autoApprove(
+            {
+              userMessage: userContext.userMessage,
+              toolName: `${toolInfo.serverName}/${toolInfo.name}`,
+              escalationReason: evaluation.reason,
+              arguments: extractArgsForAutoApprove(argsForPolicy, annotation),
+            },
+            deps.autoApproveModel,
+          );
+
+          if (autoResult.decision === 'approve') {
+            autoApproved = true;
+            escalationResult = 'approved';
+            policyDecision.status = 'allow';
+            policyDecision.reason = `Auto-approved: ${autoResult.reasoning}`;
+          }
         }
       }
     }

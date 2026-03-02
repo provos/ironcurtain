@@ -104,4 +104,10 @@ export interface IronCurtainConfig {
    * Adapters use this to choose between OAuth and API key env vars.
    */
   dockerAuth?: { readonly kind: 'oauth' | 'apikey' };
+  /**
+   * Whether this is a PTY session. When true, the proxy requires
+   * trusted input source ("mux-trusted-input") for auto-approval.
+   * Set by PTY session orchestration code.
+   */
+  isPtySession?: boolean;
 }
