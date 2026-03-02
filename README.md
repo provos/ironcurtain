@@ -190,7 +190,7 @@ See [SANDBOXING.md](SANDBOXING.md) for the full sandboxing architecture.
 ### Prerequisites
 
 - Node.js 20+
-- An API key for at least one supported LLM provider (Anthropic, Google, or OpenAI)
+- An API key for at least one supported LLM provider (Anthropic, Google, or OpenAI), or OAuth credentials via `claude login`
 
 ### Install
 
@@ -225,6 +225,8 @@ Or add it to `~/.ironcurtain/config.json` (auto-created on first run with defaul
 ```
 
 Environment variables take precedence over config file values. Supported providers: `ANTHROPIC_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`, `OPENAI_API_KEY`.
+
+In Docker mode, IronCurtain also auto-detects OAuth credentials from `~/.claude/.credentials.json` (created by `claude login`) and prefers them over API keys.
 
 ### 2. Configure settings
 
@@ -301,7 +303,7 @@ ironcurtain start "Summarize the files in the current directory"
 
 Or with npm scripts during development: `npm start` / `npm start "task"`.
 
-When Docker is available and `ANTHROPIC_API_KEY` is set, `ironcurtain start` automatically selects Docker mode (claude-code agent). Otherwise it falls back to the builtin agent silently. The selected mode is logged to stderr. Use `--agent builtin` or `--agent claude-code` to force a specific agent; explicit selection fails fast with a clear error if prerequisites are missing.
+When Docker is available and Anthropic credentials exist (OAuth token or API key), `ironcurtain start` automatically selects Docker mode (claude-code agent). Otherwise it falls back to the builtin agent silently. The selected mode is logged to stderr. Use `--agent builtin` or `--agent claude-code` to force a specific agent; explicit selection fails fast with a clear error if prerequisites are missing.
 
 **PTY mode** (interactive Docker terminal with native Claude Code UI):
 
@@ -448,6 +450,7 @@ IronCurtain is designed around a specific threat model: **the LLM goes rogue.** 
 - **Filesystem containment** -- Path-based policy with symlink-aware resolution prevents path traversal and symlink-escape attacks.
 - **Per-tool policy** -- Each MCP tool call is evaluated against compiled rules. The policy engine classifies tool arguments by role (read-path, write-path, delete-path) to make fine-grained decisions.
 - **Structural invariants** -- Certain protections are hardcoded and cannot be overridden by the constitution: the agent can never modify its own policy files, audit logs, or configuration.
+- **Credential isolation** -- In Docker mode, real credentials (API keys or OAuth tokens) never enter the container. The MITM proxy swaps fake sentinel keys for real credentials on the host side.
 - **Human escalation** -- When policy says "escalate," the agent pauses and the user must explicitly `/approve` or `/deny` the action. Optionally, an [LLM-based auto-approver](#auto-approve-escalations) can approve actions that clearly match the user's most recent request — it can never deny, only approve or fall through to human review.
 - **Audit trail** -- Every tool call and policy decision is logged to an append-only JSONL audit log.
 - **Resource limits** -- Token, step, time, and cost budgets prevent runaway sessions.
@@ -467,7 +470,7 @@ See [docs/SECURITY_CONCERNS.md](docs/SECURITY_CONCERNS.md) for a detailed threat
 
 | Issue                           | Guidance                                                                                                                                                                                                                                                   |
 | ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Missing API key**             | Set the environment variable (`ANTHROPIC_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`, or `OPENAI_API_KEY`) or add the corresponding key to `~/.ironcurtain/config.json`.                                                                                      |
+| **Missing API key**             | Set the environment variable (`ANTHROPIC_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`, or `OPENAI_API_KEY`), add the corresponding key to `~/.ironcurtain/config.json`, or run `claude login` for OAuth (Docker mode only).                                                                                      |
 | **Sandbox unavailable**         | OS-level sandboxing requires `bubblewrap` and `socat`. Install both, or set `"sandboxPolicy": "warn"` in your MCP server config for development.                                                                                                           |
 | **Budget exhausted**            | Adjust limits in `~/.ironcurtain/config.json` under `resourceBudget`. Set any individual limit to `null` to disable it.                                                                                                                                    |
 | **Node version errors**         | Node.js 22+ is required (`isolated-vm` needs `>=22.0.0`). Maximum supported is Node 25 (`<26`).                                                                                                                                                            |

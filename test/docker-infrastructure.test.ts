@@ -76,6 +76,7 @@ describe('DockerInfrastructure interface', () => {
       useTcp: false,
       socketsDir: '/tmp/test/sessions/test-session-id/sockets',
       mitmAddr: { socketPath: '/tmp/mitm.sock' },
+      authKind: 'apikey',
     };
 
     // Verify key fields are accessible at runtime

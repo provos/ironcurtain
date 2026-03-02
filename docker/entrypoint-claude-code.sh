@@ -27,11 +27,30 @@ cat > "$HOME/.claude.json" <<'EOJSON'
 EOJSON
 
 # Configure settings.json:
-# - apiKeyHelper: feeds the API key via helper so Claude Code skips the
-#   custom API key approval dialog entirely
 # - skipDangerousModePermissionPrompt: suppresses the bypass-permissions warning
+# Auth mode determines how Claude Code gets its API credentials:
+# - OAuth mode (CLAUDE_CODE_OAUTH_TOKEN set): Claude Code reads the token from
+#   this env var directly -- no apiKeyHelper needed.
+# - API key mode: apiKeyHelper echoes the fake key so Claude Code skips the
+#   custom API key approval dialog entirely.
 mkdir -p "$HOME/.claude"
-cat > "$HOME/.claude/settings.json" <<'EOSETTINGS'
+
+if [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
+  # OAuth mode: Claude Code reads the token from env var directly.
+  cat > "$HOME/.claude/settings.json" <<'EOSETTINGS'
+{
+  "permissions": {
+    "allow": [],
+    "deny": [],
+    "additionalDirectories": [],
+    "defaultMode": "bypassPermissions"
+  },
+  "skipDangerousModePermissionPrompt": true
+}
+EOSETTINGS
+else
+  # API key mode: apiKeyHelper echoes the fake key at runtime.
+  cat > "$HOME/.claude/settings.json" <<'EOSETTINGS'
 {
   "permissions": {
     "allow": [],
@@ -43,6 +62,7 @@ cat > "$HOME/.claude/settings.json" <<'EOSETTINGS'
   "skipDangerousModePermissionPrompt": true
 }
 EOSETTINGS
+fi
 
 # Load system prompt into env var so socat/bash -c doesn't have quoting issues
 if [ -f /etc/ironcurtain/system-prompt.txt ]; then

@@ -2,8 +2,15 @@ import { describe, it, expect } from 'vitest';
 import { resolveSessionMode, PreflightError } from '../src/session/preflight.js';
 import type { IronCurtainConfig } from '../src/config/types.js';
 import type { AgentId } from '../src/docker/agent-adapter.js';
+import type { CredentialSources } from '../src/docker/oauth-credentials.js';
 
 import { TEST_SANDBOX_DIR, REAL_TMP } from './fixtures/test-policy.js';
+
+/** No OAuth credentials — forces API key path. */
+const noOAuthSources: CredentialSources = {
+  loadFromFile: () => null,
+  loadFromKeychain: () => null,
+};
 
 function createTestConfig(overrides: { anthropicApiKey?: string } = {}): IronCurtainConfig {
   return {
@@ -54,10 +61,11 @@ describe('resolveSessionMode', () => {
         config: createTestConfig(),
         requestedAgent: 'claude-code' as AgentId,
         isDockerAvailable: dockerAvailable,
+        credentialSources: noOAuthSources,
       });
 
-      expect(result.mode).toEqual({ kind: 'docker', agent: 'claude-code' });
-      expect(result.reason).toBe('Explicit --agent selection');
+      expect(result.mode).toEqual({ kind: 'docker', agent: 'claude-code', authKind: 'apikey' });
+      expect(result.reason).toBe('Explicit --agent selection (API key)');
     });
 
     it('throws PreflightError when Docker is unavailable', async () => {
@@ -65,21 +73,23 @@ describe('resolveSessionMode', () => {
         config: createTestConfig(),
         requestedAgent: 'claude-code' as AgentId,
         isDockerAvailable: dockerUnavailable,
+        credentialSources: noOAuthSources,
       });
 
       await expect(promise).rejects.toThrow(PreflightError);
       await expect(promise).rejects.toThrow(/Docker/);
     });
 
-    it('throws PreflightError when API key is missing', async () => {
+    it('throws PreflightError when no credentials are available', async () => {
       const promise = resolveSessionMode({
         config: createTestConfig({ anthropicApiKey: '' }),
         requestedAgent: 'claude-code' as AgentId,
         isDockerAvailable: dockerAvailable,
+        credentialSources: noOAuthSources,
       });
 
       await expect(promise).rejects.toThrow(PreflightError);
-      await expect(promise).rejects.toThrow(/ANTHROPIC_API_KEY/);
+      await expect(promise).rejects.toThrow(/authentication/);
     });
 
     it('selects builtin mode when --agent builtin is specified', async () => {
@@ -87,20 +97,43 @@ describe('resolveSessionMode', () => {
         config: createTestConfig(),
         requestedAgent: 'builtin' as AgentId,
         isDockerAvailable: dockerUnavailable,
+        credentialSources: noOAuthSources,
       });
 
       expect(result.mode).toEqual({ kind: 'builtin' });
       expect(result.reason).toBe('Explicit --agent builtin');
     });
 
-    it('checks Docker before API key (Docker error shown first)', async () => {
+    it('checks Docker before credentials (Docker error shown first)', async () => {
       await expect(
         resolveSessionMode({
           config: createTestConfig({ anthropicApiKey: '' }),
           requestedAgent: 'claude-code' as AgentId,
           isDockerAvailable: dockerUnavailable,
+          credentialSources: noOAuthSources,
         }),
       ).rejects.toThrow(/Docker/);
+    });
+
+    it('succeeds with OAuth credentials and no API key', async () => {
+      const oauthSources: CredentialSources = {
+        loadFromFile: () => ({
+          accessToken: 'sk-ant-oat01-test',
+          refreshToken: 'sk-ant-ort01-test',
+          expiresAt: Date.now() + 3_600_000,
+        }),
+        loadFromKeychain: () => null,
+      };
+
+      const result = await resolveSessionMode({
+        config: createTestConfig({ anthropicApiKey: '' }),
+        requestedAgent: 'claude-code' as AgentId,
+        isDockerAvailable: dockerAvailable,
+        credentialSources: oauthSources,
+      });
+
+      expect(result.mode).toEqual({ kind: 'docker', agent: 'claude-code', authKind: 'oauth' });
+      expect(result.reason).toBe('Explicit --agent selection (OAuth)');
     });
   });
 
@@ -109,36 +142,60 @@ describe('resolveSessionMode', () => {
       const result = await resolveSessionMode({
         config: createTestConfig(),
         isDockerAvailable: dockerAvailable,
+        credentialSources: noOAuthSources,
       });
 
-      expect(result.mode).toEqual({ kind: 'docker', agent: 'claude-code' });
-      expect(result.reason).toBe('Docker available, ANTHROPIC_API_KEY set');
+      expect(result.mode).toEqual({ kind: 'docker', agent: 'claude-code', authKind: 'apikey' });
+      expect(result.reason).toBe('Docker available, ANTHROPIC_API_KEY detected');
+    });
+
+    it('selects Docker with OAuth when available', async () => {
+      const oauthSources: CredentialSources = {
+        loadFromFile: () => ({
+          accessToken: 'sk-ant-oat01-test',
+          refreshToken: 'sk-ant-ort01-test',
+          expiresAt: Date.now() + 3_600_000,
+        }),
+        loadFromKeychain: () => null,
+      };
+
+      const result = await resolveSessionMode({
+        config: createTestConfig({ anthropicApiKey: '' }),
+        isDockerAvailable: dockerAvailable,
+        credentialSources: oauthSources,
+      });
+
+      expect(result.mode).toEqual({ kind: 'docker', agent: 'claude-code', authKind: 'oauth' });
+      expect(result.reason).toBe('Docker available, OAuth detected');
     });
 
     it('falls back to builtin when Docker is unavailable', async () => {
       const result = await resolveSessionMode({
         config: createTestConfig(),
         isDockerAvailable: dockerUnavailable,
+        credentialSources: noOAuthSources,
       });
 
       expect(result.mode).toEqual({ kind: 'builtin' });
       expect(result.reason).toBe('Docker not available');
     });
 
-    it('falls back to builtin when API key is missing', async () => {
+    it('falls back to builtin when no credentials are available', async () => {
       const result = await resolveSessionMode({
         config: createTestConfig({ anthropicApiKey: '' }),
         isDockerAvailable: dockerAvailable,
+        credentialSources: noOAuthSources,
       });
 
       expect(result.mode).toEqual({ kind: 'builtin' });
-      expect(result.reason).toBe('ANTHROPIC_API_KEY not set');
+      expect(result.reason).toBe('No credentials (OAuth or API key)');
     });
 
-    it('falls back to builtin when both Docker and API key are missing', async () => {
+    it('falls back to builtin when both Docker and credentials are missing', async () => {
       const result = await resolveSessionMode({
         config: createTestConfig({ anthropicApiKey: '' }),
         isDockerAvailable: dockerUnavailable,
+        credentialSources: noOAuthSources,
       });
 
       expect(result.mode).toEqual({ kind: 'builtin' });

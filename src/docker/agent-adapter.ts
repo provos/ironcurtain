@@ -107,8 +107,11 @@ export interface AgentAdapter {
    * Returns LLM provider configurations for this agent.
    * The MITM proxy uses these to build the host allowlist,
    * generate fake API keys, swap keys in requests, and filter endpoints.
+   *
+   * @param authKind - When 'oauth', returns providers configured for bearer
+   *   token injection instead of header-based API key injection.
    */
-  getProviders(): readonly ProviderConfig[];
+  getProviders(authKind?: 'oauth' | 'apikey'): readonly ProviderConfig[];
 
   /**
    * Constructs environment variables for the container.

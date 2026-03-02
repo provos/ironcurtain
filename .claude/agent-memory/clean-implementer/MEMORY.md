@@ -149,6 +149,15 @@ Zod v4 (^4.3.6) strict by default. Mock response JSON must exactly match Zod sch
 - `docs/designs/scenario-generator-multi-turn.md` -- multi-turn scenario generation with prompt caching
 - `docs/designs/pty-escalation-listener.md` -- PTY mode + escalation listener (see `pty-escalation.md`)
 
+## OAuth Docker Support (Phase 1-2)
+- **Module**: `src/docker/oauth-credentials.ts` -- credential detection, Keychain extraction, `detectAuthMethod()`
+- **Providers**: `anthropicOAuthProvider`, `claudePlatformOAuthProvider` in `provider-config.ts` -- bearer injection
+- **Config**: `IronCurtainConfig.dockerAuth?: { kind: 'oauth' | 'apikey' }` set by `prepareDockerInfrastructure()`
+- **Adapter**: `getProviders(authKind?)` returns OAuth or API key providers; `buildEnv()` sets `CLAUDE_CODE_OAUTH_TOKEN` or `IRONCURTAIN_API_KEY`
+- **DI pattern**: `detectAuthMethod(config, sources?)` -- `CredentialSources` interface for test injection (ESM can't spy on module-internal calls)
+- **Env override**: `IRONCURTAIN_DOCKER_AUTH=apikey` forces API key mode
+- **Design**: `docs/designs/oauth-docker-support.md`
+
 ## PTY Session & Escalation (see pty-escalation.md for details)
 - **Shared infra**: `src/docker/docker-infrastructure.ts` -- `prepareDockerInfrastructure()` used by both createDockerSession() and runPtySession()
 - **preBuiltInfrastructure**: DockerAgentSessionDeps field; skips proxy/orientation/image when set

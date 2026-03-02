@@ -98,4 +98,10 @@ export interface IronCurtainConfig {
    * Default: "warn" -- log and continue without sandbox.
    */
   sandboxPolicy?: SandboxAvailabilityPolicy;
+  /**
+   * Docker session authentication method.
+   * Set by prepareDockerInfrastructure() after detecting credentials.
+   * Adapters use this to choose between OAuth and API key env vars.
+   */
+  dockerAuth?: { readonly kind: 'oauth' | 'apikey' };
 }

@@ -11,6 +11,7 @@ import { promisify } from 'node:util';
 import type { IronCurtainConfig } from '../config/types.js';
 import type { AgentId } from '../docker/agent-adapter.js';
 import type { SessionMode } from './types.js';
+import { detectAuthMethod, loadOAuthCredentials, type CredentialSources } from '../docker/oauth-credentials.js';
 
 const execFile = promisify(execFileCb);
 
@@ -40,6 +41,8 @@ export interface PreflightOptions {
   requestedAgent?: AgentId;
   /** Dependency injection for tests. Defaults to real Docker check. */
   isDockerAvailable?: () => Promise<boolean>;
+  /** Dependency injection for tests. Defaults to real credential detection. */
+  credentialSources?: CredentialSources;
 }
 
 /**
@@ -56,11 +59,34 @@ export async function checkDockerAvailable(): Promise<boolean> {
 }
 
 /**
- * Checks whether the API key required by the given agent is configured.
- * Currently all Docker agents (claude-code) require ANTHROPIC_API_KEY.
+ * Sources that skip macOS Keychain to keep preflight fast and non-interactive.
+ * Full Keychain detection happens in prepareDockerInfrastructure().
+ *
+ * Limitation: macOS users whose OAuth credentials exist only in the Keychain
+ * (no ~/.claude/.credentials.json and no API key) will fall back to builtin
+ * in auto-detect mode, or get a PreflightError with explicit --agent.
+ * In practice this is rare: Claude Code always writes the credentials file.
  */
-function hasApiKeyForAgent(_agentId: AgentId, config: IronCurtainConfig): boolean {
-  return config.userConfig.anthropicApiKey !== '';
+const preflightSources: CredentialSources = {
+  loadFromFile: loadOAuthCredentials,
+  loadFromKeychain: () => null,
+};
+
+/**
+ * Checks whether credentials (OAuth or API key) are available for the given agent.
+ * Returns the auth kind if available, or null if no credentials found.
+ *
+ * Skips macOS Keychain to avoid interactive prompts during preflight.
+ * Full detection including Keychain happens in prepareDockerInfrastructure().
+ */
+function detectCredentials(
+  _agentId: AgentId,
+  config: IronCurtainConfig,
+  sources?: CredentialSources,
+): 'oauth' | 'apikey' | null {
+  const auth = detectAuthMethod(config, sources ?? preflightSources);
+  if (auth.kind === 'none') return null;
+  return auth.kind === 'oauth' ? 'oauth' : 'apikey';
 }
 
 /**
@@ -70,20 +96,21 @@ function hasApiKeyForAgent(_agentId: AgentId, config: IronCurtainConfig): boolea
  * - Auto-detect: prefers Docker when available; silently falls back to builtin. Never throws.
  */
 export async function resolveSessionMode(options: PreflightOptions): Promise<PreflightResult> {
-  const { config, requestedAgent } = options;
+  const { config, requestedAgent, credentialSources } = options;
   const isDockerAvailable = options.isDockerAvailable ?? checkDockerAvailable;
 
   if (requestedAgent !== undefined) {
-    return resolveExplicit(requestedAgent, config, isDockerAvailable);
+    return resolveExplicit(requestedAgent, config, isDockerAvailable, credentialSources);
   }
 
-  return resolveAutoDetect(config, isDockerAvailable);
+  return resolveAutoDetect(config, isDockerAvailable, credentialSources);
 }
 
 async function resolveExplicit(
   agent: AgentId,
   config: IronCurtainConfig,
   isDockerAvailable: () => Promise<boolean>,
+  credentialSources?: CredentialSources,
 ): Promise<PreflightResult> {
   if (agent === 'builtin') {
     return {
@@ -99,22 +126,23 @@ async function resolveExplicit(
     );
   }
 
-  if (!hasApiKeyForAgent(agent, config)) {
+  const credKind = detectCredentials(agent, config, credentialSources);
+  if (credKind === null) {
     throw new PreflightError(
-      `--agent ${agent} requires ANTHROPIC_API_KEY to be set. ` +
-        'Set it in your environment or in ~/.ironcurtain/config.json.',
+      `--agent ${agent} requires authentication. ` + 'Log in with `claude login` (OAuth) or set ANTHROPIC_API_KEY.',
     );
   }
 
   return {
-    mode: { kind: 'docker', agent },
-    reason: 'Explicit --agent selection',
+    mode: { kind: 'docker', agent, authKind: credKind },
+    reason: `Explicit --agent selection (${credKind === 'oauth' ? 'OAuth' : 'API key'})`,
   };
 }
 
 async function resolveAutoDetect(
   config: IronCurtainConfig,
   isDockerAvailable: () => Promise<boolean>,
+  credentialSources?: CredentialSources,
 ): Promise<PreflightResult> {
   const dockerOk = await isDockerAvailable();
   if (!dockerOk) {
@@ -124,15 +152,16 @@ async function resolveAutoDetect(
     };
   }
 
-  if (!hasApiKeyForAgent(DEFAULT_DOCKER_AGENT, config)) {
+  const credKind = detectCredentials(DEFAULT_DOCKER_AGENT, config, credentialSources);
+  if (credKind === null) {
     return {
       mode: { kind: 'builtin' },
-      reason: 'ANTHROPIC_API_KEY not set',
+      reason: 'No credentials (OAuth or API key)',
     };
   }
 
   return {
-    mode: { kind: 'docker', agent: DEFAULT_DOCKER_AGENT },
-    reason: 'Docker available, ANTHROPIC_API_KEY set',
+    mode: { kind: 'docker', agent: DEFAULT_DOCKER_AGENT, authKind: credKind },
+    reason: `Docker available, ${credKind === 'oauth' ? 'OAuth' : 'ANTHROPIC_API_KEY'} detected`,
   };
 }

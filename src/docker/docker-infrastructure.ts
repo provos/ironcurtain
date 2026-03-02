@@ -41,6 +41,8 @@ export interface DockerInfrastructure {
   readonly socketsDir: string;
   /** MITM proxy listen address (port for TCP mode, socketPath for UDS mode). */
   readonly mitmAddr: { socketPath?: string; port?: number };
+  /** Authentication method used for this session ('oauth' or 'apikey'). */
+  readonly authKind: 'oauth' | 'apikey';
 }
 
 /**
@@ -72,9 +74,26 @@ export async function prepareDockerInfrastructure(
   const { prepareSession } = await import('./orientation.js');
   const { mkdirSync } = await import('node:fs');
 
+  const { detectAuthMethod } = await import('./oauth-credentials.js');
+
   await registerBuiltinAdapters();
   const adapter = getAgent(mode.agent);
   const useTcp = useTcpTransport();
+
+  // Detect authentication method. When preflight already determined the auth kind,
+  // pass it as a hint to skip potentially slow/interactive sources (e.g., macOS
+  // Keychain) that were already checked during preflight.
+  const authMethod = detectAuthMethod(config);
+  if (authMethod.kind === 'none') {
+    throw new Error(
+      'No credentials available for Docker session. ' + 'Log in with `claude login` (OAuth) or set ANTHROPIC_API_KEY.',
+    );
+  }
+  const authKind = authMethod.kind;
+
+  // Stamp auth kind onto the caller's session config so buildEnv() can read it.
+  // Safe to mutate: callers always pass a session-specific copy.
+  config.dockerAuth = { kind: authKind };
 
   // Derive socketsDir from the passed sessionDir rather than sessionId so
   // that resumed sessions (where sessionDir is based on effectiveSessionId)
@@ -94,15 +113,24 @@ export async function prepareDockerInfrastructure(
   const caDir = resolve(getIronCurtainHome(), 'ca');
   const ca = loadOrCreateCA(caDir);
 
-  // Generate fake keys and build provider key mappings
-  const providers = adapter.getProviders();
+  // Generate fake keys and build provider key mappings.
+  // In OAuth mode, use bearer-based providers and the OAuth access token as the real key.
+  // Providers sharing the same fakeKeyPrefix (and thus the same real credential)
+  // reuse the same fake key so a single container token authenticates against all hosts.
+  const oauthAccessToken = authMethod.kind === 'oauth' ? authMethod.credentials.accessToken : undefined;
+  const providers = adapter.getProviders(authKind);
   const fakeKeys = new Map<string, string>();
   const providerMappings: ProviderKeyMapping[] = [];
+  const fakeKeysByPrefix = new Map<string, string>();
   for (const providerConfig of providers) {
-    const fakeKey = generateFakeKey(providerConfig.fakeKeyPrefix);
+    let fakeKey = fakeKeysByPrefix.get(providerConfig.fakeKeyPrefix);
+    if (!fakeKey) {
+      fakeKey = generateFakeKey(providerConfig.fakeKeyPrefix);
+      fakeKeysByPrefix.set(providerConfig.fakeKeyPrefix, fakeKey);
+    }
     fakeKeys.set(providerConfig.host, fakeKey);
 
-    const realKey = resolveRealApiKey(providerConfig.host, config);
+    const realKey = resolveRealKey(providerConfig.host, config, oauthAccessToken);
     providerMappings.push({ config: providerConfig, fakeKey, realKey });
   }
 
@@ -172,6 +200,7 @@ export async function prepareDockerInfrastructure(
       useTcp,
       socketsDir,
       mitmAddr,
+      authKind,
     };
   } catch (error) {
     // Best-effort cleanup of proxies started above
@@ -182,9 +211,17 @@ export async function prepareDockerInfrastructure(
 }
 
 /**
- * Resolves the real API key for a provider host from config.
+ * Resolves the real credential for a provider host.
+ *
+ * For Anthropic hosts in OAuth mode, uses the OAuth access token.
+ * For all other cases, falls back to the API key from config.
  */
-function resolveRealApiKey(host: string, config: IronCurtainConfig): string {
+function resolveRealKey(host: string, config: IronCurtainConfig, oauthAccessToken: string | undefined): string {
+  // OAuth access token replaces API key for Anthropic hosts
+  if (oauthAccessToken && (host === 'api.anthropic.com' || host === 'platform.claude.com')) {
+    return oauthAccessToken;
+  }
+
   let key: string;
   switch (host) {
     case 'api.anthropic.com':

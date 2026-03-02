@@ -216,6 +216,28 @@ export const openaiProvider: ProviderConfig = {
   fakeKeyPrefix: 'sk-ironcurtain-',
 };
 
+export const anthropicOAuthProvider: ProviderConfig = {
+  host: 'api.anthropic.com',
+  displayName: 'Anthropic (OAuth)',
+  allowedEndpoints: [
+    ...anthropicProvider.allowedEndpoints,
+    // OAuth-only: usage data requires an OAuth session
+    { method: 'GET' as const, path: '/api/oauth/usage' },
+  ],
+  keyInjection: { type: 'bearer' },
+  fakeKeyPrefix: 'sk-ant-oat01-ironcurtain-',
+  requestRewriter: stripServerSideTools,
+  rewriteEndpoints: ['/v1/messages'],
+};
+
+export const claudePlatformOAuthProvider: ProviderConfig = {
+  host: 'platform.claude.com',
+  displayName: 'Claude Platform (OAuth)',
+  allowedEndpoints: claudePlatformProvider.allowedEndpoints,
+  keyInjection: { type: 'bearer' },
+  fakeKeyPrefix: 'sk-ant-oat01-ironcurtain-',
+};
+
 export const googleProvider: ProviderConfig = {
   host: 'generativelanguage.googleapis.com',
   displayName: 'Google',

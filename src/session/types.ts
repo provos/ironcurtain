@@ -34,7 +34,9 @@ export type SessionStatus = 'initializing' | 'ready' | 'processing' | 'closed';
  * 'docker' creates a DockerAgentSession that spawns an external agent
  * inside a Docker container with MCP proxy mediation.
  */
-export type SessionMode = { readonly kind: 'builtin' } | { readonly kind: 'docker'; readonly agent: AgentId };
+export type SessionMode =
+  | { readonly kind: 'builtin' }
+  | { readonly kind: 'docker'; readonly agent: AgentId; readonly authKind?: 'oauth' | 'apikey' };
 
 /**
  * A single turn in the conversation. Captures what the user said,
