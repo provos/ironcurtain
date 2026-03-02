@@ -83,7 +83,12 @@ export async function prepareDockerInfrastructure(
   // Detect authentication method before building providers.
   // OAuth detection reads ~/.claude/.credentials.json or macOS Keychain.
   const authMethod = detectAuthMethod(config);
-  const authKind = authMethod.kind === 'oauth' ? 'oauth' : 'apikey';
+  if (authMethod.kind === 'none') {
+    throw new Error(
+      'No credentials available for Docker session. ' + 'Log in with `claude login` (OAuth) or set ANTHROPIC_API_KEY.',
+    );
+  }
+  const authKind = authMethod.kind;
 
   // Stamp auth kind onto the caller's session config so buildEnv() can read it.
   // Safe to mutate: callers always pass a session-specific copy.

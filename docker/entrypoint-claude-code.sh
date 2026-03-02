@@ -35,23 +35,34 @@ EOJSON
 #   custom API key approval dialog entirely.
 mkdir -p "$HOME/.claude"
 
-API_KEY_HELPER_LINE=""
-if [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
-  API_KEY_HELPER_LINE='
-  "apiKeyHelper": "echo $IRONCURTAIN_API_KEY",'
-fi
-
-cat > "$HOME/.claude/settings.json" <<EOSETTINGS
+if [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
+  # OAuth mode: Claude Code reads the token from env var directly.
+  cat > "$HOME/.claude/settings.json" <<'EOSETTINGS'
 {
   "permissions": {
     "allow": [],
     "deny": [],
     "additionalDirectories": [],
     "defaultMode": "bypassPermissions"
-  },${API_KEY_HELPER_LINE}
+  },
   "skipDangerousModePermissionPrompt": true
 }
 EOSETTINGS
+else
+  # API key mode: apiKeyHelper echoes the fake key at runtime.
+  cat > "$HOME/.claude/settings.json" <<'EOSETTINGS'
+{
+  "permissions": {
+    "allow": [],
+    "deny": [],
+    "additionalDirectories": [],
+    "defaultMode": "bypassPermissions"
+  },
+  "apiKeyHelper": "echo $IRONCURTAIN_API_KEY",
+  "skipDangerousModePermissionPrompt": true
+}
+EOSETTINGS
+fi
 
 # Load system prompt into env var so socat/bash -c doesn't have quoting issues
 if [ -f /etc/ironcurtain/system-prompt.txt ]; then
