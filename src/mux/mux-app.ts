@@ -192,7 +192,15 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
           if (active.bridge.escalationDir) {
             writeTrustedUserContext(active.bridge.escalationDir, action.text);
           }
-          active.bridge.write(action.text + '\r');
+          // Write text first, then \r separately after a short delay so
+          // Claude Code's Ink UI processes them as distinct input events.
+          // A single write of "text\r" arrives as one chunk and Ink may
+          // not trigger Enter when \r is bundled with preceding text.
+          active.bridge.write(action.text);
+          const bridge = active.bridge;
+          setTimeout(() => {
+            if (bridge.alive) bridge.write('\r');
+          }, 50);
         }
         // Return to PTY mode after sending trusted input
         inputHandler.handleKey('CTRL_A');
