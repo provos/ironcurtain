@@ -21,6 +21,23 @@ import * as logger from '../logger.js';
 import { extractMcpErrorMessage } from './mcp-error-utils.js';
 import { type ServerContextMap, updateServerContext, formatServerContext } from './server-context.js';
 
+/**
+ * Detects Docker-style `-e VAR_NAME` args (no `=`) where the env var is unset.
+ */
+function getMissingEnvVars(args: string[]): string[] {
+  const missing: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '-e' && i + 1 < args.length) {
+      const val = args[i + 1];
+      if (!val.includes('=') && !process.env[val]) {
+        missing.push(val);
+      }
+      i++;
+    }
+  }
+  return missing;
+}
+
 export type EscalationPromptFn = (
   request: ToolCallRequest,
   reason: string,
@@ -84,6 +101,13 @@ export class TrustedProcess {
   async initialize(): Promise<void> {
     const failedServers: string[] = [];
     for (const [name, serverConfig] of Object.entries(this.config.mcpServers)) {
+      // Skip servers whose args reference unset env vars (Docker -e VAR_NAME syntax)
+      const missingVars = getMissingEnvVars(serverConfig.args);
+      if (missingVars.length > 0) {
+        logger.warn(`Skipping MCP server '${name}': missing environment variable(s) ${missingVars.join(', ')}`);
+        failedServers.push(name);
+        continue;
+      }
       logger.info(`Connecting to MCP server: ${name}...`);
       try {
         await this.mcpManager.connect(name, serverConfig, this.mcpRoots);

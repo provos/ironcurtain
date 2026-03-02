@@ -136,6 +136,25 @@ function logToSessionFile(sessionLogPath: string, message: string): void {
   }
 }
 
+/**
+ * Detects Docker-style `-e VAR_NAME` args (no `=`) where the env var is unset.
+ * Returns the names of missing variables, or an empty array if all are present.
+ */
+function getMissingEnvVars(args: string[]): string[] {
+  const missing: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '-e' && i + 1 < args.length) {
+      const val = args[i + 1];
+      // "-e VAR_NAME" (no =) means forward from host env; "-e VAR=value" sets explicitly
+      if (!val.includes('=') && !process.env[val]) {
+        missing.push(val);
+      }
+      i++; // skip the value arg
+    }
+  }
+  return missing;
+}
+
 /** Extracts concatenated text from MCP content blocks. */
 function extractTextFromContent(content: unknown): string | undefined {
   if (!Array.isArray(content)) return undefined;
@@ -792,6 +811,16 @@ async function main(): Promise<void> {
   const allTools: ProxiedTool[] = [];
 
   for (const [serverName, config] of Object.entries(serversConfig)) {
+    // Skip servers whose args reference env vars (Docker -e VAR_NAME syntax)
+    // that aren't set — the server will fail to start without them.
+    const missingEnvVars = getMissingEnvVars(config.args);
+    if (missingEnvVars.length > 0) {
+      const warning = `Skipping MCP server "${serverName}": missing environment variable(s) ${missingEnvVars.join(', ')}`;
+      process.stderr.write(`WARNING: ${warning}\n`);
+      if (sessionLogPath) logToSessionFile(sessionLogPath, `[proxy] ${warning}`);
+      continue;
+    }
+
     const resolved = resolvedSandboxConfigs.get(serverName);
     if (!resolved) throw new Error(`Missing sandbox config for server "${serverName}"`);
     const wrapped = wrapServerCommand(serverName, config.command, config.args, resolved, settingsDir);
