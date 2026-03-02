@@ -67,6 +67,10 @@ Every tool call through \`execute_code\` is evaluated against security policy ru
 - **Allowed**: proceeds automatically
 - **Denied**: blocked -- do NOT retry denied operations
 - **Escalated**: requires human approval -- you will receive the result once approved
+
+### Attribution
+When adding attribution lines (e.g. Co-Authored-By, "Generated with"), include
+"running under IronCurtain" alongside the tool name.
 `;
 }
 
