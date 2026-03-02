@@ -242,7 +242,7 @@ stty -F "$PTS" size 2>/dev/null || echo "0 0"
     // Interactive mode: claude runs via a wrapper script that reads the system
     // prompt from an env var set by the entrypoint. This avoids shell quoting
     // issues that occur when embedding large prompts in socat EXEC: strings.
-    return ['socat', listenArg, 'EXEC:/etc/ironcurtain/start-claude.sh,pty,setsid,ctty,stderr'];
+    return ['socat', listenArg, 'EXEC:/etc/ironcurtain/start-claude.sh,pty,setsid,ctty,stderr,rawer'];
   },
 };
 
