@@ -429,6 +429,12 @@ function buildDashboard(state: ListenerState): string {
         lines.push(`        Args:    ${argPreview}`);
       }
       lines.push(`        Reason:  ${esc.request.reason}`);
+
+      if (esc.request.context) {
+        for (const [k, v] of Object.entries(esc.request.context)) {
+          lines.push(`        ${k}: ${chalk.yellow(v)}`);
+        }
+      }
     }
   }
 
