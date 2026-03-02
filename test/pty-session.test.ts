@@ -152,7 +152,7 @@ describe('Claude Code adapter PTY orientation files', () => {
     const files = claudeCodeAdapter.generateOrientationFiles();
     const resizeScript = files.find((f) => f.path === 'resize-pty.sh');
     expect(resizeScript).toBeDefined();
-    expect(resizeScript!.content).toContain('pgrep -f "start-claude"');
+    expect(resizeScript!.content).toContain('pgrep -f "bash.*/start-claude"');
     // Should only send WINCH when Claude PID is found
     expect(resizeScript!.content).toContain('if [ -n "$CLAUDE_PID" ]');
   });
@@ -164,7 +164,7 @@ describe('Claude Code adapter PTY orientation files', () => {
     expect(checkScript!.mode).toBe(0o755);
     expect(checkScript!.content).toContain('stty -F "$PTS" size');
     // Should also have fallback PID logic
-    expect(checkScript!.content).toContain('pgrep -f "start-claude"');
+    expect(checkScript!.content).toContain('pgrep -f "bash.*/start-claude"');
   });
 
   it('pgrep uses -x (exact process name) not -f (cmdline) to find Claude', () => {
@@ -187,13 +187,17 @@ describe('Claude Code adapter PTY orientation files', () => {
 // --- PTY resize integration test (socat-based, no Docker) ---
 
 describe('PTY resize via socat', () => {
-  // Check socat availability once
+  const isLinux = process.platform === 'linux';
+
+  // Check socat availability once (only on Linux)
   let hasSocat = false;
-  try {
-    execFileSync('socat', ['-V'], { timeout: 2000 });
-    hasSocat = true;
-  } catch {
-    /* socat not installed */
+  if (isLinux) {
+    try {
+      execFileSync('socat', ['-V'], { timeout: 2000 });
+      hasSocat = true;
+    } catch {
+      /* socat not installed */
+    }
   }
 
   // Track PIDs for cleanup in afterEach
@@ -287,7 +291,7 @@ describe('PTY resize via socat', () => {
     return { tmpDir, targetPid, pts };
   }
 
-  it.skipIf(!hasSocat)('stty -F resizes a socat-managed PTY', async () => {
+  it.skipIf(!isLinux || !hasSocat)('stty -F resizes a socat-managed PTY', async () => {
     const { targetPid, pts } = await createPtySetup('sleep 300', 'sleep 300');
 
     expect(targetPid).toBeTruthy();
@@ -305,7 +309,7 @@ describe('PTY resize via socat', () => {
     expect(after).toBe('43 132');
   });
 
-  it.skipIf(!hasSocat)('resize works after exec replaces shell with target process', async () => {
+  it.skipIf(!isLinux || !hasSocat)('resize works after exec replaces shell with target process', async () => {
     const { pts } = await createPtySetup('sleep 301', 'sleep 301');
     expect(pts).toMatch(/^\/dev\/pts\/\d+$/);
 
@@ -320,12 +324,13 @@ describe('PTY resize via socat', () => {
     expect(size2).toBe('24 80');
   });
 
-  it('pgrep -x claude does not match unrelated processes', () => {
+  it('pgrep -x does not match nonexistent process names', () => {
     // pgrep -x matches the exact process name from /proc/PID/comm.
-    // In a test env with no Claude process, it should find nothing.
+    // A nonsense name should never match any running process.
     try {
-      execFileSync('pgrep', ['-x', 'claude'], { timeout: 2000 });
-      // If pgrep exits 0, something matched (unexpected in test env)
+      execFileSync('pgrep', ['-x', 'ironcurtain_no_such_proc'], { timeout: 2000 });
+      // If pgrep exits 0, something matched (should be impossible)
+      expect.unreachable('pgrep matched a nonexistent process name');
     } catch (err) {
       // Exit code 1 = no match, which is correct
       expect((err as { status: number }).status).toBe(1);
