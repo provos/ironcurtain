@@ -181,7 +181,8 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
 
     // 2. Fake key validation + swap
     const modifiedHeaders = { ...headers };
-    if (!validateAndSwapApiKey(modifiedHeaders, provider)) {
+    const keyResult = validateAndSwapApiKey(modifiedHeaders, provider);
+    if (!keyResult.valid) {
       logger.info(`[mitm-proxy] REJECTED ${method} ${targetHost}${path} - invalid API key`);
       clientRes.writeHead(403, { 'Content-Type': 'text/plain' });
       clientRes.end('Rejected: API key does not match expected sentinel.');
@@ -192,8 +193,11 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     // 3. Forward to real API - either direct pipe or buffer+rewrite.
     // Buffer the body when rewriting is needed OR when a token manager is
     // present (so we can replay the request on 401 with a refreshed token).
+    // Only enable 401 retry if the request actually carried the fake key —
+    // unauthenticated requests should not have credentials injected on retry.
     const needsRewrite = shouldRewriteBody(provider.config, method, path);
-    const needsBuffer = needsRewrite || !!provider.tokenManager;
+    const canRetryAuth = keyResult.hadKey && !!provider.tokenManager;
+    const needsBuffer = needsRewrite || canRetryAuth;
 
     /**
      * Sends the request upstream with optional body override and 401 retry.
@@ -205,7 +209,11 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
 
       const finalHeaders = { ...modifiedHeaders };
       if (bodyOverride) {
+        // When we've buffered the body, set the definitive content-length and
+        // remove transfer-encoding to avoid sending both (which is an invalid
+        // HTTP request and a request-smuggling vector per RFC 7230 §3.3.3).
         finalHeaders['content-length'] = bodyOverride.length.toString();
+        delete finalHeaders['transfer-encoding'];
       }
 
       const upstreamReq = https.request(
@@ -228,10 +236,11 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
             }
           });
 
-          // 401 retry: if we have a token manager, a buffered body, and this
-          // is not already a retry, attempt to refresh and resend.
-          if (upstreamRes.statusCode === 401 && provider.tokenManager && bodyOverride && !isRetry) {
-            const { tokenManager } = provider;
+          // 401 retry: if the request carried a fake key (so we can safely inject
+          // a refreshed real key), we have a buffered body, and this is not already
+          // a retry, attempt to refresh and resend.
+          const { tokenManager } = provider;
+          if (upstreamRes.statusCode === 401 && canRetryAuth && tokenManager && bodyOverride && !isRetry) {
             // Consume the 401 response body to free the connection, then retry
             upstreamRes.resume();
             upstreamRes.on('end', () => {
@@ -285,13 +294,16 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
      * Async to support the token manager's getValidAccessToken() call.
      */
     async function processRequest(): Promise<void> {
-      // Proactive token refresh: ensure the real key is fresh before forwarding
+      // Proactive token refresh: ensure the real key is fresh before forwarding.
+      // Only update headers if the request actually carried the fake key.
       if (provider.tokenManager) {
         try {
           const freshToken = await provider.tokenManager.getValidAccessToken();
           if (freshToken !== provider.realKey) {
             provider.realKey = freshToken;
-            injectRealKey(modifiedHeaders, provider);
+            if (keyResult.hadKey) {
+              injectRealKey(modifiedHeaders, provider);
+            }
           }
         } catch (err) {
           logger.warn(
@@ -574,31 +586,39 @@ function retryWithRefreshedToken(
     });
 }
 
+/** Result of fake key validation. */
+type KeyValidationResult =
+  | { valid: true; hadKey: true } // fake key matched and was swapped
+  | { valid: true; hadKey: false } // no key sent (unauthenticated endpoint)
+  | { valid: false; hadKey: false }; // wrong key — reject request
+
 /**
  * Validates that the request carries the expected fake key, then replaces
- * it with the real key. Returns false if the fake key does not match.
+ * it with the real key. Returns validation result including whether the
+ * request actually carried an API key (used to gate 401 retry — requests
+ * without a key should not have credentials injected on retry).
  */
 function validateAndSwapApiKey(
   headers: Record<string, string | string[] | undefined>,
   provider: ProviderKeyMapping,
-): boolean {
+): KeyValidationResult {
   const { keyInjection } = provider.config;
 
   switch (keyInjection.type) {
     case 'header': {
       const headerName = keyInjection.headerName.toLowerCase();
       const currentValue = headers[headerName];
-      if (currentValue === undefined) return true; // no key sent — unauthenticated endpoint
-      if (currentValue !== provider.fakeKey) return false;
+      if (currentValue === undefined) return { valid: true, hadKey: false };
+      if (currentValue !== provider.fakeKey) return { valid: false, hadKey: false };
       headers[headerName] = provider.realKey;
-      return true;
+      return { valid: true, hadKey: true };
     }
     case 'bearer': {
       const authHeader = headers['authorization'];
-      if (authHeader === undefined) return true; // no key sent — unauthenticated endpoint
-      if (authHeader !== `Bearer ${provider.fakeKey}`) return false;
+      if (authHeader === undefined) return { valid: true, hadKey: false };
+      if (authHeader !== `Bearer ${provider.fakeKey}`) return { valid: false, hadKey: false };
       headers['authorization'] = `Bearer ${provider.realKey}`;
-      return true;
+      return { valid: true, hadKey: true };
     }
   }
 }

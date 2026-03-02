@@ -12,7 +12,7 @@
  * 3. Fall back to API key from config
  */
 
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, chmodSync } from 'node:fs';
 import { homedir, platform, userInfo } from 'node:os';
 import { resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -234,6 +234,9 @@ export function saveOAuthCredentials(credentials: OAuthCredentials, filePath?: s
   };
 
   writeFileSync(credPath, JSON.stringify(existing, null, 2) + '\n', { mode: 0o600 });
+  // chmod after write — writeFileSync's mode only applies when creating new files;
+  // existing files with broader permissions need an explicit chmod.
+  chmodSync(credPath, 0o600);
 }
 
 /** Injectable credential sources for testability. */
