@@ -4,11 +4,44 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-03-01
+
 ### Features
 
-- OAuth support for Docker agent sessions — auto-detects credentials from `~/.claude/.credentials.json` (via `claude login`) and prefers them over API keys
-- OAuth token injection via MITM proxy with bearer auth, alongside existing fake-key swap for API keys
+- **PTY mode for Docker agent sessions** — `ironcurtain start --pty` provides interactive terminal access to Claude Code running inside Docker, with host-side Node.js PTY proxy bridging the user's terminal to the container via UDS (Linux) or TCP (macOS), SIGWINCH forwarding, and Ctrl-\ emergency exit (#43)
+- **Escalation listener TUI** — `ironcurtain escalation-listener` command with a terminal dashboard that aggregates escalations across multiple concurrent PTY sessions; approve/deny via `/approve N` and `/deny N` commands with incremental rendering to preserve input state (#43)
+- **OAuth support for Docker agent sessions** — auto-detects credentials from `~/.claude/.credentials.json` (via `claude login`) or macOS Keychain and prefers them over API keys; real tokens never enter the container — a fake sentinel is swapped for the real bearer token by the MITM proxy (#47)
 - `IRONCURTAIN_DOCKER_AUTH=apikey` environment variable to force API key mode when both OAuth and API key credentials are available
+- **GitHub MCP server integration** — add the official GitHub MCP server as the 4th built-in server with 41 annotated tools, `github-owner` argument role with case-insensitive canonicalization, owner-scoped policy rules, and GitHub identity discovery for policy customization; graceful degradation when Docker is unavailable (#38)
+- **Audit log PII/credential redaction** — masks credit cards (Luhn-validated, keeps first/last 4), US SSNs (area/group/serial validated, keeps last 4), and API keys (OpenAI, GitHub PAT, Slack, AWS) at any nesting depth; enabled by default (#16)
+- **Improved MCP error messages** — extract meaningful error messages from McpError exceptions instead of opaque schema validation errors; track git server working directory and display it in escalation requests so reviewers know which repo is affected (#46)
+- **Signal bot multi-session support** — managed session map with auto-incrementing labels, `#N` prefix for one-shot message routing without switching sessions, configurable max concurrent sessions, and escalation reply auto-routing with disambiguation
+- **Interaction log** — JSONL logging of each conversational turn (user prompt + assistant response) to `{sessionDir}/interactions.jsonl` via new BaseTransport abstract class
+- **First-start wizard safe to re-run** — loads existing config, pre-fills defaults from current settings, skips prompts for values already configured, accumulates changes atomically so cancelling mid-wizard never writes partial state (#34)
+- lint-staged integration for pre-commit formatting and linting checks
+
+### Security
+
+- **Mount only sockets subdirectory into Docker containers** — previously the entire session directory was bind-mounted read-write, giving a compromised agent access to escalation files and audit logs; now only the `sockets/` subdirectory is mounted (#42)
+- Eliminate ReDoS risk in credit card regex — replace nested quantifiers with flat pattern to avoid exponential backtracking
+- Update minimatch to 10.2.4 (CVE-2026-27903)
+
+### Fixes
+
+- Display escalation context in listener dashboard — the TUI was not rendering the context field even though all other display paths did
+- Defer session map removal until after successful close so the session remains trackable and retryable if close fails
+- Spawn tsx directly instead of via npx to prevent orphaned child processes — npx's intermediate `sh -c` process doesn't forward SIGTERM, causing "close timed out" warnings in vitest
+
+### Improvements
+
+- Reduce test execution time from 102s to 33s by replacing fixed setTimeout delays with fake timers and event-driven polling helpers
+- Upgrade production and development dependencies
+
+### Docs
+
+- Restructure README with PTY/escalation-listener and web search sections
+- Move architecture diagrams from README into SANDBOXING.md
+- Clarify audit redaction is enabled by default
 
 ## [0.4.1] - 2026-02-27
 
@@ -163,6 +196,7 @@ Initial public release.
 - CI pipeline with Node 22/24 matrix testing
 - Code of Conduct, Contributing guidelines, Security policy
 
+[0.5.0]: https://github.com/provos/ironcurtain/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/provos/ironcurtain/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/provos/ironcurtain/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/provos/ironcurtain/compare/v0.3.0...v0.3.1
