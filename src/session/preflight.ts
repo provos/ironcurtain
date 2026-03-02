@@ -11,7 +11,7 @@ import { promisify } from 'node:util';
 import type { IronCurtainConfig } from '../config/types.js';
 import type { AgentId } from '../docker/agent-adapter.js';
 import type { SessionMode } from './types.js';
-import { detectAuthMethod, type CredentialSources } from '../docker/oauth-credentials.js';
+import { detectAuthMethod, loadOAuthCredentials, type CredentialSources } from '../docker/oauth-credentials.js';
 
 const execFile = promisify(execFileCb);
 
@@ -58,16 +58,25 @@ export async function checkDockerAvailable(): Promise<boolean> {
   }
 }
 
+/** Sources that skip macOS Keychain to keep preflight fast and non-interactive. */
+const preflightSources: CredentialSources = {
+  loadFromFile: loadOAuthCredentials,
+  loadFromKeychain: () => null,
+};
+
 /**
  * Checks whether credentials (OAuth or API key) are available for the given agent.
  * Returns the auth kind if available, or null if no credentials found.
+ *
+ * Skips macOS Keychain to avoid interactive prompts during preflight.
+ * Full detection including Keychain happens in prepareDockerInfrastructure().
  */
 function detectCredentials(
   _agentId: AgentId,
   config: IronCurtainConfig,
   sources?: CredentialSources,
 ): 'oauth' | 'apikey' | null {
-  const auth = detectAuthMethod(config, sources);
+  const auth = detectAuthMethod(config, sources ?? preflightSources);
   if (auth.kind === 'none') return null;
   return auth.kind === 'oauth' ? 'oauth' : 'apikey';
 }
@@ -117,7 +126,7 @@ async function resolveExplicit(
   }
 
   return {
-    mode: { kind: 'docker', agent },
+    mode: { kind: 'docker', agent, authKind: credKind },
     reason: `Explicit --agent selection (${credKind === 'oauth' ? 'OAuth' : 'API key'})`,
   };
 }
@@ -144,7 +153,7 @@ async function resolveAutoDetect(
   }
 
   return {
-    mode: { kind: 'docker', agent: DEFAULT_DOCKER_AGENT },
+    mode: { kind: 'docker', agent: DEFAULT_DOCKER_AGENT, authKind: credKind },
     reason: `Docker available, ${credKind === 'oauth' ? 'OAuth' : 'ANTHROPIC_API_KEY'} detected`,
   };
 }

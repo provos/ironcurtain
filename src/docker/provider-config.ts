@@ -182,7 +182,6 @@ export const anthropicProvider: ProviderConfig = {
     { method: 'POST', path: '/v1/messages' },
     { method: 'POST', path: '/v1/messages/count_tokens' },
     // Claude Code internal endpoints
-    { method: 'GET', path: '/api/oauth/usage' },
     { method: 'GET', path: '/api/hello' },
     { method: 'GET', path: '/api/claude_code/settings' },
     { method: 'GET', path: '/api/claude_code/policy_limits' },
@@ -220,7 +219,11 @@ export const openaiProvider: ProviderConfig = {
 export const anthropicOAuthProvider: ProviderConfig = {
   host: 'api.anthropic.com',
   displayName: 'Anthropic (OAuth)',
-  allowedEndpoints: anthropicProvider.allowedEndpoints,
+  allowedEndpoints: [
+    ...anthropicProvider.allowedEndpoints,
+    // OAuth-only: usage data requires an OAuth session
+    { method: 'GET' as const, path: '/api/oauth/usage' },
+  ],
   keyInjection: { type: 'bearer' },
   fakeKeyPrefix: 'sk-ant-oat01-ironcurtain-',
   requestRewriter: stripServerSideTools,

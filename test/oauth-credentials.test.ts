@@ -169,6 +169,14 @@ describe('parseCredentialsJson', () => {
     expect(parseCredentialsJson(JSON.stringify(creds))).toBeNull();
   });
 
+  it('returns null when expiresAt is non-finite or non-positive', () => {
+    const base = { accessToken: 'sk-ant-oat01-test', refreshToken: 'sk-ant-ort01-test' };
+    expect(parseCredentialsJson(JSON.stringify({ claudeAiOauth: { ...base, expiresAt: NaN } }))).toBeNull();
+    expect(parseCredentialsJson(JSON.stringify({ claudeAiOauth: { ...base, expiresAt: Infinity } }))).toBeNull();
+    expect(parseCredentialsJson(JSON.stringify({ claudeAiOauth: { ...base, expiresAt: -1 } }))).toBeNull();
+    expect(parseCredentialsJson(JSON.stringify({ claudeAiOauth: { ...base, expiresAt: 0 } }))).toBeNull();
+  });
+
   it('returns null for non-object JSON root', () => {
     expect(parseCredentialsJson('"just a string"')).toBeNull();
     expect(parseCredentialsJson('42')).toBeNull();
@@ -399,11 +407,18 @@ describe('OAuth provider configs', () => {
     expect(claudePlatformOAuthProvider.fakeKeyPrefix).toBe('sk-ant-oat01-ironcurtain-');
   });
 
-  it('OAuth providers share endpoints with API key providers', async () => {
+  it('OAuth providers include all API key provider endpoints plus OAuth-only ones', async () => {
     const { anthropicProvider, anthropicOAuthProvider, claudePlatformProvider, claudePlatformOAuthProvider } =
       await import('../src/docker/provider-config.js');
 
-    expect(anthropicOAuthProvider.allowedEndpoints).toBe(anthropicProvider.allowedEndpoints);
+    // OAuth Anthropic provider has all base endpoints plus /api/oauth/usage
+    for (const ep of anthropicProvider.allowedEndpoints) {
+      expect(anthropicOAuthProvider.allowedEndpoints).toContainEqual(ep);
+    }
+    expect(anthropicOAuthProvider.allowedEndpoints).toContainEqual({ method: 'GET', path: '/api/oauth/usage' });
+    expect(anthropicProvider.allowedEndpoints).not.toContainEqual({ method: 'GET', path: '/api/oauth/usage' });
+
+    // Platform providers share endpoints
     expect(claudePlatformOAuthProvider.allowedEndpoints).toBe(claudePlatformProvider.allowedEndpoints);
   });
 

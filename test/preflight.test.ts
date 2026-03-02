@@ -64,7 +64,7 @@ describe('resolveSessionMode', () => {
         credentialSources: noOAuthSources,
       });
 
-      expect(result.mode).toEqual({ kind: 'docker', agent: 'claude-code' });
+      expect(result.mode).toEqual({ kind: 'docker', agent: 'claude-code', authKind: 'apikey' });
       expect(result.reason).toBe('Explicit --agent selection (API key)');
     });
 
@@ -132,7 +132,7 @@ describe('resolveSessionMode', () => {
         credentialSources: oauthSources,
       });
 
-      expect(result.mode).toEqual({ kind: 'docker', agent: 'claude-code' });
+      expect(result.mode).toEqual({ kind: 'docker', agent: 'claude-code', authKind: 'oauth' });
       expect(result.reason).toBe('Explicit --agent selection (OAuth)');
     });
   });
@@ -145,7 +145,7 @@ describe('resolveSessionMode', () => {
         credentialSources: noOAuthSources,
       });
 
-      expect(result.mode).toEqual({ kind: 'docker', agent: 'claude-code' });
+      expect(result.mode).toEqual({ kind: 'docker', agent: 'claude-code', authKind: 'apikey' });
       expect(result.reason).toBe('Docker available, ANTHROPIC_API_KEY detected');
     });
 
@@ -165,7 +165,7 @@ describe('resolveSessionMode', () => {
         credentialSources: oauthSources,
       });
 
-      expect(result.mode).toEqual({ kind: 'docker', agent: 'claude-code' });
+      expect(result.mode).toEqual({ kind: 'docker', agent: 'claude-code', authKind: 'oauth' });
       expect(result.reason).toBe('Docker available, OAuth detected');
     });
 

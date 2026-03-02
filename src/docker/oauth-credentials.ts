@@ -94,7 +94,7 @@ export function parseCredentialsJson(json: string): OAuthCredentials | null {
     const creds = oauth as Record<string, unknown>;
     if (typeof creds.accessToken !== 'string' || !creds.accessToken) return null;
     if (typeof creds.refreshToken !== 'string' || !creds.refreshToken) return null;
-    if (typeof creds.expiresAt !== 'number') return null;
+    if (typeof creds.expiresAt !== 'number' || !Number.isFinite(creds.expiresAt) || creds.expiresAt <= 0) return null;
 
     return {
       accessToken: creds.accessToken,

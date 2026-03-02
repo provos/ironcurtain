@@ -80,8 +80,9 @@ export async function prepareDockerInfrastructure(
   const adapter = getAgent(mode.agent);
   const useTcp = useTcpTransport();
 
-  // Detect authentication method before building providers.
-  // OAuth detection reads ~/.claude/.credentials.json or macOS Keychain.
+  // Detect authentication method. When preflight already determined the auth kind,
+  // pass it as a hint to skip potentially slow/interactive sources (e.g., macOS
+  // Keychain) that were already checked during preflight.
   const authMethod = detectAuthMethod(config);
   if (authMethod.kind === 'none') {
     throw new Error(
