@@ -66,6 +66,8 @@ function isConnectionReset(err: NodeJS.ErrnoException): boolean {
 }
 
 const MAX_REWRITE_BODY_BYTES = 10 * 1024 * 1024; // 10 MB
+/** Max Content-Length for which we buffer solely for 401 retry (1 MB). */
+const MAX_RETRY_BODY_BYTES = 1 * 1024 * 1024;
 
 /**
  * Buffers the entire request body into a single Buffer.
@@ -191,13 +193,16 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     modifiedHeaders.host = targetHost;
 
     // 3. Forward to real API - either direct pipe or buffer+rewrite.
-    // Buffer the body when rewriting is needed OR when a token manager is
-    // present (so we can replay the request on 401 with a refreshed token).
     // Only enable 401 retry if the request actually carried the fake key —
     // unauthenticated requests should not have credentials injected on retry.
     const needsRewrite = shouldRewriteBody(provider.config, method, path);
     const canRetryAuth = keyResult.hadKey && !!provider.tokenManager;
-    const needsBuffer = needsRewrite || canRetryAuth;
+    // Only buffer for retry when the body is small enough (known Content-Length
+    // under 1MB). Large or chunked bodies stream through without retry support
+    // to avoid memory overhead and 413 rejections on large payloads.
+    const contentLength = parseInt(clientReq.headers['content-length'] ?? '', 10);
+    const retryBufferOk = canRetryAuth && Number.isFinite(contentLength) && contentLength <= MAX_RETRY_BODY_BYTES;
+    const needsBuffer = needsRewrite || retryBufferOk;
 
     /**
      * Sends the request upstream with optional body override and 401 retry.
@@ -236,16 +241,30 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
             }
           });
 
-          // 401 retry: if the request carried a fake key (so we can safely inject
-          // a refreshed real key), we have a buffered body, and this is not already
-          // a retry, attempt to refresh and resend.
+          // 401 retry: requires a buffered body (bodyOverride), an authenticated
+          // request (canRetryAuth), and not already a retry.
           const { tokenManager } = provider;
-          if (upstreamRes.statusCode === 401 && canRetryAuth && tokenManager && bodyOverride && !isRetry) {
-            // Consume the 401 response body to free the connection, then retry
-            upstreamRes.resume();
-            upstreamRes.on('end', () => {
+          if (upstreamRes.statusCode === 401 && tokenManager && canRetryAuth && bodyOverride && !isRetry) {
+            // Consume the 401 response body to free the connection, then retry.
+            // Guard against the upstream closing/aborting before 'end' fires —
+            // without this the client request would hang indefinitely.
+            let handled = false;
+            const onDrained = (): void => {
+              if (handled) return;
+              handled = true;
               retryWithRefreshedToken(tokenManager, provider, modifiedHeaders, bodyOverride, clientRes, forwardRequest);
-            });
+            };
+            const onAborted = (): void => {
+              if (handled) return;
+              handled = true;
+              if (!clientRes.headersSent) {
+                clientRes.writeHead(502, { 'Content-Type': 'text/plain' });
+                clientRes.end('Upstream connection closed during auth retry.');
+              }
+            };
+            upstreamRes.resume();
+            upstreamRes.on('end', onDrained);
+            upstreamRes.on('close', onAborted);
             return;
           }
 
