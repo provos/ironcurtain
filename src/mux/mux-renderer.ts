@@ -16,8 +16,6 @@
 /* eslint-disable @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access */
 
 import type { Terminal as TerminalType } from '@xterm/headless';
-import xtermHeadless from '@xterm/headless';
-const { Terminal } = xtermHeadless;
 import { calculateLayout, type InputMode, type Layout, type MuxTab } from './types.js';
 import type { ListenerState } from '../escalation/listener-state.js';
 
@@ -102,10 +100,6 @@ export function createMuxRenderer(
     _layout = calculateLayout(_rows, deps.getMode(), deps.getPendingCount());
   }
 
-  function clearScreen(): void {
-    term.clear();
-  }
-
   function moveTo(x: number, y: number): void {
     term.moveTo(x + 1, y + 1); // terminal-kit is 1-indexed
   }
@@ -158,12 +152,12 @@ export function createMuxRenderer(
     }
 
     const xtermTerminal = activeTab.bridge.terminal;
-    const buffer = xtermTerminal.buffer.active;
     const cells = readTerminalBuffer(xtermTerminal, 0, _layout.ptyViewportRows, _cols);
 
     // Determine how many rows to render (skip overlay in command mode)
+    const mode = deps.getMode();
     const visibleRows =
-      deps.getMode() === 'command' ? _layout.ptyViewportRows - _layout.overlayRows : _layout.ptyViewportRows;
+      mode === 'command' ? _layout.ptyViewportRows - _layout.overlayRows : _layout.ptyViewportRows;
 
     for (let y = 0; y < visibleRows; y++) {
       moveTo(0, _layout.ptyViewportY + y);
@@ -181,10 +175,9 @@ export function createMuxRenderer(
     }
 
     // Position cursor where xterm.js says it should be
-    if (deps.getMode() === 'pty') {
-      const cursorX = buffer.cursorX;
-      const cursorY = buffer.cursorY;
-      moveTo(cursorX, _layout.ptyViewportY + cursorY);
+    if (mode === 'pty') {
+      const buffer = xtermTerminal.buffer.active;
+      moveTo(buffer.cursorX, _layout.ptyViewportY + buffer.cursorY);
     }
   }
 
@@ -269,7 +262,7 @@ export function createMuxRenderer(
 
     fullRedraw(): void {
       recalcLayout();
-      clearScreen();
+      term.clear();
       drawTabBar();
       drawPtyViewport();
       drawFooter();
@@ -407,12 +400,8 @@ export function readTerminalBuffer(terminal: TerminalType, startRow: number, row
  * Applies a TranslatedCell's attributes and writes the character.
  */
 function applyCell(term: TerminalKit, cell: TranslatedCell): void {
-  // Reset first to avoid attribute bleeding
-  // Use ANSI escape sequences directly for precise control
-  const parts: string[] = [];
-
-  // SGR parameters
-  const sgr: number[] = [0]; // reset
+  // SGR parameters -- reset first to avoid attribute bleeding
+  const sgr: number[] = [0];
 
   if (cell.bold) sgr.push(1);
   if (cell.dim) sgr.push(2);
@@ -439,9 +428,6 @@ function applyCell(term: TerminalKit, cell: TranslatedCell): void {
     sgr.push(48, 2, cell.bg.r, cell.bg.g, cell.bg.b);
   }
 
-  parts.push(`\x1b[${sgr.join(';')}m`);
-  parts.push(cell.char);
-
   // Write raw ANSI to avoid terminal-kit's own attribute management
-  term.noFormat(parts.join(''));
+  term.noFormat(`\x1b[${sgr.join(';')}m${cell.char}`);
 }

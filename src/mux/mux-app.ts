@@ -61,7 +61,7 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
       return { bin: process.argv[0], prefixArgs: [...process.execArgv, script] };
     }
     // If running a compiled JS file or via an installed bin, use it directly
-    return { bin: script ?? 'ironcurtain', prefixArgs: [] };
+    return { bin: script || 'ironcurtain', prefixArgs: [] };
   }
 
   async function spawnSession(): Promise<MuxTab> {
@@ -178,9 +178,6 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
       }
 
       case 'enter-command-mode':
-        renderer.fullRedraw();
-        break;
-
       case 'enter-pty-mode':
         renderer.fullRedraw();
         break;
@@ -191,10 +188,10 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
 
       case 'trusted-input': {
         const active = getActiveTab();
-        if (active && active.bridge.alive && active.bridge.escalationDir) {
-          writeTrustedUserContext(active.bridge.escalationDir, action.text);
-          active.bridge.write(action.text + '\n');
-        } else if (active && active.bridge.alive) {
+        if (active && active.bridge.alive) {
+          if (active.bridge.escalationDir) {
+            writeTrustedUserContext(active.bridge.escalationDir, action.text);
+          }
           active.bridge.write(action.text + '\n');
         }
         // Return to PTY mode after sending trusted input
@@ -215,45 +212,24 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
 
   async function handleCommand(command: string, args: string[]): Promise<void> {
     switch (command) {
-      case 'approve': {
-        const arg = args[0];
-        if (!arg) {
-          showMessage('Usage: /approve <number> or /approve all');
-          break;
-        }
-        let message: string;
-        if (arg === 'all') {
-          message = escalationManager.resolveAll('approved');
-        } else {
-          const num = parseInt(arg, 10);
-          if (isNaN(num)) {
-            showMessage('Invalid escalation number');
-            break;
-          }
-          message = escalationManager.resolve(num, 'approved');
-        }
-        showMessage(message);
-        renderer.redrawTabBar();
-        renderer.redrawCommandArea();
-        break;
-      }
-
+      case 'approve':
       case 'deny': {
+        const decision = command === 'approve' ? 'approved' : 'denied';
         const arg = args[0];
         if (!arg) {
-          showMessage('Usage: /deny <number> or /deny all');
+          showMessage(`Usage: /${command} <number> or /${command} all`);
           break;
         }
         let message: string;
         if (arg === 'all') {
-          message = escalationManager.resolveAll('denied');
+          message = escalationManager.resolveAll(decision);
         } else {
           const num = parseInt(arg, 10);
           if (isNaN(num)) {
             showMessage('Invalid escalation number');
             break;
           }
-          message = escalationManager.resolve(num, 'denied');
+          message = escalationManager.resolve(num, decision);
         }
         showMessage(message);
         renderer.redrawTabBar();
@@ -342,7 +318,7 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
     async start(): Promise<void> {
       running = true;
 
-      const terminalKit = (await import('terminal-kit')) as any;
+      const terminalKit = await import('terminal-kit');
       term = terminalKit.default?.terminal ?? terminalKit.terminal;
 
       term.fullscreen(true);

@@ -181,6 +181,9 @@ function redactCredentials(text: string, credentials: Record<string, string>): s
 const ESCALATION_POLL_INTERVAL_MS = 500;
 const DEFAULT_ESCALATION_TIMEOUT_SECONDS = 300;
 
+/** Auto-approve trusted input older than this is rejected as stale. */
+const TRUSTED_INPUT_STALENESS_MS = 120_000;
+
 /** Reads escalation timeout from env var, falling back to default. */
 function getEscalationTimeoutMs(): number {
   const envValue = process.env.ESCALATION_TIMEOUT_SECONDS;
@@ -605,15 +608,10 @@ export async function handleCallTool(
         const isPtySession = process.env.IRONCURTAIN_PTY_SESSION === '1';
         const sourceValid = !isPtySession || userContext.source === 'mux-trusted-input';
 
-        // Staleness check: reject trusted input older than 120 seconds
-        const TRUSTED_INPUT_STALENESS_MS = 120_000;
-        let stale = false;
-        if (userContext.timestamp) {
-          const age = Date.now() - new Date(userContext.timestamp).getTime();
-          if (age > TRUSTED_INPUT_STALENESS_MS) {
-            stale = true;
-          }
-        }
+        // Staleness check: reject trusted input older than the threshold
+        const stale =
+          userContext.timestamp !== undefined &&
+          Date.now() - new Date(userContext.timestamp).getTime() > TRUSTED_INPUT_STALENESS_MS;
 
         if (sourceValid && !stale) {
           const autoResult = await autoApprove(

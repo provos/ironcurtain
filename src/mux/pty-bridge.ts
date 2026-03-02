@@ -115,8 +115,7 @@ export async function createPtyBridge(options: PtyBridgeOptions): Promise<PtyBri
 
   let _alive = true;
   let _exitCode: number | undefined;
-  let _sessionId: string | undefined;
-  let _escalationDir: string | undefined;
+  let _registration: PtySessionRegistration | null | undefined;
 
   // Wire child output to headless terminal
   child.onData((data: string) => {
@@ -132,10 +131,7 @@ export async function createPtyBridge(options: PtyBridgeOptions): Promise<PtyBri
 
   // Start session discovery
   void discoverSessionRegistration(child.pid).then((registration) => {
-    if (registration) {
-      _sessionId = registration.sessionId;
-      _escalationDir = registration.escalationDir;
-    }
+    _registration = registration;
     for (const cb of sessionCallbacks) cb(registration);
   });
 
@@ -144,10 +140,10 @@ export async function createPtyBridge(options: PtyBridgeOptions): Promise<PtyBri
       return terminal;
     },
     get sessionId() {
-      return _sessionId;
+      return _registration?.sessionId;
     },
     get escalationDir() {
-      return _escalationDir;
+      return _registration?.escalationDir;
     },
     get alive() {
       return _alive;
@@ -181,13 +177,9 @@ export async function createPtyBridge(options: PtyBridgeOptions): Promise<PtyBri
     },
 
     onSessionDiscovered(callback: (reg: PtySessionRegistration | null) => void): void {
-      // If already discovered, call immediately
-      if (_sessionId !== undefined || !_alive) {
-        const reg =
-          _sessionId && _escalationDir
-            ? ({ sessionId: _sessionId, escalationDir: _escalationDir } as PtySessionRegistration)
-            : null;
-        callback(reg);
+      // If already discovered, call immediately with the stored registration
+      if (_registration !== undefined || !_alive) {
+        callback(_registration ?? null);
         return;
       }
       sessionCallbacks.push(callback);
