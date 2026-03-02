@@ -105,7 +105,13 @@ export const claudeCodeAdapter: AgentAdapter = {
   generateOrientationFiles(): AgentConfigFile[] {
     // Wrapper script for PTY mode -- avoids shell quoting issues by reading
     // the system prompt from $IRONCURTAIN_SYSTEM_PROMPT (set by entrypoint).
+    // Sets initial PTY size from host-provided env vars before exec, so the
+    // PTY has the correct dimensions before Claude even starts.
     const startScript = `#!/bin/bash
+# Set initial terminal size from host env vars
+if [ -n "$IRONCURTAIN_INITIAL_COLS" ] && [ -n "$IRONCURTAIN_INITIAL_ROWS" ]; then
+  stty cols "$IRONCURTAIN_INITIAL_COLS" rows "$IRONCURTAIN_INITIAL_ROWS" 2>/dev/null
+fi
 exec claude --dangerously-skip-permissions \\
   --mcp-config /etc/ironcurtain/claude-mcp-config.json \\
   --append-system-prompt "$IRONCURTAIN_SYSTEM_PROMPT"
@@ -113,28 +119,60 @@ exec claude --dangerously-skip-permissions \\
 
     // Helper script to resize the PTY that Claude Code is actually running on.
     // docker exec stty targets a transient exec session PTY, not socat's PTY.
+    // Falls back to start-claude.sh PID when Claude hasn't started yet.
+    // Diagnostic output goes to stderr (captured by host-side logger).
     const resizeScript = `#!/bin/bash
 # Called from the host via: docker exec <cid> /etc/ironcurtain/resize-pty.sh <cols> <rows>
 COLS=$1
 ROWS=$2
 
-CLAUDE_PID=$(pgrep -f "claude --dangerously" | head -1)
-if [ -z "$CLAUDE_PID" ]; then
-  exit 0  # claude not started yet; resize will be retried
+# Find the PTY device -- try Claude first, then fall back to start script
+PTS=""
+CLAUDE_PID=$(pgrep -x claude | head -1)
+if [ -n "$CLAUDE_PID" ]; then
+  PTS=$(readlink /proc/$CLAUDE_PID/fd/0 2>/dev/null)
 fi
-
-PTS=$(readlink /proc/$CLAUDE_PID/fd/0 2>/dev/null)
 if [ -z "$PTS" ]; then
+  SCRIPT_PID=$(pgrep -f "start-claude" | head -1)
+  if [ -n "$SCRIPT_PID" ]; then
+    PTS=$(readlink /proc/$SCRIPT_PID/fd/0 2>/dev/null)
+  fi
+fi
+if [ -z "$PTS" ] || ! [ -e "$PTS" ]; then
+  echo "no-pty pid=$CLAUDE_PID pts=$PTS" >&2
   exit 0
 fi
 
 stty -F "$PTS" cols "$COLS" rows "$ROWS" 2>/dev/null
-kill -WINCH "$CLAUDE_PID" 2>/dev/null
+RC=$?
+if [ -n "$CLAUDE_PID" ]; then
+  kill -WINCH "$CLAUDE_PID" 2>/dev/null
+fi
+echo "ok pid=$CLAUDE_PID pts=$PTS stty=$RC \${COLS}x\${ROWS}" >&2
+`;
+
+    // Helper script to report the current PTY size for host-side verification.
+    const checkSizeScript = `#!/bin/bash
+# Returns "rows cols" of the container PTY
+PTS=""
+CLAUDE_PID=$(pgrep -x claude | head -1)
+if [ -n "$CLAUDE_PID" ]; then
+  PTS=$(readlink /proc/$CLAUDE_PID/fd/0 2>/dev/null)
+fi
+if [ -z "$PTS" ]; then
+  SCRIPT_PID=$(pgrep -f "start-claude" | head -1)
+  if [ -n "$SCRIPT_PID" ]; then
+    PTS=$(readlink /proc/$SCRIPT_PID/fd/0 2>/dev/null)
+  fi
+fi
+if [ -z "$PTS" ] || ! [ -e "$PTS" ]; then echo "0 0"; exit 0; fi
+stty -F "$PTS" size 2>/dev/null || echo "0 0"
 `;
 
     return [
       { path: 'start-claude.sh', content: startScript, mode: 0o755 },
       { path: 'resize-pty.sh', content: resizeScript, mode: 0o755 },
+      { path: 'check-pty-size.sh', content: checkSizeScript, mode: 0o755 },
     ];
   },
 

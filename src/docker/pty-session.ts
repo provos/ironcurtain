@@ -234,6 +234,12 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
       ];
     }
 
+    // Pass initial terminal size so start-claude.sh can set PTY dimensions
+    // before Claude starts, eliminating the resize race condition.
+    const { columns, rows } = process.stdout;
+    if (columns) env.IRONCURTAIN_INITIAL_COLS = String(columns);
+    if (rows) env.IRONCURTAIN_INITIAL_ROWS = String(rows);
+
     // Create and start container with PTY command and TTY
     containerId = await docker.create({
       image,
@@ -388,16 +394,29 @@ function attachPty(options: PtyProxyOptions): Promise<number> {
       }
       stdin.resume();
 
-      // SIGWINCH: forward terminal resize to container PTY
+      // SIGWINCH: forward terminal resize to container PTY.
+      // verifyAbort cancels the background verify loop on first user resize
+      // so it doesn't fight with the new size.
+      const verifyAbort = new AbortController();
+      let isFirstResize = true;
       const onResize = (): void => {
         const { columns, rows } = stdout;
         if (columns && rows) {
+          if (!isFirstResize) {
+            verifyAbort.abort();
+          }
+          isFirstResize = false;
           execFile(
             'docker',
             ['exec', options.containerId, '/etc/ironcurtain/resize-pty.sh', String(columns), String(rows)],
             { timeout: 5000 },
-            () => {
-              /* best effort */
+            (err, _stdout, stderr) => {
+              if (err) {
+                logger.warn(`resize-pty.sh failed: ${err.message}`);
+              }
+              if (stderr) {
+                logger.info(`resize-pty.sh: ${stderr.trim()}`);
+              }
             },
           );
         }
@@ -405,6 +424,13 @@ function attachPty(options: PtyProxyOptions): Promise<number> {
       stdout.on('resize', onResize);
       // Send initial size
       onResize();
+
+      // Background verify+retry to ensure the initial resize took effect.
+      // Fire-and-forget -- does not block the PTY proxy.
+      // Canceled via verifyAbort when the user resizes the terminal.
+      if (stdout.columns && stdout.rows) {
+        void verifyInitialPtySize(options.containerId, stdout.columns, stdout.rows, verifyAbort.signal);
+      }
 
       // Host -> Container
       // Ctrl-\ (0x1c) is intercepted as an emergency exit since raw mode
@@ -458,6 +484,95 @@ function attachPty(options: PtyProxyOptions): Promise<number> {
       settle(1);
     });
   });
+}
+
+// --- PTY size verification ---
+
+/** Maximum retries for initial PTY size verification. */
+const PTY_SIZE_VERIFY_RETRIES = 5;
+
+/** Interval between PTY size verification attempts (ms). */
+const PTY_SIZE_VERIFY_INTERVAL_MS = 1_000;
+
+/** Initial delay before first verification attempt (ms). */
+const PTY_SIZE_VERIFY_INITIAL_DELAY_MS = 500;
+
+/**
+ * Runs check-pty-size.sh and returns { rows, cols } or null on failure.
+ */
+function checkPtySize(containerId: string): Promise<{ rows: number; cols: number } | null> {
+  return new Promise((resolve) => {
+    execFile(
+      'docker',
+      ['exec', containerId, '/etc/ironcurtain/check-pty-size.sh'],
+      { timeout: 5000 },
+      (err, stdout) => {
+        if (err) {
+          resolve(null);
+          return;
+        }
+        const parts = stdout.trim().split(/\s+/);
+        if (parts.length >= 2) {
+          const rows = parseInt(parts[0], 10);
+          const cols = parseInt(parts[1], 10);
+          if (!isNaN(rows) && !isNaN(cols) && rows > 0 && cols > 0) {
+            resolve({ rows, cols });
+            return;
+          }
+        }
+        resolve(null);
+      },
+    );
+  });
+}
+
+/**
+ * Background verify+retry loop for initial PTY resize.
+ * Non-blocking (fire-and-forget). Aborted when a user resize occurs so it
+ * does not fight with legitimate SIGWINCH-driven resizes.
+ */
+async function verifyInitialPtySize(
+  containerId: string,
+  expectedCols: number,
+  expectedRows: number,
+  signal?: AbortSignal,
+): Promise<void> {
+  await new Promise((r) => setTimeout(r, PTY_SIZE_VERIFY_INITIAL_DELAY_MS));
+
+  for (let attempt = 0; attempt < PTY_SIZE_VERIFY_RETRIES; attempt++) {
+    if (signal?.aborted) return;
+
+    const size = await checkPtySize(containerId);
+    if (size && size.cols === expectedCols && size.rows === expectedRows) {
+      return; // PTY size matches
+    }
+
+    if (signal?.aborted) return;
+
+    // Mismatch or check failed -- try resizing
+    await new Promise<void>((resolve) => {
+      execFile(
+        'docker',
+        ['exec', containerId, '/etc/ironcurtain/resize-pty.sh', String(expectedCols), String(expectedRows)],
+        { timeout: 5000 },
+        () => resolve(),
+      );
+    });
+
+    // Wait before rechecking
+    await new Promise((r) => setTimeout(r, PTY_SIZE_VERIFY_INTERVAL_MS));
+  }
+
+  if (signal?.aborted) return;
+
+  // Final check
+  const finalSize = await checkPtySize(containerId);
+  if (!finalSize || finalSize.cols !== expectedCols || finalSize.rows !== expectedRows) {
+    logger.warn(
+      `PTY size verification failed after ${PTY_SIZE_VERIFY_RETRIES} retries ` +
+        `(expected ${expectedCols}x${expectedRows}, got ${finalSize ? `${finalSize.cols}x${finalSize.rows}` : 'unknown'})`,
+    );
+  }
 }
 
 // --- Readiness polling ---
