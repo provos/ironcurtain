@@ -148,13 +148,14 @@ describe('Claude Code adapter PTY orientation files', () => {
     expect(startScript!.content).toContain('stty cols');
   });
 
-  it('resize-pty.sh has fallback to start-claude PID', () => {
+  it('resize-pty.sh finds Claude via pgrep -x and sends SIGWINCH', () => {
     const files = claudeCodeAdapter.generateOrientationFiles();
     const resizeScript = files.find((f) => f.path === 'resize-pty.sh');
     expect(resizeScript).toBeDefined();
-    expect(resizeScript!.content).toContain('pgrep -f "bash.*/start-claude"');
-    // Should only send WINCH when Claude PID is found
-    expect(resizeScript!.content).toContain('if [ -n "$CLAUDE_PID" ]');
+    // Must use pgrep -x (matches /proc/PID/comm) because Claude Code
+    // overwrites /proc/PID/cmdline to just "claude" with null padding
+    expect(resizeScript!.content).toContain('pgrep -x claude');
+    expect(resizeScript!.content).toContain('kill -WINCH');
   });
 
   it('check-pty-size.sh is included in orientation files', () => {
@@ -162,25 +163,8 @@ describe('Claude Code adapter PTY orientation files', () => {
     const checkScript = files.find((f) => f.path === 'check-pty-size.sh');
     expect(checkScript).toBeDefined();
     expect(checkScript!.mode).toBe(0o755);
+    expect(checkScript!.content).toContain('pgrep -x claude');
     expect(checkScript!.content).toContain('stty -F "$PTS" size');
-    // Should also have fallback PID logic
-    expect(checkScript!.content).toContain('pgrep -f "bash.*/start-claude"');
-  });
-
-  it('pgrep uses -x (exact process name) not -f (cmdline) to find Claude', () => {
-    const files = claudeCodeAdapter.generateOrientationFiles();
-    const resizeScript = files.find((f) => f.path === 'resize-pty.sh')!;
-    const checkScript = files.find((f) => f.path === 'check-pty-size.sh')!;
-
-    // Claude Code overwrites /proc/PID/cmdline (just "claude" + null padding),
-    // so pgrep -f with argument patterns can never match. We must use pgrep -x
-    // which matches the process name from /proc/PID/comm instead.
-    expect(resizeScript.content).toContain('pgrep -x claude');
-    expect(checkScript.content).toContain('pgrep -x claude');
-
-    // Must NOT use -f flag with argument patterns — they won't match
-    expect(resizeScript.content).not.toMatch(/pgrep -f.*claude.*dangerously/);
-    expect(checkScript.content).not.toMatch(/pgrep -f.*claude.*dangerously/);
   });
 });
 

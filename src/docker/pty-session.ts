@@ -413,9 +413,9 @@ function attachPty(options: PtyProxyOptions): Promise<number> {
             (err, _stdout, stderr) => {
               if (err) {
                 logger.warn(`resize-pty.sh failed: ${err.message}`);
-              }
-              if (stderr) {
-                logger.info(`resize-pty.sh: ${stderr.trim()}`);
+                if (stderr) {
+                  logger.warn(`resize-pty.sh stderr: ${stderr.trim()}`);
+                }
               }
             },
           );
@@ -457,6 +457,7 @@ function attachPty(options: PtyProxyOptions): Promise<number> {
         stdin.removeListener('data', onData);
         conn.unpipe(stdout);
         stdin.pause();
+        verifyAbort.abort();
         options.signal?.removeEventListener('abort', onAbort);
       }
       function onAbort(): void {
