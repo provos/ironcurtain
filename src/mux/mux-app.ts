@@ -192,7 +192,7 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
           if (active.bridge.escalationDir) {
             writeTrustedUserContext(active.bridge.escalationDir, action.text);
           }
-          active.bridge.write(action.text + '\n');
+          active.bridge.write(action.text + '\r');
         }
         // Return to PTY mode after sending trusted input
         inputHandler.handleKey('CTRL_A');
