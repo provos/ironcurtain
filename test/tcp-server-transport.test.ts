@@ -61,25 +61,6 @@ function createMessageCollector(transport: TcpServerTransport) {
   return { messages, waitForMessages };
 }
 
-/**
- * Waits until `transport.send()` succeeds, indicating the server has
- * processed the TCP connection. A single `setImmediate` is not enough
- * on macOS where the connection callback may be deferred.
- */
-async function waitForConnection(transport: TcpServerTransport, timeoutMs = 2000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  const probe: JSONRPCMessage = { jsonrpc: '2.0', method: 'ping', id: 0 };
-  while (Date.now() < deadline) {
-    try {
-      await transport.send(probe);
-      return; // connection is live
-    } catch {
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-  }
-  throw new Error('Timed out waiting for TCP connection to be accepted');
-}
-
 describe('TcpServerTransport', () => {
   let transport: TcpServerTransport | undefined;
   let clientSocket: Socket | null = null;
@@ -129,15 +110,16 @@ describe('TcpServerTransport', () => {
 
   it('sends messages to the connected client', async () => {
     transport = new TcpServerTransport('127.0.0.1', 0);
+    const { waitForMessages } = createMessageCollector(transport);
     await transport.start();
 
     clientSocket = await connectToTcp('127.0.0.1', transport.port);
 
-    // Wait until the server has processed the connection (flaky with setImmediate on macOS)
-    await waitForConnection(transport);
-
-    // Drain the probe message sent by waitForConnection
-    await readMessage(clientSocket);
+    // Send a client→server message to prove the connection is established.
+    // This is more reliable than setImmediate — on macOS the connection
+    // callback can be deferred past a single event-loop tick.
+    sendMessage(clientSocket, { jsonrpc: '2.0', id: 0, method: 'ping' });
+    await waitForMessages(1);
 
     const responseMessage: JSONRPCMessage = {
       jsonrpc: '2.0',
@@ -219,29 +201,17 @@ describe('TcpServerTransport', () => {
 
     await transport.start();
 
-    // First client
+    // First client — send a message to confirm the connection is live
     const firstClient = await connectToTcp('127.0.0.1', transport.port);
-    await waitForConnection(transport);
-    // Drain the probe
-    await readMessage(firstClient);
-
-    // Second client replaces the first
-    clientSocket = await connectToTcp('127.0.0.1', transport.port);
-    await waitForConnection(transport);
-    // Drain the probe
-    await readMessage(clientSocket);
-
-    // Message from second client should be received
-    sendMessage(clientSocket, {
-      jsonrpc: '2.0',
-      id: 42,
-      method: 'test',
-    });
-
+    sendMessage(firstClient, { jsonrpc: '2.0', id: 0, method: 'setup' });
     await waitForMessages(1);
 
-    expect(messages).toHaveLength(1);
-    expect(messages[0]).toEqual({
+    // Second client replaces the first — send a message to confirm
+    clientSocket = await connectToTcp('127.0.0.1', transport.port);
+    sendMessage(clientSocket, { jsonrpc: '2.0', id: 42, method: 'test' });
+    await waitForMessages(2);
+
+    expect(messages[1]).toEqual({
       jsonrpc: '2.0',
       id: 42,
       method: 'test',
