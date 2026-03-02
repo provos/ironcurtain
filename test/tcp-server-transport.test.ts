@@ -61,9 +61,23 @@ function createMessageCollector(transport: TcpServerTransport) {
   return { messages, waitForMessages };
 }
 
-/** Yields control to allow the event loop to process pending I/O callbacks. */
-function nextTick(): Promise<void> {
-  return new Promise((resolve) => setImmediate(resolve));
+/**
+ * Waits until `transport.send()` succeeds, indicating the server has
+ * processed the TCP connection. A single `setImmediate` is not enough
+ * on macOS where the connection callback may be deferred.
+ */
+async function waitForConnection(transport: TcpServerTransport, timeoutMs = 2000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  const probe: JSONRPCMessage = { jsonrpc: '2.0', method: 'ping', id: 0 };
+  while (Date.now() < deadline) {
+    try {
+      await transport.send(probe);
+      return; // connection is live
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+  throw new Error('Timed out waiting for TCP connection to be accepted');
 }
 
 describe('TcpServerTransport', () => {
@@ -119,8 +133,11 @@ describe('TcpServerTransport', () => {
 
     clientSocket = await connectToTcp('127.0.0.1', transport.port);
 
-    // Allow event loop to process the server-side connection callback
-    await nextTick();
+    // Wait until the server has processed the connection (flaky with setImmediate on macOS)
+    await waitForConnection(transport);
+
+    // Drain the probe message sent by waitForConnection
+    await readMessage(clientSocket);
 
     const responseMessage: JSONRPCMessage = {
       jsonrpc: '2.0',
@@ -204,11 +221,15 @@ describe('TcpServerTransport', () => {
 
     // First client
     const firstClient = await connectToTcp('127.0.0.1', transport.port);
-    await nextTick();
+    await waitForConnection(transport);
+    // Drain the probe
+    await readMessage(firstClient);
 
     // Second client replaces the first
     clientSocket = await connectToTcp('127.0.0.1', transport.port);
-    await nextTick();
+    await waitForConnection(transport);
+    // Drain the probe
+    await readMessage(clientSocket);
 
     // Message from second client should be received
     sendMessage(clientSocket, {
