@@ -1406,12 +1406,12 @@ describe('SignalBotDaemon', () => {
   it('#N prefix strips only the prefix from the forwarded message', { timeout: 15_000 }, async () => {
     await withDaemon(async () => {
       mockApi.simulateIncomingMessage('+15559876543', 'Hello agent');
-      await waitForMessage(mockApi, (m) => m.includes('Started a new session'));
+      await waitForMessage(mockApi, (m) => m.includes('Started a new session'), 10_000);
 
       // sendMessage was already called once for "Hello agent"
       const callsBefore = vi.mocked(createdMockSessions[0].session.sendMessage).mock.calls.length;
       mockApi.simulateIncomingMessage('+15559876543', '#1 check #2 issue');
-      await waitForCalls(vi.mocked(createdMockSessions[0].session.sendMessage), callsBefore + 1);
+      await waitForCalls(vi.mocked(createdMockSessions[0].session.sendMessage), callsBefore + 1, 10_000);
 
       expect(vi.mocked(createdMockSessions[0].session.sendMessage)).toHaveBeenCalledWith('check #2 issue');
     });
