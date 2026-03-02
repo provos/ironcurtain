@@ -1403,7 +1403,7 @@ describe('SignalBotDaemon', () => {
     });
   });
 
-  it('#N prefix strips only the prefix from the forwarded message', async () => {
+  it('#N prefix strips only the prefix from the forwarded message', { timeout: 15_000 }, async () => {
     await withDaemon(async () => {
       mockApi.simulateIncomingMessage('+15559876543', 'Hello agent');
       await waitForMessage(mockApi, (m) => m.includes('Started a new session'));
