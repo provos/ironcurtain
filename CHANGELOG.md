@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Features
+
+- OAuth support for Docker agent sessions — auto-detects credentials from `~/.claude/.credentials.json` (via `claude login`) and prefers them over API keys
+- OAuth token injection via MITM proxy with bearer auth, alongside existing fake-key swap for API keys
+- `IRONCURTAIN_DOCKER_AUTH=apikey` environment variable to force API key mode when both OAuth and API key credentials are available
+
 ## [0.4.1] - 2026-02-27
 
 ### Features

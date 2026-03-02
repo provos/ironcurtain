@@ -8,8 +8,9 @@ An alternative session type that runs external coding agents (Claude Code, etc.)
 - `ca.ts` - `loadOrCreateCA()` generates/loads a 2048-bit RSA CA at `~/.ironcurtain/ca/`. Key file has `0600` permissions. Cert is baked into Docker images; key never enters containers.
 - `provider-config.ts` - `ProviderConfig` interface and built-in providers (Anthropic, OpenAI, Google). `isEndpointAllowed()` does strict path matching with glob support (`*` matches one path segment). Query strings are stripped before matching.
 - `fake-keys.ts` - `generateFakeKey(prefix)` creates sentinel keys with `crypto.randomBytes(24)` (192 bits).
-- `agent-adapter.ts` - `AgentAdapter` interface. `getProviders()` returns required LLM providers. `buildEnv(config, fakeKeys)` builds container env vars with fake keys instead of real ones.
-- `adapters/claude-code.ts` - Claude Code adapter. Sets `NODE_EXTRA_CA_CERTS` for the IronCurtain CA.
+- `oauth-credentials.ts` - OAuth credential detection and macOS Keychain extraction. `detectAuthMethod()` determines whether to use OAuth or API key auth for Docker sessions.
+- `agent-adapter.ts` - `AgentAdapter` interface. `getProviders(authKind?)` returns required LLM providers (OAuth or API key). `buildEnv(config, fakeKeys)` builds container env vars with fake keys instead of real ones.
+- `adapters/claude-code.ts` - Claude Code adapter. Auth-aware `buildEnv()` sets `CLAUDE_CODE_OAUTH_TOKEN` or API key. `getProviders()` returns OAuth or API key providers based on `authKind`.
 - `docker-manager.ts` - Docker CLI wrapper. `getImageLabel()` reads labels for staleness detection. `buildImage()` accepts optional labels.
 
 **PTY mode files:**
@@ -19,4 +20,4 @@ An alternative session type that runs external coding agents (Claude Code, etc.)
 
 **PTY transport:** On Linux, the container-side socat listens on a UDS in the bind-mounted `sockets/` directory. On macOS, it uses TCP through the socat sidecar. Only the `sockets/` subdirectory is mounted into the container -- not the full session directory -- so the container cannot access escalation files, audit logs, or other session data.
 
-**Security model:** Real API keys never enter the container. The agent receives a fake sentinel key; the MITM proxy validates it and swaps for the real key on the host side. Endpoint filtering ensures only specific API paths are accessible (e.g., `POST /v1/messages`).
+**Security model:** Real credentials (API keys or OAuth tokens) never enter the container. The agent receives a fake sentinel key; the MITM proxy validates it and swaps for the real credential on the host side. OAuth is auto-detected from `~/.claude/.credentials.json` and preferred over API keys; override with `IRONCURTAIN_DOCKER_AUTH=apikey`. Endpoint filtering ensures only specific API paths are accessible (e.g., `POST /v1/messages`).

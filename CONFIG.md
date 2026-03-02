@@ -102,6 +102,8 @@ API keys can be set via environment variables (preferred) or in the config file.
 | `GOOGLE_GENERATIVE_AI_API_KEY` | `googleApiKey` | Google AI API key |
 | `OPENAI_API_KEY` | `openaiApiKey` | OpenAI API key |
 
+In Docker mode, IronCurtain auto-detects OAuth credentials from `~/.claude/.credentials.json` (created by `claude login`) and prefers them over API keys. Set `IRONCURTAIN_DOCKER_AUTH=apikey` to force API key mode.
+
 ## File Permissions
 
 The config file is created with `0600` (owner-only read/write) permissions. A warning is emitted if the file is group- or world-readable, since it may contain API keys.

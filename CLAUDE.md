@@ -42,7 +42,7 @@ Two-command offline pipeline (`annotate-tools` + `compile-policy`) that produces
 **ResourceBudgetTracker** (`resource-budget-tracker.ts`) - enforces per-session limits: tokens, steps, wall-clock time, estimated cost. Three enforcement points: StopCondition (between agent steps), AbortSignal (wall-clock timeout), pre-check in `execute_code`. Throws `BudgetExhaustedError` when any limit is exceeded. Configured via `resourceBudget` field in `~/.ironcurtain/config.json` (all fields nullable to disable individual limits). Defaults: 1M tokens, 200 steps, 30min, $5.
 
 ### Docker Agent Mode (`src/docker/`)
-Runs external agents in Docker containers with `--network=none`, communicating via UDS-mounted MITM and MCP proxies. Real API keys never enter the container - fake sentinel keys are swapped host-side. See [`src/docker/CLAUDE.md`](src/docker/CLAUDE.md) for details.
+Runs external agents in Docker containers with `--network=none`, communicating via UDS-mounted MITM and MCP proxies. Real credentials (API keys or OAuth tokens) never enter the container - fake sentinel keys are swapped host-side. OAuth is auto-detected from `~/.claude/.credentials.json` and preferred over API keys. See [`src/docker/CLAUDE.md`](src/docker/CLAUDE.md) for details.
 
 ### Configuration (`src/config/`)
 **Interactive Config Editor** (`config-command.ts`) - `ironcurtain config` subcommand. Uses `@clack/prompts` for a terminal UI to view and modify `~/.ironcurtain/config.json`. Covers models, security settings, resource budgets, auto-compaction, and audit redaction. API keys are excluded (use env vars). Changes are tracked as a partial `UserConfig`, diffed against the resolved config, and saved via `saveUserConfig()`.

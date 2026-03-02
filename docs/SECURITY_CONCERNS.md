@@ -41,7 +41,7 @@ IronCurtain has two session modes with different containment models. Both rely o
 **Mitigation:**
 *   **No Network Egress (Linux):** `--network=none` eliminates all network-based attack vectors. All external communication goes through UDS-mounted proxies.
 *   **No Network Egress (macOS):** The container runs on a Docker `--internal` bridge network with no default route and iptables DROP rules. A socat sidecar container bridges only the MCP and MITM proxy ports between the internal network and the host. The agent container cannot reach the host gateway or any host service directly — it can only reach the sidecar's forwarded ports.
-*   **Fake API Keys:** Real API keys never enter the container. The MITM proxy swaps 192-bit sentinel keys for real keys host-side.
+*   **Fake Sentinel Keys:** Real credentials (API keys or OAuth tokens) never enter the container. The MITM proxy swaps 192-bit sentinel keys for real credentials host-side.
 *   **Resource Limits:** Containers are created with memory (4 GB) and CPU (2 cores) limits.
 *   **Endpoint Filtering:** The MITM proxy only allows specific method+path combinations (e.g., `POST /v1/messages`), blocking arbitrary API usage.
 
@@ -104,14 +104,14 @@ IronCurtain has two session modes with different containment models. Both rely o
 **Decision:** Inline string replacement on stderr lines before writing to the session log — scan for known credential values and replace with `***REDACTED***`. This is a few lines of code in the proxy, not a dedicated utility. Audit log redaction is **not** implemented because the tool-argument path is indirect and unreliable to catch (the agent could transform or split credential values). A formal `CredentialRedactor` abstraction was considered and rejected as over-engineering for the actual threat surface.
 **Residual risk:** Credentials echoed by MCP servers in tool *responses* enter the LLM context and are not masked. Addressing this requires response filtering, which is a different mechanism and deferred.
 
-## 9. MITM Proxy and API Key Protection (Docker Agent Mode)
+## 9. MITM Proxy and Credential Protection (Docker Agent Mode)
 
-**Risk:** The TLS-terminating MITM proxy (`mitm-proxy.ts`) handles real API keys and terminates TLS for traffic from untrusted Docker containers.
+**Risk:** The TLS-terminating MITM proxy (`mitm-proxy.ts`) handles real credentials (API keys and OAuth tokens) and terminates TLS for traffic from untrusted Docker containers.
 **Vectors:**
-*   **Response header leakage:** If an upstream API server echoes the real API key in response headers (diagnostic headers, redirect URLs), the key could leak to the container. Current LLM API providers do not exhibit this behavior, but it is a fragile assumption.
+*   **Response header leakage:** If an upstream API server echoes the real credential in response headers (diagnostic headers, redirect URLs), the credential could leak to the container. Current LLM API providers do not exhibit this behavior, but it is a fragile assumption.
 *   **Endpoint filter bypass:** The `isEndpointAllowed()` function performs strict string matching without URL normalization. While this is conservative (encoded variants are blocked, not allowed through), a parser differential between the proxy and the upstream server could theoretically allow bypass.
 **Mitigation:**
-*   **Key never enters the container:** The agent receives a fake sentinel key (192 bits of entropy). The real key exists only in the host process memory. The MITM proxy validates the fake key and swaps it before forwarding upstream.
+*   **Credentials never enter the container:** The agent receives a fake sentinel key (192 bits of entropy). Real credentials (API keys or OAuth tokens) exist only in the host process memory. The MITM proxy validates the fake key and swaps it for the real credential before forwarding upstream.
 *   **Strict endpoint allowlist:** Only specific method+path combinations are permitted (e.g., `POST /v1/messages` for Anthropic). All other requests are blocked with 403.
 *   **No network access:** On Linux, containers run with `--network=none`. On macOS, containers run on an `--internal` network with only proxy ports forwarded via a sidecar. In both cases, the container has no direct internet access.
 **Residual risk:** A compromised agent can make excessive LLM API calls via the MITM proxy, incurring costs. Mitigated by the per-session ResourceBudgetTracker which enforces limits on estimated cost, tokens, steps, and wall-clock time — this applies in Docker Agent Mode as well as Code Mode.
