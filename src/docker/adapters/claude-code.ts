@@ -32,16 +32,21 @@ function buildDockerEnvironmentPrompt(context: OrientationContext): string {
 This is YOUR local workspace inside the container. Use your normal built-in
 tools (Bash, Read, Write, Edit, etc.) freely here -- no restrictions.
 
-This directory is a bind-mount of \`${context.hostSandboxDir}\` on the host.
-Files you create at \`${context.workspaceDir}/foo.txt\` are visible to MCP tools
-at \`${context.hostSandboxDir}/foo.txt\` and vice versa.
+### When to use \`execute_code\` (MCP tools)
+Use \`execute_code\` ONLY for operations that your built-in tools cannot do:
+- **Network requests**: HTTP fetches, web searches, API calls
+- **Git remote operations**: clone, push, pull, fetch
+- **Reading files outside ${context.workspaceDir}**
 
-### Host Filesystem
-To read or modify files on the host operating system you MUST use the
-\`execute_code\` MCP tool with the sandbox tools listed above. These tools are
-mediated by IronCurtain's policy engine: every call is evaluated against
-security rules and recorded in the audit log.
-Your built-in file tools cannot reach the host filesystem.
+For everything else -- listing, reading, searching, writing, and editing files
+inside ${context.workspaceDir} -- use your built-in tools (Bash, Read, Write,
+Edit, Glob, Grep, etc.). Do NOT use MCP filesystem or git tools for local file
+operations inside ${context.workspaceDir}.
+
+After cloning a repo or writing files via \`execute_code\`, switch to built-in
+tools for all subsequent file operations on the cloned/written files.
+When cloning repos, use ${context.workspaceDir} as the target directory
+(e.g. \`${context.workspaceDir}/repo-name\`).
 
 ### Network
 The container has NO direct internet access. All HTTP requests and
@@ -62,13 +67,6 @@ Every tool call through \`execute_code\` is evaluated against security policy ru
 - **Allowed**: proceeds automatically
 - **Denied**: blocked -- do NOT retry denied operations
 - **Escalated**: requires human approval -- you will receive the result once approved
-
-### Best Practices
-1. Use your built-in tools for work inside ${context.workspaceDir}
-2. Use \`execute_code\` for anything on the host filesystem or network
-3. Batch external operations to minimize escalation prompts
-4. If an operation is denied, explain the denial and suggest alternatives
-5. Do not attempt to bypass the sandbox
 `;
 }
 

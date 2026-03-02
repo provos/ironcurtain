@@ -8,7 +8,12 @@
 
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
-import type { AgentAdapter, AgentConfigFile, OrientationContext } from './agent-adapter.js';
+import {
+  CONTAINER_WORKSPACE_DIR,
+  type AgentAdapter,
+  type AgentConfigFile,
+  type OrientationContext,
+} from './agent-adapter.js';
 import type { IronCurtainConfig } from '../config/types.js';
 import type { ServerListing } from '../session/prompts.js';
 
@@ -60,7 +65,7 @@ export function prepareSession(
   mkdirSync(orientationDir, { recursive: true });
 
   const context: OrientationContext = {
-    workspaceDir: '/workspace',
+    workspaceDir: CONTAINER_WORKSPACE_DIR,
     hostSandboxDir,
     serverListings,
     allowedDomains: extractAllowedDomains(config),

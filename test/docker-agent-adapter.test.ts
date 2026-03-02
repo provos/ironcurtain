@@ -5,14 +5,14 @@ import { tmpdir } from 'node:os';
 import { claudeCodeAdapter } from '../src/docker/adapters/claude-code.js';
 import { registerAgent, getAgent, listAgents } from '../src/docker/agent-registry.js';
 import { prepareSession, extractAllowedDomains } from '../src/docker/orientation.js';
-import type { AgentId, OrientationContext } from '../src/docker/agent-adapter.js';
+import { CONTAINER_WORKSPACE_DIR, type AgentId, type OrientationContext } from '../src/docker/agent-adapter.js';
 import type { ServerListing } from '../src/session/prompts.js';
 import type { IronCurtainConfig } from '../src/config/types.js';
 
 const sampleServerListings: ServerListing[] = [{ name: 'filesystem', description: 'Read, write, and manage files' }];
 
 const sampleContext: OrientationContext = {
-  workspaceDir: '/workspace',
+  workspaceDir: CONTAINER_WORKSPACE_DIR,
   hostSandboxDir: '/home/user/.ironcurtain/sessions/test/sandbox',
   serverListings: sampleServerListings,
   allowedDomains: ['example.com'],
@@ -66,7 +66,7 @@ describe('Claude Code Adapter', () => {
     // Docker environment layer
     expect(prompt).toContain('/workspace');
     expect(prompt).toContain('NO direct internet access');
-    expect(prompt).toContain('Host Filesystem');
+    expect(prompt).toContain('When to use `execute_code`');
     expect(prompt).toContain('Policy Enforcement');
   });
 

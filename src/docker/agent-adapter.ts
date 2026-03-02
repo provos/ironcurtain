@@ -11,6 +11,13 @@ import type { ProviderConfig } from './provider-config.js';
 import type { ServerListing } from '../session/prompts.js';
 
 /**
+ * The workspace directory inside Docker containers. The host sandbox
+ * directory is bind-mounted at this path. Used for path rewriting
+ * between container and host in both directions.
+ */
+export const CONTAINER_WORKSPACE_DIR = '/workspace';
+
+/**
  * Structured response from an agent adapter, carrying both the
  * text response and optional cost/usage metadata reported by the agent.
  */

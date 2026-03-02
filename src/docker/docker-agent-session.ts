@@ -30,7 +30,7 @@ import type {
   BudgetStatus,
 } from '../session/types.js';
 import type { IronCurtainConfig } from '../config/types.js';
-import type { AgentAdapter } from './agent-adapter.js';
+import { CONTAINER_WORKSPACE_DIR, type AgentAdapter } from './agent-adapter.js';
 import type { DockerManager } from './types.js';
 import type { DockerProxy } from './code-mode-proxy.js';
 import type { MitmProxy } from './mitm-proxy.js';
@@ -263,7 +263,7 @@ export class DockerAgentSession implements Session {
       logger.info(`Sidecar ${sidecarName} bridging ports ${mcpPort},${mitmPort} at ${sidecarIp}`);
 
       mounts = [
-        { source: this.sandboxDir, target: '/workspace', readonly: false },
+        { source: this.sandboxDir, target: CONTAINER_WORKSPACE_DIR, readonly: false },
         // No session dir mount needed for sockets (TCP mode) -- only orientation subdir is mounted
         { source: orientationDir, target: '/etc/ironcurtain', readonly: true },
       ];
@@ -282,7 +282,7 @@ export class DockerAgentSession implements Session {
       const socketsDir = resolve(this.sessionDir, 'sockets');
       mkdirSync(socketsDir, { recursive: true });
       mounts = [
-        { source: this.sandboxDir, target: '/workspace', readonly: false },
+        { source: this.sandboxDir, target: CONTAINER_WORKSPACE_DIR, readonly: false },
         { source: socketsDir, target: '/run/ironcurtain', readonly: false },
         { source: orientationDir, target: '/etc/ironcurtain', readonly: true },
       ];
