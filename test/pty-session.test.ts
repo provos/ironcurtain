@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { execFileSync, spawn } from 'node:child_process';
 import { createEscalationWatcher, atomicWriteJsonSync } from '../src/escalation/escalation-watcher.js';
 import type { EscalationRequest } from '../src/session/types.js';
 import type { PtySessionRegistration } from '../src/docker/pty-types.js';
@@ -124,6 +125,199 @@ describe('SIGWINCH forwarding', () => {
       // When running in a TTY, columns and rows are numbers
       expect(typeof stdout.columns).toBe('number');
       expect(typeof stdout.rows).toBe('number');
+    }
+  });
+});
+
+// --- PTY size fix: orientation file tests ---
+
+describe('Claude Code adapter PTY orientation files', () => {
+  // Lazy import to avoid pulling in the full adapter at module level
+  let claudeCodeAdapter: (typeof import('../src/docker/adapters/claude-code.js'))['claudeCodeAdapter'];
+
+  beforeEach(async () => {
+    ({ claudeCodeAdapter } = await import('../src/docker/adapters/claude-code.js'));
+  });
+
+  it('start-claude.sh includes stty initialization from env vars', () => {
+    const files = claudeCodeAdapter.generateOrientationFiles();
+    const startScript = files.find((f) => f.path === 'start-claude.sh');
+    expect(startScript).toBeDefined();
+    expect(startScript!.content).toContain('IRONCURTAIN_INITIAL_COLS');
+    expect(startScript!.content).toContain('IRONCURTAIN_INITIAL_ROWS');
+    expect(startScript!.content).toContain('stty cols');
+  });
+
+  it('resize-pty.sh finds Claude via pgrep -x and sends SIGWINCH', () => {
+    const files = claudeCodeAdapter.generateOrientationFiles();
+    const resizeScript = files.find((f) => f.path === 'resize-pty.sh');
+    expect(resizeScript).toBeDefined();
+    // Must use pgrep -x (matches /proc/PID/comm) because Claude Code
+    // overwrites /proc/PID/cmdline to just "claude" with null padding
+    expect(resizeScript!.content).toContain('pgrep -x claude');
+    expect(resizeScript!.content).toContain('kill -WINCH');
+  });
+
+  it('check-pty-size.sh is included in orientation files', () => {
+    const files = claudeCodeAdapter.generateOrientationFiles();
+    const checkScript = files.find((f) => f.path === 'check-pty-size.sh');
+    expect(checkScript).toBeDefined();
+    expect(checkScript!.mode).toBe(0o755);
+    expect(checkScript!.content).toContain('pgrep -x claude');
+    expect(checkScript!.content).toContain('stty -F "$PTS" size');
+  });
+});
+
+// --- PTY resize integration test (socat-based, no Docker) ---
+
+describe('PTY resize via socat', () => {
+  const isLinux = process.platform === 'linux';
+
+  // Check socat availability once (only on Linux)
+  let hasSocat = false;
+  if (isLinux) {
+    try {
+      execFileSync('socat', ['-V'], { timeout: 2000 });
+      hasSocat = true;
+    } catch {
+      /* socat not installed */
+    }
+  }
+
+  // Track PIDs for cleanup in afterEach
+  const pidsToKill: number[] = [];
+  const dirsToClean: string[] = [];
+
+  afterEach(() => {
+    for (const pid of pidsToKill) {
+      try {
+        process.kill(-pid, 'SIGKILL');
+      } catch {
+        try {
+          process.kill(pid, 'SIGKILL');
+        } catch {
+          /* already dead */
+        }
+      }
+    }
+    pidsToKill.length = 0;
+    for (const d of dirsToClean) {
+      rmSync(d, { recursive: true, force: true });
+    }
+    dirsToClean.length = 0;
+  });
+
+  /**
+   * Creates a socat PTY setup mirroring the Docker container.
+   * socat UNIX-LISTEN → EXEC:start-script.sh,pty,setsid,ctty,stderr
+   * start-script.sh does: exec <targetCmd>
+   *
+   * Returns the target process's PID and PTY path.
+   */
+  async function createPtySetup(targetCmd: string, pgrepPattern: string) {
+    const tmpDir = mkdtempSync(join(tmpdir(), 'pty-resize-integ-'));
+    dirsToClean.push(tmpDir);
+
+    const startScript = join(tmpDir, 'start-test.sh');
+    writeFileSync(startScript, `#!/bin/bash\nexec ${targetCmd}\n`, { mode: 0o755 });
+
+    const sockPath = join(tmpDir, 'pty.sock');
+
+    // Start socat listener (same as Docker container entrypoint)
+    const socat = spawn('socat', [`UNIX-LISTEN:${sockPath},fork`, `EXEC:${startScript},pty,setsid,ctty,stderr`], {
+      stdio: 'ignore',
+      detached: true,
+    });
+    socat.unref();
+    if (socat.pid) pidsToKill.push(socat.pid);
+
+    // Wait for socket
+    for (let i = 0; i < 20; i++) {
+      await new Promise((r) => setTimeout(r, 100));
+      if (existsSync(sockPath)) break;
+    }
+
+    // Connect a client (simulating the host PTY proxy), keep stdin open
+    const client = spawn('socat', ['-', `UNIX-CONNECT:${sockPath}`], {
+      stdio: ['pipe', 'ignore', 'ignore'],
+      detached: true,
+    });
+    client.unref();
+    if (client.pid) pidsToKill.push(client.pid);
+
+    // Wait for child process to start
+    await new Promise((r) => setTimeout(r, 500));
+
+    // Find the target process: use pgrep then filter to the actual exec'd process
+    let targetPid: string | null = null;
+    let pts: string | null = null;
+    try {
+      const result = execFileSync('pgrep', ['-f', pgrepPattern], { timeout: 2000 }).toString().trim();
+      for (const pid of result.split('\n')) {
+        if (!pid) continue;
+        try {
+          const link = execFileSync('readlink', [`/proc/${pid}/fd/0`], { timeout: 1000 })
+            .toString()
+            .trim();
+          if (link.startsWith('/dev/pts/')) {
+            targetPid = pid;
+            pts = link;
+            break;
+          }
+        } catch {
+          /* skip pids with unreadable fds */
+        }
+      }
+    } catch {
+      /* pgrep found nothing */
+    }
+
+    return { tmpDir, targetPid, pts };
+  }
+
+  it.skipIf(!isLinux || !hasSocat)('stty -F resizes a socat-managed PTY', async () => {
+    const { targetPid, pts } = await createPtySetup('sleep 300', 'sleep 300');
+
+    expect(targetPid).toBeTruthy();
+    expect(pts).toMatch(/^\/dev\/pts\/\d+$/);
+
+    // Check initial size (socat PTY defaults to 0x0)
+    const initial = execFileSync('stty', ['-F', pts!, 'size'], { timeout: 1000 }).toString().trim();
+    expect(initial).toBe('0 0');
+
+    // Resize
+    execFileSync('stty', ['-F', pts!, 'cols', '132', 'rows', '43'], { timeout: 1000 });
+
+    // Verify
+    const after = execFileSync('stty', ['-F', pts!, 'size'], { timeout: 1000 }).toString().trim();
+    expect(after).toBe('43 132');
+  });
+
+  it.skipIf(!isLinux || !hasSocat)('resize works after exec replaces shell with target process', async () => {
+    const { pts } = await createPtySetup('sleep 301', 'sleep 301');
+    expect(pts).toMatch(/^\/dev\/pts\/\d+$/);
+
+    // Resize to non-default dimensions
+    execFileSync('stty', ['-F', pts!, 'cols', '200', 'rows', '50'], { timeout: 1000 });
+    const size = execFileSync('stty', ['-F', pts!, 'size'], { timeout: 1000 }).toString().trim();
+    expect(size).toBe('50 200');
+
+    // Resize again (simulating terminal resize)
+    execFileSync('stty', ['-F', pts!, 'cols', '80', 'rows', '24'], { timeout: 1000 });
+    const size2 = execFileSync('stty', ['-F', pts!, 'size'], { timeout: 1000 }).toString().trim();
+    expect(size2).toBe('24 80');
+  });
+
+  it('pgrep -x does not match nonexistent process names', () => {
+    // pgrep -x matches the exact process name from /proc/PID/comm.
+    // A nonsense name should never match any running process.
+    try {
+      execFileSync('pgrep', ['-x', 'ironcurtain_no_such_proc'], { timeout: 2000 });
+      // If pgrep exits 0, something matched (should be impossible)
+      expect.unreachable('pgrep matched a nonexistent process name');
+    } catch (err) {
+      // Exit code 1 = no match, which is correct
+      expect((err as { status: number }).status).toBe(1);
     }
   });
 });
