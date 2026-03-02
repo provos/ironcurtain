@@ -13,7 +13,7 @@
  */
 
 import { existsSync, readFileSync } from 'node:fs';
-import { homedir, platform } from 'node:os';
+import { homedir, platform, userInfo } from 'node:os';
 import { resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import type { IronCurtainConfig } from '../config/types.js';
@@ -117,9 +117,10 @@ export function parseCredentialsJson(json: string): OAuthCredentials | null {
 export function extractFromKeychain(): OAuthCredentials | null {
   if (platform() !== 'darwin') return null;
 
+  const account = userInfo().username;
   for (const service of KEYCHAIN_SERVICE_NAMES) {
     try {
-      const result = execFileSync('security', ['find-generic-password', '-s', service, '-w'], {
+      const result = execFileSync('security', ['find-generic-password', '-s', service, '-a', account, '-w'], {
         encoding: 'utf8',
         stdio: ['pipe', 'pipe', 'pipe'],
         timeout: 10_000,

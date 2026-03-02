@@ -115,12 +115,19 @@ export async function prepareDockerInfrastructure(
 
   // Generate fake keys and build provider key mappings.
   // In OAuth mode, use bearer-based providers and the OAuth access token as the real key.
+  // Providers sharing the same fakeKeyPrefix (and thus the same real credential)
+  // reuse the same fake key so a single container token authenticates against all hosts.
   const oauthAccessToken = authMethod.kind === 'oauth' ? authMethod.credentials.accessToken : undefined;
   const providers = adapter.getProviders(authKind);
   const fakeKeys = new Map<string, string>();
   const providerMappings: ProviderKeyMapping[] = [];
+  const fakeKeysByPrefix = new Map<string, string>();
   for (const providerConfig of providers) {
-    const fakeKey = generateFakeKey(providerConfig.fakeKeyPrefix);
+    let fakeKey = fakeKeysByPrefix.get(providerConfig.fakeKeyPrefix);
+    if (!fakeKey) {
+      fakeKey = generateFakeKey(providerConfig.fakeKeyPrefix);
+      fakeKeysByPrefix.set(providerConfig.fakeKeyPrefix, fakeKey);
+    }
     fakeKeys.set(providerConfig.host, fakeKey);
 
     const realKey = resolveRealKey(providerConfig.host, config, oauthAccessToken);

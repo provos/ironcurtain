@@ -58,7 +58,15 @@ export async function checkDockerAvailable(): Promise<boolean> {
   }
 }
 
-/** Sources that skip macOS Keychain to keep preflight fast and non-interactive. */
+/**
+ * Sources that skip macOS Keychain to keep preflight fast and non-interactive.
+ * Full Keychain detection happens in prepareDockerInfrastructure().
+ *
+ * Limitation: macOS users whose OAuth credentials exist only in the Keychain
+ * (no ~/.claude/.credentials.json and no API key) will fall back to builtin
+ * in auto-detect mode, or get a PreflightError with explicit --agent.
+ * In practice this is rare: Claude Code always writes the credentials file.
+ */
 const preflightSources: CredentialSources = {
   loadFromFile: loadOAuthCredentials,
   loadFromKeychain: () => null,
