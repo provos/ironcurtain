@@ -50,6 +50,12 @@ export async function main(args?: string[]): Promise<void> {
   const rawWorkspace = values.workspace as string | undefined;
   const config = loadConfig();
 
+  // Disallow combining --resume with --workspace
+  if (resumeSessionId && rawWorkspace) {
+    process.stderr.write(chalk.red('Error: --resume and --workspace cannot be used together.\n'));
+    process.exit(1);
+  }
+
   // Validate --workspace before anything else that uses config
   let workspacePath: string | undefined;
   if (rawWorkspace) {

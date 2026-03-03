@@ -10,12 +10,14 @@
 import { statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
-import { resolveRealPath } from '../types/argument-roles.js';
+import { expandTilde, resolveRealPath } from '../types/argument-roles.js';
 import { getIronCurtainHome } from '../config/paths.js';
 
 /** Returns true when `child` is equal to or nested inside `parent`. */
 function isEqualOrInside(child: string, parent: string): boolean {
-  return child === parent || child.startsWith(parent + '/');
+  if (child === parent) return true;
+  const prefix = parent === '/' ? '/' : parent + '/';
+  return child.startsWith(prefix);
 }
 
 /**
@@ -27,7 +29,7 @@ function isEqualOrInside(child: string, parent: string): boolean {
  * @throws {Error} if the path fails any validation check
  */
 export function validateWorkspacePath(rawPath: string, protectedPaths: string[]): string {
-  const absolute = resolve(rawPath.startsWith('~') ? rawPath.replace(/^~/, homedir()) : rawPath);
+  const absolute = resolve(expandTilde(rawPath));
   const canonical = resolveRealPath(absolute);
 
   // Must exist and be a directory
