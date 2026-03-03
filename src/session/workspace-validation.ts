@@ -56,18 +56,16 @@ export function validateWorkspacePath(rawPath: string, protectedPaths: string[])
     throw new Error(`Workspace path is inside the IronCurtain home directory: ${canonical}`);
   }
 
-  // Bidirectional overlap check with protected paths
+  // Check that workspace is not inside a protected path.
+  // The reverse direction (protected path inside workspace) is intentionally
+  // NOT checked here — the PolicyEngine already protects those paths at
+  // runtime regardless of the allowedDirectory, so a workspace that happens
+  // to contain e.g. src/config/generated/ is perfectly safe.
   for (const pp of protectedPaths) {
     const protectedCanonical = resolveRealPath(pp);
 
     if (isEqualOrInside(canonical, protectedCanonical)) {
       throw new Error(`Workspace path overlaps with protected path: ${protectedCanonical}`);
-    }
-
-    if (isEqualOrInside(protectedCanonical, canonical)) {
-      throw new Error(
-        `Workspace would contain protected path ${protectedCanonical} — ` + `use a more specific subdirectory`,
-      );
     }
   }
 

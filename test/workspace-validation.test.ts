@@ -85,13 +85,14 @@ describe('validateWorkspacePath', () => {
     expect(() => validateWorkspacePath(workspace, [protectedDir])).toThrow('overlaps with protected path');
   });
 
-  it('rejects workspace that contains a protected path', () => {
+  it('accepts workspace that contains a protected path (policy engine handles runtime protection)', () => {
     const workspace = join(tempDir, 'broad');
     mkdirSync(workspace, { recursive: true });
     const protectedDir = join(workspace, 'secrets');
     mkdirSync(protectedDir, { recursive: true });
 
-    expect(() => validateWorkspacePath(workspace, [protectedDir])).toThrow('would contain protected path');
+    const result = validateWorkspacePath(workspace, [protectedDir]);
+    expect(result).toBe(realpathSync(workspace));
   });
 
   it('resolves symlinks before validation', () => {
