@@ -2,7 +2,14 @@ import { describe, it, expect } from 'vitest';
 import type { Terminal as TerminalType } from '@xterm/headless';
 import xtermHeadless from '@xterm/headless';
 const { Terminal } = xtermHeadless;
-import { readTerminalBuffer } from '../src/mux/mux-renderer.js';
+import {
+  readTerminalBuffer,
+  buildSgrSequence,
+  cellStyleEquals,
+  colorEquals,
+  type TranslatedCell,
+  type TermkitColor,
+} from '../src/mux/mux-renderer.js';
 
 /** Helper: write data to terminal and wait for it to be processed. */
 function writeSync(terminal: TerminalType, data: string): Promise<void> {
@@ -159,5 +166,105 @@ describe('readTerminalBuffer', () => {
       .join('')
       .trim();
     expect(staleLine).toContain('Line 0');
+  });
+});
+
+// Helper to create a TranslatedCell with defaults
+function makeCell(overrides: Partial<TranslatedCell> = {}): TranslatedCell {
+  return {
+    char: ' ',
+    width: 1,
+    fg: 'default' as TermkitColor,
+    bg: 'default' as TermkitColor,
+    bold: false,
+    italic: false,
+    underline: false,
+    dim: false,
+    inverse: false,
+    strikethrough: false,
+    ...overrides,
+  };
+}
+
+describe('colorEquals', () => {
+  it('matches identical default colors', () => {
+    expect(colorEquals('default', 'default')).toBe(true);
+  });
+
+  it('matches identical palette numbers', () => {
+    expect(colorEquals(196, 196)).toBe(true);
+  });
+
+  it('rejects different palette numbers', () => {
+    expect(colorEquals(196, 42)).toBe(false);
+  });
+
+  it('matches identical RGB objects', () => {
+    expect(colorEquals({ r: 255, g: 128, b: 0 }, { r: 255, g: 128, b: 0 })).toBe(true);
+  });
+
+  it('rejects different RGB objects', () => {
+    expect(colorEquals({ r: 255, g: 128, b: 0 }, { r: 0, g: 128, b: 255 })).toBe(false);
+  });
+
+  it('rejects mixed types', () => {
+    expect(colorEquals('default', 196)).toBe(false);
+    expect(colorEquals(196, { r: 0, g: 0, b: 0 })).toBe(false);
+    expect(colorEquals('default', { r: 0, g: 0, b: 0 })).toBe(false);
+  });
+});
+
+describe('cellStyleEquals', () => {
+  it('matches identical default cells', () => {
+    expect(cellStyleEquals(makeCell(), makeCell())).toBe(true);
+  });
+
+  it('ignores char and width differences', () => {
+    expect(cellStyleEquals(makeCell({ char: 'A', width: 1 }), makeCell({ char: 'Z', width: 2 }))).toBe(true);
+  });
+
+  it('detects bold difference', () => {
+    expect(cellStyleEquals(makeCell({ bold: true }), makeCell({ bold: false }))).toBe(false);
+  });
+
+  it('detects fg color difference', () => {
+    expect(cellStyleEquals(makeCell({ fg: 196 }), makeCell({ fg: 42 }))).toBe(false);
+  });
+
+  it('detects bg color difference', () => {
+    expect(cellStyleEquals(makeCell({ bg: { r: 0, g: 0, b: 0 } }), makeCell({ bg: 'default' }))).toBe(false);
+  });
+
+  it('matches cells with identical non-default attributes', () => {
+    const style = { bold: true, italic: true, fg: 196 as TermkitColor, bg: { r: 10, g: 20, b: 30 } as TermkitColor };
+    expect(cellStyleEquals(makeCell(style), makeCell(style))).toBe(true);
+  });
+});
+
+describe('buildSgrSequence', () => {
+  it('produces reset + default colors for plain cell', () => {
+    const sgr = buildSgrSequence(makeCell());
+    expect(sgr).toBe('0;39;49');
+  });
+
+  it('includes bold code', () => {
+    const sgr = buildSgrSequence(makeCell({ bold: true }));
+    expect(sgr).toContain(';1;');
+  });
+
+  it('includes 256-color fg', () => {
+    const sgr = buildSgrSequence(makeCell({ fg: 196 }));
+    expect(sgr).toContain('38;5;196');
+  });
+
+  it('includes RGB bg', () => {
+    const sgr = buildSgrSequence(makeCell({ bg: { r: 10, g: 20, b: 30 } }));
+    expect(sgr).toContain('48;2;10;20;30');
+  });
+
+  it('includes multiple attributes', () => {
+    const sgr = buildSgrSequence(makeCell({ bold: true, italic: true, underline: true }));
+    // Should start with 0 (reset) then have 1, 3, 4
+    expect(sgr).toMatch(/^0;1;3;4;/);
   });
 });

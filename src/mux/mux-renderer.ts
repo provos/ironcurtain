@@ -154,19 +154,20 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
     const mode = deps.getMode();
     const visibleRows = mode === 'command' ? _layout.ptyViewportRows - _layout.overlayRows : _layout.ptyViewportRows;
 
+    let lastStyle: TranslatedCell | null = null;
     for (let y = 0; y < visibleRows; y++) {
       moveTo(0, _layout.ptyViewportY + y);
       const row = cells[y];
       if (row.length === 0) {
         term.eraseLineAfter();
+        lastStyle = null;
         continue;
       }
 
-      for (const cell of row) {
-        applyCell(term, cell);
-      }
-      term.styleReset();
+      renderRow(term, row, lastStyle);
+      term.noFormat('\x1b[0m'); // reset before eraseLineAfter
       term.eraseLineAfter();
+      lastStyle = null;
     }
 
     // Position cursor where xterm.js says it should be
@@ -489,10 +490,9 @@ export function readTerminalBuffer(
 }
 
 /**
- * Applies a TranslatedCell's attributes and writes the character.
+ * Builds the SGR parameter string for a cell's style attributes.
  */
-function applyCell(term: TerminalKit, cell: TranslatedCell): void {
-  // SGR parameters -- reset first to avoid attribute bleeding
+export function buildSgrSequence(cell: TranslatedCell): string {
   const sgr: number[] = [0];
 
   if (cell.bold) sgr.push(1);
@@ -520,8 +520,62 @@ function applyCell(term: TerminalKit, cell: TranslatedCell): void {
     sgr.push(48, 2, cell.bg.r, cell.bg.g, cell.bg.b);
   }
 
-  // Write raw ANSI to avoid terminal-kit's own attribute management
-  term.noFormat(`\x1b[${sgr.join(';')}m${cell.char}`);
+  return sgr.join(';');
+}
+
+export function colorEquals(a: TermkitColor, b: TermkitColor): boolean {
+  if (a === b) return true;
+  if (typeof a === 'object' && typeof b === 'object') {
+    return a.r === b.r && a.g === b.g && a.b === b.b;
+  }
+  return false;
+}
+
+export function cellStyleEquals(a: TranslatedCell, b: TranslatedCell): boolean {
+  return (
+    a.bold === b.bold &&
+    a.dim === b.dim &&
+    a.italic === b.italic &&
+    a.underline === b.underline &&
+    a.inverse === b.inverse &&
+    a.strikethrough === b.strikethrough &&
+    colorEquals(a.fg, b.fg) &&
+    colorEquals(a.bg, b.bg)
+  );
+}
+
+/**
+ * Renders a row by batching consecutive same-styled cells into runs.
+ * Skips SGR output when the run's style matches the last emitted style
+ * (Option C). Returns the style of the last emitted run for cross-row
+ * carry-over.
+ */
+function renderRow(term: TerminalKit, row: TranslatedCell[], lastStyle: TranslatedCell | null): void {
+  let prevStyle = lastStyle;
+  let i = 0;
+  while (i < row.length) {
+    // Find the end of the current same-style run
+    let j = i + 1;
+    while (j < row.length && cellStyleEquals(row[i], row[j])) {
+      j++;
+    }
+
+    // Collect characters for this run
+    let chars = '';
+    for (let k = i; k < j; k++) {
+      chars += row[k].char;
+    }
+
+    // Only emit SGR if the style changed from the last emitted style
+    if (prevStyle && cellStyleEquals(prevStyle, row[i])) {
+      term.noFormat(chars);
+    } else {
+      term.noFormat(`\x1b[${buildSgrSequence(row[i])}m${chars}`);
+    }
+
+    prevStyle = row[i];
+    i = j;
+  }
 }
 
 /**
