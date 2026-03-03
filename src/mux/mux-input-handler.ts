@@ -164,8 +164,12 @@ function longestCommonPrefix(strings: string[]): string {
   return prefix;
 }
 
-export function createMuxInputHandler(): MuxInputHandler {
-  let _mode: InputMode = 'pty';
+export interface MuxInputHandlerOptions {
+  initialMode?: InputMode;
+}
+
+export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInputHandler {
+  let _mode: InputMode = options?.initialMode ?? 'pty';
   let _inputBuffer = '';
   let _cursorPos = 0;
   let _pickerState: PickerState | null = null;

@@ -406,7 +406,7 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
       term.hideCursor(true);
       term.grabInput({ mouse: 'button' });
 
-      inputHandler = createMuxInputHandler();
+      inputHandler = createMuxInputHandler({ initialMode: autoSpawn ? 'pty' : 'command' });
       escalationManager = createMuxEscalationManager();
 
       const { columns, rows } = process.stdout;

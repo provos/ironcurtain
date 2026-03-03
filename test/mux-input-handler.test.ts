@@ -2,6 +2,23 @@ import { describe, it, expect } from 'vitest';
 import { createMuxInputHandler } from '../src/mux/mux-input-handler.js';
 
 describe('MuxInputHandler', () => {
+  describe('initialMode option', () => {
+    it('defaults to PTY mode when no options provided', () => {
+      const handler = createMuxInputHandler();
+      expect(handler.mode).toBe('pty');
+    });
+
+    it('starts in command mode when initialMode is "command"', () => {
+      const handler = createMuxInputHandler({ initialMode: 'command' });
+      expect(handler.mode).toBe('command');
+    });
+
+    it('starts in PTY mode when initialMode is "pty"', () => {
+      const handler = createMuxInputHandler({ initialMode: 'pty' });
+      expect(handler.mode).toBe('pty');
+    });
+  });
+
   describe('PTY mode (default)', () => {
     it('starts in PTY mode', () => {
       const handler = createMuxInputHandler();

@@ -12,6 +12,14 @@ _\*When someone writes "secure," you should immediately be skeptical. [What do w
 > [!WARNING]
 > **Research Prototype.** IronCurtain is an early-stage research project exploring how to make AI agents safe enough to be genuinely useful. APIs, configuration formats, and architecture may change. Contributions and feedback are welcome.
 
+## Demo
+
+<p align="center">
+  <img src="demo.gif" alt="IronCurtain mux demo: trusted input from command mode enables auto-approval of git clone and git push" width="800">
+</p>
+
+The agent is asked to clone a repository and push changes. Both `git_clone` and `git_push` are escalated by the policy engine, but the [auto-approver](#auto-approve-escalations) approves them automatically — the user's trusted input from command mode (Ctrl-A) provided clear intent, so no manual `/approve` was needed.
+
 ## The Problem
 
 Autonomous AI agents can manage files, run git commands, send messages, and interact with APIs on your behalf. But today's agent frameworks give the agent the same privileges as the user such as full access to the filesystem, credentials, and network. Security researchers call this **ambient authority**, and it means a single prompt injection or multi-turn drift can cause an agent to delete files, exfiltrate data, or push malicious code.
@@ -30,14 +38,6 @@ The key ideas:
 - **English in, enforcement out.** You write intent ("no destructive git operations without approval"); the system compiles it into deterministic rules that are enforced without further LLM involvement at runtime.
 - **Semantic interposition.** Instead of giving the agent raw system access, all interactions go through [MCP](https://modelcontextprotocol.io/) servers (filesystem, git, etc.). Every tool call passes through a policy engine that can **allow**, **deny**, or **escalate** to the user for approval.
 - **Defense in depth.** Agent code runs in a V8 isolate with no direct access to the host. The only way out is through semantically meaningful MCP tool calls and every one is checked against policy.
-
-## Demo
-
-<p align="center">
-  <img src="demo.gif" alt="IronCurtain demo: agent clones a repo, policy escalates git_clone for approval, user approves, then auto-approve handles git push" width="800">
-</p>
-
-The agent clones a repository and edits a file. The policy engine escalates `git_clone` for human approval. After the user types `/approve`, the agent completes the task. On the second request ("ok. git push to origin please"), [auto-approve](#auto-approve-escalations) recognizes the explicit intent and approves `git_push` automatically — no interruption needed.
 
 ## Architecture
 

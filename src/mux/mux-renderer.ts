@@ -19,6 +19,7 @@ import type { Terminal as TerminalType } from '@xterm/headless';
 import { calculateLayout, type InputMode, type Layout, type MuxTab } from './types.js';
 import type { ListenerState } from '../escalation/listener-state.js';
 import type { PickerState } from './mux-input-handler.js';
+import { createSplashScreen, type SplashScreen } from './mux-splash.js';
 
 // -- xterm.js color mode constants (from IBufferCell.getFgColorMode/getBgColorMode) --
 const CM_DEFAULT = 0;
@@ -97,6 +98,9 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
   let lastRenderTime = 0;
   let renderTimeout: ReturnType<typeof setTimeout> | null = null;
 
+  // Splash screen (shown when no tabs exist)
+  let _splash: SplashScreen | null = null;
+
   // Transient flash message
   let _flashMessage: string | null = null;
   let _flashTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -148,14 +152,45 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
     term.eraseLineAfter();
   }
 
+  function tearDownSplash(): void {
+    if (_splash) {
+      _splash.stop();
+      _splash = null;
+    }
+  }
+
+  /** Returns the number of viewport rows reserved by the current overlay. */
+  function activeOverlayRows(): number {
+    const mode = deps.getMode();
+    if (mode === 'command') return _layout.overlayRows;
+    if (mode === 'picker') return _layout.pickerRows;
+    return 0;
+  }
+
   function drawPtyViewport(): void {
     const activeTab = deps.getActiveTab();
     if (!activeTab) {
-      for (let y = _layout.ptyViewportY; y < _layout.ptyViewportY + _layout.ptyViewportRows; y++) {
-        clearLine(y);
+      if (deps.getTabs().length === 0) {
+        const reserved = activeOverlayRows();
+        // Lazily create and start the splash screen
+        if (!_splash) {
+          _splash = createSplashScreen(term, _cols, _layout.ptyViewportRows, _layout.ptyViewportY, reserved);
+          _splash.start();
+        } else {
+          // Update reserved rows in case mode changed (e.g. command -> picker)
+          _splash.resize(_cols, _layout.ptyViewportRows, _layout.ptyViewportY, reserved);
+        }
+        _splash.draw();
+      } else {
+        tearDownSplash();
+        for (let y = _layout.ptyViewportY; y < _layout.ptyViewportY + _layout.ptyViewportRows; y++) {
+          clearLine(y);
+        }
       }
       return;
     }
+
+    tearDownSplash();
 
     const xtermTerminal = activeTab.bridge.terminal;
     const baseY = xtermTerminal.buffer.active.baseY;
@@ -360,15 +395,20 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
     term.styleReset();
     currentY++;
 
-    // Input line
+    // Input line with visible block cursor
     clearLine(currentY);
     moveTo(2, currentY);
     term('> ');
-    term(deps.getInputBuffer());
+    const buf = deps.getInputBuffer();
+    const cp = deps.getCursorPos();
+    term(buf.slice(0, cp));
+    term.bgWhite.black(cp < buf.length ? buf[cp] : ' ');
+    term.styleReset();
+    term(buf.slice(cp + 1));
     term.eraseLineAfter();
 
-    // Position cursor at input
-    moveTo(2 + 2 + deps.getCursorPos(), currentY);
+    // Keep the real terminal cursor aligned with the logical input cursor for accessibility
+    moveTo(2 + 2 + cp, currentY);
   }
 
   function drawActiveOverlay(): void {
@@ -583,9 +623,11 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
       _cols = newCols;
       _rows = newRows;
       recalcLayout();
+      _splash?.resize(_cols, _layout.ptyViewportRows, _layout.ptyViewportY, activeOverlayRows());
     },
 
     destroy(): void {
+      tearDownSplash();
       if (renderTimeout) {
         clearTimeout(renderTimeout);
         renderTimeout = null;
