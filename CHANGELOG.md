@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-03-03
+
+### Features
+
+- **Terminal multiplexer** — `ironcurtain mux` provides a terminal multiplexer for managing multiple PTY sessions with tab management (`/new`, `/tab N`, `/close`), trusted input forwarding, workspace picker (fresh sandbox or existing directory via interactive file browser), mouse wheel scrollback, and escalation overlay for informed approve/deny decisions; uses headless xterm.js with SGR attribute rendering and resize propagation
+- **Matrix-style splash screen** — mux startup shows a Matrix rain animation that forms "IronCurtain" in ASCII art with usage info; small-terminal fallback for narrow viewports (#53)
+- **`--workspace` flag** — `ironcurtain start -w ./path` points the agent at an existing directory instead of a fresh sandbox; validates against root, home, `~/.ironcurtain/`, and bidirectional protected-path overlap (#51)
+- **OAuth token auto-refresh in MITM proxy** — proactive refresh before token expiry and reactive 401 retry as fallback for long-running Docker PTY sessions; read-only mode on macOS to avoid rotating Keychain-sourced refresh tokens; security hardening for transfer-encoding stripping, credential injection scoping, and 0600 file permissions (#50)
+
+### Improvements
+
+- Graceful process shutdown — unref intervals and stdin in escalation watcher, listener, agent session, and escalation handler to prevent blocking process exit
+
 ## [0.5.1] - 2026-03-01
 
 ### Features
@@ -209,6 +222,7 @@ Initial public release.
 - CI pipeline with Node 22/24 matrix testing
 - Code of Conduct, Contributing guidelines, Security policy
 
+[0.6.0]: https://github.com/provos/ironcurtain/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/provos/ironcurtain/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/provos/ironcurtain/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/provos/ironcurtain/compare/v0.4.0...v0.4.1
