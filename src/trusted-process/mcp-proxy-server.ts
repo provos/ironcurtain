@@ -265,7 +265,7 @@ async function waitForEscalationDecision(
  * Returns null when auto-approve is not enabled or env vars are missing.
  * Wraps with LLM logging middleware when a log path is provided.
  */
-async function createAutoApproveModel(): Promise<LanguageModelV3 | null> {
+async function createAutoApproveModel(sessionLogPath?: string): Promise<LanguageModelV3 | null> {
   if (process.env.AUTO_APPROVE_ENABLED !== 'true') return null;
 
   const modelId = process.env.AUTO_APPROVE_MODEL_ID;
@@ -277,15 +277,22 @@ async function createAutoApproveModel(): Promise<LanguageModelV3 | null> {
     const baseModel = await createLanguageModelFromEnv(modelId, apiKey);
 
     const llmLogPath = process.env.AUTO_APPROVE_LLM_LOG_PATH;
+    if (sessionLogPath) {
+      logToSessionFile(sessionLogPath, `Auto-approve model created: ${modelId}`);
+    }
     if (!llmLogPath) return baseModel;
 
     return wrapLanguageModel({
       model: baseModel,
       middleware: createLlmLoggingMiddleware(llmLogPath, { stepName: 'auto-approve' }),
     });
-  } catch {
+  } catch (err) {
     // Model creation failure should not prevent the proxy from starting.
     // Auto-approve simply won't be available for this session.
+    const message = err instanceof Error ? err.message : String(err);
+    if (sessionLogPath) {
+      logToSessionFile(sessionLogPath, `Auto-approve model creation failed for ${modelId}: ${message}`);
+    }
     return null;
   }
 }
@@ -811,7 +818,7 @@ async function main(): Promise<void> {
   const auditLog = new AuditLog(auditLogPath, { redact: auditRedaction });
   const circuitBreaker = new CallCircuitBreaker();
 
-  const autoApproveModel = await createAutoApproveModel();
+  const autoApproveModel = await createAutoApproveModel(sessionLogPath);
 
   const policyRoots = extractPolicyRoots(compiledPolicy, allowedDirectory ?? '/tmp');
   const mcpRoots = toMcpRoots(policyRoots);
