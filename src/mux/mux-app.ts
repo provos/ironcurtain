@@ -45,6 +45,11 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
   let nextTabNumber = 1;
   let running = false;
 
+  // Mouse event constants
+  const MOUSE_WHEEL_UP = 'MOUSE_WHEEL_UP';
+  const MOUSE_WHEEL_DOWN = 'MOUSE_WHEEL_DOWN';
+  const SCROLL_LINES = 3;
+
   // Components (initialized in start())
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let term: any;
@@ -89,12 +94,17 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
       label: agent,
       status: 'running',
       escalationAvailable: false,
+      scrollOffset: null,
     };
 
     tabs.push(tab);
 
     // Wire bridge events
     bridge.onOutput(() => {
+      // Snap back to live when new output arrives
+      if (tab.scrollOffset !== null) {
+        tab.scrollOffset = null;
+      }
       if (getActiveTab() === tab) {
         renderer.scheduleRedraw();
       }
@@ -163,6 +173,19 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
       activeTabIndex = tabs.length - 1;
     }
     renderer.fullRedraw();
+  }
+
+  /** Adjusts scroll offset by delta lines (negative = up, positive = down). */
+  function adjustScroll(tab: MuxTab, delta: number): void {
+    const baseY = tab.bridge.terminal.buffer.active.baseY;
+    if (baseY === 0) return; // no scrollback available
+    const current = tab.scrollOffset ?? baseY;
+    const newOffset = current + delta;
+    if (newOffset >= baseY) {
+      tab.scrollOffset = null; // snap to live
+    } else {
+      tab.scrollOffset = Math.max(0, newOffset);
+    }
   }
 
   function showMessage(message: string): void {
@@ -252,6 +275,16 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
       case 'redraw-picker':
         renderer.redrawCommandArea();
         break;
+
+      case 'scroll-up':
+      case 'scroll-down': {
+        const active = getActiveTab();
+        if (!active) break;
+        const delta = action.kind === 'scroll-up' ? -action.amount : action.amount;
+        adjustScroll(active, delta);
+        renderer.scheduleRedraw();
+        break;
+      }
 
       case 'quit':
         doShutdown();
@@ -366,7 +399,7 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
 
       term.fullscreen(true);
       term.hideCursor(true);
-      term.grabInput({ mouse: false });
+      term.grabInput({ mouse: 'button' });
 
       inputHandler = createMuxInputHandler();
       escalationManager = createMuxEscalationManager();
@@ -385,12 +418,26 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
         getEscalationState: () => escalationManager.state,
         getPendingCount: () => escalationManager.pendingCount,
         getPickerState: () => inputHandler.pickerState,
+        getScrollOffset: () => {
+          const active = getActiveTab();
+          return active?.scrollOffset ?? null;
+        },
       });
 
       term.on('key', (key: string) => {
         if (!running) return;
         const action = inputHandler.handleKey(key);
         void handleAction(action);
+      });
+
+      // Mouse events come through a separate 'mouse' emitter, not 'key'
+      term.on('mouse', (name: string) => {
+        if (!running) return;
+        if (name === MOUSE_WHEEL_UP) {
+          void handleAction({ kind: 'scroll-up', amount: SCROLL_LINES });
+        } else if (name === MOUSE_WHEEL_DOWN) {
+          void handleAction({ kind: 'scroll-down', amount: SCROLL_LINES });
+        }
       });
 
       process.stdout.on('resize', () => {

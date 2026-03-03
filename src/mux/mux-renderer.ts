@@ -80,6 +80,8 @@ export interface MuxRendererDeps {
   getEscalationState: () => ListenerState;
   getPendingCount: () => number;
   getPickerState: () => PickerState | null;
+  /** Returns the active tab's scroll offset (null = live/bottom). */
+  getScrollOffset: () => number | null;
 }
 
 /**
@@ -157,7 +159,9 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
 
     const xtermTerminal = activeTab.bridge.terminal;
     const baseY = xtermTerminal.buffer.active.baseY;
-    const cells = readTerminalBuffer(xtermTerminal, baseY, _layout.ptyViewportRows, _cols);
+    const scrollOffset = deps.getScrollOffset();
+    const readFrom = scrollOffset ?? baseY;
+    const cells = readTerminalBuffer(xtermTerminal, readFrom, _layout.ptyViewportRows, _cols);
 
     // Determine how many rows to render (skip overlay in command/picker mode)
     const mode = deps.getMode();
@@ -181,8 +185,8 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
       lastStyle = null;
     }
 
-    // Position cursor where xterm.js says it should be
-    if (mode === 'pty') {
+    // Position cursor where xterm.js says it should be (only when at live viewport)
+    if (mode === 'pty' && scrollOffset === null) {
       const buffer = xtermTerminal.buffer.active;
       moveTo(buffer.cursorX, _layout.ptyViewportY + buffer.cursorY);
     }
@@ -200,16 +204,27 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
     const pendingCount = deps.getPendingCount();
 
     if (mode === 'pty') {
-      // Row 1: status — tab label left, escalation badge right
+      // Row 1: status — tab label left, scroll indicator + escalation badge right
       moveTo(0, row1);
       const tabLabel = activeTab ? `PTY #${activeTab.number} ${activeTab.label}` : 'No session';
       term.dim(`  [${tabLabel}]`);
-      if (pendingCount > 0) {
-        const badge = ` [!${pendingCount} pending] `;
-        const badgeX = Math.max(0, _cols - badge.length);
-        moveTo(badgeX, row1);
-        term.bgYellow.black(badge);
-        term.styleReset();
+
+      // Right-aligned badges: scroll indicator + escalation badge
+      const scrollOffset = deps.getScrollOffset();
+      const scrollBadge =
+        scrollOffset !== null && activeTab
+          ? ` [\u2191 ${activeTab.bridge.terminal.buffer.active.baseY - scrollOffset} lines] `
+          : '';
+      const escalationBadge = pendingCount > 0 ? ` [!${pendingCount} pending] ` : '';
+      const rightContent = scrollBadge + escalationBadge;
+
+      if (rightContent.length > 0) {
+        moveTo(Math.max(0, _cols - rightContent.length), row1);
+        if (scrollBadge) term.cyan(scrollBadge);
+        if (escalationBadge) {
+          term.bgYellow.black(escalationBadge);
+          term.styleReset();
+        }
       }
       term.eraseLineAfter();
 

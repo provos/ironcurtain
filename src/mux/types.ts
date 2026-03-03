@@ -21,6 +21,8 @@ export interface MuxTab {
   exitCode?: number;
   /** Whether escalation watching is available for this session. */
   escalationAvailable: boolean;
+  /** Scroll offset into xterm buffer (null = live/bottom). */
+  scrollOffset: number | null;
 }
 
 /**
@@ -38,6 +40,8 @@ export type MuxAction =
   | { readonly kind: 'picker-spawn'; readonly workspacePath?: string }
   | { readonly kind: 'picker-cancel' }
   | { readonly kind: 'redraw-picker' }
+  | { readonly kind: 'scroll-up'; readonly amount: number }
+  | { readonly kind: 'scroll-down'; readonly amount: number }
   | { readonly kind: 'quit' };
 
 /**
