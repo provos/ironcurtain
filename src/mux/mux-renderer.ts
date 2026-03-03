@@ -231,7 +231,6 @@ export function createMuxRenderer(
       term.bgWhite.black(' Esc ');
       term.styleReset();
       term.dim(' back');
-      term.styleReset();
       term.eraseLineAfter();
 
       // Row 2: trusted input hint
@@ -372,6 +371,9 @@ export function createMuxRenderer(
     redrawCommandArea(): void {
       recalcLayout();
       if (deps.getMode() === 'command') {
+        // Repaint viewport first to clear stale overlay rows from a
+        // previously larger overlay (e.g., after resolving an escalation).
+        drawPtyViewport();
         drawCommandOverlay();
       } else {
         drawFooter();
@@ -557,6 +559,7 @@ function formatArgLines(args: Record<string, unknown>, maxWidth: number): string
 function formatArgValue(value: unknown): string {
   if (typeof value === 'string') return value;
   if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (value == null) return String(value);
   return JSON.stringify(value);
 }
 
