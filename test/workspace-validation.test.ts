@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdirSync, mkdtempSync, writeFileSync, symlinkSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync, symlinkSync, rmSync, realpathSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { validateWorkspacePath } from '../src/session/workspace-validation.js';
 
 /** Runs `fn` with IRONCURTAIN_HOME temporarily set to `fakePath`, then restores it. */
@@ -34,7 +34,7 @@ describe('validateWorkspacePath', () => {
     const workspace = join(tempDir, 'project');
     mkdirSync(workspace);
     const result = validateWorkspacePath(workspace, []);
-    expect(result).toBe(resolve(workspace));
+    expect(result).toBe(realpathSync(workspace));
   });
 
   it('rejects a non-existent path', () => {
@@ -102,7 +102,7 @@ describe('validateWorkspacePath', () => {
 
     const result = validateWorkspacePath(symlink, []);
     // Should resolve to the real path
-    expect(result).toBe(resolve(realDir));
+    expect(result).toBe(realpathSync(realDir));
   });
 
   it('accepts workspace that does not overlap with protected paths', () => {
@@ -111,6 +111,6 @@ describe('validateWorkspacePath', () => {
     const protectedDir = join(tempDir, 'protected-other');
 
     const result = validateWorkspacePath(workspace, [protectedDir]);
-    expect(result).toBe(resolve(workspace));
+    expect(result).toBe(realpathSync(workspace));
   });
 });
