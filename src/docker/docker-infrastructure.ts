@@ -45,6 +45,9 @@ export interface DockerInfrastructure {
   readonly authKind: 'oauth' | 'apikey';
 }
 
+/** Hosts that use Anthropic OAuth credentials when available. */
+const ANTHROPIC_HOSTS = new Set(['api.anthropic.com', 'platform.claude.com']);
+
 /**
  * Prepares all Docker infrastructure needed to run a session.
  *
@@ -75,6 +78,7 @@ export async function prepareDockerInfrastructure(
   const { mkdirSync } = await import('node:fs');
 
   const { detectAuthMethod } = await import('./oauth-credentials.js');
+  const { OAuthTokenManager } = await import('./oauth-token-manager.js');
 
   await registerBuiltinAdapters();
   const adapter = getAgent(mode.agent);
@@ -118,6 +122,10 @@ export async function prepareDockerInfrastructure(
   // Providers sharing the same fakeKeyPrefix (and thus the same real credential)
   // reuse the same fake key so a single container token authenticates against all hosts.
   const oauthAccessToken = authMethod.kind === 'oauth' ? authMethod.credentials.accessToken : undefined;
+  const tokenManager =
+    authMethod.kind === 'oauth'
+      ? new OAuthTokenManager(authMethod.credentials, { canRefresh: authMethod.source === 'file' })
+      : undefined;
   const providers = adapter.getProviders(authKind);
   const fakeKeys = new Map<string, string>();
   const providerMappings: ProviderKeyMapping[] = [];
@@ -131,7 +139,9 @@ export async function prepareDockerInfrastructure(
     fakeKeys.set(providerConfig.host, fakeKey);
 
     const realKey = resolveRealKey(providerConfig.host, config, oauthAccessToken);
-    providerMappings.push({ config: providerConfig, fakeKey, realKey });
+    // Attach the token manager only to Anthropic hosts (the ones using OAuth)
+    const hostTokenManager = tokenManager && ANTHROPIC_HOSTS.has(providerConfig.host) ? tokenManager : undefined;
+    providerMappings.push({ config: providerConfig, fakeKey, realKey, tokenManager: hostTokenManager });
   }
 
   const mitmProxy = useTcp
@@ -217,8 +227,7 @@ export async function prepareDockerInfrastructure(
  * For all other cases, falls back to the API key from config.
  */
 function resolveRealKey(host: string, config: IronCurtainConfig, oauthAccessToken: string | undefined): string {
-  // OAuth access token replaces API key for Anthropic hosts
-  if (oauthAccessToken && (host === 'api.anthropic.com' || host === 'platform.claude.com')) {
+  if (oauthAccessToken && ANTHROPIC_HOSTS.has(host)) {
     return oauthAccessToken;
   }
 
