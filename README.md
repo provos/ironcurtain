@@ -9,6 +9,7 @@
 
 _\*When someone writes "secure," you should immediately be skeptical. [What do we mean by secure?](https://ironcurtain.dev)_
 
+> [!WARNING]
 > **Research Prototype.** IronCurtain is an early-stage research project exploring how to make AI agents safe enough to be genuinely useful. APIs, configuration formats, and architecture may change. Contributions and feedback are welcome.
 
 ## The Problem
@@ -82,7 +83,7 @@ npm install
 export ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-Or add it to `~/.ironcurtain/config.json` via `ironcurtain config`. Environment variables take precedence. Supported: `ANTHROPIC_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`, `OPENAI_API_KEY`.
+You can also place keys in a `.env` file in the project root (loaded automatically via `dotenv`), or add them to `~/.ironcurtain/config.json` via `ironcurtain config`. Environment variables take precedence over config file values. Supported: `ANTHROPIC_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`, `OPENAI_API_KEY`.
 
 **2. Run the first-start wizard** (runs automatically on first `ironcurtain start`, or explicitly):
 
@@ -149,15 +150,26 @@ ironcurtain start --resume <session-id>
 
 Session IDs are printed on session start and stored under `~/.ironcurtain/sessions/`.
 
-### PTY mode and the escalation listener
+### Terminal multiplexer (recommended for Docker Agent Mode)
 
-PTY mode attaches your terminal directly to Claude Code running inside the Docker container. You get Claude Code's full interactive TUI — spinners, diffs, file previews, slash commands — while IronCurtain still mediates every tool call through its policy engine.
+The terminal multiplexer is the recommended way to use IronCurtain with Docker Agent Mode. It gives you the full power of Claude Code's interactive TUI — spinners, diffs, file previews, slash commands — while IronCurtain mediates every tool call through its policy engine. All in a single terminal.
 
 ```bash
-ironcurtain start --pty
+ironcurtain mux
 ```
 
-**Why a separate escalation listener?** In PTY mode your terminal is fully occupied by Claude Code's raw TTY — there is no channel left to inject escalation prompts inline. Each PTY session registers itself in `~/.ironcurtain/pty-registry/` and a separate companion process handles approvals:
+**Key capabilities:**
+
+- **Full agent TUI** — Claude Code runs in a PTY inside a Docker container with no network access. You interact with it exactly as if it were running locally.
+- **Inline escalation handling** — When a tool call needs approval, an escalation panel overlays the viewport. No separate terminal needed — press Ctrl-A to enter command mode, `/approve N` or `/deny N`, and return.
+- **Trusted user input** — Text typed in command mode (Ctrl-A) is captured on the host side before entering the container. This creates a verified intent signal that the [auto-approver](#auto-approve-escalations) can use — e.g., typing "push my changes to origin" will auto-approve a subsequent `git_push` escalation.
+- **Tab management** — Spawn multiple concurrent sessions (`/new`), switch between them (`/tab N`, Alt-1..9), close them (`/close`).
+
+See [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md) for the full walkthrough: input modes, trusted input security model, escalation workflow, and keyboard reference.
+
+### PTY mode with a separate escalation listener
+
+An alternative to the mux — run a raw PTY session in one terminal and handle escalations in another:
 
 ```bash
 # Terminal 1 — interactive Claude Code session
@@ -167,33 +179,9 @@ ironcurtain start --pty
 ironcurtain escalation-listener
 ```
 
-**How session discovery works:**
+This workflow does not support trusted input or auto-approval for PTY sessions. The mux is recommended instead.
 
-1. When `--pty` starts, it writes a registration file to `~/.ironcurtain/pty-registry/session-<id>.json` containing the session ID, escalation directory path, display label, and process PID.
-2. The escalation listener polls `pty-registry/` every second. It discovers new sessions, attaches an escalation watcher to each one, and detaches watchers when sessions end. Stale registrations (process PID no longer alive) are removed automatically, so a crashed PTY session doesn't leave phantom entries.
-
-**The escalation flow:**
-
-When a tool call is escalated, the PTY session emits a **BEL character** (`\x07`) — your terminal bell or visual flash signals that attention is needed. Switch to the listener terminal. The listener TUI re-renders in place: active sessions are listed with sequential display numbers, and each pending escalation shows the tool name, arguments, and the policy reason for the escalation.
-
-**Listener commands:**
-
-| Command        | Description                               |
-| -------------- | ----------------------------------------- |
-| `/approve N`   | Approve escalation #N                     |
-| `/deny N`      | Deny escalation #N                        |
-| `/approve all` | Approve all pending escalations           |
-| `/deny all`    | Deny all pending escalations              |
-| `/sessions`    | Show detailed session information         |
-| `/quit`        | Exit the listener                         |
-
-Escalation numbers are sequential across all sessions. If you have two active PTY sessions, their escalations share a single numbered list in the dashboard — escalation #3 might be from session [1] and #4 from session [2]. Use the number shown in the dashboard to resolve them.
-
-**Multiple concurrent sessions:** The listener aggregates escalations from all active PTY sessions in one dashboard. Each session is assigned a display number (e.g., `Claude Code [1]`, `Claude Code [2]`) when it first appears.
-
-**Single-instance lock:** Only one escalation listener may run at a time, enforced via a PID-checked lock file at `~/.ironcurtain/escalation-listener.lock`. A stale lock from a crashed process is cleaned up automatically on the next start.
-
-**Emergency exit and terminal recovery:** Press `Ctrl-\` to trigger a graceful shutdown of the PTY session (stops containers, proxies, and performs async cleanup). If the process is killed ungracefully (e.g., `kill -9`), run `reset` in that terminal to restore normal terminal mode.
+**Emergency exit and terminal recovery:** Press `Ctrl-\` to trigger a graceful shutdown of the PTY session. If the process is killed ungracefully, run `reset` in that terminal to restore normal terminal mode.
 
 ### Signal messaging transport
 
@@ -210,15 +198,15 @@ See [TRANSPORT.md](TRANSPORT.md) for setup instructions, architecture details, a
 
 Commands available during an **interactive** or **single-shot** session:
 
-| Command    | Description                                      |
-| ---------- | ------------------------------------------------ |
-| `/approve` | Approve the pending escalation                   |
-| `/deny`    | Deny the pending escalation                      |
-| `/budget`  | Show resource consumption (tokens, steps, cost)  |
-| `/logs`    | Display diagnostic events                        |
-| `/quit`    | End the session                                  |
+| Command    | Description                                     |
+| ---------- | ----------------------------------------------- |
+| `/approve` | Approve the pending escalation                  |
+| `/deny`    | Deny the pending escalation                     |
+| `/budget`  | Show resource consumption (tokens, steps, cost) |
+| `/logs`    | Display diagnostic events                       |
+| `/quit`    | End the session                                 |
 
-In **PTY mode**, use the escalation listener instead (see above) — the PTY terminal is occupied by Claude Code's TUI.
+In **PTY mode**, use the [terminal multiplexer](#terminal-multiplexer-recommended-for-docker-agent-mode) (`ironcurtain mux`) for inline escalation handling and trusted input support.
 
 ## Policy: Constitution → Enforcement
 
@@ -253,9 +241,9 @@ compiles to:
 
 ```json
 [
-  { "tool": "git_status", "decision": "allow",    "condition": { "directory": { "within": "$SANDBOX" } } },
-  { "tool": "git_diff",   "decision": "allow",    "condition": { "directory": { "within": "$SANDBOX" } } },
-  { "tool": "git_push",   "decision": "escalate", "reason": "Remote-contacting git operations require human approval" }
+  { "tool": "git_status", "decision": "allow", "condition": { "directory": { "within": "$SANDBOX" } } },
+  { "tool": "git_diff", "decision": "allow", "condition": { "directory": { "within": "$SANDBOX" } } },
+  { "tool": "git_push", "decision": "escalate", "reason": "Remote-contacting git operations require human approval" }
 ]
 ```
 
@@ -387,11 +375,11 @@ After compilation, review the updated `tool-annotations.json` and `compiled-poli
 
 IronCurtain ships with four pre-configured MCP servers. All tool calls are governed by your compiled policy.
 
-| Server         | Tools | Key capabilities                                                                               |
-| -------------- | ----- | ---------------------------------------------------------------------------------------------- |
-| **Filesystem** | 14    | Read, write, edit, search files; directory tree; move; diff calculation                        |
-| **Git**        | 27    | Full git workflow: status, diff, log, commit, branch, push/pull/fetch, clone, stash, blame     |
-| **Fetch**      | 2     | HTTP GET with HTML-to-markdown conversion; `web_search` (see [Web Search](#web-search))        |
+| Server         | Tools | Key capabilities                                                                                                  |
+| -------------- | ----- | ----------------------------------------------------------------------------------------------------------------- |
+| **Filesystem** | 14    | Read, write, edit, search files; directory tree; move; diff calculation                                           |
+| **Git**        | 27    | Full git workflow: status, diff, log, commit, branch, push/pull/fetch, clone, stash, blame                        |
+| **Fetch**      | 2     | HTTP GET with HTML-to-markdown conversion; `web_search` (see [Web Search](#web-search))                           |
 | **GitHub**     | 41    | Issues, PRs, code search, reviews via `ghcr.io/github/github-mcp-server`; requires a GitHub personal access token |
 
 Read-only operations are allowed by default policy; mutations (writes, pushes, PR creation) escalate for human approval.
@@ -422,17 +410,17 @@ See [docs/SECURITY_CONCERNS.md](docs/SECURITY_CONCERNS.md) for a detailed threat
 
 ## Troubleshooting
 
-| Issue                                       | Guidance                                                                                                                                                                                                                                              |
-| ------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Missing API key**                         | Set the environment variable (`ANTHROPIC_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`, or `OPENAI_API_KEY`) or add the corresponding key to `~/.ironcurtain/config.json`.                                                                                 |
-| **Sandbox unavailable**                     | OS-level sandboxing requires `bubblewrap` and `socat`. Install both, or set `"sandboxPolicy": "warn"` in your MCP server config for development.                                                                                                      |
-| **Budget exhausted**                        | Adjust limits in `~/.ironcurtain/config.json` under `resourceBudget`. Set any individual limit to `null` to disable it.                                                                                                                               |
-| **Node version errors**                     | Node.js 22+ is required (`isolated-vm` needs `>=22.0.0`). Maximum supported is Node 25 (`<26`).                                                                                                                                                       |
-| **Policy doesn't match intent**             | Review `compiled-policy.json` to see the generated rules. Run `ironcurtain customize-policy` to refine your constitution, then `ironcurtain compile-policy` to recompile. Specific wording produces better rules — vague phrasing leads to vague policy. |
-| **Auto-approve not triggering**             | The auto-approver only approves when the user's message explicitly authorizes the action (e.g., "push to origin" for `git_push`). Vague messages always escalate to human review. Verify `autoApprove.enabled` is `true` in `config.json`.             |
-| **PTY terminal garbled after exit**         | Run `reset` in the PTY terminal to restore normal mode. This is needed when the process is killed ungracefully and raw mode is not restored.                                                                                                           |
-| **Escalation listener: "already running"** | Another listener holds the lock at `~/.ironcurtain/escalation-listener.lock`. The lock is auto-cleared if the previous process is dead. If it persists, check the PID in the lock file.                                                               |
-| **Signal bot not responding**               | Verify the signal-cli container is running (`docker ps \| grep ironcurtain-signal`). Check that Signal is configured (`ironcurtain setup-signal`). See [TRANSPORT.md](TRANSPORT.md) for detailed troubleshooting.                                     |
+| Issue                                   | Guidance                                                                                                                                                                                                                                                 |
+| --------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Missing API key**                     | Set the environment variable (`ANTHROPIC_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`, or `OPENAI_API_KEY`) or add the corresponding key to `~/.ironcurtain/config.json`.                                                                                    |
+| **Sandbox unavailable**                 | OS-level sandboxing requires `bubblewrap` and `socat`. Install both, or set `"sandboxPolicy": "warn"` in your MCP server config for development.                                                                                                         |
+| **Budget exhausted**                    | Adjust limits in `~/.ironcurtain/config.json` under `resourceBudget`. Set any individual limit to `null` to disable it.                                                                                                                                  |
+| **Node version errors**                 | Node.js 22+ is required (`isolated-vm` needs `>=22.0.0`). Maximum supported is Node 25 (`<26`).                                                                                                                                                          |
+| **Policy doesn't match intent**         | Review `compiled-policy.json` to see the generated rules. Run `ironcurtain customize-policy` to refine your constitution, then `ironcurtain compile-policy` to recompile. Specific wording produces better rules — vague phrasing leads to vague policy. |
+| **Auto-approve not triggering**         | The auto-approver only approves when the user's message explicitly authorizes the action (e.g., "push to origin" for `git_push`). Vague messages always escalate to human review. Verify `autoApprove.enabled` is `true` in `config.json`.               |
+| **PTY/mux terminal garbled after exit** | Run `reset` in that terminal to restore normal mode. This is needed when the process is killed ungracefully and raw mode is not restored.                                                                                                                |
+| **Mux/listener: "already running"**     | Only one mux or escalation-listener can run at a time. The lock at `~/.ironcurtain/escalation-listener.lock` is auto-cleared if the previous process is dead. If it persists, check the PID in the lock file.                                            |
+| **Signal bot not responding**           | Verify the signal-cli container is running (`docker ps \| grep ironcurtain-signal`). Check that Signal is configured (`ironcurtain setup-signal`). See [TRANSPORT.md](TRANSPORT.md) for detailed troubleshooting.                                        |
 
 ## Development
 
@@ -461,6 +449,7 @@ src/
 ├── trusted-process/            # Policy engine, MCP proxy, audit log, escalation handler
 ├── pipeline/                   # Constitution → policy compilation pipeline
 ├── escalation/                 # Escalation listener: session registry, TUI dashboard, state
+├── mux/                        # Terminal multiplexer: PTY bridge, renderer, trusted input
 ├── signal/                     # Signal messaging transport (bot daemon, setup, formatting)
 ├── docker/                     # Docker agent mode, PTY session, MITM proxy, adapters
 ├── servers/                    # Built-in MCP servers (fetch, web search providers)
