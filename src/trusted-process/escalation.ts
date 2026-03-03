@@ -10,6 +10,9 @@ export class EscalationHandler {
         input: process.stdin,
         output: process.stderr,
       });
+      // Prevent the readline's stdin listener from keeping the process alive.
+      // The caller (TrustedProcess) manages the process lifecycle explicitly.
+      process.stdin.unref();
     }
     return this.rl;
   }
@@ -48,6 +51,8 @@ export class EscalationHandler {
     if (this.rl) {
       this.rl.close();
       this.rl = null;
+      // Restore stdin's ref so other consumers are not affected.
+      process.stdin.ref();
     }
   }
 }

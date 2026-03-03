@@ -26,6 +26,7 @@ import {
   type ProviderConfig,
   type RequestBodyRewriter,
 } from './provider-config.js';
+import type { OAuthTokenManager } from './oauth-token-manager.js';
 import * as logger from '../logger.js';
 
 export interface MitmProxy {
@@ -53,8 +54,10 @@ export interface ProviderKeyMapping {
   readonly config: ProviderConfig;
   /** The fake sentinel key given to the container. */
   readonly fakeKey: string;
-  /** The real API key to inject in upstream requests. */
-  readonly realKey: string;
+  /** The real API key to inject in upstream requests. Mutable for token refresh. */
+  realKey: string;
+  /** Optional token manager for OAuth providers — enables proactive refresh and 401 retry. */
+  readonly tokenManager?: OAuthTokenManager;
 }
 
 /** Connection reset errors are routine during proxy shutdown or client disconnect. */
@@ -63,6 +66,8 @@ function isConnectionReset(err: NodeJS.ErrnoException): boolean {
 }
 
 const MAX_REWRITE_BODY_BYTES = 10 * 1024 * 1024; // 10 MB
+/** Max Content-Length for which we buffer solely for 401 retry (1 MB). */
+const MAX_RETRY_BODY_BYTES = 1 * 1024 * 1024;
 
 /**
  * Buffers the entire request body into a single Buffer.
@@ -178,7 +183,8 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
 
     // 2. Fake key validation + swap
     const modifiedHeaders = { ...headers };
-    if (!validateAndSwapApiKey(modifiedHeaders, provider)) {
+    const keyResult = validateAndSwapApiKey(modifiedHeaders, provider);
+    if (!keyResult.valid) {
       logger.info(`[mitm-proxy] REJECTED ${method} ${targetHost}${path} - invalid API key`);
       clientRes.writeHead(403, { 'Content-Type': 'text/plain' });
       clientRes.end('Rejected: API key does not match expected sentinel.');
@@ -186,15 +192,33 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     }
     modifiedHeaders.host = targetHost;
 
-    // 3. Forward to real API - either direct pipe or buffer+rewrite
+    // 3. Forward to real API - either direct pipe or buffer+rewrite.
+    // Only enable 401 retry if the request actually carried the fake key —
+    // unauthenticated requests should not have credentials injected on retry.
     const needsRewrite = shouldRewriteBody(provider.config, method, path);
+    const canRetryAuth = keyResult.hadKey && !!provider.tokenManager;
+    // Only buffer for retry when the body is small enough (known Content-Length
+    // under 1MB). Large or chunked bodies stream through without retry support
+    // to avoid memory overhead and 413 rejections on large payloads.
+    const contentLength = parseInt(clientReq.headers['content-length'] ?? '', 10);
+    const retryBufferOk = canRetryAuth && Number.isFinite(contentLength) && contentLength <= MAX_RETRY_BODY_BYTES;
+    const needsBuffer = needsRewrite || retryBufferOk;
 
-    function forwardRequest(bodyOverride?: Buffer): void {
-      logger.info(`[mitm-proxy] ${method} ${targetHost}${path} → FORWARDED`);
+    /**
+     * Sends the request upstream with optional body override and 401 retry.
+     * When a tokenManager is present and the upstream returns 401, it consumes
+     * the error response, refreshes the token, and retries once.
+     */
+    function forwardRequest(bodyOverride?: Buffer, isRetry?: boolean): void {
+      logger.info(`[mitm-proxy] ${method} ${targetHost}${path} → FORWARDED${isRetry ? ' (retry)' : ''}`);
 
       const finalHeaders = { ...modifiedHeaders };
       if (bodyOverride) {
+        // When we've buffered the body, set the definitive content-length and
+        // remove transfer-encoding to avoid sending both (which is an invalid
+        // HTTP request and a request-smuggling vector per RFC 7230 §3.3.3).
         finalHeaders['content-length'] = bodyOverride.length.toString();
+        delete finalHeaders['transfer-encoding'];
       }
 
       const upstreamReq = https.request(
@@ -216,6 +240,33 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
               clientRes.socket?.destroy();
             }
           });
+
+          // 401 retry: requires a buffered body (bodyOverride), an authenticated
+          // request (canRetryAuth), and not already a retry.
+          const { tokenManager } = provider;
+          if (upstreamRes.statusCode === 401 && tokenManager && canRetryAuth && bodyOverride && !isRetry) {
+            // Consume the 401 response body to free the connection, then retry.
+            // Guard against the upstream closing/aborting before 'end' fires —
+            // without this the client request would hang indefinitely.
+            let handled = false;
+            const onDrained = (): void => {
+              if (handled) return;
+              handled = true;
+              retryWithRefreshedToken(tokenManager, provider, modifiedHeaders, bodyOverride, clientRes, forwardRequest);
+            };
+            const onAborted = (): void => {
+              if (handled) return;
+              handled = true;
+              if (!clientRes.headersSent) {
+                clientRes.writeHead(502, { 'Content-Type': 'text/plain' });
+                clientRes.end('Upstream connection closed during auth retry.');
+              }
+            };
+            upstreamRes.resume();
+            upstreamRes.on('end', onDrained);
+            upstreamRes.on('close', onAborted);
+            return;
+          }
 
           clientRes.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers);
           clientRes.flushHeaders();
@@ -257,28 +308,59 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
       }
     }
 
-    if (needsRewrite) {
-      // Reject requests with content-encoding we cannot parse (e.g. gzip).
-      // Without this, a compressed body would fail JSON.parse and be forwarded
-      // as-is, bypassing the rewriter while the upstream decompresses it.
-      const contentEncoding = clientReq.headers['content-encoding']?.toLowerCase();
-      if (contentEncoding && contentEncoding !== 'identity') {
-        logger.info(
-          `[mitm-proxy] REJECTED ${method} ${targetHost}${path} - unsupported Content-Encoding: ${contentEncoding}`,
-        );
-        clientRes.writeHead(415, { 'Content-Type': 'text/plain' });
-        clientRes.end(`Unsupported Content-Encoding for this endpoint: ${contentEncoding}`);
-        return;
+    /**
+     * Handles proactive token refresh, body buffering/rewriting, and forwarding.
+     * Async to support the token manager's getValidAccessToken() call.
+     */
+    async function processRequest(): Promise<void> {
+      // Proactive token refresh: ensure the real key is fresh before forwarding.
+      // Only update headers if the request actually carried the fake key.
+      if (provider.tokenManager) {
+        try {
+          const freshToken = await provider.tokenManager.getValidAccessToken();
+          if (freshToken !== provider.realKey) {
+            provider.realKey = freshToken;
+            if (keyResult.hadKey) {
+              injectRealKey(modifiedHeaders, provider);
+            }
+          }
+        } catch (err) {
+          logger.warn(
+            `[mitm-proxy] Proactive token refresh failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+          // Continue with existing token — it may still work
+        }
       }
 
-      // shouldRewriteBody guarantees requestRewriter, method, and path are defined
-      const rewriter = provider.config.requestRewriter as RequestBodyRewriter;
-      const reqMethod = method as string;
-      const reqPath = path as string;
+      if (needsBuffer) {
+        // Reject requests with content-encoding we cannot parse (e.g. gzip).
+        const contentEncoding = clientReq.headers['content-encoding']?.toLowerCase();
+        if (needsRewrite && contentEncoding && contentEncoding !== 'identity') {
+          logger.info(
+            `[mitm-proxy] REJECTED ${method} ${targetHost}${path} - unsupported Content-Encoding: ${contentEncoding}`,
+          );
+          clientRes.writeHead(415, { 'Content-Type': 'text/plain' });
+          clientRes.end(`Unsupported Content-Encoding for this endpoint: ${contentEncoding}`);
+          return;
+        }
 
-      bufferRequestBody(clientReq, MAX_REWRITE_BODY_BYTES)
-        .then((rawBody) => {
-          let finalBody = rawBody;
+        let rawBody: Buffer;
+        try {
+          rawBody = await bufferRequestBody(clientReq, MAX_REWRITE_BODY_BYTES);
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : 'Request body too large';
+          if (!clientRes.headersSent) {
+            clientRes.writeHead(413, { 'Content-Type': 'text/plain' });
+            clientRes.end(message);
+          }
+          return;
+        }
+
+        let finalBody = rawBody;
+        if (needsRewrite) {
+          const rewriter = provider.config.requestRewriter as RequestBodyRewriter;
+          const reqMethod = method as string;
+          const reqPath = path as string;
           try {
             const parsed = JSON.parse(rawBody.toString()) as Record<string, unknown>;
             const result = rewriter(parsed, { method: reqMethod, path: reqPath });
@@ -291,18 +373,21 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
           } catch {
             logger.info(`[mitm-proxy] POST ${targetHost}${path} - failed to parse request body, forwarding as-is`);
           }
-          forwardRequest(finalBody);
-        })
-        .catch((err: unknown) => {
-          const message = err instanceof Error ? err.message : 'Request body too large';
-          if (!clientRes.headersSent) {
-            clientRes.writeHead(413, { 'Content-Type': 'text/plain' });
-            clientRes.end(message);
-          }
-        });
-    } else {
-      forwardRequest();
+        }
+
+        forwardRequest(finalBody);
+      } else {
+        forwardRequest();
+      }
     }
+
+    processRequest().catch((err: unknown) => {
+      logger.info(`[mitm-proxy] request processing error: ${err instanceof Error ? err.message : String(err)}`);
+      if (!clientRes.headersSent) {
+        clientRes.writeHead(500, { 'Content-Type': 'text/plain' });
+        clientRes.end('Internal proxy error');
+      }
+    });
   });
 
   // Outer server - UDS listener, handles CONNECT
@@ -472,30 +557,87 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
 }
 
 /**
+ * Injects the real key into already-validated headers.
+ * Used after a token refresh to update the Authorization/API-key header
+ * with the new real key before a retry.
+ */
+function injectRealKey(headers: Record<string, string | string[] | undefined>, provider: ProviderKeyMapping): void {
+  const { keyInjection } = provider.config;
+  switch (keyInjection.type) {
+    case 'header':
+      headers[keyInjection.headerName.toLowerCase()] = provider.realKey;
+      break;
+    case 'bearer':
+      headers['authorization'] = `Bearer ${provider.realKey}`;
+      break;
+  }
+}
+
+/**
+ * Attempts to refresh the OAuth token and retry the request.
+ * Called when upstream returns 401 and a token manager is available.
+ */
+function retryWithRefreshedToken(
+  tokenManager: OAuthTokenManager,
+  provider: ProviderKeyMapping,
+  headers: Record<string, string | string[] | undefined>,
+  body: Buffer,
+  clientRes: http.ServerResponse,
+  forwardRequest: (bodyOverride?: Buffer, isRetry?: boolean) => void,
+): void {
+  tokenManager
+    .handleAuthFailure()
+    .then((newToken) => {
+      if (newToken) {
+        provider.realKey = newToken;
+        injectRealKey(headers, provider);
+        forwardRequest(body, true);
+      } else if (!clientRes.headersSent) {
+        clientRes.writeHead(401, { 'Content-Type': 'text/plain' });
+        clientRes.end('Authentication failed: unable to refresh OAuth token.');
+      }
+    })
+    .catch(() => {
+      if (!clientRes.headersSent) {
+        clientRes.writeHead(401, { 'Content-Type': 'text/plain' });
+        clientRes.end('Authentication failed: token refresh error.');
+      }
+    });
+}
+
+/** Result of fake key validation. */
+type KeyValidationResult =
+  | { valid: true; hadKey: true } // fake key matched and was swapped
+  | { valid: true; hadKey: false } // no key sent (unauthenticated endpoint)
+  | { valid: false; hadKey: false }; // wrong key — reject request
+
+/**
  * Validates that the request carries the expected fake key, then replaces
- * it with the real key. Returns false if the fake key does not match.
+ * it with the real key. Returns validation result including whether the
+ * request actually carried an API key (used to gate 401 retry — requests
+ * without a key should not have credentials injected on retry).
  */
 function validateAndSwapApiKey(
   headers: Record<string, string | string[] | undefined>,
   provider: ProviderKeyMapping,
-): boolean {
+): KeyValidationResult {
   const { keyInjection } = provider.config;
 
   switch (keyInjection.type) {
     case 'header': {
       const headerName = keyInjection.headerName.toLowerCase();
       const currentValue = headers[headerName];
-      if (currentValue === undefined) return true; // no key sent — unauthenticated endpoint
-      if (currentValue !== provider.fakeKey) return false;
+      if (currentValue === undefined) return { valid: true, hadKey: false };
+      if (currentValue !== provider.fakeKey) return { valid: false, hadKey: false };
       headers[headerName] = provider.realKey;
-      return true;
+      return { valid: true, hadKey: true };
     }
     case 'bearer': {
       const authHeader = headers['authorization'];
-      if (authHeader === undefined) return true; // no key sent — unauthenticated endpoint
-      if (authHeader !== `Bearer ${provider.fakeKey}`) return false;
+      if (authHeader === undefined) return { valid: true, hadKey: false };
+      if (authHeader !== `Bearer ${provider.fakeKey}`) return { valid: false, hadKey: false };
       headers['authorization'] = `Bearer ${provider.realKey}`;
-      return true;
+      return { valid: true, hadKey: true };
     }
   }
 }

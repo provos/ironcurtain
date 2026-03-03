@@ -444,6 +444,9 @@ export class AgentSession implements Session {
     this.escalationPollInterval = setInterval(() => {
       this.pollEscalationDirectory();
     }, ESCALATION_POLL_INTERVAL_MS);
+    // Don't keep the process alive just for escalation polling.
+    // The session owner is responsible for the process lifecycle.
+    this.escalationPollInterval.unref();
   }
 
   private pollEscalationDirectory(): void {

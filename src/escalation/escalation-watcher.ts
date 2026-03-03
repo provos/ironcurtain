@@ -111,6 +111,8 @@ export function createEscalationWatcher(
     start(): void {
       if (pollInterval) return;
       pollInterval = setInterval(pollEscalationDirectory, pollIntervalMs);
+      // Don't keep the process alive just for escalation polling.
+      pollInterval.unref();
     },
 
     stop(): void {

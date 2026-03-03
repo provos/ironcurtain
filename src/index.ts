@@ -10,6 +10,7 @@ import * as logger from './logger.js';
 import { CliTransport } from './session/cli-transport.js';
 import { createSession } from './session/index.js';
 import { resolveSessionMode } from './session/preflight.js';
+import { validateWorkspacePath } from './session/workspace-validation.js';
 import type { AgentId } from './docker/agent-adapter.js';
 
 export async function main(args?: string[]): Promise<void> {
@@ -18,6 +19,7 @@ export async function main(args?: string[]): Promise<void> {
     options: {
       resume: { type: 'string', short: 'r' },
       agent: { type: 'string', short: 'a' },
+      workspace: { type: 'string', short: 'w' },
       pty: { type: 'boolean' },
       'list-agents': { type: 'boolean' },
     },
@@ -45,7 +47,25 @@ export async function main(args?: string[]): Promise<void> {
   const task = positionals.join(' ');
   const resumeSessionId = values.resume as string | undefined;
   const agentName = values.agent as string | undefined;
+  const rawWorkspace = values.workspace as string | undefined;
   const config = loadConfig();
+
+  // Disallow combining --resume with --workspace
+  if (resumeSessionId && rawWorkspace) {
+    process.stderr.write(chalk.red('Error: --resume and --workspace cannot be used together.\n'));
+    process.exit(1);
+  }
+
+  // Validate --workspace before anything else that uses config
+  let workspacePath: string | undefined;
+  if (rawWorkspace) {
+    try {
+      workspacePath = validateWorkspacePath(rawWorkspace, config.protectedPaths);
+    } catch (error) {
+      process.stderr.write(chalk.red(`Invalid workspace: ${error instanceof Error ? error.message : String(error)}\n`));
+      process.exit(1);
+    }
+  }
 
   // Pre-flight: resolve session mode (auto-detect or validate explicit --agent)
   const preflight = await resolveSessionMode({
@@ -81,7 +101,7 @@ export async function main(args?: string[]): Promise<void> {
     }
 
     const { runPtySession } = await import('./docker/pty-session.js');
-    await runPtySession({ config, mode });
+    await runPtySession({ config, mode, workspacePath });
     process.exit(0);
   }
 
@@ -100,6 +120,7 @@ export async function main(args?: string[]): Promise<void> {
       config,
       mode,
       resumeSessionId,
+      workspacePath,
       onEscalation: transport.createEscalationHandler(),
       onEscalationExpired: transport.createEscalationExpiredHandler(),
       onDiagnostic: transport.createDiagnosticHandler(),

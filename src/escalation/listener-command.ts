@@ -73,7 +73,8 @@ export async function main(): Promise<void> {
     rl.prompt(true);
   };
 
-  // Poll for new/removed sessions
+  // Poll for new/removed sessions. The readline 'close' event
+  // drives shutdown, so these timers must not keep the process alive.
   const registryPollInterval = setInterval(() => {
     const registrations = readActiveRegistrations(registryDir);
     const currentIds = new Set(registrations.map((r) => r.sessionId));
@@ -110,6 +111,7 @@ export async function main(): Promise<void> {
 
     if (changed) render();
   }, REGISTRY_POLL_INTERVAL_MS);
+  registryPollInterval.unref();
 
   // Initial render: clear screen once, then use repositioning from now on
   rl.setPrompt('  > ');
@@ -153,7 +155,9 @@ export async function main(): Promise<void> {
     running = false;
   });
 
-  // Wait until quit
+  // Wait until quit. The readline 'close' event sets running=false.
+  // Use unref so this polling loop doesn't keep the process alive
+  // if readline closes without setting the flag (e.g., stdin EOF).
   await new Promise<void>((resolve) => {
     const checkInterval = setInterval(() => {
       if (!running) {
@@ -161,6 +165,7 @@ export async function main(): Promise<void> {
         resolve();
       }
     }, 100);
+    checkInterval.unref();
   });
 
   // Cleanup

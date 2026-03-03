@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-03-01
+
+### Features
+
+- **Reverse path rewriting for Docker agent sessions** — MCP server results containing host sandbox paths are now rewritten back to `/workspace` before reaching the agent, completing the symmetric path translation; `CONTAINER_WORKSPACE_DIR` extracted as a shared constant (#49)
+- **Improved Docker agent system prompt** — remove bind-mount details and host path exposure, replace with clear guidance on when to use `execute_code` vs built-in tools; add attribution guidance for IronCurtain (#49)
+
+### Fixes
+
+- Skip MCP servers with missing environment variables instead of crashing — graceful degradation when Docker `-e VAR_NAME` forwarding references unset host env vars
+- Resolve PTY size mismatch in Docker agent sessions — set initial PTY size via env vars before exec'ing Claude, add verify+retry loop with `check-pty-size.sh`, use `pgrep -x claude` for reliable process detection
+- Stabilize TCP transport test on macOS — use message-flow synchronization instead of probe-based polling
+
 ## [0.5.0] - 2026-03-01
 
 ### Features
@@ -196,6 +209,7 @@ Initial public release.
 - CI pipeline with Node 22/24 matrix testing
 - Code of Conduct, Contributing guidelines, Security policy
 
+[0.5.1]: https://github.com/provos/ironcurtain/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/provos/ironcurtain/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/provos/ironcurtain/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/provos/ironcurtain/compare/v0.3.1...v0.4.0
