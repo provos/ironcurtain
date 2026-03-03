@@ -42,8 +42,8 @@ describe('writeTrustedUserContext', () => {
     const data = JSON.parse(readFileSync(contextPath, 'utf-8')) as Record<string, unknown>;
 
     expect(typeof data.timestamp).toBe('string');
-    expect(data.timestamp as string >= before).toBe(true);
-    expect(data.timestamp as string <= after).toBe(true);
+    expect((data.timestamp as string) >= before).toBe(true);
+    expect((data.timestamp as string) <= after).toBe(true);
   });
 
   it('uses atomic write (no .tmp file left behind)', () => {

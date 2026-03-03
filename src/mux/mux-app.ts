@@ -191,6 +191,9 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
         if (active && active.bridge.alive) {
           if (active.bridge.escalationDir) {
             writeTrustedUserContext(active.bridge.escalationDir, action.text);
+          } else {
+            logger.warn(`Tab #${active.number}: escalation dir not yet available, skipping user-context write`);
+            process.stderr.write('\x07');
           }
           // Write text first, then \r separately after a short delay so
           // Claude Code's Ink UI processes them as distinct input events.
@@ -280,10 +283,7 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
 
       case 'sessions': {
         const sessionInfo = [...escalationManager.state.sessions.values()]
-          .map(
-            (s) =>
-              `  [${s.displayNumber}] ${s.registration.sessionId.substring(0, 8)} ${s.registration.label}`,
-          )
+          .map((s) => `  [${s.displayNumber}] ${s.registration.sessionId.substring(0, 8)} ${s.registration.label}`)
           .join('\n');
         showMessage(sessionInfo || 'No active sessions');
         break;
@@ -327,7 +327,7 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
       running = true;
 
       const terminalKit = await import('terminal-kit');
-      term = terminalKit.default?.terminal ?? terminalKit.terminal;
+      term = terminalKit.default.terminal;
 
       term.fullscreen(true);
       term.hideCursor(true);
@@ -379,6 +379,22 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
       });
 
       escalationManager.startRegistryPolling();
+
+      // Back-fill bridge registrations that timed out during initial
+      // discovery. When registry polling finds a session whose PID
+      // matches a bridge that still has no registration, push it in.
+      escalationManager.onSessionDiscovered((reg) => {
+        for (const tab of tabs) {
+          if (tab.bridge.pid === reg.pid && !tab.bridge.sessionId) {
+            tab.bridge.updateRegistration(reg);
+            tab.escalationAvailable = true;
+            tab.label = reg.label;
+            escalationManager.claimSession(reg.sessionId);
+            renderer.redrawTabBar();
+            break;
+          }
+        }
+      });
 
       const handleSignal = (): void => {
         doShutdown();

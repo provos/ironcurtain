@@ -166,7 +166,7 @@ describe('MuxInputHandler', () => {
       handler.handleKey('a');
       handler.handleKey('c');
       handler.handleKey('LEFT'); // cursor at position 1
-      handler.handleKey('b');    // insert 'b' at position 1
+      handler.handleKey('b'); // insert 'b' at position 1
       expect(handler.inputBuffer).toBe('abc');
     });
 

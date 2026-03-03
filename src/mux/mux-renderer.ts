@@ -21,9 +21,9 @@ import type { ListenerState } from '../escalation/listener-state.js';
 
 // -- xterm.js color mode constants (from IBufferCell.getFgColorMode/getBgColorMode) --
 const CM_DEFAULT = 0;
-const CM_P16 = 16777216;   // 0x01000000
-const CM_P256 = 33554432;  // 0x02000000
-const CM_RGB = 50331648;   // 0x03000000
+const CM_P16 = 16777216; // 0x01000000
+const CM_P256 = 33554432; // 0x02000000
+const CM_RGB = 50331648; // 0x03000000
 
 /** Color type compatible with terminal-kit ScreenBufferHD. */
 export type TermkitColor = number | { r: number; g: number; b: number } | 'default';
@@ -81,12 +81,7 @@ export interface MuxRendererDeps {
 /**
  * Creates a MuxRenderer.
  */
-export function createMuxRenderer(
-  term: TerminalKit,
-  cols: number,
-  rows: number,
-  deps: MuxRendererDeps,
-): MuxRenderer {
+export function createMuxRenderer(term: TerminalKit, cols: number, rows: number, deps: MuxRendererDeps): MuxRenderer {
   let _cols = cols;
   let _rows = rows;
   let _layout = calculateLayout(_rows, deps.getMode(), deps.getPendingCount());
@@ -157,8 +152,7 @@ export function createMuxRenderer(
 
     // Determine how many rows to render (skip overlay in command mode)
     const mode = deps.getMode();
-    const visibleRows =
-      mode === 'command' ? _layout.ptyViewportRows - _layout.overlayRows : _layout.ptyViewportRows;
+    const visibleRows = mode === 'command' ? _layout.ptyViewportRows - _layout.overlayRows : _layout.ptyViewportRows;
 
     for (let y = 0; y < visibleRows; y++) {
       moveTo(0, _layout.ptyViewportY + y);
@@ -213,7 +207,9 @@ export function createMuxRenderer(
       term.bgWhite.black(' ^^A ');
       term.styleReset();
       if (pendingCount > 0) {
-        term.dim(` command mode \u00b7 ${pendingCount} escalation${pendingCount !== 1 ? 's' : ''} pending \u2014 /approve or /deny`);
+        term.dim(
+          ` command mode \u00b7 ${pendingCount} escalation${pendingCount !== 1 ? 's' : ''} pending \u2014 /approve or /deny`,
+        );
       } else {
         term.dim(' command mode \u00b7 type a message to enable auto-approver');
       }
@@ -460,7 +456,12 @@ function translateCell(cell: any): TranslatedCell | null {
 /**
  * Reads the headless terminal buffer and translates each cell.
  */
-export function readTerminalBuffer(terminal: TerminalType, startRow: number, rows: number, cols: number): TranslatedCell[][] {
+export function readTerminalBuffer(
+  terminal: TerminalType,
+  startRow: number,
+  rows: number,
+  cols: number,
+): TranslatedCell[][] {
   const buffer = terminal.buffer.active;
   const result: TranslatedCell[][] = [];
 

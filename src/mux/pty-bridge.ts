@@ -68,6 +68,13 @@ export interface PtyBridge {
    * is discovered (sessionId and escalationDir become available).
    */
   onSessionDiscovered(callback: (registration: PtySessionRegistration | null) => void): void;
+
+  /**
+   * Updates the registration if not already set (e.g. from late discovery
+   * via the escalation manager's registry polling). Fires any queued
+   * session callbacks.
+   */
+  updateRegistration(registration: PtySessionRegistration): void;
 }
 
 export interface PtyBridgeOptions {
@@ -133,6 +140,7 @@ export async function createPtyBridge(options: PtyBridgeOptions): Promise<PtyBri
   void discoverSessionRegistration(child.pid).then((registration) => {
     _registration = registration;
     for (const cb of sessionCallbacks) cb(registration);
+    sessionCallbacks.length = 0;
   });
 
   return {
@@ -183,6 +191,13 @@ export async function createPtyBridge(options: PtyBridgeOptions): Promise<PtyBri
         return;
       }
       sessionCallbacks.push(callback);
+    },
+
+    updateRegistration(registration: PtySessionRegistration): void {
+      if (_registration) return; // already have one
+      _registration = registration;
+      for (const cb of sessionCallbacks) cb(registration);
+      sessionCallbacks.length = 0;
     },
   };
 }

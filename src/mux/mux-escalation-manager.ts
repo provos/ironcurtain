@@ -56,6 +56,19 @@ export interface MuxEscalationManager {
 
   /** Register callback for state changes (triggers redraws). */
   onChange(callback: () => void): void;
+
+  /**
+   * Registers a callback fired when registry polling discovers a new
+   * external session. Used to back-fill bridge registrations that
+   * timed out during initial discovery.
+   */
+  onSessionDiscovered(callback: (reg: PtySessionRegistration) => void): void;
+
+  /**
+   * Marks a session ID as managed so registry polling treats it as
+   * owned by the mux (won't re-add after removal).
+   */
+  claimSession(sessionId: string): void;
 }
 
 /**
@@ -64,6 +77,7 @@ export interface MuxEscalationManager {
 export function createMuxEscalationManager(): MuxEscalationManager {
   let state = createInitialState();
   const changeCallbacks: Array<() => void> = [];
+  const discoveryCallbacks: Array<(reg: PtySessionRegistration) => void> = [];
   let registryPollInterval: ReturnType<typeof setInterval> | null = null;
 
   // Track session IDs that we manage (spawned by mux)
@@ -73,10 +87,7 @@ export function createMuxEscalationManager(): MuxEscalationManager {
     for (const cb of changeCallbacks) cb();
   }
 
-  function createWatcherForSession(
-    sessionId: string,
-    escalationDir: string,
-  ): EscalationWatcher {
+  function createWatcherForSession(sessionId: string, escalationDir: string): EscalationWatcher {
     return createEscalationWatcher(
       escalationDir,
       {
@@ -191,6 +202,7 @@ export function createMuxEscalationManager(): MuxEscalationManager {
             state = addSession(state, reg, watcher);
             watcher.start();
             changed = true;
+            for (const cb of discoveryCallbacks) cb(reg);
           }
         }
 
@@ -221,6 +233,14 @@ export function createMuxEscalationManager(): MuxEscalationManager {
 
     onChange(callback: () => void): void {
       changeCallbacks.push(callback);
+    },
+
+    onSessionDiscovered(callback: (reg: PtySessionRegistration) => void): void {
+      discoveryCallbacks.push(callback);
+    },
+
+    claimSession(sessionId: string): void {
+      managedSessionIds.add(sessionId);
     },
   };
 }
