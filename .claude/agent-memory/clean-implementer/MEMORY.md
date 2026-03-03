@@ -247,6 +247,21 @@ When mocking `generateText` for session tests:
 - **CLI**: `--agent <name>` flag in `src/index.ts`, `--list-agents` to show registered adapters
 - **Tests**: `test/docker-session.test.ts` (20), `test/docker-agent-adapter.test.ts` (15), `test/docker-manager.test.ts` (18), `test/connect-proxy.test.ts` (6), `test/uds-server-transport.test.ts` (8)
 
+## Goose Agent Integration
+- **Adapter**: `src/docker/adapters/goose.ts` -- `createGooseAdapter(userConfig?)` factory; provider-aware (anthropic/openai/google)
+- **Config fields**: `gooseProvider`, `gooseModel`, `preferredDockerAgent` added to `UserConfig`/`ResolvedUserConfig`
+- **AgentAdapter extensions**: `detectCredential?(config)` and `credentialHelpText?` added to interface in `agent-adapter.ts`
+- **Credential detection**: `docker-infrastructure.ts` delegates to `adapter.detectCredential()` when present
+- **Registry**: `registerBuiltinAdapters(userConfig?)` accepts optional config; imports goose adapter dynamically
+- **Preflight**: `preflight.ts` checks provider-specific API key for `goose` agent; uses `preferredDockerAgent` for auto-detect
+- **Docker files**: `docker/Dockerfile.goose` (Goose binary install), `docker/entrypoint-goose.sh` (bridge + config copy)
+- **MCP config**: YAML format (`goose-config.yaml`); Goose extensions format with stdio/socat bridge
+- **Response parsing**: heuristic `extractFinalResponse()` extracts last text block; `stripAnsi()` for ANSI removal
+- **Heredoc safety**: `escapeHeredoc()` generates unique delimiters when content collides
+- **Tests**: `test/goose-adapter.test.ts` -- 70 tests covering all adapter methods + helpers
+- **Config UI**: `config-command.ts` has Goose section (provider, model, preferred agent)
+- **Key test gotcha**: test configs with `userConfig: ResolvedUserConfig` must include `gooseProvider`, `gooseModel`, `preferredDockerAgent`
+
 ## Subsystems (see subsystems.md for details)
 - **Session Logging**: `src/logger.ts` -- singleton with `setup()`/`teardown()`; test gotcha: must call `teardown()` in `afterEach`
 - **Execution Containment**: `src/trusted-process/sandbox-integration.ts` -- wraps MCP servers in `srt` processes

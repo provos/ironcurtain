@@ -211,10 +211,10 @@ Both use the same PolicyEngine with compiled artifacts.
 
 ## OAuth Docker Support (designed 2026-02-28)
 - See `docs/designs/oauth-docker-support.md` for full spec
-- Claude Code OAuth: `~/.claude/.credentials.json` has `claudeAiOauth.{accessToken,refreshToken,expiresAt}`
-- OAuth uses `Authorization: Bearer` + `anthropic-beta: oauth-2025-04-20` (not x-api-key)
-- Account metadata in `~/.claude.json` `oauthAccount` field (non-sensitive)
-- Design: fake OAuth tokens injected into container, MITM swaps bearer token
-- Preference: OAuth > API key (matches Claude Code behavior)
-- Token refresh: host-side only at session start; mid-session 401s require restart
-- Refresh token rotation: each refresh invalidates old token (known race condition issue)
+
+## Goose Agent Integration (designed 2026-03-03)
+- See `goose-integration.md` topic file and `docs/designs/goose-agent-integration.md`
+- Second Docker Agent Mode agent, validates agent-agnostic claim
+- Factory-constructed adapter: `createGooseAdapter(userConfig)` for provider selection
+- Stateless batch mode (no --resume-session), PTY mode is primary recommendation
+- Response parsing needs prototyping (no JSON output mode in Goose)
