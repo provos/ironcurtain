@@ -96,6 +96,7 @@ export async function main(args?: string[]): Promise<void> {
   try {
     const app = createMuxApp({
       agent,
+      autoSpawn: false,
       protectedPaths,
     });
 
