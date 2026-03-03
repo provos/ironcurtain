@@ -19,9 +19,13 @@ import {
   WEB_SEARCH_PROVIDERS,
   WEB_SEARCH_PROVIDER_LABELS,
   WEB_SEARCH_PROVIDER_URLS,
+  GOOSE_PROVIDERS,
+  DOCKER_AGENTS,
   type UserConfig,
   type ResolvedUserConfig,
   type WebSearchProvider,
+  type GooseProvider,
+  type DockerAgent,
 } from './user-config.js';
 import { getUserConfigPath } from './paths.js';
 import type { MCPServerConfig } from './types.js';
@@ -96,7 +100,14 @@ interface DiffEntry {
 export function computeDiff(resolved: ResolvedUserConfig, pending: UserConfig): [string, DiffEntry][] {
   const diffs: [string, DiffEntry][] = [];
 
-  const topLevelKeys = ['agentModelId', 'policyModelId', 'escalationTimeoutSeconds'] as const;
+  const topLevelKeys = [
+    'agentModelId',
+    'policyModelId',
+    'escalationTimeoutSeconds',
+    'gooseProvider',
+    'gooseModel',
+    'preferredDockerAgent',
+  ] as const;
   for (const key of topLevelKeys) {
     if (key in pending && pending[key] !== undefined && pending[key] !== resolved[key]) {
       diffs.push([key, { from: resolved[key], to: pending[key] }]);
@@ -650,6 +661,100 @@ async function handleServerCredentials(resolved: ResolvedUserConfig, pending: Us
   }
 }
 
+// ─── Goose Agent Settings ─────────────────────────────────────
+
+/** Human-readable labels for Goose providers. */
+const GOOSE_PROVIDER_LABELS: Readonly<Record<GooseProvider, string>> = {
+  anthropic: 'Anthropic',
+  openai: 'OpenAI',
+  google: 'Google',
+};
+
+/** Human-readable labels for Docker agents. */
+const DOCKER_AGENT_LABELS: Readonly<Record<DockerAgent, string>> = {
+  'claude-code': 'Claude Code',
+  goose: 'Goose',
+};
+
+async function handleGooseSettings(resolved: ResolvedUserConfig, pending: UserConfig): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- interactive loop exited via return
+  while (true) {
+    const currentProvider = pending.gooseProvider ?? resolved.gooseProvider;
+    const currentModel = pending.gooseModel ?? resolved.gooseModel;
+    const currentPreferred = pending.preferredDockerAgent ?? resolved.preferredDockerAgent;
+
+    const field = await p.select({
+      message: 'Goose Agent Settings',
+      options: [
+        {
+          value: 'gooseProvider',
+          label: 'LLM provider',
+          hint: GOOSE_PROVIDER_LABELS[currentProvider],
+        },
+        {
+          value: 'gooseModel',
+          label: 'Model',
+          hint: currentModel,
+        },
+        {
+          value: 'preferredDockerAgent',
+          label: 'Preferred Docker agent',
+          hint: DOCKER_AGENT_LABELS[currentPreferred],
+        },
+        { value: 'back', label: 'Back' },
+      ],
+    });
+    if (isCancelled(field) || field === 'back') return;
+
+    if (field === 'gooseProvider') {
+      const providerOptions = GOOSE_PROVIDERS.map((prov) => ({
+        value: prov,
+        label: GOOSE_PROVIDER_LABELS[prov],
+        hint: prov === currentProvider ? '(current)' : undefined,
+      }));
+
+      const selected = await p.select({
+        message: 'Select Goose LLM provider:',
+        options: providerOptions,
+        initialValue: currentProvider,
+      });
+      if (isCancelled(selected)) continue;
+      const provider = selected as GooseProvider;
+      if (provider !== currentProvider) {
+        pending.gooseProvider = provider;
+      }
+    } else if (field === 'gooseModel') {
+      const input = await p.text({
+        message: 'Goose model identifier:',
+        placeholder: currentModel,
+        validate: (val) => (!val ? 'Model ID is required' : undefined),
+      });
+      if (isCancelled(input)) continue;
+      const model = input as string;
+      if (model !== currentModel) {
+        pending.gooseModel = model;
+      }
+    } else if (field === 'preferredDockerAgent') {
+      const agentOptions = DOCKER_AGENTS.map((agent) => ({
+        value: agent,
+        label: DOCKER_AGENT_LABELS[agent],
+        hint: agent === currentPreferred ? '(current)' : undefined,
+      }));
+
+      const selected = await p.select({
+        message: 'Select preferred Docker agent:',
+        options: agentOptions,
+        initialValue: currentPreferred,
+      });
+      if (isCancelled(selected)) continue;
+      const agent = selected as DockerAgent;
+      if (agent !== currentPreferred) {
+        pending.preferredDockerAgent = agent;
+      }
+    }
+  }
+}
+
 // ─── Menu descriptions ───────────────────────────────────────
 
 function modelsHint(resolved: ResolvedUserConfig, pending: UserConfig): string {
@@ -684,6 +789,12 @@ function serverCredentialsHint(resolved: ResolvedUserConfig, pending: UserConfig
   const configured = Object.entries(creds).filter(([, v]) => Object.keys(v).length > 0);
   if (configured.length === 0) return 'none';
   return configured.map(([name]) => name).join(', ');
+}
+
+function gooseHint(resolved: ResolvedUserConfig, pending: UserConfig): string {
+  const provider = GOOSE_PROVIDER_LABELS[pending.gooseProvider ?? resolved.gooseProvider];
+  const preferred = DOCKER_AGENT_LABELS[pending.preferredDockerAgent ?? resolved.preferredDockerAgent];
+  return `provider: ${provider}, default agent: ${preferred}`;
 }
 
 function changeCount(resolved: ResolvedUserConfig, pending: UserConfig): string {
@@ -728,6 +839,7 @@ export async function runConfigCommand(): Promise<void> {
         { value: 'compact', label: `Auto-Compact (${autoCompactHint(resolved, pending)})` },
         { value: 'websearch', label: `Web Search (${webSearchHint(resolved, pending)})` },
         { value: 'credentials', label: `Server Credentials (${serverCredentialsHint(resolved, pending)})` },
+        { value: 'goose', label: `Goose Agent (${gooseHint(resolved, pending)})` },
         { value: 'save', label: 'Save & Exit', hint: changeCount(resolved, pending) },
         { value: 'cancel', label: 'Cancel', hint: 'discard all changes' },
       ],
@@ -755,6 +867,9 @@ export async function runConfigCommand(): Promise<void> {
         break;
       case 'credentials':
         await handleServerCredentials(resolved, pending);
+        break;
+      case 'goose':
+        await handleGooseSettings(resolved, pending);
         break;
       case 'cancel':
         p.cancel('Changes discarded.');

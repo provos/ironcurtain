@@ -152,6 +152,13 @@ const signalSchema = z
  * Validates types and constraints without applying defaults --
  * defaults are merged separately so we can distinguish "missing" from "present".
  */
+export const GOOSE_PROVIDERS = ['anthropic', 'openai', 'google'] as const;
+/** Goose provider — structurally identical to ProviderId from model-provider.ts. */
+export type GooseProvider = (typeof GOOSE_PROVIDERS)[number];
+
+export const DOCKER_AGENTS = ['claude-code', 'goose'] as const;
+export type DockerAgent = (typeof DOCKER_AGENTS)[number];
+
 export const userConfigSchema = z.object({
   agentModelId: qualifiedModelId.optional(),
   policyModelId: qualifiedModelId.optional(),
@@ -171,6 +178,9 @@ export const userConfigSchema = z.object({
   webSearch: webSearchSchema,
   serverCredentials: z.record(z.string(), z.record(z.string(), z.string().min(1))).optional(),
   signal: signalSchema,
+  gooseProvider: z.enum(GOOSE_PROVIDERS).optional(),
+  gooseModel: z.string().min(1).optional(),
+  preferredDockerAgent: z.enum(DOCKER_AGENTS).optional(),
 });
 
 /** Parsed config from ~/.ironcurtain/config.json. All fields optional. */
@@ -228,6 +238,12 @@ export interface ResolvedUserConfig {
   readonly serverCredentials: Readonly<Record<string, Readonly<Record<string, string>>>>;
   /** Signal transport config. Null when Signal is not set up. */
   readonly signal: import('../signal/signal-config.js').ResolvedSignalConfig | null;
+  /** Goose LLM provider. */
+  readonly gooseProvider: GooseProvider;
+  /** Goose model identifier. */
+  readonly gooseModel: string;
+  /** Preferred Docker agent for auto-detection. */
+  readonly preferredDockerAgent: DockerAgent;
 }
 
 /** Known fields derived from the schema. Used for unknown-field detection. */
@@ -538,6 +554,9 @@ function mergeWithDefaults(config: UserConfig): ResolvedUserConfig {
     },
     serverCredentials: config.serverCredentials ?? {},
     signal: resolveSignalFromUserConfig(config),
+    gooseProvider: config.gooseProvider ?? 'anthropic',
+    gooseModel: config.gooseModel ?? 'claude-sonnet-4-20250514',
+    preferredDockerAgent: config.preferredDockerAgent ?? 'claude-code',
   };
 }
 

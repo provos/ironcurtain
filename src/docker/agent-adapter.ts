@@ -9,6 +9,7 @@
 import type { IronCurtainConfig } from '../config/types.js';
 import type { ProviderConfig } from './provider-config.js';
 import type { ServerListing } from '../session/prompts.js';
+import type { AuthMethod } from './oauth-credentials.js';
 
 /**
  * The workspace directory inside Docker containers. The host sandbox
@@ -153,4 +154,17 @@ export interface AgentAdapter {
     ptySockPath: string | undefined,
     ptyPort: number | undefined,
   ): readonly string[];
+
+  /**
+   * Detects available credentials for this agent.
+   * When not implemented, prepareDockerInfrastructure() falls back to
+   * detectAuthMethod() (Anthropic OAuth + API key detection).
+   */
+  detectCredential?(config: IronCurtainConfig): AuthMethod;
+
+  /**
+   * Error message to show when no credentials are detected.
+   * When not set, the default Anthropic-oriented message is used.
+   */
+  readonly credentialHelpText?: string;
 }

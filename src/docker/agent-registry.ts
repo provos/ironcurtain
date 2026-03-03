@@ -6,6 +6,7 @@
  */
 
 import type { AgentAdapter, AgentId } from './agent-adapter.js';
+import type { ResolvedUserConfig } from '../config/user-config.js';
 
 const registry = new Map<AgentId, AgentAdapter>();
 
@@ -32,10 +33,20 @@ export function listAgents(): readonly AgentAdapter[] {
 /**
  * Ensures all built-in agent adapters are registered. Safe to call
  * multiple times -- skips adapters that are already registered.
+ *
+ * @param userConfig - Resolved user config. When provided, the Goose adapter
+ *   uses it for provider selection. When undefined, defaults apply (anthropic
+ *   provider, default model). This allows --list-agents to work without config.
  */
-export async function registerBuiltinAdapters(): Promise<void> {
+export async function registerBuiltinAdapters(userConfig?: ResolvedUserConfig): Promise<void> {
   const { claudeCodeAdapter } = await import('./adapters/claude-code.js');
   if (!registry.has(claudeCodeAdapter.id)) {
     registry.set(claudeCodeAdapter.id, claudeCodeAdapter);
+  }
+
+  if (!registry.has('goose' as AgentId)) {
+    const { createGooseAdapter } = await import('./adapters/goose.js');
+    const gooseAdapter = createGooseAdapter(userConfig);
+    registry.set(gooseAdapter.id, gooseAdapter);
   }
 }

@@ -8,7 +8,7 @@
 
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { existsSync, readdirSync, readFileSync, copyFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, copyFileSync, mkdtempSync, rmSync, mkdirSync } from 'node:fs';
 import { arch, tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 import type { IronCurtainConfig } from '../config/types.js';
@@ -75,22 +75,23 @@ export async function prepareDockerInfrastructure(
   const { useTcpTransport } = await import('./platform.js');
   const { getIronCurtainHome } = await import('../config/paths.js');
   const { prepareSession } = await import('./orientation.js');
-  const { mkdirSync } = await import('node:fs');
 
   const { detectAuthMethod } = await import('./oauth-credentials.js');
   const { OAuthTokenManager } = await import('./oauth-token-manager.js');
 
-  await registerBuiltinAdapters();
+  await registerBuiltinAdapters(config.userConfig);
   const adapter = getAgent(mode.agent);
   const useTcp = useTcpTransport();
 
-  // Detect authentication method. When preflight already determined the auth kind,
-  // pass it as a hint to skip potentially slow/interactive sources (e.g., macOS
-  // Keychain) that were already checked during preflight.
-  const authMethod = detectAuthMethod(config);
+  // Detect authentication method. Adapters with detectCredential() handle
+  // their own credential detection (e.g., Goose checks provider-specific keys).
+  // Adapters without it fall back to detectAuthMethod() (Anthropic OAuth + API key).
+  const authMethod = adapter.detectCredential ? adapter.detectCredential(config) : detectAuthMethod(config);
   if (authMethod.kind === 'none') {
     throw new Error(
-      'No credentials available for Docker session. ' + 'Log in with `claude login` (OAuth) or set ANTHROPIC_API_KEY.',
+      adapter.credentialHelpText ??
+        'No credentials available for Docker session. ' +
+          'Log in with `claude login` (OAuth) or set ANTHROPIC_API_KEY.',
     );
   }
   const authKind = authMethod.kind;

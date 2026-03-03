@@ -12,11 +12,11 @@ import type { IronCurtainConfig } from '../config/types.js';
 import type { AgentId } from '../docker/agent-adapter.js';
 import type { SessionMode } from './types.js';
 import { detectAuthMethod, loadOAuthCredentials, type CredentialSources } from '../docker/oauth-credentials.js';
+import { resolveApiKeyForProvider } from '../config/model-provider.js';
 
 const execFile = promisify(execFileCb);
 
 const DOCKER_TIMEOUT_MS = 5_000;
-const DEFAULT_DOCKER_AGENT = 'claude-code' as AgentId;
 
 /**
  * Thrown when explicit --agent prerequisites are not met.
@@ -72,6 +72,7 @@ const preflightSources: CredentialSources = {
   loadFromKeychain: () => null,
 };
 
+
 /**
  * Checks whether credentials (OAuth or API key) are available for the given agent.
  * Returns the auth kind if available, or null if no credentials found.
@@ -80,13 +81,36 @@ const preflightSources: CredentialSources = {
  * Full detection including Keychain happens in prepareDockerInfrastructure().
  */
 function detectCredentials(
-  _agentId: AgentId,
+  agentId: AgentId,
   config: IronCurtainConfig,
   sources?: CredentialSources,
 ): 'oauth' | 'apikey' | null {
+  // Goose uses provider-specific API keys, not Anthropic OAuth.
+  if (agentId === 'goose') {
+    const provider = config.userConfig.gooseProvider;
+    const key = resolveApiKeyForProvider(provider, config.userConfig);
+    return key ? 'apikey' : null;
+  }
+
+  // Default path: Anthropic OAuth + API key detection (Claude Code and others)
   const auth = detectAuthMethod(config, sources ?? preflightSources);
   if (auth.kind === 'none') return null;
   return auth.kind === 'oauth' ? 'oauth' : 'apikey';
+}
+
+/**
+ * Returns the error message for missing credentials, tailored to the agent.
+ */
+function credentialErrorMessage(agentId: AgentId, config: IronCurtainConfig): string {
+  if (agentId === 'goose') {
+    const provider = config.userConfig.gooseProvider;
+    return (
+      `--agent goose requires an API key for provider "${provider}". ` +
+      'Set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GOOGLE_API_KEY, ' +
+      'or configure via `ironcurtain config`.'
+    );
+  }
+  return `--agent ${agentId} requires authentication. Log in with \`claude login\` (OAuth) or set ANTHROPIC_API_KEY.`;
 }
 
 /**
@@ -128,9 +152,7 @@ async function resolveExplicit(
 
   const credKind = detectCredentials(agent, config, credentialSources);
   if (credKind === null) {
-    throw new PreflightError(
-      `--agent ${agent} requires authentication. ` + 'Log in with `claude login` (OAuth) or set ANTHROPIC_API_KEY.',
-    );
+    throw new PreflightError(credentialErrorMessage(agent, config));
   }
 
   return {
@@ -152,7 +174,8 @@ async function resolveAutoDetect(
     };
   }
 
-  const credKind = detectCredentials(DEFAULT_DOCKER_AGENT, config, credentialSources);
+  const defaultAgent = config.userConfig.preferredDockerAgent as AgentId;
+  const credKind = detectCredentials(defaultAgent, config, credentialSources);
   if (credKind === null) {
     return {
       mode: { kind: 'builtin' },
@@ -161,7 +184,7 @@ async function resolveAutoDetect(
   }
 
   return {
-    mode: { kind: 'docker', agent: DEFAULT_DOCKER_AGENT, authKind: credKind },
+    mode: { kind: 'docker', agent: defaultAgent, authKind: credKind },
     reason: `Docker available, ${credKind === 'oauth' ? 'OAuth' : 'ANTHROPIC_API_KEY'} detected`,
   };
 }

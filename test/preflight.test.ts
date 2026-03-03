@@ -47,6 +47,9 @@ function createTestConfig(overrides: { anthropicApiKey?: string } = {}): IronCur
       autoApprove: { enabled: false, modelId: 'anthropic:claude-haiku-4-5' },
       auditRedaction: { enabled: true },
       serverCredentials: {},
+      gooseProvider: 'anthropic',
+      gooseModel: 'claude-sonnet-4-20250514',
+      preferredDockerAgent: 'claude-code',
     },
   };
 }

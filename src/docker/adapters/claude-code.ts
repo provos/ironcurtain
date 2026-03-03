@@ -22,6 +22,7 @@ import {
   claudePlatformOAuthProvider,
 } from '../provider-config.js';
 import { buildSystemPrompt } from '../../session/prompts.js';
+import { buildResizePtyScript, buildCheckPtySizeScript, buildNetworkSection, buildPolicySection, buildAttributionSection } from './shared-scripts.js';
 
 const CLAUDE_CODE_IMAGE = 'ironcurtain-claude-code:latest';
 
@@ -48,9 +49,7 @@ tools for all subsequent file operations on the cloned/written files.
 When cloning repos, use ${context.workspaceDir} as the target directory
 (e.g. \`${context.workspaceDir}/repo-name\`).
 
-### Network
-The container has NO direct internet access. All HTTP requests and
-git operations MUST go through the sandbox tools via \`execute_code\`.
+${buildNetworkSection('the sandbox tools via `execute_code`')}
 
 IMPORTANT: Your built-in server-side web search tool (WebSearch) is DISABLED
 and will NOT work — it is stripped by the security proxy. You MUST use the
@@ -62,15 +61,9 @@ To search the web:
 To fetch a URL:
   \`const page = tools.fetch_http_fetch({ url: "https://example.com" });\`
 
-### Policy Enforcement
-Every tool call through \`execute_code\` is evaluated against security policy rules:
-- **Allowed**: proceeds automatically
-- **Denied**: blocked -- do NOT retry denied operations
-- **Escalated**: requires human approval -- you will receive the result once approved
+${buildPolicySection('tool call through `execute_code`')}
 
-### Attribution
-When adding attribution lines (e.g. Co-Authored-By, "Generated with"), include
-"running under IronCurtain" alongside the tool name.
+${buildAttributionSection()}
 `;
 }
 
@@ -119,43 +112,9 @@ exec claude --dangerously-skip-permissions \\
   --append-system-prompt "$IRONCURTAIN_SYSTEM_PROMPT"
 `;
 
-    // Helper script to resize the PTY that Claude Code is actually running on.
-    // docker exec stty targets a transient exec session PTY, not socat's PTY.
-    // If Claude hasn't started yet, we exit silently — start-claude.sh sets
-    // the initial size from env vars, so no fallback is needed.
-    // Diagnostic output goes to stderr (captured by host-side logger).
-    const resizeScript = `#!/bin/bash
-# Called from the host via: docker exec <cid> /etc/ironcurtain/resize-pty.sh <cols> <rows>
-COLS=$1
-ROWS=$2
-
-CLAUDE_PID=$(pgrep -x claude | head -1)
-if [ -z "$CLAUDE_PID" ]; then
-  echo "no-claude" >&2
-  exit 0
-fi
-
-PTS=$(readlink /proc/$CLAUDE_PID/fd/0 2>/dev/null)
-if [ -z "$PTS" ] || ! [ -e "$PTS" ]; then
-  echo "no-pty pid=$CLAUDE_PID pts=$PTS" >&2
-  exit 0
-fi
-
-stty -F "$PTS" cols "$COLS" rows "$ROWS" 2>/dev/null
-RC=$?
-kill -WINCH "$CLAUDE_PID" 2>/dev/null
-echo "ok pid=$CLAUDE_PID pts=$PTS stty=$RC \${COLS}x\${ROWS}" >&2
-`;
-
-    // Helper script to report the current PTY size for host-side verification.
-    const checkSizeScript = `#!/bin/bash
-# Returns "rows cols" of the container PTY
-CLAUDE_PID=$(pgrep -x claude | head -1)
-if [ -z "$CLAUDE_PID" ]; then echo "0 0"; exit 0; fi
-PTS=$(readlink /proc/$CLAUDE_PID/fd/0 2>/dev/null)
-if [ -z "$PTS" ] || ! [ -e "$PTS" ]; then echo "0 0"; exit 0; fi
-stty -F "$PTS" size 2>/dev/null || echo "0 0"
-`;
+    // Helper scripts for PTY resize — use shared generators parameterized by process name.
+    const resizeScript = buildResizePtyScript('claude');
+    const checkSizeScript = buildCheckPtySizeScript('claude');
 
     return [
       { path: 'start-claude.sh', content: startScript, mode: 0o755 },
