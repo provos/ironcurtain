@@ -9,6 +9,7 @@ IronCurtain is a secure agent runtime that mediates between an AI agent and MCP 
 ## Commands
 
 - `ironcurtain start "your task"` - run the agent with a task (or `npm start "your task"` during development)
+- `ironcurtain start -w ./path "task"` - run the agent in an existing directory instead of a fresh sandbox
 - `ironcurtain config` - interactively edit `~/.ironcurtain/config.json` (or `npm run config`)
 - `ironcurtain annotate-tools` - classify MCP tool arguments via LLM (or `npm run annotate-tools`)
 - `ironcurtain compile-policy` - compile constitution into policy rules (or `npm run compile-policy`)
@@ -47,7 +48,7 @@ Runs external agents in Docker containers with `--network=none`, communicating v
 ### Configuration (`src/config/`)
 **Interactive Config Editor** (`config-command.ts`) - `ironcurtain config` subcommand. Uses `@clack/prompts` for a terminal UI to view and modify `~/.ironcurtain/config.json`. Covers models, security settings, resource budgets, auto-compaction, and audit redaction. API keys are excluded (use env vars). Changes are tracked as a partial `UserConfig`, diffed against the resolved config, and saved via `saveUserConfig()`.
 
-`loadConfig()` reads from environment variables (`ANTHROPIC_API_KEY`, `AUDIT_LOG_PATH`, `ALLOWED_DIRECTORY`) and `src/config/mcp-servers.json` for MCP server definitions. The `ALLOWED_DIRECTORY` defines the sandbox boundary for policy evaluation. In multi-turn sessions, each session gets its own sandbox at `~/.ironcurtain/sessions/{sessionId}/sandbox/`. The fallback default is `$IRONCURTAIN_HOME/sandbox` (where `IRONCURTAIN_HOME` defaults to `~/.ironcurtain`). Requires a `.env` file (loaded via `dotenv/config` in `src/index.ts`). `loadGeneratedPolicy()` loads compiled artifacts (`compiled-policy.json`, `tool-annotations.json`, and optionally `dynamic-lists.json`) from `src/config/generated/`.
+`loadConfig()` reads from environment variables (`ANTHROPIC_API_KEY`, `AUDIT_LOG_PATH`, `ALLOWED_DIRECTORY`) and `src/config/mcp-servers.json` for MCP server definitions. The `ALLOWED_DIRECTORY` defines the sandbox boundary for policy evaluation. In multi-turn sessions, each session gets its own sandbox at `~/.ironcurtain/sessions/{sessionId}/sandbox/`. When `--workspace <path>` is provided, the validated workspace replaces the session sandbox as `allowedDirectory` (see `src/session/workspace-validation.ts`). The fallback default is `$IRONCURTAIN_HOME/sandbox` (where `IRONCURTAIN_HOME` defaults to `~/.ironcurtain`). Requires a `.env` file (loaded via `dotenv/config` in `src/index.ts`). `loadGeneratedPolicy()` loads compiled artifacts (`compiled-policy.json`, `tool-annotations.json`, and optionally `dynamic-lists.json`) from `src/config/generated/`.
 
 ### Types (`src/types/`)
 Shared types: `ToolCallRequest`/`ToolCallResult`/`PolicyDecision` in `mcp.ts`, `AuditEntry` in `audit.ts`. Policy decisions have three outcomes: `allow`, `deny`, `escalate`. The engine can produce all three, but compiled rules only use `allow` and `escalate` - `deny` comes from the default fallthrough when no rule matches.

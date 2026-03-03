@@ -41,6 +41,8 @@ Options:
   -v, --version        Show version number
   -a, --agent <name>   Agent mode: builtin or claude-code (Docker)
                        Auto-detects if omitted: Docker if available, else builtin
+  -w, --workspace <path>  Use an existing directory as the agent's workspace
+                       instead of creating a fresh sandbox
   --pty                Attach terminal directly to agent PTY (Docker mode only)
                        Ctrl-\\ is the emergency exit; run 'reset' to recover
                        the terminal if killed ungracefully
@@ -51,6 +53,7 @@ Examples:
   ironcurtain start                              # Interactive session
   ironcurtain start "Summarize files in ."       # Single-shot task
   ironcurtain start --resume <session-id>        # Resume a session
+  ironcurtain start -w ./my-project "Fix bugs"   # Work in existing directory
   ironcurtain start --agent claude-code "task"   # Docker: Claude Code
   ironcurtain start --pty                        # PTY mode: interactive Docker terminal
   ironcurtain start --list-agents                # List available agents

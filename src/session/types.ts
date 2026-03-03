@@ -196,6 +196,13 @@ export interface SessionOptions {
    * If not provided, diagnostics are silently dropped.
    */
   onDiagnostic?: (event: DiagnosticEvent) => void;
+
+  /**
+   * Validated workspace path. When provided, this existing directory replaces
+   * the session sandbox as the agent's working area (allowedDirectory).
+   * Must be validated via validateWorkspacePath() before passing here.
+   */
+  workspacePath?: string;
 }
 
 /**

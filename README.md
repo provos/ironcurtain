@@ -128,6 +128,17 @@ Send one task and exit when the agent finishes:
 ironcurtain start "Summarize the files in the current directory"
 ```
 
+### Workspace mode
+
+Point the agent at an existing directory instead of a fresh sandbox:
+
+```bash
+ironcurtain start -w ./my-project "Fix the failing tests"
+ironcurtain start --workspace /home/user/repos/my-app
+```
+
+The workspace replaces the session sandbox as the agent's working area. All session infrastructure (logs, escalations, audit) still lives under `~/.ironcurtain/sessions/`. The path is validated to prevent use of sensitive directories (root, home, `~/.ironcurtain/`, or paths overlapping with protected paths).
+
 ### Session resume
 
 Resume a previous session's conversation history:

@@ -70,7 +70,13 @@ async function createBuiltinSession(options: SessionOptions): Promise<Session> {
   }
 
   const loggerWasActive = logger.isActive();
-  const sessionConfig = buildSessionConfig(config, effectiveSessionId, sessionId, options.resumeSessionId);
+  const sessionConfig = buildSessionConfig(
+    config,
+    effectiveSessionId,
+    sessionId,
+    options.resumeSessionId,
+    options.workspacePath,
+  );
 
   const session = new AgentSession(sessionConfig.config, sessionId, sessionConfig.escalationDir, options);
 
@@ -105,7 +111,13 @@ async function createDockerSession(
   const effectiveSessionId = options.resumeSessionId ?? sessionId;
 
   const loggerWasActive = logger.isActive();
-  const sessionConfig = buildSessionConfig(config, effectiveSessionId, sessionId, options.resumeSessionId);
+  const sessionConfig = buildSessionConfig(
+    config,
+    effectiveSessionId,
+    sessionId,
+    options.resumeSessionId,
+    options.workspacePath,
+  );
 
   const { prepareDockerInfrastructure } = await import('../docker/docker-infrastructure.js');
   const { DockerAgentSession } = await import('../docker/docker-agent-session.js');
@@ -165,24 +177,32 @@ interface SessionDirConfig {
   sandboxDir: string;
   escalationDir: string;
   auditLogPath: string;
-  autoApproveLlmLogPath: string;
 }
 
 /**
  * Shared session directory setup and config patching used by both session modes.
+ *
+ * When workspacePath is provided, it replaces the session sandbox as the
+ * agent's working directory. The workspace already exists so we skip
+ * creating it, but all other session infrastructure (logs, escalations)
+ * still lives under the session directory.
  */
 function buildSessionConfig(
   config: IronCurtainConfig,
   effectiveSessionId: string,
   sessionId: SessionId,
   resumeSessionId?: string,
+  workspacePath?: string,
 ): SessionDirConfig {
   const sessionDir = getSessionDir(effectiveSessionId);
-  const sandboxDir = getSessionSandboxDir(effectiveSessionId);
+  const sandboxDir = workspacePath ?? getSessionSandboxDir(effectiveSessionId);
   const escalationDir = getSessionEscalationDir(effectiveSessionId);
   const auditLogPath = getSessionAuditLogPath(effectiveSessionId);
 
-  mkdirSync(sandboxDir, { recursive: true });
+  // Only create the sandbox directory when not using an external workspace
+  if (!workspacePath) {
+    mkdirSync(sandboxDir, { recursive: true });
+  }
   mkdirSync(escalationDir, { recursive: true });
 
   const sessionLogPath = getSessionLogPath(effectiveSessionId);
@@ -192,7 +212,7 @@ function buildSessionConfig(
   // Set up session logging -- captures all console output to file
   logger.setup({ logFilePath: sessionLogPath });
   logger.info(`Session ${sessionId} created`);
-  logger.info(`Sandbox: ${sandboxDir}`);
+  logger.info(`${workspacePath ? 'Workspace' : 'Sandbox'}: ${sandboxDir}`);
   logger.info(`Escalation dir: ${escalationDir}`);
   logger.info(`Audit log: ${auditLogPath}`);
   logger.info(`LLM log: ${llmLogPath}`);
@@ -222,7 +242,6 @@ function buildSessionConfig(
     sandboxDir,
     escalationDir,
     auditLogPath,
-    autoApproveLlmLogPath,
   };
 }
 

@@ -42,6 +42,8 @@ import * as logger from '../logger.js';
 export interface PtySessionOptions {
   readonly config: IronCurtainConfig;
   readonly mode: SessionMode & { kind: 'docker' };
+  /** Validated workspace path. When provided, replaces the session sandbox. */
+  readonly workspacePath?: string;
 }
 
 /** Maximum time to wait for the PTY socket to appear (ms). */
@@ -59,12 +61,15 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
 
   const sessionId = createSessionId();
   const sessionDir = getSessionDir(sessionId);
-  const sandboxDir = getSessionSandboxDir(sessionId);
+  const sandboxDir = options.workspacePath ?? getSessionSandboxDir(sessionId);
   const escalationDir = getSessionEscalationDir(sessionId);
   const auditLogPath = getSessionAuditLogPath(sessionId);
   const socketsDir = resolve(sessionDir, 'sockets');
 
-  mkdirSync(sandboxDir, { recursive: true, mode: 0o700 });
+  // Only create the sandbox directory when not using an external workspace
+  if (!options.workspacePath) {
+    mkdirSync(sandboxDir, { recursive: true, mode: 0o700 });
+  }
   mkdirSync(escalationDir, { recursive: true, mode: 0o700 });
   mkdirSync(socketsDir, { recursive: true, mode: 0o700 });
 
@@ -73,7 +78,7 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
   const llmLogPath = getSessionLlmLogPath(sessionId);
   logger.setup({ logFilePath: sessionLogPath });
   logger.info(`PTY session ${sessionId} starting`);
-  logger.info(`Sandbox: ${sandboxDir}`);
+  logger.info(`${options.workspacePath ? 'Workspace' : 'Sandbox'}: ${sandboxDir}`);
   logger.info(`Escalation dir: ${escalationDir}`);
   logger.info(`LLM log: ${llmLogPath}`);
 
