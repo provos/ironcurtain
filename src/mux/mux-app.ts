@@ -115,7 +115,7 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
     bridge.onSessionDiscovered((registration) => {
       if (registration) {
         tab.escalationAvailable = true;
-        escalationManager.addSession(registration.sessionId, registration.escalationDir, registration.label);
+        escalationManager.addSession(registration);
         tab.label = registration.label;
         renderer.redrawTabBar();
       } else {
@@ -316,7 +316,6 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
       term.hideCursor(false);
       term.fullscreen(false);
       term.styleReset();
-      term.processExit(0);
     }
 
     renderer.destroy();

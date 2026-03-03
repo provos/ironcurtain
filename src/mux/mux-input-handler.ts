@@ -6,7 +6,8 @@
  * - Command mode: keystrokes collected in a line buffer, dispatched on Enter
  *
  * Ctrl-A toggles between modes (following screen/tmux convention).
- * Ctrl-A Ctrl-A sends a literal Ctrl-A to the PTY.
+ * Pressing Ctrl-A twice in a row simply toggles from PTY -> command -> PTY;
+ * it does not send a literal Ctrl-A byte to the PTY.
  */
 
 import type { InputMode, MuxAction } from './types.js';

@@ -608,10 +608,15 @@ export async function handleCallTool(
         const isPtySession = process.env.IRONCURTAIN_PTY_SESSION === '1';
         const sourceValid = !isPtySession || userContext.source === 'mux-trusted-input';
 
-        // Staleness check: reject trusted input older than the threshold
-        const stale =
-          userContext.timestamp !== undefined &&
-          Date.now() - new Date(userContext.timestamp).getTime() > TRUSTED_INPUT_STALENESS_MS;
+        // Staleness check: treat missing/invalid/future timestamps as stale
+        let stale = isPtySession; // non-PTY sessions don't require timestamps
+        if (userContext.timestamp !== undefined) {
+          const tsMs = new Date(userContext.timestamp).getTime();
+          if (!Number.isNaN(tsMs)) {
+            const ageMs = Date.now() - tsMs;
+            stale = ageMs > TRUSTED_INPUT_STALENESS_MS || ageMs < 0;
+          }
+        }
 
         if (sourceValid && !stale) {
           const autoResult = await autoApprove(

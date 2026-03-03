@@ -126,8 +126,9 @@ export async function createPtyBridge(options: PtyBridgeOptions): Promise<PtyBri
 
   // Wire child output to headless terminal
   child.onData((data: string) => {
-    terminal.write(data);
-    for (const cb of outputCallbacks) cb();
+    terminal.write(data, () => {
+      for (const cb of outputCallbacks) cb();
+    });
   });
 
   child.onExit(({ exitCode }: { exitCode: number }) => {

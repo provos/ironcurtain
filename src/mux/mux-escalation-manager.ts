@@ -33,9 +33,9 @@ export interface MuxEscalationManager {
   readonly pendingCount: number;
 
   /**
-   * Registers a new session's escalation directory for watching.
+   * Registers a session for escalation watching.
    */
-  addSession(sessionId: string, escalationDir: string, label: string): void;
+  addSession(registration: PtySessionRegistration): void;
 
   /**
    * Removes a session's watcher.
@@ -115,18 +115,10 @@ export function createMuxEscalationManager(): MuxEscalationManager {
       return state.pendingEscalations.size;
     },
 
-    addSession(sessionId: string, escalationDir: string, label: string): void {
-      managedSessionIds.add(sessionId);
+    addSession(registration: PtySessionRegistration): void {
+      managedSessionIds.add(registration.sessionId);
 
-      const registration: PtySessionRegistration = {
-        sessionId,
-        escalationDir,
-        label,
-        startedAt: new Date().toISOString(),
-        pid: process.pid,
-      };
-
-      const watcher = createWatcherForSession(sessionId, escalationDir);
+      const watcher = createWatcherForSession(registration.sessionId, registration.escalationDir);
       state = addSession(state, registration, watcher);
       watcher.start();
       notifyChange();

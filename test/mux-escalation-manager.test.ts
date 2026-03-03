@@ -28,7 +28,13 @@ describe('MuxEscalationManager', () => {
     const escalationDir = resolve(tempDir, 'session1');
     mkdirSync(escalationDir, { recursive: true });
 
-    manager.addSession('session-1', escalationDir, 'test session');
+    manager.addSession({
+      sessionId: 'session-1',
+      escalationDir,
+      label: 'test session',
+      startedAt: new Date().toISOString(),
+      pid: process.pid,
+    });
     expect(manager.state.sessions.size).toBe(1);
     expect(manager.state.sessions.get('session-1')).toBeDefined();
     manager.stop();
@@ -39,7 +45,13 @@ describe('MuxEscalationManager', () => {
     const escalationDir = resolve(tempDir, 'session1');
     mkdirSync(escalationDir, { recursive: true });
 
-    manager.addSession('session-1', escalationDir, 'test session');
+    manager.addSession({
+      sessionId: 'session-1',
+      escalationDir,
+      label: 'test session',
+      startedAt: new Date().toISOString(),
+      pid: process.pid,
+    });
     manager.removeSession('session-1');
     expect(manager.state.sessions.size).toBe(0);
     manager.stop();
@@ -54,7 +66,13 @@ describe('MuxEscalationManager', () => {
 
     const escalationDir = resolve(tempDir, 'session1');
     mkdirSync(escalationDir, { recursive: true });
-    manager.addSession('session-1', escalationDir, 'test session');
+    manager.addSession({
+      sessionId: 'session-1',
+      escalationDir,
+      label: 'test session',
+      startedAt: new Date().toISOString(),
+      pid: process.pid,
+    });
 
     expect(changed).toBe(true);
     manager.stop();
@@ -64,7 +82,13 @@ describe('MuxEscalationManager', () => {
     const manager = createMuxEscalationManager();
     const escalationDir = resolve(tempDir, 'session1');
     mkdirSync(escalationDir, { recursive: true });
-    manager.addSession('session-1', escalationDir, 'test session');
+    manager.addSession({
+      sessionId: 'session-1',
+      escalationDir,
+      label: 'test session',
+      startedAt: new Date().toISOString(),
+      pid: process.pid,
+    });
 
     let changed = false;
     manager.onChange(() => {
@@ -79,7 +103,13 @@ describe('MuxEscalationManager', () => {
     const manager = createMuxEscalationManager();
     const escalationDir = resolve(tempDir, 'session1');
     mkdirSync(escalationDir, { recursive: true });
-    manager.addSession('session-1', escalationDir, 'test session');
+    manager.addSession({
+      sessionId: 'session-1',
+      escalationDir,
+      label: 'test session',
+      startedAt: new Date().toISOString(),
+      pid: process.pid,
+    });
 
     // Write an escalation request file
     const requestFile = resolve(escalationDir, 'request-test-123.json');
