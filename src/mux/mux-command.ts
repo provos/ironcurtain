@@ -15,12 +15,21 @@ import { loadConfig } from '../config/index.js';
 import { createMuxApp } from './mux-app.js';
 
 export async function main(args?: string[]): Promise<void> {
-  // Check for node-pty availability
+  // Check for optional mux dependencies
   try {
     await import('node-pty');
   } catch {
     process.stderr.write(
       chalk.red('Error: ironcurtain mux requires the node-pty package.\n') + 'Install it with: npm install node-pty\n',
+    );
+    process.exit(1);
+  }
+  try {
+    await import('terminal-kit');
+  } catch {
+    process.stderr.write(
+      chalk.red('Error: ironcurtain mux requires the terminal-kit package.\n') +
+        'Install it with: npm install terminal-kit\n',
     );
     process.exit(1);
   }

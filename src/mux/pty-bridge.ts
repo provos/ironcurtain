@@ -136,14 +136,24 @@ export async function createPtyBridge(options: PtyBridgeOptions): Promise<PtyBri
     });
   });
 
+  const discoveryAbort = new AbortController();
+
   child.onExit(({ exitCode }: { exitCode: number }) => {
     _alive = false;
     _exitCode = exitCode;
+    discoveryAbort.abort();
+    // If discovery hasn't resolved yet, flush callbacks with null
+    if (_registration === undefined) {
+      _registration = null;
+      for (const cb of sessionCallbacks) cb(null);
+      sessionCallbacks.length = 0;
+    }
     for (const cb of exitCallbacks) cb(exitCode);
   });
 
   // Start session discovery
-  void discoverSessionRegistration(child.pid).then((registration) => {
+  void discoverSessionRegistration(child.pid, discoveryAbort.signal).then((registration) => {
+    if (!_alive) return; // child already exited; ignore late result
     _registration = registration;
     for (const cb of sessionCallbacks) cb(registration);
     sessionCallbacks.length = 0;
@@ -210,12 +220,16 @@ export async function createPtyBridge(options: PtyBridgeOptions): Promise<PtyBri
 
 /**
  * Polls the PTY registry for a registration matching the child PID.
+ * Stops early if the abort signal fires (e.g. child exited).
  */
-async function discoverSessionRegistration(childPid: number): Promise<PtySessionRegistration | null> {
+async function discoverSessionRegistration(
+  childPid: number,
+  signal: AbortSignal,
+): Promise<PtySessionRegistration | null> {
   const registryDir = getPtyRegistryDir();
   const deadline = Date.now() + DISCOVERY_TIMEOUT_MS;
 
-  while (Date.now() < deadline) {
+  while (Date.now() < deadline && !signal.aborted) {
     const registrations = readActiveRegistrations(registryDir);
     const match = registrations.find((r) => r.pid === childPid);
     if (match) return match;

@@ -128,12 +128,12 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
     });
 
     bridge.onSessionDiscovered((registration) => {
-      if (registration) {
+      if (registration && tab.status === 'running') {
         tab.escalationAvailable = true;
         escalationManager.addSession(registration);
         tab.label = registration.label;
         renderer.redrawTabBar();
-      } else {
+      } else if (!registration) {
         logger.warn(`Could not discover session registration for tab #${tab.number}`);
         tab.escalationAvailable = false;
       }
@@ -395,7 +395,9 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
       running = true;
 
       const terminalKit = await import('terminal-kit');
-      term = terminalKit.default.terminal;
+      // CJS interop: terminal lives on the default export object
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      term = terminalKit.default.terminal ?? (terminalKit as any).terminal;
 
       term.fullscreen(true);
       term.hideCursor(true);
