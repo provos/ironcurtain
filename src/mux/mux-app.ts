@@ -114,6 +114,9 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
       tab.status = 'exited';
       tab.exitCode = exitCode;
 
+      // Skip UI effects if the mux is shutting down or the tab was already removed
+      if (!running || !tabs.includes(tab)) return;
+
       if (bridge.sessionId) {
         escalationManager.removeSession(bridge.sessionId);
       }

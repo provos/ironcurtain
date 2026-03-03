@@ -84,7 +84,9 @@ const MAX_OVERLAY_ROWS = 14;
  * In command mode, the overlay paints over the bottom rows of the PTY viewport.
  */
 export function calculateLayout(totalRows: number, mode: InputMode, pendingCount: number): Layout {
-  const ptyViewportRows = Math.max(1, totalRows - TAB_BAR_ROWS - FOOTER_ROWS);
+  // Ensure footer fits on screen; degrade gracefully on tiny terminals
+  const footerRows = Math.min(FOOTER_ROWS, Math.max(0, totalRows - TAB_BAR_ROWS));
+  const ptyViewportRows = Math.max(1, totalRows - TAB_BAR_ROWS - footerRows);
 
   let overlayRows = 0;
   let escalationPanelRows = 0;
@@ -93,10 +95,11 @@ export function calculateLayout(totalRows: number, mode: InputMode, pendingCount
     if (pendingCount > 0) {
       escalationPanelRows = Math.min(pendingCount * ESCALATION_ROWS_PER_ITEM, MAX_ESCALATION_PANEL_ROWS);
     }
-    overlayRows = Math.min(escalationPanelRows + HINT_BAR_ROWS + INPUT_LINE_ROWS, MAX_OVERLAY_ROWS);
+    // Clamp overlay to available viewport so it never goes above the tab bar
+    overlayRows = Math.min(escalationPanelRows + HINT_BAR_ROWS + INPUT_LINE_ROWS, MAX_OVERLAY_ROWS, ptyViewportRows);
   }
 
-  const pickerRows = mode === 'picker' ? Math.floor(ptyViewportRows / 2) : 0;
+  const pickerRows = mode === 'picker' ? Math.min(Math.floor(ptyViewportRows / 2), ptyViewportRows) : 0;
   const pickerY = TAB_BAR_ROWS + ptyViewportRows - pickerRows;
 
   return {

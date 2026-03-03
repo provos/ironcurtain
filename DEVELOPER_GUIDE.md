@@ -200,7 +200,6 @@ This workflow does not support trusted input or auto-approval for PTY sessions. 
 | Key             | PTY Mode                              | Command Mode                           |
 | --------------- | ------------------------------------- | -------------------------------------- |
 | Ctrl-A          | Enter command mode                    | Return to PTY mode                     |
-| Ctrl-A Ctrl-A   | Send literal Ctrl-A to PTY            | —                                      |
 | Escape          | —                                     | Discard input, return to PTY mode      |
 | Enter           | (forwarded to PTY)                    | Execute command or send trusted input  |
 | Ctrl-C          | (forwarded to PTY)                    | Clear input buffer                     |
