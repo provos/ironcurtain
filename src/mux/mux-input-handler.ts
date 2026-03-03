@@ -217,7 +217,6 @@ export function createMuxInputHandler(): MuxInputHandler {
       error,
     };
     resetEntrySelection(_pickerState);
-    _pickerState.error = error; // restore after resetEntrySelection clears it implicitly (it doesn't, but keep explicit)
   }
 
   function exitPickerMode(): void {

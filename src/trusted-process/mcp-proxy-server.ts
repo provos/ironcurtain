@@ -615,7 +615,7 @@ export async function handleCallTool(
         const isPtySession = process.env.IRONCURTAIN_PTY_SESSION === '1';
         const sourceValid = !isPtySession || userContext.source === 'mux-trusted-input';
 
-        // Staleness check: treat missing/invalid/future timestamps as stale
+        // Staleness check: for PTY sessions, treat missing/invalid/future timestamps as stale
         let stale = isPtySession; // non-PTY sessions don't require timestamps
         if (userContext.timestamp !== undefined) {
           const tsMs = new Date(userContext.timestamp).getTime();
