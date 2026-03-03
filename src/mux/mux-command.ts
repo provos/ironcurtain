@@ -11,6 +11,7 @@ import { getListenerLockPath, getPtyRegistryDir } from '../config/paths.js';
 import { acquireLock, releaseLock } from '../escalation/listener-lock.js';
 import { loadUserConfig } from '../config/user-config.js';
 import { parseModelId, resolveApiKeyForProvider } from '../config/model-provider.js';
+import { loadConfig } from '../config/index.js';
 import { createMuxApp } from './mux-app.js';
 
 export async function main(args?: string[]): Promise<void> {
@@ -75,9 +76,18 @@ export async function main(args?: string[]): Promise<void> {
     await new Promise((r) => setTimeout(r, 3000));
   }
 
+  // Load config once for workspace validation
+  let protectedPaths: string[] = [];
+  try {
+    protectedPaths = loadConfig().protectedPaths;
+  } catch {
+    // Config load failure is not fatal; child sessions will report it.
+  }
+
   try {
     const app = createMuxApp({
       agent,
+      protectedPaths,
     });
 
     await app.start();

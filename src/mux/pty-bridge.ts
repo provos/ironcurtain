@@ -88,6 +88,8 @@ export interface PtyBridgeOptions {
   readonly prefixArgs?: string[];
   /** Agent to pass to --agent flag. */
   readonly agent: string;
+  /** Optional workspace directory path (passed as --workspace to the child). */
+  readonly workspacePath?: string;
 }
 
 /** Session discovery timeout (ms). */
@@ -109,6 +111,9 @@ export async function createPtyBridge(options: PtyBridgeOptions): Promise<PtyBri
   });
 
   const spawnArgs = [...(options.prefixArgs ?? []), 'start', '--pty', '--agent', options.agent];
+  if (options.workspacePath) {
+    spawnArgs.push('--workspace', options.workspacePath);
+  }
   const child = nodePty.spawn(options.ironcurtainBin, spawnArgs, {
     cols: options.cols,
     rows: options.rows,

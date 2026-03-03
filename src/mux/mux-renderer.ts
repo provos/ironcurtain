@@ -18,6 +18,7 @@
 import type { Terminal as TerminalType } from '@xterm/headless';
 import { calculateLayout, type InputMode, type Layout, type MuxTab } from './types.js';
 import type { ListenerState } from '../escalation/listener-state.js';
+import type { PickerState } from './mux-input-handler.js';
 
 // -- xterm.js color mode constants (from IBufferCell.getFgColorMode/getBgColorMode) --
 const CM_DEFAULT = 0;
@@ -78,6 +79,7 @@ export interface MuxRendererDeps {
   getCursorPos: () => number;
   getEscalationState: () => ListenerState;
   getPendingCount: () => number;
+  getPickerState: () => PickerState | null;
 }
 
 /**
@@ -157,9 +159,11 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
     const baseY = xtermTerminal.buffer.active.baseY;
     const cells = readTerminalBuffer(xtermTerminal, baseY, _layout.ptyViewportRows, _cols);
 
-    // Determine how many rows to render (skip overlay in command mode)
+    // Determine how many rows to render (skip overlay in command/picker mode)
     const mode = deps.getMode();
-    const visibleRows = mode === 'command' ? _layout.ptyViewportRows - _layout.overlayRows : _layout.ptyViewportRows;
+    let visibleRows = _layout.ptyViewportRows;
+    if (mode === 'command') visibleRows -= _layout.overlayRows;
+    else if (mode === 'picker') visibleRows -= _layout.pickerRows;
 
     let lastStyle: TranslatedCell | null = null;
     for (let y = 0; y < visibleRows; y++) {
@@ -255,8 +259,6 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
 
   function drawCommandOverlay(): void {
     if (deps.getMode() !== 'command') return;
-
-    recalcLayout();
     const startY = _layout.overlayY;
 
     let currentY = startY;
@@ -354,6 +356,177 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
     moveTo(2 + 2 + deps.getCursorPos(), currentY);
   }
 
+  function drawActiveOverlay(): void {
+    const mode = deps.getMode();
+    if (mode === 'command') {
+      drawCommandOverlay();
+    } else if (mode === 'picker') {
+      drawPickerOverlay();
+    }
+  }
+
+  function drawPickerOverlay(): void {
+    const ps = deps.getPickerState();
+    if (!ps) return;
+
+    const startY = _layout.pickerY;
+    const totalRows = _layout.pickerRows;
+    if (totalRows < 4) return; // not enough space
+
+    if (ps.phase === 'menu') {
+      drawPickerMenu(ps, startY, totalRows);
+    } else {
+      drawPickerBrowse(ps, startY, totalRows);
+    }
+  }
+
+  function drawMenuOption(y: number, label: string, selected: boolean, boxWidth: number): void {
+    clearLine(y);
+    moveTo(2, y);
+    term.cyan('\u2502');
+    term(' ');
+    if (selected) {
+      term.bgCyan.black('>' + label);
+      term.styleReset();
+    } else {
+      term(' ' + label);
+    }
+    const pad = Math.max(0, boxWidth - label.length - 2);
+    term(' '.repeat(pad));
+    term.cyan('\u2502');
+  }
+
+  function drawPickerMenu(ps: PickerState, startY: number, totalRows: number): void {
+    const menuHeight = 4;
+    const topPad = Math.max(0, Math.floor((totalRows - menuHeight) / 2));
+
+    for (let y = startY; y < startY + totalRows; y++) {
+      clearLine(y);
+    }
+
+    const y0 = startY + topPad;
+    const boxWidth = Math.min(34, _cols - 4);
+
+    // Top border
+    moveTo(2, y0);
+    term.cyan('\u250c /new ' + '\u2500'.repeat(Math.max(0, boxWidth - 6)) + '\u2510');
+
+    drawMenuOption(y0 + 1, ' New sandbox', ps.menuSelection === 0, boxWidth);
+    drawMenuOption(y0 + 2, ' Existing directory', ps.menuSelection === 1, boxWidth);
+
+    // Bottom border
+    clearLine(y0 + 3);
+    moveTo(2, y0 + 3);
+    term.cyan('\u2514' + '\u2500'.repeat(boxWidth) + '\u2518');
+
+    term.styleReset();
+  }
+
+  function drawPickerBrowse(ps: PickerState, startY: number, totalRows: number): void {
+    // Row 0: path input line with cursor
+    // Row 1: separator
+    // Rows 2..N-2: entry list
+    // Row N-1: hint bar (or error)
+    let currentY = startY;
+
+    // Path input line — render with visible cursor block
+    clearLine(currentY);
+    moveTo(2, currentY);
+    term.cyan('Path: ');
+    const pathPrefix = 'Path: ';
+    const beforeCursor = ps.inputPath.slice(0, ps.cursorPos);
+    const cursorChar = ps.cursorPos < ps.inputPath.length ? ps.inputPath[ps.cursorPos] : ' ';
+    const afterCursor = ps.cursorPos < ps.inputPath.length ? ps.inputPath.slice(ps.cursorPos + 1) : '';
+    term(beforeCursor);
+    if (!ps.inList) {
+      // Show block cursor when input field has focus
+      term.bgWhite.black(cursorChar);
+      term.styleReset();
+    } else {
+      term(cursorChar);
+    }
+    term(afterCursor);
+    term.eraseLineAfter();
+    const cursorX = 2 + pathPrefix.length + ps.cursorPos;
+    currentY++;
+
+    // Separator
+    clearLine(currentY);
+    moveTo(2, currentY);
+    term.dim('\u2500'.repeat(Math.max(0, _cols - 4)));
+    term.styleReset();
+    currentY++;
+
+    // Entry list
+    const listRows = Math.max(0, totalRows - 3); // subtract input, separator, hint bar
+
+    // Only adjust scroll when focus is in the list
+    if (ps.inList) {
+      if (ps.selectedIndex < ps.scrollOffset) {
+        ps.scrollOffset = ps.selectedIndex;
+      } else if (ps.selectedIndex >= ps.scrollOffset + listRows) {
+        ps.scrollOffset = ps.selectedIndex - listRows + 1;
+      }
+    }
+
+    for (let i = 0; i < listRows; i++) {
+      clearLine(currentY);
+      const entryIdx = ps.scrollOffset + i;
+      if (entryIdx < ps.entries.length) {
+        moveTo(2, currentY);
+        const entry = ps.entries[entryIdx];
+        const isHighlighted = ps.inList && entryIdx === ps.selectedIndex;
+        const isDir = entry.endsWith('/');
+
+        if (isHighlighted) {
+          term.bgCyan.black('> ' + entry);
+          term.styleReset();
+        } else {
+          term('  ');
+          if (isDir) {
+            term.cyan(entry);
+          } else {
+            term(entry);
+          }
+        }
+      }
+      term.eraseLineAfter();
+      currentY++;
+    }
+
+    // Hint bar / error
+    clearLine(currentY);
+    moveTo(2, currentY);
+    if (ps.error) {
+      term.red(truncate(ps.error, _cols - 4));
+    } else if (ps.inList) {
+      term.bgWhite.black(' Enter ');
+      term.styleReset();
+      term.dim(' pick  ');
+      term.bgWhite.black(' Esc ');
+      term.styleReset();
+      term.dim(' back to input');
+    } else {
+      term.bgWhite.black(' Enter ');
+      term.styleReset();
+      term.dim(' submit  ');
+      term.bgWhite.black(' Tab ');
+      term.styleReset();
+      term.dim(' complete  ');
+      term.bgWhite.black(' \u2193 ');
+      term.styleReset();
+      term.dim(' browse  ');
+      term.bgWhite.black(' Esc ');
+      term.styleReset();
+      term.dim(' back');
+    }
+    term.styleReset();
+    term.eraseLineAfter();
+
+    // Position terminal cursor on the input line (for accessibility)
+    moveTo(cursorX, startY);
+  }
+
   return {
     get layout() {
       return _layout;
@@ -365,16 +538,13 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
       drawTabBar();
       drawPtyViewport();
       drawFooter();
-      if (deps.getMode() === 'command') {
-        drawCommandOverlay();
-      }
+      drawActiveOverlay();
     },
 
     redrawPty(): void {
+      recalcLayout();
       drawPtyViewport();
-      if (deps.getMode() === 'command') {
-        drawCommandOverlay();
-      }
+      drawActiveOverlay();
     },
 
     redrawTabBar(): void {
@@ -383,11 +553,12 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
 
     redrawCommandArea(): void {
       recalcLayout();
-      if (deps.getMode() === 'command') {
+      const mode = deps.getMode();
+      if (mode === 'command' || mode === 'picker') {
         // Repaint viewport first to clear stale overlay rows from a
         // previously larger overlay (e.g., after resolving an escalation).
         drawPtyViewport();
-        drawCommandOverlay();
+        drawActiveOverlay();
       } else {
         drawFooter();
       }
@@ -434,9 +605,7 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
         recalcLayout();
         drawPtyViewport();
         drawFooter();
-        if (deps.getMode() === 'command') {
-          drawCommandOverlay();
-        }
+        drawActiveOverlay();
       }, delay);
     },
   };

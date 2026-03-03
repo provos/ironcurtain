@@ -13,6 +13,7 @@ import { createMuxEscalationManager, type MuxEscalationManager } from './mux-esc
 import { createMuxRenderer, type MuxRenderer } from './mux-renderer.js';
 import { writeTrustedUserContext } from './trusted-input.js';
 import type { MuxTab, MuxAction } from './types.js';
+import { validateWorkspacePath } from '../session/workspace-validation.js';
 import * as logger from '../logger.js';
 
 export interface MuxApp {
@@ -27,6 +28,8 @@ export interface MuxAppOptions {
   readonly agent?: string;
   /** Whether to auto-spawn an initial session. Default: true. */
   readonly autoSpawn?: boolean;
+  /** Protected paths for workspace validation. */
+  readonly protectedPaths?: string[];
 }
 
 /**
@@ -35,6 +38,7 @@ export interface MuxAppOptions {
 export function createMuxApp(options: MuxAppOptions): MuxApp {
   const agent = options.agent ?? 'claude-code';
   const autoSpawn = options.autoSpawn ?? true;
+  const protectedPaths = options.protectedPaths ?? [];
 
   const tabs: MuxTab[] = [];
   let activeTabIndex = 0;
@@ -64,7 +68,7 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
     return { bin: script || 'ironcurtain', prefixArgs: [] };
   }
 
-  async function spawnSession(): Promise<MuxTab> {
+  async function spawnSession(workspacePath?: string): Promise<MuxTab> {
     const { columns } = process.stdout;
     const ptyRows = renderer.layout.ptyViewportRows;
     const ptyCols = columns || 80;
@@ -76,6 +80,7 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
       ironcurtainBin: bin,
       prefixArgs,
       agent,
+      workspacePath,
     });
 
     const tab: MuxTab = {
@@ -184,7 +189,7 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
         break;
 
       case 'command':
-        await handleCommand(action.command, action.args);
+        handleCommand(action.command, action.args);
         break;
 
       case 'trusted-input': {
@@ -216,13 +221,45 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
         renderer.redrawCommandArea();
         break;
 
+      case 'enter-picker-mode':
+        renderer.fullRedraw();
+        break;
+
+      case 'picker-spawn': {
+        let validatedPath: string | undefined;
+        if (action.workspacePath) {
+          try {
+            validatedPath = validateWorkspacePath(action.workspacePath, protectedPaths);
+          } catch (err) {
+            inputHandler.enterBrowseWithError(action.workspacePath, err instanceof Error ? err.message : String(err));
+            renderer.fullRedraw();
+            break;
+          }
+        }
+        const tab = await spawnSession(validatedPath);
+        activeTabIndex = tabs.length - 1;
+        const suffix = validatedPath ? ` in ${validatedPath}` : '';
+        showMessage(`Spawned session #${tab.number}${suffix}`);
+        inputHandler.exitPickerMode();
+        renderer.fullRedraw();
+        break;
+      }
+
+      case 'picker-cancel':
+        renderer.fullRedraw();
+        break;
+
+      case 'redraw-picker':
+        renderer.redrawCommandArea();
+        break;
+
       case 'quit':
         doShutdown();
         break;
     }
   }
 
-  async function handleCommand(command: string, args: string[]): Promise<void> {
+  function handleCommand(command: string, args: string[]): void {
     switch (command) {
       case 'approve':
       case 'deny': {
@@ -250,9 +287,7 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
       }
 
       case 'new': {
-        const tab = await spawnSession();
-        activeTabIndex = tabs.length - 1;
-        showMessage(`Spawned session #${tab.number}`);
+        inputHandler.enterPickerMode();
         renderer.fullRedraw();
         break;
       }
@@ -349,6 +384,7 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
         getCursorPos: () => inputHandler.cursorPos,
         getEscalationState: () => escalationManager.state,
         getPendingCount: () => escalationManager.pendingCount,
+        getPickerState: () => inputHandler.pickerState,
       });
 
       term.on('key', (key: string) => {

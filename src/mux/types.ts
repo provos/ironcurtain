@@ -5,7 +5,7 @@
 import type { PtyBridge } from './pty-bridge.js';
 
 /** Input mode for the mux. */
-export type InputMode = 'pty' | 'command';
+export type InputMode = 'pty' | 'command' | 'picker';
 
 /** A single tab in the mux. */
 export interface MuxTab {
@@ -34,6 +34,10 @@ export type MuxAction =
   | { readonly kind: 'command'; readonly command: string; readonly args: string[] }
   | { readonly kind: 'trusted-input'; readonly text: string }
   | { readonly kind: 'redraw-input' }
+  | { readonly kind: 'enter-picker-mode' }
+  | { readonly kind: 'picker-spawn'; readonly workspacePath?: string }
+  | { readonly kind: 'picker-cancel' }
+  | { readonly kind: 'redraw-picker' }
   | { readonly kind: 'quit' };
 
 /**
@@ -54,6 +58,10 @@ export interface Layout {
   readonly overlayY: number;
   /** Height of the escalation panel within the overlay. */
   readonly escalationPanelRows: number;
+  /** Rows available for the picker overlay (half of viewport). */
+  readonly pickerRows: number;
+  /** Y position where the picker overlay starts. */
+  readonly pickerY: number;
 }
 
 // Layout constants
@@ -84,6 +92,9 @@ export function calculateLayout(totalRows: number, mode: InputMode, pendingCount
     overlayRows = Math.min(escalationPanelRows + HINT_BAR_ROWS + INPUT_LINE_ROWS, MAX_OVERLAY_ROWS);
   }
 
+  const pickerRows = mode === 'picker' ? Math.floor(ptyViewportRows / 2) : 0;
+  const pickerY = TAB_BAR_ROWS + ptyViewportRows - pickerRows;
+
   return {
     tabBarY: 0,
     ptyViewportY: TAB_BAR_ROWS,
@@ -92,5 +103,7 @@ export function calculateLayout(totalRows: number, mode: InputMode, pendingCount
     overlayRows,
     overlayY: TAB_BAR_ROWS + ptyViewportRows - overlayRows,
     escalationPanelRows,
+    pickerRows,
+    pickerY,
   };
 }
