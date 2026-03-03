@@ -256,9 +256,11 @@ export function createMuxRenderer(
       );
 
       let rowsUsed = 0;
+      let shownCount = 0;
       for (const esc of pendingEscalations) {
         if (rowsUsed >= _layout.escalationPanelRows) break;
 
+        // Row 1: header — [N] Session #M  server/tool
         clearLine(currentY);
         moveTo(2, currentY);
         term.yellow(`[${esc.displayNumber}]`);
@@ -266,7 +268,22 @@ export function createMuxRenderer(
         term.cyan(`${esc.request.serverName}/${esc.request.toolName}`);
         currentY++;
         rowsUsed++;
+        shownCount++;
 
+        // Row 2+: arguments — packed key: value pairs
+        if (rowsUsed < _layout.escalationPanelRows) {
+          const argLines = formatArgLines(esc.request.arguments, _cols - 6);
+          for (const line of argLines) {
+            if (rowsUsed >= _layout.escalationPanelRows) break;
+            clearLine(currentY);
+            moveTo(6, currentY);
+            term(line);
+            currentY++;
+            rowsUsed++;
+          }
+        }
+
+        // Reason line
         if (rowsUsed < _layout.escalationPanelRows) {
           clearLine(currentY);
           moveTo(6, currentY);
@@ -274,6 +291,15 @@ export function createMuxRenderer(
           currentY++;
           rowsUsed++;
         }
+      }
+
+      // Overflow indicator when not all escalations fit
+      const remaining = pendingEscalations.length - shownCount;
+      if (remaining > 0 && rowsUsed >= _layout.escalationPanelRows) {
+        const lastY = startY + _layout.escalationPanelRows - 1;
+        clearLine(lastY);
+        moveTo(6, lastY);
+        term.dim(`[+${remaining} more \u2014 /approve all or /deny all]`);
       }
     }
 
@@ -375,6 +401,7 @@ export function createMuxRenderer(
       renderTimeout = setTimeout(() => {
         renderScheduled = false;
         lastRenderTime = Date.now();
+        recalcLayout();
         drawPtyViewport();
         drawFooter();
         if (deps.getMode() === 'command') {
@@ -492,4 +519,48 @@ function applyCell(term: TerminalKit, cell: TranslatedCell): void {
 
   // Write raw ANSI to avoid terminal-kit's own attribute management
   term.noFormat(`\x1b[${sgr.join(';')}m${cell.char}`);
+}
+
+/**
+ * Formats tool call arguments into packed display lines.
+ * Each line contains as many `key: value` pairs as fit within maxWidth,
+ * separated by double spaces.
+ */
+function formatArgLines(args: Record<string, unknown>, maxWidth: number): string[] {
+  const entries = Object.entries(args);
+  if (entries.length === 0) return [];
+
+  const lines: string[] = [];
+  let currentLine = '';
+
+  for (const [key, value] of entries) {
+    const formatted = formatArgValue(value);
+    const pair = `${key}: ${formatted}`;
+
+    if (currentLine.length === 0) {
+      currentLine = pair;
+    } else if (currentLine.length + 2 + pair.length <= maxWidth) {
+      currentLine += '  ' + pair;
+    } else {
+      lines.push(truncate(currentLine, maxWidth));
+      currentLine = pair;
+    }
+  }
+
+  if (currentLine.length > 0) {
+    lines.push(truncate(currentLine, maxWidth));
+  }
+
+  return lines;
+}
+
+function formatArgValue(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  return JSON.stringify(value);
+}
+
+function truncate(str: string, maxLen: number): string {
+  if (str.length <= maxLen) return str;
+  return str.slice(0, maxLen - 1) + '\u2026';
 }

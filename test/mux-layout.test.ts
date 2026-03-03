@@ -21,15 +21,15 @@ describe('calculateLayout', () => {
   it('command mode, 2 escalations: escalation panel + hint + input', () => {
     const layout = calculateLayout(24, 'command', 2);
     expect(layout.ptyViewportRows).toBe(21); // CONSTANT
-    expect(layout.escalationPanelRows).toBe(4); // 2 * 2 rows per escalation
-    expect(layout.overlayRows).toBe(6); // 4 (esc panel) + 1 (hint) + 1 (input)
+    expect(layout.escalationPanelRows).toBe(8); // 2 * 4 rows per escalation
+    expect(layout.overlayRows).toBe(10); // 8 (esc panel) + 1 (hint) + 1 (input)
   });
 
-  it('command mode, 10 escalations: escalation panel capped at 6 rows', () => {
+  it('command mode, 10 escalations: escalation panel capped at 12 rows', () => {
     const layout = calculateLayout(24, 'command', 10);
     expect(layout.ptyViewportRows).toBe(21); // CONSTANT
-    expect(layout.escalationPanelRows).toBe(6); // capped at MAX_ESCALATION_PANEL_ROWS
-    expect(layout.overlayRows).toBe(8); // 6 (esc panel) + 1 (hint) + 1 (input) = 8 = MAX_OVERLAY_ROWS
+    expect(layout.escalationPanelRows).toBe(12); // capped at MAX_ESCALATION_PANEL_ROWS
+    expect(layout.overlayRows).toBe(14); // 12 (esc panel) + 1 (hint) + 1 (input) = 14 = MAX_OVERLAY_ROWS
   });
 
   it('minimum viewport height is 1 row', () => {
@@ -46,9 +46,9 @@ describe('calculateLayout', () => {
   it('overlay Y position is correct', () => {
     const layout = calculateLayout(30, 'command', 1);
     // ptyViewport: 27 rows (30 - 3)
-    // escalation panel: 2 rows (1 * 2)
-    // overlay: 4 rows (2 esc + 1 hint + 1 input)
-    // overlayY = 1 + 27 - 4 = 24
-    expect(layout.overlayY).toBe(24);
+    // escalation panel: 4 rows (1 * 4)
+    // overlay: 6 rows (4 esc + 1 hint + 1 input)
+    // overlayY = 1 + 27 - 6 = 22
+    expect(layout.overlayY).toBe(22);
   });
 });

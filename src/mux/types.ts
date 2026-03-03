@@ -61,9 +61,9 @@ const TAB_BAR_ROWS = 1;
 const FOOTER_ROWS = 2;
 const HINT_BAR_ROWS = 1;
 const INPUT_LINE_ROWS = 1;
-const ESCALATION_ROWS_PER_ITEM = 2;
-const MAX_ESCALATION_PANEL_ROWS = 6;
-const MAX_OVERLAY_ROWS = 8;
+const ESCALATION_ROWS_PER_ITEM = 4;
+const MAX_ESCALATION_PANEL_ROWS = 12;
+const MAX_OVERLAY_ROWS = 14;
 
 /**
  * Calculates the screen layout.
