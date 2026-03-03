@@ -1143,7 +1143,7 @@ There is a time-of-check-to-time-of-use gap between when the user types trusted 
 
 **Mitigation:** The auto-approver checks the `timestamp` field in `user-context.json`. If the context is older than `TRUSTED_INPUT_STALENESS_MS` (120 seconds / 2 minutes), the auto-approver skips auto-approval and falls through to human escalation. This bounds the TOCTOU window: the user's trusted input is only valid for a short period after they typed it.
 
-The 120-second window is a pragmatic choice: long enough that the agent can process the user's instruction and make tool calls, short enough that stale context from a previous conversation turn is unlikely to be used. This value is configurable via `autoApprove.stalenessMs` in `~/.ironcurtain/config.json`.
+The 120-second window is a pragmatic choice: long enough that the agent can process the user's instruction and make tool calls, short enough that stale context from a previous conversation turn is unlikely to be used. This value is currently implemented as a fixed constant (`TRUSTED_INPUT_STALENESS_MS`) in `mcp-proxy-server.ts`; future work may make it configurable via user configuration.
 
 **Residual risk:** Within the staleness window, a compromised sandbox could still exploit the mismatch between trusted context and actual PTY input. This is acceptable because (a) the auto-approver's LLM prompt is conservative and matches on specific intent, not broad categories, and (b) the policy engine's argument-level checks (via `extractArgsForAutoApprove`) catch mismatches between the stated intent and the actual tool arguments when annotations include resource-identifier roles.
 

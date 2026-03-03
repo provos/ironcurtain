@@ -82,6 +82,8 @@ export function createMuxEscalationManager(): MuxEscalationManager {
 
   // Track session IDs that we manage (spawned by mux)
   const managedSessionIds = new Set<string>();
+  // Tombstones: removed sessions that may still linger in the registry briefly
+  const removedSessionIds = new Set<string>();
 
   function notifyChange(): void {
     for (const cb of changeCallbacks) cb();
@@ -127,7 +129,7 @@ export function createMuxEscalationManager(): MuxEscalationManager {
     removeSession(sessionId: string): void {
       const session = state.sessions.get(sessionId);
       session?.watcher.stop();
-      managedSessionIds.delete(sessionId);
+      removedSessionIds.add(sessionId);
       state = removeSession(state, sessionId);
       notifyChange();
     },
@@ -187,14 +189,25 @@ export function createMuxEscalationManager(): MuxEscalationManager {
 
         let changed = false;
 
-        // Add externally-spawned sessions
+        // Add externally-spawned sessions (skip managed, tombstoned)
         for (const reg of registrations) {
-          if (!stateIds.has(reg.sessionId) && !managedSessionIds.has(reg.sessionId)) {
+          if (
+            !stateIds.has(reg.sessionId) &&
+            !managedSessionIds.has(reg.sessionId) &&
+            !removedSessionIds.has(reg.sessionId)
+          ) {
             const watcher = createWatcherForSession(reg.sessionId, reg.escalationDir);
             state = addSession(state, reg, watcher);
             watcher.start();
             changed = true;
             for (const cb of discoveryCallbacks) cb(reg);
+          }
+        }
+
+        // Clear tombstones once the registry entry disappears
+        for (const id of removedSessionIds) {
+          if (!currentIds.has(id)) {
+            removedSessionIds.delete(id);
           }
         }
 

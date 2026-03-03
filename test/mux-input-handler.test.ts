@@ -21,18 +21,14 @@ describe('MuxInputHandler', () => {
       expect(handler.mode).toBe('command');
     });
 
-    it('Ctrl-A Ctrl-A sends literal Ctrl-A to PTY', () => {
+    it('Ctrl-A Ctrl-A toggles back to PTY mode', () => {
       const handler = createMuxInputHandler();
       handler.handleKey('CTRL_A'); // enter command mode
       expect(handler.mode).toBe('command');
 
-      // Create a new handler and test the Ctrl-A Ctrl-A sequence in PTY mode
-      const handler2 = createMuxInputHandler();
-      handler2.handleKey('CTRL_A'); // first Ctrl-A -> command mode
-
-      // Second Ctrl-A in command mode returns to PTY mode
-      const action = handler2.handleKey('CTRL_A');
+      const action = handler.handleKey('CTRL_A');
       expect(action).toEqual({ kind: 'enter-pty-mode' });
+      expect(handler.mode).toBe('pty');
     });
 
     it('forwards special characters to PTY', () => {

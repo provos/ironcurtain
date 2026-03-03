@@ -63,6 +63,8 @@ export interface MuxRenderer {
   destroy(): void;
   /** Schedule a throttled PTY redraw. */
   scheduleRedraw(): void;
+  /** Shows a transient message in the footer that auto-clears. */
+  showMessage(message: string): void;
   /** Current layout. */
   readonly layout: Layout;
 }
@@ -90,6 +92,11 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
   let renderScheduled = false;
   let lastRenderTime = 0;
   let renderTimeout: ReturnType<typeof setTimeout> | null = null;
+
+  // Transient flash message
+  let _flashMessage: string | null = null;
+  let _flashTimeout: ReturnType<typeof setTimeout> | null = null;
+  const FLASH_DURATION_MS = 3000;
 
   function recalcLayout(): void {
     _layout = calculateLayout(_rows, deps.getMode(), deps.getPendingCount());
@@ -202,17 +209,21 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
       }
       term.eraseLineAfter();
 
-      // Row 2: guidance with badge-style key
+      // Row 2: flash message or guidance
       moveTo(0, row2);
-      term('  ');
-      term.bgWhite.black(' ^^A ');
-      term.styleReset();
-      if (pendingCount > 0) {
-        term.dim(
-          ` command mode \u00b7 ${pendingCount} escalation${pendingCount !== 1 ? 's' : ''} pending \u2014 /approve or /deny`,
-        );
+      if (_flashMessage) {
+        term.yellow(`  ${_flashMessage}`);
       } else {
-        term.dim(' command mode \u00b7 type a message to enable auto-approver');
+        term('  ');
+        term.bgWhite.black(' ^^A ');
+        term.styleReset();
+        if (pendingCount > 0) {
+          term.dim(
+            ` command mode \u00b7 ${pendingCount} escalation${pendingCount !== 1 ? 's' : ''} pending \u2014 /approve or /deny`,
+          );
+        } else {
+          term.dim(' command mode \u00b7 type a message to enable auto-approver');
+        }
       }
       term.styleReset();
       term.eraseLineAfter();
@@ -230,9 +241,14 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
       term.dim(' back');
       term.eraseLineAfter();
 
-      // Row 2: trusted input hint
+      // Row 2: flash message or trusted input hint
       moveTo(0, row2);
-      term.dim('  type a message to send as trusted input to the agent');
+      if (_flashMessage) {
+        term.yellow(`  ${_flashMessage}`);
+      } else {
+        term.dim('  type a message to send as trusted input to the agent');
+      }
+      term.styleReset();
       term.eraseLineAfter();
     }
   }
@@ -388,6 +404,21 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
         clearTimeout(renderTimeout);
         renderTimeout = null;
       }
+      if (_flashTimeout) {
+        clearTimeout(_flashTimeout);
+        _flashTimeout = null;
+      }
+    },
+
+    showMessage(message: string): void {
+      _flashMessage = message;
+      if (_flashTimeout) clearTimeout(_flashTimeout);
+      _flashTimeout = setTimeout(() => {
+        _flashMessage = null;
+        _flashTimeout = null;
+        drawFooter();
+      }, FLASH_DURATION_MS);
+      drawFooter();
     },
 
     scheduleRedraw(): void {

@@ -162,6 +162,7 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
 
   function showMessage(message: string): void {
     logger.info(message);
+    renderer.showMessage(message);
   }
 
   async function handleAction(action: MuxAction): Promise<void> {

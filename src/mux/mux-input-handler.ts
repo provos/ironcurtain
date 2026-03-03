@@ -6,8 +6,8 @@
  * - Command mode: keystrokes collected in a line buffer, dispatched on Enter
  *
  * Ctrl-A toggles between modes (following screen/tmux convention).
- * Pressing Ctrl-A twice in a row simply toggles from PTY -> command -> PTY;
- * it does not send a literal Ctrl-A byte to the PTY.
+ * Pressing Ctrl-A in PTY mode enters command mode; pressing it again
+ * returns to PTY mode.
  */
 
 import type { InputMode, MuxAction } from './types.js';
@@ -72,37 +72,26 @@ export function createMuxInputHandler(): MuxInputHandler {
   let _mode: InputMode = 'pty';
   let _inputBuffer = '';
   let _cursorPos = 0;
-  let _lastKeyWasCtrlA = false;
 
   function handlePtyKey(key: string): MuxAction {
     if (key === CTRL_A) {
-      if (_lastKeyWasCtrlA) {
-        // Ctrl-A Ctrl-A -> send literal Ctrl-A to PTY
-        _lastKeyWasCtrlA = false;
-        return { kind: 'write-pty', data: '\x01' };
-      }
-      _lastKeyWasCtrlA = true;
       _mode = 'command';
       _inputBuffer = '';
       _cursorPos = 0;
       return { kind: 'enter-command-mode' };
     }
 
-    _lastKeyWasCtrlA = false;
     return { kind: 'write-pty', data: KEY_TO_SEQUENCE[key] ?? key };
   }
 
   function handleCommandKey(key: string): MuxAction {
     // Ctrl-A in command mode returns to PTY mode
     if (key === CTRL_A) {
-      _lastKeyWasCtrlA = false;
       _mode = 'pty';
       _inputBuffer = '';
       _cursorPos = 0;
       return { kind: 'enter-pty-mode' };
     }
-
-    _lastKeyWasCtrlA = false;
 
     // Escape: discard buffer, return to PTY mode
     if (key === ESCAPE) {
