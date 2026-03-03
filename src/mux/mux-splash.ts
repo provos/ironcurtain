@@ -402,13 +402,18 @@ export function createSplashScreen(
 
       _layout = computeWordLayout(_cols, _viewportRows - _reservedBottom);
 
-      if (_done) {
-        // Re-render final state with new layout
-        if (_layout) {
-          _rain = buildRainColumns(_layout);
-          for (const rc of _rain) rc.locked = true;
+      if (!_layout) {
+        // Terminal too small: stop animation, fall back to plain text on next draw
+        _rain = [];
+        if (_interval) {
+          clearInterval(_interval);
+          _interval = null;
         }
-      } else if (_layout) {
+      } else if (_done) {
+        // Re-render final state with new layout
+        _rain = buildRainColumns(_layout);
+        for (const rc of _rain) rc.locked = true;
+      } else {
         // Restart animation with new positions
         _rain = buildRainColumns(_layout);
         _frame = 0;
