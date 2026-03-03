@@ -207,21 +207,37 @@ export function createMuxRenderer(
       }
       term.eraseLineAfter();
 
-      // Row 2: guidance
+      // Row 2: guidance with badge-style key
       moveTo(0, row2);
+      term('  ');
+      term.bgWhite.black(' ^^A ');
+      term.styleReset();
       if (pendingCount > 0) {
-        term.dim(`  Ctrl-A: switch to command mode \u00b7 ${pendingCount} escalation${pendingCount !== 1 ? 's' : ''} pending \u2014 /approve or /deny`);
+        term.dim(` command mode \u00b7 ${pendingCount} escalation${pendingCount !== 1 ? 's' : ''} pending \u2014 /approve or /deny`);
       } else {
-        term.dim('  Ctrl-A: switch to command mode \u00b7 type a message to enable auto-approver');
+        term.dim(' command mode \u00b7 type a message to enable auto-approver');
       }
+      term.styleReset();
       term.eraseLineAfter();
     } else {
-      // Row 1: command mode status
+      // Row 1: command mode — badge-style keys
       moveTo(0, row1);
-      term.dim('  [CMD]  Ctrl-A \u2192 PTY | Esc \u2192 cancel');
+      term('  ');
+      term.bgWhite.black(' CMD ');
+      term('  ');
+      term.bgWhite.black(' ^^A ');
+      term.styleReset();
+      term.dim(' pty  ');
+      term.bgWhite.black(' Esc ');
+      term.styleReset();
+      term.dim(' back');
+      term.styleReset();
       term.eraseLineAfter();
 
-      // Row 2: not used in command mode (overlay provides guidance)
+      // Row 2: trusted input hint
+      moveTo(0, row2);
+      term.dim('  type a message to send as trusted input to the agent');
+      term.eraseLineAfter();
     }
   }
 
@@ -266,10 +282,27 @@ export function createMuxRenderer(
     moveTo(2, currentY);
     const pendingCount = deps.getPendingCount();
     if (pendingCount > 0) {
-      term.dim('/approve N \u00b7 /deny N \u00b7 /approve all \u00b7 /new \u00b7 Ctrl-A \u2192 PTY');
+      term.cyan('/approve');
+      term.dim(' N  ');
+      term.cyan('/deny');
+      term.dim(' N  ');
+      term.cyan('/approve all');
+      term.dim(' \u2502 ');
+      term.cyan('/new');
+      term.dim('  ');
+      term.cyan('/quit');
     } else {
-      term.dim('/approve \u00b7 /deny \u00b7 /new \u00b7 /tab N \u00b7 Ctrl-A \u2192 PTY');
+      term.cyan('/new');
+      term.dim('  ');
+      term.cyan('/tab');
+      term.dim(' N  ');
+      term.cyan('/close');
+      term.dim('  ');
+      term.cyan('/sessions');
+      term.dim('  ');
+      term.cyan('/quit');
     }
+    term.styleReset();
     currentY++;
 
     // Input line
