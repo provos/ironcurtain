@@ -58,7 +58,7 @@ export interface Layout {
 
 // Layout constants
 const TAB_BAR_ROWS = 1;
-const FOOTER_ROWS = 1;
+const FOOTER_ROWS = 2;
 const HINT_BAR_ROWS = 1;
 const INPUT_LINE_ROWS = 1;
 const ESCALATION_ROWS_PER_ITEM = 2;

@@ -375,9 +375,7 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
 
       escalationManager.onChange(() => {
         renderer.redrawTabBar();
-        if (inputHandler.mode === 'command') {
-          renderer.redrawCommandArea();
-        }
+        renderer.redrawCommandArea();
       });
 
       escalationManager.startRegistryPolling();

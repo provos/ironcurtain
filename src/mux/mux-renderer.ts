@@ -152,7 +152,8 @@ export function createMuxRenderer(
     }
 
     const xtermTerminal = activeTab.bridge.terminal;
-    const cells = readTerminalBuffer(xtermTerminal, 0, _layout.ptyViewportRows, _cols);
+    const baseY = xtermTerminal.buffer.active.baseY;
+    const cells = readTerminalBuffer(xtermTerminal, baseY, _layout.ptyViewportRows, _cols);
 
     // Determine how many rows to render (skip overlay in command mode)
     const mode = deps.getMode();
@@ -182,19 +183,46 @@ export function createMuxRenderer(
   }
 
   function drawFooter(): void {
-    clearLine(_layout.footerY);
-    moveTo(0, _layout.footerY);
+    const row1 = _layout.footerY;
+    const row2 = _layout.footerY + 1;
+
+    clearLine(row1);
+    clearLine(row2);
 
     const activeTab = deps.getActiveTab();
     const mode = deps.getMode();
+    const pendingCount = deps.getPendingCount();
 
     if (mode === 'pty') {
-      const tabLabel = activeTab ? `PTY #${activeTab.number}` : 'No session';
-      term.dim(`  [${tabLabel}]  Ctrl-A \u2192 cmd`);
+      // Row 1: status — tab label left, escalation badge right
+      moveTo(0, row1);
+      const tabLabel = activeTab ? `PTY #${activeTab.number} ${activeTab.label}` : 'No session';
+      term.dim(`  [${tabLabel}]`);
+      if (pendingCount > 0) {
+        const badge = ` [!${pendingCount} pending] `;
+        const badgeX = Math.max(0, _cols - badge.length);
+        moveTo(badgeX, row1);
+        term.bgYellow.black(badge);
+        term.styleReset();
+      }
+      term.eraseLineAfter();
+
+      // Row 2: guidance
+      moveTo(0, row2);
+      if (pendingCount > 0) {
+        term.dim(`  Ctrl-A: switch to command mode \u00b7 ${pendingCount} escalation${pendingCount !== 1 ? 's' : ''} pending \u2014 /approve or /deny`);
+      } else {
+        term.dim('  Ctrl-A: switch to command mode \u00b7 type a message to enable auto-approver');
+      }
+      term.eraseLineAfter();
     } else {
+      // Row 1: command mode status
+      moveTo(0, row1);
       term.dim('  [CMD]  Ctrl-A \u2192 PTY | Esc \u2192 cancel');
+      term.eraseLineAfter();
+
+      // Row 2: not used in command mode (overlay provides guidance)
     }
-    term.eraseLineAfter();
   }
 
   function drawCommandOverlay(): void {
@@ -315,6 +343,7 @@ export function createMuxRenderer(
         renderScheduled = false;
         lastRenderTime = Date.now();
         drawPtyViewport();
+        drawFooter();
         if (deps.getMode() === 'command') {
           drawCommandOverlay();
         }

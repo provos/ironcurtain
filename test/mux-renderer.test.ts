@@ -130,4 +130,28 @@ describe('readTerminalBuffer', () => {
     expect(cells).toHaveLength(1);
     expect(cells[0]).toHaveLength(0);
   });
+
+  it('reads from baseY to show current viewport after scrollback', async () => {
+    const terminal = new Terminal({ cols: 80, rows: 5, allowProposedApi: true });
+
+    // Write 10 lines to force scrollback (only 5 fit in the viewport)
+    for (let i = 0; i < 10; i++) {
+      await writeSync(terminal, `Line ${i}\r\n`);
+    }
+
+    const baseY = terminal.buffer.active.baseY;
+    expect(baseY).toBeGreaterThan(0);
+
+    // Reading from baseY should show the current viewport (latest lines)
+    const viewportCells = readTerminalBuffer(terminal, baseY, 5, 80);
+    expect(viewportCells[0][0].char).toBe('L');
+    // First viewport line should be Line 6 (lines 0-5 scrolled off)
+    const firstLine = viewportCells[0].map((c) => c.char).join('').trim();
+    expect(firstLine).toContain('Line 6');
+
+    // Reading from 0 would show stale scrollback (Line 0), not the viewport
+    const staleContent = readTerminalBuffer(terminal, 0, 5, 80);
+    const staleLine = staleContent[0].map((c) => c.char).join('').trim();
+    expect(staleLine).toContain('Line 0');
+  });
 });
