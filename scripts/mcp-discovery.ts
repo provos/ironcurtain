@@ -9,6 +9,7 @@
 import { mkdirSync } from 'node:fs';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { permissiveJsonSchemaValidator } from '../src/trusted-process/permissive-output-validator.js';
 import type { IronCurtainConfig } from '../src/config/types.js';
 import type { ServerListing } from '../src/session/prompts.js';
 
@@ -42,7 +43,10 @@ export async function discoverTools(config: IronCurtainConfig, clientName: strin
       // Drain piped stderr to prevent backpressure
       transport.stderr?.on('data', () => {});
 
-      const client = new Client({ name: clientName, version: '0.0.0' });
+      const client = new Client(
+        { name: clientName, version: '0.0.0' },
+        { jsonSchemaValidator: permissiveJsonSchemaValidator },
+      );
       await client.connect(transport);
       clients.push({ client, transport });
 

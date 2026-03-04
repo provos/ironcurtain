@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 import type { LanguageModel } from 'ai';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { permissiveJsonSchemaValidator } from '../trusted-process/permissive-output-validator.js';
 import chalk from 'chalk';
 import type { MCPServerConfig } from '../config/types.js';
 import {
@@ -60,7 +61,10 @@ async function connectAndDiscoverTools(
           if (transport.stderr) {
             transport.stderr.on('data', () => {});
           }
-          client = new Client({ name: 'ironcurtain-annotator', version: VERSION });
+          client = new Client(
+            { name: 'ironcurtain-annotator', version: VERSION },
+            { jsonSchemaValidator: permissiveJsonSchemaValidator },
+          );
           await client.connect(transport);
 
           const toolsResult = await client.listTools();

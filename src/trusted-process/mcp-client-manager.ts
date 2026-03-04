@@ -4,6 +4,7 @@ import { CompatibilityCallToolResultSchema, ListRootsRequestSchema } from '@mode
 import type { MCPServerConfig } from '../config/types.js';
 import * as logger from '../logger.js';
 import { VERSION } from '../version.js';
+import { permissiveJsonSchemaValidator } from './permissive-output-validator.js';
 
 export const ROOTS_REFRESH_TIMEOUT_MS = 5_000;
 
@@ -29,9 +30,15 @@ export class MCPClientManager {
       env: { ...(process.env as Record<string, string>), ...config.env },
     });
 
+    // Permissive validator bypasses client-side outputSchema validation that
+    // breaks on MCP servers returning non-conforming structuredContent on errors.
+    // See permissive-output-validator.ts for full context and SDK issue link.
     const client = new Client(
       { name: 'ironcurtain', version: VERSION },
-      roots ? { capabilities: { roots: { listChanged: true } } } : {},
+      {
+        ...(roots ? { capabilities: { roots: { listChanged: true } } } : {}),
+        jsonSchemaValidator: permissiveJsonSchemaValidator,
+      },
     );
 
     // Mutable copy -- addRoot() pushes to this array.
@@ -120,10 +127,9 @@ export class MCPClientManager {
       throw new Error(`MCP server "${serverName}" not connected`);
     }
 
-    // TODO(workaround): Remove once @cyanheads/git-mcp-server fixes outputSchema declarations.
-    // See the detailed comment in mcp-proxy-server.ts for full context.
-    // CompatibilityCallToolResultSchema bypasses client-side output schema validation that
-    // fails when servers declare outputSchema but return non-conforming structuredContent.
+    // CompatibilityCallToolResultSchema accepts the legacy `toolResult` response format.
+    // Output schema validation is intentionally bypassed by the permissiveJsonSchemaValidator
+    // on the Client (always returns { valid: true }) so schema issues don't hide real MCP tool errors.
     return server.client.callTool({ name: toolName, arguments: args }, CompatibilityCallToolResultSchema);
   }
 

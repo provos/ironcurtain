@@ -72,6 +72,7 @@ import { wrapLanguageModel } from 'ai';
 import { createLlmLoggingMiddleware } from '../pipeline/llm-logger.js';
 import { extractMcpErrorMessage } from './mcp-error-utils.js';
 import { type ServerContextMap, updateServerContext, formatServerContext } from './server-context.js';
+import { permissiveJsonSchemaValidator } from './permissive-output-validator.js';
 import type { LanguageModelV3 } from '@ai-sdk/provider';
 import type { MCPServerConfig, SandboxAvailabilityPolicy } from '../config/types.js';
 import { VERSION } from '../version.js';
@@ -712,8 +713,9 @@ export async function handleCallTool(
     }
     const client = clientState.client;
 
-    // TODO(workaround): Remove once @cyanheads/git-mcp-server fixes outputSchema declarations.
-    // Uses CompatibilityCallToolResultSchema for permissive response parsing.
+    // CompatibilityCallToolResultSchema accepts the legacy `toolResult` response format
+    // (protocol version 2024-10-07). Output schema validation is intentionally
+    // bypassed by the permissiveJsonSchemaValidator injected at Client construction time.
     const result = await client.callTool(
       {
         name: toolInfo.name,
@@ -876,9 +878,13 @@ async function main(): Promise<void> {
       });
     }
 
+    // See permissive-output-validator.ts for why this is needed.
     const client = new Client(
       { name: 'ironcurtain-proxy', version: VERSION },
-      { capabilities: { roots: { listChanged: true } } },
+      {
+        capabilities: { roots: { listChanged: true } },
+        jsonSchemaValidator: permissiveJsonSchemaValidator,
+      },
     );
 
     const state: ClientState = { client, roots: [...mcpRoots] };

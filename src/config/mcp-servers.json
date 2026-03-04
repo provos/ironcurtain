@@ -15,11 +15,9 @@
     "sandbox": {
       "filesystem": {
         "denyRead": ["~/.gnupg", "~/.aws"]
-      },
-      "network": {
-        "allowedDomains": ["github.com", "*.github.com", "gitlab.com", "*.gitlab.com"]
       }
-    }
+    },
+    "_comment": "TODO: Re-enable network restrictions once @anthropic-ai/sandbox-runtime sets GIT_SSH_COMMAND on Linux. See https://github.com/anthropic-experimental/sandbox-runtime — GIT_SSH_COMMAND (which routes git SSH through the SOCKS proxy) is only set on macOS. On Linux, git push over SSH fails with DNS resolution errors because the sandbox's --unshare-net namespace has no DNS. The intended config was: \"network\": { \"allowedDomains\": [\"github.com\", \"*.github.com\", \"gitlab.com\", \"*.gitlab.com\"] }"
   },
   "fetch": {
     "description": "HTTP requests and web search",
