@@ -85,13 +85,12 @@ export function extractFinalResponse(raw: string): string {
   let foundContent = false;
 
   for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i].trim();
-    if (line === '') {
+    if (lines[i].trim() === '') {
       if (foundContent) break;
       continue;
     }
     foundContent = true;
-    result.unshift(line);
+    result.unshift(lines[i]);
   }
 
   return result.length > 0 ? result.join('\n') : raw.trim();
@@ -150,7 +149,8 @@ if [ -n "$IRONCURTAIN_INITIAL_COLS" ] && [ -n "$IRONCURTAIN_INITIAL_ROWS" ]; the
 fi
 # Write system prompt to temp file for --instructions
 PROMPT_FILE=$(mktemp /tmp/goose-prompt-XXXXXX.md)
-echo "$IRONCURTAIN_SYSTEM_PROMPT" > "$PROMPT_FILE"
+trap 'rm -f "$PROMPT_FILE"' EXIT
+printf '%s' "$IRONCURTAIN_SYSTEM_PROMPT" > "$PROMPT_FILE"
 exec goose run -s -i "$PROMPT_FILE"
 `;
 }
@@ -222,8 +222,9 @@ export function createGooseAdapter(userConfig?: ResolvedUserConfig): AgentAdapte
         '/bin/sh',
         '-c',
         `PROMPT_FILE=$(mktemp /tmp/goose-prompt-XXXXXX.md) && ` +
+          `trap 'rm -f "$PROMPT_FILE"' EXIT && ` +
           `cat > "$PROMPT_FILE" << '${delimiter}'\n${instructions}\n${delimiter}\n` +
-          `goose run --no-session -i "$PROMPT_FILE" && rm -f "$PROMPT_FILE"`,
+          `goose run --no-session -i "$PROMPT_FILE"`,
       ];
     },
 

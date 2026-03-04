@@ -305,7 +305,7 @@ The `socketPath` parameter determines whether to use `UNIX-CONNECT:` (Linux UDS)
 
 Returns files written to `/etc/ironcurtain/` in the container:
 
-1. **`start-goose.sh`** (mode 0o755) -- PTY mode startup script. Reads the system prompt from `$IRONCURTAIN_SYSTEM_PROMPT` env var, writes it to a temp file, and execs `goose session` with instructions.
+1. **`start-goose.sh`** (mode 0o755) -- PTY mode startup script. Reads the system prompt from `$IRONCURTAIN_SYSTEM_PROMPT` env var, writes it to a temp file, and execs `goose run -s` (interactive mode with instructions).
 
 ```bash
 #!/bin/bash
@@ -315,8 +315,9 @@ if [ -n "$IRONCURTAIN_INITIAL_COLS" ] && [ -n "$IRONCURTAIN_INITIAL_ROWS" ]; the
 fi
 # Write system prompt to temp file for --instructions
 PROMPT_FILE=$(mktemp /tmp/goose-prompt-XXXXXX.md)
-echo "$IRONCURTAIN_SYSTEM_PROMPT" > "$PROMPT_FILE"
-exec goose session --with-extension ironcurtain -i "$PROMPT_FILE"
+trap 'rm -f "$PROMPT_FILE"' EXIT
+printf '%s' "$IRONCURTAIN_SYSTEM_PROMPT" > "$PROMPT_FILE"
+exec goose run -s -i "$PROMPT_FILE"
 ```
 
 2. **`resize-pty.sh`** (mode 0o755) -- Terminal resize script for PTY mode. Same pattern as Claude Code's, but targets `goose` process instead of `claude`.
@@ -570,7 +571,7 @@ extractResponse(exitCode: number, stdout: string): AgentResponse {
 
 ### 4.10 `buildPtyCommand(systemPrompt, ptySockPath, ptyPort): readonly string[]`
 
-Builds the container command for PTY mode (interactive `goose session`).
+Builds the container command for PTY mode (interactive `goose run -s`).
 
 ```typescript
 buildPtyCommand(
@@ -892,7 +893,7 @@ buildCommand(message: string, systemPrompt: string): readonly string[] {
 
 ### PTY Mode (Interactive)
 
-PTY mode runs `goose session` (interactive), which maintains full conversation history within the session. This is the recommended mode for extended work with Goose.
+PTY mode runs `goose run -s` (interactive with instructions), which maintains full conversation history within the session. This is the recommended mode for extended work with Goose.
 
 - The system prompt is injected once via `--instructions` at session start
 - Goose maintains its own conversation history
@@ -1290,7 +1291,7 @@ Prototype 3 (MCP config) is non-blocking and can be done during Phase 2.
 
 ### Phase 4: PTY Mode (1 day)
 
-1. Test `goose session` via socat PTY bridge
+1. Test `goose run -s` via socat PTY bridge
 2. Verify terminal resize works
 3. Verify escalation BEL character works
 4. Test PTY session end-to-end

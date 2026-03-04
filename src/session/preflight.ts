@@ -184,6 +184,6 @@ async function resolveAutoDetect(
 
   return {
     mode: { kind: 'docker', agent: defaultAgent, authKind: credKind },
-    reason: `Docker available, ${credKind === 'oauth' ? 'OAuth' : 'ANTHROPIC_API_KEY'} detected`,
+    reason: `Docker available, ${credKind === 'oauth' ? 'OAuth' : 'API key'} detected`,
   };
 }
