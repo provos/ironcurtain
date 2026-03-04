@@ -54,6 +54,7 @@ import type {
   ToolAnnotationsFile,
   VerificationResult,
 } from './types.js';
+import type { ArgumentRole } from '../types/argument-roles.js';
 
 /**
  * Selects the LLM prompt variant for policy compilation.
@@ -327,7 +328,16 @@ export class PipelineRunner {
       throw new Error("tool-annotations.json not found. Run 'ironcurtain annotate-tools' first.");
     }
 
-    const allAnnotations = Object.values(toolAnnotationsFile.servers).flatMap((server) => server.tools);
+    // Normalize args: old format stored single roles as a string; new format uses string[].
+    // Coerce string values to single-element arrays so all downstream code can safely call .join().
+    const allAnnotations = Object.values(toolAnnotationsFile.servers)
+      .flatMap((server) => server.tools)
+      .map((tool) => ({
+        ...tool,
+        args: Object.fromEntries(
+          Object.entries(tool.args).map(([k, v]) => [k, Array.isArray(v) ? v : [v as unknown as string]]),
+        ) as Record<string, ArgumentRole[]>,
+      }));
     const serverDomainAllowlists = config.mcpServers ? extractServerDomainAllowlists(config.mcpServers) : undefined;
 
     const includeHandwritten = config.includeHandwrittenScenarios ?? config.constitutionKind === 'constitution';

@@ -292,16 +292,20 @@ export async function runAddJobWizard(): Promise<void> {
     job = { ...job, gitRepo: finalUri };
   }
 
+  // Save job first so it's not lost if policy compilation fails
+  saveJob(job);
+
   console.error('');
   console.error('Compiling task policy...');
   try {
     await compileTaskPolicy(job.task, getJobDir(job.id));
   } catch (err) {
     console.error(chalk.red(`Policy compilation failed: ${err instanceof Error ? err.message : String(err)}`));
+    console.error(
+      chalk.yellow(`Job "${job.id}" was saved. Fix the issue then run: ironcurtain daemon recompile-job ${job.id}`),
+    );
     process.exit(1);
   }
-
-  saveJob(job);
 
   const scheduler = createCronScheduler();
   scheduler.schedule(job, async () => {});
@@ -326,17 +330,22 @@ export async function runEditJobWizard(jobIdStr: string): Promise<void> {
   const originalTask = existing.task;
   const job = await runJobReviewLoop(existing, false);
 
+  // Save first so changes aren't lost if recompilation fails
+  saveJob(job);
+
   if (job.task !== originalTask) {
     console.error('Task changed — recompiling policy...');
     try {
       await compileTaskPolicy(job.task, getJobDir(job.id));
     } catch (err) {
       console.error(chalk.red(`Policy compilation failed: ${err instanceof Error ? err.message : String(err)}`));
+      console.error(
+        chalk.yellow(`Job "${job.id}" was saved. Fix the issue then run: ironcurtain daemon recompile-job ${job.id}`),
+      );
       process.exit(1);
     }
   }
 
-  saveJob(job);
   outro(`Job "${job.id}" updated.`);
 }
 
