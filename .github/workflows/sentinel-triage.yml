@@ -1,0 +1,108 @@
+name: Sentinel Triage
+
+on:
+  schedule:
+    # Run every 6 hours
+    - cron: '0 */6 * * *'
+  workflow_dispatch: {}
+
+jobs:
+  close-expired-challenges:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/github-script@v8
+        with:
+          script: |
+            const SENTINEL_MARKER = 'This repository enforces contribution tiers.';
+            const CHALLENGE_HOURS = 72;
+            const CLOSE_MESSAGE =
+              'Proof of worthiness failed. Reputation loss noted.';
+
+            // Maintainer association types that can issue challenges
+            const MAINTAINER_ROLES = new Set([
+              'OWNER',
+              'MEMBER',
+              'COLLABORATOR',
+            ]);
+
+            const now = Date.now();
+            const cutoff = CHALLENGE_HOURS * 60 * 60 * 1000;
+
+            // Only look at issues updated in the relevant window.
+            // Issues not updated since before the challenge period cannot
+            // have an expiring challenge, and skipping them avoids
+            // API rate-limit exhaustion from spam issues.
+            const since = new Date(now - cutoff - 24 * 60 * 60 * 1000);
+
+            const issues = await github.paginate(
+              github.rest.issues.listForRepo,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                state: 'open',
+                sort: 'updated',
+                direction: 'desc',
+                since: since.toISOString(),
+                per_page: 100,
+              }
+            );
+
+            for (const issue of issues) {
+              // Skip pull requests (the API returns them mixed in)
+              if (issue.pull_request) continue;
+
+              const comments = await github.paginate(
+                github.rest.issues.listComments,
+                {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  per_page: 100,
+                }
+              );
+
+              // Find the most recent sentinel challenge comment from a maintainer
+              const challenge = comments
+                .filter(
+                  (c) =>
+                    MAINTAINER_ROLES.has(c.author_association) &&
+                    c.body?.trimEnd().endsWith(SENTINEL_MARKER)
+                )
+                .at(-1);
+
+              if (!challenge) continue;
+
+              const elapsed = now - new Date(challenge.created_at).getTime();
+              if (elapsed < cutoff) continue;
+
+              // Check there's no maintainer comment after the challenge
+              // (which would indicate engagement / manual override)
+              const hasFollowUp = comments.some(
+                (c) =>
+                  MAINTAINER_ROLES.has(c.author_association) &&
+                  new Date(c.created_at) > new Date(challenge.created_at) &&
+                  c.id !== challenge.id
+              );
+              if (hasFollowUp) continue;
+
+              core.info(
+                `Closing issue #${issue.number}: challenge expired (${Math.round(elapsed / 3600000)}h)`
+              );
+
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: CLOSE_MESSAGE,
+              });
+
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                state: 'closed',
+                state_reason: 'not_planned',
+              });
+            }
