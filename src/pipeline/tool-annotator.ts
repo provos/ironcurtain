@@ -11,12 +11,14 @@ import type { LanguageModel } from 'ai';
 import { z } from 'zod';
 import {
   ARGUMENT_ROLE_REGISTRY,
+  extractDefaultRoles,
   getRoleDefinition,
   getRolesForServer,
+  isConditionalRoles,
   type ArgumentRole,
 } from '../types/argument-roles.js';
 import { generateObjectWithRepair } from './generate-with-repair.js';
-import type { ToolAnnotation } from './types.js';
+import type { StoredToolAnnotation } from './types.js';
 
 // Input type matching what MCP's listTools() returns
 export interface MCPToolSchema {
@@ -36,6 +38,44 @@ function buildAnnotationsResponseSchema(serverName: string, tools: MCPToolSchema
   // Accept both formats and normalize to an array.
   const rolesArraySchema = z.union([z.array(argumentRoleSchema), argumentRoleSchema.transform((r) => [r])]);
 
+  // Conditional role schemas: a condition on a sibling argument's value
+  const scalarSchema = z.union([z.string(), z.number(), z.boolean()]);
+  const conditionSchema = z
+    .object({
+      arg: z.string(),
+      equals: scalarSchema.optional(),
+      in: z.array(scalarSchema).optional(),
+      is: z.enum(['present', 'absent', 'truthy', 'falsy']).optional(),
+    })
+    .refine(
+      (c) => {
+        const count = [c.equals !== undefined, c.in !== undefined, c.is !== undefined].filter(Boolean).length;
+        return count === 1;
+      },
+      { message: 'Exactly one of equals, in, or is must be set' },
+    );
+
+  const conditionalEntrySchema = z.object({
+    condition: conditionSchema,
+    roles: rolesArraySchema,
+  });
+
+  const conditionalRolesSchema = z
+    .object({
+      default: rolesArraySchema,
+      when: z.array(conditionalEntrySchema),
+    })
+    .refine(
+      (spec) => {
+        const defaultSet = new Set(spec.default);
+        return spec.when.every((entry) => entry.roles.every((role) => defaultSet.has(role)));
+      },
+      { message: 'Conditional roles must be a subset of the default roles' },
+    );
+
+  // An argument's roles: either a static array or a conditional block
+  const argumentRoleSpecSchema = z.union([rolesArraySchema, conditionalRolesSchema]);
+
   // Map tool name → expected argument names from input schemas
   const toolArgNames = new Map<string, string[]>();
   for (const t of tools) {
@@ -47,7 +87,7 @@ function buildAnnotationsResponseSchema(serverName: string, tools: MCPToolSchema
     toolName: z.enum(toolNames),
     comment: z.string(),
     sideEffects: z.boolean(),
-    args: z.record(z.string(), rolesArraySchema),
+    args: z.record(z.string(), argumentRoleSpecSchema),
   });
 
   return z.object({
@@ -62,6 +102,25 @@ function buildAnnotationsResponseSchema(serverName: string, tools: MCPToolSchema
             path: [i, 'args'],
             message: `Tool "${a.toolName}" is missing role annotations for arguments: ${missingArgs.join(', ')}. Each argument must have a role array (e.g. ["read-path"] or ["none"]).`,
           });
+        }
+
+        // Cross-argument validation: conditional role conditions must reference
+        // sibling argument names that exist in the same tool's annotation
+        for (const [argName, spec] of Object.entries(a.args)) {
+          if (isConditionalRoles(spec)) {
+            for (const entry of spec.when) {
+              const condArg = entry.condition.arg;
+              if (!(condArg in a.args)) {
+                ctx.addIssue({
+                  code: 'custom',
+                  path: [i, 'args', argName],
+                  message:
+                    `Conditional role on "${argName}" references unknown argument "${condArg}". ` +
+                    `The condition argument must be another argument in the same tool's input schema.`,
+                });
+              }
+            }
+          }
         }
       }
     }),
@@ -123,6 +182,53 @@ Here is a complete example annotation for a move_file tool that shows multi-role
   }
 }
 
+## Conditional Roles
+
+When a tool has a mode/operation argument that changes its behavior, use
+conditional role assignment instead of assigning the union of all possible
+roles. This produces more precise policy evaluation.
+
+Use conditional roles when:
+- A tool has an operation/mode/type argument that selects between read,
+  write, and delete behavior
+- A boolean flag (like dryRun or force) changes whether the tool modifies
+  state
+
+Format for conditional roles:
+{
+  "default": ["read-path", "write-history", "delete-history"],
+  "when": [
+    { "condition": { "arg": "operation", "equals": "list" }, "roles": ["read-path"] },
+    { "condition": { "arg": "operation", "in": ["create", "rename"] }, "roles": ["read-path", "write-history"] },
+    { "condition": { "arg": "operation", "equals": "delete" }, "roles": ["read-path", "delete-history"] }
+  ]
+}
+
+Rules for conditional roles:
+- The "default" MUST be the MOST RESTRICTIVE role set (the union of all
+  possible roles). This is the fallback when no condition matches.
+- Each "when" entry narrows the roles for a specific mode/flag value.
+- The "arg" in a condition must reference another argument in the same
+  tool's input schema.
+- Use "equals" for single-value matching, "in" for multiple values with
+  the same roles, and "is" for presence/truthiness checks.
+- Only use conditional roles when the mode argument genuinely changes the
+  security profile. Do not add conditions for arguments that do not affect
+  which resources are accessed.
+- Most arguments will still use static role arrays. Only use conditional
+  roles where the tool is clearly multi-mode.
+
+Example: A tool with dryRun flag:
+{
+  "path": {
+    "default": ["read-path", "write-path"],
+    "when": [
+      { "condition": { "arg": "dryRun", "equals": true }, "roles": ["read-path"] }
+    ]
+  },
+  "dryRun": ["none"]
+}
+
 Here are the tools to annotate:
 
 ${toolDescriptions}
@@ -135,7 +241,7 @@ export async function annotateTools(
   tools: MCPToolSchema[],
   llm: LanguageModel,
   onProgress?: (message: string) => void,
-): Promise<ToolAnnotation[]> {
+): Promise<StoredToolAnnotation[]> {
   if (tools.length === 0) return [];
 
   const schema = buildAnnotationsResponseSchema(serverName, tools);
@@ -148,7 +254,7 @@ export async function annotateTools(
     onProgress,
   });
 
-  const annotations: ToolAnnotation[] = output.annotations.map((a) => ({
+  const annotations: StoredToolAnnotation[] = output.annotations.map((a) => ({
     ...a,
     serverName,
   }));
@@ -204,9 +310,9 @@ export interface HeuristicValidationResult {
 
 export function validateAnnotationsHeuristic(
   tools: MCPToolSchema[],
-  annotations: ToolAnnotation[],
+  annotations: StoredToolAnnotation[],
 ): HeuristicValidationResult {
-  const annotationsByName = new Map<string, ToolAnnotation>();
+  const annotationsByName = new Map<string, StoredToolAnnotation>();
   for (const a of annotations) {
     annotationsByName.set(a.toolName, a);
   }
@@ -229,7 +335,7 @@ export function validateAnnotationsHeuristic(
       const argType = argSchema['type'];
       if (argType === 'boolean' || argType === 'number' || argType === 'integer') continue;
 
-      const roles = annotation.args[argName] as ArgumentRole[] | undefined;
+      const roles = argName in annotation.args ? extractDefaultRoles(annotation.args[argName]) : undefined;
       const hasPathRole = roles && roles.some((r) => getRoleDefinition(r).isResourceIdentifier);
 
       if (!hasPathRole) {
@@ -239,8 +345,8 @@ export function validateAnnotationsHeuristic(
 
     // Check for path-like default values or examples
     if (hasPathLikeValues(tool.inputSchema)) {
-      const hasAnyPathRole = Object.values(annotation.args).some((roles) =>
-        roles.some((r) => getRoleDefinition(r).isResourceIdentifier),
+      const hasAnyPathRole = Object.values(annotation.args).some((spec) =>
+        extractDefaultRoles(spec).some((r) => getRoleDefinition(r).isResourceIdentifier),
       );
       if (!hasAnyPathRole) {
         warnings.push(`Tool "${tool.name}" schema has path-like defaults/examples but no path roles in annotation`);

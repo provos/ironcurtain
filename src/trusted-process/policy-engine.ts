@@ -19,7 +19,8 @@ import type {
   CompiledPolicyFile,
   DynamicListsFile,
   ResolvedList,
-  ToolAnnotationsFile,
+  StoredToolAnnotationsFile,
+  StoredToolAnnotation,
   ToolAnnotation,
   CompiledRule,
   ArgumentRole,
@@ -29,6 +30,7 @@ import {
   getUrlRoles,
   getRoleDefinition,
   resolveRealPath,
+  resolveStoredAnnotation,
   SANDBOX_SAFE_PATH_ROLES,
   type RoleDefinition,
 } from '../types/argument-roles.js';
@@ -306,7 +308,7 @@ function expandListReferences(policy: CompiledPolicyFile, lists: DynamicListsFil
 }
 
 export class PolicyEngine {
-  private annotationMap: Map<string, ToolAnnotation>;
+  private annotationMap: Map<string, StoredToolAnnotation>;
   private compiledPolicy: CompiledPolicyFile;
   private protectedPaths: string[];
   private protectedPathExclusions: string[];
@@ -315,7 +317,7 @@ export class PolicyEngine {
 
   constructor(
     compiledPolicy: CompiledPolicyFile,
-    toolAnnotations: ToolAnnotationsFile,
+    toolAnnotations: StoredToolAnnotationsFile,
     protectedPaths: string[],
     allowedDirectory?: string,
     serverDomainAllowlists?: ReadonlyMap<string, readonly string[]>,
@@ -329,8 +331,8 @@ export class PolicyEngine {
     this.annotationMap = this.buildAnnotationMap(toolAnnotations);
   }
 
-  private buildAnnotationMap(annotations: ToolAnnotationsFile): Map<string, ToolAnnotation> {
-    const map = new Map<string, ToolAnnotation>();
+  private buildAnnotationMap(annotations: StoredToolAnnotationsFile): Map<string, StoredToolAnnotation> {
+    const map = new Map<string, StoredToolAnnotation>();
     for (const [serverName, serverData] of Object.entries(annotations.servers)) {
       for (const tool of serverData.tools) {
         const key = `${serverName}__${tool.toolName}`;
@@ -340,18 +342,37 @@ export class PolicyEngine {
     return map;
   }
 
-  /** Returns the annotation for a tool, or undefined if unknown. */
-  getAnnotation(serverName: string, toolName: string): ToolAnnotation | undefined {
+  /**
+   * Returns the resolved annotation for a specific tool call,
+   * with conditional role specs evaluated against the call arguments.
+   * Returns undefined for unknown tools.
+   */
+  getAnnotation(serverName: string, toolName: string, callArgs: Record<string, unknown>): ToolAnnotation | undefined {
+    const stored = this.annotationMap.get(`${serverName}__${toolName}`);
+    if (!stored) return undefined;
+    return resolveStoredAnnotation(stored, callArgs);
+  }
+
+  /**
+   * Returns the stored (unresolved) annotation for a tool.
+   * Conditional role specs are not evaluated.
+   * Used by pipeline stages that need the raw conditional structure.
+   */
+  getStoredAnnotation(serverName: string, toolName: string): StoredToolAnnotation | undefined {
     return this.annotationMap.get(`${serverName}__${toolName}`);
   }
 
   evaluate(request: ToolCallRequest): EvaluationResult {
+    // Resolve conditional roles once against the actual tool call arguments.
+    // After this point, `annotation` has the standard shape: args: Record<string, ArgumentRole[]>
+    const annotation = this.getAnnotation(request.serverName, request.toolName, request.arguments);
+
     // Structural checks (may resolve some roles via sandbox containment)
-    const structural = this.evaluateStructuralInvariants(request);
+    const structural = this.evaluateStructuralInvariants(request, annotation);
     if (structural.decision) return structural.decision;
 
     // Compiled rule evaluation (skipping sandbox-resolved roles)
-    return this.evaluateCompiledRules(request, structural.sandboxResolvedRoles);
+    return this.evaluateCompiledRules(request, structural.sandboxResolvedRoles, annotation);
   }
 
   /**
@@ -367,10 +388,12 @@ export class PolicyEngine {
    * for defense-in-depth. Returns a StructuralResult with either a
    * final decision or a set of roles resolved by sandbox containment.
    */
-  private evaluateStructuralInvariants(request: ToolCallRequest): StructuralResult {
+  private evaluateStructuralInvariants(
+    request: ToolCallRequest,
+    annotation: ToolAnnotation | undefined,
+  ): StructuralResult {
     // Extract paths using both methods for defense-in-depth
     const heuristicPaths = extractPathsHeuristic(request.arguments);
-    const annotation = this.annotationMap.get(`${request.serverName}__${request.toolName}`);
 
     // Protected path check and sandbox containment use path-category roles only (not URL roles)
     const pathRoles = getPathRoles();
@@ -519,8 +542,8 @@ export class PolicyEngine {
   private evaluateCompiledRules(
     request: ToolCallRequest,
     sandboxResolvedRoles: ReadonlySet<ArgumentRole>,
+    annotation: ToolAnnotation | undefined,
   ): EvaluationResult {
-    const annotation = this.annotationMap.get(`${request.serverName}__${request.toolName}`);
     if (!annotation) {
       throw new Error(`Missing annotation for ${request.serverName}/${request.toolName} in compiled rule evaluation`);
     }
