@@ -1,6 +1,6 @@
 import { homedir } from 'node:os';
 import { describe, it, expect } from 'vitest';
-import type { CompiledPolicyFile, ToolAnnotationsFile } from '../src/pipeline/types.js';
+import type { CompiledPolicyFile, ToolAnnotationsFile, StoredToolAnnotationsFile } from '../src/pipeline/types.js';
 import { PolicyEngine, domainMatchesAllowlist, isIpAddress } from '../src/trusted-process/policy-engine.js';
 import { extractServerDomainAllowlists } from '../src/config/index.js';
 import type { MCPServerConfig } from '../src/config/types.js';
@@ -1554,6 +1554,349 @@ describe('PolicyEngine', () => {
       );
       expect(result.decision).toBe('allow');
       expect(result.rule).toBe('structural-sandbox-allow');
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Conditional Argument Roles
+// ---------------------------------------------------------------------------
+
+describe('PolicyEngine with conditional roles', () => {
+  // Annotations with conditional role specs for multi-mode git tools
+  const conditionalAnnotations: StoredToolAnnotationsFile = {
+    generatedAt: 'test-fixture',
+    servers: {
+      git: {
+        inputHash: 'test-fixture',
+        tools: [
+          {
+            toolName: 'git_branch',
+            serverName: 'git',
+            comment: 'Creates, lists, or deletes branches.',
+            sideEffects: true,
+            args: {
+              path: {
+                default: ['read-path', 'write-history', 'delete-history'],
+                when: [
+                  { condition: { arg: 'operation', equals: 'list' }, roles: ['read-path'] },
+                  { condition: { arg: 'operation', in: ['create', 'rename'] }, roles: ['read-path', 'write-history'] },
+                  { condition: { arg: 'operation', equals: 'delete' }, roles: ['read-path', 'delete-history'] },
+                ],
+              },
+              operation: ['none'],
+              name: ['branch-name'],
+            },
+          },
+          {
+            toolName: 'git_status',
+            serverName: 'git',
+            comment: 'Shows working tree status.',
+            sideEffects: false,
+            args: { path: ['read-path'] },
+          },
+          {
+            toolName: 'git_clean',
+            serverName: 'git',
+            comment: 'Removes untracked files.',
+            sideEffects: true,
+            args: {
+              path: {
+                default: ['read-path', 'delete-path'],
+                when: [{ condition: { arg: 'dryRun', equals: true }, roles: ['read-path'] }],
+              },
+              dryRun: ['none'],
+            },
+          },
+          {
+            toolName: 'git_stash',
+            serverName: 'git',
+            comment: 'Stash/pop/list/drop changes.',
+            sideEffects: true,
+            args: {
+              path: {
+                default: ['read-path', 'write-history'],
+                when: [{ condition: { arg: 'mode', equals: 'list' }, roles: ['read-path'] }],
+              },
+              mode: ['none'],
+            },
+          },
+        ],
+      },
+      filesystem: {
+        inputHash: 'test-fixture',
+        tools: [
+          {
+            toolName: 'edit_file',
+            serverName: 'filesystem',
+            comment: 'Makes targeted edits to a file.',
+            sideEffects: true,
+            args: {
+              path: {
+                default: ['read-path', 'write-path'],
+                when: [{ condition: { arg: 'dryRun', equals: true }, roles: ['read-path'] }],
+              },
+              edits: ['none'],
+              dryRun: ['none'],
+            },
+          },
+        ],
+      },
+    },
+  };
+
+  // Policy rules matching the conditional annotation test scenarios
+  const conditionalPolicy: CompiledPolicyFile = {
+    generatedAt: 'test-fixture',
+    constitutionHash: 'test-fixture',
+    inputHash: 'test-fixture',
+    rules: [
+      {
+        name: 'allow-git-read-ops',
+        description: 'Allow read-only git operations.',
+        principle: 'Least privilege',
+        if: { server: ['git'], sideEffects: false },
+        then: 'allow',
+        reason: 'Read-only git operations are safe.',
+      },
+      {
+        name: 'escalate-git-branch-management',
+        description: 'Escalate git branch management.',
+        principle: 'Human oversight',
+        if: { server: ['git'], tool: ['git_branch'] },
+        then: 'escalate',
+        reason: 'Branch management requires human approval.',
+      },
+      {
+        name: 'escalate-git-destructive-ops',
+        description: 'Escalate git operations with write-history or delete-history.',
+        principle: 'Human oversight',
+        if: { server: ['git'], roles: ['write-history', 'delete-history'] },
+        then: 'escalate',
+        reason: 'History-modifying git operations require human approval.',
+      },
+      {
+        name: 'allow-git-safe-ops',
+        description: 'Allow git operations that only read.',
+        principle: 'Least privilege',
+        if: { server: ['git'] },
+        then: 'allow',
+        reason: 'Safe git operations are allowed.',
+      },
+      {
+        name: 'escalate-filesystem-writes',
+        description: 'Escalate filesystem writes outside sandbox.',
+        principle: 'Human oversight',
+        if: { roles: ['write-path'], server: ['filesystem'] },
+        then: 'escalate',
+        reason: 'Writes outside sandbox require approval.',
+      },
+      {
+        name: 'allow-filesystem-reads',
+        description: 'Allow filesystem reads.',
+        principle: 'Least privilege',
+        if: { roles: ['read-path'], server: ['filesystem'] },
+        then: 'allow',
+        reason: 'Reads are safe.',
+      },
+    ],
+  };
+
+  const condEngine = new PolicyEngine(conditionalPolicy, conditionalAnnotations, TEST_PROTECTED_PATHS, SANDBOX_DIR);
+
+  function makeCondRequest(overrides: Partial<ToolCallRequest> = {}): ToolCallRequest {
+    return {
+      requestId: 'test-cond',
+      serverName: 'git',
+      toolName: 'git_branch',
+      arguments: { path: `${SANDBOX_DIR}/repo`, operation: 'list' },
+      timestamp: new Date().toISOString(),
+      ...overrides,
+    };
+  }
+
+  it('escalates git_branch operation:list in sandbox (resolves to read-path only)', () => {
+    const result = condEngine.evaluate(
+      makeCondRequest({
+        arguments: { path: `${SANDBOX_DIR}/repo`, operation: 'list' },
+      }),
+    );
+    // read-path is the only role -> allow-git-safe-ops should match
+    // (write-history and delete-history are NOT present, so escalate-git-branch-management
+    // fires first since it matches on tool name alone)
+    expect(result.decision).toBe('escalate');
+    expect(result.rule).toBe('escalate-git-branch-management');
+  });
+
+  it('escalates git_branch operation:delete in sandbox (resolves to delete-history)', () => {
+    const result = condEngine.evaluate(
+      makeCondRequest({
+        arguments: { path: `${SANDBOX_DIR}/repo`, operation: 'delete' },
+      }),
+    );
+    expect(result.decision).toBe('escalate');
+  });
+
+  it('escalates git_branch with no operation (default: union of all roles)', () => {
+    const result = condEngine.evaluate(
+      makeCondRequest({
+        arguments: { path: `${SANDBOX_DIR}/repo` },
+      }),
+    );
+    // No operation arg -> default roles: read-path + write-history + delete-history
+    expect(result.decision).toBe('escalate');
+  });
+
+  it('allows edit_file with dryRun:true in sandbox (resolves to read-path only)', () => {
+    const result = condEngine.evaluate(
+      makeCondRequest({
+        serverName: 'filesystem',
+        toolName: 'edit_file',
+        arguments: { path: `${SANDBOX_DIR}/test.txt`, edits: '...', dryRun: true },
+      }),
+    );
+    // dryRun:true -> path resolves to ['read-path'] only, within sandbox -> auto-allow
+    expect(result.decision).toBe('allow');
+    expect(result.rule).toBe('structural-sandbox-allow');
+  });
+
+  it('allows edit_file with dryRun:false in sandbox (resolves to read-path + write-path)', () => {
+    const result = condEngine.evaluate(
+      makeCondRequest({
+        serverName: 'filesystem',
+        toolName: 'edit_file',
+        arguments: { path: `${SANDBOX_DIR}/test.txt`, edits: '...', dryRun: false },
+      }),
+    );
+    // dryRun:false -> no condition matches -> default ['read-path', 'write-path'], within sandbox -> auto-allow
+    expect(result.decision).toBe('allow');
+    expect(result.rule).toBe('structural-sandbox-allow');
+  });
+
+  it('escalates edit_file with dryRun:false outside sandbox (write-path escalates)', () => {
+    const result = condEngine.evaluate(
+      makeCondRequest({
+        serverName: 'filesystem',
+        toolName: 'edit_file',
+        arguments: { path: `${REAL_TMP}/outside/test.txt`, edits: '...', dryRun: false },
+      }),
+    );
+    // dryRun:false -> default ['read-path', 'write-path'], outside sandbox -> compiled rules
+    // write-path matches escalate-filesystem-writes
+    expect(result.decision).toBe('escalate');
+    expect(result.rule).toBe('escalate-filesystem-writes');
+  });
+
+  it('allows edit_file with dryRun:true outside sandbox (read-path allowed)', () => {
+    const result = condEngine.evaluate(
+      makeCondRequest({
+        serverName: 'filesystem',
+        toolName: 'edit_file',
+        arguments: { path: `${REAL_TMP}/outside/test.txt`, edits: '...', dryRun: true },
+      }),
+    );
+    // dryRun:true -> path resolves to ['read-path'] only, outside sandbox -> compiled rules
+    // read-path matches allow-filesystem-reads
+    expect(result.decision).toBe('allow');
+    expect(result.rule).toBe('allow-filesystem-reads');
+  });
+
+  it('allows git_clean with dryRun:true in sandbox (resolves to read-path only)', () => {
+    const result = condEngine.evaluate(
+      makeCondRequest({
+        toolName: 'git_clean',
+        arguments: { path: `${SANDBOX_DIR}/repo`, dryRun: true },
+      }),
+    );
+    // dryRun:true -> path resolves to ['read-path'] only
+    // git server, read-path is not sandbox-safe-auto-allow for git (only filesystem)
+    // so falls to compiled rules -> allow-git-safe-ops
+    expect(result.decision).toBe('allow');
+    expect(result.rule).toBe('allow-git-safe-ops');
+  });
+
+  it('allows git_clean with dryRun:false in sandbox (default roles: read-path + delete-path)', () => {
+    const result = condEngine.evaluate(
+      makeCondRequest({
+        toolName: 'git_clean',
+        arguments: { path: `${SANDBOX_DIR}/repo`, dryRun: false },
+      }),
+    );
+    // dryRun:false -> default ['read-path', 'delete-path']
+    // git server -> compiled rules -> allow-git-safe-ops matches both roles
+    expect(result.decision).toBe('allow');
+    expect(result.rule).toBe('allow-git-safe-ops');
+  });
+
+  it('escalates git_stash mode:drop in sandbox (resolves to write-history)', () => {
+    const result = condEngine.evaluate(
+      makeCondRequest({
+        toolName: 'git_stash',
+        arguments: { path: `${SANDBOX_DIR}/repo`, mode: 'drop' },
+      }),
+    );
+    // No condition matches for mode:"drop" -> default ['read-path', 'write-history']
+    // write-history matches escalate-git-destructive-ops
+    expect(result.decision).toBe('escalate');
+    expect(result.rule).toBe('escalate-git-destructive-ops');
+  });
+
+  it('allows git_stash mode:list in sandbox (resolves to read-path only)', () => {
+    const result = condEngine.evaluate(
+      makeCondRequest({
+        toolName: 'git_stash',
+        arguments: { path: `${SANDBOX_DIR}/repo`, mode: 'list' },
+      }),
+    );
+    // mode:list -> path resolves to ['read-path'] only -> allow-git-safe-ops
+    expect(result.decision).toBe('allow');
+    expect(result.rule).toBe('allow-git-safe-ops');
+  });
+
+  describe('getAnnotation with conditional resolution', () => {
+    it('resolves conditional roles for a specific call', () => {
+      const annotation = condEngine.getAnnotation('git', 'git_branch', {
+        path: '/tmp/repo',
+        operation: 'list',
+      });
+      expect(annotation).toBeDefined();
+      expect(annotation!.args.path).toEqual(['read-path']);
+    });
+
+    it('returns default roles when no condition matches', () => {
+      const annotation = condEngine.getAnnotation('git', 'git_branch', {
+        path: '/tmp/repo',
+        operation: 'unknown_op',
+      });
+      expect(annotation).toBeDefined();
+      expect(annotation!.args.path).toEqual(['read-path', 'write-history', 'delete-history']);
+    });
+
+    it('returns undefined for unknown tool', () => {
+      const annotation = condEngine.getAnnotation('git', 'nonexistent', {});
+      expect(annotation).toBeUndefined();
+    });
+  });
+
+  describe('getStoredAnnotation returns raw conditional structure', () => {
+    it('returns stored annotation with conditional specs', () => {
+      const stored = condEngine.getStoredAnnotation('git', 'git_branch');
+      expect(stored).toBeDefined();
+      expect(Array.isArray(stored!.args.path)).toBe(false);
+      const spec = stored!.args.path as { default: string[]; when: unknown[] };
+      expect(spec.default).toEqual(['read-path', 'write-history', 'delete-history']);
+      expect(spec.when).toHaveLength(3);
+    });
+
+    it('returns stored annotation with static specs unchanged', () => {
+      const stored = condEngine.getStoredAnnotation('git', 'git_status');
+      expect(stored).toBeDefined();
+      expect(stored!.args.path).toEqual(['read-path']);
+    });
+
+    it('returns undefined for unknown tool', () => {
+      const stored = condEngine.getStoredAnnotation('git', 'nonexistent');
+      expect(stored).toBeUndefined();
     });
   });
 });

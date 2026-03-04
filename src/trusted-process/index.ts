@@ -152,7 +152,7 @@ export class TrustedProcess {
     const startTime = Date.now();
 
     // Annotation-driven normalization: split into transport vs policy args
-    const annotation = this.policyEngine.getAnnotation(request.serverName, request.toolName);
+    const annotation = this.policyEngine.getAnnotation(request.serverName, request.toolName, request.arguments);
     if (!annotation) {
       const reason = `Missing annotation for tool: ${request.serverName}__${request.toolName}. Re-run 'ironcurtain annotate-tools' to update.`;
       return {

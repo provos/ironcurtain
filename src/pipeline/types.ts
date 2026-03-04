@@ -35,6 +35,65 @@ export interface ToolAnnotationsFile {
 }
 
 // ---------------------------------------------------------------------------
+// Conditional Argument Roles (stored/on-disk format)
+// ---------------------------------------------------------------------------
+
+/**
+ * A condition on a sibling argument that determines which roles apply.
+ * Exactly one of equals/in/is must be set.
+ */
+export interface RoleCondition {
+  readonly arg: string;
+  readonly equals?: string | number | boolean;
+  readonly in?: ReadonlyArray<string | number | boolean>;
+  readonly is?: 'present' | 'absent' | 'truthy' | 'falsy';
+}
+
+/**
+ * A conditional role assignment: when the condition matches,
+ * these roles apply instead of the default.
+ */
+export interface ConditionalRoleEntry {
+  readonly condition: RoleCondition;
+  readonly roles: ArgumentRole[];
+}
+
+/**
+ * Roles for an argument that depend on the values of sibling arguments.
+ * The `default` roles apply when no `when` clause matches.
+ *
+ * Invariant: each `when` entry's `roles` must be a subset of `default`.
+ * This ensures conditional resolution can only narrow, never expand.
+ */
+export interface ConditionalRoles {
+  readonly default: ArgumentRole[];
+  readonly when: ConditionalRoleEntry[];
+}
+
+/**
+ * An argument's roles in the stored (on-disk) format: either a static
+ * array (backward compatible) or a conditional block with default + when.
+ */
+export type ArgumentRoleSpec = ArgumentRole[] | ConditionalRoles;
+
+/**
+ * A tool annotation as stored in tool-annotations.json.
+ * Args may contain conditional role specs that need resolution
+ * against actual tool call arguments before use.
+ */
+export interface StoredToolAnnotation extends Omit<ToolAnnotation, 'args'> {
+  args: Record<string, ArgumentRoleSpec>;
+}
+
+/**
+ * The tool-annotations.json file format.
+ * Uses StoredToolAnnotation because the file may contain conditional specs.
+ */
+export interface StoredToolAnnotationsFile extends Omit<ToolAnnotationsFile, 'servers'> {
+  servers: Record<string, { inputHash: string; tools: StoredToolAnnotation[] }>;
+}
+
+// ---------------------------------------------------------------------------
 // Compiled Policy
 // ---------------------------------------------------------------------------
 

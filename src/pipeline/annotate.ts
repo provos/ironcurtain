@@ -25,7 +25,7 @@ import {
   withSpinner,
 } from './pipeline-shared.js';
 import { annotateTools, buildAnnotationPrompt, validateAnnotationsHeuristic } from './tool-annotator.js';
-import type { ToolAnnotation, ToolAnnotationsFile } from './types.js';
+import type { StoredToolAnnotation, StoredToolAnnotationsFile } from './types.js';
 import { VERSION } from '../version.js';
 
 // ---------------------------------------------------------------------------
@@ -101,7 +101,7 @@ async function connectAndDiscoverTools(
 // ---------------------------------------------------------------------------
 
 interface AnnotationResult {
-  annotations: ToolAnnotation[];
+  annotations: StoredToolAnnotation[];
   inputHash: string;
 }
 
@@ -112,7 +112,7 @@ function computeAnnotationHash(serverName: string, tools: ServerConnection['tool
 async function annotateServerTools(
   serverName: string,
   tools: ServerConnection['tools'],
-  existingAnnotations: ToolAnnotationsFile | undefined,
+  existingAnnotations: StoredToolAnnotationsFile | undefined,
   llm: LanguageModel,
 ): Promise<AnnotationResult> {
   const inputHash = computeAnnotationHash(serverName, tools);
@@ -150,8 +150,8 @@ async function annotateServerTools(
 // Artifact Construction & Output
 // ---------------------------------------------------------------------------
 
-function buildAnnotationsArtifact(annotationResults: Map<string, AnnotationResult>): ToolAnnotationsFile {
-  const servers: ToolAnnotationsFile['servers'] = {};
+function buildAnnotationsArtifact(annotationResults: Map<string, AnnotationResult>): StoredToolAnnotationsFile {
+  const servers: StoredToolAnnotationsFile['servers'] = {};
   for (const [serverName, result] of annotationResults) {
     servers[serverName] = {
       inputHash: result.inputHash,
@@ -197,7 +197,7 @@ export async function main(): Promise<void> {
   const connections = await connectAndDiscoverTools(config.mcpServers);
 
   try {
-    const existingAnnotations = loadExistingArtifact<ToolAnnotationsFile>(
+    const existingAnnotations = loadExistingArtifact<StoredToolAnnotationsFile>(
       config.generatedDir,
       'tool-annotations.json',
       config.packageGeneratedDir,

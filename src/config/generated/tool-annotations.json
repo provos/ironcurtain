@@ -1,12 +1,12 @@
 {
-  "generatedAt": "2026-02-28T00:45:15.199Z",
+  "generatedAt": "2026-03-04T19:46:46.455Z",
   "servers": {
     "filesystem": {
-      "inputHash": "3a47c5b52d421b6f14fa1f556c87bac43f98adc1a0cf7519527b32cff9cdaae4",
+      "inputHash": "4efe924aad6d0b55f7128efebd2b9e23689dad318dafa05fd71913bcb6f85ee9",
       "tools": [
         {
           "toolName": "read_file",
-          "comment": "Reads the complete (or partial) contents of a file as text, with optional head/tail line limiting (deprecated in favor of read_text_file).",
+          "comment": "Reads the complete contents of a file as text, optionally limited to the first or last N lines (deprecated in favor of read_text_file).",
           "sideEffects": true,
           "args": {
             "path": [
@@ -23,7 +23,7 @@
         },
         {
           "toolName": "read_text_file",
-          "comment": "Reads the complete or partial contents of a text file from the filesystem, handling various encodings.",
+          "comment": "Reads the complete contents of a text file, optionally limited to the first or last N lines.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -40,7 +40,7 @@
         },
         {
           "toolName": "read_media_file",
-          "comment": "Reads an image or audio file and returns its base64-encoded data along with its MIME type.",
+          "comment": "Reads an image or audio file and returns its base64-encoded data and MIME type.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -76,13 +76,26 @@
         },
         {
           "toolName": "edit_file",
-          "comment": "Makes targeted line-based edits to an existing text file by replacing exact text sequences, returning a git-style diff.",
+          "comment": "Makes line-based edits to a text file by replacing exact line sequences, returning a git-style diff of the changes.",
           "sideEffects": true,
           "args": {
-            "path": [
-              "read-path",
-              "write-path"
-            ],
+            "path": {
+              "default": [
+                "read-path",
+                "write-path"
+              ],
+              "when": [
+                {
+                  "condition": {
+                    "arg": "dryRun",
+                    "equals": true
+                  },
+                  "roles": [
+                    "read-path"
+                  ]
+                }
+              ]
+            },
             "edits": [
               "none"
             ],
@@ -94,7 +107,7 @@
         },
         {
           "toolName": "create_directory",
-          "comment": "Creates a new directory (including any necessary parent directories) or silently succeeds if it already exists.",
+          "comment": "Creates a new directory (including nested directories) at the specified path, succeeding silently if it already exists.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -105,7 +118,7 @@
         },
         {
           "toolName": "list_directory",
-          "comment": "Lists all files and directories at the specified path, distinguishing entries with [FILE] and [DIR] prefixes.",
+          "comment": "Returns a detailed listing of all files and directories within the specified path, distinguishing files from directories.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -116,7 +129,7 @@
         },
         {
           "toolName": "list_directory_with_sizes",
-          "comment": "Lists all files and directories at a specified path including their sizes, with optional sorting by name or size.",
+          "comment": "Returns a detailed listing of all files and directories within the specified path including their sizes, with optional sorting.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -130,7 +143,7 @@
         },
         {
           "toolName": "directory_tree",
-          "comment": "Recursively returns a JSON tree structure of all files and directories under the specified path, with optional exclusion patterns.",
+          "comment": "Returns a recursive JSON tree view of all files and directories under the specified path, with optional exclusion patterns.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -144,7 +157,7 @@
         },
         {
           "toolName": "move_file",
-          "comment": "Moves or renames a file or directory from a source path to a destination path, deleting the source upon success.",
+          "comment": "Moves or renames a file or directory from a source path to a destination path in a single operation.",
           "sideEffects": true,
           "args": {
             "source": [
@@ -159,7 +172,7 @@
         },
         {
           "toolName": "search_files",
-          "comment": "Recursively searches for files and directories matching a glob-style pattern under a given root path, returning full matching paths.",
+          "comment": "Recursively searches for files and directories matching a glob-style pattern within the specified path, returning full matching paths.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -187,7 +200,7 @@
         },
         {
           "toolName": "list_allowed_directories",
-          "comment": "Returns the list of directories this server is permitted to access, requiring no arguments.",
+          "comment": "Returns the list of directories that the server is permitted to access.",
           "sideEffects": false,
           "args": {},
           "serverName": "filesystem"
@@ -195,11 +208,11 @@
       ]
     },
     "git": {
-      "inputHash": "bdf9963bc2444302690ac8f62879dd949f7246f253a8f47eaa24b57c278ce026",
+      "inputHash": "7f1ec738f0b9061f49ee2b04f20d6ee449a48a5edba987be16d3de1383dc605d",
       "tools": [
         {
           "toolName": "git_add",
-          "comment": "Stages specified files in the working directory for the next commit.",
+          "comment": "Stages specified files or all changes in the repository for the next commit.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -222,7 +235,7 @@
         },
         {
           "toolName": "git_blame",
-          "comment": "Shows line-by-line authorship information for a file, revealing who last modified each line.",
+          "comment": "Shows line-by-line authorship information for a file, revealing who last modified each line and when.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -245,14 +258,53 @@
         },
         {
           "toolName": "git_branch",
-          "comment": "Lists, creates, deletes, or renames git branches in the repository.",
+          "comment": "Manages git branches by listing, creating, deleting, renaming, or showing the current branch.",
           "sideEffects": true,
           "args": {
-            "path": [
-              "read-path",
-              "write-history",
-              "delete-history"
-            ],
+            "path": {
+              "default": [
+                "read-path",
+                "write-history",
+                "delete-history"
+              ],
+              "when": [
+                {
+                  "condition": {
+                    "arg": "operation",
+                    "in": [
+                      "list",
+                      "show-current"
+                    ]
+                  },
+                  "roles": [
+                    "read-path"
+                  ]
+                },
+                {
+                  "condition": {
+                    "arg": "operation",
+                    "in": [
+                      "create",
+                      "rename"
+                    ]
+                  },
+                  "roles": [
+                    "read-path",
+                    "write-history"
+                  ]
+                },
+                {
+                  "condition": {
+                    "arg": "operation",
+                    "equals": "delete"
+                  },
+                  "roles": [
+                    "read-path",
+                    "delete-history"
+                  ]
+                }
+              ]
+            },
             "operation": [
               "none"
             ],
@@ -308,7 +360,7 @@
         },
         {
           "toolName": "git_checkout",
-          "comment": "Switches branches, restores working tree files, or creates a new branch in the repository.",
+          "comment": "Switches branches, creates new branches, or restores specific working tree files to a given state.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -325,8 +377,7 @@
               "none"
             ],
             "paths": [
-              "read-path",
-              "write-path"
+              "read-path"
             ],
             "track": [
               "none"
@@ -336,7 +387,7 @@
         },
         {
           "toolName": "git_cherry_pick",
-          "comment": "Applies specific commits from other branches onto the current branch.",
+          "comment": "Applies specific commits from other branches onto the current branch without merging entire branches.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -369,13 +420,26 @@
         },
         {
           "toolName": "git_clean",
-          "comment": "Removes untracked files (and optionally directories) from the working directory.",
+          "comment": "Removes untracked files (and optionally directories) from the working directory, with a dry-run preview option.",
           "sideEffects": true,
           "args": {
-            "path": [
-              "read-path",
-              "delete-path"
-            ],
+            "path": {
+              "default": [
+                "read-path",
+                "delete-path"
+              ],
+              "when": [
+                {
+                  "condition": {
+                    "arg": "dryRun",
+                    "equals": true
+                  },
+                  "roles": [
+                    "read-path"
+                  ]
+                }
+              ]
+            },
             "force": [
               "none"
             ],
@@ -393,7 +457,7 @@
         },
         {
           "toolName": "git_clear_working_dir",
-          "comment": "Clears the session working directory setting, requiring explicit paths for subsequent git operations.",
+          "comment": "Clears the session working directory setting so subsequent git operations require an explicit path parameter.",
           "sideEffects": false,
           "args": {
             "confirm": [
@@ -404,7 +468,7 @@
         },
         {
           "toolName": "git_clone",
-          "comment": "Clones a remote git repository to a local path, optionally with shallow cloning or specific branch.",
+          "comment": "Clones a remote git repository to a local path, with support for shallow cloning and bare/mirror modes.",
           "sideEffects": true,
           "args": {
             "url": [
@@ -430,7 +494,7 @@
         },
         {
           "toolName": "git_commit",
-          "comment": "Creates a new commit with staged changes and a commit message in the repository.",
+          "comment": "Creates a new commit recording staged changes in the repository with a specified commit message.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -466,7 +530,7 @@
         },
         {
           "toolName": "git_diff",
-          "comment": "Shows differences between commits, branches, or the working tree in unified diff format.",
+          "comment": "Shows differences between commits, branches, staged changes, or the working tree in unified diff format.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -501,11 +565,12 @@
         },
         {
           "toolName": "git_fetch",
-          "comment": "Fetches updates from a remote repository, downloading objects and refs without merging.",
+          "comment": "Downloads objects and refs from a remote repository without merging them into the local branch.",
           "sideEffects": true,
           "args": {
             "path": [
-              "read-path"
+              "read-path",
+              "write-history"
             ],
             "remote": [
               "git-remote-url"
@@ -524,7 +589,7 @@
         },
         {
           "toolName": "git_init",
-          "comment": "Initializes a new git repository at the specified path, creating the .git directory.",
+          "comment": "Initializes a new Git repository at the specified path, creating a .git directory and setting up the initial branch.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -541,7 +606,7 @@
         },
         {
           "toolName": "git_log",
-          "comment": "Views commit history with optional filtering by author, date range, file path, or message pattern.",
+          "comment": "Displays commit history with optional filtering by author, date, file path, or commit message pattern.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -588,7 +653,7 @@
         },
         {
           "toolName": "git_merge",
-          "comment": "Merges another branch into the current branch with optional merge strategies.",
+          "comment": "Merges another branch into the current branch using optional merge strategies and commit options.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -618,7 +683,7 @@
         },
         {
           "toolName": "git_pull",
-          "comment": "Fetches and integrates changes from a remote repository into the current branch.",
+          "comment": "Fetches changes from a remote repository and integrates them into the current local branch.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -642,7 +707,7 @@
         },
         {
           "toolName": "git_push",
-          "comment": "Uploads local commits to a remote repository branch, with options for force push and branch deletion.",
+          "comment": "Uploads local commits to a remote repository branch, with options for force push, tagging, and branch deletion.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -683,7 +748,7 @@
         },
         {
           "toolName": "git_rebase",
-          "comment": "Reapplies commits on top of another base tip to produce a cleaner linear history.",
+          "comment": "Reapplies commits on top of another base tip to produce a cleaner linear history, with support for continue/abort/skip modes.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -694,7 +759,7 @@
               "none"
             ],
             "upstream": [
-              "none"
+              "branch-name"
             ],
             "branch": [
               "branch-name"
@@ -713,7 +778,7 @@
         },
         {
           "toolName": "git_reflog",
-          "comment": "Views the reference logs to track when branch tips and other refs were updated, useful for recovering lost commits.",
+          "comment": "Displays the reference logs tracking when branch tips and other git references were updated, useful for recovering lost commits.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -730,7 +795,7 @@
         },
         {
           "toolName": "git_remote",
-          "comment": "Manages remote repositories by listing, adding, removing, renaming, or updating remote URLs.",
+          "comment": "Manages remote repository configurations by listing, adding, removing, renaming, or updating remote URLs.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -740,7 +805,7 @@
               "none"
             ],
             "name": [
-              "git-remote-url"
+              "none"
             ],
             "url": [
               "git-remote-url"
@@ -756,7 +821,7 @@
         },
         {
           "toolName": "git_reset",
-          "comment": "Resets the current HEAD to a specified state, optionally discarding staged or working tree changes.",
+          "comment": "Resets the current HEAD to a specified state, with modes ranging from unstaging files to discarding all changes.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -800,7 +865,7 @@
         },
         {
           "toolName": "git_show",
-          "comment": "Displays details and diff of a git object such as a commit, tree, blob, or tag.",
+          "comment": "Displays details of a git object (commit, tree, blob, or tag) including commit metadata and diffs.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -850,7 +915,7 @@
         },
         {
           "toolName": "git_status",
-          "comment": "Shows the working tree status including staged, unstaged, and untracked files.",
+          "comment": "Shows the current working tree status including staged, unstaged, and untracked files.",
           "sideEffects": true,
           "args": {
             "path": [
@@ -864,14 +929,47 @@
         },
         {
           "toolName": "git_tag",
-          "comment": "Manages tags by listing, creating, or deleting tags that mark specific points in history.",
+          "comment": "Manages git tags by listing all tags, creating new lightweight or annotated tags, or deleting existing tags.",
           "sideEffects": true,
           "args": {
-            "path": [
-              "read-path",
-              "write-history",
-              "delete-history"
-            ],
+            "path": {
+              "default": [
+                "read-path",
+                "write-history",
+                "delete-history"
+              ],
+              "when": [
+                {
+                  "condition": {
+                    "arg": "mode",
+                    "equals": "list"
+                  },
+                  "roles": [
+                    "read-path"
+                  ]
+                },
+                {
+                  "condition": {
+                    "arg": "mode",
+                    "equals": "create"
+                  },
+                  "roles": [
+                    "read-path",
+                    "write-history"
+                  ]
+                },
+                {
+                  "condition": {
+                    "arg": "mode",
+                    "equals": "delete"
+                  },
+                  "roles": [
+                    "read-path",
+                    "delete-history"
+                  ]
+                }
+              ]
+            },
             "mode": [
               "none"
             ],
@@ -910,11 +1008,62 @@
             "mode": [
               "none"
             ],
-            "worktreePath": [
-              "read-path",
-              "write-path",
-              "delete-path"
-            ],
+            "worktreePath": {
+              "default": [
+                "read-path",
+                "write-path",
+                "delete-path"
+              ],
+              "when": [
+                {
+                  "condition": {
+                    "arg": "mode",
+                    "equals": "list"
+                  },
+                  "roles": [
+                    "read-path"
+                  ]
+                },
+                {
+                  "condition": {
+                    "arg": "mode",
+                    "equals": "add"
+                  },
+                  "roles": [
+                    "write-path"
+                  ]
+                },
+                {
+                  "condition": {
+                    "arg": "mode",
+                    "equals": "remove"
+                  },
+                  "roles": [
+                    "read-path",
+                    "delete-path"
+                  ]
+                },
+                {
+                  "condition": {
+                    "arg": "mode",
+                    "equals": "move"
+                  },
+                  "roles": [
+                    "read-path",
+                    "delete-path"
+                  ]
+                },
+                {
+                  "condition": {
+                    "arg": "mode",
+                    "equals": "prune"
+                  },
+                  "roles": [
+                    "read-path"
+                  ]
+                }
+              ]
+            },
             "branch": [
               "branch-name"
             ],
@@ -941,7 +1090,7 @@
         },
         {
           "toolName": "git_wrapup_instructions",
-          "comment": "Returns the user's desired git wrap-up workflow instructions along with current repository status to guide next commit actions.",
+          "comment": "Returns the user's desired git wrap-up workflow instructions and current repository status to guide committing and documenting changes.",
           "sideEffects": false,
           "args": {
             "acknowledgement": [
@@ -959,11 +1108,11 @@
       ]
     },
     "fetch": {
-      "inputHash": "baaaafea944156876e9c2c8abfd33546228fbfc8eb74da0eb316cdefb0ba8dd9",
+      "inputHash": "b952616993b762ff5748e85c13cd0a65abfa3b6846daa3682e24341d19ae6117",
       "tools": [
         {
           "toolName": "http_fetch",
-          "comment": "Fetches content from a specified URL via HTTP GET and returns it in a configurable format.",
+          "comment": "Fetches the content of a given URL via HTTP GET and returns it in the specified format.",
           "sideEffects": true,
           "args": {
             "url": [
@@ -986,7 +1135,7 @@
         },
         {
           "toolName": "web_search",
-          "comment": "Searches the web using a configured search provider and returns a list of results for the given query.",
+          "comment": "Searches the web using a configured search provider and returns a list of results for a given query.",
           "sideEffects": true,
           "args": {
             "query": [
@@ -1001,11 +1150,11 @@
       ]
     },
     "github": {
-      "inputHash": "e63a2416f2a750f6b629701f9898ab8fe6144111c5ec921ae18e354ec25a3cfb",
+      "inputHash": "7265e8731ad1c4ceca11a34358bf18dc947eb57c3d91a29cb8644b2bbf5b044c",
       "tools": [
         {
           "toolName": "add_comment_to_pending_review",
-          "comment": "Adds a review comment to the requester's latest pending pull request review on a specific file path.",
+          "comment": "Adds a review comment to the requester's existing pending pull request review.",
           "sideEffects": true,
           "args": {
             "body": [
@@ -1063,7 +1212,7 @@
         },
         {
           "toolName": "add_reply_to_pull_request_comment",
-          "comment": "Adds a reply to an existing pull request comment, creating a threaded response.",
+          "comment": "Adds a reply to an existing pull request comment, linking it as a threaded response.",
           "sideEffects": true,
           "args": {
             "body": [
@@ -1086,7 +1235,7 @@
         },
         {
           "toolName": "assign_copilot_to_issue",
-          "comment": "Assigns GitHub Copilot to work on a specific issue, potentially resulting in an auto-generated pull request.",
+          "comment": "Assigns GitHub Copilot as an agent to work on a specific issue, potentially creating a pull request with code changes.",
           "sideEffects": true,
           "args": {
             "base_ref": [
@@ -1334,13 +1483,13 @@
         {
           "toolName": "get_me",
           "comment": "Retrieves profile details of the currently authenticated GitHub user.",
-          "sideEffects": true,
+          "sideEffects": false,
           "args": {},
           "serverName": "github"
         },
         {
           "toolName": "get_release_by_tag",
-          "comment": "Retrieves a specific release identified by its tag name from a GitHub repository.",
+          "comment": "Retrieves a specific release by its tag name from a GitHub repository.",
           "sideEffects": true,
           "args": {
             "owner": [
@@ -1388,7 +1537,7 @@
         },
         {
           "toolName": "get_teams",
-          "comment": "Retrieves the teams the authenticated user (or a specified user) is a member of.",
+          "comment": "Retrieves details of the teams the authenticated or specified user is a member of.",
           "sideEffects": true,
           "args": {
             "user": [
@@ -1399,7 +1548,7 @@
         },
         {
           "toolName": "issue_read",
-          "comment": "Reads information about a specific GitHub issue, including details, comments, sub-issues, or labels.",
+          "comment": "Retrieves information about a specific issue in a GitHub repository, including details, comments, sub-issues, or labels.",
           "sideEffects": true,
           "args": {
             "issue_number": [
@@ -1472,7 +1621,7 @@
         },
         {
           "toolName": "list_branches",
-          "comment": "Lists all branches in a GitHub repository.",
+          "comment": "Lists branches in a GitHub repository with pagination support.",
           "sideEffects": true,
           "args": {
             "owner": [
@@ -1492,7 +1641,7 @@
         },
         {
           "toolName": "list_commits",
-          "comment": "Lists commits on a branch or up to a specific SHA in a GitHub repository.",
+          "comment": "Lists commits of a branch or SHA in a GitHub repository with optional author filtering and pagination.",
           "sideEffects": true,
           "args": {
             "author": [
@@ -1518,7 +1667,7 @@
         },
         {
           "toolName": "list_issue_types",
-          "comment": "Lists the supported issue types configured for a GitHub organization.",
+          "comment": "Lists supported issue types configured for a GitHub organization.",
           "sideEffects": true,
           "args": {
             "owner": [
@@ -1529,7 +1678,7 @@
         },
         {
           "toolName": "list_issues",
-          "comment": "Lists issues in a GitHub repository with optional filtering by state, labels, or date.",
+          "comment": "Lists issues in a GitHub repository with filtering, ordering, and pagination support.",
           "sideEffects": true,
           "args": {
             "after": [
@@ -1564,7 +1713,7 @@
         },
         {
           "toolName": "list_pull_requests",
-          "comment": "Lists pull requests in a GitHub repository with optional filtering by state, head, and base branch.",
+          "comment": "Lists pull requests in a GitHub repository with optional filtering by state, branch, and sorting.",
           "sideEffects": true,
           "args": {
             "base": [
@@ -1574,7 +1723,7 @@
               "none"
             ],
             "head": [
-              "branch-name"
+              "none"
             ],
             "owner": [
               "github-owner"
@@ -1599,7 +1748,7 @@
         },
         {
           "toolName": "list_releases",
-          "comment": "Lists all releases in a GitHub repository.",
+          "comment": "Lists releases in a GitHub repository with pagination support.",
           "sideEffects": true,
           "args": {
             "owner": [
@@ -1619,7 +1768,7 @@
         },
         {
           "toolName": "list_tags",
-          "comment": "Lists all git tags in a GitHub repository.",
+          "comment": "Lists git tags in a GitHub repository with pagination support.",
           "sideEffects": true,
           "args": {
             "owner": [
@@ -1639,7 +1788,7 @@
         },
         {
           "toolName": "merge_pull_request",
-          "comment": "Merges a pull request in a GitHub repository using a specified merge method.",
+          "comment": "Merges a pull request in a GitHub repository using the specified merge method.",
           "sideEffects": true,
           "args": {
             "commit_message": [
@@ -1665,7 +1814,7 @@
         },
         {
           "toolName": "pull_request_read",
-          "comment": "Retrieves information about a specific pull request, including details, diffs, status, files, comments, or reviews.",
+          "comment": "Retrieves information about a specific pull request, including details, diff, status, files, review comments, reviews, or comments.",
           "sideEffects": true,
           "args": {
             "method": [
@@ -1691,7 +1840,7 @@
         },
         {
           "toolName": "pull_request_review_write",
-          "comment": "Creates, submits, or deletes a pull request review on a GitHub repository.",
+          "comment": "Creates, submits, or deletes a pull request review in a GitHub repository.",
           "sideEffects": true,
           "args": {
             "body": [
@@ -1743,7 +1892,7 @@
         },
         {
           "toolName": "request_copilot_review",
-          "comment": "Requests an automated GitHub Copilot code review for a specified pull request.",
+          "comment": "Requests an automated GitHub Copilot code review for a pull request.",
           "sideEffects": true,
           "args": {
             "owner": [
@@ -1867,7 +2016,7 @@
         },
         {
           "toolName": "search_users",
-          "comment": "Searches for GitHub users by username, name, or other profile information.",
+          "comment": "Searches for GitHub users by username, real name, or other profile attributes.",
           "sideEffects": true,
           "args": {
             "order": [
@@ -1922,7 +2071,7 @@
         },
         {
           "toolName": "update_pull_request",
-          "comment": "Updates an existing pull request's metadata such as title, body, state, base branch, or reviewers.",
+          "comment": "Updates an existing pull request's title, body, state, base branch, reviewers, or draft status.",
           "sideEffects": true,
           "args": {
             "base": [

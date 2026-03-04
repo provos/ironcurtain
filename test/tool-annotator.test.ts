@@ -6,7 +6,7 @@ import {
   buildRoleDescriptions,
   type MCPToolSchema,
 } from '../src/pipeline/tool-annotator.js';
-import type { ToolAnnotation } from '../src/pipeline/types.js';
+import type { StoredToolAnnotation } from '../src/pipeline/types.js';
 import { getRolesForServer } from '../src/types/argument-roles.js';
 
 const sampleTools: MCPToolSchema[] = [
@@ -146,7 +146,7 @@ describe('Tool Annotator', () => {
   });
 
   describe('validateAnnotationsHeuristic', () => {
-    const fullAnnotations: ToolAnnotation[] = cannedAnnotations.annotations.map((a) => ({
+    const fullAnnotations: StoredToolAnnotation[] = cannedAnnotations.annotations.map((a) => ({
       ...a,
       serverName: 'filesystem',
     }));
@@ -158,7 +158,7 @@ describe('Tool Annotator', () => {
     });
 
     it('warns when a path-like argument has no path role', () => {
-      const badAnnotations: ToolAnnotation[] = fullAnnotations.map((a) => {
+      const badAnnotations: StoredToolAnnotation[] = fullAnnotations.map((a) => {
         if (a.toolName === 'read_file') {
           return { ...a, args: { path: ['none'] } };
         }
@@ -195,7 +195,7 @@ describe('Tool Annotator', () => {
         },
       ];
 
-      const noPathRoleAnnotations: ToolAnnotation[] = [
+      const noPathRoleAnnotations: StoredToolAnnotation[] = [
         {
           toolName: 'custom_tool',
           serverName: 'test',
