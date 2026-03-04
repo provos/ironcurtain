@@ -1715,7 +1715,7 @@ describe('PolicyEngine with conditional roles', () => {
     };
   }
 
-  it('allows git_branch operation:list in sandbox (resolves to read-path only)', () => {
+  it('escalates git_branch operation:list in sandbox (resolves to read-path only)', () => {
     const result = condEngine.evaluate(
       makeCondRequest({
         arguments: { path: `${SANDBOX_DIR}/repo`, operation: 'list' },
