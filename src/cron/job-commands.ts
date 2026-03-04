@@ -21,23 +21,22 @@ import { syncGitRepo } from './git-sync.js';
  * Opens the user's $VISUAL / $EDITOR with a temporary file and returns
  * the edited content. Lines beginning with '#' are stripped (instructions).
  * Returns undefined if the user saves an empty file.
+ *
+ * @param initialContent Pre-populate the file with existing content (for editing).
  */
-function openEditorForMultiline(instructions: string): string | undefined {
+function openEditorForMultiline(instructions: string, initialContent = ''): string | undefined {
   const editor = process.env['VISUAL'] ?? process.env['EDITOR'] ?? 'nano';
   const tmpFile = join(tmpdir(), `ironcurtain-task-${Date.now()}.txt`);
 
-  // Write instructional comments + blank line for the user to start typing
   const header = instructions
     .split('\n')
     .map((l) => `# ${l}`)
     .join('\n');
-  writeFileSync(tmpFile, `${header}\n\n`, 'utf-8');
+  writeFileSync(tmpFile, `${header}\n\n${initialContent}`, 'utf-8');
 
   try {
     const result = spawnSync(editor, [tmpFile], { stdio: 'inherit' });
-    if (result.error) {
-      throw result.error;
-    }
+    if (result.error) throw result.error;
 
     const raw = readFileSync(tmpFile, 'utf-8');
     const content = raw
@@ -56,137 +55,48 @@ function openEditorForMultiline(instructions: string): string | undefined {
   }
 }
 
-function formatRunOutcome(outcome: RunOutcome, verbose = true): string {
-  if (outcome.kind === 'success') return chalk.green('success');
-  if (outcome.kind === 'budget_exhausted') {
-    return verbose ? chalk.yellow(`budget exhausted: ${outcome.dimension}`) : chalk.yellow('budget exhausted');
-  }
-  return verbose ? chalk.red(`error: ${outcome.message}`) : chalk.red('error');
-}
-
-/**
- * Interactive wizard for creating a new job.
- * Uses @clack/prompts for the terminal UI.
- */
-export async function runAddJobWizard(): Promise<void> {
-  const { intro, text, confirm, select, note, outro, isCancel, cancel, log } = await import('@clack/prompts');
-
-  intro('Add a new scheduled job');
-
-  const idInput = await text({
-    message: 'Job ID (slug)',
-    placeholder: 'issue-triage',
-    validate: (value) => {
-      if (!value) return 'Required';
-      try {
-        createJobId(value);
-        return undefined;
-      } catch (err) {
-        return err instanceof Error ? err.message : String(err);
-      }
-    },
-  });
-  if (isCancel(idInput)) {
-    cancel('Cancelled.');
-    process.exit(0);
-  }
-  const jobId = createJobId(idInput);
-
-  // Check if job already exists
-  const existing = loadJob(jobId);
-  if (existing) {
-    console.error(`Job "${jobId}" already exists. Use 'remove-job' first or choose a different ID.`);
-    process.exit(1);
-  }
-
-  const nameInput = await text({
-    message: 'Display name',
-    placeholder: 'GitHub Issue Triage',
-  });
-  if (isCancel(nameInput)) {
-    cancel('Cancelled.');
-    process.exit(0);
-  }
-  const name = nameInput;
-
-  const gitRepoInput = await text({
-    message: 'Git repository URI (optional, leave empty to skip)',
-    placeholder: 'git@github.com:org/repo.git',
-  });
-  if (isCancel(gitRepoInput)) {
-    cancel('Cancelled.');
-    process.exit(0);
-  }
-  const gitRepo = gitRepoInput || undefined;
-
-  const scheduleInput = await text({
-    message: 'Schedule (cron expression)',
-    placeholder: '0 9 * * *',
-    validate: (value) => {
-      if (!value) return 'Required';
-      try {
-        parseCronExpression(value);
-        return undefined;
-      } catch (err) {
-        return err instanceof Error ? err.message : String(err);
-      }
-    },
-  });
-  if (isCancel(scheduleInput)) {
-    cancel('Cancelled.');
-    process.exit(0);
-  }
-  const schedule = scheduleInput;
-
-  log.step('Task description (opening editor — save and close to continue)');
-
-  let task: string | undefined;
-  while (!task) {
-    task = openEditorForMultiline(
-      'Enter the task description for this job.\nThis becomes the policy "constitution" — be specific.\nLines starting with # are ignored.',
-    );
-    if (!task) {
-      log.warn('Task description cannot be empty. Re-opening editor...');
-    }
-  }
-
-  const notifyOnEscalation = await confirm({
-    message: 'Notify on escalation via Signal?',
-    initialValue: true,
-  });
-  if (isCancel(notifyOnEscalation)) {
-    cancel('Cancelled.');
-    process.exit(0);
-  }
-
-  const notifyOnCompletion = await confirm({
-    message: 'Notify on completion via Signal?',
-    initialValue: true,
-  });
-  if (isCancel(notifyOnCompletion)) {
-    cancel('Cancelled.');
-    process.exit(0);
-  }
-
-  let job: JobDefinition = {
-    id: jobId,
-    name,
-    schedule,
-    task,
-    gitRepo,
-    notifyOnEscalation,
-    notifyOnCompletion,
+/** Generates a unique default JobDefinition with an empty task. */
+function generateDefaultJob(): JobDefinition {
+  const suffix = Math.random().toString(36).slice(2, 8);
+  return {
+    id: createJobId(`job-${suffix}`),
+    name: '',
+    schedule: '0 9 * * *',
+    task: '',
+    gitRepo: undefined,
+    notifyOnEscalation: true,
+    notifyOnCompletion: true,
     enabled: true,
   };
+}
 
-  // Review-and-edit loop — user can change any field before confirming
+const TASK_INSTRUCTIONS =
+  'Enter the task description for this job.\n' +
+  'This becomes the policy "constitution" — be specific.\n' +
+  'Lines starting with # are ignored.';
+
+/**
+ * Interactive review-and-edit loop shared by add-job and edit-job.
+ *
+ * Shows a summary of all fields and lets the user edit any of them
+ * before confirming. Confirm is blocked until task is non-empty.
+ * In add mode the ID is editable; in edit mode it is fixed.
+ */
+async function runJobReviewLoop(initial: JobDefinition, isNew: boolean): Promise<JobDefinition> {
+  const { text, confirm, select, note, isCancel, cancel, log } = await import('@clack/prompts');
+
+  let job = initial;
+
   for (;;) {
     const gitRepoDisplay = job.gitRepo ?? '(none)';
+    const taskIsEmpty = !job.task.trim();
     const taskLines = job.task.split('\n');
-    const taskPreview = [
-      ...taskLines.slice(0, 4).map((l) => `  ${l}`),
-      ...(taskLines.length > 4 ? [`  … (${taskLines.length - 4} more lines)`] : []),
-    ].join('\n');
+    const taskPreview = taskIsEmpty
+      ? '  (not set — required)'
+      : [
+          ...taskLines.slice(0, 4).map((l) => `  ${l}`),
+          ...(taskLines.length > 4 ? [`  … (${taskLines.length - 4} more lines)`] : []),
+        ].join('\n');
     const notifyParts = [job.notifyOnEscalation ? 'escalation' : '', job.notifyOnCompletion ? 'completion' : ''].filter(
       Boolean,
     );
@@ -195,7 +105,7 @@ export async function runAddJobWizard(): Promise<void> {
     note(
       [
         `ID:        ${job.id}`,
-        `Name:      ${job.name}`,
+        `Name:      ${job.name || '(not set)'}`,
         `Schedule:  ${job.schedule}`,
         `Git repo:  ${gitRepoDisplay}`,
         `Notify:    ${notifyStr}`,
@@ -203,18 +113,19 @@ export async function runAddJobWizard(): Promise<void> {
         `Task:`,
         taskPreview,
       ].join('\n'),
-      'Review',
+      isNew ? 'New job' : 'Edit job',
     );
 
+    const confirmLabel = isNew ? 'Confirm — create this job' : 'Save changes';
     const action = await select({
       message: 'Confirm or edit a field',
       options: [
-        { value: 'confirm', label: 'Confirm — create this job' },
-        { value: 'id', label: `Edit ID          ${job.id}` },
-        { value: 'name', label: `Edit name        ${job.name}` },
+        { value: 'confirm', label: taskIsEmpty ? `${confirmLabel}  (task required)` : confirmLabel },
+        ...(isNew ? [{ value: 'id', label: `Edit ID          ${job.id}` }] : []),
+        { value: 'name', label: `Edit name        ${job.name || '(not set)'}` },
         { value: 'schedule', label: `Edit schedule    ${job.schedule}` },
         { value: 'gitRepo', label: `Edit git repo    ${gitRepoDisplay}` },
-        { value: 'task', label: 'Edit task description' },
+        { value: 'task', label: `Edit task${taskIsEmpty ? '  ← required' : ''}` },
         { value: 'notify', label: `Edit notify      ${notifyStr}` },
       ],
     });
@@ -222,18 +133,28 @@ export async function runAddJobWizard(): Promise<void> {
       cancel('Cancelled.');
       process.exit(0);
     }
-    if (action === 'confirm') break;
+
+    if (action === 'confirm') {
+      if (taskIsEmpty) {
+        log.warn('Task description is required. Please set it before confirming.');
+        continue;
+      }
+      if (isNew && loadJob(job.id)) {
+        log.error(`Job "${job.id}" already exists. Please edit the ID.`);
+        continue;
+      }
+      break;
+    }
 
     switch (action) {
       case 'id': {
         const inp = await text({
           message: 'Job ID (slug)',
           initialValue: job.id,
-          validate: (value) => {
-            if (!value) return 'Required';
+          validate: (v) => {
+            if (!v) return 'Required';
             try {
-              createJobId(value);
-              return undefined;
+              createJobId(v);
             } catch (err) {
               return err instanceof Error ? err.message : String(err);
             }
@@ -243,12 +164,7 @@ export async function runAddJobWizard(): Promise<void> {
           cancel('Cancelled.');
           process.exit(0);
         }
-        const newId = createJobId(inp);
-        if (newId !== job.id && loadJob(newId)) {
-          log.error(`Job "${newId}" already exists.`);
-        } else {
-          job = { ...job, id: newId };
-        }
+        job = { ...job, id: createJobId(inp) };
         break;
       }
       case 'name': {
@@ -264,11 +180,10 @@ export async function runAddJobWizard(): Promise<void> {
         const inp = await text({
           message: 'Schedule (cron expression)',
           initialValue: job.schedule,
-          validate: (value) => {
-            if (!value) return 'Required';
+          validate: (v) => {
+            if (!v) return 'Required';
             try {
-              parseCronExpression(value);
-              return undefined;
+              parseCronExpression(v);
             } catch (err) {
               return err instanceof Error ? err.message : String(err);
             }
@@ -295,10 +210,8 @@ export async function runAddJobWizard(): Promise<void> {
         break;
       }
       case 'task': {
-        log.step('Re-opening task editor...');
-        const newTask = openEditorForMultiline(
-          'Enter the task description for this job.\nThis becomes the policy "constitution" — be specific.\nLines starting with # are ignored.',
-        );
+        log.step('Opening editor — save and close to continue');
+        const newTask = openEditorForMultiline(TASK_INSTRUCTIONS, job.task);
         if (newTask) {
           job = { ...job, task: newTask };
         } else {
@@ -307,57 +220,78 @@ export async function runAddJobWizard(): Promise<void> {
         break;
       }
       case 'notify': {
-        const newEscalation = await confirm({
+        const esc = await confirm({
           message: 'Notify on escalation via Signal?',
           initialValue: job.notifyOnEscalation,
         });
-        if (isCancel(newEscalation)) {
+        if (isCancel(esc)) {
           cancel('Cancelled.');
           process.exit(0);
         }
-        const newCompletion = await confirm({
+        const comp = await confirm({
           message: 'Notify on completion via Signal?',
           initialValue: job.notifyOnCompletion,
         });
-        if (isCancel(newCompletion)) {
+        if (isCancel(comp)) {
           cancel('Cancelled.');
           process.exit(0);
         }
-        job = { ...job, notifyOnEscalation: newEscalation, notifyOnCompletion: newCompletion };
+        job = { ...job, notifyOnEscalation: esc, notifyOnCompletion: comp };
         break;
       }
     }
   }
 
-  // Ensure workspace exists (uses final job.id in case it was changed during review)
+  return job;
+}
+
+function formatRunOutcome(outcome: RunOutcome, verbose = true): string {
+  if (outcome.kind === 'success') return chalk.green('success');
+  if (outcome.kind === 'budget_exhausted') {
+    return verbose ? chalk.yellow(`budget exhausted: ${outcome.dimension}`) : chalk.yellow('budget exhausted');
+  }
+  return verbose ? chalk.red(`error: ${outcome.message}`) : chalk.red('error');
+}
+
+/**
+ * Clones a git repo into workspace with interactive retry on failure.
+ * Returns the final URI cloned, or undefined if the user skipped.
+ */
+async function cloneWithRetry(uri: string, workspace: string): Promise<string | undefined> {
+  const { text, isCancel, log } = await import('@clack/prompts');
+  let currentUri = uri;
+  for (;;) {
+    console.error('Cloning repository...');
+    try {
+      syncGitRepo(currentUri, workspace, /* verbose= */ true);
+      return currentUri;
+    } catch (err) {
+      log.error(`Git clone failed: ${err instanceof Error ? err.message : String(err)}`);
+      const retryInput = await text({
+        message: 'Enter a corrected repository URI, or leave empty to skip cloning',
+        placeholder: currentUri,
+      });
+      if (isCancel(retryInput) || !retryInput) return undefined;
+      currentUri = retryInput;
+    }
+  }
+}
+
+/** Creates a new scheduled job interactively. */
+export async function runAddJobWizard(): Promise<void> {
+  const { intro, outro } = await import('@clack/prompts');
+  intro('Add a new scheduled job');
+
+  let job = await runJobReviewLoop(generateDefaultJob(), true);
+
   const workspace = getJobWorkspaceDir(job.id);
   mkdirSync(workspace, { recursive: true });
 
-  // Clone git repo if specified, with retry on failure
   if (job.gitRepo) {
-    let currentUri = job.gitRepo;
-    for (;;) {
-      console.error('Cloning repository...');
-      try {
-        syncGitRepo(currentUri, workspace, /* verbose= */ true);
-        job = { ...job, gitRepo: currentUri };
-        break;
-      } catch (err) {
-        log.error(`Git clone failed: ${err instanceof Error ? err.message : String(err)}`);
-        const retryInput = await text({
-          message: 'Enter a corrected repository URI, or leave empty to skip cloning',
-          placeholder: currentUri,
-        });
-        if (isCancel(retryInput) || !retryInput) {
-          job = { ...job, gitRepo: undefined };
-          break;
-        }
-        currentUri = retryInput;
-      }
-    }
+    const finalUri = await cloneWithRetry(job.gitRepo, workspace);
+    job = { ...job, gitRepo: finalUri };
   }
 
-  // Compile per-job policy
   console.error('');
   console.error('Compiling task policy...');
   try {
@@ -367,16 +301,43 @@ export async function runAddJobWizard(): Promise<void> {
     process.exit(1);
   }
 
-  // Save job definition
   saveJob(job);
 
-  // Show next run time
   const scheduler = createCronScheduler();
   scheduler.schedule(job, async () => {});
   const nextRun = scheduler.getNextRun(job.id);
   scheduler.unscheduleAll();
 
   outro(`Job "${job.id}" created. Next run: ${nextRun?.toLocaleString() ?? 'unknown'}`);
+}
+
+/** Edits an existing job interactively. Re-compiles policy if task changed. */
+export async function runEditJobWizard(jobIdStr: string): Promise<void> {
+  const { intro, outro } = await import('@clack/prompts');
+  const jobId = createJobId(jobIdStr);
+  const existing = loadJob(jobId);
+  if (!existing) {
+    console.error(`Job not found: ${jobIdStr}`);
+    process.exit(1);
+  }
+
+  intro(`Edit job "${existing.name || existing.id}"`);
+
+  const originalTask = existing.task;
+  const job = await runJobReviewLoop(existing, false);
+
+  if (job.task !== originalTask) {
+    console.error('Task changed — recompiling policy...');
+    try {
+      await compileTaskPolicy(job.task, getJobDir(job.id));
+    } catch (err) {
+      console.error(chalk.red(`Policy compilation failed: ${err instanceof Error ? err.message : String(err)}`));
+      process.exit(1);
+    }
+  }
+
+  saveJob(job);
+  outro(`Job "${job.id}" updated.`);
 }
 
 /** Lists all jobs with their schedules and last run status. */

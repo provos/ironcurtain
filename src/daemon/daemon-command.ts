@@ -18,6 +18,7 @@ ironcurtain daemon - Unified Signal + cron daemon
 Usage:
   ironcurtain daemon [options]          Start the daemon
   ironcurtain daemon add-job            Add a new scheduled job (interactive)
+  ironcurtain daemon edit-job <id>      Edit an existing job (interactive)
   ironcurtain daemon list-jobs          List all jobs with schedule info
   ironcurtain daemon run-job <id>       Manually trigger a job run
   ironcurtain daemon remove-job <id>    Delete a job and all artifacts
@@ -80,6 +81,16 @@ export async function runDaemonCommand(argv: string[]): Promise<void> {
     case 'add-job': {
       const { runAddJobWizard } = await import('../cron/job-commands.js');
       await runAddJobWizard();
+      break;
+    }
+    case 'edit-job': {
+      const jobId = positionals[1];
+      if (!jobId) {
+        console.error('Usage: ironcurtain daemon edit-job <job-id>');
+        process.exit(1);
+      }
+      const { runEditJobWizard } = await import('../cron/job-commands.js');
+      await runEditJobWizard(jobId);
       break;
     }
     case 'list-jobs': {
