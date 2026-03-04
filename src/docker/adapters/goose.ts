@@ -151,7 +151,7 @@ fi
 # Write system prompt to temp file for --instructions
 PROMPT_FILE=$(mktemp /tmp/goose-prompt-XXXXXX.md)
 echo "$IRONCURTAIN_SYSTEM_PROMPT" > "$PROMPT_FILE"
-exec goose session --with-extension ironcurtain -i "$PROMPT_FILE"
+exec goose run -s -i "$PROMPT_FILE"
 `;
 }
 

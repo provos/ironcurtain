@@ -147,11 +147,11 @@ describe('GooseAdapter.generateOrientationFiles', () => {
     }
   });
 
-  it('start script uses goose session with --with-extension', () => {
+  it('start script uses goose run -s with instructions file', () => {
     const files = adapter.generateOrientationFiles(sampleContext);
     const startScript = files.find((f) => f.path === 'start-goose.sh')!;
-    expect(startScript.content).toContain('goose session');
-    expect(startScript.content).toContain('--with-extension ironcurtain');
+    expect(startScript.content).toContain('goose run -s');
+    expect(startScript.content).toContain('-i "$PROMPT_FILE"');
     expect(startScript.content).toContain('IRONCURTAIN_SYSTEM_PROMPT');
   });
 
