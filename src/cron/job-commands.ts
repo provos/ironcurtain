@@ -69,7 +69,7 @@ function formatRunOutcome(outcome: RunOutcome, verbose = true): string {
  * Uses @clack/prompts for the terminal UI.
  */
 export async function runAddJobWizard(): Promise<void> {
-  const { intro, text, confirm, outro, isCancel, cancel, log } = await import('@clack/prompts');
+  const { intro, text, confirm, select, note, outro, isCancel, cancel, log } = await import('@clack/prompts');
 
   intro('Add a new scheduled job');
 
@@ -174,23 +174,172 @@ export async function runAddJobWizard(): Promise<void> {
     schedule,
     task,
     gitRepo,
-    notifyOnEscalation: notifyOnEscalation,
-    notifyOnCompletion: notifyOnCompletion,
+    notifyOnEscalation,
+    notifyOnCompletion,
     enabled: true,
   };
 
-  // Ensure workspace exists
-  const workspace = getJobWorkspaceDir(jobId);
+  // Review-and-edit loop — user can change any field before confirming
+  for (;;) {
+    const gitRepoDisplay = job.gitRepo ?? '(none)';
+    const taskLines = job.task.split('\n');
+    const taskPreview = [
+      ...taskLines.slice(0, 4).map((l) => `  ${l}`),
+      ...(taskLines.length > 4 ? [`  … (${taskLines.length - 4} more lines)`] : []),
+    ].join('\n');
+    const notifyParts = [job.notifyOnEscalation ? 'escalation' : '', job.notifyOnCompletion ? 'completion' : ''].filter(
+      Boolean,
+    );
+    const notifyStr = notifyParts.length ? notifyParts.join(', ') : 'none';
+
+    note(
+      [
+        `ID:        ${job.id}`,
+        `Name:      ${job.name}`,
+        `Schedule:  ${job.schedule}`,
+        `Git repo:  ${gitRepoDisplay}`,
+        `Notify:    ${notifyStr}`,
+        ``,
+        `Task:`,
+        taskPreview,
+      ].join('\n'),
+      'Review',
+    );
+
+    const action = await select({
+      message: 'Confirm or edit a field',
+      options: [
+        { value: 'confirm', label: 'Confirm — create this job' },
+        { value: 'id', label: `Edit ID          ${job.id}` },
+        { value: 'name', label: `Edit name        ${job.name}` },
+        { value: 'schedule', label: `Edit schedule    ${job.schedule}` },
+        { value: 'gitRepo', label: `Edit git repo    ${gitRepoDisplay}` },
+        { value: 'task', label: 'Edit task description' },
+        { value: 'notify', label: `Edit notify      ${notifyStr}` },
+      ],
+    });
+    if (isCancel(action)) {
+      cancel('Cancelled.');
+      process.exit(0);
+    }
+    if (action === 'confirm') break;
+
+    switch (action) {
+      case 'id': {
+        const inp = await text({
+          message: 'Job ID (slug)',
+          initialValue: job.id,
+          validate: (value) => {
+            if (!value) return 'Required';
+            try {
+              createJobId(value);
+              return undefined;
+            } catch (err) {
+              return err instanceof Error ? err.message : String(err);
+            }
+          },
+        });
+        if (isCancel(inp)) {
+          cancel('Cancelled.');
+          process.exit(0);
+        }
+        const newId = createJobId(inp);
+        if (newId !== job.id && loadJob(newId)) {
+          log.error(`Job "${newId}" already exists.`);
+        } else {
+          job = { ...job, id: newId };
+        }
+        break;
+      }
+      case 'name': {
+        const inp = await text({ message: 'Display name', initialValue: job.name });
+        if (isCancel(inp)) {
+          cancel('Cancelled.');
+          process.exit(0);
+        }
+        job = { ...job, name: inp };
+        break;
+      }
+      case 'schedule': {
+        const inp = await text({
+          message: 'Schedule (cron expression)',
+          initialValue: job.schedule,
+          validate: (value) => {
+            if (!value) return 'Required';
+            try {
+              parseCronExpression(value);
+              return undefined;
+            } catch (err) {
+              return err instanceof Error ? err.message : String(err);
+            }
+          },
+        });
+        if (isCancel(inp)) {
+          cancel('Cancelled.');
+          process.exit(0);
+        }
+        job = { ...job, schedule: inp };
+        break;
+      }
+      case 'gitRepo': {
+        const inp = await text({
+          message: 'Git repository URI (optional, leave empty to skip)',
+          placeholder: 'git@github.com:org/repo.git',
+          initialValue: job.gitRepo ?? '',
+        });
+        if (isCancel(inp)) {
+          cancel('Cancelled.');
+          process.exit(0);
+        }
+        job = { ...job, gitRepo: inp || undefined };
+        break;
+      }
+      case 'task': {
+        log.step('Re-opening task editor...');
+        const newTask = openEditorForMultiline(
+          'Enter the task description for this job.\nThis becomes the policy "constitution" — be specific.\nLines starting with # are ignored.',
+        );
+        if (newTask) {
+          job = { ...job, task: newTask };
+        } else {
+          log.warn('Editor was empty — keeping existing task.');
+        }
+        break;
+      }
+      case 'notify': {
+        const newEscalation = await confirm({
+          message: 'Notify on escalation via Signal?',
+          initialValue: job.notifyOnEscalation,
+        });
+        if (isCancel(newEscalation)) {
+          cancel('Cancelled.');
+          process.exit(0);
+        }
+        const newCompletion = await confirm({
+          message: 'Notify on completion via Signal?',
+          initialValue: job.notifyOnCompletion,
+        });
+        if (isCancel(newCompletion)) {
+          cancel('Cancelled.');
+          process.exit(0);
+        }
+        job = { ...job, notifyOnEscalation: newEscalation, notifyOnCompletion: newCompletion };
+        break;
+      }
+    }
+  }
+
+  // Ensure workspace exists (uses final job.id in case it was changed during review)
+  const workspace = getJobWorkspaceDir(job.id);
   mkdirSync(workspace, { recursive: true });
 
   // Clone git repo if specified, with retry on failure
-  if (gitRepo) {
-    let currentUri = gitRepo;
+  if (job.gitRepo) {
+    let currentUri = job.gitRepo;
     for (;;) {
       console.error('Cloning repository...');
       try {
         syncGitRepo(currentUri, workspace, /* verbose= */ true);
-        // Update the job with the (possibly corrected) URI
         job = { ...job, gitRepo: currentUri };
         break;
       } catch (err) {
@@ -212,7 +361,7 @@ export async function runAddJobWizard(): Promise<void> {
   console.error('');
   console.error('Compiling task policy...');
   try {
-    await compileTaskPolicy(task, getJobDir(jobId));
+    await compileTaskPolicy(job.task, getJobDir(job.id));
   } catch (err) {
     console.error(chalk.red(`Policy compilation failed: ${err instanceof Error ? err.message : String(err)}`));
     process.exit(1);
@@ -224,10 +373,10 @@ export async function runAddJobWizard(): Promise<void> {
   // Show next run time
   const scheduler = createCronScheduler();
   scheduler.schedule(job, async () => {});
-  const nextRun = scheduler.getNextRun(jobId);
+  const nextRun = scheduler.getNextRun(job.id);
   scheduler.unscheduleAll();
 
-  outro(`Job "${jobId}" created. Next run: ${nextRun?.toLocaleString() ?? 'unknown'}`);
+  outro(`Job "${job.id}" created. Next run: ${nextRun?.toLocaleString() ?? 'unknown'}`);
 }
 
 /** Lists all jobs with their schedules and last run status. */
