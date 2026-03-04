@@ -8,10 +8,18 @@
 import { mkdirSync } from 'node:fs';
 import chalk from 'chalk';
 import { loadAllJobs, loadJob, saveJob, deleteJob, loadRecentRuns } from './job-store.js';
-import { createJobId, type JobDefinition } from './types.js';
-import { getJobWorkspaceDir, getJobGeneratedDir } from '../config/paths.js';
+import { createJobId, type JobDefinition, type RunOutcome } from './types.js';
+import { getJobWorkspaceDir, getJobDir } from '../config/paths.js';
 import { compileTaskPolicy } from './compile-task-policy.js';
-import { createCronScheduler, InvalidCronExpressionError } from './cron-scheduler.js';
+import { createCronScheduler, parseCronExpression } from './cron-scheduler.js';
+
+function formatRunOutcome(outcome: RunOutcome, verbose = true): string {
+  if (outcome.kind === 'success') return chalk.green('success');
+  if (outcome.kind === 'budget_exhausted') {
+    return verbose ? chalk.yellow(`budget exhausted: ${outcome.dimension}`) : chalk.yellow('budget exhausted');
+  }
+  return verbose ? chalk.red(`error: ${outcome.message}`) : chalk.red('error');
+}
 
 /**
  * Interactive wizard for creating a new job.
@@ -63,25 +71,11 @@ export async function runAddJobWizard(): Promise<void> {
     placeholder: '0 9 * * *',
     validate: (value) => {
       if (!value) return 'Required';
-      const scheduler = createCronScheduler();
       try {
-        const tempJob: JobDefinition = {
-          id: jobId,
-          schedule: value,
-          task: '',
-          name: '',
-          notifyOnEscalation: false,
-          notifyOnCompletion: false,
-          enabled: true,
-        };
-        scheduler.schedule(tempJob, async () => {});
-        scheduler.unscheduleAll();
+        parseCronExpression(value);
         return undefined;
       } catch (err) {
-        if (err instanceof InvalidCronExpressionError) {
-          return err.message;
-        }
-        return String(err);
+        return err instanceof Error ? err.message : String(err);
       }
     },
   });
@@ -137,8 +131,7 @@ export async function runAddJobWizard(): Promise<void> {
   console.error('');
   console.error('Compiling task policy...');
   try {
-    const jobDir = getJobGeneratedDir(jobId).replace('/generated', '');
-    await compileTaskPolicy(task, jobDir);
+    await compileTaskPolicy(task, getJobDir(jobId));
   } catch (err) {
     console.error(chalk.red(`Policy compilation failed: ${err instanceof Error ? err.message : String(err)}`));
     process.exit(1);
@@ -189,13 +182,7 @@ export function runListJobs(): void {
     const lastRun = lastRuns.length > 0 ? lastRuns[0] : undefined;
     let lastRunStr = '';
     if (lastRun) {
-      const outcomeStr =
-        lastRun.outcome.kind === 'success'
-          ? 'success'
-          : lastRun.outcome.kind === 'budget_exhausted'
-            ? chalk.yellow(`budget exhausted: ${lastRun.outcome.dimension}`)
-            : chalk.red(`error: ${lastRun.outcome.message}`);
-      lastRunStr = `Last run: ${lastRun.startedAt} -- ${outcomeStr}`;
+      lastRunStr = `Last run: ${lastRun.startedAt} -- ${formatRunOutcome(lastRun.outcome)}`;
       if (lastRun.summary) {
         lastRunStr += `\n${' '.repeat(20)}${lastRun.summary.split('\n')[0].slice(0, 60)}`;
       }
@@ -226,14 +213,7 @@ export async function runJobCommand(jobIdStr: string): Promise<void> {
   const daemon = new IronCurtainDaemon({ mode: { kind: 'builtin' }, noSignal: true });
   const record = await daemon.runJobNow(jobId);
 
-  const outcomeStr =
-    record.outcome.kind === 'success'
-      ? chalk.green('success')
-      : record.outcome.kind === 'budget_exhausted'
-        ? chalk.yellow(`budget exhausted: ${record.outcome.dimension}`)
-        : chalk.red(`error: ${record.outcome.message}`);
-
-  console.error(`  Outcome: ${outcomeStr}`);
+  console.error(`  Outcome: ${formatRunOutcome(record.outcome)}`);
   console.error(`  Duration: ${record.budget.elapsedSeconds.toFixed(0)}s`);
   console.error(`  Cost: $${record.budget.estimatedCostUsd.toFixed(2)}`);
   if (record.summary) {
@@ -290,8 +270,7 @@ export async function runRecompileJob(jobIdStr: string): Promise<void> {
   }
 
   console.error(`Recompiling policy for job "${jobIdStr}"...`);
-  const jobDir = getJobGeneratedDir(jobId).replace('/generated', '');
-  await compileTaskPolicy(job.task, jobDir);
+  await compileTaskPolicy(job.task, getJobDir(jobId));
   console.error('Done.');
 }
 
@@ -313,15 +292,8 @@ export function runShowLogs(jobIdStr: string, limit: number): void {
   console.error(`Recent runs for "${job.name}" (last ${runs.length}):`);
   console.error('');
   for (const run of runs) {
-    const outcomeStr =
-      run.outcome.kind === 'success'
-        ? chalk.green('success')
-        : run.outcome.kind === 'budget_exhausted'
-          ? chalk.yellow(`budget exhausted`)
-          : chalk.red(`error`);
-
     console.error(
-      `  ${run.startedAt}  ${outcomeStr}  ${run.budget.elapsedSeconds.toFixed(0)}s  $${run.budget.estimatedCostUsd.toFixed(2)}`,
+      `  ${run.startedAt}  ${formatRunOutcome(run.outcome, false)}  ${run.budget.elapsedSeconds.toFixed(0)}s  $${run.budget.estimatedCostUsd.toFixed(2)}`,
     );
     if (run.summary) {
       const firstLine = run.summary.split('\n').find((l) => l.trim()) ?? '';

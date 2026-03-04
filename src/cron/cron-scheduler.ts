@@ -107,12 +107,18 @@ function parseCronExpression(expression: string): CronFields {
     throw new Error(`Expected 5 fields (min hour dom mon dow), got ${parts.length}`);
   }
 
+  const daysOfWeek = parseField(parts[4], 0, 7); // 0 and 7 both mean Sunday
+  if (daysOfWeek.has(7)) {
+    daysOfWeek.add(0);
+    daysOfWeek.delete(7);
+  }
+
   return {
     minutes: parseField(parts[0], 0, 59),
     hours: parseField(parts[1], 0, 23),
     daysOfMonth: parseField(parts[2], 1, 31),
     months: parseField(parts[3], 1, 12),
-    daysOfWeek: parseField(parts[4], 0, 7), // 0 and 7 both mean Sunday
+    daysOfWeek,
   };
 }
 
@@ -127,21 +133,16 @@ function cronMatchesTime(fields: CronFields, date: Date): boolean {
   if (!fields.hours.has(hour)) return false;
   if (!fields.months.has(month)) return false;
 
-  // For day-of-week, normalize 7 (Sunday) to 0
-  const dowSet = new Set(fields.daysOfWeek);
-  if (dowSet.has(7)) dowSet.add(0);
-  dowSet.delete(7);
-
   // Standard cron: if both dom and dow are restricted (not *), match either
   const domIsWildcard = fields.daysOfMonth.size === 31;
-  const dowIsWildcard = dowSet.size === 7;
+  const dowIsWildcard = fields.daysOfWeek.size === 7;
 
   if (domIsWildcard && dowIsWildcard) return true;
-  if (domIsWildcard) return dowSet.has(dayOfWeek);
+  if (domIsWildcard) return fields.daysOfWeek.has(dayOfWeek);
   if (dowIsWildcard) return fields.daysOfMonth.has(dayOfMonth);
 
   // Both restricted: OR logic (standard cron behavior)
-  return fields.daysOfMonth.has(dayOfMonth) || dowSet.has(dayOfWeek);
+  return fields.daysOfMonth.has(dayOfMonth) || fields.daysOfWeek.has(dayOfWeek);
 }
 
 /**

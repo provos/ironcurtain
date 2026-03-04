@@ -68,10 +68,7 @@ export function saveJob(job: JobDefinition): void {
 
 /** Deletes a job and all its artifacts (generated, workspace, runs). */
 export function deleteJob(jobId: JobId): void {
-  const jobDir = getJobDir(jobId);
-  if (existsSync(jobDir)) {
-    rmSync(jobDir, { recursive: true, force: true });
-  }
+  rmSync(getJobDir(jobId), { recursive: true, force: true });
 }
 
 /** Records a completed run. */

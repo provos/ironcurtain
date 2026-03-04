@@ -5,31 +5,17 @@
  * HeadlessTransport's run() resolves when the single-shot task
  * message completes. It does not accept follow-up messages.
  *
- * Escalation handling is configured via the constructor:
- * - When an onEscalation callback is provided, escalations are
- *   surfaced and the session waits for external resolution.
- * - When no callback is provided, escalations are auto-denied.
+ * Escalations from the cron session are auto-denied by the policy
+ * engine's default-deny fallthrough.
  */
 
 import { BaseTransport } from '../session/base-transport.js';
-import type { Session, EscalationRequest, DiagnosticEvent } from '../session/types.js';
+import type { Session } from '../session/types.js';
 import * as logger from '../logger.js';
 
 export interface HeadlessTransportOptions {
   /** The initial task message to send. */
   readonly taskMessage: string;
-
-  /**
-   * Optional callback invoked when an escalation is surfaced.
-   * When absent, escalations are auto-denied immediately.
-   */
-  readonly onEscalation?: (request: EscalationRequest) => void;
-
-  /** Optional callback when an escalation expires (proxy timed out). */
-  readonly onEscalationExpired?: () => void;
-
-  /** Optional diagnostic event callback. */
-  readonly onDiagnostic?: (event: DiagnosticEvent) => void;
 }
 
 export class HeadlessTransport extends BaseTransport {

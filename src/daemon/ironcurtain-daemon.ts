@@ -18,7 +18,7 @@ import { resolve } from 'node:path';
 import { createSession } from '../session/index.js';
 import { loadConfig } from '../config/index.js';
 import { loadUserConfig, type ResolvedUserConfig } from '../config/user-config.js';
-import { getJobWorkspaceDir, getJobGeneratedDir } from '../config/paths.js';
+import { getJobWorkspaceDir, getJobGeneratedDir, getJobDir } from '../config/paths.js';
 import type { IronCurtainConfig } from '../config/types.js';
 import type { SessionMode, EscalationRequest } from '../session/types.js';
 import { SessionManager, type SessionSource } from '../session/session-manager.js';
@@ -27,8 +27,9 @@ import { buildCronSystemPromptAugmentation } from '../session/prompts.js';
 import { createCronScheduler, type CronScheduler } from '../cron/cron-scheduler.js';
 import { loadAllJobs, loadJob, saveJob, deleteJob, saveRunRecord, loadRecentRuns } from '../cron/job-store.js';
 import { compileTaskPolicy } from '../cron/compile-task-policy.js';
-import type { JobDefinition, JobId, RunRecord, RunOutcome, JobBudgetOverrides } from '../cron/types.js';
+import type { JobDefinition, JobId, RunRecord, RunOutcome } from '../cron/types.js';
 import { CRON_BUDGET_DEFAULTS } from '../cron/types.js';
+import { BudgetExhaustedError } from '../session/errors.js';
 import * as logger from '../logger.js';
 
 export type { SessionSource, ManagedSession } from '../session/session-manager.js';
@@ -41,15 +42,12 @@ export interface IronCurtainDaemonOptions {
   readonly noSignal?: boolean;
 }
 
-/** Cron budget defaults applied before per-job overrides. */
-const DEFAULT_CRON_BUDGET: Required<JobBudgetOverrides> = CRON_BUDGET_DEFAULTS;
-
 /**
  * Builds an IronCurtainConfig patched for cron session budget defaults.
  */
 function buildCronSessionConfig(globalConfig: IronCurtainConfig, job: JobDefinition): IronCurtainConfig {
   const cronBudget = {
-    ...DEFAULT_CRON_BUDGET,
+    ...CRON_BUDGET_DEFAULTS,
     ...(job.budgetOverrides ?? {}),
   };
 
@@ -142,14 +140,17 @@ export class IronCurtainDaemon {
     // Unschedule all jobs
     this.scheduler.unscheduleAll();
 
-    // End all cron sessions
-    for (const managed of this.sessionManager.all()) {
-      try {
-        await this.sessionManager.end(managed.label);
-      } catch (err: unknown) {
-        logger.warn(`[Daemon] Error ending session #${managed.label}: ${String(err)}`);
-      }
-    }
+    // End all cron sessions concurrently
+    const sessions = this.sessionManager.all();
+    await Promise.allSettled(
+      sessions.map(async (s) => {
+        try {
+          await this.sessionManager.end(s.label);
+        } catch (err: unknown) {
+          logger.warn(`[Daemon] Error ending session #${s.label}: ${String(err)}`);
+        }
+      }),
+    );
 
     // Shutdown Signal daemon
     if (this.signalDaemon) {
@@ -178,8 +179,7 @@ export class IronCurtainDaemon {
 
     // Compile per-job policy
     logger.info(`[Daemon] Compiling task policy for job ${job.id}...`);
-    const jobDir = resolve(getJobWorkspaceDir(job.id), '..');
-    await compileTaskPolicy(job.task, jobDir);
+    await compileTaskPolicy(job.task, getJobDir(job.id));
 
     // Save job definition
     saveJob(job);
@@ -233,8 +233,7 @@ export class IronCurtainDaemon {
     const job = loadJob(jobId);
     if (!job) throw new Error(`Job not found: ${jobId}`);
 
-    const jobDir = resolve(getJobWorkspaceDir(jobId), '..');
-    await compileTaskPolicy(job.task, jobDir);
+    await compileTaskPolicy(job.task, getJobDir(jobId));
     logger.info(`[Daemon] Recompiled policy for job ${jobId}`);
   }
 
@@ -297,8 +296,6 @@ export class IronCurtainDaemon {
   private async executeJob(job: JobDefinition): Promise<RunRecord> {
     const startedAt = new Date().toISOString();
     const workspace = job.workspace ?? getJobWorkspaceDir(job.id);
-    mkdirSync(workspace, { recursive: true });
-
     const globalConfig = loadConfig();
     const patchedConfig = buildCronSessionConfig(globalConfig, job);
     const jobGeneratedDir = getJobGeneratedDir(job.id);
@@ -310,13 +307,7 @@ export class IronCurtainDaemon {
     });
 
     // Create the headless transport
-    const transport = new HeadlessTransport({
-      taskMessage: job.task,
-      onEscalation:
-        job.notifyOnEscalation && this.sendSignalMessage
-          ? (request) => this.handleCronEscalation(request, job)
-          : undefined,
-    });
+    const transport = new HeadlessTransport({ taskMessage: job.task });
 
     // Create the session with per-job policy
     const session = await createSession({
@@ -338,11 +329,10 @@ export class IronCurtainDaemon {
       await transport.run(session);
       outcome = { kind: 'success' };
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      if (message.includes('BudgetExhausted') || message.includes('budget')) {
-        outcome = { kind: 'budget_exhausted', dimension: message };
+      if (err instanceof BudgetExhaustedError) {
+        outcome = { kind: 'budget_exhausted', dimension: err.dimension };
       } else {
-        outcome = { kind: 'error', message };
+        outcome = { kind: 'error', message: err instanceof Error ? err.message : String(err) };
       }
     }
 
