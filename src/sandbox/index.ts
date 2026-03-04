@@ -196,6 +196,7 @@ export class Sandbox {
       AUDIT_LOG_PATH: config.auditLogPath,
       MCP_SERVERS_CONFIG: JSON.stringify(config.mcpServers),
       GENERATED_DIR: config.generatedDir,
+      TOOL_ANNOTATIONS_DIR: config.toolAnnotationsDir ?? config.generatedDir,
       // Base constitution path — the proxy uses it for freshness checking
       // against the combined (base + user) constitution.
       CONSTITUTION_PATH: config.constitutionPath,

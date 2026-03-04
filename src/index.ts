@@ -81,7 +81,11 @@ export async function main(args?: string[]): Promise<void> {
   const mode = preflight.mode;
 
   // Check constitution freshness once here, before any proxy processes are spawned.
-  const { compiledPolicy } = loadGeneratedPolicy(config.generatedDir, getPackageGeneratedDir());
+  const { compiledPolicy } = loadGeneratedPolicy({
+    policyDir: config.generatedDir,
+    toolAnnotationsDir: config.generatedDir,
+    fallbackDir: getPackageGeneratedDir(),
+  });
   checkConstitutionFreshness(compiledPolicy, config.constitutionPath);
 
   // PTY mode: attach terminal directly to Claude Code in a Docker container

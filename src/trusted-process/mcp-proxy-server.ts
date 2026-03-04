@@ -305,6 +305,8 @@ export interface ProxyEnvConfig {
   auditLogPath: string;
   serversConfig: Record<string, MCPServerConfig>;
   generatedDir: string;
+  /** Directory for tool-annotations.json. Defaults to generatedDir if unset. */
+  toolAnnotationsDir: string;
   protectedPaths: string[];
   sessionLogPath: string | undefined;
   allowedDirectory: string | undefined;
@@ -390,10 +392,15 @@ export function parseProxyEnvConfig(): ProxyEnvConfig {
     process.exit(1);
   }
 
+  // When TOOL_ANNOTATIONS_DIR is set, annotations come from there.
+  // Otherwise they default to the same directory as compiled policy.
+  const toolAnnotationsDir = process.env.TOOL_ANNOTATIONS_DIR ?? generatedDir;
+
   return {
     auditLogPath,
     serversConfig,
     generatedDir,
+    toolAnnotationsDir,
     protectedPaths,
     sessionLogPath,
     allowedDirectory,
@@ -797,6 +804,7 @@ async function main(): Promise<void> {
     auditLogPath,
     serversConfig,
     generatedDir,
+    toolAnnotationsDir,
     protectedPaths,
     sessionLogPath,
     allowedDirectory,
@@ -806,7 +814,11 @@ async function main(): Promise<void> {
     auditRedaction,
   } = envConfig;
 
-  const { compiledPolicy, toolAnnotations, dynamicLists } = loadGeneratedPolicy(generatedDir, getPackageGeneratedDir());
+  const { compiledPolicy, toolAnnotations, dynamicLists } = loadGeneratedPolicy({
+    policyDir: generatedDir,
+    toolAnnotationsDir,
+    fallbackDir: getPackageGeneratedDir(),
+  });
 
   const serverDomainAllowlists = extractServerDomainAllowlists(serversConfig);
   const policyEngine = new PolicyEngine(

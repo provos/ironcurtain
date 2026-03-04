@@ -76,6 +76,7 @@ async function createBuiltinSession(options: SessionOptions): Promise<Session> {
     sessionId,
     options.resumeSessionId,
     options.workspacePath,
+    options.policyDir,
   );
 
   const session = new AgentSession(sessionConfig.config, sessionId, sessionConfig.escalationDir, options);
@@ -193,6 +194,7 @@ function buildSessionConfig(
   sessionId: SessionId,
   resumeSessionId?: string,
   workspacePath?: string,
+  policyDir?: string,
 ): SessionDirConfig {
   const sessionDir = getSessionDir(effectiveSessionId);
   const sandboxDir = workspacePath ?? getSessionSandboxDir(effectiveSessionId);
@@ -230,6 +232,15 @@ function buildSessionConfig(
     sessionLogPath,
     llmLogPath,
     autoApproveLlmLogPath,
+    // When per-job policy is provided, split generated dir:
+    // generatedDir -> per-job dir (compiled policy + dynamic lists)
+    // toolAnnotationsDir -> global dir (tool annotations)
+    ...(policyDir
+      ? {
+          generatedDir: policyDir,
+          toolAnnotationsDir: config.generatedDir,
+        }
+      : {}),
     mcpServers: JSON.parse(JSON.stringify(config.mcpServers)) as typeof config.mcpServers,
   };
 

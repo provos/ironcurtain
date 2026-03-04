@@ -63,10 +63,11 @@ export class TrustedProcess {
     private config: IronCurtainConfig,
     options?: TrustedProcessOptions,
   ) {
-    const { compiledPolicy, toolAnnotations, dynamicLists } = loadGeneratedPolicy(
-      config.generatedDir,
-      getPackageGeneratedDir(),
-    );
+    const { compiledPolicy, toolAnnotations, dynamicLists } = loadGeneratedPolicy({
+      policyDir: config.generatedDir,
+      toolAnnotationsDir: config.toolAnnotationsDir ?? config.generatedDir,
+      fallbackDir: getPackageGeneratedDir(),
+    });
     checkConstitutionFreshness(compiledPolicy, config.constitutionPath);
 
     const serverDomainAllowlists = extractServerDomainAllowlists(config.mcpServers);

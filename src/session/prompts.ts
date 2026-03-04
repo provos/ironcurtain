@@ -86,3 +86,51 @@ return content;
 \`\`\`
 `;
 }
+
+// ---------------------------------------------------------------------------
+// Cron system prompt augmentation
+// ---------------------------------------------------------------------------
+
+/**
+ * Context injected into the system prompt for cron-initiated sessions.
+ */
+export interface CronPromptContext {
+  /** The English task description from the job definition. */
+  readonly taskDescription: string;
+
+  /** Absolute path to the persistent workspace directory. */
+  readonly workspacePath: string;
+}
+
+/**
+ * Builds the system prompt augmentation for cron sessions.
+ * Appended to the standard system prompt (from buildSystemPrompt).
+ */
+export function buildCronSystemPromptAugmentation(context: CronPromptContext): string {
+  return `## Scheduled Task Mode
+
+You are running as an automated scheduled task. There is no interactive user present.
+
+### Your Task
+
+${context.taskDescription}
+
+### Workspace
+
+Your persistent workspace is: ${context.workspacePath}
+This directory persists across runs. Use it for cross-run state:
+
+- **workspace/memory.md** -- Your notes for yourself. Read this at the start of each run to recall context from previous runs. Update it with anything you want to remember for next time (last processed item, patterns observed, recurring issues, etc.).
+- **workspace/last-run.md** -- Write a structured summary here before finishing. Include:
+  - Date and time of this run
+  - Actions taken (with counts: "Labeled 12 issues, commented on 3, closed 1")
+  - Any issues encountered or items skipped
+  - Recommendations for next run (if any)
+
+### Headless Behavior
+
+- If a tool call is denied, do NOT retry it. Note the denial in your summary and continue with other work.
+- If a tool call requires approval and no human responds in time, it will be auto-denied. Continue without that operation.
+- Work efficiently: this is a recurring job, not an exploration. Focus on the task.
+- Always write workspace/last-run.md before finishing, even if the task failed.`;
+}

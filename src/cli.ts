@@ -24,9 +24,14 @@ Usage:
 
 Commands:
   start [task]         Run the agent (interactive or single-shot)
+  daemon               Unified Signal + cron daemon
+  daemon add-job       Add a new scheduled job (interactive)
+  daemon list-jobs     List all jobs with schedule info
+  daemon run-job <id>  Manually trigger a job run
+  daemon logs <id>     Show recent run summaries
   mux                  Terminal multiplexer for PTY sessions (requires node-pty)
   escalation-listener  Aggregate escalation notifications from PTY sessions
-  bot                  Run the Signal messaging transport daemon
+  bot                  Alias for 'daemon' (backward compatible)
   setup                Run the first-start wizard (always runs)
   setup-signal         Interactive Signal transport onboarding
                        --re-trust: re-verify a changed identity key
@@ -126,10 +131,23 @@ switch (subcommand) {
     await runFirstStart();
     break;
   }
+  case 'daemon': {
+    const { runDaemonCommand } = await import('./daemon/daemon-command.js');
+    await runDaemonCommand(process.argv.slice(3));
+    break;
+  }
   case 'bot': {
+    // 'bot' is an alias for 'daemon' (backward compatibility)
     const agentName = values.agent as string | undefined;
-    const { runBot } = await import('./signal/bot-command.js');
-    await runBot({ agent: agentName });
+    if (process.argv.slice(3).some((a) => !a.startsWith('-'))) {
+      // Has subcommands -- route through daemon command
+      const { runDaemonCommand } = await import('./daemon/daemon-command.js');
+      await runDaemonCommand(process.argv.slice(3));
+    } else {
+      // No subcommands -- existing bot behavior
+      const { runBot } = await import('./signal/bot-command.js');
+      await runBot({ agent: agentName });
+    }
     break;
   }
   case 'mux': {

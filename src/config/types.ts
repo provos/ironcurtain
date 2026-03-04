@@ -78,6 +78,13 @@ export interface IronCurtainConfig {
   mcpServers: Record<string, MCPServerConfig>;
   protectedPaths: string[];
   generatedDir: string;
+  /**
+   * Directory for tool-annotations.json. When per-job policy is used
+   * (cron mode), generatedDir points to the job-specific dir while
+   * toolAnnotationsDir always points to the global annotations.
+   * Defaults to generatedDir when not set.
+   */
+  toolAnnotationsDir?: string;
   constitutionPath: string;
   /** Per-session escalation directory for file-based IPC with the proxy. Optional for backward compatibility. */
   escalationDir?: string;

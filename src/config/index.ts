@@ -277,21 +277,31 @@ export function checkConstitutionFreshness(compiledPolicy: CompiledPolicyFile, c
   }
 }
 
-export function loadGeneratedPolicy(
-  generatedDir: string,
-  fallbackDir?: string,
-): {
+/**
+ * Options for loading generated policy artifacts with split directories.
+ * Allows policy files and tool annotations to come from different dirs.
+ */
+export interface PolicyLoadOptions {
+  /** Directory for compiled-policy.json and dynamic-lists.json. */
+  readonly policyDir: string;
+  /** Directory for tool-annotations.json (always global). */
+  readonly toolAnnotationsDir: string;
+  /** Fallback directory for missing artifacts (package-bundled defaults). */
+  readonly fallbackDir?: string;
+}
+
+export function loadGeneratedPolicy(options: PolicyLoadOptions): {
   compiledPolicy: CompiledPolicyFile;
   toolAnnotations: ToolAnnotationsFile;
   dynamicLists: DynamicListsFile | undefined;
 } {
   const compiledPolicy = JSON.parse(
-    readGeneratedFile(generatedDir, 'compiled-policy.json', fallbackDir),
+    readGeneratedFile(options.policyDir, 'compiled-policy.json', options.fallbackDir),
   ) as CompiledPolicyFile;
   const toolAnnotations = JSON.parse(
-    readGeneratedFile(generatedDir, 'tool-annotations.json', fallbackDir),
+    readGeneratedFile(options.toolAnnotationsDir, 'tool-annotations.json', options.fallbackDir),
   ) as ToolAnnotationsFile;
-  const dynamicLists = loadOptionalGeneratedFile(generatedDir, 'dynamic-lists.json', fallbackDir);
+  const dynamicLists = loadOptionalGeneratedFile(options.policyDir, 'dynamic-lists.json', options.fallbackDir);
 
   return { compiledPolicy, toolAnnotations, dynamicLists };
 }

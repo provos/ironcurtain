@@ -111,6 +111,9 @@ export class AgentSession implements Session {
   private readonly onEscalationExpired?: () => void;
   private readonly onDiagnostic?: (event: DiagnosticEvent) => void;
 
+  /** Additional content appended to the system prompt (e.g., cron task context). */
+  private readonly systemPromptAugmentation?: string;
+
   constructor(config: IronCurtainConfig, sessionId: SessionId, escalationDir: string, options: SessionOptions = {}) {
     this.sessionId = sessionId;
     this.config = config;
@@ -119,6 +122,7 @@ export class AgentSession implements Session {
     this.onEscalation = options.onEscalation;
     this.onEscalationExpired = options.onEscalationExpired;
     this.onDiagnostic = options.onDiagnostic;
+    this.systemPromptAugmentation = options.systemPromptAugmentation;
     this.createdAt = new Date().toISOString();
     this.budgetTracker = new ResourceBudgetTracker(config.userConfig.resourceBudget, config.agentModelId);
     this.compactor = new MessageCompactor(config.userConfig.autoCompact);
@@ -136,7 +140,10 @@ export class AgentSession implements Session {
       name,
       description,
     }));
-    const rawPrompt = buildSystemPrompt(serverListings, this.config.allowedDirectory);
+    let rawPrompt = buildSystemPrompt(serverListings, this.config.allowedDirectory);
+    if (this.systemPromptAugmentation) {
+      rawPrompt += '\n\n' + this.systemPromptAugmentation;
+    }
     this.systemPrompt = this.cacheStrategy.wrapSystemPrompt(rawPrompt);
     this.tools = this.cacheStrategy.wrapTools(this.buildTools());
     this.model = await this.buildModel();
