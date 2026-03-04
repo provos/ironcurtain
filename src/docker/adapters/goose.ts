@@ -189,6 +189,7 @@ export function createGooseAdapter(userConfig?: ResolvedUserConfig): AgentAdapte
       const connectTarget = isTcp ? `TCP:${socketPath}` : `UNIX-CONNECT:${socketPath}`;
 
       const yaml = [
+        'GOOSE_TELEMETRY_ENABLED: false',
         'extensions:',
         '  ironcurtain:',
         '    name: IronCurtain Sandbox',

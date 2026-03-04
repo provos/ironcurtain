@@ -107,7 +107,7 @@ describe('GooseAdapter.generateMcpConfig', () => {
     expect(files[0].content).not.toContain('UNIX-CONNECT');
   });
 
-  it('produces valid YAML structure', () => {
+  it('produces valid YAML structure with telemetry disabled', () => {
     const files = adapter.generateMcpConfig('/run/ironcurtain/proxy.sock');
     const content = files[0].content;
 
@@ -115,6 +115,7 @@ describe('GooseAdapter.generateMcpConfig', () => {
     expect(content).toContain('name: IronCurtain Sandbox');
     expect(content).toContain('enabled: true');
     expect(content).toContain('- STDIO');
+    expect(content).toContain('GOOSE_TELEMETRY_ENABLED: false');
   });
 });
 
