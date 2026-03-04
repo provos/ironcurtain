@@ -27,7 +27,14 @@ import {
 } from './constitution-compiler.js';
 import { getHandwrittenScenarios } from './handwritten-scenarios.js';
 import { resolveAllLists, type McpServerConnection } from './list-resolver.js';
-import { computeHash, loadExistingArtifact, writeArtifact, withSpinner, showCached } from './pipeline-shared.js';
+import {
+  computeHash,
+  loadExistingArtifact,
+  loadToolAnnotationsFile,
+  writeArtifact,
+  withSpinner,
+  showCached,
+} from './pipeline-shared.js';
 import {
   applyScenarioCorrections,
   buildJudgeSystemPrompt,
@@ -51,10 +58,8 @@ import type {
   TestScenario,
   TestScenariosFile,
   ToolAnnotation,
-  ToolAnnotationsFile,
   VerificationResult,
 } from './types.js';
-import type { ArgumentRole } from '../types/argument-roles.js';
 
 /**
  * Selects the LLM prompt variant for policy compilation.
@@ -318,26 +323,13 @@ export class PipelineRunner {
    * Runs the full pipeline. Returns the compiled policy on success.
    */
   async run(config: PipelineRunConfig): Promise<CompiledPolicyFile> {
-    const toolAnnotationsFile = loadExistingArtifact<ToolAnnotationsFile>(
-      config.toolAnnotationsDir,
-      'tool-annotations.json',
-      config.toolAnnotationsFallbackDir,
-    );
+    const toolAnnotationsFile = loadToolAnnotationsFile(config.toolAnnotationsDir, config.toolAnnotationsFallbackDir);
 
     if (!toolAnnotationsFile) {
       throw new Error("tool-annotations.json not found. Run 'ironcurtain annotate-tools' first.");
     }
 
-    // Normalize args: old format stored single roles as a string; new format uses string[].
-    // Coerce string values to single-element arrays so all downstream code can safely call .join().
-    const allAnnotations = Object.values(toolAnnotationsFile.servers)
-      .flatMap((server) => server.tools)
-      .map((tool) => ({
-        ...tool,
-        args: Object.fromEntries(
-          Object.entries(tool.args).map(([k, v]) => [k, Array.isArray(v) ? v : [v as unknown as string]]),
-        ) as Record<string, ArgumentRole[]>,
-      }));
+    const allAnnotations = Object.values(toolAnnotationsFile.servers).flatMap((server) => server.tools);
     const serverDomainAllowlists = config.mcpServers ? extractServerDomainAllowlists(config.mcpServers) : undefined;
 
     const includeHandwritten = config.includeHandwrittenScenarios ?? config.constitutionKind === 'constitution';

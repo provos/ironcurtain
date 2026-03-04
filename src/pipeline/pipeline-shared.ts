@@ -22,6 +22,8 @@ import { getIronCurtainHome, getUserGeneratedDir, loadConstitutionText } from '.
 export { loadConstitutionText } from '../config/paths.js';
 import type { MCPServerConfig } from '../config/types.js';
 import { loadUserConfig } from '../config/user-config.js';
+import type { ToolAnnotationsFile, StoredToolAnnotationsFile } from './types.js';
+import { resolveStoredAnnotationsFile } from '../types/argument-roles.js';
 import { createLlmLoggingMiddleware, type LlmLogContext } from './llm-logger.js';
 import { createCacheStrategy, type PromptCacheStrategy } from '../session/prompt-cache.js';
 
@@ -117,6 +119,21 @@ export function loadExistingArtifact<T>(generatedDir: string, filename: string, 
     }
   }
   return undefined;
+}
+
+/**
+ * Loads tool-annotations.json, resolving any conditional role specs to their
+ * default roles so the pipeline always sees the flat ToolAnnotationsFile shape.
+ *
+ * This is the single entry point for the compilation pipeline. Only the
+ * annotator (which writes the file) and the policy engine (which resolves
+ * conditionals at evaluation time against actual call args) need to know
+ * about StoredToolAnnotationsFile.
+ */
+export function loadToolAnnotationsFile(dir: string, fallbackDir?: string): ToolAnnotationsFile | undefined {
+  const stored = loadExistingArtifact<StoredToolAnnotationsFile>(dir, 'tool-annotations.json', fallbackDir);
+  if (!stored) return undefined;
+  return resolveStoredAnnotationsFile(stored);
 }
 
 // ---------------------------------------------------------------------------

@@ -387,7 +387,9 @@ import type {
   ConditionalRoles,
   RoleCondition,
   StoredToolAnnotation,
+  StoredToolAnnotationsFile,
   ToolAnnotation,
+  ToolAnnotationsFile,
 } from '../pipeline/types.js';
 
 /** Type guard: returns true if an ArgumentRoleSpec is a conditional block. */
@@ -435,6 +437,29 @@ export function resolveStoredAnnotation(
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const { args: _rawArgs, ...rest } = stored;
   return { ...rest, args: resolvedArgs };
+}
+
+/**
+ * Resolves an entire StoredToolAnnotationsFile to a plain ToolAnnotationsFile
+ * by flattening all conditional role specs to their default roles.
+ *
+ * This is the correct entry point for the policy compilation pipeline, which
+ * never has actual call arguments and should only see the flat ToolAnnotation
+ * shape. The policy engine resolves conditionals at evaluation time instead.
+ */
+export function resolveStoredAnnotationsFile(stored: StoredToolAnnotationsFile): ToolAnnotationsFile {
+  return {
+    ...stored,
+    servers: Object.fromEntries(
+      Object.entries(stored.servers).map(([serverName, server]) => [
+        serverName,
+        {
+          ...server,
+          tools: server.tools.map((tool) => resolveStoredAnnotation(tool, {})),
+        },
+      ]),
+    ),
+  };
 }
 
 /**
