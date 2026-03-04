@@ -85,6 +85,8 @@ interface ToolAnnotationsFile {
 
 All path-bearing roles use symlink-aware `resolveRealPath()` for normalization, which follows symlinks to canonical forms. This prevents symlink-escape attacks where a symlinked directory could circumvent containment checks.
 
+**Conditional roles:** Multi-mode tools (e.g., `git_branch` with list/create/delete operations) use conditional role specs in the stored annotation format (`StoredToolAnnotation`). Instead of a static `ArgumentRole[]`, an argument's roles can be `{ default: ArgumentRole[], when: [{ condition: { arg, equals|in|is }, roles }] }`. The `default` is the most-restrictive union; `when` clauses narrow it based on sibling argument values. Resolution happens at the policy engine lookup boundary via `resolveStoredAnnotation()` — all downstream consumers see plain `ToolAnnotation`. See `docs/designs/conditional-argument-roles.md` for the full design.
+
 **Side effects:** `sideEffects` is framed in security terms, not just state mutation. A tool has `sideEffects: true` if it modifies state OR can disclose information from resource paths (information disclosure is a security-relevant side effect). Only tools with NO path arguments AND no state changes qualify as `sideEffects: false` -- e.g., `list_allowed_directories` which returns system configuration the agent already knows. Tools like `read_file` are `sideEffects: true` because they can disclose file contents from arbitrary paths. The compiled policy can allow `sideEffects: false` tools unconditionally (subject to structural invariants), while path-taking tools always go through path-based rules.
 
 **Example annotations:**
