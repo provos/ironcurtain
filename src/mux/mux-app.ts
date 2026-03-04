@@ -57,7 +57,7 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
   let inputHandler!: MuxInputHandler;
   let escalationManager!: MuxEscalationManager;
   let renderer!: MuxRenderer;
-  let pasteInterceptor!: PasteInterceptor;
+  let pasteInterceptor: PasteInterceptor | undefined;
 
   function getActiveTab(): MuxTab | undefined {
     return tabs[activeTabIndex];
@@ -377,7 +377,7 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
     if (!running) return;
     running = false;
 
-    pasteInterceptor.uninstall();
+    pasteInterceptor?.uninstall();
 
     for (const tab of tabs) {
       if (tab.bridge.alive) {
@@ -503,7 +503,7 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
       process.on('SIGHUP', handleSignal);
 
       process.on('exit', () => {
-        pasteInterceptor.uninstall();
+        pasteInterceptor?.uninstall();
         if (term) {
           term.grabInput(false);
         }

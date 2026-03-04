@@ -108,8 +108,10 @@ export function calculateLayout(totalRows: number, mode: InputMode, pendingCount
       Math.floor(ptyViewportRows / 2),
       ptyViewportRows,
     );
-    // Store the actual input rows allocated (overlay might have been clamped)
-    allocatedInputRows = Math.max(1, overlayRows - escalationPanelRows - HINT_BAR_ROWS);
+    // Clamp escalation panel to fit within overlay budget, reserving
+    // space for the hint bar and at least one input row.
+    escalationPanelRows = Math.min(escalationPanelRows, Math.max(0, overlayRows - HINT_BAR_ROWS - MIN_INPUT_LINE_ROWS));
+    allocatedInputRows = Math.max(MIN_INPUT_LINE_ROWS, overlayRows - escalationPanelRows - HINT_BAR_ROWS);
   }
 
   const pickerRows = mode === 'picker' ? Math.min(Math.floor(ptyViewportRows / 2), ptyViewportRows) : 0;

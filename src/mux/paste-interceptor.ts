@@ -14,6 +14,8 @@
  * disables it — keeping the terminal protocol in one place.
  */
 
+import { StringDecoder } from 'node:string_decoder';
+
 export interface PasteInterceptor {
   install(): void;
   uninstall(): void;
@@ -28,6 +30,9 @@ const DISABLE_BRACKETED_PASTE = '\x1b[?2004l';
 type State = 'normal' | 'pasting';
 
 export function createPasteInterceptor(onPaste: (text: string) => void): PasteInterceptor {
+  // StringDecoder safely handles multi-byte UTF-8 characters split
+  // across stdin chunks (avoids replacement characters).
+  let decoder: StringDecoder | null = null;
   let originalEmit: typeof process.stdin.emit | null = null;
   let state: State = 'normal';
   let pasteBuffer = '';
@@ -114,7 +119,8 @@ export function createPasteInterceptor(onPaste: (text: string) => void): PasteIn
     }
 
     const chunk = args[0];
-    const str = typeof chunk === 'string' ? chunk : chunk instanceof Buffer ? chunk.toString('utf-8') : String(chunk);
+    const str =
+      typeof chunk === 'string' ? chunk : chunk instanceof Buffer && decoder ? decoder.write(chunk) : String(chunk);
 
     const outputs = processData(str);
     let result = false;
@@ -131,6 +137,7 @@ export function createPasteInterceptor(onPaste: (text: string) => void): PasteIn
   return {
     install(): void {
       if (originalEmit) return; // already installed
+      decoder = new StringDecoder('utf-8');
       // eslint-disable-next-line @typescript-eslint/unbound-method
       originalEmit = process.stdin.emit;
       process.stdin.emit = patchedEmit as typeof process.stdin.emit;
@@ -142,6 +149,7 @@ export function createPasteInterceptor(onPaste: (text: string) => void): PasteIn
       if (!originalEmit) return;
       process.stdin.emit = originalEmit;
       originalEmit = null;
+      decoder = null;
       resetState();
       process.stdout.write(DISABLE_BRACKETED_PASTE);
     },

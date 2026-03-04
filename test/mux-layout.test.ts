@@ -30,8 +30,8 @@ describe('calculateLayout', () => {
   it('command mode, 10 escalations: overlay capped at half viewport', () => {
     const layout = calculateLayout(24, 'command', 10);
     expect(layout.ptyViewportRows).toBe(21); // CONSTANT
-    expect(layout.escalationPanelRows).toBe(12); // capped at MAX_ESCALATION_PANEL_ROWS
-    // 12 + 1 + 1 = 14, but floor(21/2) = 10
+    // overlay capped at floor(21/2)=10, escalation clamped to fit: 10-1(hint)-1(input)=8
+    expect(layout.escalationPanelRows).toBe(8);
     expect(layout.overlayRows).toBe(10);
   });
 
