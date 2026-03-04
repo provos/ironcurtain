@@ -142,13 +142,13 @@ Arguments with role `'none'` that happen to look like paths (e.g., a `content` f
 
 ## PolicyEngine.getAnnotation()
 
-New public method on `PolicyEngine`:
+Public method on `PolicyEngine`:
 
 ```typescript
-getAnnotation(serverName: string, toolName: string): ToolAnnotation | undefined
+getAnnotation(serverName: string, toolName: string, callArgs: Record<string, unknown>): ToolAnnotation | undefined
 ```
 
-Exposes read-only access to the annotation map so callers can look up annotations for normalization without duplicating the map. Used by `mcp-proxy-server.ts` and `TrustedProcess`.
+Resolves conditional role specs against the tool call arguments and returns a plain `ToolAnnotation`. The annotation map internally stores `StoredToolAnnotation` (which may contain conditional role specs for multi-mode tools); resolution via `resolveStoredAnnotation()` happens here at the lookup boundary. A separate `getStoredAnnotation(serverName, toolName)` provides raw access for pipeline tools. Used by `mcp-proxy-server.ts` and `TrustedProcess`.
 
 ## Hardcoded String Replacement
 

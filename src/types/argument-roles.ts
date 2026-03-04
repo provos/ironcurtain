@@ -377,3 +377,108 @@ export function getIdentifierRoles(): ArgumentRole[] {
  * to check for those roles before auto-allowing.
  */
 export const SANDBOX_SAFE_PATH_ROLES: ReadonlySet<ArgumentRole> = new Set(['read-path', 'write-path', 'delete-path']);
+
+// ---------------------------------------------------------------------------
+// Conditional Role Resolution
+// ---------------------------------------------------------------------------
+
+import type {
+  ArgumentRoleSpec,
+  ConditionalRoles,
+  RoleCondition,
+  StoredToolAnnotation,
+  ToolAnnotation,
+} from '../pipeline/types.js';
+
+/** Type guard: returns true if an ArgumentRoleSpec is a conditional block. */
+export function isConditionalRoles(spec: ArgumentRoleSpec): spec is ConditionalRoles {
+  return !Array.isArray(spec) && 'default' in spec;
+}
+
+/**
+ * Extracts the static/default roles from an ArgumentRoleSpec.
+ * For static arrays, returns them directly.
+ * For conditional specs, returns the default (most-restrictive) roles.
+ *
+ * Used by pipeline stages that inspect annotations without a tool call context.
+ */
+export function extractDefaultRoles(spec: ArgumentRoleSpec): ArgumentRole[] {
+  if (Array.isArray(spec)) return spec;
+  return spec.default;
+}
+
+/**
+ * Resolves a StoredToolAnnotation (which may contain conditional role specs)
+ * into a plain ToolAnnotation (where all args are ArgumentRole[]).
+ *
+ * This is the sole boundary where conditionals are evaluated. Every consumer
+ * downstream receives a ToolAnnotation with static role arrays.
+ *
+ * @param stored - The stored annotation (from JSON file / annotation map)
+ * @param callArgs - The actual tool call arguments
+ * @returns A ToolAnnotation with all conditional specs resolved
+ */
+export function resolveStoredAnnotation(
+  stored: StoredToolAnnotation,
+  callArgs: Record<string, unknown>,
+): ToolAnnotation {
+  // Fast path: if no args have conditional specs, avoid allocation
+  const hasConditionals = Object.values(stored.args).some((spec) => !Array.isArray(spec));
+  if (!hasConditionals) {
+    return stored as unknown as ToolAnnotation;
+  }
+
+  const resolvedArgs: Record<string, ArgumentRole[]> = {};
+  for (const [argName, spec] of Object.entries(stored.args)) {
+    resolvedArgs[argName] = Array.isArray(spec) ? spec : evaluateConditionalRoles(spec, callArgs);
+  }
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const { args: _rawArgs, ...rest } = stored;
+  return { ...rest, args: resolvedArgs };
+}
+
+/**
+ * Evaluates a conditional roles block against tool call arguments.
+ * First-match-wins: iterates through `when` clauses in order and
+ * returns the first matching entry's roles, or the default roles.
+ */
+function evaluateConditionalRoles(spec: ConditionalRoles, callArgs: Record<string, unknown>): ArgumentRole[] {
+  for (const entry of spec.when) {
+    if (evaluateCondition(entry.condition, callArgs)) {
+      return entry.roles;
+    }
+  }
+  return spec.default;
+}
+
+/**
+ * Evaluates a single RoleCondition against tool call arguments.
+ * Exactly one of equals/in/is should be set (enforced by Zod at parse time).
+ */
+function evaluateCondition(cond: RoleCondition, callArgs: Record<string, unknown>): boolean {
+  const value = callArgs[cond.arg];
+
+  if (cond.equals !== undefined) {
+    return value === cond.equals;
+  }
+
+  if (cond.in !== undefined) {
+    return cond.in.includes(value as string | number | boolean);
+  }
+
+  if (cond.is !== undefined) {
+    switch (cond.is) {
+      case 'present':
+        return cond.arg in callArgs && value !== null && value !== undefined;
+      case 'absent':
+        return !(cond.arg in callArgs) || value === null || value === undefined;
+      case 'truthy':
+        return cond.arg in callArgs && !!value;
+      case 'falsy':
+        return !(cond.arg in callArgs) || !value;
+    }
+  }
+
+  // No condition operator set -- should be caught by Zod validation
+  return false;
+}

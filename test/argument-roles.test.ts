@@ -385,3 +385,295 @@ describe('getUrlRoles', () => {
     expect(roles).toEqual(['fetch-url', 'git-remote-url']);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Conditional Role Resolution
+// ---------------------------------------------------------------------------
+
+import { resolveStoredAnnotation, isConditionalRoles, extractDefaultRoles } from '../src/types/argument-roles.js';
+import type { StoredToolAnnotation, ConditionalRoles, ArgumentRoleSpec } from '../src/pipeline/types.js';
+
+/** Helper to build a minimal StoredToolAnnotation for testing. */
+function makeStored(args: Record<string, ArgumentRoleSpec>): StoredToolAnnotation {
+  return {
+    toolName: 'test_tool',
+    serverName: 'test',
+    comment: 'Test tool',
+    sideEffects: true,
+    args,
+  };
+}
+
+describe('isConditionalRoles', () => {
+  it('returns false for a static array', () => {
+    expect(isConditionalRoles(['read-path'])).toBe(false);
+  });
+
+  it('returns true for a conditional block', () => {
+    const spec: ConditionalRoles = {
+      default: ['read-path', 'write-path'],
+      when: [{ condition: { arg: 'mode', equals: 'read' }, roles: ['read-path'] }],
+    };
+    expect(isConditionalRoles(spec)).toBe(true);
+  });
+});
+
+describe('extractDefaultRoles', () => {
+  it('returns static array as-is', () => {
+    expect(extractDefaultRoles(['read-path', 'write-path'])).toEqual(['read-path', 'write-path']);
+  });
+
+  it('returns default from conditional block', () => {
+    const spec: ConditionalRoles = {
+      default: ['read-path', 'write-history', 'delete-history'],
+      when: [{ condition: { arg: 'op', equals: 'list' }, roles: ['read-path'] }],
+    };
+    expect(extractDefaultRoles(spec)).toEqual(['read-path', 'write-history', 'delete-history']);
+  });
+});
+
+describe('resolveStoredAnnotation', () => {
+  it('returns static roles unchanged (bare arrays pass through)', () => {
+    const stored = makeStored({
+      path: ['read-path'],
+      content: ['none'],
+    });
+    const resolved = resolveStoredAnnotation(stored, { path: '/tmp/foo', content: 'hello' });
+    expect(resolved.args.path).toEqual(['read-path']);
+    expect(resolved.args.content).toEqual(['none']);
+  });
+
+  it('preserves non-args fields in the resolved annotation', () => {
+    const stored = makeStored({ path: ['read-path'] });
+    const resolved = resolveStoredAnnotation(stored, {});
+    expect(resolved.toolName).toBe('test_tool');
+    expect(resolved.serverName).toBe('test');
+    expect(resolved.comment).toBe('Test tool');
+    expect(resolved.sideEffects).toBe(true);
+  });
+
+  it('returns default roles when no conditions match', () => {
+    const stored = makeStored({
+      path: {
+        default: ['read-path', 'write-history', 'delete-history'],
+        when: [
+          { condition: { arg: 'operation', equals: 'list' }, roles: ['read-path'] },
+          { condition: { arg: 'operation', equals: 'delete' }, roles: ['read-path', 'delete-history'] },
+        ],
+      },
+    });
+    const resolved = resolveStoredAnnotation(stored, { path: '/tmp/repo', operation: 'create' });
+    expect(resolved.args.path).toEqual(['read-path', 'write-history', 'delete-history']);
+  });
+
+  it('matches equals condition (string)', () => {
+    const stored = makeStored({
+      path: {
+        default: ['read-path', 'write-history', 'delete-history'],
+        when: [{ condition: { arg: 'operation', equals: 'list' }, roles: ['read-path'] }],
+      },
+    });
+    const resolved = resolveStoredAnnotation(stored, { path: '/tmp/repo', operation: 'list' });
+    expect(resolved.args.path).toEqual(['read-path']);
+  });
+
+  it('matches equals condition (boolean true)', () => {
+    const stored = makeStored({
+      path: {
+        default: ['read-path', 'write-path'],
+        when: [{ condition: { arg: 'dryRun', equals: true }, roles: ['read-path'] }],
+      },
+    });
+    const resolved = resolveStoredAnnotation(stored, { path: '/tmp/file', dryRun: true });
+    expect(resolved.args.path).toEqual(['read-path']);
+  });
+
+  it('matches equals condition (boolean false)', () => {
+    const stored = makeStored({
+      path: {
+        default: ['read-path', 'write-path'],
+        when: [{ condition: { arg: 'dryRun', equals: false }, roles: ['read-path', 'write-path'] }],
+      },
+    });
+    const resolved = resolveStoredAnnotation(stored, { path: '/tmp/file', dryRun: false });
+    expect(resolved.args.path).toEqual(['read-path', 'write-path']);
+  });
+
+  it('matches in condition', () => {
+    const stored = makeStored({
+      path: {
+        default: ['read-path', 'write-history', 'delete-history'],
+        when: [{ condition: { arg: 'operation', in: ['create', 'rename'] }, roles: ['read-path', 'write-history'] }],
+      },
+    });
+    const resolved = resolveStoredAnnotation(stored, { path: '/tmp/repo', operation: 'rename' });
+    expect(resolved.args.path).toEqual(['read-path', 'write-history']);
+  });
+
+  it('matches is:present condition', () => {
+    const stored = makeStored({
+      path: {
+        default: ['read-path', 'write-path'],
+        when: [{ condition: { arg: 'preview', is: 'present' }, roles: ['read-path'] }],
+      },
+    });
+    const resolved = resolveStoredAnnotation(stored, { path: '/tmp/file', preview: 'yes' });
+    expect(resolved.args.path).toEqual(['read-path']);
+  });
+
+  it('does not match is:present when arg is missing', () => {
+    const stored = makeStored({
+      path: {
+        default: ['read-path', 'write-path'],
+        when: [{ condition: { arg: 'preview', is: 'present' }, roles: ['read-path'] }],
+      },
+    });
+    const resolved = resolveStoredAnnotation(stored, { path: '/tmp/file' });
+    expect(resolved.args.path).toEqual(['read-path', 'write-path']);
+  });
+
+  it('does not match is:present when arg is null', () => {
+    const stored = makeStored({
+      path: {
+        default: ['read-path', 'write-path'],
+        when: [{ condition: { arg: 'preview', is: 'present' }, roles: ['read-path'] }],
+      },
+    });
+    const resolved = resolveStoredAnnotation(stored, { path: '/tmp/file', preview: null });
+    expect(resolved.args.path).toEqual(['read-path', 'write-path']);
+  });
+
+  it('matches is:absent condition for missing arg', () => {
+    const stored = makeStored({
+      path: {
+        default: ['read-path', 'write-path'],
+        when: [{ condition: { arg: 'force', is: 'absent' }, roles: ['read-path'] }],
+      },
+    });
+    const resolved = resolveStoredAnnotation(stored, { path: '/tmp/file' });
+    expect(resolved.args.path).toEqual(['read-path']);
+  });
+
+  it('matches is:absent condition for null arg', () => {
+    const stored = makeStored({
+      path: {
+        default: ['read-path', 'write-path'],
+        when: [{ condition: { arg: 'force', is: 'absent' }, roles: ['read-path'] }],
+      },
+    });
+    const resolved = resolveStoredAnnotation(stored, { path: '/tmp/file', force: null });
+    expect(resolved.args.path).toEqual(['read-path']);
+  });
+
+  it('matches is:truthy condition', () => {
+    const stored = makeStored({
+      path: {
+        default: ['read-path', 'delete-path'],
+        when: [{ condition: { arg: 'dryRun', is: 'truthy' }, roles: ['read-path'] }],
+      },
+    });
+    const resolved = resolveStoredAnnotation(stored, { path: '/tmp/file', dryRun: true });
+    expect(resolved.args.path).toEqual(['read-path']);
+  });
+
+  it('does not match is:truthy for falsy values', () => {
+    const stored = makeStored({
+      path: {
+        default: ['read-path', 'delete-path'],
+        when: [{ condition: { arg: 'dryRun', is: 'truthy' }, roles: ['read-path'] }],
+      },
+    });
+    const resolved = resolveStoredAnnotation(stored, { path: '/tmp/file', dryRun: false });
+    expect(resolved.args.path).toEqual(['read-path', 'delete-path']);
+  });
+
+  it('matches is:falsy condition for false value', () => {
+    const stored = makeStored({
+      path: {
+        default: ['read-path', 'write-path'],
+        when: [{ condition: { arg: 'dryRun', is: 'falsy' }, roles: ['read-path', 'write-path'] }],
+      },
+    });
+    const resolved = resolveStoredAnnotation(stored, { path: '/tmp/file', dryRun: false });
+    expect(resolved.args.path).toEqual(['read-path', 'write-path']);
+  });
+
+  it('matches is:falsy condition for missing arg', () => {
+    const stored = makeStored({
+      path: {
+        default: ['read-path', 'write-path'],
+        when: [{ condition: { arg: 'dryRun', is: 'falsy' }, roles: ['read-path'] }],
+      },
+    });
+    const resolved = resolveStoredAnnotation(stored, { path: '/tmp/file' });
+    expect(resolved.args.path).toEqual(['read-path']);
+  });
+
+  it('first matching condition wins (order matters)', () => {
+    const stored = makeStored({
+      path: {
+        default: ['read-path', 'write-history', 'delete-history'],
+        when: [
+          { condition: { arg: 'operation', equals: 'list' }, roles: ['read-path'] },
+          { condition: { arg: 'operation', in: ['list', 'show'] }, roles: ['read-path', 'write-history'] },
+        ],
+      },
+    });
+    // 'list' matches both conditions, but first wins
+    const resolved = resolveStoredAnnotation(stored, { path: '/tmp/repo', operation: 'list' });
+    expect(resolved.args.path).toEqual(['read-path']);
+  });
+
+  it('does not match equals when arg is absent', () => {
+    const stored = makeStored({
+      path: {
+        default: ['read-path', 'write-path'],
+        when: [{ condition: { arg: 'mode', equals: 'read' }, roles: ['read-path'] }],
+      },
+    });
+    const resolved = resolveStoredAnnotation(stored, { path: '/tmp/file' });
+    expect(resolved.args.path).toEqual(['read-path', 'write-path']);
+  });
+
+  it('does not match in when arg is absent', () => {
+    const stored = makeStored({
+      path: {
+        default: ['read-path', 'write-path'],
+        when: [{ condition: { arg: 'mode', in: ['read', 'list'] }, roles: ['read-path'] }],
+      },
+    });
+    const resolved = resolveStoredAnnotation(stored, { path: '/tmp/file' });
+    expect(resolved.args.path).toEqual(['read-path', 'write-path']);
+  });
+
+  it('handles mixed static and conditional specs in same annotation', () => {
+    const stored = makeStored({
+      path: {
+        default: ['read-path', 'write-history', 'delete-history'],
+        when: [{ condition: { arg: 'operation', equals: 'list' }, roles: ['read-path'] }],
+      },
+      operation: ['none'],
+      name: ['branch-name'],
+    });
+    const resolved = resolveStoredAnnotation(stored, {
+      path: '/tmp/repo',
+      operation: 'list',
+      name: 'main',
+    });
+    expect(resolved.args.path).toEqual(['read-path']);
+    expect(resolved.args.operation).toEqual(['none']);
+    expect(resolved.args.name).toEqual(['branch-name']);
+  });
+
+  it('returns false from condition when no operator is set', () => {
+    // Defensive: a condition with no operator should not match
+    const stored = makeStored({
+      path: {
+        default: ['read-path', 'write-path'],
+        when: [{ condition: { arg: 'mode' }, roles: ['read-path'] }],
+      },
+    });
+    const resolved = resolveStoredAnnotation(stored, { path: '/tmp/file', mode: 'anything' });
+    expect(resolved.args.path).toEqual(['read-path', 'write-path']);
+  });
+});

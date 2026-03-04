@@ -541,7 +541,7 @@ export async function handleCallTool(
   }
 
   // Annotation-driven normalization: split into transport vs policy args
-  const annotation = deps.policyEngine.getAnnotation(toolInfo.serverName, toolInfo.name);
+  const annotation = deps.policyEngine.getAnnotation(toolInfo.serverName, toolInfo.name, rawArgs);
   if (!annotation) {
     return {
       content: [
