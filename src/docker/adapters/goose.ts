@@ -24,7 +24,13 @@ import type { ResolvedUserConfig, GooseProvider } from '../../config/user-config
 import { anthropicProvider, openaiProvider, googleProvider } from '../provider-config.js';
 import { buildSystemPrompt } from '../../session/prompts.js';
 import { resolveApiKeyForProvider } from '../../config/model-provider.js';
-import { buildResizePtyScript, buildCheckPtySizeScript, buildNetworkSection, buildPolicySection, buildAttributionSection } from './shared-scripts.js';
+import {
+  buildResizePtyScript,
+  buildCheckPtySizeScript,
+  buildNetworkSection,
+  buildPolicySection,
+  buildAttributionSection,
+} from './shared-scripts.js';
 
 const GOOSE_IMAGE = 'ironcurtain-goose:latest';
 
@@ -148,7 +154,6 @@ echo "$IRONCURTAIN_SYSTEM_PROMPT" > "$PROMPT_FILE"
 exec goose session --with-extension ironcurtain -i "$PROMPT_FILE"
 `;
 }
-
 
 // ─── Adapter Factory ─────────────────────────────────────────
 

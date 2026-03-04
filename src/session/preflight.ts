@@ -72,7 +72,6 @@ const preflightSources: CredentialSources = {
   loadFromKeychain: () => null,
 };
 
-
 /**
  * Checks whether credentials (OAuth or API key) are available for the given agent.
  * Returns the auth kind if available, or null if no credentials found.

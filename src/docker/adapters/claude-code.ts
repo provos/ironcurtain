@@ -22,7 +22,13 @@ import {
   claudePlatformOAuthProvider,
 } from '../provider-config.js';
 import { buildSystemPrompt } from '../../session/prompts.js';
-import { buildResizePtyScript, buildCheckPtySizeScript, buildNetworkSection, buildPolicySection, buildAttributionSection } from './shared-scripts.js';
+import {
+  buildResizePtyScript,
+  buildCheckPtySizeScript,
+  buildNetworkSection,
+  buildPolicySection,
+  buildAttributionSection,
+} from './shared-scripts.js';
 
 const CLAUDE_CODE_IMAGE = 'ironcurtain-claude-code:latest';
 
