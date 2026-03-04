@@ -69,7 +69,7 @@ function formatRunOutcome(outcome: RunOutcome, verbose = true): string {
  * Uses @clack/prompts for the terminal UI.
  */
 export async function runAddJobWizard(): Promise<void> {
-  const { intro, text, confirm, outro, isCancel, cancel } = await import('@clack/prompts');
+  const { intro, text, confirm, outro, isCancel, cancel, log } = await import('@clack/prompts');
 
   intro('Add a new scheduled job');
 
@@ -138,7 +138,6 @@ export async function runAddJobWizard(): Promise<void> {
   }
   const schedule = scheduleInput;
 
-  const { log } = await import('@clack/prompts');
   log.step('Task description (opening editor — save and close to continue)');
 
   let task: string | undefined;
@@ -169,7 +168,7 @@ export async function runAddJobWizard(): Promise<void> {
     process.exit(0);
   }
 
-  const job: JobDefinition = {
+  let job: JobDefinition = {
     id: jobId,
     name,
     schedule,
@@ -184,14 +183,28 @@ export async function runAddJobWizard(): Promise<void> {
   const workspace = getJobWorkspaceDir(jobId);
   mkdirSync(workspace, { recursive: true });
 
-  // Clone git repo if specified
+  // Clone git repo if specified, with retry on failure
   if (gitRepo) {
-    console.error('Cloning repository...');
-    try {
-      syncGitRepo(gitRepo, workspace, /* verbose= */ true);
-    } catch (err) {
-      console.error(chalk.red(`Git clone failed: ${err instanceof Error ? err.message : String(err)}`));
-      process.exit(1);
+    let currentUri = gitRepo;
+    for (;;) {
+      console.error('Cloning repository...');
+      try {
+        syncGitRepo(currentUri, workspace, /* verbose= */ true);
+        // Update the job with the (possibly corrected) URI
+        job = { ...job, gitRepo: currentUri };
+        break;
+      } catch (err) {
+        log.error(`Git clone failed: ${err instanceof Error ? err.message : String(err)}`);
+        const retryInput = await text({
+          message: 'Enter a corrected repository URI, or leave empty to skip cloning',
+          placeholder: currentUri,
+        });
+        if (isCancel(retryInput) || !retryInput) {
+          job = { ...job, gitRepo: undefined };
+          break;
+        }
+        currentUri = retryInput;
+      }
     }
   }
 
