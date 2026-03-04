@@ -14,6 +14,7 @@
  */
 
 import { mkdirSync, readFileSync, existsSync } from 'node:fs';
+import { syncGitRepo } from '../cron/git-sync.js';
 import { resolve } from 'node:path';
 import { createSession } from '../session/index.js';
 import { loadConfig } from '../config/index.js';
@@ -177,6 +178,13 @@ export class IronCurtainDaemon {
     const workspace = job.workspace ?? getJobWorkspaceDir(job.id);
     mkdirSync(workspace, { recursive: true });
 
+    // Clone git repo if specified
+    if (job.gitRepo) {
+      logger.info(`[Daemon] Cloning repo for job ${job.id}...`);
+      syncGitRepo(job.gitRepo, workspace);
+      logger.info(`[Daemon] Repo cloned for job ${job.id}`);
+    }
+
     // Compile per-job policy
     logger.info(`[Daemon] Compiling task policy for job ${job.id}...`);
     await compileTaskPolicy(job.task, getJobDir(job.id));
@@ -296,6 +304,14 @@ export class IronCurtainDaemon {
   private async executeJob(job: JobDefinition): Promise<RunRecord> {
     const startedAt = new Date().toISOString();
     const workspace = job.workspace ?? getJobWorkspaceDir(job.id);
+
+    // Sync git repo if configured
+    if (job.gitRepo) {
+      logger.info(`[Daemon] Syncing repo for job ${job.id}...`);
+      syncGitRepo(job.gitRepo, workspace);
+      logger.info(`[Daemon] Repo synced for job ${job.id}`);
+    }
+
     const globalConfig = loadConfig();
     const patchedConfig = buildCronSessionConfig(globalConfig, job);
     const jobGeneratedDir = getJobGeneratedDir(job.id);

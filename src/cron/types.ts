@@ -55,6 +55,13 @@ export interface JobDefinition {
   readonly workspace?: string;
 
   /**
+   * Optional git repository URI to clone into the workspace.
+   * On first run, the repo is cloned. On subsequent runs,
+   * tracked files are reset to remote HEAD (untracked files preserved).
+   */
+  readonly gitRepo?: string;
+
+  /**
    * When true and Signal is configured, the daemon sends a Signal
    * message on escalation and waits for approval. When false or
    * Signal is not configured, escalations are auto-denied.

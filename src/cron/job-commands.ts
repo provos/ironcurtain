@@ -12,6 +12,7 @@ import { createJobId, type JobDefinition, type RunOutcome } from './types.js';
 import { getJobWorkspaceDir, getJobDir } from '../config/paths.js';
 import { compileTaskPolicy } from './compile-task-policy.js';
 import { createCronScheduler, parseCronExpression } from './cron-scheduler.js';
+import { syncGitRepo } from './git-sync.js';
 
 function formatRunOutcome(outcome: RunOutcome, verbose = true): string {
   if (outcome.kind === 'success') return chalk.green('success');
@@ -66,6 +67,16 @@ export async function runAddJobWizard(): Promise<void> {
   }
   const name = nameInput;
 
+  const gitRepoInput = await text({
+    message: 'Git repository URI (optional, leave empty to skip)',
+    placeholder: 'git@github.com:org/repo.git',
+  });
+  if (isCancel(gitRepoInput)) {
+    cancel('Cancelled.');
+    process.exit(0);
+  }
+  const gitRepo = gitRepoInput || undefined;
+
   const scheduleInput = await text({
     message: 'Schedule (cron expression)',
     placeholder: '0 9 * * *',
@@ -118,6 +129,7 @@ export async function runAddJobWizard(): Promise<void> {
     name,
     schedule,
     task,
+    gitRepo,
     notifyOnEscalation: notifyOnEscalation,
     notifyOnCompletion: notifyOnCompletion,
     enabled: true,
@@ -126,6 +138,17 @@ export async function runAddJobWizard(): Promise<void> {
   // Ensure workspace exists
   const workspace = getJobWorkspaceDir(jobId);
   mkdirSync(workspace, { recursive: true });
+
+  // Clone git repo if specified
+  if (gitRepo) {
+    console.error('Cloning repository...');
+    try {
+      syncGitRepo(gitRepo, workspace, /* verbose= */ true);
+    } catch (err) {
+      console.error(chalk.red(`Git clone failed: ${err instanceof Error ? err.message : String(err)}`));
+      process.exit(1);
+    }
+  }
 
   // Compile per-job policy
   console.error('');
