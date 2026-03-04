@@ -72,7 +72,7 @@ import { wrapLanguageModel } from 'ai';
 import { createLlmLoggingMiddleware } from '../pipeline/llm-logger.js';
 import { extractMcpErrorMessage } from './mcp-error-utils.js';
 import { type ServerContextMap, updateServerContext, formatServerContext } from './server-context.js';
-import { permissiveOutputValidator } from './permissive-output-validator.js';
+import { permissiveJsonSchemaValidator } from './permissive-output-validator.js';
 import type { LanguageModelV3 } from '@ai-sdk/provider';
 import type { MCPServerConfig, SandboxAvailabilityPolicy } from '../config/types.js';
 import { VERSION } from '../version.js';
@@ -714,8 +714,8 @@ export async function handleCallTool(
     const client = clientState.client;
 
     // CompatibilityCallToolResultSchema accepts the legacy `toolResult` response format
-    // (protocol version 2024-10-07). Output schema validation is separately handled by
-    // the permissiveOutputValidator injected at Client construction time.
+    // (protocol version 2024-10-07). Output schema validation is intentionally
+    // bypassed by the permissiveJsonSchemaValidator injected at Client construction time.
     const result = await client.callTool(
       {
         name: toolInfo.name,
@@ -883,7 +883,7 @@ async function main(): Promise<void> {
       { name: 'ironcurtain-proxy', version: VERSION },
       {
         capabilities: { roots: { listChanged: true } },
-        jsonSchemaValidator: permissiveOutputValidator,
+        jsonSchemaValidator: permissiveJsonSchemaValidator,
       },
     );
 

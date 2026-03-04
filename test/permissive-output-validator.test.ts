@@ -1,9 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { permissiveOutputValidator } from '../src/trusted-process/permissive-output-validator.js';
+import { permissiveJsonSchemaValidator } from '../src/trusted-process/permissive-output-validator.js';
 
-describe('permissiveOutputValidator', () => {
+describe('permissiveJsonSchemaValidator', () => {
   it('always returns valid for any input', () => {
-    const validator = permissiveOutputValidator.getValidator({
+    const validator = permissiveJsonSchemaValidator.getValidator({
       type: 'object',
       required: ['success', 'commitHash'],
       properties: {
@@ -20,7 +20,7 @@ describe('permissiveOutputValidator', () => {
   });
 
   it('returns valid for empty objects', () => {
-    const validator = permissiveOutputValidator.getValidator({
+    const validator = permissiveJsonSchemaValidator.getValidator({
       type: 'object',
       required: ['name'],
     });
@@ -28,7 +28,7 @@ describe('permissiveOutputValidator', () => {
   });
 
   it('returns valid for null/undefined input', () => {
-    const validator = permissiveOutputValidator.getValidator({ type: 'object' });
+    const validator = permissiveJsonSchemaValidator.getValidator({ type: 'object' });
     expect(validator(null).valid).toBe(true);
     expect(validator(undefined).valid).toBe(true);
   });

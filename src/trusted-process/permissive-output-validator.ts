@@ -12,15 +12,16 @@
  * the real error message from the agent.
  *
  * IronCurtain acts as a proxy -- it does not consume structuredContent itself,
- * so skipping this validation is safe. The real MCP server already performed
- * its own validation before sending the response.
+ * so it intentionally bypasses this client-side schema validation and simply
+ * forwards whatever the MCP server returns, even if the server skipped its
+ * own structuredContent validation for error responses.
  *
  * See: https://github.com/modelcontextprotocol/typescript-sdk/pull/1428
  * TODO: Remove once the SDK ships the isError skip fix for client-side validation.
  */
 import type { jsonSchemaValidator, JsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/types.js';
 
-export const permissiveOutputValidator: jsonSchemaValidator = {
+export const permissiveJsonSchemaValidator: jsonSchemaValidator = {
   getValidator<T>(): JsonSchemaValidator<T> {
     return (input: unknown) => ({
       valid: true as const,

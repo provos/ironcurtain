@@ -4,7 +4,7 @@ import { CompatibilityCallToolResultSchema, ListRootsRequestSchema } from '@mode
 import type { MCPServerConfig } from '../config/types.js';
 import * as logger from '../logger.js';
 import { VERSION } from '../version.js';
-import { permissiveOutputValidator } from './permissive-output-validator.js';
+import { permissiveJsonSchemaValidator } from './permissive-output-validator.js';
 
 export const ROOTS_REFRESH_TIMEOUT_MS = 5_000;
 
@@ -37,7 +37,7 @@ export class MCPClientManager {
       { name: 'ironcurtain', version: VERSION },
       {
         ...(roots ? { capabilities: { roots: { listChanged: true } } } : {}),
-        jsonSchemaValidator: permissiveOutputValidator,
+        jsonSchemaValidator: permissiveJsonSchemaValidator,
       },
     );
 
@@ -128,7 +128,8 @@ export class MCPClientManager {
     }
 
     // CompatibilityCallToolResultSchema accepts the legacy `toolResult` response format.
-    // Output schema validation is handled by the permissiveOutputValidator on the Client.
+    // Output schema validation is intentionally bypassed by the permissiveJsonSchemaValidator
+    // on the Client (always returns { valid: true }) so schema issues don't hide real MCP tool errors.
     return server.client.callTool({ name: toolName, arguments: args }, CompatibilityCallToolResultSchema);
   }
 
