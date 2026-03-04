@@ -33,6 +33,7 @@ import {
   computeHash,
   createPipelineLlm,
   loadExistingArtifact,
+  loadToolAnnotationsFile,
   loadPipelineConfig,
   showCached,
   writeArtifact,
@@ -505,11 +506,7 @@ export async function main(): Promise<void> {
   const config = loadPipelineConfig();
 
   // Load tool annotations from disk (produced by `npm run annotate-tools`)
-  const toolAnnotationsFile = loadExistingArtifact<ToolAnnotationsFile>(
-    config.generatedDir,
-    'tool-annotations.json',
-    config.packageGeneratedDir,
-  );
+  const toolAnnotationsFile = loadToolAnnotationsFile(config.generatedDir, config.packageGeneratedDir);
   if (!toolAnnotationsFile) {
     console.error(
       chalk.red.bold(
