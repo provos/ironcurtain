@@ -218,3 +218,15 @@ Both use the same PolicyEngine with compiled artifacts.
 - Factory-constructed adapter: `createGooseAdapter(userConfig)` for provider selection
 - Stateless batch mode (no --resume-session), PTY mode is primary recommendation
 - Response parsing needs prototyping (no JSON output mode in Goose)
+
+## Conditional Argument Roles Design (designed 2026-03-04)
+- See `docs/designs/conditional-argument-roles.md` for full spec
+- Solves multi-mode tool over-restriction (git_branch list vs delete, edit_file dryRun, etc.)
+- `ArgumentRoleSpec = ArgumentRole[] | ConditionalRoles` -- backward-compatible union
+- `ConditionalRoles { default, when: [{ condition: RoleCondition, roles }] }` -- first-match-wins
+- `RoleCondition { arg, equals?, in?, is? }` -- minimal condition language
+- `resolveEffectiveRoles(annotationArgs, callArgs)` pure function in argument-roles.ts
+- Security invariant: conditional roles must be subset of default (only narrows, never widens)
+- Policy engine resolves annotation once per call, then feeds resolved annotation to existing pipeline
+- No changes to compiled rules or rule evaluation logic
+- 4-phase migration: types, engine integration, annotator pipeline, scenario improvements
