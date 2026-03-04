@@ -1,6 +1,6 @@
-# Developer Guide: Using IronCurtain with Claude Code
+# Developer Guide: Using IronCurtain with Docker Agent Mode
 
-This guide covers the recommended way to use IronCurtain as a security layer for AI coding agents like Claude Code. The **terminal multiplexer** (`ironcurtain mux`) gives you the full power of your agent's interactive TUI while IronCurtain enforces security policy on every tool call.
+This guide covers the recommended way to use IronCurtain as a security layer for AI coding agents (Claude Code, Goose, etc.). The **terminal multiplexer** (`ironcurtain mux`) gives you the full power of your agent's interactive TUI while IronCurtain enforces security policy on every tool call.
 
 ## Why the Terminal Multiplexer?
 
@@ -10,7 +10,7 @@ IronCurtain's Docker Agent Mode runs an external agent (Claude Code, Goose, etc.
 
 **With the mux**, everything lives in a single terminal:
 
-- **Full agent TUI** — You see Claude Code's interactive interface (spinners, diffs, file previews, slash commands) exactly as if you ran it locally.
+- **Full agent TUI** — You see your agent's interactive interface exactly as if you ran it locally.
 - **Inline escalation handling** — When a tool call needs approval, the escalation panel appears as an overlay. No terminal switching, no context loss.
 - **Trusted input line** — Text you type in command mode is captured on the host side, _before_ it enters the container. This creates a verified channel of user intent that the auto-approver can use to make approval decisions.
 - **Tab management** — Run multiple agent sessions side by side and switch between them instantly.

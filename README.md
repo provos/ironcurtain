@@ -152,7 +152,7 @@ Session IDs are printed on session start and stored under `~/.ironcurtain/sessio
 
 ### Terminal multiplexer (recommended for Docker Agent Mode)
 
-The terminal multiplexer is the recommended way to use IronCurtain with Docker Agent Mode. It gives you the full power of Claude Code's interactive TUI — spinners, diffs, file previews, slash commands — while IronCurtain mediates every tool call through its policy engine. All in a single terminal.
+The terminal multiplexer is the recommended way to use IronCurtain with Docker Agent Mode. It gives you the full power of your agent's interactive TUI (Claude Code or Goose) while IronCurtain mediates every tool call through its policy engine. All in a single terminal.
 
 ```bash
 ironcurtain mux
@@ -160,7 +160,7 @@ ironcurtain mux
 
 **Key capabilities:**
 
-- **Full agent TUI** — Claude Code runs in a PTY inside a Docker container with no network access. You interact with it exactly as if it were running locally.
+- **Full agent TUI** — The agent (Claude Code or Goose) runs in a PTY inside a Docker container with no network access. You interact with it exactly as if it were running locally.
 - **Inline escalation handling** — When a tool call needs approval, an escalation panel overlays the viewport. No separate terminal needed — press Ctrl-A to enter command mode, `/approve N` or `/deny N`, and return.
 - **Trusted user input** — Text typed in command mode (Ctrl-A) is captured on the host side before entering the container. This creates a verified intent signal that the [auto-approver](#auto-approve-escalations) can use — e.g., typing "push my changes to origin" will auto-approve a subsequent `git_push` escalation.
 - **Tab management** — Spawn multiple concurrent sessions (`/new`), switch between them (`/tab N`, Alt-1..9), close them (`/close`).

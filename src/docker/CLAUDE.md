@@ -1,6 +1,6 @@
 # Docker Agent Mode (`src/docker/`)
 
-An alternative session type that runs external coding agents (Claude Code, etc.) inside Docker containers with no network egress. On Linux, containers use `--network=none` with UDS-mounted proxies. On macOS, containers run on a Docker `--internal` network with a socat sidecar that forwards only the MCP and MITM proxy ports to the host — the agent cannot reach the internet or arbitrary host services.
+An alternative session type that runs external coding agents (Claude Code, Goose, etc.) inside Docker containers with no network egress. On Linux, containers use `--network=none` with UDS-mounted proxies. On macOS, containers run on a Docker `--internal` network with a socat sidecar that forwards only the MCP and MITM proxy ports to the host — the agent cannot reach the internet or arbitrary host services.
 
 **Key files:**
 - `docker-agent-session.ts` - Session implementation. Manages container lifecycle, starts proxies, handles escalations. `ensureImage()` uses content-hash labels for staleness detection.
@@ -11,6 +11,7 @@ An alternative session type that runs external coding agents (Claude Code, etc.)
 - `oauth-credentials.ts` - OAuth credential detection and macOS Keychain extraction. `detectAuthMethod()` determines whether to use OAuth or API key auth for Docker sessions.
 - `agent-adapter.ts` - `AgentAdapter` interface. `getProviders(authKind?)` returns required LLM providers (OAuth or API key). `buildEnv(config, fakeKeys)` builds container env vars with fake keys instead of real ones.
 - `adapters/claude-code.ts` - Claude Code adapter. Auth-aware `buildEnv()` sets `CLAUDE_CODE_OAUTH_TOKEN` or API key. `getProviders()` returns OAuth or API key providers based on `authKind`.
+- `adapters/goose.ts` - Goose adapter. Generates Goose YAML config for MCP extension discovery, orientation scripts for PTY mode, and provider-specific env vars (Anthropic, OpenAI, Google).
 - `docker-manager.ts` - Docker CLI wrapper. `getImageLabel()` reads labels for staleness detection. `buildImage()` accepts optional labels.
 
 **PTY mode files:**

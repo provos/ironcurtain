@@ -23,7 +23,7 @@ IronCurtain is a secure agent runtime that mediates between an AI agent and MCP 
 
 ## Architecture
 
-IronCurtain has two session modes. **Code Mode** (builtin agent) runs LLM-generated TypeScript in a V8 sandbox - IronCurtain controls the agent, the sandbox, and the policy engine. **Docker Agent Mode** runs an external agent (Claude Code, etc.) in a Docker container with `--network=none` - IronCurtain doesn't control the agent, it only mediates external access through host-side proxies.
+IronCurtain has two session modes. **Code Mode** (builtin agent) runs LLM-generated TypeScript in a V8 sandbox - IronCurtain controls the agent, the sandbox, and the policy engine. **Docker Agent Mode** runs an external agent (Claude Code, Goose, etc.) in a Docker container with `--network=none` - IronCurtain doesn't control the agent, it only mediates external access through host-side proxies.
 
 ### Code Mode: Agent (`src/agent/`)
 Uses Vercel AI SDK v6 (`ai` package) with Anthropic's Claude. The agent has a single `execute_code` tool that sends TypeScript to the Code Mode sandbox. Uses `stepCountIs()` for loop control (not `maxSteps`). The AI SDK v6 API uses `inputSchema` (not `parameters`), `stopWhen` (not `maxSteps`), and `toolCalls[].input` (not `.args`).
