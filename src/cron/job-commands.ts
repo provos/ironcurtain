@@ -5,7 +5,10 @@
  * job files directly from ~/.ironcurtain/jobs/.
  */
 
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, unlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import chalk from 'chalk';
 import { loadAllJobs, loadJob, saveJob, deleteJob, loadRecentRuns } from './job-store.js';
 import { createJobId, type JobDefinition, type RunOutcome } from './types.js';
@@ -13,6 +16,45 @@ import { getJobWorkspaceDir, getJobDir } from '../config/paths.js';
 import { compileTaskPolicy } from './compile-task-policy.js';
 import { createCronScheduler, parseCronExpression } from './cron-scheduler.js';
 import { syncGitRepo } from './git-sync.js';
+
+/**
+ * Opens the user's $VISUAL / $EDITOR with a temporary file and returns
+ * the edited content. Lines beginning with '#' are stripped (instructions).
+ * Returns undefined if the user saves an empty file.
+ */
+function openEditorForMultiline(instructions: string): string | undefined {
+  const editor = process.env['VISUAL'] ?? process.env['EDITOR'] ?? 'nano';
+  const tmpFile = join(tmpdir(), `ironcurtain-task-${Date.now()}.txt`);
+
+  // Write instructional comments + blank line for the user to start typing
+  const header = instructions
+    .split('\n')
+    .map((l) => `# ${l}`)
+    .join('\n');
+  writeFileSync(tmpFile, `${header}\n\n`, 'utf-8');
+
+  try {
+    const result = spawnSync(editor, [tmpFile], { stdio: 'inherit' });
+    if (result.error) {
+      throw result.error;
+    }
+
+    const raw = readFileSync(tmpFile, 'utf-8');
+    const content = raw
+      .split('\n')
+      .filter((line) => !line.startsWith('#'))
+      .join('\n')
+      .trim();
+
+    return content || undefined;
+  } finally {
+    try {
+      unlinkSync(tmpFile);
+    } catch {
+      // ignore cleanup errors
+    }
+  }
+}
 
 function formatRunOutcome(outcome: RunOutcome, verbose = true): string {
   if (outcome.kind === 'success') return chalk.green('success');
@@ -96,15 +138,18 @@ export async function runAddJobWizard(): Promise<void> {
   }
   const schedule = scheduleInput;
 
-  const taskInput = await text({
-    message: 'Task description',
-    placeholder: 'Triage open GitHub issues...',
-  });
-  if (isCancel(taskInput)) {
-    cancel('Cancelled.');
-    process.exit(0);
+  const { log } = await import('@clack/prompts');
+  log.step('Task description (opening editor — save and close to continue)');
+
+  let task: string | undefined;
+  while (!task) {
+    task = openEditorForMultiline(
+      'Enter the task description for this job.\nThis becomes the policy "constitution" — be specific.\nLines starting with # are ignored.',
+    );
+    if (!task) {
+      log.warn('Task description cannot be empty. Re-opening editor...');
+    }
   }
-  const task = taskInput;
 
   const notifyOnEscalation = await confirm({
     message: 'Notify on escalation via Signal?',
