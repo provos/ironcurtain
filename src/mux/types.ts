@@ -103,10 +103,11 @@ export function calculateLayout(totalRows: number, mode: InputMode, pendingCount
       escalationPanelRows = Math.min(pendingCount * ESCALATION_ROWS_PER_ITEM, MAX_ESCALATION_PANEL_ROWS);
     }
     const actualInputRows = Math.min(Math.max(inputLineRows, MIN_INPUT_LINE_ROWS), MAX_INPUT_LINE_ROWS);
-    overlayRows = Math.min(
-      escalationPanelRows + HINT_BAR_ROWS + actualInputRows,
-      Math.floor(ptyViewportRows / 2),
-      ptyViewportRows,
+    // Ensure overlay fits at least the hint bar + 1 input row, even on tiny terminals.
+    const minOverlay = Math.min(ptyViewportRows, HINT_BAR_ROWS + MIN_INPUT_LINE_ROWS);
+    overlayRows = Math.max(
+      minOverlay,
+      Math.min(escalationPanelRows + HINT_BAR_ROWS + actualInputRows, Math.floor(ptyViewportRows / 2), ptyViewportRows),
     );
     // Clamp escalation panel to fit within overlay budget, reserving
     // space for the hint bar and at least one input row.

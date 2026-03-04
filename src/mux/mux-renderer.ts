@@ -168,7 +168,7 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
   let _flashTimeout: ReturnType<typeof setTimeout> | null = null;
   const FLASH_DURATION_MS = 3000;
 
-  /** Content width inside the 2-char left + 2-char right margins. */
+  /** Content width for the input area: _cols minus 2-char left margin minus 2-char prompt prefix. */
   function contentWidth(): number {
     return Math.max(1, _cols - 4);
   }
