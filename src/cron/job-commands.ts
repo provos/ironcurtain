@@ -399,8 +399,7 @@ interface JobDisplayEntry {
 
 /** Formats and prints a single job entry. */
 function printJobEntry(entry: JobDisplayEntry): void {
-  const statusLabel =
-    entry.statusLabels.length > 0 ? ` ${entry.statusLabels.join(' ')}` : '';
+  const statusLabel = entry.statusLabels.length > 0 ? ` ${entry.statusLabels.join(' ')}` : '';
 
   let lastRunStr = '';
   if (entry.lastRun) {

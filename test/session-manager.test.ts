@@ -15,7 +15,8 @@ import type { JobId } from '../src/cron/types.js';
 /** Minimal Session stub -- only methods actually called by SessionManager. */
 function stubSession(): Session {
   return {
-    getInfo: () => ({ id: 'test-id', status: 'ready', turnCount: 0, createdAt: new Date().toISOString() }) as SessionInfo,
+    getInfo: () =>
+      ({ id: 'test-id', status: 'ready', turnCount: 0, createdAt: new Date().toISOString() }) as SessionInfo,
     sendMessage: vi.fn(),
     getHistory: vi.fn().mockReturnValue([]),
     getDiagnosticLog: vi.fn().mockReturnValue([]),

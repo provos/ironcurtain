@@ -10,9 +10,7 @@ describe('applyToolDescriptionHints', () => {
   ];
 
   it('appends hints to matching tools', () => {
-    const hints = new Map([
-      ['git__git_checkout', 'Use createBranch: true for new branches.'],
-    ]);
+    const hints = new Map([['git__git_checkout', 'Use createBranch: true for new branches.']]);
     const result = applyToolDescriptionHints(tools, hints);
 
     expect(result[0].description).toBe('Checkout a branch.\n\nUse createBranch: true for new branches.');
@@ -33,9 +31,7 @@ describe('applyToolDescriptionHints', () => {
   });
 
   it('handles tools with no description', () => {
-    const toolsNoDesc: ProxiedTool[] = [
-      { serverName: 'git', name: 'git_checkout', inputSchema: {} },
-    ];
+    const toolsNoDesc: ProxiedTool[] = [{ serverName: 'git', name: 'git_checkout', inputSchema: {} }];
     const hints = new Map([['git__git_checkout', 'Use createBranch.']]);
     const result = applyToolDescriptionHints(toolsNoDesc, hints);
 

@@ -50,10 +50,7 @@ export function loadToolDescriptionHints(): Map<string, string> {
  * Returns a new tool list with hints appended to matching tool descriptions.
  * Tools without a matching hint are returned unchanged.
  */
-export function applyToolDescriptionHints(
-  tools: ProxiedTool[],
-  hints: Map<string, string>,
-): ProxiedTool[] {
+export function applyToolDescriptionHints(tools: ProxiedTool[], hints: Map<string, string>): ProxiedTool[] {
   if (hints.size === 0) return tools;
   return tools.map((t) => {
     const hint = hints.get(`${t.serverName}__${t.name}`);

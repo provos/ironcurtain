@@ -92,8 +92,10 @@ describe('buildInterfacePatchSnippet (via behavior)', () => {
       const suggestions: string[] = [];
       const needle = toolName.toLowerCase().replace(/^tools\./, '');
       for (let i = 0; i < allNames.length && suggestions.length < 3; i++) {
-        if (allNames[i].toLowerCase().includes(needle) ||
-            needle.includes(allNames[i].toLowerCase().replace(/^tools\./, ''))) {
+        if (
+          allNames[i].toLowerCase().includes(needle) ||
+          needle.includes(allNames[i].toLowerCase().replace(/^tools\./, ''))
+        ) {
           suggestions.push(allNames[i]);
         }
       }

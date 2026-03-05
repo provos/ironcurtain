@@ -126,10 +126,7 @@ export function releaseLock(lockDir: string): void {
  * @param staleMs Time in ms after which an unreleased lock is considered stale
  * @returns true if acquired, false if timed out
  */
-export async function acquireLock(
-  lockDir: string,
-  staleMs: number = DEFAULT_STALE_MS,
-): Promise<boolean> {
+export async function acquireLock(lockDir: string, staleMs: number = DEFAULT_STALE_MS): Promise<boolean> {
   const deadline = Date.now() + MAX_WAIT_MS;
 
   while (Date.now() < deadline) {

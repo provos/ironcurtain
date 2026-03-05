@@ -790,7 +790,9 @@ describe('handleCallTool', () => {
         toolMap,
         policyEngine: policyEngine as unknown as CallToolDeps['policyEngine'],
         auditLog: { log: vi.fn() } as unknown as CallToolDeps['auditLog'],
-        circuitBreaker: { check: vi.fn().mockReturnValue({ allowed: true }) } as unknown as CallToolDeps['circuitBreaker'],
+        circuitBreaker: {
+          check: vi.fn().mockReturnValue({ allowed: true }),
+        } as unknown as CallToolDeps['circuitBreaker'],
         clientStates,
         resolvedSandboxConfigs,
         allowedDirectory: '/tmp/sandbox',

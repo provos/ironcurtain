@@ -318,7 +318,9 @@ export class SignalBotDaemon {
         return;
       }
       if (managed.source.kind !== 'signal') {
-        await this.sendSignalMessage(`Session #${targetLabel} is a ${managed.source.kind} session and does not accept messages.`);
+        await this.sendSignalMessage(
+          `Session #${targetLabel} is a ${managed.source.kind} session and does not accept messages.`,
+        );
         return;
       }
       await this.forwardToSession(managed, messageText);
@@ -368,7 +370,10 @@ export class SignalBotDaemon {
     const sessionCount = this.sessionManager.size;
     logger.info(
       `[Signal Daemon] Routing message to session #${managed.label} ` +
-        `(currentLabel=${this.sessionManager.currentLabel}, sessions=${this.sessionManager.all().map((m) => m.label).join(',')}, ` +
+        `(currentLabel=${this.sessionManager.currentLabel}, sessions=${this.sessionManager
+          .all()
+          .map((m) => m.label)
+          .join(',')}, ` +
         `transportLabel=${transport.sessionLabel})`,
     );
 
@@ -518,13 +523,15 @@ export class SignalBotDaemon {
     managed.session
       .resolveEscalation(escalationId, decision)
       .then(() => {
-        return this.sendSignalMessage(prefixWithLabel(`Escalation ${decision}.`, managed.label, this.sessionManager.size));
+        return this.sendSignalMessage(
+          prefixWithLabel(`Escalation ${decision}.`, managed.label, this.sessionManager.size),
+        );
       })
       .catch((err: unknown) => {
         const msg = err instanceof Error ? err.message : String(err);
-        this.sendSignalMessage(prefixWithLabel(`Escalation error: ${msg}`, managed.label, this.sessionManager.size)).catch(
-          () => {},
-        );
+        this.sendSignalMessage(
+          prefixWithLabel(`Escalation error: ${msg}`, managed.label, this.sessionManager.size),
+        ).catch(() => {});
       })
       .finally(() => {
         managed.escalationResolving = false;
@@ -578,7 +585,9 @@ export class SignalBotDaemon {
         }
 
         if (wasCurrent && this.sessionManager.size > 0 && this.sessionManager.currentLabel !== null) {
-          await this.sendSignalMessage(`Session #${labelToEnd} ended. Switched to #${this.sessionManager.currentLabel}.`);
+          await this.sendSignalMessage(
+            `Session #${labelToEnd} ended. Switched to #${this.sessionManager.currentLabel}.`,
+          );
         } else if (this.sessionManager.size > 0) {
           await this.sendSignalMessage(`Session #${labelToEnd} ended.`);
         } else {
@@ -628,7 +637,9 @@ export class SignalBotDaemon {
         if (!managed) {
           await this.sendSignalMessage(`No session #${label}.`);
         } else if (managed.source.kind !== 'signal') {
-          await this.sendSignalMessage(`Session #${label} is a ${managed.source.kind} session and cannot be switched to.`);
+          await this.sendSignalMessage(
+            `Session #${label} is a ${managed.source.kind} session and cannot be switched to.`,
+          );
         } else {
           this.sessionManager.currentLabel = label;
           await this.sendSignalMessage(`Switched to session #${label}.`);
@@ -661,8 +672,7 @@ export class SignalBotDaemon {
     if (lower === '/help') {
       this.scheduleSessionOp(async () => {
         const currentLabel = this.sessionManager.currentLabel;
-        const sessionLine =
-          currentLabel !== null ? `Current session: #${currentLabel}` : 'No active session.';
+        const sessionLine = currentLabel !== null ? `Current session: #${currentLabel}` : 'No active session.';
         await this.sendSignalMessage(
           sessionLine +
             '\n\n' +

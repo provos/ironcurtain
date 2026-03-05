@@ -196,12 +196,18 @@ describe('job-store', () => {
     });
 
     it('stores different outcome types correctly', () => {
-      saveRunRecord(jobId, makeRunRecord('2026-03-01T09:00:00.000Z', {
-        outcome: { kind: 'error', message: 'something broke' },
-      }));
-      saveRunRecord(jobId, makeRunRecord('2026-03-02T09:00:00.000Z', {
-        outcome: { kind: 'budget_exhausted', dimension: 'tokens' },
-      }));
+      saveRunRecord(
+        jobId,
+        makeRunRecord('2026-03-01T09:00:00.000Z', {
+          outcome: { kind: 'error', message: 'something broke' },
+        }),
+      );
+      saveRunRecord(
+        jobId,
+        makeRunRecord('2026-03-02T09:00:00.000Z', {
+          outcome: { kind: 'budget_exhausted', dimension: 'tokens' },
+        }),
+      );
 
       const runs = loadRecentRuns(jobId);
       expect(runs[0].outcome).toEqual({ kind: 'budget_exhausted', dimension: 'tokens' });

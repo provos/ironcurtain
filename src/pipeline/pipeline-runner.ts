@@ -129,7 +129,12 @@ export interface PipelineModels {
 export async function createPipelineModels(logDir?: string): Promise<PipelineModels> {
   const effectiveLogDir = logDir ?? resolve(process.cwd(), 'generated');
   const llm = await createPipelineLlm(effectiveLogDir, 'unknown');
-  return { compilationModel: llm.model, cacheStrategy: llm.cacheStrategy, logContext: llm.logContext, logPath: llm.logPath };
+  return {
+    compilationModel: llm.model,
+    cacheStrategy: llm.cacheStrategy,
+    logContext: llm.logContext,
+    logPath: llm.logPath,
+  };
 }
 
 // ---------------------------------------------------------------------------

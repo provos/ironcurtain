@@ -183,8 +183,7 @@ function validatePolicyDir(policyDir: string): void {
 
   if (!isEqualOrInside(resolvedPolicy, home)) {
     throw new SessionError(
-      `policyDir must be under the IronCurtain home directory (${home}). ` +
-        `Received: ${resolvedPolicy}`,
+      `policyDir must be under the IronCurtain home directory (${home}). ` + `Received: ${resolvedPolicy}`,
       'SESSION_INIT_FAILED',
     );
   }
