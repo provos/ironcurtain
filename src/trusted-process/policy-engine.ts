@@ -307,6 +307,18 @@ function expandListReferences(policy: CompiledPolicyFile, lists: DynamicListsFil
   return { ...policy, rules: expandedRules };
 }
 
+/** Sentinel result returned when no rule matches (default-deny). */
+const DEFAULT_DENY_RESULT: EvaluationResult = {
+  decision: 'deny',
+  rule: 'default-deny',
+  reason: 'No matching policy rule -- denied by default',
+};
+
+/** Converts a matched compiled rule into an EvaluationResult. */
+function ruleToResult(rule: CompiledRule): EvaluationResult {
+  return { decision: rule.then, rule: rule.name, reason: rule.reason };
+}
+
 export class PolicyEngine {
   private annotationMap: Map<string, StoredToolAnnotation>;
   private compiledPolicy: CompiledPolicyFile;
@@ -589,19 +601,11 @@ export class PolicyEngine {
   private evaluateRulesUnscoped(request: ToolCallRequest, annotation: ToolAnnotation): EvaluationResult {
     for (const rule of this.compiledPolicy.rules) {
       if (this.ruleMatches(rule, request, annotation)) {
-        return {
-          decision: rule.then,
-          rule: rule.name,
-          reason: rule.reason,
-        };
+        return ruleToResult(rule);
       }
     }
 
-    return {
-      decision: 'deny',
-      rule: 'default-deny',
-      reason: 'No matching policy rule -- denied by default',
-    };
+    return DEFAULT_DENY_RESULT;
   }
 
   /**
@@ -633,19 +637,11 @@ export class PolicyEngine {
         continue;
       }
       if (this.ruleMatches(rule, request, annotation, evaluatingRole)) {
-        return {
-          decision: rule.then,
-          rule: rule.name,
-          reason: rule.reason,
-        };
+        return ruleToResult(rule);
       }
     }
 
-    return {
-      decision: 'deny',
-      rule: 'default-deny',
-      reason: 'No matching policy rule -- denied by default',
-    };
+    return DEFAULT_DENY_RESULT;
   }
 
   /**
@@ -694,11 +690,7 @@ export class PolicyEngine {
       // Discharge matched paths and record decision
       for (const p of matched) remainingPaths.delete(p);
 
-      const result: EvaluationResult = {
-        decision: rule.then,
-        rule: rule.name,
-        reason: rule.reason,
-      };
+      const result = ruleToResult(rule);
       if (!mostRestrictive || DECISION_SEVERITY[result.decision] > DECISION_SEVERITY[mostRestrictive.decision]) {
         mostRestrictive = result;
       }
@@ -706,11 +698,7 @@ export class PolicyEngine {
 
     // Any undischarged paths -> default-deny
     if (remainingPaths.size > 0) {
-      return {
-        decision: 'deny',
-        rule: 'default-deny',
-        reason: 'No matching policy rule -- denied by default',
-      };
+      return DEFAULT_DENY_RESULT;
     }
 
     if (!mostRestrictive) {
