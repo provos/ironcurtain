@@ -1174,6 +1174,11 @@ describe('SignalBotDaemon', () => {
       await waitForMessage(mockApi, (m) => m.includes('Started a new session'));
       expect(createdMockSessions).toHaveLength(1);
       const session1 = createdMockSessions[0].session;
+      // Wait for the "hello" message to be fully forwarded to the session
+      // before clearing — the WebSocket handler is fire-and-forget so
+      // sendMessage("hello") may still be in-flight after the "Started a
+      // new session" notification is sent.
+      await waitForCalls(vi.mocked(session1.sendMessage), 1);
       vi.mocked(session1.sendMessage).mockClear();
 
       // Send /new immediately followed by a message (same tick)
