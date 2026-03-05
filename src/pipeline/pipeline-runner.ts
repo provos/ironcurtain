@@ -28,6 +28,8 @@ import {
   computeHash,
   loadExistingArtifact,
   loadToolAnnotationsFile,
+  mergeReplacements,
+  resolveRulePaths,
   writeArtifact,
   withSpinner,
   showCached,
@@ -44,7 +46,7 @@ import {
 import { buildGeneratorSystemPrompt, ScenarioGeneratorSession } from './scenario-generator.js';
 import type { LlmLogContext } from './llm-logger.js';
 import type { PromptCacheStrategy } from '../session/prompt-cache.js';
-import { connectMcpServersForLists, disconnectMcpServers, mergeReplacements, resolveRulePaths } from './compile.js';
+import { connectMcpServersForLists, disconnectMcpServers } from './mcp-connections.js';
 import type {
   CompiledPolicyFile,
   CompiledRule,
@@ -798,6 +800,9 @@ export class PipelineRunner {
       console.error(`  Scenario corrections: ${scenarioCorrectionsApplied}`);
     }
     console.error(`  Artifacts written to: ${chalk.dim(config.outputDir + '/')}`);
+    if (config.llmLogPath) {
+      console.error(`  LLM interaction log: ${chalk.dim(config.llmLogPath)}`);
+    }
 
     if (!verificationResult.pass) {
       throw new Error('Verification FAILED — artifacts written but policy may need review.');

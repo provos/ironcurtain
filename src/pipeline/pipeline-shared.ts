@@ -22,8 +22,8 @@ import { getIronCurtainHome, getUserGeneratedDir, loadConstitutionText } from '.
 export { loadConstitutionText } from '../config/paths.js';
 import type { MCPServerConfig } from '../config/types.js';
 import { loadUserConfig } from '../config/user-config.js';
-import type { ToolAnnotationsFile, StoredToolAnnotationsFile } from './types.js';
-import { resolveStoredAnnotationsFile } from '../types/argument-roles.js';
+import type { CompiledRule, DiscardedScenario, TestScenario, ToolAnnotationsFile, StoredToolAnnotationsFile } from './types.js';
+import { resolveRealPath, resolveStoredAnnotationsFile } from '../types/argument-roles.js';
 import { createLlmLoggingMiddleware, type LlmLogContext } from './llm-logger.js';
 import { createCacheStrategy, type PromptCacheStrategy } from '../session/prompt-cache.js';
 
@@ -178,6 +178,63 @@ export async function withSpinner<T>(
 export function writeArtifact(generatedDir: string, filename: string, data: unknown): void {
   mkdirSync(generatedDir, { recursive: true });
   writeFileSync(resolve(generatedDir, filename), JSON.stringify(data, null, 2) + '\n');
+}
+
+// ---------------------------------------------------------------------------
+// Rule Path Resolution
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolves all `paths.within` values in compiled rules to their real
+ * filesystem paths, following symlinks. This ensures that symlinked
+ * directories (e.g., ~/Downloads -> /mnt/c/.../Downloads on WSL) are
+ * resolved to their canonical form so that runtime path comparisons
+ * match correctly.
+ *
+ * Falls back to path.resolve() if the path does not exist on disk.
+ */
+export function resolveRulePaths(rules: CompiledRule[]): CompiledRule[] {
+  return rules.map((rule) => {
+    if (!rule.if.paths?.within) return rule;
+
+    const resolved = resolveRealPath(rule.if.paths.within);
+    if (resolved === rule.if.paths.within) return rule;
+
+    return {
+      ...rule,
+      if: {
+        ...rule.if,
+        paths: { ...rule.if.paths, within: resolved },
+      },
+    };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Scenario Merge
+// ---------------------------------------------------------------------------
+
+/**
+ * Merges replacement scenarios from the regeneration session into the
+ * scenario list. Removes corrected and discarded scenarios, then adds
+ * unique replacements that don't duplicate any remaining scenario.
+ */
+export function mergeReplacements(
+  scenarios: TestScenario[],
+  replacements: TestScenario[],
+  corrections: ReadonlyArray<{ scenarioDescription: string }>,
+  discardedScenarios: ReadonlyArray<DiscardedScenario>,
+): TestScenario[] {
+  const removedDescriptions = new Set([
+    ...corrections.map((c) => c.scenarioDescription),
+    ...discardedScenarios.filter((d) => d.scenario.source !== 'handwritten').map((d) => d.scenario.description),
+  ]);
+
+  const kept = scenarios.filter((s) => !removedDescriptions.has(s.description));
+  const keptDescriptions = new Set(kept.map((s) => s.description));
+  const uniqueReplacements = replacements.filter((r) => !keptDescriptions.has(r.description));
+
+  return [...kept, ...uniqueReplacements];
 }
 
 // ---------------------------------------------------------------------------

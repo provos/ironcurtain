@@ -13,7 +13,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import chalk from 'chalk';
 import { resolveAllLists, type McpServerConnection } from './list-resolver.js';
-import { connectMcpServersForLists, disconnectMcpServers } from './compile.js';
+import { connectMcpServersForLists, disconnectMcpServers } from './mcp-connections.js';
 import {
   createPipelineLlm,
   loadExistingArtifact,
