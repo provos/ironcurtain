@@ -103,10 +103,6 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
 
     // Wire bridge events
     bridge.onOutput(() => {
-      // Snap back to live when new output arrives
-      if (tab.scrollOffset !== null) {
-        tab.scrollOffset = null;
-      }
       if (getActiveTab() === tab) {
         renderer.scheduleRedraw();
       }
