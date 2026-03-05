@@ -7,10 +7,9 @@
  *   2. Runs indefinitely, processing Signal messages and cron triggers
  *   3. shutdown() -- unschedules all jobs, ends all sessions, disconnects
  *
- * Session management for cron sessions uses the SessionManager from
- * src/session/session-manager.ts. Signal sessions continue to be managed
- * internally by SignalBotDaemon. The daemon bridges escalation routing
- * between the two.
+ * Both Signal and cron sessions are managed through a shared SessionManager
+ * instance. This enables unified escalation routing: `approve #N` from
+ * Signal works for both Signal-initiated and cron-initiated sessions.
  */
 
 import { mkdirSync, readFileSync, existsSync } from 'node:fs';
@@ -142,19 +141,7 @@ export class IronCurtainDaemon {
     // Unschedule all jobs
     this.scheduler.unscheduleAll();
 
-    // End all cron sessions concurrently
-    const sessions = this.sessionManager.all();
-    await Promise.allSettled(
-      sessions.map(async (s) => {
-        try {
-          await this.sessionManager.end(s.label);
-        } catch (err: unknown) {
-          logger.warn(`[Daemon] Error ending session #${s.label}: ${String(err)}`);
-        }
-      }),
-    );
-
-    // Shutdown Signal daemon
+    // Shutdown Signal daemon first (ends Signal sessions via shared SessionManager)
     if (this.signalDaemon) {
       try {
         await this.signalDaemon.shutdown();
@@ -162,6 +149,18 @@ export class IronCurtainDaemon {
         logger.warn(`[Daemon] Error shutting down Signal: ${String(err)}`);
       }
     }
+
+    // End remaining sessions (cron sessions and any Signal stragglers)
+    const remaining = this.sessionManager.all();
+    await Promise.allSettled(
+      remaining.map(async (s) => {
+        try {
+          await this.sessionManager.end(s.label);
+        } catch (err: unknown) {
+          logger.warn(`[Daemon] Error ending session #${s.label}: ${String(err)}`);
+        }
+      }),
+    );
 
     this.exitResolve?.();
   }
@@ -492,6 +491,7 @@ export class IronCurtainDaemon {
       config: signalConfig,
       containerManager,
       mode: this.mode,
+      sessionManager: this.sessionManager,
     });
     this.signalDaemon = signalDaemon;
 

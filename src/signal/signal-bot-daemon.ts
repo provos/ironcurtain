@@ -9,6 +9,10 @@
  * - Identity verification with TTL cache (5 min), fail-closed
  * - Escalation state with race prevention (per-session)
  * - Message sending via POST /v2/send with text_mode: "styled"
+ *
+ * Session state is owned by SessionManager (injected via constructor).
+ * This class only handles Signal-specific concerns: WebSocket, identity,
+ * message parsing, and command dispatch.
  */
 
 import { createSession } from '../session/index.js';
@@ -17,6 +21,7 @@ import { loadUserConfig } from '../config/user-config.js';
 import { resolveSignalConfig, type ResolvedSignalConfig } from './signal-config.js';
 import type { Session, SessionMode } from '../session/types.js';
 import type { SignalContainerManager } from './signal-container.js';
+import { SessionManager, type ManagedSession } from '../session/session-manager.js';
 import { SignalSessionTransport } from './signal-transport.js';
 import { markdownToSignal } from './markdown-to-signal.js';
 import {
@@ -68,22 +73,14 @@ export interface SignalBotDaemonOptions {
   readonly config: ResolvedSignalConfig;
   readonly containerManager: SignalContainerManager;
   readonly mode: SessionMode;
-}
-
-/** Per-session state bundle managed by the daemon. */
-interface ManagedSession {
-  readonly label: number;
-  readonly session: Session;
-  readonly transport: SignalSessionTransport;
-  messageInFlight: boolean;
-  pendingEscalationId: string | null;
-  escalationResolving: boolean;
+  readonly sessionManager?: SessionManager;
 }
 
 export class SignalBotDaemon {
   private config: ResolvedSignalConfig;
   private readonly containerManager: SignalContainerManager;
   private readonly mode: SessionMode;
+  readonly sessionManager: SessionManager;
 
   // WebSocket state
   private ws: WebSocket | null = null;
@@ -93,10 +90,6 @@ export class SignalBotDaemon {
   private static readonly MAX_RECONNECT_DELAY_MS = 30_000;
   private static readonly BASE_RECONNECT_DELAY_MS = 1_000;
 
-  // Multi-session state
-  private sessions = new Map<number, ManagedSession>();
-  private currentLabel: number | null = null;
-  private nextLabel = 1;
   private readonly maxConcurrentSessions: number;
 
   // Identity verification state
@@ -120,6 +113,7 @@ export class SignalBotDaemon {
     this.containerManager = options.containerManager;
     this.mode = options.mode;
     this.maxConcurrentSessions = options.config.maxConcurrentSessions;
+    this.sessionManager = options.sessionManager ?? new SessionManager();
   }
 
   /**
@@ -150,7 +144,7 @@ export class SignalBotDaemon {
   }
 
   /**
-   * Initiates graceful shutdown. Ends all active sessions,
+   * Initiates graceful shutdown. Ends all Signal sessions,
    * closes the WebSocket, and unblocks start().
    */
   async shutdown(): Promise<void> {
@@ -161,12 +155,12 @@ export class SignalBotDaemon {
     // Wait for any in-flight session operations (e.g., /new) to complete
     await this.sessionOpInProgress.catch(() => {});
 
-    // End all sessions without letting a single failure abort shutdown
-    const labels = [...this.sessions.keys()];
+    // End all Signal sessions without letting a single failure abort shutdown
+    const signalSessions = this.sessionManager.byKind('signal');
     await Promise.allSettled(
-      labels.map((label) =>
-        this.endSession(label).catch((err: unknown) => {
-          logger.error(`[Signal Daemon] Failed to end session #${label} during shutdown: ${String(err)}`);
+      signalSessions.map((managed) =>
+        this.sessionManager.end(managed.label).catch((err: unknown) => {
+          logger.error(`[Signal Daemon] Failed to end session #${managed.label} during shutdown: ${String(err)}`);
         }),
       ),
     );
@@ -289,22 +283,24 @@ export class SignalBotDaemon {
     if (!text) return;
 
     // Escalation replies: approve/deny (also accept /approve, /deny)
+    // This works across ALL session types (signal + cron)
     if (this.handleEscalationReply(text)) return;
 
     // Control commands: /quit, /new, /sessions, /switch, /budget, /help
     if (this.handleControlCommand(text)) return;
 
-    // Regular message -> route to session
+    // Regular message -> route to Signal session
     await this.routeToSession(text);
   }
 
   /**
-   * Routes a user message to the current session. Creates a new
+   * Routes a user message to the current Signal session. Creates a new
    * session if none exists. Handles BudgetExhaustedError by ending
    * the exhausted session and notifying the user.
    *
    * Supports one-shot `#N` prefix routing: `#2 do something` routes
    * "do something" to session #2 without changing currentLabel.
+   * Only Signal sessions accept forwarded messages.
    */
   private async routeToSession(text: string): Promise<void> {
     // Wait for any pending session operation (/new, /quit) to complete
@@ -316,9 +312,13 @@ export class SignalBotDaemon {
 
     // If #N prefix was used, route directly to that session (no auto-create)
     if (targetLabel !== null) {
-      const managed = this.sessions.get(targetLabel);
+      const managed = this.sessionManager.get(targetLabel);
       if (!managed) {
         await this.sendSignalMessage(`No session #${targetLabel}.`);
+        return;
+      }
+      if (managed.source.kind !== 'signal') {
+        await this.sendSignalMessage(`Session #${targetLabel} is a ${managed.source.kind} session and does not accept messages.`);
         return;
       }
       await this.forwardToSession(managed, messageText);
@@ -328,12 +328,12 @@ export class SignalBotDaemon {
     // Create session on demand if none exists.
     // Serialize through scheduleSessionOp so concurrent messages don't
     // race to create multiple sessions.
-    if (this.currentLabel === null) {
+    if (this.sessionManager.currentLabel === null) {
       const createOp = new Promise<void>((resolve, reject) => {
         this.scheduleSessionOp(async () => {
           try {
             // Re-check after serialization — another message may have created one
-            if (this.currentLabel === null) {
+            if (this.sessionManager.currentLabel === null) {
               await this.startNewSession();
             }
             resolve();
@@ -351,8 +351,9 @@ export class SignalBotDaemon {
       }
     }
 
-    if (this.currentLabel === null) return;
-    const managed = this.sessions.get(this.currentLabel);
+    const currentLabel = this.sessionManager.currentLabel;
+    if (currentLabel === null) return;
+    const managed = this.sessionManager.get(currentLabel);
     if (!managed) return;
 
     await this.forwardToSession(managed, messageText);
@@ -363,24 +364,25 @@ export class SignalBotDaemon {
    * in-flight guards, BudgetExhaustedError, and response formatting.
    */
   private async forwardToSession(managed: ManagedSession, text: string): Promise<void> {
+    const sessionCount = this.sessionManager.size;
     logger.info(
       `[Signal Daemon] Routing message to session #${managed.label} ` +
-        `(currentLabel=${this.currentLabel}, sessions=${[...this.sessions.keys()].join(',')}, ` +
-        `transportLabel=${managed.transport.sessionLabel})`,
+        `(currentLabel=${this.sessionManager.currentLabel}, sessions=${this.sessionManager.all().map((m) => m.label).join(',')}, ` +
+        `transportLabel=${(managed.transport as SignalSessionTransport).sessionLabel})`,
     );
 
     if (managed.messageInFlight) {
       await this.sendSignalMessage(
-        prefixWithLabel('Still processing previous message, please wait...', managed.label, this.sessions.size),
+        prefixWithLabel('Still processing previous message, please wait...', managed.label, sessionCount),
       );
       return;
     }
 
     managed.messageInFlight = true;
     try {
-      const response = await managed.transport.forwardMessage(text);
+      const response = await (managed.transport as SignalSessionTransport).forwardMessage(text);
       const styledText = markdownToSignal(response);
-      await this.sendSignalMessage(prefixWithLabel(styledText, managed.label, this.sessions.size));
+      await this.sendSignalMessage(prefixWithLabel(styledText, managed.label, this.sessionManager.size));
     } catch (error) {
       if (error instanceof BudgetExhaustedError) {
         const status = managed.session.getBudgetStatus();
@@ -391,13 +393,13 @@ export class SignalBotDaemon {
               '\n' +
               'Send a new message to start a fresh session.',
             managed.label,
-            this.sessions.size,
+            this.sessionManager.size,
           ),
         );
-        await this.endSession(managed.label);
+        await this.sessionManager.end(managed.label);
       } else {
         const message = error instanceof Error ? error.message : String(error);
-        await this.sendSignalMessage(prefixWithLabel(`Error: ${message}`, managed.label, this.sessions.size));
+        await this.sendSignalMessage(prefixWithLabel(`Error: ${message}`, managed.label, this.sessionManager.size));
       }
     } finally {
       managed.messageInFlight = false;
@@ -407,19 +409,19 @@ export class SignalBotDaemon {
   // --- Session lifecycle ---
 
   /**
-   * Creates a new session with a fresh SignalSessionTransport.
+   * Creates a new Signal session with a fresh SignalSessionTransport.
    * Follows the same pattern as index.ts: create transport,
    * wire callbacks, create session, start transport.
    * Returns the label of the new session.
    */
   private async startNewSession(): Promise<number> {
-    if (this.sessions.size >= this.maxConcurrentSessions) {
+    // Count only Signal sessions toward the concurrency limit
+    const signalSessionCount = this.sessionManager.byKind('signal').length;
+    if (signalSessionCount >= this.maxConcurrentSessions) {
       throw new Error(`Session limit reached (max ${this.maxConcurrentSessions}). Use /quit to end a session first.`);
     }
 
-    const label = this.nextLabel++;
     const transport = new SignalSessionTransport(this);
-    transport.sessionLabel = label;
 
     const config = loadConfig();
 
@@ -431,17 +433,8 @@ export class SignalBotDaemon {
       onDiagnostic: transport.createDiagnosticHandler(),
     });
 
-    const managed: ManagedSession = {
-      label,
-      session,
-      transport,
-      messageInFlight: false,
-      pendingEscalationId: null,
-      escalationResolving: false,
-    };
-
-    this.sessions.set(label, managed);
-    this.currentLabel = label;
+    const label = this.sessionManager.register(session, transport, { kind: 'signal' });
+    transport.sessionLabel = label;
 
     // Start the transport in the background. When it resolves
     // (session closed/budget exhausted), clean up.
@@ -449,59 +442,19 @@ export class SignalBotDaemon {
       .run(session)
       .then(() => {
         // Transport exited - remove session if still present
-        if (this.sessions.has(label)) {
-          this.sessions.delete(label);
-          if (this.currentLabel === label) {
-            this.autoSwitchCurrent();
-          }
+        const managed = this.sessionManager.get(label);
+        if (managed) {
+          this.sessionManager.end(label).catch((err: unknown) => {
+            logger.error(`[Signal Daemon] Failed to clean up session #${label}: ${String(err)}`);
+          });
         }
       })
       .catch((err: unknown) => {
         logger.error(`[Signal Daemon] Transport #${label} error: ${String(err)}`);
       });
 
-    await this.sendSignalMessage(prefixWithLabel('Started a new session.', label, this.sessions.size));
+    await this.sendSignalMessage(prefixWithLabel('Started a new session.', label, this.sessionManager.size));
     return label;
-  }
-
-  /**
-   * Ends a specific session by label and cleans up.
-   * If it was the current session, auto-switches to the most recent remaining.
-   */
-  async endSession(label: number): Promise<void> {
-    const managed = this.sessions.get(label);
-    if (!managed) return;
-
-    // Close transport first (resolves run() promise), then session.
-    // Only remove from the map after successful close so the session
-    // remains trackable (and retryable) if session.close() fails.
-    managed.transport.close();
-    await managed.session.close();
-
-    this.sessions.delete(label);
-    if (this.currentLabel === label) {
-      this.autoSwitchCurrent();
-    }
-  }
-
-  /**
-   * Convenience method: ends the current session (if any).
-   */
-  async endCurrentSession(): Promise<void> {
-    if (this.currentLabel === null) return;
-    await this.endSession(this.currentLabel);
-  }
-
-  /**
-   * Auto-switches currentLabel to the highest remaining label (most recent),
-   * or null if no sessions remain.
-   */
-  private autoSwitchCurrent(): void {
-    if (this.sessions.size === 0) {
-      this.currentLabel = null;
-      return;
-    }
-    this.currentLabel = Math.max(...this.sessions.keys());
   }
 
   // --- Escalation handling ---
@@ -511,9 +464,9 @@ export class SignalBotDaemon {
    * Accepts: approve, deny, /approve, /deny (case-insensitive).
    * Optionally with a session label: "approve #2", "/approve 2".
    *
-   * Routes to the session with a pending escalation. If multiple
-   * sessions have pending escalations and no label is specified,
-   * asks for disambiguation.
+   * Routes to the session with a pending escalation.
+   * Works across ALL session types (signal + cron) so that
+   * `approve #3` from Signal can approve a cron job's escalation.
    */
   private handleEscalationReply(text: string): boolean {
     const normalized = text.trim().toLowerCase();
@@ -525,20 +478,15 @@ export class SignalBotDaemon {
     const isApprove = match[1] === 'approve';
     const explicitLabel = match[2] ? parseInt(match[2], 10) : null;
 
-    // Find sessions with pending escalations
-    const pending: ManagedSession[] = [];
-    for (const managed of this.sessions.values()) {
-      if (managed.pendingEscalationId) {
-        pending.push(managed);
-      }
-    }
+    // Find sessions with pending escalations (across all session types)
+    const pending = this.sessionManager.withPendingEscalation();
 
     if (pending.length === 0) return false;
 
     // Determine target session
     let target: ManagedSession | undefined;
     if (explicitLabel !== null) {
-      target = this.sessions.get(explicitLabel);
+      target = this.sessionManager.get(explicitLabel);
       if (!target?.pendingEscalationId) {
         this.sendSignalMessage(`Session #${explicitLabel} has no pending escalation.`).catch(() => {});
         return true;
@@ -556,7 +504,7 @@ export class SignalBotDaemon {
 
     if (target.escalationResolving) {
       this.sendSignalMessage(
-        prefixWithLabel('Escalation is being resolved, please wait...', target.label, this.sessions.size),
+        prefixWithLabel('Escalation is being resolved, please wait...', target.label, this.sessionManager.size),
       ).catch(() => {});
       return true;
     }
@@ -569,11 +517,11 @@ export class SignalBotDaemon {
     managed.session
       .resolveEscalation(escalationId, decision)
       .then(() => {
-        return this.sendSignalMessage(prefixWithLabel(`Escalation ${decision}.`, managed.label, this.sessions.size));
+        return this.sendSignalMessage(prefixWithLabel(`Escalation ${decision}.`, managed.label, this.sessionManager.size));
       })
       .catch((err: unknown) => {
         const msg = err instanceof Error ? err.message : String(err);
-        this.sendSignalMessage(prefixWithLabel(`Escalation error: ${msg}`, managed.label, this.sessions.size)).catch(
+        this.sendSignalMessage(prefixWithLabel(`Escalation error: ${msg}`, managed.label, this.sessionManager.size)).catch(
           () => {},
         );
       })
@@ -589,23 +537,13 @@ export class SignalBotDaemon {
 
   /** Called by SignalSessionTransport when the session surfaces an escalation. */
   setPendingEscalation(label: number, escalationId: string): void {
-    const managed = this.sessions.get(label);
-    if (managed) {
-      managed.pendingEscalationId = escalationId;
-      logger.info(`[Signal Daemon] Escalation ${escalationId} set on session #${label}`);
-    } else {
-      logger.error(
-        `[Signal Daemon] setPendingEscalation: no session #${label} in map (keys: ${[...this.sessions.keys()].join(',')})`,
-      );
-    }
+    this.sessionManager.setPendingEscalation(label, escalationId);
+    logger.info(`[Signal Daemon] Escalation ${escalationId} set on session #${label}`);
   }
 
   /** Called by SignalSessionTransport when an escalation expires. */
   clearPendingEscalation(label: number): void {
-    const managed = this.sessions.get(label);
-    if (managed) {
-      managed.pendingEscalationId = null;
-    }
+    this.sessionManager.clearPendingEscalation(label);
   }
 
   // --- Control commands ---
@@ -618,29 +556,29 @@ export class SignalBotDaemon {
     if (quitMatch) {
       const explicitLabel = quitMatch[2] ? parseInt(quitMatch[2], 10) : null;
       this.scheduleSessionOp(async () => {
-        const labelToEnd = explicitLabel ?? this.currentLabel;
+        const labelToEnd = explicitLabel ?? this.sessionManager.currentLabel;
 
         if (labelToEnd === null) {
           await this.sendSignalMessage('No active session.');
           return;
         }
-        if (!this.sessions.has(labelToEnd)) {
+        if (!this.sessionManager.get(labelToEnd)) {
           await this.sendSignalMessage(`No session #${labelToEnd}.`);
           return;
         }
 
-        const wasCurrent = labelToEnd === this.currentLabel;
+        const wasCurrent = labelToEnd === this.sessionManager.currentLabel;
         try {
-          await this.endSession(labelToEnd);
+          await this.sessionManager.end(labelToEnd);
         } catch (err: unknown) {
           const msg = err instanceof Error ? err.message : String(err);
           await this.sendSignalMessage(`Failed to end session #${labelToEnd}: ${msg}`);
           return;
         }
 
-        if (wasCurrent && this.sessions.size > 0 && this.currentLabel !== null) {
-          await this.sendSignalMessage(`Session #${labelToEnd} ended. Switched to #${this.currentLabel}.`);
-        } else if (this.sessions.size > 0) {
+        if (wasCurrent && this.sessionManager.size > 0 && this.sessionManager.currentLabel !== null) {
+          await this.sendSignalMessage(`Session #${labelToEnd} ended. Switched to #${this.sessionManager.currentLabel}.`);
+        } else if (this.sessionManager.size > 0) {
           await this.sendSignalMessage(`Session #${labelToEnd} ended.`);
         } else {
           await this.sendSignalMessage('Session ended. Send a message to start a new one.');
@@ -665,7 +603,8 @@ export class SignalBotDaemon {
     // /sessions
     if (lower === '/sessions') {
       this.scheduleSessionOp(async () => {
-        const entries: SessionListEntry[] = Array.from(this.sessions.values(), (managed) => {
+        const allSessions = this.sessionManager.all();
+        const entries: SessionListEntry[] = allSessions.map((managed) => {
           const budget = managed.session.getBudgetStatus();
           const maxTokens = budget.limits.maxTotalTokens;
           return {
@@ -674,20 +613,23 @@ export class SignalBotDaemon {
             budgetPercent: maxTokens ? Math.round((budget.totalTokens / maxTokens) * 100) : 0,
           };
         });
-        await this.sendSignalMessage(formatSessionList(entries, this.currentLabel));
+        await this.sendSignalMessage(formatSessionList(entries, this.sessionManager.currentLabel));
       });
       return true;
     }
 
-    // /switch N
+    // /switch N - only switch to Signal sessions
     const switchMatch = lower.match(/^\/switch\s+#?(\d+)$/);
     if (switchMatch) {
       const label = parseInt(switchMatch[1], 10);
       this.scheduleSessionOp(async () => {
-        if (!this.sessions.has(label)) {
+        const managed = this.sessionManager.get(label);
+        if (!managed) {
           await this.sendSignalMessage(`No session #${label}.`);
+        } else if (managed.source.kind !== 'signal') {
+          await this.sendSignalMessage(`Session #${label} is a ${managed.source.kind} session and cannot be switched to.`);
         } else {
-          this.currentLabel = label;
+          this.sessionManager.currentLabel = label;
           await this.sendSignalMessage(`Switched to session #${label}.`);
         }
       });
@@ -699,8 +641,8 @@ export class SignalBotDaemon {
     if (budgetMatch) {
       const explicitBudgetLabel = budgetMatch[1] ? parseInt(budgetMatch[1], 10) : null;
       this.scheduleSessionOp(async () => {
-        const label = explicitBudgetLabel ?? this.currentLabel;
-        const managed = label !== null ? this.sessions.get(label) : undefined;
+        const label = explicitBudgetLabel ?? this.sessionManager.currentLabel;
+        const managed = label !== null ? this.sessionManager.get(label) : undefined;
 
         if (label === null) {
           await this.sendSignalMessage('No active session.');
@@ -708,7 +650,7 @@ export class SignalBotDaemon {
           await this.sendSignalMessage(`No session #${label}.`);
         } else {
           const status = managed.session.getBudgetStatus();
-          await this.sendSignalMessage(prefixWithLabel(formatBudgetMessage(status), label, this.sessions.size));
+          await this.sendSignalMessage(prefixWithLabel(formatBudgetMessage(status), label, this.sessionManager.size));
         }
       });
       return true;
@@ -717,8 +659,9 @@ export class SignalBotDaemon {
     // /help
     if (lower === '/help') {
       this.scheduleSessionOp(async () => {
+        const currentLabel = this.sessionManager.currentLabel;
         const sessionLine =
-          this.currentLabel !== null ? `Current session: #${this.currentLabel}` : 'No active session.';
+          currentLabel !== null ? `Current session: #${currentLabel}` : 'No active session.';
         await this.sendSignalMessage(
           sessionLine +
             '\n\n' +

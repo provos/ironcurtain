@@ -64,8 +64,8 @@ export class SignalSessionTransport extends BaseTransport {
   // --- Callback factories (wired into SessionOptions by the daemon) ---
 
   createDiagnosticHandler(): (event: DiagnosticEvent) => void {
-    const label = this.sessionLabel;
     return (event) => {
+      const label = this.sessionLabel;
       switch (event.kind) {
         case 'tool_call':
           // Don't send every tool call - too noisy for messaging
@@ -81,15 +81,8 @@ export class SignalSessionTransport extends BaseTransport {
   }
 
   createEscalationHandler(): (request: EscalationRequest) => void {
-    const label = this.sessionLabel;
     return (request) => {
-      const currentLabel = this.sessionLabel;
-      if (currentLabel !== label) {
-        logger.error(
-          `[Signal Transport] LABEL MISMATCH: escalation handler created for #${label} ` +
-            `but this.sessionLabel is now #${currentLabel} (escalationId=${request.escalationId})`,
-        );
-      }
+      const label = this.sessionLabel;
       logger.info(
         `[Signal Transport] Escalation fired on session #${label} ` +
           `(tool=${request.serverName}/${request.toolName}, id=${request.escalationId})`,
@@ -101,8 +94,8 @@ export class SignalSessionTransport extends BaseTransport {
   }
 
   createEscalationExpiredHandler(): () => void {
-    const label = this.sessionLabel;
     return () => {
+      const label = this.sessionLabel;
       this.daemon.clearPendingEscalation(label);
       this.daemon.sendSignalMessage(`[#${label}] Escalation expired (timed out).`).catch(() => {});
     };

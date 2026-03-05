@@ -141,6 +141,11 @@ export class SessionManager {
     return [...this.sessions.values()];
   }
 
+  /** Returns managed sessions filtered by source kind. */
+  byKind(kind: SessionSource['kind']): readonly ManagedSession[] {
+    return [...this.sessions.values()].filter((m) => m.source.kind === kind);
+  }
+
   /** Returns the number of active sessions. */
   get size(): number {
     return this.sessions.size;
