@@ -118,6 +118,7 @@ async function createDockerSession(
     sessionId,
     options.resumeSessionId,
     options.workspacePath,
+    options.policyDir,
   );
 
   const { prepareDockerInfrastructure } = await import('../docker/docker-infrastructure.js');
