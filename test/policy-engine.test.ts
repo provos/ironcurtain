@@ -1503,6 +1503,97 @@ describe('PolicyEngine', () => {
     });
   });
 
+  describe('lists conditions with github-owner + github-repo', () => {
+    // Build a minimal engine with a rule that allows create_branch only for
+    // provos/ironcurtain using two list conditions targeting different roles.
+    const githubRepoAnnotations: StoredToolAnnotationsFile = {
+      generatedAt: '2025-01-01T00:00:00Z',
+      servers: {
+        github: {
+          inputHash: 'test',
+          tools: [
+            {
+              toolName: 'create_branch',
+              serverName: 'github',
+              comment: 'Creates a branch.',
+              sideEffects: true,
+              args: { owner: ['github-owner'], repo: ['github-repo'], branch: ['branch-name'] },
+            },
+          ],
+        },
+      },
+    };
+
+    const githubRepoPolicy: CompiledPolicyFile = {
+      generatedAt: '2025-01-01T00:00:00Z',
+      constitutionHash: 'test',
+      inputHash: 'test',
+      rules: [
+        {
+          name: 'allow-create-branch-ironcurtain',
+          description: 'Allow creating branches in provos/ironcurtain only.',
+          principle: 'Restrict to one repo',
+          if: {
+            tool: ['create_branch'],
+            lists: [
+              { roles: ['github-owner'], allowed: ['provos'], matchType: 'identifiers' },
+              { roles: ['github-repo'], allowed: ['ironcurtain'], matchType: 'identifiers' },
+            ],
+          },
+          then: 'allow',
+          reason: 'Only provos/ironcurtain is authorized.',
+        },
+      ],
+    };
+
+    const repoEngine = new PolicyEngine(githubRepoPolicy, githubRepoAnnotations, []);
+
+    it('allows create_branch for provos/ironcurtain', () => {
+      const result = repoEngine.evaluate(
+        makeRequest({
+          serverName: 'github',
+          toolName: 'create_branch',
+          arguments: { owner: 'provos', repo: 'ironcurtain', branch: 'fix' },
+        }),
+      );
+      expect(result.decision).toBe('allow');
+      expect(result.rule).toBe('allow-create-branch-ironcurtain');
+    });
+
+    it('denies create_branch for wrong owner (correct repo)', () => {
+      const result = repoEngine.evaluate(
+        makeRequest({
+          serverName: 'github',
+          toolName: 'create_branch',
+          arguments: { owner: 'attacker', repo: 'ironcurtain', branch: 'fix' },
+        }),
+      );
+      expect(result.decision).toBe('deny');
+    });
+
+    it('denies create_branch for correct owner but wrong repo', () => {
+      const result = repoEngine.evaluate(
+        makeRequest({
+          serverName: 'github',
+          toolName: 'create_branch',
+          arguments: { owner: 'provos', repo: 'other-repo', branch: 'fix' },
+        }),
+      );
+      expect(result.decision).toBe('deny');
+    });
+
+    it('denies create_branch for wrong owner and wrong repo', () => {
+      const result = repoEngine.evaluate(
+        makeRequest({
+          serverName: 'github',
+          toolName: 'create_branch',
+          arguments: { owner: 'attacker', repo: 'other-repo', branch: 'fix' },
+        }),
+      );
+      expect(result.decision).toBe('deny');
+    });
+  });
+
   describe('protected path exclusions', () => {
     // The PolicyEngine excludes allowedDirectory (the sandbox) from protected
     // path checks. This means the sandbox can live under a protected directory

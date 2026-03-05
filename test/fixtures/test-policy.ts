@@ -419,14 +419,14 @@ export const testToolAnnotations: ToolAnnotationsFile = {
           serverName: 'github',
           comment: 'Lists issues in a repository.',
           sideEffects: false,
-          args: { owner: ['github-owner'], repo: ['none'] },
+          args: { owner: ['github-owner'], repo: ['github-repo'] },
         },
         {
           toolName: 'get_issue',
           serverName: 'github',
           comment: 'Gets a single issue.',
           sideEffects: false,
-          args: { owner: ['github-owner'], repo: ['none'], issue_number: ['none'] },
+          args: { owner: ['github-owner'], repo: ['github-repo'], issue_number: ['none'] },
         },
         {
           toolName: 'search_code',
@@ -440,7 +440,7 @@ export const testToolAnnotations: ToolAnnotationsFile = {
           serverName: 'github',
           comment: 'Creates an issue in a repository.',
           sideEffects: true,
-          args: { owner: ['github-owner'], repo: ['none'], title: ['none'], body: ['none'] },
+          args: { owner: ['github-owner'], repo: ['github-repo'], title: ['none'], body: ['none'] },
         },
         {
           toolName: 'create_pull_request',
@@ -449,7 +449,7 @@ export const testToolAnnotations: ToolAnnotationsFile = {
           sideEffects: true,
           args: {
             owner: ['github-owner'],
-            repo: ['none'],
+            repo: ['github-repo'],
             title: ['none'],
             head: ['branch-name'],
             base: ['branch-name'],
@@ -460,7 +460,7 @@ export const testToolAnnotations: ToolAnnotationsFile = {
           serverName: 'github',
           comment: 'Merges a pull request.',
           sideEffects: true,
-          args: { owner: ['github-owner'], repo: ['none'], pull_number: ['none'] },
+          args: { owner: ['github-owner'], repo: ['github-repo'], pull_number: ['none'] },
         },
       ],
     },

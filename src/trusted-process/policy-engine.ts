@@ -805,7 +805,12 @@ export class PolicyEngine {
     // Check lists conditions (non-domain list matching)
     if (cond.lists !== undefined) {
       for (const listCond of cond.lists) {
-        const extractRoles = evaluatingRole ? [evaluatingRole] : listCond.roles;
+        // Scope extraction to the evaluating role only when this list condition
+        // targets that role. Otherwise use the condition's own roles — this is
+        // necessary for multi-identifier rules (e.g. github-owner + github-repo)
+        // where each list condition targets a different role.
+        const extractRoles =
+          evaluatingRole && listCond.roles.includes(evaluatingRole) ? [evaluatingRole] : listCond.roles;
         const extractedValues = extractAnnotatedPaths(request.arguments, annotation, extractRoles);
 
         // Zero values extracted = condition not satisfied, rule does not match

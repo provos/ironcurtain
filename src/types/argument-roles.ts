@@ -38,6 +38,7 @@ export type ArgumentRole =
   | 'git-remote-url'
   // Identifier roles (case-insensitive allowlist-checked identifiers)
   | 'github-owner'
+  | 'github-repo'
   // Opaque roles (semantic meaning but not resource identifiers)
   | 'branch-name'
   | 'commit-message'
@@ -237,6 +238,20 @@ const registryEntries: [ArgumentRole, RoleDefinition][] = [
     },
   ],
   [
+    'github-repo',
+    {
+      description: 'GitHub repository name (without owner prefix)',
+      isResourceIdentifier: true,
+      category: 'identifier',
+      canonicalize: lowercase,
+      annotationGuidance:
+        'Assign to arguments that identify a GitHub repository name (without the owner prefix). ' +
+        'Typically the "repo" parameter on GitHub API tools. ' +
+        'Always pair with the corresponding github-owner argument.',
+      serverNames: ['github'],
+    },
+  ],
+  [
     'branch-name',
     {
       description: 'Git branch name',
@@ -291,6 +306,7 @@ const _ROLE_COMPLETENESS_CHECK: Record<ArgumentRole, true> = {
   'fetch-url': true,
   'git-remote-url': true,
   'github-owner': true,
+  'github-repo': true,
   'branch-name': true,
   'commit-message': true,
   none: true,

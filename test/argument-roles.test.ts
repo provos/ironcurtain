@@ -31,8 +31,8 @@ import {
 } from '../src/trusted-process/domain-utils.js';
 
 describe('ARGUMENT_ROLE_REGISTRY', () => {
-  it('contains all eleven roles', () => {
-    expect(ARGUMENT_ROLE_REGISTRY.size).toBe(11);
+  it('contains all twelve roles', () => {
+    expect(ARGUMENT_ROLE_REGISTRY.size).toBe(12);
   });
 
   it('has entries for all known roles', () => {
@@ -45,6 +45,7 @@ describe('ARGUMENT_ROLE_REGISTRY', () => {
       'fetch-url',
       'git-remote-url',
       'github-owner',
+      'github-repo',
       'branch-name',
       'commit-message',
       'none',
@@ -106,8 +107,8 @@ describe('getResourceRoles', () => {
     expect(roles).not.toContain('commit-message');
   });
 
-  it('returns exactly eight roles', () => {
-    expect(getResourceRoles()).toHaveLength(8);
+  it('returns exactly nine roles', () => {
+    expect(getResourceRoles()).toHaveLength(9);
   });
 });
 
@@ -139,7 +140,7 @@ describe('getArgumentRoleValues', () => {
     expect(values.length).toBeGreaterThanOrEqual(1);
   });
 
-  it('contains all eleven roles', () => {
+  it('contains all twelve roles', () => {
     const values = getArgumentRoleValues();
     expect(values).toContain('read-path');
     expect(values).toContain('write-path');
@@ -149,6 +150,7 @@ describe('getArgumentRoleValues', () => {
     expect(values).toContain('fetch-url');
     expect(values).toContain('git-remote-url');
     expect(values).toContain('github-owner');
+    expect(values).toContain('github-repo');
     expect(values).toContain('branch-name');
     expect(values).toContain('commit-message');
     expect(values).toContain('none');
