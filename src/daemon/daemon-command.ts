@@ -34,6 +34,16 @@ Options:
   );
 }
 
+/** Extracts a required job-id positional, exiting with usage if missing. */
+function requireJobIdArg(positionals: string[]): string {
+  const jobId = positionals[1];
+  if (!jobId) {
+    console.error('Usage: ironcurtain daemon <subcommand> <job-id>');
+    process.exit(1);
+  }
+  return jobId;
+}
+
 export async function runDaemonCommand(argv: string[]): Promise<void> {
   const { values, positionals } = parseArgs({
     args: argv,
@@ -91,11 +101,7 @@ export async function runDaemonCommand(argv: string[]): Promise<void> {
       break;
     }
     case 'edit-job': {
-      const jobId = positionals[1];
-      if (!jobId) {
-        console.error('Usage: ironcurtain daemon edit-job <job-id>');
-        process.exit(1);
-      }
+      const jobId = requireJobIdArg(positionals);
       const { runEditJobWizard } = await import('../cron/job-commands.js');
       await runEditJobWizard(jobId);
       break;
@@ -106,61 +112,37 @@ export async function runDaemonCommand(argv: string[]): Promise<void> {
       break;
     }
     case 'run-job': {
-      const jobId = positionals[1];
-      if (!jobId) {
-        console.error('Usage: ironcurtain daemon run-job <job-id>');
-        process.exit(1);
-      }
+      const jobId = requireJobIdArg(positionals);
       const { runJobCommand } = await import('../cron/job-commands.js');
       await runJobCommand(jobId);
       break;
     }
     case 'remove-job': {
-      const jobId = positionals[1];
-      if (!jobId) {
-        console.error('Usage: ironcurtain daemon remove-job <job-id>');
-        process.exit(1);
-      }
+      const jobId = requireJobIdArg(positionals);
       const { runRemoveJob } = await import('../cron/job-commands.js');
       runRemoveJob(jobId);
       break;
     }
     case 'disable-job': {
-      const jobId = positionals[1];
-      if (!jobId) {
-        console.error('Usage: ironcurtain daemon disable-job <job-id>');
-        process.exit(1);
-      }
+      const jobId = requireJobIdArg(positionals);
       const { runDisableJob } = await import('../cron/job-commands.js');
       await runDisableJob(jobId);
       break;
     }
     case 'enable-job': {
-      const jobId = positionals[1];
-      if (!jobId) {
-        console.error('Usage: ironcurtain daemon enable-job <job-id>');
-        process.exit(1);
-      }
+      const jobId = requireJobIdArg(positionals);
       const { runEnableJob } = await import('../cron/job-commands.js');
       await runEnableJob(jobId);
       break;
     }
     case 'recompile-job': {
-      const jobId = positionals[1];
-      if (!jobId) {
-        console.error('Usage: ironcurtain daemon recompile-job <job-id>');
-        process.exit(1);
-      }
+      const jobId = requireJobIdArg(positionals);
       const { runRecompileJob } = await import('../cron/job-commands.js');
       await runRecompileJob(jobId);
       break;
     }
     case 'logs': {
-      const jobId = positionals[1];
-      if (!jobId) {
-        console.error('Usage: ironcurtain daemon logs <job-id> [--runs N]');
-        process.exit(1);
-      }
+      const jobId = requireJobIdArg(positionals);
       const limit = values.runs ? parseInt(values.runs as string, 10) : 5;
       const { runShowLogs } = await import('../cron/job-commands.js');
       runShowLogs(jobId, limit);

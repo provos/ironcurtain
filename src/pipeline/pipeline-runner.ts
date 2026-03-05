@@ -13,12 +13,9 @@
 
 import { resolve } from 'node:path';
 import type { LanguageModel, SystemModelMessage } from 'ai';
-import { wrapLanguageModel } from 'ai';
 import chalk from 'chalk';
 import { extractServerDomainAllowlists } from '../config/index.js';
 import type { MCPServerConfig } from '../config/types.js';
-import { loadUserConfig } from '../config/user-config.js';
-import { createLanguageModel } from '../config/model-provider.js';
 import { PolicyEngine } from '../trusted-process/policy-engine.js';
 import {
   buildCompilerSystemPrompt,
@@ -34,6 +31,7 @@ import {
   writeArtifact,
   withSpinner,
   showCached,
+  createPipelineLlm,
 } from './pipeline-shared.js';
 import {
   applyScenarioCorrections,
@@ -44,8 +42,8 @@ import {
   verifyPolicy,
 } from './policy-verifier.js';
 import { buildGeneratorSystemPrompt, ScenarioGeneratorSession } from './scenario-generator.js';
-import { createLlmLoggingMiddleware, type LlmLogContext } from './llm-logger.js';
-import { createCacheStrategy, type PromptCacheStrategy } from '../session/prompt-cache.js';
+import type { LlmLogContext } from './llm-logger.js';
+import type { PromptCacheStrategy } from '../session/prompt-cache.js';
 import { connectMcpServersForLists, disconnectMcpServers, mergeReplacements, resolveRulePaths } from './compile.js';
 import type {
   CompiledPolicyFile,
@@ -112,6 +110,7 @@ export interface PipelineRunConfig {
 
 /**
  * LLM model references shared across pipeline runs.
+ * Thin wrapper around PipelineLlm with a renamed field for clarity.
  */
 export interface PipelineModels {
   readonly compilationModel: LanguageModel;
@@ -120,19 +119,11 @@ export interface PipelineModels {
   readonly logPath: string;
 }
 
-/** Creates PipelineModels from user config. */
+/** Creates PipelineModels from user config. Delegates to shared createPipelineLlm. */
 export async function createPipelineModels(logDir?: string): Promise<PipelineModels> {
-  const userConfig = loadUserConfig();
-  const baseLlm = await createLanguageModel(userConfig.policyModelId, userConfig);
-  const logContext: LlmLogContext = { stepName: 'unknown' };
   const effectiveLogDir = logDir ?? resolve(process.cwd(), 'generated');
-  const logPath = resolve(effectiveLogDir, 'llm-interactions.jsonl');
-  const model = wrapLanguageModel({
-    model: baseLlm,
-    middleware: createLlmLoggingMiddleware(logPath, logContext),
-  });
-  const cacheStrategy = createCacheStrategy(userConfig.policyModelId);
-  return { compilationModel: model, cacheStrategy, logContext, logPath };
+  const llm = await createPipelineLlm(effectiveLogDir, 'unknown');
+  return { compilationModel: llm.model, cacheStrategy: llm.cacheStrategy, logContext: llm.logContext, logPath: llm.logPath };
 }
 
 // ---------------------------------------------------------------------------

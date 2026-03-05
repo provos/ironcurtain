@@ -14,7 +14,7 @@ import { loadAllJobs, loadJob, saveJob, deleteJob, loadRecentRuns } from './job-
 import { createJobId, type JobDefinition, type RunOutcome } from './types.js';
 import { getJobWorkspaceDir, getJobDir } from '../config/paths.js';
 import { compileTaskPolicy } from './compile-task-policy.js';
-import { createCronScheduler, parseCronExpression } from './cron-scheduler.js';
+import { parseCronExpression, getNextFireTime } from './cron-scheduler.js';
 import { syncGitRepo, validateGitUri } from './git-sync.js';
 
 /**
@@ -279,6 +279,17 @@ async function runJobReviewLoop(initial: JobDefinition, isNew: boolean): Promise
   return job;
 }
 
+/** Loads a job by ID string, exiting with an error if not found. */
+function loadJobOrExit(jobIdStr: string): JobDefinition {
+  const jobId = createJobId(jobIdStr);
+  const job = loadJob(jobId);
+  if (!job) {
+    console.error(`Job not found: ${jobIdStr}`);
+    process.exit(1);
+  }
+  return job;
+}
+
 function formatRunOutcome(outcome: RunOutcome, verbose = true): string {
   if (outcome.kind === 'success') return chalk.green('success');
   if (outcome.kind === 'budget_exhausted') {
@@ -341,23 +352,15 @@ export async function runAddJobWizard(): Promise<void> {
     process.exit(1);
   }
 
-  const scheduler = createCronScheduler();
-  scheduler.schedule(job, async () => {});
-  const nextRun = scheduler.getNextRun(job.id);
-  scheduler.unscheduleAll();
+  const nextRun = getNextFireTime(parseCronExpression(job.schedule), new Date());
 
-  outro(`Job "${job.id}" created. Next run: ${nextRun?.toLocaleString() ?? 'unknown'}`);
+  outro(`Job "${job.id}" created. Next run: ${nextRun.toLocaleString()}`);
 }
 
 /** Edits an existing job interactively. Re-compiles policy if task changed. */
 export async function runEditJobWizard(jobIdStr: string): Promise<void> {
   const { intro, outro } = await import('@clack/prompts');
-  const jobId = createJobId(jobIdStr);
-  const existing = loadJob(jobId);
-  if (!existing) {
-    console.error(`Job not found: ${jobIdStr}`);
-    process.exit(1);
-  }
+  const existing = loadJobOrExit(jobIdStr);
 
   intro(`Edit job "${existing.name || existing.id}"`);
 
@@ -392,8 +395,6 @@ export function runListJobs(): void {
     return;
   }
 
-  const scheduler = createCronScheduler();
-
   console.error('Jobs:');
   for (const job of jobs) {
     const statusLabel = job.enabled ? '' : chalk.yellow(' DISABLED');
@@ -402,10 +403,8 @@ export function runListJobs(): void {
     let nextRunStr = '';
     if (job.enabled) {
       try {
-        scheduler.schedule(job, async () => {});
-        const nextRun = scheduler.getNextRun(job.id);
-        scheduler.unschedule(job.id);
-        nextRunStr = nextRun ? `next: ${nextRun.toLocaleString()}` : '';
+        const nextRun = getNextFireTime(parseCronExpression(job.schedule), new Date());
+        nextRunStr = `next: ${nextRun.toLocaleString()}`;
       } catch {
         nextRunStr = chalk.red('invalid schedule');
       }
@@ -429,18 +428,11 @@ export function runListJobs(): void {
       console.error(`  ${' '.repeat(20)}${lastRunStr}`);
     }
   }
-
-  scheduler.unscheduleAll();
 }
 
 /** Manually triggers a job run. */
 export async function runJobCommand(jobIdStr: string): Promise<void> {
-  const jobId = createJobId(jobIdStr);
-  const job = loadJob(jobId);
-  if (!job) {
-    console.error(`Job not found: ${jobIdStr}`);
-    process.exit(1);
-  }
+  const job = loadJobOrExit(jobIdStr);
 
   console.error(`Running job "${job.name}"...`);
   const { resolveSessionMode } = await import('../session/preflight.js');
@@ -449,7 +441,7 @@ export async function runJobCommand(jobIdStr: string): Promise<void> {
   console.error(`Mode: ${preflight.mode.kind} (${preflight.reason})`);
   const { IronCurtainDaemon } = await import('../daemon/ironcurtain-daemon.js');
   const daemon = new IronCurtainDaemon({ mode: preflight.mode, noSignal: true });
-  const record = await daemon.runJobNow(jobId);
+  const record = await daemon.runJobNow(job.id);
 
   console.error(`  Outcome: ${formatRunOutcome(record.outcome)}`);
   console.error(`  Duration: ${record.budget.elapsedSeconds.toFixed(0)}s`);
@@ -461,67 +453,40 @@ export async function runJobCommand(jobIdStr: string): Promise<void> {
 
 /** Removes a job. */
 export function runRemoveJob(jobIdStr: string): void {
-  const jobId = createJobId(jobIdStr);
-  const job = loadJob(jobId);
-  if (!job) {
-    console.error(`Job not found: ${jobIdStr}`);
-    process.exit(1);
-  }
+  const job = loadJobOrExit(jobIdStr);
 
-  deleteJob(jobId);
+  deleteJob(job.id);
   console.error(`Job "${jobIdStr}" removed.`);
 }
 
-/** Disables a job. */
-export async function runDisableJob(jobIdStr: string): Promise<void> {
-  const jobId = createJobId(jobIdStr);
-  const job = loadJob(jobId);
-  if (!job) {
-    console.error(`Job not found: ${jobIdStr}`);
-    process.exit(1);
-  }
+/** Sets a job's enabled state. */
+async function runSetJobEnabled(jobIdStr: string, enabled: boolean): Promise<void> {
+  const job = loadJobOrExit(jobIdStr);
 
-  await saveJob({ ...job, enabled: false });
-  console.error(`Job "${jobIdStr}" disabled.`);
+  await saveJob({ ...job, enabled });
+  console.error(`Job "${jobIdStr}" ${enabled ? 'enabled' : 'disabled'}.`);
 }
+
+/** Disables a job. */
+export const runDisableJob = (jobIdStr: string): Promise<void> => runSetJobEnabled(jobIdStr, false);
 
 /** Enables a job. */
-export async function runEnableJob(jobIdStr: string): Promise<void> {
-  const jobId = createJobId(jobIdStr);
-  const job = loadJob(jobId);
-  if (!job) {
-    console.error(`Job not found: ${jobIdStr}`);
-    process.exit(1);
-  }
-
-  await saveJob({ ...job, enabled: true });
-  console.error(`Job "${jobIdStr}" enabled.`);
-}
+export const runEnableJob = (jobIdStr: string): Promise<void> => runSetJobEnabled(jobIdStr, true);
 
 /** Re-runs policy compilation for a job. */
 export async function runRecompileJob(jobIdStr: string): Promise<void> {
-  const jobId = createJobId(jobIdStr);
-  const job = loadJob(jobId);
-  if (!job) {
-    console.error(`Job not found: ${jobIdStr}`);
-    process.exit(1);
-  }
+  const job = loadJobOrExit(jobIdStr);
 
   console.error(`Recompiling policy for job "${jobIdStr}"...`);
-  await compileTaskPolicy(job.taskConstitution, getJobDir(jobId));
+  await compileTaskPolicy(job.taskConstitution, getJobDir(job.id));
   console.error('Done.');
 }
 
 /** Shows recent run logs for a job. */
 export function runShowLogs(jobIdStr: string, limit: number): void {
-  const jobId = createJobId(jobIdStr);
-  const job = loadJob(jobId);
-  if (!job) {
-    console.error(`Job not found: ${jobIdStr}`);
-    process.exit(1);
-  }
+  const job = loadJobOrExit(jobIdStr);
 
-  const runs = loadRecentRuns(jobId, limit);
+  const runs = loadRecentRuns(job.id, limit);
   if (runs.length === 0) {
     console.error(`No run history for job "${jobIdStr}".`);
     return;

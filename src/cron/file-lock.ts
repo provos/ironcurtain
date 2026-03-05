@@ -11,7 +11,7 @@
  * see src/escalation/listener-lock.ts.
  */
 
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { isPidAlive } from '../escalation/listener-lock.js';
 
@@ -37,23 +37,29 @@ interface LockMetadata {
  * with the owning PID and creation timestamp.
  */
 function tryAcquire(lockDir: string, staleMs: number): boolean {
-  // Check for stale lock before attempting
-  if (existsSync(lockDir)) {
-    if (isLockStale(lockDir, staleMs)) {
-      forceRelease(lockDir);
-    } else {
-      return false;
-    }
-  }
-
+  // Attempt atomic mkdir first — this is the authoritative lock acquisition.
+  // Only check for stale locks after EEXIST, avoiding a TOCTOU race.
   try {
     mkdirSync(lockDir);
   } catch (err: unknown) {
-    // EEXIST means another process acquired between our check and mkdir
-    if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
+      throw err;
+    }
+    // Lock dir exists — check if it's stale
+    if (isLockStale(lockDir, staleMs)) {
+      forceRelease(lockDir);
+      // Retry mkdir after releasing stale lock
+      try {
+        mkdirSync(lockDir);
+      } catch (retryErr: unknown) {
+        if ((retryErr as NodeJS.ErrnoException).code === 'EEXIST') {
+          return false; // Another process grabbed it
+        }
+        throw retryErr;
+      }
+    } else {
       return false;
     }
-    throw err;
   }
 
   // Write metadata for stale detection

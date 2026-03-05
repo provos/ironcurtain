@@ -233,11 +233,13 @@ export function getJobsDir(): string {
   return resolve(getIronCurtainHome(), 'jobs');
 }
 
+import { JOB_ID_PATTERN } from '../cron/types.js';
+
 /**
  * Validates that a job ID contains only safe characters.
  */
 function validateJobId(jobId: string): void {
-  if (!/^[a-z0-9][a-z0-9_-]{0,62}$/.test(jobId)) {
+  if (!JOB_ID_PATTERN.test(jobId)) {
     throw new Error(`Invalid job ID: ${jobId}`);
   }
 }

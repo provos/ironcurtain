@@ -361,7 +361,7 @@ export class IronCurtainDaemon {
 
     // Track escalation counts for this run
     let escalationsEncountered = 0;
-    const escalationsApproved = 0;
+    let escalationsApproved = 0; // TODO: increment when escalation is approved via Signal
 
     // Create the session with per-job policy and escalation handler
     const session = await createSession({

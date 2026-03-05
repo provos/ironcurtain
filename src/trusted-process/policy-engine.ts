@@ -496,7 +496,13 @@ export class PolicyEngine {
     // it can already manipulate .git/ contents directly, so history roles within
     // the sandbox add no additional risk.
     const sandboxResolvedRoles = new Set<ArgumentRole>();
-    const resolvedSandboxPaths = annotation ? annotatedPaths.map((p) => resolveRealPath(p)) : resolvedPaths;
+    // Reuse already-resolved paths when annotated paths are a subset of allPaths
+    const resolvedSandboxPaths = annotation
+      ? annotatedPaths.map((p) => {
+          const idx = allPaths.indexOf(p);
+          return idx !== -1 ? resolvedPaths[idx] : resolveRealPath(p);
+        })
+      : resolvedPaths;
 
     // Extract URL args once for use in both sandbox containment (fast-path guard) and untrusted domain gate
     const urlArgs = annotation ? extractAnnotatedUrls(request.arguments, annotation, getUrlRoles()) : [];

@@ -46,12 +46,6 @@ export function validateGitUri(uri: string): void {
   }
 }
 
-/** Restricted environment for git subprocesses: only safe transport protocols. */
-const GIT_SAFE_ENV: NodeJS.ProcessEnv = {
-  ...process.env,
-  GIT_PROTOCOL_WHITELIST: 'https:git:ssh:file',
-};
-
 /**
  * Clones or refreshes a git repository in the given directory.
  *
@@ -68,7 +62,7 @@ export function syncGitRepo(uri: string, dir: string, verbose = false): string |
   validateGitUri(uri);
 
   const stdio = verbose ? ('inherit' as const) : ('pipe' as const);
-  const env = GIT_SAFE_ENV;
+  const env: NodeJS.ProcessEnv = { ...process.env, GIT_PROTOCOL_WHITELIST: 'https:git:ssh:file' };
   if (existsSync(resolve(dir, '.git'))) {
     execFileSync('git', ['fetch', 'origin'], { cwd: dir, stdio, env });
 

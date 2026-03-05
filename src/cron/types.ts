@@ -12,9 +12,12 @@
  */
 export type JobId = string & { readonly __brand: 'JobId' };
 
+/** Regex for valid job IDs: 1-63 chars, lowercase alphanumeric, hyphens, or underscores. */
+export const JOB_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,62}$/;
+
 /** Validates and creates a JobId from a user-provided string. */
 export function createJobId(raw: string): JobId {
-  if (!/^[a-z0-9][a-z0-9_-]{0,62}$/.test(raw)) {
+  if (!JOB_ID_PATTERN.test(raw)) {
     throw new Error(
       `Invalid job ID "${raw}": must be 1-63 chars, ` +
         `lowercase alphanumeric, hyphens, or underscores, ` +
