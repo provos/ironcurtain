@@ -55,14 +55,15 @@ function openEditorForMultiline(instructions: string, initialContent = ''): stri
   }
 }
 
-/** Generates a unique default JobDefinition with an empty task. */
+/** Generates a unique default JobDefinition with empty task fields. */
 function generateDefaultJob(): JobDefinition {
   const suffix = Math.random().toString(36).slice(2, 8);
   return {
     id: createJobId(`job-${suffix}`),
     name: '',
     schedule: '0 9 * * *',
-    task: '',
+    taskDescription: '',
+    taskConstitution: '',
     gitRepo: undefined,
     notifyOnEscalation: true,
     notifyOnCompletion: true,
@@ -70,9 +71,14 @@ function generateDefaultJob(): JobDefinition {
   };
 }
 
-const TASK_INSTRUCTIONS =
-  'Enter the task description for this job.\n' +
-  'This becomes the policy "constitution" — be specific.\n' +
+const TASK_DESCRIPTION_INSTRUCTIONS =
+  'Enter the task description — what the agent should do each run.\n' +
+  'This is sent to the agent as its work prompt.\n' +
+  'Lines starting with # are ignored.';
+
+const TASK_CONSTITUTION_INSTRUCTIONS =
+  'Enter the task constitution — what the agent is and is not permitted to do.\n' +
+  'This is the policy compilation input; be specific about allowed operations.\n' +
   'Lines starting with # are ignored.';
 
 /**
@@ -89,14 +95,19 @@ async function runJobReviewLoop(initial: JobDefinition, isNew: boolean): Promise
 
   for (;;) {
     const gitRepoDisplay = job.gitRepo ?? '(none)';
-    const taskIsEmpty = !job.task.trim();
-    const taskLines = job.task.split('\n');
-    const taskPreview = taskIsEmpty
-      ? '  (not set — required)'
-      : [
-          ...taskLines.slice(0, 4).map((l) => `  ${l}`),
-          ...(taskLines.length > 4 ? [`  … (${taskLines.length - 4} more lines)`] : []),
-        ].join('\n');
+    const descIsEmpty = !job.taskDescription.trim();
+    const constIsEmpty = !job.taskConstitution.trim();
+    const anyEmpty = descIsEmpty || constIsEmpty;
+
+    function fieldPreview(text: string, empty: boolean): string {
+      if (empty) return '  (not set — required)';
+      const lines = text.split('\n');
+      return [
+        ...lines.slice(0, 3).map((l) => `  ${l}`),
+        ...(lines.length > 3 ? [`  … (${lines.length - 3} more lines)`] : []),
+      ].join('\n');
+    }
+
     const notifyParts = [job.notifyOnEscalation ? 'escalation' : '', job.notifyOnCompletion ? 'completion' : ''].filter(
       Boolean,
     );
@@ -110,8 +121,11 @@ async function runJobReviewLoop(initial: JobDefinition, isNew: boolean): Promise
         `Git repo:  ${gitRepoDisplay}`,
         `Notify:    ${notifyStr}`,
         ``,
-        `Task:`,
-        taskPreview,
+        `Task description:`,
+        fieldPreview(job.taskDescription, descIsEmpty),
+        ``,
+        `Task constitution:`,
+        fieldPreview(job.taskConstitution, constIsEmpty),
       ].join('\n'),
       isNew ? 'New job' : 'Edit job',
     );
@@ -120,13 +134,14 @@ async function runJobReviewLoop(initial: JobDefinition, isNew: boolean): Promise
     const action = await select({
       message: 'Confirm or edit a field',
       options: [
-        { value: 'confirm', label: taskIsEmpty ? `${confirmLabel}  (task required)` : confirmLabel },
-        ...(isNew ? [{ value: 'id', label: `Edit ID          ${job.id}` }] : []),
-        { value: 'name', label: `Edit name        ${job.name || '(not set)'}` },
-        { value: 'schedule', label: `Edit schedule    ${job.schedule}` },
-        { value: 'gitRepo', label: `Edit git repo    ${gitRepoDisplay}` },
-        { value: 'task', label: `Edit task${taskIsEmpty ? '  ← required' : ''}` },
-        { value: 'notify', label: `Edit notify      ${notifyStr}` },
+        { value: 'confirm', label: anyEmpty ? `${confirmLabel}  (required fields missing)` : confirmLabel },
+        ...(isNew ? [{ value: 'id', label: `Edit ID               ${job.id}` }] : []),
+        { value: 'name', label: `Edit name             ${job.name || '(not set)'}` },
+        { value: 'schedule', label: `Edit schedule         ${job.schedule}` },
+        { value: 'gitRepo', label: `Edit git repo         ${gitRepoDisplay}` },
+        { value: 'taskDescription', label: `Edit task description${descIsEmpty ? '  ← required' : ''}` },
+        { value: 'taskConstitution', label: `Edit task constitution${constIsEmpty ? '  ← required' : ''}` },
+        { value: 'notify', label: `Edit notify           ${notifyStr}` },
       ],
     });
     if (isCancel(action)) {
@@ -135,8 +150,8 @@ async function runJobReviewLoop(initial: JobDefinition, isNew: boolean): Promise
     }
 
     if (action === 'confirm') {
-      if (taskIsEmpty) {
-        log.warn('Task description is required. Please set it before confirming.');
+      if (anyEmpty) {
+        log.warn('Task description and constitution are both required. Please set them before confirming.');
         continue;
       }
       if (isNew && loadJob(job.id)) {
@@ -209,13 +224,24 @@ async function runJobReviewLoop(initial: JobDefinition, isNew: boolean): Promise
         job = { ...job, gitRepo: inp || undefined };
         break;
       }
-      case 'task': {
+      case 'taskDescription': {
         log.step('Opening editor — save and close to continue');
-        const newTask = openEditorForMultiline(TASK_INSTRUCTIONS, job.task);
-        if (newTask) {
-          job = { ...job, task: newTask };
+        const newDesc = openEditorForMultiline(TASK_DESCRIPTION_INSTRUCTIONS, job.taskDescription);
+        if (newDesc) {
+          job = { ...job, taskDescription: newDesc };
         } else {
-          log.warn('Editor was empty — keeping existing task.');
+          log.warn('Editor was empty — keeping existing task description.');
+        }
+        break;
+      }
+      case 'taskConstitution': {
+        log.step('Opening editor — save and close to continue');
+        const initialConstitution = job.taskConstitution || 'The agent is allowed ';
+        const newConst = openEditorForMultiline(TASK_CONSTITUTION_INSTRUCTIONS, initialConstitution);
+        if (newConst) {
+          job = { ...job, taskConstitution: newConst };
+        } else {
+          log.warn('Editor was empty — keeping existing task constitution.');
         }
         break;
       }
@@ -298,7 +324,7 @@ export async function runAddJobWizard(): Promise<void> {
   console.error('');
   console.error('Compiling task policy...');
   try {
-    await compileTaskPolicy(job.task, getJobDir(job.id));
+    await compileTaskPolicy(job.taskConstitution, getJobDir(job.id));
   } catch (err) {
     console.error(chalk.red(`Policy compilation failed: ${err instanceof Error ? err.message : String(err)}`));
     console.error(
@@ -327,16 +353,16 @@ export async function runEditJobWizard(jobIdStr: string): Promise<void> {
 
   intro(`Edit job "${existing.name || existing.id}"`);
 
-  const originalTask = existing.task;
+  const originalConstitution = existing.taskConstitution;
   const job = await runJobReviewLoop(existing, false);
 
   // Save first so changes aren't lost if recompilation fails
   saveJob(job);
 
-  if (job.task !== originalTask) {
-    console.error('Task changed — recompiling policy...');
+  if (job.taskConstitution !== originalConstitution) {
+    console.error('Constitution changed — recompiling policy...');
     try {
-      await compileTaskPolicy(job.task, getJobDir(job.id));
+      await compileTaskPolicy(job.taskConstitution, getJobDir(job.id));
     } catch (err) {
       console.error(chalk.red(`Policy compilation failed: ${err instanceof Error ? err.message : String(err)}`));
       console.error(
@@ -470,7 +496,7 @@ export async function runRecompileJob(jobIdStr: string): Promise<void> {
   }
 
   console.error(`Recompiling policy for job "${jobIdStr}"...`);
-  await compileTaskPolicy(job.task, getJobDir(jobId));
+  await compileTaskPolicy(job.taskConstitution, getJobDir(jobId));
   console.error('Done.');
 }
 

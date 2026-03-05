@@ -43,10 +43,15 @@ export interface JobDefinition {
   readonly schedule: string;
 
   /**
-   * English task description. This is the "constitution" input
-   * for per-job policy compilation.
+   * English task description sent to the agent as its work prompt.
    */
-  readonly task: string;
+  readonly taskDescription: string;
+
+  /**
+   * English constitution text used as the policy compilation input.
+   * Describes what the agent is and is not permitted to do.
+   */
+  readonly taskConstitution: string;
 
   /**
    * Working directory for this job. Persists across runs.

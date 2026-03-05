@@ -187,7 +187,7 @@ export class IronCurtainDaemon {
 
     // Compile per-job policy
     logger.info(`[Daemon] Compiling task policy for job ${job.id}...`);
-    await compileTaskPolicy(job.task, getJobDir(job.id));
+    await compileTaskPolicy(job.taskConstitution, getJobDir(job.id));
 
     // Save job definition
     saveJob(job);
@@ -241,7 +241,7 @@ export class IronCurtainDaemon {
     const job = loadJob(jobId);
     if (!job) throw new Error(`Job not found: ${jobId}`);
 
-    await compileTaskPolicy(job.task, getJobDir(jobId));
+    await compileTaskPolicy(job.taskConstitution, getJobDir(jobId));
     logger.info(`[Daemon] Recompiled policy for job ${jobId}`);
   }
 
@@ -318,12 +318,12 @@ export class IronCurtainDaemon {
 
     // Build system prompt augmentation
     const augmentation = buildCronSystemPromptAugmentation({
-      taskDescription: job.task,
+      taskDescription: job.taskDescription,
       workspacePath: workspace,
     });
 
     // Create the headless transport
-    const transport = new HeadlessTransport({ taskMessage: job.task });
+    const transport = new HeadlessTransport({ taskMessage: job.taskDescription });
 
     // Create the session with per-job policy
     const session = await createSession({
