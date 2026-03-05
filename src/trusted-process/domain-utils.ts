@@ -128,3 +128,61 @@ export function resolveGitRemote(value: string, allArgs: Record<string, unknown>
     return value; // Resolution failed -- escalation will catch it
   }
 }
+
+/**
+ * Resolves the default remote URL for a git repository when no remote is
+ * explicitly specified in the tool call arguments.
+ *
+ * Resolution order:
+ *   1. The tracking remote for the current branch:
+ *      `git rev-parse --abbrev-ref --symbolic-full-name @{u}` yields
+ *      "refs/remotes/<remote>/<branch>" (or "<remote>/<branch>" in short form).
+ *      The remote name is extracted and resolved via `git remote get-url`.
+ *   2. Fallback: `git remote get-url origin`.
+ *
+ * Returns undefined when resolution fails for any reason (not a git repo,
+ * no remotes configured, git not installed, timeout). Callers treat undefined
+ * as "no enrichment possible" and pass the original request through unchanged.
+ *
+ * Uses execFileSync (not execSync) throughout to avoid command injection.
+ */
+export function resolveDefaultGitRemote(repoPath: string): string | undefined {
+  const resolved = resolve(repoPath);
+  const execOpts: Parameters<typeof execFileSync>[2] & { encoding: 'utf-8' } = {
+    cwd: resolved,
+    encoding: 'utf-8',
+    timeout: 5000,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  };
+
+  // Step 1: resolve via the current branch's configured tracking remote.
+  // Read branch.<name>.remote from git config directly — this works even when
+  // the remote has never been fetched (no remote-tracking refs needed).
+  try {
+    const branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], execOpts).trim();
+    if (branch && branch !== 'HEAD') {
+      // git config returns exit 1 when the key is absent — caught below
+      try {
+        const remoteName = execFileSync('git', ['config', '--get', `branch.${branch}.remote`], execOpts).trim();
+        if (remoteName) {
+          try {
+            return execFileSync('git', ['remote', 'get-url', remoteName], execOpts).trim();
+          } catch {
+            // remote name configured but deleted — fall through to origin fallback
+          }
+        }
+      } catch {
+        // No tracking remote configured for this branch
+      }
+    }
+  } catch {
+    // Not a git repo or detached HEAD — fall through to origin fallback
+  }
+
+  // Step 2: fallback to 'origin'.
+  try {
+    return execFileSync('git', ['remote', 'get-url', 'origin'], execOpts).trim();
+  } catch {
+    return undefined; // No origin configured or not a git repo
+  }
+}

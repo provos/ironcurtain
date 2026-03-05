@@ -34,7 +34,13 @@ import {
   SANDBOX_SAFE_PATH_ROLES,
   type RoleDefinition,
 } from '../types/argument-roles.js';
-import { domainMatchesAllowlist, isIpAddress, resolveGitRemote, extractDomainForRole } from './domain-utils.js';
+import {
+  domainMatchesAllowlist,
+  isIpAddress,
+  resolveGitRemote,
+  resolveDefaultGitRemote,
+  extractDomainForRole,
+} from './domain-utils.js';
 import { getListMatcher } from '../pipeline/dynamic-list-types.js';
 
 /**
@@ -367,12 +373,56 @@ export class PolicyEngine {
     // After this point, `annotation` has the standard shape: args: Record<string, ArgumentRole[]>
     const annotation = this.getAnnotation(request.serverName, request.toolName, request.arguments);
 
+    // Git remote enrichment: when a git push/pull/fetch omits the remote arg,
+    // resolve the repo's configured default remote URL from the filesystem so
+    // the domain gate and compiled domains conditions can evaluate it.
+    const effectiveRequest = this.enrichGitRequest(request, annotation);
+
     // Structural checks (may resolve some roles via sandbox containment)
-    const structural = this.evaluateStructuralInvariants(request, annotation);
+    const structural = this.evaluateStructuralInvariants(effectiveRequest, annotation);
     if (structural.decision) return structural.decision;
 
     // Compiled rule evaluation (skipping sandbox-resolved roles)
-    return this.evaluateCompiledRules(request, structural.sandboxResolvedRoles, annotation);
+    return this.evaluateCompiledRules(effectiveRequest, structural.sandboxResolvedRoles, annotation);
+  }
+
+  /**
+   * Enriches a git tool call by resolving absent git-remote-url arguments
+   * to the repository's default remote URL.
+   *
+   * When an agent calls git_push/git_pull/git_fetch without an explicit
+   * remote, git uses the branch's configured upstream (or 'origin'). This
+   * method makes that implicit remote explicit so URL-aware policy checks
+   * (the structural domain gate and compiled domains conditions) fire correctly.
+   *
+   * Only applies to the 'git' server. No-ops when the remote arg is already
+   * present, when resolution fails, or when there is no annotation.
+   */
+  private enrichGitRequest(request: ToolCallRequest, annotation: ToolAnnotation | undefined): ToolCallRequest {
+    if (request.serverName !== 'git' || !annotation) return request;
+
+    // Collect git-remote-url annotated args whose value is absent or empty.
+    const missingUrlArgNames: string[] = [];
+    for (const [argName, roles] of Object.entries(annotation.args)) {
+      if (!roles.includes('git-remote-url')) continue;
+      const value = request.arguments[argName];
+      const isAbsent = !(argName in request.arguments) || value === null || value === undefined || value === '';
+      if (isAbsent) missingUrlArgNames.push(argName);
+    }
+
+    if (missingUrlArgNames.length === 0) return request;
+
+    // Use the 'path' arg as the repo directory (convention for all git tools).
+    const rawPath = typeof request.arguments.path === 'string' ? request.arguments.path : '.';
+    const resolvedUrl = resolveDefaultGitRemote(rawPath);
+
+    if (resolvedUrl === undefined) return request;
+
+    const enrichedArgs = { ...request.arguments };
+    for (const argName of missingUrlArgNames) {
+      enrichedArgs[argName] = resolvedUrl;
+    }
+    return { ...request, arguments: enrichedArgs };
   }
 
   /**

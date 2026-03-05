@@ -1,5 +1,7 @@
 import { homedir } from 'node:os';
-import { describe, it, expect } from 'vitest';
+import { mkdtempSync, rmSync, realpathSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import type { CompiledPolicyFile, ToolAnnotationsFile, StoredToolAnnotationsFile } from '../src/pipeline/types.js';
 import { PolicyEngine, domainMatchesAllowlist, isIpAddress } from '../src/trusted-process/policy-engine.js';
 import { extractServerDomainAllowlists } from '../src/config/index.js';
@@ -1117,6 +1119,320 @@ describe('PolicyEngine', () => {
       // to compiled rules where allow-git-read matches.
       expect(result.decision).toBe('allow');
       expect(result.rule).toBe('allow-git-read');
+    });
+  });
+
+  describe('Git remote enrichment (absent remote resolved from filesystem)', () => {
+    // Annotations for git_push: path is repo locator ('none'), remote is 'git-remote-url'
+    const pushAnnotations: ToolAnnotationsFile = {
+      generatedAt: 'test',
+      servers: {
+        git: {
+          inputHash: 'test',
+          tools: [
+            {
+              toolName: 'git_push',
+              serverName: 'git',
+              comment: 'Push to remote',
+              sideEffects: true,
+              args: { path: ['none'], remote: ['git-remote-url'], branch: ['branch-name'] },
+            },
+          ],
+        },
+      },
+    };
+
+    const escalatePushPolicy: CompiledPolicyFile = {
+      generatedAt: 'test',
+      constitutionHash: 'test',
+      inputHash: 'test',
+      rules: [
+        {
+          name: 'escalate-git-push',
+          description: 'Escalate all git pushes',
+          principle: 'Human oversight',
+          if: { server: ['git'], tool: ['git_push'] },
+          then: 'escalate',
+          reason: 'Push requires human approval',
+        },
+      ],
+    };
+
+    // ── Static tests (no real git repo) ──────────────────────────────────
+
+    it('does not enrich when remote arg is already present as HTTPS URL', () => {
+      const allowlists = new Map([['git', ['github.com']]]);
+      const engine = new PolicyEngine(escalatePushPolicy, pushAnnotations, [], SANDBOX_DIR, allowlists);
+
+      const result = engine.evaluate(
+        makeRequest({
+          serverName: 'git',
+          toolName: 'git_push',
+          arguments: { path: '/nonexistent/repo', remote: 'https://github.com/org/repo.git', branch: 'main' },
+        }),
+      );
+      // URL already present → no enrichment; domain gate passes; compiled rule escalates
+      expect(result.rule).not.toBe('structural-domain-escalate');
+      expect(result.decision).toBe('escalate');
+      expect(result.rule).toBe('escalate-git-push');
+    });
+
+    it('does not enrich when remote arg is already present as SSH URL', () => {
+      const allowlists = new Map([['git', ['github.com']]]);
+      const engine = new PolicyEngine(escalatePushPolicy, pushAnnotations, [], SANDBOX_DIR, allowlists);
+
+      const result = engine.evaluate(
+        makeRequest({
+          serverName: 'git',
+          toolName: 'git_push',
+          arguments: { path: '/nonexistent/repo', remote: 'git@github.com:org/repo.git', branch: 'main' },
+        }),
+      );
+      expect(result.rule).not.toBe('structural-domain-escalate');
+      expect(result.decision).toBe('escalate');
+    });
+
+    it('falls back cleanly when path is not a git repo (no enrichment, compiled rule fires)', () => {
+      // When enrichment fails, request is unchanged → no URL arg → no domain gate → compiled rule
+      const engine = new PolicyEngine(escalatePushPolicy, pushAnnotations, [], SANDBOX_DIR);
+      const result = engine.evaluate(
+        makeRequest({
+          serverName: 'git',
+          toolName: 'git_push',
+          arguments: { path: REAL_TMP, branch: 'main' }, // remote absent; REAL_TMP is not a git repo
+        }),
+      );
+      expect(result.decision).toBe('escalate');
+      expect(result.rule).toBe('escalate-git-push');
+    });
+
+    it('does not enrich for non-git server even if annotation has git-remote-url role', () => {
+      const otherAnnotations: ToolAnnotationsFile = {
+        generatedAt: 'test',
+        servers: {
+          custom: {
+            inputHash: 'test',
+            tools: [
+              {
+                toolName: 'push_op',
+                serverName: 'custom',
+                comment: 'custom push',
+                sideEffects: true,
+                args: { url: ['git-remote-url'] },
+              },
+            ],
+          },
+        },
+      };
+      const allowPolicy: CompiledPolicyFile = {
+        generatedAt: 'test',
+        constitutionHash: 'test',
+        inputHash: 'test',
+        rules: [
+          {
+            name: 'allow-custom',
+            description: 'Allow custom ops',
+            principle: 'test',
+            if: { server: ['custom'] },
+            then: 'allow',
+            reason: 'test',
+          },
+        ],
+      };
+      const engine = new PolicyEngine(allowPolicy, otherAnnotations, [], SANDBOX_DIR);
+      const result = engine.evaluate(
+        makeRequest({ serverName: 'custom', toolName: 'push_op', arguments: { path: '/some/dir' } }),
+      );
+      // No enrichment for non-git server; url absent → compiled rule allow-custom fires
+      expect(result.decision).toBe('allow');
+      expect(result.rule).toBe('allow-custom');
+    });
+
+    // ── Dynamic tests (require real git repos) ────────────────────────────
+
+    describe('with repo whose origin is github.com', () => {
+      let repoDir: string;
+
+      beforeAll(() => {
+        repoDir = realpathSync(mkdtempSync(`${REAL_TMP}/ic-enrich-github-`));
+        const opts = {
+          cwd: repoDir,
+          encoding: 'utf-8' as const,
+          stdio: ['pipe', 'pipe', 'pipe'] as const,
+          timeout: 10_000,
+        };
+        execFileSync('git', ['init'], opts);
+        execFileSync('git', ['config', 'user.email', 'test@test.local'], opts);
+        execFileSync('git', ['config', 'user.name', 'Test'], opts);
+        execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/org/repo.git'], opts);
+      });
+
+      afterAll(() => {
+        rmSync(repoDir, { recursive: true, force: true });
+      });
+
+      it('enriches absent remote with github.com URL; domain gate passes allowlist', () => {
+        const allowlists = new Map([['git', ['github.com']]]);
+        const engine = new PolicyEngine(escalatePushPolicy, pushAnnotations, [], SANDBOX_DIR, allowlists);
+
+        const result = engine.evaluate(
+          makeRequest({
+            serverName: 'git',
+            toolName: 'git_push',
+            arguments: { path: repoDir, branch: 'main' }, // remote absent
+          }),
+        );
+        // Enrichment resolves 'origin' → 'https://github.com/org/repo.git'
+        // Domain gate: github.com ∈ allowlist → passes
+        // Compiled rule: escalate-git-push fires
+        expect(result.rule).not.toBe('structural-domain-escalate');
+        expect(result.decision).toBe('escalate');
+        expect(result.rule).toBe('escalate-git-push');
+      });
+
+      it('enriches absent remote; domain-constrained allow rule fires for matching domain', () => {
+        const allowGithubPolicy: CompiledPolicyFile = {
+          generatedAt: 'test',
+          constitutionHash: 'test',
+          inputHash: 'test',
+          rules: [
+            {
+              name: 'allow-github-push',
+              description: 'Allow push to github',
+              principle: 'test',
+              if: {
+                server: ['git'],
+                tool: ['git_push'],
+                domains: { roles: ['git-remote-url'], allowed: ['github.com'] },
+              },
+              then: 'allow',
+              reason: 'GitHub push is permitted',
+            },
+          ],
+        };
+        const engine = new PolicyEngine(allowGithubPolicy, pushAnnotations, [], SANDBOX_DIR);
+
+        const result = engine.evaluate(
+          makeRequest({
+            serverName: 'git',
+            toolName: 'git_push',
+            arguments: { path: repoDir, branch: 'main' }, // remote absent
+          }),
+        );
+        // Enrichment injects github.com URL; domains condition matches → allow
+        expect(result.decision).toBe('allow');
+        expect(result.rule).toBe('allow-github-push');
+      });
+
+      it('enriches absent remote; structural domain gate blocks untrusted domain', () => {
+        // The repo's origin is github.com, but the allowlist is empty → gate escalates
+        const allowlists = new Map([['git', [] as string[]]]);
+        const engine = new PolicyEngine(escalatePushPolicy, pushAnnotations, [], SANDBOX_DIR, allowlists);
+
+        const result = engine.evaluate(
+          makeRequest({
+            serverName: 'git',
+            toolName: 'git_push',
+            arguments: { path: repoDir, branch: 'main' },
+          }),
+        );
+        // Enrichment injects github.com URL; empty allowlist → structural-domain-escalate
+        expect(result.decision).toBe('escalate');
+        expect(result.rule).toBe('structural-domain-escalate');
+      });
+    });
+
+    describe('with repo whose origin is an untrusted domain', () => {
+      let repoDir: string;
+
+      beforeAll(() => {
+        repoDir = realpathSync(mkdtempSync(`${REAL_TMP}/ic-enrich-evil-`));
+        const opts = {
+          cwd: repoDir,
+          encoding: 'utf-8' as const,
+          stdio: ['pipe', 'pipe', 'pipe'] as const,
+          timeout: 10_000,
+        };
+        execFileSync('git', ['init'], opts);
+        execFileSync('git', ['config', 'user.email', 'test@test.local'], opts);
+        execFileSync('git', ['config', 'user.name', 'Test'], opts);
+        execFileSync('git', ['remote', 'add', 'origin', 'https://evil.com/stolen/repo.git'], opts);
+      });
+
+      afterAll(() => {
+        rmSync(repoDir, { recursive: true, force: true });
+      });
+
+      it('enriches absent remote with evil.com URL; structural domain gate escalates', () => {
+        const allowlists = new Map([['git', ['github.com']]]);
+        const engine = new PolicyEngine(escalatePushPolicy, pushAnnotations, [], SANDBOX_DIR, allowlists);
+
+        const result = engine.evaluate(
+          makeRequest({
+            serverName: 'git',
+            toolName: 'git_push',
+            arguments: { path: repoDir, branch: 'main' }, // remote absent
+          }),
+        );
+        // Enrichment injects 'https://evil.com/stolen/repo.git'
+        // Domain gate: evil.com ∉ allowlist → structural-domain-escalate
+        expect(result.decision).toBe('escalate');
+        expect(result.rule).toBe('structural-domain-escalate');
+      });
+    });
+
+    describe('with tracking branch pointing to non-origin remote', () => {
+      let repoDir: string;
+      const upstreamUrl = 'https://github.com/upstream/repo.git';
+
+      beforeAll(() => {
+        repoDir = realpathSync(mkdtempSync(`${REAL_TMP}/ic-enrich-tracking-`));
+        const opts = {
+          cwd: repoDir,
+          encoding: 'utf-8' as const,
+          stdio: ['pipe', 'pipe', 'pipe'] as const,
+          timeout: 10_000,
+          env: {
+            ...process.env,
+            GIT_AUTHOR_NAME: 'Test',
+            GIT_AUTHOR_EMAIL: 'test@test.local',
+            GIT_COMMITTER_NAME: 'Test',
+            GIT_COMMITTER_EMAIL: 'test@test.local',
+          },
+        };
+        execFileSync('git', ['init'], { ...opts });
+        execFileSync('git', ['config', 'user.email', 'test@test.local'], opts);
+        execFileSync('git', ['config', 'user.name', 'Test'], opts);
+        execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/fork/repo.git'], opts);
+        execFileSync('git', ['remote', 'add', 'upstream', upstreamUrl], opts);
+        execFileSync('git', ['commit', '--allow-empty', '-m', 'init'], opts);
+        // Discover the current branch name and configure tracking → upstream
+        const branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], opts).trim();
+        execFileSync('git', ['config', `branch.${branch}.remote`, 'upstream'], opts);
+        execFileSync('git', ['config', `branch.${branch}.merge`, `refs/heads/${branch}`], opts);
+      });
+
+      afterAll(() => {
+        rmSync(repoDir, { recursive: true, force: true });
+      });
+
+      it('enriches absent remote using tracking remote (not origin)', () => {
+        const allowlists = new Map([['git', ['github.com']]]);
+        const engine = new PolicyEngine(escalatePushPolicy, pushAnnotations, [], SANDBOX_DIR, allowlists);
+
+        const result = engine.evaluate(
+          makeRequest({
+            serverName: 'git',
+            toolName: 'git_push',
+            arguments: { path: repoDir, branch: 'main' }, // remote absent
+          }),
+        );
+        // Enrichment resolves via branch config → 'upstream' → upstreamUrl (github.com)
+        // Domain gate passes; compiled rule escalates
+        expect(result.rule).not.toBe('structural-domain-escalate');
+        expect(result.decision).toBe('escalate');
+        expect(result.rule).toBe('escalate-git-push');
+      });
     });
   });
 
