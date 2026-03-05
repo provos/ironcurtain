@@ -258,10 +258,10 @@ function resolveRealKey(host: string, config: IronCurtainConfig, oauthAccessToke
  * Ensures the Docker image exists and is up-to-date, building it
  * (and the base image) if needed.
  *
- * Extracted from DockerAgentSession.ensureImage() so both standard
- * and PTY paths can use it.
+ * Exported so DockerAgentSession can reuse this logic in its legacy
+ * (non-preBuiltInfrastructure) initialization path.
  */
-async function ensureImage(image: string, docker: DockerManager, ca: CertificateAuthority): Promise<void> {
+export async function ensureImage(image: string, docker: DockerManager, ca: CertificateAuthority): Promise<void> {
   const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
   const dockerDir = resolve(packageRoot, 'docker');
 
