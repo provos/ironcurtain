@@ -330,6 +330,7 @@ export class IronCurtainDaemon {
           summary: null,
           escalationsEncountered: 0,
           escalationsApproved: 0,
+          discardedChanges: null,
         };
         saveRunRecord(job.id, record);
         return record;
@@ -337,9 +338,13 @@ export class IronCurtainDaemon {
     }
 
     // Sync git repo if configured
+    let discardedChanges: string | null = null;
     if (job.gitRepo) {
       logger.info(`[Daemon] Syncing repo for job ${job.id}...`);
-      syncGitRepo(job.gitRepo, workspace);
+      discardedChanges = syncGitRepo(job.gitRepo, workspace);
+      if (discardedChanges) {
+        logger.info(`[Daemon] Discarded local changes in job ${job.id}:\n${discardedChanges}`);
+      }
       logger.info(`[Daemon] Repo synced for job ${job.id}`);
     }
     const patchedConfig = buildCronSessionConfig(globalConfig, job);
@@ -408,6 +413,7 @@ export class IronCurtainDaemon {
       summary,
       escalationsEncountered,
       escalationsApproved,
+      discardedChanges,
     };
 
     // Save run record

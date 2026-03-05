@@ -60,9 +60,11 @@ const GIT_SAFE_ENV: NodeJS.ProcessEnv = {
  *   FETCH_HEAD, leaving untracked files (agent artifacts) intact.
  *
  * @param verbose Pass true to inherit stdio (show git output in terminal)
+ * @returns diff --stat of tracked-file changes discarded by a hard reset,
+ *          or null on first clone / when there are no local changes.
  * @throws {Error} if the URI uses a disallowed protocol
  */
-export function syncGitRepo(uri: string, dir: string, verbose = false): void {
+export function syncGitRepo(uri: string, dir: string, verbose = false): string | null {
   validateGitUri(uri);
 
   const stdio = verbose ? ('inherit' as const) : ('pipe' as const);
@@ -70,19 +72,22 @@ export function syncGitRepo(uri: string, dir: string, verbose = false): void {
   if (existsSync(resolve(dir, '.git'))) {
     execFileSync('git', ['fetch', 'origin'], { cwd: dir, stdio, env });
 
-    // Log tracked-file changes that will be discarded by the hard reset.
+    // Capture tracked-file changes that will be discarded by the hard reset.
+    let discarded: string | null = null;
     try {
       const diff = execFileSync('git', ['diff', '--stat', 'FETCH_HEAD'], { cwd: dir, stdio: 'pipe', env });
       const diffStr = diff.toString().trim();
       if (diffStr) {
-        console.error(`[git-sync] Discarding local changes in ${dir}:\n${diffStr}`);
+        discarded = diffStr;
       }
     } catch {
       // Non-fatal: proceed with reset even if diff fails
     }
 
     execFileSync('git', ['reset', '--hard', 'FETCH_HEAD'], { cwd: dir, stdio, env });
+    return discarded;
   } else {
     execFileSync('git', ['clone', uri, '.'], { cwd: dir, stdio, env });
+    return null;
   }
 }

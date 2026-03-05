@@ -142,6 +142,9 @@ export interface RunRecord {
 
   /** Whether any escalations were approved (vs. denied or timed out). */
   readonly escalationsApproved: number;
+
+  /** git diff --stat of tracked-file changes discarded during pre-run sync. */
+  readonly discardedChanges: string | null;
 }
 
 /** Cron-specific budget defaults (differ from interactive defaults). */
