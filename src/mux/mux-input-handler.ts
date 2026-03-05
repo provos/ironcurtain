@@ -437,15 +437,8 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
       return { kind: 'enter-pty-mode' };
     }
 
-    // Escape: clear buffer, stay in command mode
-    if (key === ESCAPE) {
-      _inputBuffer = '';
-      _cursorPos = 0;
-      return { kind: 'redraw-input' };
-    }
-
-    // Ctrl-C: clear input buffer
-    if (key === CTRL_C) {
+    // Escape or Ctrl-C: clear buffer, stay in command mode
+    if (key === ESCAPE || key === CTRL_C) {
       _inputBuffer = '';
       _cursorPos = 0;
       return { kind: 'redraw-input' };

@@ -123,14 +123,16 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
 
   process.on('exit', restoreTerminal);
 
-  // SIGTERM triggers graceful shutdown by aborting the PTY connection.
+  // SIGTERM/SIGHUP trigger graceful shutdown by aborting the PTY connection.
   // This causes attachPty() to resolve, which then falls through to the
   // finally block for full async cleanup (containers, proxies, files).
+  // SIGHUP is included because node-pty's kill() sends SIGHUP by default.
   const shutdownController = new AbortController();
-  const handleSigterm = (): void => {
+  const handleShutdownSignal = (): void => {
     shutdownController.abort();
   };
-  process.on('SIGTERM', handleSigterm);
+  process.on('SIGTERM', handleShutdownSignal);
+  process.on('SIGHUP', handleShutdownSignal);
 
   // Infra variables set inside try, used in finally for cleanup
   let proxy: Awaited<ReturnType<typeof prepareDockerInfrastructure>>['proxy'] | null = null;
@@ -317,7 +319,8 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
 
     restoreTerminal();
     process.off('exit', restoreTerminal);
-    process.off('SIGTERM', handleSigterm);
+    process.off('SIGTERM', handleShutdownSignal);
+    process.off('SIGHUP', handleShutdownSignal);
 
     // Stop escalation watcher
     escalationFileWatcher?.stop();

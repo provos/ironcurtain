@@ -189,7 +189,7 @@ export async function createPtyBridge(options: PtyBridgeOptions): Promise<PtyBri
     },
 
     kill(): void {
-      if (_alive) child.kill();
+      if (_alive) child.kill('SIGTERM');
     },
 
     onOutput(callback: () => void): void {

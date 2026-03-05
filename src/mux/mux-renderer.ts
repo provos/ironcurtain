@@ -856,6 +856,21 @@ export function readTerminalBuffer(
 }
 
 /**
+ * Appends SGR color parameters for a single color slot (fg or bg).
+ * `base` is 38 for foreground, 48 for background; the default-color
+ * reset code is always base+1 (39 / 49).
+ */
+function pushColorSgr(sgr: number[], color: TermkitColor, base: 38 | 48): void {
+  if (color === 'default') {
+    sgr.push(base + 1);
+  } else if (typeof color === 'number') {
+    sgr.push(base, 5, color);
+  } else {
+    sgr.push(base, 2, color.r, color.g, color.b);
+  }
+}
+
+/**
  * Builds the SGR parameter string for a cell's style attributes.
  */
 export function buildSgrSequence(cell: TranslatedCell): string {
@@ -868,23 +883,8 @@ export function buildSgrSequence(cell: TranslatedCell): string {
   if (cell.inverse) sgr.push(7);
   if (cell.strikethrough) sgr.push(9);
 
-  // Foreground
-  if (cell.fg === 'default') {
-    sgr.push(39);
-  } else if (typeof cell.fg === 'number') {
-    sgr.push(38, 5, cell.fg);
-  } else {
-    sgr.push(38, 2, cell.fg.r, cell.fg.g, cell.fg.b);
-  }
-
-  // Background
-  if (cell.bg === 'default') {
-    sgr.push(49);
-  } else if (typeof cell.bg === 'number') {
-    sgr.push(48, 5, cell.bg);
-  } else {
-    sgr.push(48, 2, cell.bg.r, cell.bg.g, cell.bg.b);
-  }
+  pushColorSgr(sgr, cell.fg, 38);
+  pushColorSgr(sgr, cell.bg, 48);
 
   return sgr.join(';');
 }
