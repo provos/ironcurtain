@@ -223,6 +223,20 @@ export function computeConstitutionHash(basePath: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Daemon control socket
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns the daemon control socket path: {home}/daemon.sock
+ *
+ * The daemon listens on this Unix domain socket so CLI commands
+ * can communicate with a running daemon (e.g., add-job, run-job).
+ */
+export function getDaemonSocketPath(): string {
+  return resolve(getIronCurtainHome(), 'daemon.sock');
+}
+
+// ---------------------------------------------------------------------------
 // Job paths (cron mode)
 // ---------------------------------------------------------------------------
 

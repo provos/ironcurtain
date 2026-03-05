@@ -32,6 +32,7 @@ import { CRON_BUDGET_DEFAULTS } from '../cron/types.js';
 import { BudgetExhaustedError } from '../session/errors.js';
 import { validateWorkspacePath } from '../session/workspace-validation.js';
 import * as logger from '../logger.js';
+import { ControlSocketServer, type ControlRequestHandler } from './control-socket.js';
 
 export type { SessionSource, ManagedSession } from '../session/session-manager.js';
 
@@ -75,6 +76,9 @@ export class IronCurtainDaemon {
   /** Tracks which jobs are currently running (jobId -> session label). */
   private readonly activeJobRuns = new Map<string, number>();
 
+  /** Control socket server for CLI communication. */
+  private controlSocket: ControlSocketServer | null = null;
+
   /** Signal daemon instance (null if Signal not configured). */
   private signalDaemon: import('../signal/signal-bot-daemon.js').SignalBotDaemon | null = null;
 
@@ -95,6 +99,9 @@ export class IronCurtainDaemon {
    * optionally starts the Signal transport.
    */
   async start(): Promise<void> {
+    // Start control socket for CLI communication
+    await this.startControlSocket();
+
     // Load and schedule all enabled jobs
     const jobs = loadAllJobs();
     const enabledJobs = jobs.filter((j) => j.enabled);
@@ -121,6 +128,9 @@ export class IronCurtainDaemon {
     }
 
     console.error('IronCurtain daemon started.');
+    if (this.controlSocket) {
+      console.error('  Control socket: listening');
+    }
     if (enabledJobs.length > 0) {
       console.error(`  Scheduled jobs: ${enabledJobs.length}`);
     }
@@ -137,6 +147,16 @@ export class IronCurtainDaemon {
   /** Graceful shutdown. */
   async shutdown(): Promise<void> {
     logger.info('[Daemon] Shutting down...');
+
+    // Stop control socket first (reject new CLI commands)
+    if (this.controlSocket) {
+      try {
+        await this.controlSocket.stop();
+      } catch (err: unknown) {
+        logger.warn(`[Daemon] Error stopping control socket: ${String(err)}`);
+      }
+      this.controlSocket = null;
+    }
 
     // Unschedule all jobs
     this.scheduler.unscheduleAll();
@@ -507,6 +527,26 @@ export class IronCurtainDaemon {
   // -----------------------------------------------------------------------
   // Helpers
   // -----------------------------------------------------------------------
+
+  private async startControlSocket(): Promise<void> {
+    const handler: ControlRequestHandler = {
+      addJob: (job) => this.addJob(job),
+      removeJob: (jobId) => this.removeJob(jobId as JobId),
+      enableJob: (jobId) => this.enableJob(jobId as JobId),
+      disableJob: (jobId) => this.disableJob(jobId as JobId),
+      recompileJob: (jobId) => this.recompileJob(jobId as JobId),
+      runJobNow: (jobId) => this.runJobNow(jobId as JobId),
+      listJobs: () => this.listJobs(),
+    };
+
+    this.controlSocket = new ControlSocketServer(handler);
+    try {
+      await this.controlSocket.start();
+    } catch (err: unknown) {
+      logger.warn(`[Daemon] Failed to start control socket: ${err instanceof Error ? err.message : String(err)}`);
+      this.controlSocket = null;
+    }
+  }
 
   private readLastRunSummary(workspace: string): string | null {
     const summaryPath = resolve(workspace, 'last-run.md');

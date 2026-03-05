@@ -4,10 +4,16 @@
  * When no sub-subcommand is given, starts the unified daemon.
  * Subcommands: add-job, list-jobs, run-job, remove-job,
  *              disable-job, enable-job, recompile-job, logs
+ *
+ * Commands that modify daemon state (remove-job, enable-job, disable-job,
+ * recompile-job, run-job) first check if a daemon is running via the
+ * control socket. If running, the command is forwarded to the daemon.
+ * Otherwise, the command operates directly on the filesystem.
  */
 
 import { parseArgs } from 'node:util';
 import { IronCurtainDaemon } from './ironcurtain-daemon.js';
+import { isDaemonRunning, sendControlRequest, type ControlRequest, type ControlResponse } from './control-socket.js';
 import type { AgentId } from '../docker/agent-adapter.js';
 
 function printDaemonHelp(): void {
@@ -42,6 +48,37 @@ function requireJobIdArg(positionals: string[]): string {
     process.exit(1);
   }
   return jobId;
+}
+
+/**
+ * Attempts to forward a command to a running daemon.
+ * Returns the response if the daemon handled it, or null if no daemon
+ * is running (caller should fall back to local filesystem operations).
+ */
+async function tryForwardToDaemon(request: ControlRequest): Promise<ControlResponse | null> {
+  const running = await isDaemonRunning();
+  if (!running) return null;
+
+  const response = await sendControlRequest(request);
+  return response;
+}
+
+/**
+ * Handles a forwarded response: prints success/error and exits.
+ * Returns true if the response was handled (caller should return).
+ */
+function handleForwardedResponse(response: ControlResponse | null, successMessage?: string): boolean {
+  if (response === null) return false;
+
+  if (!response.ok) {
+    console.error(`Error from daemon: ${response.error}`);
+    process.exit(1);
+  }
+
+  if (successMessage) {
+    console.error(successMessage);
+  }
+  return true;
 }
 
 export async function runDaemonCommand(argv: string[]): Promise<void> {
@@ -107,36 +144,69 @@ export async function runDaemonCommand(argv: string[]): Promise<void> {
       break;
     }
     case 'list-jobs': {
+      const resp = await tryForwardToDaemon({ command: 'list-jobs' });
+      if (resp !== null) {
+        if (!resp.ok) {
+          console.error(`Error from daemon: ${resp.error}`);
+          process.exit(1);
+        }
+        const { formatDaemonJobList } = await import('../cron/job-commands.js');
+        formatDaemonJobList(resp.data as Array<Record<string, unknown>>);
+        break;
+      }
       const { runListJobs } = await import('../cron/job-commands.js');
       runListJobs();
       break;
     }
     case 'run-job': {
       const jobId = requireJobIdArg(positionals);
+      const resp = await tryForwardToDaemon({ command: 'run-job', jobId });
+      if (resp !== null) {
+        if (!resp.ok) {
+          console.error(`Error from daemon: ${resp.error}`);
+          process.exit(1);
+        }
+        const record = resp.data as import('../cron/types.js').RunRecord;
+        console.error(`Job "${jobId}" completed via daemon.`);
+        if (record) {
+          console.error(`  Outcome: ${record.outcome.kind}`);
+          console.error(`  Duration: ${record.budget.elapsedSeconds.toFixed(0)}s`);
+          console.error(`  Cost: $${record.budget.estimatedCostUsd.toFixed(2)}`);
+        }
+        break;
+      }
       const { runJobCommand } = await import('../cron/job-commands.js');
       await runJobCommand(jobId);
       break;
     }
     case 'remove-job': {
       const jobId = requireJobIdArg(positionals);
+      const resp = await tryForwardToDaemon({ command: 'remove-job', jobId });
+      if (handleForwardedResponse(resp, `Job "${jobId}" removed (daemon notified).`)) break;
       const { runRemoveJob } = await import('../cron/job-commands.js');
       runRemoveJob(jobId);
       break;
     }
     case 'disable-job': {
       const jobId = requireJobIdArg(positionals);
+      const resp = await tryForwardToDaemon({ command: 'disable-job', jobId });
+      if (handleForwardedResponse(resp, `Job "${jobId}" disabled (daemon notified).`)) break;
       const { runDisableJob } = await import('../cron/job-commands.js');
       await runDisableJob(jobId);
       break;
     }
     case 'enable-job': {
       const jobId = requireJobIdArg(positionals);
+      const resp = await tryForwardToDaemon({ command: 'enable-job', jobId });
+      if (handleForwardedResponse(resp, `Job "${jobId}" enabled (daemon notified).`)) break;
       const { runEnableJob } = await import('../cron/job-commands.js');
       await runEnableJob(jobId);
       break;
     }
     case 'recompile-job': {
       const jobId = requireJobIdArg(positionals);
+      const resp = await tryForwardToDaemon({ command: 'recompile-job', jobId });
+      if (handleForwardedResponse(resp, `Job "${jobId}" policy recompiled (daemon notified).`)) break;
       const { runRecompileJob } = await import('../cron/job-commands.js');
       await runRecompileJob(jobId);
       break;

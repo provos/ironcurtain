@@ -2,7 +2,9 @@
  * CLI subcommands for cron job management.
  *
  * These commands work without a running daemon -- they read/write
- * job files directly from ~/.ironcurtain/jobs/.
+ * job files directly from ~/.ironcurtain/jobs/. When a daemon is
+ * running, daemon-command.ts forwards commands via the control socket
+ * instead of calling these functions directly.
  */
 
 import { mkdirSync, writeFileSync, readFileSync, unlinkSync } from 'node:fs';
@@ -11,7 +13,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import chalk from 'chalk';
 import { loadAllJobs, loadJob, saveJob, deleteJob, loadRecentRuns } from './job-store.js';
-import { createJobId, type JobDefinition, type RunOutcome } from './types.js';
+import { createJobId, type JobDefinition, type RunOutcome, type RunRecord } from './types.js';
 import { getJobWorkspaceDir, getJobDir } from '../config/paths.js';
 import { compileTaskPolicy } from './compile-task-policy.js';
 import { parseCronExpression, getNextFireTime } from './cron-scheduler.js';
@@ -413,6 +415,50 @@ export function runListJobs(): void {
     // Get last run
     const lastRuns = loadRecentRuns(job.id, 1);
     const lastRun = lastRuns.length > 0 ? lastRuns[0] : undefined;
+    let lastRunStr = '';
+    if (lastRun) {
+      lastRunStr = `Last run: ${lastRun.startedAt} -- ${formatRunOutcome(lastRun.outcome)}`;
+      if (lastRun.summary) {
+        lastRunStr += `\n${' '.repeat(20)}${lastRun.summary.split('\n')[0].slice(0, 60)}`;
+      }
+    }
+
+    console.error(
+      `  ${chalk.bold(job.id.padEnd(20))} ${job.name.padEnd(30)} ${job.schedule.padEnd(15)} ${nextRunStr}${statusLabel}`,
+    );
+    if (lastRunStr) {
+      console.error(`  ${' '.repeat(20)}${lastRunStr}`);
+    }
+  }
+}
+
+/**
+ * Formats job list data received from the daemon control socket.
+ * Used when list-jobs is forwarded to a running daemon, which provides
+ * live running status and next-run times from the scheduler.
+ */
+export function formatDaemonJobList(
+  jobs: Array<Record<string, unknown>>,
+): void {
+  if (jobs.length === 0) {
+    console.error('No jobs configured. Use "ironcurtain daemon add-job" to create one.');
+    return;
+  }
+
+  console.error('Jobs (from running daemon):');
+  for (const entry of jobs) {
+    const job = entry.job as JobDefinition;
+    const nextRun = entry.nextRun as string | null;
+    const lastRun = entry.lastRun as RunRecord | undefined;
+    const isRunning = entry.isRunning as boolean;
+
+    const statusParts: string[] = [];
+    if (!job.enabled) statusParts.push(chalk.yellow('DISABLED'));
+    if (isRunning) statusParts.push(chalk.cyan('RUNNING'));
+    const statusLabel = statusParts.length > 0 ? ` ${statusParts.join(' ')}` : '';
+
+    const nextRunStr = nextRun ? `next: ${new Date(nextRun).toLocaleString()}` : '';
+
     let lastRunStr = '';
     if (lastRun) {
       lastRunStr = `Last run: ${lastRun.startedAt} -- ${formatRunOutcome(lastRun.outcome)}`;
