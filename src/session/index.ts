@@ -73,15 +73,7 @@ async function createBuiltinSession(options: SessionOptions): Promise<Session> {
   }
 
   const loggerWasActive = logger.isActive();
-  const sessionConfig = buildSessionConfig(
-    config,
-    effectiveSessionId,
-    sessionId,
-    options.resumeSessionId,
-    options.workspacePath,
-    options.policyDir,
-    options.disableAutoApprove,
-  );
+  const sessionConfig = buildSessionConfig(config, effectiveSessionId, sessionId, options);
 
   const session = new AgentSession(sessionConfig.config, sessionId, sessionConfig.escalationDir, options);
 
@@ -116,15 +108,7 @@ async function createDockerSession(
   const effectiveSessionId = options.resumeSessionId ?? sessionId;
 
   const loggerWasActive = logger.isActive();
-  const sessionConfig = buildSessionConfig(
-    config,
-    effectiveSessionId,
-    sessionId,
-    options.resumeSessionId,
-    options.workspacePath,
-    options.policyDir,
-    options.disableAutoApprove,
-  );
+  const sessionConfig = buildSessionConfig(config, effectiveSessionId, sessionId, options);
 
   const { prepareDockerInfrastructure } = await import('../docker/docker-infrastructure.js');
   const { DockerAgentSession } = await import('../docker/docker-agent-session.js');
@@ -218,11 +202,9 @@ function buildSessionConfig(
   config: IronCurtainConfig,
   effectiveSessionId: string,
   sessionId: SessionId,
-  resumeSessionId?: string,
-  workspacePath?: string,
-  policyDir?: string,
-  disableAutoApprove?: boolean,
+  opts: Pick<SessionOptions, 'resumeSessionId' | 'workspacePath' | 'policyDir' | 'disableAutoApprove'> = {},
 ): SessionDirConfig {
+  const { resumeSessionId, workspacePath, policyDir, disableAutoApprove } = opts;
   if (policyDir) {
     validatePolicyDir(policyDir);
   }

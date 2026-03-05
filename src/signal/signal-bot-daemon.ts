@@ -80,7 +80,7 @@ export class SignalBotDaemon {
   private config: ResolvedSignalConfig;
   private readonly containerManager: SignalContainerManager;
   private readonly mode: SessionMode;
-  readonly sessionManager: SessionManager;
+  private readonly sessionManager: SessionManager;
 
   // WebSocket state
   private ws: WebSocket | null = null;
@@ -364,11 +364,12 @@ export class SignalBotDaemon {
    * in-flight guards, BudgetExhaustedError, and response formatting.
    */
   private async forwardToSession(managed: ManagedSession, text: string): Promise<void> {
+    const transport = managed.transport as SignalSessionTransport;
     const sessionCount = this.sessionManager.size;
     logger.info(
       `[Signal Daemon] Routing message to session #${managed.label} ` +
         `(currentLabel=${this.sessionManager.currentLabel}, sessions=${this.sessionManager.all().map((m) => m.label).join(',')}, ` +
-        `transportLabel=${(managed.transport as SignalSessionTransport).sessionLabel})`,
+        `transportLabel=${transport.sessionLabel})`,
     );
 
     if (managed.messageInFlight) {
@@ -380,7 +381,7 @@ export class SignalBotDaemon {
 
     managed.messageInFlight = true;
     try {
-      const response = await (managed.transport as SignalSessionTransport).forwardMessage(text);
+      const response = await transport.forwardMessage(text);
       const styledText = markdownToSignal(response);
       await this.sendSignalMessage(prefixWithLabel(styledText, managed.label, this.sessionManager.size));
     } catch (error) {

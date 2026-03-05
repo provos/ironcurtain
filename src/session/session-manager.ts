@@ -178,14 +178,8 @@ export class SessionManager {
    * Returns null if no Signal sessions exist.
    */
   private findMostRecentSignalLabel(): number | null {
-    let best: number | null = null;
-    for (const managed of this.sessions.values()) {
-      if (managed.source.kind === 'signal') {
-        if (best === null || managed.label > best) {
-          best = managed.label;
-        }
-      }
-    }
-    return best;
+    const signalSessions = this.byKind('signal');
+    if (signalSessions.length === 0) return null;
+    return Math.max(...signalSessions.map((m) => m.label));
   }
 }
