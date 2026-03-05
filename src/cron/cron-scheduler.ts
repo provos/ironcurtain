@@ -77,6 +77,9 @@ function parseField(field: string, min: number, max: number): Set<number> {
   for (const part of field.split(',')) {
     const stepMatch = part.match(/^(.+)\/(\d+)$/);
     const step = stepMatch ? parseInt(stepMatch[2], 10) : 1;
+    if (stepMatch && (isNaN(step) || step < 1)) {
+      throw new Error(`Invalid step "${stepMatch[2]}" in "${part}" (expected integer >= 1)`);
+    }
     const range = stepMatch ? stepMatch[1] : part;
 
     if (range === '*') {

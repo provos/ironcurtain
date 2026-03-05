@@ -373,14 +373,18 @@ export class PolicyEngine {
     // After this point, `annotation` has the standard shape: args: Record<string, ArgumentRole[]>
     const annotation = this.getAnnotation(request.serverName, request.toolName, request.arguments);
 
+    // Structural checks first (protected-path deny, sandbox containment).
+    // Git enrichment runs AFTER structural invariants so that protected-path
+    // checks and sandbox containment are evaluated on the raw request before
+    // any filesystem access (git config reads) occurs.
+    const structural = this.evaluateStructuralInvariants(request, annotation);
+    if (structural.decision) return structural.decision;
+
     // Git remote enrichment: when a git push/pull/fetch omits the remote arg,
     // resolve the repo's configured default remote URL from the filesystem so
     // the domain gate and compiled domains conditions can evaluate it.
+    // Safe to run now: structural checks have confirmed paths are within sandbox.
     const effectiveRequest = this.enrichGitRequest(request, annotation);
-
-    // Structural checks (may resolve some roles via sandbox containment)
-    const structural = this.evaluateStructuralInvariants(effectiveRequest, annotation);
-    if (structural.decision) return structural.decision;
 
     // Compiled rule evaluation (skipping sandbox-resolved roles)
     return this.evaluateCompiledRules(effectiveRequest, structural.sandboxResolvedRoles, annotation);
@@ -412,9 +416,11 @@ export class PolicyEngine {
 
     if (missingUrlArgNames.length === 0) return request;
 
-    // Use the 'path' arg as the repo directory (convention for all git tools).
-    const rawPath = typeof request.arguments.path === 'string' ? request.arguments.path : '.';
-    const resolvedUrl = resolveDefaultGitRemote(rawPath);
+    // Only attempt enrichment when a valid path is provided. Falling back to
+    // '.' would resolve the default remote from the trusted process working
+    // directory, which may point at an unrelated repository.
+    if (typeof request.arguments.path !== 'string') return request;
+    const resolvedUrl = resolveDefaultGitRemote(request.arguments.path);
 
     if (resolvedUrl === undefined) return request;
 
@@ -524,10 +530,10 @@ export class PolicyEngine {
 
       // Fast path: all paths within sandbox, all roles sandbox-safe, no URL roles
       // → auto-allow without compiled rule evaluation.
-      // Applies to filesystem and git: if the agent can freely read/write/delete
-      // files in the sandbox (including .git/), git operations in the sandbox
-      // are no more privileged than direct file manipulation.
-      if ((isFilesystem || isGit) && allWithinSandbox && urlArgs.length === 0 && !toolHasUnsafePathRoles) {
+      // Applies only to the filesystem server. Git operations can have
+      // non-filesystem side effects (e.g., network, credentials), so they must
+      // always pass through compiled-rule evaluation.
+      if (isFilesystem && allWithinSandbox && urlArgs.length === 0 && !toolHasUnsafePathRoles) {
         return finalDecision({
           decision: 'allow',
           rule: 'structural-sandbox-allow',

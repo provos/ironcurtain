@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { mkdtempSync, rmSync, realpathSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -84,7 +84,7 @@ describe('resolveDefaultGitRemote', () => {
 
   it('returns undefined for a plain directory (not a git repo)', () => {
     const plain = join(tempDir, 'plain-dir');
-    execFileSync('mkdir', ['-p', plain]);
+    mkdirSync(plain, { recursive: true });
     expect(resolveDefaultGitRemote(plain)).toBeUndefined();
   });
 

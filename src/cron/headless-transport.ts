@@ -5,8 +5,9 @@
  * HeadlessTransport's run() resolves when the single-shot task
  * message completes. It does not accept follow-up messages.
  *
- * Escalations from the cron session are auto-denied by the policy
- * engine's default-deny fallthrough.
+ * Escalations raised during the cron session follow the normal
+ * daemon escalation resolution path and will be auto-denied
+ * if no human approval is provided within the timeout.
  */
 
 import { BaseTransport } from '../session/base-transport.js';

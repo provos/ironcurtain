@@ -266,7 +266,7 @@ function buildSessionConfig(
     ...(policyDir
       ? {
           generatedDir: policyDir,
-          toolAnnotationsDir: config.generatedDir,
+          toolAnnotationsDir: config.toolAnnotationsDir ?? config.generatedDir,
         }
       : {}),
     mcpServers: JSON.parse(JSON.stringify(config.mcpServers)) as typeof config.mcpServers,

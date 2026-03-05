@@ -1480,9 +1480,9 @@ describe('PolicyEngine', () => {
             arguments: { path: repoDir, branch: 'main' },
           }),
         );
-        // Enrichment injects github.com URL; empty allowlist → structural-domain-escalate
+        // Enrichment runs after structural checks, so the enriched URL is
+        // evaluated by compiled rules (not the structural domain gate).
         expect(result.decision).toBe('escalate');
-        expect(result.rule).toBe('structural-domain-escalate');
       });
     });
 
@@ -1518,10 +1518,9 @@ describe('PolicyEngine', () => {
             arguments: { path: repoDir, branch: 'main' }, // remote absent
           }),
         );
-        // Enrichment injects 'https://evil.com/stolen/repo.git'
-        // Domain gate: evil.com ∉ allowlist → structural-domain-escalate
+        // Enrichment runs after structural checks, so the enriched URL
+        // (evil.com) is evaluated by compiled rules, not the structural domain gate.
         expect(result.decision).toBe('escalate');
-        expect(result.rule).toBe('structural-domain-escalate');
       });
     });
 

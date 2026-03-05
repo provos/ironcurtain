@@ -81,7 +81,7 @@ export function syncGitRepo(uri: string, dir: string, verbose = false): string |
     execFileSync('git', ['reset', '--hard', 'FETCH_HEAD'], { cwd: dir, stdio, env });
     return discarded;
   } else {
-    execFileSync('git', ['clone', uri, '.'], { cwd: dir, stdio, env });
+    execFileSync('git', ['clone', '--', uri, '.'], { cwd: dir, stdio, env });
     return null;
   }
 }
