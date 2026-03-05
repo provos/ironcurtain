@@ -303,21 +303,26 @@ describe('extractDomainForRole', () => {
   });
 
   it('uses extractGitDomain for git-remote-url with SSH URL', () => {
-    expect(extractDomainForRole('git@github.com:user/repo.git', 'git-remote-url')).toBe('github.com');
+    expect(extractDomainForRole('git@github.com:user/repo.git', 'git-remote-url')).toBe('github.com/user/repo');
   });
 
   it('uses extractGitDomain for git-remote-url with HTTPS URL', () => {
-    expect(extractDomainForRole('https://gitlab.com/user/repo.git', 'git-remote-url')).toBe('gitlab.com');
+    expect(extractDomainForRole('https://gitlab.com/user/repo.git', 'git-remote-url')).toBe('gitlab.com/user/repo');
   });
 });
 
 describe('extractGitDomain', () => {
-  it('extracts domain from SSH URL', () => {
-    expect(extractGitDomain('git@github.com:user/repo.git')).toBe('github.com');
+  it('extracts hostname/owner/repo from SSH URL', () => {
+    expect(extractGitDomain('git@github.com:user/repo.git')).toBe('github.com/user/repo');
   });
 
-  it('extracts domain from HTTPS URL', () => {
-    expect(extractGitDomain('https://gitlab.com/user/repo.git')).toBe('gitlab.com');
+  it('extracts hostname/owner/repo from HTTPS URL', () => {
+    expect(extractGitDomain('https://gitlab.com/user/repo.git')).toBe('gitlab.com/user/repo');
+  });
+
+  it('returns hostname only when no repo path (HTTPS)', () => {
+    expect(extractGitDomain('https://github.com/')).toBe('github.com');
+    expect(extractGitDomain('https://github.com')).toBe('github.com');
   });
 
   it('returns named remote as-is (not a URL)', () => {

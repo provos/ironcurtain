@@ -392,7 +392,13 @@ export function getIdentifierRoles(): ArgumentRole[] {
  * serverNames including 'filesystem', the fast path must be updated
  * to check for those roles before auto-allowing.
  */
-export const SANDBOX_SAFE_PATH_ROLES: ReadonlySet<ArgumentRole> = new Set(['read-path', 'write-path', 'delete-path']);
+export const SANDBOX_SAFE_PATH_ROLES: ReadonlySet<ArgumentRole> = new Set([
+  'read-path',
+  'write-path',
+  'delete-path',
+  'write-history',
+  'delete-history',
+]);
 
 // ---------------------------------------------------------------------------
 // Conditional Role Resolution

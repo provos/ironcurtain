@@ -28,18 +28,31 @@ export function isIpAddress(domain: string): boolean {
 
 /**
  * Checks whether a domain matches any pattern in an allowlist.
- * Supports exact match, `*` wildcard (matches all domain names but NOT
- * IP addresses -- SSRF structural invariant), and `*.example.com` prefix
- * wildcards (matches example.com and *.example.com).
+ *
+ * Supports hierarchical matching for git-remote-url domains that include
+ * repository paths (e.g., `github.com/owner/repo`):
+ * - `*` wildcard: matches any domain name (not IPs — SSRF structural invariant).
+ * - `*.example.com` prefix wildcard: matches hostname portion only.
+ * - Pattern without `/` (e.g., `github.com`): matches hostname portion
+ *   (any repo on that host).
+ * - Pattern with `/` (e.g., `github.com/owner/repo`): exact match only.
+ *
+ * For plain hostname domains (e.g., from `fetch-url`), behavior is unchanged.
  */
 export function domainMatchesAllowlist(domain: string, allowedDomains: readonly string[]): boolean {
+  const slashIdx = domain.indexOf('/');
+  const hostname = slashIdx >= 0 ? domain.slice(0, slashIdx) : domain;
+
   return allowedDomains.some((pattern) => {
-    if (pattern === '*') return !isIpAddress(domain);
+    if (pattern === '*') return !isIpAddress(hostname);
     if (pattern.startsWith('*.')) {
       const suffix = pattern.slice(1); // ".github.com"
-      return domain === pattern.slice(2) || domain.endsWith(suffix);
+      return hostname === pattern.slice(2) || hostname.endsWith(suffix);
     }
-    return domain === pattern;
+    // Pattern with path → exact match required
+    if (pattern.includes('/')) return domain === pattern;
+    // Pattern without path → match hostname portion
+    return hostname === pattern;
   });
 }
 
@@ -84,12 +97,44 @@ export function extractDomainForRole(value: string, role: ArgumentRole): string 
   return role === 'git-remote-url' ? extractGitDomain(value) : extractDomain(value);
 }
 
-/** Extracts the domain from a git URL (HTTP or SSH format). */
+/**
+ * Strips `.git` suffix and trailing slashes from a git repo path component.
+ * Returns empty string for root-only paths (e.g., `/` or `/.git`).
+ */
+function normalizeGitRepoPath(pathname: string): string {
+  let s = pathname;
+  if (s.startsWith('/')) s = s.slice(1);
+  if (s.endsWith('/')) s = s.slice(0, -1);
+  if (s.endsWith('.git')) s = s.slice(0, -4);
+  if (s.endsWith('/')) s = s.slice(0, -1);
+  return s;
+}
+
+/**
+ * Extracts domain information from a git URL (HTTP or SSH format).
+ * Returns `hostname/owner/repo` when a meaningful path is present,
+ * or just `hostname` otherwise.
+ *
+ * Examples:
+ * - `https://github.com/provos/ironcurtain.git` → `github.com/provos/ironcurtain`
+ * - `git@github.com:provos/ironcurtain.git` → `github.com/provos/ironcurtain`
+ * - `https://github.com/` → `github.com`
+ */
 export function extractGitDomain(value: string): string {
   // SSH format: git@host:path
-  const sshMatch = value.match(/^(?:[\w.+-]+@)?([^:]+):/);
-  if (sshMatch && !value.includes('://')) return sshMatch[1];
-  return extractDomain(value);
+  const sshMatch = value.match(/^(?:[\w.+-]+@)?([^:]+):(.*)/);
+  if (sshMatch && !value.includes('://')) {
+    const host = sshMatch[1];
+    const repoPath = normalizeGitRepoPath(sshMatch[2]);
+    return repoPath ? `${host}/${repoPath}` : host;
+  }
+  try {
+    const url = new URL(value);
+    const repoPath = normalizeGitRepoPath(url.pathname);
+    return repoPath ? `${url.hostname}/${repoPath}` : url.hostname;
+  } catch {
+    return value;
+  }
 }
 
 /**

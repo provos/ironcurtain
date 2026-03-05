@@ -287,7 +287,7 @@ Produce an ORDERED list of policy rules (first match wins). Each rule has:
   - "tool": array of specific tool names (omit = any matching tool)
   - "sideEffects": match on the tool's sideEffects annotation (omit = don't filter)
   - "paths": path condition with "roles" and "within" (concrete absolute directory)
-  - "domains": domain condition with "roles" and "allowed" (list of allowed domain patterns)
+  - "domains": domain condition with "roles" and "allowed" (list of allowed domain patterns). For git-remote-url roles, use hostname/owner/repo patterns for specific repos (e.g., "github.com/provos/ironcurtain") or hostname-only for any repo on that host (e.g., "github.com"). Git tools with both path and URL roles need "domains" conditions for git-remote-url (path roles get sandbox-resolved separately).
   - "lists": array of list conditions with "roles", "allowed", and "matchType"
 - "then": "allow" or "escalate" (deny is implicit via default-deny)
 - "reason": human-readable explanation
