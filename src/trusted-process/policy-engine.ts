@@ -308,11 +308,11 @@ function expandListReferences(policy: CompiledPolicyFile, lists: DynamicListsFil
 }
 
 /** Sentinel result returned when no rule matches (default-deny). */
-const DEFAULT_DENY_RESULT: EvaluationResult = {
+const DEFAULT_DENY_RESULT: EvaluationResult = Object.freeze({
   decision: 'deny',
   rule: 'default-deny',
   reason: 'No matching policy rule -- denied by default',
-};
+}) as EvaluationResult;
 
 /** Converts a matched compiled rule into an EvaluationResult. */
 function ruleToResult(rule: CompiledRule): EvaluationResult {
