@@ -6,7 +6,7 @@
  * are not exported -- callers depend on the Session interface only.
  */
 
-import { existsSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { loadConfig } from '../config/index.js';
 import {
@@ -178,8 +178,21 @@ interface SessionDirConfig {
  * @throws {SessionError} if the path escapes the IronCurtain home.
  */
 function validatePolicyDir(policyDir: string): void {
-  const resolvedPolicy = resolve(policyDir);
-  const home = resolve(getIronCurtainHome());
+  // Use realpathSync to canonicalize and follow symlinks, preventing
+  // symlink escapes (e.g., ~/.ironcurtain/evil -> /etc/attacker-policy).
+  // Fall back to resolve() if the path doesn't exist yet.
+  let resolvedPolicy: string;
+  try {
+    resolvedPolicy = realpathSync(resolve(policyDir));
+  } catch {
+    resolvedPolicy = resolve(policyDir);
+  }
+  let home: string;
+  try {
+    home = realpathSync(resolve(getIronCurtainHome()));
+  } catch {
+    home = resolve(getIronCurtainHome());
+  }
 
   if (!isEqualOrInside(resolvedPolicy, home)) {
     throw new SessionError(

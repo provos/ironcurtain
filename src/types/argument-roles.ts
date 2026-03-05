@@ -477,7 +477,14 @@ export function resolveStoredAnnotationsFile(stored: StoredToolAnnotationsFile):
         serverName,
         {
           ...server,
-          tools: server.tools.map((tool) => resolveStoredAnnotation(tool, {})),
+          tools: server.tools.map((tool) => {
+            const resolvedArgs: Record<string, ArgumentRole[]> = {};
+            for (const [argName, spec] of Object.entries(tool.args)) {
+              resolvedArgs[argName] = extractDefaultRoles(spec);
+            }
+            const { args: _rawArgs, ...rest } = tool;
+            return { ...rest, args: resolvedArgs };
+          }),
         },
       ]),
     ),

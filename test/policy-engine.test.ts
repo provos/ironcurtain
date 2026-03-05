@@ -1,5 +1,5 @@
 import { homedir } from 'node:os';
-import { mkdtempSync, rmSync, realpathSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, realpathSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import type { CompiledPolicyFile, ToolAnnotationsFile, StoredToolAnnotationsFile } from '../src/pipeline/types.js';
@@ -1398,7 +1398,8 @@ describe('PolicyEngine', () => {
       let repoDir: string;
 
       beforeAll(() => {
-        repoDir = realpathSync(mkdtempSync(`${REAL_TMP}/ic-enrich-github-`));
+        mkdirSync(SANDBOX_DIR, { recursive: true });
+        repoDir = realpathSync(mkdtempSync(`${SANDBOX_DIR}/ic-enrich-github-`));
         const opts = {
           cwd: repoDir,
           encoding: 'utf-8' as const,
@@ -1490,7 +1491,8 @@ describe('PolicyEngine', () => {
       let repoDir: string;
 
       beforeAll(() => {
-        repoDir = realpathSync(mkdtempSync(`${REAL_TMP}/ic-enrich-evil-`));
+        mkdirSync(SANDBOX_DIR, { recursive: true });
+        repoDir = realpathSync(mkdtempSync(`${SANDBOX_DIR}/ic-enrich-evil-`));
         const opts = {
           cwd: repoDir,
           encoding: 'utf-8' as const,
@@ -1529,7 +1531,8 @@ describe('PolicyEngine', () => {
       const upstreamUrl = 'https://github.com/upstream/repo.git';
 
       beforeAll(() => {
-        repoDir = realpathSync(mkdtempSync(`${REAL_TMP}/ic-enrich-tracking-`));
+        mkdirSync(SANDBOX_DIR, { recursive: true });
+        repoDir = realpathSync(mkdtempSync(`${SANDBOX_DIR}/ic-enrich-tracking-`));
         const opts = {
           cwd: repoDir,
           encoding: 'utf-8' as const,

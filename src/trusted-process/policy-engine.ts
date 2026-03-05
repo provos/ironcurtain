@@ -432,6 +432,19 @@ export class PolicyEngine {
     // '.' would resolve the default remote from the trusted process working
     // directory, which may point at an unrelated repository.
     if (typeof request.arguments.path !== 'string') return request;
+
+    // Gate on sandbox containment: only read git config from repos inside the
+    // allowed directory. Without this, an attacker-controlled path could trigger
+    // filesystem reads from arbitrary locations in the trusted process.
+    if (this.allowedDirectory) {
+      try {
+        const realPath = resolveRealPath(request.arguments.path);
+        if (!isWithinDirectory(realPath, this.allowedDirectory)) return request;
+      } catch {
+        return request; // path doesn't exist or can't be resolved
+      }
+    }
+
     const resolvedUrl = resolveDefaultGitRemote(request.arguments.path);
 
     if (resolvedUrl === undefined) return request;

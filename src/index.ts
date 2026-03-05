@@ -83,7 +83,7 @@ export async function main(args?: string[]): Promise<void> {
   // Check constitution freshness once here, before any proxy processes are spawned.
   const { compiledPolicy } = loadGeneratedPolicy({
     policyDir: config.generatedDir,
-    toolAnnotationsDir: config.generatedDir,
+    toolAnnotationsDir: config.toolAnnotationsDir ?? config.generatedDir,
     fallbackDir: getPackageGeneratedDir(),
   });
   checkConstitutionFreshness(compiledPolicy, config.constitutionPath);

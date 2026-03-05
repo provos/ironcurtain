@@ -62,7 +62,7 @@ export function syncGitRepo(uri: string, dir: string, verbose = false): string |
   validateGitUri(uri);
 
   const stdio = verbose ? ('inherit' as const) : ('pipe' as const);
-  const env: NodeJS.ProcessEnv = { ...process.env, GIT_PROTOCOL_WHITELIST: 'https:git:ssh:file' };
+  const env: NodeJS.ProcessEnv = { ...process.env, GIT_ALLOW_PROTOCOL: 'https:http:ssh:git:file' };
   if (existsSync(resolve(dir, '.git'))) {
     execFileSync('git', ['fetch', 'origin'], { cwd: dir, stdio, env });
 
