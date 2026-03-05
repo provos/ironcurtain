@@ -363,13 +363,16 @@ export class IronCurtainDaemon {
     let escalationsEncountered = 0;
     let escalationsApproved = 0; // TODO: increment when escalation is approved via Signal
 
-    // Create the session with per-job policy and escalation handler
+    // Create the session with per-job policy and escalation handler.
+    // Auto-approver is disabled: cron sessions have no interactive user
+    // context, so intent-matching against a user message is meaningless.
     const session = await createSession({
       mode: this.mode,
       config: patchedConfig,
       workspacePath: workspace,
       policyDir: jobGeneratedDir,
       systemPromptAugmentation: augmentation,
+      disableAutoApprove: true,
       onEscalation: (request) => {
         escalationsEncountered++;
         this.handleCronEscalation(request, job);

@@ -80,6 +80,7 @@ async function createBuiltinSession(options: SessionOptions): Promise<Session> {
     options.resumeSessionId,
     options.workspacePath,
     options.policyDir,
+    options.disableAutoApprove,
   );
 
   const session = new AgentSession(sessionConfig.config, sessionId, sessionConfig.escalationDir, options);
@@ -122,6 +123,7 @@ async function createDockerSession(
     options.resumeSessionId,
     options.workspacePath,
     options.policyDir,
+    options.disableAutoApprove,
   );
 
   const { prepareDockerInfrastructure } = await import('../docker/docker-infrastructure.js');
@@ -219,6 +221,7 @@ function buildSessionConfig(
   resumeSessionId?: string,
   workspacePath?: string,
   policyDir?: string,
+  disableAutoApprove?: boolean,
 ): SessionDirConfig {
   if (policyDir) {
     validatePolicyDir(policyDir);
@@ -270,6 +273,10 @@ function buildSessionConfig(
         }
       : {}),
     mcpServers: JSON.parse(JSON.stringify(config.mcpServers)) as typeof config.mcpServers,
+    // Disable auto-approver for headless sessions (no interactive user context)
+    ...(disableAutoApprove
+      ? { userConfig: { ...config.userConfig, autoApprove: { ...config.userConfig.autoApprove, enabled: false } } }
+      : {}),
   };
 
   // Patch MCP server args to use the session-specific sandbox directory

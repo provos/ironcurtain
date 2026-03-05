@@ -220,6 +220,13 @@ export interface SessionOptions {
    * conventions.
    */
   systemPromptAugmentation?: string;
+
+  /**
+   * When true, disables the auto-approver for this session even if
+   * enabled in user config. Used by cron/headless sessions where there
+   * is no interactive user context to match escalations against.
+   */
+  disableAutoApprove?: boolean;
 }
 
 /**
