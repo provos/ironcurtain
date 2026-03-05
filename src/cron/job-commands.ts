@@ -15,7 +15,7 @@ import { createJobId, type JobDefinition, type RunOutcome } from './types.js';
 import { getJobWorkspaceDir, getJobDir } from '../config/paths.js';
 import { compileTaskPolicy } from './compile-task-policy.js';
 import { createCronScheduler, parseCronExpression } from './cron-scheduler.js';
-import { syncGitRepo } from './git-sync.js';
+import { syncGitRepo, validateGitUri } from './git-sync.js';
 
 /**
  * Opens the user's $VISUAL / $EDITOR with a temporary file and returns
@@ -216,6 +216,14 @@ async function runJobReviewLoop(initial: JobDefinition, isNew: boolean): Promise
           message: 'Git repository URI (optional, leave empty to skip)',
           placeholder: 'git@github.com:org/repo.git',
           initialValue: job.gitRepo ?? '',
+          validate: (v) => {
+            if (!v) return; // empty is valid (skip)
+            try {
+              validateGitUri(v);
+            } catch (err) {
+              return err instanceof Error ? err.message : String(err);
+            }
+          },
         });
         if (isCancel(inp)) {
           cancel('Cancelled.');

@@ -3,6 +3,56 @@ import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 /**
+ * Allowlisted git URI schemes. Git's ext:: protocol allows arbitrary
+ * command execution and must never be accepted.
+ *
+ * Accepted forms:
+ *   - https://host/repo.git
+ *   - http://host/repo.git
+ *   - ssh://user@host/repo.git
+ *   - git://host/repo.git
+ *   - git@host:org/repo.git  (SCP-style shorthand for SSH)
+ *   - file:///path/to/repo
+ */
+const SAFE_URI_PATTERNS: ReadonlyArray<RegExp> = [
+  /^https:\/\//i,
+  /^http:\/\//i,
+  /^ssh:\/\//i,
+  /^git:\/\//i,
+  /^file:\/\//i,
+  /^[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+:/, // SCP-style: user@host:path
+];
+
+/**
+ * Validates that a git URI uses a safe transport protocol.
+ *
+ * Rejects dangerous protocols like ext:: which allow arbitrary
+ * command execution, and any other unrecognized scheme.
+ *
+ * @throws {Error} if the URI uses a disallowed protocol
+ */
+export function validateGitUri(uri: string): void {
+  const trimmed = uri.trim();
+  if (!trimmed) {
+    throw new Error('Git URI must not be empty');
+  }
+
+  const isSafe = SAFE_URI_PATTERNS.some((pattern) => pattern.test(trimmed));
+  if (!isSafe) {
+    throw new Error(
+      `Rejected git URI with disallowed protocol: "${trimmed}". ` +
+        `Only https, http, ssh, git, file, and SCP-style (user@host:path) URIs are allowed.`,
+    );
+  }
+}
+
+/** Restricted environment for git subprocesses: only safe transport protocols. */
+const GIT_SAFE_ENV: Readonly<Record<string, string>> = {
+  ...process.env,
+  GIT_PROTOCOL_WHITELIST: 'https:git:ssh:file',
+} as Record<string, string>;
+
+/**
  * Clones or refreshes a git repository in the given directory.
  *
  * - First call: clones the repo into dir (dir must exist and be empty)
@@ -10,13 +60,17 @@ import { resolve } from 'node:path';
  *   FETCH_HEAD, leaving untracked files (agent artifacts) intact.
  *
  * @param verbose Pass true to inherit stdio (show git output in terminal)
+ * @throws {Error} if the URI uses a disallowed protocol
  */
 export function syncGitRepo(uri: string, dir: string, verbose = false): void {
+  validateGitUri(uri);
+
   const stdio = verbose ? ('inherit' as const) : ('pipe' as const);
+  const env = GIT_SAFE_ENV;
   if (existsSync(resolve(dir, '.git'))) {
-    execFileSync('git', ['fetch', 'origin'], { cwd: dir, stdio });
-    execFileSync('git', ['reset', '--hard', 'FETCH_HEAD'], { cwd: dir, stdio });
+    execFileSync('git', ['fetch', 'origin'], { cwd: dir, stdio, env });
+    execFileSync('git', ['reset', '--hard', 'FETCH_HEAD'], { cwd: dir, stdio, env });
   } else {
-    execFileSync('git', ['clone', uri, '.'], { cwd: dir, stdio });
+    execFileSync('git', ['clone', uri, '.'], { cwd: dir, stdio, env });
   }
 }

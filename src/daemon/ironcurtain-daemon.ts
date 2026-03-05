@@ -31,6 +31,7 @@ import { compileTaskPolicy } from '../cron/compile-task-policy.js';
 import type { JobDefinition, JobId, RunRecord, RunOutcome } from '../cron/types.js';
 import { CRON_BUDGET_DEFAULTS } from '../cron/types.js';
 import { BudgetExhaustedError } from '../session/errors.js';
+import { validateWorkspacePath } from '../session/workspace-validation.js';
 import * as logger from '../logger.js';
 
 export type { SessionSource, ManagedSession } from '../session/session-manager.js';
@@ -174,6 +175,12 @@ export class IronCurtainDaemon {
    * before confirming. Schedules the job if enabled.
    */
   async addJob(job: JobDefinition): Promise<void> {
+    // Validate custom workspace before proceeding
+    if (job.workspace) {
+      const globalConfig = loadConfig();
+      validateWorkspacePath(job.workspace, globalConfig.protectedPaths);
+    }
+
     // Ensure workspace exists
     const workspace = job.workspace ?? getJobWorkspaceDir(job.id);
     mkdirSync(workspace, { recursive: true });
@@ -304,6 +311,30 @@ export class IronCurtainDaemon {
   private async executeJob(job: JobDefinition): Promise<RunRecord> {
     const startedAt = new Date().toISOString();
     const workspace = job.workspace ?? getJobWorkspaceDir(job.id);
+    const globalConfig = loadConfig();
+
+    // Validate custom workspace paths against sandbox containment rules.
+    // Default job workspace dirs are safe (under ~/.ironcurtain/jobs/), but
+    // user-provided workspace fields in job.json could be arbitrary paths.
+    if (job.workspace) {
+      try {
+        validateWorkspacePath(job.workspace, globalConfig.protectedPaths);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        logger.warn(`[Daemon] Job ${job.id} has invalid workspace: ${message}`);
+        const record: RunRecord = {
+          startedAt,
+          completedAt: new Date().toISOString(),
+          outcome: { kind: 'error', message: `Invalid workspace: ${message}` },
+          budget: { totalTokens: 0, stepCount: 0, elapsedSeconds: 0, estimatedCostUsd: 0 },
+          summary: null,
+          escalationsEncountered: 0,
+          escalationsApproved: 0,
+        };
+        saveRunRecord(job.id, record);
+        return record;
+      }
+    }
 
     // Sync git repo if configured
     if (job.gitRepo) {
@@ -311,8 +342,6 @@ export class IronCurtainDaemon {
       syncGitRepo(job.gitRepo, workspace);
       logger.info(`[Daemon] Repo synced for job ${job.id}`);
     }
-
-    const globalConfig = loadConfig();
     const patchedConfig = buildCronSessionConfig(globalConfig, job);
     const jobGeneratedDir = getJobGeneratedDir(job.id);
 
@@ -325,13 +354,21 @@ export class IronCurtainDaemon {
     // Create the headless transport
     const transport = new HeadlessTransport({ taskMessage: job.taskDescription });
 
-    // Create the session with per-job policy
+    // Track escalation counts for this run
+    let escalationsEncountered = 0;
+    const escalationsApproved = 0;
+
+    // Create the session with per-job policy and escalation handler
     const session = await createSession({
       mode: this.mode,
       config: patchedConfig,
       workspacePath: workspace,
       policyDir: jobGeneratedDir,
       systemPromptAugmentation: augmentation,
+      onEscalation: (request) => {
+        escalationsEncountered++;
+        this.handleCronEscalation(request, job);
+      },
     });
 
     // Register in session manager
@@ -369,8 +406,8 @@ export class IronCurtainDaemon {
         estimatedCostUsd: budgetStatus.estimatedCostUsd,
       },
       summary,
-      escalationsEncountered: 0, // TODO: track via escalation callbacks
-      escalationsApproved: 0,
+      escalationsEncountered,
+      escalationsApproved,
     };
 
     // Save run record
