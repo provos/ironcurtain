@@ -461,9 +461,10 @@ export class PolicyEngine {
     if (this.allowedDirectory && resolvedSandboxPaths.length > 0) {
       const sandboxDir = this.allowedDirectory;
 
-      // Sandbox containment is only a structural allow for filesystem operations.
-      // For other servers, paths are locators (e.g. "which repo dir") — the
-      // operation itself needs compiled-rule evaluation regardless of path location.
+      // The fast-path auto-allow is filesystem-only: for other servers, paths
+      // may be locators ("which repo dir") and the operation itself still needs
+      // compiled-rule evaluation (e.g. git_status path inside sandbox is still
+      // a git operation that rules must authorize).
       const isFilesystem = request.serverName === 'filesystem';
 
       // Fast path: all annotated paths within sandbox -> auto-allow (filesystem only)
@@ -478,11 +479,21 @@ export class PolicyEngine {
         });
       }
 
-      // Partial sandbox resolution (filesystem only): check each path role
-      // independently. A role is "sandbox-resolved" if every path for that
-      // role is within the sandbox. Only sandbox-safe roles can be resolved.
-      // Roles with zero extracted paths are not resolved.
-      if (isFilesystem && annotation) {
+      // Partial sandbox resolution: check each SANDBOX_SAFE path role independently.
+      // A role is "sandbox-resolved" if every path for that role is within the sandbox,
+      // which removes it from compiled-rule evaluation (the remaining roles still run).
+      //
+      // Applied to filesystem always; extended to git only when the tool also has URL roles.
+      // - filesystem: file read/write/delete within sandbox needs no further rule
+      // - git + URL roles (e.g. git_clone): write-path destination inside sandbox is safe;
+      //   the URL role (git-remote-url) still runs through compiled rules independently.
+      //   Without URL roles (git_status, git_branch, git_add, git_commit, etc.), git paths
+      //   are repo locators and the operation itself still needs compiled-rule evaluation.
+      //
+      // write-history and delete-history are excluded from SANDBOX_SAFE_PATH_ROLES and
+      // therefore always fall through to compiled rules, even when the repo is in sandbox.
+      const extendsToGit = request.serverName === 'git' && urlArgs.length > 0;
+      if ((isFilesystem || extendsToGit) && annotation) {
         for (const role of pathRoles) {
           if (!SANDBOX_SAFE_PATH_ROLES.has(role)) continue;
           const pathsForRole = extractAnnotatedPaths(request.arguments, annotation, [role]);

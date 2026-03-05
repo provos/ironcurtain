@@ -997,8 +997,8 @@ describe('PolicyEngine', () => {
           arguments: { url: 'https://github.com/user/repo.git', path: `${SANDBOX_DIR}/repo` },
         }),
       );
-      // Domain passes structural check, but sandbox-allow is filesystem-only
-      // and domain check is reject-only. Roles go to compiled rule evaluation → escalate-git-clone.
+      // Domain passes structural check. write-path is sandbox-resolved (path in SANDBOX_DIR).
+      // git-remote-url goes to compiled rule evaluation → escalate-git-clone.
       expect(result.decision).toBe('escalate');
       expect(result.rule).toBe('escalate-git-clone');
     });
@@ -1046,6 +1046,44 @@ describe('PolicyEngine', () => {
       );
       // No structural domain check, falls through to compiled rule evaluation
       expect(result.rule).not.toBe('structural-domain-escalate');
+    });
+
+    it('sandbox-resolves write-path for git_clone when URL roles are present (Issue 3)', () => {
+      // git_clone has both write-path and git-remote-url. When path is inside
+      // the sandbox, write-path is structurally resolved. Only git-remote-url
+      // then runs through compiled rules — so a URL-allow rule can permit the clone
+      // without the path role forcing re-evaluation.
+      const allowClonePolicy: CompiledPolicyFile = {
+        generatedAt: 'test',
+        constitutionHash: 'test',
+        inputHash: 'test',
+        rules: [
+          {
+            name: 'allow-git-clone-github',
+            description: 'Allow cloning from GitHub',
+            principle: 'Least privilege',
+            if: {
+              server: ['git'],
+              tool: ['git_clone'],
+              domains: { roles: ['git-remote-url'], allowed: ['github.com'] },
+            },
+            then: 'allow',
+            reason: 'GitHub is trusted for cloning',
+          },
+        ],
+      };
+      const cloneEngine = new PolicyEngine(allowClonePolicy, gitAnnotations, [], SANDBOX_DIR);
+
+      const result = cloneEngine.evaluate(
+        makeRequest({
+          serverName: 'git',
+          toolName: 'git_clone',
+          arguments: { url: 'https://github.com/user/repo.git', path: `${SANDBOX_DIR}/repo` },
+        }),
+      );
+      // write-path is sandbox-resolved (path in sandbox); git-remote-url → allow-git-clone-github
+      expect(result.decision).toBe('allow');
+      expect(result.rule).toBe('allow-git-clone-github');
     });
 
     it('handles SSH git URLs in domain check', () => {
@@ -1340,10 +1378,11 @@ describe('PolicyEngine', () => {
       expect(result.rule).toBe('allow-git-staging-and-commit');
     });
 
-    it('sandbox-resolves read-path but not write-history (partial resolution)', () => {
+    it('escalates git_reset in sandbox (no sandbox resolution for git without URL roles)', () => {
       // git_reset has path: ['read-path', 'write-history']
-      // read-path should be sandbox-resolved (skipped in compiled rule evaluation)
-      // write-history should NOT be sandbox-resolved (evaluated in compiled rule evaluation)
+      // git sandbox-resolution only applies when URL roles are also present (e.g. git_clone).
+      // git_reset has no URL roles → falls through to compiled rule evaluation entirely.
+      // write-history (not sandbox-safe) → hits escalate-git-destructive-ops.
       const result = engine.evaluate(
         makeRequest({
           serverName: 'git',
@@ -1351,7 +1390,6 @@ describe('PolicyEngine', () => {
           arguments: { path: `${SANDBOX_DIR}/repo`, mode: 'soft' },
         }),
       );
-      // Falls to compiled rule evaluation with write-history unresolved → hits escalate rule
       expect(result.decision).toBe('escalate');
       expect(result.rule).toBe('escalate-git-destructive-ops');
     });
