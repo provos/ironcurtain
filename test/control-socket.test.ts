@@ -7,7 +7,6 @@ import {
   sendControlRequest,
   isDaemonRunning,
   type ControlRequestHandler,
-  type ControlResponse,
 } from '../src/daemon/control-socket.js';
 import type { JobDefinition, RunRecord } from '../src/cron/types.js';
 import type { JobId } from '../src/cron/types.js';

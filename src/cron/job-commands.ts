@@ -389,6 +389,35 @@ export async function runEditJobWizard(jobIdStr: string): Promise<void> {
 }
 
 /** Lists all jobs with their schedules and last run status. */
+/** Shared display data for a single job entry. */
+interface JobDisplayEntry {
+  job: JobDefinition;
+  nextRunStr: string;
+  lastRun: RunRecord | undefined;
+  statusLabels: string[];
+}
+
+/** Formats and prints a single job entry. */
+function printJobEntry(entry: JobDisplayEntry): void {
+  const statusLabel =
+    entry.statusLabels.length > 0 ? ` ${entry.statusLabels.join(' ')}` : '';
+
+  let lastRunStr = '';
+  if (entry.lastRun) {
+    lastRunStr = `Last run: ${entry.lastRun.startedAt} -- ${formatRunOutcome(entry.lastRun.outcome)}`;
+    if (entry.lastRun.summary) {
+      lastRunStr += `\n${' '.repeat(20)}${entry.lastRun.summary.split('\n')[0].slice(0, 60)}`;
+    }
+  }
+
+  console.error(
+    `  ${chalk.bold(entry.job.id.padEnd(20))} ${entry.job.name.padEnd(30)} ${entry.job.schedule.padEnd(15)} ${entry.nextRunStr}${statusLabel}`,
+  );
+  if (lastRunStr) {
+    console.error(`  ${' '.repeat(20)}${lastRunStr}`);
+  }
+}
+
 export function runListJobs(): void {
   const jobs = loadAllJobs();
 
@@ -399,9 +428,6 @@ export function runListJobs(): void {
 
   console.error('Jobs:');
   for (const job of jobs) {
-    const statusLabel = job.enabled ? '' : chalk.yellow(' DISABLED');
-
-    // Get next run time
     let nextRunStr = '';
     if (job.enabled) {
       try {
@@ -412,24 +438,22 @@ export function runListJobs(): void {
       }
     }
 
-    // Get last run
     const lastRuns = loadRecentRuns(job.id, 1);
-    const lastRun = lastRuns.length > 0 ? lastRuns[0] : undefined;
-    let lastRunStr = '';
-    if (lastRun) {
-      lastRunStr = `Last run: ${lastRun.startedAt} -- ${formatRunOutcome(lastRun.outcome)}`;
-      if (lastRun.summary) {
-        lastRunStr += `\n${' '.repeat(20)}${lastRun.summary.split('\n')[0].slice(0, 60)}`;
-      }
-    }
-
-    console.error(
-      `  ${chalk.bold(job.id.padEnd(20))} ${job.name.padEnd(30)} ${job.schedule.padEnd(15)} ${nextRunStr}${statusLabel}`,
-    );
-    if (lastRunStr) {
-      console.error(`  ${' '.repeat(20)}${lastRunStr}`);
-    }
+    printJobEntry({
+      job,
+      nextRunStr,
+      lastRun: lastRuns[0],
+      statusLabels: job.enabled ? [] : [chalk.yellow('DISABLED')],
+    });
   }
+}
+
+/** Daemon job list entry received over the control socket. */
+export interface DaemonJobListEntry {
+  job: JobDefinition;
+  nextRun: string | null;
+  lastRun: RunRecord | undefined;
+  isRunning: boolean;
 }
 
 /**
@@ -437,9 +461,7 @@ export function runListJobs(): void {
  * Used when list-jobs is forwarded to a running daemon, which provides
  * live running status and next-run times from the scheduler.
  */
-export function formatDaemonJobList(
-  jobs: Array<Record<string, unknown>>,
-): void {
+export function formatDaemonJobList(jobs: DaemonJobListEntry[]): void {
   if (jobs.length === 0) {
     console.error('No jobs configured. Use "ironcurtain daemon add-job" to create one.');
     return;
@@ -447,32 +469,16 @@ export function formatDaemonJobList(
 
   console.error('Jobs (from running daemon):');
   for (const entry of jobs) {
-    const job = entry.job as JobDefinition;
-    const nextRun = entry.nextRun as string | null;
-    const lastRun = entry.lastRun as RunRecord | undefined;
-    const isRunning = entry.isRunning as boolean;
+    const statusLabels: string[] = [];
+    if (!entry.job.enabled) statusLabels.push(chalk.yellow('DISABLED'));
+    if (entry.isRunning) statusLabels.push(chalk.cyan('RUNNING'));
 
-    const statusParts: string[] = [];
-    if (!job.enabled) statusParts.push(chalk.yellow('DISABLED'));
-    if (isRunning) statusParts.push(chalk.cyan('RUNNING'));
-    const statusLabel = statusParts.length > 0 ? ` ${statusParts.join(' ')}` : '';
-
-    const nextRunStr = nextRun ? `next: ${new Date(nextRun).toLocaleString()}` : '';
-
-    let lastRunStr = '';
-    if (lastRun) {
-      lastRunStr = `Last run: ${lastRun.startedAt} -- ${formatRunOutcome(lastRun.outcome)}`;
-      if (lastRun.summary) {
-        lastRunStr += `\n${' '.repeat(20)}${lastRun.summary.split('\n')[0].slice(0, 60)}`;
-      }
-    }
-
-    console.error(
-      `  ${chalk.bold(job.id.padEnd(20))} ${job.name.padEnd(30)} ${job.schedule.padEnd(15)} ${nextRunStr}${statusLabel}`,
-    );
-    if (lastRunStr) {
-      console.error(`  ${' '.repeat(20)}${lastRunStr}`);
-    }
+    printJobEntry({
+      job: entry.job,
+      nextRunStr: entry.nextRun ? `next: ${new Date(entry.nextRun).toLocaleString()}` : '',
+      lastRun: entry.lastRun,
+      statusLabels,
+    });
   }
 }
 

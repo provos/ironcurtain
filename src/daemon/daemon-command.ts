@@ -13,7 +13,7 @@
 
 import { parseArgs } from 'node:util';
 import { IronCurtainDaemon } from './ironcurtain-daemon.js';
-import { isDaemonRunning, sendControlRequest, type ControlRequest, type ControlResponse } from './control-socket.js';
+import { sendControlRequest, type ControlRequest, type ControlResponse } from './control-socket.js';
 import type { AgentId } from '../docker/agent-adapter.js';
 
 function printDaemonHelp(): void {
@@ -56,11 +56,7 @@ function requireJobIdArg(positionals: string[]): string {
  * is running (caller should fall back to local filesystem operations).
  */
 async function tryForwardToDaemon(request: ControlRequest): Promise<ControlResponse | null> {
-  const running = await isDaemonRunning();
-  if (!running) return null;
-
-  const response = await sendControlRequest(request);
-  return response;
+  return sendControlRequest(request);
 }
 
 /**
@@ -145,13 +141,11 @@ export async function runDaemonCommand(argv: string[]): Promise<void> {
     }
     case 'list-jobs': {
       const resp = await tryForwardToDaemon({ command: 'list-jobs' });
-      if (resp !== null) {
-        if (!resp.ok) {
-          console.error(`Error from daemon: ${resp.error}`);
-          process.exit(1);
-        }
+      if (handleForwardedResponse(resp)) {
         const { formatDaemonJobList } = await import('../cron/job-commands.js');
-        formatDaemonJobList(resp.data as Array<Record<string, unknown>>);
+        formatDaemonJobList(
+          (resp as ControlResponse & { ok: true }).data as import('../cron/job-commands.js').DaemonJobListEntry[],
+        );
         break;
       }
       const { runListJobs } = await import('../cron/job-commands.js');
@@ -161,18 +155,12 @@ export async function runDaemonCommand(argv: string[]): Promise<void> {
     case 'run-job': {
       const jobId = requireJobIdArg(positionals);
       const resp = await tryForwardToDaemon({ command: 'run-job', jobId });
-      if (resp !== null) {
-        if (!resp.ok) {
-          console.error(`Error from daemon: ${resp.error}`);
-          process.exit(1);
-        }
-        const record = resp.data as import('../cron/types.js').RunRecord;
+      if (handleForwardedResponse(resp)) {
+        const record = (resp as ControlResponse & { ok: true }).data as import('../cron/types.js').RunRecord;
         console.error(`Job "${jobId}" completed via daemon.`);
-        if (record) {
-          console.error(`  Outcome: ${record.outcome.kind}`);
-          console.error(`  Duration: ${record.budget.elapsedSeconds.toFixed(0)}s`);
-          console.error(`  Cost: $${record.budget.estimatedCostUsd.toFixed(2)}`);
-        }
+        console.error(`  Outcome: ${record.outcome.kind}`);
+        console.error(`  Duration: ${record.budget.elapsedSeconds.toFixed(0)}s`);
+        console.error(`  Cost: $${record.budget.estimatedCostUsd.toFixed(2)}`);
         break;
       }
       const { runJobCommand } = await import('../cron/job-commands.js');

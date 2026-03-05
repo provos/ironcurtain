@@ -11,7 +11,7 @@
  */
 
 import { createServer, createConnection, type Server, type Socket } from 'node:net';
-import { existsSync, unlinkSync } from 'node:fs';
+import { unlinkSync } from 'node:fs';
 import { getDaemonSocketPath } from '../config/paths.js';
 import * as logger from '../logger.js';
 import type { JobDefinition, RunRecord } from '../cron/types.js';
@@ -102,8 +102,9 @@ export class ControlSocketServer {
   async stop(): Promise<void> {
     if (!this.server) return;
 
+    const server = this.server;
     return new Promise<void>((resolve) => {
-      this.server!.close(() => {
+      server.close(() => {
         this.cleanupSocketFile();
         this.server = null;
         resolve();
@@ -113,37 +114,21 @@ export class ControlSocketServer {
 
   /**
    * Removes a stale socket file left behind by a crashed daemon.
-   * Tests if the socket is alive first; only removes if no one is listening.
+   * If another daemon is actually running, our listen() will fail
+   * with EADDRINUSE which is the correct behavior.
    */
   private removeStaleSocket(): void {
-    if (!existsSync(this.socketPath)) return;
-
-    // Try to connect -- if it succeeds, another daemon is running
-    const probe = createConnection({ path: this.socketPath });
-    const cleanup = () => {
-      probe.removeAllListeners();
-      probe.destroy();
-    };
-
-    // Use synchronous-style check: destroy immediately, then remove
-    // We can't truly async here without complicating the start() flow,
-    // so we do an optimistic removal. If another daemon is running,
-    // our listen() will fail with EADDRINUSE which is the correct behavior.
-    cleanup();
-
     try {
       unlinkSync(this.socketPath);
       logger.info(`[ControlSocket] Removed stale socket file`);
     } catch {
-      // Ignore -- may have been cleaned up concurrently
+      // File doesn't exist or can't be removed -- fine either way
     }
   }
 
   private cleanupSocketFile(): void {
     try {
-      if (existsSync(this.socketPath)) {
-        unlinkSync(this.socketPath);
-      }
+      unlinkSync(this.socketPath);
     } catch {
       // Best-effort cleanup
     }
@@ -151,14 +136,17 @@ export class ControlSocketServer {
 
   private onConnection(socket: Socket): void {
     let data = '';
+    let dispatched = false;
 
     socket.on('data', (chunk) => {
+      if (dispatched) return;
       data += chunk.toString();
       const newlineIndex = data.indexOf('\n');
       if (newlineIndex === -1) return;
 
+      dispatched = true;
       const line = data.slice(0, newlineIndex);
-      this.handleRequest(line, socket);
+      void this.handleRequest(line, socket);
     });
 
     socket.on('error', (err) => {
@@ -263,16 +251,16 @@ export async function sendControlRequest(
 ): Promise<ControlResponse | null> {
   const path = socketPath ?? getDaemonSocketPath();
 
-  if (!existsSync(path)) return null;
-
   return new Promise<ControlResponse | null>((resolve) => {
     const socket = createConnection({ path });
     let data = '';
     let settled = false;
+    let connectTimer: ReturnType<typeof setTimeout> | null = null;
 
     const finish = (result: ControlResponse | null) => {
       if (settled) return;
       settled = true;
+      if (connectTimer) clearTimeout(connectTimer);
       socket.destroy();
       resolve(result);
     };
@@ -303,7 +291,7 @@ export async function sendControlRequest(
     });
 
     // Connect timeout -- daemon not responding
-    setTimeout(() => {
+    connectTimer = setTimeout(() => {
       finish(null);
     }, CONNECT_TIMEOUT);
   });
