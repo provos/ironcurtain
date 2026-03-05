@@ -513,7 +513,21 @@ export class PolicyEngine {
         // to block structurally." URL roles are NOT marked as resolved;
         // compiled rules still evaluate the operation (e.g. "escalate all git push").
       }
-      // If no allowlist, URL roles are not structurally restricted -- fall through to compiled rule evaluation
+      // KNOWN GAP: when no allowlist is configured for a server (e.g. the git
+      // server's allowedDomains is currently disabled — see mcp-servers.json
+      // _comment — due to a Linux SSH/sandbox-runtime limitation), the
+      // structural domain gate does not fire. In that case, compiled "allow"
+      // rules without a URL/domain constraint (e.g. allow-git-push-default-remote,
+      // allow-git-fetch-no-remote) will match even when an explicit unauthorized
+      // remote URL is supplied, because the rule was designed as a no-remote
+      // fallback but has no condition to distinguish the two cases.
+      //
+      // The correct long-term fix is Option A (skip no-constraint allow rules
+      // when concrete URL values are present during URL-role evaluation).
+      // Option C (structural gate) is the intended primary defense here, but
+      // requires allowedDomains to be configured. Until the sandbox-runtime
+      // SSH issue is resolved and allowedDomains can be re-enabled for the git
+      // server, this gap exists. See Issue 2 in the policy engine design notes.
     }
 
     // Unknown tool denial

@@ -247,6 +247,14 @@ export function loadConfig(): IronCurtainConfig {
  * The `*` wildcard is preserved (not filtered) so that the untrusted domain gate fires
  * for servers with `["*"]`. The SSRF structural invariant in
  * `domainMatchesAllowlist()` prevents `*` from matching IP addresses.
+ *
+ * SECURITY NOTE: This is the primary defense against compiled "allow" rules that
+ * lack a URL/domain constraint (e.g. allow-git-push-default-remote). Such rules
+ * are intended as fallbacks for when no remote URL is supplied, but they will also
+ * fire for explicit unauthorized URLs if no structural gate catches them first.
+ * Servers without an allowedDomains entry in mcp-servers.json have no structural
+ * URL gate — compiled rules are the only defense in that case, and broad no-constraint
+ * allow rules create a gap. See the KNOWN GAP comment in policy-engine.ts.
  */
 export function extractServerDomainAllowlists(mcpServers: Record<string, MCPServerConfig>): Map<string, string[]> {
   const allowlists = new Map<string, string[]>();
