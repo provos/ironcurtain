@@ -14,7 +14,7 @@ import { expandTilde, resolveRealPath } from '../types/argument-roles.js';
 import { getIronCurtainHome } from '../config/paths.js';
 
 /** Returns true when `child` is equal to or nested inside `parent`. */
-function isEqualOrInside(child: string, parent: string): boolean {
+export function isEqualOrInside(child: string, parent: string): boolean {
   if (child === parent) return true;
   const prefix = parent === '/' ? '/' : parent + '/';
   return child.startsWith(prefix);

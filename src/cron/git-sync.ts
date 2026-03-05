@@ -47,10 +47,10 @@ export function validateGitUri(uri: string): void {
 }
 
 /** Restricted environment for git subprocesses: only safe transport protocols. */
-const GIT_SAFE_ENV: Readonly<Record<string, string>> = {
+const GIT_SAFE_ENV: NodeJS.ProcessEnv = {
   ...process.env,
   GIT_PROTOCOL_WHITELIST: 'https:git:ssh:file',
-} as Record<string, string>;
+};
 
 /**
  * Clones or refreshes a git repository in the given directory.

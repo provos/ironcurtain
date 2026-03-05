@@ -13,6 +13,7 @@
 import { readdirSync, readFileSync, unlinkSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { PtySessionRegistration } from '../docker/pty-types.js';
+import { isPidAlive } from './listener-lock.js';
 
 /**
  * Reads all valid, non-stale session registrations from the registry directory.
@@ -75,20 +76,6 @@ function isValidRegistration(value: unknown): value is PtySessionRegistration {
     typeof obj.startedAt === 'string' &&
     typeof obj.pid === 'number'
   );
-}
-
-/**
- * Checks if a PID is alive. Uses process.kill(pid, 0) which
- * returns true if the process exists and the caller has permission
- * to signal it (same user).
- */
-function isPidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 /**

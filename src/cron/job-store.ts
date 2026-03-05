@@ -78,20 +78,13 @@ export function deleteJob(jobId: JobId): void {
   rmSync(getJobDir(jobId), { recursive: true, force: true });
 }
 
-/**
- * Records a completed run.
- * Acquires an advisory file lock to prevent concurrent write corruption.
- */
-export async function saveRunRecord(jobId: JobId, record: RunRecord): Promise<void> {
+/** Records a completed run. Filenames are unique (timestamp-based), so no lock needed. */
+export function saveRunRecord(jobId: JobId, record: RunRecord): void {
   const runsDir = getJobRunsDir(jobId);
   mkdirSync(runsDir, { recursive: true });
 
-  const jobDir = getJobDir(jobId);
-  await withFileLock(getJobLockDir(jobDir), () => {
-    // Use the start time as the filename, sanitized for filesystem safety
-    const filename = record.startedAt.replace(/:/g, '-') + '.json';
-    writeFileSync(resolve(runsDir, filename), JSON.stringify(record, null, 2) + '\n');
-  });
+  const filename = record.startedAt.replace(/:/g, '-') + '.json';
+  writeFileSync(resolve(runsDir, filename), JSON.stringify(record, null, 2) + '\n');
 }
 
 /**

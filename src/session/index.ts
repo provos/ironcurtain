@@ -23,6 +23,7 @@ import type { IronCurtainConfig } from '../config/types.js';
 import * as logger from '../logger.js';
 import { AgentSession } from './agent-session.js';
 import { SessionError } from './errors.js';
+import { isEqualOrInside } from './workspace-validation.js';
 import { createSessionId } from './types.js';
 import type { Session, SessionId, SessionOptions, SessionMode } from './types.js';
 
@@ -194,10 +195,7 @@ function validatePolicyDir(policyDir: string): void {
   const resolvedPolicy = resolve(policyDir);
   const home = resolve(getIronCurtainHome());
 
-  // The resolved path must be under (or equal to) the home directory.
-  // Add trailing separator to prevent prefix-matching tricks
-  // (e.g., /home/.ironcurtain-evil matching /home/.ironcurtain).
-  if (resolvedPolicy !== home && !resolvedPolicy.startsWith(home + '/')) {
+  if (!isEqualOrInside(resolvedPolicy, home)) {
     throw new SessionError(
       `policyDir must be under the IronCurtain home directory (${home}). ` +
         `Received: ${resolvedPolicy}`,

@@ -11,8 +11,9 @@
  * see src/escalation/listener-lock.ts.
  */
 
-import { existsSync, mkdirSync, readFileSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { isPidAlive } from '../escalation/listener-lock.js';
 
 /** Default stale timeout: 30 seconds. */
 const DEFAULT_STALE_MS = 30_000;
@@ -95,27 +96,11 @@ function isLockStale(lockDir: string, staleMs: number): boolean {
 }
 
 /**
- * Checks if a PID is alive using signal 0.
- */
-function isPidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
  * Force-removes a lock directory. Best-effort.
  */
 function forceRelease(lockDir: string): void {
   try {
-    const metaPath = resolve(lockDir, 'meta.json');
-    if (existsSync(metaPath)) {
-      unlinkSync(metaPath);
-    }
-    rmdirSync(lockDir);
+    rmSync(lockDir, { recursive: true, force: true });
   } catch {
     /* best effort */
   }

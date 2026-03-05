@@ -331,7 +331,7 @@ export class IronCurtainDaemon {
           escalationsEncountered: 0,
           escalationsApproved: 0,
         };
-        await saveRunRecord(job.id, record);
+        saveRunRecord(job.id, record);
         return record;
       }
     }
@@ -411,7 +411,7 @@ export class IronCurtainDaemon {
     };
 
     // Save run record
-    await saveRunRecord(job.id, record);
+    saveRunRecord(job.id, record);
 
     // Notify via Signal if configured
     if (job.notifyOnCompletion && this.sendSignalMessage) {
