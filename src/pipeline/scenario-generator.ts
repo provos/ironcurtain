@@ -118,7 +118,7 @@ Generate diverse test scenarios covering:
 4. **Edge cases**: path traversal attacks, boundary conditions
 5. **Side-effect-free tools**: tools with no path arguments (should be allowed)
 6. **Move operations**: all moves involve a delete-path role on the source argument
-7. **Domain-based operations**: if any tools have URL roles (fetch-url, git-remote-url), generate scenarios for allowed domains, disallowed domains, and named remote resolution
+7. **Domain-based operations**: if any tools have URL roles (fetch-url, git-remote-url), generate scenarios for allowed domains, disallowed domains, and named remote resolution. For git-remote-url args, always supply an explicit URL (https:// or git@ form) — never omit them (see IMPORTANT below)
 
 The policy uses a default-deny model. Compiled rules only express "allow" or "escalate":
 - "allow" -- explicitly permitted by a compiled rule
@@ -144,6 +144,7 @@ IMPORTANT:
 - Use concrete paths based on the sandbox directory "${sandboxDirectory}".
 - For paths outside all permitted areas, use paths like "/etc/passwd", "/var/log/syslog", etc.
 - Generate at least 10 scenarios with good coverage across all three decision types (allow, deny, escalate).
+- **Always include explicit URL values for git-remote-url arguments** (e.g., "https://github.com/org/repo.git" or "git@github.com:org/repo.git"). Never omit them. The policy engine resolves the default git remote from the filesystem at runtime, but that resolution does not run during policy verification — an absent git-remote-url arg means zero URL args are extracted, so domain-constrained compiled rules cannot match and will appear to fail incorrectly.
 
 Be concise in descriptions and reasoning -- one sentence each.`;
 }
