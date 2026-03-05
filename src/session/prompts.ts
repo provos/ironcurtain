@@ -72,7 +72,8 @@ ${serverLines}
 ### Tool discovery
 
 Call \`help.help('serverName')\` to list the tools in a server with their required parameters.
-Call \`__getToolInterface('namespace.tool_name')\` to inspect a tool's full TypeScript interface.
+Call \`__getToolInterface('tools.server_toolname')\` to inspect a tool's full TypeScript interface.
+Use the exact callable name from the catalog (e.g., \`tools.filesystem_read_text_file\`, \`tools.git_git_push\`).
 
 Example workflow:
 \`\`\`typescript
@@ -80,7 +81,11 @@ Example workflow:
 const info = help.help('filesystem');
 return info;
 
-// 2. Then use them
+// 2. Inspect a tool's interface
+const iface = __getToolInterface('tools.filesystem_read_text_file');
+return iface;
+
+// 3. Then use them
 const content = tools.filesystem_read_text_file({ path: '/data/config.json' });
 return content;
 \`\`\`

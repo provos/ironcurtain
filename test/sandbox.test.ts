@@ -66,13 +66,44 @@ describe('buildInterfacePatchSnippet (via behavior)', () => {
       }
     }
 
-    // Simulate what the patch snippet does: wrap origFn with callable name lookup
-    const patchedFn = (toolName: string) => {
-      const result = origFn(toolName);
+    // Simulate what the patch snippet does: wrap origFn with callable name lookup,
+    // auto-correction for missing "tools." prefix, and helpful error messages.
+    const allNames = Object.keys(callableToRaw);
+    const patchedFn = (toolName: string): string | null => {
+      let result = origFn(toolName);
       if (result) return result;
-      const rawName = callableToRaw[toolName];
+      let rawName = callableToRaw[toolName];
       if (rawName) return origFn(rawName);
-      return null;
+
+      // Auto-correct: try prepending "tools."
+      if (toolName && !toolName.startsWith('tools.')) {
+        const prefixed = 'tools.' + toolName;
+        result = origFn(prefixed);
+        if (result) return result;
+        rawName = callableToRaw[prefixed];
+        if (rawName) return origFn(rawName);
+        // Try converting dots to underscores
+        const asCallable = 'tools.' + toolName.replace(/\./g, '_');
+        rawName = callableToRaw[asCallable];
+        if (rawName) return origFn(rawName);
+      }
+
+      // Build helpful error with suggestions
+      const suggestions: string[] = [];
+      const needle = toolName.toLowerCase().replace(/^tools\./, '');
+      for (let i = 0; i < allNames.length && suggestions.length < 3; i++) {
+        if (allNames[i].toLowerCase().includes(needle) ||
+            needle.includes(allNames[i].toLowerCase().replace(/^tools\./, ''))) {
+          suggestions.push(allNames[i]);
+        }
+      }
+      let msg = `Unknown tool '${toolName}'.`;
+      if (suggestions.length > 0) {
+        msg += ' Did you mean: ' + suggestions.join(', ') + '?';
+      } else {
+        msg += ' Use the callable name format shown in the tool catalog, e.g. tools.git_git_push';
+      }
+      return msg;
     };
 
     // Raw names still work
@@ -87,8 +118,20 @@ describe('buildInterfacePatchSnippet (via behavior)', () => {
     expect(patchedFn('tools.filesystem.read_file')).toBe(interfaceMap['tools.filesystem.read_file']);
     expect(patchedFn('tools.filesystem_read_file')).toBe(interfaceMap['tools.filesystem.read_file']);
 
-    // Unknown names return null
-    expect(patchedFn('tools.nonexistent_tool')).toBeNull();
+    // Auto-correction: missing "tools." prefix with dot notation
+    expect(patchedFn('git.git_add')).toBe(interfaceMap['tools.git.git_add']);
+    expect(patchedFn('filesystem.read_file')).toBe(interfaceMap['tools.filesystem.read_file']);
+
+    // Auto-correction: missing "tools." prefix with underscore notation
+    expect(patchedFn('git_git_add')).toBe(interfaceMap['tools.git.git_add']);
+
+    // Unknown names return helpful error messages
+    expect(patchedFn('tools.nonexistent_tool')).toContain("Unknown tool 'tools.nonexistent_tool'");
+    expect(patchedFn('totally_unknown')).toContain('Use the callable name format');
+
+    // Unknown name with partial match suggests similar tools
+    expect(patchedFn('tools.git_git')).toContain('Did you mean:');
+    expect(patchedFn('tools.git_git')).toContain('tools.git_git_add');
   });
 
   it('handles the case where callable and raw names are identical', () => {

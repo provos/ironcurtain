@@ -76,6 +76,7 @@ import { permissiveJsonSchemaValidator } from './permissive-output-validator.js'
 import type { LanguageModelV3 } from '@ai-sdk/provider';
 import type { MCPServerConfig, SandboxAvailabilityPolicy } from '../config/types.js';
 import { VERSION } from '../version.js';
+import { loadToolDescriptionHints, applyToolDescriptionHints } from './tool-description-hints.js';
 
 export interface ProxiedTool {
   serverName: string;
@@ -970,20 +971,21 @@ async function main(): Promise<void> {
   }
 
   const toolMap = buildToolMap(allTools);
+  const toolDescriptionHints = loadToolDescriptionHints();
+  const hintedTools = applyToolDescriptionHints(allTools, toolDescriptionHints);
+  const listToolsResponse = {
+    tools: hintedTools.map((t) => ({
+      name: t.name,
+      description: t.description,
+      inputSchema: t.inputSchema,
+    })),
+  };
 
   // ── Create the proxy MCP server ───────────────────────────────────
   // eslint-disable-next-line @typescript-eslint/no-deprecated -- intentional use of low-level Server for raw JSON schema passthrough
   const server = new Server({ name: 'ironcurtain-proxy', version: VERSION }, { capabilities: { tools: {} } });
 
-  server.setRequestHandler(ListToolsRequestSchema, () => {
-    return {
-      tools: allTools.map((t) => ({
-        name: t.name,
-        description: t.description,
-        inputSchema: t.inputSchema,
-      })),
-    };
-  });
+  server.setRequestHandler(ListToolsRequestSchema, () => listToolsResponse);
 
   const serverContextMap: ServerContextMap = new Map();
 

@@ -113,6 +113,8 @@ function buildInterfacePatchSnippet(callableToRawMap: Record<string, string>): s
   const mapJson = JSON.stringify(callableToRawMap);
   // The snippet runs inside the V8 isolate before user code.
   // It wraps the existing __getToolInterface to also accept callable names.
+  // When the name is wrong, it tries auto-correction (prepending "tools.")
+  // and falls back to a helpful error message with suggestions.
   return `
     (function() {
       var _callableToRaw = ${mapJson};
@@ -123,7 +125,39 @@ function buildInterfacePatchSnippet(callableToRawMap: Record<string, string>): s
           if (result) return result;
           var rawName = _callableToRaw[toolName];
           if (rawName) return _origGetToolInterface(rawName);
-          return null;
+
+          // Auto-correct: try prepending "tools." for common mistake
+          if (toolName && !toolName.startsWith('tools.')) {
+            var prefixed = 'tools.' + toolName;
+            // Try as raw name first
+            result = _origGetToolInterface(prefixed);
+            if (result) return result;
+            // Try as callable name
+            rawName = _callableToRaw[prefixed];
+            if (rawName) return _origGetToolInterface(rawName);
+            // Try converting dots to underscores (e.g. "git.git_push" -> "tools.git_git_push")
+            var asCallable = 'tools.' + toolName.replace(/\\./g, '_');
+            rawName = _callableToRaw[asCallable];
+            if (rawName) return _origGetToolInterface(rawName);
+          }
+
+          // Build helpful error with suggestions
+          var allNames = Object.keys(_callableToRaw);
+          var suggestions = [];
+          var needle = toolName.toLowerCase().replace(/^tools\\./, '');
+          for (var i = 0; i < allNames.length && suggestions.length < 3; i++) {
+            if (allNames[i].toLowerCase().indexOf(needle) !== -1 ||
+                needle.indexOf(allNames[i].toLowerCase().replace(/^tools\\./, '')) !== -1) {
+              suggestions.push(allNames[i]);
+            }
+          }
+          var msg = "Unknown tool '" + toolName + "'.";
+          if (suggestions.length > 0) {
+            msg += " Did you mean: " + suggestions.join(', ') + "?";
+          } else {
+            msg += " Use the callable name format shown in the tool catalog, e.g. tools.git_git_push";
+          }
+          return msg;
         };
       }
     })();

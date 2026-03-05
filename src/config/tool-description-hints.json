@@ -1,0 +1,15 @@
+{
+  "_comment": "Usage hints appended to MCP tool descriptions before exposing them to agents. Each entry patches the description of a specific server/tool combination. Hints help agents use tool parameters correctly (e.g. avoiding CLI flags in structured parameters).",
+  "hints": [
+    {
+      "server": "git",
+      "tool": "git_checkout",
+      "hint": "IMPORTANT: The `target` parameter accepts ONLY a branch name, commit hash, or tag — never CLI flags like `-b`. To create a new branch, set `createBranch: true` and pass the new branch name as `target`. Example: { target: \"feature/my-branch\", createBranch: true }"
+    },
+    {
+      "server": "git",
+      "tool": "git_push",
+      "hint": "IMPORTANT: When pushing a branch for the first time (no upstream tracking configured), you MUST set `setUpstream: true` or the push will fail with \"no upstream branch\". Example: { setUpstream: true }"
+    }
+  ]
+}
