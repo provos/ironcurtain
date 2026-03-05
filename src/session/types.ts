@@ -191,6 +191,13 @@ export interface SessionOptions {
   onEscalationExpired?: () => void;
 
   /**
+   * Callback invoked when a pending escalation is resolved (approved or denied).
+   * Fires after the response file is written, regardless of whether the resolution
+   * was initiated by the transport or by the proxy (e.g., Signal approve command).
+   */
+  onEscalationResolved?: (escalationId: string, decision: 'approved' | 'denied') => void;
+
+  /**
    * Callback invoked during message processing with diagnostic events.
    * Transports use this to display progress (e.g., tool call previews).
    * If not provided, diagnostics are silently dropped.

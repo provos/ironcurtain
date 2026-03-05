@@ -109,6 +109,7 @@ export class AgentSession implements Session {
   /** Callbacks from SessionOptions. */
   private readonly onEscalation?: (request: EscalationRequest) => void;
   private readonly onEscalationExpired?: () => void;
+  private readonly onEscalationResolved?: (escalationId: string, decision: 'approved' | 'denied') => void;
   private readonly onDiagnostic?: (event: DiagnosticEvent) => void;
 
   /** Additional content appended to the system prompt (e.g., cron task context). */
@@ -121,6 +122,7 @@ export class AgentSession implements Session {
     this.sandboxFactory = options.sandboxFactory ?? defaultSandboxFactory;
     this.onEscalation = options.onEscalation;
     this.onEscalationExpired = options.onEscalationExpired;
+    this.onEscalationResolved = options.onEscalationResolved;
     this.onDiagnostic = options.onDiagnostic;
     this.systemPromptAugmentation = options.systemPromptAugmentation;
     this.createdAt = new Date().toISOString();
@@ -279,6 +281,7 @@ export class AgentSession implements Session {
     const responsePath = resolve(this.escalationDir, `response-${escalationId}.json`);
     writeFileSync(responsePath, JSON.stringify({ decision }));
     this.pendingEscalation = undefined;
+    this.onEscalationResolved?.(escalationId, decision);
   }
 
   async close(): Promise<void> {

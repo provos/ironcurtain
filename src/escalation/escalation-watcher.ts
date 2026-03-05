@@ -18,6 +18,8 @@ export interface EscalationWatcherEvents {
   onEscalation: (request: EscalationRequest) => void;
   /** A pending escalation expired (proxy timed out and cleaned up files). */
   onEscalationExpired: (escalationId: string) => void;
+  /** A pending escalation was resolved (approved or denied). */
+  onEscalationResolved?: (escalationId: string, decision: 'approved' | 'denied') => void;
 }
 
 export interface EscalationWatcher {
@@ -138,6 +140,9 @@ export function createEscalationWatcher(
       // Stale detection: verify the request file still exists after writing the response.
       // If the proxy already timed out and cleaned up, the response was too late.
       const requestStillExists = existsSync(resolve(escalationDir, `request-${escalationId}.json`));
+      if (requestStillExists) {
+        events.onEscalationResolved?.(escalationId, decision);
+      }
       return requestStillExists;
     },
   };

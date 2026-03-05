@@ -139,6 +139,7 @@ async function createDockerSession(
     useTcp: infra.useTcp,
     onEscalation: options.onEscalation,
     onEscalationExpired: options.onEscalationExpired,
+    onEscalationResolved: options.onEscalationResolved,
     onDiagnostic: options.onDiagnostic,
     preBuiltInfrastructure: {
       systemPrompt: infra.systemPrompt,

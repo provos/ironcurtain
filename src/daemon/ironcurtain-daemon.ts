@@ -380,7 +380,7 @@ export class IronCurtainDaemon {
 
     // Track escalation counts for this run
     let escalationsEncountered = 0;
-    const escalationsApproved = 0; // TODO: increment when escalation is approved via Signal
+    let escalationsApproved = 0;
 
     // Create the session with per-job policy and escalation handler.
     // Auto-approver is disabled: cron sessions have no interactive user
@@ -395,6 +395,15 @@ export class IronCurtainDaemon {
       onEscalation: (request) => {
         escalationsEncountered++;
         this.handleCronEscalation(request, job);
+      },
+      onEscalationResolved: (_id, decision) => {
+        if (decision === 'approved') escalationsApproved++;
+      },
+      onEscalationExpired: () => {
+        const label = this.activeJobRuns.get(job.id);
+        if (label !== undefined) {
+          this.sessionManager.clearPendingEscalation(label);
+        }
       },
     });
 
