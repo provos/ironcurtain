@@ -58,6 +58,7 @@ import type {
   TestScenario,
   TestScenariosFile,
   ToolAnnotation,
+  ToolAnnotationsFile,
   VerificationResult,
 } from './types.js';
 
@@ -108,6 +109,9 @@ export interface PipelineRunConfig {
 
   /** Progress callback for CLI output. */
   readonly onProgress?: (message: string) => void;
+
+  /** Pre-loaded tool annotations (avoids re-reading from disk). */
+  readonly preloadedToolAnnotations?: ToolAnnotationsFile;
 }
 
 /**
@@ -316,7 +320,9 @@ export class PipelineRunner {
    * Runs the full pipeline. Returns the compiled policy on success.
    */
   async run(config: PipelineRunConfig): Promise<CompiledPolicyFile> {
-    const toolAnnotationsFile = loadToolAnnotationsFile(config.toolAnnotationsDir, config.toolAnnotationsFallbackDir);
+    const toolAnnotationsFile =
+      config.preloadedToolAnnotations ??
+      loadToolAnnotationsFile(config.toolAnnotationsDir, config.toolAnnotationsFallbackDir);
 
     if (!toolAnnotationsFile) {
       throw new Error("tool-annotations.json not found. Run 'ironcurtain annotate-tools' first.");
@@ -361,13 +367,7 @@ export class PipelineRunner {
       listDefinitions,
       inputHash,
       session: compilerSession,
-    } = await this.compilePolicyRules(
-      allAnnotations,
-      config.protectedPaths,
-      compilerHash,
-      existingPolicy,
-      compilerSystem,
-    );
+    } = await this.compilePolicyRules(allAnnotations, compilerHash, existingPolicy, compilerSystem);
 
     let compiledPolicyFile = buildPolicyArtifact(constitutionHash, rules, listDefinitions, inputHash);
     writeArtifact(config.outputDir, 'compiled-policy.json', compiledPolicyFile);
@@ -820,7 +820,6 @@ export class PipelineRunner {
 
   private async compilePolicyRules(
     annotations: ToolAnnotation[],
-    protectedPaths: string[],
     inputHash: string,
     existingPolicy: CompiledPolicyFile | undefined,
     system: string | SystemModelMessage,

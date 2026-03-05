@@ -36,37 +36,38 @@ export async function connectMcpServersForLists(
           .map((d) => d.mcpServerHint),
       );
 
-  const connections = new Map<string, McpServerConnection>();
-  for (const serverName of neededServers) {
-    const serverConfig = mcpServers[serverName];
-    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- serverName may not exist in mcpServers at runtime (from mcpServerHint)
-    if (!serverConfig) {
-      console.error(`  ${chalk.yellow('Warning:')} MCP server "${serverName}" not configured — skipping`);
-      continue;
-    }
+  const entries = await Promise.all(
+    [...neededServers].map(async (serverName): Promise<[string, McpServerConnection] | null> => {
+      const serverConfig = mcpServers[serverName];
+      // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- serverName may not exist in mcpServers at runtime (from mcpServerHint)
+      if (!serverConfig) {
+        console.error(`  ${chalk.yellow('Warning:')} MCP server "${serverName}" not configured — skipping`);
+        return null;
+      }
 
-    const transport = new StdioClientTransport({
-      command: serverConfig.command,
-      args: serverConfig.args,
-      env: serverConfig.env ? { ...(process.env as Record<string, string>), ...serverConfig.env } : undefined,
-      stderr: 'pipe',
-    });
-    // Drain piped stderr to prevent backpressure
-    if (transport.stderr) {
-      transport.stderr.on('data', () => {});
-    }
+      const transport = new StdioClientTransport({
+        command: serverConfig.command,
+        args: serverConfig.args,
+        env: serverConfig.env ? { ...(process.env as Record<string, string>), ...serverConfig.env } : undefined,
+        stderr: 'pipe',
+      });
+      // Drain piped stderr to prevent backpressure
+      if (transport.stderr) {
+        transport.stderr.on('data', () => {});
+      }
 
-    const client = new Client(
-      { name: 'ironcurtain-list-resolver', version: VERSION },
-      { jsonSchemaValidator: permissiveJsonSchemaValidator },
-    );
-    await client.connect(transport);
-    const toolsResult = await client.listTools();
+      const client = new Client(
+        { name: 'ironcurtain-list-resolver', version: VERSION },
+        { jsonSchemaValidator: permissiveJsonSchemaValidator },
+      );
+      await client.connect(transport);
+      const toolsResult = await client.listTools();
 
-    connections.set(serverName, { client, tools: toolsResult.tools });
-  }
+      return [serverName, { client, tools: toolsResult.tools }];
+    }),
+  );
 
-  return connections;
+  return new Map(entries.filter((e): e is [string, McpServerConnection] => e !== null));
 }
 
 export async function disconnectMcpServers(connections: Map<string, McpServerConnection>): Promise<void> {

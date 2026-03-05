@@ -19,7 +19,7 @@ import { createSession } from '../session/index.js';
 import { loadConfig } from '../config/index.js';
 import { loadUserConfig } from '../config/user-config.js';
 import { resolveSignalConfig, type ResolvedSignalConfig } from './signal-config.js';
-import type { Session, SessionMode } from '../session/types.js';
+import type { SessionMode } from '../session/types.js';
 import type { SignalContainerManager } from './signal-container.js';
 import { SessionManager, type ManagedSession } from '../session/session-manager.js';
 import { SignalSessionTransport } from './signal-transport.js';

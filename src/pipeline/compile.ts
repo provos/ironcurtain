@@ -13,11 +13,8 @@ import chalk from 'chalk';
 import { loadPipelineConfig, loadToolAnnotationsFile } from './pipeline-shared.js';
 import { PipelineRunner, createPipelineModels } from './pipeline-runner.js';
 
-// Re-export shared utilities that other modules import from this file.
-// These were moved to their canonical locations but callers still reference
-// './compile.js' — the re-exports maintain backward compatibility.
+// Re-export utilities that test files import from this file.
 export { resolveRulePaths, mergeReplacements } from './pipeline-shared.js';
-export { connectMcpServersForLists, disconnectMcpServers } from './mcp-connections.js';
 
 // ---------------------------------------------------------------------------
 // Main Pipeline
@@ -64,6 +61,7 @@ export async function main(): Promise<void> {
       protectedPaths: config.protectedPaths,
       mcpServers: config.mcpServers,
       llmLogPath: models.logPath,
+      preloadedToolAnnotations: toolAnnotationsFile,
     });
   } catch (err) {
     if (err instanceof Error && err.message.includes('Verification FAILED')) {

@@ -7,7 +7,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { LanguageModel } from 'ai';
@@ -19,7 +19,6 @@ import { createLanguageModel } from '../config/model-provider.js';
 import { getIronCurtainHome, getUserGeneratedDir, loadConstitutionText } from '../config/paths.js';
 
 // Re-export so existing pipeline callers (loadPipelineConfig) don't need updating.
-export { loadConstitutionText } from '../config/paths.js';
 import type { MCPServerConfig } from '../config/types.js';
 import { loadUserConfig } from '../config/user-config.js';
 import type { CompiledRule, DiscardedScenario, TestScenario, ToolAnnotationsFile, StoredToolAnnotationsFile } from './types.js';
@@ -36,7 +35,6 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 export interface PipelineConfig {
   constitutionPath: string;
   constitutionText: string;
-  constitutionHash: string;
   mcpServers: Record<string, MCPServerConfig>;
   generatedDir: string; // write target (user-local)
   packageGeneratedDir: string; // fallback for reads (package-bundled)
@@ -48,7 +46,6 @@ export function loadPipelineConfig(): PipelineConfig {
   const configDir = resolve(__dirname, '..', 'config');
   const constitutionPath = resolve(configDir, 'constitution.md');
   const constitutionText = loadConstitutionText(constitutionPath);
-  const constitutionHash = createHash('sha256').update(constitutionText).digest('hex');
   const mcpServersPath = resolve(configDir, 'mcp-servers.json');
   const mcpServers = JSON.parse(readFileSync(mcpServersPath, 'utf-8')) as Record<string, MCPServerConfig>;
   resolveMcpServerPaths(mcpServers);
@@ -82,7 +79,6 @@ export function loadPipelineConfig(): PipelineConfig {
   return {
     constitutionPath,
     constitutionText,
-    constitutionHash,
     mcpServers,
     generatedDir,
     packageGeneratedDir,
@@ -110,12 +106,10 @@ export function loadExistingArtifact<T>(generatedDir: string, filename: string, 
     candidates.push(resolve(fallbackDir, filename));
   }
   for (const path of candidates) {
-    if (existsSync(path)) {
-      try {
-        return JSON.parse(readFileSync(path, 'utf-8')) as T;
-      } catch {
-        // Corrupt file -- try next candidate
-      }
+    try {
+      return JSON.parse(readFileSync(path, 'utf-8')) as T;
+    } catch {
+      // File missing or corrupt -- try next candidate
     }
   }
   return undefined;
