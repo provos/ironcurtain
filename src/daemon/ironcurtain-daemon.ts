@@ -327,6 +327,7 @@ export class IronCurtainDaemon {
 
     // Create the session with per-job policy
     const session = await createSession({
+      mode: this.mode,
       config: patchedConfig,
       workspacePath: workspace,
       policyDir: jobGeneratedDir,

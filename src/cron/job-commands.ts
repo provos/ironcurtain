@@ -435,8 +435,12 @@ export async function runJobCommand(jobIdStr: string): Promise<void> {
   }
 
   console.error(`Running job "${job.name}"...`);
+  const { resolveSessionMode } = await import('../session/preflight.js');
+  const { loadConfig } = await import('../config/index.js');
+  const preflight = await resolveSessionMode({ config: loadConfig() });
+  console.error(`Mode: ${preflight.mode.kind} (${preflight.reason})`);
   const { IronCurtainDaemon } = await import('../daemon/ironcurtain-daemon.js');
-  const daemon = new IronCurtainDaemon({ mode: { kind: 'builtin' }, noSignal: true });
+  const daemon = new IronCurtainDaemon({ mode: preflight.mode, noSignal: true });
   const record = await daemon.runJobNow(jobId);
 
   console.error(`  Outcome: ${formatRunOutcome(record.outcome)}`);
