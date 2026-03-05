@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-03-04T19:46:46.455Z",
+  "generatedAt": "2026-03-05T00:53:56.055Z",
   "servers": {
     "filesystem": {
       "inputHash": "4efe924aad6d0b55f7128efebd2b9e23689dad318dafa05fd71913bcb6f85ee9",
@@ -1150,29 +1150,32 @@
       ]
     },
     "github": {
-      "inputHash": "7265e8731ad1c4ceca11a34358bf18dc947eb57c3d91a29cb8644b2bbf5b044c",
+      "inputHash": "d3e8b8ddd578329c19e676ca628bf1cb7ea7e79fd77d9fffc0ed43a9918fcdde",
       "tools": [
         {
           "toolName": "add_comment_to_pending_review",
           "comment": "Adds a review comment to the requester's existing pending pull request review.",
           "sideEffects": true,
           "args": {
-            "body": [
-              "none"
-            ],
-            "line": [
-              "none"
-            ],
             "owner": [
               "github-owner"
             ],
-            "path": [
-              "none"
+            "repo": [
+              "github-repo"
             ],
             "pullNumber": [
               "none"
             ],
-            "repo": [
+            "path": [
+              "none"
+            ],
+            "body": [
+              "none"
+            ],
+            "subjectType": [
+              "none"
+            ],
+            "line": [
               "none"
             ],
             "side": [
@@ -1183,9 +1186,6 @@
             ],
             "startSide": [
               "none"
-            ],
-            "subjectType": [
-              "none"
             ]
           },
           "serverName": "github"
@@ -1195,16 +1195,16 @@
           "comment": "Adds a comment to a specific issue or pull request in a GitHub repository.",
           "sideEffects": true,
           "args": {
-            "body": [
-              "none"
-            ],
-            "issue_number": [
-              "none"
-            ],
             "owner": [
               "github-owner"
             ],
             "repo": [
+              "github-repo"
+            ],
+            "issue_number": [
+              "none"
+            ],
+            "body": [
               "none"
             ]
           },
@@ -1215,19 +1215,19 @@
           "comment": "Adds a reply to an existing pull request comment, linking it as a threaded response.",
           "sideEffects": true,
           "args": {
-            "body": [
+            "owner": [
+              "github-owner"
+            ],
+            "repo": [
+              "github-repo"
+            ],
+            "pullNumber": [
               "none"
             ],
             "commentId": [
               "none"
             ],
-            "owner": [
-              "github-owner"
-            ],
-            "pullNumber": [
-              "none"
-            ],
-            "repo": [
+            "body": [
               "none"
             ]
           },
@@ -1238,19 +1238,19 @@
           "comment": "Assigns GitHub Copilot as an agent to work on a specific issue, potentially creating a pull request with code changes.",
           "sideEffects": true,
           "args": {
-            "base_ref": [
-              "branch-name"
-            ],
-            "custom_instructions": [
-              "none"
-            ],
-            "issue_number": [
-              "none"
-            ],
             "owner": [
               "github-owner"
             ],
             "repo": [
+              "github-repo"
+            ],
+            "issue_number": [
+              "none"
+            ],
+            "base_ref": [
+              "branch-name"
+            ],
+            "custom_instructions": [
               "none"
             ]
           },
@@ -1261,28 +1261,34 @@
           "comment": "Creates a new branch in a GitHub repository, optionally from a specified source branch.",
           "sideEffects": true,
           "args": {
+            "owner": [
+              "github-owner"
+            ],
+            "repo": [
+              "github-repo"
+            ],
             "branch": [
               "branch-name"
             ],
             "from_branch": [
               "branch-name"
-            ],
-            "owner": [
-              "github-owner"
-            ],
-            "repo": [
-              "none"
             ]
           },
           "serverName": "github"
         },
         {
           "toolName": "create_or_update_file",
-          "comment": "Creates or updates a single file in a GitHub repository on a specified branch.",
+          "comment": "Creates or updates a single file in a GitHub repository with a commit message.",
           "sideEffects": true,
           "args": {
-            "branch": [
-              "branch-name"
+            "owner": [
+              "github-owner"
+            ],
+            "repo": [
+              "github-repo"
+            ],
+            "path": [
+              "none"
             ],
             "content": [
               "none"
@@ -1290,14 +1296,8 @@
             "message": [
               "none"
             ],
-            "owner": [
-              "github-owner"
-            ],
-            "path": [
-              "none"
-            ],
-            "repo": [
-              "none"
+            "branch": [
+              "branch-name"
             ],
             "sha": [
               "none"
@@ -1307,9 +1307,21 @@
         },
         {
           "toolName": "create_pull_request",
-          "comment": "Creates a new pull request in a GitHub repository from a head branch into a base branch.",
+          "comment": "Creates a new pull request in a GitHub repository between specified head and base branches.",
           "sideEffects": true,
           "args": {
+            "owner": [
+              "github-owner"
+            ],
+            "repo": [
+              "github-repo"
+            ],
+            "title": [
+              "none"
+            ],
+            "head": [
+              "branch-name"
+            ],
             "base": [
               "branch-name"
             ],
@@ -1319,19 +1331,7 @@
             "draft": [
               "none"
             ],
-            "head": [
-              "branch-name"
-            ],
             "maintainer_can_modify": [
-              "none"
-            ],
-            "owner": [
-              "github-owner"
-            ],
-            "repo": [
-              "none"
-            ],
-            "title": [
               "none"
             ]
           },
@@ -1342,19 +1342,19 @@
           "comment": "Creates a new GitHub repository in the authenticated user's account or a specified organization.",
           "sideEffects": true,
           "args": {
-            "autoInit": [
-              "none"
-            ],
-            "description": [
-              "none"
-            ],
             "name": [
-              "none"
+              "github-repo"
             ],
             "organization": [
               "github-owner"
             ],
+            "description": [
+              "none"
+            ],
             "private": [
+              "none"
+            ],
+            "autoInit": [
               "none"
             ]
           },
@@ -1362,23 +1362,23 @@
         },
         {
           "toolName": "delete_file",
-          "comment": "Deletes a file from a specified branch in a GitHub repository.",
+          "comment": "Deletes a file from a GitHub repository on a specified branch with a commit message.",
           "sideEffects": true,
           "args": {
-            "branch": [
-              "branch-name"
-            ],
-            "message": [
-              "none"
-            ],
             "owner": [
               "github-owner"
+            ],
+            "repo": [
+              "github-repo"
             ],
             "path": [
               "none"
             ],
-            "repo": [
+            "message": [
               "none"
+            ],
+            "branch": [
+              "branch-name"
             ]
           },
           "serverName": "github"
@@ -1388,14 +1388,14 @@
           "comment": "Forks a GitHub repository to the authenticated user's account or a specified organization.",
           "sideEffects": true,
           "args": {
-            "organization": [
-              "github-owner"
-            ],
             "owner": [
               "github-owner"
             ],
             "repo": [
-              "none"
+              "github-repo"
+            ],
+            "organization": [
+              "github-owner"
             ]
           },
           "serverName": "github"
@@ -1405,22 +1405,22 @@
           "comment": "Retrieves details for a specific commit from a GitHub repository, optionally including diffs.",
           "sideEffects": true,
           "args": {
-            "include_diff": [
-              "none"
-            ],
             "owner": [
               "github-owner"
+            ],
+            "repo": [
+              "github-repo"
+            ],
+            "sha": [
+              "none"
+            ],
+            "include_diff": [
+              "none"
             ],
             "page": [
               "none"
             ],
             "perPage": [
-              "none"
-            ],
-            "repo": [
-              "none"
-            ],
-            "sha": [
               "none"
             ]
           },
@@ -1434,13 +1434,13 @@
             "owner": [
               "github-owner"
             ],
+            "repo": [
+              "github-repo"
+            ],
             "path": [
               "none"
             ],
             "ref": [
-              "none"
-            ],
-            "repo": [
               "none"
             ],
             "sha": [
@@ -1454,13 +1454,13 @@
           "comment": "Retrieves details of a specific label from a GitHub repository.",
           "sideEffects": true,
           "args": {
-            "name": [
-              "none"
-            ],
             "owner": [
               "github-owner"
             ],
             "repo": [
+              "github-repo"
+            ],
+            "name": [
               "none"
             ]
           },
@@ -1475,7 +1475,7 @@
               "github-owner"
             ],
             "repo": [
-              "none"
+              "github-repo"
             ]
           },
           "serverName": "github"
@@ -1489,14 +1489,14 @@
         },
         {
           "toolName": "get_release_by_tag",
-          "comment": "Retrieves a specific release by its tag name from a GitHub repository.",
+          "comment": "Retrieves a specific release from a GitHub repository identified by its tag name.",
           "sideEffects": true,
           "args": {
             "owner": [
               "github-owner"
             ],
             "repo": [
-              "none"
+              "github-repo"
             ],
             "tag": [
               "none"
@@ -1513,7 +1513,7 @@
               "github-owner"
             ],
             "repo": [
-              "none"
+              "github-repo"
             ],
             "tag": [
               "none"
@@ -1537,7 +1537,7 @@
         },
         {
           "toolName": "get_teams",
-          "comment": "Retrieves details of the teams the authenticated or specified user is a member of.",
+          "comment": "Retrieves the teams that a specified user (or the authenticated user) is a member of.",
           "sideEffects": true,
           "args": {
             "user": [
@@ -1548,25 +1548,25 @@
         },
         {
           "toolName": "issue_read",
-          "comment": "Retrieves information about a specific issue in a GitHub repository, including details, comments, sub-issues, or labels.",
+          "comment": "Reads information about a specific issue in a GitHub repository, including details, comments, sub-issues, or labels.",
           "sideEffects": true,
           "args": {
-            "issue_number": [
-              "none"
-            ],
             "method": [
               "none"
             ],
             "owner": [
               "github-owner"
             ],
+            "repo": [
+              "github-repo"
+            ],
+            "issue_number": [
+              "none"
+            ],
             "page": [
               "none"
             ],
             "perPage": [
-              "none"
-            ],
-            "repo": [
               "none"
             ]
           },
@@ -1577,31 +1577,22 @@
           "comment": "Creates a new issue or updates an existing issue in a GitHub repository.",
           "sideEffects": true,
           "args": {
-            "assignees": [
-              "none"
-            ],
-            "body": [
-              "none"
-            ],
-            "duplicate_of": [
-              "none"
-            ],
-            "issue_number": [
-              "none"
-            ],
-            "labels": [
-              "none"
-            ],
             "method": [
-              "none"
-            ],
-            "milestone": [
               "none"
             ],
             "owner": [
               "github-owner"
             ],
             "repo": [
+              "github-repo"
+            ],
+            "issue_number": [
+              "none"
+            ],
+            "title": [
+              "none"
+            ],
+            "body": [
               "none"
             ],
             "state": [
@@ -1610,10 +1601,19 @@
             "state_reason": [
               "none"
             ],
-            "title": [
+            "labels": [
+              "none"
+            ],
+            "assignees": [
+              "none"
+            ],
+            "milestone": [
               "none"
             ],
             "type": [
+              "none"
+            ],
+            "duplicate_of": [
               "none"
             ]
           },
@@ -1627,13 +1627,13 @@
             "owner": [
               "github-owner"
             ],
+            "repo": [
+              "github-repo"
+            ],
             "page": [
               "none"
             ],
             "perPage": [
-              "none"
-            ],
-            "repo": [
               "none"
             ]
           },
@@ -1641,25 +1641,25 @@
         },
         {
           "toolName": "list_commits",
-          "comment": "Lists commits of a branch or SHA in a GitHub repository with optional author filtering and pagination.",
+          "comment": "Lists commits on a branch or up to a specific SHA in a GitHub repository.",
           "sideEffects": true,
           "args": {
-            "author": [
-              "none"
-            ],
             "owner": [
               "github-owner"
+            ],
+            "repo": [
+              "github-repo"
+            ],
+            "sha": [
+              "none"
+            ],
+            "author": [
+              "none"
             ],
             "page": [
               "none"
             ],
             "perPage": [
-              "none"
-            ],
-            "repo": [
-              "none"
-            ],
-            "sha": [
               "none"
             ]
           },
@@ -1667,7 +1667,7 @@
         },
         {
           "toolName": "list_issue_types",
-          "comment": "Lists supported issue types configured for a GitHub organization.",
+          "comment": "Lists the supported issue types configured for a GitHub organization.",
           "sideEffects": true,
           "args": {
             "owner": [
@@ -1678,34 +1678,34 @@
         },
         {
           "toolName": "list_issues",
-          "comment": "Lists issues in a GitHub repository with filtering, ordering, and pagination support.",
+          "comment": "Lists issues in a GitHub repository with filtering and pagination support.",
           "sideEffects": true,
           "args": {
-            "after": [
-              "none"
+            "owner": [
+              "github-owner"
             ],
-            "direction": [
+            "repo": [
+              "github-repo"
+            ],
+            "state": [
               "none"
             ],
             "labels": [
               "none"
             ],
-            "orderBy": [
+            "since": [
               "none"
-            ],
-            "owner": [
-              "github-owner"
             ],
             "perPage": [
               "none"
             ],
-            "repo": [
+            "after": [
               "none"
             ],
-            "since": [
+            "orderBy": [
               "none"
             ],
-            "state": [
+            "direction": [
               "none"
             ]
           },
@@ -1713,34 +1713,34 @@
         },
         {
           "toolName": "list_pull_requests",
-          "comment": "Lists pull requests in a GitHub repository with optional filtering by state, branch, and sorting.",
+          "comment": "Lists pull requests in a GitHub repository with filtering and pagination support.",
           "sideEffects": true,
           "args": {
-            "base": [
-              "branch-name"
+            "owner": [
+              "github-owner"
             ],
-            "direction": [
+            "repo": [
+              "github-repo"
+            ],
+            "state": [
               "none"
             ],
             "head": [
               "none"
             ],
-            "owner": [
-              "github-owner"
-            ],
-            "page": [
-              "none"
-            ],
-            "perPage": [
-              "none"
-            ],
-            "repo": [
+            "base": [
               "none"
             ],
             "sort": [
               "none"
             ],
-            "state": [
+            "direction": [
+              "none"
+            ],
+            "page": [
+              "none"
+            ],
+            "perPage": [
               "none"
             ]
           },
@@ -1754,13 +1754,13 @@
             "owner": [
               "github-owner"
             ],
+            "repo": [
+              "github-repo"
+            ],
             "page": [
               "none"
             ],
             "perPage": [
-              "none"
-            ],
-            "repo": [
               "none"
             ]
           },
@@ -1774,13 +1774,13 @@
             "owner": [
               "github-owner"
             ],
+            "repo": [
+              "github-repo"
+            ],
             "page": [
               "none"
             ],
             "perPage": [
-              "none"
-            ],
-            "repo": [
               "none"
             ]
           },
@@ -1788,25 +1788,25 @@
         },
         {
           "toolName": "merge_pull_request",
-          "comment": "Merges a pull request in a GitHub repository using the specified merge method.",
+          "comment": "Merges a pull request in a GitHub repository using a specified merge method.",
           "sideEffects": true,
           "args": {
-            "commit_message": [
+            "owner": [
+              "github-owner"
+            ],
+            "repo": [
+              "github-repo"
+            ],
+            "pullNumber": [
               "none"
             ],
             "commit_title": [
               "none"
             ],
+            "commit_message": [
+              "none"
+            ],
             "merge_method": [
-              "none"
-            ],
-            "owner": [
-              "github-owner"
-            ],
-            "pullNumber": [
-              "none"
-            ],
-            "repo": [
               "none"
             ]
           },
@@ -1814,7 +1814,7 @@
         },
         {
           "toolName": "pull_request_read",
-          "comment": "Retrieves information about a specific pull request, including details, diff, status, files, review comments, reviews, or comments.",
+          "comment": "Retrieves information about a specific pull request, including details, diffs, status, files, review comments, reviews, or comments.",
           "sideEffects": true,
           "args": {
             "method": [
@@ -1823,16 +1823,16 @@
             "owner": [
               "github-owner"
             ],
-            "page": [
-              "none"
-            ],
-            "perPage": [
-              "none"
+            "repo": [
+              "github-repo"
             ],
             "pullNumber": [
               "none"
             ],
-            "repo": [
+            "page": [
+              "none"
+            ],
+            "perPage": [
               "none"
             ]
           },
@@ -1840,28 +1840,28 @@
         },
         {
           "toolName": "pull_request_review_write",
-          "comment": "Creates, submits, or deletes a pull request review in a GitHub repository.",
+          "comment": "Creates, submits, or deletes a pull request review on a GitHub repository.",
           "sideEffects": true,
           "args": {
-            "body": [
-              "none"
-            ],
-            "commitID": [
-              "none"
-            ],
-            "event": [
-              "none"
-            ],
             "method": [
               "none"
             ],
             "owner": [
               "github-owner"
             ],
+            "repo": [
+              "github-repo"
+            ],
             "pullNumber": [
               "none"
             ],
-            "repo": [
+            "body": [
+              "none"
+            ],
+            "event": [
+              "none"
+            ],
+            "commitID": [
               "none"
             ]
           },
@@ -1869,9 +1869,15 @@
         },
         {
           "toolName": "push_files",
-          "comment": "Pushes multiple files to a GitHub repository branch in a single commit.",
+          "comment": "Pushes multiple files to a GitHub repository in a single commit on a specified branch.",
           "sideEffects": true,
           "args": {
+            "owner": [
+              "github-owner"
+            ],
+            "repo": [
+              "github-repo"
+            ],
             "branch": [
               "branch-name"
             ],
@@ -1880,28 +1886,22 @@
             ],
             "message": [
               "none"
-            ],
-            "owner": [
-              "github-owner"
-            ],
-            "repo": [
-              "none"
             ]
           },
           "serverName": "github"
         },
         {
           "toolName": "request_copilot_review",
-          "comment": "Requests an automated GitHub Copilot code review for a pull request.",
+          "comment": "Requests an automated GitHub Copilot code review for a specified pull request.",
           "sideEffects": true,
           "args": {
             "owner": [
               "github-owner"
             ],
-            "pullNumber": [
-              "none"
-            ],
             "repo": [
+              "github-repo"
+            ],
+            "pullNumber": [
               "none"
             ]
           },
@@ -1912,6 +1912,12 @@
           "comment": "Searches for code across GitHub repositories using GitHub's native code search syntax.",
           "sideEffects": true,
           "args": {
+            "query": [
+              "none"
+            ],
+            "sort": [
+              "none"
+            ],
             "order": [
               "none"
             ],
@@ -1919,12 +1925,6 @@
               "none"
             ],
             "perPage": [
-              "none"
-            ],
-            "query": [
-              "none"
-            ],
-            "sort": [
               "none"
             ]
           },
@@ -1935,25 +1935,25 @@
           "comment": "Searches for issues across GitHub repositories using GitHub's issue search syntax.",
           "sideEffects": true,
           "args": {
-            "order": [
+            "query": [
               "none"
             ],
             "owner": [
               "github-owner"
             ],
+            "repo": [
+              "github-repo"
+            ],
+            "sort": [
+              "none"
+            ],
+            "order": [
+              "none"
+            ],
             "page": [
               "none"
             ],
             "perPage": [
-              "none"
-            ],
-            "query": [
-              "none"
-            ],
-            "repo": [
-              "none"
-            ],
-            "sort": [
               "none"
             ]
           },
@@ -1964,25 +1964,25 @@
           "comment": "Searches for pull requests across GitHub repositories using GitHub's pull request search syntax.",
           "sideEffects": true,
           "args": {
-            "order": [
+            "query": [
               "none"
             ],
             "owner": [
               "github-owner"
             ],
+            "repo": [
+              "github-repo"
+            ],
+            "sort": [
+              "none"
+            ],
+            "order": [
+              "none"
+            ],
             "page": [
               "none"
             ],
             "perPage": [
-              "none"
-            ],
-            "query": [
-              "none"
-            ],
-            "repo": [
-              "none"
-            ],
-            "sort": [
               "none"
             ]
           },
@@ -1993,7 +1993,10 @@
           "comment": "Searches for GitHub repositories by name, description, topics, or other metadata.",
           "sideEffects": true,
           "args": {
-            "minimal_output": [
+            "query": [
+              "none"
+            ],
+            "sort": [
               "none"
             ],
             "order": [
@@ -2005,10 +2008,7 @@
             "perPage": [
               "none"
             ],
-            "query": [
-              "none"
-            ],
-            "sort": [
+            "minimal_output": [
               "none"
             ]
           },
@@ -2016,9 +2016,15 @@
         },
         {
           "toolName": "search_users",
-          "comment": "Searches for GitHub users by username, real name, or other profile attributes.",
+          "comment": "Searches for GitHub users by username, real name, or other profile information.",
           "sideEffects": true,
           "args": {
+            "query": [
+              "none"
+            ],
+            "sort": [
+              "none"
+            ],
             "order": [
               "none"
             ],
@@ -2027,43 +2033,37 @@
             ],
             "perPage": [
               "none"
-            ],
-            "query": [
-              "none"
-            ],
-            "sort": [
-              "none"
             ]
           },
           "serverName": "github"
         },
         {
           "toolName": "sub_issue_write",
-          "comment": "Adds, removes, or reprioritizes a sub-issue within a parent issue in a GitHub repository.",
+          "comment": "Adds, removes, or reprioritizes a sub-issue under a parent issue in a GitHub repository.",
           "sideEffects": true,
           "args": {
-            "after_id": [
-              "none"
-            ],
-            "before_id": [
-              "none"
-            ],
-            "issue_number": [
-              "none"
-            ],
             "method": [
               "none"
             ],
             "owner": [
               "github-owner"
             ],
-            "replace_parent": [
-              "none"
-            ],
             "repo": [
+              "github-repo"
+            ],
+            "issue_number": [
               "none"
             ],
             "sub_issue_id": [
+              "none"
+            ],
+            "replace_parent": [
+              "none"
+            ],
+            "after_id": [
+              "none"
+            ],
+            "before_id": [
               "none"
             ]
           },
@@ -2071,37 +2071,37 @@
         },
         {
           "toolName": "update_pull_request",
-          "comment": "Updates an existing pull request's title, body, state, base branch, reviewers, or draft status.",
+          "comment": "Updates an existing pull request's title, description, state, base branch, reviewers, or draft status.",
           "sideEffects": true,
           "args": {
-            "base": [
-              "branch-name"
-            ],
-            "body": [
-              "none"
-            ],
-            "draft": [
-              "none"
-            ],
-            "maintainer_can_modify": [
-              "none"
-            ],
             "owner": [
               "github-owner"
+            ],
+            "repo": [
+              "github-repo"
             ],
             "pullNumber": [
               "none"
             ],
-            "repo": [
+            "title": [
               "none"
             ],
-            "reviewers": [
+            "body": [
               "none"
             ],
             "state": [
               "none"
             ],
-            "title": [
+            "base": [
+              "branch-name"
+            ],
+            "maintainer_can_modify": [
+              "none"
+            ],
+            "draft": [
+              "none"
+            ],
+            "reviewers": [
               "none"
             ]
           },
@@ -2112,16 +2112,16 @@
           "comment": "Updates a pull request's branch with the latest changes from its base branch.",
           "sideEffects": true,
           "args": {
-            "expectedHeadSha": [
-              "none"
-            ],
             "owner": [
               "github-owner"
+            ],
+            "repo": [
+              "github-repo"
             ],
             "pullNumber": [
               "none"
             ],
-            "repo": [
+            "expectedHeadSha": [
               "none"
             ]
           },
