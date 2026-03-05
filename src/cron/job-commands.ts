@@ -327,7 +327,7 @@ export async function runAddJobWizard(): Promise<void> {
   }
 
   // Save job first so it's not lost if policy compilation fails
-  saveJob(job);
+  await saveJob(job);
 
   console.error('');
   console.error('Compiling task policy...');
@@ -365,7 +365,7 @@ export async function runEditJobWizard(jobIdStr: string): Promise<void> {
   const job = await runJobReviewLoop(existing, false);
 
   // Save first so changes aren't lost if recompilation fails
-  saveJob(job);
+  await saveJob(job);
 
   if (job.taskConstitution !== originalConstitution) {
     console.error('Constitution changed — recompiling policy...');
@@ -473,7 +473,7 @@ export function runRemoveJob(jobIdStr: string): void {
 }
 
 /** Disables a job. */
-export function runDisableJob(jobIdStr: string): void {
+export async function runDisableJob(jobIdStr: string): Promise<void> {
   const jobId = createJobId(jobIdStr);
   const job = loadJob(jobId);
   if (!job) {
@@ -481,12 +481,12 @@ export function runDisableJob(jobIdStr: string): void {
     process.exit(1);
   }
 
-  saveJob({ ...job, enabled: false });
+  await saveJob({ ...job, enabled: false });
   console.error(`Job "${jobIdStr}" disabled.`);
 }
 
 /** Enables a job. */
-export function runEnableJob(jobIdStr: string): void {
+export async function runEnableJob(jobIdStr: string): Promise<void> {
   const jobId = createJobId(jobIdStr);
   const job = loadJob(jobId);
   if (!job) {
@@ -494,7 +494,7 @@ export function runEnableJob(jobIdStr: string): void {
     process.exit(1);
   }
 
-  saveJob({ ...job, enabled: true });
+  await saveJob({ ...job, enabled: true });
   console.error(`Job "${jobIdStr}" enabled.`);
 }
 

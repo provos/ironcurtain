@@ -7,8 +7,10 @@
  */
 
 import { existsSync, mkdirSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { loadConfig } from '../config/index.js';
 import {
+  getIronCurtainHome,
   getSessionDir,
   getSessionSandboxDir,
   getSessionEscalationDir,
@@ -182,6 +184,29 @@ interface SessionDirConfig {
 }
 
 /**
+ * Validates that a policyDir path resolves to a location under the
+ * IronCurtain home directory. Prevents loading attacker-controlled
+ * policy files from arbitrary filesystem locations.
+ *
+ * @throws {SessionError} if the path escapes the IronCurtain home.
+ */
+function validatePolicyDir(policyDir: string): void {
+  const resolvedPolicy = resolve(policyDir);
+  const home = resolve(getIronCurtainHome());
+
+  // The resolved path must be under (or equal to) the home directory.
+  // Add trailing separator to prevent prefix-matching tricks
+  // (e.g., /home/.ironcurtain-evil matching /home/.ironcurtain).
+  if (resolvedPolicy !== home && !resolvedPolicy.startsWith(home + '/')) {
+    throw new SessionError(
+      `policyDir must be under the IronCurtain home directory (${home}). ` +
+        `Received: ${resolvedPolicy}`,
+      'SESSION_INIT_FAILED',
+    );
+  }
+}
+
+/**
  * Shared session directory setup and config patching used by both session modes.
  *
  * When workspacePath is provided, it replaces the session sandbox as the
@@ -197,6 +222,10 @@ function buildSessionConfig(
   workspacePath?: string,
   policyDir?: string,
 ): SessionDirConfig {
+  if (policyDir) {
+    validatePolicyDir(policyDir);
+  }
+
   const sessionDir = getSessionDir(effectiveSessionId);
   const sandboxDir = workspacePath ?? getSessionSandboxDir(effectiveSessionId);
   const escalationDir = getSessionEscalationDir(effectiveSessionId);

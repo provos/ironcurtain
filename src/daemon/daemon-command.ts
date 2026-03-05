@@ -132,7 +132,7 @@ export async function runDaemonCommand(argv: string[]): Promise<void> {
         process.exit(1);
       }
       const { runDisableJob } = await import('../cron/job-commands.js');
-      runDisableJob(jobId);
+      await runDisableJob(jobId);
       break;
     }
     case 'enable-job': {
@@ -142,7 +142,7 @@ export async function runDaemonCommand(argv: string[]): Promise<void> {
         process.exit(1);
       }
       const { runEnableJob } = await import('../cron/job-commands.js');
-      runEnableJob(jobId);
+      await runEnableJob(jobId);
       break;
     }
     case 'recompile-job': {

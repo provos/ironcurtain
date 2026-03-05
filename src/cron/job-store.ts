@@ -20,6 +20,7 @@ import { resolve } from 'node:path';
 import { getJobsDir, getJobDir, getJobRunsDir } from '../config/paths.js';
 import type { JobDefinition, JobId, RunRecord } from './types.js';
 import { createJobId } from './types.js';
+import { withFileLock, getJobLockDir } from './file-lock.js';
 
 /** Loads a job definition from disk. Returns undefined if not found. */
 export function loadJob(jobId: JobId): JobDefinition | undefined {
@@ -59,11 +60,17 @@ export function loadAllJobs(): JobDefinition[] {
   return jobs;
 }
 
-/** Saves a job definition to disk. Creates directories as needed. */
-export function saveJob(job: JobDefinition): void {
+/**
+ * Saves a job definition to disk. Creates directories as needed.
+ * Acquires an advisory file lock to prevent concurrent write corruption.
+ */
+export async function saveJob(job: JobDefinition): Promise<void> {
   const jobDir = getJobDir(job.id);
   mkdirSync(jobDir, { recursive: true });
-  writeFileSync(resolve(jobDir, 'job.json'), JSON.stringify(job, null, 2) + '\n');
+
+  await withFileLock(getJobLockDir(jobDir), () => {
+    writeFileSync(resolve(jobDir, 'job.json'), JSON.stringify(job, null, 2) + '\n');
+  });
 }
 
 /** Deletes a job and all its artifacts (generated, workspace, runs). */
@@ -71,14 +78,20 @@ export function deleteJob(jobId: JobId): void {
   rmSync(getJobDir(jobId), { recursive: true, force: true });
 }
 
-/** Records a completed run. */
-export function saveRunRecord(jobId: JobId, record: RunRecord): void {
+/**
+ * Records a completed run.
+ * Acquires an advisory file lock to prevent concurrent write corruption.
+ */
+export async function saveRunRecord(jobId: JobId, record: RunRecord): Promise<void> {
   const runsDir = getJobRunsDir(jobId);
   mkdirSync(runsDir, { recursive: true });
 
-  // Use the start time as the filename, sanitized for filesystem safety
-  const filename = record.startedAt.replace(/:/g, '-') + '.json';
-  writeFileSync(resolve(runsDir, filename), JSON.stringify(record, null, 2) + '\n');
+  const jobDir = getJobDir(jobId);
+  await withFileLock(getJobLockDir(jobDir), () => {
+    // Use the start time as the filename, sanitized for filesystem safety
+    const filename = record.startedAt.replace(/:/g, '-') + '.json';
+    writeFileSync(resolve(runsDir, filename), JSON.stringify(record, null, 2) + '\n');
+  });
 }
 
 /**

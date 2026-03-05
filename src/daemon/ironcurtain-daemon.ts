@@ -197,7 +197,7 @@ export class IronCurtainDaemon {
     await compileTaskPolicy(job.taskConstitution, getJobDir(job.id));
 
     // Save job definition
-    saveJob(job);
+    await saveJob(job);
 
     // Schedule if enabled
     if (job.enabled) {
@@ -222,23 +222,23 @@ export class IronCurtainDaemon {
   }
 
   /** Enables a previously disabled job. Schedules it. */
-  enableJob(jobId: JobId): void {
+  async enableJob(jobId: JobId): Promise<void> {
     const job = loadJob(jobId);
     if (!job) throw new Error(`Job not found: ${jobId}`);
 
     const updated = { ...job, enabled: true };
-    saveJob(updated);
+    await saveJob(updated);
     this.scheduler.schedule(updated, (j) => this.onJobTrigger(j));
     logger.info(`[Daemon] Enabled job ${jobId}`);
   }
 
   /** Disables a job. Unschedules it but preserves files. */
-  disableJob(jobId: JobId): void {
+  async disableJob(jobId: JobId): Promise<void> {
     const job = loadJob(jobId);
     if (!job) throw new Error(`Job not found: ${jobId}`);
 
     const updated = { ...job, enabled: false };
-    saveJob(updated);
+    await saveJob(updated);
     this.scheduler.unschedule(jobId);
     logger.info(`[Daemon] Disabled job ${jobId}`);
   }
@@ -331,7 +331,7 @@ export class IronCurtainDaemon {
           escalationsEncountered: 0,
           escalationsApproved: 0,
         };
-        saveRunRecord(job.id, record);
+        await saveRunRecord(job.id, record);
         return record;
       }
     }
@@ -411,7 +411,7 @@ export class IronCurtainDaemon {
     };
 
     // Save run record
-    saveRunRecord(job.id, record);
+    await saveRunRecord(job.id, record);
 
     // Notify via Signal if configured
     if (job.notifyOnCompletion && this.sendSignalMessage) {
