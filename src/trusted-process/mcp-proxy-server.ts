@@ -560,8 +560,45 @@ export async function handleCallTool(
       isError: true,
     };
   }
+
+  // Enrich git tool args with the locally tracked working directory when
+  // the agent omits the `path` argument. The git MCP server tracks its own
+  // CWD (set via git_set_working_dir) and uses it implicitly, but the
+  // policy engine needs the explicit path to resolve sandbox containment
+  // and the default remote URL for domain-based policy rules.
+  // The serverContextMap mirrors the git server's working directory from
+  // successful git_set_working_dir / git_clone calls, avoiding an RPC.
+  let effectiveRawArgs = rawArgs;
+  if (toolInfo.serverName === 'git' && 'path' in annotation.args && !('path' in rawArgs)) {
+    const gitWorkDir = deps.serverContextMap.get('git')?.workingDirectory;
+    if (!gitWorkDir) {
+      const errorMsg = 'Git server has no working directory set. Call git_set_working_dir first.';
+      deps.auditLog.log(
+        buildAuditEntry(
+          {
+            requestId: uuidv4(),
+            serverName: toolInfo.serverName,
+            toolName: toolInfo.name,
+            arguments: rawArgs,
+            timestamp: new Date().toISOString(),
+          },
+          rawArgs,
+          { status: 'deny', rule: 'git-path-enrichment-failed', reason: errorMsg },
+          { status: 'denied', error: errorMsg },
+          0,
+          {},
+        ),
+      );
+      return {
+        content: [{ type: 'text', text: `Error: ${errorMsg}` }],
+        isError: true,
+      };
+    }
+    effectiveRawArgs = { ...rawArgs, path: gitWorkDir };
+  }
+
   const { argsForTransport, argsForPolicy } = prepareToolArgs(
-    rawArgs,
+    effectiveRawArgs,
     annotation,
     deps.allowedDirectory,
     CONTAINER_WORKSPACE_DIR,

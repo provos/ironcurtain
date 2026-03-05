@@ -749,6 +749,110 @@ describe('handleCallTool', () => {
 
     expect(deps.serverContextMap.get('git')?.workingDirectory).toBe('/home/user/repo');
   });
+
+  describe('git path enrichment', () => {
+    function createGitDeps(overrides: Partial<CallToolDeps> = {}): CallToolDeps {
+      const gitTool: ProxiedTool = { serverName: 'git', name: 'git_push', inputSchema: { type: 'object' } };
+      const toolMap = new Map<string, ProxiedTool>();
+      toolMap.set('git_push', gitTool);
+
+      const annotation = {
+        toolName: 'git_push',
+        serverName: 'git',
+        comment: 'Pushes commits',
+        sideEffects: true,
+        args: { path: ['read-path'], remote: ['git-remote-url'], branch: ['branch-name'] },
+      };
+
+      const policyEngine = {
+        getAnnotation: vi.fn().mockReturnValue(annotation),
+        evaluate: vi.fn().mockReturnValue({ decision: 'allow', rule: 'test-allow', reason: 'test' }),
+      };
+
+      const mockGitClient = {
+        callTool: vi.fn().mockResolvedValue({
+          content: [{ type: 'text', text: 'pushed' }],
+          isError: false,
+        }),
+      };
+
+      const clientStates = new Map<string, ClientState>();
+      clientStates.set('git', { client: mockGitClient as unknown as ClientState['client'], roots: [] });
+
+      const resolvedSandboxConfigs = new Map();
+      resolvedSandboxConfigs.set('git', { sandboxed: false, reason: 'opt-out' });
+
+      // Pre-populate serverContextMap with a git working directory
+      const serverContextMap = new Map();
+      serverContextMap.set('git', { workingDirectory: '/home/user/repo' });
+
+      return {
+        toolMap,
+        policyEngine: policyEngine as unknown as CallToolDeps['policyEngine'],
+        auditLog: { log: vi.fn() } as unknown as CallToolDeps['auditLog'],
+        circuitBreaker: { check: vi.fn().mockReturnValue({ allowed: true }) } as unknown as CallToolDeps['circuitBreaker'],
+        clientStates,
+        resolvedSandboxConfigs,
+        allowedDirectory: '/tmp/sandbox',
+        escalationDir: undefined,
+        autoApproveModel: null,
+        serverContextMap,
+        ...overrides,
+      };
+    }
+
+    it('injects path from serverContextMap when path is absent', async () => {
+      const deps = createGitDeps();
+      const mockPrepareToolArgs = vi.mocked(await import('../src/trusted-process/path-utils.js')).prepareToolArgs;
+
+      await handleCallTool('git_push', { remote: 'origin' }, deps);
+
+      expect(mockPrepareToolArgs).toHaveBeenCalledWith(
+        expect.objectContaining({ path: '/home/user/repo', remote: 'origin' }),
+        expect.anything(),
+        expect.anything(),
+        expect.anything(),
+      );
+    });
+
+    it('does not inject path when path is already provided', async () => {
+      const deps = createGitDeps();
+      const mockPrepareToolArgs = vi.mocked(await import('../src/trusted-process/path-utils.js')).prepareToolArgs;
+
+      await handleCallTool('git_push', { path: '/explicit/path' }, deps);
+
+      expect(mockPrepareToolArgs).toHaveBeenCalledWith(
+        expect.objectContaining({ path: '/explicit/path' }),
+        expect.anything(),
+        expect.anything(),
+        expect.anything(),
+      );
+    });
+
+    it('returns error when git working directory is not set', async () => {
+      const deps = createGitDeps();
+      deps.serverContextMap.set('git', {}); // no workingDirectory
+
+      const result = await handleCallTool('git_push', {}, deps);
+
+      expect(result.isError).toBe(true);
+      const content = result.content as Array<{ type: string; text: string }>;
+      expect(content[0].text).toContain('git_set_working_dir');
+      expect(deps.auditLog.log).toHaveBeenCalled();
+    });
+
+    it('returns error when no git context exists at all', async () => {
+      const deps = createGitDeps();
+      deps.serverContextMap.clear();
+
+      const result = await handleCallTool('git_push', {}, deps);
+
+      expect(result.isError).toBe(true);
+      const content = result.content as Array<{ type: string; text: string }>;
+      expect(content[0].text).toContain('git_set_working_dir');
+      expect(deps.auditLog.log).toHaveBeenCalled();
+    });
+  });
 });
 
 // ── selectTransportConfig tests ────────────────────────────────────────
