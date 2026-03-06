@@ -58,6 +58,14 @@ export interface DaemonStatus {
   readonly nextFireTime: Date | null;
 }
 
+/** JSON-serialized form of DaemonStatus (Date → ISO string). */
+export interface DaemonStatusDto {
+  readonly uptimeSeconds: number;
+  readonly jobs: { total: number; enabled: number; running: number };
+  readonly signalConnected: boolean;
+  readonly nextFireTime: string | null;
+}
+
 export interface ControlRequestHandler {
   getStatus(): DaemonStatus;
   addJob(job: JobDefinition): Promise<void>;

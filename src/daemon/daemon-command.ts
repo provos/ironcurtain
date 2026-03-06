@@ -15,18 +15,7 @@ import { parseArgs } from 'node:util';
 import { IronCurtainDaemon } from './ironcurtain-daemon.js';
 import { sendControlRequest, type ControlRequest, type ControlResponse } from './control-socket.js';
 import type { AgentId } from '../docker/agent-adapter.js';
-
-function formatUptime(seconds: number): string {
-  const days = Math.floor(seconds / 86400);
-  const hours = Math.floor((seconds % 86400) / 3600);
-  const minutes = Math.floor((seconds % 3600) / 60);
-
-  const parts: string[] = [];
-  if (days > 0) parts.push(`${days}d`);
-  if (hours > 0) parts.push(`${hours}h`);
-  if (minutes > 0 || parts.length === 0) parts.push(`${minutes}m`);
-  return parts.join(' ');
-}
+import { formatDuration } from '../cron/format-utils.js';
 
 function printDaemonHelp(): void {
   console.error(
@@ -155,24 +144,14 @@ export async function runDaemonCommand(argv: string[]): Promise<void> {
       break;
     }
     case 'status': {
-      const { isDaemonRunning, sendControlRequest: sendReq } = await import('./control-socket.js');
-      const running = await isDaemonRunning();
-      if (!running) {
+      const { sendControlRequest: sendReq } = await import('./control-socket.js');
+      const resp = await sendReq({ command: 'status' });
+      if (!resp || !resp.ok) {
         console.error('Daemon is not running.');
         break;
       }
-      const resp = await sendReq({ command: 'status' });
-      if (!resp || !resp.ok) {
-        console.error('Daemon is running but did not respond to status request.');
-        break;
-      }
-      const status = resp.data as {
-        uptimeSeconds: number;
-        jobs: { total: number; enabled: number; running: number };
-        signalConnected: boolean;
-        nextFireTime: string | null;
-      };
-      const uptimeStr = formatUptime(status.uptimeSeconds);
+      const status = resp.data as import('./control-socket.js').DaemonStatusDto;
+      const uptimeStr = formatDuration(status.uptimeSeconds);
       console.error('Daemon is running.');
       console.error(`  Uptime:             ${uptimeStr}`);
       console.error(

@@ -5,8 +5,31 @@
 import { parseCronExpression, type CronFields } from './cron-scheduler.js';
 
 // ---------------------------------------------------------------------------
-// Relative time display
+// Shared constants
 // ---------------------------------------------------------------------------
+
+const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+// ---------------------------------------------------------------------------
+// Duration and relative time display
+// ---------------------------------------------------------------------------
+
+/**
+ * Formats a duration in seconds as a compact string like "1d 2h 30m".
+ * Shows up to two units for brevity (e.g., "2h 15m" not "2h 15m 30s").
+ */
+export function formatDuration(seconds: number): string {
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+  const days = Math.floor(hours / 24);
+
+  const parts: string[] = [];
+  if (days > 0) parts.push(`${days}d`);
+  if (hours % 24 > 0) parts.push(`${hours % 24}h`);
+  if (minutes % 60 > 0 && days === 0) parts.push(`${minutes % 60}m`);
+  if (parts.length === 0) parts.push('0m');
+  return parts.join(' ');
+}
 
 /**
  * Formats a date as a relative time string with an absolute time suffix.
@@ -14,39 +37,18 @@ import { parseCronExpression, type CronFields } from './cron-scheduler.js';
  */
 export function formatRelativeTime(date: Date, now = new Date()): string {
   const diffMs = date.getTime() - now.getTime();
-  const absDiffMs = Math.abs(diffMs);
-  const relative = formatRelativePart(absDiffMs, diffMs >= 0);
+  const absDiffSec = Math.floor(Math.abs(diffMs) / 1000);
   const absolute = formatAbsoluteTime(date);
+
+  if (absDiffSec < 60) return `just now (${absolute})`;
+
+  const dur = formatDuration(absDiffSec);
+  const relative = diffMs >= 0 ? `in ${dur}` : `${dur} ago`;
   return `${relative} (${absolute})`;
 }
 
-function formatRelativePart(absDiffMs: number, isFuture: boolean): string {
-  const seconds = Math.floor(absDiffMs / 1000);
-  if (seconds < 60) return 'just now';
-
-  const minutes = Math.floor(seconds / 60);
-  const hours = Math.floor(minutes / 60);
-  const days = Math.floor(hours / 24);
-
-  let parts: string;
-  if (days > 0) {
-    parts = `${days}d`;
-    const remainHours = hours % 24;
-    if (remainHours > 0) parts += ` ${remainHours}h`;
-  } else if (hours > 0) {
-    parts = `${hours}h`;
-    const remainMinutes = minutes % 60;
-    if (remainMinutes > 0) parts += ` ${remainMinutes}m`;
-  } else {
-    parts = `${minutes}m`;
-  }
-
-  return isFuture ? `in ${parts}` : `${parts} ago`;
-}
-
 function formatAbsoluteTime(date: Date): string {
-  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-  const month = months[date.getMonth()];
+  const month = MONTH_NAMES[date.getMonth()];
   const day = date.getDate();
   const hours = date.getHours().toString().padStart(2, '0');
   const minutes = date.getMinutes().toString().padStart(2, '0');
@@ -151,9 +153,8 @@ function describeDaysOfMonth(fields: CronFields): string | null {
 function describeMonths(fields: CronFields): string | null {
   if (fields.months.size === 12) return null; // wildcard
 
-  const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   const months = [...fields.months].sort((a, b) => a - b);
-  return `in ${months.map((m) => monthNames[m - 1]).join(', ')}`;
+  return `in ${months.map((m) => MONTH_NAMES[m - 1]).join(', ')}`;
 }
 
 function isContiguous(sorted: number[]): boolean {
