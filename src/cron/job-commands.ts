@@ -500,6 +500,11 @@ export async function runJobCommand(jobIdStr: string): Promise<void> {
   if (record.summary) {
     console.error(`  Summary: ${record.summary.split('\n')[0].slice(0, 100)}`);
   }
+
+  // Clean up daemon resources (scheduler, logger file handles) and exit.
+  // Without this, lingering handles keep the Node.js event loop alive.
+  await daemon.shutdown();
+  process.exit(record.outcome.kind === 'success' ? 0 : 1);
 }
 
 /** Removes a job. */
