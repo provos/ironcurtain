@@ -213,7 +213,8 @@ describe('formatBudgetMessage', () => {
 describe('formatBudgetSummary', () => {
   it('includes tokens, steps, time, and cost when tracking is available', () => {
     const summary = formatBudgetSummary(makeBudgetStatus());
-    expect(summary).toContain('7,000 tokens');
+    // Use toLocaleString() to match the implementation's locale-aware formatting
+    expect(summary).toContain(`${(7000).toLocaleString()} tokens`);
     expect(summary).toContain('25 steps');
     expect(summary).toContain('600s');
     expect(summary).toContain('$0.25');
