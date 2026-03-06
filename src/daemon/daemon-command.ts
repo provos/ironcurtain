@@ -122,8 +122,6 @@ export async function runDaemonCommand(argv: string[]): Promise<void> {
     // Handle shutdown signals
     const shutdownHandler = async () => {
       await daemon.shutdown();
-      const { teardown: teardownLogger } = await import('../logger.js');
-      teardownLogger();
       process.exit(0);
     };
     process.on('SIGINT', () => void shutdownHandler());

@@ -86,9 +86,6 @@ export class IronCurtainDaemon {
   /** Signal daemon instance (null if Signal not configured). */
   private signalDaemon: import('../signal/signal-bot-daemon.js').SignalBotDaemon | null = null;
 
-  /** Send a message via Signal (no-op if Signal not available). */
-  private sendSignalMessage: ((message: string) => Promise<void>) | null = null;
-
   /** Resolve to exit the daemon. */
   private exitResolve: (() => void) | null = null;
 
@@ -190,6 +187,9 @@ export class IronCurtainDaemon {
         }
       }),
     );
+
+    // Teardown logger last (restores console.* to original behavior)
+    logger.teardown();
 
     this.exitResolve?.();
   }
@@ -364,9 +364,9 @@ export class IronCurtainDaemon {
     if (this.activeJobRuns.has(job.id)) {
       const msg = `[Daemon] Skipping job ${job.id}: previous run still active (session #${this.activeJobRuns.get(job.id)})`;
       logger.warn(msg);
-      if (this.sendSignalMessage) {
-        this.sendSignalMessage(`Skipped job "${job.name}": previous run still in progress.`).catch(() => {});
-      }
+      this.signalDaemon
+        ?.sendSignalMessage(`Skipped job "${job.name}": previous run still in progress.`)
+        .catch(() => {});
       return;
     }
 
@@ -509,7 +509,7 @@ export class IronCurtainDaemon {
     saveRunRecord(job.id, record);
 
     // Notify via Signal if configured
-    if (job.notifyOnCompletion && this.sendSignalMessage) {
+    if (job.notifyOnCompletion && this.signalDaemon) {
       const outcomeStr =
         outcome.kind === 'success'
           ? 'Completed'
@@ -519,7 +519,7 @@ export class IronCurtainDaemon {
 
       const notify = `[cron: ${job.name}] ${outcomeStr} (${budgetStatus.elapsedSeconds.toFixed(0)}s, $${budgetStatus.estimatedCostUsd.toFixed(2)})`;
       const notifyMsg = summary ? `${notify}\n${summary.slice(0, 500)}` : notify;
-      this.sendSignalMessage(notifyMsg).catch(() => {});
+      this.signalDaemon.sendSignalMessage(notifyMsg).catch(() => {});
     }
 
     // Cleanup
@@ -540,13 +540,13 @@ export class IronCurtainDaemon {
 
     this.sessionManager.setPendingEscalation(label, request.escalationId);
 
-    if (job.notifyOnEscalation && this.sendSignalMessage) {
+    if (job.notifyOnEscalation && this.signalDaemon) {
       const banner = [
         `[#${label} cron: ${job.name}] Escalation: ${request.serverName}/${request.toolName}`,
         `Reason: "${request.reason}"`,
         `Reply: approve #${label} / deny #${label}`,
       ].join('\n');
-      this.sendSignalMessage(banner).catch(() => {});
+      this.signalDaemon.sendSignalMessage(banner).catch(() => {});
     } else {
       // Auto-deny when Signal is not configured
       const managed = this.sessionManager.get(label);
@@ -588,14 +588,10 @@ export class IronCurtainDaemon {
 
     this.signalDaemon = signalDaemon;
 
-    // Capture the sendSignalMessage method for cron notifications
-    this.sendSignalMessage = (msg: string) => signalDaemon.sendSignalMessage(msg);
-
     // Run the blocking event loop in the background (blocks until shutdown)
     signalDaemon.run().catch((err: unknown) => {
       logger.warn(`[Daemon] Signal daemon exited: ${String(err)}`);
       this.signalDaemon = null;
-      this.sendSignalMessage = null;
     });
   }
 
