@@ -291,6 +291,13 @@ export class SignalBotDaemon {
     // Control commands: /quit, /new, /sessions, /switch, /budget, /jobs, /help
     if (this.handleControlCommand(text)) return;
 
+    // Reject unrecognized slash commands rather than forwarding to agent
+    if (text.trimStart().startsWith('/')) {
+      const cmd = text.trim().split(/\s/)[0];
+      await this.sendSignalMessage(`Unknown command: ${cmd}\nSend /help for available commands.`);
+      return;
+    }
+
     // Regular message -> route to Signal session
     await this.routeToSession(text);
   }
