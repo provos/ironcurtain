@@ -570,7 +570,8 @@ export async function handleCallTool(
   // The serverContextMap mirrors the git server's working directory from
   // successful git_set_working_dir / git_clone calls, avoiding an RPC.
   let effectiveRawArgs = rawArgs;
-  if (toolInfo.serverName === 'git' && 'path' in annotation.args && !('path' in rawArgs)) {
+  const hasEffectivePath = 'path' in rawArgs && typeof rawArgs.path === 'string' && rawArgs.path.trim() !== '';
+  if (toolInfo.serverName === 'git' && 'path' in annotation.args && !hasEffectivePath) {
     const gitWorkDir = deps.serverContextMap.get('git')?.workingDirectory;
     if (!gitWorkDir) {
       const errorMsg = 'Git server has no working directory set. Call git_set_working_dir first.';

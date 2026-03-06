@@ -80,7 +80,7 @@ export class ControlSocketServer {
 
   /** Starts listening on the Unix domain socket. */
   async start(): Promise<void> {
-    this.removeStaleSocket();
+    await this.removeStaleSocket();
 
     return new Promise<void>((resolve, reject) => {
       const server = createServer((socket) => this.onConnection(socket));
@@ -114,16 +114,41 @@ export class ControlSocketServer {
 
   /**
    * Removes a stale socket file left behind by a crashed daemon.
-   * If another daemon is actually running, our listen() will fail
-   * with EADDRINUSE which is the correct behavior.
+   * Attempts to connect first — only unlinks when the socket is
+   * confirmed stale (ECONNREFUSED) or absent (ENOENT). If the
+   * socket is live, throws so the caller knows another daemon is running.
    */
-  private removeStaleSocket(): void {
+  private async removeStaleSocket(): Promise<void> {
+    const alive = await this.isSocketAlive();
+    if (alive) {
+      throw new Error(
+        `Another daemon is already listening on ${this.socketPath}. ` + `Stop it first or remove the socket manually.`,
+      );
+    }
+    // Socket is stale or absent — safe to unlink
     try {
       unlinkSync(this.socketPath);
       logger.info(`[ControlSocket] Removed stale socket file`);
     } catch {
-      // File doesn't exist or can't be removed -- fine either way
+      // File doesn't exist — fine
     }
+  }
+
+  /**
+   * Probes whether the socket is actively accepting connections.
+   * Returns true if a daemon is listening, false if stale/absent.
+   */
+  private isSocketAlive(): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      const conn = createConnection(this.socketPath);
+      conn.once('connect', () => {
+        conn.destroy();
+        resolve(true);
+      });
+      conn.once('error', () => {
+        resolve(false);
+      });
+    });
   }
 
   private cleanupSocketFile(): void {
