@@ -12,13 +12,9 @@
  * 3. close() -- stop container, stop proxies, clean up
  */
 
-import { mkdirSync, readdirSync, readFileSync, writeFileSync, existsSync, copyFileSync, rmSync } from 'node:fs';
-import { resolve, dirname } from 'node:path';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir, arch } from 'node:os';
+import { mkdirSync, writeFileSync, existsSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { quote } from 'shell-quote';
-import { createHash } from 'node:crypto';
-import { fileURLToPath } from 'node:url';
 import type {
   Session,
   SessionId,
@@ -36,6 +32,7 @@ import type { DockerProxy } from './code-mode-proxy.js';
 import type { MitmProxy } from './mitm-proxy.js';
 import type { CertificateAuthority } from './ca.js';
 import { AuditLogTailer } from './audit-log-tailer.js';
+import { ensureImage } from './docker-infrastructure.js';
 import { prepareSession } from './orientation.js';
 import { INTERNAL_NETWORK_NAME, INTERNAL_NETWORK_SUBNET, INTERNAL_NETWORK_GATEWAY } from './platform.js';
 import { SessionNotReadyError, SessionClosedError } from '../session/errors.js';
@@ -196,7 +193,7 @@ export class DockerAgentSession implements Session {
 
       // 5. Ensure Docker image exists (build if needed, with CA cert)
       image = await this.adapter.getImage();
-      await this.ensureImage(image);
+      await ensureImage(image, this.docker, this.ca);
     }
 
     // 6. Create and start container
@@ -516,124 +513,6 @@ export class DockerAgentSession implements Session {
     } catch {
       // Ignore write failures
     }
-  }
-
-  /**
-   * Ensures the Docker image exists and is up-to-date, building it
-   * (and the base image) if needed.
-   *
-   * Staleness detection uses a content hash of all build inputs
-   * (Dockerfiles, entrypoint scripts, CA certificate) stored as
-   * Docker image labels.
-   */
-  private async ensureImage(image: string): Promise<void> {
-    const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
-    const dockerDir = resolve(packageRoot, 'docker');
-
-    // On arm64 hosts (Apple Silicon), use the lightweight arm64-native Dockerfile
-    // instead of the amd64-only devcontainers/universal image.
-    const baseDockerfile =
-      arch() === 'arm64' && existsSync(resolve(dockerDir, 'Dockerfile.base.arm64'))
-        ? 'Dockerfile.base.arm64'
-        : 'Dockerfile.base';
-
-    // Build base image with CA cert baked in (if stale or missing)
-    const baseImage = 'ironcurtain-base:latest';
-    const baseBuildHash = this.computeBuildHash(dockerDir, [baseDockerfile]);
-    const baseRebuilt = await this.ensureBaseImage(baseImage, dockerDir, baseDockerfile, baseBuildHash);
-
-    // Build the agent-specific image (if stale, missing, or base was rebuilt)
-    const agentName = image.replace('ironcurtain-', '').replace(':latest', '');
-    const dockerfile = `Dockerfile.${agentName}`;
-    const agentDockerfilePath = resolve(dockerDir, dockerfile);
-    if (!existsSync(agentDockerfilePath)) {
-      throw new Error(`Dockerfile not found for agent "${agentName}": ${agentDockerfilePath}`);
-    }
-
-    const agentBuildHash = this.computeBuildHash(dockerDir, [dockerfile], baseBuildHash);
-    const needsAgentBuild = baseRebuilt || (await this.isImageStale(image, agentBuildHash));
-
-    if (needsAgentBuild) {
-      logger.info(`Building Docker image ${image}...`);
-      await this.docker.buildImage(image, agentDockerfilePath, dockerDir, {
-        'ironcurtain.build-hash': agentBuildHash,
-      });
-      logger.info(`Docker image ${image} built successfully`);
-    }
-  }
-
-  /**
-   * Ensures the base image exists and is up-to-date.
-   * Returns true if the base image was (re)built.
-   */
-  private async ensureBaseImage(
-    baseImage: string,
-    dockerDir: string,
-    dockerfile: string,
-    buildHash: string,
-  ): Promise<boolean> {
-    if (!(await this.isImageStale(baseImage, buildHash))) return false;
-
-    logger.info('Building base Docker image (this may take a while on first run)...');
-
-    // Create temporary build context with CA cert
-    const tmpContext = mkdtempSync(resolve(tmpdir(), 'ironcurtain-build-'));
-    try {
-      // Copy Dockerfile and entrypoint scripts
-      for (const file of readdirSync(dockerDir)) {
-        copyFileSync(resolve(dockerDir, file), resolve(tmpContext, file));
-      }
-      // Copy CA cert into build context
-      copyFileSync(this.ca.certPath, resolve(tmpContext, 'ironcurtain-ca-cert.pem'));
-
-      await this.docker.buildImage(baseImage, resolve(tmpContext, dockerfile), tmpContext, {
-        'ironcurtain.build-hash': buildHash,
-      });
-    } finally {
-      rmSync(tmpContext, { recursive: true, force: true });
-    }
-    logger.info('Base Docker image built successfully');
-    return true;
-  }
-
-  /**
-   * Checks if an image needs (re)building by comparing the stored
-   * build hash label against the expected hash.
-   */
-  private async isImageStale(image: string, expectedHash: string): Promise<boolean> {
-    if (!(await this.docker.imageExists(image))) return true;
-    const storedHash = await this.docker.getImageLabel(image, 'ironcurtain.build-hash');
-    return storedHash !== expectedHash;
-  }
-
-  /**
-   * Computes a SHA-256 content hash of all files in the docker directory
-   * plus the CA certificate. This captures changes to Dockerfiles,
-   * entrypoint scripts, and the CA cert.
-   */
-  private computeBuildHash(dockerDir: string, dockerfiles: string[], parentHash?: string): string {
-    const hash = createHash('sha256');
-
-    // Hash specified Dockerfiles and all entrypoint scripts
-    const files = readdirSync(dockerDir).sort();
-    for (const file of files) {
-      // Include requested Dockerfiles and all entrypoint/script files
-      if (dockerfiles.includes(file) || file.endsWith('.sh')) {
-        hash.update(`file:${file}\n`);
-        hash.update(readFileSync(resolve(dockerDir, file)));
-      }
-    }
-
-    // Hash CA certificate content
-    hash.update('ca-cert\n');
-    hash.update(this.ca.certPem);
-
-    // Chain parent hash for agent images (so base rebuild triggers agent rebuild)
-    if (parentHash) {
-      hash.update(`parent:${parentHash}\n`);
-    }
-
-    return hash.digest('hex');
   }
 }
 
