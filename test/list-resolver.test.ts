@@ -79,11 +79,11 @@ describe('resolveList', () => {
       expect(result.values).toContain('gamma');
     });
 
-    it('returns a non-empty resolvedAt ISO timestamp', async () => {
+    it('returns a valid ISO 8601 resolvedAt timestamp', async () => {
       const def = makeDefinition();
       const result = await resolveList(def, makeConfig(['x']));
-      expect(result.resolvedAt).toBeTruthy();
-      expect(() => new Date(result.resolvedAt)).not.toThrow();
+      expect(Number.isNaN(Date.parse(result.resolvedAt))).toBe(false);
+      expect(new Date(result.resolvedAt).toISOString()).toBe(result.resolvedAt);
     });
 
     it('returns a non-empty inputHash', async () => {
