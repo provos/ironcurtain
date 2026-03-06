@@ -21,7 +21,7 @@ import type { CommandSpec } from '../cli-help.js';
 
 export const botSpec: CommandSpec = {
   name: 'ironcurtain bot',
-  description: 'Run the Signal transport daemon (alias for daemon)',
+  description: 'Run the Signal transport (standalone, without cron scheduler)',
   usage: ['ironcurtain bot [options]'],
   options: [
     { flag: 'agent', short: 'a', description: 'Agent mode: builtin or claude-code (Docker)', placeholder: '<name>' },

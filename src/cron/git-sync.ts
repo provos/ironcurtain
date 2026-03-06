@@ -64,7 +64,19 @@ function resolveDefaultBranch(dir: string, env: NodeJS.ProcessEnv): string {
     return ref.replace(/^origin\//, '');
   } catch {
     // origin/HEAD may not exist if the repo was cloned with an old git version
-    // or if HEAD was never set. Fall back to 'main'.
+    // or if HEAD was never set. Probe for common default branch names.
+    for (const candidate of ['main', 'master']) {
+      try {
+        execFileSync('git', ['rev-parse', '--verify', `origin/${candidate}`], {
+          cwd: dir,
+          stdio: 'pipe',
+          env,
+        });
+        return candidate;
+      } catch {
+        // Branch doesn't exist, try next
+      }
+    }
     return 'main';
   }
 }
