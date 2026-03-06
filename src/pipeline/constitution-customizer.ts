@@ -503,9 +503,13 @@ export async function main(): Promise<void> {
 
     // Call LLM
     let response: CustomizerResponse;
+    const llmSpinner = p.spinner();
+    llmSpinner.start('Thinking...');
     try {
       response = await callLlm(model, systemPrompt, cachedMessages);
+      llmSpinner.stop('Done.');
     } catch (err) {
+      llmSpinner.stop('Failed.');
       p.log.error(`LLM error: ${err instanceof Error ? err.message : String(err)}`);
       // Remove the user message we just added since the call failed
       conversationHistory.pop();
@@ -563,9 +567,13 @@ export async function main(): Promise<void> {
 
       const refinedMessages = cacheStrategy.applyHistoryBreakpoint(conversationHistory);
 
+      const refineSpinner = p.spinner();
+      refineSpinner.start('Thinking...');
       try {
         response = await callLlm(model, systemPrompt, refinedMessages);
+        refineSpinner.stop('Done.');
       } catch (err) {
+        refineSpinner.stop('Failed.');
         p.log.error(`LLM error: ${err instanceof Error ? err.message : String(err)}`);
         conversationHistory.pop();
         break;

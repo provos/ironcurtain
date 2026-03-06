@@ -137,9 +137,13 @@ export async function runJobConstitutionCustomizer(
 
     // Call LLM
     let response: CustomizerResponse;
+    const llmSpinner = p.spinner();
+    llmSpinner.start('Thinking...');
     try {
       response = await callLlm(model, systemPrompt, cachedMessages);
+      llmSpinner.stop('Done.');
     } catch (err) {
+      llmSpinner.stop('Failed.');
       p.log.error(`LLM error: ${err instanceof Error ? err.message : String(err)}`);
       conversationHistory.pop();
       continue;
@@ -196,9 +200,13 @@ export async function runJobConstitutionCustomizer(
 
       const refinedMessages = cacheStrategy.applyHistoryBreakpoint(conversationHistory);
 
+      const refineSpinner = p.spinner();
+      refineSpinner.start('Thinking...');
       try {
         response = await callLlm(model, systemPrompt, refinedMessages);
+        refineSpinner.stop('Done.');
       } catch (err) {
+        refineSpinner.stop('Failed.');
         p.log.error(`LLM error: ${err instanceof Error ? err.message : String(err)}`);
         conversationHistory.pop();
         break;
