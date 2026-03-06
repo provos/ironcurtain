@@ -27,10 +27,12 @@ import { markdownToSignal } from './markdown-to-signal.js';
 import {
   formatBudgetMessage,
   formatBudgetSummary,
+  formatJobList,
   formatSessionList,
   prefixWithLabel,
   splitMessage,
   SIGNAL_MAX_MESSAGE_LENGTH,
+  type JobListEntry,
   type SessionListEntry,
 } from './format.js';
 import { BudgetExhaustedError } from '../session/errors.js';
@@ -286,7 +288,7 @@ export class SignalBotDaemon {
     // This works across ALL session types (signal + cron)
     if (this.handleEscalationReply(text)) return;
 
-    // Control commands: /quit, /new, /sessions, /switch, /budget, /help
+    // Control commands: /quit, /new, /sessions, /switch, /budget, /jobs, /help
     if (this.handleControlCommand(text)) return;
 
     // Regular message -> route to Signal session
@@ -668,6 +670,27 @@ export class SignalBotDaemon {
       return true;
     }
 
+    // /jobs
+    if (lower === '/jobs') {
+      this.scheduleSessionOp(async () => {
+        try {
+          const { sendControlRequest } = await import('../daemon/control-socket.js');
+          const response = await sendControlRequest({ command: 'list-jobs' });
+          if (response?.ok) {
+            const jobs = (response.data ?? []) as JobListEntry[];
+            await this.sendSignalMessage(formatJobList(jobs));
+          } else {
+            const errMsg = response ? response.error : 'daemon may not be running';
+            await this.sendSignalMessage(`Failed to query jobs: ${errMsg}`);
+          }
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          await this.sendSignalMessage(`Failed to query jobs: ${msg}`);
+        }
+      });
+      return true;
+    }
+
     // /help
     if (lower === '/help') {
       this.scheduleSessionOp(async () => {
@@ -683,6 +706,7 @@ export class SignalBotDaemon {
             '  #N <message> - send to session #N without switching\n' +
             '  /quit [N] - end session (current or #N)\n' +
             '  /budget [N] - show resource usage\n' +
+            '  /jobs - list scheduled cron jobs\n' +
             '  /help - show this message\n' +
             '  approve [#N] - approve pending escalation\n' +
             '  deny [#N] - deny pending escalation',

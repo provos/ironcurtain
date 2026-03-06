@@ -7,6 +7,7 @@
  */
 
 import type { EscalationRequest, BudgetStatus } from '../session/types.js';
+import { describeCronExpression, formatRelativeTime } from '../cron/format-utils.js';
 
 /** Maximum length for a single Signal message. */
 export const SIGNAL_MAX_MESSAGE_LENGTH = 2000;
@@ -154,6 +155,91 @@ export function formatSessionList(sessions: SessionListEntry[], currentLabel: nu
 export function prefixWithLabel(text: string, label: number, sessionCount: number): string {
   if (sessionCount <= 1) return text;
   return `[#${label}] ${text}`;
+}
+
+// --- Job list formatting ---
+
+/**
+ * Information about a scheduled job for display in Signal.
+ * Dates are ISO strings (serialized by the control socket).
+ */
+export interface JobListEntry {
+  readonly job: {
+    readonly id: string;
+    readonly name: string;
+    readonly schedule: string;
+    readonly enabled: boolean;
+  };
+  readonly nextRun: string | null;
+  readonly lastRun:
+    | {
+        readonly outcome: { readonly kind: string; readonly message?: string; readonly dimension?: string };
+        readonly startedAt: string;
+      }
+    | undefined;
+  readonly isRunning: boolean;
+}
+
+/**
+ * Formats the /jobs command output.
+ * Shows each job with schedule, status, next run, and last run outcome.
+ */
+export function formatJobList(jobs: JobListEntry[]): string {
+  if (jobs.length === 0) return 'No scheduled jobs.';
+
+  const lines = ['**Scheduled jobs:**'];
+  for (const entry of jobs) {
+    lines.push('');
+    lines.push(formatJobEntry(entry));
+  }
+  return lines.join('\n');
+}
+
+function formatJobEntry(entry: JobListEntry): string {
+  const { job, nextRun, lastRun, isRunning } = entry;
+  const lines: string[] = [];
+
+  // Header: name + status tags
+  const tags: string[] = [];
+  if (isRunning) tags.push('[RUNNING]');
+  if (!job.enabled) tags.push('[DISABLED]');
+  const tagSuffix = tags.length > 0 ? ' ' + tags.join(' ') : '';
+  lines.push(`**${job.name}** (\`${job.id}\`)${tagSuffix}`);
+
+  // Schedule
+  const scheduleDesc = describeCronExpression(job.schedule);
+  lines.push(`  Schedule: ${scheduleDesc}`);
+
+  // Next run
+  if (nextRun) {
+    lines.push(`  Next run: ${formatRelativeTime(new Date(nextRun))}`);
+  } else if (!job.enabled) {
+    lines.push('  Next run: disabled');
+  } else {
+    lines.push('  Next run: --');
+  }
+
+  // Last run
+  if (lastRun) {
+    const outcomeStr = formatRunOutcome(lastRun.outcome);
+    const timeStr = formatRelativeTime(new Date(lastRun.startedAt));
+    lines.push(`  Last run: ${outcomeStr}, ${timeStr}`);
+  }
+
+  return lines.join('\n');
+}
+
+function formatRunOutcome(outcome: { kind: string; message?: string; dimension?: string }): string {
+  switch (outcome.kind) {
+    case 'success':
+      return 'success';
+    case 'budget_exhausted':
+      return `budget exhausted (${outcome.dimension ?? 'unknown'})`;
+    case 'error':
+      return `error: ${outcome.message ?? 'unknown'}`;
+    default:
+      return outcome.kind;
+  }
 }
 
 // --- Private helpers ---
