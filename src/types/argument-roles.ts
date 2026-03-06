@@ -482,7 +482,7 @@ export function resolveStoredAnnotationsFile(stored: StoredToolAnnotationsFile):
             for (const [argName, spec] of Object.entries(tool.args)) {
               resolvedArgs[argName] = extractDefaultRoles(spec);
             }
-            const { args: _rawArgs, ...rest } = tool;
+            const { args: _rawArgs, ...rest } = tool; // eslint-disable-line @typescript-eslint/no-unused-vars
             return { ...rest, args: resolvedArgs };
           }),
         },

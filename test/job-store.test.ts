@@ -4,11 +4,11 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { saveJob, loadJob, loadAllJobs, deleteJob, saveRunRecord, loadRecentRuns } from '../src/cron/job-store.js';
 import { createJobId } from '../src/cron/types.js';
-import type { JobDefinition, RunRecord, JobId } from '../src/cron/types.js';
+import type { JobDefinition, RunRecord } from '../src/cron/types.js';
 
 const TEST_DIR = resolve(`/tmp/ironcurtain-jobstore-test-${process.pid}`);
 

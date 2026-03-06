@@ -12,7 +12,6 @@ import {
   createCronScheduler,
   InvalidCronExpressionError,
 } from '../src/cron/cron-scheduler.js';
-import type { CronFields } from '../src/cron/cron-scheduler.js';
 import { createJobId } from '../src/cron/types.js';
 import type { JobDefinition } from '../src/cron/types.js';
 
@@ -198,7 +197,7 @@ describe('cron-scheduler', () => {
     let scheduler: ReturnType<typeof createCronScheduler>;
 
     afterEach(() => {
-      scheduler?.unscheduleAll();
+      scheduler.unscheduleAll();
     });
 
     it('schedule adds a job and getNextRun returns a future date', () => {
@@ -240,7 +239,7 @@ describe('cron-scheduler', () => {
       scheduler = createCronScheduler();
       const job1 = makeJob('replace', '0 9 * * *');
       scheduler.schedule(job1, async () => {});
-      const first = scheduler.getNextRun(job1.id);
+      scheduler.getNextRun(job1.id);
 
       const job2 = makeJob('replace', '0 15 * * *');
       scheduler.schedule(job2, async () => {});

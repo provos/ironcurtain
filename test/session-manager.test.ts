@@ -216,7 +216,7 @@ describe('SessionManager', () => {
     it('withPendingEscalation returns only sessions with active escalations', () => {
       const mgr = new SessionManager();
       const l1 = mgr.register(stubSession(), stubTransport(), signalSource);
-      const l2 = mgr.register(stubSession(), stubTransport(), signalSource);
+      mgr.register(stubSession(), stubTransport(), signalSource);
       const l3 = mgr.register(stubSession(), stubTransport(), cronSource);
 
       mgr.setPendingEscalation(l1, 'esc-1');
