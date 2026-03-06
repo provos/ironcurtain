@@ -17,6 +17,16 @@ import { createSignalContainerManager } from './signal-container.js';
 import { resolveSignalConfig } from './signal-config.js';
 import * as logger from '../logger.js';
 import type { AgentId } from '../docker/agent-adapter.js';
+import type { CommandSpec } from '../cli-help.js';
+
+export const botSpec: CommandSpec = {
+  name: 'ironcurtain bot',
+  description: 'Run the Signal transport (standalone, without cron scheduler)',
+  usage: ['ironcurtain bot [options]'],
+  options: [
+    { flag: 'agent', short: 'a', description: 'Agent mode: builtin or claude-code (Docker)', placeholder: '<name>' },
+  ],
+};
 
 export interface BotOptions {
   /** Explicit agent selection (e.g., 'claude-code'). */

@@ -23,11 +23,13 @@ import type { JobDefinition, RunRecord } from '../cron/types.js';
 /** Commands the CLI can send to the daemon. */
 export type ControlRequest =
   | { readonly command: 'ping' }
+  | { readonly command: 'status' }
   | { readonly command: 'add-job'; readonly job: JobDefinition }
   | { readonly command: 'remove-job'; readonly jobId: string }
   | { readonly command: 'enable-job'; readonly jobId: string }
   | { readonly command: 'disable-job'; readonly jobId: string }
   | { readonly command: 'recompile-job'; readonly jobId: string }
+  | { readonly command: 'reload-job'; readonly jobId: string }
   | { readonly command: 'run-job'; readonly jobId: string }
   | { readonly command: 'list-jobs' };
 
@@ -49,12 +51,30 @@ export type ControlResponse = ControlResponseOk | ControlResponseError;
 // Request handler interface (implemented by the daemon)
 // ---------------------------------------------------------------------------
 
+/** Status snapshot returned by the daemon. */
+export interface DaemonStatus {
+  readonly uptimeSeconds: number;
+  readonly jobs: { total: number; enabled: number; running: number };
+  readonly signalConnected: boolean;
+  readonly nextFireTime: Date | null;
+}
+
+/** JSON-serialized form of DaemonStatus (Date → ISO string). */
+export interface DaemonStatusDto {
+  readonly uptimeSeconds: number;
+  readonly jobs: { total: number; enabled: number; running: number };
+  readonly signalConnected: boolean;
+  readonly nextFireTime: string | null;
+}
+
 export interface ControlRequestHandler {
+  getStatus(): DaemonStatus;
   addJob(job: JobDefinition): Promise<void>;
   removeJob(jobId: string): Promise<void>;
   enableJob(jobId: string): Promise<void>;
   disableJob(jobId: string): Promise<void>;
   recompileJob(jobId: string): Promise<void>;
+  reloadJob(jobId: string): Promise<void>;
   runJobNow(jobId: string): Promise<RunRecord>;
   listJobs(): Array<{
     job: JobDefinition;
@@ -207,6 +227,17 @@ export class ControlSocketServer {
       case 'ping':
         return { ok: true, data: { status: 'running' } };
 
+      case 'status': {
+        const status = this.handler.getStatus();
+        return {
+          ok: true,
+          data: {
+            ...status,
+            nextFireTime: status.nextFireTime?.toISOString() ?? null,
+          },
+        };
+      }
+
       case 'add-job':
         await this.handler.addJob(request.job);
         return { ok: true };
@@ -225,6 +256,10 @@ export class ControlSocketServer {
 
       case 'recompile-job':
         await this.handler.recompileJob(request.jobId);
+        return { ok: true };
+
+      case 'reload-job':
+        await this.handler.reloadJob(request.jobId);
         return { ok: true };
 
       case 'run-job': {

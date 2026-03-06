@@ -7,6 +7,8 @@ import {
   sendControlRequest,
   isDaemonRunning,
   type ControlRequestHandler,
+  type DaemonStatus,
+  type DaemonStatusDto,
 } from '../src/daemon/control-socket.js';
 import type { JobDefinition, RunRecord } from '../src/cron/types.js';
 import type { JobId } from '../src/cron/types.js';
@@ -47,6 +49,15 @@ function createMockHandler(): ControlRequestHandler & {
       escalationsApproved: 0,
       discardedChanges: null,
     },
+    getStatus(): DaemonStatus {
+      handler.calls.push({ method: 'getStatus', args: [] });
+      return {
+        uptimeSeconds: 120,
+        jobs: { total: 2, enabled: 1, running: 0 },
+        signalConnected: true,
+        nextFireTime: new Date('2026-03-05T10:00:00Z'),
+      };
+    },
     async addJob(job: JobDefinition) {
       handler.calls.push({ method: 'addJob', args: [job] });
     },
@@ -61,6 +72,9 @@ function createMockHandler(): ControlRequestHandler & {
     },
     async recompileJob(jobId: string) {
       handler.calls.push({ method: 'recompileJob', args: [jobId] });
+    },
+    async reloadJob(jobId: string) {
+      handler.calls.push({ method: 'reloadJob', args: [jobId] });
     },
     async runJobNow(jobId: string): Promise<RunRecord> {
       handler.calls.push({ method: 'runJobNow', args: [jobId] });
@@ -207,6 +221,19 @@ describe('Control socket commands', () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
+  it('forwards status and serializes Date to ISO string', async () => {
+    const response = await sendControlRequest({ command: 'status' }, socketPath);
+    expect(response).not.toBeNull();
+    expect(response!.ok).toBe(true);
+    expect(handler.calls).toEqual([{ method: 'getStatus', args: [] }]);
+
+    const data = (response as { ok: true; data: DaemonStatusDto }).data;
+    expect(data.uptimeSeconds).toBe(120);
+    expect(data.jobs).toEqual({ total: 2, enabled: 1, running: 0 });
+    expect(data.signalConnected).toBe(true);
+    expect(data.nextFireTime).toBe('2026-03-05T10:00:00.000Z');
+  });
+
   it('forwards remove-job to handler', async () => {
     const response = await sendControlRequest({ command: 'remove-job', jobId: 'my-job' }, socketPath);
     expect(response).not.toBeNull();
@@ -233,6 +260,13 @@ describe('Control socket commands', () => {
     expect(response).not.toBeNull();
     expect(response!.ok).toBe(true);
     expect(handler.calls).toEqual([{ method: 'recompileJob', args: ['my-job'] }]);
+  });
+
+  it('forwards reload-job to handler', async () => {
+    const response = await sendControlRequest({ command: 'reload-job', jobId: 'my-job' }, socketPath);
+    expect(response).not.toBeNull();
+    expect(response!.ok).toBe(true);
+    expect(handler.calls).toEqual([{ method: 'reloadJob', args: ['my-job'] }]);
   });
 
   it('forwards run-job and returns run record', async () => {

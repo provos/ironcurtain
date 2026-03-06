@@ -194,6 +194,22 @@ ironcurtain bot             # Start the Signal bot daemon
 
 See [TRANSPORT.md](TRANSPORT.md) for setup instructions, architecture details, and why we chose Signal over alternatives like Telegram.
 
+### Daemon mode
+
+A unified long-running daemon that combines Signal messaging with scheduled cron jobs. Define recurring tasks with per-job security policies, and IronCurtain runs them headlessly on a cron schedule.
+
+```bash
+ironcurtain daemon add-job        # Interactive wizard to define a scheduled job
+ironcurtain daemon                # Start the daemon (Signal + cron)
+ironcurtain daemon --no-signal    # Cron-only mode (no Signal transport)
+ironcurtain daemon list-jobs      # List jobs with schedule and status
+ironcurtain daemon logs <id>      # Show recent run summaries
+```
+
+Each job has its own task description, security constitution (compiled into per-job policy rules), persistent workspace, optional git repo sync, and configurable resource budgets. Escalations are auto-denied in headless mode unless Signal is configured for approval routing.
+
+See [DAEMON.md](DAEMON.md) for the full setup guide, job definition reference, and troubleshooting.
+
 ## Session Commands
 
 Commands available during an **interactive** or **single-shot** session:
@@ -291,6 +307,7 @@ IronCurtain stores configuration and session data in `~/.ironcurtain/`:
 ├── generated/               # User-compiled policy artifacts (overrides package defaults)
 ├── signal-data/             # Signal transport persistent data (registration keys)
 ├── pty-registry/            # Active PTY session registrations (auto-managed)
+├── jobs/                    # Cron job definitions, workspaces, and run records
 ├── sessions/
 │   └── {sessionId}/
 │       ├── sandbox/         # Per-session filesystem sandbox
@@ -451,6 +468,8 @@ src/
 ├── escalation/                 # Escalation listener: session registry, TUI dashboard, state
 ├── mux/                        # Terminal multiplexer: PTY bridge, renderer, trusted input
 ├── signal/                     # Signal messaging transport (bot daemon, setup, formatting)
+├── daemon/                     # Unified daemon (Signal + cron scheduler, control socket)
+├── cron/                       # Cron job management (scheduler, job store, git sync, policy)
 ├── docker/                     # Docker agent mode, PTY session, MITM proxy, adapters
 ├── servers/                    # Built-in MCP servers (fetch, web search providers)
 └── types/                      # Shared type definitions

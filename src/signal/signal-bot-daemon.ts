@@ -27,10 +27,12 @@ import { markdownToSignal } from './markdown-to-signal.js';
 import {
   formatBudgetMessage,
   formatBudgetSummary,
+  formatJobList,
   formatSessionList,
   prefixWithLabel,
   splitMessage,
   SIGNAL_MAX_MESSAGE_LENGTH,
+  type JobListEntry,
   type SessionListEntry,
 } from './format.js';
 import { BudgetExhaustedError } from '../session/errors.js';
@@ -128,19 +130,43 @@ export class SignalBotDaemon {
   }
 
   /**
-   * Starts the daemon. Returns a promise that resolves when
-   * shutdown() is called (e.g., SIGTERM/SIGINT).
+   * Connects the daemon: starts the Docker container, waits for
+   * health, connects WebSocket, and sends the online greeting.
+   * Throws if any step fails (container won't start, health timeout, etc.).
    */
-  async start(): Promise<void> {
+  async connect(): Promise<void> {
+    logger.info('[Signal Daemon] Ensuring container is running...');
     this.baseUrl = await this.containerManager.ensureRunning();
+    logger.info('[Signal Daemon] Waiting for container health check...');
     await this.containerManager.waitForHealthy(this.baseUrl);
+    logger.info('[Signal Daemon] Connecting WebSocket...');
     await this.connectWebSocket();
-    await this.sendSignalMessage('IronCurtain bot is online. Send a message to begin.');
+    // Greeting is best-effort — signal-cli may be healthy but not yet
+    // fully connected to Signal servers (e.g., broken pipe on first send).
+    try {
+      await this.sendSignalMessage('IronCurtain bot is online. Send a message to begin.');
+    } catch (err) {
+      logger.warn(`[Signal Daemon] Greeting failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
 
-    // Block until shutdown
+  /**
+   * Blocks until shutdown() is called (e.g., SIGTERM/SIGINT).
+   * Call connect() first to establish the connection.
+   */
+  async run(): Promise<void> {
     await new Promise<void>((resolve) => {
       this.exitResolve = resolve;
     });
+  }
+
+  /**
+   * Convenience: connects and then blocks until shutdown.
+   * Used by the standalone `ironcurtain bot` command.
+   */
+  async start(): Promise<void> {
+    await this.connect();
+    await this.run();
   }
 
   /**
@@ -286,8 +312,15 @@ export class SignalBotDaemon {
     // This works across ALL session types (signal + cron)
     if (this.handleEscalationReply(text)) return;
 
-    // Control commands: /quit, /new, /sessions, /switch, /budget, /help
+    // Control commands: /quit, /new, /sessions, /switch, /budget, /jobs, /help
     if (this.handleControlCommand(text)) return;
+
+    // Reject unrecognized slash commands rather than forwarding to agent
+    if (text.trimStart().startsWith('/')) {
+      const cmd = text.trim().split(/\s/)[0];
+      await this.sendSignalMessage(`Unknown command: ${cmd}\nSend /help for available commands.`);
+      return;
+    }
 
     // Regular message -> route to Signal session
     await this.routeToSession(text);
@@ -668,6 +701,27 @@ export class SignalBotDaemon {
       return true;
     }
 
+    // /jobs
+    if (lower === '/jobs') {
+      this.scheduleSessionOp(async () => {
+        try {
+          const { sendControlRequest } = await import('../daemon/control-socket.js');
+          const response = await sendControlRequest({ command: 'list-jobs' });
+          if (response?.ok) {
+            const jobs = (response.data ?? []) as JobListEntry[];
+            await this.sendSignalMessage(formatJobList(jobs));
+          } else {
+            const errMsg = response ? response.error : 'daemon may not be running';
+            await this.sendSignalMessage(`Failed to query jobs: ${errMsg}`);
+          }
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          await this.sendSignalMessage(`Failed to query jobs: ${msg}`);
+        }
+      });
+      return true;
+    }
+
     // /help
     if (lower === '/help') {
       this.scheduleSessionOp(async () => {
@@ -683,6 +737,7 @@ export class SignalBotDaemon {
             '  #N <message> - send to session #N without switching\n' +
             '  /quit [N] - end session (current or #N)\n' +
             '  /budget [N] - show resource usage\n' +
+            '  /jobs - list scheduled cron jobs\n' +
             '  /help - show this message\n' +
             '  approve [#N] - approve pending escalation\n' +
             '  deny [#N] - deny pending escalation',

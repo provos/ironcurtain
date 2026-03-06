@@ -32,7 +32,8 @@ import { CRON_BUDGET_DEFAULTS } from '../cron/types.js';
 import { BudgetExhaustedError } from '../session/errors.js';
 import { validateWorkspacePath } from '../session/workspace-validation.js';
 import * as logger from '../logger.js';
-import { ControlSocketServer, type ControlRequestHandler } from './control-socket.js';
+import { getDaemonLogPath } from '../config/paths.js';
+import { ControlSocketServer, type ControlRequestHandler, type DaemonStatus } from './control-socket.js';
 
 export type { SessionSource, ManagedSession } from '../session/session-manager.js';
 
@@ -73,6 +74,9 @@ export class IronCurtainDaemon {
   private readonly sessionManager = new SessionManager();
   private readonly scheduler: CronScheduler;
 
+  /** Time the daemon was started (for uptime calculation). */
+  private startTime: Date | null = null;
+
   /** Tracks which jobs are currently running (jobId -> session label). */
   private readonly activeJobRuns = new Map<string, number>();
 
@@ -81,9 +85,6 @@ export class IronCurtainDaemon {
 
   /** Signal daemon instance (null if Signal not configured). */
   private signalDaemon: import('../signal/signal-bot-daemon.js').SignalBotDaemon | null = null;
-
-  /** Send a message via Signal (no-op if Signal not available). */
-  private sendSignalMessage: ((message: string) => Promise<void>) | null = null;
 
   /** Resolve to exit the daemon. */
   private exitResolve: (() => void) | null = null;
@@ -99,6 +100,11 @@ export class IronCurtainDaemon {
    * optionally starts the Signal transport.
    */
   async start(): Promise<void> {
+    this.startTime = new Date();
+
+    // Set up file-based logger (redirects console.* to log file)
+    logger.setup({ logFilePath: getDaemonLogPath('daemon') });
+
     // Start control socket for CLI communication
     await this.startControlSocket();
 
@@ -127,15 +133,15 @@ export class IronCurtainDaemon {
       }
     }
 
-    console.error('IronCurtain daemon started.');
+    process.stderr.write('IronCurtain daemon started.\n');
     if (this.controlSocket) {
-      console.error('  Control socket: listening');
+      process.stderr.write('  Control socket: listening\n');
     }
     if (enabledJobs.length > 0) {
-      console.error(`  Scheduled jobs: ${enabledJobs.length}`);
+      process.stderr.write(`  Scheduled jobs: ${enabledJobs.length}\n`);
     }
     if (this.signalDaemon) {
-      console.error('  Signal transport: connected');
+      process.stderr.write('  Signal transport: connected\n');
     }
 
     // Block until shutdown
@@ -181,6 +187,9 @@ export class IronCurtainDaemon {
         }
       }),
     );
+
+    // Teardown logger last (restores console.* to original behavior)
+    logger.teardown();
 
     this.exitResolve?.();
   }
@@ -262,6 +271,23 @@ export class IronCurtainDaemon {
     logger.info(`[Daemon] Disabled job ${jobId}`);
   }
 
+  /** Reloads a job definition from disk and reschedules it. */
+  // eslint-disable-next-line @typescript-eslint/require-await -- must be async to satisfy ControlRequestHandler interface
+  async reloadJob(jobId: JobId): Promise<void> {
+    const job = loadJob(jobId);
+    if (!job) throw new Error(`Job not found: ${jobId}`);
+
+    this.scheduler.unschedule(jobId);
+
+    if (job.enabled) {
+      this.scheduler.schedule(job, (j) => this.onJobTrigger(j));
+      const nextRun = this.scheduler.getNextRun(jobId);
+      logger.info(`[Daemon] Reloaded job ${jobId}: rescheduled (next: ${nextRun?.toISOString() ?? 'unknown'})`);
+    } else {
+      logger.info(`[Daemon] Reloaded job ${jobId}: disabled, not scheduled`);
+    }
+  }
+
   /** Re-runs policy compilation for an existing job. */
   async recompileJob(jobId: JobId): Promise<void> {
     const job = loadJob(jobId);
@@ -297,6 +323,34 @@ export class IronCurtainDaemon {
     }));
   }
 
+  /** Returns a status snapshot for the control socket. */
+  getStatus(): DaemonStatus {
+    const jobs = loadAllJobs();
+    const enabledJobs = jobs.filter((j) => j.enabled);
+
+    // Find the earliest next fire time across all scheduled jobs
+    let nextFireTime: Date | null = null;
+    for (const job of enabledJobs) {
+      const nextRun = this.scheduler.getNextRun(job.id);
+      if (nextRun && (nextFireTime === null || nextRun < nextFireTime)) {
+        nextFireTime = nextRun;
+      }
+    }
+
+    const uptimeSeconds = this.startTime ? (Date.now() - this.startTime.getTime()) / 1000 : 0;
+
+    return {
+      uptimeSeconds,
+      jobs: {
+        total: jobs.length,
+        enabled: enabledJobs.length,
+        running: this.activeJobRuns.size,
+      },
+      signalConnected: this.signalDaemon !== null,
+      nextFireTime,
+    };
+  }
+
   // -----------------------------------------------------------------------
   // Job execution
   // -----------------------------------------------------------------------
@@ -310,9 +364,9 @@ export class IronCurtainDaemon {
     if (this.activeJobRuns.has(job.id)) {
       const msg = `[Daemon] Skipping job ${job.id}: previous run still active (session #${this.activeJobRuns.get(job.id)})`;
       logger.warn(msg);
-      if (this.sendSignalMessage) {
-        this.sendSignalMessage(`Skipped job "${job.name}": previous run still in progress.`).catch(() => {});
-      }
+      this.signalDaemon
+        ?.sendSignalMessage(`Skipped job "${job.name}": previous run still in progress.`)
+        .catch(() => {});
       return;
     }
 
@@ -455,7 +509,7 @@ export class IronCurtainDaemon {
     saveRunRecord(job.id, record);
 
     // Notify via Signal if configured
-    if (job.notifyOnCompletion && this.sendSignalMessage) {
+    if (job.notifyOnCompletion && this.signalDaemon) {
       const outcomeStr =
         outcome.kind === 'success'
           ? 'Completed'
@@ -465,7 +519,7 @@ export class IronCurtainDaemon {
 
       const notify = `[cron: ${job.name}] ${outcomeStr} (${budgetStatus.elapsedSeconds.toFixed(0)}s, $${budgetStatus.estimatedCostUsd.toFixed(2)})`;
       const notifyMsg = summary ? `${notify}\n${summary.slice(0, 500)}` : notify;
-      this.sendSignalMessage(notifyMsg).catch(() => {});
+      this.signalDaemon.sendSignalMessage(notifyMsg).catch(() => {});
     }
 
     // Cleanup
@@ -486,13 +540,13 @@ export class IronCurtainDaemon {
 
     this.sessionManager.setPendingEscalation(label, request.escalationId);
 
-    if (job.notifyOnEscalation && this.sendSignalMessage) {
+    if (job.notifyOnEscalation && this.signalDaemon) {
       const banner = [
         `[#${label} cron: ${job.name}] Escalation: ${request.serverName}/${request.toolName}`,
         `Reason: "${request.reason}"`,
         `Reply: approve #${label} / deny #${label}`,
       ].join('\n');
-      this.sendSignalMessage(banner).catch(() => {});
+      this.signalDaemon.sendSignalMessage(banner).catch(() => {});
     } else {
       // Auto-deny when Signal is not configured
       const managed = this.sessionManager.get(label);
@@ -517,6 +571,7 @@ export class IronCurtainDaemon {
       throw new Error('Signal is not configured. Run: ironcurtain setup-signal');
     }
 
+    process.stderr.write('Starting Signal transport...\n');
     const docker = createDockerManager();
     const containerManager = createSignalContainerManager(docker, signalConfig.container);
 
@@ -526,14 +581,17 @@ export class IronCurtainDaemon {
       mode: this.mode,
       sessionManager: this.sessionManager,
     });
+
+    // Await the connection phase (starts Docker, health check, WebSocket).
+    // Throws if the container won't start or health check times out.
+    await signalDaemon.connect();
+
     this.signalDaemon = signalDaemon;
 
-    // Capture the sendSignalMessage method for cron notifications
-    this.sendSignalMessage = (msg: string) => signalDaemon.sendSignalMessage(msg);
-
-    // Start Signal daemon in the background (it blocks until shutdown)
-    this.signalDaemon.start().catch((err: unknown) => {
+    // Run the blocking event loop in the background (blocks until shutdown)
+    signalDaemon.run().catch((err: unknown) => {
       logger.warn(`[Daemon] Signal daemon exited: ${String(err)}`);
+      this.signalDaemon = null;
     });
   }
 
@@ -543,11 +601,13 @@ export class IronCurtainDaemon {
 
   private async startControlSocket(): Promise<void> {
     const handler: ControlRequestHandler = {
+      getStatus: () => this.getStatus(),
       addJob: (job) => this.addJob(job),
       removeJob: (jobId) => this.removeJob(jobId as JobId),
       enableJob: (jobId) => this.enableJob(jobId as JobId),
       disableJob: (jobId) => this.disableJob(jobId as JobId),
       recompileJob: (jobId) => this.recompileJob(jobId as JobId),
+      reloadJob: (jobId) => this.reloadJob(jobId as JobId),
       runJobNow: (jobId) => this.runJobNow(jobId as JobId),
       listJobs: () => this.listJobs(),
     };

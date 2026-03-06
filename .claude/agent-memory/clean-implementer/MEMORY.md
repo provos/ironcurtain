@@ -85,7 +85,10 @@ Engine uses concrete filesystem paths with `path.resolve()` and directory contai
 - `src/pipeline/scenario-generator.ts` -- LLM test generation + `ScenarioGeneratorSession` (multi-turn) + `formatFeedbackMessage()`
 - `src/pipeline/policy-verifier.ts` -- multi-round real engine + LLM judge (re-exports DiscardedScenario from types)
 - `src/pipeline/handwritten-scenarios.ts` -- 26 mandatory test scenarios (15 filesystem + 11 git)
-- `src/pipeline/compile.ts` -- CLI entry point; `mergeReplacements()` exported; uses ScenarioGeneratorSession in repair loop
+- `src/pipeline/compile.ts` -- CLI thin wrapper over PipelineRunner; re-exports `mergeReplacements`, `resolveRulePaths`, `connectMcpServersForLists`, `disconnectMcpServers`
+- `src/pipeline/pipeline-runner.ts` -- `PipelineRunner` class: full compile-verify-repair loop; `buildTaskCompilerSystemPrompt()` for task-policy
+- `src/pipeline/mcp-connections.ts` -- `connectMcpServersForLists()`, `disconnectMcpServers()`
+- `src/pipeline/pipeline-shared.ts` -- shared utils: `resolveRulePaths()`, `mergeReplacements()`, `loadPipelineConfig()`, `createPipelineLlm()`, caching, spinners
 - `src/pipeline/constitution-customizer.ts` -- LLM-assisted conversational customizer CLI
 - `src/config/index.ts` -- `loadConfig()` and `loadGeneratedPolicy()` (returns dynamicLists)
 
@@ -112,7 +115,7 @@ Zod v4 (^4.3.6) strict by default. Mock response JSON must exactly match Zod sch
 - **Per-role**: `hasRoleConditions()` and `ruleRelevantToRole()` both check `lists` conditions
 - **Resolver**: knowledge-based uses `generateObjectWithRepair`; MCP-backed uses `generateText` with bridged tools + `parseValuesFromText`
 - **MCP resolution**: `McpServerConnection` interface, `bridgeMcpTools()` bridges MCP tools as AI SDK tools, `selectMcpConnection()` prefers `mcpServerHint`
-- **MCP in compile.ts**: `connectMcpServersForLists()` connects only needed servers; `disconnectMcpServers()` cleans up; uses try/finally pattern
+- **MCP connections**: `connectMcpServersForLists()` in `src/pipeline/mcp-connections.ts`; connects only needed servers; `disconnectMcpServers()` cleans up; uses try/finally pattern
 - **Circular import gotcha**: `dynamic-list-types.ts` imports `domainMatchesAllowlist` from `domain-utils.ts`; policy-engine defines its own `getListMatcher()` to avoid reverse import
 - **loadGeneratedPolicy**: returns `{ compiledPolicy, toolAnnotations, dynamicLists }` -- dynamicLists is optional (backward compatible)
 - **Tests**: `test/dynamic-lists.test.ts` -- 60 tests (Phase 1 validation/compiler + Phase 2 registry/resolver/engine + Phase 3 MCP-backed resolution)
@@ -135,7 +138,7 @@ Zod v4 (^4.3.6) strict by default. Mock response JSON must exactly match Zod sch
 - **Pattern**: stable system prompt (cacheable) + growing message history; `generate()` for turn 1, `regenerate(feedback)` for turn 2+
 - **ScenarioFeedback**: `src/pipeline/types.ts` -- corrections + discardedScenarios + probeScenarios
 - **formatFeedbackMessage()**: exported from scenario-generator.ts; formats feedback as markdown sections
-- **mergeReplacements()**: exported from compile.ts; removes corrected/discarded, adds unique replacements
+- **mergeReplacements()**: canonical in pipeline-shared.ts (re-exported from compile.ts); removes corrected/discarded, adds unique replacements
 - **DiscardedScenario**: moved to `src/pipeline/types.ts` (was in policy-verifier.ts); re-exported from policy-verifier for backward compat
 - **parseJsonWithSchema()**: exported from generate-with-repair.ts; shared extraction+validation for session and generateObjectWithRepair
 - **Design**: `docs/designs/scenario-generator-multi-turn.md`
@@ -261,6 +264,16 @@ When mocking `generateText` for session tests:
 - **Tests**: `test/goose-adapter.test.ts` -- 70 tests covering all adapter methods + helpers
 - **Config UI**: `config-command.ts` has Goose section (provider, model, preferred agent)
 - **Key test gotcha**: test configs with `userConfig: ResolvedUserConfig` must include `gooseProvider`, `gooseModel`, `preferredDockerAgent`
+
+## Daemon Control Socket
+- **Module**: `src/daemon/control-socket.ts` -- server + client + protocol types
+- **Path helper**: `getDaemonSocketPath()` in `src/config/paths.ts` -- `{home}/daemon.sock`
+- **Protocol**: newline-delimited JSON over Unix domain socket (one request line, one response line per connection)
+- **Server**: `ControlSocketServer` -- takes `ControlRequestHandler` interface; started/stopped by `IronCurtainDaemon`
+- **Client**: `sendControlRequest()` and `isDaemonRunning()` -- used by `daemon-command.ts` to detect+forward
+- **Forwarded commands**: remove-job, enable-job, disable-job, recompile-job, run-job, list-jobs
+- **Fallback**: CLI commands operate directly on filesystem when no daemon is running
+- **Tests**: `test/control-socket.test.ts` -- 17 tests
 
 ## Subsystems (see subsystems.md for details)
 - **Session Logging**: `src/logger.ts` -- singleton with `setup()`/`teardown()`; test gotcha: must call `teardown()` in `afterEach`

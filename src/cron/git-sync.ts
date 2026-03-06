@@ -47,6 +47,41 @@ export function validateGitUri(uri: string): void {
 }
 
 /**
+ * Determines the remote's default branch by inspecting origin/HEAD.
+ * Falls back to 'main' if the symbolic ref is not set.
+ */
+function resolveDefaultBranch(dir: string, env: NodeJS.ProcessEnv): string {
+  try {
+    // origin/HEAD is set automatically on clone; resolve it to a branch name.
+    const ref = execFileSync('git', ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'], {
+      cwd: dir,
+      stdio: 'pipe',
+      env,
+    })
+      .toString()
+      .trim();
+    // ref is "origin/main" or "origin/master" — strip the "origin/" prefix.
+    return ref.replace(/^origin\//, '');
+  } catch {
+    // origin/HEAD may not exist if the repo was cloned with an old git version
+    // or if HEAD was never set. Probe for common default branch names.
+    for (const candidate of ['main', 'master']) {
+      try {
+        execFileSync('git', ['rev-parse', '--verify', `origin/${candidate}`], {
+          cwd: dir,
+          stdio: 'pipe',
+          env,
+        });
+        return candidate;
+      } catch {
+        // Branch doesn't exist, try next
+      }
+    }
+    return 'main';
+  }
+}
+
+/**
  * Clones or refreshes a git repository in the given directory.
  *
  * - First call: clones the repo into dir (dir must exist and be empty)
@@ -66,10 +101,14 @@ export function syncGitRepo(uri: string, dir: string, verbose = false): string |
   if (existsSync(resolve(dir, '.git'))) {
     execFileSync('git', ['fetch', 'origin'], { cwd: dir, stdio, env });
 
+    // Resolve the remote's default branch (e.g., main, master).
+    const defaultBranch = resolveDefaultBranch(dir, env);
+    const target = `origin/${defaultBranch}`;
+
     // Capture tracked-file changes that will be discarded by the hard reset.
     let discarded: string | null = null;
     try {
-      const diff = execFileSync('git', ['diff', '--stat', 'FETCH_HEAD'], { cwd: dir, stdio: 'pipe', env });
+      const diff = execFileSync('git', ['diff', '--stat', target], { cwd: dir, stdio: 'pipe', env });
       const diffStr = diff.toString().trim();
       if (diffStr) {
         discarded = diffStr;
@@ -78,7 +117,8 @@ export function syncGitRepo(uri: string, dir: string, verbose = false): string |
       // Non-fatal: proceed with reset even if diff fails
     }
 
-    execFileSync('git', ['reset', '--hard', 'FETCH_HEAD'], { cwd: dir, stdio, env });
+    // Ensure the default branch is checked out, then reset to latest remote.
+    execFileSync('git', ['checkout', '-B', defaultBranch, target], { cwd: dir, stdio, env });
     return discarded;
   } else {
     execFileSync('git', ['clone', '--', uri, '.'], { cwd: dir, stdio, env });

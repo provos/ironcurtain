@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
+import { checkHelp, printHelp as printSpecHelp, type CommandSpec } from './cli-help.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -14,64 +15,49 @@ function getVersion(): string {
   return pkg.version;
 }
 
-function printHelp(): void {
-  console.error(
-    `
-ironcurtain - Secure agent runtime with policy-driven tool mediation
+const topLevelSpec: CommandSpec = {
+  name: 'ironcurtain',
+  description: 'Secure agent runtime with policy-driven tool mediation',
+  usage: ['ironcurtain <command> [options]'],
+  subcommands: [
+    { name: 'start [task]', description: 'Run the agent (interactive or single-shot)' },
+    { name: 'daemon', description: 'Unified Signal + cron daemon' },
+    { name: 'mux', description: 'Terminal multiplexer for PTY sessions (requires node-pty)' },
+    { name: 'escalation-listener', description: 'Aggregate escalation notifications from PTY sessions' },
+    { name: 'bot', description: "Alias for 'daemon' (backward compatible)" },
+    { name: 'setup', description: 'Run the first-start wizard (always runs)' },
+    { name: 'setup-signal', description: 'Interactive Signal transport onboarding' },
+    { name: 'annotate-tools', description: 'Classify MCP tool arguments via LLM' },
+    { name: 'compile-policy', description: 'Compile constitution into enforceable policy rules' },
+    { name: 'refresh-lists', description: 'Re-resolve dynamic lists without full recompilation' },
+    { name: 'customize-policy', description: 'Customize your policy via LLM-assisted conversation' },
+    { name: 'config', description: 'Edit configuration interactively' },
+    { name: 'help', description: 'Show this help message' },
+  ],
+  options: [
+    { flag: 'help', short: 'h', description: 'Show this help message' },
+    { flag: 'version', short: 'v', description: 'Show version number' },
+  ],
+  examples: [
+    'ironcurtain start "Summarize files in ."       # Single-shot task',
+    'ironcurtain start                              # Interactive session',
+    'ironcurtain start --resume <session-id>        # Resume a session',
+    'ironcurtain start -w ./my-project "Fix bugs"   # Work in existing directory',
+    'ironcurtain start --agent claude-code "task"   # Docker: Claude Code',
+    'ironcurtain start --pty                        # PTY mode',
+    'ironcurtain daemon                             # Start the daemon',
+    'ironcurtain daemon list-jobs                   # List scheduled jobs',
+    'ironcurtain compile-policy                     # Compile policy',
+    'ironcurtain refresh-lists --with-mcp           # Refresh dynamic lists',
+  ],
+};
 
-Usage:
-  ironcurtain <command> [options]
-
-Commands:
-  start [task]         Run the agent (interactive or single-shot)
-  daemon               Unified Signal + cron daemon
-  daemon add-job       Add a new scheduled job (interactive)
-  daemon list-jobs     List all jobs with schedule info
-  daemon run-job <id>  Manually trigger a job run
-  daemon logs <id>     Show recent run summaries
-  mux                  Terminal multiplexer for PTY sessions (requires node-pty)
-  escalation-listener  Aggregate escalation notifications from PTY sessions
-  bot                  Alias for 'daemon' (backward compatible)
-  setup                Run the first-start wizard (always runs)
-  setup-signal         Interactive Signal transport onboarding
-                       --re-trust: re-verify a changed identity key
-  annotate-tools       Classify MCP tool arguments via LLM
-  compile-policy       Compile constitution into enforceable policy rules
-  refresh-lists        Re-resolve dynamic lists without full recompilation
-  customize-policy     Customize your policy via LLM-assisted conversation
-  config               Edit configuration interactively
-  help                 Show this help message
-
-Options:
-  -h, --help           Show this help message
-  -v, --version        Show version number
-  -a, --agent <name>   Agent mode: builtin or claude-code (Docker)
-                       Auto-detects if omitted: Docker if available, else builtin
-  -w, --workspace <path>  Use an existing directory as the agent's workspace
-                       instead of creating a fresh sandbox
-  --pty                Attach terminal directly to agent PTY (Docker mode only)
-                       Ctrl-\\ is the emergency exit; run 'reset' to recover
-                       the terminal if killed ungracefully
-  --list-agents        List registered agent adapters
-
-Examples:
-  ironcurtain start "task"                        # Auto-detects Docker or builtin
-  ironcurtain start                              # Interactive session
-  ironcurtain start "Summarize files in ."       # Single-shot task
-  ironcurtain start --resume <session-id>        # Resume a session
-  ironcurtain start -w ./my-project "Fix bugs"   # Work in existing directory
-  ironcurtain start --agent claude-code "task"   # Docker: Claude Code
-  ironcurtain start --pty                        # PTY mode: interactive Docker terminal
-  ironcurtain start --list-agents                # List available agents
-  ironcurtain annotate-tools                     # Classify tool arguments
-  ironcurtain compile-policy                     # Compile policy from constitution
-  ironcurtain refresh-lists                      # Refresh all dynamic lists
-  ironcurtain refresh-lists --list major-news    # Refresh a single list
-  ironcurtain refresh-lists --with-mcp           # Include MCP-backed lists
-  ironcurtain customize-policy                   # Customize policy interactively
-`.trim(),
-  );
-}
+const setupSignalSpec: CommandSpec = {
+  name: 'ironcurtain setup-signal',
+  description: 'Interactive Signal transport onboarding',
+  usage: ['ironcurtain setup-signal [options]'],
+  options: [{ flag: 're-trust', description: 'Re-verify a changed identity key' }],
+};
 
 const { values, positionals } = parseArgs({
   args: process.argv.slice(2),
@@ -90,8 +76,11 @@ if (values.version) {
 
 const subcommand = positionals[0];
 
-if (values.help || subcommand === 'help' || !subcommand) {
-  printHelp();
+// Show top-level help when no subcommand is given or 'help' is the subcommand.
+// When a recognized subcommand is present, --help passes through to the
+// subcommand handler via process.argv.slice(3).
+if (!subcommand || subcommand === 'help') {
+  printSpecHelp(topLevelSpec);
   process.exit(0);
 }
 
@@ -138,11 +127,17 @@ switch (subcommand) {
   }
   case 'bot': {
     // 'bot' is an alias for 'daemon' (backward compatibility)
+    const botArgs = process.argv.slice(3);
+    if (botArgs.includes('--help') || botArgs.includes('-h')) {
+      const { botSpec } = await import('./signal/bot-command.js');
+      printSpecHelp(botSpec);
+      break;
+    }
     const agentName = values.agent as string | undefined;
-    if (process.argv.slice(3).some((a) => !a.startsWith('-'))) {
+    if (botArgs.some((a) => !a.startsWith('-'))) {
       // Has subcommands -- route through daemon command
       const { runDaemonCommand } = await import('./daemon/daemon-command.js');
-      await runDaemonCommand(process.argv.slice(3));
+      await runDaemonCommand(botArgs);
     } else {
       // No subcommands -- existing bot behavior
       const { runBot } = await import('./signal/bot-command.js');
@@ -161,6 +156,7 @@ switch (subcommand) {
     break;
   }
   case 'setup-signal': {
+    if (checkHelp({ help: process.argv.includes('--help') || process.argv.includes('-h') }, setupSignalSpec)) break;
     const reTrust = process.argv.includes('--re-trust');
     const { runSignalSetup } = await import('./signal/setup-signal.js');
     await runSignalSetup({ reTrust });
@@ -168,6 +164,6 @@ switch (subcommand) {
   }
   default:
     console.error(`Unknown command: ${subcommand}\n`);
-    printHelp();
+    printSpecHelp(topLevelSpec);
     process.exit(1);
 }

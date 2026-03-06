@@ -17,6 +17,7 @@ import { createJobId, type JobDefinition, type RunOutcome, type RunRecord } from
 import { getJobWorkspaceDir, getJobDir } from '../config/paths.js';
 import { compileTaskPolicy } from './compile-task-policy.js';
 import { parseCronExpression, getNextFireTime } from './cron-scheduler.js';
+import { formatRelativeTime, describeCronExpression } from './format-utils.js';
 import { syncGitRepo, validateGitUri } from './git-sync.js';
 
 /**
@@ -115,11 +116,13 @@ async function runJobReviewLoop(initial: JobDefinition, isNew: boolean): Promise
     );
     const notifyStr = notifyParts.length ? notifyParts.join(', ') : 'none';
 
+    const scheduleDesc = describeCronExpression(job.schedule);
+
     note(
       [
         `ID:        ${job.id}`,
         `Name:      ${job.name || '(not set)'}`,
-        `Schedule:  ${job.schedule}`,
+        `Schedule:  ${job.schedule}  (${scheduleDesc})`,
         `Git repo:  ${gitRepoDisplay}`,
         `Notify:    ${notifyStr}`,
         ``,
@@ -385,6 +388,19 @@ export async function runEditJobWizard(jobIdStr: string): Promise<void> {
     }
   }
 
+  // Notify running daemon to pick up changes (single round-trip, no pre-check)
+  try {
+    const { sendControlRequest } = await import('../daemon/control-socket.js');
+    const response = await sendControlRequest({ command: 'reload-job', jobId: job.id });
+    if (response?.ok) {
+      console.error('Daemon notified — job reloaded.');
+    } else if (response) {
+      console.error(chalk.yellow(`Daemon reload failed: ${response.error}`));
+    }
+  } catch {
+    // Daemon not reachable — changes will be picked up on next start
+  }
+
   outro(`Job "${job.id}" updated.`);
 }
 
@@ -400,17 +416,20 @@ interface JobDisplayEntry {
 /** Formats and prints a single job entry. */
 function printJobEntry(entry: JobDisplayEntry): void {
   const statusLabel = entry.statusLabels.length > 0 ? ` ${entry.statusLabels.join(' ')}` : '';
+  const cronDesc = describeCronExpression(entry.job.schedule);
 
   let lastRunStr = '';
   if (entry.lastRun) {
-    lastRunStr = `Last run: ${entry.lastRun.startedAt} -- ${formatRunOutcome(entry.lastRun.outcome)}`;
+    const lastRunDate = new Date(entry.lastRun.startedAt);
+    const lastRunRelative = formatRelativeTime(lastRunDate);
+    lastRunStr = `Last run: ${lastRunRelative} -- ${formatRunOutcome(entry.lastRun.outcome)}`;
     if (entry.lastRun.summary) {
       lastRunStr += `\n${' '.repeat(20)}${entry.lastRun.summary.split('\n')[0].slice(0, 60)}`;
     }
   }
 
   console.error(
-    `  ${chalk.bold(entry.job.id.padEnd(20))} ${entry.job.name.padEnd(30)} ${entry.job.schedule.padEnd(15)} ${entry.nextRunStr}${statusLabel}`,
+    `  ${chalk.bold(entry.job.id.padEnd(20))} ${entry.job.name.padEnd(30)} ${cronDesc.padEnd(25)} ${entry.nextRunStr}${statusLabel}`,
   );
   if (lastRunStr) {
     console.error(`  ${' '.repeat(20)}${lastRunStr}`);
@@ -431,7 +450,7 @@ export function runListJobs(): void {
     if (job.enabled) {
       try {
         const nextRun = getNextFireTime(parseCronExpression(job.schedule), new Date());
-        nextRunStr = `next: ${nextRun.toLocaleString()}`;
+        nextRunStr = `next: ${formatRelativeTime(nextRun)}`;
       } catch {
         nextRunStr = chalk.red('invalid schedule');
       }
@@ -474,7 +493,7 @@ export function formatDaemonJobList(jobs: DaemonJobListEntry[]): void {
 
     printJobEntry({
       job: entry.job,
-      nextRunStr: entry.nextRun ? `next: ${new Date(entry.nextRun).toLocaleString()}` : '',
+      nextRunStr: entry.nextRun ? `next: ${formatRelativeTime(new Date(entry.nextRun))}` : '',
       lastRun: entry.lastRun,
       statusLabels,
     });
@@ -507,9 +526,21 @@ export async function runJobCommand(jobIdStr: string): Promise<void> {
   process.exit(record.outcome.kind === 'success' ? 0 : 1);
 }
 
-/** Removes a job. */
-export function runRemoveJob(jobIdStr: string): void {
+/** Removes a job. Prompts for confirmation unless force is true. */
+export async function runRemoveJob(jobIdStr: string, force = false): Promise<void> {
   const job = loadJobOrExit(jobIdStr);
+
+  if (!force) {
+    const { confirm, isCancel } = await import('@clack/prompts');
+    const displayName = job.name || job.id;
+    const shouldDelete = await confirm({
+      message: `Remove "${displayName}"? This deletes the workspace, run history, and policy.`,
+    });
+    if (isCancel(shouldDelete) || !shouldDelete) {
+      console.error('Cancelled.');
+      return;
+    }
+  }
 
   deleteJob(job.id);
   console.error(`Job "${jobIdStr}" removed.`);
@@ -551,8 +582,10 @@ export function runShowLogs(jobIdStr: string, limit: number): void {
   console.error(`Recent runs for "${job.name}" (last ${runs.length}):`);
   console.error('');
   for (const run of runs) {
+    const runDate = new Date(run.startedAt);
+    const runRelative = formatRelativeTime(runDate);
     console.error(
-      `  ${run.startedAt}  ${formatRunOutcome(run.outcome, false)}  ${run.budget.elapsedSeconds.toFixed(0)}s  $${run.budget.estimatedCostUsd.toFixed(2)}`,
+      `  ${runRelative}  ${formatRunOutcome(run.outcome, false)}  ${run.budget.elapsedSeconds.toFixed(0)}s  $${run.budget.estimatedCostUsd.toFixed(2)}`,
     );
     if (run.summary) {
       const firstLine = run.summary.split('\n').find((l) => l.trim()) ?? '';
