@@ -514,7 +514,6 @@ export class DockerAgentSession implements Session {
       // Ignore write failures
     }
   }
-
 }
 
 /** Formats a command array for logging, truncating long arguments. */
