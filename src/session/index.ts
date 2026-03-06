@@ -189,7 +189,9 @@ function validatePolicyDir(policyDir: string): void {
 
   if (!trustedDirs.some((dir) => isEqualOrInside(resolvedPolicy, dir))) {
     throw new SessionError(
-      `policyDir must be under the IronCurtain home or package config directory. ` + `Received: ${resolvedPolicy}`,
+      `policyDir must be under a trusted directory. ` +
+        `Received: ${resolvedPolicy}; ` +
+        `trusted: ${trustedDirs.join(', ')}`,
       'SESSION_INIT_FAILED',
     );
   }

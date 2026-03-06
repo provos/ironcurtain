@@ -55,7 +55,7 @@ describe('policyDir containment validation', () => {
         config,
         policyDir: '/tmp/evil-policy',
       }),
-    ).rejects.toThrow(/policyDir must be under the IronCurtain home or package config directory/);
+    ).rejects.toThrow(/policyDir must be under a trusted directory/);
   });
 
   it('rejects policyDir with path traversal', async () => {
@@ -69,7 +69,7 @@ describe('policyDir containment validation', () => {
         config,
         policyDir: resolve(TEST_HOME, 'jobs/../../../etc'),
       }),
-    ).rejects.toThrow(/policyDir must be under the IronCurtain home or package config directory/);
+    ).rejects.toThrow(/policyDir must be under a trusted directory/);
   });
 
   it('rejects policyDir that is a prefix-match but not a subdirectory', async () => {
@@ -86,7 +86,7 @@ describe('policyDir containment validation', () => {
           config,
           policyDir: evilDir,
         }),
-      ).rejects.toThrow(/policyDir must be under the IronCurtain home or package config directory/);
+      ).rejects.toThrow(/policyDir must be under a trusted directory/);
     } finally {
       rmSync(evilDir, { recursive: true, force: true });
     }

@@ -4,7 +4,7 @@
  * constitution from a task description.
  *
  * The LLM explores MCP servers (read files, list dirs, check git,
- * fetch URLs) to understand the task context, then produces a
+ * query GitHub) to understand the task context, then produces a
  * structured constitution.
  */
 
@@ -60,7 +60,7 @@ A constitution is a high-level document describing the guiding principles and
 permissions for the agent — what it is and is not permitted to do. A separate
 policy compiler will derive concrete enforcement rules from your constitution,
 so write at the level of principles and intent, not individual tool-level rules.
-You have read-only access to MCP servers to explore the task's context.
+You have read-only access to MCP servers (filesystem, git, GitHub) to explore the task's context.
 
 ## Task Description
 
@@ -155,9 +155,9 @@ function buildConstitutionGenerationUserMessage(taskDescription: string): string
  * Looks for a JSON block in the response text (in code fences or raw).
  */
 export function parseConstitutionResponse(response: string): ConstitutionGenerationResult {
-  // Try ```json ... ``` first, then raw JSON object
+  // Try ```json ... ``` first, then raw JSON (only if the entire response is JSON)
   const fencedMatch = response.match(/```json\s*([\s\S]*?)```/);
-  const rawMatch = response.match(/(\{[\s\S]*\})/);
+  const rawMatch = response.match(/^\s*(\{[\s\S]*\})\s*$/);
   const jsonMatch = fencedMatch ?? rawMatch;
   if (!jsonMatch) {
     throw new Error('LLM did not produce a valid constitution response (no JSON block found)');

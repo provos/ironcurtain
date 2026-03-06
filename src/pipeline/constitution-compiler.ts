@@ -182,6 +182,34 @@ CRITICAL RULES:
    handles them. Only write rules for things the constitution explicitly allows or
    requires human judgment on.
 
+## Multi-Mode Tools and Role Scoping
+
+IMPORTANT: The engine evaluates each argument role independently and takes the most
+restrictive result (deny > escalate > allow). A rule WITHOUT a "roles" condition is
+**role-agnostic** — it matches during evaluation of ANY role. This has critical
+implications:
+
+- A tool-only rule like {"tool": ["X"]} with "then": "allow" is a blanket allow
+  for ALL roles on that tool, including write and delete roles.
+- To allow a tool only for READ operations, add "roles": ["read-path"] to scope the
+  rule. Mutation roles (write-path, write-history, delete-path, delete-history) will
+  then have no matching rule and fall through to default-deny.
+
+Look at each tool's argument roles in the annotations above. If a tool has BOTH read
+roles (read-path) AND mutation roles (write-path, write-history, delete-path,
+delete-history), it is a **multi-mode tool** — its behavior depends on how it is called.
+At runtime, the engine resolves which roles are active based on the actual arguments.
+
+For multi-mode tools:
+- If the roles are distinct (e.g., read-path vs write-history), you CAN scope rules
+  using the "roles" condition. Example: {"tool": ["X"], "roles": ["read-path"]} allows
+  read-only calls; mutation calls fall to default-deny because their write/delete roles
+  have no matching rule.
+- If all modes share the same roles (e.g., a tool always has both read-path and
+  write-path regardless of operation), role scoping cannot distinguish modes. Choose
+  one disposition for the entire tool — prefer escalate if the constitution restricts
+  mutations.
+
 Be concise in descriptions and reasons -- one sentence each.
 ${formatGroundTruthSection(handwrittenScenarios)}
 ## Dynamic Lists
