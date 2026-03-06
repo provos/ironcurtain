@@ -23,6 +23,7 @@ import type { JobDefinition, RunRecord } from '../cron/types.js';
 /** Commands the CLI can send to the daemon. */
 export type ControlRequest =
   | { readonly command: 'ping' }
+  | { readonly command: 'status' }
   | { readonly command: 'add-job'; readonly job: JobDefinition }
   | { readonly command: 'remove-job'; readonly jobId: string }
   | { readonly command: 'enable-job'; readonly jobId: string }
@@ -49,7 +50,16 @@ export type ControlResponse = ControlResponseOk | ControlResponseError;
 // Request handler interface (implemented by the daemon)
 // ---------------------------------------------------------------------------
 
+/** Status snapshot returned by the daemon. */
+export interface DaemonStatus {
+  readonly uptimeSeconds: number;
+  readonly jobs: { total: number; enabled: number; running: number };
+  readonly signalConnected: boolean;
+  readonly nextFireTime: Date | null;
+}
+
 export interface ControlRequestHandler {
+  getStatus(): DaemonStatus;
   addJob(job: JobDefinition): Promise<void>;
   removeJob(jobId: string): Promise<void>;
   enableJob(jobId: string): Promise<void>;
@@ -206,6 +216,17 @@ export class ControlSocketServer {
     switch (request.command) {
       case 'ping':
         return { ok: true, data: { status: 'running' } };
+
+      case 'status': {
+        const status = this.handler.getStatus();
+        return {
+          ok: true,
+          data: {
+            ...status,
+            nextFireTime: status.nextFireTime?.toISOString() ?? null,
+          },
+        };
+      }
 
       case 'add-job':
         await this.handler.addJob(request.job);

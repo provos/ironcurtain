@@ -32,7 +32,7 @@ import { CRON_BUDGET_DEFAULTS } from '../cron/types.js';
 import { BudgetExhaustedError } from '../session/errors.js';
 import { validateWorkspacePath } from '../session/workspace-validation.js';
 import * as logger from '../logger.js';
-import { ControlSocketServer, type ControlRequestHandler } from './control-socket.js';
+import { ControlSocketServer, type ControlRequestHandler, type DaemonStatus } from './control-socket.js';
 
 export type { SessionSource, ManagedSession } from '../session/session-manager.js';
 
@@ -73,6 +73,9 @@ export class IronCurtainDaemon {
   private readonly sessionManager = new SessionManager();
   private readonly scheduler: CronScheduler;
 
+  /** Time the daemon was started (for uptime calculation). */
+  private startTime: Date | null = null;
+
   /** Tracks which jobs are currently running (jobId -> session label). */
   private readonly activeJobRuns = new Map<string, number>();
 
@@ -99,6 +102,8 @@ export class IronCurtainDaemon {
    * optionally starts the Signal transport.
    */
   async start(): Promise<void> {
+    this.startTime = new Date();
+
     // Start control socket for CLI communication
     await this.startControlSocket();
 
@@ -295,6 +300,34 @@ export class IronCurtainDaemon {
       lastRun: loadRecentRuns(job.id, 1)[0],
       isRunning: this.activeJobRuns.has(job.id),
     }));
+  }
+
+  /** Returns a status snapshot for the control socket. */
+  getStatus(): DaemonStatus {
+    const jobs = loadAllJobs();
+    const enabledJobs = jobs.filter((j) => j.enabled);
+
+    // Find the earliest next fire time across all scheduled jobs
+    let nextFireTime: Date | null = null;
+    for (const job of enabledJobs) {
+      const nextRun = this.scheduler.getNextRun(job.id);
+      if (nextRun && (nextFireTime === null || nextRun < nextFireTime)) {
+        nextFireTime = nextRun;
+      }
+    }
+
+    const uptimeSeconds = this.startTime ? (Date.now() - this.startTime.getTime()) / 1000 : 0;
+
+    return {
+      uptimeSeconds,
+      jobs: {
+        total: jobs.length,
+        enabled: enabledJobs.length,
+        running: this.activeJobRuns.size,
+      },
+      signalConnected: this.signalDaemon !== null,
+      nextFireTime,
+    };
   }
 
   // -----------------------------------------------------------------------
@@ -543,6 +576,7 @@ export class IronCurtainDaemon {
 
   private async startControlSocket(): Promise<void> {
     const handler: ControlRequestHandler = {
+      getStatus: () => this.getStatus(),
       addJob: (job) => this.addJob(job),
       removeJob: (jobId) => this.removeJob(jobId as JobId),
       enableJob: (jobId) => this.enableJob(jobId as JobId),

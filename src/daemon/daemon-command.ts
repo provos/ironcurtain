@@ -16,6 +16,18 @@ import { IronCurtainDaemon } from './ironcurtain-daemon.js';
 import { sendControlRequest, type ControlRequest, type ControlResponse } from './control-socket.js';
 import type { AgentId } from '../docker/agent-adapter.js';
 
+function formatUptime(seconds: number): string {
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+
+  const parts: string[] = [];
+  if (days > 0) parts.push(`${days}d`);
+  if (hours > 0) parts.push(`${hours}h`);
+  if (minutes > 0 || parts.length === 0) parts.push(`${minutes}m`);
+  return parts.join(' ');
+}
+
 function printDaemonHelp(): void {
   console.error(
     `
@@ -27,7 +39,8 @@ Usage:
   ironcurtain daemon edit-job <id>      Edit an existing job (interactive)
   ironcurtain daemon list-jobs          List all jobs with schedule info
   ironcurtain daemon run-job <id>       Manually trigger a job run
-  ironcurtain daemon remove-job <id>    Delete a job and all artifacts
+  ironcurtain daemon status              Show daemon status
+  ironcurtain daemon remove-job <id> [-f] Delete a job and all artifacts
   ironcurtain daemon disable-job <id>   Stop scheduling a job
   ironcurtain daemon enable-job <id>    Resume scheduling a job
   ironcurtain daemon recompile-job <id> Re-run policy compilation
@@ -35,6 +48,7 @@ Usage:
 
 Options:
   -a, --agent <name>   Agent mode (same as start)
+  -f, --force          Skip confirmation prompts
   --no-signal          Skip Signal transport (cron-only mode)
 `.trim(),
   );
@@ -83,6 +97,7 @@ export async function runDaemonCommand(argv: string[]): Promise<void> {
     options: {
       agent: { type: 'string', short: 'a' },
       'no-signal': { type: 'boolean' },
+      force: { type: 'boolean', short: 'f' },
       runs: { type: 'string' },
       help: { type: 'boolean', short: 'h' },
     },
@@ -139,6 +154,39 @@ export async function runDaemonCommand(argv: string[]): Promise<void> {
       await runEditJobWizard(jobId);
       break;
     }
+    case 'status': {
+      const { isDaemonRunning, sendControlRequest: sendReq } = await import('./control-socket.js');
+      const running = await isDaemonRunning();
+      if (!running) {
+        console.error('Daemon is not running.');
+        break;
+      }
+      const resp = await sendReq({ command: 'status' });
+      if (!resp || !resp.ok) {
+        console.error('Daemon is running but did not respond to status request.');
+        break;
+      }
+      const status = resp.data as {
+        uptimeSeconds: number;
+        jobs: { total: number; enabled: number; running: number };
+        signalConnected: boolean;
+        nextFireTime: string | null;
+      };
+      const uptimeStr = formatUptime(status.uptimeSeconds);
+      console.error('Daemon is running.');
+      console.error(`  Uptime:             ${uptimeStr}`);
+      console.error(
+        `  Jobs:               ${status.jobs.total} total, ${status.jobs.enabled} enabled, ${status.jobs.running} running`,
+      );
+      console.error(`  Signal transport:   ${status.signalConnected ? 'connected' : 'not configured'}`);
+      if (status.nextFireTime) {
+        const { formatRelativeTime } = await import('../cron/format-utils.js');
+        console.error(`  Next scheduled run: ${formatRelativeTime(new Date(status.nextFireTime))}`);
+      } else {
+        console.error('  Next scheduled run: none');
+      }
+      break;
+    }
     case 'list-jobs': {
       const resp = await tryForwardToDaemon({ command: 'list-jobs' });
       if (handleForwardedResponse(resp)) {
@@ -169,10 +217,11 @@ export async function runDaemonCommand(argv: string[]): Promise<void> {
     }
     case 'remove-job': {
       const jobId = requireJobIdArg(positionals);
+      // When forwarding to daemon via control socket, skip interactive prompt
       const resp = await tryForwardToDaemon({ command: 'remove-job', jobId });
       if (handleForwardedResponse(resp, `Job "${jobId}" removed (daemon notified).`)) break;
       const { runRemoveJob } = await import('../cron/job-commands.js');
-      runRemoveJob(jobId);
+      await runRemoveJob(jobId, values.force as boolean | undefined);
       break;
     }
     case 'disable-job': {
