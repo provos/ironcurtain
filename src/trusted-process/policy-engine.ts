@@ -44,27 +44,6 @@ import {
 import { getListMatcher } from '../pipeline/dynamic-list-types.js';
 
 /**
- * Heuristically extracts filesystem paths from tool call arguments.
- * Any string value starting with '/', '.', or '~' is treated as a path.
- * Handles both single string values and arrays of strings.
- */
-function extractPathsHeuristic(args: Record<string, unknown>): string[] {
-  const paths: string[] = [];
-  for (const value of Object.values(args)) {
-    if (typeof value === 'string' && (value.startsWith('/') || value.startsWith('.') || value.startsWith('~'))) {
-      paths.push(value);
-    } else if (Array.isArray(value)) {
-      for (const item of value) {
-        if (typeof item === 'string' && (item.startsWith('/') || item.startsWith('.') || item.startsWith('~'))) {
-          paths.push(item);
-        }
-      }
-    }
-  }
-  return paths;
-}
-
-/**
  * Extracts string values from arguments based on annotation roles.
  * Only returns values for arguments whose annotated roles intersect
  * with the target roles. Handles both string and string[] arguments.
@@ -465,24 +444,17 @@ export class PolicyEngine {
    * 3. Untrusted domain gate for url-category roles (escalate)
    * 4. Unknown tool denial (deny)
    *
-   * Uses the union of heuristic and annotation-based path extraction
-   * for defense-in-depth. Returns a StructuralResult with either a
-   * final decision or a set of roles resolved by sandbox containment.
+   * Returns a StructuralResult with either a final decision or a set
+   * of roles resolved by sandbox containment.
    */
   private evaluateStructuralInvariants(
     request: ToolCallRequest,
     annotation: ToolAnnotation | undefined,
   ): StructuralResult {
-    // Extract paths using both methods for defense-in-depth
-    const heuristicPaths = extractPathsHeuristic(request.arguments);
-
     // Protected path check and sandbox containment use path-category roles only (not URL roles)
     const pathRoles = getPathRoles();
     const annotatedPaths = annotation ? extractAnnotatedPaths(request.arguments, annotation, pathRoles) : [];
-
-    // Union of both extraction methods, deduplicated
-    const allPaths = [...new Set([...heuristicPaths, ...annotatedPaths])];
-    const resolvedPaths = allPaths.map((p) => resolveRealPath(p));
+    const resolvedPaths = annotatedPaths.map((p) => resolveRealPath(p));
 
     // Protected path check -- any match is an immediate deny.
     for (const rp of resolvedPaths) {
@@ -515,25 +487,13 @@ export class PolicyEngine {
 
     // Filesystem sandbox containment (path-category roles)
     //
-    // The sandbox auto-allow decision uses annotated paths when annotations
-    // exist (not heuristic paths). An arg annotated as 'none' should not
-    // grant sandbox containment even if the value looks like a path.
-    // Heuristic paths are only used for defense-in-depth on the deny side
-    // (protected path check).
-    //
     // Only SANDBOX_SAFE_PATH_ROLES (read-path, write-path, delete-path,
     // write-history, delete-history) can be auto-resolved by sandbox containment.
     // Rationale: if the agent can freely read/write/delete files in the sandbox,
     // it can already manipulate .git/ contents directly, so history roles within
     // the sandbox add no additional risk.
     const sandboxResolvedRoles = new Set<ArgumentRole>();
-    // Reuse already-resolved paths when annotated paths are a subset of allPaths
-    const resolvedSandboxPaths = annotation
-      ? annotatedPaths.map((p) => {
-          const idx = allPaths.indexOf(p);
-          return idx !== -1 ? resolvedPaths[idx] : resolveRealPath(p);
-        })
-      : resolvedPaths;
+    const resolvedSandboxPaths = resolvedPaths;
 
     // Extract URL args once for use in both sandbox containment (fast-path guard) and untrusted domain gate
     const urlArgs = annotation ? extractAnnotatedUrls(request.arguments, annotation, getUrlRoles()) : [];

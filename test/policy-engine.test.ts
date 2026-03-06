@@ -117,30 +117,7 @@ describe('PolicyEngine', () => {
     });
   });
 
-  describe('tilde path recognition (defense-in-depth)', () => {
-    it('recognizes tilde paths in extractPathsHeuristic and denies protected home path', () => {
-      // Create an engine where a tilde-expanded path would be protected.
-      // Since the heuristic now recognizes ~ paths, they will be resolved
-      // and checked against protected paths.
-      const homeDir = homedir();
-      const engineWithHome = new PolicyEngine(testCompiledPolicy, testToolAnnotations, [homeDir], SANDBOX_DIR);
-      // A tilde path targeting the home directory should be caught.
-      // path.resolve('~/') does NOT expand tilde -- it produces <cwd>/~
-      // But the heuristic will extract it, and resolve will produce cwd/~.
-      // The real fix is prepareToolArgs at the proxy layer.
-      // This test verifies the heuristic at least SEES tilde paths.
-      const result = engineWithHome.evaluate(
-        makeRequest({
-          toolName: 'read_file',
-          arguments: { path: '~/.ssh/id_rsa' },
-        }),
-      );
-      // The heuristic extracts '~/.ssh/id_rsa' -- resolve produces <cwd>/~/.ssh/id_rsa
-      // which won't match homeDir. But this still exercises the code path.
-      // The real protection comes from prepareToolArgs in the proxy/TrustedProcess.
-      expect(result.decision).toBeDefined();
-    });
-
+  describe('tilde path recognition', () => {
     it('with pre-normalized tilde path, denies access to protected home directory', () => {
       const homeDir = homedir();
       const engineWithHome = new PolicyEngine(testCompiledPolicy, testToolAnnotations, [homeDir], SANDBOX_DIR);
@@ -195,26 +172,26 @@ describe('PolicyEngine', () => {
   });
 
   describe('delete operations', () => {
-    it('allows delete_file in sandbox (structural sandbox invariant fires before unknown-tool check)', () => {
+    it('denies delete_file in sandbox when tool is unannotated (unknown tool)', () => {
       const result = engine.evaluate(
         makeRequest({
           toolName: 'delete_file',
           arguments: { path: `${SANDBOX_DIR}/test.txt` },
         }),
       );
-      expect(result.decision).toBe('allow');
-      expect(result.rule).toBe('structural-sandbox-allow');
+      expect(result.decision).toBe('deny');
+      expect(result.rule).toBe('structural-unknown-tool');
     });
 
-    it('allows delete_directory in sandbox (structural sandbox invariant fires before unknown-tool check)', () => {
+    it('denies delete_directory in sandbox when tool is unannotated (unknown tool)', () => {
       const result = engine.evaluate(
         makeRequest({
           toolName: 'delete_directory',
           arguments: { path: `${SANDBOX_DIR}/subdir` },
         }),
       );
-      expect(result.decision).toBe('allow');
-      expect(result.rule).toBe('structural-sandbox-allow');
+      expect(result.decision).toBe('deny');
+      expect(result.rule).toBe('structural-unknown-tool');
     });
 
     it('denies delete_file outside sandbox (unknown tool)', () => {
