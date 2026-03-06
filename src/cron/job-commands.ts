@@ -19,6 +19,8 @@ import { compileTaskPolicy } from './compile-task-policy.js';
 import { parseCronExpression, getNextFireTime } from './cron-scheduler.js';
 import { formatRelativeTime, describeCronExpression } from './format-utils.js';
 import { syncGitRepo, validateGitUri } from './git-sync.js';
+import { generateConstitution } from './constitution-generator.js';
+import { runJobConstitutionCustomizer } from './job-customizer.js';
 
 /**
  * Opens the user's $VISUAL / $EDITOR with a temporary file and returns
@@ -92,7 +94,7 @@ const TASK_CONSTITUTION_INSTRUCTIONS =
  * In add mode the ID is editable; in edit mode it is fixed.
  */
 async function runJobReviewLoop(initial: JobDefinition, isNew: boolean): Promise<JobDefinition> {
-  const { text, confirm, select, note, isCancel, cancel, log } = await import('@clack/prompts');
+  const { text, confirm, select, note, isCancel, cancel, log, spinner } = await import('@clack/prompts');
 
   let job = initial;
 
@@ -146,6 +148,14 @@ async function runJobReviewLoop(initial: JobDefinition, isNew: boolean): Promise
         { value: 'gitRepo', label: `Edit git repo         ${gitRepoDisplay}` },
         { value: 'taskDescription', label: `Edit task description${descIsEmpty ? '  ← required' : ''}` },
         { value: 'taskConstitution', label: `Edit task constitution${constIsEmpty ? '  ← required' : ''}` },
+        {
+          value: 'generateConstitution',
+          label: `Generate constitution from task${descIsEmpty ? '  (set task first)' : ''}`,
+        },
+        {
+          value: 'customizeConstitution',
+          label: `Customize constitution interactively${constIsEmpty ? '  (set constitution first)' : ''}`,
+        },
         { value: 'notify', label: `Edit notify           ${notifyStr}` },
       ],
     });
@@ -255,6 +265,69 @@ async function runJobReviewLoop(initial: JobDefinition, isNew: boolean): Promise
           job = { ...job, taskConstitution: newConst };
         } else {
           log.warn('Editor was empty — keeping existing task constitution.');
+        }
+        break;
+      }
+      case 'generateConstitution': {
+        if (descIsEmpty) {
+          log.warn('Set the task description first.');
+          break;
+        }
+        const genSpinner = spinner();
+        genSpinner.start('Generating constitution...');
+        try {
+          const workspace = getJobWorkspaceDir(job.id);
+          mkdirSync(workspace, { recursive: true });
+          const result = await generateConstitution({
+            taskDescription: job.taskDescription,
+            workspacePath: workspace,
+            gitRepo: job.gitRepo,
+            onProgress: (msg) => {
+              genSpinner.message(msg);
+            },
+          });
+          genSpinner.stop('Constitution generated.');
+          note(result.constitution.trim(), 'Generated Constitution');
+          if (result.reasoning) {
+            log.info(result.reasoning);
+          }
+
+          const genAction = await select({
+            message: 'What would you like to do with the generated constitution?',
+            options: [
+              { value: 'accept', label: 'Accept as-is' },
+              { value: 'refine', label: 'Refine interactively' },
+              { value: 'discard', label: 'Discard' },
+            ],
+          });
+          if (isCancel(genAction)) {
+            cancel('Cancelled.');
+            process.exit(0);
+          }
+
+          if (genAction === 'accept') {
+            job = { ...job, taskConstitution: result.constitution };
+          } else if (genAction === 'refine') {
+            const refined = await runJobConstitutionCustomizer(result.constitution, job.taskDescription);
+            if (refined) {
+              job = { ...job, taskConstitution: refined };
+            }
+          }
+          // 'discard' falls through without changing job
+        } catch (err) {
+          genSpinner.stop('Generation failed.');
+          log.error(`Constitution generation failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        break;
+      }
+      case 'customizeConstitution': {
+        if (!job.taskConstitution.trim()) {
+          log.warn('Set or generate a constitution first.');
+          break;
+        }
+        const refined = await runJobConstitutionCustomizer(job.taskConstitution, job.taskDescription);
+        if (refined) {
+          job = { ...job, taskConstitution: refined };
         }
         break;
       }

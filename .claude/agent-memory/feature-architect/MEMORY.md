@@ -191,42 +191,30 @@ Both use the same PolicyEngine with compiled artifacts.
 - LLM-assisted constitution customization: `npm run customize-policy` interactive CLI
 - 6-phase migration: (1) role extensibility, (2) engine domain support, (3) git server, (4) fetch server, (5) user config, (6) constitution customizer
 
-## Auto-Approver Design (designed 2026-02-20)
-- See `auto-approver.md` topic file for details
-- `src/trusted-process/auto-approver.ts` -- stateless `autoApprove()` function
-- `approve | escalate` only, never deny; fail-open to human on any error
-- File-based IPC: `last-user-message.txt` in session dir; proxy reads on escalation
-- Config: `autoApprove: { enabled: false, modelId: 'anthropic:claude-haiku-4-5' }`
+## Auto-Approver -- see `auto-approver.md` topic file
+## Signal Transport -- `docs/designs/signal-transport.md`; `src/signal/` module
+## Docker Agent Mode -- see `docker-agent.md` topic file
+## OAuth Docker Support -- `docs/designs/oauth-docker-support.md`
+## Goose Agent Integration -- see `goose-integration.md` topic file
+## Conditional Argument Roles -- `docs/designs/conditional-argument-roles.md`
 
-## Signal Transport (designed 2026-02-24)
-- See `docs/designs/signal-transport.md` for full spec; `src/signal/` module
+## Cron Job System (implemented)
+- `src/cron/` module: job-commands.ts, job-store.ts, compile-task-policy.ts, headless-transport.ts
+- `src/daemon/ironcurtain-daemon.ts` -- orchestrates cron scheduling + Signal + sessions
+- JobDefinition: id (branded JobId), taskDescription, taskConstitution, schedule, gitRepo, etc.
+- Jobs stored at `~/.ironcurtain/jobs/{id}/job.json` with workspace/ and generated/ subdirs
+- `compileTaskPolicy()` wraps PipelineRunner with constitutionKind: 'task-policy'
+- `buildTaskCompilerSystemPrompt()` in pipeline-runner.ts -- whitelist-generation from task text
+- `SessionOptions.policyDir` loads per-job policy; `systemPromptAugmentation` injects task context
+- Review loop in `runJobReviewLoop()` with confirm/edit cycle using @clack/prompts
 
-## Docker Agent Mode -- see `docker-agent.md` topic file for details
-- Key files: `docker-agent-session.ts`, `agent-adapter.ts`, `mitm-proxy.ts`, `provider-config.ts`, `fake-keys.ts`
-- Security invariant: real API keys/tokens NEVER enter the container
-- Fake-key-swap pattern: container gets sentinel key, MITM proxy swaps for real on host side
-- `ProviderKeyMapping { config, fakeKey, realKey }` -- MITM matches fake, injects real
-- `KeyInjection`: `{ type: 'header', headerName }` or `{ type: 'bearer' }`
-- `resolveRealApiKey()` in docker-infrastructure.ts maps host to config.userConfig key
-
-## OAuth Docker Support (designed 2026-02-28)
-- See `docs/designs/oauth-docker-support.md` for full spec
-
-## Goose Agent Integration (designed 2026-03-03)
-- See `goose-integration.md` topic file and `docs/designs/goose-agent-integration.md`
-- Second Docker Agent Mode agent, validates agent-agnostic claim
-- Factory-constructed adapter: `createGooseAdapter(userConfig)` for provider selection
-- Stateless batch mode (no --resume-session), PTY mode is primary recommendation
-- Response parsing needs prototyping (no JSON output mode in Goose)
-
-## Conditional Argument Roles Design (designed 2026-03-04)
-- See `docs/designs/conditional-argument-roles.md` for full spec
-- Solves multi-mode tool over-restriction (git_branch list vs delete, edit_file dryRun, etc.)
-- `ArgumentRoleSpec = ArgumentRole[] | ConditionalRoles` -- backward-compatible union
-- `ConditionalRoles { default, when: [{ condition: RoleCondition, roles }] }` -- first-match-wins
-- `RoleCondition { arg, equals?, in?, is? }` -- minimal condition language
-- `resolveEffectiveRoles(annotationArgs, callArgs)` pure function in argument-roles.ts
-- Security invariant: conditional roles must be subset of default (only narrows, never widens)
-- Policy engine resolves annotation once per call, then feeds resolved annotation to existing pipeline
-- No changes to compiled rules or rule evaluation logic
-- 4-phase migration: types, engine integration, annotator pipeline, scenario improvements
+## Auto-Constitution Generation Design (designed 2026-03-05)
+- See `docs/designs/auto-constitution-generation.md`
+- LLM explores MCP servers via bridged tools (list-resolver pattern, NOT full Code Mode)
+- Tool filtering: `isReadOnlyTool()` checks annotations for sideEffects + role safety
+- Hand-authored read-only policy at `src/config/generated-readonly/compiled-policy.json` (documentation)
+- `src/cron/constitution-generator.ts` -- `generateConstitution()` returns constitution + reasoning
+- `src/cron/job-customizer.ts` -- `runJobConstitutionCustomizer()` reuses customizer patterns
+- Integrated into job review loop as "Generate constitution" menu option
+- Graceful degradation: works without MCP servers (task description only)
+- 4-phase migration: read-only artifact, generator module, customizer, CLI integration

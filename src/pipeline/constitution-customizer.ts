@@ -373,7 +373,7 @@ function handleCancel(value: unknown): void {
 // LLM Call
 // ---------------------------------------------------------------------------
 
-async function callLlm(
+export async function callLlm(
   model: LanguageModel,
   systemPrompt: string | SystemModelMessage,
   messages: ModelMessage[],
@@ -393,7 +393,7 @@ async function callLlm(
 // Load Tool Annotations
 // ---------------------------------------------------------------------------
 
-function loadAnnotations(generatedDir: string, packageGeneratedDir: string): ToolAnnotation[] {
+export function loadAnnotations(generatedDir: string, packageGeneratedDir: string): ToolAnnotation[] {
   const file = loadExistingArtifact<ToolAnnotationsFile>(generatedDir, 'tool-annotations.json', packageGeneratedDir);
   if (!file) {
     console.error(

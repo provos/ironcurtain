@@ -5,6 +5,10 @@
  * loading config, printing the progress banner, and exit codes.
  *
  * The core compile-verify-repair loop lives in PipelineRunner.
+ *
+ * CLI flags:
+ *   --constitution <path>  Use an alternative constitution file
+ *   --output-dir <path>    Write compiled artifacts to this directory
  */
 
 import { resolve } from 'node:path';
@@ -17,11 +21,37 @@ import { PipelineRunner, createPipelineModels } from './pipeline-runner.js';
 export { resolveRulePaths, mergeReplacements } from './pipeline-shared.js';
 
 // ---------------------------------------------------------------------------
+// CLI Argument Parsing
+// ---------------------------------------------------------------------------
+
+export interface CompilePolicyCliArgs {
+  constitution?: string;
+  outputDir?: string;
+}
+
+/**
+ * Parses --constitution and --output-dir from process.argv.
+ * Returns resolved absolute paths when provided.
+ */
+export function parseCompilePolicyArgs(argv: string[] = process.argv.slice(2)): CompilePolicyCliArgs {
+  const result: CompilePolicyCliArgs = {};
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--constitution' && argv[i + 1]) {
+      result.constitution = resolve(argv[++i]);
+    } else if (argv[i] === '--output-dir' && argv[i + 1]) {
+      result.outputDir = resolve(argv[++i]);
+    }
+  }
+  return result;
+}
+
+// ---------------------------------------------------------------------------
 // Main Pipeline
 // ---------------------------------------------------------------------------
 
 export async function main(): Promise<void> {
-  const config = loadPipelineConfig();
+  const cliArgs = parseCompilePolicyArgs();
+  const config = loadPipelineConfig(cliArgs);
 
   // Load tool annotations early to validate they exist before printing the banner
   const toolAnnotationsFile = loadToolAnnotationsFile(config.generatedDir, config.packageGeneratedDir);

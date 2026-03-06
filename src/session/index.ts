@@ -6,11 +6,11 @@
  * are not exported -- callers depend on the Session interface only.
  */
 
-import { existsSync, mkdirSync, realpathSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { existsSync, mkdirSync } from 'node:fs';
 import { loadConfig } from '../config/index.js';
 import {
   getIronCurtainHome,
+  getPackageConfigDir,
   getSessionDir,
   getSessionSandboxDir,
   getSessionEscalationDir,
@@ -21,6 +21,7 @@ import {
 } from '../config/paths.js';
 import type { IronCurtainConfig } from '../config/types.js';
 import * as logger from '../logger.js';
+import { resolveRealPath } from '../types/argument-roles.js';
 import { AgentSession } from './agent-session.js';
 import { SessionError } from './errors.js';
 import { isEqualOrInside } from './workspace-validation.js';
@@ -173,31 +174,22 @@ interface SessionDirConfig {
 
 /**
  * Validates that a policyDir path resolves to a location under the
- * IronCurtain home directory. Prevents loading attacker-controlled
- * policy files from arbitrary filesystem locations.
+ * IronCurtain home directory or the package config directory. Prevents
+ * loading attacker-controlled policy files from arbitrary filesystem locations.
  *
- * @throws {SessionError} if the path escapes the IronCurtain home.
+ * The package config directory is allowed so that built-in policy variants
+ * (e.g., the read-only policy for constitution generation) can be loaded
+ * without copying files into the user home.
+ *
+ * @throws {SessionError} if the path escapes all trusted directories.
  */
 function validatePolicyDir(policyDir: string): void {
-  // Use realpathSync to canonicalize and follow symlinks, preventing
-  // symlink escapes (e.g., ~/.ironcurtain/evil -> /etc/attacker-policy).
-  // Fall back to resolve() if the path doesn't exist yet.
-  let resolvedPolicy: string;
-  try {
-    resolvedPolicy = realpathSync(resolve(policyDir));
-  } catch {
-    resolvedPolicy = resolve(policyDir);
-  }
-  let home: string;
-  try {
-    home = realpathSync(resolve(getIronCurtainHome()));
-  } catch {
-    home = resolve(getIronCurtainHome());
-  }
+  const resolvedPolicy = resolveRealPath(policyDir);
+  const trustedDirs = [getIronCurtainHome(), getPackageConfigDir()].map(resolveRealPath);
 
-  if (!isEqualOrInside(resolvedPolicy, home)) {
+  if (!trustedDirs.some((dir) => isEqualOrInside(resolvedPolicy, dir))) {
     throw new SessionError(
-      `policyDir must be under the IronCurtain home directory (${home}). ` + `Received: ${resolvedPolicy}`,
+      `policyDir must be under the IronCurtain home or package config directory. ` + `Received: ${resolvedPolicy}`,
       'SESSION_INIT_FAILED',
     );
   }

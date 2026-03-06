@@ -187,6 +187,24 @@ export function getUserGeneratedDir(): string {
 }
 
 /**
+ * Returns the package-bundled read-only policy directory.
+ * Contains compiled-policy.json derived from constitution-readonly.md.
+ * This is always the package version -- not user-local.
+ */
+export function getReadOnlyPolicyDir(): string {
+  return resolve(__dirname, 'generated-readonly');
+}
+
+/**
+ * Returns the package-bundled config directory.
+ * Used to validate that a policyDir is within a trusted location
+ * (either the user's IronCurtain home or the package config dir).
+ */
+export function getPackageConfigDir(): string {
+  return resolve(__dirname);
+}
+
+/**
  * Loads the combined constitution text (base + optional user constitution).
  * If ~/.ironcurtain/constitution.md exists, it replaces the package-bundled base.
  * The user extension file (~/.ironcurtain/constitution-user.md), when present,
