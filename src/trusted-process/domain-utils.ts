@@ -202,11 +202,11 @@ function gitBranchRemote(branch: string, opts: GitExecOpts): string | undefined 
 }
 
 /**
- * Returns the fetch URL for a named remote, or undefined if not found.
+ * Returns the fetch URL for a named remote, or undefined if not found or empty.
  */
 function gitRemoteUrl(remoteName: string, opts: GitExecOpts): string | undefined {
   try {
-    return execFileSync('git', ['remote', 'get-url', remoteName], opts).trim();
+    return execFileSync('git', ['remote', 'get-url', remoteName], opts).trim() || undefined;
   } catch {
     return undefined;
   }
