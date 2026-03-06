@@ -130,19 +130,43 @@ export class SignalBotDaemon {
   }
 
   /**
-   * Starts the daemon. Returns a promise that resolves when
-   * shutdown() is called (e.g., SIGTERM/SIGINT).
+   * Connects the daemon: starts the Docker container, waits for
+   * health, connects WebSocket, and sends the online greeting.
+   * Throws if any step fails (container won't start, health timeout, etc.).
    */
-  async start(): Promise<void> {
+  async connect(): Promise<void> {
+    logger.info('[Signal Daemon] Ensuring container is running...');
     this.baseUrl = await this.containerManager.ensureRunning();
+    logger.info('[Signal Daemon] Waiting for container health check...');
     await this.containerManager.waitForHealthy(this.baseUrl);
+    logger.info('[Signal Daemon] Connecting WebSocket...');
     await this.connectWebSocket();
-    await this.sendSignalMessage('IronCurtain bot is online. Send a message to begin.');
+    // Greeting is best-effort — signal-cli may be healthy but not yet
+    // fully connected to Signal servers (e.g., broken pipe on first send).
+    try {
+      await this.sendSignalMessage('IronCurtain bot is online. Send a message to begin.');
+    } catch (err) {
+      logger.warn(`[Signal Daemon] Greeting failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
 
-    // Block until shutdown
+  /**
+   * Blocks until shutdown() is called (e.g., SIGTERM/SIGINT).
+   * Call connect() first to establish the connection.
+   */
+  async run(): Promise<void> {
     await new Promise<void>((resolve) => {
       this.exitResolve = resolve;
     });
+  }
+
+  /**
+   * Convenience: connects and then blocks until shutdown.
+   * Used by the standalone `ironcurtain bot` command.
+   */
+  async start(): Promise<void> {
+    await this.connect();
+    await this.run();
   }
 
   /**

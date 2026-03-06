@@ -32,6 +32,7 @@ import { CRON_BUDGET_DEFAULTS } from '../cron/types.js';
 import { BudgetExhaustedError } from '../session/errors.js';
 import { validateWorkspacePath } from '../session/workspace-validation.js';
 import * as logger from '../logger.js';
+import { getDaemonLogPath } from '../config/paths.js';
 import { ControlSocketServer, type ControlRequestHandler, type DaemonStatus } from './control-socket.js';
 
 export type { SessionSource, ManagedSession } from '../session/session-manager.js';
@@ -104,6 +105,9 @@ export class IronCurtainDaemon {
   async start(): Promise<void> {
     this.startTime = new Date();
 
+    // Set up file-based logger (redirects console.* to log file)
+    logger.setup({ logFilePath: getDaemonLogPath('daemon') });
+
     // Start control socket for CLI communication
     await this.startControlSocket();
 
@@ -132,15 +136,15 @@ export class IronCurtainDaemon {
       }
     }
 
-    console.error('IronCurtain daemon started.');
+    process.stderr.write('IronCurtain daemon started.\n');
     if (this.controlSocket) {
-      console.error('  Control socket: listening');
+      process.stderr.write('  Control socket: listening\n');
     }
     if (enabledJobs.length > 0) {
-      console.error(`  Scheduled jobs: ${enabledJobs.length}`);
+      process.stderr.write(`  Scheduled jobs: ${enabledJobs.length}\n`);
     }
     if (this.signalDaemon) {
-      console.error('  Signal transport: connected');
+      process.stderr.write('  Signal transport: connected\n');
     }
 
     // Block until shutdown
@@ -567,6 +571,7 @@ export class IronCurtainDaemon {
       throw new Error('Signal is not configured. Run: ironcurtain setup-signal');
     }
 
+    process.stderr.write('Starting Signal transport...\n');
     const docker = createDockerManager();
     const containerManager = createSignalContainerManager(docker, signalConfig.container);
 
@@ -576,14 +581,21 @@ export class IronCurtainDaemon {
       mode: this.mode,
       sessionManager: this.sessionManager,
     });
+
+    // Await the connection phase (starts Docker, health check, WebSocket).
+    // Throws if the container won't start or health check times out.
+    await signalDaemon.connect();
+
     this.signalDaemon = signalDaemon;
 
     // Capture the sendSignalMessage method for cron notifications
     this.sendSignalMessage = (msg: string) => signalDaemon.sendSignalMessage(msg);
 
-    // Start Signal daemon in the background (it blocks until shutdown)
-    this.signalDaemon.start().catch((err: unknown) => {
+    // Run the blocking event loop in the background (blocks until shutdown)
+    signalDaemon.run().catch((err: unknown) => {
       logger.warn(`[Daemon] Signal daemon exited: ${String(err)}`);
+      this.signalDaemon = null;
+      this.sendSignalMessage = null;
     });
   }
 

@@ -8,9 +8,11 @@
  * Delegates to DockerManager for all Docker CLI operations.
  */
 
+import { existsSync } from 'node:fs';
 import { mkdirSync } from 'node:fs';
 import type { DockerManager } from '../docker/types.js';
 import { getSignalDataDir } from './signal-config.js';
+import * as logger from '../logger.js';
 
 /** Configuration for the signal-cli Docker container. */
 export interface SignalContainerConfig {
@@ -49,6 +51,25 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * Detects stale bind mounts by comparing the host data directory contents
+ * with what the container sees. After a host reboot (WSL2/Windows), Docker
+ * may restart the container but the bind mount shows an empty or partial
+ * view of the host directory.
+ */
+async function hasStaleBindMount(docker: DockerManager, containerName: string, hostDataDir: string): Promise<boolean> {
+  // If the host data dir has a data/ subdirectory, check that the container can see it
+  if (!existsSync(`${hostDataDir}/data`)) {
+    return false; // Fresh install, no data yet — nothing to be stale
+  }
+  try {
+    const result = await docker.exec(containerName, ['test', '-d', '/home/.local/share/signal-cli/data'], 5_000);
+    return result.exitCode !== 0;
+  } catch {
+    return false; // Can't tell — assume OK
+  }
+}
+
 export function createSignalContainerManager(
   docker: DockerManager,
   config: SignalContainerConfig,
@@ -60,41 +81,58 @@ export function createSignalContainerManager(
       const baseUrl = `http://127.0.0.1:${config.port}`;
 
       // Pull latest image (fast no-op when already up to date)
+      logger.info(`[Signal Container] Pulling image ${config.image}...`);
       try {
         await docker.pullImage(config.image);
       } catch {
-        // Offline or registry unavailable - continue with cached image
+        logger.info('[Signal Container] Pull failed (offline?) - using cached image');
       }
 
       // If container exists, check whether its image is current.
       // If outdated, remove it so we recreate with the new image.
       if (await docker.containerExists(config.containerName)) {
+        logger.info(`[Signal Container] Container ${config.containerName} exists, checking image...`);
         const containerId = await docker.getImageId(config.containerName);
         const imageId = await docker.getImageId(config.image);
         const outdated = containerId && imageId && containerId !== imageId;
 
         if (outdated) {
+          logger.info('[Signal Container] Image outdated, recreating container...');
           if (await docker.isRunning(config.containerName)) {
             await docker.stop(config.containerName);
           }
           await docker.remove(config.containerName);
           // Fall through to create below
         } else if (await docker.isRunning(config.containerName)) {
+          // Verify the bind mount is healthy. After a host reboot (e.g. WSL2/Windows),
+          // Docker may auto-restart the container with a stale bind mount where the
+          // host directory contents are invisible inside the container.
+          if (await hasStaleBindMount(docker, config.containerName, resolvedDataDir)) {
+            logger.info('[Signal Container] Stale bind mount detected, restarting container...');
+            await docker.stop(config.containerName);
+            await docker.start(config.containerName);
+          } else {
+            logger.info('[Signal Container] Already running');
+          }
           return baseUrl;
         } else {
+          logger.info('[Signal Container] Starting existing container...');
           await docker.start(config.containerName);
           return baseUrl;
         }
       }
 
       // Create new container via DockerManager.create()
+      logger.info('[Signal Container] Creating new container...');
       mkdirSync(resolvedDataDir, { recursive: true });
       await docker.create({
         image: config.image,
         name: config.containerName,
         network: 'bridge',
         ports: [`127.0.0.1:${config.port}:8080`],
-        restartPolicy: 'unless-stopped',
+        // No restartPolicy — the daemon manages the container lifecycle.
+        // Docker's auto-restart after a host reboot produces stale bind mounts
+        // (host directory contents invisible inside the container).
         // The signal-cli-rest-api entrypoint needs capabilities for:
         //   CHOWN, FOWNER - jsonrpc2-helper creates FIFOs and sets permissions
         //   DAC_OVERRIDE  - root writes config to UID-1000-owned volume
