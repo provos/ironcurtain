@@ -191,6 +191,13 @@ export async function main(): Promise<void> {
 
   console.error(chalk.bold('Tool Annotation Pipeline'));
   console.error(chalk.bold('========================'));
+  console.error('');
+  console.error(
+    chalk.yellow.bold('⚠  WARNING: Tool annotations are part of the IronCurtain TCB (Trusted Computing Base).'),
+  );
+  console.error(chalk.yellow('   This is a developer tool and should not be run lightly. All annotation'));
+  console.error(chalk.yellow('   output must be manually reviewed for correctness before use in production.'));
+  console.error('');
   console.error(`Output: ${chalk.dim(config.generatedDir + '/')}`);
   console.error('');
 
