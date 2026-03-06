@@ -388,6 +388,19 @@ export async function runEditJobWizard(jobIdStr: string): Promise<void> {
     }
   }
 
+  // Notify running daemon to pick up changes (single round-trip, no pre-check)
+  try {
+    const { sendControlRequest } = await import('../daemon/control-socket.js');
+    const response = await sendControlRequest({ command: 'reload-job', jobId: job.id });
+    if (response?.ok) {
+      console.error('Daemon notified — job reloaded.');
+    } else if (response) {
+      console.error(chalk.yellow(`Daemon reload failed: ${response.error}`));
+    }
+  } catch {
+    // Daemon not reachable — changes will be picked up on next start
+  }
+
   outro(`Job "${job.id}" updated.`);
 }
 

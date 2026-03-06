@@ -62,6 +62,9 @@ function createMockHandler(): ControlRequestHandler & {
     async recompileJob(jobId: string) {
       handler.calls.push({ method: 'recompileJob', args: [jobId] });
     },
+    async reloadJob(jobId: string) {
+      handler.calls.push({ method: 'reloadJob', args: [jobId] });
+    },
     async runJobNow(jobId: string): Promise<RunRecord> {
       handler.calls.push({ method: 'runJobNow', args: [jobId] });
       return handler.mockRunRecord;
@@ -233,6 +236,13 @@ describe('Control socket commands', () => {
     expect(response).not.toBeNull();
     expect(response!.ok).toBe(true);
     expect(handler.calls).toEqual([{ method: 'recompileJob', args: ['my-job'] }]);
+  });
+
+  it('forwards reload-job to handler', async () => {
+    const response = await sendControlRequest({ command: 'reload-job', jobId: 'my-job' }, socketPath);
+    expect(response).not.toBeNull();
+    expect(response!.ok).toBe(true);
+    expect(handler.calls).toEqual([{ method: 'reloadJob', args: ['my-job'] }]);
   });
 
   it('forwards run-job and returns run record', async () => {

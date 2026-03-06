@@ -29,6 +29,7 @@ export type ControlRequest =
   | { readonly command: 'enable-job'; readonly jobId: string }
   | { readonly command: 'disable-job'; readonly jobId: string }
   | { readonly command: 'recompile-job'; readonly jobId: string }
+  | { readonly command: 'reload-job'; readonly jobId: string }
   | { readonly command: 'run-job'; readonly jobId: string }
   | { readonly command: 'list-jobs' };
 
@@ -73,6 +74,7 @@ export interface ControlRequestHandler {
   enableJob(jobId: string): Promise<void>;
   disableJob(jobId: string): Promise<void>;
   recompileJob(jobId: string): Promise<void>;
+  reloadJob(jobId: string): Promise<void>;
   runJobNow(jobId: string): Promise<RunRecord>;
   listJobs(): Array<{
     job: JobDefinition;
@@ -254,6 +256,10 @@ export class ControlSocketServer {
 
       case 'recompile-job':
         await this.handler.recompileJob(request.jobId);
+        return { ok: true };
+
+      case 'reload-job':
+        await this.handler.reloadJob(request.jobId);
         return { ok: true };
 
       case 'run-job': {

@@ -267,6 +267,23 @@ export class IronCurtainDaemon {
     logger.info(`[Daemon] Disabled job ${jobId}`);
   }
 
+  /** Reloads a job definition from disk and reschedules it. */
+  // eslint-disable-next-line @typescript-eslint/require-await -- must be async to satisfy ControlRequestHandler interface
+  async reloadJob(jobId: JobId): Promise<void> {
+    const job = loadJob(jobId);
+    if (!job) throw new Error(`Job not found: ${jobId}`);
+
+    this.scheduler.unschedule(jobId);
+
+    if (job.enabled) {
+      this.scheduler.schedule(job, (j) => this.onJobTrigger(j));
+      const nextRun = this.scheduler.getNextRun(jobId);
+      logger.info(`[Daemon] Reloaded job ${jobId}: rescheduled (next: ${nextRun?.toISOString() ?? 'unknown'})`);
+    } else {
+      logger.info(`[Daemon] Reloaded job ${jobId}: disabled, not scheduled`);
+    }
+  }
+
   /** Re-runs policy compilation for an existing job. */
   async recompileJob(jobId: JobId): Promise<void> {
     const job = loadJob(jobId);
@@ -582,6 +599,7 @@ export class IronCurtainDaemon {
       enableJob: (jobId) => this.enableJob(jobId as JobId),
       disableJob: (jobId) => this.disableJob(jobId as JobId),
       recompileJob: (jobId) => this.recompileJob(jobId as JobId),
+      reloadJob: (jobId) => this.reloadJob(jobId as JobId),
       runJobNow: (jobId) => this.runJobNow(jobId as JobId),
       listJobs: () => this.listJobs(),
     };
