@@ -398,6 +398,10 @@ export class IronCurtainDaemon {
       },
       onEscalationResolved: (_id, decision) => {
         if (decision === 'approved') escalationsApproved++;
+        const label = this.activeJobRuns.get(job.id);
+        if (label !== undefined) {
+          this.sessionManager.clearPendingEscalation(label);
+        }
       },
       onEscalationExpired: () => {
         const label = this.activeJobRuns.get(job.id);
