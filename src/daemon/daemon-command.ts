@@ -16,32 +16,34 @@ import { IronCurtainDaemon } from './ironcurtain-daemon.js';
 import { sendControlRequest, type ControlRequest, type ControlResponse } from './control-socket.js';
 import type { AgentId } from '../docker/agent-adapter.js';
 import { formatDuration } from '../cron/format-utils.js';
+import { checkHelp, type CommandSpec } from '../cli-help.js';
 
-function printDaemonHelp(): void {
-  console.error(
-    `
-ironcurtain daemon - Unified Signal + cron daemon
-
-Usage:
-  ironcurtain daemon [options]          Start the daemon
-  ironcurtain daemon add-job            Add a new scheduled job (interactive)
-  ironcurtain daemon edit-job <id>      Edit an existing job (interactive)
-  ironcurtain daemon list-jobs          List all jobs with schedule info
-  ironcurtain daemon run-job <id>       Manually trigger a job run
-  ironcurtain daemon status              Show daemon status
-  ironcurtain daemon remove-job <id> [-f] Delete a job and all artifacts
-  ironcurtain daemon disable-job <id>   Stop scheduling a job
-  ironcurtain daemon enable-job <id>    Resume scheduling a job
-  ironcurtain daemon recompile-job <id> Re-run policy compilation
-  ironcurtain daemon logs <id> [--runs N]  Show recent run summaries
-
-Options:
-  -a, --agent <name>   Agent mode (same as start)
-  -f, --force          Skip confirmation prompts
-  --no-signal          Skip Signal transport (cron-only mode)
-`.trim(),
-  );
-}
+const daemonSpec: CommandSpec = {
+  name: 'ironcurtain daemon',
+  description: 'Unified Signal + cron daemon',
+  usage: [
+    'ironcurtain daemon [options]              Start the daemon',
+    'ironcurtain daemon <subcommand> [options]  Manage jobs',
+  ],
+  subcommands: [
+    { name: 'add-job', description: 'Add a new scheduled job (interactive)' },
+    { name: 'edit-job <id>', description: 'Edit an existing job (interactive)' },
+    { name: 'list-jobs', description: 'List all jobs with schedule info' },
+    { name: 'run-job <id>', description: 'Manually trigger a job run' },
+    { name: 'status', description: 'Show daemon status' },
+    { name: 'remove-job <id>', description: 'Delete a job and all artifacts' },
+    { name: 'disable-job <id>', description: 'Stop scheduling a job' },
+    { name: 'enable-job <id>', description: 'Resume scheduling a job' },
+    { name: 'recompile-job <id>', description: 'Re-run policy compilation' },
+    { name: 'logs <id>', description: 'Show recent run summaries' },
+  ],
+  options: [
+    { flag: 'agent', short: 'a', description: 'Agent mode (same as start)', placeholder: '<name>' },
+    { flag: 'force', short: 'f', description: 'Skip confirmation prompts' },
+    { flag: 'no-signal', description: 'Skip Signal transport (cron-only mode)' },
+    { flag: 'runs', description: 'Number of recent runs to show (for logs)', placeholder: '<N>' },
+  ],
+};
 
 /** Extracts a required job-id positional, exiting with usage if missing. */
 function requireJobIdArg(positionals: string[]): string {
@@ -94,8 +96,7 @@ export async function runDaemonCommand(argv: string[]): Promise<void> {
     strict: false,
   });
 
-  if (values.help) {
-    printDaemonHelp();
+  if (checkHelp(values as { help?: boolean }, daemonSpec)) {
     return;
   }
 
@@ -236,7 +237,7 @@ export async function runDaemonCommand(argv: string[]): Promise<void> {
     }
     default:
       console.error(`Unknown daemon subcommand: ${subcommand}\n`);
-      printDaemonHelp();
+      checkHelp({ help: true }, daemonSpec);
       process.exit(1);
   }
 }

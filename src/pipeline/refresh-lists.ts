@@ -11,7 +11,9 @@
 
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseArgs } from 'node:util';
 import chalk from 'chalk';
+import { checkHelp, type CommandSpec } from '../cli-help.js';
 import { resolveAllLists, type McpServerConnection } from './list-resolver.js';
 import { connectMcpServersForLists, disconnectMcpServers } from './mcp-connections.js';
 import {
@@ -24,8 +26,23 @@ import {
 import type { CompiledPolicyFile, DynamicListsFile, ListDefinition } from './types.js';
 
 // ---------------------------------------------------------------------------
-// Argument Parsing
+// Help + Argument Parsing
 // ---------------------------------------------------------------------------
+
+const refreshListsSpec: CommandSpec = {
+  name: 'ironcurtain refresh-lists',
+  description: 'Re-resolve dynamic lists without full recompilation',
+  usage: ['ironcurtain refresh-lists [options]'],
+  options: [
+    { flag: 'list', description: 'Refresh only the named list', placeholder: '<name>' },
+    { flag: 'with-mcp', description: 'Connect to MCP servers for data-backed lists' },
+  ],
+  examples: [
+    'ironcurtain refresh-lists                      # Refresh all knowledge-based lists',
+    'ironcurtain refresh-lists --list major-news    # Refresh a single list',
+    'ironcurtain refresh-lists --with-mcp           # Include MCP-backed lists',
+  ],
+};
 
 interface RefreshListsOptions {
   /** When set, refresh only this named list. */
@@ -34,19 +51,24 @@ interface RefreshListsOptions {
   readonly withMcp: boolean;
 }
 
-function parseRefreshArgs(args: string[]): RefreshListsOptions {
-  let listName: string | undefined;
-  let withMcp = false;
+function parseRefreshArgs(args: string[]): RefreshListsOptions | null {
+  const { values } = parseArgs({
+    args,
+    options: {
+      help: { type: 'boolean', short: 'h' },
+      list: { type: 'string' },
+      'with-mcp': { type: 'boolean' },
+    },
+    allowPositionals: true,
+    strict: false,
+  });
 
-  for (let i = 0; i < args.length; i++) {
-    if (args[i] === '--list' && i + 1 < args.length) {
-      listName = args[++i];
-    } else if (args[i] === '--with-mcp') {
-      withMcp = true;
-    }
-  }
+  if (checkHelp(values as { help?: boolean }, refreshListsSpec)) return null;
 
-  return { listName, withMcp };
+  return {
+    listName: values.list as string | undefined,
+    withMcp: (values['with-mcp'] as boolean | undefined) ?? false,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -88,6 +110,7 @@ function selectListsToRefresh(definitions: ListDefinition[], options: RefreshLis
 
 export async function main(args: string[] = []): Promise<void> {
   const options = parseRefreshArgs(args);
+  if (!options) return;
   const config = loadPipelineConfig();
 
   // Load compiled policy to get list definitions

@@ -7,12 +7,21 @@
 
 import chalk from 'chalk';
 import { mkdirSync } from 'node:fs';
+import { parseArgs } from 'node:util';
 import { getListenerLockPath, getPtyRegistryDir } from '../config/paths.js';
 import { acquireLock, releaseLock } from '../escalation/listener-lock.js';
 import { loadUserConfig } from '../config/user-config.js';
 import { parseModelId, resolveApiKeyForProvider } from '../config/model-provider.js';
 import { loadConfig } from '../config/index.js';
+import { checkHelp, type CommandSpec } from '../cli-help.js';
 import { createMuxApp } from './mux-app.js';
+
+const muxSpec: CommandSpec = {
+  name: 'ironcurtain mux',
+  description: 'Terminal multiplexer for PTY sessions (requires node-pty)',
+  usage: ['ironcurtain mux [options]'],
+  options: [{ flag: 'agent', short: 'a', description: 'Agent mode (default: claude-code)', placeholder: '<name>' }],
+};
 
 export async function main(args?: string[]): Promise<void> {
   // Check for optional mux dependencies
@@ -35,15 +44,19 @@ export async function main(args?: string[]): Promise<void> {
   }
 
   // Parse args
-  let agent = 'claude-code';
-  if (args) {
-    for (let i = 0; i < args.length; i++) {
-      if ((args[i] === '--agent' || args[i] === '-a') && args[i + 1]) {
-        agent = args[i + 1];
-        i++;
-      }
-    }
-  }
+  const { values } = parseArgs({
+    args: args ?? [],
+    options: {
+      help: { type: 'boolean', short: 'h' },
+      agent: { type: 'string', short: 'a' },
+    },
+    allowPositionals: true,
+    strict: false,
+  });
+
+  if (checkHelp(values as { help?: boolean }, muxSpec)) return;
+
+  const agent = (values.agent as string | undefined) ?? 'claude-code';
 
   // Acquire single-instance lock
   const lockPath = getListenerLockPath();

@@ -6,6 +6,7 @@ import chalk from 'chalk';
 import ora from 'ora';
 import { loadConfig, loadGeneratedPolicy, checkConstitutionFreshness, getPackageGeneratedDir } from './config/index.js';
 import { getUserConfigPath } from './config/paths.js';
+import { checkHelp, type CommandSpec } from './cli-help.js';
 import * as logger from './logger.js';
 import { CliTransport } from './session/cli-transport.js';
 import { createSession } from './session/index.js';
@@ -13,10 +14,33 @@ import { resolveSessionMode } from './session/preflight.js';
 import { validateWorkspacePath } from './session/workspace-validation.js';
 import type { AgentId } from './docker/agent-adapter.js';
 
+const startSpec: CommandSpec = {
+  name: 'ironcurtain start',
+  description: 'Run the agent (interactive or single-shot)',
+  usage: ['ironcurtain start [options] [task]'],
+  options: [
+    { flag: 'resume', short: 'r', description: 'Resume a previous session', placeholder: '<id>' },
+    { flag: 'agent', short: 'a', description: 'Agent mode: builtin or claude-code (Docker)', placeholder: '<name>' },
+    { flag: 'workspace', short: 'w', description: 'Use an existing directory as the workspace', placeholder: '<path>' },
+    { flag: 'pty', description: 'Attach terminal directly to agent PTY (Docker mode only)' },
+    { flag: 'list-agents', description: 'List registered agent adapters' },
+  ],
+  examples: [
+    'ironcurtain start                              # Interactive session',
+    'ironcurtain start "Summarize files in ."       # Single-shot task',
+    'ironcurtain start --resume <session-id>        # Resume a session',
+    'ironcurtain start -w ./my-project "Fix bugs"   # Work in existing directory',
+    'ironcurtain start --agent claude-code "task"   # Docker: Claude Code',
+    'ironcurtain start --pty                        # PTY mode: interactive Docker terminal',
+    'ironcurtain start --list-agents                # List available agents',
+  ],
+};
+
 export async function main(args?: string[]): Promise<void> {
   const { values, positionals } = parseArgs({
     args: args ?? process.argv.slice(2),
     options: {
+      help: { type: 'boolean', short: 'h' },
       resume: { type: 'string', short: 'r' },
       agent: { type: 'string', short: 'a' },
       workspace: { type: 'string', short: 'w' },
@@ -26,6 +50,8 @@ export async function main(args?: string[]): Promise<void> {
     allowPositionals: true,
     strict: false,
   });
+
+  if (checkHelp(values as { help?: boolean }, startSpec)) return;
 
   // Handle --list-agents: print registered agents and exit
   if (values['list-agents']) {
