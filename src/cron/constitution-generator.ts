@@ -8,6 +8,10 @@
  * structured constitution.
  */
 
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import { createSession } from '../session/index.js';
 import { getReadOnlyPolicyDir } from '../config/paths.js';
 import { HeadlessTransport } from './headless-transport.js';
@@ -76,9 +80,9 @@ ${gitRepo ? `Git repository: ${gitRepo}` : 'No git repository configured.'}
 The policy engine has **structural rules** that are always active — you must NOT
 duplicate them in the constitution:
 
-- **Workspace auto-allow**: All read AND write operations within the job workspace
-  (${workspacePath}) are automatically allowed. Do NOT write rules about reading
-  or writing files in the workspace — they are redundant.
+- **Workspace auto-allow**: At runtime, all read AND write operations within the
+  job workspace (${workspacePath}) are automatically allowed. Do NOT write rules
+  about reading or writing files in the workspace — they are redundant.
 - **Default-deny**: Any operation not covered by a rule is automatically denied.
   You do NOT need to write "deny" or "NOT allowed" statements — omitting a
   permission is sufficient to block it.
@@ -214,14 +218,21 @@ export async function generateConstitution(
 
   const transport = new HeadlessTransport({ taskMessage: userMessage });
 
-  const session = await createSession({
-    workspacePath: options.workspacePath,
-    policyDir: readOnlyPolicyDir,
-    systemPromptAugmentation: augmentation,
-    disableAutoApprove: true,
-  });
+  // Use a throwaway temp dir as the session sandbox so the sandbox fast-path
+  // auto-allows writes only in the temp dir, not the real job workspace.
+  // The job workspace path is still communicated to the LLM via the system
+  // prompt so it knows where to explore.
+  const sandboxDir = mkdtempSync(join(tmpdir(), 'ironcurtain-constgen-'));
 
+  let session: Awaited<ReturnType<typeof createSession>> | undefined;
   try {
+    session = await createSession({
+      workspacePath: sandboxDir,
+      policyDir: readOnlyPolicyDir,
+      systemPromptAugmentation: augmentation,
+      disableAutoApprove: true,
+    });
+
     options.onProgress?.('LLM exploring workspace and MCP servers...');
     await transport.run(session);
 
@@ -233,6 +244,7 @@ export async function generateConstitution(
     options.onProgress?.('Parsing generated constitution...');
     return parseConstitutionResponse(response);
   } finally {
-    await session.close();
+    if (session) await session.close();
+    rmSync(sandboxDir, { recursive: true, force: true });
   }
 }
