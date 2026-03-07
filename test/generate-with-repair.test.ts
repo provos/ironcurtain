@@ -20,21 +20,26 @@ function makeV3Result(text: string) {
       inputTokens: { total: 100, noCache: undefined, cacheRead: undefined, cacheWrite: undefined },
       outputTokens: { total: 50, text: undefined, reasoning: undefined },
     },
-    warnings: [] as never[],
+    warnings: [],
     request: {},
     response: { id: 'test-id', modelId: 'test-model', timestamp: new Date() },
   };
 }
 
 /**
- * Creates a MockLanguageModelV3 that cycles through `responses` in order,
- * returning the last entry for any call beyond the end of the array.
+ * Creates a MockLanguageModelV3 that returns entries from `responses` in order.
+ * Throws an error if called more times than there are provided responses.
  */
 function createMockModel(responses: string[]): MockLanguageModelV3 {
   let callIndex = 0;
   return new MockLanguageModelV3({
     doGenerate: async () => {
-      const text = responses[Math.min(callIndex++, responses.length - 1)];
+      if (callIndex >= responses.length) {
+        throw new Error(
+          `MockLanguageModelV3 called ${callIndex + 1} times, but only ${responses.length} responses were provided.`,
+        );
+      }
+      const text = responses[callIndex++];
       return makeV3Result(text);
     },
   });
@@ -245,7 +250,8 @@ describe('generateObjectWithRepair', () => {
       onProgress,
     });
 
-    // Two failed attempts → two onProgress calls
+    // onProgress fires for every attempt after the first (attempt > 0),
+    // regardless of whether that attempt fails or succeeds.
     expect(onProgress).toHaveBeenCalledTimes(2);
     expect(onProgress).toHaveBeenCalledWith('Schema repair 1/2...');
     expect(onProgress).toHaveBeenCalledWith('Schema repair 2/2...');
@@ -305,9 +311,14 @@ describe('generateObjectWithRepair', () => {
     expect(result.repairAttempts).toBe(0);
   });
 
-  it('respects custom maxOutputTokens', async () => {
-    // We cannot easily observe the tokens sent, but we verify it does not throw
-    const model = createMockModel(['{"value": 1}']);
+  it('passes maxOutputTokens to the underlying model call', async () => {
+    let capturedMaxTokens: number | undefined;
+    const model = new MockLanguageModelV3({
+      doGenerate: async (options) => {
+        capturedMaxTokens = options.maxOutputTokens;
+        return makeV3Result('{"value": 1}');
+      },
+    });
 
     const result = await generateObjectWithRepair({
       model,
@@ -317,6 +328,7 @@ describe('generateObjectWithRepair', () => {
     });
 
     expect(result.output).toEqual({ value: 1 });
+    expect(capturedMaxTokens).toBe(512);
   });
 
   it('throws on schema validation failure even with valid JSON', async () => {
