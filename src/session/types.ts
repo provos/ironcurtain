@@ -234,6 +234,14 @@ export interface SessionOptions {
    * is no interactive user context to match escalations against.
    */
   disableAutoApprove?: boolean;
+
+  /**
+   * Persona name. When set, resolves to a policyDir, optional server
+   * filter, persistent workspace, and system prompt augmentation.
+   * Mutually exclusive with policyDir -- if both are provided,
+   * persona takes precedence with a warning.
+   */
+  persona?: string;
 }
 
 /**

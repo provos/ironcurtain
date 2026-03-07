@@ -7,6 +7,7 @@
  */
 
 import { existsSync, mkdirSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { loadConfig } from '../config/index.js';
 import {
   getIronCurtainHome,
@@ -22,6 +23,8 @@ import {
 import type { IronCurtainConfig } from '../config/types.js';
 import * as logger from '../logger.js';
 import { resolveRealPath } from '../types/argument-roles.js';
+import { resolvePersona, applyServerAllowlist } from '../persona/resolve.js';
+import { buildPersonaSystemPromptAugmentation } from '../persona/persona-prompt.js';
 import { AgentSession } from './agent-session.js';
 import { SessionError } from './errors.js';
 import { isEqualOrInside } from './workspace-validation.js';
@@ -76,7 +79,13 @@ async function createBuiltinSession(options: SessionOptions): Promise<Session> {
   const loggerWasActive = logger.isActive();
   const sessionConfig = buildSessionConfig(config, effectiveSessionId, sessionId, options);
 
-  const session = new AgentSession(sessionConfig.config, sessionId, sessionConfig.escalationDir, options);
+  // Merge resolved systemPromptAugmentation (may include persona augmentation)
+  // back into options so AgentSession sees it.
+  const effectiveOptions: SessionOptions = sessionConfig.systemPromptAugmentation
+    ? { ...options, systemPromptAugmentation: sessionConfig.systemPromptAugmentation }
+    : options;
+
+  const session = new AgentSession(sessionConfig.config, sessionId, sessionConfig.escalationDir, effectiveOptions);
 
   try {
     await session.initialize();
@@ -170,6 +179,8 @@ interface SessionDirConfig {
   sandboxDir: string;
   escalationDir: string;
   auditLogPath: string;
+  /** Resolved system prompt augmentation (may include persona augmentation). */
+  systemPromptAugmentation?: string;
 }
 
 /**
@@ -204,14 +215,51 @@ function validatePolicyDir(policyDir: string): void {
  * agent's working directory. The workspace already exists so we skip
  * creating it, but all other session infrastructure (logs, escalations)
  * still lives under the session directory.
+ *
+ * When persona is set, resolves the persona to a policyDir, workspace,
+ * server allowlist, and system prompt augmentation. Persona takes
+ * precedence over explicit policyDir if both are provided.
  */
 function buildSessionConfig(
   config: IronCurtainConfig,
   effectiveSessionId: string,
   sessionId: SessionId,
-  opts: Pick<SessionOptions, 'resumeSessionId' | 'workspacePath' | 'policyDir' | 'disableAutoApprove'> = {},
+  opts: Pick<
+    SessionOptions,
+    'resumeSessionId' | 'workspacePath' | 'policyDir' | 'disableAutoApprove' | 'persona' | 'systemPromptAugmentation'
+  > = {},
 ): SessionDirConfig {
-  const { resumeSessionId, workspacePath, policyDir, disableAutoApprove } = opts;
+  let { workspacePath, policyDir, systemPromptAugmentation } = opts;
+  const { resumeSessionId, disableAutoApprove } = opts;
+  let serverAllowlist: readonly string[] | undefined;
+
+  // Resolve persona early -- derives policyDir, workspace, server filter,
+  // and system prompt augmentation from the persona definition.
+  if (opts.persona) {
+    const resolved = resolvePersona(opts.persona);
+    if (policyDir) {
+      logger.warn('Both persona and policyDir specified; using persona.');
+    }
+    policyDir = resolved.policyDir;
+    serverAllowlist = resolved.persona.servers;
+
+    // Use persona workspace unless an explicit workspacePath was provided
+    if (!workspacePath) {
+      workspacePath = resolved.workspacePath;
+    }
+
+    // Build persona system prompt augmentation (includes memory contents)
+    const personaAugmentation = buildPersonaSystemPromptAugmentation(
+      resolved.persona,
+      resolve(resolved.workspacePath, 'memory.md'),
+    );
+    systemPromptAugmentation = systemPromptAugmentation
+      ? `${personaAugmentation}\n\n${systemPromptAugmentation}`
+      : personaAugmentation;
+
+    logger.info(`Persona "${opts.persona}" resolved: policyDir=${policyDir}`);
+  }
+
   if (policyDir) {
     validatePolicyDir(policyDir);
   }
@@ -221,8 +269,11 @@ function buildSessionConfig(
   const escalationDir = getSessionEscalationDir(effectiveSessionId);
   const auditLogPath = getSessionAuditLogPath(effectiveSessionId);
 
-  // Only create the sandbox directory when not using an external workspace
-  if (!workspacePath) {
+  // Create the directory when not using an explicit --workspace flag.
+  // When persona is set, `workspacePath` was derived internally (not
+  // from the caller), so we still need to ensure it exists.
+  // Only skip creation for explicit user-provided workspace paths.
+  if (!opts.workspacePath) {
     mkdirSync(sandboxDir, { recursive: true });
   }
   mkdirSync(escalationDir, { recursive: true });
@@ -252,8 +303,8 @@ function buildSessionConfig(
     sessionLogPath,
     llmLogPath,
     autoApproveLlmLogPath,
-    // When per-job policy is provided, split generated dir:
-    // generatedDir -> per-job dir (compiled policy + dynamic lists)
+    // When per-job/persona policy is provided, split generated dir:
+    // generatedDir -> per-job/persona dir (compiled policy + dynamic lists)
     // toolAnnotationsDir -> global dir (tool annotations)
     ...(policyDir
       ? {
@@ -268,6 +319,11 @@ function buildSessionConfig(
       : {}),
   };
 
+  // Apply server allowlist if persona specifies one
+  if (serverAllowlist) {
+    sessionConfig.mcpServers = applyServerAllowlist(sessionConfig.mcpServers, serverAllowlist);
+  }
+
   // Patch MCP server args to use the session-specific sandbox directory
   patchMcpServerAllowedDirectory(sessionConfig, sandboxDir);
 
@@ -277,6 +333,7 @@ function buildSessionConfig(
     sandboxDir,
     escalationDir,
     auditLogPath,
+    systemPromptAugmentation,
   };
 }
 

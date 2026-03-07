@@ -22,6 +22,7 @@ const startSpec: CommandSpec = {
     { flag: 'resume', short: 'r', description: 'Resume a previous session', placeholder: '<id>' },
     { flag: 'agent', short: 'a', description: 'Agent mode: builtin or claude-code (Docker)', placeholder: '<name>' },
     { flag: 'workspace', short: 'w', description: 'Use an existing directory as the workspace', placeholder: '<path>' },
+    { flag: 'persona', short: 'p', description: 'Use a named persona profile', placeholder: '<name>' },
     { flag: 'pty', description: 'Attach terminal directly to agent PTY (Docker mode only)' },
     { flag: 'list-agents', description: 'List registered agent adapters' },
   ],
@@ -31,6 +32,7 @@ const startSpec: CommandSpec = {
     'ironcurtain start --resume <session-id>        # Resume a session',
     'ironcurtain start -w ./my-project "Fix bugs"   # Work in existing directory',
     'ironcurtain start --agent claude-code "task"   # Docker: Claude Code',
+    'ironcurtain start -p exec-assistant "Check mail" # Use a persona',
     'ironcurtain start --pty                        # PTY mode: interactive Docker terminal',
     'ironcurtain start --list-agents                # List available agents',
   ],
@@ -44,6 +46,7 @@ export async function main(args?: string[]): Promise<void> {
       resume: { type: 'string', short: 'r' },
       agent: { type: 'string', short: 'a' },
       workspace: { type: 'string', short: 'w' },
+      persona: { type: 'string', short: 'p' },
       pty: { type: 'boolean' },
       'list-agents': { type: 'boolean' },
     },
@@ -74,6 +77,7 @@ export async function main(args?: string[]): Promise<void> {
   const resumeSessionId = values.resume as string | undefined;
   const agentName = values.agent as string | undefined;
   const rawWorkspace = values.workspace as string | undefined;
+  const personaName = values.persona as string | undefined;
   const config = loadConfig();
 
   // Disallow combining --resume with --workspace
@@ -151,6 +155,7 @@ export async function main(args?: string[]): Promise<void> {
       mode,
       resumeSessionId,
       workspacePath,
+      persona: personaName,
       onEscalation: transport.createEscalationHandler(),
       onEscalationExpired: transport.createEscalationExpiredHandler(),
       onDiagnostic: transport.createDiagnosticHandler(),

@@ -88,6 +88,15 @@ export interface JobDefinition {
    */
   readonly budgetOverrides?: Partial<JobBudgetOverrides>;
 
+  /**
+   * Optional persona name. When set, the job uses this persona's
+   * compiled policy instead of its inline taskConstitution.
+   * Mutually exclusive with taskConstitution -- if persona is set,
+   * taskConstitution is ignored for policy loading (but still used
+   * as the system prompt augmentation if present).
+   */
+  readonly persona?: string;
+
   /** Whether this job is active. Disabled jobs are not scheduled. */
   readonly enabled: boolean;
 }
