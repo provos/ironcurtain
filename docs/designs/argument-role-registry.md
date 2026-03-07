@@ -127,7 +127,7 @@ mcp-proxy-server.ts / TrustedProcess.handleToolCall()
      |                               |
      |                          Structural checks
      |                               +-- extractAnnotatedPaths()
-     |                               +-- uses getResourceRoles()
+     |                               +-- uses getPathRoles() / getUrlRoles()
      |                          Compiled rule evaluation
      |                               +-- collectDistinctRoles() uses isResourceIdentifier
      |                               +-- per-role evaluation, most-restrictive-wins
