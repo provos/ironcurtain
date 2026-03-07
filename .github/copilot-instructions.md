@@ -28,6 +28,7 @@ This project uses AI SDK v6. Any use of the old API will fail at runtime:
 - `PolicyDecisionStatus` is a three-state union: `allow | deny | escalate`. Code handling only `allow`/`deny` without `escalate` has a missing case.
 - User-facing output uses `process.stdout.write()` / `process.stderr.write()`, NOT `console.log()` (intercepted by logger module).
 - Shell commands must use `shell-quote` for construction, not string concatenation or template literals.
+- Avoid hand-crafted code for problems where well-established Node.js modules or built-ins exist (e.g., use `node:util` `parseArgs` for CLI argument parsing, not manual `argv` loops).
 
 ## Common Mistakes
 
