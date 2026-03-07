@@ -56,10 +56,15 @@ export function getPersonaDefinitionPath(name: PersonaName): string {
  */
 export function loadPersona(name: PersonaName): PersonaDefinition {
   const defPath = getPersonaDefinitionPath(name);
-  if (!existsSync(defPath)) {
-    throw new Error(`Persona "${name}" not found: ${defPath} does not exist.`);
+  let raw: string;
+  try {
+    raw = readFileSync(defPath, 'utf-8');
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new Error(`Persona "${name}" not found: ${defPath} does not exist.`, { cause: err });
+    }
+    throw err;
   }
-  const raw = readFileSync(defPath, 'utf-8');
   return JSON.parse(raw) as PersonaDefinition;
 }
 

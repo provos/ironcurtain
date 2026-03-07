@@ -5,11 +5,13 @@
  * Follows the same branded-type pattern as JobId in src/cron/types.ts.
  */
 
+import { SLUG_PATTERN, validateSlug } from '../types/slug.js';
+
 /**
  * Regex for valid persona names: 1-63 chars, lowercase alphanumeric,
  * hyphens, or underscores. Same rules as JobId.
  */
-export const PERSONA_NAME_PATTERN = /^[a-z0-9][a-z0-9_-]{0,62}$/;
+export const PERSONA_NAME_PATTERN: RegExp = SLUG_PATTERN;
 
 /**
  * Branded persona name to prevent mixing with other string identifiers.
@@ -20,13 +22,7 @@ export type PersonaName = string & { readonly __brand: 'PersonaName' };
  * Validates and creates a PersonaName from a user-provided string.
  */
 export function createPersonaName(raw: string): PersonaName {
-  if (!PERSONA_NAME_PATTERN.test(raw)) {
-    throw new Error(
-      `Invalid persona name "${raw}": must be 1-63 chars, ` +
-        `lowercase alphanumeric, hyphens, or underscores, ` +
-        `starting with a letter or digit`,
-    );
-  }
+  validateSlug(raw, 'persona name');
   return raw as PersonaName;
 }
 

@@ -9,12 +9,11 @@
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { tmpdir } from 'node:os';
-import { spawnSync } from 'node:child_process';
 import { parseArgs } from 'node:util';
 import chalk from 'chalk';
 import { checkHelp, printHelp, type CommandSpec } from '../cli-help.js';
 import { loadConfig } from '../config/index.js';
+import { openEditor, openEditorForMultiline } from '../utils/editor.js';
 import { createPersonaName, type PersonaDefinition, type PersonaName } from './types.js';
 import {
   getPersonaDir,
@@ -57,61 +56,15 @@ const personaSpec: CommandSpec = {
 // Utilities
 // ---------------------------------------------------------------------------
 
-/** Opens $EDITOR with the given file path. Returns true if the file changed. */
-function openEditor(filePath: string): boolean {
-  const editor = process.env['VISUAL'] ?? process.env['EDITOR'] ?? 'nano';
-  const before = existsSync(filePath) ? readFileSync(filePath, 'utf-8') : '';
-  const result = spawnSync(editor, [filePath], { stdio: 'inherit' });
-  if (result.error) throw result.error;
-  const after = existsSync(filePath) ? readFileSync(filePath, 'utf-8') : '';
-  return before !== after;
-}
-
-/**
- * Opens the user's $VISUAL / $EDITOR with a temporary file and returns
- * the edited content. Lines beginning with '#' are stripped (instructions).
- * Returns undefined if the user saves an empty file.
- */
-function openEditorForMultiline(instructions: string, initialContent = ''): string | undefined {
-  const editor = process.env['VISUAL'] ?? process.env['EDITOR'] ?? 'nano';
-  const tmpFile = join(tmpdir(), `ironcurtain-persona-${Date.now()}.md`);
-
-  const header = instructions
-    .split('\n')
-    .map((l) => `# ${l}`)
-    .join('\n');
-  writeFileSync(tmpFile, `${header}\n\n${initialContent}`, 'utf-8');
-
-  try {
-    const result = spawnSync(editor, [tmpFile], { stdio: 'inherit' });
-    if (result.error) throw result.error;
-
-    const raw = readFileSync(tmpFile, 'utf-8');
-    const content = raw
-      .split('\n')
-      .filter((line) => !line.startsWith('#'))
-      .join('\n')
-      .trim();
-
-    return content || undefined;
-  } finally {
-    try {
-      rmSync(tmpFile);
-    } catch {
-      // ignore cleanup errors
-    }
-  }
-}
-
 /** Loads a persona by name string, exiting with an error if not found. */
 function loadPersonaOrExit(nameStr: string): PersonaDefinition {
-  const name = createPersonaName(nameStr);
-  const defPath = getPersonaDefinitionPath(name);
-  if (!existsSync(defPath)) {
+  try {
+    const name = createPersonaName(nameStr);
+    return loadPersona(name);
+  } catch {
     console.error(chalk.red(`Persona not found: ${nameStr}`));
     process.exit(1);
   }
-  return loadPersona(name);
 }
 
 /** Returns all persona names by reading the personas directory. */
