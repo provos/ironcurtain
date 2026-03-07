@@ -153,8 +153,8 @@ export function extractFromKeychain(): OAuthCredentials | null {
 /** Claude Code's public OAuth client ID. */
 const OAUTH_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
 
-/** Anthropic's OAuth token endpoint. */
-const OAUTH_TOKEN_URL = 'https://console.anthropic.com/api/oauth/token';
+/** Anthropic's OAuth token endpoint (platform.claude.com since mid-2025). */
+const OAUTH_TOKEN_URL = 'https://platform.claude.com/v1/oauth/token';
 
 /**
  * Refreshes an OAuth access token using a refresh token grant.
