@@ -36,7 +36,7 @@
 - **resolveGitRemote()**: uses `execFileSync` (not `execSync`) for safety; resolves named remotes to URLs via `git remote get-url`
 - **prepareToolArgs()**: in `src/trusted-process/path-utils.ts` -- annotation-driven normalization, returns `{ argsForTransport, argsForPolicy }`
 - **PolicyEngine.getAnnotation()**: public method to look up ToolAnnotation for a tool
-- **Heuristic fallback**: `normalizeToolArgPaths()` is `@deprecated` but retained for defense-in-depth on deny-side only
+- **No heuristic path extraction**: `extractPathsHeuristic` removed; policy engine trusts annotations exclusively
 
 ## ToolAnnotation shape (post-refactor)
 - Fields: `toolName`, `serverName`, `comment` (string), `sideEffects` (boolean), `args` (Record<string, ArgumentRole[]>)
@@ -172,7 +172,7 @@ Zod v4 (^4.3.6) strict by default. Mock response JSON must exactly match Zod sch
 - **Untrusted domain gate**: structural invariant checks URL-role args against `serverDomainAllowlists` -- escalates (not denies) unknown domains
 - **Domain allowlists source**: extracted from `mcp-servers.json` sandbox network `allowedDomains` (wildcards filtered out)
 - **Domain matching**: `domainMatchesAllowlist()` exported from policy-engine -- exact match or `*.suffix` wildcard
-- **Annotation-aware sandbox auto-allow**: when annotation exists, only annotated path-category args trigger sandbox auto-allow; heuristic paths only used for deny-side (protected path check)
+- **Annotation-aware sandbox auto-allow**: only annotated path-category args trigger sandbox auto-allow and protected path checks; unannotated tools are denied as unknown
 - **Git tool annotation strategy**: read-only ops (status/log/diff) use `path: ['read-path']` for sandbox containment; remote/destructive ops use `path: ['none']` to prevent sandbox auto-allow, letting compiled rules handle escalation
 - **User constitution**: `getUserConstitutionPath()` in `src/config/paths.ts`; `loadConstitutionText()` in `src/pipeline/compile.ts` concatenates base + optional user constitution
 

@@ -126,9 +126,8 @@ mcp-proxy-server.ts / TrustedProcess.handleToolCall()
   callTool(argsForTransport)    PolicyEngine.evaluate(argsForPolicy)
      |                               |
      |                          Structural checks
-     |                               +-- extractPathsHeuristic() (defense-in-depth)
      |                               +-- extractAnnotatedPaths()
-     |                               +-- uses getResourceRoles()
+     |                               +-- uses getPathRoles() / getUrlRoles()
      |                          Compiled rule evaluation
      |                               +-- collectDistinctRoles() uses isResourceIdentifier
      |                               +-- per-role evaluation, most-restrictive-wins

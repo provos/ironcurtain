@@ -134,9 +134,11 @@ async function annotateServerTools(
 
       const validation = validateAnnotationsHeuristic(tools, annotations);
       if (!validation.valid) {
-        for (const w of validation.warnings) {
-          spinner.text = `${stepText} — WARNING: ${w}`;
-        }
+        const summary = validation.warnings.join('\n  - ');
+        throw new Error(
+          `Path-gap validation failed for server "${serverName}":\n  - ${summary}\n` +
+            'Annotations are part of the TCB — every path-bearing argument must have a path role.',
+        );
       }
       return annotations;
     },
