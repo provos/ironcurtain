@@ -80,7 +80,13 @@ export async function runJobConstitutionCustomizer(
   // Load tool annotations
   const generatedDir = getUserGeneratedDir();
   const packageGeneratedDir = getPackageGeneratedDir();
-  const annotations = loadAnnotations(generatedDir, packageGeneratedDir);
+  let annotations: ToolAnnotation[];
+  try {
+    annotations = loadAnnotations(generatedDir, packageGeneratedDir);
+  } catch {
+    p.log.error("tool-annotations.json not found. Run 'ironcurtain annotate-tools' first.");
+    return undefined;
+  }
 
   // Discover GitHub identity (best-effort)
   const userConfig = loadUserConfig();

@@ -13,6 +13,7 @@
 
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseArgs } from 'node:util';
 import chalk from 'chalk';
 import { loadPipelineConfig, loadToolAnnotationsFile } from './pipeline-shared.js';
 import { PipelineRunner, createPipelineModels } from './pipeline-runner.js';
@@ -34,15 +35,20 @@ export interface CompilePolicyCliArgs {
  * Returns resolved absolute paths when provided.
  */
 export function parseCompilePolicyArgs(argv: string[] = process.argv.slice(2)): CompilePolicyCliArgs {
-  const result: CompilePolicyCliArgs = {};
-  for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === '--constitution' && argv[i + 1]) {
-      result.constitution = resolve(argv[++i]);
-    } else if (argv[i] === '--output-dir' && argv[i + 1]) {
-      result.outputDir = resolve(argv[++i]);
-    }
-  }
-  return result;
+  const { values } = parseArgs({
+    args: argv,
+    options: {
+      constitution: { type: 'string' },
+      'output-dir': { type: 'string' },
+    },
+    strict: false,
+  });
+  const constitution = typeof values.constitution === 'string' ? values.constitution : undefined;
+  const outputDir = typeof values['output-dir'] === 'string' ? values['output-dir'] : undefined;
+  return {
+    constitution: constitution ? resolve(constitution) : undefined,
+    outputDir: outputDir ? resolve(outputDir) : undefined,
+  };
 }
 
 // ---------------------------------------------------------------------------

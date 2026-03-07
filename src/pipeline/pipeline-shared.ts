@@ -63,7 +63,7 @@ export function loadPipelineConfig(overrides: PipelineConfigOverrides = {}): Pip
   // When overriding, read the file directly (skip user constitution merging).
   const constitutionPath = overrides.constitution ?? resolve(configDir, 'constitution.md');
   const constitutionText = overrides.constitution
-    ? readFileSync(overrides.constitution, 'utf-8')
+    ? readFileSync(constitutionPath, 'utf-8')
     : loadConstitutionText(constitutionPath);
 
   const mcpServersPath = resolve(configDir, 'mcp-servers.json');

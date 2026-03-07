@@ -91,7 +91,11 @@ function makeGitBranchRequest(operation: string, path: string): ToolCallRequest 
 }
 
 describe('spike: git_branch conditional role evaluation', () => {
-  describe('tool-only rule (role-agnostic) — BROKEN: allows mutations', () => {
+  describe('tool-only rule (role-agnostic) — allows all roles', () => {
+    // A tool-only rule (no `roles` condition) intentionally matches every role,
+    // including write-history and delete-history.  This is correct engine behavior:
+    // the rule author chose not to scope by role, so mutations are allowed.
+    // To restrict mutations, use a role-scoped rule (see the next describe block).
     const engine = new PolicyEngine(policyToolOnly, annotations, [], SANDBOX);
 
     it('allows git_branch list outside sandbox', () => {
@@ -99,15 +103,13 @@ describe('spike: git_branch conditional role evaluation', () => {
       expect(result.decision).toBe('allow');
     });
 
-    it('BUG: also allows git_branch create outside sandbox', () => {
-      // This is the problem: the tool-only rule is role-agnostic,
-      // so it matches write-history too → allow for mutations
+    it('allows git_branch create outside sandbox (role-agnostic rule matches all roles)', () => {
       const result = engine.evaluate(makeGitBranchRequest('create', OUTSIDE));
-      expect(result.decision).toBe('allow'); // should be deny!
+      expect(result.decision).toBe('allow');
     });
   });
 
-  describe('role-scoped rule — CORRECT: allows reads, denies mutations', () => {
+  describe('role-scoped rule — allows reads, denies mutations', () => {
     const engine = new PolicyEngine(policyRoleScoped, annotations, [], SANDBOX);
 
     it('allows git_branch list outside sandbox (read-path matches)', () => {
