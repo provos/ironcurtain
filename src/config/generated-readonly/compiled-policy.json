@@ -1,0 +1,468 @@
+{
+  "generatedAt": "2026-03-06T22:53:18.790Z",
+  "constitutionHash": "750295d07a6b1a5dba6ab44d3fa62b2b5a3426340ada35f2cf300b04c418b49b",
+  "inputHash": "0536def5e41fbc6f740995d8e9e211b58b4cc40ea7157d053f42ab7931b6fadc-repair",
+  "rules": [
+    {
+      "name": "allow-filesystem-reads",
+      "description": "Allow reading files, listing directories, and querying metadata anywhere on the filesystem.",
+      "principle": "Broad read access: Reading files, listing directories, and querying metadata is permitted anywhere.",
+      "if": {
+        "tool": [
+          "read_file",
+          "read_text_file",
+          "read_media_file",
+          "read_multiple_files",
+          "list_directory",
+          "list_directory_with_sizes",
+          "directory_tree",
+          "search_files",
+          "get_file_info"
+        ]
+      },
+      "then": "allow",
+      "reason": "Constitution explicitly permits reading files and listing directories anywhere on the filesystem."
+    },
+    {
+      "name": "allow-list-allowed-directories",
+      "description": "Allow querying which directories the filesystem server can access.",
+      "principle": "Broad read access: Reading files, listing directories, and querying metadata is permitted anywhere.",
+      "if": {
+        "tool": [
+          "list_allowed_directories"
+        ]
+      },
+      "then": "allow",
+      "reason": "Listing allowed directories is a read-only metadata query explicitly permitted."
+    },
+    {
+      "name": "escalate-filesystem-writes",
+      "description": "Escalate any file write, edit, or create operation for human approval.",
+      "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
+      "if": {
+        "tool": [
+          "write_file",
+          "edit_file",
+          "create_directory"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Constitution requires human approval before any write or create operation."
+    },
+    {
+      "name": "escalate-filesystem-move",
+      "description": "Escalate any file move/rename operation for human approval.",
+      "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
+      "if": {
+        "tool": [
+          "move_file"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Move operations modify the filesystem by deleting the source and creating the destination, requiring human approval."
+    },
+    {
+      "name": "allow-git-read-only-tools",
+      "description": "Allow reading git log, status, diff, blame, show, reflog, and changelog analysis.",
+      "principle": "The agent is allowed to read git log, status, diff, and branch information.",
+      "if": {
+        "tool": [
+          "git_log",
+          "git_status",
+          "git_diff",
+          "git_blame",
+          "git_show",
+          "git_reflog",
+          "git_changelog_analyze"
+        ]
+      },
+      "then": "allow",
+      "reason": "Constitution explicitly permits reading git log, status, diff, and branch information."
+    },
+    {
+      "name": "allow-git-set-working-dir",
+      "description": "Allow setting or clearing the git working directory for navigation.",
+      "principle": "The agent is allowed to set the git working directory for navigation.",
+      "if": {
+        "tool": [
+          "git_set_working_dir",
+          "git_clear_working_dir"
+        ]
+      },
+      "then": "allow",
+      "reason": "Constitution explicitly permits setting the git working directory for navigation."
+    },
+    {
+      "name": "allow-git-wrapup-instructions",
+      "description": "Allow querying git wrap-up workflow instructions (read-only, no side effects).",
+      "principle": "Read-only exploration: The agent may only observe and query.",
+      "if": {
+        "tool": [
+          "git_wrapup_instructions"
+        ]
+      },
+      "then": "allow",
+      "reason": "git_wrapup_instructions is a read-only query with no side effects."
+    },
+    {
+      "name": "allow-git-branch-read",
+      "description": "Allow listing git branches (read-only).",
+      "principle": "The agent is allowed to read git log, status, diff, and branch information.",
+      "if": {
+        "roles": [
+          "read-path"
+        ],
+        "tool": [
+          "git_branch"
+        ]
+      },
+      "then": "allow",
+      "reason": "Constitution permits reading branch information; listing only activates read-path role."
+    },
+    {
+      "name": "allow-git-remote-list",
+      "description": "Allow listing git remotes (read-only, no remote URL argument present).",
+      "principle": "The agent is allowed to read git log, status, diff, and branch information.",
+      "if": {
+        "roles": [
+          "read-path"
+        ],
+        "tool": [
+          "git_remote"
+        ]
+      },
+      "then": "allow",
+      "reason": "Listing remotes only activates read-path; constitution only requires approval for mutations to remote config."
+    },
+    {
+      "name": "escalate-git-remote-mutations",
+      "description": "Escalate adding, removing, or renaming git remotes (when a remote URL is provided).",
+      "principle": "The agent must ask for approval before adding, removing, or renaming git remotes.",
+      "if": {
+        "roles": [
+          "git-remote-url"
+        ],
+        "tool": [
+          "git_remote"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Constitution requires human approval before modifying git remote configuration."
+    },
+    {
+      "name": "allow-git-fetch-from-github",
+      "description": "Allow git fetch from GitHub remotes.",
+      "principle": "GitHub read access: Querying GitHub repositories, issues, and pull requests is permitted for reading.",
+      "if": {
+        "tool": [
+          "git_fetch"
+        ],
+        "domains": {
+          "roles": [
+            "git-remote-url"
+          ],
+          "allowed": [
+            "github.com"
+          ]
+        }
+      },
+      "then": "allow",
+      "reason": "Constitution permits GitHub read access; git fetch downloads objects without merging."
+    },
+    {
+      "name": "allow-git-clone-from-github",
+      "description": "Allow git clone from GitHub.",
+      "principle": "GitHub read access: Querying GitHub repositories, issues, and pull requests is permitted for reading.",
+      "if": {
+        "tool": [
+          "git_clone"
+        ],
+        "domains": {
+          "roles": [
+            "git-remote-url"
+          ],
+          "allowed": [
+            "github.com"
+          ]
+        }
+      },
+      "then": "allow",
+      "reason": "Constitution permits GitHub read access; cloning from GitHub is a read operation."
+    },
+    {
+      "name": "allow-git-stash-list",
+      "description": "Allow listing git stashes (read-only stash inspection with no write-history argument active).",
+      "principle": "The agent is allowed to read git log, status, diff, and branch information.",
+      "if": {
+        "roles": [
+          "read-path"
+        ],
+        "tool": [
+          "git_stash"
+        ]
+      },
+      "then": "allow",
+      "reason": "Stash listing is read-only; constitution permits read-only git inspection."
+    },
+    {
+      "name": "escalate-git-stash-mutations",
+      "description": "Escalate git stash push/pop/apply/drop operations that modify git state.",
+      "principle": "The agent must ask for approval before modifying git state.",
+      "if": {
+        "roles": [
+          "write-history"
+        ],
+        "tool": [
+          "git_stash"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Stash push/pop operations modify git state and require human approval."
+    },
+    {
+      "name": "allow-git-clean-dry-run",
+      "description": "Allow git clean in dry-run mode (preview only, read-path role only, no delete-path active).",
+      "principle": "Read-only exploration: The agent may only observe and query.",
+      "if": {
+        "roles": [
+          "read-path"
+        ],
+        "tool": [
+          "git_clean"
+        ]
+      },
+      "then": "allow",
+      "reason": "git_clean dry-run only reads the working tree without deleting anything."
+    },
+    {
+      "name": "escalate-git-clean-actual",
+      "description": "Escalate git clean when it would actually delete files (delete-path role active).",
+      "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
+      "if": {
+        "roles": [
+          "delete-path"
+        ],
+        "tool": [
+          "git_clean"
+        ]
+      },
+      "then": "escalate",
+      "reason": "git_clean deletes untracked files from the working directory and requires human approval."
+    },
+    {
+      "name": "escalate-git-checkout",
+      "description": "Escalate git checkout operations that modify git state.",
+      "principle": "The agent must ask for approval before modifying git state (commit, checkout, merge, rebase).",
+      "if": {
+        "tool": [
+          "git_checkout"
+        ]
+      },
+      "then": "escalate",
+      "reason": "git_checkout modifies git working tree state and requires human approval."
+    },
+    {
+      "name": "escalate-git-commit",
+      "description": "Escalate git commit operations that modify git history.",
+      "principle": "The agent must ask for approval before modifying git state (commit, checkout, merge, rebase).",
+      "if": {
+        "tool": [
+          "git_commit"
+        ]
+      },
+      "then": "escalate",
+      "reason": "git_commit modifies git history and requires human approval."
+    },
+    {
+      "name": "escalate-git-merge",
+      "description": "Escalate git merge operations that modify git history.",
+      "principle": "The agent must ask for approval before modifying git state (commit, checkout, merge, rebase).",
+      "if": {
+        "tool": [
+          "git_merge"
+        ]
+      },
+      "then": "escalate",
+      "reason": "git_merge modifies git history and requires human approval."
+    },
+    {
+      "name": "escalate-git-rebase",
+      "description": "Escalate git rebase operations that modify git history.",
+      "principle": "The agent must ask for approval before modifying git state (commit, checkout, merge, rebase).",
+      "if": {
+        "tool": [
+          "git_rebase"
+        ]
+      },
+      "then": "escalate",
+      "reason": "git_rebase modifies git history and requires human approval."
+    },
+    {
+      "name": "escalate-git-reset",
+      "description": "Escalate git reset operations that modify git state.",
+      "principle": "The agent must ask for approval before modifying git state (commit, checkout, merge, rebase).",
+      "if": {
+        "tool": [
+          "git_reset"
+        ]
+      },
+      "then": "escalate",
+      "reason": "git_reset modifies git state and requires human approval."
+    },
+    {
+      "name": "escalate-git-cherry-pick",
+      "description": "Escalate git cherry-pick operations that modify git history.",
+      "principle": "The agent must ask for approval before modifying git state (commit, checkout, merge, rebase).",
+      "if": {
+        "tool": [
+          "git_cherry_pick"
+        ]
+      },
+      "then": "escalate",
+      "reason": "git_cherry_pick modifies git history and requires human approval."
+    },
+    {
+      "name": "escalate-git-pull",
+      "description": "Escalate git pull operations that modify git state.",
+      "principle": "The agent must ask for approval before modifying git state (commit, checkout, merge, rebase).",
+      "if": {
+        "tool": [
+          "git_pull"
+        ]
+      },
+      "then": "escalate",
+      "reason": "git_pull fetches and merges, modifying git state, and requires human approval."
+    },
+    {
+      "name": "escalate-git-push",
+      "description": "Escalate git push operations to GitHub for human approval.",
+      "principle": "The agent must ask for approval before any write, create, delete, or push operation.",
+      "if": {
+        "tool": [
+          "git_push"
+        ],
+        "domains": {
+          "roles": [
+            "git-remote-url"
+          ],
+          "allowed": [
+            "github.com"
+          ]
+        }
+      },
+      "then": "escalate",
+      "reason": "Constitution requires human approval before push operations even to GitHub."
+    },
+    {
+      "name": "escalate-git-add",
+      "description": "Escalate git add (staging files modifies git index state).",
+      "principle": "The agent must ask for approval before modifying git state.",
+      "if": {
+        "tool": [
+          "git_add"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Staging files modifies the git index and requires human approval per the constitution."
+    },
+    {
+      "name": "escalate-git-tag",
+      "description": "Escalate git tag operations that create or delete tags.",
+      "principle": "The agent must ask for approval before modifying git state.",
+      "if": {
+        "tool": [
+          "git_tag"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Creating or deleting tags modifies git state and requires human approval."
+    },
+    {
+      "name": "escalate-git-worktree",
+      "description": "Escalate git worktree operations that create or delete working trees.",
+      "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
+      "if": {
+        "tool": [
+          "git_worktree"
+        ]
+      },
+      "then": "escalate",
+      "reason": "git_worktree can create or delete working trees and requires human approval."
+    },
+    {
+      "name": "escalate-git-init",
+      "description": "Escalate git init that creates a new repository.",
+      "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
+      "if": {
+        "tool": [
+          "git_init"
+        ]
+      },
+      "then": "escalate",
+      "reason": "git_init creates a new git repository on disk and requires human approval."
+    },
+    {
+      "name": "allow-github-read-operations",
+      "description": "Allow read-only GitHub API operations: listing/reading issues, PRs, repos, commits, tags, releases, users, teams, and code search.",
+      "principle": "GitHub read access: Querying GitHub repositories, issues, and pull requests is permitted for reading.",
+      "if": {
+        "tool": [
+          "get_commit",
+          "get_file_contents",
+          "get_label",
+          "get_latest_release",
+          "get_me",
+          "get_release_by_tag",
+          "get_tag",
+          "get_team_members",
+          "get_teams",
+          "issue_read",
+          "list_branches",
+          "list_commits",
+          "list_issue_types",
+          "list_issues",
+          "list_pull_requests",
+          "list_releases",
+          "list_tags",
+          "pull_request_read",
+          "search_code",
+          "search_issues",
+          "search_pull_requests",
+          "search_repositories",
+          "search_users"
+        ]
+      },
+      "then": "allow",
+      "reason": "Constitution explicitly permits querying GitHub repositories, issues, and pull requests for reading."
+    },
+    {
+      "name": "escalate-github-write-operations",
+      "description": "Escalate all GitHub mutation operations for human approval.",
+      "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
+      "if": {
+        "tool": [
+          "add_comment_to_pending_review",
+          "add_issue_comment",
+          "add_reply_to_pull_request_comment",
+          "assign_copilot_to_issue",
+          "create_branch",
+          "create_or_update_file",
+          "create_pull_request",
+          "create_repository",
+          "delete_file",
+          "fork_repository",
+          "issue_write",
+          "merge_pull_request",
+          "pull_request_review_write",
+          "push_files",
+          "request_copilot_review",
+          "sub_issue_write",
+          "update_pull_request",
+          "update_pull_request_branch"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Constitution requires human approval before any write, create, delete, or push operation on GitHub."
+    }
+  ]
+}

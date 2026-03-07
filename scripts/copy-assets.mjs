@@ -15,7 +15,13 @@ const distConfig = resolve(__dirname, '..', 'dist', 'config');
 mkdirSync(resolve(distConfig, 'generated'), { recursive: true });
 
 // Copy static config assets
-for (const file of ['constitution.md', 'constitution-user-base.md', 'mcp-servers.json', 'tool-description-hints.json']) {
+for (const file of [
+  'constitution.md',
+  'constitution-readonly.md',
+  'constitution-user-base.md',
+  'mcp-servers.json',
+  'tool-description-hints.json',
+]) {
   const src = resolve(srcConfig, file);
   if (existsSync(src)) {
     cpSync(src, resolve(distConfig, file));
@@ -29,6 +35,18 @@ if (existsSync(generatedDir)) {
     const src = resolve(generatedDir, file);
     if (existsSync(src)) {
       cpSync(src, resolve(distConfig, 'generated', file));
+    }
+  }
+}
+
+// Copy read-only policy artifacts (if they exist)
+const readOnlyDir = resolve(srcConfig, 'generated-readonly');
+if (existsSync(readOnlyDir)) {
+  mkdirSync(resolve(distConfig, 'generated-readonly'), { recursive: true });
+  for (const file of ['compiled-policy.json']) {
+    const src = resolve(readOnlyDir, file);
+    if (existsSync(src)) {
+      cpSync(src, resolve(distConfig, 'generated-readonly', file));
     }
   }
 }

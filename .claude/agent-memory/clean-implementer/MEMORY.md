@@ -120,18 +120,19 @@ Zod v4 (^4.3.6) strict by default. Mock response JSON must exactly match Zod sch
 - **loadGeneratedPolicy**: returns `{ compiledPolicy, toolAnnotations, dynamicLists }` -- dynamicLists is optional (backward compatible)
 - **Tests**: `test/dynamic-lists.test.ts` -- 60 tests (Phase 1 validation/compiler + Phase 2 registry/resolver/engine + Phase 3 MCP-backed resolution)
 
-## Constitution Customizer (TB1c)
-- **Module**: `src/pipeline/constitution-customizer.ts` -- LLM-assisted conversational CLI
-- **Base constitution**: `src/config/constitution-user-base.md` -- shipped guiding principles
-- **Path helper**: `getBaseUserConstitutionPath()` in `src/config/paths.ts`
-- **CLI**: `ironcurtain customize-policy` registered in `src/cli.ts`
-- **Schema**: `CustomizerResponseSchema` -- discriminated union: `constitution` or `question`
-- **Exports**: `buildSystemPrompt()`, `buildUserMessage()`, `formatAnnotationsForPrompt()`, `computeLineDiff()`, `formatDiff()`, `writeConstitution()`, `revertConstitution()`, `seedBaseConstitution()`
-- **Diff**: LCS-based line-level diff (`computeLineDiff`), chalk-colorized output (`formatDiff`)
-- **Backup**: `writeConstitution()` copies existing to `.bak`; `revertConstitution()` renames `.bak` back
-- **Caching**: Uses `PromptCacheStrategy` (Anthropic cache breakpoints on system prompt + history)
-- **Build**: `copy-assets.mjs` copies `constitution-user-base.md` to `dist/config/`
-- **Tests**: `test/constitution-customizer.test.ts` -- 39 tests (prompts, annotations, diff, backup/revert, seeding, schema)
+## Constitution Customizer (TB1c) & Auto-Constitution Generation
+- **Global customizer**: `src/pipeline/constitution-customizer.ts` -- LLM-assisted conversational CLI
+- **Exports**: `buildSystemPrompt()`, `buildUserMessage()`, `formatAnnotationsForPrompt()`, `computeLineDiff()`, `formatDiff()`, `applyChanges()`, `callLlm()`, `loadAnnotations()`, `writeConstitution()`, `revertConstitution()`, `seedBaseConstitution()`
+- **Job customizer**: `src/cron/job-customizer.ts` -- `runJobConstitutionCustomizer(initialConstitution, taskDescription)` returns `string | undefined`; operates in-memory (no file I/O)
+- **Constitution generator**: `src/cron/constitution-generator.ts` -- `generateConstitution(options)` runs Code Mode session with read-only policy; exports `buildConstitutionGeneratorSystemPrompt()`, `parseConstitutionResponse()`
+- **Read-only policy**: `src/config/constitution-readonly.md` + `src/config/generated-readonly/compiled-policy.json`
+- **Path helpers**: `getReadOnlyPolicyDir()`, `getPackageConfigDir()` in `src/config/paths.ts`
+- **CLI flags**: `compile-policy --constitution <path> --output-dir <path>` parsed by `parseCompilePolicyArgs()` in `compile.ts`
+- **Pipeline config**: `loadPipelineConfig(overrides?)` accepts `PipelineConfigOverrides` with `constitution?` and `outputDir?`
+- **Session policyDir validation**: `validatePolicyDir()` accepts paths under IronCurtain home OR package config dir
+- **Job commands**: `job-commands.ts` review loop has `generateConstitution` and `customizeConstitution` menu options
+- **Build**: `copy-assets.mjs` copies `constitution-readonly.md` + `generated-readonly/` to `dist/config/`
+- **Tests**: `test/constitution-generator.test.ts`, `test/job-customizer.test.ts`, `test/compile-policy-cli.test.ts`, `test/readonly-policy-paths.test.ts`
 
 ## Multi-Turn Scenario Generator Session
 - **ScenarioGeneratorSession**: `src/pipeline/scenario-generator.ts` -- stateful multi-turn wrapper

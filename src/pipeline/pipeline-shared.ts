@@ -48,10 +48,24 @@ export interface PipelineConfig {
   protectedPaths: string[];
 }
 
-export function loadPipelineConfig(): PipelineConfig {
+/** Optional CLI overrides for pipeline configuration. */
+export interface PipelineConfigOverrides {
+  /** Alternative constitution file path. */
+  constitution?: string;
+  /** Alternative output directory for compiled artifacts. */
+  outputDir?: string;
+}
+
+export function loadPipelineConfig(overrides: PipelineConfigOverrides = {}): PipelineConfig {
   const configDir = resolve(__dirname, '..', 'config');
-  const constitutionPath = resolve(configDir, 'constitution.md');
-  const constitutionText = loadConstitutionText(constitutionPath);
+
+  // Constitution: use CLI override if provided, otherwise the default.
+  // When overriding, read the file directly (skip user constitution merging).
+  const constitutionPath = overrides.constitution ?? resolve(configDir, 'constitution.md');
+  const constitutionText = overrides.constitution
+    ? readFileSync(constitutionPath, 'utf-8')
+    : loadConstitutionText(constitutionPath);
+
   const mcpServersPath = resolve(configDir, 'mcp-servers.json');
   const mcpServers = JSON.parse(readFileSync(mcpServersPath, 'utf-8')) as Record<string, MCPServerConfig>;
   resolveMcpServerPaths(mcpServers);
@@ -70,7 +84,8 @@ export function loadPipelineConfig(): PipelineConfig {
     }
   }
 
-  const generatedDir = getUserGeneratedDir();
+  // Output directory: use CLI override if provided, otherwise user generated dir.
+  const generatedDir = overrides.outputDir ?? getUserGeneratedDir();
   const packageGeneratedDir = resolve(configDir, 'generated');
   const auditLogPath = process.env.AUDIT_LOG_PATH ?? './audit.jsonl';
 

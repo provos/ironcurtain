@@ -189,10 +189,16 @@ conditional role assignment instead of assigning the union of all possible
 roles. This produces more precise policy evaluation.
 
 Use conditional roles when:
-- A tool has an operation/mode/type argument that selects between read,
-  write, and delete behavior
+- A tool has an operation/mode/type/action argument that selects between
+  read-only and mutating behavior (e.g., "list" vs "create"/"delete")
 - A boolean flag (like dryRun or force) changes whether the tool modifies
   state
+
+IMPORTANT: Always check for mode-like arguments (mode, operation, type,
+action, command, subcommand). If a mode argument's possible values include
+both read-only operations (list, show, get, status) and mutating operations
+(create, delete, add, remove, push, pop, apply, drop, rename), the path
+argument MUST use conditional roles — not a static union of all roles.
 
 Format for conditional roles:
 {
@@ -217,6 +223,18 @@ Rules for conditional roles:
   which resources are accessed.
 - Most arguments will still use static role arrays. Only use conditional
   roles where the tool is clearly multi-mode.
+
+Example: A tool with a mode argument (list is read-only, push/pop mutate):
+{
+  "path": {
+    "default": ["read-path", "write-history"],
+    "when": [
+      { "condition": { "arg": "mode", "in": ["list", "show"] }, "roles": ["read-path"] }
+    ]
+  },
+  "mode": ["none"],
+  "message": ["none"]
+}
 
 Example: A tool with dryRun flag:
 {

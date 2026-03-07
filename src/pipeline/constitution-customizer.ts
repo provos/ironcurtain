@@ -373,7 +373,7 @@ function handleCancel(value: unknown): void {
 // LLM Call
 // ---------------------------------------------------------------------------
 
-async function callLlm(
+export async function callLlm(
   model: LanguageModel,
   systemPrompt: string | SystemModelMessage,
   messages: ModelMessage[],
@@ -393,15 +393,12 @@ async function callLlm(
 // Load Tool Annotations
 // ---------------------------------------------------------------------------
 
-function loadAnnotations(generatedDir: string, packageGeneratedDir: string): ToolAnnotation[] {
+export function loadAnnotations(generatedDir: string, packageGeneratedDir: string): ToolAnnotation[] {
   const file = loadExistingArtifact<ToolAnnotationsFile>(generatedDir, 'tool-annotations.json', packageGeneratedDir);
   if (!file) {
-    console.error(
-      chalk.red.bold(
-        "Error: tool-annotations.json not found. Run 'ironcurtain annotate-tools' first to generate tool annotations.",
-      ),
+    throw new Error(
+      "tool-annotations.json not found. Run 'ironcurtain annotate-tools' first to generate tool annotations.",
     );
-    process.exit(1);
   }
   return Object.values(file.servers).flatMap((server) => server.tools);
 }
@@ -428,7 +425,13 @@ export async function main(): Promise<void> {
   const generatedDir = getUserGeneratedDir();
 
   // Load tool annotations
-  const annotations = loadAnnotations(generatedDir, packageGeneratedDir);
+  let annotations: ToolAnnotation[];
+  try {
+    annotations = loadAnnotations(generatedDir, packageGeneratedDir);
+  } catch (err) {
+    p.log.error(err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  }
   const serverCount = new Set(annotations.map((a) => a.serverName)).size;
   p.log.info(
     `Loaded tool annotations (${serverCount} server${serverCount !== 1 ? 's' : ''}, ${annotations.length} tools)`,
@@ -503,9 +506,13 @@ export async function main(): Promise<void> {
 
     // Call LLM
     let response: CustomizerResponse;
+    const llmSpinner = p.spinner();
+    llmSpinner.start('Thinking...');
     try {
       response = await callLlm(model, systemPrompt, cachedMessages);
+      llmSpinner.stop('Done.');
     } catch (err) {
+      llmSpinner.stop('Failed.');
       p.log.error(`LLM error: ${err instanceof Error ? err.message : String(err)}`);
       // Remove the user message we just added since the call failed
       conversationHistory.pop();
@@ -563,9 +570,13 @@ export async function main(): Promise<void> {
 
       const refinedMessages = cacheStrategy.applyHistoryBreakpoint(conversationHistory);
 
+      const refineSpinner = p.spinner();
+      refineSpinner.start('Thinking...');
       try {
         response = await callLlm(model, systemPrompt, refinedMessages);
+        refineSpinner.stop('Done.');
       } catch (err) {
+        refineSpinner.stop('Failed.');
         p.log.error(`LLM error: ${err instanceof Error ? err.message : String(err)}`);
         conversationHistory.pop();
         break;

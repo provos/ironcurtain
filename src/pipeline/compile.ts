@@ -5,10 +5,15 @@
  * loading config, printing the progress banner, and exit codes.
  *
  * The core compile-verify-repair loop lives in PipelineRunner.
+ *
+ * CLI flags:
+ *   --constitution <path>  Use an alternative constitution file
+ *   --output-dir <path>    Write compiled artifacts to this directory
  */
 
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseArgs } from 'node:util';
 import chalk from 'chalk';
 import { loadPipelineConfig, loadToolAnnotationsFile } from './pipeline-shared.js';
 import { PipelineRunner, createPipelineModels } from './pipeline-runner.js';
@@ -17,11 +22,42 @@ import { PipelineRunner, createPipelineModels } from './pipeline-runner.js';
 export { resolveRulePaths, mergeReplacements } from './pipeline-shared.js';
 
 // ---------------------------------------------------------------------------
+// CLI Argument Parsing
+// ---------------------------------------------------------------------------
+
+export interface CompilePolicyCliArgs {
+  constitution?: string;
+  outputDir?: string;
+}
+
+/**
+ * Parses --constitution and --output-dir from process.argv.
+ * Returns resolved absolute paths when provided.
+ */
+export function parseCompilePolicyArgs(argv: string[] = process.argv.slice(2)): CompilePolicyCliArgs {
+  const { values } = parseArgs({
+    args: argv,
+    options: {
+      constitution: { type: 'string' },
+      'output-dir': { type: 'string' },
+    },
+    strict: false,
+  });
+  const constitution = typeof values.constitution === 'string' ? values.constitution : undefined;
+  const outputDir = typeof values['output-dir'] === 'string' ? values['output-dir'] : undefined;
+  return {
+    constitution: constitution ? resolve(constitution) : undefined,
+    outputDir: outputDir ? resolve(outputDir) : undefined,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Main Pipeline
 // ---------------------------------------------------------------------------
 
 export async function main(): Promise<void> {
-  const config = loadPipelineConfig();
+  const cliArgs = parseCompilePolicyArgs();
+  const config = loadPipelineConfig(cliArgs);
 
   // Load tool annotations early to validate they exist before printing the banner
   const toolAnnotationsFile = loadToolAnnotationsFile(config.generatedDir, config.packageGeneratedDir);
