@@ -120,7 +120,7 @@ export function applyServerAllowlist(
   const knownServers = new Set(Object.keys(mcpServers));
   for (const name of allowlist) {
     if (!knownServers.has(name) && name !== 'filesystem') {
-      console.warn(`Warning: persona allowlist includes unknown server "${name}" (not in mcp-servers.json)`);
+      process.stderr.write(`Warning: persona allowlist includes unknown server "${name}" (not in mcp-servers.json)\n`);
     }
   }
 

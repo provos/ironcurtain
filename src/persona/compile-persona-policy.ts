@@ -10,8 +10,7 @@
 
 import { readFileSync } from 'node:fs';
 import { PipelineRunner, createPipelineModels } from '../pipeline/pipeline-runner.js';
-import { loadConfig } from '../config/index.js';
-import { getPackageGeneratedDir } from '../config/index.js';
+import { loadConfig, getPackageGeneratedDir } from '../config/index.js';
 import { getUserGeneratedDir } from '../config/paths.js';
 import { getPersonaConstitutionPath, getPersonaGeneratedDir, loadPersona, applyServerAllowlist } from './resolve.js';
 import type { PersonaName } from './types.js';

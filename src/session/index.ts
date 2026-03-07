@@ -248,10 +248,12 @@ function buildSessionConfig(
       workspacePath = resolved.workspacePath;
     }
 
-    // Build persona system prompt augmentation (includes memory contents)
+    // Build persona system prompt augmentation (includes memory contents).
+    // workspacePath is guaranteed set here (either from opts or resolved above),
+    // so the memory path is always inside the session's allowedDirectory.
     const personaAugmentation = buildPersonaSystemPromptAugmentation(
       resolved.persona,
-      resolve(resolved.workspacePath, 'memory.md'),
+      resolve(workspacePath, 'memory.md'),
     );
     systemPromptAugmentation = systemPromptAugmentation
       ? `${personaAugmentation}\n\n${systemPromptAugmentation}`

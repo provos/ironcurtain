@@ -240,12 +240,12 @@ describe('applyServerAllowlist', () => {
   });
 
   it('warns about unknown server names', () => {
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     try {
       applyServerAllowlist(mockServers, ['filesystem', 'nonexistent-server']);
-      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('unknown server "nonexistent-server"'));
+      expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining('unknown server "nonexistent-server"'));
     } finally {
-      warnSpy.mockRestore();
+      stderrSpy.mockRestore();
     }
   });
 
@@ -254,12 +254,12 @@ describe('applyServerAllowlist', () => {
       github: { command: 'node', args: ['gh.js'] },
     };
 
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     try {
       applyServerAllowlist(serversWithoutFilesystem, ['filesystem']);
-      expect(warnSpy).not.toHaveBeenCalled();
+      expect(stderrSpy).not.toHaveBeenCalled();
     } finally {
-      warnSpy.mockRestore();
+      stderrSpy.mockRestore();
     }
   });
 

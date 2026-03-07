@@ -80,9 +80,13 @@ export async function main(args?: string[]): Promise<void> {
   const personaName = values.persona as string | undefined;
   const config = loadConfig();
 
-  // Disallow combining --resume with --workspace
+  // Disallow combining --resume with --workspace or --persona
   if (resumeSessionId && rawWorkspace) {
     process.stderr.write(chalk.red('Error: --resume and --workspace cannot be used together.\n'));
+    process.exit(1);
+  }
+  if (resumeSessionId && personaName) {
+    process.stderr.write(chalk.red('Error: --resume and --persona cannot be used together.\n'));
     process.exit(1);
   }
 

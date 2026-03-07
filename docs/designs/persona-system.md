@@ -22,14 +22,14 @@ Today IronCurtain has one global policy for interactive sessions and per-job pol
         compiled-policy.json   # output of persona compilation
         dynamic-lists.json     # optional, same as global pipeline
       workspace/               # persistent workspace across sessions
-      memory.md                # agent-readable/writable memory file
+        memory.md              # agent-readable/writable memory file
     coder/
       constitution.md
       persona.json
       generated/
         compiled-policy.json
       workspace/
-      memory.md
+        memory.md
 ```
 
 Personas live under `~/.ironcurtain/personas/`, which is already covered by the IronCurtain home directory's protected-path rule. The agent cannot modify persona configuration files (`constitution.md`, `persona.json`, `generated/`). However, `workspace/` and `memory.md` are writable by the agent — they are the persona's persistent state.
