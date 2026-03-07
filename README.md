@@ -56,7 +56,7 @@ See [SANDBOXING.md](SANDBOXING.md) for the full architecture with diagrams, laye
 ### Prerequisites
 
 - Node.js 22+ (required by `isolated-vm`; maximum Node 25)
-- Docker (required for Docker Agent Mode and PTY mode)
+- Docker — not required but **strongly recommended** for Docker Agent Mode, which provides the strongest isolation
 - An API key for at least one LLM provider (Anthropic, Google, or OpenAI)
 
 ### Install
@@ -93,66 +93,13 @@ ironcurtain setup
 
 Walks you through GitHub token setup, web search provider, model selection, and other settings. Creates `~/.ironcurtain/config.json` with your choices.
 
-**3. Customize your policy** (optional but recommended):
+## Running IronCurtain
 
-```bash
-ironcurtain customize-policy
-```
+IronCurtain ships with a default policy geared towards the developer experience — read-only operations are allowed, mutations (writes, pushes, PR creation) escalate for human approval. You can start using it immediately after setup.
 
-An LLM-assisted conversation that generates a constitution tailored to your workflow, saved to `~/.ironcurtain/constitution-user.md`. You can also edit this file directly.
+### Terminal multiplexer (recommended)
 
-**4. Compile the policy:**
-
-```bash
-ironcurtain compile-policy
-```
-
-Translates your constitution into deterministic rules, generates test scenarios, and verifies them. Compiled artifacts go to `~/.ironcurtain/generated/`. The package ships with pre-compiled defaults — skip this step until you customize.
-
-## Running Modes
-
-### Interactive mode
-
-A multi-turn session where you type tasks and the agent responds:
-
-```bash
-ironcurtain start
-```
-
-Escalated tool calls pause the agent and prompt you with `/approve` or `/deny`.
-
-### Single-shot mode
-
-Send one task and exit when the agent finishes:
-
-```bash
-ironcurtain start "Summarize the files in the current directory"
-```
-
-### Workspace mode
-
-Point the agent at an existing directory instead of a fresh sandbox:
-
-```bash
-ironcurtain start -w ./my-project "Fix the failing tests"
-ironcurtain start --workspace /home/user/repos/my-app
-```
-
-The workspace replaces the session sandbox as the agent's working area. All session infrastructure (logs, escalations, audit) still lives under `~/.ironcurtain/sessions/`. The path is validated to prevent use of sensitive directories (root, home, `~/.ironcurtain/`, or paths overlapping with protected paths).
-
-### Session resume
-
-Resume a previous session's conversation history:
-
-```bash
-ironcurtain start --resume <session-id>
-```
-
-Session IDs are printed on session start and stored under `~/.ironcurtain/sessions/`.
-
-### Terminal multiplexer (recommended for Docker Agent Mode)
-
-The terminal multiplexer is the recommended way to use IronCurtain with Docker Agent Mode. It gives you the full power of your agent's interactive TUI (Claude Code or Goose) while IronCurtain mediates every tool call through its policy engine. All in a single terminal.
+The recommended way to use IronCurtain. It gives you the full power of your agent's interactive TUI (Claude Code or Goose) while IronCurtain mediates every tool call through its policy engine — all in a single terminal.
 
 ```bash
 ironcurtain mux
@@ -160,69 +107,46 @@ ironcurtain mux
 
 **Key capabilities:**
 
-- **Full agent TUI** — The agent (Claude Code or Goose) runs in a PTY inside a Docker container with no network access. You interact with it exactly as if it were running locally.
-- **Inline escalation handling** — When a tool call needs approval, an escalation panel overlays the viewport. No separate terminal needed — press Ctrl-A to enter command mode, `/approve N` or `/deny N`, and return.
+- **Full agent TUI** — The agent runs in a PTY inside a Docker container with no network access. You interact with it exactly as if it were running locally.
+- **Inline escalation handling** — When a tool call needs approval, an escalation panel overlays the viewport. Press Ctrl-A to enter command mode, `/approve N` or `/deny N`, and return.
 - **Trusted user input** — Text typed in command mode (Ctrl-A) is captured on the host side before entering the container. This creates a verified intent signal that the [auto-approver](#auto-approve-escalations) can use — e.g., typing "push my changes to origin" will auto-approve a subsequent `git_push` escalation.
 - **Tab management** — Spawn multiple concurrent sessions (`/new`), switch between them (`/tab N`, Alt-1..9), close them (`/close`).
 
 See [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md) for the full walkthrough: input modes, trusted input security model, escalation workflow, and keyboard reference.
 
-### PTY mode with a separate escalation listener
+### Builtin agent (no Docker required)
 
-An alternative to the mux — run a raw PTY session in one terminal and handle escalations in another:
-
-```bash
-# Terminal 1 — interactive Claude Code session
-ironcurtain start --pty
-
-# Terminal 2 — approve or deny escalations from all active PTY sessions
-ironcurtain escalation-listener
-```
-
-This workflow does not support trusted input or auto-approval for PTY sessions. The mux is recommended instead.
-
-**Emergency exit and terminal recovery:** Press `Ctrl-\` to trigger a graceful shutdown of the PTY session. If the process is killed ungracefully, run `reset` in that terminal to restore normal terminal mode.
-
-### Signal messaging transport
-
-Run IronCurtain sessions via Signal messages — send tasks, receive responses, and approve or deny escalations from your phone. All communication is end-to-end encrypted via the Signal protocol.
+For quick tasks or environments without Docker, IronCurtain's builtin agent runs entirely locally in a V8 sandbox:
 
 ```bash
-ironcurtain setup-signal    # One-time setup wizard
-ironcurtain bot             # Start the Signal bot daemon
+ironcurtain start                                    # Interactive multi-turn session
+ironcurtain start "Summarize the files in ./src"     # Single-shot mode
+ironcurtain start -w ./my-project "Fix the tests"    # Workspace mode
 ```
 
-See [TRANSPORT.md](TRANSPORT.md) for setup instructions, architecture details, and why we chose Signal over alternatives like Telegram.
+### Other running modes
 
-### Daemon mode
+IronCurtain also supports PTY mode with a separate escalation listener, a Signal messaging transport for mobile approval, and a daemon mode for scheduled cron jobs. See [RUNNING_MODES.md](RUNNING_MODES.md) for details.
 
-A unified long-running daemon that combines Signal messaging with scheduled cron jobs. Define recurring tasks with per-job security policies, and IronCurtain runs them headlessly on a cron schedule.
+## Customizing Your Policy
+
+The default policy works well for general development, but you can tailor it to your workflow:
+
+**1. Customize your constitution** (optional but recommended):
 
 ```bash
-ironcurtain daemon add-job        # Interactive wizard to define a scheduled job
-ironcurtain daemon                # Start the daemon (Signal + cron)
-ironcurtain daemon --no-signal    # Cron-only mode (no Signal transport)
-ironcurtain daemon list-jobs      # List jobs with schedule and status
-ironcurtain daemon logs <id>      # Show recent run summaries
+ironcurtain customize-policy
 ```
 
-Each job has its own task description, security constitution (compiled into per-job policy rules), persistent workspace, optional git repo sync, and configurable resource budgets. Escalations are auto-denied in headless mode unless Signal is configured for approval routing.
+An LLM-assisted conversation that generates a constitution tailored to your workflow, saved to `~/.ironcurtain/constitution-user.md`. You can also edit this file directly.
 
-See [DAEMON.md](DAEMON.md) for the full setup guide, job definition reference, and troubleshooting.
+**2. Compile the policy:**
 
-## Session Commands
+```bash
+ironcurtain compile-policy
+```
 
-Commands available during an **interactive** or **single-shot** session:
-
-| Command    | Description                                     |
-| ---------- | ----------------------------------------------- |
-| `/approve` | Approve the pending escalation                  |
-| `/deny`    | Deny the pending escalation                     |
-| `/budget`  | Show resource consumption (tokens, steps, cost) |
-| `/logs`    | Display diagnostic events                       |
-| `/quit`    | End the session                                 |
-
-In **PTY mode**, use the [terminal multiplexer](#terminal-multiplexer-recommended-for-docker-agent-mode) (`ironcurtain mux`) for inline escalation handling and trusted input support.
+Translates your constitution into deterministic rules, generates test scenarios, and verifies them. Compiled artifacts go to `~/.ironcurtain/generated/`.
 
 ## Policy: Constitution → Enforcement
 
@@ -276,7 +200,7 @@ Review the generated `~/.ironcurtain/generated/compiled-policy.json` — these a
 
 ## Web Search
 
-IronCurtain's fetch server includes a `web_search` tool backed by your choice of provider. Configure via `ironcurtain config` → **Web Search**, or directly in `~/.ironcurtain/config.json`:
+IronCurtain's fetch server includes a `web_search` tool backed by your choice of provider. Configure via `ironcurtain config` or directly in `~/.ironcurtain/config.json`:
 
 ```json
 {
