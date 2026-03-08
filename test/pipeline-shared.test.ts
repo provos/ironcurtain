@@ -64,7 +64,7 @@ describe('computeHash', () => {
     expect(computeHash('abc')).not.toBe(computeHash('xyz'));
   });
 
-  it('treats multiple args differently from a single concatenated string', () => {
+  it('treats multiple args the same as a single concatenated string', () => {
     // computeHash('ab', 'c') === computeHash('a', 'bc') === computeHash('abc')
     // because it just calls hash.update() sequentially -- all equivalent
     const h1 = computeHash('abc');
