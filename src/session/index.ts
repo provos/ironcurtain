@@ -27,6 +27,7 @@ import { resolvePersona, applyServerAllowlist } from '../persona/resolve.js';
 import { buildPersonaSystemPromptAugmentation } from '../persona/persona-prompt.js';
 import { AgentSession } from './agent-session.js';
 import { SessionError } from './errors.js';
+import { saveSessionMetadata, loadSessionMetadata } from './session-metadata.js';
 import { isEqualOrInside } from './workspace-validation.js';
 import { createSessionId } from './types.js';
 import type { Session, SessionId, SessionOptions, SessionMode } from './types.js';
@@ -46,13 +47,33 @@ import type { Session, SessionId, SessionOptions, SessionMode } from './types.js
  *   sandbox or MCP connection setup fails.
  */
 export async function createSession(options: SessionOptions = {}): Promise<Session> {
-  const mode: SessionMode = options.mode ?? { kind: 'builtin' };
+  // When resuming, restore persisted session settings (persona, workspace, etc.)
+  const effectiveOptions = applyResumeMetadata(options);
+  const mode: SessionMode = effectiveOptions.mode ?? { kind: 'builtin' };
 
   if (mode.kind === 'docker') {
-    return createDockerSession(mode.agent, options);
+    return createDockerSession(mode.agent, effectiveOptions);
   }
 
-  return createBuiltinSession(options);
+  return createBuiltinSession(effectiveOptions);
+}
+
+/**
+ * Merges persisted session metadata into options when resuming.
+ * Returns options unchanged for new sessions or when no metadata exists
+ * (graceful for sessions created before metadata persistence was added).
+ */
+function applyResumeMetadata(options: SessionOptions): SessionOptions {
+  if (!options.resumeSessionId) return options;
+  const metadata = loadSessionMetadata(options.resumeSessionId);
+  if (!metadata) return options;
+  return {
+    ...options,
+    persona: metadata.persona,
+    workspacePath: metadata.workspacePath,
+    policyDir: metadata.policyDir,
+    disableAutoApprove: metadata.disableAutoApprove,
+  };
 }
 
 /**
@@ -328,6 +349,19 @@ function buildSessionConfig(
 
   // Patch MCP server args to use the session-specific sandbox directory
   patchMcpServerAllowedDirectory(sessionConfig, sandboxDir);
+
+  // Persist session settings so --resume can restore them.
+  // Only write on initial creation (not when resuming).
+  if (!resumeSessionId) {
+    saveSessionMetadata(effectiveSessionId, {
+      createdAt: new Date().toISOString(),
+      ...(opts.persona ? { persona: opts.persona } : {}),
+      ...(opts.workspacePath ? { workspacePath: opts.workspacePath } : {}),
+      // Only store policyDir when no persona is set (persona derives its own)
+      ...(!opts.persona && policyDir ? { policyDir } : {}),
+      ...(opts.disableAutoApprove ? { disableAutoApprove: true } : {}),
+    });
+  }
 
   return {
     config: sessionConfig,

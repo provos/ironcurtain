@@ -57,6 +57,14 @@ export function getSessionEscalationDir(sessionId: string): string {
 }
 
 /**
+ * Returns the session metadata path for a given session:
+ *   {home}/sessions/{sessionId}/session-metadata.json
+ */
+export function getSessionMetadataPath(sessionId: string): string {
+  return resolve(getSessionDir(sessionId), 'session-metadata.json');
+}
+
+/**
  * Returns the audit log path for a given session:
  *   {home}/sessions/{sessionId}/audit.jsonl
  */

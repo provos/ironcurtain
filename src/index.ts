@@ -80,19 +80,18 @@ export async function main(args?: string[]): Promise<void> {
   const personaName = values.persona as string | undefined;
   const config = loadConfig();
 
-  // Disallow combining --resume with --workspace or --persona
+  // When resuming, CLI --workspace and --persona are ignored -- the original
+  // values are restored from persisted session metadata.
   if (resumeSessionId && rawWorkspace) {
-    process.stderr.write(chalk.red('Error: --resume and --workspace cannot be used together.\n'));
-    process.exit(1);
+    process.stderr.write(chalk.yellow('Note: --workspace is ignored when resuming; original workspace is restored.\n'));
   }
   if (resumeSessionId && personaName) {
-    process.stderr.write(chalk.red('Error: --resume and --persona cannot be used together.\n'));
-    process.exit(1);
+    process.stderr.write(chalk.yellow('Note: --persona is ignored when resuming; original persona is restored.\n'));
   }
 
   // Validate --workspace before anything else that uses config
   let workspacePath: string | undefined;
-  if (rawWorkspace) {
+  if (rawWorkspace && !resumeSessionId) {
     try {
       workspacePath = validateWorkspacePath(rawWorkspace, config.protectedPaths);
     } catch (error) {
@@ -158,8 +157,9 @@ export async function main(args?: string[]): Promise<void> {
       config,
       mode,
       resumeSessionId,
+      // workspacePath is already undefined when resuming (validation skipped above)
       workspacePath,
-      persona: personaName,
+      persona: resumeSessionId ? undefined : personaName,
       onEscalation: transport.createEscalationHandler(),
       onEscalationExpired: transport.createEscalationExpiredHandler(),
       onDiagnostic: transport.createDiagnosticHandler(),

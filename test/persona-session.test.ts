@@ -14,7 +14,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } from 'vitest';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import * as loggerModule from '../src/logger.js';
 import { TEST_SANDBOX_DIR, REAL_TMP } from './fixtures/test-policy.js';
@@ -42,6 +42,8 @@ vi.mock('@utcp/code-mode', () => ({
 
 import { generateText } from 'ai';
 import { createSession } from '../src/session/index.js';
+import { loadSessionMetadata } from '../src/session/session-metadata.js';
+import { getSessionMetadataPath } from '../src/config/paths.js';
 import type { Sandbox } from '../src/sandbox/index.js';
 import type { IronCurtainConfig } from '../src/config/types.js';
 import type { SessionOptions } from '../src/session/types.js';
@@ -432,6 +434,121 @@ describe('buildSessionConfig with persona', () => {
     });
     try {
       expect(sandboxFactory).toHaveBeenCalledOnce();
+    } finally {
+      await session.close();
+    }
+  });
+});
+
+describe('session metadata persistence', () => {
+  it('saves metadata file when creating a session with a persona', async () => {
+    createTestPersonaOnDisk('coder');
+
+    const session = await createTestSession({ persona: 'coder' });
+    try {
+      const sessionId = session.getInfo().id;
+      const metadataPath = getSessionMetadataPath(sessionId);
+      expect(existsSync(metadataPath)).toBe(true);
+
+      const metadata = loadSessionMetadata(sessionId);
+      expect(metadata).toBeDefined();
+      expect(metadata!.persona).toBe('coder');
+      expect(metadata!.createdAt).toBeDefined();
+    } finally {
+      await session.close();
+    }
+  });
+
+  it('does not store policyDir when persona is set', async () => {
+    createTestPersonaOnDisk('coder');
+
+    const session = await createTestSession({ persona: 'coder' });
+    try {
+      const metadata = loadSessionMetadata(session.getInfo().id);
+      expect(metadata).toBeDefined();
+      expect(metadata!.persona).toBe('coder');
+      // policyDir should NOT be stored because persona derives it
+      expect(metadata!.policyDir).toBeUndefined();
+    } finally {
+      await session.close();
+    }
+  });
+
+  it('restores persona settings on resume', async () => {
+    createTestPersonaOnDisk('coder');
+    const expectedPolicyDir = resolve(TEST_HOME, 'personas', 'coder', 'generated');
+
+    // Create the initial session with persona
+    const firstSession = await createTestSession({ persona: 'coder' });
+    const firstSessionId = firstSession.getInfo().id;
+    await firstSession.close();
+
+    // Resume the session — persona should be restored from metadata
+    const sandboxFactory = vi.fn().mockImplementation(async (config: IronCurtainConfig) => {
+      // generatedDir should be the persona's policy dir (restored from metadata)
+      expect(config.generatedDir).toBe(expectedPolicyDir);
+      return createMockSandbox();
+    });
+
+    const resumedSession = await createTestSession({
+      resumeSessionId: firstSessionId,
+      sandboxFactory,
+    });
+    try {
+      expect(sandboxFactory).toHaveBeenCalledOnce();
+    } finally {
+      await resumedSession.close();
+    }
+  });
+
+  it('restores persona workspace on resume', async () => {
+    createTestPersonaOnDisk('coder');
+    const expectedWorkspace = resolve(TEST_HOME, 'personas', 'coder', 'workspace');
+
+    const firstSession = await createTestSession({ persona: 'coder' });
+    const firstSessionId = firstSession.getInfo().id;
+    await firstSession.close();
+
+    const sandboxFactory = vi.fn().mockImplementation(async (config: IronCurtainConfig) => {
+      expect(config.allowedDirectory).toBe(expectedWorkspace);
+      return createMockSandbox();
+    });
+
+    const resumedSession = await createTestSession({
+      resumeSessionId: firstSessionId,
+      sandboxFactory,
+    });
+    try {
+      expect(sandboxFactory).toHaveBeenCalledOnce();
+    } finally {
+      await resumedSession.close();
+    }
+  });
+
+  it('resumes gracefully when no metadata file exists (old session)', async () => {
+    // Create a session directory manually without metadata
+    const fakeSessionId = 'legacy-session-no-metadata';
+    const sessionDir = resolve(TEST_HOME, 'sessions', fakeSessionId);
+    mkdirSync(resolve(sessionDir, 'sandbox'), { recursive: true });
+
+    // Should not throw — just proceeds without persona/workspace
+    const session = await createTestSession({
+      resumeSessionId: fakeSessionId,
+    });
+    try {
+      const info = session.getInfo();
+      expect(info.status).toBe('ready');
+    } finally {
+      await session.close();
+    }
+  });
+
+  it('stores disableAutoApprove when set', async () => {
+    const session = await createTestSession({ disableAutoApprove: true });
+    try {
+      const metadata = loadSessionMetadata(session.getInfo().id);
+      expect(metadata).toBeDefined();
+      expect(metadata!.disableAutoApprove).toBe(true);
     } finally {
       await session.close();
     }
