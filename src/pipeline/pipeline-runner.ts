@@ -20,6 +20,7 @@ import { PolicyEngine } from '../trusted-process/policy-engine.js';
 import {
   buildCompilerSystemPrompt,
   ConstitutionCompilerSession,
+  formatAnnotationsSummary,
   validateCompiledRules,
 } from './constitution-compiler.js';
 import { getHandwrittenScenarios } from './handwritten-scenarios.js';
@@ -226,14 +227,7 @@ function buildTaskCompilerSystemPrompt(
   protectedPaths: string[],
   allowedDirectory: string,
 ): string {
-  const annotationsSummary = annotations
-    .map((a) => {
-      const argsDesc = Object.entries(a.args)
-        .map(([name, roles]) => `    ${name}: [${roles.join(', ')}]`)
-        .join('\n');
-      return `  ${a.serverName}/${a.toolName}: ${a.comment}, sideEffects=${a.sideEffects}\n    args:\n${argsDesc || '    (none)'}`;
-    })
-    .join('\n');
+  const annotationsSummary = formatAnnotationsSummary(annotations);
 
   return `You are compiling a task-scoped security policy for an automated scheduled job. The job runs unattended on a schedule. Your goal is to generate the MINIMUM set of policy rules required for this specific task -- nothing more.
 

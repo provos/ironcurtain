@@ -105,6 +105,22 @@ ${lines.join('\n\n')}
 }
 
 /**
+ * Formats tool annotations into a multi-line summary for LLM system prompts.
+ * Each entry shows server/tool name, comment, side-effects flag, and per-argument roles.
+ * Used by both the constitution compiler and task-policy compiler prompts.
+ */
+export function formatAnnotationsSummary(annotations: ToolAnnotation[]): string {
+  return annotations
+    .map((a) => {
+      const argsDesc = Object.entries(a.args)
+        .map(([name, roles]) => `    ${name}: [${roles.join(', ')}]`)
+        .join('\n');
+      return `  ${a.serverName}/${a.toolName}: ${a.comment}, sideEffects=${a.sideEffects}\n    args:\n${argsDesc || '    (none)'}`;
+    })
+    .join('\n');
+}
+
+/**
  * Builds the stable system prompt portion for the compiler.
  * Contains: role preamble, constitution, annotations, structural invariants, and instructions.
  * This is the cacheable part — it stays the same across repair rounds.
@@ -115,14 +131,7 @@ export function buildCompilerSystemPrompt(
   config: CompilerConfig,
   handwrittenScenarios?: TestScenario[],
 ): string {
-  const annotationsSummary = annotations
-    .map((a) => {
-      const argsDesc = Object.entries(a.args)
-        .map(([name, roles]) => `    ${name}: [${roles.join(', ')}]`)
-        .join('\n');
-      return `  ${a.serverName}/${a.toolName}: ${a.comment}, sideEffects=${a.sideEffects}\n    args:\n${argsDesc || '    (none)'}`;
-    })
-    .join('\n');
+  const annotationsSummary = formatAnnotationsSummary(annotations);
 
   return `You are compiling a security policy from a constitution document into enforceable declarative rules.
 

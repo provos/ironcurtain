@@ -527,7 +527,7 @@ describe('refreshOAuthToken', () => {
     expect(result!.expiresAt).toBeGreaterThan(Date.now());
 
     const fetchCall = vi.mocked(globalThis.fetch).mock.calls[0];
-    expect(fetchCall[0]).toBe('https://console.anthropic.com/api/oauth/token');
+    expect(fetchCall[0]).toBe('https://platform.claude.com/v1/oauth/token');
     const body = JSON.parse((fetchCall[1] as RequestInit).body as string);
     expect(body.grant_type).toBe('refresh_token');
     expect(body.refresh_token).toBe('old-refresh-token');

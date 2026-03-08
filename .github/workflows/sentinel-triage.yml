@@ -68,7 +68,7 @@ jobs:
                 .filter(
                   (c) =>
                     MAINTAINER_ROLES.has(c.author_association) &&
-                    c.body?.trimEnd().endsWith(SENTINEL_MARKER)
+                    c.body?.includes(SENTINEL_MARKER)
                 )
                 .at(-1);
 

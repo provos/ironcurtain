@@ -102,16 +102,21 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     providersByHost.set(mapping.config.host, mapping);
   }
 
-  // Certificate cache: hostname → tls.SecureContext
-  const certCache = new Map<string, tls.SecureContext>();
+  // Certificate cache: hostname → { ctx, expiresAt }
+  const certCache = new Map<string, { ctx: tls.SecureContext; expiresAt: number }>();
+
+  // Renew leaf certs 1 hour before they expire
+  const LEAF_LIFETIME_MS = 24 * 60 * 60 * 1000;
+  const RENEWAL_MARGIN_MS = 60 * 60 * 1000;
 
   /**
    * Returns a cached SecureContext for the hostname, generating one if needed.
+   * Automatically renews leaf certificates before they expire.
    * Synchronous because node-forge's RSA key generation is pure JS.
    */
   function getOrCreateSecureContext(hostname: string): tls.SecureContext {
     const cached = certCache.get(hostname);
-    if (cached) return cached;
+    if (cached && cached.expiresAt - Date.now() > RENEWAL_MARGIN_MS) return cached.ctx;
 
     // Generate leaf cert signed by IronCurtain CA
     const leafKeys = forge.pki.rsa.generateKeyPair(2048);
@@ -120,7 +125,8 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     leafCert.publicKey = leafKeys.publicKey;
     leafCert.serialNumber = randomSerialNumber();
     leafCert.validity.notBefore = new Date();
-    leafCert.validity.notAfter = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24h
+    const expiresAt = Date.now() + LEAF_LIFETIME_MS;
+    leafCert.validity.notAfter = new Date(expiresAt);
 
     leafCert.setSubject([{ name: 'commonName', value: hostname }]);
     leafCert.setIssuer(caCert.subject.attributes);
@@ -137,7 +143,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
       cert: forge.pki.certificateToPem(leafCert),
     });
 
-    certCache.set(hostname, ctx);
+    certCache.set(hostname, { ctx, expiresAt });
     return ctx;
   }
 

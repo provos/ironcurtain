@@ -445,6 +445,45 @@ describe('MitmProxy', () => {
     tlsSocket.destroy();
   });
 
+  it('renews leaf cert when cached cert is near expiry', async () => {
+    proxy = createMitmProxy({
+      socketPath,
+      ca,
+      providers: [{ config: testProvider, fakeKey, realKey }],
+    });
+    await proxy.start();
+
+    // First connection — generates and caches a leaf cert
+    const { socket: s1 } = await sendConnect(socketPath, 'api.test.com', 443);
+    const tls1 = await new Promise<tls.TLSSocket>((resolve, reject) => {
+      const t = tls.connect({ socket: s1!, servername: 'api.test.com', ca: ca.certPem }, () => resolve(t));
+      t.on('error', reject);
+    });
+    const cert1 = tls1.getPeerCertificate();
+    tls1.destroy();
+
+    // Advance time past the renewal margin (23h+) so the cached cert is stale
+    const realNow = Date.now;
+    Date.now = () => realNow.call(Date) + 23.5 * 60 * 60 * 1000;
+
+    let tls2: tls.TLSSocket | undefined;
+    try {
+      // Second connection — should get a freshly generated cert, not the expired cached one
+      const { socket: s2 } = await sendConnect(socketPath, 'api.test.com', 443);
+      tls2 = await new Promise<tls.TLSSocket>((resolve, reject) => {
+        const t = tls.connect({ socket: s2!, servername: 'api.test.com', ca: ca.certPem }, () => resolve(t));
+        t.on('error', reject);
+      });
+      expect(tls2.authorized).toBe(true);
+      const cert2 = tls2.getPeerCertificate();
+      // The serial numbers should differ — proves the cert was regenerated
+      expect(cert2.serialNumber).not.toBe(cert1.serialNumber);
+    } finally {
+      tls2?.destroy();
+      Date.now = realNow;
+    }
+  });
+
   it('blocks requests to disallowed endpoints', async () => {
     proxy = createMitmProxy({
       socketPath,
