@@ -69,10 +69,12 @@ function applyResumeMetadata(options: SessionOptions): SessionOptions {
   if (!metadata) return options;
   return {
     ...options,
-    persona: metadata.persona,
-    workspacePath: metadata.workspacePath,
-    policyDir: metadata.policyDir,
-    disableAutoApprove: metadata.disableAutoApprove,
+    // Only spread defined metadata fields so undefined doesn't overwrite
+    // caller-provided values (important for non-CLI callers like the daemon).
+    ...(metadata.persona !== undefined ? { persona: metadata.persona } : {}),
+    ...(metadata.workspacePath !== undefined ? { workspacePath: metadata.workspacePath } : {}),
+    ...(metadata.policyDir !== undefined ? { policyDir: metadata.policyDir } : {}),
+    ...(metadata.disableAutoApprove !== undefined ? { disableAutoApprove: metadata.disableAutoApprove } : {}),
   };
 }
 
@@ -173,7 +175,9 @@ async function createDockerSession(
     onEscalationResolved: options.onEscalationResolved,
     onDiagnostic: options.onDiagnostic,
     preBuiltInfrastructure: {
-      systemPrompt: infra.systemPrompt,
+      systemPrompt: sessionConfig.systemPromptAugmentation
+        ? `${infra.systemPrompt}\n\n${sessionConfig.systemPromptAugmentation}`
+        : infra.systemPrompt,
       image: infra.image,
       mitmAddr: infra.mitmAddr,
     },

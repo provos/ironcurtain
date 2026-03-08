@@ -32,7 +32,7 @@ Today IronCurtain has one global policy for interactive sessions and per-job pol
         memory.md
 ```
 
-Personas live under `~/.ironcurtain/personas/`, which is already covered by the IronCurtain home directory's protected-path rule. The agent cannot modify persona configuration files (`constitution.md`, `persona.json`, `generated/`). However, `workspace/` and `memory.md` are writable by the agent — they are the persona's persistent state.
+Personas live under `~/.ironcurtain/personas/`, which is already covered by the IronCurtain home directory's protected-path rule. The agent cannot modify persona configuration files (`constitution.md`, `persona.json`, `generated/`). However, `workspace/` (including `workspace/memory.md`) is writable by the agent — it is the persona's persistent state.
 
 Tool annotations (`tool-annotations.json`) remain global -- they describe MCP tool schemas, not policy. Persona compilation reads annotations from the global generated directory, same as cron job compilation.
 
@@ -189,11 +189,7 @@ ${memoryContent ? `### Current Memory Contents\n\n${memoryContent}` : 'The memor
 }
 ```
 
-The memory file lives inside the persona directory but outside the `workspace/`. Since the persona's `allowedDirectory` is the workspace, the memory file is NOT directly writable via filesystem MCP tools. Instead, the memory content is injected into the system prompt (read) and the agent updates it by writing to a file inside the workspace that a post-session hook copies back.
-
-**Alternative (simpler)**: Place `memory.md` inside `workspace/` so it's directly readable and writable by the agent via filesystem tools. This is simpler and works immediately with no hooks. The downside is the agent could accidentally delete it, but that's a low risk and recoverable.
-
-**Recommended approach**: Place `memory.md` inside `workspace/memory.md`. The system prompt augmentation reads it at session start and includes its contents. The agent can also read and write it directly via filesystem tools during the session. Simple, no new infrastructure.
+The memory file lives at `workspace/memory.md`. The system prompt augmentation reads it at session start and includes its contents, and the agent can also read and write it directly via filesystem tools during the session. This is simple, requires no extra hooks, and matches the actual implementation.
 
 ### Security Considerations for Workspace and Memory
 

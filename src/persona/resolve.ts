@@ -87,15 +87,19 @@ export interface ResolvedPersona {
  */
 export function resolvePersona(nameRaw: string): ResolvedPersona {
   const name = createPersonaName(nameRaw);
-  const generatedDir = getPersonaGeneratedDir(name);
 
+  // Load persona.json first — validates the persona directory exists and
+  // produces a clear error ("not found") before checking for compiled policy.
+  const persona = loadPersona(name);
+
+  const generatedDir = getPersonaGeneratedDir(name);
   if (!existsSync(resolve(generatedDir, 'compiled-policy.json'))) {
     throw new Error(`Persona "${name}" has no compiled policy. ` + `Run: ironcurtain persona compile ${name}`);
   }
 
   return {
     policyDir: generatedDir,
-    persona: loadPersona(name),
+    persona,
     workspacePath: getPersonaWorkspaceDir(name),
   };
 }
