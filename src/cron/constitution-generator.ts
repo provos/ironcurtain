@@ -30,6 +30,14 @@ export interface ConstitutionGenerationResult {
   readonly exploredServers: readonly string[];
 }
 
+/**
+ * Controls the framing of the constitution generation prompt.
+ *
+ * - 'cron': unattended job, escalation effectively means block
+ * - 'persona': interactive session, escalation is valid for risky operations
+ */
+export type GenerationContext = 'cron' | 'persona';
+
 /** Options for constitution generation. */
 export interface ConstitutionGeneratorOptions {
   /** The task description to generate a constitution for. */
@@ -40,6 +48,8 @@ export interface ConstitutionGeneratorOptions {
   readonly gitRepo?: string;
   /** Progress callback for spinner updates. */
   readonly onProgress?: (message: string) => void;
+  /** Generation context: 'cron' (default) or 'persona'. */
+  readonly context?: GenerationContext;
 }
 
 // ---------------------------------------------------------------------------
@@ -50,16 +60,55 @@ export interface ConstitutionGeneratorOptions {
  * Builds the system prompt augmentation for the constitution generator.
  * This is appended to the standard Code Mode system prompt via
  * SessionOptions.systemPromptAugmentation.
+ *
+ * @param context - Generation context: 'cron' for unattended jobs,
+ *   'persona' for interactive sessions. Defaults to 'cron'.
  */
 export function buildConstitutionGeneratorSystemPrompt(
   taskDescription: string,
   workspacePath: string,
   gitRepo?: string,
+  context: GenerationContext = 'cron',
 ): string {
+  const introLine =
+    context === 'persona'
+      ? 'You are generating a constitution for an interactive persona — a named profile used for human-interactive sessions.'
+      : 'You are generating a constitution for an automated, unattended scheduled job (cron).';
+
+  const criticalContext =
+    context === 'persona'
+      ? `This is an **interactive persona** — a human is present during sessions and can
+approve or deny escalated operations. Use escalation for operations that are
+risky but sometimes necessary (e.g., deleting files outside the workspace,
+pushing to protected branches). The human will decide in real time.
+
+If the description says the persona should do something, **allow it** — do not
+escalate operations the persona explicitly requires.`
+      : `This is a **cron job that runs unattended** — there is no human to approve
+escalations. "Require approval" effectively means "block this operation."
+Only escalate operations that are truly dangerous and should never run
+automatically (e.g., deleting production data, force-pushing to main).
+
+If the task description says the agent should do something (push to a remote,
+create PRs, write files), then **allow it** — do not escalate operations the
+task explicitly requires.`;
+
+  const exploreStep =
+    context === 'persona'
+      ? `1. **Explore** (optional): If the description references a specific project or
+   workspace, use execute_code to call MCP tools for essential context. If the
+   persona is general-purpose (email, research, etc.), skip exploration and
+   generate directly.`
+      : `1. **Explore** (briefly): Use execute_code to call MCP tools for essential context:
+   - Check the project structure and key files (README, package.json)
+   - Check git remotes and branching patterns if the task involves git
+   - Check GitHub repo structure if the task involves GitHub
+   Keep exploration focused — spend most effort on generation, not discovery.`;
+
   return `
 ## Constitution Generation Mode
 
-You are generating a constitution for an automated, unattended scheduled job (cron).
+${introLine}
 A constitution is a high-level document describing the guiding principles and
 permissions for the agent — what it is and is not permitted to do. A separate
 policy compiler will derive concrete enforcement rules from your constitution,
@@ -72,37 +121,26 @@ ${taskDescription}
 
 ## Workspace
 
-The job workspace is: ${workspacePath}
+The ${context === 'persona' ? 'persona' : 'job'} workspace is: ${workspacePath}
 ${gitRepo ? `Git repository: ${gitRepo}` : 'No git repository configured.'}
 
-## Critical Context: Structural Rules and Cron Jobs
+## Critical Context: Structural Rules
 
 The policy engine has **structural rules** that are always active — you must NOT
 duplicate them in the constitution:
 
 - **Workspace auto-allow**: At runtime, all read AND write operations within the
-  job workspace (${workspacePath}) are automatically allowed. Do NOT write rules
+  workspace (${workspacePath}) are automatically allowed. Do NOT write rules
   about reading or writing files in the workspace — they are redundant.
 - **Default-deny**: Any operation not covered by a rule is automatically denied.
   You do NOT need to write "deny" or "NOT allowed" statements — omitting a
   permission is sufficient to block it.
 
-This is a **cron job that runs unattended** — there is no human to approve
-escalations. "Require approval" effectively means "block this operation."
-Only escalate operations that are truly dangerous and should never run
-automatically (e.g., deleting production data, force-pushing to main).
-
-If the task description says the agent should do something (push to a remote,
-create PRs, write files), then **allow it** — do not escalate operations the
-task explicitly requires.
+${criticalContext}
 
 ## Your Process
 
-1. **Explore** (briefly): Use execute_code to call MCP tools for essential context:
-   - Check the project structure and key files (README, package.json)
-   - Check git remotes and branching patterns if the task involves git
-   - Check GitHub repo structure if the task involves GitHub
-   Keep exploration focused — spend most effort on generation, not discovery.
+${exploreStep}
 
 2. **Generate**: Write a concise constitution (aim for 5-10 high-level statements):
    - **Only describe permissions for actions mediated by MCP tools** — the policy
@@ -117,7 +155,7 @@ task explicitly requires.
      However, branch names and commit messages CANNOT be constrained — do not
      write statements about specific branch name patterns.
    - Write statements about operations OUTSIDE the workspace or for external services
-   - Allow everything the task explicitly needs to do autonomously
+   - Allow everything the ${context === 'persona' ? 'persona' : 'task'} explicitly needs to do autonomously
    - Only escalate truly dangerous operations (destructive, irreversible)
    - Use natural language — the policy compiler will derive concrete rules
    - Reference categories for groups (e.g., "popular news sites") not individual items
@@ -133,7 +171,7 @@ Output a JSON block with:
 
 Wrap the JSON in a \`\`\`json code fence.
 
-## Example Constitution (for a job that pushes code and creates PRs)
+## Example Constitution (for a ${context === 'persona' ? 'persona' : 'job'} that pushes code and creates PRs)
 
  - The agent has full local git access and may push to the origin remote
  - The agent has read access to all GitHub repositories
@@ -210,6 +248,7 @@ export async function generateConstitution(
     options.taskDescription,
     options.workspacePath,
     options.gitRepo,
+    options.context ?? 'cron',
   );
 
   const userMessage = buildConstitutionGenerationUserMessage(options.taskDescription);

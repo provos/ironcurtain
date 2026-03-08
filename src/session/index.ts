@@ -7,6 +7,7 @@
  */
 
 import { existsSync, mkdirSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { loadConfig } from '../config/index.js';
 import {
   getIronCurtainHome,
@@ -22,8 +23,11 @@ import {
 import type { IronCurtainConfig } from '../config/types.js';
 import * as logger from '../logger.js';
 import { resolveRealPath } from '../types/argument-roles.js';
+import { resolvePersona, applyServerAllowlist } from '../persona/resolve.js';
+import { buildPersonaSystemPromptAugmentation } from '../persona/persona-prompt.js';
 import { AgentSession } from './agent-session.js';
 import { SessionError } from './errors.js';
+import { saveSessionMetadata, loadSessionMetadata } from './session-metadata.js';
 import { isEqualOrInside } from './workspace-validation.js';
 import { createSessionId } from './types.js';
 import type { Session, SessionId, SessionOptions, SessionMode } from './types.js';
@@ -43,13 +47,35 @@ import type { Session, SessionId, SessionOptions, SessionMode } from './types.js
  *   sandbox or MCP connection setup fails.
  */
 export async function createSession(options: SessionOptions = {}): Promise<Session> {
-  const mode: SessionMode = options.mode ?? { kind: 'builtin' };
+  // When resuming, restore persisted session settings (persona, workspace, etc.)
+  const effectiveOptions = applyResumeMetadata(options);
+  const mode: SessionMode = effectiveOptions.mode ?? { kind: 'builtin' };
 
   if (mode.kind === 'docker') {
-    return createDockerSession(mode.agent, options);
+    return createDockerSession(mode.agent, effectiveOptions);
   }
 
-  return createBuiltinSession(options);
+  return createBuiltinSession(effectiveOptions);
+}
+
+/**
+ * Merges persisted session metadata into options when resuming.
+ * Returns options unchanged for new sessions or when no metadata exists
+ * (graceful for sessions created before metadata persistence was added).
+ */
+function applyResumeMetadata(options: SessionOptions): SessionOptions {
+  if (!options.resumeSessionId) return options;
+  const metadata = loadSessionMetadata(options.resumeSessionId);
+  if (!metadata) return options;
+  return {
+    ...options,
+    // Only spread defined metadata fields so undefined doesn't overwrite
+    // caller-provided values (important for non-CLI callers like the daemon).
+    ...(metadata.persona !== undefined ? { persona: metadata.persona } : {}),
+    ...(metadata.workspacePath !== undefined ? { workspacePath: metadata.workspacePath } : {}),
+    ...(metadata.policyDir !== undefined ? { policyDir: metadata.policyDir } : {}),
+    ...(metadata.disableAutoApprove !== undefined ? { disableAutoApprove: metadata.disableAutoApprove } : {}),
+  };
 }
 
 /**
@@ -76,7 +102,13 @@ async function createBuiltinSession(options: SessionOptions): Promise<Session> {
   const loggerWasActive = logger.isActive();
   const sessionConfig = buildSessionConfig(config, effectiveSessionId, sessionId, options);
 
-  const session = new AgentSession(sessionConfig.config, sessionId, sessionConfig.escalationDir, options);
+  // Merge resolved systemPromptAugmentation (may include persona augmentation)
+  // back into options so AgentSession sees it.
+  const effectiveOptions: SessionOptions = sessionConfig.systemPromptAugmentation
+    ? { ...options, systemPromptAugmentation: sessionConfig.systemPromptAugmentation }
+    : options;
+
+  const session = new AgentSession(sessionConfig.config, sessionId, sessionConfig.escalationDir, effectiveOptions);
 
   try {
     await session.initialize();
@@ -143,7 +175,9 @@ async function createDockerSession(
     onEscalationResolved: options.onEscalationResolved,
     onDiagnostic: options.onDiagnostic,
     preBuiltInfrastructure: {
-      systemPrompt: infra.systemPrompt,
+      systemPrompt: sessionConfig.systemPromptAugmentation
+        ? `${infra.systemPrompt}\n\n${sessionConfig.systemPromptAugmentation}`
+        : infra.systemPrompt,
       image: infra.image,
       mitmAddr: infra.mitmAddr,
     },
@@ -170,6 +204,8 @@ interface SessionDirConfig {
   sandboxDir: string;
   escalationDir: string;
   auditLogPath: string;
+  /** Resolved system prompt augmentation (may include persona augmentation). */
+  systemPromptAugmentation?: string;
 }
 
 /**
@@ -204,14 +240,53 @@ function validatePolicyDir(policyDir: string): void {
  * agent's working directory. The workspace already exists so we skip
  * creating it, but all other session infrastructure (logs, escalations)
  * still lives under the session directory.
+ *
+ * When persona is set, resolves the persona to a policyDir, workspace,
+ * server allowlist, and system prompt augmentation. Persona takes
+ * precedence over explicit policyDir if both are provided.
  */
 function buildSessionConfig(
   config: IronCurtainConfig,
   effectiveSessionId: string,
   sessionId: SessionId,
-  opts: Pick<SessionOptions, 'resumeSessionId' | 'workspacePath' | 'policyDir' | 'disableAutoApprove'> = {},
+  opts: Pick<
+    SessionOptions,
+    'resumeSessionId' | 'workspacePath' | 'policyDir' | 'disableAutoApprove' | 'persona' | 'systemPromptAugmentation'
+  > = {},
 ): SessionDirConfig {
-  const { resumeSessionId, workspacePath, policyDir, disableAutoApprove } = opts;
+  let { workspacePath, policyDir, systemPromptAugmentation } = opts;
+  const { resumeSessionId, disableAutoApprove } = opts;
+  let serverAllowlist: readonly string[] | undefined;
+
+  // Resolve persona early -- derives policyDir, workspace, server filter,
+  // and system prompt augmentation from the persona definition.
+  if (opts.persona) {
+    const resolved = resolvePersona(opts.persona);
+    if (policyDir) {
+      logger.warn('Both persona and policyDir specified; using persona.');
+    }
+    policyDir = resolved.policyDir;
+    serverAllowlist = resolved.persona.servers;
+
+    // Use persona workspace unless an explicit workspacePath was provided
+    if (!workspacePath) {
+      workspacePath = resolved.workspacePath;
+    }
+
+    // Build persona system prompt augmentation (includes memory contents).
+    // workspacePath is guaranteed set here (either from opts or resolved above),
+    // so the memory path is always inside the session's allowedDirectory.
+    const personaAugmentation = buildPersonaSystemPromptAugmentation(
+      resolved.persona,
+      resolve(workspacePath, 'memory.md'),
+    );
+    systemPromptAugmentation = systemPromptAugmentation
+      ? `${personaAugmentation}\n\n${systemPromptAugmentation}`
+      : personaAugmentation;
+
+    logger.info(`Persona "${opts.persona}" resolved: policyDir=${policyDir}`);
+  }
+
   if (policyDir) {
     validatePolicyDir(policyDir);
   }
@@ -221,8 +296,11 @@ function buildSessionConfig(
   const escalationDir = getSessionEscalationDir(effectiveSessionId);
   const auditLogPath = getSessionAuditLogPath(effectiveSessionId);
 
-  // Only create the sandbox directory when not using an external workspace
-  if (!workspacePath) {
+  // Create the directory when not using an explicit --workspace flag.
+  // When persona is set, `workspacePath` was derived internally (not
+  // from the caller), so we still need to ensure it exists.
+  // Only skip creation for explicit user-provided workspace paths.
+  if (!opts.workspacePath) {
     mkdirSync(sandboxDir, { recursive: true });
   }
   mkdirSync(escalationDir, { recursive: true });
@@ -252,8 +330,8 @@ function buildSessionConfig(
     sessionLogPath,
     llmLogPath,
     autoApproveLlmLogPath,
-    // When per-job policy is provided, split generated dir:
-    // generatedDir -> per-job dir (compiled policy + dynamic lists)
+    // When per-job/persona policy is provided, split generated dir:
+    // generatedDir -> per-job/persona dir (compiled policy + dynamic lists)
     // toolAnnotationsDir -> global dir (tool annotations)
     ...(policyDir
       ? {
@@ -268,8 +346,26 @@ function buildSessionConfig(
       : {}),
   };
 
+  // Apply server allowlist if persona specifies one
+  if (serverAllowlist) {
+    sessionConfig.mcpServers = applyServerAllowlist(sessionConfig.mcpServers, serverAllowlist);
+  }
+
   // Patch MCP server args to use the session-specific sandbox directory
   patchMcpServerAllowedDirectory(sessionConfig, sandboxDir);
+
+  // Persist session settings so --resume can restore them.
+  // Only write on initial creation (not when resuming).
+  if (!resumeSessionId) {
+    saveSessionMetadata(effectiveSessionId, {
+      createdAt: new Date().toISOString(),
+      ...(opts.persona ? { persona: opts.persona } : {}),
+      ...(opts.workspacePath ? { workspacePath: opts.workspacePath } : {}),
+      // Only store policyDir when no persona is set (persona derives its own)
+      ...(!opts.persona && policyDir ? { policyDir } : {}),
+      ...(opts.disableAutoApprove ? { disableAutoApprove: true } : {}),
+    });
+  }
 
   return {
     config: sessionConfig,
@@ -277,6 +373,7 @@ function buildSessionConfig(
     sandboxDir,
     escalationDir,
     auditLogPath,
+    systemPromptAugmentation,
   };
 }
 

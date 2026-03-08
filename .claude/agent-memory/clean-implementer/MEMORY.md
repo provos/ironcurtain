@@ -144,6 +144,18 @@ Zod v4 (^4.3.6) strict by default. Mock response JSON must exactly match Zod sch
 - **parseJsonWithSchema()**: exported from generate-with-repair.ts; shared extraction+validation for session and generateObjectWithRepair
 - **Design**: `docs/designs/scenario-generator-multi-turn.md`
 
+## Persona System
+- **Design**: `docs/designs/persona-system.md`
+- **Types**: `src/persona/types.ts` -- `PersonaName` (branded), `PersonaDefinition`, `PERSONA_NAME_PATTERN`, `createPersonaName()`
+- **Resolver**: `src/persona/resolve.ts` -- path helpers, `loadPersona()`, `resolvePersona()`, `applyServerAllowlist()`
+- **Compilation**: `src/persona/compile-persona-policy.ts` -- `compilePersonaPolicy(name)` wraps PipelineRunner with `constitutionKind: 'constitution'`
+- **Prompt**: `src/persona/persona-prompt.ts` -- `buildPersonaSystemPromptAugmentation(persona, memoryPath)`
+- **Customizer**: `src/persona/persona-customizer.ts` -- `runPersonaConstitutionCustomizer()` same pattern as job-customizer
+- **CLI**: `src/persona/persona-command.ts` -- subcommands: create, list, compile, edit, delete, show
+- **Session integration**: `persona?: string` in `SessionOptions`; resolved in `buildSessionConfig()` via static import of resolve.ts
+- **Constitution generator**: `context?: 'cron' | 'persona'` added to `ConstitutionGeneratorOptions` in `src/cron/constitution-generator.ts`
+- **Layout**: `~/.ironcurtain/personas/{name}/{persona.json, constitution.md, generated/, workspace/memory.md}`
+
 ## Design Documents
 - `docs/designs/policy-compilation-pipeline.md` -- pipeline design spec
 - `docs/designs/multi-server-onboarding.md` -- TB1a design spec (role extensibility + git server)
@@ -152,6 +164,7 @@ Zod v4 (^4.3.6) strict by default. Mock response JSON must exactly match Zod sch
 - `docs/designs/tb1c-constitution-customizer.md` -- LLM-assisted constitution customization
 - `docs/designs/scenario-generator-multi-turn.md` -- multi-turn scenario generation with prompt caching
 - `docs/designs/pty-escalation-listener.md` -- PTY mode + escalation listener (see `pty-escalation.md`)
+- `docs/designs/persona-system.md` -- persona system design spec
 
 ## OAuth Docker Support (Phase 1-2)
 - **Module**: `src/docker/oauth-credentials.ts` -- credential detection, Keychain extraction, `detectAuthMethod()`

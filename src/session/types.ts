@@ -17,6 +17,20 @@ export function createSessionId(): SessionId {
 }
 
 /**
+ * Persisted session metadata written to session-metadata.json.
+ * Stores the original user intent (persona name, explicit workspace)
+ * rather than resolved paths so that on resume the persona can be
+ * re-resolved with updated policies.
+ */
+export interface SessionMetadata {
+  readonly createdAt: string;
+  readonly persona?: string;
+  readonly workspacePath?: string;
+  readonly policyDir?: string;
+  readonly disableAutoApprove?: boolean;
+}
+
+/**
  * The possible states a session can be in. Linear progression:
  * initializing -> ready -> (processing <-> ready) -> closed.
  *
@@ -234,6 +248,14 @@ export interface SessionOptions {
    * is no interactive user context to match escalations against.
    */
   disableAutoApprove?: boolean;
+
+  /**
+   * Persona name. When set, resolves to a policyDir, optional server
+   * filter, persistent workspace, and system prompt augmentation.
+   * Mutually exclusive with policyDir -- if both are provided,
+   * persona takes precedence with a warning.
+   */
+  persona?: string;
 }
 
 /**

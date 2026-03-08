@@ -22,6 +22,7 @@ const startSpec: CommandSpec = {
     { flag: 'resume', short: 'r', description: 'Resume a previous session', placeholder: '<id>' },
     { flag: 'agent', short: 'a', description: 'Agent mode: builtin or claude-code (Docker)', placeholder: '<name>' },
     { flag: 'workspace', short: 'w', description: 'Use an existing directory as the workspace', placeholder: '<path>' },
+    { flag: 'persona', short: 'p', description: 'Use a named persona profile', placeholder: '<name>' },
     { flag: 'pty', description: 'Attach terminal directly to agent PTY (Docker mode only)' },
     { flag: 'list-agents', description: 'List registered agent adapters' },
   ],
@@ -31,6 +32,7 @@ const startSpec: CommandSpec = {
     'ironcurtain start --resume <session-id>        # Resume a session',
     'ironcurtain start -w ./my-project "Fix bugs"   # Work in existing directory',
     'ironcurtain start --agent claude-code "task"   # Docker: Claude Code',
+    'ironcurtain start -p exec-assistant "Check mail" # Use a persona',
     'ironcurtain start --pty                        # PTY mode: interactive Docker terminal',
     'ironcurtain start --list-agents                # List available agents',
   ],
@@ -44,6 +46,7 @@ export async function main(args?: string[]): Promise<void> {
       resume: { type: 'string', short: 'r' },
       agent: { type: 'string', short: 'a' },
       workspace: { type: 'string', short: 'w' },
+      persona: { type: 'string', short: 'p' },
       pty: { type: 'boolean' },
       'list-agents': { type: 'boolean' },
     },
@@ -74,17 +77,21 @@ export async function main(args?: string[]): Promise<void> {
   const resumeSessionId = values.resume as string | undefined;
   const agentName = values.agent as string | undefined;
   const rawWorkspace = values.workspace as string | undefined;
+  const personaName = values.persona as string | undefined;
   const config = loadConfig();
 
-  // Disallow combining --resume with --workspace
+  // When resuming, CLI --workspace and --persona are ignored -- the original
+  // values are restored from persisted session metadata.
   if (resumeSessionId && rawWorkspace) {
-    process.stderr.write(chalk.red('Error: --resume and --workspace cannot be used together.\n'));
-    process.exit(1);
+    process.stderr.write(chalk.yellow('Note: --workspace is ignored when resuming; original workspace is restored.\n'));
+  }
+  if (resumeSessionId && personaName) {
+    process.stderr.write(chalk.yellow('Note: --persona is ignored when resuming; original persona is restored.\n'));
   }
 
   // Validate --workspace before anything else that uses config
   let workspacePath: string | undefined;
-  if (rawWorkspace) {
+  if (rawWorkspace && !resumeSessionId) {
     try {
       workspacePath = validateWorkspacePath(rawWorkspace, config.protectedPaths);
     } catch (error) {
@@ -150,7 +157,9 @@ export async function main(args?: string[]): Promise<void> {
       config,
       mode,
       resumeSessionId,
+      // workspacePath is already undefined when resuming (validation skipped above)
       workspacePath,
+      persona: resumeSessionId ? undefined : personaName,
       onEscalation: transport.createEscalationHandler(),
       onEscalationExpired: transport.createEscalationExpiredHandler(),
       onDiagnostic: transport.createDiagnosticHandler(),

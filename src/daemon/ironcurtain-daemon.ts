@@ -439,11 +439,13 @@ export class IronCurtainDaemon {
     // Create the session with per-job policy and escalation handler.
     // Auto-approver is disabled: cron sessions have no interactive user
     // context, so intent-matching against a user message is meaningless.
+    // When job.persona is set, use the persona's compiled policy instead
+    // of the job-specific generated dir.
     const session = await createSession({
       mode: this.mode,
       config: patchedConfig,
       workspacePath: workspace,
-      policyDir: jobGeneratedDir,
+      ...(job.persona ? { persona: job.persona } : { policyDir: jobGeneratedDir }),
       systemPromptAugmentation: augmentation,
       disableAutoApprove: true,
       onEscalation: (request) => {
