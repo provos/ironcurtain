@@ -466,10 +466,11 @@ describe('MitmProxy', () => {
     const realNow = Date.now;
     Date.now = () => realNow.call(Date) + 23.5 * 60 * 60 * 1000;
 
+    let tls2: tls.TLSSocket | undefined;
     try {
       // Second connection — should get a freshly generated cert, not the expired cached one
       const { socket: s2 } = await sendConnect(socketPath, 'api.test.com', 443);
-      const tls2 = await new Promise<tls.TLSSocket>((resolve, reject) => {
+      tls2 = await new Promise<tls.TLSSocket>((resolve, reject) => {
         const t = tls.connect({ socket: s2!, servername: 'api.test.com', ca: ca.certPem }, () => resolve(t));
         t.on('error', reject);
       });
@@ -477,8 +478,8 @@ describe('MitmProxy', () => {
       const cert2 = tls2.getPeerCertificate();
       // The serial numbers should differ — proves the cert was regenerated
       expect(cert2.serialNumber).not.toBe(cert1.serialNumber);
-      tls2.destroy();
     } finally {
+      tls2?.destroy();
       Date.now = realNow;
     }
   });

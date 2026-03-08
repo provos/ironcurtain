@@ -102,7 +102,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     providersByHost.set(mapping.config.host, mapping);
   }
 
-  // Certificate cache: hostname → { context, expiresAt }
+  // Certificate cache: hostname → { ctx, expiresAt }
   const certCache = new Map<string, { ctx: tls.SecureContext; expiresAt: number }>();
 
   // Renew leaf certs 1 hour before they expire
