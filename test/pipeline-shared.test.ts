@@ -338,16 +338,13 @@ describe('loadToolAnnotationsFile', () => {
 
   it('resolves conditional role specs to their default roles', () => {
     const dir = tempDir('annotations-conditional');
-    writeFileSync(
-      resolve(dir, 'tool-annotations.json'),
-      JSON.stringify(makeStoredAnnotationsWithConditional()),
-    );
+    writeFileSync(resolve(dir, 'tool-annotations.json'), JSON.stringify(makeStoredAnnotationsWithConditional()));
 
     const result = loadToolAnnotationsFile(dir);
     expect(result).toBeDefined();
     // The conditional spec { default: ['git-remote-url'], when: [...] }
     // should be flattened to the default roles ['git-remote-url']
-    const cloneTool = result!.servers['git']!.tools[0]!;
+    const cloneTool = result!.servers['git'].tools[0];
     expect(cloneTool.args['url']).toEqual(['git-remote-url']);
   });
 
@@ -368,7 +365,7 @@ describe('loadToolAnnotationsFile', () => {
 
     const result = loadToolAnnotationsFile(dir);
     expect(result!.generatedAt).toBe('2026-03-08T00:00:00.000Z');
-    expect(result!.servers['filesystem']!.inputHash).toBe('abc123');
+    expect(result!.servers['filesystem'].inputHash).toBe('abc123');
   });
 
   it('returns undefined when the JSON is corrupt', () => {
