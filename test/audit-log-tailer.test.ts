@@ -91,7 +91,11 @@ describe('AuditLogTailer', () => {
     });
 
     it('formats toolName as "serverName.toolName"', () => {
-      writeFileSync(logPath, JSON.stringify(makeEntry({ serverName: 'github', toolName: 'create_issue' })) + '\n', 'utf-8');
+      writeFileSync(
+        logPath,
+        JSON.stringify(makeEntry({ serverName: 'github', toolName: 'create_issue' })) + '\n',
+        'utf-8',
+      );
       tailer.readNewEntries();
 
       const ev = events[0] as Extract<DiagnosticEvent, { kind: 'tool_call' }>;
