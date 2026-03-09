@@ -43,13 +43,7 @@ export async function main(args?: string[]): Promise<void> {
   if (process.platform === 'darwin') {
     try {
       const nodePtyEntry = fileURLToPath(import.meta.resolve('node-pty'));
-      const helperPath = join(
-        dirname(nodePtyEntry),
-        '..',
-        'prebuilds',
-        `darwin-${process.arch}`,
-        'spawn-helper',
-      );
+      const helperPath = join(dirname(nodePtyEntry), '..', 'prebuilds', `darwin-${process.arch}`, 'spawn-helper');
       const st = statSync(helperPath);
       if (!(st.mode & constants.S_IXUSR)) {
         try {
