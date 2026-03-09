@@ -6,7 +6,9 @@
  */
 
 import chalk from 'chalk';
-import { mkdirSync } from 'node:fs';
+import { chmodSync, constants, mkdirSync, statSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { getListenerLockPath, getPtyRegistryDir } from '../config/paths.js';
 import { acquireLock, releaseLock } from '../escalation/listener-lock.js';
@@ -32,6 +34,39 @@ export async function main(args?: string[]): Promise<void> {
       chalk.red('Error: ironcurtain mux requires the node-pty package.\n') + 'Install it with: npm install node-pty\n',
     );
     process.exit(1);
+  }
+
+  // On macOS, node-pty <=1.1.0 ships spawn-helper without the execute bit
+  // (https://github.com/microsoft/node-pty/issues/850), causing
+  // "posix_spawnp failed" at runtime.  Try to fix it; if we can't (e.g.
+  // read-only npx cache), give the user an actionable error message.
+  if (process.platform === 'darwin') {
+    try {
+      const nodePtyEntry = fileURLToPath(import.meta.resolve('node-pty'));
+      const helperPath = join(
+        dirname(nodePtyEntry),
+        '..',
+        'prebuilds',
+        `darwin-${process.arch}`,
+        'spawn-helper',
+      );
+      const st = statSync(helperPath);
+      if (!(st.mode & constants.S_IXUSR)) {
+        try {
+          chmodSync(helperPath, st.mode | constants.S_IXUSR | constants.S_IXGRP | constants.S_IXOTH);
+        } catch {
+          process.stderr.write(
+            chalk.red('Error: node-pty spawn-helper is not executable and cannot be fixed automatically.\n') +
+              `Run: chmod +x "${helperPath}"\n` +
+              'See: https://github.com/microsoft/node-pty/issues/850\n',
+          );
+          process.exit(1);
+        }
+      }
+    } catch {
+      // Could not locate spawn-helper; not fatal — let node-pty report
+      // its own error if spawning fails.
+    }
   }
   try {
     await import('terminal-kit');
