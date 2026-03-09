@@ -1000,22 +1000,14 @@ describe('isUserContextTrusted', () => {
   describe('PTY sessions', () => {
     it('trusts a context with the correct source and a fresh timestamp', () => {
       expect(
-        isUserContextTrusted(
-          { userMessage: 'hello', source: 'mux-trusted-input', timestamp: FRESH },
-          true,
-          NOW,
-        ),
+        isUserContextTrusted({ userMessage: 'hello', source: 'mux-trusted-input', timestamp: FRESH }, true, NOW),
       ).toBe(true);
     });
 
     it('does not trust a context with wrong source', () => {
-      expect(
-        isUserContextTrusted(
-          { userMessage: 'hello', source: 'other-source', timestamp: FRESH },
-          true,
-          NOW,
-        ),
-      ).toBe(false);
+      expect(isUserContextTrusted({ userMessage: 'hello', source: 'other-source', timestamp: FRESH }, true, NOW)).toBe(
+        false,
+      );
     });
 
     it('does not trust a context with missing source', () => {
@@ -1028,31 +1020,19 @@ describe('isUserContextTrusted', () => {
 
     it('does not trust a context with an invalid (NaN) timestamp', () => {
       expect(
-        isUserContextTrusted(
-          { userMessage: 'hello', source: 'mux-trusted-input', timestamp: 'not-a-date' },
-          true,
-          NOW,
-        ),
+        isUserContextTrusted({ userMessage: 'hello', source: 'mux-trusted-input', timestamp: 'not-a-date' }, true, NOW),
       ).toBe(false);
     });
 
     it('does not trust a context with a stale timestamp', () => {
       expect(
-        isUserContextTrusted(
-          { userMessage: 'hello', source: 'mux-trusted-input', timestamp: STALE },
-          true,
-          NOW,
-        ),
+        isUserContextTrusted({ userMessage: 'hello', source: 'mux-trusted-input', timestamp: STALE }, true, NOW),
       ).toBe(false);
     });
 
     it('does not trust a context with a future timestamp', () => {
       expect(
-        isUserContextTrusted(
-          { userMessage: 'hello', source: 'mux-trusted-input', timestamp: FUTURE },
-          true,
-          NOW,
-        ),
+        isUserContextTrusted({ userMessage: 'hello', source: 'mux-trusted-input', timestamp: FUTURE }, true, NOW),
       ).toBe(false);
     });
   });
