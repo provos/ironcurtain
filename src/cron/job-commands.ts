@@ -7,13 +7,11 @@
  * instead of calling these functions directly.
  */
 
-import { mkdirSync, writeFileSync, readFileSync, unlinkSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { mkdirSync } from 'node:fs';
 import chalk from 'chalk';
 import { loadAllJobs, loadJob, saveJob, deleteJob, loadRecentRuns } from './job-store.js';
 import { createJobId, type JobDefinition, type RunOutcome, type RunRecord } from './types.js';
+import { openEditorForMultiline } from '../utils/editor.js';
 import { getJobWorkspaceDir, getJobDir } from '../config/paths.js';
 import { compileTaskPolicy } from './compile-task-policy.js';
 import { parseCronExpression, getNextFireTime } from './cron-scheduler.js';
@@ -21,44 +19,6 @@ import { formatRelativeTime, describeCronExpression } from './format-utils.js';
 import { syncGitRepo, validateGitUri } from './git-sync.js';
 import { generateConstitution } from './constitution-generator.js';
 import { runJobConstitutionCustomizer } from './job-customizer.js';
-
-/**
- * Opens the user's $VISUAL / $EDITOR with a temporary file and returns
- * the edited content. Lines beginning with '#' are stripped (instructions).
- * Returns undefined if the user saves an empty file.
- *
- * @param initialContent Pre-populate the file with existing content (for editing).
- */
-function openEditorForMultiline(instructions: string, initialContent = ''): string | undefined {
-  const editor = process.env['VISUAL'] ?? process.env['EDITOR'] ?? 'nano';
-  const tmpFile = join(tmpdir(), `ironcurtain-task-${Date.now()}.txt`);
-
-  const header = instructions
-    .split('\n')
-    .map((l) => `# ${l}`)
-    .join('\n');
-  writeFileSync(tmpFile, `${header}\n\n${initialContent}`, 'utf-8');
-
-  try {
-    const result = spawnSync(editor, [tmpFile], { stdio: 'inherit' });
-    if (result.error) throw result.error;
-
-    const raw = readFileSync(tmpFile, 'utf-8');
-    const content = raw
-      .split('\n')
-      .filter((line) => !line.startsWith('#'))
-      .join('\n')
-      .trim();
-
-    return content || undefined;
-  } finally {
-    try {
-      unlinkSync(tmpFile);
-    } catch {
-      // ignore cleanup errors
-    }
-  }
-}
 
 /** Generates a unique default JobDefinition with empty task fields. */
 function generateDefaultJob(): JobDefinition {

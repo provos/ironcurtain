@@ -5,6 +5,8 @@
  * and CLI commands.
  */
 
+import { SLUG_PATTERN, validateSlug } from '../types/slug.js';
+
 /**
  * Stable, user-chosen identifier for a cron job.
  * Must be a valid slug: lowercase alphanumeric, hyphens, underscores.
@@ -13,17 +15,11 @@
 export type JobId = string & { readonly __brand: 'JobId' };
 
 /** Regex for valid job IDs: 1-63 chars, lowercase alphanumeric, hyphens, or underscores. */
-export const JOB_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,62}$/;
+export const JOB_ID_PATTERN: RegExp = SLUG_PATTERN;
 
 /** Validates and creates a JobId from a user-provided string. */
 export function createJobId(raw: string): JobId {
-  if (!JOB_ID_PATTERN.test(raw)) {
-    throw new Error(
-      `Invalid job ID "${raw}": must be 1-63 chars, ` +
-        `lowercase alphanumeric, hyphens, or underscores, ` +
-        `starting with a letter or digit`,
-    );
-  }
+  validateSlug(raw, 'job ID');
   return raw as JobId;
 }
 
@@ -87,6 +83,15 @@ export interface JobDefinition {
    * the cron-specific defaults.
    */
   readonly budgetOverrides?: Partial<JobBudgetOverrides>;
+
+  /**
+   * Optional persona name. When set, the job uses this persona's
+   * compiled policy instead of its inline taskConstitution.
+   * Mutually exclusive with taskConstitution -- if persona is set,
+   * taskConstitution is ignored for policy loading (but still used
+   * as the system prompt augmentation if present).
+   */
+  readonly persona?: string;
 
   /** Whether this job is active. Disabled jobs are not scheduled. */
   readonly enabled: boolean;

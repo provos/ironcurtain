@@ -25,6 +25,7 @@ const topLevelSpec: CommandSpec = {
     { name: 'mux', description: 'Terminal multiplexer for PTY sessions (requires node-pty)' },
     { name: 'escalation-listener', description: 'Aggregate escalation notifications from PTY sessions' },
     { name: 'bot', description: "Alias for 'daemon' (backward compatible)" },
+    { name: 'persona', description: 'Manage personas (named policy profiles)' },
     { name: 'setup', description: 'Run the first-start wizard (always runs)' },
     { name: 'setup-signal', description: 'Interactive Signal transport onboarding' },
     { name: 'annotate-tools', description: 'Classify MCP tool arguments via LLM' },
@@ -113,6 +114,11 @@ switch (subcommand) {
   case 'config': {
     const { runConfigCommand } = await import('./config/config-command.js');
     await runConfigCommand();
+    break;
+  }
+  case 'persona': {
+    const { main: personaMain } = await import('./persona/persona-command.js');
+    await personaMain(process.argv.slice(3));
     break;
   }
   case 'setup': {

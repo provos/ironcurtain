@@ -453,7 +453,7 @@ export class SignalBotDaemon {
    * wire callbacks, create session, start transport.
    * Returns the label of the new session.
    */
-  private async startNewSession(): Promise<number> {
+  private async startNewSession(persona?: string): Promise<number> {
     // Count only Signal sessions toward the concurrency limit
     const signalSessionCount = this.sessionManager.byKind('signal').length;
     if (signalSessionCount >= this.maxConcurrentSessions) {
@@ -467,6 +467,7 @@ export class SignalBotDaemon {
     const session = await createSession({
       config,
       mode: this.mode,
+      persona,
       onEscalation: transport.createEscalationHandler(),
       onEscalationExpired: transport.createEscalationExpiredHandler(),
       onDiagnostic: transport.createDiagnosticHandler(),
@@ -630,11 +631,13 @@ export class SignalBotDaemon {
       return true;
     }
 
-    // /new
-    if (lower === '/new') {
+    // /new [persona-name]
+    const newMatch = lower.match(/^\/new(?:\s+(\S+))?$/);
+    if (newMatch) {
+      const personaArg = newMatch[1]; // undefined if bare /new
       this.scheduleSessionOp(async () => {
         try {
-          await this.startNewSession();
+          await this.startNewSession(personaArg);
         } catch (err: unknown) {
           const msg = err instanceof Error ? err.message : String(err);
           await this.sendSignalMessage(msg);
@@ -731,7 +734,7 @@ export class SignalBotDaemon {
           sessionLine +
             '\n\n' +
             'Commands:\n' +
-            '  /new - start a new session\n' +
+            '  /new [persona] - start a new session (optionally with a persona)\n' +
             '  /sessions - list active sessions\n' +
             '  /switch N - switch to session #N\n' +
             '  #N <message> - send to session #N without switching\n' +
