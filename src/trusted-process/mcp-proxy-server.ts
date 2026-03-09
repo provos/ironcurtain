@@ -66,7 +66,7 @@ import type { ToolCallRequest, PolicyDecision } from '../types/mcp.js';
 import type { AuditEntry } from '../types/audit.js';
 import { ROOTS_REFRESH_TIMEOUT_MS, type McpRoot } from './mcp-client-manager.js';
 import { CallCircuitBreaker } from './call-circuit-breaker.js';
-import { autoApprove, extractArgsForAutoApprove, readUserContext } from './auto-approver.js';
+import { autoApprove, extractArgsForAutoApprove, readUserContext, type UserContext } from './auto-approver.js';
 import { createLanguageModelFromEnv } from '../config/model-provider.js';
 import { wrapLanguageModel } from 'ai';
 import { createLlmLoggingMiddleware } from '../pipeline/llm-logger.js';
@@ -185,6 +185,38 @@ const DEFAULT_ESCALATION_TIMEOUT_SECONDS = 300;
 
 /** Auto-approve trusted input older than this is rejected as stale. */
 const TRUSTED_INPUT_STALENESS_MS = 120_000;
+
+/**
+ * Returns true when a user context is safe to act on for auto-approval.
+ *
+ * For PTY sessions (isPtySession=true):
+ *   - source must be 'mux-trusted-input' (set by the trusted mux layer)
+ *   - timestamp must be present, valid, not in the future, and within
+ *     TRUSTED_INPUT_STALENESS_MS of `now`
+ *
+ * For non-PTY sessions:
+ *   - source is not checked (no mux layer in the path)
+ *   - a missing or invalid timestamp does not prevent trust; a valid stale
+ *     timestamp still prevents trust (belt-and-suspenders for future callers)
+ *
+ * @param context - The user context parsed from user-context.json
+ * @param isPtySession - Whether this is a PTY interactive session
+ * @param now - Current time in ms; defaults to Date.now() (injectable for tests)
+ */
+export function isUserContextTrusted(context: UserContext, isPtySession: boolean, now: number = Date.now()): boolean {
+  const sourceValid = !isPtySession || context.source === 'mux-trusted-input';
+  if (!sourceValid) return false;
+
+  let stale = isPtySession; // non-PTY sessions don't require timestamps
+  if (context.timestamp !== undefined) {
+    const tsMs = new Date(context.timestamp).getTime();
+    if (!Number.isNaN(tsMs)) {
+      const ageMs = now - tsMs;
+      stale = ageMs > TRUSTED_INPUT_STALENESS_MS || ageMs < 0;
+    }
+  }
+  return !stale;
+}
 
 /** Reads escalation timeout from env var, falling back to default. */
 function getEscalationTimeoutMs(): number {
@@ -658,21 +690,8 @@ export async function handleCallTool(
     if (deps.autoApproveModel) {
       const userContext = readUserContext(deps.escalationDir);
       if (userContext) {
-        // For PTY sessions, require trusted source from the mux
         const isPtySession = process.env.IRONCURTAIN_PTY_SESSION === '1';
-        const sourceValid = !isPtySession || userContext.source === 'mux-trusted-input';
-
-        // Staleness check: for PTY sessions, treat missing/invalid/future timestamps as stale
-        let stale = isPtySession; // non-PTY sessions don't require timestamps
-        if (userContext.timestamp !== undefined) {
-          const tsMs = new Date(userContext.timestamp).getTime();
-          if (!Number.isNaN(tsMs)) {
-            const ageMs = Date.now() - tsMs;
-            stale = ageMs > TRUSTED_INPUT_STALENESS_MS || ageMs < 0;
-          }
-        }
-
-        if (sourceValid && !stale) {
+        if (isUserContextTrusted(userContext, isPtySession)) {
           const autoResult = await autoApprove(
             {
               userMessage: userContext.userMessage,
