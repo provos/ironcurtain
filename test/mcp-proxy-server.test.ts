@@ -7,6 +7,7 @@ import {
   buildAuditEntry,
   handleCallTool,
   selectTransportConfig,
+  isUserContextTrusted,
   type ProxiedTool,
   type CallToolDeps,
   type ClientState,
@@ -959,5 +960,100 @@ describe('selectTransportConfig', () => {
     if (config.kind === 'tcp') {
       expect(config.port).toBe(65535);
     }
+  });
+});
+
+// ── isUserContextTrusted tests ─────────────────────────────────────────
+
+describe('isUserContextTrusted', () => {
+  const NOW = 1_000_000; // fixed "now" for deterministic staleness tests
+  const FRESH = new Date(NOW - 1000).toISOString(); // 1 second old (fresh)
+  const STALE = new Date(NOW - 200_000).toISOString(); // 200 seconds old (stale, limit is 120s)
+  const FUTURE = new Date(NOW + 5000).toISOString(); // 5 seconds in the future
+
+  describe('non-PTY sessions', () => {
+    it('trusts a context with no timestamp', () => {
+      expect(isUserContextTrusted({ userMessage: 'hello' }, false, NOW)).toBe(true);
+    });
+
+    it('trusts a context with a fresh timestamp', () => {
+      expect(isUserContextTrusted({ userMessage: 'hello', timestamp: FRESH }, false, NOW)).toBe(true);
+    });
+
+    it('does not trust a context with a stale timestamp', () => {
+      expect(isUserContextTrusted({ userMessage: 'hello', timestamp: STALE }, false, NOW)).toBe(false);
+    });
+
+    it('does not trust a context with a future timestamp', () => {
+      expect(isUserContextTrusted({ userMessage: 'hello', timestamp: FUTURE }, false, NOW)).toBe(false);
+    });
+
+    it('trusts a context with an invalid (NaN) timestamp', () => {
+      expect(isUserContextTrusted({ userMessage: 'hello', timestamp: 'not-a-date' }, false, NOW)).toBe(true);
+    });
+
+    it('ignores source for non-PTY sessions', () => {
+      expect(isUserContextTrusted({ userMessage: 'hello', source: 'untrusted-source' }, false, NOW)).toBe(true);
+    });
+  });
+
+  describe('PTY sessions', () => {
+    it('trusts a context with the correct source and a fresh timestamp', () => {
+      expect(
+        isUserContextTrusted(
+          { userMessage: 'hello', source: 'mux-trusted-input', timestamp: FRESH },
+          true,
+          NOW,
+        ),
+      ).toBe(true);
+    });
+
+    it('does not trust a context with wrong source', () => {
+      expect(
+        isUserContextTrusted(
+          { userMessage: 'hello', source: 'other-source', timestamp: FRESH },
+          true,
+          NOW,
+        ),
+      ).toBe(false);
+    });
+
+    it('does not trust a context with missing source', () => {
+      expect(isUserContextTrusted({ userMessage: 'hello', timestamp: FRESH }, true, NOW)).toBe(false);
+    });
+
+    it('does not trust a context with no timestamp (PTY requires it)', () => {
+      expect(isUserContextTrusted({ userMessage: 'hello', source: 'mux-trusted-input' }, true, NOW)).toBe(false);
+    });
+
+    it('does not trust a context with an invalid (NaN) timestamp', () => {
+      expect(
+        isUserContextTrusted(
+          { userMessage: 'hello', source: 'mux-trusted-input', timestamp: 'not-a-date' },
+          true,
+          NOW,
+        ),
+      ).toBe(false);
+    });
+
+    it('does not trust a context with a stale timestamp', () => {
+      expect(
+        isUserContextTrusted(
+          { userMessage: 'hello', source: 'mux-trusted-input', timestamp: STALE },
+          true,
+          NOW,
+        ),
+      ).toBe(false);
+    });
+
+    it('does not trust a context with a future timestamp', () => {
+      expect(
+        isUserContextTrusted(
+          { userMessage: 'hello', source: 'mux-trusted-input', timestamp: FUTURE },
+          true,
+          NOW,
+        ),
+      ).toBe(false);
+    });
   });
 });
