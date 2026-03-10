@@ -382,7 +382,7 @@ function buildSessionConfig(
  * to use the session-specific sandbox directory, mirroring the
  * logic in loadConfig() that syncs ALLOWED_DIRECTORY.
  */
-function patchMcpServerAllowedDirectory(
+export function patchMcpServerAllowedDirectory(
   config: { mcpServers: Record<string, { args: string[] }> },
   sandboxDir: string,
 ): void {
