@@ -292,12 +292,19 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
     });
     escalationFileWatcher.start();
 
-    // Wait for PTY socket readiness
+    // Wait for PTY socket readiness.
+    // On macOS TCP mode, skip the readiness probe — the main container's socat
+    // does NOT use `fork`, so it only accepts one connection. A readiness probe
+    // would consume that slot and cause the real attachPty connection to fail.
+    // Instead, attachPty retries internally for TCP targets.
     const ptyTarget = useTcp
       ? { host: 'localhost', port: ptyPort ?? DEFAULT_PTY_PORT }
       : resolve(socketsDir, PTY_SOCK_NAME);
 
-    await waitForPtyReady(ptyTarget);
+    if (!useTcp) {
+      await waitForPtyReady(ptyTarget);
+      logger.info('PTY readiness check passed');
+    }
 
     initSpinner.succeed(chalk.dim('PTY session ready'));
     process.stderr.write('\n');
@@ -308,6 +315,7 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
       containerId,
       signal: shutdownController.signal,
     });
+    logger.info(`PTY attach returned with exit code ${exitCode}`);
 
     // PTY disconnected -- restore terminal and show shutdown progress
     restoreTerminal();
@@ -397,8 +405,42 @@ interface PtyProxyOptions {
 /**
  * Attaches the user's terminal to the container PTY via a Node.js socket.
  * Returns a promise that resolves with 0 on normal close, 1 on error.
+ *
+ * For TCP targets (macOS), retries the connection with polling since
+ * the container's socat may not be listening yet when this is called.
+ * The socat inside the container does NOT use `fork`, so only one
+ * connection is accepted — no separate readiness probe is used.
  */
-function attachPty(options: PtyProxyOptions): Promise<number> {
+async function attachPty(options: PtyProxyOptions): Promise<number> {
+  const isTcp = typeof options.target !== 'string';
+  if (isTcp) {
+    // TCP: poll until the connection succeeds and stays open, then attach.
+    const deadline = Date.now() + PTY_READINESS_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      const code = await attachPtyOnce(options);
+      // code 0 with very short duration means the connection was closed immediately
+      // (socat not ready or backend refused). Retry unless signal aborted.
+      if (options.signal?.aborted) return 0;
+      // If we got a real session (not an instant close), return the exit code.
+      // We detect "instant close" by checking if the connection lasted meaningfully.
+      // attachPtyOnce sets a flag when data was received from the remote.
+      if (code !== -1) return code;
+      logger.info('PTY TCP connection closed immediately, retrying...');
+      await new Promise((r) => setTimeout(r, PTY_READINESS_POLL_MS));
+    }
+    throw new Error(`PTY TCP connection did not stabilize within ${PTY_READINESS_TIMEOUT_MS / 1000}s`);
+  }
+  // UDS (Linux): readiness was already verified, so -1 (no data before close)
+  // is treated as a normal close — the container exited before sending output.
+  const code = await attachPtyOnce(options);
+  return code === -1 ? 0 : code;
+}
+
+/**
+ * Single attempt to attach to the PTY. Returns -1 if the connection
+ * was closed before any data was received (signals retry for TCP).
+ */
+function attachPtyOnce(options: PtyProxyOptions): Promise<number> {
   const conn = connectToTarget(options.target);
 
   const { stdin, stdout } = process;
@@ -412,6 +454,10 @@ function attachPty(options: PtyProxyOptions): Promise<number> {
     };
 
     conn.once('connect', () => {
+      let receivedData = false;
+      conn.once('data', () => {
+        receivedData = true;
+      });
       // Put terminal in raw mode
       if (stdin.isTTY) {
         stdin.setRawMode(true);
@@ -497,16 +543,16 @@ function attachPty(options: PtyProxyOptions): Promise<number> {
 
       conn.once('close', () => {
         cleanup();
-        settle(0);
+        settle(receivedData ? 0 : -1);
       });
       conn.once('error', () => {
         cleanup();
-        settle(1);
+        settle(receivedData ? 1 : -1);
       });
     });
 
     conn.once('error', () => {
-      settle(1);
+      settle(-1); // connection failed, signal retry for TCP
     });
   });
 }
@@ -619,7 +665,8 @@ async function waitForPtyReady(target: PtyTarget): Promise<void> {
 }
 
 /**
- * Tries to connect to a target. Returns true if the connection succeeds.
+ * Tries to connect to a UDS target. Returns true if the connection succeeds.
+ * Used only for Linux readiness polling (macOS TCP skips the readiness probe).
  */
 function tryConnect(target: PtyTarget): Promise<boolean> {
   return new Promise((resolve) => {
