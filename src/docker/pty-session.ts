@@ -13,7 +13,7 @@
  *     -> mcp-proxy-server (PolicyEngine + Audit)
  */
 
-import { createConnection } from 'node:net';
+import { createConnection, createServer } from 'node:net';
 import { execFile } from 'node:child_process';
 import { mkdirSync, writeFileSync, unlinkSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -183,6 +183,8 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
     let network: string;
     let mounts: { source: string; target: string; readonly: boolean }[];
     let extraHosts: string[] | undefined;
+    let hostPtyPort: number | undefined;
+    const mainContainerName = `ironcurtain-pty-${shortId}`;
 
     if (useTcp && proxy.port !== undefined && mitmAddr.port !== undefined) {
       // macOS TCP mode
@@ -208,9 +210,15 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
         await docker.pullImage(socatImage);
       }
 
-      // Create socat sidecar with PTY port forwarding
+      // Create socat sidecar: forwards MCP/MITM container→host and PTY host→container.
+      // The PTY socat is reversed because the host connects TO the container's PTY socket.
+      // Docker DNS resolves the main container name on the internal network, and socat
+      // with `fork` only resolves at connection time (so it's fine that main starts later).
       const sidecarName = `ironcurtain-sidecar-${shortId}`;
-      const ptyPortNum = ptyPort ?? DEFAULT_PTY_PORT;
+      // Container-internal PTY port is fixed; host-side port is dynamic to
+      // avoid conflicts when multiple PTY sessions run concurrently.
+      const containerPtyPort = ptyPort ?? DEFAULT_PTY_PORT;
+      hostPtyPort = await findFreePort();
       sidecarContainerId = await docker.create({
         image: socatImage,
         name: sidecarName,
@@ -218,13 +226,18 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
         mounts: [],
         env: {},
         entrypoint: '/bin/sh',
+        ports: [`127.0.0.1:${hostPtyPort}:${containerPtyPort}`],
         command: [
           '-c',
           quote(['socat', `TCP-LISTEN:${mcpPort},fork,reuseaddr`, `TCP:host.docker.internal:${mcpPort}`]) +
             ' & ' +
             quote(['socat', `TCP-LISTEN:${mitmPort},fork,reuseaddr`, `TCP:host.docker.internal:${mitmPort}`]) +
             ' & ' +
-            quote(['socat', `TCP-LISTEN:${ptyPortNum},fork,reuseaddr`, `TCP:host.docker.internal:${ptyPortNum}`]) +
+            quote([
+              'socat',
+              `TCP-LISTEN:${containerPtyPort},fork,reuseaddr`,
+              `TCP:${mainContainerName}:${containerPtyPort}`,
+            ]) +
             ' & wait',
         ],
       });
@@ -261,7 +274,7 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
     // Create and start container with PTY command and TTY
     containerId = await docker.create({
       image,
-      name: `ironcurtain-pty-${shortId}`,
+      name: mainContainerName,
       network,
       mounts,
       env,
@@ -287,12 +300,25 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
     });
     escalationFileWatcher.start();
 
-    // Wait for PTY socket readiness
-    const ptyTarget = useTcp
-      ? { host: 'localhost', port: ptyPort ?? DEFAULT_PTY_PORT }
-      : resolve(socketsDir, PTY_SOCK_NAME);
+    // Wait for PTY socket readiness.
+    // On macOS TCP mode, skip the readiness probe — the main container's socat
+    // does NOT use `fork`, so it only accepts one connection. A readiness probe
+    // would consume that slot and cause the real attachPty connection to fail.
+    // Instead, attachPty retries internally for TCP targets.
+    let ptyTarget: PtyTarget;
+    if (useTcp) {
+      if (hostPtyPort === undefined) {
+        throw new Error('PTY session misconfiguration: useTcp is true but hostPtyPort was not assigned');
+      }
+      ptyTarget = { host: 'localhost', port: hostPtyPort };
+    } else {
+      ptyTarget = resolve(socketsDir, PTY_SOCK_NAME);
+    }
 
-    await waitForPtyReady(ptyTarget);
+    if (!useTcp) {
+      await waitForPtyReady(ptyTarget);
+      logger.info('PTY readiness check passed');
+    }
 
     initSpinner.succeed(chalk.dim('PTY session ready'));
     process.stderr.write('\n');
@@ -303,6 +329,7 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
       containerId,
       signal: shutdownController.signal,
     });
+    logger.info(`PTY attach returned with exit code ${exitCode}`);
 
     // PTY disconnected -- restore terminal and show shutdown progress
     restoreTerminal();
@@ -392,8 +419,42 @@ interface PtyProxyOptions {
 /**
  * Attaches the user's terminal to the container PTY via a Node.js socket.
  * Returns a promise that resolves with 0 on normal close, 1 on error.
+ *
+ * For TCP targets (macOS), retries the connection with polling since
+ * the container's socat may not be listening yet when this is called.
+ * The socat inside the container does NOT use `fork`, so only one
+ * connection is accepted — no separate readiness probe is used.
  */
-function attachPty(options: PtyProxyOptions): Promise<number> {
+async function attachPty(options: PtyProxyOptions): Promise<number> {
+  const isTcp = typeof options.target !== 'string';
+  if (isTcp) {
+    // TCP: poll until the connection succeeds and stays open, then attach.
+    const deadline = Date.now() + PTY_READINESS_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      const code = await attachPtyOnce(options);
+      // code 0 with very short duration means the connection was closed immediately
+      // (socat not ready or backend refused). Retry unless signal aborted.
+      if (options.signal?.aborted) return 0;
+      // If we got a real session (not an instant close), return the exit code.
+      // We detect "instant close" by checking if the connection lasted meaningfully.
+      // attachPtyOnce sets a flag when data was received from the remote.
+      if (code !== -1) return code;
+      logger.info('PTY TCP connection closed immediately, retrying...');
+      await new Promise((r) => setTimeout(r, PTY_READINESS_POLL_MS));
+    }
+    throw new Error(`PTY TCP connection did not stabilize within ${PTY_READINESS_TIMEOUT_MS / 1000}s`);
+  }
+  // UDS (Linux): readiness was already verified, so -1 (no data before close)
+  // is treated as a normal close — the container exited before sending output.
+  const code = await attachPtyOnce(options);
+  return code === -1 ? 0 : code;
+}
+
+/**
+ * Single attempt to attach to the PTY. Returns -1 if the connection
+ * was closed before any data was received (signals retry for TCP).
+ */
+function attachPtyOnce(options: PtyProxyOptions): Promise<number> {
   const conn = connectToTarget(options.target);
 
   const { stdin, stdout } = process;
@@ -407,17 +468,14 @@ function attachPty(options: PtyProxyOptions): Promise<number> {
     };
 
     conn.once('connect', () => {
-      // Put terminal in raw mode
-      if (stdin.isTTY) {
-        stdin.setRawMode(true);
-      }
-      stdin.resume();
-
-      // SIGWINCH: forward terminal resize to container PTY.
-      // verifyAbort cancels the background verify loop on first user resize
-      // so it doesn't fight with the new size.
+      // Defer raw mode, stdin forwarding, and resize handling until the first
+      // data arrives from the remote. For TCP retries, an instant close (no
+      // data) returns -1 without touching the terminal, so the user is never
+      // left stuck in raw mode between retry attempts.
+      let receivedData = false;
       const verifyAbort = new AbortController();
       let isFirstResize = true;
+
       const onResize = (): void => {
         const { columns, rows } = stdout;
         if (columns && rows) {
@@ -440,16 +498,6 @@ function attachPty(options: PtyProxyOptions): Promise<number> {
           );
         }
       };
-      stdout.on('resize', onResize);
-      // Send initial size
-      onResize();
-
-      // Background verify+retry to ensure the initial resize took effect.
-      // Fire-and-forget -- does not block the PTY proxy.
-      // Canceled via verifyAbort when the user resizes the terminal.
-      if (stdout.columns && stdout.rows) {
-        void verifyInitialPtySize(options.containerId, stdout.columns, stdout.rows, verifyAbort.signal);
-      }
 
       // Host -> Container
       // Ctrl-\ (0x1c) is intercepted as an emergency exit since raw mode
@@ -464,10 +512,33 @@ function attachPty(options: PtyProxyOptions): Promise<number> {
         }
         conn.write(data);
       };
-      stdin.on('data', onData);
 
-      // Container -> Host (untrusted output, displayed directly)
+      // Container -> Host (untrusted output, displayed directly).
+      // Piped immediately so no data is lost; raw mode and stdin forwarding
+      // are deferred until we confirm the connection is real (first data).
       conn.pipe(stdout);
+
+      conn.once('data', () => {
+        receivedData = true;
+        // Now that the connection is confirmed, enter raw mode and start
+        // forwarding user input to the container.
+        if (stdin.isTTY) {
+          stdin.setRawMode(true);
+        }
+        stdin.resume();
+        stdin.on('data', onData);
+
+        // Start resize forwarding and send initial size
+        stdout.on('resize', onResize);
+        onResize();
+
+        // Background verify+retry to ensure the initial resize took effect.
+        // Fire-and-forget -- does not block the PTY proxy.
+        // Canceled via verifyAbort when the user resizes the terminal.
+        if (stdout.columns && stdout.rows) {
+          void verifyInitialPtySize(options.containerId, stdout.columns, stdout.rows, verifyAbort.signal);
+        }
+      });
 
       // Use function declarations (hoisted) so cleanup and onAbort can
       // reference each other without temporal dead zone issues.
@@ -475,7 +546,9 @@ function attachPty(options: PtyProxyOptions): Promise<number> {
         stdout.removeListener('resize', onResize);
         stdin.removeListener('data', onData);
         conn.unpipe(stdout);
-        stdin.pause();
+        if (receivedData) {
+          stdin.pause();
+        }
         verifyAbort.abort();
         options.signal?.removeEventListener('abort', onAbort);
       }
@@ -492,16 +565,16 @@ function attachPty(options: PtyProxyOptions): Promise<number> {
 
       conn.once('close', () => {
         cleanup();
-        settle(0);
+        settle(receivedData ? 0 : -1);
       });
       conn.once('error', () => {
         cleanup();
-        settle(1);
+        settle(receivedData ? 1 : -1);
       });
     });
 
     conn.once('error', () => {
-      settle(1);
+      settle(-1); // connection failed, signal retry for TCP
     });
   });
 }
@@ -614,7 +687,8 @@ async function waitForPtyReady(target: PtyTarget): Promise<void> {
 }
 
 /**
- * Tries to connect to a target. Returns true if the connection succeeds.
+ * Tries to connect to a UDS target. Returns true if the connection succeeds.
+ * Used only for Linux readiness polling (macOS TCP skips the readiness probe).
  */
 function tryConnect(target: PtyTarget): Promise<boolean> {
   return new Promise((resolve) => {
@@ -635,6 +709,33 @@ function tryConnect(target: PtyTarget): Promise<boolean> {
       clearTimeout(timer);
       resolve(false);
     });
+  });
+}
+
+// --- Port allocation ---
+
+/**
+ * Finds a free TCP port on localhost by binding to port 0 and immediately
+ * closing the server. Used on macOS to allocate the PTY host port dynamically
+ * so multiple PTY sessions can run concurrently.
+ *
+ * Note: inherent TOCTOU window between discovering the port and Docker
+ * binding it. In practice this is extremely unlikely for ephemeral ports.
+ */
+function findFreePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const srv = createServer();
+    srv.listen(0, '127.0.0.1', () => {
+      const addr = srv.address();
+      if (!addr || typeof addr === 'string') {
+        srv.close();
+        reject(new Error('Failed to get ephemeral port'));
+        return;
+      }
+      const { port } = addr;
+      srv.close(() => resolve(port));
+    });
+    srv.on('error', reject);
   });
 }
 
