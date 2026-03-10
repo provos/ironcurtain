@@ -4,6 +4,61 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-03-10
+
+### Fixes
+
+- **macOS PTY session networking** — reverse PTY socat direction in the sidecar so the host can reach the container's PTY socket (MCP/MITM remain container→host); skip the readiness probe for TCP since the container's socat only accepts one connection; add retry logic in `attachPty` that polls until the connection receives data; allocate dynamic host ports via `findFreePort()` to avoid collisions between concurrent PTY sessions (#89)
+- **Filesystem server path in PTY sessions** — export and reuse `patchMcpServerAllowedDirectory()` so the filesystem MCP server's directory arg points to the actual session workspace instead of the stale default from `loadConfig()` (#87)
+- **macOS node-pty spawn-helper** — auto-fix missing execute permission on the node-pty `spawn-helper` binary at startup; show actionable error if chmod fails (e.g., read-only npx cache)
+- **MITM leaf certificate renewal** — track per-cert expiry and regenerate 1 hour before the 24-hour validity window closes, preventing "SSL certificate has expired" errors in long-running sessions (#84)
+- **OAuth token endpoint** — update refresh endpoint from `console.anthropic.com` to `platform.claude.com/v1/oauth/token`
+- **Sentinel triage** — widen the `since` window from 24 hours to 30 days so expired challenges are not silently filtered; use `includes()` for marker matching
+- Upgrade vulnerable package versions
+
+### Features
+
+- **Persona system** — named profiles bundling a constitution, compiled policy, server filter, persistent workspace, and memory file under `~/.ironcurtain/personas/<name>/`; CLI commands (`persona create/list/compile/edit/delete/show`), `--persona` flag for `start`, Signal `/new [persona]`, cron `persona` field, and session metadata persistence for `--resume` (#82)
+- **Auto-generate constitutions for cron jobs** — Code Mode session with read-only policy explores the workspace and MCP servers to produce a tailored constitution (#77)
+- Design documents for Memory MCP Server and Session Resume
+
+### Improvements
+
+- Extract `isUserContextTrusted` helper from `handleCallTool` for independent testability (#86)
+- Extract `formatAnnotationsSummary` to eliminate duplicate annotation-formatting logic (#81)
+- Remove `extractPathsHeuristic` from policy engine; rely solely on tool annotations for path extraction (#78)
+- Flatten `resolveDefaultGitRemote` with named git helpers (#75)
+
+### Tests
+
+- Coverage for `docker/audit-log-tailer`, `pipeline/pipeline-shared`, `pipeline/generate-with-repair`, `pipeline/list-resolver`, `cron/format-utils`, and signal formatting modules (#72, #73, #74, #80, #83, #85)
+
+## [0.7.0] - 2026-03-06
+
+### Features
+
+- **Cron mode** — unified daemon with per-job policy, scheduled sessions via `ironcurtain cron add/list/remove/run`, job-specific constitutions and compiled policies (#63)
+- **Daemon & cron polish** — Signal transport fixes, CLI help improvements, job management enhancements (#70)
+- **Goose agent adapter** — run Goose as an external agent in Docker Agent Mode with auto-generated YAML config and provider-specific env vars (#55)
+- **Conditional argument role assignment** — role specs can include conditions evaluated against tool call arguments for multi-mode tools (#60)
+- **Mux bracketed paste and multiline input** — paste detection with bracketed paste sequences, multiline editing support (#57)
+- **Sentinel triage workflow** — auto-close expired agent challenges via GitHub Actions
+
+### Fixes
+
+- Ensure PTY session cleanup on mux shutdown
+- Don't auto-scroll to bottom on new mux output (#61)
+- Stay in command mode after sending trusted input
+- Bypass MCP SDK client-side `outputSchema` validation on error responses (#54)
+- Allow workspace to contain in-package protected paths
+
+### Improvements
+
+- Remove duplicate image-building methods from `DockerAgentSession` (#68)
+- Extract `DEFAULT_DENY_RESULT` and `ruleToResult()` in policy engine (#62)
+- Extract `pushColorSgr` helper in `buildSgrSequence` (#65)
+- Merge identical ESCAPE and Ctrl-C branches in `handleCommandKey` (#66)
+
 ## [0.6.0] - 2026-03-03
 
 ### Features
