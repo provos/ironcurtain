@@ -13,7 +13,7 @@
  *     -> mcp-proxy-server (PolicyEngine + Audit)
  */
 
-import { createConnection } from 'node:net';
+import { createConnection, createServer } from 'node:net';
 import { execFile } from 'node:child_process';
 import { mkdirSync, writeFileSync, unlinkSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -183,6 +183,7 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
     let network: string;
     let mounts: { source: string; target: string; readonly: boolean }[];
     let extraHosts: string[] | undefined;
+    let hostPtyPort: number | undefined;
     const mainContainerName = `ironcurtain-pty-${shortId}`;
 
     if (useTcp && proxy.port !== undefined && mitmAddr.port !== undefined) {
@@ -214,7 +215,10 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
       // Docker DNS resolves the main container name on the internal network, and socat
       // with `fork` only resolves at connection time (so it's fine that main starts later).
       const sidecarName = `ironcurtain-sidecar-${shortId}`;
-      const ptyPortNum = ptyPort ?? DEFAULT_PTY_PORT;
+      // Container-internal PTY port is fixed; host-side port is dynamic to
+      // avoid conflicts when multiple PTY sessions run concurrently.
+      const containerPtyPort = ptyPort ?? DEFAULT_PTY_PORT;
+      hostPtyPort = await findFreePort();
       sidecarContainerId = await docker.create({
         image: socatImage,
         name: sidecarName,
@@ -222,14 +226,18 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
         mounts: [],
         env: {},
         entrypoint: '/bin/sh',
-        ports: [`127.0.0.1:${ptyPortNum}:${ptyPortNum}`],
+        ports: [`127.0.0.1:${hostPtyPort}:${containerPtyPort}`],
         command: [
           '-c',
           quote(['socat', `TCP-LISTEN:${mcpPort},fork,reuseaddr`, `TCP:host.docker.internal:${mcpPort}`]) +
             ' & ' +
             quote(['socat', `TCP-LISTEN:${mitmPort},fork,reuseaddr`, `TCP:host.docker.internal:${mitmPort}`]) +
             ' & ' +
-            quote(['socat', `TCP-LISTEN:${ptyPortNum},fork,reuseaddr`, `TCP:${mainContainerName}:${ptyPortNum}`]) +
+            quote([
+              'socat',
+              `TCP-LISTEN:${containerPtyPort},fork,reuseaddr`,
+              `TCP:${mainContainerName}:${containerPtyPort}`,
+            ]) +
             ' & wait',
         ],
       });
@@ -297,9 +305,9 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
     // does NOT use `fork`, so it only accepts one connection. A readiness probe
     // would consume that slot and cause the real attachPty connection to fail.
     // Instead, attachPty retries internally for TCP targets.
-    const ptyTarget = useTcp
-      ? { host: 'localhost', port: ptyPort ?? DEFAULT_PTY_PORT }
-      : resolve(socketsDir, PTY_SOCK_NAME);
+    // hostPtyPort is always set when useTcp is true (assigned in the TCP branch above).
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+    const ptyTarget = useTcp ? { host: 'localhost', port: hostPtyPort! } : resolve(socketsDir, PTY_SOCK_NAME);
 
     if (!useTcp) {
       await waitForPtyReady(ptyTarget);
@@ -687,6 +695,30 @@ function tryConnect(target: PtyTarget): Promise<boolean> {
       clearTimeout(timer);
       resolve(false);
     });
+  });
+}
+
+// --- Port allocation ---
+
+/**
+ * Finds a free TCP port on localhost by binding to port 0 and immediately
+ * closing the server. Used on macOS to allocate the PTY host port dynamically
+ * so multiple PTY sessions can run concurrently.
+ */
+function findFreePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const srv = createServer();
+    srv.listen(0, '127.0.0.1', () => {
+      const addr = srv.address();
+      if (!addr || typeof addr === 'string') {
+        srv.close();
+        reject(new Error('Failed to get ephemeral port'));
+        return;
+      }
+      const { port } = addr;
+      srv.close(() => resolve(port));
+    });
+    srv.on('error', reject);
   });
 }
 
