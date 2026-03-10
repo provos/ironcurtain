@@ -183,6 +183,7 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
     let network: string;
     let mounts: { source: string; target: string; readonly: boolean }[];
     let extraHosts: string[] | undefined;
+    const mainContainerName = `ironcurtain-pty-${shortId}`;
 
     if (useTcp && proxy.port !== undefined && mitmAddr.port !== undefined) {
       // macOS TCP mode
@@ -208,7 +209,10 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
         await docker.pullImage(socatImage);
       }
 
-      // Create socat sidecar with PTY port forwarding
+      // Create socat sidecar: forwards MCP/MITM container→host and PTY host→container.
+      // The PTY socat is reversed because the host connects TO the container's PTY socket.
+      // Docker DNS resolves the main container name on the internal network, and socat
+      // with `fork` only resolves at connection time (so it's fine that main starts later).
       const sidecarName = `ironcurtain-sidecar-${shortId}`;
       const ptyPortNum = ptyPort ?? DEFAULT_PTY_PORT;
       sidecarContainerId = await docker.create({
@@ -218,13 +222,14 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
         mounts: [],
         env: {},
         entrypoint: '/bin/sh',
+        ports: [`127.0.0.1:${ptyPortNum}:${ptyPortNum}`],
         command: [
           '-c',
           quote(['socat', `TCP-LISTEN:${mcpPort},fork,reuseaddr`, `TCP:host.docker.internal:${mcpPort}`]) +
             ' & ' +
             quote(['socat', `TCP-LISTEN:${mitmPort},fork,reuseaddr`, `TCP:host.docker.internal:${mitmPort}`]) +
             ' & ' +
-            quote(['socat', `TCP-LISTEN:${ptyPortNum},fork,reuseaddr`, `TCP:host.docker.internal:${ptyPortNum}`]) +
+            quote(['socat', `TCP-LISTEN:${ptyPortNum},fork,reuseaddr`, `TCP:${mainContainerName}:${ptyPortNum}`]) +
             ' & wait',
         ],
       });
@@ -261,7 +266,7 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
     // Create and start container with PTY command and TTY
     containerId = await docker.create({
       image,
-      name: `ironcurtain-pty-${shortId}`,
+      name: mainContainerName,
       network,
       mounts,
       env,
