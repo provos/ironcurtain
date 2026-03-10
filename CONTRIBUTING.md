@@ -76,6 +76,29 @@ src/
 - `stderr` for diagnostic output, `stdout` for agent responses
 - Integration tests spawn real MCP server processes and need ~30s timeout
 
+## Testing on Linux (from macOS)
+
+IronCurtain uses different transport mechanisms on Linux (UDS + `--network=none`) vs macOS (TCP + internal bridge network). If you develop on macOS, use the provided script to test in a Linux environment via Docker-in-Docker:
+
+```bash
+# One-time setup: create a separate clone for Linux (avoids native module conflicts)
+git clone git@github.com:provos/ironcurtain ~/src/ironcurtain-linux
+
+# Launch a Linux dev shell (builds the DinD image on first run)
+./scripts/linux-dev.sh
+
+# Or run a specific command
+./scripts/linux-dev.sh npm test
+```
+
+The script automatically syncs your current branch to the Linux clone, installs dependencies with Linux-native binaries, and starts a Docker daemon inside the container. Push your changes before running the script so the Linux clone can pick them up.
+
+To rebuild the image (e.g. after changing the Dockerfile in the script):
+
+```bash
+./scripts/linux-dev.sh --rebuild
+```
+
 ## Pre-commit Hook
 
 The project includes a pre-commit hook that automatically runs `format:check` and `lint` before each commit. Install it with:
