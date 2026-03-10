@@ -305,9 +305,15 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
     // does NOT use `fork`, so it only accepts one connection. A readiness probe
     // would consume that slot and cause the real attachPty connection to fail.
     // Instead, attachPty retries internally for TCP targets.
-    // hostPtyPort is always set when useTcp is true (assigned in the TCP branch above).
-    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-    const ptyTarget = useTcp ? { host: 'localhost', port: hostPtyPort! } : resolve(socketsDir, PTY_SOCK_NAME);
+    let ptyTarget: PtyTarget;
+    if (useTcp) {
+      if (hostPtyPort === undefined) {
+        throw new Error('PTY session misconfiguration: useTcp is true but hostPtyPort was not assigned');
+      }
+      ptyTarget = { host: 'localhost', port: hostPtyPort };
+    } else {
+      ptyTarget = resolve(socketsDir, PTY_SOCK_NAME);
+    }
 
     if (!useTcp) {
       await waitForPtyReady(ptyTarget);
@@ -462,21 +468,14 @@ function attachPtyOnce(options: PtyProxyOptions): Promise<number> {
     };
 
     conn.once('connect', () => {
+      // Defer raw mode, stdin forwarding, and resize handling until the first
+      // data arrives from the remote. For TCP retries, an instant close (no
+      // data) returns -1 without touching the terminal, so the user is never
+      // left stuck in raw mode between retry attempts.
       let receivedData = false;
-      conn.once('data', () => {
-        receivedData = true;
-      });
-      // Put terminal in raw mode
-      if (stdin.isTTY) {
-        stdin.setRawMode(true);
-      }
-      stdin.resume();
-
-      // SIGWINCH: forward terminal resize to container PTY.
-      // verifyAbort cancels the background verify loop on first user resize
-      // so it doesn't fight with the new size.
       const verifyAbort = new AbortController();
       let isFirstResize = true;
+
       const onResize = (): void => {
         const { columns, rows } = stdout;
         if (columns && rows) {
@@ -499,16 +498,6 @@ function attachPtyOnce(options: PtyProxyOptions): Promise<number> {
           );
         }
       };
-      stdout.on('resize', onResize);
-      // Send initial size
-      onResize();
-
-      // Background verify+retry to ensure the initial resize took effect.
-      // Fire-and-forget -- does not block the PTY proxy.
-      // Canceled via verifyAbort when the user resizes the terminal.
-      if (stdout.columns && stdout.rows) {
-        void verifyInitialPtySize(options.containerId, stdout.columns, stdout.rows, verifyAbort.signal);
-      }
 
       // Host -> Container
       // Ctrl-\ (0x1c) is intercepted as an emergency exit since raw mode
@@ -523,10 +512,33 @@ function attachPtyOnce(options: PtyProxyOptions): Promise<number> {
         }
         conn.write(data);
       };
-      stdin.on('data', onData);
 
-      // Container -> Host (untrusted output, displayed directly)
+      // Container -> Host (untrusted output, displayed directly).
+      // Piped immediately so no data is lost; raw mode and stdin forwarding
+      // are deferred until we confirm the connection is real (first data).
       conn.pipe(stdout);
+
+      conn.once('data', () => {
+        receivedData = true;
+        // Now that the connection is confirmed, enter raw mode and start
+        // forwarding user input to the container.
+        if (stdin.isTTY) {
+          stdin.setRawMode(true);
+        }
+        stdin.resume();
+        stdin.on('data', onData);
+
+        // Start resize forwarding and send initial size
+        stdout.on('resize', onResize);
+        onResize();
+
+        // Background verify+retry to ensure the initial resize took effect.
+        // Fire-and-forget -- does not block the PTY proxy.
+        // Canceled via verifyAbort when the user resizes the terminal.
+        if (stdout.columns && stdout.rows) {
+          void verifyInitialPtySize(options.containerId, stdout.columns, stdout.rows, verifyAbort.signal);
+        }
+      });
 
       // Use function declarations (hoisted) so cleanup and onAbort can
       // reference each other without temporal dead zone issues.
@@ -534,7 +546,9 @@ function attachPtyOnce(options: PtyProxyOptions): Promise<number> {
         stdout.removeListener('resize', onResize);
         stdin.removeListener('data', onData);
         conn.unpipe(stdout);
-        stdin.pause();
+        if (receivedData) {
+          stdin.pause();
+        }
         verifyAbort.abort();
         options.signal?.removeEventListener('abort', onAbort);
       }
@@ -704,6 +718,9 @@ function tryConnect(target: PtyTarget): Promise<boolean> {
  * Finds a free TCP port on localhost by binding to port 0 and immediately
  * closing the server. Used on macOS to allocate the PTY host port dynamically
  * so multiple PTY sessions can run concurrently.
+ *
+ * Note: inherent TOCTOU window between discovering the port and Docker
+ * binding it. In practice this is extremely unlikely for ephemeral ports.
  */
 function findFreePort(): Promise<number> {
   return new Promise((resolve, reject) => {
