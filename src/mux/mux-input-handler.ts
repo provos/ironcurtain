@@ -51,7 +51,7 @@ export interface MuxInputHandler {
   /** Re-enter picker browse phase with a validation error. */
   enterBrowseWithError(path: string, error: string): void;
 
-  /** Exit picker mode and return to PTY mode (no side effects). */
+  /** Exit picker mode and return to command mode (no side effects). */
   exitPickerMode(): void;
 
   /**
