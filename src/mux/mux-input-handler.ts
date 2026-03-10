@@ -233,13 +233,13 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
   }
 
   function exitPickerMode(): void {
-    _mode = 'pty';
+    _mode = 'command';
     _pickerState = null;
   }
 
   function executeMenuSelection(selection: number): MuxAction {
     if (selection === 0) {
-      _mode = 'pty';
+      _mode = 'command';
       _pickerState = null;
       return { kind: 'picker-spawn' };
     }
@@ -358,7 +358,7 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
     if (key === ENTER && !ps.inList) {
       if (ps.inputPath.trim()) {
         const workspacePath = ps.inputPath.replace(/\/+$/, '');
-        _mode = 'pty';
+        _mode = 'command';
         _pickerState = null;
         return { kind: 'picker-spawn', workspacePath };
       }
@@ -420,8 +420,6 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
   function handlePtyKey(key: string): MuxAction {
     if (key === CTRL_A) {
       _mode = 'command';
-      _inputBuffer = '';
-      _cursorPos = 0;
       return { kind: 'enter-command-mode' };
     }
 
@@ -432,8 +430,6 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
     // Ctrl-A in command mode returns to PTY mode
     if (key === CTRL_A) {
       _mode = 'pty';
-      _inputBuffer = '';
-      _cursorPos = 0;
       return { kind: 'enter-pty-mode' };
     }
 

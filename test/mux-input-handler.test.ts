@@ -144,6 +144,45 @@ describe('MuxInputHandler', () => {
       expect(handler.mode).toBe('pty');
     });
 
+    it('input buffer is preserved across Ctrl-A toggles', () => {
+      const handler = createMuxInputHandler();
+      // Enter command mode, type some text
+      handler.handleKey('CTRL_A');
+      expect(handler.mode).toBe('command');
+      handler.handleKey('h');
+      handler.handleKey('e');
+      handler.handleKey('l');
+      handler.handleKey('l');
+      handler.handleKey('o');
+      expect(handler.inputBuffer).toBe('hello');
+      expect(handler.cursorPos).toBe(5);
+
+      // Toggle to PTY mode
+      handler.handleKey('CTRL_A');
+      expect(handler.mode).toBe('pty');
+
+      // Toggle back to command mode -- buffer should be preserved
+      handler.handleKey('CTRL_A');
+      expect(handler.mode).toBe('command');
+      expect(handler.inputBuffer).toBe('hello');
+      expect(handler.cursorPos).toBe(5);
+    });
+
+    it('ESC clears input buffer in command mode', () => {
+      const handler = createMuxInputHandler();
+      handler.handleKey('CTRL_A');
+      handler.handleKey('t');
+      handler.handleKey('e');
+      handler.handleKey('s');
+      handler.handleKey('t');
+      expect(handler.inputBuffer).toBe('test');
+
+      handler.handleKey('ESCAPE');
+      expect(handler.inputBuffer).toBe('');
+      expect(handler.cursorPos).toBe(0);
+      expect(handler.mode).toBe('command');
+    });
+
     it('Backspace deletes character', () => {
       const handler = enterCommandMode();
       handler.handleKey('a');
@@ -348,6 +387,61 @@ describe('MuxInputHandler', () => {
 
       const action = handler.handlePaste('text');
       expect(action).toEqual({ kind: 'none' });
+    });
+  });
+
+  describe('picker mode transitions', () => {
+    it('exitPickerMode returns to command mode', () => {
+      const handler = createMuxInputHandler({ initialMode: 'command' });
+      handler.enterPickerMode();
+      expect(handler.mode).toBe('picker');
+
+      handler.exitPickerMode();
+      expect(handler.mode).toBe('command');
+      expect(handler.pickerState).toBeNull();
+    });
+
+    it('/new quick-spawn (menu option 1) returns to command mode', () => {
+      const handler = createMuxInputHandler({ initialMode: 'command' });
+      handler.enterPickerMode();
+      expect(handler.mode).toBe('picker');
+
+      // Select option 1 (quick-spawn)
+      const action = handler.handleKey('1');
+      expect(action).toEqual({ kind: 'picker-spawn' });
+      expect(handler.mode).toBe('command');
+      expect(handler.pickerState).toBeNull();
+    });
+
+    it('/new browse path submit returns to command mode', () => {
+      const handler = createMuxInputHandler({ initialMode: 'command' });
+      handler.enterPickerMode();
+      // Select option 2 (browse)
+      handler.handleKey('2');
+      expect(handler.pickerState?.phase).toBe('browse');
+
+      // Clear the default path and type a custom one
+      const ps = handler.pickerState!;
+      while (ps.cursorPos > 0) {
+        handler.handleKey('BACKSPACE');
+      }
+      for (const c of '/tmp/test') handler.handleKey(c);
+
+      // Submit
+      const action = handler.handleKey('ENTER');
+      expect(action).toEqual({ kind: 'picker-spawn', workspacePath: '/tmp/test' });
+      expect(handler.mode).toBe('command');
+      expect(handler.pickerState).toBeNull();
+    });
+
+    it('picker cancel (ESC from menu) returns to command mode', () => {
+      const handler = createMuxInputHandler({ initialMode: 'command' });
+      handler.enterPickerMode();
+      expect(handler.mode).toBe('picker');
+
+      const action = handler.handleKey('ESCAPE');
+      expect(action).toEqual({ kind: 'picker-cancel' });
+      expect(handler.mode).toBe('command');
     });
   });
 });
