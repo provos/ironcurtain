@@ -138,7 +138,7 @@ export async function main(args?: string[]): Promise<void> {
     }
 
     const { runPtySession } = await import('./docker/pty-session.js');
-    await runPtySession({ config, mode, workspacePath });
+    await runPtySession({ config, mode, workspacePath, resumeSessionId });
     process.exit(0);
   }
 

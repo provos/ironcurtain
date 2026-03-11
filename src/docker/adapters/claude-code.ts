@@ -12,7 +12,17 @@
  * 2. Docker environment context explaining workspace, host access, and policy
  */
 
-import type { AgentAdapter, AgentConfigFile, AgentId, AgentResponse, OrientationContext } from '../agent-adapter.js';
+import { existsSync, readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { homedir } from 'node:os';
+import type {
+  AgentAdapter,
+  AgentConfigFile,
+  AgentId,
+  AgentResponse,
+  ConversationStateConfig,
+  OrientationContext,
+} from '../agent-adapter.js';
 import type { IronCurtainConfig } from '../../config/types.js';
 import type { ProviderConfig } from '../provider-config.js';
 import {
@@ -31,6 +41,20 @@ import {
 } from './shared-scripts.js';
 
 const CLAUDE_CODE_IMAGE = 'ironcurtain-claude-code:latest';
+
+/**
+ * Reads Claude Code settings.json from the host if it exists.
+ * Returns the file content or undefined if not present.
+ */
+function readSettingsFromHost(): string | undefined {
+  const settingsPath = resolve(homedir(), '.claude', 'settings.json');
+  if (!existsSync(settingsPath)) return undefined;
+  try {
+    return readFileSync(settingsPath, 'utf-8');
+  } catch {
+    return undefined;
+  }
+}
 
 function buildDockerEnvironmentPrompt(context: OrientationContext): string {
   return `## Docker Environment
@@ -113,9 +137,11 @@ export const claudeCodeAdapter: AgentAdapter = {
 if [ -n "$IRONCURTAIN_INITIAL_COLS" ] && [ -n "$IRONCURTAIN_INITIAL_ROWS" ]; then
   stty cols "$IRONCURTAIN_INITIAL_COLS" rows "$IRONCURTAIN_INITIAL_ROWS" 2>/dev/null
 fi
+# shellcheck disable=SC2086
 exec claude --dangerously-skip-permissions \\
   --mcp-config /etc/ironcurtain/claude-mcp-config.json \\
-  --append-system-prompt "$IRONCURTAIN_SYSTEM_PROMPT"
+  --append-system-prompt "$IRONCURTAIN_SYSTEM_PROMPT" \\
+  $IRONCURTAIN_RESUME_FLAGS
 `;
 
     // Helper scripts for PTY resize — use shared generators parameterized by process name.
@@ -208,6 +234,19 @@ exec claude --dangerously-skip-permissions \\
     // prompt from an env var set by the entrypoint. This avoids shell quoting
     // issues that occur when embedding large prompts in socat EXEC: strings.
     return ['socat', listenArg, 'EXEC:/etc/ironcurtain/start-claude.sh,pty,setsid,ctty,stderr,rawer'];
+  },
+
+  getConversationStateConfig(): ConversationStateConfig {
+    return {
+      hostDirName: 'claude-state',
+      containerMountPath: '/root/.claude/',
+      seed: [
+        { path: 'projects/', content: '' }, // directory, populated by Claude Code
+        { path: '.claude.json', content: '{"hasCompletedOnboarding": true}' },
+        { path: 'settings.json', content: () => readSettingsFromHost() },
+      ],
+      resumeFlags: ['--continue'],
+    };
   },
 };
 

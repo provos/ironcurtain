@@ -15,7 +15,7 @@
 
 import { createConnection, createServer } from 'node:net';
 import { execFile } from 'node:child_process';
-import { mkdirSync, writeFileSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import { resolve } from 'node:path';
 import chalk from 'chalk';
 import ora from 'ora';
@@ -26,7 +26,8 @@ import { createSessionId } from '../session/types.js';
 import { patchMcpServerAllowedDirectory } from '../session/index.js';
 import { CONTAINER_WORKSPACE_DIR } from './agent-adapter.js';
 import { PTY_SOCK_NAME, DEFAULT_PTY_PORT } from './pty-types.js';
-import type { PtySessionRegistration } from './pty-types.js';
+import type { PtySessionRegistration, SessionSnapshot } from './pty-types.js';
+import { SESSION_STATE_FILENAME } from './pty-types.js';
 import { createEscalationWatcher, atomicWriteJsonSync } from '../escalation/escalation-watcher.js';
 import type { EscalationWatcher } from '../escalation/escalation-watcher.js';
 import {
@@ -46,6 +47,8 @@ export interface PtySessionOptions {
   readonly mode: SessionMode & { kind: 'docker' };
   /** Validated workspace path. When provided, replaces the session sandbox. */
   readonly workspacePath?: string;
+  /** Session ID to resume. When set, reuses the existing session directory. */
+  readonly resumeSessionId?: string;
 }
 
 /** Maximum time to wait for the PTY socket to appear (ms). */
@@ -55,37 +58,115 @@ const PTY_READINESS_TIMEOUT_MS = 30_000;
 const PTY_READINESS_POLL_MS = 200;
 
 /**
+ * Validates a session for resume and returns the loaded snapshot.
+ * Throws descriptive errors for invalid resume attempts.
+ */
+export function validateResumeSession(resumeSessionId: string): SessionSnapshot {
+  const sessionDir = getSessionDir(resumeSessionId);
+  if (!existsSync(sessionDir)) {
+    throw new Error(`Cannot resume session "${resumeSessionId}": session directory not found`);
+  }
+
+  const snapshotPath = resolve(sessionDir, SESSION_STATE_FILENAME);
+  if (!existsSync(snapshotPath)) {
+    throw new Error(`Cannot resume session "${resumeSessionId}": no session state snapshot found`);
+  }
+
+  const snapshot = JSON.parse(readFileSync(snapshotPath, 'utf-8')) as SessionSnapshot;
+  if (!snapshot.resumable) {
+    throw new Error(
+      `Cannot resume session "${resumeSessionId}": session is not resumable (status: ${snapshot.status})`,
+    );
+  }
+
+  return snapshot;
+}
+
+/**
+ * Loads a session snapshot from disk.
+ * Returns undefined if the snapshot file does not exist or is invalid.
+ */
+export function loadSessionSnapshot(sessionId: string): SessionSnapshot | undefined {
+  const snapshotPath = resolve(getSessionDir(sessionId), SESSION_STATE_FILENAME);
+  if (!existsSync(snapshotPath)) return undefined;
+  try {
+    return JSON.parse(readFileSync(snapshotPath, 'utf-8')) as SessionSnapshot;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Classifies the PTY session exit reason from the container exit code.
+ */
+function classifyExitStatus(exitCode: number | null): SessionSnapshot['status'] {
+  if (exitCode === null) return 'crashed';
+  if (exitCode === 0) return 'completed';
+  // Exit code 2 is commonly used by agents for auth failures
+  if (exitCode === 2) return 'auth-failure';
+  return 'crashed';
+}
+
+/**
+ * Checks whether a conversation state directory contains files,
+ * indicating the agent wrote conversation data that can be resumed.
+ */
+function hasConversationState(stateDir: string): boolean {
+  if (!existsSync(stateDir)) return false;
+  try {
+    const entries = readdirSync(stateDir);
+    return entries.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Writes a session state snapshot to the session directory.
+ */
+function writeSessionSnapshot(sessionDir: string, snapshot: SessionSnapshot): void {
+  atomicWriteJsonSync(resolve(sessionDir, SESSION_STATE_FILENAME), snapshot);
+}
+
+/**
  * Runs a PTY session: starts proxies, launches container with PTY-enabled
  * Claude Code, attaches the terminal, and blocks until the session ends.
  */
 export async function runPtySession(options: PtySessionOptions): Promise<void> {
   const { prepareDockerInfrastructure } = await import('./docker-infrastructure.js');
 
-  const sessionId = createSessionId();
-  const sessionDir = getSessionDir(sessionId);
-  const sandboxDir = options.workspacePath ?? getSessionSandboxDir(sessionId);
-  const escalationDir = getSessionEscalationDir(sessionId);
-  const auditLogPath = getSessionAuditLogPath(sessionId);
+  // When resuming, validate the snapshot and reuse the existing session directory
+  const resumeSnapshot = options.resumeSessionId ? validateResumeSession(options.resumeSessionId) : undefined;
+  const isResume = !!resumeSnapshot;
+
+  // Use the original session ID when resuming, otherwise create a new one
+  const effectiveSessionId = options.resumeSessionId ?? createSessionId();
+  const sessionDir = getSessionDir(effectiveSessionId);
+  const sandboxDir = isResume
+    ? resumeSnapshot.workspacePath
+    : (options.workspacePath ?? getSessionSandboxDir(effectiveSessionId));
+  const escalationDir = getSessionEscalationDir(effectiveSessionId);
+  const auditLogPath = getSessionAuditLogPath(effectiveSessionId);
   const socketsDir = resolve(sessionDir, 'sockets');
 
-  // Only create the sandbox directory when not using an external workspace
-  if (!options.workspacePath) {
+  // Only create the sandbox directory when not using an external workspace and not resuming
+  if (!options.workspacePath && !isResume) {
     mkdirSync(sandboxDir, { recursive: true, mode: 0o700 });
   }
   mkdirSync(escalationDir, { recursive: true, mode: 0o700 });
   mkdirSync(socketsDir, { recursive: true, mode: 0o700 });
 
-  // Set up session logging
-  const sessionLogPath = getSessionLogPath(sessionId);
-  const llmLogPath = getSessionLlmLogPath(sessionId);
+  // Set up session logging (append-only for resumed sessions)
+  const sessionLogPath = getSessionLogPath(effectiveSessionId);
+  const llmLogPath = getSessionLlmLogPath(effectiveSessionId);
   logger.setup({ logFilePath: sessionLogPath });
-  logger.info(`PTY session ${sessionId} starting`);
+  logger.info(`PTY session ${effectiveSessionId} ${isResume ? 'resuming' : 'starting'}`);
   logger.info(`${options.workspacePath ? 'Workspace' : 'Sandbox'}: ${sandboxDir}`);
   logger.info(`Escalation dir: ${escalationDir}`);
   logger.info(`LLM log: ${llmLogPath}`);
 
   // Patch config for this session
-  const autoApproveLlmLogPath = getSessionAutoApproveLlmLogPath(sessionId);
+  const autoApproveLlmLogPath = getSessionAutoApproveLlmLogPath(effectiveSessionId);
   const sessionConfig = {
     ...options.config,
     allowedDirectory: sandboxDir,
@@ -140,11 +221,16 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
   process.on('SIGTERM', handleShutdownSignal);
   process.on('SIGHUP', handleShutdownSignal);
 
-  // Infra variables set inside try, used in finally for cleanup
+  // Infra variables set inside try, used in finally for cleanup and snapshot
   let proxy: Awaited<ReturnType<typeof prepareDockerInfrastructure>>['proxy'] | null = null;
   let mitmProxy: Awaited<ReturnType<typeof prepareDockerInfrastructure>>['mitmProxy'] | null = null;
   let docker: Awaited<ReturnType<typeof prepareDockerInfrastructure>>['docker'] | null = null;
   let useTcp = false;
+  let ptyExitCode: number | null = null;
+  let adapterIdForSnapshot: string | null = null;
+  let adapterDisplayNameForSnapshot: string | null = null;
+  let conversationStateDirForSnapshot: string | undefined;
+  let userExited = false;
 
   try {
     const infra = await prepareDockerInfrastructure(
@@ -154,11 +240,23 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
       sandboxDir,
       escalationDir,
       auditLogPath,
-      sessionId,
+      effectiveSessionId,
     );
 
     ({ docker, proxy, mitmProxy, useTcp } = infra);
-    const { adapter, fakeKeys, orientationDir, systemPrompt, image, mitmAddr } = infra;
+    const {
+      adapter,
+      fakeKeys,
+      orientationDir,
+      systemPrompt,
+      image,
+      mitmAddr,
+      conversationStateDir,
+      conversationStateConfig,
+    } = infra;
+    adapterIdForSnapshot = adapter.id;
+    adapterDisplayNameForSnapshot = adapter.displayName;
+    conversationStateDirForSnapshot = conversationStateDir;
 
     // Validate adapter supports PTY mode
     if (!adapter.buildPtyCommand) {
@@ -176,7 +274,7 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
     const ptyCommand = adapter.buildPtyCommand(systemPrompt, ptySockPath, ptyPort);
 
     // Build container configuration
-    const shortId = sessionId.substring(0, 12);
+    const shortId = effectiveSessionId.substring(0, 12);
     const { INTERNAL_NETWORK_NAME, INTERNAL_NETWORK_SUBNET, INTERNAL_NETWORK_GATEWAY } = await import('./platform.js');
     const { quote } = await import('shell-quote');
     let env: Record<string, string>;
@@ -265,11 +363,25 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
       ];
     }
 
+    // Mount conversation state directory if the adapter supports resume
+    if (conversationStateDir && conversationStateConfig) {
+      mounts.push({
+        source: conversationStateDir,
+        target: conversationStateConfig.containerMountPath,
+        readonly: false,
+      });
+    }
+
     // Pass initial terminal size so start-claude.sh can set PTY dimensions
     // before Claude starts, eliminating the resize race condition.
     const { columns, rows } = process.stdout;
     if (columns) env.IRONCURTAIN_INITIAL_COLS = String(columns);
     if (rows) env.IRONCURTAIN_INITIAL_ROWS = String(rows);
+
+    // Pass resume flags when resuming a session
+    if (isResume && conversationStateConfig && conversationStateConfig.resumeFlags.length > 0) {
+      env.IRONCURTAIN_RESUME_FLAGS = conversationStateConfig.resumeFlags.join(' ');
+    }
 
     // Create and start container with PTY command and TTY
     containerId = await docker.create({
@@ -279,7 +391,7 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
       mounts,
       env,
       command: ptyCommand,
-      sessionLabel: sessionId,
+      sessionLabel: effectiveSessionId,
       resources: { memoryMb: 4096, cpus: 2 },
       extraHosts,
       tty: true,
@@ -289,7 +401,7 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
     logger.info(`PTY container started: ${containerId.substring(0, 12)}`);
 
     // Write session registration for the escalation listener
-    registrationPath = writeRegistration(sessionId, escalationDir, adapter.displayName);
+    registrationPath = writeRegistration(effectiveSessionId, escalationDir, adapter.displayName);
 
     // Start escalation file watcher (emits BEL to alert user)
     escalationFileWatcher = createEscalationWatcher(escalationDir, {
@@ -329,6 +441,8 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
       containerId,
       signal: shutdownController.signal,
     });
+    ptyExitCode = exitCode;
+    userExited = shutdownController.signal.aborted;
     logger.info(`PTY attach returned with exit code ${exitCode}`);
 
     // PTY disconnected -- restore terminal and show shutdown progress
@@ -387,7 +501,34 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
     await mitmProxy?.stop().catch(() => {});
     await proxy?.stop().catch(() => {});
 
-    logger.info(`PTY session ${sessionId} ended`);
+    // Write session snapshot for resume support
+    if (adapterIdForSnapshot) {
+      try {
+        const status: SessionSnapshot['status'] = userExited ? 'user-exit' : classifyExitStatus(ptyExitCode);
+
+        const canResume = !!conversationStateDirForSnapshot && hasConversationState(conversationStateDirForSnapshot);
+
+        const snapshot: SessionSnapshot = {
+          sessionId: effectiveSessionId,
+          status,
+          exitCode: ptyExitCode,
+          lastActivity: new Date().toISOString(),
+          workspacePath: sandboxDir,
+          agent: adapterIdForSnapshot,
+          label: `${adapterDisplayNameForSnapshot ?? adapterIdForSnapshot} (interactive)`,
+          resumable: canResume,
+        };
+
+        writeSessionSnapshot(sessionDir, snapshot);
+        logger.info(`Session snapshot written (status: ${status}, resumable: ${canResume})`);
+      } catch (snapshotErr) {
+        logger.warn(
+          `Failed to write session snapshot: ${snapshotErr instanceof Error ? snapshotErr.message : String(snapshotErr)}`,
+        );
+      }
+    }
+
+    logger.info(`PTY session ${effectiveSessionId} ended`);
     logger.teardown();
 
     // shutdownSpinner is declared inside try but accessible here via closure

@@ -117,6 +117,14 @@ export function getSessionSocketsDir(sessionId: string): string {
 }
 
 /**
+ * Returns the session state snapshot path for a given session:
+ *   {home}/sessions/{sessionId}/session-state.json
+ */
+export function getSessionStatePath(sessionId: string): string {
+  return resolve(getSessionDir(sessionId), 'session-state.json');
+}
+
+/**
  * Returns the PTY session registry directory:
  *   {home}/pty-registry/
  *

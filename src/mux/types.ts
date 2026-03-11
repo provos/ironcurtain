@@ -5,7 +5,7 @@
 import type { PtyBridge } from './pty-bridge.js';
 
 /** Input mode for the mux. */
-export type InputMode = 'pty' | 'command' | 'picker';
+export type InputMode = 'pty' | 'command' | 'picker' | 'resume-picker';
 
 /** A single tab in the mux. */
 export interface MuxTab {
@@ -40,6 +40,7 @@ export type MuxAction =
   | { readonly kind: 'picker-spawn'; readonly workspacePath?: string }
   | { readonly kind: 'picker-cancel' }
   | { readonly kind: 'redraw-picker' }
+  | { readonly kind: 'resume-spawn'; readonly sessionId: string; readonly agent: string }
   | { readonly kind: 'scroll-up'; readonly amount: number }
   | { readonly kind: 'scroll-down'; readonly amount: number }
   | { readonly kind: 'quit' };
@@ -115,7 +116,8 @@ export function calculateLayout(totalRows: number, mode: InputMode, pendingCount
     allocatedInputRows = Math.max(MIN_INPUT_LINE_ROWS, overlayRows - escalationPanelRows - HINT_BAR_ROWS);
   }
 
-  const pickerRows = mode === 'picker' ? Math.min(Math.floor(ptyViewportRows / 2), ptyViewportRows) : 0;
+  const pickerRows =
+    mode === 'picker' || mode === 'resume-picker' ? Math.min(Math.floor(ptyViewportRows / 2), ptyViewportRows) : 0;
   const pickerY = TAB_BAR_ROWS + ptyViewportRows - pickerRows;
 
   return {
