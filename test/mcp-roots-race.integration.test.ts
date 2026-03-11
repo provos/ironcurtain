@@ -203,7 +203,7 @@ describe('MCP roots-expansion race -- handleCallTool retry', () => {
     clientStates.set('filesystem', clientState);
 
     const resolvedSandboxConfigs = new Map();
-    resolvedSandboxConfigs.set('filesystem', { sandboxed: false, reason: 'test' });
+    resolvedSandboxConfigs.set('filesystem', { sandboxed: false, reason: 'opt-out' });
 
     return {
       toolMap,

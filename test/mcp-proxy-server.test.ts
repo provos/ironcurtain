@@ -856,6 +856,127 @@ describe('handleCallTool', () => {
       expect(deps.auditLog.log).toHaveBeenCalled();
     });
   });
+
+  describe('roots-race retry', () => {
+    it('retries once when callTool returns access-denied after roots expansion', async () => {
+      const { autoApprove, readUserContext } = await import('../src/trusted-process/auto-approver.js');
+      const { extractAnnotatedPaths } = await import('../src/trusted-process/policy-engine.js');
+
+      // Configure auto-approve to approve the escalation
+      vi.mocked(readUserContext).mockReturnValue({ userMessage: 'read /outside/file.txt' });
+      vi.mocked(autoApprove).mockResolvedValue({ decision: 'approve', reasoning: 'user requested' });
+      // Return a path so roots get expanded
+      vi.mocked(extractAnnotatedPaths).mockReturnValue(['/outside/file.txt']);
+
+      const mockCallTool = vi
+        .fn()
+        .mockResolvedValueOnce({
+          content: [{ type: 'text', text: 'Access denied - path outside allowed directories' }],
+          isError: true,
+        })
+        .mockResolvedValueOnce({
+          content: [{ type: 'text', text: 'file content' }],
+          isError: false,
+        });
+
+      const clientState: ClientState = {
+        client: null as unknown as ClientState['client'],
+        roots: [{ uri: 'file:///tmp/sandbox', name: 'sandbox' }],
+      };
+
+      // sendRootsListChanged triggers the rootsRefreshed callback (simulating
+      // the server calling roots/list), so addRootToClient returns 'added'.
+      const mockClient = {
+        callTool: mockCallTool,
+        sendRootsListChanged: vi.fn().mockImplementation(async () => {
+          clientState.rootsRefreshed?.();
+          clientState.rootsRefreshed = undefined;
+        }),
+      };
+      clientState.client = mockClient as unknown as ClientState['client'];
+
+      const clientStates = new Map<string, ClientState>();
+      clientStates.set('fs', clientState);
+
+      const deps = createMockDeps({
+        clientStates,
+        escalationDir: '/tmp/esc',
+        autoApproveModel: 'test-model' as unknown as CallToolDeps['autoApproveModel'],
+      });
+
+      // Policy escalates
+      vi.mocked(deps.policyEngine.evaluate).mockReturnValue({
+        decision: 'escalate',
+        rule: 'escalate-reads',
+        reason: 'Read outside sandbox',
+      });
+
+      const result = await handleCallTool('read_file', { path: '/outside/file.txt' }, deps);
+
+      // Should have retried and succeeded
+      expect(result.isError).toBeUndefined();
+      expect(result.content).toEqual([{ type: 'text', text: 'file content' }]);
+      expect(mockCallTool).toHaveBeenCalledTimes(2);
+
+      // Audit log should have 2 entries: the initial race error + the successful retry
+      expect(deps.auditLog.log).toHaveBeenCalledTimes(2);
+      const firstLog = vi.mocked(deps.auditLog.log).mock.calls[0][0];
+      expect(firstLog.result.status).toBe('error');
+      expect((firstLog.result as { error: string }).error).toContain('Roots race detected');
+    });
+
+    it('does not retry when roots expansion timed out (server did not acknowledge)', async () => {
+      const { autoApprove, readUserContext } = await import('../src/trusted-process/auto-approver.js');
+      const { extractAnnotatedPaths } = await import('../src/trusted-process/policy-engine.js');
+
+      vi.mocked(readUserContext).mockReturnValue({ userMessage: 'read /outside/file.txt' });
+      vi.mocked(autoApprove).mockResolvedValue({ decision: 'approve', reasoning: 'user requested' });
+      vi.mocked(extractAnnotatedPaths).mockReturnValue(['/outside/file.txt']);
+
+      const mockCallTool = vi.fn().mockResolvedValue({
+        content: [{ type: 'text', text: 'Access denied - path outside allowed directories' }],
+        isError: true,
+      });
+
+      // sendRootsListChanged resolves but rootsRefreshed callback is never called,
+      // so addRootToClient will timeout and return 'timeout' → rootsExpanded stays false
+      const mockClient = {
+        callTool: mockCallTool,
+        sendRootsListChanged: vi.fn().mockResolvedValue(undefined),
+      };
+
+      const clientStates = new Map<string, ClientState>();
+      clientStates.set('fs', {
+        client: mockClient as unknown as ClientState['client'],
+        roots: [{ uri: 'file:///tmp/sandbox', name: 'sandbox' }],
+      });
+
+      const deps = createMockDeps({
+        clientStates,
+        escalationDir: '/tmp/esc',
+        autoApproveModel: 'test-model' as unknown as CallToolDeps['autoApproveModel'],
+      });
+
+      vi.mocked(deps.policyEngine.evaluate).mockReturnValue({
+        decision: 'escalate',
+        rule: 'escalate-reads',
+        reason: 'Read outside sandbox',
+      });
+
+      // Use fake timers so addRootToClient's timeout fires immediately
+      vi.useFakeTimers();
+      const resultPromise = handleCallTool('read_file', { path: '/outside/file.txt' }, deps);
+      // Advance past the ROOTS_REFRESH_TIMEOUT_MS so addRootToClient resolves via timeout
+      await vi.advanceTimersByTimeAsync(ROOTS_REFRESH_TIMEOUT_MS + 100);
+      vi.useRealTimers();
+
+      const result = await resultPromise;
+
+      // callTool should have been called only once — no retry since server didn't acknowledge
+      expect(mockCallTool).toHaveBeenCalledTimes(1);
+      expect(result.isError).toBe(true);
+    });
+  });
 });
 
 // ── selectTransportConfig tests ────────────────────────────────────────

@@ -105,15 +105,21 @@ export interface ClientState {
  * fetch the updated list. No-op if the root URI is already present.
  * Times out after ROOTS_REFRESH_TIMEOUT_MS if the server never requests
  * the updated list (e.g. servers that don't implement Roots protocol).
+ *
+ * Returns `'added'` when the server acknowledged the update (called
+ * `roots/list`), `'timeout'` when the server didn't respond in time,
+ * or `false` when the root was already present.
  */
-async function addRootToClient(state: ClientState, root: McpRoot): Promise<boolean> {
+async function addRootToClient(state: ClientState, root: McpRoot): Promise<'added' | 'timeout' | false> {
   if (state.roots.some((r) => r.uri === root.uri)) return false;
   state.roots.push(root);
 
   let timer: ReturnType<typeof setTimeout>;
+  let outcome: 'added' | 'timeout' = 'timeout';
   const refreshed = new Promise<void>((resolve) => {
     state.rootsRefreshed = () => {
       clearTimeout(timer);
+      outcome = 'added';
       resolve();
     };
   });
@@ -126,7 +132,7 @@ async function addRootToClient(state: ClientState, root: McpRoot): Promise<boole
   });
   await state.client.sendRootsListChanged();
   await Promise.race([refreshed, timeout]);
-  return true;
+  return outcome;
 }
 
 /**
@@ -142,7 +148,7 @@ export const ROOTS_RACE_RETRY_DELAY_MS = 200;
  * error -- the filesystem server rejected the call because it hasn't finished
  * processing the updated roots yet.
  */
-function isRootsRaceError(result: Record<string, unknown>): boolean {
+function isRootsRaceError(result: { isError?: boolean; content?: unknown }): boolean {
   if (!result.isError) return false;
   const text = extractTextFromContent(result.content);
   if (!text) return false;
@@ -764,11 +770,11 @@ export async function handleCallTool(
     if (state) {
       const pathValues = extractAnnotatedPaths(argsForTransport, annotation, getPathRoles());
       for (const p of pathValues) {
-        const added = await addRootToClient(state, {
+        const result = await addRootToClient(state, {
           uri: `file://${directoryForPath(p)}`,
           name: 'escalation-approved',
         });
-        if (added) rootsExpanded = true;
+        if (result === 'added') rootsExpanded = true;
       }
     }
   }
@@ -813,6 +819,8 @@ export async function handleCallTool(
     // has been notified but may not have finished async-validating the new
     // roots (fs.realpath, fs.stat). Retry once after a short delay.
     if (rootsExpanded && isRootsRaceError(result)) {
+      const initialError = extractTextFromContent(result.content) ?? 'access denied (roots race)';
+      logAudit({ status: 'error', error: `Roots race detected, retrying: ${initialError}` }, Date.now() - startTime);
       await new Promise((r) => setTimeout(r, ROOTS_RACE_RETRY_DELAY_MS));
       result = await client.callTool(callToolArgs, CompatibilityCallToolResultSchema, callToolOpts);
     }
