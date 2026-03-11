@@ -173,7 +173,8 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
     tabs.splice(index, 1);
 
     if (tabs.length === 0) {
-      doShutdown();
+      activeTabIndex = 0;
+      renderer.fullRedraw();
       return;
     }
 

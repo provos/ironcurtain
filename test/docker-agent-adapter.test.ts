@@ -129,26 +129,14 @@ describe('Claude Code Adapter', () => {
   it('returns conversation state config for session resume', () => {
     const config = claudeCodeAdapter.getConversationStateConfig!();
     expect(config.hostDirName).toBe('claude-state');
-    expect(config.containerMountPath).toBe('/root/.claude/');
+    expect(config.containerMountPath).toBe('/home/codespace/.claude/');
     expect(config.resumeFlags).toEqual(['--continue']);
-    expect(config.seed.length).toBeGreaterThanOrEqual(2);
-
-    // Verify .claude.json seed has onboarding flag
-    const claudeJson = config.seed.find((s) => s.path === '.claude.json');
-    expect(claudeJson).toBeDefined();
-    expect(typeof claudeJson!.content).toBe('string');
-    const parsed = JSON.parse(claudeJson!.content as string) as Record<string, unknown>;
-    expect(parsed.hasCompletedOnboarding).toBe(true);
+    expect(config.seed.length).toBeGreaterThanOrEqual(1);
 
     // Verify projects/ seed is a directory entry
     const projects = config.seed.find((s) => s.path === 'projects/');
     expect(projects).toBeDefined();
     expect(projects!.content).toBe('');
-
-    // Verify settings.json seed is a function
-    const settings = config.seed.find((s) => s.path === 'settings.json');
-    expect(settings).toBeDefined();
-    expect(typeof settings!.content).toBe('function');
   });
 });
 

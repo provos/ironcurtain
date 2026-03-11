@@ -33,6 +33,7 @@ EOJSON
 #   this env var directly -- no apiKeyHelper needed.
 # - API key mode: apiKeyHelper echoes the fake key so Claude Code skips the
 #   custom API key approval dialog entirely.
+# Always written (even on resume) because auth mode is runtime-specific.
 mkdir -p "$HOME/.claude"
 
 if [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
