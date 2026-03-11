@@ -148,8 +148,8 @@ export const ROOTS_RACE_RETRY_DELAY_MS = 200;
  * error -- the filesystem server rejected the call because it hasn't finished
  * processing the updated roots yet.
  */
-function isRootsRaceError(result: { isError?: boolean; content?: unknown }): boolean {
-  if (!result.isError) return false;
+function isRootsRaceError(result: Record<string, unknown>): boolean {
+  if (!('isError' in result) || !result.isError) return false;
   const text = extractTextFromContent(result.content);
   if (!text) return false;
   const lower = text.toLowerCase();
