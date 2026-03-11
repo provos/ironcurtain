@@ -106,8 +106,8 @@ export interface ClientState {
  * Times out after ROOTS_REFRESH_TIMEOUT_MS if the server never requests
  * the updated list (e.g. servers that don't implement Roots protocol).
  */
-async function addRootToClient(state: ClientState, root: McpRoot): Promise<void> {
-  if (state.roots.some((r) => r.uri === root.uri)) return;
+async function addRootToClient(state: ClientState, root: McpRoot): Promise<boolean> {
+  if (state.roots.some((r) => r.uri === root.uri)) return false;
   state.roots.push(root);
 
   let timer: ReturnType<typeof setTimeout>;
@@ -126,6 +126,28 @@ async function addRootToClient(state: ClientState, root: McpRoot): Promise<void>
   });
   await state.client.sendRootsListChanged();
   await Promise.race([refreshed, timeout]);
+  return true;
+}
+
+/**
+ * Delay before retrying a tool call that returned "access denied" immediately
+ * after roots expansion. The filesystem server needs time to async-validate
+ * (fs.realpath, fs.stat) the new roots after receiving the rootsListChanged
+ * notification. Exported for test access.
+ */
+export const ROOTS_RACE_RETRY_DELAY_MS = 200;
+
+/**
+ * Checks whether an MCP tool call result looks like a roots-race "access denied"
+ * error -- the filesystem server rejected the call because it hasn't finished
+ * processing the updated roots yet.
+ */
+function isRootsRaceError(result: Record<string, unknown>): boolean {
+  if (!result.isError) return false;
+  const text = extractTextFromContent(result.content);
+  if (!text) return false;
+  const lower = text.toLowerCase();
+  return lower.includes('access denied') || lower.includes('outside allowed directories');
 }
 
 /** Appends a timestamped line to the session log file. */
@@ -158,7 +180,7 @@ function getMissingEnvVars(args: string[]): string[] {
 }
 
 /** Extracts concatenated text from MCP content blocks. */
-function extractTextFromContent(content: unknown): string | undefined {
+export function extractTextFromContent(content: unknown): string | undefined {
   if (!Array.isArray(content)) return undefined;
   const texts = content
     .filter((c: Record<string, unknown>) => c.type === 'text' && typeof c.text === 'string')
@@ -655,6 +677,7 @@ export async function handleCallTool(
 
   let escalationResult: 'approved' | 'denied' | undefined;
   let autoApproved = false;
+  let rootsExpanded = false;
 
   const serverSandboxConfig = deps.resolvedSandboxConfigs.get(toolInfo.serverName);
   const serverIsSandboxed = serverSandboxConfig?.sandboxed === true;
@@ -741,10 +764,11 @@ export async function handleCallTool(
     if (state) {
       const pathValues = extractAnnotatedPaths(argsForTransport, annotation, getPathRoles());
       for (const p of pathValues) {
-        await addRootToClient(state, {
+        const added = await addRootToClient(state, {
           uri: `file://${directoryForPath(p)}`,
           name: 'escalation-approved',
         });
+        if (added) rootsExpanded = true;
       }
     }
   }
@@ -781,14 +805,17 @@ export async function handleCallTool(
     // CompatibilityCallToolResultSchema accepts the legacy `toolResult` response format
     // (protocol version 2024-10-07). Output schema validation is intentionally
     // bypassed by the permissiveJsonSchemaValidator injected at Client construction time.
-    const result = await client.callTool(
-      {
-        name: toolInfo.name,
-        arguments: argsForTransport,
-      },
-      CompatibilityCallToolResultSchema,
-      { timeout: getEscalationTimeoutMs() },
-    );
+    const callToolArgs = { name: toolInfo.name, arguments: argsForTransport };
+    const callToolOpts = { timeout: getEscalationTimeoutMs() };
+    let result = await client.callTool(callToolArgs, CompatibilityCallToolResultSchema, callToolOpts);
+
+    // Race condition mitigation: after roots expansion the filesystem server
+    // has been notified but may not have finished async-validating the new
+    // roots (fs.realpath, fs.stat). Retry once after a short delay.
+    if (rootsExpanded && isRootsRaceError(result)) {
+      await new Promise((r) => setTimeout(r, ROOTS_RACE_RETRY_DELAY_MS));
+      result = await client.callTool(callToolArgs, CompatibilityCallToolResultSchema, callToolOpts);
+    }
 
     // Reverse-rewrite host sandbox paths to container workspace paths in results
     const rewrittenContent = deps.allowedDirectory
