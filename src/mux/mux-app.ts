@@ -15,6 +15,7 @@ import { writeTrustedUserContext } from './trusted-input.js';
 import { createPasteInterceptor, type PasteInterceptor } from './paste-interceptor.js';
 import type { MuxTab, MuxAction } from './types.js';
 import { validateWorkspacePath } from '../session/workspace-validation.js';
+import { scanResumableSessions } from './session-scanner.js';
 import * as logger from '../logger.js';
 
 export interface MuxApp {
@@ -75,10 +76,15 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
     return { bin: script || 'ironcurtain', prefixArgs: [] };
   }
 
-  async function spawnSession(workspacePath?: string): Promise<MuxTab> {
+  async function spawnSession(opts?: {
+    workspacePath?: string;
+    resumeSessionId?: string;
+    agentOverride?: string;
+  }): Promise<MuxTab> {
     const { columns } = process.stdout;
     const ptyRows = renderer.layout.ptyViewportRows;
     const ptyCols = columns || 80;
+    const sessionAgent = opts?.agentOverride ?? agent;
 
     const { bin, prefixArgs } = resolveIroncurtainBin();
     const bridge = await createPtyBridge({
@@ -86,14 +92,15 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
       rows: ptyRows,
       ironcurtainBin: bin,
       prefixArgs,
-      agent,
-      workspacePath,
+      agent: sessionAgent,
+      workspacePath: opts?.workspacePath,
+      resumeSessionId: opts?.resumeSessionId,
     });
 
     const tab: MuxTab = {
       number: nextTabNumber++,
       bridge,
-      label: agent,
+      label: sessionAgent,
       status: 'running',
       escalationAvailable: false,
       scrollOffset: null,
@@ -166,7 +173,8 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
     tabs.splice(index, 1);
 
     if (tabs.length === 0) {
-      doShutdown();
+      activeTabIndex = 0;
+      renderer.fullRedraw();
       return;
     }
 
@@ -258,7 +266,7 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
             break;
           }
         }
-        const tab = await spawnSession(validatedPath);
+        const tab = await spawnSession({ workspacePath: validatedPath });
         activeTabIndex = tabs.length - 1;
         const suffix = validatedPath ? ` in ${validatedPath}` : '';
         showMessage(`Spawned session #${tab.number}${suffix}`);
@@ -270,6 +278,17 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
       case 'picker-cancel':
         renderer.fullRedraw();
         break;
+
+      case 'resume-spawn': {
+        const resumeTab = await spawnSession({
+          resumeSessionId: action.sessionId,
+          agentOverride: action.agent,
+        });
+        activeTabIndex = tabs.length - 1;
+        showMessage(`Resuming session ${action.sessionId.substring(0, 8)} as tab #${resumeTab.number}`);
+        renderer.fullRedraw();
+        break;
+      }
 
       case 'redraw-picker':
         renderer.redrawCommandArea();
@@ -320,6 +339,30 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
 
       case 'new': {
         inputHandler.enterPickerMode();
+        renderer.fullRedraw();
+        break;
+      }
+
+      case 'resume': {
+        const directId = args[0];
+        if (directId) {
+          // Direct resume by session ID
+          const sessions = scanResumableSessions();
+          const match = sessions.find((s) => s.sessionId.startsWith(directId));
+          if (!match) {
+            showMessage(`No resumable session matching "${directId}"`);
+          } else {
+            void handleAction({ kind: 'resume-spawn', sessionId: match.sessionId, agent: match.agent });
+          }
+          break;
+        }
+        // Open the resume picker
+        const sessions = scanResumableSessions();
+        if (sessions.length === 0) {
+          showMessage('No resumable sessions found');
+          break;
+        }
+        inputHandler.enterResumePickerMode(sessions);
         renderer.fullRedraw();
         break;
       }
@@ -428,6 +471,7 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
         getEscalationState: () => escalationManager.state,
         getPendingCount: () => escalationManager.pendingCount,
         getPickerState: () => inputHandler.pickerState,
+        getResumePickerState: () => inputHandler.resumePickerState,
         getScrollOffset: () => {
           const active = getActiveTab();
           return active?.scrollOffset ?? null;

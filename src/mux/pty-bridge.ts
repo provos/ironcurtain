@@ -90,6 +90,8 @@ export interface PtyBridgeOptions {
   readonly agent: string;
   /** Optional workspace directory path (passed as --workspace to the child). */
   readonly workspacePath?: string;
+  /** Optional session ID to resume (passed as --resume to the child). */
+  readonly resumeSessionId?: string;
 }
 
 /** Session discovery timeout (ms). */
@@ -111,6 +113,9 @@ export async function createPtyBridge(options: PtyBridgeOptions): Promise<PtyBri
   });
 
   const spawnArgs = [...(options.prefixArgs ?? []), 'start', '--pty', '--agent', options.agent];
+  if (options.resumeSessionId) {
+    spawnArgs.push('--resume', options.resumeSessionId);
+  }
   if (options.workspacePath) {
     spawnArgs.push('--workspace', options.workspacePath);
   }

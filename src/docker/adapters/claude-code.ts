@@ -12,7 +12,14 @@
  * 2. Docker environment context explaining workspace, host access, and policy
  */
 
-import type { AgentAdapter, AgentConfigFile, AgentId, AgentResponse, OrientationContext } from '../agent-adapter.js';
+import type {
+  AgentAdapter,
+  AgentConfigFile,
+  AgentId,
+  AgentResponse,
+  ConversationStateConfig,
+  OrientationContext,
+} from '../agent-adapter.js';
 import type { IronCurtainConfig } from '../../config/types.js';
 import type { ProviderConfig } from '../provider-config.js';
 import {
@@ -113,9 +120,26 @@ export const claudeCodeAdapter: AgentAdapter = {
 if [ -n "$IRONCURTAIN_INITIAL_COLS" ] && [ -n "$IRONCURTAIN_INITIAL_ROWS" ]; then
   stty cols "$IRONCURTAIN_INITIAL_COLS" rows "$IRONCURTAIN_INITIAL_ROWS" 2>/dev/null
 fi
-exec claude --dangerously-skip-permissions \\
-  --mcp-config /etc/ironcurtain/claude-mcp-config.json \\
-  --append-system-prompt "$IRONCURTAIN_SYSTEM_PROMPT"
+cd /workspace
+
+# shellcheck disable=SC2086
+if [ -n "$IRONCURTAIN_RESUME_FLAGS" ]; then
+  # Try resume; if --continue fails (no conversation), fall back to fresh start
+  claude --dangerously-skip-permissions --mcp-config /etc/ironcurtain/claude-mcp-config.json --append-system-prompt "$IRONCURTAIN_SYSTEM_PROMPT" $IRONCURTAIN_RESUME_FLAGS
+  STATUS=$?
+  if [ $STATUS -ne 0 ]; then
+    claude --dangerously-skip-permissions --mcp-config /etc/ironcurtain/claude-mcp-config.json --append-system-prompt "$IRONCURTAIN_SYSTEM_PROMPT"
+    STATUS=$?
+  fi
+else
+  claude --dangerously-skip-permissions --mcp-config /etc/ironcurtain/claude-mcp-config.json --append-system-prompt "$IRONCURTAIN_SYSTEM_PROMPT"
+  STATUS=$?
+fi
+
+# Save .claude.json into the mounted state dir so it persists for resume.
+# Contains conversation metadata that --continue needs to find the session.
+cp "$HOME/.claude.json" "$HOME/.claude/.claude.json.saved" 2>/dev/null
+exit $STATUS
 `;
 
     // Helper scripts for PTY resize — use shared generators parameterized by process name.
@@ -208,6 +232,17 @@ exec claude --dangerously-skip-permissions \\
     // prompt from an env var set by the entrypoint. This avoids shell quoting
     // issues that occur when embedding large prompts in socat EXEC: strings.
     return ['socat', listenArg, 'EXEC:/etc/ironcurtain/start-claude.sh,pty,setsid,ctty,stderr,rawer'];
+  },
+
+  getConversationStateConfig(): ConversationStateConfig {
+    return {
+      hostDirName: 'claude-state',
+      containerMountPath: '/home/codespace/.claude/',
+      seed: [
+        { path: 'projects/', content: '' }, // directory, populated by Claude Code
+      ],
+      resumeFlags: ['--continue'],
+    };
   },
 };
 

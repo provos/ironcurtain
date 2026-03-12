@@ -125,6 +125,19 @@ describe('Claude Code Adapter', () => {
     expect(response.text).toContain('error message');
     expect(response.costUsd).toBeUndefined();
   });
+
+  it('returns conversation state config for session resume', () => {
+    const config = claudeCodeAdapter.getConversationStateConfig!();
+    expect(config.hostDirName).toBe('claude-state');
+    expect(config.containerMountPath).toBe('/home/codespace/.claude/');
+    expect(config.resumeFlags).toEqual(['--continue']);
+    expect(config.seed.length).toBeGreaterThanOrEqual(1);
+
+    // Verify projects/ seed is a directory entry
+    const projects = config.seed.find((s) => s.path === 'projects/');
+    expect(projects).toBeDefined();
+    expect(projects!.content).toBe('');
+  });
 });
 
 describe('Agent Registry', () => {

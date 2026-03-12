@@ -16,6 +16,32 @@ export interface PtySessionRegistration {
   readonly pid: number;
 }
 
+/**
+ * Snapshot of a PTY session's state, written to session-state.json when a
+ * session ends. Contains enough metadata for resume decisions.
+ */
+export interface SessionSnapshot {
+  /** Unique session identifier. */
+  readonly sessionId: string;
+  /** How the session ended. */
+  readonly status: 'completed' | 'crashed' | 'auth-failure' | 'user-exit';
+  /** Container exit code, or null if unavailable. */
+  readonly exitCode: number | null;
+  /** ISO 8601 timestamp of last activity. */
+  readonly lastActivity: string;
+  /** Host-side workspace path. */
+  readonly workspacePath: string;
+  /** Agent adapter ID (e.g., 'claude-code', 'goose'). */
+  readonly agent: string;
+  /** Human-readable session label. */
+  readonly label: string;
+  /** True if the agent supports resume AND conversation state exists. */
+  readonly resumable: boolean;
+}
+
+/** Well-known filename for session state snapshots. */
+export const SESSION_STATE_FILENAME = 'session-state.json';
+
 /** Well-known directory for PTY session registration files. */
 export const PTY_REGISTRY_DIR_NAME = 'pty-registry';
 

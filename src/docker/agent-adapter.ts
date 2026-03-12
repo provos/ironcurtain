@@ -35,6 +35,44 @@ export interface AgentResponse {
 export type AgentId = string & { readonly __brand: 'AgentId' };
 
 /**
+ * Configuration for persisting an agent's conversation state across
+ * container restarts, enabling session resume.
+ *
+ * Each adapter that supports resume returns this from
+ * `getConversationStateConfig()`. The generic infrastructure uses it
+ * to create/mount a host-side state directory and to append resume
+ * flags on subsequent runs.
+ */
+export interface ConversationStateConfig {
+  /** Host-side subdirectory name within sessionDir (e.g., 'claude-state'). */
+  readonly hostDirName: string;
+
+  /** Container-side mount target (e.g., '/root/.claude/'). */
+  readonly containerMountPath: string;
+
+  /**
+   * Files/directories to pre-populate on first session start.
+   * Paths are relative to the host-side directory.
+   *
+   * When `content` is a string, a file is created with that content.
+   * An empty string creates a directory instead.
+   * When `content` is a function, it is called to produce the content;
+   * returning `undefined` skips creation of that entry.
+   */
+  readonly seed: ReadonlyArray<{
+    readonly path: string;
+    readonly content: string | (() => string | undefined);
+  }>;
+
+  /**
+   * CLI flag(s) the agent uses to continue a previous conversation.
+   * Appended to the PTY command on resume (e.g., ['--continue']).
+   * If empty, the agent handles resume via presence of state files alone.
+   */
+  readonly resumeFlags: readonly string[];
+}
+
+/**
  * A file to write into the container's orientation or config directory.
  */
 export interface AgentConfigFile {
@@ -167,4 +205,11 @@ export interface AgentAdapter {
    * When not set, the default Anthropic-oriented message is used.
    */
   readonly credentialHelpText?: string;
+
+  /**
+   * Returns the conversation state configuration for this agent.
+   * If undefined, the agent does not support conversation persistence
+   * and sessions will not be marked as resumable.
+   */
+  getConversationStateConfig?(): ConversationStateConfig;
 }

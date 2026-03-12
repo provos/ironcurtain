@@ -15,6 +15,7 @@ import { homedir } from 'node:os';
 import { expandTilde } from '../types/argument-roles.js';
 import { PASTE_START, PASTE_END } from './paste-interceptor.js';
 import type { InputMode, MuxAction } from './types.js';
+import type { SessionSnapshot } from './session-scanner.js';
 
 export type PickerPhase = 'menu' | 'browse';
 
@@ -32,6 +33,12 @@ export interface PickerState {
   error: string | null;
 }
 
+export interface ResumePickerState {
+  sessions: SessionSnapshot[];
+  selectedIndex: number;
+  scrollOffset: number;
+}
+
 export interface MuxInputHandler {
   /** Current input mode. */
   readonly mode: InputMode;
@@ -45,8 +52,17 @@ export interface MuxInputHandler {
   /** Current picker state (null when not in picker mode). */
   readonly pickerState: PickerState | null;
 
+  /** Current resume picker state (null when not in resume picker mode). */
+  readonly resumePickerState: ResumePickerState | null;
+
   /** Enter picker mode (called by /new command handler). */
   enterPickerMode(): void;
+
+  /** Enter resume picker mode with the given sessions. */
+  enterResumePickerMode(sessions: SessionSnapshot[]): void;
+
+  /** Exit resume picker mode and return to command mode. */
+  exitResumePickerMode(): void;
 
   /** Re-enter picker browse phase with a validation error. */
   enterBrowseWithError(path: string, error: string): void;
@@ -182,6 +198,7 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
   let _inputBuffer = '';
   let _cursorPos = 0;
   let _pickerState: PickerState | null = null;
+  let _resumePickerState: ResumePickerState | null = null;
 
   function enterPickerMode(): void {
     _mode = 'picker';
@@ -235,6 +252,61 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
   function exitPickerMode(): void {
     _mode = 'command';
     _pickerState = null;
+  }
+
+  function enterResumePickerMode(sessions: SessionSnapshot[]): void {
+    _mode = 'resume-picker';
+    _resumePickerState = {
+      sessions,
+      selectedIndex: 0,
+      scrollOffset: 0,
+    };
+  }
+
+  function exitResumePickerMode(): void {
+    _mode = 'command';
+    _resumePickerState = null;
+  }
+
+  function handleResumePickerKey(key: string): MuxAction {
+    const rps = _resumePickerState;
+    if (!rps || rps.sessions.length === 0) {
+      if (key === ESCAPE || key === CTRL_C || key === ENTER) {
+        exitResumePickerMode();
+        return { kind: 'picker-cancel' };
+      }
+      return { kind: 'none' };
+    }
+
+    if (key === ESCAPE || key === CTRL_C) {
+      exitResumePickerMode();
+      return { kind: 'picker-cancel' };
+    }
+
+    if (key === ENTER) {
+      const selected = rps.sessions[rps.selectedIndex];
+      exitResumePickerMode();
+      return { kind: 'resume-spawn', sessionId: selected.sessionId, agent: selected.agent };
+    }
+
+    if (key === UP) {
+      if (rps.selectedIndex > 0) {
+        rps.selectedIndex--;
+        if (rps.selectedIndex < rps.scrollOffset) {
+          rps.scrollOffset = rps.selectedIndex;
+        }
+      }
+      return { kind: 'redraw-picker' };
+    }
+
+    if (key === DOWN) {
+      if (rps.selectedIndex < rps.sessions.length - 1) {
+        rps.selectedIndex++;
+      }
+      return { kind: 'redraw-picker' };
+    }
+
+    return { kind: 'none' };
   }
 
   function executeMenuSelection(selection: number): MuxAction {
@@ -562,8 +634,13 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
     get pickerState() {
       return _pickerState;
     },
+    get resumePickerState() {
+      return _resumePickerState;
+    },
 
     enterPickerMode,
+    enterResumePickerMode,
+    exitResumePickerMode,
     enterBrowseWithError,
     exitPickerMode,
 
@@ -573,6 +650,9 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
       }
       if (_mode === 'picker') {
         return handlePickerKey(key);
+      }
+      if (_mode === 'resume-picker') {
+        return handleResumePickerKey(key);
       }
       return handleCommandKey(key);
     },

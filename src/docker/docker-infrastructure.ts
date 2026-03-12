@@ -8,12 +8,22 @@
 
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { existsSync, readdirSync, readFileSync, copyFileSync, mkdtempSync, rmSync, mkdirSync } from 'node:fs';
+import {
+  existsSync,
+  readdirSync,
+  readFileSync,
+  copyFileSync,
+  mkdtempSync,
+  rmSync,
+  mkdirSync,
+  writeFileSync,
+  unlinkSync,
+} from 'node:fs';
 import { arch, tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 import type { IronCurtainConfig } from '../config/types.js';
 import type { SessionMode } from '../session/types.js';
-import type { AgentAdapter } from './agent-adapter.js';
+import type { AgentAdapter, ConversationStateConfig } from './agent-adapter.js';
 import type { DockerProxy } from './code-mode-proxy.js';
 import type { MitmProxy } from './mitm-proxy.js';
 import type { CertificateAuthority } from './ca.js';
@@ -43,6 +53,10 @@ export interface DockerInfrastructure {
   readonly mitmAddr: { socketPath?: string; port?: number };
   /** Authentication method used for this session ('oauth' or 'apikey'). */
   readonly authKind: 'oauth' | 'apikey';
+  /** Host-side conversation state directory, if the adapter supports resume. */
+  readonly conversationStateDir?: string;
+  /** Conversation state config from the adapter, if resume is supported. */
+  readonly conversationStateConfig?: ConversationStateConfig;
 }
 
 /** Hosts that use Anthropic OAuth credentials when available. */
@@ -193,6 +207,12 @@ export async function prepareDockerInfrastructure(
 
     const orientationDir = resolve(sessionDir, 'orientation');
 
+    // Set up conversation state directory if the adapter supports resume
+    const conversationStateConfig = adapter.getConversationStateConfig?.();
+    const conversationStateDir = conversationStateConfig
+      ? prepareConversationStateDir(sessionDir, conversationStateConfig)
+      : undefined;
+
     return {
       sessionId,
       sessionDir,
@@ -212,6 +232,8 @@ export async function prepareDockerInfrastructure(
       socketsDir,
       mitmAddr,
       authKind,
+      conversationStateDir,
+      conversationStateConfig,
     };
   } catch (error) {
     // Best-effort cleanup of proxies started above
@@ -252,6 +274,53 @@ function resolveRealKey(host: string, config: IronCurtainConfig, oauthAccessToke
     logger.warn(`No API key configured for provider host: ${host}`);
   }
   return key;
+}
+
+/**
+ * Creates and seeds the conversation state directory for agents that
+ * support session resume. Idempotent: skips seeding if the directory
+ * already exists (resume case).
+ *
+ * As a defense-in-depth measure, always deletes `.credentials.json`
+ * from the state directory — the MITM proxy handles auth independently,
+ * so any credentials file left by the agent is stale.
+ */
+export function prepareConversationStateDir(sessionDir: string, config: ConversationStateConfig): string {
+  const stateDir = resolve(sessionDir, config.hostDirName);
+  const isNew = !existsSync(stateDir);
+
+  if (isNew) {
+    mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+
+    for (const entry of config.seed) {
+      const content = typeof entry.content === 'function' ? entry.content() : entry.content;
+      if (content === undefined) continue;
+
+      const targetPath = resolve(stateDir, entry.path);
+      // Reject paths that escape the state directory
+      if (!targetPath.startsWith(stateDir + '/') && targetPath !== stateDir) {
+        throw new Error(`Seed path escapes state directory: ${entry.path}`);
+      }
+      if (entry.path.endsWith('/') || content === '') {
+        // Directory entry
+        mkdirSync(targetPath, { recursive: true });
+      } else {
+        // File entry
+        mkdirSync(dirname(targetPath), { recursive: true });
+        writeFileSync(targetPath, content);
+      }
+    }
+  }
+
+  // Defense-in-depth: remove stale credentials on every start
+  const credentialsPath = resolve(stateDir, '.credentials.json');
+  try {
+    unlinkSync(credentialsPath);
+  } catch {
+    // File doesn't exist — expected on first run
+  }
+
+  return stateDir;
 }
 
 /**

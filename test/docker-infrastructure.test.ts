@@ -1,5 +1,10 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, existsSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import type { DockerInfrastructure } from '../src/docker/docker-infrastructure.js';
+import { prepareConversationStateDir } from '../src/docker/docker-infrastructure.js';
+import type { ConversationStateConfig } from '../src/docker/agent-adapter.js';
 
 /**
  * Type-level tests for the DockerInfrastructure interface.
@@ -99,5 +104,118 @@ describe('DockerInfrastructure interface', () => {
     const udsAddr: DockerInfrastructure['mitmAddr'] = { socketPath: '/tmp/mitm.sock' };
     expect(udsAddr.socketPath).toBe('/tmp/mitm.sock');
     expect(udsAddr.port).toBeUndefined();
+  });
+});
+
+describe('prepareConversationStateDir', () => {
+  let sessionDir: string;
+
+  beforeEach(() => {
+    sessionDir = mkdtempSync(join(tmpdir(), 'conv-state-test-'));
+  });
+
+  afterEach(() => {
+    if (existsSync(sessionDir)) {
+      rmSync(sessionDir, { recursive: true, force: true });
+    }
+  });
+
+  it('creates state dir and seeds files on first run', () => {
+    const config: ConversationStateConfig = {
+      hostDirName: 'test-state',
+      containerMountPath: '/root/.test/',
+      seed: [
+        { path: 'data/', content: '' },
+        { path: 'config.json', content: '{"key": "value"}' },
+      ],
+      resumeFlags: ['--resume'],
+    };
+
+    const stateDir = prepareConversationStateDir(sessionDir, config);
+
+    expect(stateDir).toBe(join(sessionDir, 'test-state'));
+    expect(existsSync(join(stateDir, 'data'))).toBe(true);
+    expect(readFileSync(join(stateDir, 'config.json'), 'utf-8')).toBe('{"key": "value"}');
+  });
+
+  it('calls seed content function and skips undefined results', () => {
+    const config: ConversationStateConfig = {
+      hostDirName: 'test-state',
+      containerMountPath: '/root/.test/',
+      seed: [
+        { path: 'present.json', content: () => '{"present": true}' },
+        { path: 'absent.json', content: () => undefined },
+      ],
+      resumeFlags: [],
+    };
+
+    const stateDir = prepareConversationStateDir(sessionDir, config);
+
+    expect(readFileSync(join(stateDir, 'present.json'), 'utf-8')).toBe('{"present": true}');
+    expect(existsSync(join(stateDir, 'absent.json'))).toBe(false);
+  });
+
+  it('does not re-seed on subsequent runs', () => {
+    const config: ConversationStateConfig = {
+      hostDirName: 'test-state',
+      containerMountPath: '/root/.test/',
+      seed: [{ path: 'config.json', content: '{"original": true}' }],
+      resumeFlags: [],
+    };
+
+    // First run creates the file
+    prepareConversationStateDir(sessionDir, config);
+
+    // Modify the file to simulate agent writes
+    const configPath = join(sessionDir, 'test-state', 'config.json');
+    writeFileSync(configPath, '{"modified": true}');
+
+    // Second run should not overwrite
+    prepareConversationStateDir(sessionDir, config);
+    expect(readFileSync(configPath, 'utf-8')).toBe('{"modified": true}');
+  });
+
+  it('deletes .credentials.json on every run (defense-in-depth)', () => {
+    const config: ConversationStateConfig = {
+      hostDirName: 'test-state',
+      containerMountPath: '/root/.test/',
+      seed: [],
+      resumeFlags: [],
+    };
+
+    // First run creates the dir
+    const stateDir = prepareConversationStateDir(sessionDir, config);
+
+    // Simulate agent creating credentials
+    writeFileSync(join(stateDir, '.credentials.json'), '{"token": "secret"}');
+    expect(existsSync(join(stateDir, '.credentials.json'))).toBe(true);
+
+    // Second run should delete it
+    prepareConversationStateDir(sessionDir, config);
+    expect(existsSync(join(stateDir, '.credentials.json'))).toBe(false);
+  });
+
+  it('handles missing .credentials.json gracefully', () => {
+    const config: ConversationStateConfig = {
+      hostDirName: 'test-state',
+      containerMountPath: '/root/.test/',
+      seed: [],
+      resumeFlags: [],
+    };
+
+    // Should not throw even when .credentials.json doesn't exist
+    expect(() => prepareConversationStateDir(sessionDir, config)).not.toThrow();
+  });
+
+  it('creates nested directories for seed file paths', () => {
+    const config: ConversationStateConfig = {
+      hostDirName: 'test-state',
+      containerMountPath: '/root/.test/',
+      seed: [{ path: 'deep/nested/file.txt', content: 'hello' }],
+      resumeFlags: [],
+    };
+
+    const stateDir = prepareConversationStateDir(sessionDir, config);
+    expect(readFileSync(join(stateDir, 'deep', 'nested', 'file.txt'), 'utf-8')).toBe('hello');
   });
 });

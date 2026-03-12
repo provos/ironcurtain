@@ -13,7 +13,13 @@ fi
 
 # Pre-seed .claude.json so Claude Code skips onboarding, trusts /workspace,
 # and doesn't prompt for API key approval.
-cat > "$HOME/.claude.json" <<'EOJSON'
+# On resume, restore the previous session's .claude.json from the state dir
+# (it contains conversation metadata that --continue needs).
+SAVED_CLAUDE_JSON="$HOME/.claude/.claude.json.saved"
+if [ -n "$IRONCURTAIN_RESUME_FLAGS" ] && [ -f "$SAVED_CLAUDE_JSON" ]; then
+  cp "$SAVED_CLAUDE_JSON" "$HOME/.claude.json"
+else
+  cat > "$HOME/.claude.json" <<'EOJSON'
 {
   "hasCompletedOnboarding": true,
   "numStartups": 1,
@@ -25,6 +31,7 @@ cat > "$HOME/.claude.json" <<'EOJSON'
   }
 }
 EOJSON
+fi
 
 # Configure settings.json:
 # - skipDangerousModePermissionPrompt: suppresses the bypass-permissions warning
@@ -33,6 +40,7 @@ EOJSON
 #   this env var directly -- no apiKeyHelper needed.
 # - API key mode: apiKeyHelper echoes the fake key so Claude Code skips the
 #   custom API key approval dialog entirely.
+# Always written (even on resume) because auth mode is runtime-specific.
 mkdir -p "$HOME/.claude"
 
 if [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ]; then

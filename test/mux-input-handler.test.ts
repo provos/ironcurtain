@@ -444,4 +444,128 @@ describe('MuxInputHandler', () => {
       expect(handler.mode).toBe('command');
     });
   });
+
+  describe('resume picker mode', () => {
+    const sessions = [
+      {
+        sessionId: 'session-aaa',
+        status: 'user-exit' as const,
+        exitCode: 0,
+        lastActivity: '2026-03-10T18:00:00Z',
+
+        workspacePath: '/workspace',
+        agent: 'claude-code',
+        label: 'Claude Code (interactive)',
+        resumable: true,
+      },
+      {
+        sessionId: 'session-bbb',
+        status: 'crashed' as const,
+        exitCode: 1,
+        lastActivity: '2026-03-10T12:00:00Z',
+
+        workspacePath: '/workspace',
+        agent: 'claude-code',
+        label: 'Claude Code (interactive)',
+        resumable: true,
+      },
+    ];
+
+    function enterResumePicker() {
+      const handler = createMuxInputHandler({ initialMode: 'command' });
+      handler.enterResumePickerMode(sessions);
+      return handler;
+    }
+
+    it('enters resume-picker mode', () => {
+      const handler = enterResumePicker();
+      expect(handler.mode).toBe('resume-picker');
+      expect(handler.resumePickerState).not.toBeNull();
+      expect(handler.resumePickerState?.sessions).toHaveLength(2);
+      expect(handler.resumePickerState?.selectedIndex).toBe(0);
+    });
+
+    it('navigates down in session list', () => {
+      const handler = enterResumePicker();
+      const action = handler.handleKey('DOWN');
+      expect(action).toEqual({ kind: 'redraw-picker' });
+      expect(handler.resumePickerState?.selectedIndex).toBe(1);
+    });
+
+    it('does not go below last session', () => {
+      const handler = enterResumePicker();
+      handler.handleKey('DOWN');
+      handler.handleKey('DOWN');
+      expect(handler.resumePickerState?.selectedIndex).toBe(1);
+    });
+
+    it('navigates up in session list', () => {
+      const handler = enterResumePicker();
+      handler.handleKey('DOWN');
+      const action = handler.handleKey('UP');
+      expect(action).toEqual({ kind: 'redraw-picker' });
+      expect(handler.resumePickerState?.selectedIndex).toBe(0);
+    });
+
+    it('does not go above first session', () => {
+      const handler = enterResumePicker();
+      handler.handleKey('UP');
+      expect(handler.resumePickerState?.selectedIndex).toBe(0);
+    });
+
+    it('Enter selects session and returns resume-spawn', () => {
+      const handler = enterResumePicker();
+      const action = handler.handleKey('ENTER');
+      expect(action).toEqual({
+        kind: 'resume-spawn',
+        sessionId: 'session-aaa',
+        agent: 'claude-code',
+      });
+      expect(handler.mode).toBe('command');
+      expect(handler.resumePickerState).toBeNull();
+    });
+
+    it('Enter selects second session after DOWN', () => {
+      const handler = enterResumePicker();
+      handler.handleKey('DOWN');
+      const action = handler.handleKey('ENTER');
+      expect(action).toEqual({
+        kind: 'resume-spawn',
+        sessionId: 'session-bbb',
+        agent: 'claude-code',
+      });
+    });
+
+    it('Escape cancels resume picker', () => {
+      const handler = enterResumePicker();
+      const action = handler.handleKey('ESCAPE');
+      expect(action).toEqual({ kind: 'picker-cancel' });
+      expect(handler.mode).toBe('command');
+      expect(handler.resumePickerState).toBeNull();
+    });
+
+    it('Ctrl-C cancels resume picker', () => {
+      const handler = enterResumePicker();
+      const action = handler.handleKey('CTRL_C');
+      expect(action).toEqual({ kind: 'picker-cancel' });
+      expect(handler.mode).toBe('command');
+    });
+
+    it('exitResumePickerMode returns to command mode', () => {
+      const handler = enterResumePicker();
+      handler.exitResumePickerMode();
+      expect(handler.mode).toBe('command');
+      expect(handler.resumePickerState).toBeNull();
+    });
+
+    it('handles empty session list gracefully', () => {
+      const handler = createMuxInputHandler({ initialMode: 'command' });
+      handler.enterResumePickerMode([]);
+      expect(handler.mode).toBe('resume-picker');
+
+      const action = handler.handleKey('ENTER');
+      expect(action).toEqual({ kind: 'picker-cancel' });
+      expect(handler.mode).toBe('command');
+    });
+  });
 });

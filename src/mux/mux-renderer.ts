@@ -18,8 +18,9 @@
 import type { Terminal as TerminalType } from '@xterm/headless';
 import { calculateLayout, type InputMode, type Layout, type MuxTab } from './types.js';
 import type { ListenerState } from '../escalation/listener-state.js';
-import type { PickerState } from './mux-input-handler.js';
+import type { PickerState, ResumePickerState } from './mux-input-handler.js';
 import { createSplashScreen, type SplashScreen } from './mux-splash.js';
+import { formatRelativeTime } from './session-scanner.js';
 
 // -- xterm.js color mode constants (from IBufferCell.getFgColorMode/getBgColorMode) --
 const CM_DEFAULT = 0;
@@ -137,6 +138,7 @@ export interface MuxRendererDeps {
   getEscalationState: () => ListenerState;
   getPendingCount: () => number;
   getPickerState: () => PickerState | null;
+  getResumePickerState: () => ResumePickerState | null;
   /** Returns the active tab's scroll offset (null = live/bottom). */
   getScrollOffset: () => number | null;
 }
@@ -236,7 +238,7 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
   function activeOverlayRows(): number {
     const mode = deps.getMode();
     if (mode === 'command') return _layout.overlayRows;
-    if (mode === 'picker') return _layout.pickerRows;
+    if (mode === 'picker' || mode === 'resume-picker') return _layout.pickerRows;
     return 0;
   }
 
@@ -275,7 +277,7 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
     const mode = deps.getMode();
     let visibleRows = _layout.ptyViewportRows;
     if (mode === 'command') visibleRows -= _layout.overlayRows;
-    else if (mode === 'picker') visibleRows -= _layout.pickerRows;
+    else if (mode === 'picker' || mode === 'resume-picker') visibleRows -= _layout.pickerRows;
 
     let lastStyle: TranslatedCell | null = null;
     for (let y = 0; y < visibleRows; y++) {
@@ -457,6 +459,8 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
     } else {
       term.cyan('/new');
       term.dim('  ');
+      term.cyan('/resume');
+      term.dim('  ');
       term.cyan('/tab');
       term.dim(' N  ');
       term.cyan('/close');
@@ -526,6 +530,8 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
       drawCommandOverlay();
     } else if (mode === 'picker') {
       drawPickerOverlay();
+    } else if (mode === 'resume-picker') {
+      drawResumePickerOverlay();
     }
   }
 
@@ -691,6 +697,92 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
     moveTo(cursorX, startY);
   }
 
+  function drawResumePickerOverlay(): void {
+    const rps = deps.getResumePickerState();
+    if (!rps) return;
+
+    const startY = _layout.pickerY;
+    const totalRows = _layout.pickerRows;
+    if (totalRows < 3) return;
+
+    let currentY = startY;
+
+    // Title
+    clearLine(currentY);
+    moveTo(2, currentY);
+    term.cyan('/resume');
+    term.dim(' \u2014 select a session to resume');
+    term.eraseLineAfter();
+    currentY++;
+
+    if (rps.sessions.length === 0) {
+      clearLine(currentY);
+      moveTo(4, currentY);
+      term.dim('No resumable sessions found');
+      term.eraseLineAfter();
+      currentY++;
+
+      for (let y = currentY; y < startY + totalRows; y++) {
+        clearLine(y);
+      }
+      return;
+    }
+
+    // Session list
+    const listRows = Math.max(0, totalRows - 2); // title + hint bar
+
+    // Scroll adjustment (render-time only; do not mutate rps)
+    let scrollOffset = rps.scrollOffset;
+    if (rps.selectedIndex < scrollOffset) {
+      scrollOffset = rps.selectedIndex;
+    } else if (rps.selectedIndex >= scrollOffset + listRows) {
+      scrollOffset = rps.selectedIndex - listRows + 1;
+    }
+
+    for (let i = 0; i < listRows; i++) {
+      clearLine(currentY);
+      const idx = scrollOffset + i;
+      if (idx < rps.sessions.length) {
+        const s = rps.sessions[idx];
+        const isSelected = idx === rps.selectedIndex;
+        const shortId = s.sessionId.substring(0, 8);
+        const timeAgo = formatRelativeTime(s.lastActivity);
+        const line = `${shortId}  ${s.agent}  ${s.label}  ${timeAgo}  [${s.status}]`;
+
+        moveTo(2, currentY);
+        if (isSelected) {
+          term.bgCyan.black('> ' + truncate(line, Math.max(1, _cols - 6)));
+          term.styleReset();
+        } else {
+          term('  ');
+          term.dim(shortId);
+          term('  ');
+          term(s.agent);
+          term('  ');
+          term.cyan(truncate(s.label, Math.max(10, _cols - 50)));
+          term('  ');
+          term.dim(timeAgo);
+          term('  ');
+          term.dim(`[${s.status}]`);
+        }
+      }
+      term.eraseLineAfter();
+      currentY++;
+    }
+
+    // Hint bar
+    clearLine(currentY);
+    moveTo(2, currentY);
+    term.bgWhite.black(' Enter ');
+    term.styleReset();
+    term.dim(' resume  ');
+    term.bgWhite.black(' Esc ');
+    term.styleReset();
+    term.dim(' cancel');
+    term.styleReset();
+    term.eraseLineAfter();
+  }
+
   return {
     get layout() {
       return _layout;
@@ -718,7 +810,7 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
     redrawCommandArea(): void {
       recalcLayout();
       const mode = deps.getMode();
-      if (mode === 'command' || mode === 'picker') {
+      if (mode === 'command' || mode === 'picker' || mode === 'resume-picker') {
         // Repaint viewport first to clear stale overlay rows from a
         // previously larger overlay (e.g., after resolving an escalation).
         drawPtyViewport();
