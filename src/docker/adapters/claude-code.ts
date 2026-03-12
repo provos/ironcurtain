@@ -122,19 +122,17 @@ if [ -n "$IRONCURTAIN_INITIAL_COLS" ] && [ -n "$IRONCURTAIN_INITIAL_ROWS" ]; the
 fi
 cd /workspace
 
-COMMON_ARGS="--dangerously-skip-permissions --mcp-config /etc/ironcurtain/claude-mcp-config.json --append-system-prompt \\"$IRONCURTAIN_SYSTEM_PROMPT\\""
-
 # shellcheck disable=SC2086
 if [ -n "$IRONCURTAIN_RESUME_FLAGS" ]; then
   # Try resume; if --continue fails (no conversation), fall back to fresh start
-  claude $COMMON_ARGS $IRONCURTAIN_RESUME_FLAGS
+  claude --dangerously-skip-permissions --mcp-config /etc/ironcurtain/claude-mcp-config.json --append-system-prompt "$IRONCURTAIN_SYSTEM_PROMPT" $IRONCURTAIN_RESUME_FLAGS
   STATUS=$?
   if [ $STATUS -ne 0 ]; then
-    claude $COMMON_ARGS
+    claude --dangerously-skip-permissions --mcp-config /etc/ironcurtain/claude-mcp-config.json --append-system-prompt "$IRONCURTAIN_SYSTEM_PROMPT"
     STATUS=$?
   fi
 else
-  claude $COMMON_ARGS
+  claude --dangerously-skip-permissions --mcp-config /etc/ironcurtain/claude-mcp-config.json --append-system-prompt "$IRONCURTAIN_SYSTEM_PROMPT"
   STATUS=$?
 fi
 

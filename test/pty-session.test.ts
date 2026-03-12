@@ -148,6 +148,21 @@ describe('Claude Code adapter PTY orientation files', () => {
     expect(startScript!.content).toContain('stty cols');
   });
 
+  it('start-claude.sh quotes $IRONCURTAIN_SYSTEM_PROMPT to prevent word-splitting', () => {
+    const files = claudeCodeAdapter.generateOrientationFiles();
+    const startScript = files.find((f) => f.path === 'start-claude.sh')!;
+    // Every use of $IRONCURTAIN_SYSTEM_PROMPT must be in double quotes.
+    // Unquoted expansion causes bash to word-split the prompt text,
+    // injecting individual words as separate arguments to claude.
+    const lines = startScript.content.split('\n');
+    const promptUsages = lines.filter((l) => l.includes('IRONCURTAIN_SYSTEM_PROMPT') && !l.trimStart().startsWith('#'));
+    expect(promptUsages.length).toBeGreaterThan(0);
+    for (const line of promptUsages) {
+      // Must appear as "$IRONCURTAIN_SYSTEM_PROMPT" (quoted), not bare
+      expect(line).toMatch(/"\$IRONCURTAIN_SYSTEM_PROMPT"/);
+    }
+  });
+
   it('resize-pty.sh finds Claude via pgrep -x and sends SIGWINCH', () => {
     const files = claudeCodeAdapter.generateOrientationFiles();
     const resizeScript = files.find((f) => f.path === 'resize-pty.sh');
