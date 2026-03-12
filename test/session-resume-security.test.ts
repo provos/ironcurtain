@@ -8,7 +8,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { SessionSnapshot } from '../src/docker/pty-types.js';
 import { SESSION_STATE_FILENAME } from '../src/docker/pty-types.js';
@@ -82,7 +82,10 @@ describe('snapshot tampering resistance', () => {
   it('rejects non-resumable sessions even if other fields look valid', () => {
     const sessionDir = join(baseDir, 'sessions', 'tampered-session');
     mkdirSync(sessionDir, { recursive: true });
-    writeFileSync(join(sessionDir, SESSION_STATE_FILENAME), JSON.stringify(makeSnapshot({ resumable: false })));
+    writeFileSync(
+      join(sessionDir, SESSION_STATE_FILENAME),
+      JSON.stringify(makeSnapshot({ sessionId: 'tampered-session', resumable: false })),
+    );
 
     expect(() => validateResumeSession('tampered-session')).toThrow('not resumable');
   });
@@ -90,12 +93,33 @@ describe('snapshot tampering resistance', () => {
   it('rejects snapshot with missing sessionId field', () => {
     const sessionDir = join(baseDir, 'sessions', 'no-id-session');
     mkdirSync(sessionDir, { recursive: true });
-    // Write snapshot without sessionId
     writeFileSync(join(sessionDir, SESSION_STATE_FILENAME), JSON.stringify({ resumable: true, status: 'user-exit' }));
 
-    // scanResumableSessions requires sessionId to be truthy
+    // validateResumeSession rejects missing/mismatched sessionId
+    expect(() => validateResumeSession('no-id-session')).toThrow('sessionId mismatch');
+
+    // scanResumableSessions also requires sessionId to be truthy
     const sessions = scanResumableSessions();
     expect(sessions).toHaveLength(0);
+  });
+
+  it('rejects snapshot with mismatched sessionId', () => {
+    const sessionDir = join(baseDir, 'sessions', 'real-session');
+    mkdirSync(sessionDir, { recursive: true });
+    writeFileSync(
+      join(sessionDir, SESSION_STATE_FILENAME),
+      JSON.stringify(makeSnapshot({ sessionId: 'different-session' })),
+    );
+
+    expect(() => validateResumeSession('real-session')).toThrow('sessionId mismatch');
+  });
+
+  it('rejects snapshot with corrupted JSON', () => {
+    const sessionDir = join(baseDir, 'sessions', 'corrupt-session');
+    mkdirSync(sessionDir, { recursive: true });
+    writeFileSync(join(sessionDir, SESSION_STATE_FILENAME), '{not valid json!!!');
+
+    expect(() => validateResumeSession('corrupt-session')).toThrow('corrupted or invalid');
   });
 
   it('handles extra unexpected fields in snapshot gracefully', () => {
@@ -181,25 +205,15 @@ describe('seed file path traversal', () => {
     rmSync(sessionDir, { recursive: true, force: true });
   });
 
-  it('rejects seed paths that attempt to escape the state directory', () => {
-    // prepareConversationStateDir() validates that resolved seed paths
-    // stay within the state directory, rejecting traversal attempts.
+  it('rejects seed paths that attempt to escape the state directory via traversal', () => {
     const config: ConversationStateConfig = {
       hostDirName: 'state',
       containerMountPath: '/root/.test/',
-      seed: [
-        // A normal nested path
-        { path: 'deep/nested/file.txt', content: 'safe' },
-      ],
+      seed: [{ path: '../escape.txt', content: 'should-fail' }],
       resumeFlags: [],
     };
 
-    const stateDir = prepareConversationStateDir(sessionDir, config);
-    expect(existsSync(join(stateDir, 'deep', 'nested', 'file.txt'))).toBe(true);
-
-    // Verify the file was created inside stateDir
-    const filePath = resolve(stateDir, 'deep', 'nested', 'file.txt');
-    expect(filePath.startsWith(stateDir)).toBe(true);
+    expect(() => prepareConversationStateDir(sessionDir, config)).toThrow('Seed path escapes state directory');
   });
 
   it('rejects absolute seed paths that escape the state directory', () => {

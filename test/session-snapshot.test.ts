@@ -116,12 +116,15 @@ describe('validateResumeSession', () => {
   });
 
   it('returns snapshot for a valid resumable session', () => {
-    const snapshot = makeSnapshot({ resumable: true });
+    const workspaceDir = mkdtempSync(join(tmpdir(), 'snapshot-ws-'));
+    const snapshot = makeSnapshot({ sessionId: 'valid-resume', resumable: true, workspacePath: workspaceDir });
     createFakeSessionDir(baseDir, 'valid-resume', snapshot);
 
     const result = validateResumeSession('valid-resume');
-    expect(result.sessionId).toBe('test-session-123');
+    expect(result.sessionId).toBe('valid-resume');
     expect(result.resumable).toBe(true);
+
+    rmSync(workspaceDir, { recursive: true, force: true });
   });
 
   it('throws when session directory does not exist', () => {
@@ -134,7 +137,7 @@ describe('validateResumeSession', () => {
   });
 
   it('throws when session is not resumable', () => {
-    const snapshot = makeSnapshot({ resumable: false, status: 'crashed' });
+    const snapshot = makeSnapshot({ sessionId: 'not-resumable', resumable: false, status: 'crashed' });
     createFakeSessionDir(baseDir, 'not-resumable', snapshot);
     expect(() => validateResumeSession('not-resumable')).toThrow('not resumable');
   });

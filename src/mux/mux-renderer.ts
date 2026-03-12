@@ -731,16 +731,17 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
     // Session list
     const listRows = Math.max(0, totalRows - 2); // title + hint bar
 
-    // Scroll adjustment
-    if (rps.selectedIndex < rps.scrollOffset) {
-      rps.scrollOffset = rps.selectedIndex;
-    } else if (rps.selectedIndex >= rps.scrollOffset + listRows) {
-      rps.scrollOffset = rps.selectedIndex - listRows + 1;
+    // Scroll adjustment (render-time only; do not mutate rps)
+    let scrollOffset = rps.scrollOffset;
+    if (rps.selectedIndex < scrollOffset) {
+      scrollOffset = rps.selectedIndex;
+    } else if (rps.selectedIndex >= scrollOffset + listRows) {
+      scrollOffset = rps.selectedIndex - listRows + 1;
     }
 
     for (let i = 0; i < listRows; i++) {
       clearLine(currentY);
-      const idx = rps.scrollOffset + i;
+      const idx = scrollOffset + i;
       if (idx < rps.sessions.length) {
         const s = rps.sessions[idx];
         const isSelected = idx === rps.selectedIndex;

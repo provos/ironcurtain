@@ -72,11 +72,23 @@ export function validateResumeSession(resumeSessionId: string): SessionSnapshot 
     throw new Error(`Cannot resume session "${resumeSessionId}": no session state snapshot found`);
   }
 
-  const snapshot = JSON.parse(readFileSync(snapshotPath, 'utf-8')) as SessionSnapshot;
+  let snapshot: SessionSnapshot;
+  try {
+    snapshot = JSON.parse(readFileSync(snapshotPath, 'utf-8')) as SessionSnapshot;
+  } catch {
+    throw new Error(`Cannot resume session "${resumeSessionId}": session state snapshot is corrupted or invalid`);
+  }
+
+  if (!snapshot.sessionId || snapshot.sessionId !== resumeSessionId) {
+    throw new Error(`Cannot resume session "${resumeSessionId}": snapshot sessionId mismatch`);
+  }
   if (!snapshot.resumable) {
     throw new Error(
       `Cannot resume session "${resumeSessionId}": session is not resumable (status: ${snapshot.status})`,
     );
+  }
+  if (!snapshot.agent) {
+    throw new Error(`Cannot resume session "${resumeSessionId}": agent configuration is missing`);
   }
 
   // Validate workspace path exists and is a directory to prevent
