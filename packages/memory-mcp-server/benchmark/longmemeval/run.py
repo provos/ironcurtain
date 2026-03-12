@@ -4,6 +4,7 @@ Main orchestrator for the LongMemEval benchmark harness.
 Runs three modes:
   python run.py run [--variant S|M|Oracle] [--resume] [--limit N]
   python run.py evaluate --hypotheses results/run-xxx/hypotheses.jsonl [--variant S|M|Oracle]
+  python run.py evaluate --hypotheses results/run-xxx/hypotheses.jsonl --retrieval-only
   python run.py run+evaluate [--variant S|M|Oracle] [--resume] [--limit N]
 
 All status/progress output goes to stderr. Data output goes to files only.
@@ -26,6 +27,13 @@ from .evaluate import evaluate_all
 from .ingest import ingest_question
 from .mcp_client import call_recall, memory_server
 from .reader import build_reader_client, generate_answer
+from .retrieval_metrics import (
+    compute_retrieval_summary,
+    evaluate_retrieval_from_checkpoint,
+    print_retrieval_summary,
+    score_retrieval,
+    write_retrieval_summary,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -155,6 +163,7 @@ async def main_run(config: BenchmarkConfig, questions: list[Question] | None = N
     save_config(config)
 
     reader_client = build_reader_client(config)
+    retrieval_results: list[dict] = []
 
     for i, question in enumerate(remaining):
         t0 = time.time()
@@ -168,6 +177,12 @@ async def main_run(config: BenchmarkConfig, questions: list[Question] | None = N
         result = await run_question(question, config, reader_client=reader_client)
         elapsed = time.time() - t0
         result["elapsed_seconds"] = round(elapsed, 2)
+
+        # Score retrieval for non-abstention questions
+        if "_abs" not in question.question_id:
+            ret_score = score_retrieval(result["retrieved_context"], question)
+            result["retrieval"] = ret_score
+            retrieval_results.append(ret_score)
 
         if config.keep_db:
             _preserve_db(result.pop("db_path"), config.run_dir, question.question_id)
@@ -184,6 +199,12 @@ async def main_run(config: BenchmarkConfig, questions: list[Question] | None = N
         append_jsonl(config.checkpoint_path, result)
 
         print(f" ({elapsed:.1f}s)", file=sys.stderr, flush=True)
+
+    # Write retrieval summary
+    if retrieval_results:
+        ret_summary = compute_retrieval_summary(retrieval_results)
+        write_retrieval_summary(config.run_dir, ret_summary)
+        print_retrieval_summary(ret_summary)
 
     print(f"\nDone. Hypotheses: {config.hypotheses_path}", file=sys.stderr)
     return config.hypotheses_path
@@ -208,19 +229,48 @@ async def main_evaluate(
     print(f"\nEvaluation complete. Results in: {config.run_dir}/", file=sys.stderr)
 
 
+def main_retrieval_only(
+    config: BenchmarkConfig,
+    hypotheses_path: str,
+    questions: list[Question] | None = None,
+) -> None:
+    """Compute retrieval metrics from checkpoint.jsonl without running the judge.
+
+    The checkpoint file lives alongside the hypotheses file in the same run
+    directory.
+    """
+    if questions is None:
+        questions = load_questions(config)
+
+    # Derive checkpoint path from hypotheses path (same directory)
+    run_dir = os.path.dirname(hypotheses_path)
+    checkpoint_path = os.path.join(run_dir, "checkpoint.jsonl")
+    if not os.path.exists(checkpoint_path):
+        print(
+            f"error: checkpoint file not found at {checkpoint_path}\n"
+            "  --retrieval-only requires a checkpoint.jsonl with retrieved_context",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    results, summary = evaluate_retrieval_from_checkpoint(checkpoint_path, questions)
+    write_retrieval_summary(run_dir, summary)
+    print_retrieval_summary(summary)
+
+
 # ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
 
 
-def _parse_mode_and_hypotheses() -> tuple[str, str | None, list[str]]:
-    """Extract mode and --hypotheses from sys.argv before handing off to config parser.
+def _parse_mode_and_hypotheses() -> tuple[str, str | None, bool, list[str]]:
+    """Extract mode, --hypotheses, and --retrieval-only from sys.argv.
 
     The mode is a positional argument (run, evaluate, run+evaluate) and
-    --hypotheses is only valid for evaluate mode. Both are consumed here
+    --hypotheses is only valid for evaluate mode. All three are consumed here
     so that config.parse_args sees only the flags it knows about.
 
-    Returns (mode, hypotheses_path, remaining_argv).
+    Returns (mode, hypotheses_path, retrieval_only, remaining_argv).
     """
     if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
         print(
@@ -232,6 +282,7 @@ def _parse_mode_and_hypotheses() -> tuple[str, str | None, list[str]]:
             "  run+evaluate  Run then evaluate in one pass\n"
             "\n"
             "evaluate mode requires: --hypotheses PATH\n"
+            "evaluate mode accepts:  --retrieval-only (skip judge, only compute retrieval metrics)\n"
             "\n"
             "Run with <mode> --help for full option list.",
             file=sys.stderr,
@@ -247,9 +298,12 @@ def _parse_mode_and_hypotheses() -> tuple[str, str | None, list[str]]:
         )
         sys.exit(1)
 
-    # Extract --hypotheses before passing remaining args to config parser
+    # Extract --hypotheses and --retrieval-only before passing remaining args
+    # to the config parser
     remaining = sys.argv[2:]
     hypotheses_path: str | None = None
+    retrieval_only = False
+
     if "--hypotheses" in remaining:
         idx = remaining.index("--hypotheses")
         if idx + 1 >= len(remaining):
@@ -258,15 +312,27 @@ def _parse_mode_and_hypotheses() -> tuple[str, str | None, list[str]]:
         hypotheses_path = remaining[idx + 1]
         remaining = remaining[:idx] + remaining[idx + 2 :]
 
+    if "--retrieval-only" in remaining:
+        idx = remaining.index("--retrieval-only")
+        retrieval_only = True
+        remaining = remaining[:idx] + remaining[idx + 1 :]
+
     if mode == "evaluate" and hypotheses_path is None:
         print("error: evaluate mode requires --hypotheses PATH", file=sys.stderr)
         sys.exit(1)
 
-    return mode, hypotheses_path, remaining
+    if retrieval_only and mode not in ("evaluate",):
+        print(
+            "error: --retrieval-only is only valid with evaluate mode",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    return mode, hypotheses_path, retrieval_only, remaining
 
 
 def main() -> None:
-    mode, hypotheses_path, config_argv = _parse_mode_and_hypotheses()
+    mode, hypotheses_path, retrieval_only, config_argv = _parse_mode_and_hypotheses()
     config = parse_args(config_argv)
 
     try:
@@ -277,7 +343,10 @@ def main() -> None:
 
         if mode in ("evaluate", "run+evaluate"):
             assert hypotheses_path is not None
-            asyncio.run(main_evaluate(config, hypotheses_path, questions))
+            if retrieval_only:
+                main_retrieval_only(config, hypotheses_path, questions)
+            else:
+                asyncio.run(main_evaluate(config, hypotheses_path, questions))
     except KeyboardInterrupt:
         print(
             f"\nInterrupted. Partial results in: {config.run_dir}/",
