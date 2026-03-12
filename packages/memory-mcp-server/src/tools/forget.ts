@@ -5,6 +5,7 @@
  */
 
 import type { MemoryEngine } from '../engine.js';
+import { MAX_QUERY_LENGTH, validateIds, validateTags } from './validation.js';
 
 export interface ForgetInput {
   ids?: string[];
@@ -13,35 +14,11 @@ export interface ForgetInput {
   before?: string;
   confirm?: boolean;
   dry_run?: boolean;
-  namespace?: string;
 }
 
-const MAX_IDS = 100;
-const MAX_TAGS = 50;
-const MAX_QUERY_LENGTH = 2000;
-const NAMESPACE_PATTERN = /^[a-zA-Z0-9_\-.:]+$/;
-const MAX_NAMESPACE_LENGTH = 256;
-
 export function validateForgetInput(args: Record<string, unknown>): ForgetInput {
-  const ids = args.ids;
-  if (ids !== undefined) {
-    if (!Array.isArray(ids) || !ids.every((id) => typeof id === 'string')) {
-      throw new Error('ids must be an array of strings');
-    }
-    if (ids.length > MAX_IDS) {
-      throw new Error(`ids array exceeds maximum of ${MAX_IDS} items`);
-    }
-  }
-
-  const tags = args.tags;
-  if (tags !== undefined) {
-    if (!Array.isArray(tags) || !tags.every((t) => typeof t === 'string')) {
-      throw new Error('tags must be an array of strings');
-    }
-    if (tags.length > MAX_TAGS) {
-      throw new Error(`tags array exceeds maximum of ${MAX_TAGS} items`);
-    }
-  }
+  const ids = validateIds(args.ids);
+  const tags = validateTags(args.tags);
 
   const query = args.query;
   if (query !== undefined && typeof query !== 'string') {
@@ -72,32 +49,18 @@ export function validateForgetInput(args: Record<string, unknown>): ForgetInput 
     throw new Error('dry_run must be a boolean');
   }
 
-  const namespace = args.namespace;
-  if (namespace !== undefined && typeof namespace !== 'string') {
-    throw new Error('namespace must be a string');
-  }
-  if (typeof namespace === 'string') {
-    if (namespace.length > MAX_NAMESPACE_LENGTH) {
-      throw new Error(`namespace exceeds maximum length of ${MAX_NAMESPACE_LENGTH} characters`);
-    }
-    if (!NAMESPACE_PATTERN.test(namespace)) {
-      throw new Error('namespace must contain only alphanumeric characters, hyphens, underscores, dots, and colons');
-    }
-  }
-
   // At least one targeting criterion is required
   if (!ids && !tags && !query && !before) {
     throw new Error('At least one of ids, tags, query, or before must be specified');
   }
 
   return {
-    ids: ids,
-    tags: tags,
+    ids,
+    tags,
     query: typeof query === 'string' ? query.trim() : undefined,
     before: before,
     confirm: confirm,
     dry_run: dryRun,
-    namespace: namespace,
   };
 }
 
@@ -121,7 +84,6 @@ export async function handleForget(engine: MemoryEngine, args: Record<string, un
     before: input.before,
     confirm: input.confirm,
     dry_run: input.dry_run,
-    namespace: input.namespace,
   });
 
   if (input.dry_run) {

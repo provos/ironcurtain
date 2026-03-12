@@ -99,7 +99,6 @@ describe('MCP server', () => {
     expect(engine.store).toHaveBeenCalledWith('User prefers dark mode', {
       tags: ['preference'],
       importance: undefined,
-      namespace: undefined,
     });
     expect(result.content).toEqual([{ type: 'text', text: 'Stored memory test-id' }]);
   });
@@ -118,7 +117,6 @@ describe('MCP server', () => {
       token_budget: undefined,
       tags: undefined,
       format: undefined,
-      namespace: undefined,
     });
     expect(result.content).toEqual([{ type: 'text', text: 'test recall' }]);
   });
@@ -135,7 +133,6 @@ describe('MCP server', () => {
     expect(engine.context).toHaveBeenCalledWith({
       task: 'Fix auth bug',
       token_budget: undefined,
-      namespace: undefined,
     });
     expect(result.content).toEqual([{ type: 'text', text: '## Briefing\nSome context' }]);
   });
@@ -166,7 +163,6 @@ describe('MCP server', () => {
       view: 'stats',
       ids: undefined,
       limit: undefined,
-      namespace: undefined,
     });
     const text = (result.content as Array<{ type: string; text: string }>)[0].text;
     expect(text).toContain('Memory Statistics');

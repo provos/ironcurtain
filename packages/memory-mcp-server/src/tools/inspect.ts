@@ -5,19 +5,15 @@
 
 import type { MemoryEngine } from '../engine.js';
 import type { Memory, MemoryStats } from '../types.js';
+import { MAX_LIMIT, validateIds } from './validation.js';
 
 export interface InspectInput {
   view?: 'stats' | 'recent' | 'important' | 'tags' | 'export';
   ids?: string[];
   limit?: number;
-  namespace?: string;
 }
 
 const VALID_VIEWS = new Set(['stats', 'recent', 'important', 'tags', 'export']);
-const MAX_LIMIT = 1000;
-const MAX_IDS = 100;
-const NAMESPACE_PATTERN = /^[a-zA-Z0-9_\-.:]+$/;
-const MAX_NAMESPACE_LENGTH = 256;
 
 export function validateInspectInput(args: Record<string, unknown>): InspectInput {
   const view = args.view;
@@ -27,15 +23,7 @@ export function validateInspectInput(args: Record<string, unknown>): InspectInpu
     }
   }
 
-  const ids = args.ids;
-  if (ids !== undefined) {
-    if (!Array.isArray(ids) || !ids.every((id) => typeof id === 'string')) {
-      throw new Error('ids must be an array of strings');
-    }
-    if (ids.length > MAX_IDS) {
-      throw new Error(`ids array exceeds maximum of ${MAX_IDS} items`);
-    }
-  }
+  const ids = validateIds(args.ids);
 
   const limit = args.limit;
   if (limit !== undefined) {
@@ -47,24 +35,10 @@ export function validateInspectInput(args: Record<string, unknown>): InspectInpu
     }
   }
 
-  const namespace = args.namespace;
-  if (namespace !== undefined && typeof namespace !== 'string') {
-    throw new Error('namespace must be a string');
-  }
-  if (typeof namespace === 'string') {
-    if (namespace.length > MAX_NAMESPACE_LENGTH) {
-      throw new Error(`namespace exceeds maximum length of ${MAX_NAMESPACE_LENGTH} characters`);
-    }
-    if (!NAMESPACE_PATTERN.test(namespace)) {
-      throw new Error('namespace must contain only alphanumeric characters, hyphens, underscores, dots, and colons');
-    }
-  }
-
   return {
     view: view as InspectInput['view'],
-    ids: ids,
-    limit: limit,
-    namespace: namespace,
+    ids,
+    limit,
   };
 }
 
@@ -122,7 +96,6 @@ export async function handleInspect(engine: MemoryEngine, args: Record<string, u
     view: input.view,
     ids: input.ids,
     limit: input.limit,
-    namespace: input.namespace,
   });
 
   // Engine returns different types based on the view

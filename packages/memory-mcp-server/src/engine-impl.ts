@@ -74,7 +74,7 @@ async function storeImmediate(
   content: string,
   opts: StoreOptions,
 ): Promise<StoreResult> {
-  const namespace = opts.namespace ?? config.namespace;
+  const namespace = config.namespace;
   const importance = opts.importance ?? 0.5;
   const embedding = await embed(content, config);
 
@@ -144,7 +144,7 @@ async function buildContext(db: Database.Database, config: MemoryConfig, opts: C
 // ---------- Forget ----------
 
 async function forgetMemories(db: Database.Database, config: MemoryConfig, opts: ForgetOptions): Promise<ForgetResult> {
-  const namespace = opts.namespace ?? config.namespace;
+  const namespace = config.namespace;
   let targetIds: string[] = [];
 
   if (opts.ids) {
@@ -190,7 +190,7 @@ function inspectMemories(
   config: MemoryConfig,
   opts: InspectOptions,
 ): MemoryStats | Memory[] | string {
-  const namespace = opts.namespace ?? config.namespace;
+  const namespace = config.namespace;
   const limit = opts.limit ?? 20;
 
   if (opts.ids) {
@@ -260,11 +260,7 @@ export function createMemoryEngineFromConfig(config: MemoryConfig): MemoryEngine
     },
 
     async recall(opts: RecallOptions): Promise<RecallResult> {
-      const namespace = opts.namespace ?? config.namespace;
-      // Use a local config with the correct namespace
-      const nsConfig = namespace !== config.namespace ? { ...config, namespace } : config;
-
-      const result = await retrievalRecall(db, nsConfig, {
+      const result = await retrievalRecall(db, config, {
         query: opts.query,
         token_budget: opts.token_budget ?? config.defaultTokenBudget,
         tags: opts.tags,
@@ -279,9 +275,7 @@ export function createMemoryEngineFromConfig(config: MemoryConfig): MemoryEngine
     },
 
     async context(opts: ContextOptions): Promise<string> {
-      const namespace = opts.namespace ?? config.namespace;
-      const nsConfig = namespace !== config.namespace ? { ...config, namespace } : config;
-      return buildContext(db, nsConfig, opts);
+      return buildContext(db, config, opts);
     },
 
     async forget(opts: ForgetOptions): Promise<ForgetResult> {

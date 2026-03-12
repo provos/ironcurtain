@@ -29,7 +29,6 @@ export interface RecallOptions {
   token_budget?: number;
   tags?: string[];
   format?: 'summary' | 'list' | 'raw';
-  namespace?: string;
 }
 
 export interface RecallResult {
@@ -41,7 +40,6 @@ export interface RecallResult {
 export interface ContextOptions {
   task?: string;
   token_budget?: number;
-  namespace?: string;
 }
 
 export interface ForgetOptions {
@@ -51,7 +49,6 @@ export interface ForgetOptions {
   before?: string;
   confirm?: boolean;
   dry_run?: boolean;
-  namespace?: string;
 }
 
 export interface ForgetResult {
@@ -63,7 +60,6 @@ export interface InspectOptions {
   view?: 'stats' | 'recent' | 'important' | 'tags' | 'export';
   ids?: string[];
   limit?: number;
-  namespace?: string;
 }
 
 export interface MemoryStats {

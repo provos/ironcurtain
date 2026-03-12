@@ -115,7 +115,6 @@ describe('memory_store', () => {
       expect(engine.store).toHaveBeenCalledWith('fact', {
         tags: ['a'],
         importance: 0.7,
-        namespace: undefined,
       });
     });
 
@@ -182,7 +181,6 @@ describe('memory_recall', () => {
         token_budget: undefined,
         tags: undefined,
         format: 'raw',
-        namespace: undefined,
       });
     });
 
@@ -242,7 +240,6 @@ describe('memory_context', () => {
       expect(engine.context).toHaveBeenCalledWith({
         task: 'test',
         token_budget: undefined,
-        namespace: undefined,
       });
     });
 

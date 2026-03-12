@@ -19,7 +19,6 @@ import type {
 export interface StoreOptions {
   tags?: string[];
   importance?: number;
-  namespace?: string;
 }
 
 export interface MemoryEngine {
