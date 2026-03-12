@@ -78,11 +78,11 @@ async function compactCluster(memories: MemoryRow[], config: MemoryConfig): Prom
   // Try LLM abstractive compaction
   const llmSummary = await llmComplete(
     config,
-    `You are a memory compaction assistant. Consolidate the following related memories ` +
+    `You are a memory compaction assistant. Consolidate the related memories provided within <memories> tags ` +
       `into a single concise summary that preserves all key facts, specific details ` +
       `(names, dates, numbers), and actionable information. The summary should be ` +
       `self-contained and useful without access to the original memories.`,
-    `Memories to consolidate:\n${memoriesText}`,
+    `<memories>\n${memoriesText}\n</memories>`,
     { maxTokens: 200 },
   );
 

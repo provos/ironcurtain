@@ -40,6 +40,15 @@ import type Database from 'better-sqlite3';
 
 // ---------- Row <-> Memory conversion ----------
 
+function safeParseJson(value: string | null | undefined): unknown {
+  if (!value) return null;
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return null;
+  }
+}
+
 function rowToMemory(row: MemoryRow): Memory {
   return {
     id: row.id,
@@ -52,9 +61,9 @@ function rowToMemory(row: MemoryRow): Memory {
     last_accessed_at: row.last_accessed_at,
     access_count: row.access_count,
     is_compacted: row.is_compacted === 1,
-    compacted_from: row.compacted_from ? (JSON.parse(row.compacted_from) as string[]) : null,
+    compacted_from: safeParseJson(row.compacted_from) as string[] | null,
     source: row.source,
-    metadata: row.metadata ? (JSON.parse(row.metadata) as Record<string, unknown>) : null,
+    metadata: safeParseJson(row.metadata) as Record<string, unknown> | null,
   };
 }
 

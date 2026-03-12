@@ -14,6 +14,10 @@ export interface InspectInput {
 }
 
 const VALID_VIEWS = new Set(['stats', 'recent', 'important', 'tags', 'export']);
+const MAX_LIMIT = 1000;
+const MAX_IDS = 100;
+const NAMESPACE_PATTERN = /^[a-zA-Z0-9_\-.:]+$/;
+const MAX_NAMESPACE_LENGTH = 256;
 
 export function validateInspectInput(args: Record<string, unknown>): InspectInput {
   const view = args.view;
@@ -28,6 +32,9 @@ export function validateInspectInput(args: Record<string, unknown>): InspectInpu
     if (!Array.isArray(ids) || !ids.every((id) => typeof id === 'string')) {
       throw new Error('ids must be an array of strings');
     }
+    if (ids.length > MAX_IDS) {
+      throw new Error(`ids array exceeds maximum of ${MAX_IDS} items`);
+    }
   }
 
   const limit = args.limit;
@@ -35,11 +42,22 @@ export function validateInspectInput(args: Record<string, unknown>): InspectInpu
     if (typeof limit !== 'number' || !Number.isInteger(limit) || limit < 1) {
       throw new Error('limit must be a positive integer');
     }
+    if (limit > MAX_LIMIT) {
+      throw new Error(`limit exceeds maximum of ${MAX_LIMIT}`);
+    }
   }
 
   const namespace = args.namespace;
   if (namespace !== undefined && typeof namespace !== 'string') {
     throw new Error('namespace must be a string');
+  }
+  if (typeof namespace === 'string') {
+    if (namespace.length > MAX_NAMESPACE_LENGTH) {
+      throw new Error(`namespace exceeds maximum length of ${MAX_NAMESPACE_LENGTH} characters`);
+    }
+    if (!NAMESPACE_PATTERN.test(namespace)) {
+      throw new Error('namespace must contain only alphanumeric characters, hyphens, underscores, dots, and colons');
+    }
   }
 
   return {

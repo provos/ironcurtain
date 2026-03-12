@@ -71,11 +71,12 @@ export async function judgeMemoryRelation(
   const result = await llmComplete(
     config,
     `You judge whether two memories are duplicates, contradictions, or distinct facts.\n` +
+      `The existing memory is provided within <existing_memory> tags and the new memory within <new_memory> tags.\n` +
       `Reply with exactly one word: "duplicate", "contradiction", or "distinct".\n` +
       `- "duplicate": they express the same fact, possibly worded differently\n` +
       `- "contradiction": they express conflicting facts about the same topic (the new one supersedes the old)\n` +
       `- "distinct": they are about different topics or complementary facts`,
-    `Existing memory: ${existingContent}\nNew memory: ${newContent}`,
+    `<existing_memory>\n${existingContent}\n</existing_memory>\n<new_memory>\n${newContent}\n</new_memory>`,
     { maxTokens: 10 },
   );
 

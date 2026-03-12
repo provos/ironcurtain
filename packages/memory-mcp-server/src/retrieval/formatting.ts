@@ -56,11 +56,11 @@ async function formatAsSummaryWithLLM(
 
   return llmComplete(
     config,
-    `You are a memory compression assistant. Summarize the following memories into a concise, ` +
+    `You are a memory compression assistant. Summarize the memories provided within <memories> tags into a concise, ` +
       `information-dense response relevant to the query. Preserve specific details (names, dates, ` +
       `numbers, exact preferences). Do not add information not present in the memories. ` +
       `Target approximately ${tokenBudget} tokens.`,
-    `Query: ${query}\n\nMemories:\n${memoriesText}`,
+    `Query: ${query}\n\n<memories>\n${memoriesText}\n</memories>`,
     { maxTokens: tokenBudget },
   );
 }

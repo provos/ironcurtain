@@ -144,7 +144,8 @@ function sanitizeFtsQuery(query: string): string {
   const words = query
     .replace(/[^\w\s]/g, ' ')
     .split(/\s+/)
-    .filter((w) => w.length > 0);
+    .filter((w) => w.length > 0)
+    .slice(0, 20);
   if (words.length === 0) return '';
   // OR each word for broad matching
   return words.join(' OR ');

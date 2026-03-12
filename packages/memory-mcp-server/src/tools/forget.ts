@@ -16,11 +16,20 @@ export interface ForgetInput {
   namespace?: string;
 }
 
+const MAX_IDS = 100;
+const MAX_TAGS = 50;
+const MAX_QUERY_LENGTH = 2000;
+const NAMESPACE_PATTERN = /^[a-zA-Z0-9_\-.:]+$/;
+const MAX_NAMESPACE_LENGTH = 256;
+
 export function validateForgetInput(args: Record<string, unknown>): ForgetInput {
   const ids = args.ids;
   if (ids !== undefined) {
     if (!Array.isArray(ids) || !ids.every((id) => typeof id === 'string')) {
       throw new Error('ids must be an array of strings');
+    }
+    if (ids.length > MAX_IDS) {
+      throw new Error(`ids array exceeds maximum of ${MAX_IDS} items`);
     }
   }
 
@@ -29,11 +38,17 @@ export function validateForgetInput(args: Record<string, unknown>): ForgetInput 
     if (!Array.isArray(tags) || !tags.every((t) => typeof t === 'string')) {
       throw new Error('tags must be an array of strings');
     }
+    if (tags.length > MAX_TAGS) {
+      throw new Error(`tags array exceeds maximum of ${MAX_TAGS} items`);
+    }
   }
 
   const query = args.query;
   if (query !== undefined && typeof query !== 'string') {
     throw new Error('query must be a string');
+  }
+  if (typeof query === 'string' && query.length > MAX_QUERY_LENGTH) {
+    throw new Error(`query exceeds maximum length of ${MAX_QUERY_LENGTH} characters`);
   }
 
   const before = args.before;
@@ -60,6 +75,14 @@ export function validateForgetInput(args: Record<string, unknown>): ForgetInput 
   const namespace = args.namespace;
   if (namespace !== undefined && typeof namespace !== 'string') {
     throw new Error('namespace must be a string');
+  }
+  if (typeof namespace === 'string') {
+    if (namespace.length > MAX_NAMESPACE_LENGTH) {
+      throw new Error(`namespace exceeds maximum length of ${MAX_NAMESPACE_LENGTH} characters`);
+    }
+    if (!NAMESPACE_PATTERN.test(namespace)) {
+      throw new Error('namespace must contain only alphanumeric characters, hyphens, underscores, dots, and colons');
+    }
   }
 
   // At least one targeting criterion is required

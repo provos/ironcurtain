@@ -1,8 +1,14 @@
 /**
  * Parse a JSON-encoded tags string into a string array.
- * Handles null, undefined, and empty strings gracefully.
+ * Handles null, undefined, empty strings, and corrupted JSON gracefully.
  */
 export function parseTags(json: string | null | undefined): string[] {
   if (!json) return [];
-  return JSON.parse(json) as string[];
+  try {
+    const parsed: unknown = JSON.parse(json);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((t): t is string => typeof t === 'string');
+  } catch {
+    return [];
+  }
 }
