@@ -20,7 +20,6 @@ import { initDatabase } from './storage/database.js';
 import {
   generateId,
   insertMemory,
-  updateMemoryTimestamp,
   updateMemoryContent,
   vectorSearch,
   deleteMemories,
@@ -31,10 +30,10 @@ import {
   getImportantMemories,
   getNamespaceStats,
 } from './storage/queries.js';
-import { maybeRunMaintenance } from './storage/maintenance.js';
+import { maybeRunMaintenance, runMaintenance } from './storage/maintenance.js';
 import { embed } from './embedding/embedder.js';
-import { judgeMemoryRelation, getLLMClient } from './llm/client.js';
 import { recall as retrievalRecall } from './retrieval/pipeline.js';
+import { EXACT_DEDUP_DISTANCE } from './storage/constants.js';
 import { parseTags } from './utils/tags.js';
 import type Database from 'better-sqlite3';
 
@@ -67,14 +66,9 @@ function rowToMemory(row: MemoryRow): Memory {
   };
 }
 
-// ---------- Dedup-on-store ----------
+// ---------- Store (immediate, no LLM) ----------
 
-const DEDUP_CANDIDATE_LIMIT = 5;
-const DEDUP_DISTANCE_THRESHOLD = 0.3;
-/** Very high similarity — without LLM, treat as duplicate (distance < 0.1 = cosine > 0.9) */
-const EXACT_DEDUP_DISTANCE = 0.1;
-
-async function storeWithDedup(
+async function storeImmediate(
   db: Database.Database,
   config: MemoryConfig,
   content: string,
@@ -84,33 +78,16 @@ async function storeWithDedup(
   const importance = opts.importance ?? 0.5;
   const embedding = await embed(content, config);
 
-  // Check for near-duplicates via vector search
-  const candidates = vectorSearch(db, namespace, embedding, DEDUP_CANDIDATE_LIMIT);
-  const close = candidates.filter((c) => c.distance < DEDUP_DISTANCE_THRESHOLD);
+  // Cheap heuristic: exact-dedup at distance < 0.1 (cosine similarity > 0.9)
+  const candidates = vectorSearch(db, namespace, embedding, 3);
+  const exactMatch = candidates.find((c) => c.distance < EXACT_DEDUP_DISTANCE);
 
-  for (const candidate of close) {
-    // Without LLM: very high similarity is treated as duplicate (update to latest)
-    if (candidate.distance < EXACT_DEDUP_DISTANCE && !getLLMClient(config)) {
-      updateMemoryContent(db, candidate.id, content, embedding, importance, candidate.content);
-      return { id: candidate.id, action: 'merged_duplicate' };
-    }
-
-    const relation = await judgeMemoryRelation(config, content, candidate.content);
-
-    if (relation === 'duplicate') {
-      // Merge: update timestamp and optionally upgrade importance/tags
-      updateMemoryTimestamp(db, candidate.id, opts.tags, importance);
-      return { id: candidate.id, action: 'merged_duplicate' };
-    }
-
-    if (relation === 'contradiction') {
-      // Supersede: update content and re-embed
-      updateMemoryContent(db, candidate.id, content, embedding, importance, candidate.content);
-      return { id: candidate.id, action: 'contradiction_resolved' };
-    }
+  if (exactMatch) {
+    updateMemoryContent(db, exactMatch.id, content, embedding, importance, exactMatch.content);
+    return { id: exactMatch.id, action: 'merged_duplicate' };
   }
 
-  // No duplicate/contradiction -- create new
+  // Insert as unconsolidated -- LLM dedup happens during maintenance
   const id = generateId();
   insertMemory(
     db,
@@ -120,13 +97,12 @@ async function storeWithDedup(
       content,
       tags: opts.tags,
       importance,
+      consolidated: false,
     },
     embedding,
   );
 
-  // Amortized maintenance
   await maybeRunMaintenance(db, config);
-
   return { id, action: 'created' };
 }
 
@@ -272,9 +248,15 @@ function inspectMemories(
 export function createMemoryEngineFromConfig(config: MemoryConfig): MemoryEngine {
   const db = initDatabase(config.dbPath, config.embeddingModel);
 
+  // Run consolidation on startup to process any memories left unconsolidated
+  // from a previous session. Fire-and-forget so it doesn't block initialization.
+  runMaintenance(db, config).catch((err: unknown) => {
+    console.error('[memory-server] Startup maintenance failed:', err);
+  });
+
   return {
     async store(content: string, opts: StoreOptions): Promise<StoreResult> {
-      return storeWithDedup(db, config, content, opts);
+      return storeImmediate(db, config, content, opts);
     },
 
     async recall(opts: RecallOptions): Promise<RecallResult> {

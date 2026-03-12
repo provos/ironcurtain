@@ -3,6 +3,7 @@ import type { MemoryRow } from './database.js';
 import type { MemoryConfig } from '../config.js';
 import { getRandomActiveMemories, markDecayed } from './queries.js';
 import { runCompaction } from './compaction.js';
+import { runConsolidation } from './consolidation.js';
 
 const SAMPLE_SIZE = 100;
 
@@ -15,31 +16,35 @@ export function resetMaintenanceCounter(): void {
   storeCounter = 0;
 }
 
+export interface MaintenanceResult {
+  consolidated: number;
+  merged: number;
+  superseded: number;
+  decayed: number;
+  compacted: number;
+}
+
 /**
  * Called after each store operation. Runs maintenance every N stores.
  */
-export async function maybeRunMaintenance(
-  db: Database.Database,
-  config: MemoryConfig,
-): Promise<{ decayed: number; compacted: number }> {
+export async function maybeRunMaintenance(db: Database.Database, config: MemoryConfig): Promise<MaintenanceResult> {
   storeCounter++;
   if (storeCounter < config.maintenanceInterval) {
-    return { decayed: 0, compacted: 0 };
+    return { consolidated: 0, merged: 0, superseded: 0, decayed: 0, compacted: 0 };
   }
   storeCounter = 0;
   return runMaintenance(db, config);
 }
 
 /**
- * Run a full maintenance pass: decay check + compaction.
+ * Run a full maintenance pass: consolidation + decay check + compaction.
  */
-export async function runMaintenance(
-  db: Database.Database,
-  config: MemoryConfig,
-): Promise<{ decayed: number; compacted: number }> {
-  const now = Date.now();
+export async function runMaintenance(db: Database.Database, config: MemoryConfig): Promise<MaintenanceResult> {
+  // Phase 0: Consolidation -- batch-resolve duplicates/contradictions
+  const consolidation = await runConsolidation(db, config);
 
-  // Phase 1: Decay — sample random memories and check vitality
+  // Phase 1: Decay -- sample random memories and check vitality
+  const now = Date.now();
   const sample = getRandomActiveMemories(db, config.namespace, SAMPLE_SIZE);
 
   let decayed = 0;
@@ -54,7 +59,7 @@ export async function runMaintenance(
   // Phase 2: Compaction
   const compacted = await runCompaction(db, config);
 
-  return { decayed, compacted };
+  return { ...consolidation, decayed, compacted };
 }
 
 /**

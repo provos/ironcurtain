@@ -17,6 +17,7 @@ export interface InsertMemoryParams {
   importance: number;
   source?: string;
   metadata?: Record<string, unknown>;
+  consolidated?: boolean;
 }
 
 export function insertMemory(db: Database.Database, params: InsertMemoryParams, embedding: Float32Array): void {
@@ -24,8 +25,8 @@ export function insertMemory(db: Database.Database, params: InsertMemoryParams, 
   const txn = db.transaction(() => {
     db.prepare(
       `INSERT INTO memories (id, namespace, content, tags, importance,
-         created_at, updated_at, last_accessed_at, source, metadata)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         created_at, updated_at, last_accessed_at, source, metadata, consolidated)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       params.id,
       params.namespace,
@@ -37,6 +38,7 @@ export function insertMemory(db: Database.Database, params: InsertMemoryParams, 
       now,
       params.source ?? null,
       params.metadata ? JSON.stringify(params.metadata) : null,
+      params.consolidated === false ? 0 : 1,
     );
 
     db.prepare(`INSERT INTO vec_memories (memory_id, embedding) VALUES (?, ?)`).run(
@@ -340,6 +342,23 @@ export function markCompacted(db: Database.Database, ids: string[]): void {
     }
   });
   txn();
+}
+
+export function getUnconsolidatedMemories(db: Database.Database, namespace: string, limit: number): MemoryRow[] {
+  return db
+    .prepare(
+      `SELECT * FROM memories
+       WHERE namespace = ? AND consolidated = 0 AND importance > 0
+       ORDER BY created_at ASC
+       LIMIT ?`,
+    )
+    .all(namespace, limit) as MemoryRow[];
+}
+
+export function markConsolidated(db: Database.Database, ids: string[]): void {
+  if (ids.length === 0) return;
+  const placeholders = ids.map(() => '?').join(',');
+  db.prepare(`UPDATE memories SET consolidated = 1 WHERE id IN (${placeholders})`).run(...ids);
 }
 
 export function getEmbeddingsForMemories(db: Database.Database, memoryIds: string[]): Map<string, Float32Array> {

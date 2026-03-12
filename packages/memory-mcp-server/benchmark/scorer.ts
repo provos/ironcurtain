@@ -1,5 +1,9 @@
 /**
  * Scoring logic — evaluates server responses against ground-truth expectations.
+ *
+ * Uses substring matching first, then falls back to embedding-based semantic
+ * similarity for mustInclude items that aren't found verbatim. This prevents
+ * penalizing LLM summarization that rephrases content (e.g. "fixed" → "resolved").
  */
 
 import type {
@@ -11,6 +15,72 @@ import type {
   BenchmarkCategory,
   BenchmarkReport,
 } from './types.js';
+import { embed, cosineSimilarity } from '../src/embedding/embedder.js';
+import type { MemoryConfig } from '../src/config.js';
+import { loadConfig } from '../src/config.js';
+
+/** Cosine similarity threshold for semantic matching of mustInclude items. */
+const SEMANTIC_THRESHOLD = 0.5;
+/** Minimum sentence length (chars) to consider for semantic matching. */
+const MIN_SENTENCE_LENGTH = 8;
+
+let cachedConfig: MemoryConfig | null = null;
+function getEmbeddingConfig(): MemoryConfig {
+  if (!cachedConfig) {
+    cachedConfig = loadConfig();
+  }
+  return cachedConfig;
+}
+
+/**
+ * Split text into sentences for semantic matching.
+ * Splits on periods, newlines, and bullet markers (space-dash-space).
+ */
+function splitIntoChunks(text: string): string[] {
+  return text
+    .split(/[.\n•]|\s-\s/)
+    .map((s) => s.trim())
+    .filter((s) => s.length >= MIN_SENTENCE_LENGTH);
+}
+
+/**
+ * Check which items from `candidates` are semantically present in the response.
+ * Embeds response chunks once, then checks each candidate against all chunks.
+ */
+async function semanticMatch(
+  responseText: string,
+  candidates: string[],
+): Promise<{ found: string[]; missed: string[] }> {
+  if (candidates.length === 0) return { found: [], missed: [] };
+
+  const config = getEmbeddingConfig();
+  const chunks = splitIntoChunks(responseText);
+
+  if (chunks.length === 0) return { found: [], missed: [...candidates] };
+
+  // Embed all response chunks once (reused across all candidates)
+  const chunkEmbeddings = await Promise.all(chunks.map((c) => embed(c, config)));
+
+  const found: string[] = [];
+  const missed: string[] = [];
+
+  for (const item of candidates) {
+    const itemEmbedding = await embed(item, config);
+    let maxSim = 0;
+    for (const chunkEmb of chunkEmbeddings) {
+      const sim = cosineSimilarity(itemEmbedding, chunkEmb);
+      if (sim > maxSim) maxSim = sim;
+    }
+
+    if (maxSim >= SEMANTIC_THRESHOLD) {
+      found.push(item);
+    } else {
+      missed.push(item);
+    }
+  }
+
+  return { found, missed };
+}
 
 // ---------------------------------------------------------------------------
 // Query-level scoring
@@ -18,28 +88,38 @@ import type {
 
 /**
  * Score a single query response against its expectation.
- * Uses substring matching (case-insensitive) to check for presence/absence.
+ * Uses substring matching first, then semantic similarity fallback for missed items.
  */
-export function scoreQuery(
+export async function scoreQuery(
   responseText: string,
   expectation: QueryExpectation,
   latencyMs: number,
   queryText: string,
-): QueryResult {
+): Promise<QueryResult> {
   const lower = responseText.toLowerCase();
 
   const foundItems: string[] = [];
-  const missedItems: string[] = [];
+  const substringMissed: string[] = [];
   const unwantedItems: string[] = [];
 
-  // Check mustInclude
+  // Check mustInclude — substring first
   const mustInclude = expectation.mustInclude ?? [];
   for (const item of mustInclude) {
     if (lower.includes(item.toLowerCase())) {
       foundItems.push(item);
     } else {
-      missedItems.push(item);
+      substringMissed.push(item);
     }
+  }
+
+  // Semantic fallback for items not found by substring
+  let missedItems: string[];
+  if (substringMissed.length > 0) {
+    const semantic = await semanticMatch(responseText, substringMissed);
+    foundItems.push(...semantic.found);
+    missedItems = semantic.missed;
+  } else {
+    missedItems = [];
   }
 
   // Check mustExclude

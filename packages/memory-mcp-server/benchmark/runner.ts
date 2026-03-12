@@ -103,7 +103,7 @@ async function runScenario(
 
       const latencyMs = performance.now() - start;
 
-      const result = scoreQuery(responseText, expectation, latencyMs, query.query);
+      const result = await scoreQuery(responseText, expectation, latencyMs, query.query);
       queryResults.push(result);
 
       if (verbose) {

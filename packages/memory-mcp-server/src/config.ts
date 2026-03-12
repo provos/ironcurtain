@@ -20,6 +20,9 @@ export interface MemoryConfig {
   maintenanceInterval: number;
   compactionMinGroup: number;
 
+  // Consolidation
+  consolidationBatchSize: number;
+
   // Retrieval
   defaultTokenBudget: number;
 }
@@ -57,6 +60,8 @@ export function loadConfig(env: EnvSource = process.env): MemoryConfig {
     decayThreshold: envFloat(env, 'MEMORY_DECAY_THRESHOLD', 0.05),
     maintenanceInterval: envInt(env, 'MEMORY_MAINTENANCE_INTERVAL', 50),
     compactionMinGroup: envInt(env, 'MEMORY_COMPACTION_MIN_GROUP', 10),
+
+    consolidationBatchSize: envInt(env, 'MEMORY_CONSOLIDATION_BATCH_SIZE', 50),
 
     defaultTokenBudget: envInt(env, 'MEMORY_DEFAULT_TOKEN_BUDGET', 500),
   };
