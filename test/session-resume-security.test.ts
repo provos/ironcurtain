@@ -101,16 +101,18 @@ describe('snapshot tampering resistance', () => {
   it('handles extra unexpected fields in snapshot gracefully', () => {
     const sessionDir = join(baseDir, 'sessions', 'extra-fields');
     mkdirSync(sessionDir, { recursive: true });
-    const snapshot = {
-      ...makeSnapshot({ sessionId: 'extra-fields' }),
-      maliciousField: '<script>alert(1)</script>',
-      __proto__: { isAdmin: true },
-    };
+    // Use a real directory as workspacePath so validation passes
+    const workspaceDir = mkdtempSync(join(tmpdir(), 'sec-workspace-'));
+    const snapshot = makeSnapshot({ sessionId: 'extra-fields', workspacePath: workspaceDir });
+    Object.defineProperty(snapshot, 'maliciousField', { value: '<script>alert(1)</script>', enumerable: true });
+    Object.defineProperty(snapshot, '__proto__', { value: { isAdmin: true }, enumerable: true });
     writeFileSync(join(sessionDir, SESSION_STATE_FILENAME), JSON.stringify(snapshot));
 
     // Should load without issues -- extra fields are ignored
     const result = validateResumeSession('extra-fields');
     expect(result.sessionId).toBe('extra-fields');
+
+    rmSync(workspaceDir, { recursive: true, force: true });
   });
 });
 
@@ -179,10 +181,9 @@ describe('seed file path traversal', () => {
     rmSync(sessionDir, { recursive: true, force: true });
   });
 
-  it('resolve() confines seed files within the state directory', () => {
-    // Note: this tests that Node's resolve() with a base + relative path
-    // does NOT escape the base directory for common traversal patterns.
-    // The seed paths come from trusted adapter code, but we verify the behavior.
+  it('rejects seed paths that attempt to escape the state directory', () => {
+    // prepareConversationStateDir() validates that resolved seed paths
+    // stay within the state directory, rejecting traversal attempts.
     const config: ConversationStateConfig = {
       hostDirName: 'state',
       containerMountPath: '/root/.test/',
@@ -201,9 +202,7 @@ describe('seed file path traversal', () => {
     expect(filePath.startsWith(stateDir)).toBe(true);
   });
 
-  it('absolute seed paths escape the state directory (documents risk from untrusted seeds)', () => {
-    // This test documents the behavior: absolute paths in seeds WOULD
-    // write outside the state directory. Seeds must come from trusted adapters only.
+  it('rejects absolute seed paths that escape the state directory', () => {
     const targetPath = join(sessionDir, 'escape-target.txt');
 
     const config: ConversationStateConfig = {
@@ -213,13 +212,9 @@ describe('seed file path traversal', () => {
       resumeFlags: [],
     };
 
-    prepareConversationStateDir(sessionDir, config);
-
-    // resolve(stateDir, absolutePath) = absolutePath in Node.js
-    // This demonstrates that absolute seed paths are NOT confined.
-    // Since seeds come from adapter code (not user input), this is acceptable
-    // but worth documenting.
-    expect(existsSync(targetPath)).toBe(true);
+    // The containment check rejects absolute paths that resolve outside stateDir
+    expect(() => prepareConversationStateDir(sessionDir, config)).toThrow('Seed path escapes state directory');
+    expect(existsSync(targetPath)).toBe(false);
   });
 });
 

@@ -95,15 +95,9 @@ This keeps agent-specific details out of the generic infrastructure. `pty-sessio
 getConversationStateConfig(): ConversationStateConfig {
   return {
     hostDirName: 'claude-state',
-    containerMountPath: '/root/.claude/',
+    containerMountPath: '/home/codespace/.claude/',
     seed: [
       { path: 'projects/', content: '' },  // directory, populated by Claude Code
-      { path: '.claude.json', content: '{"hasCompletedOnboarding": true}' },
-      {
-        path: 'settings.json',
-        // Copy host settings if they exist, otherwise omit
-        content: () => readSettingsFromHost(),
-      },
     ],
     resumeFlags: ['--continue'],
   };

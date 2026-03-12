@@ -3,6 +3,7 @@ import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { scanResumableSessions, formatRelativeTime } from '../src/mux/session-scanner.js';
 import type { SessionSnapshot } from '../src/mux/session-scanner.js';
+import { SESSION_STATE_FILENAME } from '../src/docker/pty-types.js';
 
 describe('session-scanner', () => {
   const testDir = resolve('/tmp', `ironcurtain-scanner-test-${process.pid}`);
@@ -21,7 +22,7 @@ describe('session-scanner', () => {
   function writeSnapshot(sessionId: string, snapshot: SessionSnapshot): void {
     const dir = resolve(sessionsDir, sessionId);
     mkdirSync(dir, { recursive: true });
-    writeFileSync(resolve(dir, 'session-state.json'), JSON.stringify(snapshot));
+    writeFileSync(resolve(dir, SESSION_STATE_FILENAME), JSON.stringify(snapshot));
   }
 
   it('returns empty array when sessions dir does not exist', () => {
