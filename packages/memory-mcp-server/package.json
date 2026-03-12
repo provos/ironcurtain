@@ -9,6 +9,10 @@
     "memory-mcp-server": "./dist/index.js"
   },
   "main": "dist/index.js",
+  "exports": {
+    ".": "./dist/index.js",
+    "./prompts": "./dist/prompts.js"
+  },
   "files": ["dist/"],
   "publishConfig": {
     "access": "public"

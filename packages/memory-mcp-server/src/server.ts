@@ -11,6 +11,7 @@ import { handleRecall } from './tools/recall.js';
 import { handleContext } from './tools/context.js';
 import { handleForget } from './tools/forget.js';
 import { handleInspect } from './tools/inspect.js';
+import { TOOL_DESCRIPTIONS } from './prompts.js';
 
 export function createServer(engine: MemoryEngine): McpServer {
   const server = new McpServer({
@@ -29,7 +30,7 @@ export function createServer(engine: MemoryEngine): McpServer {
 function registerTools(server: McpServer, engine: MemoryEngine): void {
   server.tool(
     'memory_store',
-    'Store a memory for later retrieval. Memories are automatically embedded for semantic search. Store atomic facts — one idea per memory.',
+    TOOL_DESCRIPTIONS.memory_store,
     {
       content: z
         .string()
@@ -60,7 +61,7 @@ function registerTools(server: McpServer, engine: MemoryEngine): void {
 
   server.tool(
     'memory_recall',
-    'Recall memories relevant to a query. Returns a pre-summarized context block optimized for your context window. Uses hybrid semantic + keyword search.',
+    TOOL_DESCRIPTIONS.memory_recall,
     {
       query: z.string().describe('Natural language query describing what you want to remember.'),
       token_budget: z
@@ -90,7 +91,7 @@ function registerTools(server: McpServer, engine: MemoryEngine): void {
 
   server.tool(
     'memory_context',
-    'Get a pre-summarized briefing of relevant memories for starting a new session. Call this at the beginning of each session to recall prior context.',
+    TOOL_DESCRIPTIONS.memory_context,
     {
       task: z
         .string()
@@ -115,7 +116,7 @@ function registerTools(server: McpServer, engine: MemoryEngine): void {
 
   server.tool(
     'memory_forget',
-    'Forget specific memories by ID, tag, or query match.',
+    TOOL_DESCRIPTIONS.memory_forget,
     {
       ids: z.array(z.string()).optional().describe('Specific memory IDs to forget.'),
       tags: z.array(z.string()).optional().describe('Forget all memories with ALL of these tags.'),
@@ -145,7 +146,7 @@ function registerTools(server: McpServer, engine: MemoryEngine): void {
 
   server.tool(
     'memory_inspect',
-    'View memory statistics or inspect specific memories.',
+    TOOL_DESCRIPTIONS.memory_inspect,
     {
       view: z
         .enum(['stats', 'recent', 'important', 'tags', 'export'])

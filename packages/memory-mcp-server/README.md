@@ -220,6 +220,35 @@ All settings are controlled via environment variables:
 | `MEMORY_COMPACTION_MIN_GROUP` | `10` | Min decayed memories before compaction |
 | `MEMORY_CONSOLIDATION_BATCH_SIZE` | `50` | Max memories per consolidation pass |
 
+## Agent Integration
+
+The package exports system prompts and tool descriptions for integrating the memory server with LLM agents:
+
+```typescript
+import { MEMORY_SYSTEM_PROMPT } from '@provos/memory-mcp-server/prompts';
+
+// Append to your agent's system prompt
+const systemPrompt = basePrompt + '\n\n' + MEMORY_SYSTEM_PROMPT;
+```
+
+For custom setups, use the configurable builder:
+
+```typescript
+import { buildMemorySystemPrompt } from '@provos/memory-mcp-server/prompts';
+
+const prompt = buildMemorySystemPrompt({
+  persona: 'Research Assistant',
+  additionalInstructions: 'Always tag paper references with "paper:<title>".',
+});
+```
+
+The `TOOL_DESCRIPTIONS` export provides enhanced descriptions used in tool registration:
+
+```typescript
+import { TOOL_DESCRIPTIONS } from '@provos/memory-mcp-server/prompts';
+// TOOL_DESCRIPTIONS.memory_store, .memory_recall, .memory_context, etc.
+```
+
 ## Development
 
 ```bash
