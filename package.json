@@ -25,6 +25,7 @@
     "trusted-process",
     "model-context-protocol"
   ],
+  "workspaces": ["packages/*"],
   "engines": {
     "node": ">=22.0.0 <26"
   },
