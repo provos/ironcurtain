@@ -15,7 +15,7 @@
 
 import { createConnection, createServer } from 'node:net';
 import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync, unlinkSync } from 'node:fs';
 import { resolve } from 'node:path';
 import chalk from 'chalk';
 import ora from 'ora';
@@ -77,6 +77,17 @@ export function validateResumeSession(resumeSessionId: string): SessionSnapshot 
     throw new Error(
       `Cannot resume session "${resumeSessionId}": session is not resumable (status: ${snapshot.status})`,
     );
+  }
+
+  // Validate workspace path exists and is a directory to prevent
+  // a tampered snapshot from expanding the sandbox to an arbitrary path.
+  if (
+    !snapshot.workspacePath ||
+    typeof snapshot.workspacePath !== 'string' ||
+    !existsSync(snapshot.workspacePath) ||
+    !statSync(snapshot.workspacePath).isDirectory()
+  ) {
+    throw new Error(`Cannot resume session "${resumeSessionId}": workspace path is missing or invalid`);
   }
 
   return snapshot;
@@ -378,8 +389,15 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
     if (columns) env.IRONCURTAIN_INITIAL_COLS = String(columns);
     if (rows) env.IRONCURTAIN_INITIAL_ROWS = String(rows);
 
-    // Pass resume flags when resuming a session
+    // Pass resume flags when resuming a session.
+    // Validate each flag to prevent shell injection via adapter misconfiguration.
     if (isResume && conversationStateConfig && conversationStateConfig.resumeFlags.length > 0) {
+      const SAFE_FLAG = /^--[a-z0-9-]+$/;
+      for (const flag of conversationStateConfig.resumeFlags) {
+        if (!SAFE_FLAG.test(flag)) {
+          throw new Error(`Invalid resume flag: ${flag}`);
+        }
+      }
       env.IRONCURTAIN_RESUME_FLAGS = conversationStateConfig.resumeFlags.join(' ');
     }
 

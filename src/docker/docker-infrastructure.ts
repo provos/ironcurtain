@@ -297,6 +297,10 @@ export function prepareConversationStateDir(sessionDir: string, config: Conversa
       if (content === undefined) continue;
 
       const targetPath = resolve(stateDir, entry.path);
+      // Reject paths that escape the state directory
+      if (!targetPath.startsWith(stateDir + '/') && targetPath !== stateDir) {
+        throw new Error(`Seed path escapes state directory: ${entry.path}`);
+      }
       if (entry.path.endsWith('/') || content === '') {
         // Directory entry
         mkdirSync(targetPath, { recursive: true });

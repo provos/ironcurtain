@@ -44,8 +44,8 @@ export function scanResumableSessions(): SessionSnapshot[] {
   }
 
   snapshots.sort((a, b) => {
-    const ta = new Date(a.lastActivity).getTime();
-    const tb = new Date(b.lastActivity).getTime();
+    const ta = new Date(a.lastActivity).getTime() || 0;
+    const tb = new Date(b.lastActivity).getTime() || 0;
     return tb - ta;
   });
 
@@ -57,6 +57,7 @@ export function scanResumableSessions(): SessionSnapshot[] {
  */
 export function formatRelativeTime(isoDate: string): string {
   const diff = Date.now() - new Date(isoDate).getTime();
+  if (isNaN(diff)) return 'unknown';
   const seconds = Math.floor(diff / 1000);
 
   if (seconds < 60) return 'just now';
