@@ -13,6 +13,10 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 # ---------------------------------------------------------------------------
 # Variant mapping: CLI name -> HuggingFace dataset JSON filename (without .json)
 # ---------------------------------------------------------------------------
