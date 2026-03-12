@@ -35,7 +35,7 @@ _DEFAULT_MEMORY_LLM_MODEL = "hadad/LFM2.5-1.2B:Q8_0"
 _DEFAULT_READER_MODEL = "gemma3:27b"
 _DEFAULT_JUDGE_MODEL = "gemma3:27b"
 _DEFAULT_OLLAMA_URL = "http://localhost:11434/v1"
-_DEFAULT_ANTHROPIC_JUDGE_MODEL = "claude-haiku-4-5-20251001"
+_DEFAULT_ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
 
 
 def _resolve_server_cwd() -> str:
@@ -73,6 +73,7 @@ class BenchmarkConfig:
     recall_format: str = "list"
 
     # Reader LLM
+    reader_provider: str = "ollama"  # "ollama" or "anthropic"
     reader_base_url: str = _DEFAULT_OLLAMA_URL
     reader_model: str = _DEFAULT_READER_MODEL
     reader_api_key: str = "ollama"
@@ -113,6 +114,18 @@ class BenchmarkConfig:
 # ---------------------------------------------------------------------------
 # CLI argument parsing
 # ---------------------------------------------------------------------------
+
+
+def _resolve_provider(
+    provider: str, model: str, default_ollama_model: str
+) -> tuple[str, str, str]:
+    """Resolve base_url, model, and api_key for a provider choice."""
+    if provider == "anthropic":
+        base_url = "https://api.anthropic.com/v1"
+        resolved_model = model if model != default_ollama_model else _DEFAULT_ANTHROPIC_MODEL
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        return base_url, resolved_model, api_key
+    return _DEFAULT_OLLAMA_URL, model, "ollama"
 
 
 def parse_args(argv: list[str] | None = None) -> BenchmarkConfig:
@@ -181,6 +194,12 @@ def parse_args(argv: list[str] | None = None) -> BenchmarkConfig:
         help="Reader LLM model name",
     )
     parser.add_argument(
+        "--reader-provider",
+        choices=["ollama", "anthropic"],
+        default="ollama",
+        help="Reader LLM provider",
+    )
+    parser.add_argument(
         "--judge-model",
         default=_DEFAULT_JUDGE_MODEL,
         help="Judge LLM model name",
@@ -194,19 +213,12 @@ def parse_args(argv: list[str] | None = None) -> BenchmarkConfig:
 
     args = parser.parse_args(argv)
 
-    # Resolve judge configuration based on provider
-    if args.judge_provider == "anthropic":
-        judge_base_url = "https://api.anthropic.com/v1"
-        judge_model = (
-            args.judge_model
-            if args.judge_model != _DEFAULT_JUDGE_MODEL
-            else _DEFAULT_ANTHROPIC_JUDGE_MODEL
-        )
-        judge_api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    else:
-        judge_base_url = _DEFAULT_OLLAMA_URL
-        judge_model = args.judge_model
-        judge_api_key = "ollama"
+    reader_base_url, reader_model, reader_api_key = _resolve_provider(
+        args.reader_provider, args.reader_model, _DEFAULT_READER_MODEL
+    )
+    judge_base_url, judge_model, judge_api_key = _resolve_provider(
+        args.judge_provider, args.judge_model, _DEFAULT_JUDGE_MODEL
+    )
 
     return BenchmarkConfig(
         dataset_variant=VARIANT_MAP[args.variant],
@@ -218,7 +230,10 @@ def parse_args(argv: list[str] | None = None) -> BenchmarkConfig:
         recall_format=args.recall_format,
         recall_token_budget=args.recall_budget,
         memory_llm_model=args.memory_llm_model,
-        reader_model=args.reader_model,
+        reader_provider=args.reader_provider,
+        reader_base_url=reader_base_url,
+        reader_model=reader_model,
+        reader_api_key=reader_api_key,
         judge_provider=args.judge_provider,
         judge_base_url=judge_base_url,
         judge_model=judge_model,
