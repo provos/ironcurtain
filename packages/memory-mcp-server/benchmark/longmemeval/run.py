@@ -127,13 +127,21 @@ def append_jsonl(path: str, record: dict) -> None:
         f.flush()
 
 
+_REDACTED_FIELDS = {"reader_api_key", "judge_api_key", "memory_llm_api_key"}
+
+
 def save_config(config: BenchmarkConfig) -> None:
-    """Write the frozen config to disk for reproducibility."""
+    """Write the frozen config to disk for reproducibility (API keys redacted)."""
     import dataclasses
+
+    data = dataclasses.asdict(config)
+    for key in _REDACTED_FIELDS:
+        if key in data:
+            data[key] = "***"
 
     path = os.path.join(config.run_dir, "config.json")
     with open(path, "w") as f:
-        json.dump(dataclasses.asdict(config), f, indent=2)
+        json.dump(data, f, indent=2)
 
 
 # ---------------------------------------------------------------------------

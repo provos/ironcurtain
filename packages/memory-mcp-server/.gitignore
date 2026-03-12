@@ -9,5 +9,6 @@ node_modules/
 # Python benchmark
 benchmark/.venv/
 benchmark/results/
+benchmark/data/
 benchmark/uv.lock
 __pycache__/
