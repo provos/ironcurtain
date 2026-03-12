@@ -2,6 +2,18 @@
 
 A persistent memory server for LLM agents using the [Model Context Protocol](https://modelcontextprotocol.io/). Provides semantic search, optional LLM summarization, and automatic maintenance — all backed by a single SQLite file.
 
+## Why Another Memory Server?
+
+Most memory MCP servers fall into two camps: minimal and infrastructure-heavy. The official `@modelcontextprotocol/server-memory` stores a knowledge graph in a JSON file with substring search only — useful, but limited as memories grow. Mem0, Hindsight, and doobidoo offer semantic search and smart features, but require Python runtimes, Docker containers, or external databases (PostgreSQL, Qdrant, Neo4j).
+
+This server fills a specific gap: **a TypeScript MCP server with semantic search, LLM summarization, and automatic maintenance that runs from a single SQLite file with zero external dependencies.**
+
+- **Single command, single file** — `npx` to start, one `.db` file to back up. SQLite + sqlite-vec + FTS5 handle storage, vector search, and keyword search in-process.
+- **Works without an LLM, improves with one** — Extractive retrieval, cosine-only dedup, and bullet-point formatting work out of the box. Adding a cheap LLM endpoint (Haiku, Ollama, etc.) enables abstractive summarization, contradiction detection, and smarter consolidation.
+- **Token-budget-aware responses** — Instead of dumping raw memories into your context window, the server summarizes and packs results to fit a specified token budget. The `memory_context` tool provides a structured session-start briefing — a capability unique to this server.
+
+For a detailed competitive analysis covering 11 memory systems, see [docs/designs/memory-server-comparison.md](../../docs/designs/memory-server-comparison.md).
+
 ## Features
 
 - **Hybrid search** — vector similarity (all-MiniLM-L6-v2) + BM25 keyword search, merged via Reciprocal Rank Fusion
