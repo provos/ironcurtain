@@ -6,7 +6,6 @@ import { initDatabase } from '../src/storage/database.js';
 import {
   insertMemory,
   generateId,
-  getMemoryById,
   getMemoriesByIds,
   getRecentMemories,
   getImportantMemories,
@@ -15,7 +14,7 @@ import {
   ftsSearch,
   updateAccessStats,
   getNamespaceStats,
-  getEmbeddingForMemory,
+  getEmbeddingsForMemories,
 } from '../src/storage/queries.js';
 import type Database from 'better-sqlite3';
 
@@ -82,12 +81,12 @@ describe('database', () => {
       emb,
     );
 
-    const mem = getMemoryById(db, id);
+    const mem = getMemoriesByIds(db, [id])[0];
     expect(mem).toBeDefined();
-    expect(mem!.content).toBe('User prefers dark mode');
-    expect(JSON.parse(mem!.tags!)).toEqual(['preference', 'ui']);
-    expect(mem!.importance).toBe(0.8);
-    expect(mem!.access_count).toBe(0);
+    expect(mem.content).toBe('User prefers dark mode');
+    expect(JSON.parse(mem.tags!)).toEqual(['preference', 'ui']);
+    expect(mem.importance).toBe(0.8);
+    expect(mem.access_count).toBe(0);
   });
 
   it('retrieves multiple memories by IDs', () => {
@@ -113,8 +112,8 @@ describe('database', () => {
     );
 
     expect(deleteMemory(db, id)).toBe(true);
-    expect(getMemoryById(db, id)).toBeUndefined();
-    expect(getEmbeddingForMemory(db, id)).toBeNull();
+    expect(getMemoriesByIds(db, [id])[0]).toBeUndefined();
+    expect(getEmbeddingsForMemories(db, [id]).get(id)).toBeUndefined();
   });
 
   it('performs vector search', () => {
@@ -171,9 +170,9 @@ describe('database', () => {
 
     updateAccessStats(db, [id]);
 
-    const mem = getMemoryById(db, id);
-    expect(mem!.access_count).toBe(1);
-    expect(mem!.last_accessed_at).toBeGreaterThan(mem!.created_at - 1);
+    const mem = getMemoriesByIds(db, [id])[0];
+    expect(mem.access_count).toBe(1);
+    expect(mem.last_accessed_at).toBeGreaterThan(mem.created_at - 1);
   });
 
   it('returns recent memories sorted by created_at', () => {

@@ -2,8 +2,10 @@ import type Database from 'better-sqlite3';
 import type { MemoryRow } from './database.js';
 import type { MemoryConfig } from '../config.js';
 import { getDecayedUncompacted, markCompacted, getEmbeddingsForMemories, generateId, insertMemory } from './queries.js';
-import { embed, cosineSimilarity } from '../embedding/embedder.js';
+import { embed } from '../embedding/embedder.js';
 import { llmComplete } from '../llm/client.js';
+import { clusterByEmbedding } from '../utils/clustering.js';
+import { parseTags } from '../utils/tags.js';
 
 const MAX_DECAYED_SCAN = 200;
 const MIN_CLUSTER_SIZE = 3;
@@ -27,7 +29,7 @@ export async function runCompaction(db: Database.Database, config: MemoryConfig)
   const embeddings = getEmbeddingsForMemories(db, ids);
 
   // Cluster by embedding similarity
-  const clusters = clusterMemories(decayed, embeddings, CLUSTER_THRESHOLD);
+  const clusters = clusterByEmbedding(decayed, embeddings, CLUSTER_THRESHOLD);
 
   let totalCompacted = 0;
 
@@ -43,7 +45,7 @@ export async function runCompaction(db: Database.Database, config: MemoryConfig)
     const clusterIds = cluster.map((m) => m.id);
 
     // Merge tags from all source memories
-    const mergedTags = [...new Set(cluster.flatMap((m) => JSON.parse(m.tags ?? '[]') as string[]))];
+    const mergedTags = [...new Set(cluster.flatMap((m) => parseTags(m.tags)))];
 
     // Insert compacted summary
     insertMemory(
@@ -60,56 +62,12 @@ export async function runCompaction(db: Database.Database, config: MemoryConfig)
       summaryEmbedding,
     );
 
-    // Update the is_compacted flag separately since insertMemory doesn't handle it
-    db.prepare(`UPDATE memories SET is_compacted = 1 WHERE id = ?`).run(summaryId);
-    // Actually we want the summary to NOT be marked as compacted.
-    // The is_compacted=1 flag is for the sources, not the summary.
-    db.prepare(`UPDATE memories SET is_compacted = 0 WHERE id = ?`).run(summaryId);
-
     // Mark source memories as compacted
     markCompacted(db, clusterIds);
     totalCompacted += clusterIds.length;
   }
 
   return totalCompacted;
-}
-
-function clusterMemories(
-  memories: MemoryRow[],
-  embeddings: Map<string, Float32Array>,
-  threshold: number,
-): MemoryRow[][] {
-  const clusters: MemoryRow[][] = [];
-  const assigned = new Set<string>();
-
-  for (const mem of memories) {
-    if (assigned.has(mem.id)) continue;
-
-    const memEmb = embeddings.get(mem.id);
-    if (!memEmb) {
-      clusters.push([mem]);
-      assigned.add(mem.id);
-      continue;
-    }
-
-    const cluster: MemoryRow[] = [mem];
-    assigned.add(mem.id);
-
-    for (const other of memories) {
-      if (assigned.has(other.id)) continue;
-      const otherEmb = embeddings.get(other.id);
-      if (!otherEmb) continue;
-
-      if (cosineSimilarity(memEmb, otherEmb) > threshold) {
-        cluster.push(other);
-        assigned.add(other.id);
-      }
-    }
-
-    clusters.push(cluster);
-  }
-
-  return clusters;
 }
 
 async function compactCluster(memories: MemoryRow[], config: MemoryConfig): Promise<string | null> {

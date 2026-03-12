@@ -1,6 +1,7 @@
 import type Database from 'better-sqlite3';
 import type { MemoryRow, VectorSearchResult, FtsSearchResult } from './database.js';
 import { randomBytes } from 'node:crypto';
+import { parseTags } from '../utils/tags.js';
 
 export function generateId(): string {
   return randomBytes(16).toString('hex');
@@ -151,10 +152,6 @@ function sanitizeFtsQuery(query: string): string {
 
 // ---------- Retrieval helpers ----------
 
-export function getMemoryById(db: Database.Database, id: string): MemoryRow | undefined {
-  return db.prepare(`SELECT * FROM memories WHERE id = ?`).get(id) as MemoryRow | undefined;
-}
-
 export function getMemoriesByIds(db: Database.Database, ids: string[]): MemoryRow[] {
   if (ids.length === 0) return [];
   const placeholders = ids.map(() => '?').join(',');
@@ -196,26 +193,26 @@ export function deleteMemory(db: Database.Database, id: string): boolean {
 
 export function deleteMemories(db: Database.Database, ids: string[]): number {
   if (ids.length === 0) return 0;
-  let count = 0;
+  const placeholders = ids.map(() => '?').join(',');
   const txn = db.transaction(() => {
-    for (const id of ids) {
-      if (deleteMemory(db, id)) count++;
-    }
+    db.prepare(`DELETE FROM vec_memories WHERE memory_id IN (${placeholders})`).run(...ids);
+    const result = db.prepare(`DELETE FROM memories WHERE id IN (${placeholders})`).run(...ids);
+    return result.changes;
   });
-  txn();
-  return count;
+  return txn();
 }
 
 export function findMemoriesByTags(db: Database.Database, namespace: string, tags: string[]): MemoryRow[] {
-  // Find memories that have ALL the specified tags
-  const rows = db
-    .prepare(`SELECT * FROM memories WHERE namespace = ? AND tags IS NOT NULL`)
-    .all(namespace) as MemoryRow[];
-
-  return rows.filter((row) => {
-    const memTags = JSON.parse(row.tags ?? '[]') as string[];
-    return tags.every((t) => memTags.includes(t));
-  });
+  if (tags.length === 0) return [];
+  const placeholders = tags.map(() => '?').join(',');
+  return db
+    .prepare(
+      `SELECT m.* FROM memories m
+       WHERE m.namespace = ? AND m.tags IS NOT NULL
+         AND (SELECT COUNT(*) FROM json_each(m.tags) je
+              WHERE je.value IN (${placeholders})) = ?`,
+    )
+    .all(namespace, ...tags, tags.length) as MemoryRow[];
 }
 
 export function findMemoriesBefore(db: Database.Database, namespace: string, beforeMs: number): MemoryRow[] {
@@ -238,42 +235,24 @@ export interface NamespaceStats {
 }
 
 export function getNamespaceStats(db: Database.Database, namespace: string): NamespaceStats {
-  const total = (db.prepare(`SELECT COUNT(*) as c FROM memories WHERE namespace = ?`).get(namespace) as { c: number })
-    .c;
-
-  const active = (
-    db
-      .prepare(
-        `SELECT COUNT(*) as c FROM memories
-         WHERE namespace = ? AND is_compacted = 0 AND importance > 0`,
-      )
-      .get(namespace) as { c: number }
-  ).c;
-
-  const decayed = (
-    db
-      .prepare(
-        `SELECT COUNT(*) as c FROM memories
-         WHERE namespace = ? AND importance = 0 AND is_compacted = 0`,
-      )
-      .get(namespace) as { c: number }
-  ).c;
-
-  const compacted = (
-    db
-      .prepare(
-        `SELECT COUNT(*) as c FROM memories
-         WHERE namespace = ? AND is_compacted = 1`,
-      )
-      .get(namespace) as { c: number }
-  ).c;
-
-  const oldest = db.prepare(`SELECT MIN(created_at) as v FROM memories WHERE namespace = ?`).get(namespace) as {
-    v: number | null;
-  };
-
-  const newest = db.prepare(`SELECT MAX(created_at) as v FROM memories WHERE namespace = ?`).get(namespace) as {
-    v: number | null;
+  const agg = db
+    .prepare(
+      `SELECT
+         COUNT(*) as total,
+         SUM(CASE WHEN is_compacted = 0 AND importance > 0 THEN 1 ELSE 0 END) as active,
+         SUM(CASE WHEN importance = 0 AND is_compacted = 0 THEN 1 ELSE 0 END) as decayed,
+         SUM(CASE WHEN is_compacted = 1 THEN 1 ELSE 0 END) as compacted,
+         MIN(created_at) as oldest,
+         MAX(created_at) as newest
+       FROM memories WHERE namespace = ?`,
+    )
+    .get(namespace) as {
+    total: number;
+    active: number;
+    decayed: number;
+    compacted: number;
+    oldest: number | null;
+    newest: number | null;
   };
 
   // Approximate storage size from page_count * page_size
@@ -283,12 +262,12 @@ export function getNamespaceStats(db: Database.Database, namespace: string): Nam
   const topTags = computeTopTags(db, namespace, 20);
 
   return {
-    total_memories: total,
-    active_memories: active,
-    decayed_memories: decayed,
-    compacted_memories: compacted,
-    oldest_memory: oldest.v,
-    newest_memory: newest.v,
+    total_memories: agg.total,
+    active_memories: agg.active,
+    decayed_memories: agg.decayed,
+    compacted_memories: agg.compacted,
+    oldest_memory: agg.oldest,
+    newest_memory: agg.newest,
     storage_bytes: pageCount * pageSize,
     top_tags: topTags,
   };
@@ -308,7 +287,7 @@ function computeTopTags(
 
   const counts = new Map<string, number>();
   for (const row of rows) {
-    const tags = JSON.parse(row.tags) as string[];
+    const tags = parseTags(row.tags);
     for (const tag of tags) {
       counts.set(tag, (counts.get(tag) ?? 0) + 1);
     }
@@ -360,14 +339,6 @@ export function markCompacted(db: Database.Database, ids: string[]): void {
     }
   });
   txn();
-}
-
-export function getEmbeddingForMemory(db: Database.Database, memoryId: string): Float32Array | null {
-  const row = db.prepare(`SELECT embedding FROM vec_memories WHERE memory_id = ?`).get(memoryId) as
-    | { embedding: Buffer }
-    | undefined;
-  if (!row) return null;
-  return new Float32Array(row.embedding.buffer, row.embedding.byteOffset, row.embedding.byteLength / 4);
 }
 
 export function getEmbeddingsForMemories(db: Database.Database, memoryIds: string[]): Map<string, Float32Array> {

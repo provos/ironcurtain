@@ -2,6 +2,7 @@ import type { ScoredMemory } from './scoring.js';
 import type { MemoryConfig } from '../config.js';
 import { llmComplete } from '../llm/client.js';
 import { clusterByEmbeddingSimilarity } from './dedup.js';
+import { parseTags } from '../utils/tags.js';
 
 export type FormatMode = 'summary' | 'list' | 'raw';
 
@@ -95,7 +96,7 @@ function formatAsRaw(memories: ScoredMemory[]): string {
   const items = memories.map((m) => ({
     id: m.id,
     content: m.content,
-    tags: m.tags ? (JSON.parse(m.tags) as string[]) : [],
+    tags: parseTags(m.tags),
     importance: m.importance,
     created_at: m.created_at,
     updated_at: m.updated_at,

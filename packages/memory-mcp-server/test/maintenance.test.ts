@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { initDatabase } from '../src/storage/database.js';
-import { insertMemory, generateId, getMemoryById, getEmbeddingForMemory } from '../src/storage/queries.js';
+import { insertMemory, generateId, getMemoriesByIds, getEmbeddingsForMemories } from '../src/storage/queries.js';
 import { computeVitality, maybeRunMaintenance, resetMaintenanceCounter } from '../src/storage/maintenance.js';
 import type Database from 'better-sqlite3';
 import type { MemoryRow } from '../src/storage/database.js';
@@ -232,10 +232,10 @@ describe('maybeRunMaintenance', () => {
     await maybeRunMaintenance(db, config);
     await maybeRunMaintenance(db, config);
 
-    const mem = getMemoryById(db, id);
+    const mem = getMemoriesByIds(db, [id])[0];
     // If decayed, importance should be 0 and no vec embedding
-    if (mem && mem.importance === 0) {
-      expect(getEmbeddingForMemory(db, id)).toBeNull();
+    if (mem.importance === 0) {
+      expect(getEmbeddingsForMemories(db, [id]).get(id)).toBeUndefined();
     }
   });
 });

@@ -1,5 +1,8 @@
 import type { ScoredMemory } from './scoring.js';
 import { cosineSimilarity } from '../embedding/embedder.js';
+import { clusterByEmbedding } from '../utils/clustering.js';
+
+export { clusterByEmbedding };
 
 export interface DedupResult {
   kept: ScoredMemory[];
@@ -52,35 +55,5 @@ export function clusterByEmbeddingSimilarity(
   embeddings: Map<string, Float32Array>,
   threshold: number = 0.8,
 ): ScoredMemory[][] {
-  const clusters: ScoredMemory[][] = [];
-  const assigned = new Set<string>();
-
-  for (const mem of memories) {
-    if (assigned.has(mem.id)) continue;
-
-    const memEmb = embeddings.get(mem.id);
-    if (!memEmb) {
-      clusters.push([mem]);
-      assigned.add(mem.id);
-      continue;
-    }
-
-    const cluster: ScoredMemory[] = [mem];
-    assigned.add(mem.id);
-
-    for (const other of memories) {
-      if (assigned.has(other.id)) continue;
-      const otherEmb = embeddings.get(other.id);
-      if (!otherEmb) continue;
-
-      if (cosineSimilarity(memEmb, otherEmb) > threshold) {
-        cluster.push(other);
-        assigned.add(other.id);
-      }
-    }
-
-    clusters.push(cluster);
-  }
-
-  return clusters;
+  return clusterByEmbedding(memories, embeddings, threshold);
 }

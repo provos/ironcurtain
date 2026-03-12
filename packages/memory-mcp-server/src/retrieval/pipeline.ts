@@ -1,23 +1,18 @@
 import type Database from 'better-sqlite3';
 import type { MemoryRow } from '../storage/database.js';
 import type { MemoryConfig } from '../config.js';
-import type { FormatMode } from './formatting.js';
+import type { RecallOptions } from '../types.js';
 import { vectorSearch, ftsSearch, updateAccessStats, getEmbeddingsForMemories } from '../storage/queries.js';
 import { embed } from '../embedding/embedder.js';
 import { reciprocalRankFusion, computeCompositeScore, packToBudget } from './scoring.js';
 import { deduplicateByEmbedding } from './dedup.js';
 import { formatMemories } from './formatting.js';
+import { parseTags } from '../utils/tags.js';
 
 const DEFAULT_CANDIDATE_LIMIT = 50;
 
-export interface RecallOptions {
-  query: string;
-  tokenBudget?: number;
-  tags?: string[];
-  format?: FormatMode;
-}
-
-export interface RecallResult {
+/** Internal result from the retrieval pipeline, richer than the public RecallResult. */
+export interface PipelineRecallResult {
   text: string;
   memoryIds: string[];
   totalCandidates: number;
@@ -31,9 +26,9 @@ export interface RecallResult {
 export async function recall(
   db: Database.Database,
   config: MemoryConfig,
-  options: RecallOptions,
-): Promise<RecallResult> {
-  const { query, tokenBudget = config.defaultTokenBudget, tags, format = 'summary' } = options;
+  options: Omit<RecallOptions, 'namespace'>,
+): Promise<PipelineRecallResult> {
+  const { query, token_budget: tokenBudget = config.defaultTokenBudget, tags, format = 'summary' } = options;
 
   // 1. Embed query
   const queryEmbedding = await embed(query, config);
@@ -62,7 +57,7 @@ export async function recall(
   // 4. Filter by tags if requested
   if (tags && tags.length > 0) {
     scored = scored.filter((m) => {
-      const memTags = JSON.parse(m.tags ?? '[]') as string[];
+      const memTags = parseTags(m.tags);
       return tags.every((t) => memTags.includes(t));
     });
   }
@@ -84,11 +79,12 @@ export async function recall(
   // 8. Token budget packing
   const selected = packToBudget(kept, tokenBudget);
 
-  // 9. Format
-  const selectedEmbeddings = getEmbeddingsForMemories(
-    db,
-    selected.map((m) => m.id),
-  );
+  // 9. Format — reuse embeddings already loaded for dedup
+  const selectedIds = new Set(selected.map((m) => m.id));
+  const selectedEmbeddings = new Map<string, Float32Array>();
+  for (const [id, emb] of embeddings) {
+    if (selectedIds.has(id)) selectedEmbeddings.set(id, emb);
+  }
   const text = await formatMemories(selected, selectedEmbeddings, query, tokenBudget, format, config);
 
   // 10. Update access stats for returned memories

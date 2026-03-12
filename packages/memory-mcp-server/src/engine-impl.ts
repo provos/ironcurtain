@@ -35,6 +35,7 @@ import { maybeRunMaintenance } from './storage/maintenance.js';
 import { embed } from './embedding/embedder.js';
 import { judgeMemoryRelation } from './llm/client.js';
 import { recall as retrievalRecall } from './retrieval/pipeline.js';
+import { parseTags } from './utils/tags.js';
 import type Database from 'better-sqlite3';
 
 // ---------- Row <-> Memory conversion ----------
@@ -44,7 +45,7 @@ function rowToMemory(row: MemoryRow): Memory {
     id: row.id,
     namespace: row.namespace,
     content: row.content,
-    tags: row.tags ? (JSON.parse(row.tags) as string[]) : [],
+    tags: parseTags(row.tags),
     importance: row.importance,
     created_at: row.created_at,
     updated_at: row.updated_at,
@@ -126,7 +127,7 @@ async function buildContext(db: Database.Database, config: MemoryConfig, opts: C
     // Task-relevant retrieval gets the majority of the budget
     const taskResult = await retrievalRecall(db, config, {
       query: opts.task,
-      tokenBudget: Math.floor(totalBudget * CONTEXT_TASK_BUDGET_FRACTION),
+      token_budget: Math.floor(totalBudget * CONTEXT_TASK_BUDGET_FRACTION),
       format: 'summary',
     });
     if (taskResult.memoryIds.length > 0) {
@@ -137,7 +138,7 @@ async function buildContext(db: Database.Database, config: MemoryConfig, opts: C
   // Recent important memories for general awareness
   const recentResult = await retrievalRecall(db, config, {
     query: 'recent important information decisions preferences',
-    tokenBudget: Math.floor(totalBudget * (opts.task ? CONTEXT_RECENT_BUDGET_FRACTION : 1)),
+    token_budget: Math.floor(totalBudget * (opts.task ? CONTEXT_RECENT_BUDGET_FRACTION : 1)),
     format: 'list',
   });
   if (recentResult.memoryIds.length > 0) {
@@ -266,7 +267,7 @@ export function createMemoryEngineFromConfig(config: MemoryConfig): MemoryEngine
 
       const result = await retrievalRecall(db, nsConfig, {
         query: opts.query,
-        tokenBudget: opts.token_budget ?? config.defaultTokenBudget,
+        token_budget: opts.token_budget ?? config.defaultTokenBudget,
         tags: opts.tags,
         format: opts.format ?? 'summary',
       });
