@@ -91,6 +91,7 @@ class BenchmarkConfig:
     # Execution
     limit: int | None = None
     resume: bool = False
+    keep_db: bool = False
 
     @property
     def run_dir(self) -> str:
@@ -132,6 +133,11 @@ def parse_args(argv: list[str] | None = None) -> BenchmarkConfig:
         "--resume",
         action="store_true",
         help="Resume from checkpoint (requires matching run_id via --output-dir)",
+    )
+    parser.add_argument(
+        "--keep-db",
+        action="store_true",
+        help="Preserve SQLite databases in the run directory for inspection",
     )
     parser.add_argument(
         "--output-dir",
@@ -202,6 +208,7 @@ def parse_args(argv: list[str] | None = None) -> BenchmarkConfig:
         dataset_variant=VARIANT_MAP[args.variant],
         limit=args.limit,
         resume=args.resume,
+        keep_db=args.keep_db,
         output_dir=args.output_dir,
         recall_tool=args.recall_tool,
         recall_format=args.recall_format,

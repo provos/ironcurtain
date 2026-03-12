@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import sys
 import time
 
@@ -57,14 +58,33 @@ async def run_question(
                 "hypothesis": hypothesis,
                 "retrieved_context": context,
                 "memories_stored": num_stored,
+                "db_path": db_path,
             }
     finally:
-        _cleanup_db(db_path)
+        if not config.keep_db:
+            _cleanup_db(db_path)
 
 
 def _cleanup_db(db_path: str) -> None:
     """Remove the SQLite database and its WAL/SHM sidecar files."""
     for suffix in ("", "-wal", "-shm"):
+        try:
+            os.unlink(db_path + suffix)
+        except FileNotFoundError:
+            pass
+
+
+def _preserve_db(db_path: str, run_dir: str, question_id: str) -> None:
+    """Move the SQLite database into the run directory for inspection."""
+    db_dir = os.path.join(run_dir, "dbs")
+    os.makedirs(db_dir, exist_ok=True)
+    dest = os.path.join(db_dir, f"{question_id}.db")
+    try:
+        shutil.move(db_path, dest)
+    except FileNotFoundError:
+        pass
+    # Clean up WAL/SHM sidecars from /tmp
+    for suffix in ("-wal", "-shm"):
         try:
             os.unlink(db_path + suffix)
         except FileNotFoundError:
@@ -148,6 +168,11 @@ async def main_run(config: BenchmarkConfig, questions: list[Question] | None = N
         result = await run_question(question, config, reader_client=reader_client)
         elapsed = time.time() - t0
         result["elapsed_seconds"] = round(elapsed, 2)
+
+        if config.keep_db:
+            _preserve_db(result.pop("db_path"), config.run_dir, question.question_id)
+        else:
+            result.pop("db_path", None)
 
         append_jsonl(
             config.hypotheses_path,
