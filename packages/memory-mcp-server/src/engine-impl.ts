@@ -33,7 +33,7 @@ import {
 } from './storage/queries.js';
 import { maybeRunMaintenance } from './storage/maintenance.js';
 import { embed } from './embedding/embedder.js';
-import { judgeMemoryRelation } from './llm/client.js';
+import { judgeMemoryRelation, getLLMClient } from './llm/client.js';
 import { recall as retrievalRecall } from './retrieval/pipeline.js';
 import { parseTags } from './utils/tags.js';
 import type Database from 'better-sqlite3';
@@ -71,6 +71,8 @@ function rowToMemory(row: MemoryRow): Memory {
 
 const DEDUP_CANDIDATE_LIMIT = 5;
 const DEDUP_DISTANCE_THRESHOLD = 0.3;
+/** Very high similarity — without LLM, treat as duplicate (distance < 0.1 = cosine > 0.9) */
+const EXACT_DEDUP_DISTANCE = 0.1;
 
 async function storeWithDedup(
   db: Database.Database,
@@ -87,6 +89,12 @@ async function storeWithDedup(
   const close = candidates.filter((c) => c.distance < DEDUP_DISTANCE_THRESHOLD);
 
   for (const candidate of close) {
+    // Without LLM: very high similarity is treated as duplicate (update to latest)
+    if (candidate.distance < EXACT_DEDUP_DISTANCE && !getLLMClient(config)) {
+      updateMemoryContent(db, candidate.id, content, embedding, importance, candidate.content);
+      return { id: candidate.id, action: 'merged_duplicate' };
+    }
+
     const relation = await judgeMemoryRelation(config, content, candidate.content);
 
     if (relation === 'duplicate') {

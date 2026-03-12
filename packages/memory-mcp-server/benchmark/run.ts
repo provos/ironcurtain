@@ -82,15 +82,25 @@ async function main(): Promise<void> {
   // Load .env for LLM key if requested
   const envOverrides: Record<string, string> = {};
   if (args.withLlm) {
-    const envPath = resolve(args.serverCwd, '.env');
-    if (existsSync(envPath)) {
-      const envContent = readFileSync(envPath, 'utf-8');
-      for (const line of envContent.split('\n')) {
-        const match = line.match(/^\s*([\w]+)\s*=\s*(.+?)\s*$/);
-        if (match) {
-          envOverrides[match[1]] = match[2].replace(/^["']|["']$/g, '');
+    // Search for .env in server cwd, then parent directories
+    for (const dir of [resolve(args.serverCwd), resolve(args.serverCwd, '..', '..')]) {
+      const envPath = resolve(dir, '.env');
+      if (existsSync(envPath)) {
+        const envContent = readFileSync(envPath, 'utf-8');
+        for (const line of envContent.split('\n')) {
+          const match = line.match(/^\s*([\w]+)\s*=\s*(.+?)\s*$/);
+          if (match && !(match[1] in envOverrides)) {
+            envOverrides[match[1]] = match[2].replace(/^["']|["']$/g, '');
+          }
         }
       }
+    }
+
+    // Map ANTHROPIC_API_KEY to MEMORY_LLM_* if not already set
+    const apiKey = envOverrides['ANTHROPIC_API_KEY'] ?? process.env.ANTHROPIC_API_KEY;
+    if (apiKey && !envOverrides['MEMORY_LLM_API_KEY']) {
+      envOverrides['MEMORY_LLM_API_KEY'] = apiKey;
+      envOverrides['MEMORY_LLM_BASE_URL'] = envOverrides['MEMORY_LLM_BASE_URL'] ?? 'https://api.anthropic.com/v1/';
     }
   }
 

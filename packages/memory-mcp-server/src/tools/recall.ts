@@ -73,7 +73,7 @@ export function validateRecallInput(args: Record<string, unknown>): RecallInput 
     query: query.trim(),
     token_budget: tokenBudget,
     tags: tags,
-    format: format,
+    format: format as RecallInput['format'],
     namespace: namespace,
   };
 }

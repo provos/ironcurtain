@@ -61,7 +61,7 @@ export function validateInspectInput(args: Record<string, unknown>): InspectInpu
   }
 
   return {
-    view: view,
+    view: view as InspectInput['view'],
     ids: ids,
     limit: limit,
     namespace: namespace,
