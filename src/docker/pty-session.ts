@@ -15,7 +15,7 @@
 
 import { createConnection, createServer } from 'node:net';
 import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import { resolve } from 'node:path';
 import chalk from 'chalk';
 import ora from 'ora';
@@ -24,6 +24,7 @@ import type { IronCurtainConfig } from '../config/types.js';
 import type { SessionMode } from '../session/types.js';
 import { createSessionId } from '../session/types.js';
 import { patchMcpServerAllowedDirectory } from '../session/index.js';
+import { validateWorkspacePath } from '../session/workspace-validation.js';
 import { CONTAINER_WORKSPACE_DIR } from './agent-adapter.js';
 import { PTY_SOCK_NAME, DEFAULT_PTY_PORT } from './pty-types.js';
 import type { PtySessionRegistration, SessionSnapshot } from './pty-types.js';
@@ -61,7 +62,7 @@ const PTY_READINESS_POLL_MS = 200;
  * Validates a session for resume and returns the loaded snapshot.
  * Throws descriptive errors for invalid resume attempts.
  */
-export function validateResumeSession(resumeSessionId: string): SessionSnapshot {
+export function validateResumeSession(resumeSessionId: string, protectedPaths: string[] = []): SessionSnapshot {
   const sessionDir = getSessionDir(resumeSessionId);
   if (!existsSync(sessionDir)) {
     throw new Error(`Cannot resume session "${resumeSessionId}": session directory not found`);
@@ -91,15 +92,18 @@ export function validateResumeSession(resumeSessionId: string): SessionSnapshot 
     throw new Error(`Cannot resume session "${resumeSessionId}": agent configuration is missing`);
   }
 
-  // Validate workspace path exists and is a directory to prevent
-  // a tampered snapshot from expanding the sandbox to an arbitrary path.
-  if (
-    !snapshot.workspacePath ||
-    typeof snapshot.workspacePath !== 'string' ||
-    !existsSync(snapshot.workspacePath) ||
-    !statSync(snapshot.workspacePath).isDirectory()
-  ) {
+  // Validate workspace path using the same checks as --workspace to prevent
+  // a tampered snapshot from expanding the sandbox to a sensitive directory.
+  if (!snapshot.workspacePath || typeof snapshot.workspacePath !== 'string') {
     throw new Error(`Cannot resume session "${resumeSessionId}": workspace path is missing or invalid`);
+  }
+  try {
+    validateWorkspacePath(snapshot.workspacePath, protectedPaths);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    throw new Error(`Cannot resume session "${resumeSessionId}": workspace path is unsafe: ${detail}`, {
+      cause: err,
+    });
   }
 
   return snapshot;
@@ -159,7 +163,9 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
   const { prepareDockerInfrastructure } = await import('./docker-infrastructure.js');
 
   // When resuming, validate the snapshot and reuse the existing session directory
-  const resumeSnapshot = options.resumeSessionId ? validateResumeSession(options.resumeSessionId) : undefined;
+  const resumeSnapshot = options.resumeSessionId
+    ? validateResumeSession(options.resumeSessionId, options.config.protectedPaths)
+    : undefined;
   const isResume = !!resumeSnapshot;
 
   // Use the original session ID when resuming, otherwise create a new one
@@ -472,7 +478,7 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
       signal: shutdownController.signal,
     });
     ptyExitCode = exitCode;
-    userExited = shutdownController.signal.aborted;
+    userExited = exitCode === 0;
     logger.info(`PTY attach returned with exit code ${exitCode}`);
 
     // PTY disconnected -- restore terminal and show shutdown progress

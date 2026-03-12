@@ -751,7 +751,7 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
 
         moveTo(2, currentY);
         if (isSelected) {
-          term.bgCyan.black('> ' + truncate(line, _cols - 6));
+          term.bgCyan.black('> ' + truncate(line, Math.max(1, _cols - 6)));
           term.styleReset();
         } else {
           term('  ');

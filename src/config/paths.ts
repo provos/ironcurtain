@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { SESSION_STATE_FILENAME } from '../docker/pty-types.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -121,7 +122,7 @@ export function getSessionSocketsDir(sessionId: string): string {
  *   {home}/sessions/{sessionId}/session-state.json
  */
 export function getSessionStatePath(sessionId: string): string {
-  return resolve(getSessionDir(sessionId), 'session-state.json');
+  return resolve(getSessionDir(sessionId), SESSION_STATE_FILENAME);
 }
 
 /**
