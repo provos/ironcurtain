@@ -43,8 +43,12 @@ def load_questions(config: BenchmarkConfig) -> list[Question]:
         flush=True,
     )
 
-    ds = load_dataset(config.dataset_name, config.dataset_variant)
-    split = ds["test"] if "test" in ds else ds[list(ds.keys())[0]]
+    # Each variant is a separate JSON file in the repo
+    split = load_dataset(
+        config.dataset_name,
+        data_files=f"{config.dataset_variant}.json",
+        split="train",
+    )
 
     questions: list[Question] = []
     for row in split:

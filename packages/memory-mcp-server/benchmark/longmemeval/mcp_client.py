@@ -19,9 +19,7 @@ from .config import BenchmarkConfig
 
 
 @asynccontextmanager
-async def memory_server(
-    config: BenchmarkConfig, db_path: str
-) -> AsyncIterator[ClientSession]:
+async def memory_server(config: BenchmarkConfig, db_path: str) -> AsyncIterator[ClientSession]:
     """Start the memory MCP server and yield a connected ClientSession.
 
     The server process is cleaned up when the context manager exits.
@@ -86,6 +84,4 @@ async def call_recall(
 
 def extract_text(result: object) -> str:
     """Extract concatenated text from an MCP tool result's content blocks."""
-    return "\n".join(
-        block.text for block in result.content if block.type == "text" and block.text
-    )
+    return "\n".join(block.text for block in result.content if block.type == "text" and block.text)

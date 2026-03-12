@@ -102,8 +102,6 @@ async def generate_answer(
                 )
                 await asyncio.sleep(wait)
 
-    error_msg = (
-        f"[ERROR: Reader LLM failed after {_MAX_RETRIES} attempts: {last_error}]"
-    )
+    error_msg = f"[ERROR: Reader LLM failed after {_MAX_RETRIES} attempts: {last_error}]"
     print(f"  {error_msg}", file=sys.stderr, flush=True)
     return error_msg

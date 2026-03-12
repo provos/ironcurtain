@@ -113,9 +113,7 @@ def save_config(config: BenchmarkConfig) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def main_run(
-    config: BenchmarkConfig, questions: list[Question] | None = None
-) -> str:
+async def main_run(config: BenchmarkConfig, questions: list[Question] | None = None) -> str:
     """Execute the full benchmark run. Returns the path to hypotheses.jsonl."""
     if questions is None:
         questions = load_questions(config)

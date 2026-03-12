@@ -219,9 +219,7 @@ def _compute_metrics(
     results: list[dict],
 ) -> dict:
     """Compute overall, per-type, and abstention accuracy from judged results."""
-    per_type: dict[str, dict[str, int]] = defaultdict(
-        lambda: {"correct": 0, "total": 0}
-    )
+    per_type: dict[str, dict[str, int]] = defaultdict(lambda: {"correct": 0, "total": 0})
     abstention_correct = 0
     abstention_total = 0
 
@@ -255,13 +253,9 @@ def _compute_metrics(
         }
         type_accuracies.append(acc)
 
-    task_averaged = (
-        sum(type_accuracies) / len(type_accuracies) if type_accuracies else 0.0
-    )
+    task_averaged = sum(type_accuracies) / len(type_accuracies) if type_accuracies else 0.0
 
-    abstention_accuracy = (
-        abstention_correct / abstention_total if abstention_total > 0 else 0.0
-    )
+    abstention_accuracy = abstention_correct / abstention_total if abstention_total > 0 else 0.0
 
     return {
         "overall_accuracy": overall_accuracy,
@@ -384,8 +378,7 @@ def _write_summary(config: BenchmarkConfig, metrics: dict) -> None:
     print("\nPer-type breakdown:", file=sys.stderr)
     for qtype, vals in sorted(metrics["per_type"].items()):
         print(
-            f"  {qtype:30s}  {vals['accuracy']:.1%}  "
-            f"({vals['correct']}/{vals['total']})",
+            f"  {qtype:30s}  {vals['accuracy']:.1%}  ({vals['correct']}/{vals['total']})",
             file=sys.stderr,
         )
     print(f"\nSummary written to {summary_path}", file=sys.stderr, flush=True)

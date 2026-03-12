@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# Variant mapping: CLI name -> HuggingFace dataset config name
+# Variant mapping: CLI name -> HuggingFace dataset JSON filename (without .json)
 # ---------------------------------------------------------------------------
 
 VARIANT_MAP: dict[str, str] = {
