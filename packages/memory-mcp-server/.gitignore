@@ -5,3 +5,9 @@ node_modules/
 *.db
 *.db-wal
 *.db-shm
+
+# Python benchmark
+benchmark/.venv/
+benchmark/results/
+benchmark/uv.lock
+__pycache__/
