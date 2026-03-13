@@ -183,6 +183,10 @@ async def main_run(config: BenchmarkConfig, questions: list[Question] | None = N
     completed = load_completed_ids(config.checkpoint_path)
     remaining = [q for q in questions if q.question_id not in completed]
 
+    if config.question_types:
+        type_set = set(config.question_types)
+        remaining = [q for q in remaining if q.question_type in type_set]
+
     if config.limit is not None:
         remaining = remaining[: config.limit]
 

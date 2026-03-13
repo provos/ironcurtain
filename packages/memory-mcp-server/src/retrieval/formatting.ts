@@ -68,8 +68,9 @@ async function formatAsAnswer(
       `Rules:\n` +
       `- Answer ONLY with the factual content. No preamble like "Based on my records" or "According to my memories".\n` +
       `- Do not editorialize, encourage, or add commentary beyond what was asked.\n` +
+      `- Synthesize across all provided memories — combine, aggregate, and reason over them to answer fully.\n` +
       `- Use the shortest accurate answer. One sentence is ideal.\n` +
-      `- If the memories don't contain the answer, reply: "I don't have that information."`,
+      `- Only say "I don't have that information" if the memories are truly irrelevant to the question.`,
     `Question: ${query}\n\n<memories>\n${buildMemoriesText(memories)}\n</memories>`,
     { maxTokens: tokenBudget },
   );

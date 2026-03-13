@@ -14,7 +14,6 @@ export interface MemoryRow {
   last_accessed_at: number;
   access_count: number;
   is_compacted: number;
-  compacted_from: string | null;
   source: string | null;
   metadata: string | null;
 }
@@ -62,7 +61,6 @@ function createSchema(db: Database.Database): void {
       last_accessed_at INTEGER NOT NULL,
       access_count INTEGER NOT NULL DEFAULT 0,
       is_compacted INTEGER NOT NULL DEFAULT 0,
-      compacted_from TEXT,
       source TEXT,
       metadata TEXT,
       consolidated INTEGER NOT NULL DEFAULT 1
@@ -129,28 +127,11 @@ function createSchema(db: Database.Database): void {
   }
 }
 
-function migrateSchema(db: Database.Database): void {
-  const row = db.prepare(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).get() as
-    | { value: string }
-    | undefined;
-  const currentVersion = row?.value ?? '0';
-
-  if (currentVersion === '1') {
-    db.exec(`ALTER TABLE memories ADD COLUMN consolidated INTEGER NOT NULL DEFAULT 1`);
-    db.exec(
-      `CREATE INDEX IF NOT EXISTS idx_memories_unconsolidated
-         ON memories(namespace, created_at) WHERE consolidated = 0`,
-    );
-  }
-}
-
 function ensureSchemaMeta(db: Database.Database, embeddingModel: string): void {
   const upsert = db.prepare(
     `INSERT INTO schema_meta (key, value) VALUES (?, ?)
      ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
   );
-
-  migrateSchema(db);
 
   const existing = db.prepare(`SELECT value FROM schema_meta WHERE key = 'embedding_model'`).get() as
     | { value: string }

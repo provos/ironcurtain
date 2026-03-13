@@ -95,6 +95,7 @@ class BenchmarkConfig:
 
     # Execution
     limit: int | None = None
+    question_types: list[str] | None = None
     resume: bool = False
     keep_db: bool = False
 
@@ -144,7 +145,17 @@ def parse_args(argv: list[str] | None = None) -> BenchmarkConfig:
         "--limit",
         type=int,
         default=None,
-        help="Only run the first N questions (for testing)",
+        help="Only run the first N questions (after type filtering)",
+    )
+    parser.add_argument(
+        "--question-type",
+        action="append",
+        dest="question_types",
+        metavar="TYPE",
+        help="Filter to specific question types (can be repeated). "
+        "Types: single-session-user, single-session-assistant, "
+        "single-session-preference, multi-session, temporal-reasoning, "
+        "knowledge-update",
     )
     parser.add_argument(
         "--resume",
@@ -246,6 +257,7 @@ def parse_args(argv: list[str] | None = None) -> BenchmarkConfig:
     return BenchmarkConfig(
         dataset_variant=VARIANT_MAP[args.variant],
         limit=args.limit,
+        question_types=args.question_types,
         resume=args.resume,
         keep_db=args.keep_db,
         output_dir=args.output_dir,

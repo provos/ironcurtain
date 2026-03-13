@@ -60,7 +60,8 @@ function rowToMemory(row: MemoryRow): Memory {
     last_accessed_at: row.last_accessed_at,
     access_count: row.access_count,
     is_compacted: row.is_compacted === 1,
-    compacted_from: safeParseJson(row.compacted_from) as string[] | null,
+    compacted_from:
+      ((safeParseJson(row.metadata) as Record<string, unknown> | null)?.compacted_from as string[] | undefined) ?? null,
     source: row.source,
     metadata: safeParseJson(row.metadata) as Record<string, unknown> | null,
   };
