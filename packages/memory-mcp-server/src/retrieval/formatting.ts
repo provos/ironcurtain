@@ -64,9 +64,12 @@ async function formatAsAnswer(
 
   const llmResult = await llmComplete(
     config,
-    `You are a question-answering assistant with access to the user's stored memories. ` +
-      `Answer the user's question based only on the provided memories. Be concise and direct. ` +
-      `If the memories don't contain enough information to answer, say so clearly.`,
+    `You answer questions using the user's stored memories. ` +
+      `Rules:\n` +
+      `- Answer ONLY with the factual content. No preamble like "Based on my records" or "According to my memories".\n` +
+      `- Do not editorialize, encourage, or add commentary beyond what was asked.\n` +
+      `- Use the shortest accurate answer. One sentence is ideal.\n` +
+      `- If the memories don't contain the answer, reply: "I don't have that information."`,
     `Question: ${query}\n\n<memories>\n${buildMemoriesText(memories)}\n</memories>`,
     { maxTokens: tokenBudget },
   );
@@ -85,10 +88,12 @@ async function formatAsSummaryWithLLM(
 ): Promise<string | null> {
   return llmComplete(
     config,
-    `You are a memory compression assistant. Summarize the memories provided within <memories> tags into a concise, ` +
-      `information-dense response relevant to the query. Preserve specific details (names, dates, ` +
-      `numbers, exact preferences). Do not add information not present in the memories. ` +
-      `Target approximately ${tokenBudget} tokens.`,
+    `You compress stored memories into a concise briefing relevant to the query. ` +
+      `Rules:\n` +
+      `- Lead with the most relevant facts. No preamble or filler.\n` +
+      `- Preserve specific details: names, dates, numbers, exact preferences.\n` +
+      `- Do not add information not present in the memories.\n` +
+      `- Target approximately ${tokenBudget} tokens.`,
     `Query: ${query}\n\n<memories>\n${buildMemoriesText(memories)}\n</memories>`,
     { maxTokens: tokenBudget },
   );

@@ -71,14 +71,20 @@ async def call_recall(
     session: ClientSession,
     query: str,
     config: BenchmarkConfig,
+    *,
+    format_override: str | None = None,
 ) -> str:
-    """Retrieve memories using the configured recall tool and parameters."""
+    """Retrieve memories using the configured recall tool and parameters.
+
+    When *format_override* is given it replaces the config's recall_format
+    for this single call.  All other parameters come from *config*.
+    """
     # memory_recall uses "query", memory_context uses "task"
     query_key = "task" if config.recall_tool == "memory_context" else "query"
     args: dict[str, object] = {
         query_key: query,
         "token_budget": config.recall_token_budget,
-        "format": config.recall_format,
+        "format": format_override or config.recall_format,
     }
 
     result = await session.call_tool(config.recall_tool, args)

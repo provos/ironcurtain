@@ -65,7 +65,9 @@ async def run_question(
             if _uses_builtin_answer(config):
                 hypothesis = context
             else:
-                assert reader_client is not None, "reader_client required when not using format=answer"
+                assert reader_client is not None, (
+                    "reader_client required when not using format=answer"
+                )
                 hypothesis = await generate_answer(
                     context,
                     question.question,
@@ -74,11 +76,21 @@ async def run_question(
                     client=reader_client,
                 )
 
+            # When format=answer, the LLM-generated answer lacks the
+            # [Session date: ...] markers that retrieval metrics need.
+            # Make a second recall with format=list to get raw memories.
+            if config.recall_format == "answer":
+                retrieved_context = await call_recall(
+                    session, question.question, config, format_override="list"
+                )
+            else:
+                retrieved_context = context
+
             return {
                 "question_id": question.question_id,
                 "question_type": question.question_type,
                 "hypothesis": hypothesis,
-                "retrieved_context": context,
+                "retrieved_context": retrieved_context,
                 "memories_stored": num_stored,
                 "db_path": db_path,
             }
