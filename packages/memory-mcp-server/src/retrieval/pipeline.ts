@@ -67,7 +67,7 @@ export async function recall(
   }
 
   // 3. RRF merge
-  const { scored: rrfScored, rrfMax } = reciprocalRankFusion(vectorResults, ftsResults, allMemories);
+  const { scored: rrfScored, rrfMax: rrfMaxRaw } = reciprocalRankFusion(vectorResults, ftsResults, allMemories);
   let scored = rrfScored;
 
   // 4. Filter by tags if requested
@@ -77,6 +77,10 @@ export async function recall(
       return tags.every((t) => memTags.includes(t));
     });
   }
+
+  // Recompute rrfMax after tag filtering so downstream normalization
+  // and relevance gating use the actual max of the surviving set.
+  const rrfMax = scored.length > 0 ? Math.max(...scored.map((m) => m.rrfScore)) : rrfMaxRaw;
 
   // 5. Composite scoring
   const now = Date.now();

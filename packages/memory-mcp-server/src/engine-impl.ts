@@ -78,7 +78,7 @@ async function storeImmediate(
   const importance = opts.importance ?? 0.5;
   const embedding = await embed(content, config);
 
-  // Cheap heuristic: exact-dedup at distance < 0.1 (cosine similarity > 0.9)
+  // Cheap heuristic: exact-dedup at small cosine distance (high similarity)
   const candidates = vectorSearch(db, namespace, embedding, 3);
   const exactMatch = candidates.find((c) => c.distance < EXACT_DEDUP_DISTANCE);
 

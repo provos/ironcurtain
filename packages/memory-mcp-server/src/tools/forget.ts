@@ -49,8 +49,11 @@ export function validateForgetInput(args: Record<string, unknown>): ForgetInput 
     throw new Error('dry_run must be a boolean');
   }
 
-  // At least one targeting criterion is required
-  if (!ids && !tags && !query && !before) {
+  // At least one effective targeting criterion is required
+  // Treat empty arrays as "not provided" to prevent no-op forgets
+  const hasIds = ids && ids.length > 0;
+  const hasTags = tags && tags.length > 0;
+  if (!hasIds && !hasTags && !query && !before) {
     throw new Error('At least one of ids, tags, query, or before must be specified');
   }
 
