@@ -5,6 +5,8 @@ export interface ScoredMemory extends MemoryRow {
   compositeScore: number;
   /** Cosine distance from query embedding (lower = more similar). Only set for vector-retrieved memories. */
   vectorDistance?: number;
+  /** Cross-encoder relevance score. Set by the re-ranker step; higher = more relevant. */
+  rerankerScore?: number;
 }
 
 /** Result of RRF merge — includes the max RRF score for downstream normalization. */

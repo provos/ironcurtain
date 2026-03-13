@@ -6,6 +6,7 @@ import { vectorSearch, ftsSearch, updateAccessStats, getEmbeddingsForMemories } 
 import { embedQuery } from '../embedding/embedder.js';
 import { reciprocalRankFusion, computeCompositeScore, filterByRelevance, packToBudget } from './scoring.js';
 import { deduplicateByEmbedding } from './dedup.js';
+import { rerank } from './reranker.js';
 import { formatMemories } from './formatting.js';
 import { parseTags } from '../utils/tags.js';
 
@@ -78,15 +79,19 @@ export async function recall(
   }
   scored.sort((a, b) => b.compositeScore - a.compositeScore);
 
-  // 6. Drop low-relevance candidates before loading embeddings
+  // 6. Drop low-relevance candidates before expensive steps
   const relevant = filterByRelevance(scored, rrfMax);
 
+  // 6b. Cross-encoder re-ranking: refine ordering using (query, passage) pairs.
+  // Runs only on the filtered set (typically 30-50 items) to keep latency reasonable.
+  const reranked = await rerank(query, relevant, config);
+
   // 7. Load embeddings only for relevant candidates
-  const embeddingIds = relevant.map((m) => m.id);
+  const embeddingIds = reranked.map((m) => m.id);
   const embeddings = getEmbeddingsForMemories(db, embeddingIds);
 
   // 8. Dedup
-  const { kept } = deduplicateByEmbedding(relevant, embeddings);
+  const { kept } = deduplicateByEmbedding(reranked, embeddings);
 
   // 9. Token budget packing
   const selected = packToBudget(kept, tokenBudget);

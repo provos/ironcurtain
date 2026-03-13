@@ -25,6 +25,10 @@ export interface MemoryConfig {
 
   // Retrieval
   defaultTokenBudget: number;
+
+  // Re-ranker
+  rerankerModel: string;
+  rerankerEnabled: boolean;
 }
 
 type EnvSource = Record<string, string | undefined>;
@@ -64,5 +68,8 @@ export function loadConfig(env: EnvSource = process.env): MemoryConfig {
     consolidationBatchSize: envInt(env, 'MEMORY_CONSOLIDATION_BATCH_SIZE', 50),
 
     defaultTokenBudget: envInt(env, 'MEMORY_DEFAULT_TOKEN_BUDGET', 500),
+
+    rerankerModel: env.MEMORY_RERANKER_MODEL ?? 'Xenova/ms-marco-MiniLM-L-6-v2',
+    rerankerEnabled: env.MEMORY_RERANKER_ENABLED !== 'false',
   };
 }
