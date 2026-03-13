@@ -16,7 +16,7 @@ function makeScoredMemory(id: string, content: string = 'test'): ScoredMemory {
     last_accessed_at: now,
     access_count: 0,
     is_compacted: 0,
-    compacted_from: null,
+    consolidated: 1,
     source: null,
     metadata: null,
     fusionScore: 0.5,

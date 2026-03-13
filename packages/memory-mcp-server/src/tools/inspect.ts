@@ -100,7 +100,7 @@ export async function handleInspect(engine: MemoryEngine, args: Record<string, u
 
   // Engine returns different types based on the view
   if (typeof result === 'string') {
-    // Export view returns JSONL string
+    // String results (tags, export) are returned as-is
     return result;
   }
 

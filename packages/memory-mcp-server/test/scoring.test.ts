@@ -23,7 +23,7 @@ function makeMemory(overrides: Partial<MemoryRow> = {}): MemoryRow {
     last_accessed_at: overrides.last_accessed_at ?? now,
     access_count: overrides.access_count ?? 0,
     is_compacted: overrides.is_compacted ?? 0,
-    compacted_from: overrides.compacted_from ?? null,
+    consolidated: overrides.consolidated ?? 1,
     source: overrides.source ?? null,
     metadata: overrides.metadata ?? null,
   };

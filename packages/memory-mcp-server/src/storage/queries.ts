@@ -42,7 +42,7 @@ export function insertMemory(db: Database.Database, params: InsertMemoryParams, 
 
     db.prepare(`INSERT INTO vec_memories (memory_id, embedding) VALUES (?, ?)`).run(
       params.id,
-      Buffer.from(embedding.buffer),
+      Buffer.from(embedding.buffer, embedding.byteOffset, embedding.byteLength),
     );
   });
   txn();
@@ -112,7 +112,7 @@ export function updateMemoryContent(
     db.prepare(
       `UPDATE vec_memories SET embedding = ?
        WHERE memory_id = ? AND memory_id IN (SELECT id FROM memories WHERE namespace = ?)`,
-    ).run(Buffer.from(embedding.buffer), id, namespace);
+    ).run(Buffer.from(embedding.buffer, embedding.byteOffset, embedding.byteLength), id, namespace);
   });
   txn();
 }
@@ -150,7 +150,11 @@ export function vectorSearch(
        ORDER BY distance ASC
        LIMIT ?`,
     )
-    .all(Buffer.from(embedding.buffer), namespace, limit) as VectorSearchResult[];
+    .all(
+      Buffer.from(embedding.buffer, embedding.byteOffset, embedding.byteLength),
+      namespace,
+      limit,
+    ) as VectorSearchResult[];
 }
 
 export function ftsSearch(db: Database.Database, namespace: string, query: string, limit: number): FtsSearchResult[] {

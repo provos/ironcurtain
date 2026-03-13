@@ -50,7 +50,7 @@ describe('computeVitality', () => {
       last_accessed_at: now,
       access_count: 0,
       is_compacted: 0,
-      compacted_from: null,
+      consolidated: 1,
       source: null,
       metadata: null,
     };
@@ -72,7 +72,7 @@ describe('computeVitality', () => {
       last_accessed_at: now - 30 * 24 * 3600000,
       access_count: 0,
       is_compacted: 0,
-      compacted_from: null,
+      consolidated: 1,
       source: null,
       metadata: null,
     };
@@ -93,7 +93,7 @@ describe('computeVitality', () => {
       last_accessed_at: now - 60 * 24 * 3600000,
       access_count: 0,
       is_compacted: 0,
-      compacted_from: null,
+      consolidated: 1,
       source: null,
       metadata: null,
     };
@@ -116,7 +116,7 @@ describe('computeVitality', () => {
       updated_at: now - 30 * 24 * 3600000,
       last_accessed_at: now - 1 * 3600000, // recently accessed
       is_compacted: 0,
-      compacted_from: null,
+      consolidated: 1,
       source: null,
       metadata: null,
     };
@@ -140,7 +140,7 @@ describe('computeVitality', () => {
       last_accessed_at: now,
       access_count: 0,
       is_compacted: 0,
-      compacted_from: null,
+      consolidated: 1,
       source: null,
       metadata: null,
     };

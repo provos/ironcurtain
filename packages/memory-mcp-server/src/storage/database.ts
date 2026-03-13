@@ -14,6 +14,7 @@ export interface MemoryRow {
   last_accessed_at: number;
   access_count: number;
   is_compacted: number;
+  consolidated: number;
   source: string | null;
   metadata: string | null;
 }
