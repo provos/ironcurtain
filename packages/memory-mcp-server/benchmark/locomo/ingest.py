@@ -30,14 +30,24 @@ async def ingest_conversation(
 ) -> int:
     """Ingest all sessions for a conversation. Returns the number of stored turns."""
     stored = 0
+    merged = 0
 
     for sess in conversation.sessions:
         for turn in sess.turns:
             content = _format_content(turn.speaker, turn.text)
             tags = _build_tags(turn.dia_id, sess.session_number, sess.date_time, turn.speaker)
 
-            await call_store(session, content, tags, config.importance_default)
+            result = await call_store(session, content, tags, config.importance_default)
             stored += 1
+            if "duplicate" in result.lower() or "merged" in result.lower():
+                merged += 1
+
+    if merged > 0:
+        print(
+            f"    Warning: {merged}/{stored} turns were dedup-merged during ingestion",
+            file=sys.stderr,
+            flush=True,
+        )
 
     if verbose:
         print(

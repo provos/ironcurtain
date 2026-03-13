@@ -3,8 +3,8 @@ import type { MemoryRow } from '../storage/database.js';
 import type { MemoryConfig } from '../config.js';
 import type { RecallOptions } from '../types.js';
 import { vectorSearch, ftsSearch, updateAccessStats, getEmbeddingsForMemories } from '../storage/queries.js';
-import { embed } from '../embedding/embedder.js';
-import { reciprocalRankFusion, computeCompositeScore, packToBudget } from './scoring.js';
+import { embedQuery } from '../embedding/embedder.js';
+import { reciprocalRankFusion, computeCompositeScore, filterByRelevance, packToBudget } from './scoring.js';
 import { deduplicateByEmbedding } from './dedup.js';
 import { formatMemories } from './formatting.js';
 import { parseTags } from '../utils/tags.js';
@@ -33,8 +33,8 @@ export async function recall(
 ): Promise<PipelineRecallResult> {
   const { query, token_budget: tokenBudget = config.defaultTokenBudget, tags, format = 'summary' } = options;
 
-  // 1. Embed query
-  const queryEmbedding = await embed(query, config);
+  // 1. Embed query (with asymmetric prefix for retrieval-optimized embedding)
+  const queryEmbedding = await embedQuery(query, config);
 
   // 2. Hybrid search: vector KNN + FTS5
   const vectorResultsRaw = vectorSearch(db, config.namespace, queryEmbedding, DEFAULT_CANDIDATE_LIMIT);
@@ -77,17 +77,20 @@ export async function recall(
   }
   scored.sort((a, b) => b.compositeScore - a.compositeScore);
 
-  // 6. Load embeddings for dedup
-  const embeddingIds = scored.map((m) => m.id);
+  // 6. Drop low-relevance candidates before loading embeddings
+  const relevant = filterByRelevance(scored);
+
+  // 7. Load embeddings only for relevant candidates
+  const embeddingIds = relevant.map((m) => m.id);
   const embeddings = getEmbeddingsForMemories(db, embeddingIds);
 
-  // 7. Dedup
-  const { kept } = deduplicateByEmbedding(scored, embeddings);
+  // 8. Dedup
+  const { kept } = deduplicateByEmbedding(relevant, embeddings);
 
-  // 8. Token budget packing
+  // 9. Token budget packing
   const selected = packToBudget(kept, tokenBudget);
 
-  // 9. Format — reuse embeddings already loaded for dedup
+  // 10. Format — reuse embeddings already loaded for dedup
   const selectedIds = new Set(selected.map((m) => m.id));
   const selectedEmbeddings = new Map<string, Float32Array>();
   for (const [id, emb] of embeddings) {
@@ -95,7 +98,7 @@ export async function recall(
   }
   const text = await formatMemories(selected, selectedEmbeddings, query, tokenBudget, format, config);
 
-  // 10. Update access stats for returned memories
+  // 11. Update access stats for returned memories
   const returnedIds = selected.map((m) => m.id);
   updateAccessStats(db, returnedIds);
 

@@ -31,7 +31,7 @@ import {
   getNamespaceStats,
 } from './storage/queries.js';
 import { maybeRunMaintenance, runMaintenance } from './storage/maintenance.js';
-import { embed } from './embedding/embedder.js';
+import { embed, embedQuery } from './embedding/embedder.js';
 import { recall as retrievalRecall } from './retrieval/pipeline.js';
 import { EXACT_DEDUP_DISTANCE } from './storage/constants.js';
 import { parseTags } from './utils/tags.js';
@@ -168,7 +168,7 @@ async function forgetMemories(db: Database.Database, config: MemoryConfig, opts:
   }
 
   if (opts.query) {
-    const embedding = await embed(opts.query, config);
+    const embedding = await embedQuery(opts.query, config);
     const results = vectorSearch(db, namespace, embedding, 10);
     targetIds.push(...results.map((r) => r.id));
   }

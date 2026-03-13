@@ -27,8 +27,8 @@ export interface FtsSearchResult extends MemoryRow {
   bm25_score: number;
 }
 
-const SCHEMA_VERSION = '2';
-const EMBEDDING_DIMENSIONS = 384;
+const SCHEMA_VERSION = '3';
+const EMBEDDING_DIMENSIONS = 768;
 
 /**
  * Initialize a SQLite database with the memory schema, sqlite-vec, and FTS5.

@@ -61,6 +61,27 @@ export function estimateTokens(text: string): number {
 }
 
 /**
+ * Drop candidates whose RRF score is negligible compared to the best.
+ * This filters noise before budget packing — candidates with very low
+ * RRF relevance contribute nothing useful even if there's token budget left.
+ *
+ * Uses RRF score (not composite) because the composite score includes
+ * constant components (recency, importance) that compress the range.
+ */
+const MIN_RRF_FRACTION = 0.2;
+
+export function filterByRelevance(ranked: ScoredMemory[]): ScoredMemory[] {
+  if (ranked.length === 0) return ranked;
+  let bestRrf = 0;
+  for (const m of ranked) {
+    if (m.rrfScore > bestRrf) bestRrf = m.rrfScore;
+  }
+  if (bestRrf <= 0) return ranked;
+  const threshold = bestRrf * MIN_RRF_FRACTION;
+  return ranked.filter((m) => m.rrfScore >= threshold);
+}
+
+/**
  * Greedily select memories by score until the token budget is filled.
  * Uses skip (not break) so smaller memories further down can still fit.
  */

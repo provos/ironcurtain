@@ -160,15 +160,86 @@ export function ftsSearch(db: Database.Database, namespace: string, query: strin
     .all(sanitized, namespace, limit) as FtsSearchResult[];
 }
 
+// Common English stop words — these have near-zero IDF in any corpus and
+// pollute BM25 rankings when OR-joined with discriminative terms.
+const STOP_WORDS = new Set([
+  'a',
+  'an',
+  'and',
+  'are',
+  'as',
+  'at',
+  'be',
+  'but',
+  'by',
+  'can',
+  'did',
+  'do',
+  'does',
+  'for',
+  'from',
+  'had',
+  'has',
+  'have',
+  'he',
+  'her',
+  'him',
+  'his',
+  'how',
+  'i',
+  'if',
+  'in',
+  'into',
+  'is',
+  'it',
+  'its',
+  'me',
+  'my',
+  'no',
+  'not',
+  'of',
+  'on',
+  'or',
+  'our',
+  's',
+  'she',
+  'so',
+  'that',
+  'the',
+  'their',
+  'them',
+  'then',
+  'there',
+  'these',
+  'they',
+  'this',
+  'to',
+  'too',
+  'up',
+  'us',
+  'was',
+  'we',
+  'were',
+  'what',
+  'when',
+  'where',
+  'which',
+  'who',
+  'will',
+  'with',
+  'would',
+  'you',
+  'your',
+]);
+
 function sanitizeFtsQuery(query: string): string {
-  // Strip FTS5 special characters, keep words
+  // Strip FTS5 special characters, keep words, remove stop words
   const words = query
     .replace(/[^\w\s]/g, ' ')
     .split(/\s+/)
-    .filter((w) => w.length > 0)
+    .filter((w) => w.length > 0 && !STOP_WORDS.has(w.toLowerCase()))
     .slice(0, 20);
   if (words.length === 0) return '';
-  // OR each word for broad matching
   return words.join(' OR ');
 }
 

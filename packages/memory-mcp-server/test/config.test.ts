@@ -5,7 +5,7 @@ describe('loadConfig', () => {
   it('returns defaults when no env vars set', () => {
     const config = loadConfig({});
     expect(config.namespace).toBe('default');
-    expect(config.embeddingModel).toBe('Xenova/all-MiniLM-L6-v2');
+    expect(config.embeddingModel).toBe('Xenova/bge-base-en-v1.5');
     expect(config.embeddingDtype).toBe('q8');
     expect(config.llmBaseUrl).toBeNull();
     expect(config.llmApiKey).toBeNull();

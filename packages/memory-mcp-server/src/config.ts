@@ -50,7 +50,7 @@ export function loadConfig(env: EnvSource = process.env): MemoryConfig {
     dbPath: env.MEMORY_DB_PATH ?? defaultDbPath,
     namespace: env.MEMORY_NAMESPACE ?? 'default',
 
-    embeddingModel: env.MEMORY_EMBEDDING_MODEL ?? 'Xenova/all-MiniLM-L6-v2',
+    embeddingModel: env.MEMORY_EMBEDDING_MODEL ?? 'Xenova/bge-base-en-v1.5',
     embeddingDtype: env.MEMORY_EMBEDDING_DTYPE ?? 'q8',
 
     llmBaseUrl: env.MEMORY_LLM_BASE_URL ?? null,

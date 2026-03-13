@@ -4,6 +4,7 @@ import {
   reciprocalRankFusion,
   computeCompositeScore,
   estimateTokens,
+  filterByRelevance,
   packToBudget,
   type ScoredMemory,
 } from '../src/retrieval/scoring.js';
@@ -127,6 +128,49 @@ describe('estimateTokens', () => {
     expect(estimateTokens('abcd')).toBe(1);
     expect(estimateTokens('abcdefgh')).toBe(2);
     expect(estimateTokens('')).toBe(0);
+  });
+});
+
+describe('filterByRelevance', () => {
+  it('drops candidates with low RRF scores', () => {
+    const memories: ScoredMemory[] = [
+      { ...makeMemory({ id: 'a' }), rrfScore: 0.5, compositeScore: 0.5 },
+      { ...makeMemory({ id: 'b' }), rrfScore: 0.2, compositeScore: 0.4 },
+      { ...makeMemory({ id: 'c' }), rrfScore: 0.05, compositeScore: 0.3 },
+    ];
+
+    const filtered = filterByRelevance(memories);
+    // threshold = 0.5 * 0.2 = 0.1 → c (0.05) is dropped
+    expect(filtered).toHaveLength(2);
+    expect(filtered.map((m) => m.id)).toEqual(['a', 'b']);
+  });
+
+  it('finds best RRF even when not first by compositeScore', () => {
+    // Sorted by compositeScore (descending), but best rrfScore is not first
+    const memories: ScoredMemory[] = [
+      { ...makeMemory({ id: 'a' }), rrfScore: 0.05, compositeScore: 0.8 },
+      { ...makeMemory({ id: 'b' }), rrfScore: 0.5, compositeScore: 0.6 },
+      { ...makeMemory({ id: 'c' }), rrfScore: 0.02, compositeScore: 0.4 },
+    ];
+
+    const filtered = filterByRelevance(memories);
+    // bestRrf = 0.5, threshold = 0.1 → both a (0.05) and c (0.02) dropped
+    expect(filtered).toHaveLength(1);
+    expect(filtered[0].id).toBe('b');
+  });
+
+  it('keeps all when scores are close', () => {
+    const memories: ScoredMemory[] = [
+      { ...makeMemory({ id: 'a' }), rrfScore: 0.1, compositeScore: 0.5 },
+      { ...makeMemory({ id: 'b' }), rrfScore: 0.08, compositeScore: 0.4 },
+    ];
+
+    const filtered = filterByRelevance(memories);
+    expect(filtered).toHaveLength(2);
+  });
+
+  it('handles empty input', () => {
+    expect(filterByRelevance([])).toHaveLength(0);
   });
 });
 

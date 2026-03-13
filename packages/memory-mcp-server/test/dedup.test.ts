@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import type { ScoredMemory } from '../src/retrieval/scoring.js';
 import { deduplicateByEmbedding, clusterByEmbeddingSimilarity } from '../src/retrieval/dedup.js';
+import { EMBEDDING_DIMENSIONS } from '../src/storage/database.js';
 
 function makeScoredMemory(id: string, content: string = 'test'): ScoredMemory {
   const now = Date.now();
@@ -24,14 +25,14 @@ function makeScoredMemory(id: string, content: string = 'test'): ScoredMemory {
 }
 
 function normalizedVector(seed: number): Float32Array {
-  const arr = new Float32Array(384);
-  for (let i = 0; i < 384; i++) {
+  const arr = new Float32Array(EMBEDDING_DIMENSIONS);
+  for (let i = 0; i < EMBEDDING_DIMENSIONS; i++) {
     arr[i] = Math.sin(seed * (i + 1));
   }
   let norm = 0;
-  for (let i = 0; i < 384; i++) norm += arr[i] * arr[i];
+  for (let i = 0; i < EMBEDDING_DIMENSIONS; i++) norm += arr[i] * arr[i];
   norm = Math.sqrt(norm);
-  for (let i = 0; i < 384; i++) arr[i] /= norm;
+  for (let i = 0; i < EMBEDDING_DIMENSIONS; i++) arr[i] /= norm;
   return arr;
 }
 

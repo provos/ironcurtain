@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { initDatabase } from '../src/storage/database.js';
+import { initDatabase, EMBEDDING_DIMENSIONS } from '../src/storage/database.js';
 import {
   insertMemory,
   generateId,
@@ -23,15 +23,15 @@ const TEST_MODEL = 'test-model';
 const NAMESPACE = 'test';
 
 function randomEmbedding(): Float32Array {
-  const arr = new Float32Array(384);
-  for (let i = 0; i < 384; i++) {
+  const arr = new Float32Array(EMBEDDING_DIMENSIONS);
+  for (let i = 0; i < EMBEDDING_DIMENSIONS; i++) {
     arr[i] = Math.random() * 2 - 1;
   }
   // Normalize
   let norm = 0;
-  for (let i = 0; i < 384; i++) norm += arr[i] * arr[i];
+  for (let i = 0; i < EMBEDDING_DIMENSIONS; i++) norm += arr[i] * arr[i];
   norm = Math.sqrt(norm);
-  for (let i = 0; i < 384; i++) arr[i] /= norm;
+  for (let i = 0; i < EMBEDDING_DIMENSIONS; i++) arr[i] /= norm;
   return arr;
 }
 
