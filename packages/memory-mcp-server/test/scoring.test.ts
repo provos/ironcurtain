@@ -5,6 +5,7 @@ import {
   computeCompositeScore,
   estimateTokens,
   filterByRelevance,
+  filterByRerankerScore,
   packToBudget,
   type ScoredMemory,
 } from '../src/retrieval/scoring.js';
@@ -232,6 +233,60 @@ describe('filterByRelevance', () => {
 
   it('handles empty input', () => {
     expect(filterByRelevance([], 0)).toHaveLength(0);
+  });
+});
+
+describe('filterByRerankerScore', () => {
+  it('keeps candidates within score gap of the best', () => {
+    const memories: ScoredMemory[] = [
+      { ...makeMemory({ id: 'a' }), rrfScore: 0.5, compositeScore: 0.5, rerankerScore: 5 },
+      { ...makeMemory({ id: 'b' }), rrfScore: 0.4, compositeScore: 0.4, rerankerScore: 2 },
+      { ...makeMemory({ id: 'c' }), rrfScore: 0.3, compositeScore: 0.3, rerankerScore: -1 },
+      { ...makeMemory({ id: 'd' }), rrfScore: 0.2, compositeScore: 0.2, rerankerScore: -3 },
+    ];
+    // Gap of 5 from best (5): keeps scores >= 0, so a, b pass; c(-1) and d(-3) fail
+    // But MIN_RERANKER_RESULTS = 5 > 2 passing, so keeps top 5 (only 4 here → all kept)
+    const filtered = filterByRerankerScore(memories);
+    expect(filtered).toHaveLength(4);
+  });
+
+  it('drops candidates far below the best score', () => {
+    const memories: ScoredMemory[] = Array.from({ length: 10 }, (_, i) => ({
+      ...makeMemory({ id: `m${i}` }),
+      rrfScore: 0.5,
+      compositeScore: 0.5,
+      rerankerScore: 10 - i * 2, // 10, 8, 6, 4, 2, 0, -2, -4, -6, -8
+    }));
+    const filtered = filterByRerankerScore(memories);
+    // Gap of 5 from best (10): keeps scores >= 5, i.e. indices 0-2 (3 items)
+    // MIN_RERANKER_RESULTS = 5 > 3 passing, so keeps top 5
+    expect(filtered).toHaveLength(5);
+    expect(filtered.map((m) => m.id)).toEqual(['m0', 'm1', 'm2', 'm3', 'm4']);
+  });
+
+  it('returns all passing when more than MIN_RERANKER_RESULTS pass', () => {
+    const memories: ScoredMemory[] = Array.from({ length: 10 }, (_, i) => ({
+      ...makeMemory({ id: `m${i}` }),
+      rrfScore: 0.5,
+      compositeScore: 0.5,
+      rerankerScore: 10 - i, // 10, 9, 8, 7, 6, 5, 4, 3, 2, 1
+    }));
+    const filtered = filterByRerankerScore(memories);
+    // Gap of 5 from best (10): keeps scores >= 5, i.e. indices 0-5 (6 items)
+    expect(filtered).toHaveLength(6);
+  });
+
+  it('passes through unchanged when no reranker scores', () => {
+    const memories: ScoredMemory[] = [
+      { ...makeMemory({ id: 'a' }), rrfScore: 0.5, compositeScore: 0.5 },
+      { ...makeMemory({ id: 'b' }), rrfScore: 0.4, compositeScore: 0.4 },
+    ];
+    const filtered = filterByRerankerScore(memories);
+    expect(filtered).toHaveLength(2);
+  });
+
+  it('handles empty input', () => {
+    expect(filterByRerankerScore([])).toHaveLength(0);
   });
 });
 

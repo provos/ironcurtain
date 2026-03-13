@@ -123,19 +123,25 @@ export function filterByRelevance(ranked: ScoredMemory[], rrfMax: number): Score
 }
 
 /**
- * Drop candidates the cross-encoder scored as irrelevant.
- * ms-marco logits: positive = relevant, negative = not relevant.
+ * Drop candidates the cross-encoder scored as clearly irrelevant relative
+ * to the best candidate.  Uses a relative gap from the top score rather than
+ * an absolute threshold — this adapts automatically to content types where
+ * even the best candidate gets a negative logit (e.g. conversational text
+ * scored by a web-search cross-encoder).
+ *
  * Always keeps at least MIN_RERANKER_RESULTS so vague queries still return something.
  */
-const MIN_RERANKER_RESULTS = 3;
-const RERANKER_SCORE_THRESHOLD = 0;
+const MIN_RERANKER_RESULTS = 5;
+/** Maximum allowed gap between a candidate's score and the best score. */
+const RERANKER_SCORE_GAP = 5;
 
 export function filterByRerankerScore(ranked: ScoredMemory[]): ScoredMemory[] {
   if (ranked.length === 0) return ranked;
   // If no reranker scores, pass through unchanged
   if (ranked[0].rerankerScore == null) return ranked;
 
-  const passing = ranked.filter((m) => (m.rerankerScore ?? 0) >= RERANKER_SCORE_THRESHOLD);
+  const bestScore = ranked[0].rerankerScore;
+  const passing = ranked.filter((m) => bestScore - (m.rerankerScore ?? 0) <= RERANKER_SCORE_GAP);
   // Always keep at least MIN_RERANKER_RESULTS from the top of the reranked list
   if (passing.length >= MIN_RERANKER_RESULTS) return passing;
   return ranked.slice(0, MIN_RERANKER_RESULTS);
