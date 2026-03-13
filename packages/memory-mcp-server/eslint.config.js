@@ -7,14 +7,7 @@ export default tseslint.config(
   ...tseslint.configs.strictTypeChecked,
   prettier,
   {
-    ignores: [
-      'dist/',
-      'node_modules/',
-      'packages/',
-      'scripts/',
-      'vitest.config.ts',
-      'eslint.config.js',
-    ],
+    ignores: ['dist/', 'node_modules/', 'vitest.config.ts', 'eslint.config.js'],
   },
   {
     languageOptions: {
@@ -35,10 +28,8 @@ export default tseslint.config(
       '@typescript-eslint/no-non-null-assertion': 'error',
     },
   },
-  // Relaxed rules for test files — mocking patterns, deprecated API testing,
-  // and vitest callbacks make strict unsafe-* rules too noisy.
   {
-    files: ['test/**/*.ts'],
+    files: ['test/**/*.ts', 'benchmark/**/*.ts'],
     rules: {
       '@typescript-eslint/require-await': 'off',
       '@typescript-eslint/no-unsafe-assignment': 'off',

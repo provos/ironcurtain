@@ -1,0 +1,14 @@
+dist/
+node_modules/
+.env
+.env.*
+*.db
+*.db-wal
+*.db-shm
+
+# Python benchmark
+benchmark/.venv/
+benchmark/results/
+benchmark/data/
+benchmark/uv.lock
+__pycache__/
