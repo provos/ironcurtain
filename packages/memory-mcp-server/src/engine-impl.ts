@@ -83,7 +83,12 @@ async function storeImmediate(
   const exactMatch = candidates.find((c) => c.distance < EXACT_DEDUP_DISTANCE);
 
   if (exactMatch) {
-    updateMemoryContent(db, exactMatch.id, content, embedding, importance, exactMatch.content);
+    // Merge tags from both memories so no metadata is lost
+    const existingTags = parseTags(exactMatch.tags);
+    const newTags = opts.tags ?? [];
+    const mergedTags = [...new Set([...existingTags, ...newTags])];
+
+    updateMemoryContent(db, exactMatch.id, content, embedding, importance, exactMatch.content, mergedTags);
     return { id: exactMatch.id, action: 'merged_duplicate' };
   }
 

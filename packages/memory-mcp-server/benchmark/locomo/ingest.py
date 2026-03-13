@@ -1,9 +1,9 @@
 """
 Ingest LoCoMo conversation sessions into the memory MCP server.
 
-Each conversation turn becomes a separate memory_store call with dia_id
-and session metadata embedded in both content and tags. The dia_id tag is
-critical for retrieval evaluation against ground-truth evidence.
+Each conversation turn becomes a separate memory_store call. Session metadata
+(dia_id, session number, date, speaker) is stored in tags only — not in
+content — so that embeddings reflect pure semantic meaning.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ async def ingest_conversation(
 
     for sess in conversation.sessions:
         for turn in sess.turns:
-            content = _format_content(sess.session_number, sess.date_time, turn.speaker, turn.text)
+            content = _format_content(turn.speaker, turn.text)
             tags = _build_tags(turn.dia_id, sess.session_number, sess.date_time, turn.speaker)
 
             await call_store(session, content, tags, config.importance_default)
@@ -49,9 +49,13 @@ async def ingest_conversation(
     return stored
 
 
-def _format_content(session_number: int, date_time: str, speaker: str, text: str) -> str:
-    """Format a turn as a prefixed memory string, truncating if too long."""
-    result = f"[Session: {session_number}, Date: {date_time}] [{speaker}]: {text}"
+def _format_content(speaker: str, text: str) -> str:
+    """Format a turn as a memory string, truncating if too long.
+
+    Session and date metadata are stored in tags — keeping them out of the
+    content avoids polluting the embedding vector with structural noise.
+    """
+    result = f"[{speaker}]: {text}"
 
     if len(result) > MAX_CONTENT_LENGTH:
         result = result[:_TRUNCATION_BODY_LIMIT] + _TRUNCATION_SUFFIX

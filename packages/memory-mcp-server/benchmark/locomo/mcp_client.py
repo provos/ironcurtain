@@ -31,6 +31,9 @@ async def memory_server(config: BenchmarkConfig, db_path: str) -> AsyncIterator[
         "MEMORY_LLM_BASE_URL": config.memory_llm_base_url,
         "MEMORY_LLM_MODEL": config.memory_llm_model,
         "MEMORY_LLM_API_KEY": config.memory_llm_api_key,
+        # Disable LLM-based maintenance during benchmarking — consolidation
+        # would modify stored memories and skew retrieval evaluation.
+        "MEMORY_MAINTENANCE_INTERVAL": "999999",
     }
 
     server_params = StdioServerParameters(
@@ -79,6 +82,58 @@ async def call_recall(
 
     result = await session.call_tool(config.recall_tool, args)
     return extract_text(result)
+
+
+async def call_recall_raw(
+    session: ClientSession,
+    query: str,
+    config: BenchmarkConfig,
+) -> tuple[str, list[list[str]]]:
+    """Retrieve memories in raw format, returning (readable_context, per_memory_tags).
+
+    Uses raw format to get structured output with tags, then reconstructs
+    readable context for the reader LLM. This avoids embedding retrieval
+    metadata in memory content which would degrade embedding quality.
+    """
+    import json
+
+    query_key = "task" if config.recall_tool == "memory_context" else "query"
+    args: dict[str, object] = {
+        query_key: query,
+        "token_budget": config.recall_token_budget,
+        "format": "raw",
+    }
+
+    result = await session.call_tool(config.recall_tool, args)
+    raw_text = extract_text(result)
+
+    try:
+        memories = json.loads(raw_text)
+    except (json.JSONDecodeError, TypeError):
+        return raw_text, []
+
+    # Reconstruct readable context for the reader LLM
+    # Pull session date from tags (where it's stored) rather than created_at
+    # (which is just the ingestion timestamp).
+    lines: list[str] = []
+    all_tags: list[list[str]] = []
+    for m in memories:
+        tags = m.get("tags", [])
+        date = _extract_tag_value(tags, "date:") or "unknown"
+        session = _extract_tag_value(tags, "session:") or "?"
+        lines.append(f"- [Session {session}, {date}] {m['content']}")
+        all_tags.append(tags)
+
+    readable = "\n".join(lines) if lines else "No relevant memories found."
+    return readable, all_tags
+
+
+def _extract_tag_value(tags: list[str], prefix: str) -> str | None:
+    """Return the value after *prefix* from the first matching tag, or None."""
+    for t in tags:
+        if t.startswith(prefix):
+            return t[len(prefix):]
+    return None
 
 
 def extract_text(result: object) -> str:

@@ -2,7 +2,7 @@
 Retrieval evaluation metrics for the LoCoMo benchmark.
 
 Scores whether the memory MCP server retrieved the correct evidence
-turns, using dia_id tags embedded in the retrieved context to compare
+turns, using dia_id tags from the raw recall response to compare
 against the ground-truth evidence field.
 """
 
@@ -15,17 +15,29 @@ import sys
 
 from .scoring import CATEGORY_NAMES
 
-# Matches dia_id tags in retrieved context: dia_id:D1:3
+# Matches dia_id tags: dia_id:D1:3
 _DIA_ID_RE = re.compile(r"dia_id:(D\d+:\d+)")
 
 
-def extract_retrieved_dia_ids(context: str) -> set[str]:
-    """Parse dia_id tags from retrieved context."""
-    return set(_DIA_ID_RE.findall(context))
+def extract_dia_ids_from_tags(all_tags: list[list[str]]) -> set[str]:
+    """Extract dia_id values from per-memory tag lists (from raw format)."""
+    dia_ids: set[str] = set()
+    for tags in all_tags:
+        for tag in tags:
+            m = _DIA_ID_RE.match(tag)
+            if m:
+                dia_ids.add(m.group(1))
+    return dia_ids
 
 
-def score_retrieval(retrieved_context: str, evidence: list[str]) -> dict:
+def score_retrieval(
+    evidence: list[str],
+    *,
+    tags: list[list[str]],
+) -> dict:
     """Score retrieval for a single question.
+
+    Extracts dia_ids from per-memory tag lists (from raw recall format).
 
     Returns:
         {
@@ -33,7 +45,8 @@ def score_retrieval(retrieved_context: str, evidence: list[str]) -> dict:
             retrieved_count, evidence_count, found_count,
         }
     """
-    retrieved = extract_retrieved_dia_ids(retrieved_context)
+    retrieved = extract_dia_ids_from_tags(tags)
+
     evidence_set = set(evidence)
     found = retrieved & evidence_set
 

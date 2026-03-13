@@ -13,6 +13,7 @@ import {
   vectorSearch,
   ftsSearch,
   updateAccessStats,
+  updateMemoryContent,
   getNamespaceStats,
   getEmbeddingsForMemories,
 } from '../src/storage/queries.js';
@@ -234,6 +235,59 @@ describe('database', () => {
     expect(stats.top_tags).toHaveLength(1);
     expect(stats.top_tags[0].tag).toBe('test');
     expect(stats.top_tags[0].count).toBe(3);
+  });
+
+  it('merges tags when updating memory content', () => {
+    const id = generateId();
+    const emb = randomEmbedding();
+
+    insertMemory(
+      db,
+      {
+        id,
+        namespace: NAMESPACE,
+        content: 'Original content',
+        tags: ['dia_id:D1:5', 'session:1'],
+        importance: 0.5,
+      },
+      emb,
+    );
+
+    const newEmb = randomEmbedding();
+    updateMemoryContent(db, id, 'Updated content', newEmb, 0.7, 'Original content', [
+      'dia_id:D1:5',
+      'session:1',
+      'dia_id:D1:6',
+      'session:2',
+    ]);
+
+    const mem = getMemoriesByIds(db, [id])[0];
+    expect(mem.content).toBe('Updated content');
+    expect(JSON.parse(mem.tags!)).toEqual(['dia_id:D1:5', 'session:1', 'dia_id:D1:6', 'session:2']);
+    expect(mem.importance).toBe(0.7);
+  });
+
+  it('preserves existing tags when mergedTags is omitted', () => {
+    const id = generateId();
+    const emb = randomEmbedding();
+
+    insertMemory(
+      db,
+      {
+        id,
+        namespace: NAMESPACE,
+        content: 'Original',
+        tags: ['keep-me'],
+        importance: 0.5,
+      },
+      emb,
+    );
+
+    updateMemoryContent(db, id, 'Updated', randomEmbedding(), 0.6, 'Original');
+
+    const mem = getMemoriesByIds(db, [id])[0];
+    expect(mem.content).toBe('Updated');
+    expect(JSON.parse(mem.tags!)).toEqual(['keep-me']);
   });
 
   it('isolates namespaces', () => {

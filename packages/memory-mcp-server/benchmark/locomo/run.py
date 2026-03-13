@@ -24,7 +24,7 @@ from openai import AsyncOpenAI
 from .config import BenchmarkConfig, parse_args
 from .dataset import Conversation, load_conversations
 from .ingest import ingest_conversation
-from .mcp_client import call_recall, memory_server
+from .mcp_client import call_recall_raw, memory_server
 from .reader import build_reader_client, generate_answer
 from .retrieval_metrics import (
     compute_retrieval_summary,
@@ -59,7 +59,7 @@ async def run_conversation(
             qa_results: list[dict] = []
             for qa in questions:
                 t0 = time.time()
-                context = await call_recall(session, qa.question, config)
+                context, recall_tags = await call_recall_raw(session, qa.question, config)
                 hypothesis = await generate_answer(
                     context, qa.question, config, client=reader_client
                 )
@@ -75,6 +75,7 @@ async def run_conversation(
                         "adversarial_answer": qa.adversarial_answer,
                         "hypothesis": hypothesis,
                         "retrieved_context": context,
+                        "retrieved_tags": recall_tags,
                         "elapsed_seconds": round(elapsed, 2),
                     }
                 )
@@ -211,7 +212,9 @@ async def main_run(
         # Score retrieval for non-adversarial questions
         for qa_result in result["questions"]:
             if qa_result["category"] != ADVERSARIAL_CATEGORY and qa_result["evidence"]:
-                ret_score = score_retrieval(qa_result["retrieved_context"], qa_result["evidence"])
+                ret_score = score_retrieval(
+                    qa_result["evidence"], tags=qa_result.get("retrieved_tags")
+                )
                 qa_result["retrieval"] = ret_score
                 all_retrieval_results.append(ret_score)
                 all_retrieval_categories.append(qa_result["category"])
@@ -305,7 +308,7 @@ async def main_evaluate(
         qa_scores.append(score)
 
         if qa["category"] != ADVERSARIAL_CATEGORY and qa.get("evidence"):
-            ret_score = score_retrieval(qa.get("retrieved_context", ""), qa["evidence"])
+            ret_score = score_retrieval(qa["evidence"], tags=qa.get("retrieved_tags"))
             retrieval_results.append(ret_score)
             retrieval_categories.append(qa["category"])
 
@@ -346,7 +349,7 @@ def main_retrieval_only(
 
     for qa in _iter_checkpoint_qa(checkpoint_path):
         if qa["category"] != ADVERSARIAL_CATEGORY and qa.get("evidence"):
-            ret_score = score_retrieval(qa.get("retrieved_context", ""), qa["evidence"])
+            ret_score = score_retrieval(qa["evidence"], tags=qa.get("retrieved_tags"))
             retrieval_results.append(ret_score)
             retrieval_categories.append(qa["category"])
 

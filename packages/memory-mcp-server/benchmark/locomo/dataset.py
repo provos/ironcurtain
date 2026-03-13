@@ -106,9 +106,8 @@ def _parse_sessions(conv_data: dict) -> list[Session]:
 
         turns = []
         for t in raw_turns:
-            # Skip image-related entries
-            if "img_url" in t:
-                continue
+            # Image turns have both img_url and text — keep the text content
+            # since it provides context needed for QA evidence
             turns.append(Turn(speaker=t["speaker"], dia_id=t["dia_id"], text=t["text"]))
 
         sessions.append(Session(session_number=n, date_time=date_time, turns=turns))

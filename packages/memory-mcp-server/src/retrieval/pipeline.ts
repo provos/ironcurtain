@@ -13,9 +13,6 @@ const DEFAULT_CANDIDATE_LIMIT = 50;
 /** Maximum cosine distance for vector search results.
  *  0.9 = cosine similarity > 0.1; generous enough for vague queries while filtering pure noise. */
 const MAX_VECTOR_DISTANCE = 0.9;
-/** Tighter threshold: at least one result must be this close to trust the query is on-topic.
- *  0.7 = cosine similarity > 0.3. If no result meets this, FTS results are excluded. */
-const STRONG_MATCH_DISTANCE = 0.7;
 
 /** Internal result from the retrieval pipeline, richer than the public RecallResult. */
 export interface PipelineRecallResult {
@@ -46,19 +43,12 @@ export async function recall(
   const ftsResults = ftsSearch(db, config.namespace, query, DEFAULT_CANDIDATE_LIMIT);
 
   // Build a map of all candidate memories for RRF lookup.
-  // Only include FTS results when at least one vector result is a strong semantic match;
-  // this prevents FTS keyword hits on off-topic queries from producing false positives.
-  const bestDistance = vectorResults.length > 0 ? vectorResults[0].distance : Infinity;
-  const hasStrongMatch = bestDistance < STRONG_MATCH_DISTANCE;
+  // Always include both vector and FTS results — RRF handles the fusion.
+  // Gating FTS on vector confidence is an anti-pattern: FTS keyword matches
+  // are most valuable precisely when vector search is uncertain.
   const allMemories = new Map<string, MemoryRow>();
-  if (hasStrongMatch) {
-    for (const m of vectorResults) allMemories.set(m.id, m);
-    for (const m of ftsResults) allMemories.set(m.id, m);
-  } else {
-    // Weak semantic match — only include vector results, no FTS boost.
-    // This limits false positives from keyword matches on off-topic queries.
-    for (const m of vectorResults) allMemories.set(m.id, m);
-  }
+  for (const m of vectorResults) allMemories.set(m.id, m);
+  for (const m of ftsResults) allMemories.set(m.id, m);
 
   if (allMemories.size === 0) {
     return {

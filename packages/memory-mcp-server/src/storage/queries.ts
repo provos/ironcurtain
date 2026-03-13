@@ -71,17 +71,36 @@ export function updateMemoryContent(
   embedding: Float32Array,
   importance: number,
   supersededContent: string,
+  mergedTags?: string[],
 ): void {
   const now = Date.now();
   const txn = db.transaction(() => {
-    db.prepare(
-      `UPDATE memories
-       SET content = ?, updated_at = ?,
-           importance = MAX(importance, ?),
-           metadata = json_set(COALESCE(metadata, '{}'), '$.superseded',
-             json(?))
-       WHERE id = ?`,
-    ).run(content, now, importance, JSON.stringify({ content: supersededContent, at: now }), id);
+    if (mergedTags !== undefined) {
+      db.prepare(
+        `UPDATE memories
+         SET content = ?, updated_at = ?, tags = ?,
+             importance = MAX(importance, ?),
+             metadata = json_set(COALESCE(metadata, '{}'), '$.superseded',
+               json(?))
+         WHERE id = ?`,
+      ).run(
+        content,
+        now,
+        JSON.stringify(mergedTags),
+        importance,
+        JSON.stringify({ content: supersededContent, at: now }),
+        id,
+      );
+    } else {
+      db.prepare(
+        `UPDATE memories
+         SET content = ?, updated_at = ?,
+             importance = MAX(importance, ?),
+             metadata = json_set(COALESCE(metadata, '{}'), '$.superseded',
+               json(?))
+         WHERE id = ?`,
+      ).run(content, now, importance, JSON.stringify({ content: supersededContent, at: now }), id);
+    }
 
     db.prepare(`UPDATE vec_memories SET embedding = ? WHERE memory_id = ?`).run(Buffer.from(embedding.buffer), id);
   });
