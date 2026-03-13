@@ -90,12 +90,17 @@ export async function recall(
 
   // 6b. Cross-encoder re-ranking: refine ordering using (query, passage) pairs.
   // Runs only on the filtered set (typically 30-50 items) to keep latency reasonable.
-  const reranked = await rerank(query, relevant, config);
-
-  // 6c. Drop candidates the cross-encoder scored as irrelevant.
-  // ms-marco logits: positive = relevant, negative = not relevant.
-  // Always keep at least MIN_RERANKER_RESULTS to avoid returning nothing.
-  const afterRerankerFilter = filterByRerankerScore(reranked);
+  // Falls back to pre-rerank ordering if model loading fails (e.g., network issue).
+  let afterRerankerFilter: typeof relevant;
+  try {
+    const reranked = await rerank(query, relevant, config);
+    // 6c. Drop candidates the cross-encoder scored as irrelevant.
+    // ms-marco logits: positive = relevant, negative = not relevant.
+    // Always keep at least MIN_RERANKER_RESULTS to avoid returning nothing.
+    afterRerankerFilter = filterByRerankerScore(reranked);
+  } catch {
+    afterRerankerFilter = relevant;
+  }
 
   // 7. Load embeddings only for relevant candidates
   const embeddingIds = afterRerankerFilter.map((m) => m.id);

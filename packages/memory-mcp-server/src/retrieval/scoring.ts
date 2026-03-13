@@ -138,7 +138,7 @@ export function filterByRerankerScore(ranked: ScoredMemory[]): ScoredMemory[] {
   const passing = ranked.filter((m) => (m.rerankerScore ?? 0) >= RERANKER_SCORE_THRESHOLD);
   // Always keep at least MIN_RERANKER_RESULTS from the top of the reranked list
   if (passing.length >= MIN_RERANKER_RESULTS) return passing;
-  return ranked.slice(0, Math.max(MIN_RERANKER_RESULTS, passing.length));
+  return ranked.slice(0, MIN_RERANKER_RESULTS);
 }
 
 /**

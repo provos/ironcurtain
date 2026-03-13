@@ -10,36 +10,41 @@ interface RerankerModel {
   };
 }
 
-let cached: RerankerModel | null = null;
+let cachedPromise: Promise<RerankerModel> | null = null;
 let currentModel: string | null = null;
 
 /**
  * Get or lazily initialize the cross-encoder model and tokenizer.
- * Cached as a singleton — the model is only loaded once.
+ * Caches the loading promise to prevent concurrent loads from racing.
  */
 export async function getReranker(config: MemoryConfig): Promise<RerankerModel> {
-  if (cached && currentModel === config.rerankerModel) {
-    return cached;
+  if (cachedPromise && currentModel === config.rerankerModel) {
+    return cachedPromise;
   }
 
-  const { AutoTokenizer, AutoModelForSequenceClassification } = await import('@huggingface/transformers');
-  const tokenizer = await AutoTokenizer.from_pretrained(config.rerankerModel);
-  const model = await AutoModelForSequenceClassification.from_pretrained(config.rerankerModel, { dtype: 'q8' });
+  // Model changed — discard old promise before starting a new load
+  currentModel = config.rerankerModel;
+  cachedPromise = loadReranker(config.rerankerModel);
 
-  cached = {
+  return cachedPromise;
+}
+
+async function loadReranker(modelName: string): Promise<RerankerModel> {
+  const { AutoTokenizer, AutoModelForSequenceClassification } = await import('@huggingface/transformers');
+  const tokenizer = await AutoTokenizer.from_pretrained(modelName);
+  const model = await AutoModelForSequenceClassification.from_pretrained(modelName, { dtype: 'q8' });
+
+  return {
     tokenizer: tokenizer as unknown as RerankerModel['tokenizer'],
     model: model as unknown as RerankerModel['model'],
   };
-  currentModel = config.rerankerModel;
-
-  return cached;
 }
 
 /**
  * Reset the cached reranker instance. Primarily for testing.
  */
 export function resetReranker(): void {
-  cached = null;
+  cachedPromise = null;
   currentModel = null;
 }
 
