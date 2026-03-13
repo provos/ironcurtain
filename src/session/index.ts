@@ -7,7 +7,7 @@
  */
 
 import { existsSync, mkdirSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { dirname } from 'node:path';
 import { loadConfig } from '../config/index.js';
 import {
   getIronCurtainHome,
@@ -25,6 +25,9 @@ import * as logger from '../logger.js';
 import { resolveRealPath } from '../types/argument-roles.js';
 import { resolvePersona, applyServerAllowlist } from '../persona/resolve.js';
 import { buildPersonaSystemPromptAugmentation } from '../persona/persona-prompt.js';
+import { resolveMemoryDbPath } from '../memory/resolve-memory-path.js';
+import { buildMemoryServerConfig, MEMORY_SERVER_NAME } from '../memory/memory-annotations.js';
+import { buildMemorySystemPrompt } from '../memory/memory-prompt.js';
 import { AgentSession } from './agent-session.js';
 import { SessionError } from './errors.js';
 import { saveSessionMetadata, loadSessionMetadata } from './session-metadata.js';
@@ -251,7 +254,13 @@ function buildSessionConfig(
   sessionId: SessionId,
   opts: Pick<
     SessionOptions,
-    'resumeSessionId' | 'workspacePath' | 'policyDir' | 'disableAutoApprove' | 'persona' | 'systemPromptAugmentation'
+    | 'resumeSessionId'
+    | 'workspacePath'
+    | 'policyDir'
+    | 'disableAutoApprove'
+    | 'persona'
+    | 'systemPromptAugmentation'
+    | 'jobId'
   > = {},
 ): SessionDirConfig {
   let { workspacePath, policyDir, systemPromptAugmentation } = opts;
@@ -273,13 +282,9 @@ function buildSessionConfig(
       workspacePath = resolved.workspacePath;
     }
 
-    // Build persona system prompt augmentation (includes memory contents).
-    // workspacePath is guaranteed set here (either from opts or resolved above),
-    // so the memory path is always inside the session's allowedDirectory.
-    const personaAugmentation = buildPersonaSystemPromptAugmentation(
-      resolved.persona,
-      resolve(workspacePath, 'memory.md'),
-    );
+    // Build persona system prompt augmentation (includes MCP memory prompt when enabled).
+    const memoryEnabled = config.userConfig.memory.enabled;
+    const personaAugmentation = buildPersonaSystemPromptAugmentation(resolved.persona, memoryEnabled);
     systemPromptAugmentation = systemPromptAugmentation
       ? `${personaAugmentation}\n\n${systemPromptAugmentation}`
       : personaAugmentation;
@@ -349,6 +354,31 @@ function buildSessionConfig(
   // Apply server allowlist if persona specifies one
   if (serverAllowlist) {
     sessionConfig.mcpServers = applyServerAllowlist(sessionConfig.mcpServers, serverAllowlist);
+  }
+
+  // Inject the memory MCP server when enabled
+  const memoryConfig = config.userConfig.memory;
+  if (memoryConfig.enabled) {
+    const dbPath = resolveMemoryDbPath({
+      persona: opts.persona,
+      jobId: opts.jobId,
+    });
+    mkdirSync(dirname(dbPath), { recursive: true });
+    sessionConfig.mcpServers[MEMORY_SERVER_NAME] = buildMemoryServerConfig({
+      dbPath,
+      namespace: opts.persona ?? opts.jobId ?? 'default',
+      llmBaseUrl: memoryConfig.llmBaseUrl,
+      llmApiKey: memoryConfig.llmApiKey,
+      anthropicApiKey: config.userConfig.anthropicApiKey || undefined,
+    });
+
+    // For non-persona sessions, add the memory system prompt
+    if (!opts.persona) {
+      const memoryPrompt = buildMemorySystemPrompt();
+      systemPromptAugmentation = systemPromptAugmentation
+        ? `${memoryPrompt}\n\n${systemPromptAugmentation}`
+        : memoryPrompt;
+    }
   }
 
   // Patch MCP server args to use the session-specific sandbox directory

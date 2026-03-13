@@ -11,6 +11,10 @@ import { resolve } from 'node:path';
 import { getIronCurtainHome } from '../config/paths.js';
 import { createPersonaName, type PersonaDefinition, type PersonaName } from './types.js';
 import type { MCPServerConfig } from '../config/types.js';
+import { MEMORY_SERVER_NAME } from '../memory/memory-annotations.js';
+
+/** Servers always included in persona sessions regardless of allowlist. */
+const ALWAYS_INCLUDED_SERVERS = new Set(['filesystem', MEMORY_SERVER_NAME]);
 
 // ---------------------------------------------------------------------------
 // Path helpers
@@ -123,14 +127,14 @@ export function applyServerAllowlist(
   // without breaking the persona (non-fatal warning).
   const knownServers = new Set(Object.keys(mcpServers));
   for (const name of allowlist) {
-    if (!knownServers.has(name) && name !== 'filesystem') {
+    if (!knownServers.has(name) && !ALWAYS_INCLUDED_SERVERS.has(name)) {
       process.stderr.write(`Warning: persona allowlist includes unknown server "${name}" (not in mcp-servers.json)\n`);
     }
   }
 
   const filtered: Record<string, MCPServerConfig> = {};
   for (const [name, config] of Object.entries(mcpServers)) {
-    if (allowlist.includes(name) || name === 'filesystem') {
+    if (allowlist.includes(name) || ALWAYS_INCLUDED_SERVERS.has(name)) {
       filtered[name] = config;
     }
   }

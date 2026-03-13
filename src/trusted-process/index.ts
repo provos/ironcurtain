@@ -20,6 +20,7 @@ import { extractPolicyRoots, toMcpRoots, directoryForPath } from './policy-roots
 import * as logger from '../logger.js';
 import { extractMcpErrorMessage } from './mcp-error-utils.js';
 import { type ServerContextMap, updateServerContext, formatServerContext } from './server-context.js';
+import { MEMORY_SERVER_NAME, injectMemoryAnnotations } from '../memory/memory-annotations.js';
 
 /**
  * Detects Docker-style `-e VAR_NAME` args (no `=`) where the env var is unset.
@@ -69,6 +70,12 @@ export class TrustedProcess {
       fallbackDir: getPackageGeneratedDir(),
     });
     checkConstitutionFreshness(compiledPolicy, config.constitutionPath);
+
+    // Inject memory server annotations and blanket-allow rule when the memory
+    // server is present in the MCP server config.
+    if (MEMORY_SERVER_NAME in config.mcpServers) {
+      injectMemoryAnnotations(toolAnnotations, compiledPolicy);
+    }
 
     const serverDomainAllowlists = extractServerDomainAllowlists(config.mcpServers);
     this.policyEngine = new PolicyEngine(

@@ -2,44 +2,30 @@
  * Persona system prompt augmentation.
  *
  * Builds the system prompt fragment injected when a session is
- * created with a persona. Includes the persona description and
- * the contents of the persistent memory file (workspace/memory.md).
+ * created with a persona. Includes the persona description and,
+ * when memory is enabled, the MCP-based memory system prompt.
  */
 
-import { existsSync, readFileSync } from 'node:fs';
+import { buildMemorySystemPrompt } from '../memory/memory-prompt.js';
 import type { PersonaDefinition } from './types.js';
 
 /**
  * Builds the system prompt augmentation for a persona session.
  *
- * Includes the persona's description and the current contents of
- * the memory file. The agent is instructed to read and update the
- * memory file across sessions.
+ * When memory is enabled, appends the memory system prompt with
+ * the persona name for namespace context. When disabled, only
+ * includes the persona name and description.
  *
  * @param persona - The persona definition.
- * @param memoryPath - Absolute path to the memory file (workspace/memory.md).
+ * @param memoryEnabled - Whether the MCP memory system is active.
  */
-export function buildPersonaSystemPromptAugmentation(persona: PersonaDefinition, memoryPath: string): string {
-  const memoryContent = existsSync(memoryPath) ? readFileSync(memoryPath, 'utf-8') : '';
+export function buildPersonaSystemPromptAugmentation(persona: PersonaDefinition, memoryEnabled: boolean): string {
+  const sections: string[] = [`## Persona: ${persona.name}`, '', persona.description];
 
-  return `
-## Persona: ${persona.name}
+  if (memoryEnabled) {
+    sections.push('');
+    sections.push(buildMemorySystemPrompt({ persona: persona.name }));
+  }
 
-${persona.description}
-
-## Persistent Memory
-
-You have a persistent memory file at: ${memoryPath}
-This file survives across sessions. Use it to remember important context:
-- User preferences and patterns
-- Ongoing tasks and their status
-- Key decisions and their reasoning
-- Names, dates, and recurring items
-
-Read this file at the start of each session to recall prior context.
-Before the session ends, update it with anything worth remembering.
-Keep it concise and organized — this is your long-term memory.
-
-${memoryContent ? `### Current Memory Contents\n\n${memoryContent}` : 'The memory file is currently empty — this is your first session.'}
-`.trim();
+  return sections.join('\n');
 }

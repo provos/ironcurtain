@@ -10,6 +10,8 @@ import type { ToolCallRequest } from '../src/types/mcp.js';
 import {
   testCompiledPolicy,
   testToolAnnotations,
+  testCompiledPolicyWithMemory,
+  testToolAnnotationsWithMemory,
   TEST_SANDBOX_DIR,
   TEST_PROTECTED_PATHS,
   REAL_TMP,
@@ -2457,6 +2459,59 @@ describe('PolicyEngine with conditional roles', () => {
     it('returns undefined for unknown tool', () => {
       const stored = condEngine.getStoredAnnotation('git', 'nonexistent');
       expect(stored).toBeUndefined();
+    });
+  });
+
+  describe('memory server policy', () => {
+    const memoryEngine = new PolicyEngine(
+      testCompiledPolicyWithMemory,
+      testToolAnnotationsWithMemory,
+      protectedPaths,
+      SANDBOX_DIR,
+    );
+
+    it('allows memory_store when memory annotations and rule are injected', () => {
+      const result = memoryEngine.evaluate(
+        makeRequest({ serverName: 'memory', toolName: 'memory_store', arguments: { content: 'hello' } }),
+      );
+      expect(result.decision).toBe('allow');
+    });
+
+    it('allows memory_recall when memory annotations and rule are injected', () => {
+      const result = memoryEngine.evaluate(
+        makeRequest({ serverName: 'memory', toolName: 'memory_recall', arguments: { query: 'test' } }),
+      );
+      expect(result.decision).toBe('allow');
+    });
+
+    it('allows memory_context when memory annotations and rule are injected', () => {
+      const result = memoryEngine.evaluate(
+        makeRequest({ serverName: 'memory', toolName: 'memory_context', arguments: {} }),
+      );
+      expect(result.decision).toBe('allow');
+    });
+
+    it('allows memory_forget when memory annotations and rule are injected', () => {
+      const result = memoryEngine.evaluate(
+        makeRequest({ serverName: 'memory', toolName: 'memory_forget', arguments: { tag: 'old' } }),
+      );
+      expect(result.decision).toBe('allow');
+    });
+
+    it('allows memory_inspect when memory annotations and rule are injected', () => {
+      const result = memoryEngine.evaluate(
+        makeRequest({ serverName: 'memory', toolName: 'memory_inspect', arguments: { view: 'stats' } }),
+      );
+      expect(result.decision).toBe('allow');
+    });
+
+    it('denies memory tools when annotations are not injected (unknown tool)', () => {
+      // Use a base engine without memory annotations
+      const baseEngine = new PolicyEngine(testCompiledPolicy, testToolAnnotations, protectedPaths, SANDBOX_DIR);
+      const result = baseEngine.evaluate(
+        makeRequest({ serverName: 'memory', toolName: 'memory_store', arguments: { content: 'hello' } }),
+      );
+      expect(result.decision).toBe('deny');
     });
   });
 });

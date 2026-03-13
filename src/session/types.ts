@@ -256,6 +256,12 @@ export interface SessionOptions {
    * persona takes precedence with a warning.
    */
   persona?: string;
+
+  /**
+   * Cron job ID. When set (and no persona), the memory server uses
+   * a job-specific database at ~/.ironcurtain/jobs/{jobId}/memory.db.
+   */
+  jobId?: string;
 }
 
 /**

@@ -7,6 +7,14 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
+// Mock the memory prompt module before importing persona-prompt
+vi.mock('../src/memory/memory-prompt.js', () => ({
+  buildMemorySystemPrompt: vi.fn(
+    (opts?: { persona?: string }) =>
+      `## Memory System${opts?.persona ? ` (${opts.persona})` : ''}\nUse memory tools to store and retrieve information.`,
+  ),
+}));
+
 import { createPersonaName, PERSONA_NAME_PATTERN } from '../src/persona/types.js';
 import {
   getPersonaDir,
@@ -282,53 +290,54 @@ describe('buildPersonaSystemPromptAugmentation', () => {
       createdAt: '2026-03-07T12:00:00.000Z',
     };
 
-    const result = buildPersonaSystemPromptAugmentation(persona, '/tmp/memory.md');
+    const result = buildPersonaSystemPromptAugmentation(persona, false);
     expect(result).toContain('## Persona: exec-assistant');
     expect(result).toContain('Email triage and calendar management');
   });
 
-  it('includes memory file path', () => {
+  it('includes memory system prompt when memoryEnabled is true', () => {
     const persona = {
       name: 'test' as ReturnType<typeof createPersonaName>,
       description: 'Test',
       createdAt: '2026-03-07T12:00:00.000Z',
     };
 
-    const result = buildPersonaSystemPromptAugmentation(persona, '/tmp/memory.md');
-    expect(result).toContain('/tmp/memory.md');
-    expect(result).toContain('Persistent Memory');
+    const result = buildPersonaSystemPromptAugmentation(persona, true);
+    expect(result).toContain('## Memory System (test)');
+    expect(result).toContain('memory tools');
   });
 
-  it('includes memory contents when file exists', () => {
-    const memoryPath = resolve(TEST_HOME, 'test-memory.md');
-    writeFileSync(memoryPath, 'Remember: user prefers dark mode');
-
+  it('does not include memory section when memoryEnabled is false', () => {
     const persona = {
       name: 'test' as ReturnType<typeof createPersonaName>,
       description: 'Test',
       createdAt: '2026-03-07T12:00:00.000Z',
     };
 
-    const result = buildPersonaSystemPromptAugmentation(persona, memoryPath);
-    expect(result).toContain('Current Memory Contents');
-    expect(result).toContain('user prefers dark mode');
+    const result = buildPersonaSystemPromptAugmentation(persona, false);
+    expect(result).not.toContain('Memory System');
+    expect(result).not.toContain('memory tools');
   });
 
-  it('shows empty message when memory file does not exist', () => {
+  it('passes persona name to buildMemorySystemPrompt', async () => {
+    const { buildMemorySystemPrompt } = await import('../src/memory/memory-prompt.js');
+    const mockBuild = buildMemorySystemPrompt as ReturnType<typeof vi.fn>;
+    mockBuild.mockClear();
+
     const persona = {
-      name: 'test' as ReturnType<typeof createPersonaName>,
-      description: 'Test',
+      name: 'exec-assistant' as ReturnType<typeof createPersonaName>,
+      description: 'Email triage',
       createdAt: '2026-03-07T12:00:00.000Z',
     };
 
-    const result = buildPersonaSystemPromptAugmentation(persona, '/nonexistent/memory.md');
-    expect(result).toContain('currently empty');
-    expect(result).toContain('first session');
+    buildPersonaSystemPromptAugmentation(persona, true);
+    expect(mockBuild).toHaveBeenCalledWith({ persona: 'exec-assistant' });
   });
 
-  it('shows empty message when memory file is empty', () => {
-    const memoryPath = resolve(TEST_HOME, 'empty-memory.md');
-    writeFileSync(memoryPath, '');
+  it('does not call buildMemorySystemPrompt when memory is disabled', async () => {
+    const { buildMemorySystemPrompt } = await import('../src/memory/memory-prompt.js');
+    const mockBuild = buildMemorySystemPrompt as ReturnType<typeof vi.fn>;
+    mockBuild.mockClear();
 
     const persona = {
       name: 'test' as ReturnType<typeof createPersonaName>,
@@ -336,20 +345,8 @@ describe('buildPersonaSystemPromptAugmentation', () => {
       createdAt: '2026-03-07T12:00:00.000Z',
     };
 
-    const result = buildPersonaSystemPromptAugmentation(persona, memoryPath);
-    expect(result).toContain('currently empty');
-  });
-
-  it('includes guidance on how to use the memory file', () => {
-    const persona = {
-      name: 'test' as ReturnType<typeof createPersonaName>,
-      description: 'Test',
-      createdAt: '2026-03-07T12:00:00.000Z',
-    };
-
-    const result = buildPersonaSystemPromptAugmentation(persona, '/tmp/memory.md');
-    expect(result).toContain('Read this file');
-    expect(result).toContain('update it');
+    buildPersonaSystemPromptAugmentation(persona, false);
+    expect(mockBuild).not.toHaveBeenCalled();
   });
 });
 

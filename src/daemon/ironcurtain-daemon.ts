@@ -446,6 +446,7 @@ export class IronCurtainDaemon {
       config: patchedConfig,
       workspacePath: workspace,
       ...(job.persona ? { persona: job.persona } : { policyDir: jobGeneratedDir }),
+      jobId: job.id,
       systemPromptAugmentation: augmentation,
       disableAutoApprove: true,
       onEscalation: (request) => {

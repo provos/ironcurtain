@@ -98,6 +98,14 @@ const auditRedactionSchema = z
   })
   .optional();
 
+const memorySchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    llmBaseUrl: z.string().optional(),
+    llmApiKey: z.string().optional(),
+  })
+  .optional();
+
 export const WEB_SEARCH_PROVIDERS = ['brave', 'tavily', 'serpapi'] as const;
 export type WebSearchProvider = (typeof WEB_SEARCH_PROVIDERS)[number];
 
@@ -178,6 +186,7 @@ export const userConfigSchema = z.object({
   webSearch: webSearchSchema,
   serverCredentials: z.record(z.string(), z.record(z.string(), z.string().min(1))).optional(),
   signal: signalSchema,
+  memory: memorySchema,
   gooseProvider: z.enum(GOOSE_PROVIDERS).optional(),
   gooseModel: z.string().min(1).optional(),
   preferredDockerAgent: z.enum(DOCKER_AGENTS).optional(),
@@ -214,6 +223,13 @@ export interface ResolvedAuditRedactionConfig {
   readonly enabled: boolean;
 }
 
+/** Resolved memory config with all fields present. */
+export interface ResolvedMemoryConfig {
+  readonly enabled: boolean;
+  readonly llmBaseUrl: string | undefined;
+  readonly llmApiKey: string | undefined;
+}
+
 /** Resolved web search config with all fields present. */
 export interface ResolvedWebSearchConfig {
   readonly provider: WebSearchProvider | null;
@@ -234,6 +250,7 @@ export interface ResolvedUserConfig {
   readonly autoCompact: ResolvedAutoCompactConfig;
   readonly autoApprove: ResolvedAutoApproveConfig;
   readonly auditRedaction: ResolvedAuditRedactionConfig;
+  readonly memory: ResolvedMemoryConfig;
   readonly webSearch: ResolvedWebSearchConfig;
   readonly serverCredentials: Readonly<Record<string, Readonly<Record<string, string>>>>;
   /** Signal transport config. Null when Signal is not set up. */
@@ -545,6 +562,11 @@ function mergeWithDefaults(config: UserConfig): ResolvedUserConfig {
     },
     auditRedaction: {
       enabled: r?.enabled ?? redactionDefaults.enabled,
+    },
+    memory: {
+      enabled: config.memory?.enabled ?? true,
+      llmBaseUrl: config.memory?.llmBaseUrl,
+      llmApiKey: config.memory?.llmApiKey,
     },
     webSearch: {
       provider: config.webSearch?.provider ?? null,

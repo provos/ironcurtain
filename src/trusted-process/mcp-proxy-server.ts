@@ -76,6 +76,7 @@ import { permissiveJsonSchemaValidator } from './permissive-output-validator.js'
 import type { LanguageModelV3 } from '@ai-sdk/provider';
 import type { MCPServerConfig, SandboxAvailabilityPolicy } from '../config/types.js';
 import { VERSION } from '../version.js';
+import { MEMORY_SERVER_NAME, injectMemoryAnnotations } from '../memory/memory-annotations.js';
 import { loadToolDescriptionHints, applyToolDescriptionHints } from './tool-description-hints.js';
 
 export interface ProxiedTool {
@@ -912,6 +913,12 @@ async function main(): Promise<void> {
     toolAnnotationsDir,
     fallbackDir: getPackageGeneratedDir(),
   });
+
+  // Inject memory server annotations and blanket-allow rule when the memory
+  // server is present in the server config (injected by session setup).
+  if (MEMORY_SERVER_NAME in serversConfig) {
+    injectMemoryAnnotations(toolAnnotations, compiledPolicy);
+  }
 
   const serverDomainAllowlists = extractServerDomainAllowlists(serversConfig);
   const policyEngine = new PolicyEngine(
