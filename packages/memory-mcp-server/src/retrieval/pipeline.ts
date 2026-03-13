@@ -108,7 +108,7 @@ export async function recall(
 
   // 7. Load embeddings only for relevant candidates
   const embeddingIds = afterRerankerFilter.map((m) => m.id);
-  const embeddings = getEmbeddingsForMemories(db, embeddingIds);
+  const embeddings = getEmbeddingsForMemories(db, config.namespace, embeddingIds);
 
   // 8. Dedup
   const { kept } = deduplicateByEmbedding(afterRerankerFilter, embeddings);
@@ -126,7 +126,7 @@ export async function recall(
 
   // 11. Update access stats for returned memories
   const returnedIds = selected.map((m) => m.id);
-  updateAccessStats(db, returnedIds);
+  updateAccessStats(db, config.namespace, returnedIds);
 
   return {
     text,

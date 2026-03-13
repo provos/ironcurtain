@@ -1,7 +1,6 @@
 import type Database from 'better-sqlite3';
 import type { MemoryRow, VectorSearchResult, FtsSearchResult } from './database.js';
 import { randomBytes } from 'node:crypto';
-import { parseTags } from '../utils/tags.js';
 
 export function generateId(): string {
   return randomBytes(16).toString('hex');
@@ -51,21 +50,28 @@ export function insertMemory(db: Database.Database, params: InsertMemoryParams, 
 
 // ---------- Update ----------
 
-export function updateMemoryTimestamp(db: Database.Database, id: string, tags?: string[], importance?: number): void {
+export function updateMemoryTimestamp(
+  db: Database.Database,
+  namespace: string,
+  id: string,
+  tags?: string[],
+  importance?: number,
+): void {
   const now = Date.now();
   if (tags !== undefined && importance !== undefined) {
     db.prepare(
       `UPDATE memories
        SET updated_at = ?, tags = ?, importance = MAX(importance, ?)
-       WHERE id = ?`,
-    ).run(now, JSON.stringify(tags), importance, id);
+       WHERE id = ? AND namespace = ?`,
+    ).run(now, JSON.stringify(tags), importance, id, namespace);
   } else {
-    db.prepare(`UPDATE memories SET updated_at = ? WHERE id = ?`).run(now, id);
+    db.prepare(`UPDATE memories SET updated_at = ? WHERE id = ? AND namespace = ?`).run(now, id, namespace);
   }
 }
 
 export function updateMemoryContent(
   db: Database.Database,
+  namespace: string,
   id: string,
   content: string,
   embedding: Float32Array,
@@ -82,7 +88,7 @@ export function updateMemoryContent(
              importance = MAX(importance, ?),
              metadata = json_set(COALESCE(metadata, '{}'), '$.superseded',
                json(?))
-         WHERE id = ?`,
+         WHERE id = ? AND namespace = ?`,
       ).run(
         content,
         now,
@@ -90,6 +96,7 @@ export function updateMemoryContent(
         importance,
         JSON.stringify({ content: supersededContent, at: now }),
         id,
+        namespace,
       );
     } else {
       db.prepare(
@@ -98,26 +105,29 @@ export function updateMemoryContent(
              importance = MAX(importance, ?),
              metadata = json_set(COALESCE(metadata, '{}'), '$.superseded',
                json(?))
-         WHERE id = ?`,
-      ).run(content, now, importance, JSON.stringify({ content: supersededContent, at: now }), id);
+         WHERE id = ? AND namespace = ?`,
+      ).run(content, now, importance, JSON.stringify({ content: supersededContent, at: now }), id, namespace);
     }
 
-    db.prepare(`UPDATE vec_memories SET embedding = ? WHERE memory_id = ?`).run(Buffer.from(embedding.buffer), id);
+    db.prepare(
+      `UPDATE vec_memories SET embedding = ?
+       WHERE memory_id = ? AND memory_id IN (SELECT id FROM memories WHERE namespace = ?)`,
+    ).run(Buffer.from(embedding.buffer), id, namespace);
   });
   txn();
 }
 
-export function updateAccessStats(db: Database.Database, ids: string[]): void {
+export function updateAccessStats(db: Database.Database, namespace: string, ids: string[]): void {
   if (ids.length === 0) return;
   const now = Date.now();
   const stmt = db.prepare(
     `UPDATE memories
      SET last_accessed_at = ?, access_count = access_count + 1
-     WHERE id = ?`,
+     WHERE id = ? AND namespace = ?`,
   );
   const txn = db.transaction(() => {
     for (const id of ids) {
-      stmt.run(now, id);
+      stmt.run(now, id, namespace);
     }
   });
   txn();
@@ -253,10 +263,12 @@ function sanitizeFtsQuery(query: string): string {
 
 // ---------- Retrieval helpers ----------
 
-export function getMemoriesByIds(db: Database.Database, ids: string[]): MemoryRow[] {
+export function getMemoriesByIds(db: Database.Database, namespace: string, ids: string[]): MemoryRow[] {
   if (ids.length === 0) return [];
   const placeholders = ids.map(() => '?').join(',');
-  return db.prepare(`SELECT * FROM memories WHERE id IN (${placeholders})`).all(...ids) as MemoryRow[];
+  return db
+    .prepare(`SELECT * FROM memories WHERE namespace = ? AND id IN (${placeholders})`)
+    .all(namespace, ...ids) as MemoryRow[];
 }
 
 export function getRecentMemories(db: Database.Database, namespace: string, limit: number): MemoryRow[] {
@@ -283,27 +295,40 @@ export function getImportantMemories(db: Database.Database, namespace: string, l
 
 // ---------- Delete ----------
 
-export function deleteMemory(db: Database.Database, id: string): boolean {
+export function deleteMemory(db: Database.Database, namespace: string, id: string): boolean {
   const txn = db.transaction(() => {
-    db.prepare(`DELETE FROM vec_memories WHERE memory_id = ?`).run(id);
-    const result = db.prepare(`DELETE FROM memories WHERE id = ?`).run(id);
+    db.prepare(
+      `DELETE FROM vec_memories WHERE memory_id = ?
+       AND memory_id IN (SELECT id FROM memories WHERE namespace = ?)`,
+    ).run(id, namespace);
+    const result = db.prepare(`DELETE FROM memories WHERE id = ? AND namespace = ?`).run(id, namespace);
     return result.changes > 0;
   });
   return txn();
 }
 
-export function deleteMemories(db: Database.Database, ids: string[]): number {
+export function deleteMemories(db: Database.Database, namespace: string, ids: string[]): number {
   if (ids.length === 0) return 0;
   const placeholders = ids.map(() => '?').join(',');
   const txn = db.transaction(() => {
-    db.prepare(`DELETE FROM vec_memories WHERE memory_id IN (${placeholders})`).run(...ids);
-    const result = db.prepare(`DELETE FROM memories WHERE id IN (${placeholders})`).run(...ids);
+    db.prepare(
+      `DELETE FROM vec_memories WHERE memory_id IN (${placeholders})
+       AND memory_id IN (SELECT id FROM memories WHERE namespace = ?)`,
+    ).run(...ids, namespace);
+    const result = db
+      .prepare(`DELETE FROM memories WHERE namespace = ? AND id IN (${placeholders})`)
+      .run(namespace, ...ids);
     return result.changes;
   });
   return txn();
 }
 
-export function findMemoriesByTags(db: Database.Database, namespace: string, tags: string[]): MemoryRow[] {
+export function findMemoriesByTags(
+  db: Database.Database,
+  namespace: string,
+  tags: string[],
+  limit: number = 1000,
+): MemoryRow[] {
   if (tags.length === 0) return [];
   const placeholders = tags.map(() => '?').join(',');
   return db
@@ -311,15 +336,21 @@ export function findMemoriesByTags(db: Database.Database, namespace: string, tag
       `SELECT m.* FROM memories m
        WHERE m.namespace = ? AND m.tags IS NOT NULL
          AND (SELECT COUNT(*) FROM json_each(m.tags) je
-              WHERE je.value IN (${placeholders})) = ?`,
+              WHERE je.value IN (${placeholders})) = ?
+       LIMIT ?`,
     )
-    .all(namespace, ...tags, tags.length) as MemoryRow[];
+    .all(namespace, ...tags, tags.length, limit) as MemoryRow[];
 }
 
-export function findMemoriesBefore(db: Database.Database, namespace: string, beforeMs: number): MemoryRow[] {
+export function findMemoriesBefore(
+  db: Database.Database,
+  namespace: string,
+  beforeMs: number,
+  limit: number = 1000,
+): MemoryRow[] {
   return db
-    .prepare(`SELECT * FROM memories WHERE namespace = ? AND created_at < ?`)
-    .all(namespace, beforeMs) as MemoryRow[];
+    .prepare(`SELECT * FROM memories WHERE namespace = ? AND created_at < ? LIMIT ?`)
+    .all(namespace, beforeMs, limit) as MemoryRow[];
 }
 
 // ---------- Stats ----------
@@ -379,25 +410,16 @@ function computeTopTags(
   namespace: string,
   limit: number,
 ): Array<{ tag: string; count: number }> {
-  const rows = db
+  return db
     .prepare(
-      `SELECT tags FROM memories
-       WHERE namespace = ? AND tags IS NOT NULL AND is_compacted = 0`,
+      `SELECT value AS tag, COUNT(*) AS count
+       FROM memories, json_each(memories.tags)
+       WHERE namespace = ? AND tags IS NOT NULL AND is_compacted = 0
+       GROUP BY value
+       ORDER BY count DESC
+       LIMIT ?`,
     )
-    .all(namespace) as Array<{ tags: string }>;
-
-  const counts = new Map<string, number>();
-  for (const row of rows) {
-    const tags = parseTags(row.tags);
-    for (const tag of tags) {
-      counts.set(tag, (counts.get(tag) ?? 0) + 1);
-    }
-  }
-
-  return [...counts.entries()]
-    .sort(([, a], [, b]) => b - a)
-    .slice(0, limit)
-    .map(([tag, count]) => ({ tag, count }));
+    .all(namespace, limit) as Array<{ tag: string; count: number }>;
 }
 
 // ---------- Maintenance queries ----------
@@ -413,10 +435,13 @@ export function getRandomActiveMemories(db: Database.Database, namespace: string
     .all(namespace, limit) as MemoryRow[];
 }
 
-export function markDecayed(db: Database.Database, id: string): void {
+export function markDecayed(db: Database.Database, namespace: string, id: string): void {
   const txn = db.transaction(() => {
-    db.prepare(`DELETE FROM vec_memories WHERE memory_id = ?`).run(id);
-    db.prepare(`UPDATE memories SET importance = 0 WHERE id = ?`).run(id);
+    db.prepare(
+      `DELETE FROM vec_memories WHERE memory_id = ?
+       AND memory_id IN (SELECT id FROM memories WHERE namespace = ?)`,
+    ).run(id, namespace);
+    db.prepare(`UPDATE memories SET importance = 0 WHERE id = ? AND namespace = ?`).run(id, namespace);
   });
   txn();
 }
@@ -432,11 +457,11 @@ export function getDecayedUncompacted(db: Database.Database, namespace: string, 
     .all(namespace, limit) as MemoryRow[];
 }
 
-export function markCompacted(db: Database.Database, ids: string[]): void {
-  const stmt = db.prepare(`UPDATE memories SET is_compacted = 1 WHERE id = ?`);
+export function markCompacted(db: Database.Database, namespace: string, ids: string[]): void {
+  const stmt = db.prepare(`UPDATE memories SET is_compacted = 1 WHERE id = ? AND namespace = ?`);
   const txn = db.transaction(() => {
     for (const id of ids) {
-      stmt.run(id);
+      stmt.run(id, namespace);
     }
   });
   txn();
@@ -453,20 +478,31 @@ export function getUnconsolidatedMemories(db: Database.Database, namespace: stri
     .all(namespace, limit) as MemoryRow[];
 }
 
-export function markConsolidated(db: Database.Database, ids: string[]): void {
+export function markConsolidated(db: Database.Database, namespace: string, ids: string[]): void {
   if (ids.length === 0) return;
   const placeholders = ids.map(() => '?').join(',');
-  db.prepare(`UPDATE memories SET consolidated = 1 WHERE id IN (${placeholders})`).run(...ids);
+  db.prepare(`UPDATE memories SET consolidated = 1 WHERE namespace = ? AND id IN (${placeholders})`).run(
+    namespace,
+    ...ids,
+  );
 }
 
-export function getEmbeddingsForMemories(db: Database.Database, memoryIds: string[]): Map<string, Float32Array> {
+export function getEmbeddingsForMemories(
+  db: Database.Database,
+  namespace: string,
+  memoryIds: string[],
+): Map<string, Float32Array> {
   const result = new Map<string, Float32Array>();
   if (memoryIds.length === 0) return result;
 
   const placeholders = memoryIds.map(() => '?').join(',');
   const rows = db
-    .prepare(`SELECT memory_id, embedding FROM vec_memories WHERE memory_id IN (${placeholders})`)
-    .all(...memoryIds) as Array<{ memory_id: string; embedding: Buffer }>;
+    .prepare(
+      `SELECT v.memory_id, v.embedding FROM vec_memories v
+       JOIN memories m ON m.id = v.memory_id
+       WHERE m.namespace = ? AND v.memory_id IN (${placeholders})`,
+    )
+    .all(namespace, ...memoryIds) as Array<{ memory_id: string; embedding: Buffer }>;
 
   for (const row of rows) {
     result.set(

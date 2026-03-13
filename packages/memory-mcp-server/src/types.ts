@@ -54,6 +54,7 @@ export interface ForgetOptions {
 export interface ForgetResult {
   forgotten: number;
   memories?: Array<{ id: string; content: string }>;
+  truncated?: boolean;
 }
 
 export interface InspectOptions {

@@ -26,7 +26,7 @@ export async function runCompaction(db: Database.Database, config: MemoryConfig)
 
   // Load embeddings for clustering
   const ids = decayed.map((m) => m.id);
-  const embeddings = getEmbeddingsForMemories(db, ids);
+  const embeddings = getEmbeddingsForMemories(db, config.namespace, ids);
 
   // Cluster by embedding similarity
   const clusters = clusterByEmbedding(decayed, embeddings, CLUSTER_THRESHOLD);
@@ -63,7 +63,7 @@ export async function runCompaction(db: Database.Database, config: MemoryConfig)
     );
 
     // Mark source memories as compacted
-    markCompacted(db, clusterIds);
+    markCompacted(db, config.namespace, clusterIds);
     totalCompacted += clusterIds.length;
   }
 

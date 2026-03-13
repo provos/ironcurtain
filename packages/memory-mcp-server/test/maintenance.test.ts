@@ -232,10 +232,10 @@ describe('maybeRunMaintenance', () => {
     await maybeRunMaintenance(db, config);
     await maybeRunMaintenance(db, config);
 
-    const mem = getMemoriesByIds(db, [id])[0];
+    const mem = getMemoriesByIds(db, NAMESPACE, [id])[0];
     // If decayed, importance should be 0 and no vec embedding
     if (mem.importance === 0) {
-      expect(getEmbeddingsForMemories(db, [id]).get(id)).toBeUndefined();
+      expect(getEmbeddingsForMemories(db, NAMESPACE, [id]).get(id)).toBeUndefined();
     }
   });
 });

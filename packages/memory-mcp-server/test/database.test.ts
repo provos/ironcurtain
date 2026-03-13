@@ -82,7 +82,7 @@ describe('database', () => {
       emb,
     );
 
-    const mem = getMemoriesByIds(db, [id])[0];
+    const mem = getMemoriesByIds(db, NAMESPACE, [id])[0];
     expect(mem).toBeDefined();
     expect(mem.content).toBe('User prefers dark mode');
     expect(JSON.parse(mem.tags!)).toEqual(['preference', 'ui']);
@@ -100,7 +100,7 @@ describe('database', () => {
       );
     }
 
-    const results = getMemoriesByIds(db, ids);
+    const results = getMemoriesByIds(db, NAMESPACE, ids);
     expect(results).toHaveLength(2);
   });
 
@@ -112,9 +112,9 @@ describe('database', () => {
       randomEmbedding(),
     );
 
-    expect(deleteMemory(db, id)).toBe(true);
-    expect(getMemoriesByIds(db, [id])[0]).toBeUndefined();
-    expect(getEmbeddingsForMemories(db, [id]).get(id)).toBeUndefined();
+    expect(deleteMemory(db, NAMESPACE, id)).toBe(true);
+    expect(getMemoriesByIds(db, NAMESPACE, [id])[0]).toBeUndefined();
+    expect(getEmbeddingsForMemories(db, NAMESPACE, [id]).get(id)).toBeUndefined();
   });
 
   it('performs vector search', () => {
@@ -169,9 +169,9 @@ describe('database', () => {
       randomEmbedding(),
     );
 
-    updateAccessStats(db, [id]);
+    updateAccessStats(db, NAMESPACE, [id]);
 
-    const mem = getMemoriesByIds(db, [id])[0];
+    const mem = getMemoriesByIds(db, NAMESPACE, [id])[0];
     expect(mem.access_count).toBe(1);
     expect(mem.last_accessed_at).toBeGreaterThan(mem.created_at - 1);
   });
@@ -254,14 +254,14 @@ describe('database', () => {
     );
 
     const newEmb = randomEmbedding();
-    updateMemoryContent(db, id, 'Updated content', newEmb, 0.7, 'Original content', [
+    updateMemoryContent(db, NAMESPACE, id, 'Updated content', newEmb, 0.7, 'Original content', [
       'dia_id:D1:5',
       'session:1',
       'dia_id:D1:6',
       'session:2',
     ]);
 
-    const mem = getMemoriesByIds(db, [id])[0];
+    const mem = getMemoriesByIds(db, NAMESPACE, [id])[0];
     expect(mem.content).toBe('Updated content');
     expect(JSON.parse(mem.tags!)).toEqual(['dia_id:D1:5', 'session:1', 'dia_id:D1:6', 'session:2']);
     expect(mem.importance).toBe(0.7);
@@ -283,9 +283,9 @@ describe('database', () => {
       emb,
     );
 
-    updateMemoryContent(db, id, 'Updated', randomEmbedding(), 0.6, 'Original');
+    updateMemoryContent(db, NAMESPACE, id, 'Updated', randomEmbedding(), 0.6, 'Original');
 
-    const mem = getMemoriesByIds(db, [id])[0];
+    const mem = getMemoriesByIds(db, NAMESPACE, [id])[0];
     expect(mem.content).toBe('Updated');
     expect(JSON.parse(mem.tags!)).toEqual(['keep-me']);
   });

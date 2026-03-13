@@ -67,6 +67,8 @@ function rowToMemory(row: MemoryRow): Memory {
   };
 }
 
+const FORGET_RESULT_LIMIT = 1000;
+
 // ---------- Store (immediate, no LLM) ----------
 
 async function storeImmediate(
@@ -89,7 +91,7 @@ async function storeImmediate(
     const newTags = opts.tags ?? [];
     const mergedTags = [...new Set([...existingTags, ...newTags])];
 
-    updateMemoryContent(db, exactMatch.id, content, embedding, importance, exactMatch.content, mergedTags);
+    updateMemoryContent(db, namespace, exactMatch.id, content, embedding, importance, exactMatch.content, mergedTags);
     return { id: exactMatch.id, action: 'merged_duplicate' };
   }
 
@@ -157,14 +159,18 @@ async function forgetMemories(db: Database.Database, config: MemoryConfig, opts:
     targetIds = opts.ids;
   }
 
+  let truncated = false;
+
   if (opts.tags) {
-    const rows = findMemoriesByTags(db, namespace, opts.tags);
+    const rows = findMemoriesByTags(db, namespace, opts.tags, FORGET_RESULT_LIMIT);
+    if (rows.length >= FORGET_RESULT_LIMIT) truncated = true;
     targetIds.push(...rows.map((r) => r.id));
   }
 
   if (opts.before) {
     const beforeMs = Date.parse(opts.before);
-    const rows = findMemoriesBefore(db, namespace, beforeMs);
+    const rows = findMemoriesBefore(db, namespace, beforeMs, FORGET_RESULT_LIMIT);
+    if (rows.length >= FORGET_RESULT_LIMIT) truncated = true;
     targetIds.push(...rows.map((r) => r.id));
   }
 
@@ -178,15 +184,16 @@ async function forgetMemories(db: Database.Database, config: MemoryConfig, opts:
   targetIds = [...new Set(targetIds)];
 
   if (opts.dry_run) {
-    const rows = getMemoriesByIds(db, targetIds);
+    const rows = getMemoriesByIds(db, namespace, targetIds);
     return {
       forgotten: rows.length,
       memories: rows.map((r) => ({ id: r.id, content: r.content })),
+      ...(truncated ? { truncated } : {}),
     };
   }
 
-  const forgotten = deleteMemories(db, targetIds);
-  return { forgotten };
+  const forgotten = deleteMemories(db, namespace, targetIds);
+  return { forgotten, ...(truncated ? { truncated } : {}) };
 }
 
 // ---------- Inspect ----------
@@ -200,7 +207,7 @@ function inspectMemories(
   const limit = opts.limit ?? 20;
 
   if (opts.ids && opts.ids.length > 0) {
-    const rows = getMemoriesByIds(db, opts.ids);
+    const rows = getMemoriesByIds(db, namespace, opts.ids);
     return rows.map(rowToMemory);
   }
 

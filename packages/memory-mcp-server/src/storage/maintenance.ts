@@ -51,7 +51,7 @@ export async function runMaintenance(db: Database.Database, config: MemoryConfig
   for (const mem of sample) {
     const vitality = computeVitality(mem, now);
     if (vitality < config.decayThreshold) {
-      markDecayed(db, mem.id);
+      markDecayed(db, config.namespace, mem.id);
       decayed++;
     }
   }

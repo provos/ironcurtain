@@ -40,6 +40,7 @@ export async function runConsolidation(
   if (!getLLMClient(config)) {
     markConsolidated(
       db,
+      config.namespace,
       unconsolidated.map((m) => m.id),
     );
     return { consolidated: unconsolidated.length, merged: 0, superseded: 0 };
@@ -47,7 +48,7 @@ export async function runConsolidation(
 
   // Load all unconsolidated embeddings from DB once (they were stored at insert time)
   const unconsolidatedIds = new Set(unconsolidated.map((m) => m.id));
-  const embeddings = getEmbeddingsForMemories(db, [...unconsolidatedIds]);
+  const embeddings = getEmbeddingsForMemories(db, config.namespace, [...unconsolidatedIds]);
 
   // Build candidate pairs: for each unconsolidated memory, find close existing memories
   const pairs: CandidatePair[] = [];
@@ -111,17 +112,25 @@ export async function runConsolidation(
     if (consumed.has(pair.newId)) continue;
 
     if (judgment.relation === 'duplicate') {
-      updateMemoryTimestamp(db, pair.existingId);
-      deleteMemory(db, pair.newId);
+      updateMemoryTimestamp(db, config.namespace, pair.existingId);
+      deleteMemory(db, config.namespace, pair.newId);
       consumed.add(pair.newId);
       merged++;
     } else if (judgment.relation === 'contradiction') {
       // Reuse embedding from DB instead of re-computing
       const newEmbedding = embeddings.get(pair.newId);
       if (newEmbedding) {
-        updateMemoryContent(db, pair.existingId, pair.newContent, newEmbedding, 0.5, pair.existingContent);
+        updateMemoryContent(
+          db,
+          config.namespace,
+          pair.existingId,
+          pair.newContent,
+          newEmbedding,
+          0.5,
+          pair.existingContent,
+        );
       }
-      deleteMemory(db, pair.newId);
+      deleteMemory(db, config.namespace, pair.newId);
       consumed.add(pair.newId);
       superseded++;
     }
@@ -129,7 +138,7 @@ export async function runConsolidation(
 
   // Mark all surviving unconsolidated memories as consolidated
   const survivingIds = unconsolidated.map((m) => m.id).filter((id) => !consumed.has(id));
-  markConsolidated(db, survivingIds);
+  markConsolidated(db, config.namespace, survivingIds);
 
   return { consolidated: unconsolidated.length, merged, superseded };
 }

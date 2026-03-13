@@ -89,13 +89,17 @@ export async function handleForget(engine: MemoryEngine, args: Record<string, un
     dry_run: input.dry_run,
   });
 
+  const truncatedNote = result.truncated
+    ? ' (results were truncated — more memories match; run again to continue)'
+    : '';
+
   if (input.dry_run) {
     if (!result.memories || result.memories.length === 0) {
       return 'No memories match the criteria.';
     }
     const preview = result.memories.map((m) => `- ${m.id}: ${m.content.slice(0, 100)}`).join('\n');
-    return `Would forget ${result.forgotten} memories:\n${preview}`;
+    return `Would forget ${result.forgotten} memories${truncatedNote}:\n${preview}`;
   }
 
-  return `Forgot ${result.forgotten} memories.`;
+  return `Forgot ${result.forgotten} memories.${truncatedNote}`;
 }
