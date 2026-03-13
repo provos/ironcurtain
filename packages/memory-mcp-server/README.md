@@ -198,7 +198,7 @@ limit (integer, optional)   — Max items returned. Default 20.
 2. **Score-based fusion** — Weaviate-style relativeScoreFusion: min-max normalize vector similarity and BM25 scores independently to [0,1], then blend with alpha weighting (default 0.5). Candidates from only one source get only that source's weighted contribution
 3. **Tag filter** — optional intersection filter
 4. **Composite scoring** — fusion relevance (0.65) + recency (0.15) + importance (0.1) + access patterns (0.1). The fusion score already encodes vector + BM25 magnitudes
-5. **Relevance gating** — drop candidates with fusion score < 20% of max
+5. **Relevance gating** — drop candidates with fusion score < 5% of max
 6. **Cross-encoder reranking** — ms-marco-MiniLM-L-6-v2 re-scores candidates; relative gap filter (5 logit points from best)
 7. **Deduplication** — remove near-duplicates by embedding cosine similarity
 8. **Token budget packing** — greedily select memories by score until budget is filled (skip, not break)

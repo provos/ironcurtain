@@ -4,16 +4,17 @@
  */
 
 import type { MemoryEngine } from '../engine.js';
+import { FORMAT_MODES, type FormatMode } from '../retrieval/formatting.js';
 import { MAX_QUERY_LENGTH, validateTokenBudget, validateTags } from './validation.js';
 
 export interface RecallInput {
   query: string;
   token_budget?: number;
   tags?: string[];
-  format?: 'summary' | 'list' | 'raw';
+  format?: FormatMode;
 }
 
-const VALID_FORMATS = new Set(['summary', 'list', 'raw']);
+const VALID_FORMATS: ReadonlySet<string> = new Set(FORMAT_MODES);
 
 export function validateRecallInput(args: Record<string, unknown>): RecallInput {
   const query = args.query;
@@ -30,7 +31,7 @@ export function validateRecallInput(args: Record<string, unknown>): RecallInput 
   const format = args.format;
   if (format !== undefined) {
     if (typeof format !== 'string' || !VALID_FORMATS.has(format)) {
-      throw new Error("format must be one of: 'summary', 'list', 'raw'");
+      throw new Error(`format must be one of: ${FORMAT_MODES.map((f) => `'${f}'`).join(', ')}`);
     }
   }
 

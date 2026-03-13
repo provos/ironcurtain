@@ -4,7 +4,8 @@ import { llmComplete } from '../llm/client.js';
 import { clusterByEmbeddingSimilarity } from './dedup.js';
 import { parseTags } from '../utils/tags.js';
 
-export type FormatMode = 'summary' | 'list' | 'raw';
+export const FORMAT_MODES = ['summary', 'list', 'raw', 'answer'] as const;
+export type FormatMode = (typeof FORMAT_MODES)[number];
 
 /**
  * Format scored memories according to the requested format mode.
@@ -20,6 +21,8 @@ export async function formatMemories(
   switch (format) {
     case 'summary':
       return formatAsSummary(memories, embeddings, query, tokenBudget, config);
+    case 'answer':
+      return formatAsAnswer(memories, query, tokenBudget, config);
     case 'list':
       return formatAsList(memories);
     case 'raw':
@@ -44,23 +47,49 @@ async function formatAsSummary(
   return formatAsSummaryExtractive(memories, embeddings);
 }
 
+/** Build numbered memory text for LLM prompts. Shared by summary and answer formats. */
+function buildMemoriesText(memories: ScoredMemory[]): string {
+  return memories
+    .map((m, i) => `[${i + 1}] (${new Date(m.created_at).toISOString().slice(0, 10)}) ${m.content}`)
+    .join('\n');
+}
+
+async function formatAsAnswer(
+  memories: ScoredMemory[],
+  query: string,
+  tokenBudget: number,
+  config: MemoryConfig,
+): Promise<string> {
+  if (memories.length === 0) return 'No relevant memories found.';
+
+  const llmResult = await llmComplete(
+    config,
+    `You are a question-answering assistant with access to the user's stored memories. ` +
+      `Answer the user's question based only on the provided memories. Be concise and direct. ` +
+      `If the memories don't contain enough information to answer, say so clearly.`,
+    `Question: ${query}\n\n<memories>\n${buildMemoriesText(memories)}\n</memories>`,
+    { maxTokens: tokenBudget },
+  );
+
+  // Fall back to list format when no LLM is configured
+  if (llmResult === null) return formatAsList(memories);
+
+  return llmResult;
+}
+
 async function formatAsSummaryWithLLM(
   memories: ScoredMemory[],
   query: string,
   tokenBudget: number,
   config: MemoryConfig,
 ): Promise<string | null> {
-  const memoriesText = memories
-    .map((m, i) => `[${i + 1}] (${new Date(m.created_at).toISOString().slice(0, 10)}) ${m.content}`)
-    .join('\n');
-
   return llmComplete(
     config,
     `You are a memory compression assistant. Summarize the memories provided within <memories> tags into a concise, ` +
       `information-dense response relevant to the query. Preserve specific details (names, dates, ` +
       `numbers, exact preferences). Do not add information not present in the memories. ` +
       `Target approximately ${tokenBudget} tokens.`,
-    `Query: ${query}\n\n<memories>\n${memoriesText}\n</memories>`,
+    `Query: ${query}\n\n<memories>\n${buildMemoriesText(memories)}\n</memories>`,
     { maxTokens: tokenBudget },
   );
 }

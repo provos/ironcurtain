@@ -61,7 +61,7 @@ src/
 3. **Score-based fusion** — Weaviate-style relativeScoreFusion: min-max normalize vector similarity and BM25 scores, blend with alpha weighting (default 0.5)
 4. **Tag filter** — Optional intersection filter
 5. **Composite scoring** — Weighted: fusion relevance (0.65) + recency (0.15) + importance (0.1) + access (0.1). Fusion score already incorporates vector + BM25 magnitudes
-6. **Relevance gating** — Drop fusion score < 20% of max
+6. **Relevance gating** — Drop fusion score < 5% of max
 7. **Cross-encoder re-ranking** — ms-marco-MiniLM-L-6-v2 via `AutoModelForSequenceClassification` (raw logits, NOT pipeline API which squashes to 1.0). Try/catch falls back gracefully
 8. **Re-ranker filter** — Relative gap (12 logit points from best), min 5 results
 9. **Dedup** — Embedding cosine similarity

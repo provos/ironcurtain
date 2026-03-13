@@ -153,7 +153,7 @@ export function estimateTokens(text: string): number {
  * Uses fusion score (not composite) because the composite score includes
  * constant components (recency, importance) that compress the range.
  */
-const MIN_FUSION_FRACTION = 0.2;
+const MIN_FUSION_FRACTION = 0.05;
 
 export function filterByRelevance(ranked: ScoredMemory[], fusionMax: number): ScoredMemory[] {
   if (ranked.length === 0 || fusionMax <= 0) return ranked;

@@ -294,11 +294,11 @@ describe('filterByRelevance', () => {
     const memories: ScoredMemory[] = [
       { ...makeMemory({ id: 'a' }), fusionScore: 0.5, compositeScore: 0.5 },
       { ...makeMemory({ id: 'b' }), fusionScore: 0.2, compositeScore: 0.4 },
-      { ...makeMemory({ id: 'c' }), fusionScore: 0.05, compositeScore: 0.3 },
+      { ...makeMemory({ id: 'c' }), fusionScore: 0.01, compositeScore: 0.3 },
     ];
 
     const filtered = filterByRelevance(memories, 0.5);
-    // threshold = 0.5 * 0.2 = 0.1 → c (0.05) is dropped
+    // threshold = 0.5 * 0.05 = 0.025 → c (0.01) is dropped
     expect(filtered).toHaveLength(2);
     expect(filtered.map((m) => m.id)).toEqual(['a', 'b']);
   });
@@ -307,13 +307,13 @@ describe('filterByRelevance', () => {
     const memories: ScoredMemory[] = [
       { ...makeMemory({ id: 'a' }), fusionScore: 0.05, compositeScore: 0.8 },
       { ...makeMemory({ id: 'b' }), fusionScore: 0.5, compositeScore: 0.6 },
-      { ...makeMemory({ id: 'c' }), fusionScore: 0.02, compositeScore: 0.4 },
+      { ...makeMemory({ id: 'c' }), fusionScore: 0.005, compositeScore: 0.4 },
     ];
 
     const filtered = filterByRelevance(memories, 0.5);
-    // threshold = 0.5 * 0.2 = 0.1 → both a (0.05) and c (0.02) dropped
-    expect(filtered).toHaveLength(1);
-    expect(filtered[0].id).toBe('b');
+    // threshold = 0.5 * 0.05 = 0.025 → c (0.005) is dropped, a (0.05) kept
+    expect(filtered).toHaveLength(2);
+    expect(filtered.map((m) => m.id)).toEqual(['a', 'b']);
   });
 
   it('keeps all when scores are close', () => {

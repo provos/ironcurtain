@@ -6,6 +6,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { MemoryEngine } from './engine.js';
+import { FORMAT_MODES } from './retrieval/formatting.js';
 import { handleStore } from './tools/store.js';
 import { handleRecall } from './tools/recall.js';
 import { handleContext } from './tools/context.js';
@@ -72,9 +73,11 @@ function registerTools(server: McpServer, engine: MemoryEngine): void {
         .describe('Maximum approximate tokens in the response. Default: 500.'),
       tags: z.array(z.string()).optional().describe('Only search memories with ALL of these tags.'),
       format: z
-        .enum(['summary', 'list', 'raw'])
+        .enum(FORMAT_MODES)
         .optional()
-        .describe("'summary': compressed narrative (default). 'list': bullet points. 'raw': full JSON objects."),
+        .describe(
+          "'summary': compressed narrative (default). 'list': bullet points. 'raw': full JSON objects. 'answer': directly answer the query from memories (requires LLM, falls back to list).",
+        ),
     },
     async (args) => {
       try {

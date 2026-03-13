@@ -140,7 +140,8 @@ export const TOOL_DESCRIPTIONS = {
 
   memory_recall:
     'Recall memories relevant to a query. Returns a pre-summarized context block optimized ' +
-    'for your context window. Uses hybrid semantic + keyword search. Use this when you need ' +
+    'for your context window. Uses hybrid semantic + keyword search. Use format="answer" to get ' +
+    'a direct answer to a question from stored memories. Use this when you need ' +
     'context from prior sessions or before making recommendations that might conflict with stored preferences.',
 
   memory_context:

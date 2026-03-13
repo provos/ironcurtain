@@ -70,10 +70,10 @@ class BenchmarkConfig:
     # Retrieval
     recall_token_budget: int = 2000
     recall_tool: str = "memory_recall"
-    recall_format: str = "list"
+    recall_format: str = "answer"
 
-    # Reader LLM
-    reader_provider: str = "ollama"  # "ollama" or "anthropic"
+    # Reader LLM (only used when recall_format != "answer")
+    reader_provider: str | None = None
     reader_base_url: str = _DEFAULT_OLLAMA_URL
     reader_model: str = _DEFAULT_READER_MODEL
     reader_api_key: str = "ollama"
@@ -171,9 +171,9 @@ def parse_args(argv: list[str] | None = None) -> BenchmarkConfig:
     )
     parser.add_argument(
         "--recall-format",
-        choices=["summary", "list", "raw"],
-        default="list",
-        help="Format parameter for the recall tool",
+        choices=["summary", "list", "raw", "answer"],
+        default="answer",
+        help="Format parameter for the recall tool (default: answer, which uses the memory server's LLM to answer directly)",
     )
     parser.add_argument(
         "--recall-budget",
@@ -196,8 +196,8 @@ def parse_args(argv: list[str] | None = None) -> BenchmarkConfig:
     parser.add_argument(
         "--reader-provider",
         choices=["ollama", "anthropic"],
-        default="ollama",
-        help="Reader LLM provider",
+        default=None,
+        help="Reader LLM provider. Only needed when --recall-format is not 'answer'. If set, uses a separate reader LLM instead of the memory server's built-in answer format.",
     )
     parser.add_argument(
         "--judge-model",
@@ -213,12 +213,26 @@ def parse_args(argv: list[str] | None = None) -> BenchmarkConfig:
 
     args = parser.parse_args(argv)
 
-    reader_base_url, reader_model, reader_api_key = _resolve_provider(
-        args.reader_provider, args.reader_model, _DEFAULT_READER_MODEL
-    )
     judge_base_url, judge_model, judge_api_key = _resolve_provider(
         args.judge_provider, args.judge_model, _DEFAULT_JUDGE_MODEL
     )
+
+    # Resolve reader config only when a reader provider is explicitly set
+    reader_provider = args.reader_provider
+    if reader_provider is not None:
+        reader_base_url, reader_model, reader_api_key = _resolve_provider(
+            reader_provider, args.reader_model, _DEFAULT_READER_MODEL
+        )
+    else:
+        reader_base_url = _DEFAULT_OLLAMA_URL
+        reader_model = args.reader_model
+        reader_api_key = "ollama"
+
+    # When a reader provider is set but recall_format is "answer", switch to
+    # "list" so the separate reader LLM receives raw context to work with.
+    recall_format = args.recall_format
+    if reader_provider is not None and recall_format == "answer":
+        recall_format = "list"
 
     return BenchmarkConfig(
         dataset_variant=VARIANT_MAP[args.variant],
@@ -227,10 +241,10 @@ def parse_args(argv: list[str] | None = None) -> BenchmarkConfig:
         keep_db=args.keep_db,
         output_dir=args.output_dir,
         recall_tool=args.recall_tool,
-        recall_format=args.recall_format,
+        recall_format=recall_format,
         recall_token_budget=args.recall_budget,
         memory_llm_model=args.memory_llm_model,
-        reader_provider=args.reader_provider,
+        reader_provider=reader_provider,
         reader_base_url=reader_base_url,
         reader_model=reader_model,
         reader_api_key=reader_api_key,

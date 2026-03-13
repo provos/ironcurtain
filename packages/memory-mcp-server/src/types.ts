@@ -28,7 +28,7 @@ export interface RecallOptions {
   query: string;
   token_budget?: number;
   tags?: string[];
-  format?: 'summary' | 'list' | 'raw';
+  format?: import('./retrieval/formatting.js').FormatMode;
 }
 
 export interface RecallResult {

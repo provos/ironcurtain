@@ -41,8 +41,16 @@ from .retrieval_metrics import (
 # ---------------------------------------------------------------------------
 
 
+def _uses_builtin_answer(config: BenchmarkConfig) -> bool:
+    """True when the memory server answers directly (no separate reader LLM)."""
+    return config.recall_format == "answer" and config.reader_provider is None
+
+
 async def run_question(
-    question: Question, config: BenchmarkConfig, *, reader_client: AsyncOpenAI
+    question: Question,
+    config: BenchmarkConfig,
+    *,
+    reader_client: AsyncOpenAI | None,
 ) -> dict:
     """Process a single question: ingest haystack, recall context, generate answer."""
     db_path = f"/tmp/longmemeval-{os.getpid()}-{question.question_id}.db"
@@ -52,13 +60,19 @@ async def run_question(
 
             context = await call_recall(session, question.question, config)
 
-            hypothesis = await generate_answer(
-                context,
-                question.question,
-                question.question_date,
-                config,
-                client=reader_client,
-            )
+            # When using format=answer, the recall response IS the answer.
+            # Otherwise, pipe through the separate reader LLM.
+            if _uses_builtin_answer(config):
+                hypothesis = context
+            else:
+                assert reader_client is not None, "reader_client required when not using format=answer"
+                hypothesis = await generate_answer(
+                    context,
+                    question.question,
+                    question.question_date,
+                    config,
+                    client=reader_client,
+                )
 
             return {
                 "question_id": question.question_id,
@@ -160,7 +174,13 @@ async def main_run(config: BenchmarkConfig, questions: list[Question] | None = N
     if config.limit is not None:
         remaining = remaining[: config.limit]
 
+    builtin_answer = _uses_builtin_answer(config)
+
     print(f"Dataset: {config.dataset_variant}", file=sys.stderr)
+    print(
+        f"Answer mode: {'memory_recall format=answer' if builtin_answer else f'reader LLM ({config.reader_provider})'}",
+        file=sys.stderr,
+    )
     print(
         f"Questions: {len(remaining)} remaining ({len(completed)} done)",
         file=sys.stderr,
@@ -170,7 +190,7 @@ async def main_run(config: BenchmarkConfig, questions: list[Question] | None = N
     os.makedirs(config.run_dir, exist_ok=True)
     save_config(config)
 
-    reader_client = build_reader_client(config)
+    reader_client = None if builtin_answer else build_reader_client(config)
     retrieval_results: list[dict] = []
 
     for i, question in enumerate(remaining):

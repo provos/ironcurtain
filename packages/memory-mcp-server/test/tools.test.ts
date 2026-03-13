@@ -167,6 +167,11 @@ describe('memory_recall', () => {
       );
     });
 
+    it('accepts answer format', () => {
+      const result = validateRecallInput({ query: 'q', format: 'answer' });
+      expect(result.format).toBe('answer');
+    });
+
     it('rejects invalid format', () => {
       expect(() => validateRecallInput({ query: 'q', format: 'xml' })).toThrow('format must be one of');
     });
