@@ -59,7 +59,7 @@ class BenchmarkConfig:
     memory_llm_api_key: str = "ollama"
 
     # Retrieval
-    recall_token_budget: int = 2000
+    recall_token_budget: int = 1000
     recall_tool: str = "memory_recall"
     recall_format: str = "list"
 
@@ -163,8 +163,8 @@ def parse_args(argv: list[str] | None = None) -> BenchmarkConfig:
     parser.add_argument(
         "--recall-budget",
         type=int,
-        default=2000,
-        help="Token budget for recall (default: 2000)",
+        default=1000,
+        help="Token budget for recall (default: 1000)",
     )
 
     # Model options

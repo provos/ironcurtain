@@ -1,46 +1,71 @@
-import type { MemoryRow } from '../storage/database.js';
+import type { MemoryRow, VectorSearchResult } from '../storage/database.js';
 
 export interface ScoredMemory extends MemoryRow {
   rrfScore: number;
   compositeScore: number;
+  /** Cosine distance from query embedding (lower = more similar). Only set for vector-retrieved memories. */
+  vectorDistance?: number;
+}
+
+/** Result of RRF merge — includes the max RRF score for downstream normalization. */
+export interface RrfResult {
+  scored: ScoredMemory[];
+  rrfMax: number;
 }
 
 /**
  * Reciprocal Rank Fusion — merge ranked lists from vector and FTS search
  * without needing to normalize their scores.
  *
+ * Also preserves vector cosine distances for use in composite scoring,
+ * since rank alone discards valuable magnitude information.
+ *
  * @param k - smoothing constant (default 60, standard RRF value)
  */
 export function reciprocalRankFusion(
-  vectorResults: MemoryRow[],
+  vectorResults: VectorSearchResult[],
   ftsResults: MemoryRow[],
   allMemories: Map<string, MemoryRow>,
   k: number = 60,
-): ScoredMemory[] {
+): RrfResult {
   const scores = new Map<string, number>();
+  const vectorDistanceById = new Map<string, number>();
 
-  vectorResults.forEach((m, rank) => {
+  for (let rank = 0; rank < vectorResults.length; rank++) {
+    const m = vectorResults[rank];
     scores.set(m.id, (scores.get(m.id) ?? 0) + 1 / (k + rank + 1));
-  });
+    vectorDistanceById.set(m.id, m.distance);
+  }
 
-  ftsResults.forEach((m, rank) => {
+  for (let rank = 0; rank < ftsResults.length; rank++) {
+    const m = ftsResults[rank];
     scores.set(m.id, (scores.get(m.id) ?? 0) + 1 / (k + rank + 1));
-  });
+  }
 
-  return [...scores.entries()]
+  let rrfMax = 0;
+  const scored = [...scores.entries()]
     .sort(([, a], [, b]) => b - a)
     .flatMap(([id, score]) => {
       const mem = allMemories.get(id);
       if (!mem) return [];
-      return [{ ...mem, rrfScore: score, compositeScore: 0 }];
+      if (score > rrfMax) rrfMax = score;
+      return [{ ...mem, rrfScore: score, compositeScore: 0, vectorDistance: vectorDistanceById.get(id) }];
     });
+
+  return { scored, rrfMax };
 }
 
 /**
- * Compute a composite score combining RRF relevance with metadata signals.
- * Weights are initial defaults — should be tuned with real usage data.
+ * Compute a composite score combining RRF relevance, vector similarity,
+ * and metadata signals.
+ *
+ * Vector similarity (1 − cosine distance) provides much stronger
+ * discriminating power than RRF rank alone, since RRF compresses scores
+ * into a narrow range (~0.009–0.033 for k=60, limit=50).
+ *
+ * @param rrfMax - the maximum RRF score in this result set, used for normalization
  */
-export function computeCompositeScore(memory: ScoredMemory, now: number): number {
+export function computeCompositeScore(memory: ScoredMemory, now: number, rrfMax: number = 1): number {
   const ageHours = (now - memory.created_at) / 3600000;
   const accessAgeHours = (now - memory.last_accessed_at) / 3600000;
 
@@ -50,7 +75,26 @@ export function computeCompositeScore(memory: ScoredMemory, now: number): number
   // Access pattern: recently/frequently accessed memories are boosted
   const accessScore = Math.exp(-0.002 * accessAgeHours) * Math.min(memory.access_count / 10, 1.0);
 
-  return 0.55 * memory.rrfScore + 0.2 * recencyScore + 0.1 * memory.importance + 0.15 * accessScore;
+  // Normalize RRF score to 0–1 range so it's comparable to other signals
+  const normalizedRrf = memory.rrfScore / rrfMax;
+
+  // Vector similarity: clamp distance to [0,1] then convert to similarity.
+  // Adaptive weighting: when vectorDistance is available, split relevance
+  // weight between RRF and similarity. FTS-only results redistribute
+  // the similarity weight to RRF so they aren't penalized.
+  const vectorSimilarity = memory.vectorDistance != null ? Math.max(0, 1 - Math.min(memory.vectorDistance, 1)) : 0;
+  const hasVector = memory.vectorDistance != null;
+
+  const rrfWeight = hasVector ? 0.3 : 0.65;
+  const vecWeight = hasVector ? 0.35 : 0;
+
+  return (
+    rrfWeight * normalizedRrf +
+    vecWeight * vectorSimilarity +
+    0.15 * recencyScore +
+    0.1 * memory.importance +
+    0.1 * accessScore
+  );
 }
 
 /**
@@ -70,14 +114,9 @@ export function estimateTokens(text: string): number {
  */
 const MIN_RRF_FRACTION = 0.2;
 
-export function filterByRelevance(ranked: ScoredMemory[]): ScoredMemory[] {
-  if (ranked.length === 0) return ranked;
-  let bestRrf = 0;
-  for (const m of ranked) {
-    if (m.rrfScore > bestRrf) bestRrf = m.rrfScore;
-  }
-  if (bestRrf <= 0) return ranked;
-  const threshold = bestRrf * MIN_RRF_FRACTION;
+export function filterByRelevance(ranked: ScoredMemory[], rrfMax: number): ScoredMemory[] {
+  if (ranked.length === 0 || rrfMax <= 0) return ranked;
+  const threshold = rrfMax * MIN_RRF_FRACTION;
   return ranked.filter((m) => m.rrfScore >= threshold);
 }
 

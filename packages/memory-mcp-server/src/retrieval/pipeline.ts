@@ -60,7 +60,8 @@ export async function recall(
   }
 
   // 3. RRF merge
-  let scored = reciprocalRankFusion(vectorResults, ftsResults, allMemories);
+  const { scored: rrfScored, rrfMax } = reciprocalRankFusion(vectorResults, ftsResults, allMemories);
+  let scored = rrfScored;
 
   // 4. Filter by tags if requested
   if (tags && tags.length > 0) {
@@ -73,12 +74,12 @@ export async function recall(
   // 5. Composite scoring
   const now = Date.now();
   for (const mem of scored) {
-    mem.compositeScore = computeCompositeScore(mem, now);
+    mem.compositeScore = computeCompositeScore(mem, now, rrfMax);
   }
   scored.sort((a, b) => b.compositeScore - a.compositeScore);
 
   // 6. Drop low-relevance candidates before loading embeddings
-  const relevant = filterByRelevance(scored);
+  const relevant = filterByRelevance(scored, rrfMax);
 
   // 7. Load embeddings only for relevant candidates
   const embeddingIds = relevant.map((m) => m.id);
