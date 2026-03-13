@@ -70,7 +70,7 @@ export function validateForgetInput(args: Record<string, unknown>): ForgetInput 
 function requiresConfirmation(input: ForgetInput): boolean {
   // Bulk operations (query-based, tag-based, time-based) require confirm=true
   // ID-based deletion is targeted enough to not require confirmation
-  return !input.ids && !input.confirm;
+  return !(input.ids && input.ids.length > 0) && !input.confirm;
 }
 
 export async function handleForget(engine: MemoryEngine, args: Record<string, unknown>): Promise<string> {

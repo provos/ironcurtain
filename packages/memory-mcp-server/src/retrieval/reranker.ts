@@ -24,7 +24,11 @@ export async function getReranker(config: MemoryConfig): Promise<RerankerModel> 
 
   // Model changed — discard old promise before starting a new load
   currentModel = config.rerankerModel;
-  cachedPromise = loadReranker(config.rerankerModel);
+  cachedPromise = loadReranker(config.rerankerModel).catch((e: unknown) => {
+    cachedPromise = null;
+    currentModel = null;
+    throw e;
+  });
 
   return cachedPromise;
 }

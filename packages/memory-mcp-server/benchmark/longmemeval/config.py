@@ -184,6 +184,12 @@ def parse_args(argv: list[str] | None = None) -> BenchmarkConfig:
 
     # Model options
     parser.add_argument(
+        "--memory-llm-provider",
+        choices=["ollama", "anthropic"],
+        default="ollama",
+        help="Provider for the memory server's internal LLM (used for summarization and format=answer)",
+    )
+    parser.add_argument(
         "--memory-llm-model",
         default=_DEFAULT_MEMORY_LLM_MODEL,
         help="Model for the memory server's internal LLM",
@@ -213,6 +219,9 @@ def parse_args(argv: list[str] | None = None) -> BenchmarkConfig:
 
     args = parser.parse_args(argv)
 
+    memory_llm_base_url, memory_llm_model, memory_llm_api_key = _resolve_provider(
+        args.memory_llm_provider, args.memory_llm_model, _DEFAULT_MEMORY_LLM_MODEL
+    )
     judge_base_url, judge_model, judge_api_key = _resolve_provider(
         args.judge_provider, args.judge_model, _DEFAULT_JUDGE_MODEL
     )
@@ -243,7 +252,9 @@ def parse_args(argv: list[str] | None = None) -> BenchmarkConfig:
         recall_tool=args.recall_tool,
         recall_format=recall_format,
         recall_token_budget=args.recall_budget,
-        memory_llm_model=args.memory_llm_model,
+        memory_llm_base_url=memory_llm_base_url,
+        memory_llm_model=memory_llm_model,
+        memory_llm_api_key=memory_llm_api_key,
         reader_provider=reader_provider,
         reader_base_url=reader_base_url,
         reader_model=reader_model,

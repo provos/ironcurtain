@@ -31,6 +31,9 @@ async def memory_server(config: BenchmarkConfig, db_path: str) -> AsyncIterator[
         "MEMORY_LLM_BASE_URL": config.memory_llm_base_url,
         "MEMORY_LLM_MODEL": config.memory_llm_model,
         "MEMORY_LLM_API_KEY": config.memory_llm_api_key,
+        # Disable maintenance (consolidation/compaction) during benchmarking —
+        # the benchmark stores once and queries, so dedup is wasted LLM cost.
+        "MEMORY_MAINTENANCE_INTERVAL": "999999",
     }
 
     server_params = StdioServerParameters(

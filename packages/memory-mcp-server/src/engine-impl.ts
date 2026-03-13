@@ -198,7 +198,7 @@ function inspectMemories(
   const namespace = config.namespace;
   const limit = opts.limit ?? 20;
 
-  if (opts.ids) {
+  if (opts.ids && opts.ids.length > 0) {
     const rows = getMemoriesByIds(db, opts.ids);
     return rows.map(rowToMemory);
   }

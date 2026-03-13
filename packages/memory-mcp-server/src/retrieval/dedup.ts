@@ -11,7 +11,8 @@ export interface DedupResult {
 
 /**
  * Remove near-duplicate memories from a scored list.
- * Keeps the higher-scoring memory when a duplicate pair is found.
+ * Keeps the first encountered memory in each duplicate group (i.e. the
+ * higher-ranked one, since input is expected to be pre-sorted by score).
  *
  * @param threshold - cosine similarity above which two memories are considered duplicates (default 0.95)
  */

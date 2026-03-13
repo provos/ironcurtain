@@ -5,7 +5,7 @@ type EmbedderPipeline = (
   options: { pooling: string; normalize: boolean },
 ) => Promise<{ data: ArrayLike<number> }>;
 
-let embedder: EmbedderPipeline | null = null;
+let cachedPromise: Promise<EmbedderPipeline> | null = null;
 let currentModel: string | null = null;
 
 /**
@@ -25,17 +25,26 @@ const QUERY_PREFIXES: Record<string, string> = {
  * The pipeline is cached as a singleton — the model is only loaded once.
  */
 export async function getEmbedder(config: MemoryConfig): Promise<EmbedderPipeline> {
-  if (embedder && currentModel === config.embeddingModel) {
-    return embedder;
+  if (cachedPromise && currentModel === config.embeddingModel) {
+    return cachedPromise;
   }
 
+  // Cache the loading promise to prevent concurrent calls from racing
+  currentModel = config.embeddingModel;
+  cachedPromise = loadEmbedder(config).catch((e: unknown) => {
+    cachedPromise = null;
+    currentModel = null;
+    throw e;
+  });
+
+  return cachedPromise;
+}
+
+async function loadEmbedder(config: MemoryConfig): Promise<EmbedderPipeline> {
   const { pipeline } = await import('@huggingface/transformers');
-  embedder = (await pipeline('feature-extraction', config.embeddingModel, {
+  return (await pipeline('feature-extraction', config.embeddingModel, {
     dtype: config.embeddingDtype as 'q8' | 'fp32' | 'fp16',
   })) as unknown as EmbedderPipeline;
-  currentModel = config.embeddingModel;
-
-  return embedder;
 }
 
 /**

@@ -38,10 +38,14 @@ npm run build
 # Minimal (no LLM, extractive retrieval only)
 MEMORY_DB_PATH=./my-memories.db node dist/index.js
 
-# With Anthropic Haiku for summarization + contradiction detection
+# With an OpenAI-compatible LLM for summarization + contradiction detection
+# The LLM client uses the OpenAI SDK, so MEMORY_LLM_BASE_URL must point to
+# an OpenAI-compatible endpoint (e.g., OpenRouter, Ollama, LiteLLM proxy).
+# Anthropic's native API is NOT OpenAI-compatible — use a proxy or OpenRouter.
 MEMORY_DB_PATH=./my-memories.db \
-MEMORY_LLM_API_KEY=$ANTHROPIC_API_KEY \
-MEMORY_LLM_BASE_URL=https://api.anthropic.com/v1/ \
+MEMORY_LLM_API_KEY=$OPENROUTER_API_KEY \
+MEMORY_LLM_BASE_URL=https://openrouter.ai/api/v1 \
+MEMORY_LLM_MODEL=anthropic/claude-haiku-4-5-20251001 \
 node dist/index.js
 ```
 
@@ -56,7 +60,8 @@ node dist/index.js
       "env": {
         "MEMORY_DB_PATH": "~/.local/share/memory-mcp/default.db",
         "MEMORY_LLM_API_KEY": "your-api-key",
-        "MEMORY_LLM_BASE_URL": "https://api.anthropic.com/v1/"
+        "MEMORY_LLM_BASE_URL": "https://openrouter.ai/api/v1",
+        "MEMORY_LLM_MODEL": "anthropic/claude-haiku-4-5-20251001"
       }
     }
   }
@@ -233,7 +238,7 @@ All settings are controlled via environment variables:
 | `MEMORY_EMBEDDING_MODEL` | `Xenova/bge-base-en-v1.5` | HuggingFace embedding model |
 | `MEMORY_EMBEDDING_DTYPE` | `q8` | Model quantization (q8, fp16, fp32) |
 | `MEMORY_LLM_API_KEY` | *(none)* | API key for LLM (enables enhanced features) |
-| `MEMORY_LLM_BASE_URL` | *(none)* | OpenAI-compatible API endpoint |
+| `MEMORY_LLM_BASE_URL` | *(none)* | OpenAI-compatible API endpoint (must support `/v1/chat/completions`) |
 | `MEMORY_LLM_MODEL` | `claude-haiku-4-5-20251001` | LLM model name |
 | `MEMORY_DEFAULT_TOKEN_BUDGET` | `500` | Default token budget for recall |
 | `MEMORY_MAINTENANCE_INTERVAL` | `50` | Stores between maintenance passes |
