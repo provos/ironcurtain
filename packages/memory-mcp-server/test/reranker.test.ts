@@ -21,7 +21,7 @@ function makeScored(overrides: Partial<MemoryRow & ScoredMemory> = {}): ScoredMe
     compacted_from: overrides.compacted_from ?? null,
     source: overrides.source ?? null,
     metadata: overrides.metadata ?? null,
-    rrfScore: overrides.rrfScore ?? 0.5,
+    fusionScore: overrides.fusionScore ?? 0.5,
     compositeScore: overrides.compositeScore ?? 0.5,
     vectorDistance: overrides.vectorDistance,
   };

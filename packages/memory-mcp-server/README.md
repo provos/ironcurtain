@@ -16,12 +16,14 @@ For a detailed competitive analysis covering 11 memory systems, see [docs/design
 
 ## Features
 
-- **Hybrid search** — vector similarity (all-MiniLM-L6-v2) + BM25 keyword search, merged via Reciprocal Rank Fusion
+- **Score-based hybrid fusion** — vector similarity (BGE-base) + FTS5 BM25 keyword search, merged via Weaviate-style relativeScoreFusion with min-max normalized scores blended by alpha weighting. Unlike pure rank-based fusion (used by Letta, Zep, mind-mem, LangChain), score-based fusion retains the discriminating power of both retrieval signals — an approach validated by production search engines (Weaviate, Elasticsearch, Qdrant) and research (Bruch et al. 2023)
+- **Cross-encoder reranking** — ms-marco-MiniLM re-ranks candidates using raw logits with relative gap filtering, improving precision without aggressive cutoffs
+- **Composite scoring** — fusion relevance (incorporating vector + BM25 magnitudes) blended with recency, importance, and access pattern signals
 - **Token-budget-aware retrieval** — returns pre-summarized context blocks sized to fit your context window
-- **Local-first** — embeddings run locally; cloud LLM is optional and enhances quality when available
-- **Automatic maintenance** — unused memories decay over time; related memories compact into summaries
+- **SQLite-native, zero external dependencies** — embeddings and reranking run locally in-process; no Postgres, Neo4j, Redis, or Docker required. One `.db` file to back up
+- **Works without an LLM, improves with one** — extractive retrieval and bullet-point formatting work out of the box; adding a cheap LLM (Haiku, Ollama) enables abstractive summarization and contradiction detection
+- **Automatic maintenance** — unused memories decay over time; related memories compact into summaries via three-phase pipeline (consolidation, decay, compaction)
 - **Namespace isolation** — multiple agents or projects share one database without cross-contamination
-- **Deferred batch consolidation** — duplicate/contradiction detection runs periodically in a single batched LLM call, not on every store
 
 ## Quick Start
 
@@ -155,13 +157,17 @@ limit (integer, optional)   — Max items returned. Default 20.
 │                                                  │
 │  ┌─────────────┐  ┌──────────────────────────┐   │
 │  │  Embedder   │  │   Retrieval Pipeline     │   │
-│  │ MiniLM-L6   │  │  Vector KNN + FTS5 BM25  │   │
-│  │  (local)    │  │  → RRF merge             │   │
+│  │ BGE-base    │  │  Vector KNN + FTS5 BM25  │   │
+│  │  (local)    │  │  → Score-based fusion     │   │
 │  └─────────────┘  │  → Composite scoring     │   │
-│                   │  → Dedup by embedding    │   │
-│  ┌─────────────┐  │  → Token budget packing  │   │
-│  │  LLM Client │  │  → Format (summary/lis)  │   │
-│  │  (optional) │  └──────────────────────────┘   │
+│  ┌─────────────┐  │  → Cross-encoder rerank  │   │
+│  │  Reranker   │  │  → Dedup by embedding    │   │
+│  │ ms-marco    │  │  → Token budget packing  │   │
+│  │  (local)    │  │  → Format (summary/list) │   │
+│  └─────────────┘  └──────────────────────────┘   │
+│  ┌─────────────┐                                 │
+│  │  LLM Client │                                 │
+│  │  (optional) │                                 │
 │  │  Haiku etc. │                                 │
 │  └─────────────┘  ┌──────────────────────────┐   │
 │                   │   Maintenance            │   │
@@ -173,8 +179,8 @@ limit (integer, optional)   — Max items returned. Default 20.
 ├──────────────────────────────────────────────────┤
 │  SQLite (WAL mode)                               │
 │  ┌────────────┬──────────────┬────────────────┐  │
-│  │  memories   │ vec_memories │  memories_ft  │  │
-│  │  (rows)     │ (384-dim)   │  (BM25 index)  │  │
+│  │  memories   │ vec_memories │  memories_fts  │  │
+│  │  (rows)     │ (768-dim)   │  (BM25 index)  │  │
 │  └────────────┴──────────────┴────────────────┘  │
 └──────────────────────────────────────────────────┘
 ```
@@ -188,12 +194,15 @@ limit (integer, optional)   — Max items returned. Default 20.
 
 ### Retrieval pipeline
 
-1. **Candidate generation** — parallel vector KNN + FTS5 search
-2. **RRF merge** — Reciprocal Rank Fusion combines both result sets
-3. **Composite scoring** — RRF (55%) + recency (20%) + importance (10%) + access pattern (15%)
-4. **Deduplication** — remove near-duplicates by embedding similarity
-5. **Token budget packing** — greedily select memories by score until budget is filled
-6. **Formatting** — LLM summarization (if available) or extractive output
+1. **Candidate generation** — parallel vector KNN (50 candidates) + FTS5 BM25 search (50 candidates, Porter stemming, bigram phrases)
+2. **Score-based fusion** — Weaviate-style relativeScoreFusion: min-max normalize vector similarity and BM25 scores independently to [0,1], then blend with alpha weighting (default 0.5). Candidates from only one source get only that source's weighted contribution
+3. **Tag filter** — optional intersection filter
+4. **Composite scoring** — fusion relevance (0.65) + recency (0.15) + importance (0.1) + access patterns (0.1). The fusion score already encodes vector + BM25 magnitudes
+5. **Relevance gating** — drop candidates with fusion score < 20% of max
+6. **Cross-encoder reranking** — ms-marco-MiniLM-L-6-v2 re-scores candidates; relative gap filter (5 logit points from best)
+7. **Deduplication** — remove near-duplicates by embedding cosine similarity
+8. **Token budget packing** — greedily select memories by score until budget is filled (skip, not break)
+9. **Formatting** — LLM summarization (if available) or extractive bullet list
 
 ### Maintenance (amortized, no background processes)
 
@@ -221,7 +230,7 @@ All settings are controlled via environment variables:
 |----------|---------|-------------|
 | `MEMORY_DB_PATH` | `~/.local/share/memory-mcp/default.db` | SQLite database path |
 | `MEMORY_NAMESPACE` | `default` | Namespace for memory isolation |
-| `MEMORY_EMBEDDING_MODEL` | `Xenova/all-MiniLM-L6-v2` | HuggingFace embedding model |
+| `MEMORY_EMBEDDING_MODEL` | `Xenova/bge-base-en-v1.5` | HuggingFace embedding model |
 | `MEMORY_EMBEDDING_DTYPE` | `q8` | Model quantization (q8, fp16, fp32) |
 | `MEMORY_LLM_API_KEY` | *(none)* | API key for LLM (enables enhanced features) |
 | `MEMORY_LLM_BASE_URL` | *(none)* | OpenAI-compatible API endpoint |

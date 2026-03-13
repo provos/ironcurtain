@@ -23,7 +23,11 @@
     "test:e2e": "vitest run test/e2e/",
     "benchmark": "npx tsx benchmark/run.ts --verbose",
     "benchmark:json": "npx tsx benchmark/run.ts --json",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "lint": "eslint src/ test/",
+    "lint:fix": "eslint --fix src/ test/",
+    "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\" \"test/**/*.ts\""
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",

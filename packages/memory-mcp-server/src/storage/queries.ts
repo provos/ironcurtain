@@ -150,11 +150,11 @@ export function ftsSearch(db: Database.Database, namespace: string, query: strin
 
   return db
     .prepare(
-      `SELECT m.*, fts.rank as bm25_score
+      `SELECT m.*, bm25(memories_fts, 3.0, 1.5) as bm25_score
        FROM memories_fts fts
        JOIN memories m ON m.rowid = fts.rowid
        WHERE memories_fts MATCH ? AND m.namespace = ?
-       ORDER BY fts.rank
+       ORDER BY bm25(memories_fts, 3.0, 1.5)
        LIMIT ?`,
     )
     .all(sanitized, namespace, limit) as FtsSearchResult[];
@@ -240,7 +240,15 @@ function sanitizeFtsQuery(query: string): string {
     .filter((w) => w.length > 0 && !STOP_WORDS.has(w.toLowerCase()))
     .slice(0, 20);
   if (words.length === 0) return '';
-  return words.join(' OR ');
+  if (words.length === 1) return words[0];
+
+  // Build bigram phrases from consecutive word pairs
+  const phrases: string[] = [];
+  for (let i = 0; i < words.length - 1; i++) {
+    phrases.push(`"${words[i]} ${words[i + 1]}"`);
+  }
+
+  return [...phrases, ...words].join(' OR ');
 }
 
 // ---------- Retrieval helpers ----------

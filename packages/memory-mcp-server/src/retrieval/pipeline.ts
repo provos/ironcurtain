@@ -5,7 +5,7 @@ import type { RecallOptions } from '../types.js';
 import { vectorSearch, ftsSearch, updateAccessStats, getEmbeddingsForMemories } from '../storage/queries.js';
 import { embedQuery } from '../embedding/embedder.js';
 import {
-  reciprocalRankFusion,
+  hybridScoreFusion,
   computeCompositeScore,
   filterByRelevance,
   filterByRerankerScore,
@@ -30,7 +30,7 @@ export interface PipelineRecallResult {
 }
 
 /**
- * Full retrieval pipeline: embed query -> vector KNN -> FTS5 -> RRF merge ->
+ * Full retrieval pipeline: embed query -> vector KNN -> FTS5 -> score-based fusion ->
  * composite score -> dedup -> token budget pack -> format.
  */
 export async function recall(
@@ -49,8 +49,8 @@ export async function recall(
   const vectorResults = vectorResultsRaw.filter((r) => r.distance < MAX_VECTOR_DISTANCE);
   const ftsResults = ftsSearch(db, config.namespace, query, DEFAULT_CANDIDATE_LIMIT);
 
-  // Build a map of all candidate memories for RRF lookup.
-  // Always include both vector and FTS results — RRF handles the fusion.
+  // Build a map of all candidate memories for fusion lookup.
+  // Always include both vector and FTS results — hybrid fusion handles the merge.
   // Gating FTS on vector confidence is an anti-pattern: FTS keyword matches
   // are most valuable precisely when vector search is uncertain.
   const allMemories = new Map<string, MemoryRow>();
@@ -66,9 +66,9 @@ export async function recall(
     };
   }
 
-  // 3. RRF merge
-  const { scored: rrfScored, rrfMax: rrfMaxRaw } = reciprocalRankFusion(vectorResults, ftsResults, allMemories);
-  let scored = rrfScored;
+  // 3. Score-based hybrid fusion
+  const { scored: fusionScored, fusionMax: fusionMaxRaw } = hybridScoreFusion(vectorResults, ftsResults, allMemories);
+  let scored = fusionScored;
 
   // 4. Filter by tags if requested
   if (tags && tags.length > 0) {
@@ -78,19 +78,19 @@ export async function recall(
     });
   }
 
-  // Recompute rrfMax after tag filtering so downstream normalization
+  // Recompute fusionMax after tag filtering so downstream normalization
   // and relevance gating use the actual max of the surviving set.
-  const rrfMax = scored.length > 0 ? Math.max(...scored.map((m) => m.rrfScore)) : rrfMaxRaw;
+  const fusionMax = scored.length > 0 ? Math.max(...scored.map((m) => m.fusionScore)) : fusionMaxRaw;
 
   // 5. Composite scoring
   const now = Date.now();
   for (const mem of scored) {
-    mem.compositeScore = computeCompositeScore(mem, now, rrfMax);
+    mem.compositeScore = computeCompositeScore(mem, now, fusionMax);
   }
   scored.sort((a, b) => b.compositeScore - a.compositeScore);
 
   // 6. Drop low-relevance candidates before expensive steps
-  const relevant = filterByRelevance(scored, rrfMax);
+  const relevant = filterByRelevance(scored, fusionMax);
 
   // 6b. Cross-encoder re-ranking: refine ordering using (query, passage) pairs.
   // Runs only on the filtered set (typically 30-50 items) to keep latency reasonable.

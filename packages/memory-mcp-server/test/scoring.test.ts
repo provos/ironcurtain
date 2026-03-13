@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import type { MemoryRow, VectorSearchResult } from '../src/storage/database.js';
+import type { MemoryRow, VectorSearchResult, FtsSearchResult } from '../src/storage/database.js';
 import {
-  reciprocalRankFusion,
+  hybridScoreFusion,
   computeCompositeScore,
   estimateTokens,
   filterByRelevance,
@@ -33,62 +33,175 @@ function makeVectorResult(overrides: Partial<MemoryRow> = {}, distance = 0.5): V
   return { ...makeMemory(overrides), distance };
 }
 
-describe('reciprocalRankFusion', () => {
+function makeFtsResult(overrides: Partial<MemoryRow> = {}, bm25_score = -5): FtsSearchResult {
+  return { ...makeMemory(overrides), bm25_score };
+}
+
+describe('hybridScoreFusion', () => {
   it('merges results from both sources', () => {
-    const m1 = makeVectorResult({ id: 'a' }, 0.3);
-    const m2 = makeVectorResult({ id: 'b' }, 0.4);
-    const m3 = makeMemory({ id: 'c' });
+    const m1 = makeVectorResult({ id: 'a' }, 0.5);
+    const m2 = makeVectorResult({ id: 'b' }, 0.3);
+    const f2 = makeFtsResult({ id: 'b' }, -10);
+    const f3 = makeFtsResult({ id: 'c' }, -5);
 
     const allMemories = new Map<string, MemoryRow>([
       ['a', m1],
       ['b', m2],
-      ['c', m3],
+      ['c', f3],
     ]);
 
-    const vectorResults = [m1, m2]; // a at rank 0, b at rank 1
-    const ftsResults = [m2, m3]; // b at rank 0, c at rank 1
+    const vectorResults = [m2, m1]; // b at distance 0.3 (best), a at distance 0.5
+    const ftsResults = [f2, f3]; // b at -10 (best), c at -5 (worst)
 
-    const { scored, rrfMax } = reciprocalRankFusion(vectorResults, ftsResults, allMemories);
+    const { scored, fusionMax } = hybridScoreFusion(vectorResults, ftsResults, allMemories);
 
     expect(scored.length).toBe(3);
-    // b appears in both lists, so should have highest RRF score
+    // b appears in both lists with best scores in each, so should have highest fusion score
     expect(scored[0].id).toBe('b');
-    expect(rrfMax).toBe(scored[0].rrfScore);
+    expect(fusionMax).toBe(scored[0].fusionScore);
   });
 
   it('handles empty result sets', () => {
-    const { scored, rrfMax } = reciprocalRankFusion([], [], new Map());
+    const { scored, fusionMax } = hybridScoreFusion([], [], new Map());
     expect(scored).toHaveLength(0);
-    expect(rrfMax).toBe(0);
+    expect(fusionMax).toBe(0);
   });
 
-  it('handles single-source results', () => {
+  it('handles vector-only results', () => {
     const m1 = makeVectorResult({ id: 'a' }, 0.3);
     const allMemories = new Map<string, MemoryRow>([['a', m1]]);
 
-    const { scored } = reciprocalRankFusion([m1], [], allMemories);
+    const { scored } = hybridScoreFusion([m1], [], allMemories);
     expect(scored).toHaveLength(1);
     expect(scored[0].id).toBe('a');
-    expect(scored[0].rrfScore).toBeGreaterThan(0);
+    // Single vector result: normalized to 1.0, weighted by alpha (0.5)
+    expect(scored[0].fusionScore).toBeCloseTo(0.5);
+  });
+
+  it('handles FTS-only results', () => {
+    const f1 = makeFtsResult({ id: 'a' }, -7);
+    const allMemories = new Map<string, MemoryRow>([['a', f1]]);
+
+    const { scored } = hybridScoreFusion([], [f1], allMemories);
+    expect(scored).toHaveLength(1);
+    // Single FTS result: normalized to 1.0, weighted by (1-alpha) = 0.5
+    expect(scored[0].fusionScore).toBeCloseTo(0.5);
   });
 
   it('preserves vector distances on scored results', () => {
     const m1 = makeVectorResult({ id: 'a' }, 0.2);
     const m2 = makeVectorResult({ id: 'b' }, 0.7);
-    const m3 = makeMemory({ id: 'c' }); // FTS-only
+    const f3 = makeFtsResult({ id: 'c' }, -5); // FTS-only
 
     const allMemories = new Map<string, MemoryRow>([
       ['a', m1],
       ['b', m2],
-      ['c', m3],
+      ['c', f3],
     ]);
 
-    const { scored } = reciprocalRankFusion([m1, m2], [m3], allMemories);
+    const { scored } = hybridScoreFusion([m1, m2], [f3], allMemories);
     const byId = new Map(scored.map((r) => [r.id, r]));
 
     expect(byId.get('a')!.vectorDistance).toBe(0.2);
     expect(byId.get('b')!.vectorDistance).toBe(0.7);
     expect(byId.get('c')!.vectorDistance).toBeUndefined();
+  });
+
+  it('preserves normalized BM25 scores on scored results', () => {
+    const f1 = makeFtsResult({ id: 'a' }, -10); // best match
+    const f2 = makeFtsResult({ id: 'b' }, -5); // worst match
+
+    const allMemories = new Map<string, MemoryRow>([
+      ['a', f1],
+      ['b', f2],
+    ]);
+
+    const { scored } = hybridScoreFusion([], [f1, f2], allMemories);
+    const byId = new Map(scored.map((r) => [r.id, r]));
+
+    // Most negative (-10) → 1.0, least negative (-5) → 0.0
+    expect(byId.get('a')!.bm25Score).toBe(1.0);
+    expect(byId.get('b')!.bm25Score).toBe(0.0);
+    // No vector distance for FTS-only
+    expect(byId.get('a')!.vectorDistance).toBeUndefined();
+  });
+
+  it('normalizes single FTS result to 1.0', () => {
+    const f1 = makeFtsResult({ id: 'a' }, -7);
+
+    const allMemories = new Map<string, MemoryRow>([['a', f1]]);
+
+    const { scored } = hybridScoreFusion([], [f1], allMemories);
+    expect(scored[0].bm25Score).toBe(1.0);
+  });
+
+  it('produces scores in [0, 1] range', () => {
+    const m1 = makeVectorResult({ id: 'a' }, 0.1);
+    const m2 = makeVectorResult({ id: 'b' }, 0.9);
+    const f1 = makeFtsResult({ id: 'a' }, -20);
+    const f3 = makeFtsResult({ id: 'c' }, -1);
+
+    const allMemories = new Map<string, MemoryRow>([
+      ['a', m1],
+      ['b', m2],
+      ['c', f3],
+    ]);
+
+    const { scored } = hybridScoreFusion([m1, m2], [f1, f3], allMemories);
+    for (const s of scored) {
+      expect(s.fusionScore).toBeGreaterThanOrEqual(0);
+      expect(s.fusionScore).toBeLessThanOrEqual(1);
+    }
+  });
+
+  it('gives highest score to candidate with best combined normalized scores', () => {
+    // a: best vector (distance 0.1 = sim 0.9), best FTS (-20)
+    // b: worst vector (distance 0.9 = sim 0.1), worst FTS (-1)
+    const m1 = makeVectorResult({ id: 'a' }, 0.1);
+    const m2 = makeVectorResult({ id: 'b' }, 0.9);
+    const f1 = makeFtsResult({ id: 'a' }, -20);
+    const f2 = makeFtsResult({ id: 'b' }, -1);
+
+    const allMemories = new Map<string, MemoryRow>([
+      ['a', m1],
+      ['b', m2],
+    ]);
+
+    const { scored } = hybridScoreFusion([m1, m2], [f1, f2], allMemories);
+    // a should be first since it's best in both sources
+    expect(scored[0].id).toBe('a');
+    expect(scored[0].fusionScore).toBeCloseTo(1.0);
+    expect(scored[1].fusionScore).toBeCloseTo(0.0);
+  });
+
+  it('alpha weighting: vector-only gets alpha * 1.0', () => {
+    const m1 = makeVectorResult({ id: 'a' }, 0.3);
+    const allMemories = new Map<string, MemoryRow>([['a', m1]]);
+
+    const alpha = 0.7;
+    const { scored } = hybridScoreFusion([m1], [], allMemories, alpha);
+    // Single result normalized to 1.0, weighted by alpha
+    expect(scored[0].fusionScore).toBeCloseTo(0.7);
+  });
+
+  it('alpha weighting: FTS-only gets (1-alpha) * 1.0', () => {
+    const f1 = makeFtsResult({ id: 'a' }, -5);
+    const allMemories = new Map<string, MemoryRow>([['a', f1]]);
+
+    const alpha = 0.7;
+    const { scored } = hybridScoreFusion([], [f1], allMemories, alpha);
+    // Single result normalized to 1.0, weighted by (1-alpha)
+    expect(scored[0].fusionScore).toBeCloseTo(0.3);
+  });
+
+  it('normalizes single vector result to 1.0', () => {
+    const m1 = makeVectorResult({ id: 'a' }, 0.4);
+    const allMemories = new Map<string, MemoryRow>([['a', m1]]);
+
+    const { scored } = hybridScoreFusion([m1], [], allMemories);
+    // Single vector result: range=0, normalized to 1.0
+    // fusionScore = 0.5 * 1.0 = 0.5
+    expect(scored[0].fusionScore).toBeCloseTo(0.5);
   });
 });
 
@@ -97,13 +210,13 @@ describe('computeCompositeScore', () => {
     const now = Date.now();
     const recent = {
       ...makeMemory({ created_at: now - 3600000 }), // 1 hour ago
-      rrfScore: 0.01,
+      fusionScore: 0.5,
       compositeScore: 0,
     } as ScoredMemory;
 
     const old = {
       ...makeMemory({ created_at: now - 30 * 24 * 3600000 }), // 30 days ago
-      rrfScore: 0.01,
+      fusionScore: 0.5,
       compositeScore: 0,
     } as ScoredMemory;
 
@@ -113,7 +226,7 @@ describe('computeCompositeScore', () => {
   it('gives higher score to more important memories', () => {
     const now = Date.now();
     const base = {
-      rrfScore: 0.01,
+      fusionScore: 0.5,
       compositeScore: 0,
       created_at: now,
       last_accessed_at: now,
@@ -126,10 +239,9 @@ describe('computeCompositeScore', () => {
     expect(computeCompositeScore(important, now)).toBeGreaterThan(computeCompositeScore(unimportant, now));
   });
 
-  it('gives higher score to memories with closer vector distance', () => {
+  it('gives higher score to memories with higher fusion scores', () => {
     const now = Date.now();
     const base = {
-      rrfScore: 0.01,
       compositeScore: 0,
       created_at: now,
       last_accessed_at: now,
@@ -137,36 +249,19 @@ describe('computeCompositeScore', () => {
       importance: 0.5,
     };
 
-    const close = { ...makeMemory(), ...base, vectorDistance: 0.2 } as ScoredMemory;
-    const far = { ...makeMemory(), ...base, vectorDistance: 0.8 } as ScoredMemory;
+    const highFusion = { ...makeMemory(), ...base, fusionScore: 0.9 } as ScoredMemory;
+    const lowFusion = { ...makeMemory(), ...base, fusionScore: 0.1 } as ScoredMemory;
 
-    const rrfMax = 0.01;
-    expect(computeCompositeScore(close, now, rrfMax)).toBeGreaterThan(computeCompositeScore(far, now, rrfMax));
-  });
-
-  it('does not penalize FTS-only results vs distant vector results', () => {
-    const now = Date.now();
-    const base = {
-      rrfScore: 0.01,
-      compositeScore: 0,
-      created_at: now,
-      last_accessed_at: now,
-      access_count: 0,
-      importance: 0.5,
-    };
-
-    const far = { ...makeMemory(), ...base, vectorDistance: 0.8 } as ScoredMemory;
-    const ftsOnly = { ...makeMemory(), ...base } as ScoredMemory;
-
-    const rrfMax = 0.01;
-    // FTS-only gets more RRF weight, so should score >= distant vector result
-    expect(computeCompositeScore(ftsOnly, now, rrfMax)).toBeGreaterThanOrEqual(computeCompositeScore(far, now, rrfMax));
+    const fusionMax = 0.9;
+    expect(computeCompositeScore(highFusion, now, fusionMax)).toBeGreaterThan(
+      computeCompositeScore(lowFusion, now, fusionMax),
+    );
   });
 
   it('boosts frequently accessed memories', () => {
     const now = Date.now();
     const base = {
-      rrfScore: 0.01,
+      fusionScore: 0.5,
       compositeScore: 0,
       created_at: now,
       importance: 0.5,
@@ -195,11 +290,11 @@ describe('estimateTokens', () => {
 });
 
 describe('filterByRelevance', () => {
-  it('drops candidates with low RRF scores', () => {
+  it('drops candidates with low fusion scores', () => {
     const memories: ScoredMemory[] = [
-      { ...makeMemory({ id: 'a' }), rrfScore: 0.5, compositeScore: 0.5 },
-      { ...makeMemory({ id: 'b' }), rrfScore: 0.2, compositeScore: 0.4 },
-      { ...makeMemory({ id: 'c' }), rrfScore: 0.05, compositeScore: 0.3 },
+      { ...makeMemory({ id: 'a' }), fusionScore: 0.5, compositeScore: 0.5 },
+      { ...makeMemory({ id: 'b' }), fusionScore: 0.2, compositeScore: 0.4 },
+      { ...makeMemory({ id: 'c' }), fusionScore: 0.05, compositeScore: 0.3 },
     ];
 
     const filtered = filterByRelevance(memories, 0.5);
@@ -208,11 +303,11 @@ describe('filterByRelevance', () => {
     expect(filtered.map((m) => m.id)).toEqual(['a', 'b']);
   });
 
-  it('uses provided rrfMax for threshold', () => {
+  it('uses provided fusionMax for threshold', () => {
     const memories: ScoredMemory[] = [
-      { ...makeMemory({ id: 'a' }), rrfScore: 0.05, compositeScore: 0.8 },
-      { ...makeMemory({ id: 'b' }), rrfScore: 0.5, compositeScore: 0.6 },
-      { ...makeMemory({ id: 'c' }), rrfScore: 0.02, compositeScore: 0.4 },
+      { ...makeMemory({ id: 'a' }), fusionScore: 0.05, compositeScore: 0.8 },
+      { ...makeMemory({ id: 'b' }), fusionScore: 0.5, compositeScore: 0.6 },
+      { ...makeMemory({ id: 'c' }), fusionScore: 0.02, compositeScore: 0.4 },
     ];
 
     const filtered = filterByRelevance(memories, 0.5);
@@ -223,8 +318,8 @@ describe('filterByRelevance', () => {
 
   it('keeps all when scores are close', () => {
     const memories: ScoredMemory[] = [
-      { ...makeMemory({ id: 'a' }), rrfScore: 0.1, compositeScore: 0.5 },
-      { ...makeMemory({ id: 'b' }), rrfScore: 0.08, compositeScore: 0.4 },
+      { ...makeMemory({ id: 'a' }), fusionScore: 0.1, compositeScore: 0.5 },
+      { ...makeMemory({ id: 'b' }), fusionScore: 0.08, compositeScore: 0.4 },
     ];
 
     const filtered = filterByRelevance(memories, 0.1);
@@ -239,10 +334,10 @@ describe('filterByRelevance', () => {
 describe('filterByRerankerScore', () => {
   it('keeps candidates within score gap of the best', () => {
     const memories: ScoredMemory[] = [
-      { ...makeMemory({ id: 'a' }), rrfScore: 0.5, compositeScore: 0.5, rerankerScore: 5 },
-      { ...makeMemory({ id: 'b' }), rrfScore: 0.4, compositeScore: 0.4, rerankerScore: 2 },
-      { ...makeMemory({ id: 'c' }), rrfScore: 0.3, compositeScore: 0.3, rerankerScore: -1 },
-      { ...makeMemory({ id: 'd' }), rrfScore: 0.2, compositeScore: 0.2, rerankerScore: -3 },
+      { ...makeMemory({ id: 'a' }), fusionScore: 0.5, compositeScore: 0.5, rerankerScore: 5 },
+      { ...makeMemory({ id: 'b' }), fusionScore: 0.4, compositeScore: 0.4, rerankerScore: 2 },
+      { ...makeMemory({ id: 'c' }), fusionScore: 0.3, compositeScore: 0.3, rerankerScore: -1 },
+      { ...makeMemory({ id: 'd' }), fusionScore: 0.2, compositeScore: 0.2, rerankerScore: -3 },
     ];
     // Gap of 5 from best (5): keeps scores >= 0, so a, b pass; c(-1) and d(-3) fail
     // But MIN_RERANKER_RESULTS = 5 > 2 passing, so keeps top 5 (only 4 here → all kept)
@@ -253,7 +348,7 @@ describe('filterByRerankerScore', () => {
   it('drops candidates far below the best score', () => {
     const memories: ScoredMemory[] = Array.from({ length: 10 }, (_, i) => ({
       ...makeMemory({ id: `m${i}` }),
-      rrfScore: 0.5,
+      fusionScore: 0.5,
       compositeScore: 0.5,
       rerankerScore: 10 - i * 2, // 10, 8, 6, 4, 2, 0, -2, -4, -6, -8
     }));
@@ -267,7 +362,7 @@ describe('filterByRerankerScore', () => {
   it('returns all passing when more than MIN_RERANKER_RESULTS pass', () => {
     const memories: ScoredMemory[] = Array.from({ length: 10 }, (_, i) => ({
       ...makeMemory({ id: `m${i}` }),
-      rrfScore: 0.5,
+      fusionScore: 0.5,
       compositeScore: 0.5,
       rerankerScore: 10 - i, // 10, 9, 8, 7, 6, 5, 4, 3, 2, 1
     }));
@@ -278,8 +373,8 @@ describe('filterByRerankerScore', () => {
 
   it('passes through unchanged when no reranker scores', () => {
     const memories: ScoredMemory[] = [
-      { ...makeMemory({ id: 'a' }), rrfScore: 0.5, compositeScore: 0.5 },
-      { ...makeMemory({ id: 'b' }), rrfScore: 0.4, compositeScore: 0.4 },
+      { ...makeMemory({ id: 'a' }), fusionScore: 0.5, compositeScore: 0.5 },
+      { ...makeMemory({ id: 'b' }), fusionScore: 0.4, compositeScore: 0.4 },
     ];
     const filtered = filterByRerankerScore(memories);
     expect(filtered).toHaveLength(2);
@@ -293,9 +388,9 @@ describe('filterByRerankerScore', () => {
 describe('packToBudget', () => {
   it('selects memories within budget', () => {
     const memories: ScoredMemory[] = [
-      { ...makeMemory({ content: 'a'.repeat(100) }), rrfScore: 0.5, compositeScore: 0.5 },
-      { ...makeMemory({ id: 'b', content: 'b'.repeat(100) }), rrfScore: 0.4, compositeScore: 0.4 },
-      { ...makeMemory({ id: 'c', content: 'c'.repeat(100) }), rrfScore: 0.3, compositeScore: 0.3 },
+      { ...makeMemory({ content: 'a'.repeat(100) }), fusionScore: 0.5, compositeScore: 0.5 },
+      { ...makeMemory({ id: 'b', content: 'b'.repeat(100) }), fusionScore: 0.4, compositeScore: 0.4 },
+      { ...makeMemory({ id: 'c', content: 'c'.repeat(100) }), fusionScore: 0.3, compositeScore: 0.3 },
     ];
 
     // Budget for ~2 memories (100 chars = 25 tokens each)
@@ -305,8 +400,8 @@ describe('packToBudget', () => {
 
   it('skips large memories and picks smaller ones', () => {
     const memories: ScoredMemory[] = [
-      { ...makeMemory({ content: 'x'.repeat(400) }), rrfScore: 0.5, compositeScore: 0.5 },
-      { ...makeMemory({ id: 'small', content: 'small' }), rrfScore: 0.3, compositeScore: 0.3 },
+      { ...makeMemory({ content: 'x'.repeat(400) }), fusionScore: 0.5, compositeScore: 0.5 },
+      { ...makeMemory({ id: 'small', content: 'small' }), fusionScore: 0.3, compositeScore: 0.3 },
     ];
 
     // Budget too small for the first but enough for the second
@@ -316,7 +411,7 @@ describe('packToBudget', () => {
   });
 
   it('returns empty for zero budget', () => {
-    const memories: ScoredMemory[] = [{ ...makeMemory(), rrfScore: 0.5, compositeScore: 0.5 }];
+    const memories: ScoredMemory[] = [{ ...makeMemory(), fusionScore: 0.5, compositeScore: 0.5 }];
     expect(packToBudget(memories, 0)).toHaveLength(0);
   });
 });

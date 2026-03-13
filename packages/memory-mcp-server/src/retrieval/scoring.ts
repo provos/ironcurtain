@@ -1,73 +1,125 @@
-import type { MemoryRow, VectorSearchResult } from '../storage/database.js';
+import type { MemoryRow, VectorSearchResult, FtsSearchResult } from '../storage/database.js';
 
 export interface ScoredMemory extends MemoryRow {
-  rrfScore: number;
+  fusionScore: number;
   compositeScore: number;
   /** Cosine distance from query embedding (lower = more similar). Only set for vector-retrieved memories. */
   vectorDistance?: number;
+  /** Normalized BM25 score [0,1] within this result set. Only set for FTS-retrieved memories. */
+  bm25Score?: number;
   /** Cross-encoder relevance score. Set by the re-ranker step; higher = more relevant. */
   rerankerScore?: number;
 }
 
-/** Result of RRF merge — includes the max RRF score for downstream normalization. */
-export interface RrfResult {
+/** Result of hybrid score fusion — includes the max fusion score for downstream normalization. */
+export interface FusionResult {
   scored: ScoredMemory[];
-  rrfMax: number;
+  fusionMax: number;
 }
 
 /**
- * Reciprocal Rank Fusion — merge ranked lists from vector and FTS search
- * without needing to normalize their scores.
- *
- * Also preserves vector cosine distances for use in composite scoring,
- * since rank alone discards valuable magnitude information.
- *
- * @param k - smoothing constant (default 60, standard RRF value)
+ * Min-max normalize a value given the min and max of the set.
+ * When range is 0 (all values equal), returns 1.0 (Weaviate convention).
  */
-export function reciprocalRankFusion(
+function minMaxNormalized(value: number, min: number, max: number): number {
+  const range = max - min;
+  return range === 0 ? 1.0 : (value - min) / range;
+}
+
+/**
+ * Weaviate-style relativeScoreFusion — merge vector and FTS search results
+ * using normalized score magnitudes rather than rank positions.
+ *
+ * - Vector similarity scores (1 - distance) are min-max normalized to [0, 1]
+ * - BM25 scores (negative, more negative = better) are min-max normalized to [0, 1]
+ * - Fusion: alpha * norm_vec_sim + (1 - alpha) * norm_bm25
+ * - Candidates from only one source get only that source's weighted contribution
+ *
+ * @param alpha - weight for vector similarity (default 0.5)
+ */
+export function hybridScoreFusion(
   vectorResults: VectorSearchResult[],
-  ftsResults: MemoryRow[],
+  ftsResults: FtsSearchResult[],
   allMemories: Map<string, MemoryRow>,
-  k: number = 60,
-): RrfResult {
-  const scores = new Map<string, number>();
+  alpha: number = 0.5,
+): FusionResult {
+  const vectorScoreById = new Map<string, number>();
+  const ftsScoreById = new Map<string, number>();
   const vectorDistanceById = new Map<string, number>();
+  const bm25NormalizedById = new Map<string, number>();
 
-  for (let rank = 0; rank < vectorResults.length; rank++) {
-    const m = vectorResults[rank];
-    scores.set(m.id, (scores.get(m.id) ?? 0) + 1 / (k + rank + 1));
-    vectorDistanceById.set(m.id, m.distance);
+  // Normalize vector similarities (1 - distance) to [0, 1]
+  if (vectorResults.length > 0) {
+    const similarities = vectorResults.map((r) => 1 - r.distance);
+    const simMin = Math.min(...similarities);
+    const simMax = Math.max(...similarities);
+    for (const r of vectorResults) {
+      const sim = 1 - r.distance;
+      vectorScoreById.set(r.id, minMaxNormalized(sim, simMin, simMax));
+      vectorDistanceById.set(r.id, r.distance);
+    }
   }
 
-  for (let rank = 0; rank < ftsResults.length; rank++) {
-    const m = ftsResults[rank];
-    scores.set(m.id, (scores.get(m.id) ?? 0) + 1 / (k + rank + 1));
+  // Normalize BM25 scores to [0, 1]
+  // FTS5 bm25() returns negative values (more negative = better).
+  // Negate so that better = higher, then min-max normalize.
+  if (ftsResults.length > 0) {
+    const negated = ftsResults.map((r) => -r.bm25_score);
+    const negMin = Math.min(...negated);
+    const negMax = Math.max(...negated);
+    for (const r of ftsResults) {
+      const norm = minMaxNormalized(-r.bm25_score, negMin, negMax);
+      ftsScoreById.set(r.id, norm);
+      bm25NormalizedById.set(r.id, norm);
+    }
   }
 
-  let rrfMax = 0;
-  const scored = [...scores.entries()]
+  // Fuse scores: alpha * norm_vec + (1 - alpha) * norm_bm25
+  // Candidates from only one source get only that source's weighted contribution
+  const fusionScores = new Map<string, number>();
+  const allIds = new Set([...vectorScoreById.keys(), ...ftsScoreById.keys()]);
+
+  for (const id of allIds) {
+    const vecScore = vectorScoreById.get(id);
+    const ftsScore = ftsScoreById.get(id);
+
+    let score = 0;
+    if (vecScore != null) score += alpha * vecScore;
+    if (ftsScore != null) score += (1 - alpha) * ftsScore;
+    fusionScores.set(id, score);
+  }
+
+  let fusionMax = 0;
+  const scored = [...fusionScores.entries()]
     .sort(([, a], [, b]) => b - a)
     .flatMap(([id, score]) => {
       const mem = allMemories.get(id);
       if (!mem) return [];
-      if (score > rrfMax) rrfMax = score;
-      return [{ ...mem, rrfScore: score, compositeScore: 0, vectorDistance: vectorDistanceById.get(id) }];
+      if (score > fusionMax) fusionMax = score;
+      return [
+        {
+          ...mem,
+          fusionScore: score,
+          compositeScore: 0,
+          vectorDistance: vectorDistanceById.get(id),
+          bm25Score: bm25NormalizedById.get(id),
+        },
+      ];
     });
 
-  return { scored, rrfMax };
+  return { scored, fusionMax };
 }
 
 /**
- * Compute a composite score combining RRF relevance, vector similarity,
- * and metadata signals.
+ * Compute a composite score blending fusion relevance with metadata signals.
  *
- * Vector similarity (1 − cosine distance) provides much stronger
- * discriminating power than RRF rank alone, since RRF compresses scores
- * into a narrow range (~0.009–0.033 for k=60, limit=50).
+ * The fusion score already incorporates vector + BM25 magnitudes via
+ * relativeScoreFusion, so the composite just needs to blend it with
+ * recency, importance, and access pattern signals.
  *
- * @param rrfMax - the maximum RRF score in this result set, used for normalization
+ * @param fusionMax - the maximum fusion score in this result set, used for normalization
  */
-export function computeCompositeScore(memory: ScoredMemory, now: number, rrfMax: number = 1): number {
+export function computeCompositeScore(memory: ScoredMemory, now: number, fusionMax: number = 1): number {
   const ageHours = (now - memory.created_at) / 3600000;
   const accessAgeHours = (now - memory.last_accessed_at) / 3600000;
 
@@ -77,26 +129,13 @@ export function computeCompositeScore(memory: ScoredMemory, now: number, rrfMax:
   // Access pattern: recently/frequently accessed memories are boosted
   const accessScore = Math.exp(-0.002 * accessAgeHours) * Math.min(memory.access_count / 10, 1.0);
 
-  // Normalize RRF score to 0–1 range so it's comparable to other signals
-  const normalizedRrf = memory.rrfScore / rrfMax;
+  // Normalize fusion score to 0-1 range
+  const normalizedFusion = memory.fusionScore / fusionMax;
 
-  // Vector similarity: clamp distance to [0,1] then convert to similarity.
-  // Adaptive weighting: when vectorDistance is available, split relevance
-  // weight between RRF and similarity. FTS-only results redistribute
-  // the similarity weight to RRF so they aren't penalized.
-  const vectorSimilarity = memory.vectorDistance != null ? Math.max(0, 1 - Math.min(memory.vectorDistance, 1)) : 0;
-  const hasVector = memory.vectorDistance != null;
+  // Fixed weights: fusion relevance gets the remaining budget after metadata signals
+  const relevanceWeight = 0.65;
 
-  const rrfWeight = hasVector ? 0.3 : 0.65;
-  const vecWeight = hasVector ? 0.35 : 0;
-
-  return (
-    rrfWeight * normalizedRrf +
-    vecWeight * vectorSimilarity +
-    0.15 * recencyScore +
-    0.1 * memory.importance +
-    0.1 * accessScore
-  );
+  return relevanceWeight * normalizedFusion + 0.15 * recencyScore + 0.1 * memory.importance + 0.1 * accessScore;
 }
 
 /**
@@ -107,19 +146,19 @@ export function estimateTokens(text: string): number {
 }
 
 /**
- * Drop candidates whose RRF score is negligible compared to the best.
+ * Drop candidates whose fusion score is negligible compared to the best.
  * This filters noise before budget packing — candidates with very low
- * RRF relevance contribute nothing useful even if there's token budget left.
+ * fusion relevance contribute nothing useful even if there's token budget left.
  *
- * Uses RRF score (not composite) because the composite score includes
+ * Uses fusion score (not composite) because the composite score includes
  * constant components (recency, importance) that compress the range.
  */
-const MIN_RRF_FRACTION = 0.2;
+const MIN_FUSION_FRACTION = 0.2;
 
-export function filterByRelevance(ranked: ScoredMemory[], rrfMax: number): ScoredMemory[] {
-  if (ranked.length === 0 || rrfMax <= 0) return ranked;
-  const threshold = rrfMax * MIN_RRF_FRACTION;
-  return ranked.filter((m) => m.rrfScore >= threshold);
+export function filterByRelevance(ranked: ScoredMemory[], fusionMax: number): ScoredMemory[] {
+  if (ranked.length === 0 || fusionMax <= 0) return ranked;
+  const threshold = fusionMax * MIN_FUSION_FRACTION;
+  return ranked.filter((m) => m.fusionScore >= threshold);
 }
 
 /**

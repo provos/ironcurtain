@@ -34,7 +34,7 @@ src/
 │   └── consolidation.ts  Deferred batch dedup/contradiction detection at store time
 ├── retrieval/
 │   ├── pipeline.ts       Full recall flow (10 steps, see below)
-│   ├── scoring.ts        RRF, composite scoring, relevance filter, reranker filter, budget packing
+│   ├── scoring.ts        Score-based hybrid fusion, composite scoring, relevance filter, reranker filter, budget packing
 │   ├── reranker.ts       Cross-encoder re-ranking (ms-marco-MiniLM, raw logits)
 │   ├── dedup.ts          Embedding-based deduplication
 │   └── formatting.ts     Output: summary (LLM), list (bullets), raw (JSON)
@@ -58,10 +58,10 @@ src/
 
 1. **Embed query** — BGE asymmetric prefix for retrieval-optimized embedding
 2. **Hybrid search** — Vector KNN (50 candidates, distance < 0.9) + FTS5 (50 keywords)
-3. **RRF merge** — Reciprocal Rank Fusion (k=60), preserves vector distances
+3. **Score-based fusion** — Weaviate-style relativeScoreFusion: min-max normalize vector similarity and BM25 scores, blend with alpha weighting (default 0.5)
 4. **Tag filter** — Optional intersection filter
-5. **Composite scoring** — Weighted: RRF (0.3–0.65) + vector similarity (0–0.35) + recency (0.15) + importance (0.1) + access (0.1). Adaptive weighting: FTS-only results redistribute vector weight to RRF
-6. **Relevance gating** — Drop RRF < 20% of max
+5. **Composite scoring** — Weighted: fusion relevance (0.65) + recency (0.15) + importance (0.1) + access (0.1). Fusion score already incorporates vector + BM25 magnitudes
+6. **Relevance gating** — Drop fusion score < 20% of max
 7. **Cross-encoder re-ranking** — ms-marco-MiniLM-L-6-v2 via `AutoModelForSequenceClassification` (raw logits, NOT pipeline API which squashes to 1.0). Try/catch falls back gracefully
 8. **Re-ranker filter** — Relative gap (12 logit points from best), min 5 results
 9. **Dedup** — Embedding cosine similarity
@@ -69,7 +69,8 @@ src/
 
 ## Key Design Decisions
 
-- **Hybrid search over vector-only**: FTS keyword matches are most valuable precisely when vector search is uncertain. Always include both — RRF handles fusion.
+- **Hybrid search over vector-only**: FTS keyword matches are most valuable precisely when vector search is uncertain. Always include both — score-based fusion handles the merge.
+- **Score-based fusion over rank-based (RRF)**: Pure RRF discards score magnitudes and compresses into a tiny range (~0.009-0.033), making relevance filtering ineffective. Weaviate-style relativeScoreFusion preserves normalized score magnitudes in [0,1], giving the relevance gate real discriminating power.
 - **Relative reranker threshold**: ms-marco is trained on web search, so conversational content often gets negative logits even when relevant. Absolute threshold=0 cuts too aggressively. Use gap-from-best instead.
 - **Raw logits, not pipeline API**: The HuggingFace `pipeline('text-classification', ...)` applies softmax on single-output cross-encoders, squashing scores to always 1.0. Must use `AutoModelForSequenceClassification` directly.
 - **Promise-cached model loading**: Both embedder and reranker cache the loading promise (not the resolved value) to prevent concurrent `recall()` calls from racing and loading the model twice.

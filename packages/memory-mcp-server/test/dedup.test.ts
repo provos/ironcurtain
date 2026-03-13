@@ -19,7 +19,7 @@ function makeScoredMemory(id: string, content: string = 'test'): ScoredMemory {
     compacted_from: null,
     source: null,
     metadata: null,
-    rrfScore: 0.5,
+    fusionScore: 0.5,
     compositeScore: 0.5,
   };
 }
