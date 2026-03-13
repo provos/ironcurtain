@@ -123,6 +123,25 @@ export function filterByRelevance(ranked: ScoredMemory[], rrfMax: number): Score
 }
 
 /**
+ * Drop candidates the cross-encoder scored as irrelevant.
+ * ms-marco logits: positive = relevant, negative = not relevant.
+ * Always keeps at least MIN_RERANKER_RESULTS so vague queries still return something.
+ */
+const MIN_RERANKER_RESULTS = 3;
+const RERANKER_SCORE_THRESHOLD = 0;
+
+export function filterByRerankerScore(ranked: ScoredMemory[]): ScoredMemory[] {
+  if (ranked.length === 0) return ranked;
+  // If no reranker scores, pass through unchanged
+  if (ranked[0].rerankerScore == null) return ranked;
+
+  const passing = ranked.filter((m) => (m.rerankerScore ?? 0) >= RERANKER_SCORE_THRESHOLD);
+  // Always keep at least MIN_RERANKER_RESULTS from the top of the reranked list
+  if (passing.length >= MIN_RERANKER_RESULTS) return passing;
+  return ranked.slice(0, Math.max(MIN_RERANKER_RESULTS, passing.length));
+}
+
+/**
  * Greedily select memories by score until the token budget is filled.
  * Uses skip (not break) so smaller memories further down can still fit.
  */

@@ -4,7 +4,13 @@ import type { MemoryConfig } from '../config.js';
 import type { RecallOptions } from '../types.js';
 import { vectorSearch, ftsSearch, updateAccessStats, getEmbeddingsForMemories } from '../storage/queries.js';
 import { embedQuery } from '../embedding/embedder.js';
-import { reciprocalRankFusion, computeCompositeScore, filterByRelevance, packToBudget } from './scoring.js';
+import {
+  reciprocalRankFusion,
+  computeCompositeScore,
+  filterByRelevance,
+  filterByRerankerScore,
+  packToBudget,
+} from './scoring.js';
 import { deduplicateByEmbedding } from './dedup.js';
 import { rerank } from './reranker.js';
 import { formatMemories } from './formatting.js';
@@ -86,12 +92,17 @@ export async function recall(
   // Runs only on the filtered set (typically 30-50 items) to keep latency reasonable.
   const reranked = await rerank(query, relevant, config);
 
+  // 6c. Drop candidates the cross-encoder scored as irrelevant.
+  // ms-marco logits: positive = relevant, negative = not relevant.
+  // Always keep at least MIN_RERANKER_RESULTS to avoid returning nothing.
+  const afterRerankerFilter = filterByRerankerScore(reranked);
+
   // 7. Load embeddings only for relevant candidates
-  const embeddingIds = reranked.map((m) => m.id);
+  const embeddingIds = afterRerankerFilter.map((m) => m.id);
   const embeddings = getEmbeddingsForMemories(db, embeddingIds);
 
   // 8. Dedup
-  const { kept } = deduplicateByEmbedding(reranked, embeddings);
+  const { kept } = deduplicateByEmbedding(afterRerankerFilter, embeddings);
 
   // 9. Token budget packing
   const selected = packToBudget(kept, tokenBudget);
