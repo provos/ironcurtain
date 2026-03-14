@@ -12,11 +12,6 @@ import { resolve, dirname } from 'node:path';
 import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { CompiledPolicyFile, ToolAnnotationsFile } from '../../src/pipeline/types.js';
-import {
-  getMemoryToolAnnotations,
-  MEMORY_BLANKET_ALLOW_RULE,
-  MEMORY_SERVER_NAME,
-} from '../../src/memory/memory-annotations.js';
 import { getUserConfigPath } from '../../src/config/paths.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -482,24 +477,6 @@ export const testToolAnnotations: ToolAnnotationsFile = {
       ],
     },
   },
-};
-
-/** Test annotations extended with memory server tools. */
-export const testToolAnnotationsWithMemory: ToolAnnotationsFile = {
-  ...testToolAnnotations,
-  servers: {
-    ...testToolAnnotations.servers,
-    [MEMORY_SERVER_NAME]: {
-      inputHash: 'builtin',
-      tools: getMemoryToolAnnotations(),
-    },
-  },
-};
-
-/** Test compiled policy extended with memory blanket-allow rule (prepended). */
-export const testCompiledPolicyWithMemory: CompiledPolicyFile = {
-  ...testCompiledPolicy,
-  rules: [MEMORY_BLANKET_ALLOW_RULE, ...testCompiledPolicy.rules],
 };
 
 /** Domain allowlists matching the fetch server config (allowedDomains: ["*"]). */

@@ -76,7 +76,7 @@ import { permissiveJsonSchemaValidator } from './permissive-output-validator.js'
 import type { LanguageModelV3 } from '@ai-sdk/provider';
 import type { MCPServerConfig, SandboxAvailabilityPolicy } from '../config/types.js';
 import { VERSION } from '../version.js';
-import { MEMORY_SERVER_NAME, injectMemoryAnnotations } from '../memory/memory-annotations.js';
+import { MEMORY_SERVER_NAME } from '../memory/memory-annotations.js';
 import { loadToolDescriptionHints, applyToolDescriptionHints } from './tool-description-hints.js';
 
 export interface ProxiedTool {
@@ -609,6 +609,97 @@ export async function handleCallTool(
     };
   }
 
+  // Trusted servers bypass annotation lookup and policy evaluation entirely.
+  if (deps.policyEngine.isTrustedServer(toolInfo.serverName)) {
+    const policyDecision: PolicyDecision = {
+      status: 'allow',
+      rule: 'trusted-server',
+      reason: `Server "${toolInfo.serverName}" is trusted`,
+    };
+
+    const startTime = Date.now();
+    try {
+      const clientState = deps.clientStates.get(toolInfo.serverName);
+      if (!clientState) {
+        const err = `Internal error: no client connection for server "${toolInfo.serverName}"`;
+        deps.auditLog.log(
+          buildAuditEntry(
+            {
+              requestId: uuidv4(),
+              serverName: toolInfo.serverName,
+              toolName: toolInfo.name,
+              arguments: rawArgs,
+              timestamp: new Date().toISOString(),
+            },
+            rawArgs,
+            policyDecision,
+            { status: 'error', error: err },
+            Date.now() - startTime,
+            {},
+          ),
+        );
+        return { content: [{ type: 'text', text: err }], isError: true };
+      }
+
+      const callToolOpts = { timeout: getEscalationTimeoutMs() };
+      const result = await clientState.client.callTool(
+        { name: toolInfo.name, arguments: rawArgs },
+        CompatibilityCallToolResultSchema,
+        callToolOpts,
+      );
+
+      const request: ToolCallRequest = {
+        requestId: uuidv4(),
+        serverName: toolInfo.serverName,
+        toolName: toolInfo.name,
+        arguments: rawArgs,
+        timestamp: new Date().toISOString(),
+      };
+
+      if (result.isError) {
+        const errorText = extractTextFromContent(result.content) ?? 'Unknown tool error';
+        deps.auditLog.log(
+          buildAuditEntry(
+            request,
+            rawArgs,
+            policyDecision,
+            { status: 'error', error: errorText },
+            Date.now() - startTime,
+            {},
+          ),
+        );
+        return { content: result.content, isError: true };
+      }
+
+      deps.auditLog.log(
+        buildAuditEntry(request, rawArgs, policyDecision, { status: 'success' }, Date.now() - startTime, {}),
+      );
+      return { content: result.content };
+    } catch (err) {
+      const errorMessage = extractMcpErrorMessage(err);
+      deps.auditLog.log(
+        buildAuditEntry(
+          {
+            requestId: uuidv4(),
+            serverName: toolInfo.serverName,
+            toolName: toolInfo.name,
+            arguments: rawArgs,
+            timestamp: new Date().toISOString(),
+          },
+          rawArgs,
+          policyDecision,
+          { status: 'error', error: errorMessage },
+          Date.now() - startTime,
+          {},
+        ),
+      );
+      return {
+        content: [{ type: 'text', text: `Error: ${errorMessage}` }],
+        isError: true,
+      };
+    }
+  }
+
   // Annotation-driven normalization: split into transport vs policy args
   const annotation = deps.policyEngine.getAnnotation(toolInfo.serverName, toolInfo.name, rawArgs);
   if (!annotation) {
@@ -914,13 +1005,11 @@ async function main(): Promise<void> {
     fallbackDir: getPackageGeneratedDir(),
   });
 
-  // Inject memory server annotations and blanket-allow rule when the memory
-  // server is present in the server config (injected by session setup).
-  if (MEMORY_SERVER_NAME in serversConfig) {
-    injectMemoryAnnotations(toolAnnotations, compiledPolicy);
-  }
-
   const serverDomainAllowlists = extractServerDomainAllowlists(serversConfig);
+  const trustedServers = new Set<string>();
+  if (MEMORY_SERVER_NAME in serversConfig) {
+    trustedServers.add(MEMORY_SERVER_NAME);
+  }
   const policyEngine = new PolicyEngine(
     compiledPolicy,
     toolAnnotations,
@@ -928,6 +1017,7 @@ async function main(): Promise<void> {
     allowedDirectory,
     serverDomainAllowlists,
     dynamicLists,
+    trustedServers,
   );
   const auditLog = new AuditLog(auditLogPath, { redact: auditRedaction });
   const circuitBreaker = new CallCircuitBreaker();

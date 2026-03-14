@@ -311,6 +311,7 @@ export class PolicyEngine {
   private protectedPathExclusions: string[];
   private allowedDirectory?: string;
   private serverDomainAllowlists: ReadonlyMap<string, readonly string[]>;
+  private trustedServers: ReadonlySet<string>;
 
   constructor(
     compiledPolicy: CompiledPolicyFile,
@@ -319,6 +320,7 @@ export class PolicyEngine {
     allowedDirectory?: string,
     serverDomainAllowlists?: ReadonlyMap<string, readonly string[]>,
     dynamicLists?: DynamicListsFile,
+    trustedServers?: ReadonlySet<string>,
   ) {
     this.compiledPolicy = dynamicLists ? expandListReferences(compiledPolicy, dynamicLists) : compiledPolicy;
     this.protectedPaths = protectedPaths;
@@ -326,6 +328,7 @@ export class PolicyEngine {
     this.protectedPathExclusions = allowedDirectory ? [resolveRealPath(allowedDirectory)] : [];
     this.serverDomainAllowlists = serverDomainAllowlists ?? new Map();
     this.annotationMap = this.buildAnnotationMap(toolAnnotations);
+    this.trustedServers = trustedServers ?? new Set();
   }
 
   private buildAnnotationMap(annotations: StoredToolAnnotationsFile): Map<string, StoredToolAnnotation> {
@@ -359,7 +362,20 @@ export class PolicyEngine {
     return this.annotationMap.get(`${serverName}__${toolName}`);
   }
 
+  /** Returns true when the server bypasses all policy evaluation. */
+  isTrustedServer(serverName: string): boolean {
+    return this.trustedServers.has(serverName);
+  }
+
   evaluate(request: ToolCallRequest): EvaluationResult {
+    // Trusted servers bypass all policy evaluation (no annotations needed).
+    if (this.trustedServers.has(request.serverName)) {
+      return {
+        decision: 'allow',
+        rule: 'trusted-server',
+        reason: `Server "${request.serverName}" is trusted`,
+      };
+    }
     // Resolve conditional roles once against the actual tool call arguments.
     // After this point, `annotation` has the standard shape: args: Record<string, ArgumentRole[]>
     const annotation = this.getAnnotation(request.serverName, request.toolName, request.arguments);

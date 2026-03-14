@@ -8,12 +8,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { resolveMemoryDbPath } from '../src/memory/resolve-memory-path.js';
-import {
-  getMemoryToolAnnotations,
-  MEMORY_BLANKET_ALLOW_RULE,
-  MEMORY_SERVER_NAME,
-  buildMemoryServerConfig,
-} from '../src/memory/memory-annotations.js';
+import { MEMORY_SERVER_NAME, buildMemoryServerConfig } from '../src/memory/memory-annotations.js';
 import { applyServerAllowlist } from '../src/persona/resolve.js';
 import type { MCPServerConfig } from '../src/config/types.js';
 
@@ -35,59 +30,6 @@ describe('resolveMemoryDbPath', () => {
 
   it('throws when neither persona nor jobId is set', () => {
     expect(() => resolveMemoryDbPath({})).toThrow('requires either persona or jobId');
-  });
-});
-
-describe('getMemoryToolAnnotations', () => {
-  it('returns annotations for all 5 memory tools', () => {
-    const annotations = getMemoryToolAnnotations();
-    expect(annotations).toHaveLength(5);
-    const names = annotations.map((a) => a.toolName);
-    expect(names).toEqual(['memory_store', 'memory_recall', 'memory_context', 'memory_forget', 'memory_inspect']);
-  });
-
-  it('marks store and forget as having side effects', () => {
-    const annotations = getMemoryToolAnnotations();
-    const store = annotations.find((a) => a.toolName === 'memory_store')!;
-    const forget = annotations.find((a) => a.toolName === 'memory_forget')!;
-    expect(store.sideEffects).toBe(true);
-    expect(forget.sideEffects).toBe(true);
-  });
-
-  it('marks recall, context, and inspect as side-effect-free', () => {
-    const annotations = getMemoryToolAnnotations();
-    const recall = annotations.find((a) => a.toolName === 'memory_recall')!;
-    const context = annotations.find((a) => a.toolName === 'memory_context')!;
-    const inspect = annotations.find((a) => a.toolName === 'memory_inspect')!;
-    expect(recall.sideEffects).toBe(false);
-    expect(context.sideEffects).toBe(false);
-    expect(inspect.sideEffects).toBe(false);
-  });
-
-  it('assigns all args the none role', () => {
-    const annotations = getMemoryToolAnnotations();
-    for (const annotation of annotations) {
-      for (const roles of Object.values(annotation.args)) {
-        expect(roles).toEqual(['none']);
-      }
-    }
-  });
-
-  it('sets serverName to memory for all tools', () => {
-    const annotations = getMemoryToolAnnotations();
-    for (const annotation of annotations) {
-      expect(annotation.serverName).toBe(MEMORY_SERVER_NAME);
-    }
-  });
-});
-
-describe('MEMORY_BLANKET_ALLOW_RULE', () => {
-  it('targets the memory server', () => {
-    expect(MEMORY_BLANKET_ALLOW_RULE.if.server).toEqual([MEMORY_SERVER_NAME]);
-  });
-
-  it('has allow decision', () => {
-    expect(MEMORY_BLANKET_ALLOW_RULE.then).toBe('allow');
   });
 });
 
@@ -128,6 +70,12 @@ describe('buildMemoryServerConfig', () => {
   });
 });
 
+describe('MEMORY_SERVER_NAME', () => {
+  it('is the string "memory"', () => {
+    expect(MEMORY_SERVER_NAME).toBe('memory');
+  });
+});
+
 describe('applyServerAllowlist always includes memory', () => {
   const servers: Record<string, MCPServerConfig> = {
     filesystem: { command: 'node', args: ['/tmp'] },
@@ -143,8 +91,6 @@ describe('applyServerAllowlist always includes memory', () => {
   });
 
   it('does not warn about memory being unknown', () => {
-    // memory should be treated like filesystem - no warning when in allowlist
-    // This is tested indirectly: the function should not throw or warn for 'memory'
     const filtered = applyServerAllowlist(servers, ['memory']);
     expect(filtered).toHaveProperty('memory');
   });

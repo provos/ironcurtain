@@ -518,6 +518,7 @@ describe('handleCallTool', () => {
         rule: 'allow-reads',
         reason: 'allowed',
       }),
+      isTrustedServer: vi.fn().mockReturnValue(false),
     };
 
     const mockClient = {
@@ -768,6 +769,7 @@ describe('handleCallTool', () => {
       const policyEngine = {
         getAnnotation: vi.fn().mockReturnValue(annotation),
         evaluate: vi.fn().mockReturnValue({ decision: 'allow', rule: 'test-allow', reason: 'test' }),
+        isTrustedServer: vi.fn().mockReturnValue(false),
       };
 
       const mockGitClient = {

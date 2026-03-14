@@ -10,8 +10,6 @@ import type { ToolCallRequest } from '../src/types/mcp.js';
 import {
   testCompiledPolicy,
   testToolAnnotations,
-  testCompiledPolicyWithMemory,
-  testToolAnnotationsWithMemory,
   TEST_SANDBOX_DIR,
   TEST_PROTECTED_PATHS,
   REAL_TMP,
@@ -2462,56 +2460,64 @@ describe('PolicyEngine with conditional roles', () => {
     });
   });
 
-  describe('memory server policy', () => {
-    const memoryEngine = new PolicyEngine(
-      testCompiledPolicyWithMemory,
-      testToolAnnotationsWithMemory,
+  describe('trusted server policy', () => {
+    const trustedEngine = new PolicyEngine(
+      testCompiledPolicy,
+      testToolAnnotations,
       protectedPaths,
       SANDBOX_DIR,
+      undefined,
+      undefined,
+      new Set(['memory']),
     );
 
-    it('allows memory_store when memory annotations and rule are injected', () => {
-      const result = memoryEngine.evaluate(
+    it('allows any tool from a trusted server without annotations', () => {
+      const result = trustedEngine.evaluate(
         makeRequest({ serverName: 'memory', toolName: 'memory_store', arguments: { content: 'hello' } }),
       );
       expect(result.decision).toBe('allow');
+      expect(result.rule).toBe('trusted-server');
     });
 
-    it('allows memory_recall when memory annotations and rule are injected', () => {
-      const result = memoryEngine.evaluate(
+    it('allows memory_recall from a trusted server', () => {
+      const result = trustedEngine.evaluate(
         makeRequest({ serverName: 'memory', toolName: 'memory_recall', arguments: { query: 'test' } }),
       );
       expect(result.decision).toBe('allow');
+      expect(result.rule).toBe('trusted-server');
     });
 
-    it('allows memory_context when memory annotations and rule are injected', () => {
-      const result = memoryEngine.evaluate(
-        makeRequest({ serverName: 'memory', toolName: 'memory_context', arguments: {} }),
+    it('allows unknown tool names from a trusted server', () => {
+      const result = trustedEngine.evaluate(
+        makeRequest({ serverName: 'memory', toolName: 'nonexistent_tool', arguments: {} }),
       );
       expect(result.decision).toBe('allow');
+      expect(result.rule).toBe('trusted-server');
     });
 
-    it('allows memory_forget when memory annotations and rule are injected', () => {
-      const result = memoryEngine.evaluate(
-        makeRequest({ serverName: 'memory', toolName: 'memory_forget', arguments: { tag: 'old' } }),
+    it('does not affect non-trusted servers', () => {
+      const result = trustedEngine.evaluate(
+        makeRequest({ serverName: 'filesystem', toolName: 'read_file', arguments: { path: '/etc/passwd' } }),
       );
-      expect(result.decision).toBe('allow');
+      // Should go through normal policy evaluation, not trusted-server shortcut
+      expect(result.rule).not.toBe('trusted-server');
     });
 
-    it('allows memory_inspect when memory annotations and rule are injected', () => {
-      const result = memoryEngine.evaluate(
-        makeRequest({ serverName: 'memory', toolName: 'memory_inspect', arguments: { view: 'stats' } }),
-      );
-      expect(result.decision).toBe('allow');
+    it('isTrustedServer returns true for trusted servers', () => {
+      expect(trustedEngine.isTrustedServer('memory')).toBe(true);
     });
 
-    it('denies memory tools when annotations are not injected (unknown tool)', () => {
-      // Use a base engine without memory annotations
+    it('isTrustedServer returns false for non-trusted servers', () => {
+      expect(trustedEngine.isTrustedServer('filesystem')).toBe(false);
+    });
+
+    it('denies memory tools when trustedServers is not configured', () => {
       const baseEngine = new PolicyEngine(testCompiledPolicy, testToolAnnotations, protectedPaths, SANDBOX_DIR);
       const result = baseEngine.evaluate(
         makeRequest({ serverName: 'memory', toolName: 'memory_store', arguments: { content: 'hello' } }),
       );
       expect(result.decision).toBe('deny');
+      expect(result.rule).toBe('structural-unknown-tool');
     });
   });
 });

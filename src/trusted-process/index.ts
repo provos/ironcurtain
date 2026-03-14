@@ -1,7 +1,6 @@
 import type { LanguageModelV3 } from '@ai-sdk/provider';
 import type { IronCurtainConfig } from '../config/types.js';
 import type { ToolCallRequest, ToolCallResult, PolicyDecision } from '../types/mcp.js';
-import type { AuditEntry } from '../types/audit.js';
 import {
   loadGeneratedPolicy,
   extractServerDomainAllowlists,
@@ -19,8 +18,9 @@ import { prepareToolArgs } from './path-utils.js';
 import { extractPolicyRoots, toMcpRoots, directoryForPath } from './policy-roots.js';
 import * as logger from '../logger.js';
 import { extractMcpErrorMessage } from './mcp-error-utils.js';
+import { extractTextFromContent, buildAuditEntry } from './mcp-proxy-server.js';
 import { type ServerContextMap, updateServerContext, formatServerContext } from './server-context.js';
-import { MEMORY_SERVER_NAME, injectMemoryAnnotations } from '../memory/memory-annotations.js';
+import { MEMORY_SERVER_NAME } from '../memory/memory-annotations.js';
 
 /**
  * Detects Docker-style `-e VAR_NAME` args (no `=`) where the env var is unset.
@@ -71,13 +71,11 @@ export class TrustedProcess {
     });
     checkConstitutionFreshness(compiledPolicy, config.constitutionPath);
 
-    // Inject memory server annotations and blanket-allow rule when the memory
-    // server is present in the MCP server config.
-    if (MEMORY_SERVER_NAME in config.mcpServers) {
-      injectMemoryAnnotations(toolAnnotations, compiledPolicy);
-    }
-
     const serverDomainAllowlists = extractServerDomainAllowlists(config.mcpServers);
+    const trustedServers = new Set<string>();
+    if (MEMORY_SERVER_NAME in config.mcpServers) {
+      trustedServers.add(MEMORY_SERVER_NAME);
+    }
     this.policyEngine = new PolicyEngine(
       compiledPolicy,
       toolAnnotations,
@@ -85,6 +83,7 @@ export class TrustedProcess {
       config.allowedDirectory,
       serverDomainAllowlists,
       dynamicLists,
+      trustedServers,
     );
 
     const policyRoots = extractPolicyRoots(compiledPolicy, config.allowedDirectory);
@@ -157,6 +156,63 @@ export class TrustedProcess {
    */
   async handleToolCall(request: ToolCallRequest): Promise<ToolCallResult> {
     const startTime = Date.now();
+
+    // Trusted servers bypass annotation lookup and policy evaluation entirely.
+    // Forward directly and log the result.
+    if (this.policyEngine.isTrustedServer(request.serverName)) {
+      const policyDecision: PolicyDecision = {
+        status: 'allow',
+        rule: 'trusted-server',
+        reason: `Server "${request.serverName}" is trusted`,
+      };
+
+      let resultContent: unknown;
+      let resultStatus: 'success' | 'error';
+      let resultError: string | undefined;
+
+      try {
+        const mcpResult = (await this.mcpManager.callTool(request.serverName, request.toolName, request.arguments)) as {
+          content?: unknown;
+          isError?: boolean;
+        };
+        resultContent = mcpResult;
+
+        if (mcpResult.isError) {
+          resultStatus = 'error';
+          resultError = extractTextFromContent(mcpResult.content);
+        } else {
+          resultStatus = 'success';
+        }
+      } catch (err) {
+        resultStatus = 'error';
+        resultError = extractMcpErrorMessage(err);
+        resultContent = { error: resultError };
+      }
+
+      const durationMs = Date.now() - startTime;
+      this.auditLog.log(
+        buildAuditEntry(
+          request,
+          request.arguments,
+          policyDecision,
+          {
+            status: resultStatus,
+            content: resultStatus === 'success' ? resultContent : undefined,
+            error: resultError,
+          },
+          durationMs,
+          {},
+        ),
+      );
+
+      return {
+        requestId: request.requestId,
+        status: resultStatus,
+        content: resultContent,
+        policyDecision,
+        durationMs,
+      };
+    }
 
     // Annotation-driven normalization: split into transport vs policy args
     const annotation = this.policyEngine.getAnnotation(request.serverName, request.toolName, request.arguments);
@@ -255,13 +311,7 @@ export class TrustedProcess {
 
         if (mcpResult.isError) {
           resultStatus = 'error';
-          const content = mcpResult.content;
-          if (Array.isArray(content)) {
-            resultError = content
-              .filter((c: Record<string, unknown>) => c.type === 'text' && typeof c.text === 'string')
-              .map((c: Record<string, unknown>) => c.text as string)
-              .join('\n');
-          }
+          resultError = extractTextFromContent(mcpResult.content);
         } else {
           resultStatus = 'success';
           updateServerContext(
@@ -284,23 +334,20 @@ export class TrustedProcess {
     const durationMs = Date.now() - startTime;
 
     // Step 4: Append-only audit log (records argsForTransport -- what was sent to MCP server)
-    const auditEntry: AuditEntry = {
-      timestamp: new Date().toISOString(),
-      requestId: transportRequest.requestId,
-      serverName: transportRequest.serverName,
-      toolName: transportRequest.toolName,
-      arguments: transportRequest.arguments,
-      policyDecision,
-      escalationResult,
-      result: {
-        status: resultStatus,
-        content: resultStatus === 'success' ? resultContent : undefined,
-        error: resultError,
-      },
-      durationMs,
-      autoApproved: autoApproved || undefined,
-    };
-    this.auditLog.log(auditEntry);
+    this.auditLog.log(
+      buildAuditEntry(
+        transportRequest,
+        transportRequest.arguments,
+        policyDecision,
+        {
+          status: resultStatus,
+          content: resultStatus === 'success' ? resultContent : undefined,
+          error: resultError,
+        },
+        durationMs,
+        { escalationResult, autoApproved: autoApproved || undefined },
+      ),
+    );
 
     // Step 5: Return result to caller
     return {
