@@ -2,6 +2,22 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## General Workflow
+
+When asked to find a file or document, ask the user for the path after one failed search attempt rather than spending many tool calls searching.
+
+## Git & Worktrees
+
+When working with git worktrees, always verify the current working directory before making changes. Run `pwd` and confirm the target worktree path before any edits.
+
+## Git Workflow
+
+Always stage and verify all relevant files before committing. Run `git status` before `git commit` to confirm nothing is missing.
+
+## Platform Considerations
+
+When fixing bugs or implementing features for cross-platform code (macOS/Linux/Docker), ensure changes are scoped to the correct platform and do not break other platforms. Always ask if unsure.
+
 ## Project Overview
 
 IronCurtain is a secure agent runtime that mediates between an AI agent and MCP (Model Context Protocol) servers. Every tool call from the agent passes through a trusted process that evaluates it against policy rules (allow/deny/escalate) before routing to the real MCP server. This is a proof-of-concept implementation.
