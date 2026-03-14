@@ -203,6 +203,7 @@ Both use the same PolicyEngine with compiled artifacts.
 - Replaces `memory.md` system prompt injection approach
 - Always included in server allowlist (like filesystem)
 
+## Docker MITM Proxy -- see `docker-mitm-proxy.md` topic file
 ## Auto-Approver -- see `auto-approver.md` topic file
 ## Signal Transport -- `docs/designs/signal-transport.md`; `src/signal/` module
 ## Docker Agent Mode -- see `docker-agent.md` topic file

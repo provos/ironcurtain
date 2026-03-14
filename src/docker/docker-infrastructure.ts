@@ -159,16 +159,39 @@ export async function prepareDockerInfrastructure(
     providerMappings.push({ config: providerConfig, fakeKey, realKey, tokenManager: hostTokenManager });
   }
 
+  // Build package installation proxy config if enabled
+  const pkgConfig = config.userConfig.packageInstall;
+  let registries: import('./package-types.js').RegistryConfig[] | undefined;
+  let packageValidation: { validator: import('./package-types.js').PackageValidator; auditLogPath: string } | undefined;
+
+  if (pkgConfig.enabled) {
+    const { npmRegistry, pypiRegistry } = await import('./registry-proxy.js');
+    const { createPackageValidator } = await import('./package-validator.js');
+
+    registries = [npmRegistry, pypiRegistry];
+    const validator = createPackageValidator({
+      allowedPackages: pkgConfig.allowedPackages,
+      deniedPackages: pkgConfig.deniedPackages,
+      quarantineDays: pkgConfig.quarantineDays,
+    });
+    const packageAuditLogPath = resolve(sessionDir, 'package-audit.jsonl');
+    packageValidation = { validator, auditLogPath: packageAuditLogPath };
+  }
+
   const mitmProxy = useTcp
     ? createMitmProxy({
         listenPort: 0,
         ca,
         providers: providerMappings,
+        registries,
+        packageValidation,
       })
     : createMitmProxy({
         socketPath: resolve(socketsDir, 'mitm-proxy.sock'),
         ca,
         providers: providerMappings,
+        registries,
+        packageValidation,
       });
 
   const docker = createDockerManager();

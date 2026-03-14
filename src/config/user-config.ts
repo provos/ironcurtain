@@ -132,6 +132,15 @@ const webSearchSchema = z
   })
   .optional();
 
+const packageInstallSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    quarantineDays: z.number().int().min(0).optional(),
+    allowedPackages: z.array(z.string().min(1)).optional(),
+    deniedPackages: z.array(z.string().min(1)).optional(),
+  })
+  .optional();
+
 const signalContainerSchema = z
   .object({
     image: z.string().min(1).optional(),
@@ -190,6 +199,7 @@ export const userConfigSchema = z.object({
   gooseProvider: z.enum(GOOSE_PROVIDERS).optional(),
   gooseModel: z.string().min(1).optional(),
   preferredDockerAgent: z.enum(DOCKER_AGENTS).optional(),
+  packageInstall: packageInstallSchema,
 });
 
 /** Parsed config from ~/.ironcurtain/config.json. All fields optional. */
@@ -230,6 +240,14 @@ export interface ResolvedMemoryConfig {
   readonly llmApiKey: string | undefined;
 }
 
+/** Resolved package installation config with all fields present. */
+export interface ResolvedPackageInstallConfig {
+  readonly enabled: boolean;
+  readonly quarantineDays: number;
+  readonly allowedPackages: readonly string[];
+  readonly deniedPackages: readonly string[];
+}
+
 /** Resolved web search config with all fields present. */
 export interface ResolvedWebSearchConfig {
   readonly provider: WebSearchProvider | null;
@@ -261,6 +279,8 @@ export interface ResolvedUserConfig {
   readonly gooseModel: string;
   /** Preferred Docker agent for auto-detection. */
   readonly preferredDockerAgent: DockerAgent;
+  /** Package installation proxy configuration. */
+  readonly packageInstall: ResolvedPackageInstallConfig;
 }
 
 /** Known fields derived from the schema. Used for unknown-field detection. */
@@ -579,6 +599,12 @@ function mergeWithDefaults(config: UserConfig): ResolvedUserConfig {
     gooseProvider: config.gooseProvider ?? 'anthropic',
     gooseModel: config.gooseModel ?? 'claude-sonnet-4-20250514',
     preferredDockerAgent: config.preferredDockerAgent ?? 'claude-code',
+    packageInstall: {
+      enabled: config.packageInstall?.enabled ?? true,
+      quarantineDays: config.packageInstall?.quarantineDays ?? 2,
+      allowedPackages: config.packageInstall?.allowedPackages ?? [],
+      deniedPackages: config.packageInstall?.deniedPackages ?? [],
+    },
   };
 }
 
