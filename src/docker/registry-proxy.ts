@@ -104,6 +104,7 @@ function parseNpmPackagePart(packagePart: string): { name: string; scope?: strin
   // Ensure we don't parse paths with extra segments as metadata
   // /name/something should not be a metadata request (except /-/ which is handled above)
   if (packagePart.includes('/')) return undefined;
+  if (!packagePart) return undefined;
   return { name: packagePart };
 }
 
@@ -234,7 +235,9 @@ export function filterNpmPackument(
   if (packument.time?.modified) filteredTime.modified = packument.time.modified;
 
   for (const [version, manifest] of Object.entries(packument.versions)) {
-    const publishedAt = packument.time?.[version] ? new Date(packument.time[version]) : undefined;
+    const rawDate = packument.time?.[version] ? new Date(packument.time[version]) : undefined;
+    // Treat invalid dates (NaN) as missing — prevents fail-open on garbage timestamps
+    const publishedAt = rawDate && Number.isFinite(rawDate.getTime()) ? rawDate : undefined;
 
     const decision = validator.validate({ registry: 'npm', name: packageName, scope, version }, { publishedAt });
 
@@ -388,10 +391,11 @@ export async function handleRegistryRequest(
   if (registry.type === 'npm') {
     if (isNpmMetadataRequest(path)) {
       await handleNpmMetadata(registry, path, clientReq, clientRes, host, port, options);
-    } else if (path.includes('/-/')) {
+    } else if (path.includes('/-/') && !path.startsWith('/-/')) {
+      // Tarball download: /-/ appears after package name (e.g., /express/-/express-1.0.0.tgz)
       await handleTarballDownload(registry, path, clientRes, host, port, options, 'npm');
     } else {
-      // Unknown path (e.g., /-/ping) -- pass through
+      // npm internal endpoints (/-/ping, /-/v1/security/...) or unknown paths -- pass through
       await forwardUpstream(clientReq, clientRes, host, port);
     }
   } else {

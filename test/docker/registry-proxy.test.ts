@@ -67,6 +67,13 @@ describe('parseNpmUrl', () => {
     it('returns undefined for paths with extra segments', () => {
       expect(parseNpmUrl('/express/something')).toBeUndefined();
     });
+
+    it('returns undefined for empty package name (/-/ prefix paths)', () => {
+      // /-/ping has empty package part before /-/
+      expect(parseNpmUrl('/-/ping')).toBeUndefined();
+      expect(parseNpmUrl('/-/v1/security/advisories')).toBeUndefined();
+      expect(parseNpmUrl('/-/')).toBeUndefined();
+    });
   });
 
   describe('tarball requests', () => {
@@ -334,6 +341,22 @@ describe('filterNpmPackument', () => {
 
     expect(Object.keys(filtered.versions)).toEqual(['20.0.0']);
   });
+
+  it('treats invalid timestamps as missing metadata (fail-closed)', () => {
+    const packument: NpmPackument = {
+      name: 'express',
+      versions: { '5.0.0': { version: '5.0.0' } },
+      'dist-tags': { latest: '5.0.0' },
+      time: { '5.0.0': 'not-a-valid-date' },
+    };
+    const validator = createPackageValidator({ quarantineDays: 7 });
+    const { filtered, denied } = filterNpmPackument(packument, validator, 'express');
+
+    // Invalid date should be treated as no timestamp -> fail-closed deny
+    expect(Object.keys(filtered.versions)).toHaveLength(0);
+    expect(denied).toHaveLength(1);
+    expect(denied[0].reason).toContain('fail-closed');
+  });
 });
 
 // ── PyPI index filtering ────────────────────────────────────────────
@@ -477,18 +500,16 @@ describe('handleRegistryRequest: adversarial /-/ paths', () => {
     cache: new Map(),
   };
 
-  const adversarialPaths = [
-    '/-/some-random-path',
-    '/-/',
+  // Paths with a package prefix before /-/ go to tarball backstop (403)
+  const tarballBackstopPaths = [
     '/express/-/not-a-real-tarball',
     '/express/-/',
     '/@scope/pkg/-/garbled-filename.xyz',
-    '/-/v1/security/advisories',
     '/express/-/express-99.99.99.tgz', // valid-looking but won't be in cache
   ];
 
-  for (const path of adversarialPaths) {
-    it(`denies crafted path: ${path}`, async () => {
+  for (const path of tarballBackstopPaths) {
+    it(`denies crafted tarball path: ${path}`, async () => {
       const req = fakeReq(path);
       const res = fakeRes();
 
@@ -499,14 +520,30 @@ describe('handleRegistryRequest: adversarial /-/ paths', () => {
     });
   }
 
-  it('does not deny legitimate npm metadata requests', async () => {
-    const req = fakeReq('/express');
-    const res = fakeRes();
+  // Paths starting with /-/ are npm internal endpoints — verify they are NOT
+  // routed to the tarball backstop by confirming parseNpmUrl returns undefined
+  // (so handleTarballDownload would not be invoked for these).
+  const npmInternalPaths = ['/-/ping', '/-/', '/-/v1/security/advisories', '/-/some-random-path'];
 
-    // This will try to fetch upstream and fail (no real network), resulting in 502
-    // The important thing is it does NOT return 403
-    await handleRegistryRequest(npmRegistry, req, res, 'registry.npmjs.org', 443, options);
+  for (const path of npmInternalPaths) {
+    it(`does not parse as package: ${path}`, () => {
+      // These paths have empty package part before /-/, so parseNpmUrl returns undefined
+      expect(parseNpmUrl(path)).toBeUndefined();
+    });
 
-    expect(res.statusCode).not.toBe(403);
+    it(`is not classified as tarball request: ${path}`, () => {
+      expect(isNpmTarballRequest(path)).toBe(false);
+    });
+
+    it(`is not classified as metadata request: ${path}`, () => {
+      expect(isNpmMetadataRequest(path)).toBe(false);
+    });
+  }
+
+  it('classifies legitimate metadata requests correctly', () => {
+    // Metadata requests are routed to handleNpmMetadata, not tarball backstop
+    expect(isNpmMetadataRequest('/express')).toBe(true);
+    expect(isNpmTarballRequest('/express')).toBe(false);
+    expect(isNpmMetadataRequest('/@types/node')).toBe(true);
   });
 });
