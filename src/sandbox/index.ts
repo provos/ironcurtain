@@ -140,7 +140,7 @@ export interface HelpData {
 }
 
 /** Namespaces that must not be shadowed by alias globals. */
-const RESERVED_NAMESPACES = new Set(['help', 'console', 'global', 'undefined', 'NaN', 'Infinity']);
+const RESERVED_NAMESPACES = new Set(['tools', 'help', 'console', 'global', 'undefined', 'NaN', 'Infinity']);
 
 /**
  * Builds a JavaScript snippet that creates server-namespace aliases in the
