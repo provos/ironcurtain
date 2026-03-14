@@ -110,7 +110,13 @@ async function createBuiltinSession(options: SessionOptions): Promise<Session> {
     ? { ...options, systemPromptAugmentation: sessionConfig.systemPromptAugmentation }
     : options;
 
-  const session = new AgentSession(sessionConfig.config, sessionId, sessionConfig.escalationDir, effectiveOptions);
+  const session = new AgentSession(
+    sessionConfig.config,
+    sessionId,
+    sessionConfig.escalationDir,
+    sessionConfig.sessionDir,
+    effectiveOptions,
+  );
 
   try {
     await session.initialize();

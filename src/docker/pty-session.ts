@@ -295,6 +295,9 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
     // Write system prompt to file for shell-injection-safe PTY command
     writeFileSync(resolve(orientationDir, 'system-prompt.txt'), systemPrompt);
 
+    // Write the effective system prompt to the session directory for debugging
+    writeFileSync(resolve(sessionDir, 'system-prompt.txt'), systemPrompt);
+
     // Determine PTY connection target
     const ptySockPath = useTcp ? undefined : `/run/ironcurtain/${PTY_SOCK_NAME}`;
     const ptyPort = useTcp ? DEFAULT_PTY_PORT : undefined;

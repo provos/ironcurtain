@@ -63,6 +63,7 @@ export class AgentSession implements Session {
   private readonly createdAt: string;
   private readonly sandboxFactory: SandboxFactory;
   private readonly escalationDir: string;
+  private readonly sessionDir: string;
 
   /** Raw AI SDK message history. */
   private messages: ModelMessage[] = [];
@@ -115,10 +116,17 @@ export class AgentSession implements Session {
   /** Additional content appended to the system prompt (e.g., cron task context). */
   private readonly systemPromptAugmentation?: string;
 
-  constructor(config: IronCurtainConfig, sessionId: SessionId, escalationDir: string, options: SessionOptions = {}) {
+  constructor(
+    config: IronCurtainConfig,
+    sessionId: SessionId,
+    escalationDir: string,
+    sessionDir: string,
+    options: SessionOptions = {},
+  ) {
     this.sessionId = sessionId;
     this.config = config;
     this.escalationDir = escalationDir;
+    this.sessionDir = sessionDir;
     this.sandboxFactory = options.sandboxFactory ?? defaultSandboxFactory;
     this.onEscalation = options.onEscalation;
     this.onEscalationExpired = options.onEscalationExpired;
@@ -146,6 +154,7 @@ export class AgentSession implements Session {
     if (this.systemPromptAugmentation) {
       rawPrompt += '\n\n' + this.systemPromptAugmentation;
     }
+    writeFileSync(resolve(this.sessionDir, 'system-prompt.txt'), rawPrompt);
     this.systemPrompt = this.cacheStrategy.wrapSystemPrompt(rawPrompt);
     this.tools = this.cacheStrategy.wrapTools(this.buildTools());
     this.model = await this.buildModel();

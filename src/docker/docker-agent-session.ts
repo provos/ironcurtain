@@ -199,6 +199,9 @@ export class DockerAgentSession implements Session {
       await ensureImage(image, this.docker, this.ca);
     }
 
+    // Write the effective system prompt for debugging
+    writeFileSync(resolve(this.sessionDir, 'system-prompt.txt'), this.systemPrompt);
+
     // 6. Create and start container
     const shortId = this.sessionId.substring(0, 12);
     const orientationDir = resolve(this.sessionDir, 'orientation');
