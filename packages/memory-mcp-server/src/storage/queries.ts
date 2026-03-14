@@ -370,6 +370,15 @@ export interface NamespaceStats {
   top_tags: Array<{ tag: string; count: number }>;
 }
 
+interface AggregateStatsRow {
+  total: number;
+  active: number;
+  decayed: number;
+  compacted: number;
+  oldest: number | null;
+  newest: number | null;
+}
+
 export function getNamespaceStats(db: Database.Database, namespace: string): NamespaceStats {
   const agg = db
     .prepare(
@@ -382,14 +391,7 @@ export function getNamespaceStats(db: Database.Database, namespace: string): Nam
          MAX(created_at) as newest
        FROM memories WHERE namespace = ?`,
     )
-    .get(namespace) as {
-    total: number;
-    active: number;
-    decayed: number;
-    compacted: number;
-    oldest: number | null;
-    newest: number | null;
-  };
+    .get(namespace) as AggregateStatsRow;
 
   // Approximate storage size from page_count * page_size
   const pageCount = (db.prepare(`PRAGMA page_count`).get() as { page_count: number }).page_count;
