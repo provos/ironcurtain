@@ -10,6 +10,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends socat && rm -rf
 COPY ironcurtain-ca-cert.pem /usr/local/share/ca-certificates/ironcurtain-ca.crt
 RUN update-ca-certificates
 
+# Python tooling: uv (fast package manager) and ruff (linter)
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
+    curl -LsSf https://astral.sh/ruff/install.sh | sh && \
+    mv /root/.local/bin/uv /usr/local/bin/uv && \
+    mv /root/.local/bin/ruff /usr/local/bin/ruff && \
+    rm -rf /root/.local
+
 RUN mkdir -p /workspace /etc/ironcurtain /run/ironcurtain && \
     chown codespace:codespace /workspace /etc/ironcurtain /run/ironcurtain
 
