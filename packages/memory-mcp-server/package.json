@@ -1,10 +1,15 @@
 {
   "name": "@provos/memory-mcp-server",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "type": "module",
   "description": "Persistent memory MCP server with semantic search, LLM summarization, and automatic compaction",
   "license": "Apache-2.0",
   "author": "Niels Provos",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/provos/ironcurtain.git",
+    "directory": "packages/memory-mcp-server"
+  },
   "bin": {
     "memory-mcp-server": "./dist/index.js"
   },
