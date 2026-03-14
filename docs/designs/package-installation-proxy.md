@@ -440,7 +440,7 @@ interface PackageInstallConfig {
    * Days a version must age before auto-allow.
    * Versions published less than this many days ago are denied
    * (filtered from metadata). Allowlisted packages bypass this.
-   * Default: 7. Set to 0 to disable the age gate.
+   * Default: 2. Set to 0 to disable the age gate.
    */
   readonly quarantineDays?: number;
 
@@ -975,12 +975,12 @@ leakage risks.
 
 ### Fail-Closed Behavior
 
-If the metadata fetch fails (network error, invalid JSON, timeout),
-the proxy returns the unfiltered metadata with all versions removed
-that could not be validated. For tarball backstop cache misses where
-metadata cannot be fetched, the download is denied. This ensures
-that registry outages or parsing errors do not silently allow
-potentially dangerous packages.
+If the upstream metadata fetch fails (network error, invalid JSON,
+timeout), the metadata handler returns a 502 error to the package
+manager rather than serving unfiltered metadata. For tarball backstop
+cache misses where metadata cannot be fetched, the download is denied
+with a 403. This ensures that registry outages or parsing errors do
+not silently allow potentially dangerous packages.
 
 ### Two-Layer Defense
 
@@ -996,7 +996,9 @@ Adding registry hosts to the MITM proxy's allowlist does NOT give the
 container general internet access. The container can only reach hosts
 explicitly listed in the `providersByHost` or `registriesByHost` maps.
 Each registry host's traffic is further filtered by the registry request
-handler -- only package metadata and tarball download paths are forwarded.
+handler -- package metadata and tarball download paths are validated
+and filtered; other registry paths (e.g., `/-/ping`) are forwarded
+upstream without filtering.
 
 ### Post-Install Script Mitigation
 

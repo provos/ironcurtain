@@ -53,7 +53,6 @@ when adding a fundamentally new host type (e.g., registries vs LLM providers).
 - Extends MITM proxy with `registriesByHost` map alongside `providersByHost`
 - Registry connections: TLS termination same as providers, but no key injection
 - npm/PyPI URL parsers extract PackageIdentity from request paths
-- PackageValidator: allowlist/denylist + 7-day quarantine for new packages
-- Escalation: hold HTTP response, file-based IPC, 25s timeout (below npm's 30s)
-- Separate audit log: `package-audit-{sessionId}.jsonl`
+- PackageValidator: allowlist/denylist + 2-day quarantine for new packages (configurable, binary allow/deny)
+- Separate audit log: `package-audit.jsonl` in session directory
 - Dockerfiles: uv and ruff pre-installed in base images
