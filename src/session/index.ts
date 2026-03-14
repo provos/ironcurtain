@@ -6,8 +6,8 @@
  * are not exported -- callers depend on the Session interface only.
  */
 
-import { existsSync, mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { existsSync, mkdirSync, writeFileSync, unlinkSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
 import { loadConfig } from '../config/index.js';
 import {
   getIronCurtainHome,
@@ -154,6 +154,12 @@ async function createDockerSession(
 
   const { prepareDockerInfrastructure } = await import('../docker/docker-infrastructure.js');
   const { DockerAgentSession } = await import('../docker/docker-agent-session.js');
+  const { buildDockerClaudeMd } = await import('../docker/claude-md-seed.js');
+
+  const claudeMdContent = buildDockerClaudeMd({
+    personaName: options.persona,
+    memoryEnabled: config.userConfig.memory.enabled,
+  });
 
   const infra = await prepareDockerInfrastructure(
     sessionConfig.config,
@@ -164,6 +170,22 @@ async function createDockerSession(
     sessionConfig.auditLogPath,
     sessionId,
   );
+
+  // Write CLAUDE.md into conversation state dir (unconditionally, even on
+  // resume, since persona/memory config may change between sessions).
+  // Clean up stale CLAUDE.md when memory is disabled to avoid leftover rules.
+  if (infra.conversationStateDir) {
+    const claudeMdPath = resolve(infra.conversationStateDir, 'CLAUDE.md');
+    if (claudeMdContent) {
+      writeFileSync(claudeMdPath, claudeMdContent);
+    } else {
+      try {
+        unlinkSync(claudeMdPath);
+      } catch {
+        /* not present */
+      }
+    }
+  }
 
   const session = new DockerAgentSession({
     config: sessionConfig.config,

@@ -42,6 +42,10 @@ import {
   getPtyRegistryDir,
 } from '../config/paths.js';
 import * as logger from '../logger.js';
+import { resolvePersona } from '../persona/resolve.js';
+import { buildPersonaSystemPromptAugmentation } from '../persona/persona-prompt.js';
+import { buildMemorySystemPrompt } from '../memory/memory-prompt.js';
+import { buildDockerClaudeMd } from './claude-md-seed.js';
 
 export interface PtySessionOptions {
   readonly config: IronCurtainConfig;
@@ -50,6 +54,8 @@ export interface PtySessionOptions {
   readonly workspacePath?: string;
   /** Session ID to resume. When set, reuses the existing session directory. */
   readonly resumeSessionId?: string;
+  /** Persona name. Used to build CLAUDE.md and system prompt augmentation. */
+  readonly persona?: string;
 }
 
 /** Maximum time to wait for the PTY socket to appear (ms). */
@@ -261,6 +267,24 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
   let conversationStateDirForSnapshot: string | undefined;
   let userExited = false;
 
+  // Resolve persona and build CLAUDE.md content + system prompt augmentation
+  let systemPromptAugmentation: string | undefined;
+  const memoryEnabled = options.config.userConfig.memory.enabled;
+
+  if (options.persona) {
+    const resolved = resolvePersona(options.persona);
+    systemPromptAugmentation = buildPersonaSystemPromptAugmentation(resolved.persona, memoryEnabled);
+    logger.info(`PTY persona "${options.persona}" resolved`);
+  } else if (memoryEnabled) {
+    // Non-persona sessions with memory enabled still need memory instructions
+    systemPromptAugmentation = buildMemorySystemPrompt();
+  }
+
+  const claudeMdContent = buildDockerClaudeMd({
+    personaName: options.persona,
+    memoryEnabled,
+  });
+
   try {
     const infra = await prepareDockerInfrastructure(
       sessionConfig,
@@ -277,12 +301,34 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
       adapter,
       fakeKeys,
       orientationDir,
-      systemPrompt,
+      systemPrompt: baseSystemPrompt,
       image,
       mitmAddr,
       conversationStateDir,
       conversationStateConfig,
     } = infra;
+
+    // Write CLAUDE.md into conversation state dir (unconditionally, even on
+    // resume, since persona/memory config may change between sessions).
+    // Clean up stale CLAUDE.md when memory is disabled to avoid leftover rules.
+    if (conversationStateDir) {
+      const claudeMdPath = resolve(conversationStateDir, 'CLAUDE.md');
+      if (claudeMdContent) {
+        writeFileSync(claudeMdPath, claudeMdContent);
+      } else {
+        try {
+          unlinkSync(claudeMdPath);
+        } catch {
+          /* not present */
+        }
+      }
+    }
+
+    // Compose final system prompt with persona/memory augmentation
+    const systemPrompt = systemPromptAugmentation
+      ? `${baseSystemPrompt}\n\n${systemPromptAugmentation}`
+      : baseSystemPrompt;
+
     adapterIdForSnapshot = adapter.id;
     adapterDisplayNameForSnapshot = adapter.displayName;
     conversationStateDirForSnapshot = conversationStateDir;
