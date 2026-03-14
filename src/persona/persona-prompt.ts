@@ -6,7 +6,7 @@
  * when memory is enabled, the MCP-based memory system prompt.
  */
 
-import { buildMemorySystemPrompt } from '../memory/memory-prompt.js';
+import { buildMemorySystemPrompt, adaptMemoryToolNames } from '../memory/memory-prompt.js';
 import type { PersonaDefinition } from './types.js';
 
 /**
@@ -24,14 +24,7 @@ export function buildPersonaSystemPromptAugmentation(persona: PersonaDefinition,
 
   if (memoryEnabled) {
     sections.push('');
-    sections.push(
-      buildMemorySystemPrompt({ persona: persona.name })
-        .replaceAll('memory_context', 'memory.context')
-        .replaceAll('memory_store', 'memory.store')
-        .replaceAll('memory_recall', 'memory.recall')
-        .replaceAll('memory_forget', 'memory.forget')
-        .replaceAll('memory_inspect', 'memory.inspect'),
-    );
+    sections.push(adaptMemoryToolNames(buildMemorySystemPrompt({ persona: persona.name })));
   }
 
   return sections.join('\n');

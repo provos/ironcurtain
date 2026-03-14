@@ -13,6 +13,7 @@ vi.mock('../src/memory/memory-prompt.js', () => ({
     (opts?: { persona?: string }) =>
       `## Memory System${opts?.persona ? ` (${opts.persona})` : ''}\nUse memory tools to store and retrieve information.`,
   ),
+  adaptMemoryToolNames: (prompt: string) => prompt,
 }));
 
 import { createPersonaName, PERSONA_NAME_PATTERN } from '../src/persona/types.js';
