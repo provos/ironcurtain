@@ -27,6 +27,8 @@ import {
   type RequestBodyRewriter,
 } from './provider-config.js';
 import type { OAuthTokenManager } from './oauth-token-manager.js';
+import type { RegistryConfig, PackageValidator, AllowedVersionCache } from './package-types.js';
+import { DENY_ALL_VALIDATOR } from './package-validator.js';
 import * as logger from '../logger.js';
 
 export interface MitmProxy {
@@ -48,6 +50,22 @@ export interface MitmProxyOptions {
    * The proxy uses these for host allowlisting, key swapping, and endpoint filtering.
    */
   readonly providers: readonly ProviderKeyMapping[];
+
+  /**
+   * Package registry configurations.
+   * When present, the proxy allows CONNECT to registry hosts and
+   * validates/filters package metadata and tarball downloads.
+   */
+  readonly registries?: readonly RegistryConfig[];
+
+  /**
+   * Package validation configuration.
+   * Only meaningful when registries is non-empty.
+   */
+  readonly packageValidation?: {
+    readonly validator: PackageValidator;
+    readonly auditLogPath?: string;
+  };
 }
 
 export interface ProviderKeyMapping {
@@ -147,11 +165,33 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     return ctx;
   }
 
+  // Build host → registry lookup (including mirror hosts)
+  const registriesByHost = new Map<string, RegistryConfig>();
+  if (options.registries) {
+    for (const reg of options.registries) {
+      registriesByHost.set(reg.host, reg);
+      if (reg.mirrorHosts) {
+        for (const mirror of reg.mirrorHosts) {
+          registriesByHost.set(mirror, reg);
+        }
+      }
+    }
+  }
+
+  // AllowedVersionCache for tarball backstop
+  const allowedVersionCache: AllowedVersionCache = new Map();
+
   // Connection tracking
+  interface ConnectionMeta {
+    readonly provider?: ProviderKeyMapping;
+    readonly registry?: RegistryConfig;
+    readonly host: string;
+    readonly port: number;
+  }
   const activeClientSockets = new Set<Socket>();
   const activeTlsSockets = new Set<tls.TLSSocket>();
   const activeUpstreamRequests = new Set<http.ClientRequest>();
-  const socketMetadata = new WeakMap<tls.TLSSocket, { provider: ProviderKeyMapping; host: string; port: number }>();
+  const socketMetadata = new WeakMap<tls.TLSSocket, ConnectionMeta>();
 
   let connectionId = 0;
 
@@ -167,6 +207,53 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     }
   });
 
+  // Lazy-loaded registry handler to avoid circular imports.
+  // Cached after first import so subsequent calls are synchronous.
+  let registryHandlerModule: typeof import('./registry-proxy.js') | undefined;
+
+  function dispatchRegistryRequest(
+    registry: RegistryConfig,
+    clientReq: http.IncomingMessage,
+    clientRes: http.ServerResponse,
+    host: string,
+    port: number,
+  ): void {
+    const doDispatch = (mod: typeof import('./registry-proxy.js')): void => {
+      mod
+        .handleRegistryRequest(registry, clientReq, clientRes, host, port, {
+          validator: options.packageValidation?.validator ?? DENY_ALL_VALIDATOR,
+          cache: allowedVersionCache,
+          auditLogPath: options.packageValidation?.auditLogPath,
+        })
+        .catch((err: unknown) => {
+          logger.info(`[mitm-proxy] registry request error: ${err instanceof Error ? err.message : String(err)}`);
+          if (!clientRes.headersSent) {
+            clientRes.writeHead(500, { 'Content-Type': 'text/plain' });
+            clientRes.end('Internal proxy error');
+          }
+        });
+    };
+
+    if (registryHandlerModule) {
+      doDispatch(registryHandlerModule);
+    } else {
+      import('./registry-proxy.js')
+        .then((mod) => {
+          registryHandlerModule = mod;
+          doDispatch(mod);
+        })
+        .catch((err: unknown) => {
+          logger.info(
+            `[mitm-proxy] failed to load registry-proxy: ${err instanceof Error ? err.message : String(err)}`,
+          );
+          if (!clientRes.headersSent) {
+            clientRes.writeHead(500, { 'Content-Type': 'text/plain' });
+            clientRes.end('Internal proxy error');
+          }
+        });
+    }
+  }
+
   innerServer.on('request', (clientReq: http.IncomingMessage, clientRes: http.ServerResponse) => {
     const tlsSock = clientReq.socket as tls.TLSSocket;
     const meta = socketMetadata.get(tlsSock);
@@ -176,7 +263,20 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
       return;
     }
 
-    const { provider, host: targetHost, port: targetPort } = meta;
+    // Dispatch: registry connections are handled separately from provider connections
+    if (meta.registry) {
+      dispatchRegistryRequest(meta.registry, clientReq, clientRes, meta.host, meta.port);
+      return;
+    }
+
+    if (!meta.provider) {
+      clientRes.writeHead(500);
+      clientRes.end('Internal error: no provider or registry for connection');
+      return;
+    }
+    const provider = meta.provider;
+    const targetHost = meta.host;
+    const targetPort = meta.port;
     const { method, url: path, headers } = clientReq;
 
     // 1. Endpoint filtering
@@ -421,16 +521,18 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     activeClientSockets.add(clientSocket);
     clientSocket.on('close', () => activeClientSockets.delete(clientSocket));
 
-    // 1. Check allowlist
+    // 1. Check allowlist (providers and registries)
     const provider = providersByHost.get(host);
-    if (!provider) {
+    const registry = registriesByHost.get(host);
+    if (!provider && !registry) {
       logger.info(`[mitm-proxy] #${connId} DENIED CONNECT ${host}:${port}`);
       clientSocket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
       clientSocket.destroy();
       return;
     }
 
-    logger.info(`[mitm-proxy] #${connId} CONNECT ${host}:${port} → MITM`);
+    const connType = provider ? 'provider' : 'registry';
+    logger.info(`[mitm-proxy] #${connId} CONNECT ${host}:${port} → MITM (${connType})`);
 
     // 2. Acknowledge the CONNECT
     clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
@@ -459,7 +561,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
 
     // 6. Track the connection
     activeTlsSockets.add(tlsSocket);
-    socketMetadata.set(tlsSocket, { provider, host, port });
+    socketMetadata.set(tlsSocket, { provider, registry, host, port });
 
     tlsSocket.on('error', (err) => {
       const log = isConnectionReset(err) ? logger.debug : logger.info;
@@ -482,9 +584,12 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
 
   return {
     async start() {
-      // Pre-warm cert cache for all configured providers
+      // Pre-warm cert cache for all configured providers and registries
       for (const mapping of options.providers) {
         getOrCreateSecureContext(mapping.config.host);
+      }
+      for (const host of registriesByHost.keys()) {
+        getOrCreateSecureContext(host);
       }
 
       if (useTcp) {
