@@ -11,7 +11,9 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { z } from 'zod';
 
+import { parseJsonWithSchema } from '../pipeline/generate-with-repair.js';
 import { createSession } from '../session/index.js';
 import { getReadOnlyPolicyDir } from '../config/paths.js';
 import { HeadlessTransport } from './headless-transport.js';
@@ -70,6 +72,9 @@ export function buildConstitutionGeneratorSystemPrompt(
   gitRepo?: string,
   context: GenerationContext = 'cron',
 ): string {
+  const contextLabel = context === 'persona' ? 'persona' : 'job';
+  const taskLabel = context === 'persona' ? 'persona' : 'task';
+
   const introLine =
     context === 'persona'
       ? 'You are generating a constitution for an interactive persona — a named profile used for human-interactive sessions.'
@@ -119,10 +124,12 @@ You have read-only access to MCP servers (filesystem, git, GitHub) to explore th
 
 ${taskDescription}
 
-## Workspace
+## Workspace (for exploration only)
 
-The ${context === 'persona' ? 'persona' : 'job'} workspace is: ${workspacePath}
+The ${contextLabel} workspace is at: ${workspacePath}
 ${gitRepo ? `Git repository: ${gitRepo}` : 'No git repository configured.'}
+Use this path to explore project context. Do NOT reference this path in the constitution —
+workspace access is handled automatically by structural rules (see below).
 
 ## Critical Context: Structural Rules
 
@@ -130,11 +137,21 @@ The policy engine has **structural rules** that are always active — you must N
 duplicate them in the constitution:
 
 - **Workspace auto-allow**: At runtime, all read AND write operations within the
-  workspace (${workspacePath}) are automatically allowed. Do NOT write rules
-  about reading or writing files in the workspace — they are redundant.
+  workspace are automatically allowed. The workspace path is configured at
+  runtime and may change between sessions. Do NOT write ANY statements about
+  the workspace — not "within the workspace", not "outside the workspace",
+  not "reading/writing files in the workspace". All workspace containment is
+  handled structurally and is completely invisible to the constitution.
 - **Default-deny**: Any operation not covered by a rule is automatically denied.
   You do NOT need to write "deny" or "NOT allowed" statements — omitting a
   permission is sufficient to block it.
+
+Instead of workspace-relative framing, write statements about **specific named
+directories or resources** the agent should access beyond its workspace. For
+example, instead of "may read files outside the workspace", write "may read
+files in ~/Documents and ~/projects". Instead of "writing outside the workspace
+requires approval", simply specify which external directories the agent may
+write to (or omit them to let default-deny handle it).
 
 ${criticalContext}
 
@@ -154,12 +171,12 @@ ${exploreStep}
      • **GitHub owner/repo**: exact values (e.g., "on org/repo")
      However, branch names and commit messages CANNOT be constrained — do not
      write statements about specific branch name patterns.
-   - Write statements about operations OUTSIDE the workspace or for external services
-   - Allow everything the ${context === 'persona' ? 'persona' : 'task'} explicitly needs to do autonomously
+   - Write statements about specific directories, services, or resources — never
+     mention "the workspace" or frame rules relative to it
+   - Allow everything the ${taskLabel} explicitly needs to do autonomously
    - Only escalate truly dangerous operations (destructive, irreversible)
    - Use natural language — the policy compiler will derive concrete rules
    - Reference categories for groups (e.g., "popular news sites") not individual items
-   - Do NOT reference ${workspacePath} or /workspace — those are handled structurally
 
 ## Output Format
 
@@ -171,7 +188,7 @@ Output a JSON block with:
 
 Wrap the JSON in a \`\`\`json code fence.
 
-## Example Constitution (for a ${context === 'persona' ? 'persona' : 'job'} that pushes code and creates PRs)
+## Example Constitution (for a ${contextLabel} that pushes code and creates PRs)
 
  - The agent has full local git access and may push to the origin remote
  - The agent has read access to all GitHub repositories
@@ -192,41 +209,22 @@ function buildConstitutionGenerationUserMessage(taskDescription: string): string
 // Response Parsing
 // ---------------------------------------------------------------------------
 
+const constitutionResponseSchema = z.object({
+  constitution: z
+    .string()
+    .transform((s) => s.trim())
+    .pipe(z.string().min(1, 'missing "constitution" field')),
+  reasoning: z.string().default(''),
+  exploredServers: z.array(z.string()).catch([]),
+});
+
 /**
  * Extracts the constitution generation result from the LLM's response.
- * Looks for a JSON block in the response text (in code fences or raw).
+ * Looks for a JSON block in the response text (in code fences or raw),
+ * then validates against the schema.
  */
 export function parseConstitutionResponse(response: string): ConstitutionGenerationResult {
-  // Try ```json ... ``` first, then raw JSON (only if the entire response is JSON)
-  const fencedMatch = response.match(/```json\s*([\s\S]*?)```/);
-  const rawMatch = response.match(/^\s*(\{[\s\S]*\})\s*$/);
-  const jsonMatch = fencedMatch ?? rawMatch;
-  if (!jsonMatch) {
-    throw new Error('LLM did not produce a valid constitution response (no JSON block found)');
-  }
-
-  // capture group 1 always exists since both patterns have a group
-  const jsonText = jsonMatch[1];
-  let parsed: Record<string, unknown>;
-  try {
-    parsed = JSON.parse(jsonText) as Record<string, unknown>;
-  } catch {
-    throw new Error('LLM produced invalid JSON in constitution response');
-  }
-
-  const constitution = parsed['constitution'];
-  if (typeof constitution !== 'string' || !constitution.trim()) {
-    throw new Error('LLM response missing "constitution" field');
-  }
-
-  const reasoning = parsed['reasoning'];
-  const servers = parsed['exploredServers'];
-
-  return {
-    constitution,
-    reasoning: typeof reasoning === 'string' ? reasoning : '',
-    exploredServers: Array.isArray(servers) ? (servers as string[]) : [],
-  };
+  return parseJsonWithSchema(response, constitutionResponseSchema);
 }
 
 // ---------------------------------------------------------------------------

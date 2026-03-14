@@ -38,7 +38,7 @@ const personaSpec: CommandSpec = {
     { name: 'create <name>', description: 'Create a new persona interactively' },
     { name: 'list', description: 'List all personas' },
     { name: 'compile <name>', description: "Compile a persona's constitution into policy" },
-    { name: 'edit <name>', description: "Edit a persona's constitution in $EDITOR" },
+    { name: 'edit <name>', description: "Edit a persona's constitution" },
     { name: 'delete <name>', description: 'Delete a persona (with confirmation)' },
     { name: 'show <name>', description: 'Show persona metadata and constitution' },
   ],
@@ -83,6 +83,73 @@ function listPersonaNames(): PersonaName[] {
       }
     })
     .map((name) => name as PersonaName);
+}
+
+// ---------------------------------------------------------------------------
+// Shared helpers for create & edit flows
+// ---------------------------------------------------------------------------
+
+/**
+ * Generates a constitution via LLM, then presents accept/refine/discard.
+ * Returns the final constitution text, or undefined if discarded/cancelled.
+ */
+async function generateAndReviewConstitution(
+  description: string,
+  workspacePath: string,
+  servers: readonly string[] | undefined,
+  p: typeof import('@clack/prompts'),
+): Promise<string | undefined> {
+  const genSpinner = p.spinner();
+  genSpinner.start('Generating constitution...');
+  try {
+    const { generateConstitution } = await import('../cron/constitution-generator.js');
+    const result = await generateConstitution({
+      taskDescription: description,
+      workspacePath,
+      context: 'persona',
+      onProgress: (msg) => genSpinner.message(msg),
+    });
+    genSpinner.stop('Constitution generated.');
+    p.note(result.constitution.trim(), 'Generated Constitution');
+    if (result.reasoning) {
+      p.log.info(result.reasoning);
+    }
+
+    const action = await p.select({
+      message: 'What would you like to do with the generated constitution?',
+      options: [
+        { value: 'accept' as const, label: 'Accept as-is' },
+        { value: 'refine' as const, label: 'Customize interactively' },
+        { value: 'discard' as const, label: 'Discard' },
+      ],
+    });
+    if (p.isCancel(action) || action === 'discard') return undefined;
+
+    if (action === 'refine') {
+      const { runPersonaConstitutionCustomizer } = await import('./persona-customizer.js');
+      return (await runPersonaConstitutionCustomizer(result.constitution, description, servers)) ?? undefined;
+    }
+    return result.constitution;
+  } catch (err) {
+    genSpinner.stop('Generation failed.');
+    p.log.error(`Constitution generation failed: ${err instanceof Error ? err.message : String(err)}`);
+    return undefined;
+  }
+}
+
+/** Runs policy compilation with a spinner and error handling. */
+async function compileWithSpinner(name: PersonaName, p: typeof import('@clack/prompts')): Promise<boolean> {
+  const compileSpinner = p.spinner();
+  compileSpinner.start('Compiling policy...');
+  try {
+    await compilePersonaPolicy(name);
+    compileSpinner.stop('Policy compiled.');
+    return true;
+  } catch (err) {
+    compileSpinner.stop('Compilation failed.');
+    p.log.error(`Compilation failed: ${err instanceof Error ? err.message : String(err)}`);
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -197,47 +264,8 @@ async function runCreate(nameStr: string, args: string[]): Promise<void> {
     }
 
     if (shouldGenerate) {
-      const genSpinner = p.spinner();
-      genSpinner.start('Generating constitution...');
-      try {
-        const { generateConstitution } = await import('../cron/constitution-generator.js');
-        const result = await generateConstitution({
-          taskDescription: description,
-          workspacePath: workspaceDir,
-          context: 'persona',
-          onProgress: (msg) => genSpinner.message(msg),
-        });
-        genSpinner.stop('Constitution generated.');
-        p.note(result.constitution.trim(), 'Generated Constitution');
-        if (result.reasoning) {
-          p.log.info(result.reasoning);
-        }
-
-        const genAction = await p.select({
-          message: 'What would you like to do with the generated constitution?',
-          options: [
-            { value: 'accept' as const, label: 'Accept as-is' },
-            { value: 'refine' as const, label: 'Customize interactively' },
-            { value: 'discard' as const, label: 'Discard and write manually' },
-          ],
-        });
-        if (p.isCancel(genAction)) {
-          p.cancel('Cancelled.');
-          process.exit(0);
-        }
-
-        if (genAction === 'accept') {
-          constitution = result.constitution;
-        } else if (genAction === 'refine') {
-          const { runPersonaConstitutionCustomizer } = await import('./persona-customizer.js');
-          constitution =
-            (await runPersonaConstitutionCustomizer(result.constitution, description, servers)) ?? undefined;
-        }
-        // discard: falls through to editor below
-      } catch (err) {
-        genSpinner.stop('Generation failed.');
-        p.log.error(`Constitution generation failed: ${err instanceof Error ? err.message : String(err)}`);
-      }
+      constitution = await generateAndReviewConstitution(description, workspaceDir, servers, p);
+      // undefined: falls through to editor below
     }
   }
 
@@ -261,14 +289,8 @@ async function runCreate(nameStr: string, args: string[]): Promise<void> {
   // 5. Write constitution and compile
   writeFileSync(constitutionPath, constitution + '\n', 'utf-8');
 
-  const compileSpinner = p.spinner();
-  compileSpinner.start('Compiling policy...');
-  try {
-    await compilePersonaPolicy(name);
-    compileSpinner.stop('Policy compiled.');
-  } catch (err) {
-    compileSpinner.stop('Compilation failed.');
-    p.log.error(`Policy compilation failed: ${err instanceof Error ? err.message : String(err)}`);
+  const compiled = await compileWithSpinner(name, p);
+  if (!compiled) {
     p.log.warn(`Persona "${name}" was created. Fix the issue then run: ironcurtain persona compile ${name}`);
     process.exit(1);
   }
@@ -344,53 +366,94 @@ async function runEdit(nameStr: string): Promise<void> {
     writeFileSync(constitutionPath, '', 'utf-8');
   }
 
-  console.error('Opening constitution in editor...');
-  const changed = openEditor(constitutionPath);
-
-  if (!changed) {
-    console.error('No changes detected.');
-    return;
-  }
-
+  const persona = loadPersona(name);
   const p = await import('@clack/prompts');
-  const action = await p.select({
-    message: 'Constitution changed. What next?',
+  p.intro(`Edit persona "${name}"`);
+
+  const editAction = await p.select({
+    message: 'How would you like to edit the constitution?',
     options: [
-      { value: 'compile' as const, label: 'Compile now' },
-      { value: 'customize' as const, label: 'Customize interactively first' },
-      { value: 'skip' as const, label: 'Done (skip compilation)' },
+      { value: 'customize' as const, label: 'Customize interactively (LLM-assisted)' },
+      { value: 'editor' as const, label: 'Edit in $EDITOR' },
+      { value: 'generate' as const, label: 'Generate new constitution from description' },
     ],
   });
 
-  if (p.isCancel(action)) return;
+  if (p.isCancel(editAction)) {
+    p.cancel('Cancelled.');
+    return;
+  }
 
-  if (action === 'compile') {
-    console.error('Compiling policy...');
-    try {
-      await compilePersonaPolicy(name);
-      console.error(chalk.green('Done.'));
-    } catch (err) {
-      console.error(chalk.red(`Compilation failed: ${err instanceof Error ? err.message : String(err)}`));
-    }
-  } else if (action === 'customize') {
-    const persona = loadPersona(name);
-    const currentConstitution = readFileSync(constitutionPath, 'utf-8');
-    const { runPersonaConstitutionCustomizer } = await import('./persona-customizer.js');
-    const refined = await runPersonaConstitutionCustomizer(
-      currentConstitution,
-      persona.description,
-      persona.servers ? [...persona.servers] : undefined,
-    );
-    if (refined) {
-      writeFileSync(constitutionPath, refined + '\n', 'utf-8');
-      console.error('Compiling policy...');
-      try {
-        await compilePersonaPolicy(name);
-        console.error(chalk.green('Done.'));
-      } catch (err) {
-        console.error(chalk.red(`Compilation failed: ${err instanceof Error ? err.message : String(err)}`));
-      }
-    }
+  let constitutionChanged: boolean;
+
+  if (editAction === 'customize') {
+    constitutionChanged = await editViaCustomizer(persona, constitutionPath);
+  } else if (editAction === 'editor') {
+    constitutionChanged = editViaEditor(constitutionPath);
+  } else {
+    constitutionChanged = await editViaGeneration(persona, constitutionPath, p);
+  }
+
+  if (!constitutionChanged) {
+    p.outro('No changes made.');
+    return;
+  }
+
+  await offerCompilation(name, p);
+}
+
+/** Runs the LLM-assisted interactive customizer on the current constitution. */
+async function editViaCustomizer(persona: PersonaDefinition, constitutionPath: string): Promise<boolean> {
+  const currentConstitution = readFileSync(constitutionPath, 'utf-8');
+  const { runPersonaConstitutionCustomizer } = await import('./persona-customizer.js');
+  const refined = await runPersonaConstitutionCustomizer(currentConstitution, persona.description, persona.servers);
+  if (refined) {
+    writeFileSync(constitutionPath, refined + '\n', 'utf-8');
+    return true;
+  }
+  return false;
+}
+
+/** Opens $EDITOR on the constitution file and returns whether it changed. */
+function editViaEditor(constitutionPath: string): boolean {
+  console.error('Opening constitution in editor...');
+  return openEditor(constitutionPath);
+}
+
+/** Generates a fresh constitution from the persona description. */
+async function editViaGeneration(
+  persona: PersonaDefinition,
+  constitutionPath: string,
+  p: typeof import('@clack/prompts'),
+): Promise<boolean> {
+  const constitution = await generateAndReviewConstitution(
+    persona.description,
+    getPersonaWorkspaceDir(persona.name),
+    persona.servers,
+    p,
+  );
+  if (!constitution) return false;
+  writeFileSync(constitutionPath, constitution + '\n', 'utf-8');
+  return true;
+}
+
+/** Offers to compile the persona policy after a constitution change. */
+async function offerCompilation(name: PersonaName, p: typeof import('@clack/prompts')): Promise<void> {
+  const shouldCompile = await p.confirm({
+    message: 'Compile policy now?',
+    initialValue: true,
+  });
+
+  if (p.isCancel(shouldCompile) || !shouldCompile) {
+    p.outro(`Constitution updated. Run "ironcurtain persona compile ${name}" when ready.`);
+    return;
+  }
+
+  const compiled = await compileWithSpinner(name, p);
+  if (compiled) {
+    p.outro(`Persona "${name}" updated and compiled.`);
+  } else {
+    p.outro(`Constitution saved. Fix the issue then run: ironcurtain persona compile ${name}`);
   }
 }
 
