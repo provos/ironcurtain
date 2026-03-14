@@ -24,7 +24,14 @@ export function buildPersonaSystemPromptAugmentation(persona: PersonaDefinition,
 
   if (memoryEnabled) {
     sections.push('');
-    sections.push(buildMemorySystemPrompt({ persona: persona.name }));
+    sections.push(
+      buildMemorySystemPrompt({ persona: persona.name })
+        .replaceAll('memory_context', 'memory.context')
+        .replaceAll('memory_store', 'memory.store')
+        .replaceAll('memory_recall', 'memory.recall')
+        .replaceAll('memory_forget', 'memory.forget')
+        .replaceAll('memory_inspect', 'memory.inspect'),
+    );
   }
 
   return sections.join('\n');

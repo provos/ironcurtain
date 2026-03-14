@@ -233,7 +233,7 @@ function createMockProxy(socketPath: string, port?: number): DockerProxy {
       return {
         serverDescriptions: { filesystem: 'Read, write, and manage files' },
         toolsByServer: {
-          filesystem: [{ callableName: 'tools.filesystem_read_file', params: '{ path }' }],
+          filesystem: [{ callableName: 'filesystem.read_file', params: '{ path }' }],
         },
       };
     },

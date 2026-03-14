@@ -102,7 +102,7 @@ function createMockSandbox(): Sandbox {
     getHelpData: vi.fn().mockReturnValue({
       serverDescriptions: { filesystem: 'File operations' },
       toolsByServer: {
-        filesystem: [{ callableName: 'filesystem.filesystem_read_file', params: '{ path }' }],
+        filesystem: [{ callableName: 'filesystem.read_file', params: '{ path }' }],
       },
     }),
     executeCode: vi.fn().mockResolvedValue({ result: 'mock result', logs: [] }),

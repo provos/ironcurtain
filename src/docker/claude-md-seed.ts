@@ -33,12 +33,12 @@ export function buildDockerClaudeMd(opts: { personaName?: string; memoryEnabled:
 
   sections.push(`# Pre-response protocol
 
-Before responding to any user message, call the \`memory_context\` MCP tool.
+Before responding to any user message, call the \`memory.context\` MCP tool.
 Do not skip this step. Do not respond first and call it later.
 
-After receiving the memory_context result, respond to the user normally.
+After receiving the memory.context result, respond to the user normally.
 
-Store new facts via \`memory_store\` as you learn them. Do not use built-in
+Store new facts via \`memory.store\` as you learn them. Do not use built-in
 memory (auto memory, MEMORY.md) — only MCP memory tools persist.`);
 
   return sections.join('\n');

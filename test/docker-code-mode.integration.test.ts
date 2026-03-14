@@ -149,7 +149,7 @@ describe('Docker Code Mode proxy integration', () => {
       });
       const text = (result.content as Array<{ type: string; text: string }>)[0].text;
       expect(text).toContain('Tools in filesystem:');
-      expect(text).toContain('filesystem_read_file');
+      expect(text).toContain('filesystem.read_file');
     });
   });
 

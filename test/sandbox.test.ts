@@ -6,29 +6,34 @@ describe('toCallableName', () => {
     expect(toCallableName('read_file')).toBe('read_file');
   });
 
-  it('preserves first dot, joins remaining parts with underscores', () => {
-    // "tools.filesystem.read_file" -> "tools.filesystem_read_file"
-    expect(toCallableName('tools.filesystem.read_file')).toBe('tools.filesystem_read_file');
+  it('strips server prefix from tool name in 3-segment names', () => {
+    // "tools.filesystem.read_file" -> "filesystem.read_file" (no prefix to strip)
+    expect(toCallableName('tools.filesystem.read_file')).toBe('filesystem.read_file');
   });
 
-  it('handles three-segment dotted names (manual.server.tool)', () => {
-    // "tools.git.git_add" -> "tools.git_git_add"
-    expect(toCallableName('tools.git.git_add')).toBe('tools.git_git_add');
+  it('strips redundant server prefix from tool name', () => {
+    // "tools.git.git_add" -> "git.add" (git_ prefix stripped)
+    expect(toCallableName('tools.git.git_add')).toBe('git.add');
+  });
+
+  it('strips redundant server prefix for memory tools', () => {
+    // "tools.memory.memory_context" -> "memory.context"
+    expect(toCallableName('tools.memory.memory_context')).toBe('memory.context');
   });
 
   it('handles four-segment dotted names', () => {
-    // "tools.a.b.c" -> "tools.a_b_c"
-    expect(toCallableName('tools.a.b.c')).toBe('tools.a_b_c');
+    // "tools.a.b.c" -> "a.b_c" (no prefix to strip)
+    expect(toCallableName('tools.a.b.c')).toBe('a.b_c');
   });
 
   it('sanitizes non-alphanumeric characters in segments', () => {
     // Hyphens get replaced with underscores
-    expect(toCallableName('tools.my-server.my-tool')).toBe('tools.my_server_my_tool');
+    expect(toCallableName('tools.my-server.my-tool')).toBe('my_server.my_tool');
   });
 
   it('handles names starting with digits in segments', () => {
     // Leading digit gets prefixed with underscore
-    expect(toCallableName('tools.3scale.get_api')).toBe('tools._3scale_get_api');
+    expect(toCallableName('tools.3scale.get_api')).toBe('_3scale.get_api');
   });
 
   it('returns two-segment names unchanged when already clean', () => {
@@ -38,6 +43,11 @@ describe('toCallableName', () => {
 
   it('handles names without dots', () => {
     expect(toCallableName('simple_tool')).toBe('simple_tool');
+  });
+
+  it('does not strip partial prefix match', () => {
+    // Server "mem", tool "memory_store" — "memory_store" doesn't start with "mem_"
+    expect(toCallableName('tools.mem.memory_store')).toBe('mem.memory_store');
   });
 });
 
@@ -57,17 +67,25 @@ describe('buildInterfacePatchSnippet (via behavior)', () => {
     // Simulate the __getToolInterface function that UTCP sets up
     const origFn = (name: string) => interfaceMap[name] ?? null;
 
-    // Build the mapping from callable names to raw names
+    // Build the mapping from both new and old callable names to raw names
     const callableToRaw: Record<string, string> = {};
     for (const rawName of Object.keys(interfaceMap)) {
       const callableName = toCallableName(rawName);
       if (callableName !== rawName) {
         callableToRaw[callableName] = rawName;
       }
+      // Also add old UTCP callable format for backward compat
+      const segments = rawName.split('.');
+      if (segments.length >= 3) {
+        const oldCallable = `${segments[0]}.${segments.slice(1).join('_')}`;
+        if (oldCallable !== rawName && oldCallable !== callableName) {
+          callableToRaw[oldCallable] = rawName;
+        }
+      }
     }
 
     // Simulate what the patch snippet does: wrap origFn with callable name lookup,
-    // auto-correction for missing "tools." prefix, and helpful error messages.
+    // auto-correction, and helpful error messages.
     const allNames = Object.keys(callableToRaw);
     const patchedFn = (toolName: string): string | null => {
       let result = origFn(toolName);
@@ -83,8 +101,8 @@ describe('buildInterfacePatchSnippet (via behavior)', () => {
         rawName = callableToRaw[prefixed];
         if (rawName) return origFn(rawName);
         // Try converting dots to underscores
-        const asCallable = 'tools.' + toolName.replace(/\./g, '_');
-        rawName = callableToRaw[asCallable];
+        const asOldCallable = 'tools.' + toolName.replace(/\./g, '_');
+        rawName = callableToRaw[asOldCallable];
         if (rawName) return origFn(rawName);
       }
 
@@ -103,7 +121,7 @@ describe('buildInterfacePatchSnippet (via behavior)', () => {
       if (suggestions.length > 0) {
         msg += ' Did you mean: ' + suggestions.join(', ') + '?';
       } else {
-        msg += ' Use the callable name format shown in the tool catalog, e.g. tools.git_git_push';
+        msg += ' Use the callable name format shown in the tool catalog, e.g. git.push';
       }
       return msg;
     };
@@ -112,19 +130,17 @@ describe('buildInterfacePatchSnippet (via behavior)', () => {
     expect(patchedFn('tools.git.git_add')).toBe(interfaceMap['tools.git.git_add']);
     expect(patchedFn('tools.git.git_status')).toBe(interfaceMap['tools.git.git_status']);
 
-    // Callable names now also work
-    expect(patchedFn('tools.git_git_add')).toBe(interfaceMap['tools.git.git_add']);
-    expect(patchedFn('tools.git_git_status')).toBe(interfaceMap['tools.git.git_status']);
-
-    // Two-segment names that don't differ still work
-    expect(patchedFn('tools.filesystem.read_file')).toBe(interfaceMap['tools.filesystem.read_file']);
-    expect(patchedFn('tools.filesystem_read_file')).toBe(interfaceMap['tools.filesystem.read_file']);
-
-    // Auto-correction: missing "tools." prefix with dot notation
-    expect(patchedFn('git.git_add')).toBe(interfaceMap['tools.git.git_add']);
+    // New callable names work
+    expect(patchedFn('git.add')).toBe(interfaceMap['tools.git.git_add']);
+    expect(patchedFn('git.status')).toBe(interfaceMap['tools.git.git_status']);
     expect(patchedFn('filesystem.read_file')).toBe(interfaceMap['tools.filesystem.read_file']);
 
-    // Auto-correction: missing "tools." prefix with underscore notation
+    // Old UTCP callable names still work (backward compat)
+    expect(patchedFn('tools.git_git_add')).toBe(interfaceMap['tools.git.git_add']);
+    expect(patchedFn('tools.git_git_status')).toBe(interfaceMap['tools.git.git_status']);
+    expect(patchedFn('tools.filesystem_read_file')).toBe(interfaceMap['tools.filesystem.read_file']);
+
+    // Auto-correction: missing "tools." prefix with old underscore notation
     expect(patchedFn('git_git_add')).toBe(interfaceMap['tools.git.git_add']);
 
     // Unknown names return helpful error messages
@@ -132,8 +148,8 @@ describe('buildInterfacePatchSnippet (via behavior)', () => {
     expect(patchedFn('totally_unknown')).toContain('Use the callable name format');
 
     // Unknown name with partial match suggests similar tools
-    expect(patchedFn('tools.git_git')).toContain('Did you mean:');
-    expect(patchedFn('tools.git_git')).toContain('tools.git_git_add');
+    expect(patchedFn('git.ad')).toContain('Did you mean:');
+    expect(patchedFn('git.ad')).toContain('git.add');
   });
 
   it('handles the case where callable and raw names are identical', () => {

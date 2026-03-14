@@ -59,18 +59,58 @@ const tsxBin = resolveNodeModulesBin('tsx', resolve(__dirname, '..', '..'));
 const PROXY_COMMAND = isCompiled ? 'node' : tsxBin;
 const PROXY_ARGS = [proxyServerPath];
 
+/** Sanitize a string to a valid JS identifier segment. */
+const sanitize = (s: string) => s.replace(/[^a-zA-Z0-9_]/g, '_').replace(/^[0-9]/, '_$&');
+
+/** Shared: first segment + remaining joined with underscores. */
+function flattenDotted(segments: string[]): string {
+  const [manual, ...parts] = segments;
+  return `${sanitize(manual)}.${parts.map(sanitize).join('_')}`;
+}
+
 /**
- * Transforms a UTCP tool name (dotted) into the actual callable function name
- * in the sandbox. Mirrors UTCP Code Mode's sanitizeIdentifier() behavior:
- * split on first dot (manual name), join remaining parts with underscores.
+ * Mirrors UTCP Code Mode's sanitizeIdentifier() behavior — the property name
+ * that UTCP actually creates on `global.tools` in the V8 isolate.
  *
- * Example: "filesystem.filesystem.list_directory" → "filesystem.filesystem_list_directory"
+ * Example: "tools.filesystem.read_file" → "tools.filesystem_read_file"
+ */
+export function toUtcpCallable(toolName: string): string {
+  if (!toolName.includes('.')) return sanitize(toolName);
+  return flattenDotted(toolName.split('.'));
+}
+
+/**
+ * Transforms a UTCP tool name (dotted) into the user-facing callable name
+ * with server-namespace prefix stripping.
+ *
+ * For 3+ segment names (tools.<server>.<tool>):
+ * - Extract server and tool segments
+ * - If tool starts with `serverName_`, strip that prefix
+ * - Return `server.strippedTool`
+ *
+ * Examples:
+ *   "tools.filesystem.read_file"    → "filesystem.read_file"
+ *   "tools.git.git_add"             → "git.add"
+ *   "tools.memory.memory_context"   → "memory.context"
+ *   "tools.a.b.c"                   → "a.b_c"
  */
 export function toCallableName(toolName: string): string {
-  const sanitize = (s: string) => s.replace(/[^a-zA-Z0-9_]/g, '_').replace(/^[0-9]/, '_$&');
   if (!toolName.includes('.')) return sanitize(toolName);
-  const [manual, ...parts] = toolName.split('.');
-  return `${sanitize(manual)}.${parts.map(sanitize).join('_')}`;
+  const segments = toolName.split('.');
+
+  // 2-segment names: unchanged (e.g., "tools.read_file")
+  if (segments.length <= 2) return flattenDotted(segments);
+
+  // 3+ segments: server-namespace with prefix stripping
+  const server = sanitize(segments[1]);
+  const toolParts = segments.slice(2).map(sanitize);
+  const tool = toolParts.join('_');
+
+  // Strip redundant server prefix from tool name (e.g., git_add → add)
+  const prefix = server + '_';
+  const strippedTool = tool.startsWith(prefix) ? tool.slice(prefix.length) : tool;
+
+  return `${server}.${strippedTool}`;
 }
 
 /**
@@ -99,22 +139,59 @@ export interface HelpData {
   toolsByServer: Record<string, HelpToolEntry[]>;
 }
 
+/** Namespaces that must not be shadowed by alias globals. */
+const RESERVED_NAMESPACES = new Set(['help', 'console', 'global', 'undefined', 'NaN', 'Infinity']);
+
+/**
+ * Builds a JavaScript snippet that creates server-namespace aliases in the
+ * V8 sandbox isolate: `global.<server> = { <tool>: global.tools.<utcpProp> }`.
+ *
+ * This enables `filesystem.read_file(...)` alongside the UTCP-created
+ * `tools.filesystem_read_file(...)`.
+ */
+function buildNamespaceAliasSnippet(aliases: Array<{ newCallable: string; utcpProp: string }>): string {
+  // Group by namespace
+  const byNs: Record<string, Array<{ tool: string; utcpProp: string }>> = {};
+  for (const { newCallable, utcpProp } of aliases) {
+    const dotIdx = newCallable.indexOf('.');
+    if (dotIdx === -1) continue;
+    const ns = newCallable.slice(0, dotIdx);
+    if (RESERVED_NAMESPACES.has(ns)) continue;
+    const tool = newCallable.slice(dotIdx + 1);
+    if (!(ns in byNs)) byNs[ns] = [];
+    byNs[ns].push({ tool, utcpProp });
+  }
+
+  if (Object.keys(byNs).length === 0) return '';
+
+  const lines: string[] = ['(function() {'];
+  for (const [ns, tools] of Object.entries(byNs)) {
+    lines.push(`  global["${ns}"] = {};`);
+    for (const { tool, utcpProp } of tools) {
+      lines.push(`  global["${ns}"]["${tool}"] = global["tools"]["${utcpProp}"];`);
+    }
+  }
+  lines.push('})();');
+  return lines.join('\n');
+}
+
 /**
  * Builds a JavaScript snippet that patches __getToolInterface inside the
- * sandbox isolate so that callable names (with underscores) resolve to
+ * sandbox isolate so that both new callable names (e.g., "filesystem.read_file")
+ * and old UTCP callable names (e.g., "tools.filesystem_read_file") resolve to
  * the same interface as the raw UTCP tool names (with dots).
  *
  * UTCP Code Mode keys its interface map by raw tool name (e.g.,
  * "tools.git.git_add") but the callable function name the agent sees
- * uses underscores (e.g., "tools.git_git_add"). Without this patch,
+ * uses the new namespace format (e.g., "git.add"). Without this patch,
  * __getToolInterface(callableName) returns null.
  */
 function buildInterfacePatchSnippet(callableToRawMap: Record<string, string>): string {
   const mapJson = JSON.stringify(callableToRawMap);
   // The snippet runs inside the V8 isolate before user code.
   // It wraps the existing __getToolInterface to also accept callable names.
-  // When the name is wrong, it tries auto-correction (prepending "tools.")
-  // and falls back to a helpful error message with suggestions.
+  // When the name is wrong, it tries auto-correction and falls back to
+  // a helpful error message with suggestions.
   return `
     (function() {
       var _callableToRaw = ${mapJson};
@@ -126,18 +203,16 @@ function buildInterfacePatchSnippet(callableToRawMap: Record<string, string>): s
           var rawName = _callableToRaw[toolName];
           if (rawName) return _origGetToolInterface(rawName);
 
-          // Auto-correct: try prepending "tools." for common mistake
+          // Auto-correct: try prepending "tools." for raw name lookup
           if (toolName && !toolName.startsWith('tools.')) {
             var prefixed = 'tools.' + toolName;
-            // Try as raw name first
             result = _origGetToolInterface(prefixed);
             if (result) return result;
-            // Try as callable name
             rawName = _callableToRaw[prefixed];
             if (rawName) return _origGetToolInterface(rawName);
-            // Try converting dots to underscores (e.g. "git.git_push" -> "tools.git_git_push")
-            var asCallable = 'tools.' + toolName.replace(/\\./g, '_');
-            rawName = _callableToRaw[asCallable];
+            // Try converting dots to underscores (e.g. "git.add" -> "tools.git_add")
+            var asOldCallable = 'tools.' + toolName.replace(/\\./g, '_');
+            rawName = _callableToRaw[asOldCallable];
             if (rawName) return _origGetToolInterface(rawName);
           }
 
@@ -155,7 +230,7 @@ function buildInterfacePatchSnippet(callableToRawMap: Record<string, string>): s
           if (suggestions.length > 0) {
             msg += " Did you mean: " + suggestions.join(', ') + "?";
           } else {
-            msg += " Use the callable name format shown in the tool catalog, e.g. tools.git_git_push";
+            msg += " Use the callable name format shown in the tool catalog, e.g. git.push";
           }
           return msg;
         };
@@ -213,8 +288,7 @@ export function buildHelpSnippet(helpData: HelpData): string {
 export class Sandbox {
   private client: CodeModeUtcpClient | null = null;
   private toolCatalog: string = '';
-  private interfacePatchSnippet: string = '';
-  private helpSnippet: string = '';
+  private preamble: string = '';
   private helpData: HelpData = { serverDescriptions: {}, toolsByServer: {} };
 
   async initialize(config: IronCurtainConfig): Promise<void> {
@@ -321,47 +395,73 @@ export class Sandbox {
       throw new Error(`Failed to register MCP servers: ${errors}`);
     }
 
-    const { catalog, patchSnippet, helpData } = await this.buildToolCatalogAndPatch(config);
+    const { catalog, patchSnippet, aliasSnippet, helpData } = await this.buildToolCatalogAndPatch(config);
     this.toolCatalog = catalog;
-    this.interfacePatchSnippet = patchSnippet;
     this.helpData = helpData;
-    this.helpSnippet = buildHelpSnippet(helpData);
+
+    // Pre-build the preamble once — each executeCode() call creates a fresh
+    // V8 isolate, so the preamble must be prepended every time, but the
+    // string itself never changes after initialization.
+    let preamble = '';
+    if (patchSnippet) preamble += patchSnippet + '\n';
+    if (aliasSnippet) preamble += aliasSnippet + '\n';
+    const helpSnippet = buildHelpSnippet(helpData);
+    if (helpSnippet) preamble += helpSnippet + '\n';
+    this.preamble = preamble;
   }
 
   /**
-   * Builds the tool catalog, the __getToolInterface patch, and help data in one pass.
+   * Builds the tool catalog, the __getToolInterface patch, namespace alias
+   * snippet, and help data in one pass.
    *
-   * The catalog is a compact one-line-per-tool listing using callable names.
-   * The patch snippet maps callable names back to raw UTCP names so that
-   * __getToolInterface works with either naming convention.
+   * The catalog is a compact one-line-per-tool listing using new callable names.
+   * The patch snippet maps both new and old callable names back to raw UTCP
+   * names so that __getToolInterface works with any naming convention.
+   * The alias snippet creates server-namespace globals so the new names work.
    * The help data groups tools by server for progressive disclosure.
    */
   private async buildToolCatalogAndPatch(
     config: IronCurtainConfig,
-  ): Promise<{ catalog: string; patchSnippet: string; helpData: HelpData }> {
+  ): Promise<{ catalog: string; patchSnippet: string; aliasSnippet: string; helpData: HelpData }> {
     if (!this.client) throw new Error('Sandbox not initialized');
     const emptyHelp: HelpData = { serverDescriptions: {}, toolsByServer: {} };
 
     const tools = await this.client.getTools();
-    if (tools.length === 0) return { catalog: 'No tools available', patchSnippet: '', helpData: emptyHelp };
+    if (tools.length === 0) {
+      return { catalog: 'No tools available', patchSnippet: '', aliasSnippet: '', helpData: emptyHelp };
+    }
 
     const callableToRaw: Record<string, string> = {};
     const catalogLines: string[] = [];
     const toolsByServer: Record<string, HelpToolEntry[]> = {};
     const serverDescriptions: Record<string, string> = {};
+    const namespaceAliases: Array<{ newCallable: string; utcpProp: string }> = [];
 
     for (const t of tools) {
+      // Split once; derive all name variants from the same segments.
+      const segments = t.name.split('.');
       const callableName = toCallableName(t.name);
+      const utcpCallable = segments.length > 1 ? flattenDotted(segments) : sanitize(t.name);
       const params = extractRequiredParams(t.inputs);
       catalogLines.push(`- \`${callableName}(${params})\` — ${t.description}`);
 
-      // Only add mapping when the names actually differ
+      // Map new callable name → raw UTCP name
       if (callableName !== t.name) {
         callableToRaw[callableName] = t.name;
       }
+      // Map old UTCP callable name → raw UTCP name (backward compat)
+      if (utcpCallable !== t.name && utcpCallable !== callableName) {
+        callableToRaw[utcpCallable] = t.name;
+      }
+
+      // Build namespace alias: new callable → UTCP property on global.tools
+      // The utcpCallable is "tools.<prop>", extract the property part after the dot
+      if (segments.length > 1) {
+        const utcpProp = utcpCallable.slice(utcpCallable.indexOf('.') + 1);
+        namespaceAliases.push({ newCallable: callableName, utcpProp });
+      }
 
       // Extract server name from the UTCP name: tools.<server>.<tool>
-      const segments = t.name.split('.');
       const serverName = segments.length >= 2 ? segments[1] : segments[0];
       if (!(serverName in toolsByServer)) {
         toolsByServer[serverName] = [];
@@ -372,9 +472,10 @@ export class Sandbox {
     }
 
     const patchSnippet = Object.keys(callableToRaw).length > 0 ? buildInterfacePatchSnippet(callableToRaw) : '';
+    const aliasSnippet = namespaceAliases.length > 0 ? buildNamespaceAliasSnippet(namespaceAliases) : '';
     const helpData: HelpData = { serverDescriptions, toolsByServer };
 
-    return { catalog: catalogLines.join('\n'), patchSnippet, helpData };
+    return { catalog: catalogLines.join('\n'), patchSnippet, aliasSnippet, helpData };
   }
 
   getToolInterfaces(): string {
@@ -388,12 +489,9 @@ export class Sandbox {
   async executeCode(code: string, timeoutMs = 300000): Promise<CodeExecutionResult> {
     if (!this.client) throw new Error('Sandbox not initialized');
 
-    // Prepend the interface patch and help snippet. Each callToolChain
-    // invocation creates a fresh V8 isolate, so both must be re-applied.
-    let preamble = '';
-    if (this.interfacePatchSnippet) preamble += this.interfacePatchSnippet + '\n';
-    if (this.helpSnippet) preamble += this.helpSnippet + '\n';
-    const patchedCode = preamble ? `${preamble}${code}` : code;
+    // Prepend the pre-built preamble (interface patch + namespace aliases +
+    // help snippet). Each callToolChain creates a fresh V8 isolate.
+    const patchedCode = this.preamble ? `${this.preamble}${code}` : code;
 
     // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment -- callToolChain returns { result: any }
     const { result, logs } = await this.client.callToolChain(patchedCode, timeoutMs);

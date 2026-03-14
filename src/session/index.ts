@@ -403,7 +403,12 @@ export function buildSessionConfig(
     // For non-persona cron jobs, inject memory usage instructions since
     // persona sessions get this via buildPersonaSystemPromptAugmentation.
     if (!opts.persona) {
-      const memoryPrompt = buildMemorySystemPrompt();
+      const memoryPrompt = buildMemorySystemPrompt()
+        .replaceAll('memory_context', 'memory.context')
+        .replaceAll('memory_store', 'memory.store')
+        .replaceAll('memory_recall', 'memory.recall')
+        .replaceAll('memory_forget', 'memory.forget')
+        .replaceAll('memory_inspect', 'memory.inspect');
       systemPromptAugmentation = systemPromptAugmentation
         ? `${memoryPrompt}\n\n${systemPromptAugmentation}`
         : memoryPrompt;

@@ -107,8 +107,8 @@ describe('Help system integration', () => {
     const { result } = await sandbox.executeCode("return help.help('filesystem');");
     const output = String(result);
     expect(output).toContain('Tools in filesystem:');
-    expect(output).toContain('tools.filesystem_list_directory');
-    expect(output).toContain('tools.filesystem_read_file');
+    expect(output).toContain('filesystem.list_directory');
+    expect(output).toContain('filesystem.read_file');
   });
 
   it("help.help('unknown') returns error message", async () => {
@@ -123,8 +123,8 @@ describe('Help system integration', () => {
     const { result } = await sandbox.executeCode(`
         // First discover tools
         help.help('filesystem');
-        // Then use one
-        const r = tools.filesystem_list_directory({ path: "${SANDBOX_DIR}" });
+        // Then use one via new namespace alias
+        const r = filesystem.list_directory({ path: "${SANDBOX_DIR}" });
         return r;
       `);
     expect(result).toBeDefined();
@@ -144,7 +144,7 @@ describe('Help system integration', () => {
     const tool = helpData.toolsByServer.filesystem[0];
     expect(tool).toHaveProperty('callableName');
     expect(tool).toHaveProperty('params');
-    expect(tool.callableName).toContain('filesystem_');
+    expect(tool.callableName).toContain('filesystem.');
   });
 
   it('new prompt is significantly smaller than old catalog-based prompt', () => {

@@ -27,7 +27,7 @@ ${sandboxInfo}
 
 - Tools are synchronous — do NOT use \`await\`.
 - Use \`return\` to send a value back to the conversation.
-- Example: \`const result = tools.filesystem_list_directory({ path: "/tmp" });\`
+- Example: \`const result = filesystem.list_directory({ path: "/tmp" });\`
 
 ## Efficient code execution
 
@@ -44,11 +44,11 @@ BAD — 81 separate execute_code calls:
   ...
 
 GOOD — one execute_code call with a loop:
-  const dir = tools.filesystem_list_directory({ path: "/data" });
+  const dir = filesystem.list_directory({ path: "/data" });
   let count = 0;
   for (const entry of dir.entries) {
     if (entry.name.endsWith('.txt')) {
-      tools.filesystem_move_file({ source: \`/data/\${entry.name}\`, destination: \`/archive/\${entry.name}\` });
+      filesystem.move_file({ source: \`/data/\${entry.name}\`, destination: \`/archive/\${entry.name}\` });
       count++;
     }
   }
@@ -61,7 +61,7 @@ Large tool results are automatically truncated. To avoid losing information:
 - Before reading files, use list_directory to survey what exists. Assess which files are relevant to the task.
 - Do NOT read all files in a directory at once. Read a few at a time, summarize findings, then continue if needed.
 - For large files, use the head and tail parameters on read_text_file to read specific portions.
-  Example: tools.filesystem_read_text_file({ path: "large.log", tail: 50 })
+  Example: filesystem.read_text_file({ path: "large.log", tail: 50 })
 - If a result contains [... truncated N bytes ...], use targeted reads to access the specific portion you need.
 - When you need information from multiple files, read them in a single execute_code call using a loop, not in separate calls.
 
@@ -72,8 +72,8 @@ ${serverLines}
 ### Tool discovery
 
 Call \`help.help('serverName')\` to list the tools in a server with their required parameters.
-Call \`__getToolInterface('tools.server_toolname')\` to inspect a tool's full TypeScript interface.
-Use the exact callable name from the catalog (e.g., \`tools.filesystem_read_text_file\`, \`tools.git_git_push\`).
+Call \`__getToolInterface('filesystem.read_text_file')\` to inspect a tool's full TypeScript interface.
+Use the exact callable name from the catalog (e.g., \`filesystem.read_text_file\`, \`git.push\`).
 
 Example workflow:
 \`\`\`typescript
@@ -82,11 +82,11 @@ const info = help.help('filesystem');
 return info;
 
 // 2. Inspect a tool's interface
-const iface = __getToolInterface('tools.filesystem_read_text_file');
+const iface = __getToolInterface('filesystem.read_text_file');
 return iface;
 
 // 3. Then use them
-const content = tools.filesystem_read_text_file({ path: '/data/config.json' });
+const content = filesystem.read_text_file({ path: '/data/config.json' });
 return content;
 \`\`\`
 `;

@@ -26,7 +26,7 @@ async function main(): Promise<void> {
   // Also build the old-style full catalog for comparison
   const catalogLines: string[] = [];
   for (const t of allTools) {
-    const utcpName = `${t.serverName}.${t.serverName}_${t.name}`;
+    const utcpName = `tools.${t.serverName}.${t.name}`;
     const callableName = toCallableName(utcpName);
     const params = extractRequiredParams(
       t.inputSchema as { properties?: Record<string, unknown>; required?: string[] } | undefined,

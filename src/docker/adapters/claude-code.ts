@@ -70,9 +70,9 @@ sandbox tools via \`execute_code\` instead. Do NOT attempt to use your
 built-in WebSearch or WebFetch tools.
 
 To search the web:
-  \`const results = tools.fetch_web_search({ query: "search terms" });\`
+  \`const results = fetch.web_search({ query: "search terms" });\`
 To fetch a URL:
-  \`const page = tools.fetch_http_fetch({ url: "https://example.com" });\`
+  \`const page = fetch.http_fetch({ url: "https://example.com" });\`
 
 ${buildPolicySection('tool call through `execute_code`')}
 
