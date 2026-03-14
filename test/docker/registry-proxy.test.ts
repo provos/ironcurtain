@@ -1,4 +1,6 @@
 import { describe, it, expect } from 'vitest';
+import * as http from 'node:http';
+import { PassThrough } from 'node:stream';
 import {
   parseNpmUrl,
   parsePypiSimpleUrl,
@@ -12,9 +14,12 @@ import {
   filterPypiIndex,
   getCachedVersions,
   setCachedVersions,
+  handleRegistryRequest,
+  npmRegistry,
   type NpmPackument,
+  type RegistryHandlerOptions,
 } from '../../src/docker/registry-proxy.js';
-import { createPackageValidator } from '../../src/docker/package-validator.js';
+import { createPackageValidator, DENY_ALL_VALIDATOR } from '../../src/docker/package-validator.js';
 import type { AllowedVersionCache, PackageIdentity } from '../../src/docker/package-types.js';
 
 // ── npm URL parsing ─────────────────────────────────────────────────
@@ -436,5 +441,72 @@ describe('AllowedVersionCache', () => {
 
     expect(getCachedVersions(cache, npmPkg)!.has('1.0.0')).toBe(true);
     expect(getCachedVersions(cache, pypiPkg)!.has('2.0.0')).toBe(true);
+  });
+});
+
+// ── Adversarial tarball backstop routing ─────────────────────────────
+
+describe('handleRegistryRequest: adversarial /-/ paths', () => {
+  /** Creates a fake IncomingMessage with the given URL. */
+  function fakeReq(url: string): http.IncomingMessage {
+    const req = new PassThrough() as unknown as http.IncomingMessage;
+    req.url = url;
+    req.method = 'GET';
+    req.headers = {};
+    return req;
+  }
+
+  /** Creates a fake ServerResponse that captures statusCode and body. */
+  function fakeRes(): http.ServerResponse & { body: string; statusCode: number } {
+    const res = new PassThrough() as unknown as http.ServerResponse & { body: string; statusCode: number };
+    res.body = '';
+    res.statusCode = 0;
+    res.writeHead = ((code: number) => {
+      res.statusCode = code;
+      return res;
+    }) as unknown as typeof res.writeHead;
+    res.end = ((data?: string) => {
+      if (data) res.body = data;
+      return res;
+    }) as unknown as typeof res.end;
+    return res;
+  }
+
+  const options: RegistryHandlerOptions = {
+    validator: DENY_ALL_VALIDATOR,
+    cache: new Map(),
+  };
+
+  const adversarialPaths = [
+    '/-/some-random-path',
+    '/-/',
+    '/express/-/not-a-real-tarball',
+    '/express/-/',
+    '/@scope/pkg/-/garbled-filename.xyz',
+    '/-/v1/security/advisories',
+    '/express/-/express-99.99.99.tgz', // valid-looking but won't be in cache
+  ];
+
+  for (const path of adversarialPaths) {
+    it(`denies crafted path: ${path}`, async () => {
+      const req = fakeReq(path);
+      const res = fakeRes();
+
+      await handleRegistryRequest(npmRegistry, req, res, 'registry.npmjs.org', 443, options);
+
+      expect(res.statusCode).toBe(403);
+      expect(res.body).toContain('Forbidden');
+    });
+  }
+
+  it('does not deny legitimate npm metadata requests', async () => {
+    const req = fakeReq('/express');
+    const res = fakeRes();
+
+    // This will try to fetch upstream and fail (no real network), resulting in 502
+    // The important thing is it does NOT return 403
+    await handleRegistryRequest(npmRegistry, req, res, 'registry.npmjs.org', 443, options);
+
+    expect(res.statusCode).not.toBe(403);
   });
 });
