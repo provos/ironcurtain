@@ -24,6 +24,10 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
     mv /root/.local/bin/ruff /usr/local/bin/ruff && \
     rm -rf /root/.local
 
+# Node.js headers for native addon compilation (node-gyp).
+# Pre-installed so agents can build native modules without network access to nodejs.org.
+RUN node-gyp install
+
 RUN mkdir -p /workspace /etc/ironcurtain /run/ironcurtain && \
     chown codespace:codespace /workspace /etc/ironcurtain /run/ironcurtain
 

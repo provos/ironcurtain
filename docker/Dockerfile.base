@@ -10,6 +10,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends socat && rm -rf
 COPY ironcurtain-ca-cert.pem /usr/local/share/ca-certificates/ironcurtain-ca.crt
 RUN update-ca-certificates
 
+# Node.js headers for native addon compilation (node-gyp).
+# Pre-installed so agents can build native modules without network access to nodejs.org.
+RUN node-gyp install
+
 # Python tooling: uv (fast package manager) and ruff (linter)
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
     curl -LsSf https://astral.sh/ruff/install.sh | sh && \
