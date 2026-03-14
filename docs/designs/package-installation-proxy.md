@@ -154,19 +154,19 @@ version age gate (which only requires reading the package metadata timestamp)
 combined with an allowlist gives meaningful security value with minimal
 complexity.
 
-### 6. Version age gate: 7 days (configurable)
+### 6. Version age gate: 2 days (configurable)
 
-**Decision:** Deny versions whose publish timestamp is less than 7 days old.
+**Decision:** Deny versions whose publish timestamp is less than 2 days old.
 Allowlisted packages bypass this check.
 
 **Rationale:**
 - Most malicious packages are detected and removed within 24-72 hours.
-  A 7-day window provides margin without being so long that it blocks
+  A 2-day window provides margin without being so long that it blocks
   legitimate new packages indefinitely.
 - This specifically targets new *versions* of packages (including brand-new
   packages where all versions are new), not established packages getting
   routine updates -- unless those updates are very recent.
-- Configurable via `quarantineDays` in user config (default: 7, set to 0
+- Configurable via `quarantineDays` in user config (default: 2, set to 0
   to disable).
 
 ### 7. Pre-install uv and ruff in base image
@@ -185,7 +185,7 @@ Allowlisted packages bypass this check.
 ### 8. Audit logging for package operations
 
 **Decision:** Package install decisions are logged to a new
-`package-audit-{sessionId}.jsonl` file alongside the existing MCP audit log.
+`package-audit.jsonl` file alongside the existing MCP audit log.
 
 **Rationale:**
 - Package operations are not MCP tool calls, so they do not fit the existing
@@ -408,7 +408,7 @@ type AllowedVersionCache = Map<string, {
 ```typescript
 /**
  * Audit log entry for package installation decisions.
- * Written to package-audit-{sessionId}.jsonl.
+ * Written to package-audit.jsonl in the session directory.
  */
 interface PackageAuditEntry {
   readonly timestamp: string;

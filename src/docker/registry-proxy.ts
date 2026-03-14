@@ -14,6 +14,7 @@ import * as https from 'node:https';
 import { promises as fs } from 'node:fs';
 import type {
   PackageIdentity,
+  PackageDecision,
   PackageValidator,
   PackageAuditEntry,
   AllowedVersionCache,
@@ -56,7 +57,13 @@ export function parseNpmUrl(path: string): PackageIdentity | undefined {
   const cleanPath = path.split('?')[0];
 
   // Handle URL-encoded scoped packages: /@scope%2fname -> /@scope/name
-  const decodedPath = decodeURIComponent(cleanPath);
+  let decodedPath: string;
+  try {
+    decodedPath = decodeURIComponent(cleanPath);
+  } catch {
+    // Malformed percent-encoding (e.g., %E0%A4) -- fail-closed
+    return undefined;
+  }
 
   // Tarball request: contains /-/
   const tarballIndex = decodedPath.indexOf('/-/');
@@ -549,7 +556,7 @@ async function handleTarballDownload(
     // Can't parse -- fail-closed
     logger.info(`[registry-proxy] tarball backstop: can't parse URL, denying: ${path}`);
     clientRes.writeHead(403, { 'Content-Type': 'text/plain' });
-    clientRes.end('Forbidden: unable to identify package');
+    clientRes.end('Forbidden: unable to identify package from URL — ensure the package name and version are correct');
     return;
   }
 
@@ -561,7 +568,7 @@ async function handleTarballDownload(
       await forwardToUpstream(clientRes, host, port, path, { timeoutMs: 60_000 });
       return;
     }
-    // In cache but not in allowed set -- was filtered
+    // In cache but not in allowed set -- was filtered during metadata validation
     const name = canonicalPackageName(pkg);
     logger.info(`[registry-proxy] tarball backstop: denied ${name}@${pkg.version}`);
     writeAuditEntry(options.auditLogPath, {
@@ -576,18 +583,20 @@ async function handleTarballDownload(
       requestPath: path,
     });
     clientRes.writeHead(403, { 'Content-Type': 'text/plain' });
-    clientRes.end(`Forbidden: ${name}@${pkg.version} is not allowed`);
+    clientRes.end(
+      `Forbidden: ${name}@${pkg.version} was filtered during metadata validation (may be too new, denylisted, or otherwise disallowed). Try an older version.`,
+    );
     return;
   }
 
   // Cache miss -- need to fetch metadata and validate
   try {
-    const allowed = await fetchAndValidateVersion(registry, pkg, options);
-    if (allowed) {
+    const decision = await fetchAndValidateVersion(registry, pkg, options);
+    if (decision.status === 'allow') {
       await forwardToUpstream(clientRes, host, port, path, { timeoutMs: 60_000 });
     } else {
       const name = canonicalPackageName(pkg);
-      logger.info(`[registry-proxy] tarball backstop (cache miss): denied ${name}@${pkg.version}`);
+      logger.info(`[registry-proxy] tarball backstop (cache miss): denied ${name}@${pkg.version}: ${decision.reason}`);
       writeAuditEntry(options.auditLogPath, {
         timestamp: new Date().toISOString(),
         registry: pkg.registry,
@@ -595,18 +604,20 @@ async function handleTarballDownload(
         packageScope: pkg.scope,
         packageVersion: pkg.version,
         decision: 'deny',
-        reason: 'Version denied after metadata fetch (cache miss)',
+        reason: decision.reason,
         source: 'tarball-backstop',
         requestPath: path,
       });
       clientRes.writeHead(403, { 'Content-Type': 'text/plain' });
-      clientRes.end(`Forbidden: ${name}@${pkg.version} is not allowed`);
+      clientRes.end(`Forbidden: ${name}@${pkg.version} — ${decision.reason}. Try a different version.`);
     }
   } catch (err) {
     // Fail-closed
     logger.info(`[registry-proxy] tarball backstop error: ${err instanceof Error ? err.message : String(err)}`);
     clientRes.writeHead(403, { 'Content-Type': 'text/plain' });
-    clientRes.end('Forbidden: unable to validate package (fail-closed)');
+    clientRes.end(
+      'Forbidden: unable to validate package version (upstream metadata fetch failed). This is a fail-closed response — retry later or use an allowlisted package.',
+    );
   }
 }
 
@@ -618,31 +629,43 @@ async function fetchAndValidateVersion(
   registry: RegistryConfig,
   pkg: PackageIdentity,
   options: RegistryHandlerOptions,
-): Promise<boolean> {
+): Promise<PackageDecision> {
   if (registry.type === 'npm') {
     const metadataPath = pkg.scope ? `/@${pkg.scope}/${pkg.name}` : `/${pkg.name}`;
     const packument = await fetchUpstreamJson<NpmPackument>(registry.host, 443, metadataPath);
-    if (!packument) return false;
+    if (!packument) return { status: 'deny', reason: 'Failed to fetch package metadata from upstream' };
 
-    const { filtered } = filterNpmPackument(packument, options.validator, pkg.name, pkg.scope);
+    const { filtered, denied } = filterNpmPackument(packument, options.validator, pkg.name, pkg.scope);
     const allowedVersions = new Set(Object.keys(filtered.versions));
     setCachedVersions(options.cache, pkg, allowedVersions);
-    return pkg.version !== undefined && allowedVersions.has(pkg.version);
+
+    if (pkg.version !== undefined && allowedVersions.has(pkg.version)) {
+      return { status: 'allow', reason: 'Version passed validation' };
+    }
+    const deniedEntry = denied.find((d) => d.version === pkg.version);
+    return { status: 'deny', reason: deniedEntry?.reason ?? 'Version not found in package metadata' };
   }
 
   // PyPI: fetch JSON API for timestamps, validate ALL versions, populate cache
   const versionTimestamps = await fetchPypiVersionTimestamps(registry.host, 443, pkg.name);
   const allowedVersions = new Set<string>();
+  let requestedVersionReason: string | undefined;
 
   for (const [version, publishedAt] of versionTimestamps) {
     const decision = options.validator.validate({ registry: 'pypi', name: pkg.name, version }, { publishedAt });
     if (decision.status === 'allow') {
       allowedVersions.add(version);
+    } else if (version === pkg.version) {
+      requestedVersionReason = decision.reason;
     }
   }
 
   setCachedVersions(options.cache, pkg, allowedVersions);
-  return pkg.version !== undefined && allowedVersions.has(pkg.version);
+
+  if (pkg.version !== undefined && allowedVersions.has(pkg.version)) {
+    return { status: 'allow', reason: 'Version passed validation' };
+  }
+  return { status: 'deny', reason: requestedVersionReason ?? 'Version not found in package metadata' };
 }
 
 // ── HTTP helpers ────────────────────────────────────────────────────
