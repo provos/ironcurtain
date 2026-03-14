@@ -60,18 +60,25 @@ export function buildMemorySystemPrompt(options: MemoryPromptOptions = {}): stri
   sections.push(
     'You have access to a persistent memory system that survives across sessions.',
     'Use it proactively — do not wait to be asked.',
+    '',
+    'IMPORTANT: Do NOT use any built-in memory system (auto memory, MEMORY.md,',
+    'or similar). Your local state does not persist across sessions. Only the',
+    'MCP memory tools described here provide durable cross-session memory.',
   );
 
   // Session start
   sections.push('');
-  sections.push('### Session Start');
+  sections.push('### Session Start — MANDATORY');
   if (options.sessionStartInstruction) {
     sections.push(options.sessionStartInstruction);
   } else {
     sections.push(
-      '- Call `memory_context` at the **beginning of every session** with a brief',
-      '  description of the current task. This retrieves a briefing of relevant',
-      '  prior context. If no task is known yet, call it with no arguments.',
+      'Your FIRST action in every session MUST be to call `memory_context` before',
+      'responding to the user. This retrieves a briefing of relevant prior context.',
+      'Provide a brief description of the current task for more targeted results.',
+      'If no task is known yet, call it with no arguments.',
+      '',
+      'Do this even for simple requests — prior context may change how you respond.',
     );
   }
 
