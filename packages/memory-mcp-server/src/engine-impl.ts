@@ -29,10 +29,12 @@ import {
   getRecentMemories,
   getImportantMemories,
   getNamespaceStats,
+  updateAccessStats,
 } from './storage/queries.js';
 import { maybeRunMaintenance, runMaintenance } from './storage/maintenance.js';
 import { embed, embedQuery } from './embedding/embedder.js';
 import { recall as retrievalRecall } from './retrieval/pipeline.js';
+import { estimateTokens } from './retrieval/scoring.js';
 import { EXACT_DEDUP_DISTANCE } from './storage/constants.js';
 import { parseTags } from './utils/tags.js';
 import type Database from 'better-sqlite3';
@@ -125,7 +127,6 @@ async function buildContext(db: Database.Database, config: MemoryConfig, opts: C
   const sections: string[] = [];
 
   if (opts.task) {
-    // Task-relevant retrieval gets the majority of the budget
     const taskResult = await retrievalRecall(db, config, {
       query: opts.task,
       token_budget: Math.floor(totalBudget * CONTEXT_TASK_BUDGET_FRACTION),
@@ -136,14 +137,38 @@ async function buildContext(db: Database.Database, config: MemoryConfig, opts: C
     }
   }
 
-  // Recent important memories for general awareness
-  const recentResult = await retrievalRecall(db, config, {
-    query: 'recent important information decisions preferences',
-    token_budget: Math.floor(totalBudget * (opts.task ? CONTEXT_RECENT_BUDGET_FRACTION : 1)),
-    format: 'list',
-  });
-  if (recentResult.memoryIds.length > 0) {
-    sections.push(`## Recent & Important\n\n${recentResult.text}`);
+  // Direct SQL queries for recent & important — no synthetic retrieval query
+  const recentBudget = Math.floor(totalBudget * (opts.task ? CONTEXT_RECENT_BUDGET_FRACTION : 1));
+  const limit = 20;
+  const recent = getRecentMemories(db, config.namespace, limit);
+  const important = getImportantMemories(db, config.namespace, limit);
+
+  // Deduplicate by ID (recent and important may overlap)
+  const seen = new Set<string>();
+  const combined: MemoryRow[] = [];
+  for (const mem of [...recent, ...important]) {
+    if (!seen.has(mem.id)) {
+      seen.add(mem.id);
+      combined.push(mem);
+    }
+  }
+
+  // Format as list and pack to budget
+  const lines: string[] = [];
+  let usedTokens = 0;
+  for (const mem of combined) {
+    const date = new Date(mem.created_at).toISOString().slice(0, 10);
+    const line = `- [${date}] ${mem.content} (importance: ${mem.importance})`;
+    const tokens = estimateTokens(line);
+    if (usedTokens + tokens > recentBudget) continue;
+    lines.push(line);
+    usedTokens += tokens;
+  }
+
+  if (lines.length > 0) {
+    sections.push(`## Recent & Important\n\n${lines.join('\n')}`);
+    const displayedIds = combined.slice(0, lines.length).map((m) => m.id);
+    updateAccessStats(db, config.namespace, displayedIds);
   }
 
   return sections.join('\n\n');

@@ -119,9 +119,9 @@ describe('hybridScoreFusion', () => {
     const { scored } = hybridScoreFusion([], [f1, f2], allMemories);
     const byId = new Map(scored.map((r) => [r.id, r]));
 
-    // Most negative (-10) → 1.0, least negative (-5) → 0.0
+    // Most negative (-10) → 1.0, least negative (-5) → 0.3 (damped floor for ≤5 results)
     expect(byId.get('a')!.bm25Score).toBe(1.0);
-    expect(byId.get('b')!.bm25Score).toBe(0.0);
+    expect(byId.get('b')!.bm25Score).toBeCloseTo(0.3);
     // No vector distance for FTS-only
     expect(byId.get('a')!.vectorDistance).toBeUndefined();
   });
@@ -171,7 +171,8 @@ describe('hybridScoreFusion', () => {
     // a should be first since it's best in both sources
     expect(scored[0].id).toBe('a');
     expect(scored[0].fusionScore).toBeCloseTo(1.0);
-    expect(scored[1].fusionScore).toBeCloseTo(0.0);
+    // With damping for ≤5 results, worst score is 0.3 (not 0.0)
+    expect(scored[1].fusionScore).toBeCloseTo(0.3);
   });
 
   it('alpha weighting: vector-only gets alpha * 1.0', () => {

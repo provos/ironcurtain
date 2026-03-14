@@ -398,6 +398,7 @@ export function buildSessionConfig(
       namespace: (opts.persona ?? opts.jobId) as string,
       llmBaseUrl: memoryConfig.llmBaseUrl,
       llmApiKey: memoryConfig.llmApiKey,
+      anthropicApiKey: config.userConfig.anthropicApiKey,
     });
 
     // For non-persona cron jobs, inject memory usage instructions since
