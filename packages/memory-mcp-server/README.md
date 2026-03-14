@@ -9,7 +9,7 @@ Most memory MCP servers fall into two camps: minimal and infrastructure-heavy. T
 This server fills a specific gap: **a TypeScript MCP server with semantic search, LLM summarization, and automatic maintenance that runs from a single SQLite file with zero external dependencies.**
 
 - **Single command, single file** — `npx` to start, one `.db` file to back up. SQLite + sqlite-vec + FTS5 handle storage, vector search, and keyword search in-process.
-- **Works without an LLM, improves with one** — Extractive retrieval, cosine-only dedup, and bullet-point formatting work out of the box. Adding a cheap LLM endpoint (Haiku, Ollama, etc.) enables abstractive summarization, contradiction detection, and smarter consolidation.
+- **Works without an LLM, improves with one** — Extractive retrieval, cosine-only dedup, and bullet-point formatting work out of the box. Adding a cheap LLM endpoint (Haiku, Ollama, etc.) enables abstractive summarization, direct question answering, contradiction detection, and smarter consolidation.
 - **Token-budget-aware responses** — Instead of dumping raw memories into your context window, the server summarizes and packs results to fit a specified token budget. The `memory_context` tool provides a structured session-start briefing — a capability unique to this server.
 
 For a detailed competitive analysis covering 11 memory systems, see [docs/designs/memory-server-comparison.md](../../docs/designs/memory-server-comparison.md).
@@ -20,34 +20,13 @@ For a detailed competitive analysis covering 11 memory systems, see [docs/design
 - **Cross-encoder reranking** — ms-marco-MiniLM re-ranks candidates using raw logits with relative gap filtering, improving precision without aggressive cutoffs
 - **Composite scoring** — fusion relevance (incorporating vector + BM25 magnitudes) blended with recency, importance, and access pattern signals
 - **Token-budget-aware retrieval** — returns pre-summarized context blocks sized to fit your context window
+- **Direct question answering** — `format="answer"` synthesizes across retrieved memories to answer questions directly, without a separate reader LLM
 - **SQLite-native, zero external dependencies** — embeddings and reranking run locally in-process; no Postgres, Neo4j, Redis, or Docker required. One `.db` file to back up
-- **Works without an LLM, improves with one** — extractive retrieval and bullet-point formatting work out of the box; adding a cheap LLM (Haiku, Ollama) enables abstractive summarization and contradiction detection
+- **Works without an LLM, improves with one** — extractive retrieval and bullet-point formatting work out of the box; adding a cheap LLM (Haiku, Ollama) enables abstractive summarization, direct answers, and contradiction detection
 - **Automatic maintenance** — unused memories decay over time; related memories compact into summaries via three-phase pipeline (consolidation, decay, compaction)
 - **Namespace isolation** — multiple agents or projects share one database without cross-contamination
 
 ## Quick Start
-
-```bash
-npm install
-npm run build
-```
-
-### Run as an MCP server
-
-```bash
-# Minimal (no LLM, extractive retrieval only)
-MEMORY_DB_PATH=./my-memories.db node dist/index.js
-
-# With an OpenAI-compatible LLM for summarization + contradiction detection
-# The LLM client uses the OpenAI SDK, so MEMORY_LLM_BASE_URL must point to
-# an OpenAI-compatible endpoint (e.g., OpenRouter, Ollama, LiteLLM proxy).
-# Anthropic's native API is NOT OpenAI-compatible — use a proxy or OpenRouter.
-MEMORY_DB_PATH=./my-memories.db \
-MEMORY_LLM_API_KEY=$OPENROUTER_API_KEY \
-MEMORY_LLM_BASE_URL=https://openrouter.ai/api/v1 \
-MEMORY_LLM_MODEL=anthropic/claude-haiku-4-5-20251001 \
-node dist/index.js
-```
 
 ### Configure in Claude Desktop / MCP client
 
@@ -55,8 +34,26 @@ node dist/index.js
 {
   "mcpServers": {
     "memory": {
-      "command": "node",
-      "args": ["/path/to/memory-mcp-server/dist/index.js"],
+      "command": "npx",
+      "args": ["-y", "@provos/memory-mcp-server"],
+      "env": {
+        "MEMORY_DB_PATH": "~/.local/share/memory-mcp/default.db"
+      }
+    }
+  }
+}
+```
+
+### With an LLM (recommended)
+
+Adding an LLM enables summarization, direct question answering (`format="answer"`), and contradiction detection. The LLM client uses the OpenAI SDK, so `MEMORY_LLM_BASE_URL` must point to an OpenAI-compatible endpoint.
+
+```json
+{
+  "mcpServers": {
+    "memory": {
+      "command": "npx",
+      "args": ["-y", "@provos/memory-mcp-server"],
       "env": {
         "MEMORY_DB_PATH": "~/.local/share/memory-mcp/default.db",
         "MEMORY_LLM_API_KEY": "your-api-key",
@@ -74,8 +71,8 @@ node dist/index.js
 {
   "mcpServers": {
     "memory": {
-      "command": "node",
-      "args": ["/path/to/memory-mcp-server/dist/index.js"],
+      "command": "npx",
+      "args": ["-y", "@provos/memory-mcp-server"],
       "env": {
         "MEMORY_DB_PATH": "~/.local/share/memory-mcp/default.db",
         "MEMORY_LLM_BASE_URL": "http://localhost:11434/v1",
@@ -93,21 +90,27 @@ node dist/index.js
 Store a memory for later retrieval. Memories are automatically embedded for semantic search.
 
 ```
-content  (string, required)   — The memory content. Store one fact per call.
-tags     (string[], optional) — For filtering, e.g. ["preference", "project:foo"]
-importance (number, optional) — 0-1 scale, controls decay resistance. Default 0.5.
+content    (string, required)   — The memory content. Store one fact per call.
+tags       (string[], optional) — For filtering, e.g. ["preference", "project:foo"]
+importance (number, optional)   — 0-1 scale, controls decay resistance. Default 0.5.
 ```
 
 ### memory_recall
 
-Retrieve memories relevant to a query. Returns a pre-summarized context block.
+Retrieve memories relevant to a query. Returns formatted results within a token budget.
 
 ```
 query        (string, required)   — Natural language query
 token_budget (integer, optional)  — Max tokens in response. Default 500.
 tags         (string[], optional) — Filter to memories with ALL these tags
-format       (string, optional)   — "summary" (default), "list", or "raw"
+format       (string, optional)   — "summary" (default), "list", "raw", or "answer"
 ```
+
+**Format modes:**
+- `summary` — LLM-generated briefing (falls back to extractive clusters without LLM)
+- `list` — Bullet list with dates and importance scores
+- `raw` — Full JSON with all metadata
+- `answer` — LLM answers the query directly by synthesizing across retrieved memories (falls back to `list` without LLM)
 
 ### memory_context
 
@@ -168,17 +171,15 @@ limit (integer, optional)   — Max items returned. Default 20.
 │  ┌─────────────┐  │  → Cross-encoder rerank  │   │
 │  │  Reranker   │  │  → Dedup by embedding    │   │
 │  │ ms-marco    │  │  → Token budget packing  │   │
-│  │  (local)    │  │  → Format (summary/list) │   │
-│  └─────────────┘  └──────────────────────────┘   │
-│  ┌─────────────┐                                 │
+│  │  (local)    │  │  → Format (answer/       │   │
+│  └─────────────┘  │     summary/list/raw)    │   │
+│  ┌─────────────┐  └──────────────────────────┘   │
 │  │  LLM Client │                                 │
-│  │  (optional) │                                 │
-│  │  Haiku etc. │                                 │
-│  └─────────────┘  ┌──────────────────────────┐   │
-│                   │   Maintenance            │   │
-│                   │  Phase 0: Consolidation  │   │
+│  │  (optional) │  ┌──────────────────────────┐   │
+│  │  Haiku etc. │  │   Maintenance            │   │
+│  └─────────────┘  │  Phase 0: Consolidation  │   │
 │                   │    (batch LLM dedup)     │   │
-│                   │  Phase 1: Vitality deca  │   │
+│                   │  Phase 1: Vitality decay │   │
 │                   │  Phase 2: Compaction     │   │
 │                   └──────────────────────────┘   │
 ├──────────────────────────────────────────────────┤
@@ -193,7 +194,7 @@ limit (integer, optional)   — Max items returned. Default 20.
 ### Store path
 
 1. Embed content locally (~5ms)
-2. Check for near-exact duplicates (cosine distance < 0.1) — auto-merge, no LLM
+2. Check for near-exact duplicates (cosine distance < 0.05) — auto-merge, no LLM
 3. Insert with `consolidated = false`
 4. Every N stores (default 50), run maintenance which includes batch consolidation
 
@@ -207,7 +208,7 @@ limit (integer, optional)   — Max items returned. Default 20.
 6. **Cross-encoder reranking** — ms-marco-MiniLM-L-6-v2 re-scores candidates; relative gap filter (5 logit points from best)
 7. **Deduplication** — remove near-duplicates by embedding cosine similarity
 8. **Token budget packing** — greedily select memories by score until budget is filled (skip, not break)
-9. **Formatting** — LLM summarization (if available) or extractive bullet list
+9. **Formatting** — `answer` (LLM synthesis), `summary` (LLM briefing), `list` (bullets), or `raw` (JSON)
 
 ### Maintenance (amortized, no background processes)
 
@@ -221,7 +222,7 @@ Every LLM-enhanced feature has an extractive fallback:
 
 | Feature | With LLM | Without LLM |
 |---------|----------|-------------|
-| Recall formatting | Abstractive summary | Extractive bullet list |
+| Recall formatting | Abstractive summary or direct answer | Extractive bullet list |
 | Dedup on store | Exact-match heuristic only | Same (LLM dedup deferred to consolidation) |
 | Consolidation | Batch LLM judgment | Mark all as consolidated |
 | Compaction | LLM-generated summaries | Skip compaction |
@@ -237,8 +238,10 @@ All settings are controlled via environment variables:
 | `MEMORY_NAMESPACE` | `default` | Namespace for memory isolation |
 | `MEMORY_EMBEDDING_MODEL` | `Xenova/bge-base-en-v1.5` | HuggingFace embedding model |
 | `MEMORY_EMBEDDING_DTYPE` | `q8` | Model quantization (q8, fp16, fp32) |
+| `MEMORY_RERANKER_ENABLED` | `true` | Enable cross-encoder reranking |
+| `MEMORY_RERANKER_MODEL` | `Xenova/ms-marco-MiniLM-L-6-v2` | HuggingFace reranker model |
 | `MEMORY_LLM_API_KEY` | *(none)* | API key for LLM (enables enhanced features) |
-| `MEMORY_LLM_BASE_URL` | *(none)* | OpenAI-compatible API endpoint (must support `/v1/chat/completions`) |
+| `MEMORY_LLM_BASE_URL` | *(none)* | OpenAI-compatible endpoint (must support `/v1/chat/completions`) |
 | `MEMORY_LLM_MODEL` | `claude-haiku-4-5-20251001` | LLM model name |
 | `MEMORY_DEFAULT_TOKEN_BUDGET` | `500` | Default token budget for recall |
 | `MEMORY_MAINTENANCE_INTERVAL` | `50` | Stores between maintenance passes |
@@ -278,9 +281,12 @@ import { TOOL_DESCRIPTIONS } from '@provos/memory-mcp-server/prompts';
 ## Development
 
 ```bash
+npm install
 npm run build          # TypeScript compilation
 npm test               # Run unit tests
-npm run test:e2e       # Run end-to-end tests (requires build)
+npm run test:e2e       # Run end-to-end tests (spawns real server)
+npm run lint           # ESLint
+npm run format         # Prettier
 npm run benchmark      # Run retrieval quality benchmark
 ```
 
