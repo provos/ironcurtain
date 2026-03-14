@@ -77,7 +77,7 @@ import type { LanguageModelV3 } from '@ai-sdk/provider';
 import type { MCPServerConfig, SandboxAvailabilityPolicy } from '../config/types.js';
 import type { ToolAnnotation } from '../pipeline/types.js';
 import { VERSION } from '../version.js';
-import { MEMORY_SERVER_NAME, verifyMemoryServerConfig } from '../memory/memory-annotations.js';
+import { buildTrustedServerSet } from '../memory/memory-annotations.js';
 import { loadToolDescriptionHints, applyToolDescriptionHints } from './tool-description-hints.js';
 
 export interface ProxiedTool {
@@ -931,10 +931,7 @@ async function main(): Promise<void> {
   });
 
   const serverDomainAllowlists = extractServerDomainAllowlists(serversConfig);
-  const trustedServers = new Set<string>();
-  if (verifyMemoryServerConfig(serversConfig)) {
-    trustedServers.add(MEMORY_SERVER_NAME);
-  }
+  const trustedServers = buildTrustedServerSet(serversConfig);
   const policyEngine = new PolicyEngine(
     compiledPolicy,
     toolAnnotations,

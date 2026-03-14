@@ -7,8 +7,9 @@
  */
 
 import { resolve } from 'node:path';
-import { getIronCurtainHome } from '../config/paths.js';
-import { validateSlug } from '../types/slug.js';
+import { getJobDir } from '../config/paths.js';
+import { getPersonaDir } from '../persona/resolve.js';
+import { createPersonaName } from '../persona/types.js';
 
 /**
  * Returns the absolute path to the memory SQLite database.
@@ -16,19 +17,16 @@ import { validateSlug } from '../types/slug.js';
  * - Persona sessions: ~/.ironcurtain/personas/{name}/memory.db
  * - Cron jobs (no persona): ~/.ironcurtain/jobs/{jobId}/memory.db
  *
- * Validates persona/jobId to prevent path traversal (e.g. "../" segments).
+ * Uses the established path helpers and validators (createPersonaName,
+ * getJobDir) to ensure consistent validation and path construction.
  */
 export function resolveMemoryDbPath(opts: { persona?: string; jobId?: string }): string {
-  const home = getIronCurtainHome();
-
   if (opts.persona) {
-    validateSlug(opts.persona, 'persona name');
-    return resolve(home, 'personas', opts.persona, 'memory.db');
+    return resolve(getPersonaDir(createPersonaName(opts.persona)), 'memory.db');
   }
 
   if (opts.jobId) {
-    validateSlug(opts.jobId, 'job ID');
-    return resolve(home, 'jobs', opts.jobId, 'memory.db');
+    return resolve(getJobDir(opts.jobId), 'memory.db');
   }
 
   throw new Error('resolveMemoryDbPath requires either persona or jobId');

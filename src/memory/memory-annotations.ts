@@ -45,6 +45,20 @@ export function verifyMemoryServerConfig(mcpServers: Record<string, MCPServerCon
 }
 
 /**
+ * Builds the set of trusted server names from the MCP server config.
+ * Currently only the memory server can be trusted, verified by exact
+ * command/args match. Throws if a 'memory' server exists with an
+ * unexpected shape.
+ */
+export function buildTrustedServerSet(mcpServers: Record<string, MCPServerConfig>): ReadonlySet<string> {
+  const trusted = new Set<string>();
+  if (verifyMemoryServerConfig(mcpServers)) {
+    trusted.add(MEMORY_SERVER_NAME);
+  }
+  return trusted;
+}
+
+/**
  * Builds the MCP server config for the memory server.
  *
  * The server runs as a Node.js subprocess using the compiled

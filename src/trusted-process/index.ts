@@ -20,7 +20,7 @@ import * as logger from '../logger.js';
 import { extractMcpErrorMessage } from './mcp-error-utils.js';
 import { extractTextFromContent, buildAuditEntry } from './mcp-proxy-server.js';
 import { type ServerContextMap, updateServerContext, formatServerContext } from './server-context.js';
-import { MEMORY_SERVER_NAME, verifyMemoryServerConfig } from '../memory/memory-annotations.js';
+import { buildTrustedServerSet } from '../memory/memory-annotations.js';
 
 /**
  * Detects Docker-style `-e VAR_NAME` args (no `=`) where the env var is unset.
@@ -72,10 +72,7 @@ export class TrustedProcess {
     checkConstitutionFreshness(compiledPolicy, config.constitutionPath);
 
     const serverDomainAllowlists = extractServerDomainAllowlists(config.mcpServers);
-    const trustedServers = new Set<string>();
-    if (verifyMemoryServerConfig(config.mcpServers)) {
-      trustedServers.add(MEMORY_SERVER_NAME);
-    }
+    const trustedServers = buildTrustedServerSet(config.mcpServers);
     this.policyEngine = new PolicyEngine(
       compiledPolicy,
       toolAnnotations,
