@@ -20,7 +20,7 @@ import * as logger from '../logger.js';
 import { extractMcpErrorMessage } from './mcp-error-utils.js';
 import { extractTextFromContent, buildAuditEntry } from './mcp-proxy-server.js';
 import { type ServerContextMap, updateServerContext, formatServerContext } from './server-context.js';
-import { MEMORY_SERVER_NAME, MEMORY_SERVER_ENTRY } from '../memory/memory-annotations.js';
+import { MEMORY_SERVER_NAME, verifyMemoryServerConfig } from '../memory/memory-annotations.js';
 
 /**
  * Detects Docker-style `-e VAR_NAME` args (no `=`) where the env var is unset.
@@ -73,11 +73,8 @@ export class TrustedProcess {
 
     const serverDomainAllowlists = extractServerDomainAllowlists(config.mcpServers);
     const trustedServers = new Set<string>();
-    if (MEMORY_SERVER_NAME in config.mcpServers) {
-      const memConfig = config.mcpServers[MEMORY_SERVER_NAME];
-      if (memConfig.command === 'node' && memConfig.args.includes(MEMORY_SERVER_ENTRY)) {
-        trustedServers.add(MEMORY_SERVER_NAME);
-      }
+    if (verifyMemoryServerConfig(config.mcpServers)) {
+      trustedServers.add(MEMORY_SERVER_NAME);
     }
     this.policyEngine = new PolicyEngine(
       compiledPolicy,

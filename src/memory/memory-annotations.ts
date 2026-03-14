@@ -20,6 +20,31 @@ export const MEMORY_SERVER_NAME = 'memory';
 export const MEMORY_SERVER_ENTRY = createRequire(import.meta.url).resolve('@provos/memory-mcp-server');
 
 /**
+ * Verifies that a server config named 'memory' matches the exact shape
+ * produced by buildMemoryServerConfig(). If the config exists but doesn't
+ * match, the process cannot safely trust it — this is a fatal error.
+ *
+ * Returns true if the config is verified as our memory server,
+ * false if no 'memory' server is configured.
+ * Throws if a 'memory' server exists but has an unexpected shape.
+ */
+export function verifyMemoryServerConfig(mcpServers: Record<string, MCPServerConfig>): boolean {
+  if (!(MEMORY_SERVER_NAME in mcpServers)) return false;
+
+  const config = mcpServers[MEMORY_SERVER_NAME];
+  if (config.command === 'node' && config.args.length === 1 && config.args[0] === MEMORY_SERVER_ENTRY) {
+    return true;
+  }
+
+  throw new Error(
+    `MCP server "${MEMORY_SERVER_NAME}" has unexpected config ` +
+      `(command=${JSON.stringify(config.command)}, args=${JSON.stringify(config.args)}). ` +
+      `Expected command="node" with args=[${JSON.stringify(MEMORY_SERVER_ENTRY)}]. ` +
+      `The memory server config appears tampered or misconfigured.`,
+  );
+}
+
+/**
  * Builds the MCP server config for the memory server.
  *
  * The server runs as a Node.js subprocess using the compiled

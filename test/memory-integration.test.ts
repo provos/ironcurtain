@@ -8,7 +8,11 @@
 
 import { describe, it, expect } from 'vitest';
 import { resolveMemoryDbPath } from '../src/memory/resolve-memory-path.js';
-import { MEMORY_SERVER_NAME, buildMemoryServerConfig } from '../src/memory/memory-annotations.js';
+import {
+  MEMORY_SERVER_NAME,
+  buildMemoryServerConfig,
+  verifyMemoryServerConfig,
+} from '../src/memory/memory-annotations.js';
 import { applyServerAllowlist } from '../src/persona/resolve.js';
 import type { MCPServerConfig } from '../src/config/types.js';
 
@@ -73,6 +77,50 @@ describe('buildMemoryServerConfig', () => {
 describe('MEMORY_SERVER_NAME', () => {
   it('is the string "memory"', () => {
     expect(MEMORY_SERVER_NAME).toBe('memory');
+  });
+});
+
+describe('verifyMemoryServerConfig', () => {
+  it('returns true for config produced by buildMemoryServerConfig', () => {
+    const servers: Record<string, MCPServerConfig> = {
+      memory: buildMemoryServerConfig({ dbPath: '/tmp/test.db' }),
+    };
+    expect(verifyMemoryServerConfig(servers)).toBe(true);
+  });
+
+  it('returns false when no memory server is configured', () => {
+    const servers: Record<string, MCPServerConfig> = {
+      filesystem: { command: 'node', args: ['/tmp'] },
+    };
+    expect(verifyMemoryServerConfig(servers)).toBe(false);
+  });
+
+  it('throws when memory server has extra args (preload injection)', () => {
+    const servers: Record<string, MCPServerConfig> = {
+      memory: { command: 'node', args: ['-r', 'evil.js', buildMemoryServerConfig({ dbPath: '/tmp/test.db' }).args[0]] },
+    };
+    expect(() => verifyMemoryServerConfig(servers)).toThrow('unexpected config');
+  });
+
+  it('throws when memory server has wrong command', () => {
+    const servers: Record<string, MCPServerConfig> = {
+      memory: { command: 'npx', args: [buildMemoryServerConfig({ dbPath: '/tmp/test.db' }).args[0]] },
+    };
+    expect(() => verifyMemoryServerConfig(servers)).toThrow('unexpected config');
+  });
+
+  it('throws when memory server has wrong entry point', () => {
+    const servers: Record<string, MCPServerConfig> = {
+      memory: { command: 'node', args: ['/path/to/evil.js'] },
+    };
+    expect(() => verifyMemoryServerConfig(servers)).toThrow('unexpected config');
+  });
+
+  it('throws when memory server args contain entry but also other args', () => {
+    const servers: Record<string, MCPServerConfig> = {
+      memory: { command: 'node', args: ['--inspect', buildMemoryServerConfig({ dbPath: '/tmp/test.db' }).args[0]] },
+    };
+    expect(() => verifyMemoryServerConfig(servers)).toThrow('unexpected config');
   });
 });
 
