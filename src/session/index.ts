@@ -229,7 +229,7 @@ async function createDockerSession(
 }
 
 /** Paths and patched config produced by buildSessionConfig. */
-interface SessionDirConfig {
+export interface SessionDirConfig {
   config: IronCurtainConfig;
   sessionDir: string;
   sandboxDir: string;
@@ -276,7 +276,7 @@ function validatePolicyDir(policyDir: string): void {
  * server allowlist, and system prompt augmentation. Persona takes
  * precedence over explicit policyDir if both are provided.
  */
-function buildSessionConfig(
+export function buildSessionConfig(
   config: IronCurtainConfig,
   effectiveSessionId: string,
   sessionId: SessionId,

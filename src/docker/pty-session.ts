@@ -23,7 +23,7 @@ import ora from 'ora';
 import type { IronCurtainConfig } from '../config/types.js';
 import type { SessionMode } from '../session/types.js';
 import { createSessionId } from '../session/types.js';
-import { patchMcpServerAllowedDirectory } from '../session/index.js';
+import { buildSessionConfig } from '../session/index.js';
 import { validateWorkspacePath } from '../session/workspace-validation.js';
 import { CONTAINER_WORKSPACE_DIR } from './agent-adapter.js';
 import { PTY_SOCK_NAME, DEFAULT_PTY_PORT } from './pty-types.js';
@@ -31,20 +31,8 @@ import type { PtySessionRegistration, SessionSnapshot } from './pty-types.js';
 import { SESSION_STATE_FILENAME } from './pty-types.js';
 import { createEscalationWatcher, atomicWriteJsonSync } from '../escalation/escalation-watcher.js';
 import type { EscalationWatcher } from '../escalation/escalation-watcher.js';
-import {
-  getSessionDir,
-  getSessionSandboxDir,
-  getSessionEscalationDir,
-  getSessionAuditLogPath,
-  getSessionLogPath,
-  getSessionLlmLogPath,
-  getSessionAutoApproveLlmLogPath,
-  getPtyRegistryDir,
-} from '../config/paths.js';
+import { getSessionDir, getPtyRegistryDir } from '../config/paths.js';
 import * as logger from '../logger.js';
-import { resolvePersona } from '../persona/resolve.js';
-import { buildPersonaSystemPromptAugmentation } from '../persona/persona-prompt.js';
-import { buildMemorySystemPrompt } from '../memory/memory-prompt.js';
 import { buildDockerClaudeMd } from './claude-md-seed.js';
 
 export interface PtySessionOptions {
@@ -175,49 +163,27 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
   const isResume = !!resumeSnapshot;
 
   // Use the original session ID when resuming, otherwise create a new one
-  const effectiveSessionId = options.resumeSessionId ?? createSessionId();
+  const sessionId = createSessionId();
+  const effectiveSessionId = options.resumeSessionId ?? sessionId;
   const sessionDir = getSessionDir(effectiveSessionId);
-  const sandboxDir = isResume
-    ? resumeSnapshot.workspacePath
-    : (options.workspacePath ?? getSessionSandboxDir(effectiveSessionId));
-  const escalationDir = getSessionEscalationDir(effectiveSessionId);
-  const auditLogPath = getSessionAuditLogPath(effectiveSessionId);
-  const socketsDir = resolve(sessionDir, 'sockets');
 
-  // Only create the sandbox directory when not using an external workspace and not resuming
-  if (!options.workspacePath && !isResume) {
-    mkdirSync(sandboxDir, { recursive: true, mode: 0o700 });
-  }
-  mkdirSync(escalationDir, { recursive: true, mode: 0o700 });
+  // Delegate to shared buildSessionConfig() so PTY sessions get the same
+  // config patching as standard Docker sessions (persona, memory MCP server
+  // injection, server allowlist, policy dir, etc.).
+  const dirConfig = buildSessionConfig(options.config, effectiveSessionId, sessionId, {
+    resumeSessionId: options.resumeSessionId,
+    workspacePath: isResume ? resumeSnapshot.workspacePath : options.workspacePath,
+    persona: options.persona,
+  });
+
+  // Layer PTY-specific fields on top of the shared config.
+  const sessionConfig = { ...dirConfig.config, isPtySession: true };
+  const { sandboxDir, escalationDir, auditLogPath, systemPromptAugmentation } = dirConfig;
+
+  const socketsDir = resolve(sessionDir, 'sockets');
   mkdirSync(socketsDir, { recursive: true, mode: 0o700 });
 
-  // Set up session logging (append-only for resumed sessions)
-  const sessionLogPath = getSessionLogPath(effectiveSessionId);
-  const llmLogPath = getSessionLlmLogPath(effectiveSessionId);
-  logger.setup({ logFilePath: sessionLogPath });
   logger.info(`PTY session ${effectiveSessionId} ${isResume ? 'resuming' : 'starting'}`);
-  logger.info(`${options.workspacePath ? 'Workspace' : 'Sandbox'}: ${sandboxDir}`);
-  logger.info(`Escalation dir: ${escalationDir}`);
-  logger.info(`LLM log: ${llmLogPath}`);
-
-  // Patch config for this session
-  const autoApproveLlmLogPath = getSessionAutoApproveLlmLogPath(effectiveSessionId);
-  const sessionConfig = {
-    ...options.config,
-    allowedDirectory: sandboxDir,
-    auditLogPath,
-    escalationDir,
-    sessionLogPath,
-    llmLogPath,
-    autoApproveLlmLogPath,
-    isPtySession: true,
-    mcpServers: JSON.parse(JSON.stringify(options.config.mcpServers)) as typeof options.config.mcpServers,
-  };
-
-  // Sync the filesystem server's directory arg with the session sandbox.
-  // Without this, the filesystem server inherits the stale default from
-  // loadConfig() (~/.ironcurtain/sandbox) instead of the session workspace.
-  patchMcpServerAllowedDirectory(sessionConfig, sandboxDir);
 
   const initSpinner = ora({
     text: `Initializing PTY session (${options.mode.agent})...`,
@@ -267,22 +233,9 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
   let conversationStateDirForSnapshot: string | undefined;
   let userExited = false;
 
-  // Resolve persona and build CLAUDE.md content + system prompt augmentation
-  let systemPromptAugmentation: string | undefined;
-  const memoryEnabled = options.config.userConfig.memory.enabled;
-
-  if (options.persona) {
-    const resolved = resolvePersona(options.persona);
-    systemPromptAugmentation = buildPersonaSystemPromptAugmentation(resolved.persona, memoryEnabled);
-    logger.info(`PTY persona "${options.persona}" resolved`);
-  } else if (memoryEnabled) {
-    // Non-persona sessions with memory enabled still need memory instructions
-    systemPromptAugmentation = buildMemorySystemPrompt();
-  }
-
   const claudeMdContent = buildDockerClaudeMd({
     personaName: options.persona,
-    memoryEnabled,
+    memoryEnabled: options.config.userConfig.memory.enabled,
   });
 
   try {
