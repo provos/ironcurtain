@@ -20,7 +20,7 @@ import * as logger from '../logger.js';
 import { extractMcpErrorMessage } from './mcp-error-utils.js';
 import { extractTextFromContent, buildAuditEntry } from './mcp-proxy-server.js';
 import { type ServerContextMap, updateServerContext, formatServerContext } from './server-context.js';
-import { MEMORY_SERVER_NAME } from '../memory/memory-annotations.js';
+import { MEMORY_SERVER_NAME, MEMORY_SERVER_ENTRY } from '../memory/memory-annotations.js';
 
 /**
  * Detects Docker-style `-e VAR_NAME` args (no `=`) where the env var is unset.
@@ -74,7 +74,10 @@ export class TrustedProcess {
     const serverDomainAllowlists = extractServerDomainAllowlists(config.mcpServers);
     const trustedServers = new Set<string>();
     if (MEMORY_SERVER_NAME in config.mcpServers) {
-      trustedServers.add(MEMORY_SERVER_NAME);
+      const memConfig = config.mcpServers[MEMORY_SERVER_NAME];
+      if (memConfig.command === 'node' && memConfig.args.includes(MEMORY_SERVER_ENTRY)) {
+        trustedServers.add(MEMORY_SERVER_NAME);
+      }
     }
     this.policyEngine = new PolicyEngine(
       compiledPolicy,
@@ -157,66 +160,16 @@ export class TrustedProcess {
   async handleToolCall(request: ToolCallRequest): Promise<ToolCallResult> {
     const startTime = Date.now();
 
-    // Trusted servers bypass annotation lookup and policy evaluation entirely.
-    // Forward directly and log the result.
-    if (this.policyEngine.isTrustedServer(request.serverName)) {
-      const policyDecision: PolicyDecision = {
-        status: 'allow',
-        rule: 'trusted-server',
-        reason: `Server "${request.serverName}" is trusted`,
-      };
-
-      let resultContent: unknown;
-      let resultStatus: 'success' | 'error';
-      let resultError: string | undefined;
-
-      try {
-        const mcpResult = (await this.mcpManager.callTool(request.serverName, request.toolName, request.arguments)) as {
-          content?: unknown;
-          isError?: boolean;
-        };
-        resultContent = mcpResult;
-
-        if (mcpResult.isError) {
-          resultStatus = 'error';
-          resultError = extractTextFromContent(mcpResult.content);
-        } else {
-          resultStatus = 'success';
-        }
-      } catch (err) {
-        resultStatus = 'error';
-        resultError = extractMcpErrorMessage(err);
-        resultContent = { error: resultError };
-      }
-
-      const durationMs = Date.now() - startTime;
-      this.auditLog.log(
-        buildAuditEntry(
-          request,
-          request.arguments,
-          policyDecision,
-          {
-            status: resultStatus,
-            content: resultStatus === 'success' ? resultContent : undefined,
-            error: resultError,
-          },
-          durationMs,
-          {},
-        ),
-      );
-
-      return {
-        requestId: request.requestId,
-        status: resultStatus,
-        content: resultContent,
-        policyDecision,
-        durationMs,
-      };
-    }
-
-    // Annotation-driven normalization: split into transport vs policy args
+    // Annotation-driven normalization: split into transport vs policy args.
+    // Trusted servers skip annotation lookup and prepareToolArgs — use raw args directly.
     const annotation = this.policyEngine.getAnnotation(request.serverName, request.toolName, request.arguments);
-    if (!annotation) {
+    let argsForTransport: Record<string, unknown>;
+    let argsForPolicy: Record<string, unknown>;
+
+    if (!annotation && this.policyEngine.isTrustedServer(request.serverName)) {
+      argsForTransport = request.arguments;
+      argsForPolicy = request.arguments;
+    } else if (!annotation) {
       const reason = `Missing annotation for tool: ${request.serverName}__${request.toolName}. Re-run 'ironcurtain annotate-tools' to update.`;
       return {
         requestId: request.requestId,
@@ -225,12 +178,13 @@ export class TrustedProcess {
         policyDecision: { status: 'deny', rule: 'missing-annotation', reason },
         durationMs: Date.now() - startTime,
       };
+    } else {
+      ({ argsForTransport, argsForPolicy } = prepareToolArgs(
+        request.arguments,
+        annotation,
+        this.config.allowedDirectory,
+      ));
     }
-    const { argsForTransport, argsForPolicy } = prepareToolArgs(
-      request.arguments,
-      annotation,
-      this.config.allowedDirectory,
-    );
     const policyRequest = { ...request, arguments: argsForPolicy };
     const transportRequest = { ...request, arguments: argsForTransport };
 
@@ -288,7 +242,7 @@ export class TrustedProcess {
 
         // Expand roots to include target directories so the filesystem
         // server accepts the forwarded call (for both auto and human approval).
-        if (escalationResult === 'approved') {
+        if (escalationResult === 'approved' && annotation) {
           const pathValues = extractAnnotatedPaths(transportRequest.arguments, annotation, getPathRoles());
           for (const p of pathValues) {
             const dir = directoryForPath(p);

@@ -5,10 +5,11 @@ IronCurtain is a secure agent runtime that mediates between an AI agent and MCP 
 ## Security Invariants
 
 - Every tool call MUST pass through `policyEngine.evaluate()` before forwarding to a real MCP server. Any code path that skips evaluation is a security bypass.
+- **Trusted servers** are an intentional exception to annotation requirements. Servers in the `trustedServers` set (currently only the memory MCP server) bypass structural invariants and compiled rules via an early return in `evaluate()`. This is by design: trusted server tools have no filesystem paths or URLs, so structural invariants (protected paths, sandbox containment, domain gate) are not applicable and would require fake annotations. Trust is verified by matching both the server name AND the expected entrypoint path (`MEMORY_SERVER_ENTRY`), not name alone. The normal flow (annotation lookup → evaluate → forward → audit) still runs; only `prepareToolArgs` is skipped when no annotation exists.
 - Path containment checks MUST use `resolveRealPath()` (symlink resolution) before comparison. Raw `path.resolve()` is a symlink-escape vulnerability.
 - `isWithinDirectory()` appends a trailing `/` before `startsWith()`. Without it, `/tmp/sandbox-evil` matches `/tmp/sandbox`.
 - Multi-role evaluation uses most-restrictive-wins (deny > escalate > allow). Least-restrictive is a privilege escalation.
-- Unknown tools (without annotations) MUST be denied. Allowing them bypasses the annotation requirement.
+- Unknown tools (without annotations) MUST be denied, unless the server is in the `trustedServers` set.
 - The auto-approver can only return `approve` or `escalate`, never `deny`. Error paths must return `escalate` (fail-open to human).
 - `SERVER_CREDENTIALS` must be deleted from `process.env` immediately after parsing to prevent child process leakage.
 - Audit logging must occur for every tool call outcome. No code path should skip it.

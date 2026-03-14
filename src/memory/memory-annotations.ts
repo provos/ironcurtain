@@ -15,7 +15,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 export const MEMORY_SERVER_NAME = 'memory';
 
 /** Resolved path to the memory-mcp-server entry point (computed once). */
-const SERVER_ENTRY = resolve(__dirname, '..', '..', 'packages', 'memory-mcp-server', 'dist', 'index.js');
+export const MEMORY_SERVER_ENTRY = resolve(__dirname, '..', '..', 'packages', 'memory-mcp-server', 'dist', 'index.js');
 
 /**
  * Builds the MCP server config for the memory server.
@@ -50,7 +50,7 @@ export function buildMemoryServerConfig(opts: {
 
   return {
     command: 'node',
-    args: [SERVER_ENTRY],
+    args: [MEMORY_SERVER_ENTRY],
     env,
     description: 'Persistent memory with semantic search',
     sandbox: false,
