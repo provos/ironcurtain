@@ -32,6 +32,7 @@ jobs:
           node-version: ${{ matrix.node-version }}
           cache: npm
       - run: npm ci
+      - run: npm run build --workspace=packages/memory-mcp-server
       - run: npm run format:check
       - run: npm run lint
       - run: npm run build

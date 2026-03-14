@@ -71,6 +71,7 @@
     "@clack/prompts": "^1.0.1",
     "@cyanheads/git-mcp-server": "^2.8.4",
     "@modelcontextprotocol/sdk": "^1.27.1",
+    "@provos/memory-mcp-server": "workspace:*",
     "@mozilla/readability": "^0.6.0",
     "@utcp/code-mode": "^1.2.11",
     "@utcp/mcp": "^1.1.1",

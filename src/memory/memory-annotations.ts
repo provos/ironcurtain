@@ -6,16 +6,18 @@
  * or policy rules are needed here.
  */
 
-import { resolve, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 import type { MCPServerConfig } from '../config/types.js';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
 
 export const MEMORY_SERVER_NAME = 'memory';
 
-/** Resolved path to the memory-mcp-server entry point (computed once). */
-export const MEMORY_SERVER_ENTRY = resolve(__dirname, '..', '..', 'packages', 'memory-mcp-server', 'dist', 'index.js');
+/**
+ * Resolved path to the memory-mcp-server entry point (computed once).
+ *
+ * Uses Node module resolution so the path works both in development
+ * (workspace symlink) and production (installed from npm).
+ */
+export const MEMORY_SERVER_ENTRY = createRequire(import.meta.url).resolve('@provos/memory-mcp-server');
 
 /**
  * Builds the MCP server config for the memory server.
