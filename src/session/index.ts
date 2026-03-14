@@ -27,7 +27,6 @@ import { resolvePersona, applyServerAllowlist } from '../persona/resolve.js';
 import { buildPersonaSystemPromptAugmentation } from '../persona/persona-prompt.js';
 import { resolveMemoryDbPath } from '../memory/resolve-memory-path.js';
 import { buildMemoryServerConfig, MEMORY_SERVER_NAME } from '../memory/memory-annotations.js';
-import { buildMemorySystemPrompt } from '../memory/memory-prompt.js';
 import { AgentSession } from './agent-session.js';
 import { SessionError } from './errors.js';
 import { saveSessionMetadata, loadSessionMetadata } from './session-metadata.js';
@@ -356,9 +355,10 @@ function buildSessionConfig(
     sessionConfig.mcpServers = applyServerAllowlist(sessionConfig.mcpServers, serverAllowlist);
   }
 
-  // Inject the memory MCP server when enabled
+  // Inject the memory MCP server for persona and cron job sessions only.
+  // Default (ad-hoc) sessions are stateless and don't benefit from memory.
   const memoryConfig = config.userConfig.memory;
-  if (memoryConfig.enabled) {
+  if (memoryConfig.enabled && (opts.persona || opts.jobId)) {
     const dbPath = resolveMemoryDbPath({
       persona: opts.persona,
       jobId: opts.jobId,
@@ -366,19 +366,11 @@ function buildSessionConfig(
     mkdirSync(dirname(dbPath), { recursive: true });
     sessionConfig.mcpServers[MEMORY_SERVER_NAME] = buildMemoryServerConfig({
       dbPath,
-      namespace: opts.persona ?? opts.jobId ?? 'default',
+      namespace: (opts.persona ?? opts.jobId) as string,
       llmBaseUrl: memoryConfig.llmBaseUrl,
       llmApiKey: memoryConfig.llmApiKey,
       anthropicApiKey: config.userConfig.anthropicApiKey || undefined,
     });
-
-    // For non-persona sessions, add the memory system prompt
-    if (!opts.persona) {
-      const memoryPrompt = buildMemorySystemPrompt();
-      systemPromptAugmentation = systemPromptAugmentation
-        ? `${memoryPrompt}\n\n${systemPromptAugmentation}`
-        : memoryPrompt;
-    }
   }
 
   // Patch MCP server args to use the session-specific sandbox directory

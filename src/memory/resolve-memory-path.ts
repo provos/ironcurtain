@@ -1,6 +1,9 @@
 /**
  * Resolves the SQLite database path for the memory MCP server
- * based on the session context (persona, cron job, or default).
+ * based on the session context (persona or cron job).
+ *
+ * Memory is only available for persona and cron job sessions,
+ * not for ad-hoc default sessions.
  */
 
 import { resolve } from 'node:path';
@@ -11,18 +14,17 @@ import { getIronCurtainHome } from '../config/paths.js';
  *
  * - Persona sessions: ~/.ironcurtain/personas/{name}/memory.db
  * - Cron jobs (no persona): ~/.ironcurtain/jobs/{jobId}/memory.db
- * - Default sessions: ~/.ironcurtain/memory/default.db
  */
-export function resolveMemoryDbPath(opts?: { persona?: string; jobId?: string }): string {
+export function resolveMemoryDbPath(opts: { persona?: string; jobId?: string }): string {
   const home = getIronCurtainHome();
 
-  if (opts?.persona) {
+  if (opts.persona) {
     return resolve(home, 'personas', opts.persona, 'memory.db');
   }
 
-  if (opts?.jobId) {
+  if (opts.jobId) {
     return resolve(home, 'jobs', opts.jobId, 'memory.db');
   }
 
-  return resolve(home, 'memory', 'default.db');
+  throw new Error('resolveMemoryDbPath requires either persona or jobId');
 }

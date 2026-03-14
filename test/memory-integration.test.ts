@@ -3,7 +3,7 @@
  *
  * Tests that buildSessionConfig() correctly injects (or skips) the
  * memory server based on configuration, and that memory DB paths
- * resolve correctly for persona / cron / default sessions.
+ * resolve correctly for persona and cron job sessions.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -33,14 +33,8 @@ describe('resolveMemoryDbPath', () => {
     expect(path).toMatch(/personas\/exec-assistant\/memory\.db$/);
   });
 
-  it('returns default path when neither persona nor jobId is set', () => {
-    const path = resolveMemoryDbPath();
-    expect(path).toMatch(/memory\/default\.db$/);
-  });
-
-  it('returns default path for empty options', () => {
-    const path = resolveMemoryDbPath({});
-    expect(path).toMatch(/memory\/default\.db$/);
+  it('throws when neither persona nor jobId is set', () => {
+    expect(() => resolveMemoryDbPath({})).toThrow('requires either persona or jobId');
   });
 });
 
