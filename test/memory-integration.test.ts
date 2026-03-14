@@ -121,16 +121,7 @@ describe('buildMemoryServerConfig', () => {
     expect(config.env?.MEMORY_LLM_API_KEY).toBe('custom-key');
   });
 
-  it('falls back to Anthropic defaults when no explicit LLM config', () => {
-    const config = buildMemoryServerConfig({
-      dbPath: '/tmp/test.db',
-      anthropicApiKey: 'sk-ant-test',
-    });
-    expect(config.env?.MEMORY_LLM_BASE_URL).toBe('https://api.anthropic.com/v1/');
-    expect(config.env?.MEMORY_LLM_API_KEY).toBe('sk-ant-test');
-  });
-
-  it('does not set LLM env vars when no keys are available', () => {
+  it('does not set LLM env vars when no keys are provided', () => {
     const config = buildMemoryServerConfig({ dbPath: '/tmp/test.db' });
     expect(config.env?.MEMORY_LLM_BASE_URL).toBeUndefined();
     expect(config.env?.MEMORY_LLM_API_KEY).toBeUndefined();

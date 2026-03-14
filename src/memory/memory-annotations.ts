@@ -14,42 +14,45 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 export const MEMORY_SERVER_NAME = 'memory';
 
-/** Hardcoded tool annotations for all 5 memory tools (shared constant). */
+/**
+ * Hardcoded tool annotations for all 5 memory tools (shared constant).
+ * Args must match the schemas registered in packages/memory-mcp-server/src/server.ts.
+ */
 const MEMORY_TOOL_ANNOTATIONS: ToolAnnotation[] = [
   {
     toolName: 'memory_store',
     serverName: MEMORY_SERVER_NAME,
     comment: 'Stores a memory for later retrieval.',
     sideEffects: true,
-    args: { content: ['none'], tags: ['none'], importance: ['none'], metadata: ['none'] },
+    args: { content: ['none'], tags: ['none'], importance: ['none'] },
   },
   {
     toolName: 'memory_recall',
     serverName: MEMORY_SERVER_NAME,
     comment: 'Recalls memories relevant to a query.',
     sideEffects: false,
-    args: { query: ['none'], limit: ['none'], tags: ['none'], threshold: ['none'] },
+    args: { query: ['none'], token_budget: ['none'], tags: ['none'], format: ['none'] },
   },
   {
     toolName: 'memory_context',
     serverName: MEMORY_SERVER_NAME,
     comment: 'Gets a session briefing of relevant memories.',
     sideEffects: false,
-    args: { task: ['none'], limit: ['none'] },
+    args: { task: ['none'], token_budget: ['none'] },
   },
   {
     toolName: 'memory_forget',
     serverName: MEMORY_SERVER_NAME,
     comment: 'Forgets specific memories by ID, tag, or query match.',
     sideEffects: true,
-    args: { id: ['none'], tag: ['none'], query: ['none'], dry_run: ['none'], before: ['none'] },
+    args: { ids: ['none'], tags: ['none'], query: ['none'], before: ['none'], confirm: ['none'], dry_run: ['none'] },
   },
   {
     toolName: 'memory_inspect',
     serverName: MEMORY_SERVER_NAME,
     comment: 'View memory statistics, recent or important memories.',
     sideEffects: false,
-    args: { view: ['none'], limit: ['none'], format: ['none'] },
+    args: { view: ['none'], ids: ['none'], limit: ['none'] },
   },
 ];
 
@@ -99,10 +102,7 @@ export function buildMemoryServerConfig(opts: {
   namespace?: string;
   llmBaseUrl?: string;
   llmApiKey?: string;
-  anthropicApiKey?: string;
 }): MCPServerConfig {
-  const serverEntry = SERVER_ENTRY;
-
   const env: Record<string, string> = {
     MEMORY_DB_PATH: opts.dbPath,
   };
@@ -111,22 +111,19 @@ export function buildMemoryServerConfig(opts: {
     env.MEMORY_NAMESPACE = opts.namespace;
   }
 
-  // LLM config: explicit values take precedence, then fall back to Anthropic defaults
+  // LLM config: only set when explicitly configured. The memory server uses
+  // an OpenAI-compatible client, so Anthropic API keys don't work as a fallback.
+  // Without LLM vars the server degrades gracefully (no summarization/compaction).
   if (opts.llmBaseUrl) {
     env.MEMORY_LLM_BASE_URL = opts.llmBaseUrl;
-  } else if (opts.anthropicApiKey) {
-    env.MEMORY_LLM_BASE_URL = 'https://api.anthropic.com/v1/';
   }
-
   if (opts.llmApiKey) {
     env.MEMORY_LLM_API_KEY = opts.llmApiKey;
-  } else if (opts.anthropicApiKey) {
-    env.MEMORY_LLM_API_KEY = opts.anthropicApiKey;
   }
 
   return {
     command: 'node',
-    args: [serverEntry],
+    args: [SERVER_ENTRY],
     env,
     description: 'Persistent memory with semantic search',
     sandbox: false,

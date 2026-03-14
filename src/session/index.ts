@@ -369,7 +369,6 @@ function buildSessionConfig(
       namespace: (opts.persona ?? opts.jobId) as string,
       llmBaseUrl: memoryConfig.llmBaseUrl,
       llmApiKey: memoryConfig.llmApiKey,
-      anthropicApiKey: config.userConfig.anthropicApiKey || undefined,
     });
   }
 

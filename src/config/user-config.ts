@@ -101,8 +101,8 @@ const auditRedactionSchema = z
 const memorySchema = z
   .object({
     enabled: z.boolean().optional(),
-    llmBaseUrl: z.string().optional(),
-    llmApiKey: z.string().optional(),
+    llmBaseUrl: z.url().optional(),
+    llmApiKey: z.string().min(1).optional(),
   })
   .optional();
 

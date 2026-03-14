@@ -8,21 +8,26 @@
 
 import { resolve } from 'node:path';
 import { getIronCurtainHome } from '../config/paths.js';
+import { validateSlug } from '../types/slug.js';
 
 /**
  * Returns the absolute path to the memory SQLite database.
  *
  * - Persona sessions: ~/.ironcurtain/personas/{name}/memory.db
  * - Cron jobs (no persona): ~/.ironcurtain/jobs/{jobId}/memory.db
+ *
+ * Validates persona/jobId to prevent path traversal (e.g. "../" segments).
  */
 export function resolveMemoryDbPath(opts: { persona?: string; jobId?: string }): string {
   const home = getIronCurtainHome();
 
   if (opts.persona) {
+    validateSlug(opts.persona, 'persona name');
     return resolve(home, 'personas', opts.persona, 'memory.db');
   }
 
   if (opts.jobId) {
+    validateSlug(opts.jobId, 'job ID');
     return resolve(home, 'jobs', opts.jobId, 'memory.db');
   }
 
