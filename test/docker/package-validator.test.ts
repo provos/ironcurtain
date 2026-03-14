@@ -130,6 +130,28 @@ describe('createPackageValidator', () => {
     });
   });
 
+  describe('case-insensitive pattern matching', () => {
+    const validator = createPackageValidator({
+      allowedPackages: ['Express'],
+      deniedPackages: ['Bad-Actor'],
+    });
+
+    it('allowlist matches case-insensitively', () => {
+      const pkg: PackageIdentity = { registry: 'npm', name: 'express', version: '4.18.2' };
+      const metadata: VersionMetadata = { publishedAt: daysAgo(0) };
+      const result = validator.validate(pkg, metadata);
+      expect(result.status).toBe('allow');
+      expect(result.reason).toContain('allow list');
+    });
+
+    it('denylist matches case-insensitively', () => {
+      const pkg: PackageIdentity = { registry: 'npm', name: 'bad-actor', version: '1.0.0' };
+      const result = validator.validate(pkg, { publishedAt: daysAgo(30) });
+      expect(result.status).toBe('deny');
+      expect(result.reason).toContain('deny list');
+    });
+  });
+
   describe('denylist takes precedence over allowlist', () => {
     const validator = createPackageValidator({
       allowedPackages: ['express'],

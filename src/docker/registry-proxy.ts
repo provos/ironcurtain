@@ -388,7 +388,7 @@ export async function handleRegistryRequest(
   if (registry.type === 'npm') {
     if (isNpmMetadataRequest(path)) {
       await handleNpmMetadata(registry, path, clientReq, clientRes, host, port, options);
-    } else if (isNpmTarballRequest(path)) {
+    } else if (path.includes('/-/')) {
       await handleTarballDownload(registry, path, clientRes, host, port, options, 'npm');
     } else {
       // Unknown path (e.g., /-/ping) -- pass through

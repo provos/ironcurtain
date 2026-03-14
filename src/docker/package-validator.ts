@@ -56,7 +56,7 @@ export function packageCacheKey(pkg: PackageIdentity): string {
  * Supports glob patterns via minimatch.
  */
 function matchesPatternList(packageName: string, patterns: readonly string[]): boolean {
-  return patterns.some((pattern) => minimatch(packageName, pattern));
+  return patterns.some((pattern) => minimatch(packageName, pattern, { nocase: true }));
 }
 
 /**
@@ -96,7 +96,7 @@ export function createPackageValidator(config: PackageValidatorConfig = {}): Pac
           return { status: 'deny', reason: `No publish timestamp for "${name}" (fail-closed)` };
         }
 
-        const ageMs = Date.now() - metadata.publishedAt.getTime();
+        const ageMs = Math.max(0, Date.now() - metadata.publishedAt.getTime());
         const ageDays = ageMs / MS_PER_DAY;
 
         if (ageDays < quarantineDays) {

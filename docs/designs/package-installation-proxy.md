@@ -663,7 +663,7 @@ The `PackageValidator` evaluates rules in this order (first match wins):
 5. Default             -> ALLOW
 ```
 
-Allowlist and denylist support glob patterns via [micromatch](https://github.com/micromatch/micromatch)
+Allowlist and denylist support glob patterns via [minimatch](https://github.com/isaacs/minimatch)
 or similar. Examples: `@types/*`, `eslint-*`, `react-*`.
 
 ## MITM Proxy Integration
