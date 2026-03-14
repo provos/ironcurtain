@@ -454,6 +454,21 @@ async function handleNpmMetadata(
       });
     }
 
+    // Audit log allowed versions (summary to avoid per-version verbosity)
+    if (allowedVersions.size > 0) {
+      writeAuditEntry(options.auditLogPath, {
+        timestamp: new Date().toISOString(),
+        registry: pkg.registry,
+        packageName: pkg.name,
+        packageScope: pkg.scope,
+        packageVersion: `${allowedVersions.size} version(s)`,
+        decision: 'allow',
+        reason: 'Passed all validation checks',
+        source: 'metadata-filter',
+        requestPath: path,
+      });
+    }
+
     if (denied.length > 0) {
       logger.info(
         `[registry-proxy] npm ${canonicalPackageName(pkg)}: filtered ${denied.length} version(s), ${allowedVersions.size} allowed`,
@@ -508,7 +523,7 @@ async function handlePypiSimple(
     // Cache allowed versions (collected during filtering)
     setCachedVersions(options.cache, pkg, allowedVersions);
 
-    // Audit log
+    // Audit log denied versions
     for (const d of denied) {
       writeAuditEntry(options.auditLogPath, {
         timestamp: new Date().toISOString(),
@@ -517,6 +532,20 @@ async function handlePypiSimple(
         packageVersion: d.version,
         decision: 'deny',
         reason: d.reason,
+        source: 'metadata-filter',
+        requestPath: path,
+      });
+    }
+
+    // Audit log allowed versions (summary to avoid per-version verbosity)
+    if (allowedVersions.size > 0) {
+      writeAuditEntry(options.auditLogPath, {
+        timestamp: new Date().toISOString(),
+        registry: pkg.registry,
+        packageName: pkg.name,
+        packageVersion: `${allowedVersions.size} version(s)`,
+        decision: 'allow',
+        reason: 'Passed all validation checks',
         source: 'metadata-filter',
         requestPath: path,
       });
@@ -564,7 +593,18 @@ async function handleTarballDownload(
   const cached = getCachedVersions(options.cache, pkg);
   if (cached !== undefined) {
     if (cached.has(pkg.version)) {
-      // Allowed -- forward upstream (no audit entry for cache hits to reduce noise)
+      // Allowed -- forward upstream
+      writeAuditEntry(options.auditLogPath, {
+        timestamp: new Date().toISOString(),
+        registry: pkg.registry,
+        packageName: pkg.name,
+        packageScope: pkg.scope,
+        packageVersion: pkg.version,
+        decision: 'allow',
+        reason: 'Version in allowed cache from metadata filtering',
+        source: 'tarball-backstop',
+        requestPath: path,
+      });
       await forwardToUpstream(clientRes, host, port, path, { timeoutMs: 60_000 });
       return;
     }
@@ -593,6 +633,17 @@ async function handleTarballDownload(
   try {
     const decision = await fetchAndValidateVersion(registry, pkg, options);
     if (decision.status === 'allow') {
+      writeAuditEntry(options.auditLogPath, {
+        timestamp: new Date().toISOString(),
+        registry: pkg.registry,
+        packageName: pkg.name,
+        packageScope: pkg.scope,
+        packageVersion: pkg.version,
+        decision: 'allow',
+        reason: 'Version passed validation on cache miss',
+        source: 'tarball-backstop',
+        requestPath: path,
+      });
       await forwardToUpstream(clientRes, host, port, path, { timeoutMs: 60_000 });
     } else {
       const name = canonicalPackageName(pkg);
