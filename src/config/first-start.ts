@@ -233,7 +233,10 @@ export async function runFirstStart(): Promise<void> {
       '  ironcurtain config             — change models, resource limits, and other settings\n' +
       '  ironcurtain customize-policy   — LLM-assisted interactive policy customization\n' +
       '  ironcurtain compile-policy     — recompile after constitution changes\n' +
-      '  ironcurtain annotate-tools     — reclassify tool arguments after server changes',
+      '  ironcurtain annotate-tools     — reclassify tool arguments after server changes\n\n' +
+      'Personas give your agent a named identity with its own workspace, policy,\n' +
+      'and persistent memory. Create one with:\n\n' +
+      '  ironcurtain persona create <name>',
     'Customization',
   );
 
