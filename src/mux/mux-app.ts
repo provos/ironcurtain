@@ -266,7 +266,11 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
               allowPersonaWorkspace: !!action.persona,
             });
           } catch (err) {
-            inputHandler.enterBrowseWithError(action.workspacePath, err instanceof Error ? err.message : String(err));
+            inputHandler.enterBrowseWithError(
+              action.workspacePath,
+              err instanceof Error ? err.message : String(err),
+              action.persona,
+            );
             renderer.fullRedraw();
             break;
           }

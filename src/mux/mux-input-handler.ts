@@ -78,7 +78,7 @@ export interface MuxInputHandler {
   exitResumePickerMode(): void;
 
   /** Re-enter picker browse phase with a validation error. */
-  enterBrowseWithError(path: string, error: string): void;
+  enterBrowseWithError(path: string, error: string, persona?: string): void;
 
   /** Exit picker mode and return to command mode (no side effects). */
   exitPickerMode(): void;
@@ -258,9 +258,9 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
     resetEntrySelection(_pickerState);
   }
 
-  function enterBrowseWithError(path: string, error: string): void {
+  function enterBrowseWithError(path: string, error: string, persona?: string): void {
     _mode = 'picker';
-    const persona = _pickerState?.persona ?? null;
+    const resolvedPersona = persona ?? _pickerState?.persona ?? null;
     _pickerState = {
       phase: 'browse',
       menuSelection: 0,
@@ -272,7 +272,7 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
       scrollOffset: 0,
       inList: false,
       error,
-      persona,
+      persona: resolvedPersona,
     };
     resetEntrySelection(_pickerState);
   }
@@ -549,10 +549,11 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
     if (key === ENTER && !ps.inList) {
       if (ps.inputPath.trim()) {
         const workspacePath = ps.inputPath.replace(/\/+$/, '');
-        const persona = ps.persona ?? undefined;
         _mode = 'command';
         _pickerState = null;
-        return { kind: 'picker-spawn', workspacePath, persona };
+        return ps.persona
+          ? { kind: 'picker-spawn', workspacePath, persona: ps.persona }
+          : { kind: 'picker-spawn', workspacePath };
       }
       return { kind: 'redraw-picker' };
     }
