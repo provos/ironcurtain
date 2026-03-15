@@ -155,6 +155,7 @@ async function buildContext(db: Database.Database, config: MemoryConfig, opts: C
 
   // Format as list and pack to budget
   const lines: string[] = [];
+  const displayedIds: string[] = [];
   let usedTokens = 0;
   for (const mem of combined) {
     const date = new Date(mem.created_at).toISOString().slice(0, 10);
@@ -162,12 +163,12 @@ async function buildContext(db: Database.Database, config: MemoryConfig, opts: C
     const tokens = estimateTokens(line);
     if (usedTokens + tokens > recentBudget) continue;
     lines.push(line);
+    displayedIds.push(mem.id);
     usedTokens += tokens;
   }
 
   if (lines.length > 0) {
     sections.push(`## Recent & Important\n\n${lines.join('\n')}`);
-    const displayedIds = combined.slice(0, lines.length).map((m) => m.id);
     updateAccessStats(db, config.namespace, displayedIds);
   }
 

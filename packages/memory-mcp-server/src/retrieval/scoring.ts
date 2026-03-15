@@ -25,7 +25,7 @@ function minMaxNormalized(value: number, min: number, max: number, count: number
   const range = max - min;
   if (range === 0) return 1.0;
   const normalized = (value - min) / range;
-  // For small result sets, compress toward 0.5 to avoid degenerate 0/1 scores
+  // For small result sets, remap from [0,1] to [0.3,1] so the worst score isn't zero
   if (count <= 5) {
     const damping = 0.3;
     return damping + (1 - damping) * normalized;
