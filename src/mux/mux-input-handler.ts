@@ -16,13 +16,15 @@ import { expandTilde } from '../types/argument-roles.js';
 import { PASTE_START, PASTE_END } from './paste-interceptor.js';
 import type { InputMode, MuxAction } from './types.js';
 import type { SessionSnapshot } from './session-scanner.js';
+import type { PersonaSnapshot } from './persona-scanner.js';
 
 export type PickerPhase = 'menu' | 'browse';
 
 export interface PickerState {
   phase: PickerPhase;
   // menu phase
-  menuSelection: number; // 0 or 1
+  menuSelection: number; // 0, 1, or 2 (persona)
+  menuItemCount: number; // 2 (no personas) or 3 (with personas)
   // browse phase
   inputPath: string;
   cursorPos: number;
@@ -31,10 +33,18 @@ export interface PickerState {
   scrollOffset: number;
   inList: boolean; // true when focus is in the entry list (vs. the input field)
   error: string | null;
+  // persona context (set when persona selected, carried through browse phase)
+  persona: string | null;
 }
 
 export interface ResumePickerState {
   sessions: SessionSnapshot[];
+  selectedIndex: number;
+  scrollOffset: number;
+}
+
+export interface PersonaPickerState {
+  personas: PersonaSnapshot[];
   selectedIndex: number;
   scrollOffset: number;
 }
@@ -55,8 +65,11 @@ export interface MuxInputHandler {
   /** Current resume picker state (null when not in resume picker mode). */
   readonly resumePickerState: ResumePickerState | null;
 
+  /** Current persona picker state (null when not in persona picker mode). */
+  readonly personaPickerState: PersonaPickerState | null;
+
   /** Enter picker mode (called by /new command handler). */
-  enterPickerMode(): void;
+  enterPickerMode(personas?: PersonaSnapshot[]): void;
 
   /** Enter resume picker mode with the given sessions. */
   enterResumePickerMode(sessions: SessionSnapshot[]): void;
@@ -65,10 +78,16 @@ export interface MuxInputHandler {
   exitResumePickerMode(): void;
 
   /** Re-enter picker browse phase with a validation error. */
-  enterBrowseWithError(path: string, error: string): void;
+  enterBrowseWithError(path: string, error: string, persona?: string): void;
 
   /** Exit picker mode and return to command mode (no side effects). */
   exitPickerMode(): void;
+
+  /** Enter persona picker mode with the given personas. */
+  enterPersonaPickerMode(personas: PersonaSnapshot[]): void;
+
+  /** Exit persona picker mode and return to command mode. */
+  exitPersonaPickerMode(): void;
 
   /**
    * Processes a key event from terminal-kit.
@@ -199,12 +218,17 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
   let _cursorPos = 0;
   let _pickerState: PickerState | null = null;
   let _resumePickerState: ResumePickerState | null = null;
+  let _personaPickerState: PersonaPickerState | null = null;
 
-  function enterPickerMode(): void {
+  let _cachedPersonas: PersonaSnapshot[] = [];
+
+  function enterPickerMode(personas?: PersonaSnapshot[]): void {
+    _cachedPersonas = personas ?? [];
     _mode = 'picker';
     _pickerState = {
       phase: 'menu',
       menuSelection: 0,
+      menuItemCount: _cachedPersonas.length > 0 ? 3 : 2,
       inputPath: '',
       cursorPos: 0,
       entries: [],
@@ -212,6 +236,7 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
       scrollOffset: 0,
       inList: false,
       error: null,
+      persona: null,
     };
   }
 
@@ -233,11 +258,13 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
     resetEntrySelection(_pickerState);
   }
 
-  function enterBrowseWithError(path: string, error: string): void {
+  function enterBrowseWithError(path: string, error: string, persona?: string): void {
     _mode = 'picker';
+    const resolvedPersona = persona ?? _pickerState?.persona ?? null;
     _pickerState = {
       phase: 'browse',
       menuSelection: 0,
+      menuItemCount: 2,
       inputPath: path,
       cursorPos: path.length,
       entries: [],
@@ -245,6 +272,7 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
       scrollOffset: 0,
       inList: false,
       error,
+      persona: resolvedPersona,
     };
     resetEntrySelection(_pickerState);
   }
@@ -266,6 +294,83 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
   function exitResumePickerMode(): void {
     _mode = 'command';
     _resumePickerState = null;
+  }
+
+  function enterPersonaPickerMode(personas: PersonaSnapshot[]): void {
+    _mode = 'persona-picker';
+    _personaPickerState = {
+      personas,
+      selectedIndex: 0,
+      scrollOffset: 0,
+    };
+  }
+
+  function exitPersonaPickerMode(): void {
+    _mode = 'command';
+    _personaPickerState = null;
+  }
+
+  function handlePersonaPickerKey(key: string): MuxAction {
+    const pps = _personaPickerState;
+    if (!pps || pps.personas.length === 0) {
+      if (key === ESCAPE || key === CTRL_C || key === ENTER) {
+        _personaPickerState = null;
+        _mode = 'command';
+        return { kind: 'picker-cancel' };
+      }
+      return { kind: 'none' };
+    }
+
+    if (key === ESCAPE || key === CTRL_C) {
+      // Return to the picker menu (not command mode)
+      _personaPickerState = null;
+      enterPickerMode(_cachedPersonas);
+      return { kind: 'redraw-picker' };
+    }
+
+    if (key === ENTER) {
+      const selected = pps.personas[pps.selectedIndex];
+      if (!selected.compiled) {
+        return { kind: 'none' };
+      }
+      // Transition to workspace browse phase with persona context
+      exitPersonaPickerMode();
+      _mode = 'picker';
+      _pickerState = {
+        phase: 'browse',
+        menuSelection: 0,
+        menuItemCount: 2,
+        inputPath: selected.workspacePath + '/',
+        cursorPos: selected.workspacePath.length + 1,
+        entries: [],
+        selectedIndex: 0,
+        scrollOffset: 0,
+        inList: false,
+        error: null,
+        persona: selected.name,
+      };
+      resetEntrySelection(_pickerState);
+      return { kind: 'redraw-picker' };
+    }
+
+    if (key === UP) {
+      if (pps.selectedIndex > 0) {
+        pps.selectedIndex--;
+        if (pps.selectedIndex < pps.scrollOffset) {
+          pps.scrollOffset = pps.selectedIndex;
+        }
+      }
+      return { kind: 'redraw-picker' };
+    }
+
+    if (key === DOWN) {
+      if (pps.selectedIndex < pps.personas.length - 1) {
+        pps.selectedIndex++;
+      }
+      return { kind: 'redraw-picker' };
+    }
+
+    return { kind: 'none' };
   }
 
   function handleResumePickerKey(key: string): MuxAction {
@@ -315,7 +420,13 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
       _pickerState = null;
       return { kind: 'picker-spawn' };
     }
-    initBrowsePhase();
+    if (selection === 1) {
+      initBrowsePhase();
+      return { kind: 'redraw-picker' };
+    }
+    // selection === 2: open persona picker directly from cached personas
+    _pickerState = null;
+    enterPersonaPickerMode(_cachedPersonas);
     return { kind: 'redraw-picker' };
   }
 
@@ -325,10 +436,16 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
 
     if (key === '1') return executeMenuSelection(0);
     if (key === '2') return executeMenuSelection(1);
+    if (key === '3' && ps.menuItemCount >= 3) return executeMenuSelection(2);
     if (key === ENTER) return executeMenuSelection(ps.menuSelection);
 
-    if (key === UP || key === DOWN) {
-      ps.menuSelection = ps.menuSelection === 0 ? 1 : 0;
+    if (key === UP) {
+      ps.menuSelection = Math.max(0, ps.menuSelection - 1);
+      return { kind: 'redraw-picker' };
+    }
+
+    if (key === DOWN) {
+      ps.menuSelection = Math.min(ps.menuItemCount - 1, ps.menuSelection + 1);
       return { kind: 'redraw-picker' };
     }
 
@@ -352,9 +469,11 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
         ps.inList = false;
         return { kind: 'redraw-picker' };
       }
-      // Return to menu phase
+      // Return to menu phase, restoring persona menu item if available
       ps.phase = 'menu';
       ps.menuSelection = 0;
+      ps.menuItemCount = _cachedPersonas.length > 0 ? 3 : 2;
+      ps.persona = null;
       return { kind: 'redraw-picker' };
     }
 
@@ -432,7 +551,9 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
         const workspacePath = ps.inputPath.replace(/\/+$/, '');
         _mode = 'command';
         _pickerState = null;
-        return { kind: 'picker-spawn', workspacePath };
+        return ps.persona
+          ? { kind: 'picker-spawn', workspacePath, persona: ps.persona }
+          : { kind: 'picker-spawn', workspacePath };
       }
       return { kind: 'redraw-picker' };
     }
@@ -637,10 +758,15 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
     get resumePickerState() {
       return _resumePickerState;
     },
+    get personaPickerState() {
+      return _personaPickerState;
+    },
 
     enterPickerMode,
     enterResumePickerMode,
     exitResumePickerMode,
+    enterPersonaPickerMode,
+    exitPersonaPickerMode,
     enterBrowseWithError,
     exitPickerMode,
 
@@ -653,6 +779,9 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
       }
       if (_mode === 'resume-picker') {
         return handleResumePickerKey(key);
+      }
+      if (_mode === 'persona-picker') {
+        return handlePersonaPickerKey(key);
       }
       return handleCommandKey(key);
     },

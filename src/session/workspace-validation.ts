@@ -11,13 +11,34 @@ import { statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import { expandTilde, resolveRealPath } from '../types/argument-roles.js';
-import { getIronCurtainHome } from '../config/paths.js';
+import { getIronCurtainHome, getSessionsDir } from '../config/paths.js';
+import { getPersonasDir } from '../persona/resolve.js';
 
 /** Returns true when `child` is equal to or nested inside `parent`. */
 export function isEqualOrInside(child: string, parent: string): boolean {
   if (child === parent) return true;
   const prefix = parent === '/' ? '/' : parent + '/';
   return child.startsWith(prefix);
+}
+
+/**
+ * Checks whether a canonical path inside ~/.ironcurtain/ is one of the
+ * managed workspace directories that should be allowed as a workspace:
+ *   - personas/{name}/workspace[/...]
+ *   - sessions/{id}/sandbox[/...]
+ */
+function isAllowedIronCurtainSubpath(canonical: string): boolean {
+  const personasBase = resolveRealPath(getPersonasDir());
+  if (isEqualOrInside(canonical, personasBase)) {
+    const relative = canonical.slice(personasBase.length + 1);
+    if (/^[^/]+\/workspace(\/.*)?$/.test(relative)) return true;
+  }
+  const sessionsBase = resolveRealPath(getSessionsDir());
+  if (isEqualOrInside(canonical, sessionsBase)) {
+    const relative = canonical.slice(sessionsBase.length + 1);
+    if (/^[^/]+\/sandbox(\/.*)?$/.test(relative)) return true;
+  }
+  return false;
 }
 
 /**
@@ -51,8 +72,14 @@ export function validateWorkspacePath(rawPath: string, protectedPaths: string[])
     throw new Error('Cannot use home directory as workspace');
   }
 
+  // IronCurtain manages two kinds of internal workspace directories:
+  // - Persona workspaces: ~/.ironcurtain/personas/{name}/workspace[/...]
+  // - Session sandboxes:  ~/.ironcurtain/sessions/{id}/sandbox[/...]
+  // These are always allowed. All other paths under ~/.ironcurtain/ are rejected.
   const ironCurtainHome = resolveRealPath(getIronCurtainHome());
-  if (isEqualOrInside(canonical, ironCurtainHome)) {
+  const isAllowedInternalPath = isEqualOrInside(canonical, ironCurtainHome) && isAllowedIronCurtainSubpath(canonical);
+
+  if (isEqualOrInside(canonical, ironCurtainHome) && !isAllowedInternalPath) {
     throw new Error(`Workspace path is inside the IronCurtain home directory: ${canonical}`);
   }
 
@@ -61,11 +88,15 @@ export function validateWorkspacePath(rawPath: string, protectedPaths: string[])
   // NOT checked here — the PolicyEngine already protects those paths at
   // runtime regardless of the allowedDirectory, so a workspace that happens
   // to contain e.g. src/config/generated/ is perfectly safe.
-  for (const pp of protectedPaths) {
-    const protectedCanonical = resolveRealPath(pp);
+  // Allowed internal paths are exempt — they live under ~/.ironcurtain/ by
+  // design, and the PolicyEngine protects config/policy files at runtime.
+  if (!isAllowedInternalPath) {
+    for (const pp of protectedPaths) {
+      const protectedCanonical = resolveRealPath(pp);
 
-    if (isEqualOrInside(canonical, protectedCanonical)) {
-      throw new Error(`Workspace path overlaps with protected path: ${protectedCanonical}`);
+      if (isEqualOrInside(canonical, protectedCanonical)) {
+        throw new Error(`Workspace path overlaps with protected path: ${protectedCanonical}`);
+      }
     }
   }
 

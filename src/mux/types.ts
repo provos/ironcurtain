@@ -5,7 +5,12 @@
 import type { PtyBridge } from './pty-bridge.js';
 
 /** Input mode for the mux. */
-export type InputMode = 'pty' | 'command' | 'picker' | 'resume-picker';
+export type InputMode = 'pty' | 'command' | 'picker' | 'resume-picker' | 'persona-picker';
+
+/** Whether the mode is any picker variant. */
+export function isPickerMode(mode: InputMode): boolean {
+  return mode === 'picker' || mode === 'resume-picker' || mode === 'persona-picker';
+}
 
 /** A single tab in the mux. */
 export interface MuxTab {
@@ -15,6 +20,8 @@ export interface MuxTab {
   readonly bridge: PtyBridge;
   /** Display label for the tab. */
   label: string;
+  /** Persona name if this tab was spawned with a persona. */
+  persona?: string;
   /** Whether the child process has exited. */
   status: 'running' | 'exited';
   /** Exit code if exited. */
@@ -37,10 +44,11 @@ export type MuxAction =
   | { readonly kind: 'trusted-input'; readonly text: string }
   | { readonly kind: 'redraw-input' }
   | { readonly kind: 'enter-picker-mode' }
-  | { readonly kind: 'picker-spawn'; readonly workspacePath?: string }
+  | { readonly kind: 'picker-spawn'; readonly workspacePath?: string; readonly persona?: string }
   | { readonly kind: 'picker-cancel' }
   | { readonly kind: 'redraw-picker' }
   | { readonly kind: 'resume-spawn'; readonly sessionId: string; readonly agent: string }
+  | { readonly kind: 'persona-spawn'; readonly persona: string }
   | { readonly kind: 'scroll-up'; readonly amount: number }
   | { readonly kind: 'scroll-down'; readonly amount: number }
   | { readonly kind: 'quit' };
@@ -116,8 +124,7 @@ export function calculateLayout(totalRows: number, mode: InputMode, pendingCount
     allocatedInputRows = Math.max(MIN_INPUT_LINE_ROWS, overlayRows - escalationPanelRows - HINT_BAR_ROWS);
   }
 
-  const pickerRows =
-    mode === 'picker' || mode === 'resume-picker' ? Math.min(Math.floor(ptyViewportRows / 2), ptyViewportRows) : 0;
+  const pickerRows = isPickerMode(mode) ? Math.min(Math.floor(ptyViewportRows / 2), ptyViewportRows) : 0;
   const pickerY = TAB_BAR_ROWS + ptyViewportRows - pickerRows;
 
   return {

@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { createMuxInputHandler } from '../src/mux/mux-input-handler.js';
+import { createPersonaName } from '../src/persona/types.js';
+import type { PersonaSnapshot } from '../src/mux/persona-scanner.js';
 
 describe('MuxInputHandler', () => {
   describe('initialMode option', () => {
@@ -566,6 +568,113 @@ describe('MuxInputHandler', () => {
       const action = handler.handleKey('ENTER');
       expect(action).toEqual({ kind: 'picker-cancel' });
       expect(handler.mode).toBe('command');
+    });
+  });
+
+  describe('persona picker mode', () => {
+    const personas: PersonaSnapshot[] = [
+      {
+        name: createPersonaName('researcher'),
+        description: 'Research assistant',
+        compiled: true,
+        workspacePath: '/home/user/research',
+      },
+      {
+        name: createPersonaName('writer'),
+        description: 'Writing helper',
+        compiled: false,
+        workspacePath: '/home/user/writing',
+      },
+    ];
+
+    function enterPersonaPicker() {
+      const handler = createMuxInputHandler({ initialMode: 'command' });
+      handler.enterPickerMode(personas);
+      // Select option 3 (persona picker) from the /new menu
+      handler.handleKey('3');
+      expect(handler.mode).toBe('persona-picker');
+      return handler;
+    }
+
+    it('ESC in persona picker returns to /new menu', () => {
+      const handler = enterPersonaPicker();
+      const action = handler.handleKey('ESCAPE');
+      expect(action).toEqual({ kind: 'redraw-picker' });
+      expect(handler.mode).toBe('picker');
+      expect(handler.personaPickerState).toBeNull();
+      expect(handler.pickerState).not.toBeNull();
+      expect(handler.pickerState?.phase).toBe('menu');
+    });
+
+    it('ENTER on compiled persona transitions to browse with prefilled workspacePath', () => {
+      const handler = enterPersonaPicker();
+      // First persona (researcher) is compiled and selected by default
+      expect(handler.personaPickerState?.selectedIndex).toBe(0);
+
+      const action = handler.handleKey('ENTER');
+      expect(action).toEqual({ kind: 'redraw-picker' });
+      expect(handler.mode).toBe('picker');
+      expect(handler.personaPickerState).toBeNull();
+      expect(handler.pickerState).not.toBeNull();
+      expect(handler.pickerState?.phase).toBe('browse');
+      expect(handler.pickerState?.inputPath).toBe('/home/user/research/');
+      expect(handler.pickerState?.persona).toBe('researcher');
+    });
+
+    it('ENTER on non-compiled persona is ignored', () => {
+      const handler = enterPersonaPicker();
+      // Navigate to second persona (writer, not compiled)
+      handler.handleKey('DOWN');
+      expect(handler.personaPickerState?.selectedIndex).toBe(1);
+
+      const action = handler.handleKey('ENTER');
+      expect(action).toEqual({ kind: 'none' });
+      expect(handler.mode).toBe('persona-picker');
+      expect(handler.personaPickerState).not.toBeNull();
+    });
+
+    it('browse submit with persona carries through to picker-spawn', () => {
+      const handler = enterPersonaPicker();
+      // Select compiled persona
+      handler.handleKey('ENTER');
+      expect(handler.pickerState?.phase).toBe('browse');
+      expect(handler.pickerState?.persona).toBe('researcher');
+
+      // Clear the prefilled path and type a custom one
+      const ps = handler.pickerState!;
+      while (ps.cursorPos > 0) {
+        handler.handleKey('BACKSPACE');
+      }
+      for (const c of '/tmp/work') handler.handleKey(c);
+
+      // Submit the path
+      const action = handler.handleKey('ENTER');
+      expect(action).toEqual({
+        kind: 'picker-spawn',
+        workspacePath: '/tmp/work',
+        persona: 'researcher',
+      });
+      expect(handler.mode).toBe('command');
+      expect(handler.pickerState).toBeNull();
+    });
+
+    it('browse submit without persona omits persona field', () => {
+      const handler = createMuxInputHandler({ initialMode: 'command' });
+      handler.enterPickerMode();
+      // Select option 2 (browse, no personas)
+      handler.handleKey('2');
+      expect(handler.pickerState?.phase).toBe('browse');
+
+      // Clear default path and type a custom one
+      const ps = handler.pickerState!;
+      while (ps.cursorPos > 0) {
+        handler.handleKey('BACKSPACE');
+      }
+      for (const c of '/tmp/test') handler.handleKey(c);
+
+      const action = handler.handleKey('ENTER');
+      expect(action).toEqual({ kind: 'picker-spawn', workspacePath: '/tmp/test' });
+      expect(action).not.toHaveProperty('persona');
     });
   });
 });

@@ -16,9 +16,9 @@
 /* eslint-disable @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access */
 
 import type { Terminal as TerminalType } from '@xterm/headless';
-import { calculateLayout, type InputMode, type Layout, type MuxTab } from './types.js';
+import { calculateLayout, isPickerMode, type InputMode, type Layout, type MuxTab } from './types.js';
 import type { ListenerState } from '../escalation/listener-state.js';
-import type { PickerState, ResumePickerState } from './mux-input-handler.js';
+import type { PickerState, ResumePickerState, PersonaPickerState } from './mux-input-handler.js';
 import { createSplashScreen, type SplashScreen } from './mux-splash.js';
 import { formatRelativeTime } from './session-scanner.js';
 
@@ -139,6 +139,7 @@ export interface MuxRendererDeps {
   getPendingCount: () => number;
   getPickerState: () => PickerState | null;
   getResumePickerState: () => ResumePickerState | null;
+  getPersonaPickerState: () => PersonaPickerState | null;
   /** Returns the active tab's scroll offset (null = live/bottom). */
   getScrollOffset: () => number | null;
 }
@@ -238,7 +239,7 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
   function activeOverlayRows(): number {
     const mode = deps.getMode();
     if (mode === 'command') return _layout.overlayRows;
-    if (mode === 'picker' || mode === 'resume-picker') return _layout.pickerRows;
+    if (isPickerMode(mode)) return _layout.pickerRows;
     return 0;
   }
 
@@ -277,7 +278,7 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
     const mode = deps.getMode();
     let visibleRows = _layout.ptyViewportRows;
     if (mode === 'command') visibleRows -= _layout.overlayRows;
-    else if (mode === 'picker' || mode === 'resume-picker') visibleRows -= _layout.pickerRows;
+    else if (isPickerMode(mode)) visibleRows -= _layout.pickerRows;
 
     let lastStyle: TranslatedCell | null = null;
     for (let y = 0; y < visibleRows; y++) {
@@ -532,6 +533,8 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
       drawPickerOverlay();
     } else if (mode === 'resume-picker') {
       drawResumePickerOverlay();
+    } else if (mode === 'persona-picker') {
+      drawPersonaPickerOverlay();
     }
   }
 
@@ -567,7 +570,8 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
   }
 
   function drawPickerMenu(ps: PickerState, startY: number, totalRows: number): void {
-    const menuHeight = 4;
+    const hasPersonas = ps.menuItemCount >= 3;
+    const menuHeight = hasPersonas ? 5 : 4;
     const topPad = Math.max(0, Math.floor((totalRows - menuHeight) / 2));
 
     for (let y = startY; y < startY + totalRows; y++) {
@@ -583,10 +587,14 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
 
     drawMenuOption(y0 + 1, ' New sandbox', ps.menuSelection === 0, boxWidth);
     drawMenuOption(y0 + 2, ' Existing directory', ps.menuSelection === 1, boxWidth);
+    if (hasPersonas) {
+      drawMenuOption(y0 + 3, ' Use a persona', ps.menuSelection === 2, boxWidth);
+    }
 
     // Bottom border
-    clearLine(y0 + 3);
-    moveTo(2, y0 + 3);
+    const bottomY = hasPersonas ? y0 + 4 : y0 + 3;
+    clearLine(bottomY);
+    moveTo(2, bottomY);
     term.cyan('\u2514' + '\u2500'.repeat(boxWidth) + '\u2518');
 
     term.styleReset();
@@ -783,6 +791,93 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
     term.eraseLineAfter();
   }
 
+  function drawPersonaPickerOverlay(): void {
+    const pps = deps.getPersonaPickerState();
+    if (!pps) return;
+
+    const startY = _layout.pickerY;
+    const totalRows = _layout.pickerRows;
+    if (totalRows < 3) return;
+
+    let currentY = startY;
+
+    // Title
+    clearLine(currentY);
+    moveTo(2, currentY);
+    term.cyan('/new');
+    term.dim(' \u2014 select a persona');
+    term.eraseLineAfter();
+    currentY++;
+
+    if (pps.personas.length === 0) {
+      clearLine(currentY);
+      moveTo(4, currentY);
+      term.dim('No personas found');
+      term.eraseLineAfter();
+      currentY++;
+
+      for (let y = currentY; y < startY + totalRows; y++) {
+        clearLine(y);
+      }
+      return;
+    }
+
+    // Persona list
+    const listRows = Math.max(0, totalRows - 2); // title + hint bar
+
+    // Scroll adjustment
+    let scrollOffset = pps.scrollOffset;
+    if (pps.selectedIndex < scrollOffset) {
+      scrollOffset = pps.selectedIndex;
+    } else if (pps.selectedIndex >= scrollOffset + listRows) {
+      scrollOffset = pps.selectedIndex - listRows + 1;
+    }
+
+    for (let i = 0; i < listRows; i++) {
+      clearLine(currentY);
+      const idx = scrollOffset + i;
+      if (idx < pps.personas.length) {
+        const p = pps.personas[idx];
+        const isSelected = idx === pps.selectedIndex;
+        const status = p.compiled ? '' : ' [not compiled]';
+        const desc = truncate(p.description, Math.max(10, _cols - p.name.length - status.length - 10));
+        const line = `${p.name}  ${desc}${status}`;
+
+        moveTo(2, currentY);
+        if (isSelected) {
+          term.bgCyan.black('> ' + truncate(line, Math.max(1, _cols - 6)));
+          term.styleReset();
+        } else {
+          term('  ');
+          if (p.compiled) {
+            term.cyan(p.name);
+          } else {
+            term.dim(p.name);
+          }
+          term('  ');
+          term.dim(desc);
+          if (!p.compiled) {
+            term.yellow(status);
+          }
+        }
+      }
+      term.eraseLineAfter();
+      currentY++;
+    }
+
+    // Hint bar
+    clearLine(currentY);
+    moveTo(2, currentY);
+    term.bgWhite.black(' Enter ');
+    term.styleReset();
+    term.dim(' spawn  ');
+    term.bgWhite.black(' Esc ');
+    term.styleReset();
+    term.dim(' cancel');
+    term.styleReset();
+    term.eraseLineAfter();
+  }
+
   return {
     get layout() {
       return _layout;
@@ -810,7 +905,7 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
     redrawCommandArea(): void {
       recalcLayout();
       const mode = deps.getMode();
-      if (mode === 'command' || mode === 'picker' || mode === 'resume-picker') {
+      if (mode === 'command' || isPickerMode(mode)) {
         // Repaint viewport first to clear stale overlay rows from a
         // previously larger overlay (e.g., after resolving an escalation).
         drawPtyViewport();

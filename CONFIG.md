@@ -104,6 +104,32 @@ API keys can be set via environment variables (preferred) or in the config file.
 
 In Docker mode, IronCurtain auto-detects OAuth credentials from `~/.claude/.credentials.json` (created by `claude login`) and prefers them over API keys. Set `IRONCURTAIN_DOCKER_AUTH=apikey` to force API key mode.
 
+## Memory
+
+Controls the persistent memory server, automatically enabled for persona and cron job sessions. When an Anthropic API key is available, the memory server uses it for LLM-based summarization, duplicate detection, and compaction via Anthropic's OpenAI-compatible endpoint. Without an LLM key, the server works but uses extractive fallbacks.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `memory.enabled` | boolean | `true` | Enable the memory MCP server for persona/cron sessions. |
+| `memory.llmBaseUrl` | string | *(Anthropic endpoint)* | OpenAI-compatible API endpoint for memory LLM operations. |
+| `memory.llmApiKey` | string | *(falls back to Anthropic key)* | API key for the memory LLM endpoint. |
+
+The memory server can also be configured via environment variables (`MEMORY_DB_PATH`, `MEMORY_NAMESPACE`, `MEMORY_LLM_*`). See the [memory-mcp-server README](packages/memory-mcp-server/README.md) for standalone usage.
+
+## Multi-Provider Support
+
+Use the `provider:model-name` format in config and provide the API key for each provider you use:
+
+```json
+{
+  "agentModelId": "anthropic:claude-sonnet-4-6",
+  "policyModelId": "google:gemini-2.5-flash",
+  "googleApiKey": "AIza..."
+}
+```
+
+Supported providers: `anthropic`, `google`, `openai`. Environment variables take precedence over config file values.
+
 ## File Permissions
 
 The config file is created with `0600` (owner-only read/write) permissions. A warning is emitted if the file is group- or world-readable, since it may contain API keys.
@@ -138,6 +164,9 @@ The config file is created with `0600` (owner-only read/write) permissions. A wa
   "webSearch": {
     "provider": "brave",
     "brave": { "apiKey": "BSA..." }
+  },
+  "memory": {
+    "enabled": true
   }
 }
 ```

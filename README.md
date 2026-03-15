@@ -18,7 +18,7 @@ _\*When someone writes "secure," you should immediately be skeptical. [What do w
   <img src="demo.gif" alt="IronCurtain mux demo: trusted input from command mode enables auto-approval of git clone and git push" width="800">
 </p>
 
-The agent is asked to clone a repository and push changes. Both `git_clone` and `git_push` are escalated by the policy engine, but the [auto-approver](#auto-approve-escalations) approves them automatically — the user's trusted input from command mode (Ctrl-A) provided clear intent, so no manual `/approve` was needed.
+The agent is asked to clone a repository and push changes. Both `git_clone` and `git_push` are escalated by the policy engine, but the auto-approver approves them automatically — the user's trusted input from command mode (Ctrl-A) provided clear intent, so no manual `/approve` was needed.
 
 ## The Problem
 
@@ -45,7 +45,7 @@ IronCurtain supports two session modes with different trust models:
 
 - **Builtin Agent (Code Mode)** — IronCurtain's own LLM agent writes TypeScript snippets that execute in a V8 sandbox. IronCurtain controls the agent, the sandbox, and the policy engine. Every tool call exits the sandbox as a structured MCP request, passes through the policy engine (allow / deny / escalate), and only then reaches the real MCP server.
 
-- **Docker Agent Mode** — An external agent (Claude Code, Goose, etc.) runs inside a Docker container with no network access. IronCurtain mediates the external effects: LLM API calls pass through a TLS-terminating MITM proxy (host allowlist, fake-to-real key swap), and MCP tool calls pass through the same policy engine used by Code Mode.
+- **Docker Agent Mode** — An external agent (Claude Code, Goose, etc.) runs inside a Docker container with no network access. IronCurtain mediates the external effects: LLM API calls pass through a TLS-terminating MITM proxy (host allowlist, fake-to-real key swap), MCP tool calls pass through the same policy engine, and package installations (npm/PyPI) go through a validating registry proxy.
 
 In both modes, the agent is **untrusted**. Security does not depend on the model following instructions — it is enforced at the boundary.
 
@@ -109,7 +109,7 @@ ironcurtain mux
 
 - **Full agent TUI** — The agent runs in a PTY inside a Docker container with no network access. You interact with it exactly as if it were running locally.
 - **Inline escalation handling** — When a tool call needs approval, an escalation panel overlays the viewport. Press Ctrl-A to enter command mode, `/approve N` or `/deny N`, and return.
-- **Trusted user input** — Text typed in command mode (Ctrl-A) is captured on the host side before entering the container. This creates a verified intent signal that the [auto-approver](#auto-approve-escalations) can use — e.g., typing "push my changes to origin" will auto-approve a subsequent `git_push` escalation.
+- **Trusted user input** — Text typed in command mode (Ctrl-A) is captured on the host side before entering the container. This creates a verified intent signal that the auto-approver can use — e.g., typing "push my changes to origin" will auto-approve a subsequent `git_push` escalation.
 - **Tab management** — Spawn multiple concurrent sessions (`/new`), switch between them (`/tab N`, Alt-1..9), close them (`/close`).
 
 See [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md) for the full walkthrough: input modes, trusted input security model, escalation workflow, and keyboard reference.
@@ -122,11 +122,12 @@ For quick tasks or environments without Docker, IronCurtain's builtin agent runs
 ironcurtain start                                    # Interactive multi-turn session
 ironcurtain start "Summarize the files in ./src"     # Single-shot mode
 ironcurtain start -w ./my-project "Fix the tests"    # Workspace mode
+ironcurtain start --persona my-assistant "Check my email"  # Use a persona
 ```
 
 ### Other running modes
 
-IronCurtain also supports PTY mode with a separate escalation listener, a Signal messaging transport for mobile approval, and a daemon mode for scheduled cron jobs. See [RUNNING_MODES.md](RUNNING_MODES.md) for details.
+IronCurtain also supports PTY mode, session resume (`--resume <session-id>`), a Signal messaging transport for mobile approval, and a daemon mode for scheduled cron jobs. See [RUNNING_MODES.md](RUNNING_MODES.md) for details.
 
 ## Customizing Your Policy
 
@@ -147,6 +148,18 @@ ironcurtain compile-policy
 ```
 
 Translates your constitution into deterministic rules, generates test scenarios, and verifies them. Compiled artifacts go to `~/.ironcurtain/generated/`.
+
+### Personas
+
+Personas are named policy profiles — each bundles a constitution, compiled policy, persistent workspace, and semantic memory. Use them to run agents with different roles or access levels.
+
+```bash
+ironcurtain persona create my-assistant    # Create a persona
+ironcurtain persona compile my-assistant   # Compile its policy
+ironcurtain start --persona my-assistant "Check my calendar"
+```
+
+In mux mode, `/new my-assistant` spawns a tab using that persona. Personas can also be assigned to cron jobs. See [DAEMON.md](DAEMON.md) for scheduled job configuration.
 
 ## Policy: Constitution → Enforcement
 
@@ -198,27 +211,6 @@ ironcurtain refresh-lists --list major-news     # Refresh a single list
 
 Review the generated `~/.ironcurtain/generated/compiled-policy.json` — these are the exact rules enforced at runtime.
 
-## Web Search
-
-IronCurtain's fetch server includes a `web_search` tool backed by your choice of provider. Configure via `ironcurtain config` or directly in `~/.ironcurtain/config.json`:
-
-```json
-{
-  "webSearch": {
-    "provider": "brave",
-    "brave": { "apiKey": "BSA..." }
-  }
-}
-```
-
-| Provider | `provider` value | API key field              | Sign up                       |
-| -------- | ---------------- | -------------------------- | ----------------------------- |
-| Brave    | `"brave"`        | `webSearch.brave.apiKey`   | https://brave.com/search/api/ |
-| Tavily   | `"tavily"`       | `webSearch.tavily.apiKey`  | https://tavily.com/           |
-| SerpAPI  | `"serpapi"`      | `webSearch.serpapi.apiKey` | https://serpapi.com/          |
-
-`web_search` is available in both builtin and Docker Agent modes. If no provider is configured, calls to `web_search` return an error explaining how to set one up via `ironcurtain config`.
-
 ## Configuration
 
 IronCurtain stores configuration and session data in `~/.ironcurtain/`:
@@ -229,8 +221,7 @@ IronCurtain stores configuration and session data in `~/.ironcurtain/`:
 ├── constitution.md          # User-local base constitution (overrides package default)
 ├── constitution-user.md     # Your policy customizations (generated by customize-policy)
 ├── generated/               # User-compiled policy artifacts (overrides package defaults)
-├── signal-data/             # Signal transport persistent data (registration keys)
-├── pty-registry/            # Active PTY session registrations (auto-managed)
+├── personas/                # Persona directories (constitution, policy, workspace, memory)
 ├── jobs/                    # Cron job definitions, workspaces, and run records
 ├── sessions/
 │   └── {sessionId}/
@@ -246,84 +237,21 @@ Edit configuration interactively:
 ironcurtain config
 ```
 
-See [CONFIG.md](CONFIG.md) for the full configuration reference covering all fields, defaults, and environment variable overrides.
-
-### Resource Budgets
-
-Sessions enforce configurable limits to prevent runaway agents:
-
-| Limit           | Default    | Config Key                           |
-| --------------- | ---------- | ------------------------------------ |
-| Max tokens      | 1,000,000  | `resourceBudget.maxTotalTokens`      |
-| Max steps       | 200        | `resourceBudget.maxSteps`            |
-| Session timeout | 30 minutes | `resourceBudget.maxSessionSeconds`   |
-| Cost cap        | $5.00      | `resourceBudget.maxEstimatedCostUsd` |
-
-Set any limit to `null` in `config.json` to disable it.
-
-### Auto-Approve Escalations
-
-By default, all escalations require manual `/approve` or `/deny`. You can optionally enable an LLM-based auto-approver that checks whether the user's most recent message clearly authorized the escalated action:
-
-```json
-{
-  "autoApprove": {
-    "enabled": true,
-    "modelId": "anthropic:claude-haiku-4-5"
-  }
-}
-```
-
-The auto-approver is conservative — it only approves when intent is unambiguous (e.g., "push my changes to origin" clearly authorizes `git_push`). Vague messages like "go ahead" or "fix the tests" always fall through to human review. It can never deny — only approve or escalate. All auto-approved actions are recorded in the audit log with `autoApproved: true`.
-
-### Audit Redaction
-
-Audit log entries may contain sensitive data passed through tool arguments or results. By default, recognized patterns (credit card numbers, SSNs, API keys) are automatically redacted before entries are written to `audit.jsonl`. Disable with `"auditRedaction": { "enabled": false }` in `config.json` for full forensic logging.
-
-### Multi-Provider Support
-
-IronCurtain supports multiple LLM providers. Use the `provider:model-name` format in config and provide the API key for each provider you use:
-
-```json
-{
-  "agentModelId": "anthropic:claude-sonnet-4-6",
-  "policyModelId": "google:gemini-2.5-flash",
-  "googleApiKey": "AIza..."
-}
-```
-
-| Provider  | Config Key        | Environment Variable           |
-| --------- | ----------------- | ------------------------------ |
-| Anthropic | `anthropicApiKey` | `ANTHROPIC_API_KEY`            |
-| Google    | `googleApiKey`    | `GOOGLE_GENERATIVE_AI_API_KEY` |
-| OpenAI    | `openaiApiKey`    | `OPENAI_API_KEY`               |
-
-Environment variables take precedence over config file values.
-
-### Adding MCP Servers
-
-IronCurtain ships with filesystem, git, fetch, and GitHub MCP servers pre-configured. Adding a new server is a developer-level task:
-
-1. **Register the server** in `src/config/mcp-servers.json` with its command, arguments, and optional environment variables or sandbox settings.
-2. **Extend the argument role registry** in `src/types/argument-roles.ts` if the new server's tools have argument semantics not covered by existing roles (e.g., `read-path`, `write-path`, `fetch-url`).
-3. **Update the constitution** in `src/config/constitution.md` to cover the new server's capabilities.
-4. **Re-run `ironcurtain annotate-tools`** to classify the new server's tool arguments by role.
-5. **Re-run `ironcurtain compile-policy`** to compile policy rules from your constitution. The verification stage will flag gaps.
-
-After compilation, review the updated `tool-annotations.json` and `compiled-policy.json` to verify the new tools are correctly classified and covered by policy.
+Key configuration areas: models and API keys, resource budgets (token/step/time/cost limits), auto-approve escalations, web search provider, audit redaction, and memory server LLM settings. See [CONFIG.md](CONFIG.md) for the full reference.
 
 ## Built-in Capabilities
 
-IronCurtain ships with four pre-configured MCP servers. All tool calls are governed by your compiled policy.
+IronCurtain ships with five pre-configured MCP servers. All tool calls (except memory) are governed by your compiled policy.
 
 | Server         | Tools | Key capabilities                                                                                                  |
 | -------------- | ----- | ----------------------------------------------------------------------------------------------------------------- |
 | **Filesystem** | 14    | Read, write, edit, search files; directory tree; move; diff calculation                                           |
 | **Git**        | 27    | Full git workflow: status, diff, log, commit, branch, push/pull/fetch, clone, stash, blame                        |
-| **Fetch**      | 2     | HTTP GET with HTML-to-markdown conversion; `web_search` (see [Web Search](#web-search))                           |
+| **Fetch**      | 2     | HTTP GET with HTML-to-markdown conversion; web search (Brave, Tavily, SerpAPI)                                    |
 | **GitHub**     | 41    | Issues, PRs, code search, reviews via `ghcr.io/github/github-mcp-server`; requires a GitHub personal access token |
+| **Memory**     | 5     | Persistent semantic memory with hybrid vector+keyword search, LLM summarization, and automatic compaction. Enabled for persona and cron sessions. |
 
-Read-only operations are allowed by default policy; mutations (writes, pushes, PR creation) escalate for human approval.
+Read-only operations are allowed by default policy; mutations (writes, pushes, PR creation) escalate for human approval. Tools use `server.tool` naming (e.g., `filesystem.read_file`, `memory.recall`).
 
 ## Security Model
 
@@ -334,7 +262,7 @@ IronCurtain is designed around a specific threat model: **the LLM goes rogue.** 
 - **Filesystem containment** — Symlink-aware path resolution prevents path traversal and symlink-escape attacks.
 - **Per-tool policy** — Each MCP tool call is evaluated against compiled rules. The policy engine classifies tool arguments by role (read-path, write-path, delete-path) to make fine-grained decisions.
 - **Structural invariants** — Certain protections are hardcoded and cannot be overridden by the constitution: the agent can never modify its own policy files, audit logs, or configuration.
-- **Human escalation** — When policy says "escalate," the agent pauses and the user must explicitly approve or deny. Optionally, an [LLM-based auto-approver](#auto-approve-escalations) handles unambiguous cases.
+- **Human escalation** — When policy says "escalate," the agent pauses and the user must explicitly approve or deny. Optionally, an LLM-based auto-approver handles unambiguous cases (see [CONFIG.md](CONFIG.md)).
 - **Audit trail** — Every tool call and policy decision is logged to an append-only JSONL audit log.
 - **Resource limits** — Token, step, time, and cost budgets prevent runaway sessions.
 
@@ -382,21 +310,22 @@ src/
 ├── index.ts                    # Entry point
 ├── cli.ts                      # CLI command dispatcher
 ├── config/                     # Configuration loading, constitution, MCP server definitions
-│   ├── constitution.md         # Base security policy in plain English
-│   ├── mcp-servers.json        # MCP server definitions
-│   └── generated/              # Compiled policy artifacts (do not edit manually)
 ├── session/                    # Multi-turn session management, budgets, loop detection
 ├── sandbox/                    # V8 isolated execution environment
 ├── trusted-process/            # Policy engine, MCP proxy, audit log, escalation handler
 ├── pipeline/                   # Constitution → policy compilation pipeline
 ├── escalation/                 # Escalation listener: session registry, TUI dashboard, state
 ├── mux/                        # Terminal multiplexer: PTY bridge, renderer, trusted input
+├── persona/                    # Persona management (create, compile, resolve)
+├── memory/                     # Memory server integration (config, annotations, path resolution)
 ├── signal/                     # Signal messaging transport (bot daemon, setup, formatting)
 ├── daemon/                     # Unified daemon (Signal + cron scheduler, control socket)
 ├── cron/                       # Cron job management (scheduler, job store, git sync, policy)
-├── docker/                     # Docker agent mode, PTY session, MITM proxy, adapters
+├── docker/                     # Docker agent mode, PTY session, MITM proxy, registry proxy
 ├── servers/                    # Built-in MCP servers (fetch, web search providers)
 └── types/                      # Shared type definitions
+packages/
+└── memory-mcp-server/          # Standalone memory MCP server (publishable npm package)
 ```
 
 ## License

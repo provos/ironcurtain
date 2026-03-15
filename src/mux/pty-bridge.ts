@@ -92,6 +92,8 @@ export interface PtyBridgeOptions {
   readonly workspacePath?: string;
   /** Optional session ID to resume (passed as --resume to the child). */
   readonly resumeSessionId?: string;
+  /** Optional persona name (passed as --persona to the child). */
+  readonly persona?: string;
 }
 
 /** Session discovery timeout (ms). */
@@ -118,6 +120,9 @@ export async function createPtyBridge(options: PtyBridgeOptions): Promise<PtyBri
   }
   if (options.workspacePath) {
     spawnArgs.push('--workspace', options.workspacePath);
+  }
+  if (options.persona) {
+    spawnArgs.push('--persona', options.persona);
   }
   const child = nodePty.spawn(options.ironcurtainBin, spawnArgs, {
     cols: options.cols,
