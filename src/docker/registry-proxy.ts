@@ -39,6 +39,13 @@ export const pypiRegistry: RegistryConfig = {
   mirrorHosts: ['files.pythonhosted.org'],
 };
 
+export const debianRegistry: RegistryConfig = {
+  host: 'deb.debian.org',
+  displayName: 'Debian APT',
+  type: 'debian',
+  mirrorHosts: ['security.debian.org'],
+};
+
 // ── PyPI sidecar suffixes (PEP 658 metadata, PEP 714 provenance) ────
 
 const PYPI_SIDECAR_SUFFIXES = ['.metadata', '.provenance'];
@@ -202,6 +209,64 @@ export function extractPypiPackageFromFilename(filename: string): PackageIdentit
  */
 export function normalizePypiName(name: string): string {
   return name.toLowerCase().replace(/[-_.]+/g, '-');
+}
+
+// ── Debian URL parsing ──────────────────────────────────────────────
+
+/**
+ * Extracts package name and version from a Debian `.deb` filename.
+ *
+ * Format: {name}_{version}_{arch}.deb
+ * Examples:
+ *   libssl3_3.0.11-1~deb12u2_arm64.deb -> name='libssl3', version='3.0.11-1~deb12u2'
+ *   gcc-14-base_14.2.0-19_arm64.deb    -> name='gcc-14-base', version='14.2.0-19'
+ *
+ * Epoch versions (e.g., 1:2.3-4) use %3a URL-encoding for the colon.
+ */
+export function extractDebianPackageFromFilename(filename: string): PackageIdentity | undefined {
+  // Must end with .deb
+  if (!filename.endsWith('.deb')) return undefined;
+
+  // Strip .deb suffix
+  const base = filename.slice(0, -4);
+
+  // Split on underscores: name_version_arch
+  const firstUnderscore = base.indexOf('_');
+  if (firstUnderscore < 1) return undefined;
+
+  const lastUnderscore = base.lastIndexOf('_');
+  if (lastUnderscore <= firstUnderscore) return undefined;
+
+  const name = base.substring(0, firstUnderscore);
+  let version = base.substring(firstUnderscore + 1, lastUnderscore);
+
+  // Decode URL-encoded epoch (e.g., 1%3a2.3-4 -> 1:2.3-4)
+  try {
+    version = decodeURIComponent(version);
+  } catch {
+    // Malformed encoding -- use as-is
+  }
+
+  if (!name || !version) return undefined;
+
+  return { registry: 'debian', name, version };
+}
+
+/**
+ * Parses a Debian repository URL path into a PackageIdentity.
+ * Returns undefined for non-.deb paths (metadata, Release files, etc.).
+ *
+ * Only `.deb` files in pool paths are parsed; everything else
+ * (Release, Packages.gz, GPG keys) returns undefined for pass-through.
+ *
+ * Pattern: /debian/pool/.../{name}_{version}_{arch}.deb
+ */
+export function parseDebianPackageUrl(path: string): PackageIdentity | undefined {
+  const cleanPath = path.split('?')[0];
+  const filename = cleanPath.split('/').pop();
+  if (!filename || !filename.endsWith('.deb')) return undefined;
+
+  return extractDebianPackageFromFilename(filename);
 }
 
 // ── Request classification ──────────────────────────────────────────
@@ -420,8 +485,7 @@ export async function handleRegistryRequest(
       // npm internal endpoints (/-/ping, /-/v1/security/...) or unknown paths -- pass through
       await forwardUpstream(clientReq, clientRes, host, port);
     }
-  } else {
-    // registry.type === 'pypi'
+  } else if (registry.type === 'pypi') {
     if (isPypiSimpleRequest(path)) {
       await handlePypiSimple(registry, path, clientReq, clientRes, host, port, options);
     } else if (registry.mirrorHosts?.includes(host)) {
@@ -431,6 +495,9 @@ export async function handleRegistryRequest(
       // All other pypi.org paths -- pass through
       await forwardUpstream(clientReq, clientRes, host, port);
     }
+  } else {
+    // registry.type === 'debian'
+    await handleDebianRequest(registry, path, clientReq, clientRes, host, port, options);
   }
 }
 
@@ -695,6 +762,65 @@ async function handleTarballDownload(
     clientRes.end(
       'Forbidden: unable to validate package version (upstream metadata fetch failed). This is a fail-closed response — retry later or use an allowlisted package.',
     );
+  }
+}
+
+async function handleDebianRequest(
+  _registry: RegistryConfig,
+  path: string,
+  clientReq: http.IncomingMessage,
+  clientRes: http.ServerResponse,
+  host: string,
+  port: number,
+  options: RegistryHandlerOptions,
+): Promise<void> {
+  // parseDebianPackageUrl returns undefined for non-.deb paths (metadata,
+  // Release files, GPG keys) — those pass through unmodified since apt
+  // verifies them with GPG signatures.
+  const pkg = parseDebianPackageUrl(path);
+  if (!pkg) {
+    // Distinguish "not a .deb file" (pass-through) from "malformed .deb" (fail-closed)
+    const filename = path.split('?')[0].split('/').pop() ?? '';
+    if (filename.endsWith('.deb')) {
+      logger.info(`[registry-proxy] debian backstop: can't parse .deb filename, denying: ${path}`);
+      clientRes.writeHead(403, { 'Content-Type': 'text/plain' });
+      clientRes.end('Forbidden: unable to identify Debian package from URL');
+      return;
+    }
+    await forwardUpstream(clientReq, clientRes, host, port);
+    return;
+  }
+
+  // .deb download -- backstop check against allow/denylist
+  if (!pkg.version) {
+    // Unparseable .deb filename -- fail-closed
+    logger.info(`[registry-proxy] debian backstop: can't parse .deb filename, denying: ${path}`);
+    clientRes.writeHead(403, { 'Content-Type': 'text/plain' });
+    clientRes.end('Forbidden: unable to identify Debian package from URL');
+    return;
+  }
+
+  // Debian packages are distro-curated — bypass quarantine by providing
+  // an epoch publish date. Only allow/denylist checks apply.
+  const decision = options.validator.validate(pkg, { publishedAt: new Date(0) });
+
+  writeAuditEntry(options.auditLogPath, {
+    timestamp: new Date().toISOString(),
+    registry: 'debian',
+    packageName: pkg.name,
+    packageVersion: pkg.version,
+    decision: decision.status,
+    reason: decision.reason,
+    source: 'deb-backstop',
+    requestPath: path,
+  });
+
+  if (decision.status === 'allow') {
+    await forwardUpstream(clientReq, clientRes, host, port);
+  } else {
+    logger.info(`[registry-proxy] debian backstop: denied ${pkg.name}_${pkg.version}: ${decision.reason}`);
+    clientRes.writeHead(403, { 'Content-Type': 'text/plain' });
+    clientRes.end(`Forbidden: Debian package ${pkg.name} (${pkg.version}) — ${decision.reason}`);
   }
 }
 
