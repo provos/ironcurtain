@@ -21,9 +21,16 @@ export interface FusionResult {
  * Min-max normalize a value given the min and max of the set.
  * When range is 0 (all values equal), returns 1.0 (Weaviate convention).
  */
-function minMaxNormalized(value: number, min: number, max: number): number {
+function minMaxNormalized(value: number, min: number, max: number, count: number): number {
   const range = max - min;
-  return range === 0 ? 1.0 : (value - min) / range;
+  if (range === 0) return 1.0;
+  const normalized = (value - min) / range;
+  // For small result sets, remap from [0,1] to [0.3,1] so the worst score isn't zero
+  if (count <= 5) {
+    const damping = 0.3;
+    return damping + (1 - damping) * normalized;
+  }
+  return normalized;
 }
 
 /**
@@ -55,7 +62,7 @@ export function hybridScoreFusion(
     const simMax = Math.max(...similarities);
     for (const r of vectorResults) {
       const sim = 1 - r.distance;
-      vectorScoreById.set(r.id, minMaxNormalized(sim, simMin, simMax));
+      vectorScoreById.set(r.id, minMaxNormalized(sim, simMin, simMax, vectorResults.length));
       vectorDistanceById.set(r.id, r.distance);
     }
   }
@@ -68,7 +75,7 @@ export function hybridScoreFusion(
     const negMin = Math.min(...negated);
     const negMax = Math.max(...negated);
     for (const r of ftsResults) {
-      const norm = minMaxNormalized(-r.bm25_score, negMin, negMax);
+      const norm = minMaxNormalized(-r.bm25_score, negMin, negMax, ftsResults.length);
       ftsScoreById.set(r.id, norm);
       bm25NormalizedById.set(r.id, norm);
     }

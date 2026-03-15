@@ -72,6 +72,34 @@ describe('buildMemoryServerConfig', () => {
     expect(config.env?.MEMORY_LLM_BASE_URL).toBeUndefined();
     expect(config.env?.MEMORY_LLM_API_KEY).toBeUndefined();
   });
+
+  it('falls back to Anthropic API key with Anthropic base URL', () => {
+    const config = buildMemoryServerConfig({
+      dbPath: '/tmp/test.db',
+      anthropicApiKey: 'sk-ant-test',
+    });
+    expect(config.env?.MEMORY_LLM_API_KEY).toBe('sk-ant-test');
+    expect(config.env?.MEMORY_LLM_BASE_URL).toBe('https://api.anthropic.com/v1/');
+  });
+
+  it('prefers explicit llmApiKey over anthropicApiKey', () => {
+    const config = buildMemoryServerConfig({
+      dbPath: '/tmp/test.db',
+      llmApiKey: 'custom-key',
+      anthropicApiKey: 'sk-ant-test',
+    });
+    expect(config.env?.MEMORY_LLM_API_KEY).toBe('custom-key');
+  });
+
+  it('uses explicit llmBaseUrl with Anthropic fallback key', () => {
+    const config = buildMemoryServerConfig({
+      dbPath: '/tmp/test.db',
+      llmBaseUrl: 'https://custom.api/v1/',
+      anthropicApiKey: 'sk-ant-test',
+    });
+    expect(config.env?.MEMORY_LLM_API_KEY).toBe('sk-ant-test');
+    expect(config.env?.MEMORY_LLM_BASE_URL).toBe('https://custom.api/v1/');
+  });
 });
 
 describe('MEMORY_SERVER_NAME', () => {

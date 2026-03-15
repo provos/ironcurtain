@@ -70,6 +70,7 @@ export function buildMemoryServerConfig(opts: {
   namespace?: string;
   llmBaseUrl?: string;
   llmApiKey?: string;
+  anthropicApiKey?: string;
 }): MCPServerConfig {
   const env: Record<string, string> = {
     MEMORY_DB_PATH: opts.dbPath,
@@ -79,14 +80,18 @@ export function buildMemoryServerConfig(opts: {
     env.MEMORY_NAMESPACE = opts.namespace;
   }
 
-  // LLM config: only set when explicitly configured. The memory server uses
-  // an OpenAI-compatible client, so Anthropic API keys don't work as a fallback.
-  // Without LLM vars the server degrades gracefully (no summarization/compaction).
+  // LLM config for summarization, dedup, and compaction.
+  // Falls back to Anthropic API key via their OpenAI-compatible endpoint.
   if (opts.llmBaseUrl) {
     env.MEMORY_LLM_BASE_URL = opts.llmBaseUrl;
   }
   if (opts.llmApiKey) {
     env.MEMORY_LLM_API_KEY = opts.llmApiKey;
+  } else if (opts.anthropicApiKey) {
+    env.MEMORY_LLM_API_KEY = opts.anthropicApiKey;
+    if (!opts.llmBaseUrl) {
+      env.MEMORY_LLM_BASE_URL = 'https://api.anthropic.com/v1/';
+    }
   }
 
   return {
