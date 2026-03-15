@@ -12,6 +12,7 @@ import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import { expandTilde, resolveRealPath } from '../types/argument-roles.js';
 import { getIronCurtainHome } from '../config/paths.js';
+import { getPersonasDir } from '../persona/resolve.js';
 
 /** Returns true when `child` is equal to or nested inside `parent`. */
 export function isEqualOrInside(child: string, parent: string): boolean {
@@ -65,9 +66,11 @@ export function validateWorkspacePath(
   if (isEqualOrInside(canonical, ironCurtainHome)) {
     // Persona workspaces live inside IronCurtain home by design
     // (~/.ironcurtain/personas/{name}/workspace/) — allow them when opted in.
-    const personasDir = ironCurtainHome + '/personas/';
+    // Strict check: must be exactly {personasDir}/{single-segment}/workspace
+    const personasBase = resolveRealPath(getPersonasDir());
+    const relative = isEqualOrInside(canonical, personasBase) ? canonical.slice(personasBase.length + 1) : undefined;
     const isPersonaWorkspace =
-      options.allowPersonaWorkspace && canonical.startsWith(personasDir) && canonical.endsWith('/workspace');
+      options.allowPersonaWorkspace && relative !== undefined && /^[^/]+\/workspace$/.test(relative);
     if (!isPersonaWorkspace) {
       throw new Error(`Workspace path is inside the IronCurtain home directory: ${canonical}`);
     }

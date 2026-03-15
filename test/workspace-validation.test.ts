@@ -136,6 +136,18 @@ describe('validateWorkspacePath', () => {
     });
   });
 
+  it('rejects nested persona paths even with allowPersonaWorkspace', () => {
+    const fakeHome = join(tempDir, 'ic-home');
+    const nestedWorkspace = join(fakeHome, 'personas', 'evil', 'deep', 'workspace');
+    mkdirSync(nestedWorkspace, { recursive: true });
+
+    withIronCurtainHome(fakeHome, () => {
+      expect(() => validateWorkspacePath(nestedWorkspace, [], { allowPersonaWorkspace: true })).toThrow(
+        'IronCurtain home',
+      );
+    });
+  });
+
   it('rejects persona workspace inside IronCurtain home without opt-in', () => {
     const fakeHome = join(tempDir, 'ic-home');
     const personaWorkspace = join(fakeHome, 'personas', 'test-persona', 'workspace');
