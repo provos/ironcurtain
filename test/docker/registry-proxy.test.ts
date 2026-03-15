@@ -163,6 +163,15 @@ describe('parsePypiTarballUrl', () => {
     });
   });
 
+  it('parses .whl.metadata sidecar URL', () => {
+    const result = parsePypiTarballUrl('/packages/hash/hatchling-1.25.0-py3-none-any.whl.metadata');
+    expect(result).toEqual({
+      registry: 'pypi',
+      name: 'hatchling',
+      version: '1.25.0',
+    });
+  });
+
   it('returns undefined for unrecognized format', () => {
     expect(parsePypiTarballUrl('/packages/hash/readme.txt')).toBeUndefined();
   });
@@ -194,6 +203,52 @@ describe('extractPypiPackageFromFilename', () => {
       name: 'scipy',
       version: '1.12.0',
     });
+  });
+
+  it('handles .whl.metadata sidecar (PEP 658)', () => {
+    const result = extractPypiPackageFromFilename('hatchling-1.25.0-py3-none-any.whl.metadata');
+    expect(result).toEqual({
+      registry: 'pypi',
+      name: 'hatchling',
+      version: '1.25.0',
+    });
+  });
+
+  it('handles .whl.metadata for complex wheel names', () => {
+    const result = extractPypiPackageFromFilename('shiboken6-6.8.3-cp39-abi3-manylinux_2_28_x86_64.whl.metadata');
+    expect(result).toEqual({
+      registry: 'pypi',
+      name: 'shiboken6',
+      version: '6.8.3',
+    });
+  });
+
+  it('handles .whl.provenance sidecar (PEP 714)', () => {
+    const result = extractPypiPackageFromFilename('numpy-1.26.0-cp312-cp312-manylinux_2_17_x86_64.whl.provenance');
+    expect(result).toEqual({
+      registry: 'pypi',
+      name: 'numpy',
+      version: '1.26.0',
+    });
+  });
+
+  it('handles .tar.gz.metadata sidecar', () => {
+    const result = extractPypiPackageFromFilename('requests-2.31.0.tar.gz.metadata');
+    expect(result).toEqual({
+      registry: 'pypi',
+      name: 'requests',
+      version: '2.31.0',
+    });
+  });
+
+  it('rejects double-suffix .whl.metadata.metadata (fail-closed)', () => {
+    expect(
+      extractPypiPackageFromFilename('numpy-1.26.0-cp312-cp312-manylinux_2_17_x86_64.whl.metadata.metadata'),
+    ).toBeUndefined();
+  });
+
+  it('rejects bare .metadata without distribution extension', () => {
+    expect(extractPypiPackageFromFilename('something.metadata')).toBeUndefined();
   });
 });
 

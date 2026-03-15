@@ -39,6 +39,25 @@ export const pypiRegistry: RegistryConfig = {
   mirrorHosts: ['files.pythonhosted.org'],
 };
 
+// ── PyPI sidecar suffixes (PEP 658 metadata, PEP 714 provenance) ────
+
+const PYPI_SIDECAR_SUFFIXES = ['.metadata', '.provenance'];
+
+/**
+ * Strips known PEP 658/714 sidecar suffixes from a PyPI filename.
+ * e.g. "numpy-1.26.0-cp312-cp312-manylinux_2_17_x86_64.whl.metadata"
+ *   -> "numpy-1.26.0-cp312-cp312-manylinux_2_17_x86_64.whl"
+ * Returns the filename unchanged if no known suffix matches.
+ */
+function stripPypiSidecarSuffix(filename: string): string {
+  for (const suffix of PYPI_SIDECAR_SUFFIXES) {
+    if (filename.endsWith(suffix)) {
+      return filename.slice(0, -suffix.length);
+    }
+  }
+  return filename;
+}
+
 // ── URL Parsers ─────────────────────────────────────────────────────
 
 /**
@@ -158,10 +177,13 @@ export function parsePypiTarballUrl(path: string): PackageIdentity | undefined {
  *   numpy-1.26.0-cp312-*.whl -> { name: 'numpy', version: '1.26.0' }
  */
 export function extractPypiPackageFromFilename(filename: string): PackageIdentity | undefined {
+  // Strip known sidecar suffixes (e.g. .whl.metadata -> .whl) before parsing
+  const baseFilename = stripPypiSidecarSuffix(filename);
+
   // Wheel format: {name}-{version}(-{tags}).whl
   // Sdist format: {name}-{version}.tar.gz or {name}-{version}.zip
   // The name-version boundary is the first hyphen followed by a digit
-  const match = filename.match(
+  const match = baseFilename.match(
     /^([a-zA-Z0-9](?:[a-zA-Z0-9._-]*[a-zA-Z0-9])?)-(\d[^-]*?)(?:\.tar\.gz|\.zip|-[a-zA-Z].*\.whl)$/,
   );
   if (!match) return undefined;
