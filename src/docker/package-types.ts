@@ -10,7 +10,7 @@
  * Each type determines how package names and versions are extracted
  * from HTTP request paths, and how metadata responses are filtered.
  */
-export type RegistryType = 'npm' | 'pypi';
+export type RegistryType = 'npm' | 'pypi' | 'debian';
 
 /**
  * Configuration for a package registry host.
@@ -131,7 +131,7 @@ export interface PackageAuditEntry {
   readonly decision: 'allow' | 'deny';
   readonly reason: string;
   /** Whether this was a metadata filter or tarball backstop decision. */
-  readonly source: 'metadata-filter' | 'tarball-backstop';
+  readonly source: 'metadata-filter' | 'tarball-backstop' | 'deb-backstop';
   /** The HTTP request path that triggered this check. */
   readonly requestPath: string;
 }

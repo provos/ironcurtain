@@ -6,6 +6,8 @@ import {
   parsePypiSimpleUrl,
   parsePypiTarballUrl,
   extractPypiPackageFromFilename,
+  extractDebianPackageFromFilename,
+  parseDebianPackageUrl,
   normalizePypiName,
   isNpmMetadataRequest,
   isNpmTarballRequest,
@@ -16,6 +18,7 @@ import {
   setCachedVersions,
   handleRegistryRequest,
   npmRegistry,
+  debianRegistry,
   type NpmPackument,
   type RegistryHandlerOptions,
 } from '../../src/docker/registry-proxy.js';
@@ -163,6 +166,15 @@ describe('parsePypiTarballUrl', () => {
     });
   });
 
+  it('parses .whl.metadata sidecar URL', () => {
+    const result = parsePypiTarballUrl('/packages/hash/hatchling-1.25.0-py3-none-any.whl.metadata');
+    expect(result).toEqual({
+      registry: 'pypi',
+      name: 'hatchling',
+      version: '1.25.0',
+    });
+  });
+
   it('returns undefined for unrecognized format', () => {
     expect(parsePypiTarballUrl('/packages/hash/readme.txt')).toBeUndefined();
   });
@@ -194,6 +206,52 @@ describe('extractPypiPackageFromFilename', () => {
       name: 'scipy',
       version: '1.12.0',
     });
+  });
+
+  it('handles .whl.metadata sidecar (PEP 658)', () => {
+    const result = extractPypiPackageFromFilename('hatchling-1.25.0-py3-none-any.whl.metadata');
+    expect(result).toEqual({
+      registry: 'pypi',
+      name: 'hatchling',
+      version: '1.25.0',
+    });
+  });
+
+  it('handles .whl.metadata for complex wheel names', () => {
+    const result = extractPypiPackageFromFilename('shiboken6-6.8.3-cp39-abi3-manylinux_2_28_x86_64.whl.metadata');
+    expect(result).toEqual({
+      registry: 'pypi',
+      name: 'shiboken6',
+      version: '6.8.3',
+    });
+  });
+
+  it('handles .whl.provenance sidecar (PEP 714)', () => {
+    const result = extractPypiPackageFromFilename('numpy-1.26.0-cp312-cp312-manylinux_2_17_x86_64.whl.provenance');
+    expect(result).toEqual({
+      registry: 'pypi',
+      name: 'numpy',
+      version: '1.26.0',
+    });
+  });
+
+  it('handles .tar.gz.metadata sidecar', () => {
+    const result = extractPypiPackageFromFilename('requests-2.31.0.tar.gz.metadata');
+    expect(result).toEqual({
+      registry: 'pypi',
+      name: 'requests',
+      version: '2.31.0',
+    });
+  });
+
+  it('rejects double-suffix .whl.metadata.metadata (fail-closed)', () => {
+    expect(
+      extractPypiPackageFromFilename('numpy-1.26.0-cp312-cp312-manylinux_2_17_x86_64.whl.metadata.metadata'),
+    ).toBeUndefined();
+  });
+
+  it('rejects bare .metadata without distribution extension', () => {
+    expect(extractPypiPackageFromFilename('something.metadata')).toBeUndefined();
   });
 });
 
@@ -467,34 +525,36 @@ describe('AllowedVersionCache', () => {
   });
 });
 
+// ── Test helpers for handleRegistryRequest ───────────────────────────
+
+/** Creates a fake IncomingMessage with the given URL. */
+function fakeReq(url: string): http.IncomingMessage {
+  const req = new PassThrough() as unknown as http.IncomingMessage;
+  req.url = url;
+  req.method = 'GET';
+  req.headers = {};
+  return req;
+}
+
+/** Creates a fake ServerResponse that captures statusCode and body. */
+function fakeRes(): http.ServerResponse & { body: string; statusCode: number } {
+  const res = new PassThrough() as unknown as http.ServerResponse & { body: string; statusCode: number };
+  res.body = '';
+  res.statusCode = 0;
+  res.writeHead = ((code: number) => {
+    res.statusCode = code;
+    return res;
+  }) as unknown as typeof res.writeHead;
+  res.end = ((data?: string) => {
+    if (data) res.body = data;
+    return res;
+  }) as unknown as typeof res.end;
+  return res;
+}
+
 // ── Adversarial tarball backstop routing ─────────────────────────────
 
 describe('handleRegistryRequest: adversarial /-/ paths', () => {
-  /** Creates a fake IncomingMessage with the given URL. */
-  function fakeReq(url: string): http.IncomingMessage {
-    const req = new PassThrough() as unknown as http.IncomingMessage;
-    req.url = url;
-    req.method = 'GET';
-    req.headers = {};
-    return req;
-  }
-
-  /** Creates a fake ServerResponse that captures statusCode and body. */
-  function fakeRes(): http.ServerResponse & { body: string; statusCode: number } {
-    const res = new PassThrough() as unknown as http.ServerResponse & { body: string; statusCode: number };
-    res.body = '';
-    res.statusCode = 0;
-    res.writeHead = ((code: number) => {
-      res.statusCode = code;
-      return res;
-    }) as unknown as typeof res.writeHead;
-    res.end = ((data?: string) => {
-      if (data) res.body = data;
-      return res;
-    }) as unknown as typeof res.end;
-    return res;
-  }
-
   const options: RegistryHandlerOptions = {
     validator: DENY_ALL_VALIDATOR,
     cache: new Map(),
@@ -545,5 +605,155 @@ describe('handleRegistryRequest: adversarial /-/ paths', () => {
     expect(isNpmMetadataRequest('/express')).toBe(true);
     expect(isNpmTarballRequest('/express')).toBe(false);
     expect(isNpmMetadataRequest('/@types/node')).toBe(true);
+  });
+});
+
+// ── Debian .deb filename parsing ────────────────────────────────────
+
+describe('extractDebianPackageFromFilename', () => {
+  it('parses standard .deb filename', () => {
+    expect(extractDebianPackageFromFilename('libssl3_3.0.11-1~deb12u2_arm64.deb')).toEqual({
+      registry: 'debian',
+      name: 'libssl3',
+      version: '3.0.11-1~deb12u2',
+    });
+  });
+
+  it('parses package with hyphens in name', () => {
+    expect(extractDebianPackageFromFilename('gcc-14-base_14.2.0-19_arm64.deb')).toEqual({
+      registry: 'debian',
+      name: 'gcc-14-base',
+      version: '14.2.0-19',
+    });
+  });
+
+  it('parses epoch version (URL-encoded colon)', () => {
+    expect(extractDebianPackageFromFilename('tar_1%3a1.35-2_arm64.deb')).toEqual({
+      registry: 'debian',
+      name: 'tar',
+      version: '1:1.35-2',
+    });
+  });
+
+  it('parses multi-arch all package', () => {
+    expect(extractDebianPackageFromFilename('fonts-dejavu-core_2.37-8_all.deb')).toEqual({
+      registry: 'debian',
+      name: 'fonts-dejavu-core',
+      version: '2.37-8',
+    });
+  });
+
+  it('returns undefined for non-.deb file', () => {
+    expect(extractDebianPackageFromFilename('Release')).toBeUndefined();
+    expect(extractDebianPackageFromFilename('Packages.gz')).toBeUndefined();
+    expect(extractDebianPackageFromFilename('something.tar.gz')).toBeUndefined();
+  });
+
+  it('returns undefined for malformed .deb (no underscores)', () => {
+    expect(extractDebianPackageFromFilename('broken.deb')).toBeUndefined();
+  });
+
+  it('returns undefined for .deb with only one underscore', () => {
+    expect(extractDebianPackageFromFilename('name_version.deb')).toBeUndefined();
+  });
+});
+
+// ── Debian URL parsing ──────────────────────────────────────────────
+
+describe('parseDebianPackageUrl', () => {
+  it('parses pool path with .deb', () => {
+    expect(parseDebianPackageUrl('/debian/pool/main/l/libssl3/libssl3_3.0.11-1~deb12u2_arm64.deb')).toEqual({
+      registry: 'debian',
+      name: 'libssl3',
+      version: '3.0.11-1~deb12u2',
+    });
+  });
+
+  it('returns undefined for Release file', () => {
+    expect(parseDebianPackageUrl('/debian/dists/trixie/Release')).toBeUndefined();
+  });
+
+  it('returns undefined for InRelease file', () => {
+    expect(parseDebianPackageUrl('/debian/dists/trixie/InRelease')).toBeUndefined();
+  });
+
+  it('returns undefined for Packages.gz', () => {
+    expect(parseDebianPackageUrl('/debian/dists/trixie/main/binary-arm64/Packages.gz')).toBeUndefined();
+  });
+
+  it('returns undefined for GPG key paths', () => {
+    expect(parseDebianPackageUrl('/debian/dists/trixie/Release.gpg')).toBeUndefined();
+  });
+
+  it('strips query string before parsing', () => {
+    expect(parseDebianPackageUrl('/debian/pool/main/l/libegl1/libegl1_1.7.0-1_arm64.deb?some=param')).toEqual({
+      registry: 'debian',
+      name: 'libegl1',
+      version: '1.7.0-1',
+    });
+  });
+});
+
+// ── Debian handleRegistryRequest ────────────────────────────────────
+
+describe('handleRegistryRequest: debian', () => {
+  it('blocks .deb download for denied package', async () => {
+    const options: RegistryHandlerOptions = {
+      validator: DENY_ALL_VALIDATOR,
+      cache: new Map(),
+    };
+    const req = fakeReq('/debian/pool/main/l/libssl3/libssl3_3.0.11-1~deb12u2_arm64.deb');
+    const res = fakeRes();
+
+    await handleRegistryRequest(debianRegistry, req, res, 'deb.debian.org', 443, options);
+
+    expect(res.statusCode).toBe(403);
+    expect(res.body).toContain('Forbidden');
+    expect(res.body).toContain('libssl3');
+  });
+
+  it('blocks unparseable .deb filename (fail-closed)', async () => {
+    const options: RegistryHandlerOptions = {
+      validator: createPackageValidator({}),
+      cache: new Map(),
+    };
+    const req = fakeReq('/debian/pool/main/b/broken/broken.deb');
+    const res = fakeRes();
+
+    await handleRegistryRequest(debianRegistry, req, res, 'deb.debian.org', 443, options);
+
+    expect(res.statusCode).toBe(403);
+    expect(res.body).toContain('Forbidden');
+  });
+
+  it('calls validator with epoch date to bypass quarantine for .deb files', async () => {
+    // Track what the validator receives to verify quarantine bypass
+    let validatedPkg: import('../../src/docker/package-types.js').PackageIdentity | undefined;
+    let validatedMetadata: import('../../src/docker/package-types.js').VersionMetadata | undefined;
+
+    const options: RegistryHandlerOptions = {
+      validator: {
+        validate(pkg, metadata) {
+          validatedPkg = pkg;
+          validatedMetadata = metadata;
+          // Return deny to avoid triggering forwardUpstream (which would try real network)
+          return { status: 'deny', reason: 'test deny' };
+        },
+      },
+      cache: new Map(),
+    };
+    const req = fakeReq('/debian/pool/main/l/libssl3/libssl3_3.0.11-1~deb12u2_arm64.deb');
+    const res = fakeRes();
+
+    await handleRegistryRequest(debianRegistry, req, res, 'deb.debian.org', 443, options);
+
+    // Validator should have been called with the parsed package
+    expect(validatedPkg).toEqual({
+      registry: 'debian',
+      name: 'libssl3',
+      version: '3.0.11-1~deb12u2',
+    });
+    // Debian packages bypass quarantine via epoch publishedAt
+    expect(validatedMetadata?.publishedAt).toEqual(new Date(0));
   });
 });

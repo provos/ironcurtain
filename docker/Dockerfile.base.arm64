@@ -1,15 +1,30 @@
-FROM node:22-bookworm
+FROM node:22-trixie
 
 # Replicate the 'codespace' user (uid 1000) from the devcontainers/universal
 # image so Dockerfile.claude-code works unchanged on both platforms.
-# node:22-bookworm already has node:node at uid/gid 1000 — rename it.
+# The node base image ships node:node at uid/gid 1000 — rename it.
 RUN usermod -l codespace -d /home/codespace -m node && \
     groupmod -n codespace node
 
 USER root
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends git socat ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
+    apt-get install -y --no-install-recommends \
+    # Existing
+    git socat ca-certificates \
+    # Build tools for native extensions
+    build-essential cmake pkg-config \
+    # Graphics/Qt runtime + dev
+    libegl1 libegl-dev libgl1 libgl-dev \
+    libxkbcommon0 libxkbcommon-dev libdbus-1-3 libdbus-1-dev \
+    # X11/XCB (Qt offscreen mode)
+    libx11-6 libxext6 libxrender1 libxcb1 \
+    libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 \
+    libxcb-shape0 libxcb-xfixes0 libxcb-xkb1 libxkbcommon-x11-0 \
+    # Common native Python deps
+    libffi-dev libssl-dev zlib1g-dev libxml2-dev libxslt1-dev \
+    # Fonts (Qt needs at least one font)
+    fontconfig fonts-dejavu-core \
+    && rm -rf /var/lib/apt/lists/*
 
 # IronCurtain CA (for MITM proxy trust)
 # This file is copied into a temporary build context by ensureImage().
@@ -26,6 +41,12 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
 
 # Pre-install Python 3.12 so uv never needs to download it at runtime.
 # Containers run with --network=none, so runtime downloads would fail.
+# Install to a shared location so the codespace user can find it.
+# uv uses rustls by default, which doesn't read system CA certs.
+# UV_NATIVE_TLS makes it use the system TLS stack (OpenSSL) instead,
+# so it trusts the IronCurtain MITM CA installed above.
+ENV UV_NATIVE_TLS=1
+ENV UV_PYTHON_INSTALL_DIR=/opt/uv-python
 RUN uv python install 3.12
 
 RUN npm install -g node-gyp
