@@ -16,6 +16,7 @@ import { createPasteInterceptor, type PasteInterceptor } from './paste-intercept
 import type { MuxTab, MuxAction } from './types.js';
 import { validateWorkspacePath } from '../session/workspace-validation.js';
 import { scanResumableSessions } from './session-scanner.js';
+import { scanPersonas } from './persona-scanner.js';
 import * as logger from '../logger.js';
 
 export interface MuxApp {
@@ -80,6 +81,7 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
     workspacePath?: string;
     resumeSessionId?: string;
     agentOverride?: string;
+    persona?: string;
   }): Promise<MuxTab> {
     const { columns } = process.stdout;
     const ptyRows = renderer.layout.ptyViewportRows;
@@ -95,12 +97,13 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
       agent: sessionAgent,
       workspacePath: opts?.workspacePath,
       resumeSessionId: opts?.resumeSessionId,
+      persona: opts?.persona,
     });
 
     const tab: MuxTab = {
       number: nextTabNumber++,
       bridge,
-      label: sessionAgent,
+      label: opts?.persona ? `${sessionAgent} (${opts.persona})` : sessionAgent,
       status: 'running',
       escalationAvailable: false,
       scrollOffset: null,
@@ -266,10 +269,11 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
             break;
           }
         }
-        const tab = await spawnSession({ workspacePath: validatedPath });
+        const tab = await spawnSession({ workspacePath: validatedPath, persona: action.persona });
         activeTabIndex = tabs.length - 1;
+        const personaPrefix = action.persona ? `persona "${action.persona}" ` : '';
         const suffix = validatedPath ? ` in ${validatedPath}` : '';
-        showMessage(`Spawned session #${tab.number}${suffix}`);
+        showMessage(`Spawned ${personaPrefix}session #${tab.number}${suffix}`);
         inputHandler.exitPickerMode();
         renderer.fullRedraw();
         break;
@@ -286,6 +290,14 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
         });
         activeTabIndex = tabs.length - 1;
         showMessage(`Resuming session ${action.sessionId.substring(0, 8)} as tab #${resumeTab.number}`);
+        renderer.fullRedraw();
+        break;
+      }
+
+      case 'persona-spawn': {
+        const personaTab = await spawnSession({ persona: action.persona });
+        activeTabIndex = tabs.length - 1;
+        showMessage(`Spawned persona "${action.persona}" as tab #${personaTab.number}`);
         renderer.fullRedraw();
         break;
       }
@@ -338,7 +350,14 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
       }
 
       case 'new': {
-        inputHandler.enterPickerMode();
+        const personaArg = args[0];
+        if (personaArg) {
+          // Direct spawn: /new <persona>
+          void handleAction({ kind: 'persona-spawn', persona: personaArg });
+          break;
+        }
+        const personas = scanPersonas();
+        inputHandler.enterPickerMode(personas);
         renderer.fullRedraw();
         break;
       }
@@ -472,6 +491,7 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
         getPendingCount: () => escalationManager.pendingCount,
         getPickerState: () => inputHandler.pickerState,
         getResumePickerState: () => inputHandler.resumePickerState,
+        getPersonaPickerState: () => inputHandler.personaPickerState,
         getScrollOffset: () => {
           const active = getActiveTab();
           return active?.scrollOffset ?? null;
