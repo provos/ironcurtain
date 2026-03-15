@@ -20,15 +20,25 @@ export function isEqualOrInside(child: string, parent: string): boolean {
   return child.startsWith(prefix);
 }
 
+export interface ValidateWorkspaceOptions {
+  /** Allow persona workspace paths inside IronCurtain home (e.g., ~/.ironcurtain/personas/{name}/workspace). */
+  readonly allowPersonaWorkspace?: boolean;
+}
+
 /**
  * Validates and canonicalizes a workspace path.
  *
  * @param rawPath - The user-provided path (may be relative, contain ~, etc.)
  * @param protectedPaths - The list of protected paths from config
+ * @param options - Optional validation overrides
  * @returns The canonical absolute path
  * @throws {Error} if the path fails any validation check
  */
-export function validateWorkspacePath(rawPath: string, protectedPaths: string[]): string {
+export function validateWorkspacePath(
+  rawPath: string,
+  protectedPaths: string[],
+  options: ValidateWorkspaceOptions = {},
+): string {
   const absolute = resolve(expandTilde(rawPath));
   const canonical = resolveRealPath(absolute);
 
@@ -53,7 +63,14 @@ export function validateWorkspacePath(rawPath: string, protectedPaths: string[])
 
   const ironCurtainHome = resolveRealPath(getIronCurtainHome());
   if (isEqualOrInside(canonical, ironCurtainHome)) {
-    throw new Error(`Workspace path is inside the IronCurtain home directory: ${canonical}`);
+    // Persona workspaces live inside IronCurtain home by design
+    // (~/.ironcurtain/personas/{name}/workspace/) — allow them when opted in.
+    const personasDir = ironCurtainHome + '/personas/';
+    const isPersonaWorkspace =
+      options.allowPersonaWorkspace && canonical.startsWith(personasDir) && canonical.endsWith('/workspace');
+    if (!isPersonaWorkspace) {
+      throw new Error(`Workspace path is inside the IronCurtain home directory: ${canonical}`);
+    }
   }
 
   // Check that workspace is not inside a protected path.

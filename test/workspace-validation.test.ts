@@ -114,4 +114,35 @@ describe('validateWorkspacePath', () => {
     const result = validateWorkspacePath(workspace, [protectedDir]);
     expect(result).toBe(realpathSync(workspace));
   });
+
+  it('allows persona workspace inside IronCurtain home when opted in', () => {
+    const fakeHome = join(tempDir, 'ic-home');
+    const personaWorkspace = join(fakeHome, 'personas', 'test-persona', 'workspace');
+    mkdirSync(personaWorkspace, { recursive: true });
+
+    withIronCurtainHome(fakeHome, () => {
+      const result = validateWorkspacePath(personaWorkspace, [], { allowPersonaWorkspace: true });
+      expect(result).toBe(realpathSync(personaWorkspace));
+    });
+  });
+
+  it('still rejects non-workspace paths inside IronCurtain home even with allowPersonaWorkspace', () => {
+    const fakeHome = join(tempDir, 'ic-home');
+    const sessions = join(fakeHome, 'sessions');
+    mkdirSync(sessions, { recursive: true });
+
+    withIronCurtainHome(fakeHome, () => {
+      expect(() => validateWorkspacePath(sessions, [], { allowPersonaWorkspace: true })).toThrow('IronCurtain home');
+    });
+  });
+
+  it('rejects persona workspace inside IronCurtain home without opt-in', () => {
+    const fakeHome = join(tempDir, 'ic-home');
+    const personaWorkspace = join(fakeHome, 'personas', 'test-persona', 'workspace');
+    mkdirSync(personaWorkspace, { recursive: true });
+
+    withIronCurtainHome(fakeHome, () => {
+      expect(() => validateWorkspacePath(personaWorkspace, [])).toThrow('IronCurtain home');
+    });
+  });
 });

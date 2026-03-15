@@ -92,7 +92,7 @@ export function validateResumeSession(resumeSessionId: string, protectedPaths: s
     throw new Error(`Cannot resume session "${resumeSessionId}": workspace path is missing or invalid`);
   }
   try {
-    validateWorkspacePath(snapshot.workspacePath, protectedPaths);
+    validateWorkspacePath(snapshot.workspacePath, protectedPaths, { allowPersonaWorkspace: true });
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     throw new Error(`Cannot resume session "${resumeSessionId}": workspace path is unsafe: ${detail}`, {

@@ -262,7 +262,9 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
         let validatedPath: string | undefined;
         if (action.workspacePath) {
           try {
-            validatedPath = validateWorkspacePath(action.workspacePath, protectedPaths);
+            validatedPath = validateWorkspacePath(action.workspacePath, protectedPaths, {
+              allowPersonaWorkspace: !!action.persona,
+            });
           } catch (err) {
             inputHandler.enterBrowseWithError(action.workspacePath, err instanceof Error ? err.message : String(err));
             renderer.fullRedraw();
