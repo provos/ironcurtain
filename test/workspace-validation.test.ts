@@ -115,46 +115,87 @@ describe('validateWorkspacePath', () => {
     expect(result).toBe(realpathSync(workspace));
   });
 
-  it('allows persona workspace inside IronCurtain home when opted in', () => {
+  it('allows persona workspace inside IronCurtain home', () => {
     const fakeHome = join(tempDir, 'ic-home');
     const personaWorkspace = join(fakeHome, 'personas', 'test-persona', 'workspace');
     mkdirSync(personaWorkspace, { recursive: true });
 
     withIronCurtainHome(fakeHome, () => {
-      const result = validateWorkspacePath(personaWorkspace, [], { allowPersonaWorkspace: true });
+      const result = validateWorkspacePath(personaWorkspace, []);
       expect(result).toBe(realpathSync(personaWorkspace));
     });
   });
 
-  it('still rejects non-workspace paths inside IronCurtain home even with allowPersonaWorkspace', () => {
+  it('allows persona workspace when IronCurtain home is in protected paths', () => {
+    const fakeHome = join(tempDir, 'ic-home');
+    const personaWorkspace = join(fakeHome, 'personas', 'test-persona', 'workspace');
+    mkdirSync(personaWorkspace, { recursive: true });
+
+    withIronCurtainHome(fakeHome, () => {
+      const result = validateWorkspacePath(personaWorkspace, [fakeHome]);
+      expect(result).toBe(realpathSync(personaWorkspace));
+    });
+  });
+
+  it('allows subdirectories within persona workspace', () => {
+    const fakeHome = join(tempDir, 'ic-home');
+    const subdir = join(fakeHome, 'personas', 'test-persona', 'workspace', 'project');
+    mkdirSync(subdir, { recursive: true });
+
+    withIronCurtainHome(fakeHome, () => {
+      const result = validateWorkspacePath(subdir, [fakeHome]);
+      expect(result).toBe(realpathSync(subdir));
+    });
+  });
+
+  it('rejects non-workspace paths inside IronCurtain home', () => {
     const fakeHome = join(tempDir, 'ic-home');
     const sessions = join(fakeHome, 'sessions');
     mkdirSync(sessions, { recursive: true });
 
     withIronCurtainHome(fakeHome, () => {
-      expect(() => validateWorkspacePath(sessions, [], { allowPersonaWorkspace: true })).toThrow('IronCurtain home');
+      expect(() => validateWorkspacePath(sessions, [])).toThrow('IronCurtain home');
     });
   });
 
-  it('rejects nested persona paths even with allowPersonaWorkspace', () => {
+  it('rejects nested persona paths with extra directory segments', () => {
     const fakeHome = join(tempDir, 'ic-home');
     const nestedWorkspace = join(fakeHome, 'personas', 'evil', 'deep', 'workspace');
     mkdirSync(nestedWorkspace, { recursive: true });
 
     withIronCurtainHome(fakeHome, () => {
-      expect(() => validateWorkspacePath(nestedWorkspace, [], { allowPersonaWorkspace: true })).toThrow(
-        'IronCurtain home',
-      );
+      expect(() => validateWorkspacePath(nestedWorkspace, [])).toThrow('IronCurtain home');
     });
   });
 
-  it('rejects persona workspace inside IronCurtain home without opt-in', () => {
+  it('rejects persona generated dir', () => {
     const fakeHome = join(tempDir, 'ic-home');
-    const personaWorkspace = join(fakeHome, 'personas', 'test-persona', 'workspace');
-    mkdirSync(personaWorkspace, { recursive: true });
+    const generated = join(fakeHome, 'personas', 'test-persona', 'generated');
+    mkdirSync(generated, { recursive: true });
 
     withIronCurtainHome(fakeHome, () => {
-      expect(() => validateWorkspacePath(personaWorkspace, [])).toThrow('IronCurtain home');
+      expect(() => validateWorkspacePath(generated, [])).toThrow('IronCurtain home');
+    });
+  });
+
+  it('allows session sandbox', () => {
+    const fakeHome = join(tempDir, 'ic-home');
+    const sandbox = join(fakeHome, 'sessions', 'abc123', 'sandbox');
+    mkdirSync(sandbox, { recursive: true });
+
+    withIronCurtainHome(fakeHome, () => {
+      const result = validateWorkspacePath(sandbox, [fakeHome]);
+      expect(result).toBe(realpathSync(sandbox));
+    });
+  });
+
+  it('rejects non-sandbox session paths', () => {
+    const fakeHome = join(tempDir, 'ic-home');
+    const escalations = join(fakeHome, 'sessions', 'abc123', 'escalations');
+    mkdirSync(escalations, { recursive: true });
+
+    withIronCurtainHome(fakeHome, () => {
+      expect(() => validateWorkspacePath(escalations, [fakeHome])).toThrow('IronCurtain home');
     });
   });
 });

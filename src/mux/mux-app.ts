@@ -104,6 +104,7 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
       number: nextTabNumber++,
       bridge,
       label: opts?.persona ? `${sessionAgent} (${opts.persona})` : sessionAgent,
+      persona: opts?.persona,
       status: 'running',
       escalationAvailable: false,
       scrollOffset: null,
@@ -142,7 +143,7 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
       if (registration && tab.status === 'running') {
         tab.escalationAvailable = true;
         escalationManager.addSession(registration);
-        tab.label = registration.label;
+        tab.label = tab.persona ? `${registration.label} [${tab.persona}]` : registration.label;
         renderer.redrawTabBar();
       } else if (!registration) {
         logger.warn(`Could not discover session registration for tab #${tab.number}`);
@@ -262,9 +263,7 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
         let validatedPath: string | undefined;
         if (action.workspacePath) {
           try {
-            validatedPath = validateWorkspacePath(action.workspacePath, protectedPaths, {
-              allowPersonaWorkspace: !!action.persona,
-            });
+            validatedPath = validateWorkspacePath(action.workspacePath, protectedPaths);
           } catch (err) {
             inputHandler.enterBrowseWithError(
               action.workspacePath,

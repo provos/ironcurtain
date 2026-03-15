@@ -20,6 +20,8 @@ export interface MuxTab {
   readonly bridge: PtyBridge;
   /** Display label for the tab. */
   label: string;
+  /** Persona name if this tab was spawned with a persona. */
+  persona?: string;
   /** Whether the child process has exited. */
   status: 'running' | 'exited';
   /** Exit code if exited. */
