@@ -256,10 +256,9 @@ export function extractDebianPackageFromFilename(filename: string): PackageIdent
  * Parses a Debian repository URL path into a PackageIdentity.
  * Returns undefined for non-.deb paths (metadata, Release files, etc.).
  *
- * Only `.deb` files in pool paths are parsed; everything else
- * (Release, Packages.gz, GPG keys) returns undefined for pass-through.
- *
- * Pattern: /debian/pool/.../{name}_{version}_{arch}.deb
+ * Matches any URL whose last path segment ends with `.deb` — not restricted
+ * to `/pool/` paths, since mirrors and security repos may use different layouts.
+ * Non-.deb paths (Release, Packages.gz, GPG keys) return undefined for pass-through.
  */
 export function parseDebianPackageUrl(path: string): PackageIdentity | undefined {
   const cleanPath = path.split('?')[0];
@@ -475,29 +474,36 @@ export async function handleRegistryRequest(
 ): Promise<void> {
   const path = clientReq.url ?? '/';
 
-  if (registry.type === 'npm') {
-    if (isNpmMetadataRequest(path)) {
-      await handleNpmMetadata(registry, path, clientReq, clientRes, host, port, options);
-    } else if (path.includes('/-/') && !path.startsWith('/-/')) {
-      // Tarball download: /-/ appears after package name (e.g., /express/-/express-1.0.0.tgz)
-      await handleTarballDownload(registry, path, clientRes, host, port, options, 'npm');
-    } else {
-      // npm internal endpoints (/-/ping, /-/v1/security/...) or unknown paths -- pass through
-      await forwardUpstream(clientReq, clientRes, host, port);
+  switch (registry.type) {
+    case 'npm':
+      if (isNpmMetadataRequest(path)) {
+        await handleNpmMetadata(registry, path, clientReq, clientRes, host, port, options);
+      } else if (path.includes('/-/') && !path.startsWith('/-/')) {
+        // Tarball download: /-/ appears after package name (e.g., /express/-/express-1.0.0.tgz)
+        await handleTarballDownload(registry, path, clientRes, host, port, options, 'npm');
+      } else {
+        // npm internal endpoints (/-/ping, /-/v1/security/...) or unknown paths -- pass through
+        await forwardUpstream(clientReq, clientRes, host, port);
+      }
+      break;
+    case 'pypi':
+      if (isPypiSimpleRequest(path)) {
+        await handlePypiSimple(registry, path, clientReq, clientRes, host, port, options);
+      } else if (registry.mirrorHosts?.includes(host)) {
+        // Mirror hosts serve tarballs
+        await handleTarballDownload(registry, path, clientRes, host, port, options, 'pypi');
+      } else {
+        // All other pypi.org paths -- pass through
+        await forwardUpstream(clientReq, clientRes, host, port);
+      }
+      break;
+    case 'debian':
+      await handleDebianRequest(registry, path, clientReq, clientRes, host, port, options);
+      break;
+    default: {
+      const _exhaustive: never = registry.type;
+      throw new Error(`Unknown registry type: ${String(_exhaustive)}`);
     }
-  } else if (registry.type === 'pypi') {
-    if (isPypiSimpleRequest(path)) {
-      await handlePypiSimple(registry, path, clientReq, clientRes, host, port, options);
-    } else if (registry.mirrorHosts?.includes(host)) {
-      // Mirror hosts serve tarballs
-      await handleTarballDownload(registry, path, clientRes, host, port, options, 'pypi');
-    } else {
-      // All other pypi.org paths -- pass through
-      await forwardUpstream(clientReq, clientRes, host, port);
-    }
-  } else {
-    // registry.type === 'debian'
-    await handleDebianRequest(registry, path, clientReq, clientRes, host, port, options);
   }
 }
 
@@ -788,15 +794,6 @@ async function handleDebianRequest(
       return;
     }
     await forwardUpstream(clientReq, clientRes, host, port);
-    return;
-  }
-
-  // .deb download -- backstop check against allow/denylist
-  if (!pkg.version) {
-    // Unparseable .deb filename -- fail-closed
-    logger.info(`[registry-proxy] debian backstop: can't parse .deb filename, denying: ${path}`);
-    clientRes.writeHead(403, { 'Content-Type': 'text/plain' });
-    clientRes.end('Forbidden: unable to identify Debian package from URL');
     return;
   }
 
