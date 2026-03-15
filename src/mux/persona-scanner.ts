@@ -6,6 +6,7 @@
  */
 
 import { existsSync, readdirSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { getPersonasDir, getPersonaGeneratedDir, getPersonaWorkspaceDir, loadPersona } from '../persona/resolve.js';
 import { createPersonaName, type PersonaName } from '../persona/types.js';
 
@@ -46,7 +47,7 @@ export function scanPersonas(): PersonaSnapshot[] {
     try {
       const persona = loadPersona(name);
       const generatedDir = getPersonaGeneratedDir(name);
-      const compiled = existsSync(generatedDir + '/compiled-policy.json');
+      const compiled = existsSync(resolve(generatedDir, 'compiled-policy.json'));
       snapshots.push({
         name,
         description: persona.description,

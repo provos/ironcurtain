@@ -357,7 +357,17 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
       case 'new': {
         const personaArg = args[0];
         if (personaArg) {
-          // Direct spawn: /new <persona>
+          // Validate persona before spawning
+          const personas = scanPersonas();
+          const match = personas.find((p) => p.name === personaArg);
+          if (!match) {
+            showMessage(`Unknown persona: "${personaArg}"`);
+            break;
+          }
+          if (!match.compiled) {
+            showMessage(`Persona "${personaArg}" is not compiled. Run: ironcurtain persona compile ${personaArg}`);
+            break;
+          }
           void handleAction({ kind: 'persona-spawn', persona: personaArg });
           break;
         }
