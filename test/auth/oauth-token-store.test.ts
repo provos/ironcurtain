@@ -26,7 +26,11 @@ describe('oauth-token-store', () => {
   });
 
   afterEach(() => {
-    process.env.IRONCURTAIN_HOME = originalEnv;
+    if (originalEnv === undefined) {
+      delete process.env.IRONCURTAIN_HOME;
+    } else {
+      process.env.IRONCURTAIN_HOME = originalEnv;
+    }
     rmSync(testDir, { recursive: true, force: true });
   });
 

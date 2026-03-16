@@ -262,6 +262,16 @@ export function computeConstitutionHash(basePath: string): string {
 // ---------------------------------------------------------------------------
 
 /**
+ * Validates that a provider ID contains only safe characters
+ * (lowercase alphanumeric and hyphens) to prevent path traversal.
+ */
+function validateProviderId(providerId: string): void {
+  if (!/^[a-z0-9-]+$/.test(providerId)) {
+    throw new Error(`Invalid provider ID: ${providerId}`);
+  }
+}
+
+/**
  * Returns the OAuth directory: {home}/oauth/
  * Stores provider credentials and token files.
  */
@@ -274,6 +284,7 @@ export function getOAuthDir(): string {
  *   {home}/oauth/{providerId}.json
  */
 export function getOAuthTokenPath(providerId: string): string {
+  validateProviderId(providerId);
   return resolve(getOAuthDir(), `${providerId}.json`);
 }
 
@@ -282,6 +293,7 @@ export function getOAuthTokenPath(providerId: string): string {
  *   {home}/oauth/{providerId}-credentials.json
  */
 export function getOAuthCredentialsPath(providerId: string): string {
+  validateProviderId(providerId);
   return resolve(getOAuthDir(), `${providerId}-credentials.json`);
 }
 

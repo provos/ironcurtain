@@ -642,7 +642,7 @@ $ ironcurtain auth google --scopes gmail.send,calendar.events
   Opening browser...
 ```
 
-The flow uses Google's `include_granted_scopes=true` parameter to preserve existing scopes while adding new ones.
+The flow uses Google's `include_granted_scopes=true` authorization parameter (set via `extraAuthParams` in the provider config) combined with local scope merging to preserve existing scopes while adding new ones.
 
 ## Multi-Provider Abstraction
 
