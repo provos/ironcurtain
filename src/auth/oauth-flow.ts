@@ -146,7 +146,7 @@ function respondWithHtml(res: ServerResponse, title: string, message: string): v
   const html = `<!DOCTYPE html>
 <html><head><title>${safeTitle}</title></head>
 <body><h1>${safeTitle}</h1><p>${safeMessage}</p></body></html>`;
-  res.writeHead(200, { 'Content-Type': 'text/html' });
+  res.writeHead(200, { 'Content-Type': 'text/html', Connection: 'close' });
   res.end(html);
 }
 
@@ -325,8 +325,9 @@ export async function runOAuthFlow(
     // Step 6: Exchange code for tokens
     return await exchangeCodeForTokens(provider, clientCredentials, outcome.code, redirectUri, codeVerifier);
   } finally {
-    // Step 7: Stop server
+    // Step 7: Stop server and force-close any lingering connections
     server.close();
+    server.closeAllConnections();
   }
 }
 
