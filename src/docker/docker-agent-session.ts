@@ -225,11 +225,14 @@ export class DockerAgentSession implements Session {
         HTTP_PROXY: `http://host.docker.internal:${mitmPort}`,
       };
 
-      // Create a per-session --internal Docker network that blocks internet egress
+      // Create a per-session --internal Docker network that blocks internet egress.
+      // Assign to this.networkName immediately so the catch block can clean it up
+      // if any subsequent step (sidecar setup, container creation) fails.
       const internalNetworkName = getInternalNetworkName(shortId);
       await this.docker.createNetwork(internalNetworkName, {
         internal: true,
       });
+      this.networkName = internalNetworkName;
       network = internalNetworkName;
 
       // Ensure the socat image is available
@@ -304,7 +307,6 @@ export class DockerAgentSession implements Session {
       });
 
       await this.docker.start(this.containerId);
-      this.networkName = network;
       logger.info(`Container started: ${this.containerId.substring(0, 12)}`);
 
       // Connectivity check: verify the container can reach host proxies

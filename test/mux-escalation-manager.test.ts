@@ -225,9 +225,7 @@ describe('MuxEscalationManager', () => {
 
     /** Triggers one registry poll tick by advancing the fake timer. */
     async function triggerPoll(): Promise<void> {
-      vi.advanceTimersByTime(1100);
-      // Flush microtasks so any async callbacks settle
-      await vi.runAllTimersAsync().catch(() => {});
+      await vi.advanceTimersByTimeAsync(1100);
     }
 
     let readActiveRegistrationsMock: ReturnType<typeof vi.fn>;
