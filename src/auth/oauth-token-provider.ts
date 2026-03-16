@@ -136,6 +136,12 @@ export class OAuthTokenProvider {
     return existsSync(getOAuthTokenPath(this.provider.id));
   }
 
+  /** Returns the scopes granted during the last authorization flow. */
+  getGrantedScopes(): readonly string[] {
+    const token = loadOAuthToken(this.provider.id);
+    return token?.scopes ?? [];
+  }
+
   /**
    * Core refresh with deduplication. Concurrent callers share a single
    * in-flight refresh promise.

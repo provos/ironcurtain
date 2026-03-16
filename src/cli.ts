@@ -26,8 +26,8 @@ const topLevelSpec: CommandSpec = {
     { name: 'escalation-listener', description: 'Aggregate escalation notifications from PTY sessions' },
     { name: 'bot', description: "Alias for 'daemon' (backward compatible)" },
     { name: 'persona', description: 'Manage personas (named policy profiles)' },
-    { name: 'setup', description: 'First-start wizard, or import OAuth credentials (setup <provider> <file>)' },
-    { name: 'auth', description: 'Manage OAuth authorization (status, authorize, revoke)' },
+    { name: 'auth', description: 'Manage OAuth providers (import credentials, authorize, revoke)' },
+    { name: 'setup', description: 'Run the first-start wizard (always runs)' },
     { name: 'setup-signal', description: 'Interactive Signal transport onboarding' },
     { name: 'annotate-tools', description: 'Classify MCP tool arguments via LLM' },
     { name: 'compile-policy', description: 'Compile constitution into enforceable policy rules' },
@@ -122,22 +122,14 @@ switch (subcommand) {
     await personaMain(process.argv.slice(3));
     break;
   }
-  case 'setup': {
-    // With provider args: credential import (ironcurtain setup google creds.json)
-    // Without args: first-start wizard
-    const setupArgs = process.argv.slice(3);
-    if (setupArgs.length > 0 && !setupArgs[0].startsWith('-')) {
-      const { runSetupCommand } = await import('./auth/setup-command.js');
-      runSetupCommand(setupArgs);
-    } else {
-      const { runFirstStart } = await import('./config/first-start.js');
-      await runFirstStart();
-    }
-    break;
-  }
   case 'auth': {
     const { runAuthCommand } = await import('./auth/auth-command.js');
     await runAuthCommand(process.argv.slice(3));
+    break;
+  }
+  case 'setup': {
+    const { runFirstStart } = await import('./config/first-start.js');
+    await runFirstStart();
     break;
   }
   case 'daemon': {

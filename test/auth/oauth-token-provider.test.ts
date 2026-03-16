@@ -148,6 +148,27 @@ describe('OAuthTokenProvider', () => {
   });
 
   // -----------------------------------------------------------------------
+  // getGrantedScopes
+  // -----------------------------------------------------------------------
+
+  describe('getGrantedScopes', () => {
+    it('returns empty array when no token exists', () => {
+      const provider = makeProvider('http://localhost/token');
+      const tp = new OAuthTokenProvider(provider, TEST_CLIENT_CREDENTIALS);
+      expect(tp.getGrantedScopes()).toEqual([]);
+    });
+
+    it('returns scopes from stored token', () => {
+      const token = makeToken({ scopes: ['scope-a', 'scope-b'] });
+      saveOAuthToken('google', token);
+
+      const provider = makeProvider('http://localhost/token');
+      const tp = new OAuthTokenProvider(provider, TEST_CLIENT_CREDENTIALS);
+      expect(tp.getGrantedScopes()).toEqual(['scope-a', 'scope-b']);
+    });
+  });
+
+  // -----------------------------------------------------------------------
   // getValidAccessToken -- happy path
   // -----------------------------------------------------------------------
 
