@@ -258,6 +258,34 @@ export function computeConstitutionHash(basePath: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// OAuth paths
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns the OAuth directory: {home}/oauth/
+ * Stores provider credentials and token files.
+ */
+export function getOAuthDir(): string {
+  return resolve(getIronCurtainHome(), 'oauth');
+}
+
+/**
+ * Returns the token file path for a given provider:
+ *   {home}/oauth/{providerId}.json
+ */
+export function getOAuthTokenPath(providerId: string): string {
+  return resolve(getOAuthDir(), `${providerId}.json`);
+}
+
+/**
+ * Returns the client credentials file path for a given provider:
+ *   {home}/oauth/{providerId}-credentials.json
+ */
+export function getOAuthCredentialsPath(providerId: string): string {
+  return resolve(getOAuthDir(), `${providerId}-credentials.json`);
+}
+
+// ---------------------------------------------------------------------------
 // Daemon control socket
 // ---------------------------------------------------------------------------
 
