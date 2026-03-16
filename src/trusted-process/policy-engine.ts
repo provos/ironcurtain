@@ -30,6 +30,7 @@ import {
   getUrlRoles,
   getRoleDefinition,
   resolveRealPath,
+  isWithinDirectory,
   resolveStoredAnnotation,
   SANDBOX_SAFE_PATH_ROLES,
   type RoleDefinition,
@@ -68,17 +69,6 @@ function extractAnnotatedPaths(
     }
   }
   return paths;
-}
-
-/**
- * Checks whether a target path is contained within a directory.
- * Both paths are resolved to their real canonical form (following symlinks)
- * before comparison, which neutralizes both path traversal and symlink attacks.
- */
-function isWithinDirectory(targetPath: string, directory: string): boolean {
-  const resolved = resolveRealPath(targetPath);
-  const resolvedDir = resolveRealPath(directory);
-  return resolved === resolvedDir || resolved.startsWith(resolvedDir + '/');
 }
 
 /**
@@ -194,8 +184,9 @@ function resolveUrlForDomainCheck(
   return extractDomainForRole(normalized, role);
 }
 
-// Re-export utilities used by sibling modules (mcp-proxy-server, index)
-export { domainMatchesAllowlist, extractAnnotatedPaths, isIpAddress };
+// Re-export utilities used by sibling modules (mcp-proxy-server, index, approval-whitelist).
+// Canonical location: isWithinDirectory is defined in src/types/argument-roles.ts.
+export { domainMatchesAllowlist, extractAnnotatedPaths, collectDistinctRoles, isIpAddress, isWithinDirectory };
 
 /**
  * Checks whether a rule has role-related conditions (roles, paths, or domains).
@@ -573,6 +564,7 @@ export class PolicyEngine {
               decision: 'escalate',
               rule: 'structural-domain-escalate',
               reason: `URL domain "${domain}" is not in the allowlist for server "${request.serverName}"`,
+              escalatedRoles: [role],
             });
           }
         }
@@ -650,9 +642,13 @@ export class PolicyEngine {
     }
 
     let mostRestrictive: EvaluationResult | undefined;
+    const escalatedRoles: ArgumentRole[] = [];
     for (const role of rolesToEvaluate) {
       const result = this.evaluateRulesForRole(request, annotation, role);
       if (result.decision === 'deny') return result;
+      if (result.decision === 'escalate') {
+        escalatedRoles.push(role);
+      }
       if (!mostRestrictive || DECISION_SEVERITY[result.decision] > DECISION_SEVERITY[mostRestrictive.decision]) {
         mostRestrictive = result;
       }
@@ -660,6 +656,10 @@ export class PolicyEngine {
 
     if (!mostRestrictive) {
       throw new Error('unreachable: rolesToEvaluate was non-empty but no result was produced');
+    }
+    // Attach escalated roles when the final decision is escalate
+    if (mostRestrictive.decision === 'escalate' && escalatedRoles.length > 0) {
+      return { ...mostRestrictive, escalatedRoles };
     }
     return mostRestrictive;
   }

@@ -4,6 +4,7 @@ import type { Sandbox } from '../sandbox/index.js';
 import type { ResolvedResourceBudgetConfig } from '../config/user-config.js';
 import type { CumulativeBudgetSnapshot } from './resource-budget-tracker.js';
 import type { AgentId } from '../docker/agent-adapter.js';
+import type { WhitelistCandidateIpc } from '../trusted-process/approval-whitelist.js';
 
 /**
  * Unique identifier for a session. Branded to prevent accidental
@@ -157,6 +158,8 @@ export interface EscalationRequest {
   readonly arguments: Record<string, unknown>;
   readonly reason: string;
   readonly context?: Readonly<Record<string, string>>;
+  /** Whitelist candidates for display. Present when the proxy supports whitelisting. */
+  readonly whitelistCandidates?: readonly WhitelistCandidateIpc[];
 }
 
 /**
@@ -312,7 +315,11 @@ export interface Session {
    *
    * @throws {Error} if no escalation with this ID is pending
    */
-  resolveEscalation(escalationId: string, decision: 'approved' | 'denied'): Promise<void>;
+  resolveEscalation(
+    escalationId: string,
+    decision: 'approved' | 'denied',
+    options?: { whitelistSelection?: number },
+  ): Promise<void>;
 
   /**
    * Returns any currently pending escalation, or undefined.

@@ -21,4 +21,17 @@ export interface AuditEntry {
    * rather than a human. Only present when escalationResult is 'approved'.
    */
   autoApproved?: boolean;
+
+  /**
+   * When true, the escalation was bypassed because a whitelist
+   * pattern matched. The whitelistPatternId links to the original
+   * approval that created the pattern.
+   */
+  whitelistApproved?: boolean;
+
+  /**
+   * ID of the whitelist pattern that matched, linking back to the
+   * original escalation approval. Only present when whitelistApproved is true.
+   */
+  whitelistPatternId?: string;
 }

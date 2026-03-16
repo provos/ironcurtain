@@ -36,7 +36,7 @@ export interface EscalationWatcher {
    *
    * @throws {Error} if no escalation with this ID is pending
    */
-  resolve(escalationId: string, decision: 'approved' | 'denied'): boolean;
+  resolve(escalationId: string, decision: 'approved' | 'denied', options?: { whitelistSelection?: number }): boolean;
 }
 
 export interface EscalationWatcherOptions {
@@ -128,13 +128,17 @@ export function createEscalationWatcher(
       return pendingEscalation;
     },
 
-    resolve(escalationId: string, decision: 'approved' | 'denied'): boolean {
+    resolve(escalationId: string, decision: 'approved' | 'denied', options?: { whitelistSelection?: number }): boolean {
       if (!pendingEscalation || pendingEscalation.escalationId !== escalationId) {
         throw new Error(`No pending escalation with ID: ${escalationId}`);
       }
 
       const responsePath = resolve(escalationDir, `response-${escalationId}.json`);
-      atomicWriteJsonSync(responsePath, { decision });
+      const responseData: Record<string, unknown> = { decision };
+      if (options?.whitelistSelection !== undefined) {
+        responseData.whitelistSelection = options.whitelistSelection;
+      }
+      atomicWriteJsonSync(responsePath, responseData);
       pendingEscalation = undefined;
 
       // Stale detection: verify the request file still exists after writing the response.

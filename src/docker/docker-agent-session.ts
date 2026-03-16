@@ -449,11 +449,15 @@ export class DockerAgentSession implements Session {
   }
 
   // eslint-disable-next-line @typescript-eslint/require-await -- must be async to satisfy Session interface
-  async resolveEscalation(escalationId: string, decision: 'approved' | 'denied'): Promise<void> {
+  async resolveEscalation(
+    escalationId: string,
+    decision: 'approved' | 'denied',
+    options?: { whitelistSelection?: number },
+  ): Promise<void> {
     if (!this.escalationWatcher) {
       throw new Error(`No pending escalation with ID: ${escalationId}`);
     }
-    this.escalationWatcher.resolve(escalationId, decision);
+    this.escalationWatcher.resolve(escalationId, decision, options);
   }
 
   async close(): Promise<void> {

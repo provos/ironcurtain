@@ -27,6 +27,7 @@ import {
   expireEscalation,
   type ListenerState,
 } from './listener-state.js';
+import { DEFAULT_WHITELIST_OPTIONS } from '../trusted-process/approval-whitelist.js';
 
 /** Poll interval for the session registry directory (ms). */
 const REGISTRY_POLL_INTERVAL_MS = 1000;
@@ -213,17 +214,22 @@ function handleCommand(input: string, state: ListenerState): CommandResult {
   const parts = input.split(/\s+/);
   const command = parts[0].toLowerCase();
 
-  switch (command) {
+  // Strip + suffix for whitelist variant (e.g., /approve+ -> /approve with whitelist flag)
+  // Only /approve+ is valid; /deny+ is ignored (whitelisting a deny makes no sense).
+  const baseCommand = command.endsWith('+') ? command.slice(0, -1) : command;
+  const withWhitelist = command.endsWith('+') && baseCommand === '/approve';
+
+  switch (baseCommand) {
     case '/approve': {
       const arg = parts[1];
       if (!arg) return { state, message: chalk.yellow('Usage: /approve <number> or /approve all') };
 
       if (arg === 'all') {
-        return approveOrDenyAll(state, 'approved');
+        return approveOrDenyAll(state, 'approved', withWhitelist);
       }
       const num = parseInt(arg, 10);
       if (isNaN(num)) return { state, message: chalk.yellow('Invalid escalation number') };
-      return approveOrDeny(state, num, 'approved');
+      return approveOrDeny(state, num, 'approved', withWhitelist);
     }
 
     case '/deny': {
@@ -249,13 +255,18 @@ function handleCommand(input: string, state: ListenerState): CommandResult {
       return {
         state,
         message: chalk.yellow(
-          'Unknown command. Available: /approve <N>, /deny <N>, /approve all, /deny all, /sessions, /quit',
+          'Unknown command. Available: /approve <N>, /approve+ <N>, /deny <N>, /approve all, /deny all, /sessions, /quit',
         ),
       };
   }
 }
 
-function approveOrDeny(state: ListenerState, displayNumber: number, decision: 'approved' | 'denied'): CommandResult {
+function approveOrDeny(
+  state: ListenerState,
+  displayNumber: number,
+  decision: 'approved' | 'denied',
+  whitelist?: boolean,
+): CommandResult {
   const escalation = state.pendingEscalations.get(displayNumber);
   if (!escalation) {
     return { state, message: chalk.yellow(`No pending escalation #${displayNumber}`) };
@@ -267,7 +278,8 @@ function approveOrDeny(state: ListenerState, displayNumber: number, decision: 'a
   }
 
   try {
-    const accepted = session.watcher.resolve(escalation.request.escalationId, decision);
+    const options = whitelist ? DEFAULT_WHITELIST_OPTIONS : undefined;
+    const accepted = session.watcher.resolve(escalation.request.escalationId, decision, options);
     const newState = resolveEscalation(state, displayNumber, decision);
 
     if (!accepted) {
@@ -278,16 +290,17 @@ function approveOrDeny(state: ListenerState, displayNumber: number, decision: 'a
     }
 
     const label = decision === 'approved' ? chalk.green('APPROVED') : chalk.red('DENIED');
+    const whitelistSuffix = whitelist ? chalk.cyan(' (whitelisted)') : '';
     return {
       state: newState,
-      message: `Escalation #${displayNumber} ${label}`,
+      message: `Escalation #${displayNumber} ${label}${whitelistSuffix}`,
     };
   } catch (err) {
     return { state, message: chalk.red(`Error: ${err instanceof Error ? err.message : String(err)}`) };
   }
 }
 
-function approveOrDenyAll(state: ListenerState, decision: 'approved' | 'denied'): CommandResult {
+function approveOrDenyAll(state: ListenerState, decision: 'approved' | 'denied', whitelist?: boolean): CommandResult {
   if (state.pendingEscalations.size === 0) {
     return { state, message: chalk.yellow('No pending escalations') };
   }
@@ -297,7 +310,7 @@ function approveOrDenyAll(state: ListenerState, decision: 'approved' | 'denied')
   const nums = [...state.pendingEscalations.keys()].sort((a, b) => a - b);
 
   for (const num of nums) {
-    const result = approveOrDeny(currentState, num, decision);
+    const result = approveOrDeny(currentState, num, decision, whitelist);
     currentState = result.state;
     if (result.message) messages.push(result.message);
   }
@@ -386,6 +399,14 @@ function buildDashboard(state: ListenerState): string {
           lines.push(`        ${k}: ${chalk.yellow(v)}`);
         }
       }
+
+      if (esc.request.whitelistCandidates && esc.request.whitelistCandidates.length > 0) {
+        const candidate = esc.request.whitelistCandidates[0];
+        lines.push(`        ${chalk.cyan('Whitelist: ' + candidate.description)}`);
+        if (candidate.warning) {
+          lines.push(`        ${chalk.yellow('Warning:   ' + candidate.warning)}`);
+        }
+      }
     }
   }
 
@@ -406,7 +427,7 @@ function buildDashboard(state: ListenerState): string {
   // Command hint (prompt itself is handled by readline)
   lines.push('');
   lines.push(chalk.dim('  ' + '\u2500'.repeat(60)));
-  lines.push(chalk.dim('  /approve N | /deny N | /approve all | /deny all | /quit'));
+  lines.push(chalk.dim('  /approve N | /approve+ N | /deny N | /approve all | /deny all | /quit'));
 
   return lines.join('\n') + '\n';
 }

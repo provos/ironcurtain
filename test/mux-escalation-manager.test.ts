@@ -128,6 +128,45 @@ describe('MuxEscalationManager', () => {
     manager.stop();
   });
 
+  it('re-adding a session stops the old watcher (no duplicate escalations)', async () => {
+    const manager = createMuxEscalationManager();
+    const escalationDir = resolve(tempDir, 'session1');
+    mkdirSync(escalationDir, { recursive: true });
+
+    const registration = {
+      sessionId: 'session-1',
+      escalationDir,
+      label: 'test session',
+      startedAt: new Date().toISOString(),
+      pid: process.pid,
+    };
+
+    // Simulate the race: registry polling adds the session first
+    manager.addSession(registration);
+    // Then bridge discovery adds it again (same session ID)
+    manager.addSession(registration);
+
+    // Should still be just one session
+    expect(manager.state.sessions.size).toBe(1);
+
+    // Write an escalation request file
+    const requestFile = resolve(escalationDir, 'request-dup-test.json');
+    atomicWriteJsonSync(requestFile, {
+      escalationId: 'dup-test',
+      serverName: 'filesystem',
+      toolName: 'write_file',
+      arguments: { path: '/test' },
+      reason: 'Test escalation',
+    });
+
+    // Wait for the watcher to poll (default 300ms)
+    await new Promise((r) => setTimeout(r, 500));
+
+    // Should only have 1 pending escalation, not 2
+    expect(manager.pendingCount).toBe(1);
+    manager.stop();
+  });
+
   it('resolve returns message for non-existent escalation', () => {
     const manager = createMuxEscalationManager();
     const result = manager.resolve(999, 'approved');

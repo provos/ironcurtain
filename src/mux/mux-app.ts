@@ -330,8 +330,13 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
   function handleCommand(command: string, args: string[]): void {
     switch (command) {
       case 'approve':
-      case 'deny': {
-        const decision = command === 'approve' ? 'approved' : 'denied';
+      case 'approve+':
+      case 'deny':
+      case 'deny+': {
+        const baseCommand = command.endsWith('+') ? command.slice(0, -1) : command;
+        // Only approve+ enables whitelisting; deny+ is treated as plain deny.
+        const withWhitelist = command === 'approve+';
+        const decision = baseCommand === 'approve' ? 'approved' : 'denied';
         const arg = args[0];
         if (!arg) {
           showMessage(`Usage: /${command} <number> or /${command} all`);
@@ -339,14 +344,14 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
         }
         let message: string;
         if (arg === 'all') {
-          message = escalationManager.resolveAll(decision);
+          message = escalationManager.resolveAll(decision, withWhitelist);
         } else {
           const num = parseInt(arg, 10);
           if (isNaN(num)) {
             showMessage('Invalid escalation number');
             break;
           }
-          message = escalationManager.resolve(num, decision);
+          message = escalationManager.resolve(num, decision, withWhitelist);
         }
         showMessage(message);
         renderer.redrawTabBar();

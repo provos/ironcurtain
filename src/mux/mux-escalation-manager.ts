@@ -21,6 +21,7 @@ import {
   expireEscalation,
   type ListenerState,
 } from '../escalation/listener-state.js';
+import { DEFAULT_WHITELIST_OPTIONS } from '../trusted-process/approval-whitelist.js';
 
 /** Poll interval for the session registry directory (ms). */
 const REGISTRY_POLL_INTERVAL_MS = 1000;
@@ -43,10 +44,10 @@ export interface MuxEscalationManager {
   removeSession(sessionId: string): void;
 
   /** Resolves a pending escalation by display number. */
-  resolve(displayNumber: number, decision: 'approved' | 'denied'): string;
+  resolve(displayNumber: number, decision: 'approved' | 'denied', whitelist?: boolean): string;
 
   /** Resolves all pending escalations. */
-  resolveAll(decision: 'approved' | 'denied'): string;
+  resolveAll(decision: 'approved' | 'denied', whitelist?: boolean): string;
 
   /** Starts polling for externally-spawned sessions. */
   startRegistryPolling(): void;
@@ -120,6 +121,13 @@ export function createMuxEscalationManager(): MuxEscalationManager {
     addSession(registration: PtySessionRegistration): void {
       managedSessionIds.add(registration.sessionId);
 
+      // If a watcher already exists for this session (e.g., registry polling
+      // discovered it before the bridge did), stop the old watcher first.
+      const existing = state.sessions.get(registration.sessionId);
+      if (existing) {
+        existing.watcher.stop();
+      }
+
       const watcher = createWatcherForSession(registration.sessionId, registration.escalationDir);
       state = addSession(state, registration, watcher);
       watcher.start();
@@ -134,7 +142,7 @@ export function createMuxEscalationManager(): MuxEscalationManager {
       notifyChange();
     },
 
-    resolve(displayNumber: number, decision: 'approved' | 'denied'): string {
+    resolve(displayNumber: number, decision: 'approved' | 'denied', whitelist?: boolean): string {
       const escalation = state.pendingEscalations.get(displayNumber);
       if (!escalation) {
         return `No pending escalation #${displayNumber}`;
@@ -146,7 +154,8 @@ export function createMuxEscalationManager(): MuxEscalationManager {
       }
 
       try {
-        const accepted = session.watcher.resolve(escalation.request.escalationId, decision);
+        const options = whitelist ? DEFAULT_WHITELIST_OPTIONS : undefined;
+        const accepted = session.watcher.resolve(escalation.request.escalationId, decision, options);
         state = resolveEscalation(state, displayNumber, decision);
         notifyChange();
 
@@ -155,13 +164,14 @@ export function createMuxEscalationManager(): MuxEscalationManager {
         }
 
         const label = decision === 'approved' ? 'APPROVED' : 'DENIED';
-        return `Escalation #${displayNumber} ${label}`;
+        const whitelistSuffix = whitelist ? ' (whitelisted)' : '';
+        return `Escalation #${displayNumber} ${label}${whitelistSuffix}`;
       } catch (err) {
         return `Error: ${err instanceof Error ? err.message : String(err)}`;
       }
     },
 
-    resolveAll(decision: 'approved' | 'denied'): string {
+    resolveAll(decision: 'approved' | 'denied', whitelist?: boolean): string {
       if (state.pendingEscalations.size === 0) {
         return 'No pending escalations';
       }
@@ -170,7 +180,7 @@ export function createMuxEscalationManager(): MuxEscalationManager {
       const nums = [...state.pendingEscalations.keys()].sort((a, b) => a - b);
 
       for (const num of nums) {
-        messages.push(this.resolve(num, decision));
+        messages.push(this.resolve(num, decision, whitelist));
       }
 
       return messages.join('\n');
