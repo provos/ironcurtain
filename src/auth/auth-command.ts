@@ -197,11 +197,15 @@ function showStatus(): void {
   process.stdout.write('\nOAuth Provider Status:\n\n');
 
   for (const provider of providers) {
-    const hasCredentials = loadClientCredentials(provider) !== null;
+    let credStatus: string;
+    try {
+      credStatus = loadClientCredentials(provider) !== null ? 'configured' : 'not configured';
+    } catch {
+      credStatus = 'invalid';
+    }
     const tokenPath = getOAuthTokenPath(provider.id);
     const hasToken = existsSync(tokenPath);
 
-    const credStatus = hasCredentials ? 'configured' : 'not configured';
     const tokenStatus = hasToken ? 'authorized' : 'not authorized';
 
     process.stdout.write(`  ${provider.displayName} (${provider.id})\n`);
@@ -289,7 +293,10 @@ function parseScopesArg(args: string[]): readonly string[] | undefined {
     });
 
     if (typeof values.scopes === 'string' && values.scopes.length > 0) {
-      return values.scopes.split(',').map((s) => s.trim());
+      return values.scopes
+        .split(',')
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0);
     }
   } catch {
     // Ignore parse errors -- treat as no scopes
@@ -345,7 +352,15 @@ async function confirmNonDefaultScopes(provider: OAuthProviderConfig, scopes: re
 async function authorize(providerId: string, extraArgs: string[]): Promise<void> {
   const provider = resolveProviderOrExit(providerId);
 
-  const credentials = loadClientCredentials(provider);
+  let credentials;
+  try {
+    credentials = loadClientCredentials(provider);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    process.stdout.write(`Invalid credentials for ${provider.displayName}: ${message}\n`);
+    process.stdout.write(`Re-import with: ironcurtain auth import ${provider.id} <credentials-file>\n`);
+    process.exit(1);
+  }
   if (!credentials) {
     process.stdout.write(
       `No credentials configured for ${provider.displayName}.\n` +

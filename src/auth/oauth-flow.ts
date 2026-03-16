@@ -83,7 +83,7 @@ function startCallbackServer(
   callbackPath: string,
   expectedState: string,
 ): { server: Server; result: Promise<CallbackOutcome>; getPort: () => number } {
-  let resolveResult: (value: CallbackOutcome) => void;
+  let resolveResult!: (value: CallbackOutcome) => void;
   const result = new Promise<CallbackOutcome>((resolve) => {
     resolveResult = resolve;
   });
@@ -244,9 +244,12 @@ function buildAuthorizationUrl(
     url.searchParams.set('code_challenge_method', 'S256');
   }
 
-  // Request offline access for refresh tokens
-  url.searchParams.set('access_type', 'offline');
-  url.searchParams.set('prompt', 'consent');
+  // Apply provider-specific extra params (e.g. access_type=offline for Google)
+  if (provider.extraAuthParams) {
+    for (const [key, value] of Object.entries(provider.extraAuthParams)) {
+      url.searchParams.set(key, value);
+    }
+  }
 
   return url.toString();
 }

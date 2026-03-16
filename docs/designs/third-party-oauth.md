@@ -243,7 +243,6 @@ export interface OAuthClientCredentials {
  * Throws if the file exists but has an invalid format.
  */
 export function loadClientCredentials(provider: OAuthProviderConfig): OAuthClientCredentials | null;
-
 ```
 
 ### Built-in Provider Definitions
@@ -325,9 +324,6 @@ export function getProviderForServer(serverName: string): OAuthProviderConfig | 
  * oauth-credentials.ts (line 236) and user-config.ts (line 300).
  */
 export interface StoredOAuthToken {
-  /** Provider identifier for validation on load. */
-  readonly providerId: OAuthProviderId;
-
   /** OAuth access token (short-lived, ~1 hour). */
   readonly accessToken: string;
 
@@ -342,19 +338,7 @@ export interface StoredOAuthToken {
    * Tracked for incremental consent: new scope requests check
    * whether the existing grant already covers them.
    */
-  readonly grantedScopes: readonly string[];
-
-  /**
-   * ISO 8601 timestamp of when the token was first authorized.
-   * Used for audit logging and display in `ironcurtain config`.
-   */
-  readonly authorizedAt: string;
-
-  /**
-   * ISO 8601 timestamp of the last successful token refresh.
-   * Null if the token has never been refreshed.
-   */
-  readonly lastRefreshedAt: string | null;
+  readonly scopes: readonly string[];
 }
 ```
 
@@ -365,13 +349,13 @@ export interface StoredOAuthToken {
  * Loads the stored token for a provider, or null if not authorized.
  * Validates the file structure but does NOT check expiry.
  */
-export function loadOAuthToken(providerId: OAuthProviderId): StoredOAuthToken | null;
+export function loadOAuthToken(providerId: string): StoredOAuthToken | null;
 
 /**
  * Saves an OAuth token to disk with 0o600 permissions.
  * Uses write-then-chmod pattern from oauth-credentials.ts (line 236-239).
  */
-export function saveOAuthToken(token: StoredOAuthToken): void;
+export function saveOAuthToken(providerId: string, token: StoredOAuthToken): void;
 
 /**
  * Deletes the stored token for a provider (revocation).
@@ -432,6 +416,7 @@ export function runOAuthFlow(
 ### Implementation Notes
 
 The flow runner is a standalone module with no dependencies on the session layer. It uses:
+
 - `node:http` for the ephemeral callback server (similar to the MITM proxy's `http.createServer` pattern in `mitm-proxy.ts`)
 - `node:crypto` for PKCE code verifier/challenge (SHA-256, base64url encoding)
 - `open` (npm package) or `node:child_process` `exec` for launching the browser
@@ -493,14 +478,18 @@ for (const serverName of Object.keys(config.mcpServers)) {
     // Load user's client credentials (from their Cloud Console download)
     const clientCreds = loadClientCredentials(oauthProvider);
     if (!clientCreds) {
-      log.warn(`Skipping MCP server "${serverName}": OAuth credentials not configured. ` +
-        `Run 'ironcurtain auth import ${oauthProvider.id} <credentials-file>' to import your credentials.`);
+      log.warn(
+        `Skipping MCP server "${serverName}": OAuth credentials not configured. ` +
+          `Run 'ironcurtain auth import ${oauthProvider.id} <credentials-file>' to import your credentials.`,
+      );
       continue;
     }
     const tokenProvider = new OAuthTokenProvider(oauthProvider.id);
     if (!tokenProvider.isAuthorized()) {
-      log.warn(`Skipping MCP server "${serverName}": OAuth not authorized. ` +
-        `Run 'ironcurtain auth ${oauthProvider.id}' to authorize.`);
+      log.warn(
+        `Skipping MCP server "${serverName}": OAuth not authorized. ` +
+          `Run 'ironcurtain auth ${oauthProvider.id}' to authorize.`,
+      );
       continue;
     }
     try {
@@ -515,8 +504,10 @@ for (const serverName of Object.keys(config.mcpServers)) {
       creds[oauthProvider.clientIdEnvVar] = clientCreds.clientId;
       creds[oauthProvider.clientSecretEnvVar] = clientCreds.clientSecret;
     } catch {
-      log.warn(`Skipping MCP server "${serverName}": OAuth token refresh failed. ` +
-        `Run 'ironcurtain auth ${oauthProvider.id}' to re-authorize.`);
+      log.warn(
+        `Skipping MCP server "${serverName}": OAuth token refresh failed. ` +
+          `Run 'ironcurtain auth ${oauthProvider.id}' to re-authorize.`,
+      );
       continue;
     }
   }
@@ -665,6 +656,7 @@ The design uses a simple registry pattern rather than an abstract factory becaus
 The `OAuthProviderConfig` interface captures all provider-specific variation declaratively. The flow runner, token store, and token provider are provider-agnostic. Client credentials are loaded at runtime from user-provided files via `loadClientCredentials()`.
 
 **Extension point**: Adding a new OAuth provider requires:
+
 1. Create `src/auth/providers/{provider}.ts` with the `OAuthProviderConfig`
 2. Register it in `src/auth/oauth-registry.ts`
 3. Add the `OAuthProviderId` union member
@@ -716,6 +708,7 @@ Google rotates refresh tokens on use. If IronCurtain and another application sha
 ### Risk: Testing Mode Token Expiry
 
 For users whose Google Cloud project is in "Testing" mode (the default), refresh tokens expire after **7 days**. This means:
+
 - Users must re-run `ironcurtain auth google` weekly
 - Long-running sessions that span the 7-day boundary will fail
 - The `OAuthTokenProvider` surfaces a clear `OAuthTokenExpiredError` with instructions to re-authorize
@@ -758,6 +751,7 @@ IronCurtain's `ironcurtain auth import google` command displays these instructio
    - **Google Drive API** (`drive.googleapis.com`)
 
 Alternatively, via `gcloud` CLI:
+
 ```bash
 gcloud services enable gmail.googleapis.com calendar-json.googleapis.com drive.googleapis.com
 ```
@@ -786,6 +780,7 @@ gcloud services enable gmail.googleapis.com calendar-json.googleapis.com drive.g
 6. Click **Download JSON** to download the credentials file
 
 The downloaded file has this structure:
+
 ```json
 {
   "installed": {
@@ -809,6 +804,7 @@ ironcurtain auth import google /path/to/downloaded-credentials.json
 ```
 
 This command:
+
 1. Validates the JSON structure (checks for `"installed"` key with `client_id` and `client_secret`)
 2. Copies the file to `~/.ironcurtain/oauth/google-credentials.json` with `0o600` permissions
 3. Confirms the setup and prompts to run `ironcurtain auth google` to complete authorization
@@ -826,17 +822,17 @@ The credentials file is read at authorization time and at token refresh time. Th
 
 ### Scope Verification Reference
 
-| Scope | Classification | Verification Required |
-|-------|---------------|----------------------|
-| `calendar.readonly` | Sensitive | Brand + justification + demo |
-| `calendar.events` | Sensitive | Brand + justification + demo |
-| `gmail.readonly` | **Restricted** | Annual CASA security assessment |
-| `gmail.send` | **Restricted** | Annual CASA security assessment |
-| `gmail.compose` | **Restricted** | Annual CASA security assessment |
-| `drive.readonly` | **Restricted** | Annual CASA security assessment |
-| `drive` (full) | **Restricted** | Annual CASA security assessment |
-| `drive.file` | Non-sensitive | Brand verification only |
-| `calendar.freebusy` | Non-sensitive | Brand verification only |
+| Scope               | Classification | Verification Required           |
+| ------------------- | -------------- | ------------------------------- |
+| `calendar.readonly` | Sensitive      | Brand + justification + demo    |
+| `calendar.events`   | Sensitive      | Brand + justification + demo    |
+| `gmail.readonly`    | **Restricted** | Annual CASA security assessment |
+| `gmail.send`        | **Restricted** | Annual CASA security assessment |
+| `gmail.compose`     | **Restricted** | Annual CASA security assessment |
+| `drive.readonly`    | **Restricted** | Annual CASA security assessment |
+| `drive` (full)      | **Restricted** | Annual CASA security assessment |
+| `drive.file`        | Non-sensitive  | Brand verification only         |
+| `calendar.freebusy` | Non-sensitive  | Brand verification only         |
 
 For personal use in Testing mode, verification is not required -- but refresh tokens expire after 7 days and only listed test users can authorize.
 
@@ -908,6 +904,7 @@ async getValidAccessToken(): Promise<string> {
 ### Phase 1: Core OAuth Infrastructure (1-2 PRs)
 
 **New files:**
+
 - `src/auth/oauth-provider.ts` -- `OAuthProviderConfig`, `OAuthProviderId`, `OAuthClientCredentials` types, `loadClientCredentials()`
 - `src/auth/oauth-registry.ts` -- provider registry
 - `src/auth/oauth-token-store.ts` -- `StoredOAuthToken`, load/save/delete
@@ -916,9 +913,11 @@ async getValidAccessToken(): Promise<string> {
 - `src/auth/providers/google.ts` -- Google Workspace provider config
 
 **Modified files:**
+
 - `src/config/paths.ts` -- add `getOAuthDir()`, `getOAuthTokenPath()`, `getOAuthCredentialsPath()`
 
 **Tests:**
+
 - Unit tests for `loadClientCredentials()` (valid Google format, missing file, invalid format)
 - Unit tests for token store (read/write/delete, permissions)
 - Unit tests for PKCE generation
@@ -928,9 +927,11 @@ async getValidAccessToken(): Promise<string> {
 ### Phase 2: CLI Commands (1 PR)
 
 **New files:**
+
 - `src/auth/auth-command.ts` -- `ironcurtain auth` CLI command implementation (includes `auth import <provider> <file>` subcommand for credential import)
 
 **Modified files:**
+
 - `src/cli.ts` -- register `auth` subcommand
 - `src/config/config-command.ts` -- add "OAuth Providers" menu item
 - `src/config/first-start.ts` -- mention `ironcurtain auth import` in the customization note
@@ -938,13 +939,16 @@ async getValidAccessToken(): Promise<string> {
 ### Phase 3: Code Mode Integration (1 PR)
 
 **Modified files:**
+
 - `src/trusted-process/mcp-proxy-server.ts` -- token injection in server spawn loop
 - `src/config/mcp-servers.json` -- add `google-workspace` server entry
 
 **New files:**
+
 - `src/config/constitution-google-workspace.md` (or additions to constitution-user-base.md) -- policy principles for Workspace tools
 
 **Tests:**
+
 - Integration test: proxy spawns a mock MCP server with OAuth token in env
 - Policy engine tests for Google Workspace tool annotations
 
@@ -956,6 +960,7 @@ async getValidAccessToken(): Promise<string> {
 ### Phase 5: Proxy-Side Token Refresh (future, deferred)
 
 For long-running sessions where access tokens expire mid-session:
+
 - Monitor token expiry timestamps; when a token is near expiry, refresh it and restart the MCP server process with the new token injected into its environment
 - Alternatively: protocol for the proxy to signal running MCP servers to reload credentials via IPC
 

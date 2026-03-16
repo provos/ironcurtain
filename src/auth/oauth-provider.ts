@@ -33,6 +33,8 @@ export interface OAuthProviderConfig {
   readonly additionalEnvVars?: Readonly<Record<string, (token: StoredOAuthToken) => string>>;
   readonly postAuthUrl?: string;
   readonly revocationUrl?: string;
+  /** Extra query parameters for the authorization URL (e.g. access_type, prompt). */
+  readonly extraAuthParams?: Readonly<Record<string, string>>;
   /** Interactive scope picker shown when no --scopes flag and stdin is a TTY. */
   readonly scopePicker?: (existingScopes: readonly string[]) => Promise<readonly string[] | symbol>;
   /** Resolves short scope names (e.g. "gmail.send") to full scope URLs for --scopes flag. */
