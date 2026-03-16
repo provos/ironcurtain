@@ -207,7 +207,7 @@ export class DockerAgentSession implements Session {
     const orientationDir = resolve(this.sessionDir, 'orientation');
 
     let env: Record<string, string>;
-    let network: string;
+    let network: string | null;
     let mounts: { source: string; target: string; readonly: boolean }[];
 
     let extraHosts: string[] | undefined;
@@ -276,7 +276,7 @@ export class DockerAgentSession implements Session {
         HTTPS_PROXY: 'http://127.0.0.1:18080',
         HTTP_PROXY: 'http://127.0.0.1:18080',
       };
-      network = 'none';
+      network = null;
       // Mount only the sockets subdirectory into the container -- not the full
       // session dir. This prevents the container from accessing escalation files,
       // audit logs, or other session data. proxy.sock and mitm-proxy.sock are
@@ -294,7 +294,7 @@ export class DockerAgentSession implements Session {
       this.containerId = await this.docker.create({
         image,
         name: `ironcurtain-${shortId}`,
-        network,
+        network: network ?? 'none',
         mounts,
         env,
         command: ['sleep', 'infinity'],
@@ -309,7 +309,7 @@ export class DockerAgentSession implements Session {
 
       // Connectivity check: verify the container can reach host proxies
       // through the internal network. Abort if unreachable.
-      if (this.useTcp && this.networkName !== 'none' && this.proxy.port !== undefined) {
+      if (this.useTcp && this.networkName !== null && this.proxy.port !== undefined) {
         await this.checkInternalNetworkConnectivity(this.containerId, this.proxy.port);
       }
     } catch (err) {
@@ -466,20 +466,20 @@ export class DockerAgentSession implements Session {
     this.escalationWatcher?.stop();
     this.auditTailer?.stop();
 
-    // Stop and remove container
+    // Stop and remove containers in parallel
+    const cleanups: Promise<void>[] = [];
     if (this.containerId) {
-      await this.docker.stop(this.containerId);
-      await this.docker.remove(this.containerId);
+      const cid = this.containerId;
+      cleanups.push(this.docker.stop(cid).then(() => this.docker.remove(cid)));
     }
-
-    // Stop and remove sidecar container
     if (this.sidecarContainerId) {
-      await this.docker.stop(this.sidecarContainerId);
-      await this.docker.remove(this.sidecarContainerId);
+      const sid = this.sidecarContainerId;
+      cleanups.push(this.docker.stop(sid).then(() => this.docker.remove(sid)));
     }
+    await Promise.all(cleanups);
 
-    // Remove per-session internal network
-    if (this.networkName && this.networkName !== 'none') {
+    // Remove per-session internal network after both containers are gone
+    if (this.networkName !== null) {
       await this.docker.removeNetwork(this.networkName);
     }
 

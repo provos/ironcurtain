@@ -455,6 +455,8 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
     }
   }
 
+  let resolveShutdown: (() => void) | null = null;
+
   function doShutdown(): void {
     if (!running) return;
     running = false;
@@ -477,6 +479,7 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
     }
 
     renderer.destroy();
+    resolveShutdown?.();
   }
 
   return {
@@ -600,12 +603,11 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
       renderer.fullRedraw();
 
       await new Promise<void>((resolve) => {
-        const checkInterval = setInterval(() => {
-          if (!running) {
-            clearInterval(checkInterval);
-            resolve();
-          }
-        }, 100);
+        if (!running) {
+          resolve();
+          return;
+        }
+        resolveShutdown = resolve;
       });
     },
 

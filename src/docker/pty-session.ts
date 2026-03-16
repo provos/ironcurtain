@@ -227,7 +227,8 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
   let proxy: Awaited<ReturnType<typeof prepareDockerInfrastructure>>['proxy'] | null = null;
   let mitmProxy: Awaited<ReturnType<typeof prepareDockerInfrastructure>>['mitmProxy'] | null = null;
   let docker: Awaited<ReturnType<typeof prepareDockerInfrastructure>>['docker'] | null = null;
-  let useTcp = false;
+  let useTcp: boolean;
+  let networkName: string | null = null;
   let ptyExitCode: number | null = null;
   let adapterIdForSnapshot: string | null = null;
   let adapterDisplayNameForSnapshot: string | null = null;
@@ -310,7 +311,7 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
     const { quote } = await import('shell-quote');
     const internalNetworkName = getInternalNetworkName(shortId);
     let env: Record<string, string>;
-    let network: string;
+    let network: string | null;
     let mounts: { source: string; target: string; readonly: boolean }[];
     let extraHosts: string[] | undefined;
     let hostPtyPort: number | undefined;
@@ -331,6 +332,7 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
         internal: true,
       });
       network = internalNetworkName;
+      networkName = internalNetworkName;
 
       const socatImage = 'alpine/socat';
       if (!(await docker.imageExists(socatImage))) {
@@ -385,7 +387,7 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
         HTTPS_PROXY: 'http://127.0.0.1:18080',
         HTTP_PROXY: 'http://127.0.0.1:18080',
       };
-      network = 'none';
+      network = null;
       mounts = [
         { source: sandboxDir, target: CONTAINER_WORKSPACE_DIR, readonly: false },
         { source: socketsDir, target: '/run/ironcurtain', readonly: false },
@@ -424,7 +426,7 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
     containerId = await docker.create({
       image,
       name: mainContainerName,
-      network,
+      network: network ?? 'none',
       mounts,
       env,
       command: ptyCommand,
@@ -518,20 +520,34 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
       }
     }
 
-    // Stop and remove containers
-    if (docker && containerId) {
-      await docker.stop(containerId).catch(() => {});
-      await docker.remove(containerId).catch(() => {});
-    }
-    if (docker && sidecarContainerId) {
-      await docker.stop(sidecarContainerId).catch(() => {});
-      await docker.remove(sidecarContainerId).catch(() => {});
-    }
+    // Stop and remove containers in parallel
+    if (docker) {
+      const d = docker;
+      const cleanups: Promise<void>[] = [];
+      if (containerId) {
+        const cid = containerId;
+        cleanups.push(
+          d
+            .stop(cid)
+            .then(() => d.remove(cid))
+            .catch(() => {}),
+        );
+      }
+      if (sidecarContainerId) {
+        const sid = sidecarContainerId;
+        cleanups.push(
+          d
+            .stop(sid)
+            .then(() => d.remove(sid))
+            .catch(() => {}),
+        );
+      }
+      await Promise.all(cleanups);
 
-    // Remove per-session internal network if used
-    if (docker && useTcp) {
-      const netName = getInternalNetworkName(effectiveSessionId.substring(0, 12));
-      await docker.removeNetwork(netName).catch(() => {});
+      // Remove per-session internal network after both containers are gone
+      if (networkName !== null) {
+        await d.removeNetwork(networkName).catch(() => {});
+      }
     }
 
     // Stop proxies
