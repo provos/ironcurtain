@@ -136,10 +136,16 @@ function startCallbackServer(
   return { server, result, getPort };
 }
 
+function escapeHtml(text: string): string {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
 function respondWithHtml(res: ServerResponse, title: string, message: string): void {
+  const safeTitle = escapeHtml(title);
+  const safeMessage = escapeHtml(message);
   const html = `<!DOCTYPE html>
-<html><head><title>${title}</title></head>
-<body><h1>${title}</h1><p>${message}</p></body></html>`;
+<html><head><title>${safeTitle}</title></head>
+<body><h1>${safeTitle}</h1><p>${safeMessage}</p></body></html>`;
   res.writeHead(200, { 'Content-Type': 'text/html' });
   res.end(html);
 }

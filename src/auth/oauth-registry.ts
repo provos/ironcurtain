@@ -50,3 +50,34 @@ export function getAllOAuthProviders(): readonly OAuthProviderConfig[] {
 export function getProviderForServer(serverName: string): OAuthProviderConfig | undefined {
   return providerByServerName.get(serverName);
 }
+
+/**
+ * Returns true if the given string is a registered provider ID.
+ */
+export function isValidProviderId(id: string): id is OAuthProviderId {
+  return providerById.has(id as OAuthProviderId);
+}
+
+/**
+ * Resolves a provider ID string to its config, or writes an error and exits
+ * if the ID is not registered. Shared by setup-command and auth-command.
+ */
+export function resolveProviderOrExit(id: string): OAuthProviderConfig {
+  if (!isValidProviderId(id)) {
+    process.stdout.write(`Unknown provider: ${id}\n\n`);
+    printAvailableProviders();
+    process.exit(1);
+  }
+  return getOAuthProvider(id);
+}
+
+/**
+ * Prints registered provider IDs and display names to stdout.
+ */
+export function printAvailableProviders(): void {
+  process.stdout.write('Available providers:\n');
+  for (const p of providers) {
+    process.stdout.write(`  ${p.id}  ${p.displayName}\n`);
+  }
+  process.stdout.write('\n');
+}

@@ -163,13 +163,12 @@ export class OAuthTokenProvider {
       return reread.accessToken;
     }
 
-    // Use the freshest token we have for the refresh request
-    const tokenForRefresh = reread ?? loadOAuthToken(this.provider.id);
-    if (!tokenForRefresh) {
+    // The re-read returned an expired token (or null if the file was deleted)
+    if (!reread) {
       throw new OAuthTokenExpiredError(this.provider.id);
     }
 
-    const refreshed = await refreshAccessToken(this.provider, this.clientCredentials, tokenForRefresh);
+    const refreshed = await refreshAccessToken(this.provider, this.clientCredentials, reread);
     saveOAuthToken(this.provider.id, refreshed);
     return refreshed.accessToken;
   }

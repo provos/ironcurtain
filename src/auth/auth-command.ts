@@ -11,29 +11,9 @@
 import { existsSync, unlinkSync } from 'node:fs';
 import { getOAuthTokenPath } from '../config/paths.js';
 import { loadClientCredentials } from './oauth-provider.js';
-import type { OAuthProviderId } from './oauth-provider.js';
-import { getOAuthProvider, getAllOAuthProviders } from './oauth-registry.js';
+import { getAllOAuthProviders, resolveProviderOrExit } from './oauth-registry.js';
 import { runOAuthFlow } from './oauth-flow.js';
 import { saveOAuthToken } from './oauth-token-store.js';
-
-const VALID_PROVIDER_IDS = new Set<string>(['google', 'microsoft', 'github-oauth']);
-
-function printAvailableProviders(): void {
-  process.stdout.write('Available providers:\n');
-  for (const p of getAllOAuthProviders()) {
-    process.stdout.write(`  ${p.id}  ${p.displayName}\n`);
-  }
-  process.stdout.write('\n');
-}
-
-function resolveProvider(providerId: string): ReturnType<typeof getOAuthProvider> {
-  if (!VALID_PROVIDER_IDS.has(providerId)) {
-    process.stdout.write(`Unknown provider: ${providerId}\n\n`);
-    printAvailableProviders();
-    process.exit(1);
-  }
-  return getOAuthProvider(providerId as OAuthProviderId);
-}
 
 // ---------------------------------------------------------------------------
 // Status display
@@ -69,7 +49,7 @@ function showStatus(): void {
 // ---------------------------------------------------------------------------
 
 function revokeToken(providerId: string): void {
-  const provider = resolveProvider(providerId);
+  const provider = resolveProviderOrExit(providerId);
 
   const tokenPath = getOAuthTokenPath(provider.id);
   if (!existsSync(tokenPath)) {
@@ -87,7 +67,7 @@ function revokeToken(providerId: string): void {
 // ---------------------------------------------------------------------------
 
 async function authorize(providerId: string): Promise<void> {
-  const provider = resolveProvider(providerId);
+  const provider = resolveProviderOrExit(providerId);
 
   const credentials = loadClientCredentials(provider);
   if (!credentials) {
