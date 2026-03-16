@@ -11,20 +11,21 @@ import { runAuthCommand } from '../../src/auth/auth-command.js';
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Captures stdout/stderr writes and console.error, suppresses process.exit. */
+/** Captures stdout and stderr writes, suppresses process.exit. */
 async function captureOutput(fn: () => Promise<void>): Promise<string> {
   const writes: string[] = [];
   const origWrite = process.stdout.write;
   const origErrWrite = process.stderr.write;
-  const origConsoleError = console.error;
   process.stdout.write = ((chunk: string) => {
     writes.push(chunk);
     return true;
   }) as typeof process.stdout.write;
+  // printHelp() uses console.error which writes to stderr
   process.stderr.write = ((chunk: string) => {
     writes.push(chunk);
     return true;
   }) as typeof process.stderr.write;
+  const origConsoleError = console.error;
   console.error = ((...args: unknown[]) => {
     writes.push(args.map(String).join(' '));
   }) as typeof console.error;
@@ -158,10 +159,11 @@ describe('auth-command', () => {
     expect(output).toContain('Subcommands');
   });
 
-  it('shows help even when subcommand is present', async () => {
+  it('runs subcommand normally when --help is not the first arg', async () => {
+    // --help after a subcommand should not intercept; the subcommand runs normally
     const output = await captureOutput(() => runAuthCommand(['status', '--help']));
 
-    expect(output).toContain('ironcurtain auth');
+    expect(output).toContain('OAuth Provider Status');
   });
 
   // -----------------------------------------------------------------------

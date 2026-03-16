@@ -18,7 +18,7 @@ import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { printHelp, type CommandSpec } from '../cli-help.js';
 import { getOAuthDir, getOAuthTokenPath } from '../config/paths.js';
-import type { OAuthProviderConfig } from './oauth-provider.js';
+import type { OAuthProviderConfig, StoredOAuthToken } from './oauth-provider.js';
 import { loadClientCredentials } from './oauth-provider.js';
 import { getAllOAuthProviders, printAvailableProviders, resolveProviderOrExit } from './oauth-registry.js';
 import { runOAuthFlow } from './oauth-flow.js';
@@ -137,18 +137,20 @@ function importCredentials(args: string[]): void {
   }
 
   const resolvedPath = resolve(credentialsPath);
-  if (!existsSync(resolvedPath)) {
-    process.stdout.write(`File not found: ${resolvedPath}\n`);
-    process.exit(1);
-  }
 
   // Ensure the oauth directory exists and copy the file
   const oauthDir = getOAuthDir();
   mkdirSync(oauthDir, { recursive: true });
 
   const destPath = resolve(oauthDir, provider.credentialsFilename);
-  copyFileSync(resolvedPath, destPath);
-  chmodSync(destPath, 0o600);
+  try {
+    copyFileSync(resolvedPath, destPath);
+    chmodSync(destPath, 0o600);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    process.stdout.write(`Failed to import credentials: ${message}\n`);
+    process.exit(1);
+  }
 
   // Validate by loading the copied credentials
   const credentials = loadClientCredentials(provider);
@@ -203,15 +205,16 @@ function showStatus(): void {
 async function revokeToken(providerId: string): Promise<void> {
   const provider = resolveProviderOrExit(providerId);
 
-  const tokenPath = getOAuthTokenPath(provider.id);
-  if (!existsSync(tokenPath)) {
+  const token = loadOAuthToken(provider.id);
+  if (!token) {
     process.stdout.write(`No stored token found for ${provider.displayName}.\n`);
     return;
   }
 
   // Attempt server-side revocation if the provider has a revocation endpoint
-  await revokeTokenRemotely(provider);
+  await revokeTokenRemotely(provider, token);
 
+  const tokenPath = getOAuthTokenPath(provider.id);
   unlinkSync(tokenPath);
   process.stdout.write(`Token revoked for ${provider.displayName}.\n`);
   process.stdout.write(`Deleted: ${tokenPath}\n`);
@@ -221,13 +224,8 @@ async function revokeToken(providerId: string): Promise<void> {
  * Calls the provider's token revocation endpoint to invalidate the token
  * server-side. Best-effort: logs a warning on failure but does not throw.
  */
-async function revokeTokenRemotely(provider: OAuthProviderConfig): Promise<void> {
+async function revokeTokenRemotely(provider: OAuthProviderConfig, token: StoredOAuthToken): Promise<void> {
   if (!provider.revocationUrl) {
-    return;
-  }
-
-  const token = loadOAuthToken(provider.id);
-  if (!token) {
     return;
   }
 
@@ -345,13 +343,14 @@ async function authorize(providerId: string, extraArgs: string[]): Promise<void>
 // ---------------------------------------------------------------------------
 
 export async function runAuthCommand(args: string[]): Promise<void> {
-  // Check for --help anywhere in the args
-  if (args.includes('--help') || args.includes('-h')) {
+  const subcommand = args[0];
+
+  // Show help when --help/-h is the first arg or no subcommand is given.
+  // Don't intercept --help after a subcommand — let subcommands handle their own help.
+  if (subcommand === '--help' || subcommand === '-h') {
     printHelp(authSpec);
     return;
   }
-
-  const subcommand = args[0];
 
   if (!subcommand || subcommand === 'status') {
     showStatus();
