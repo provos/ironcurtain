@@ -313,11 +313,15 @@ export class DockerAgentSession implements Session {
         await this.checkInternalNetworkConnectivity(this.containerId, this.proxy.port);
       }
     } catch (err) {
-      // Clean up sidecar if app container setup fails
+      // Clean up sidecar and per-session network if setup fails
       if (this.sidecarContainerId) {
-        await this.docker.stop(this.sidecarContainerId);
-        await this.docker.remove(this.sidecarContainerId);
+        await this.docker.stop(this.sidecarContainerId).catch(() => {});
+        await this.docker.remove(this.sidecarContainerId).catch(() => {});
         this.sidecarContainerId = null;
+      }
+      if (this.networkName !== null) {
+        await this.docker.removeNetwork(this.networkName).catch(() => {});
+        this.networkName = null;
       }
       throw err;
     }

@@ -1,8 +1,8 @@
 /**
  * CLI entry point for `ironcurtain mux`.
  *
- * Parses command-line options, loads config, acquires the listener lock,
- * creates the MuxApp, and runs until quit.
+ * Parses command-line options, loads config, generates a unique muxId
+ * for session ownership, creates the MuxApp, and runs until quit.
  */
 
 import chalk from 'chalk';
