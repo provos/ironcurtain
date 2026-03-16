@@ -28,6 +28,7 @@ import { markedTerminal } from 'marked-terminal';
 import type { Ora } from 'ora';
 import { BaseTransport } from './base-transport.js';
 import type { Session, DiagnosticEvent, EscalationRequest, BudgetStatus } from './types.js';
+import { DEFAULT_WHITELIST_OPTIONS } from '../trusted-process/approval-whitelist.js';
 
 /** Options for constructing a CliTransport. */
 export interface CliTransportOptions {
@@ -308,7 +309,7 @@ export class CliTransport extends BaseTransport {
     // Only /approve+ enables whitelisting; /deny+ is treated as plain deny.
     const withWhitelist = command === '/approve+';
     const decision = isDeny ? ('denied' as const) : ('approved' as const);
-    const options = withWhitelist ? { whitelistSelection: 0 } : undefined;
+    const options = withWhitelist ? DEFAULT_WHITELIST_OPTIONS : undefined;
 
     session
       .resolveEscalation(pending.escalationId, decision, options)

@@ -95,6 +95,14 @@ import {
   type WhitelistPattern,
 } from './approval-whitelist.js';
 
+/**
+ * Pending whitelist candidates keyed by escalation ID.
+ * Populated when a request file is written with candidates;
+ * consumed when the response comes back with a selection.
+ * Module-level state — the proxy is a singleton process.
+ */
+const pendingWhitelistCandidates = new Map<string, Array<Omit<WhitelistPattern, 'id'>>>();
+
 interface EscalationFileRequest {
   escalationId: string;
   serverName: string;
@@ -431,12 +439,6 @@ export interface CallToolDeps {
   serverContextMap: ServerContextMap;
   /** Ephemeral approval whitelist for this session. */
   whitelist: ApprovalWhitelist;
-  /**
-   * Pending whitelist candidates keyed by escalation ID.
-   * Populated when a request file is written with candidates;
-   * consumed when the response comes back with a selection.
-   */
-  pendingWhitelistCandidates: Map<string, Array<Omit<WhitelistPattern, 'id'>>>;
 }
 
 // ── Extracted functions ────────────────────────────────────────────────
@@ -761,16 +763,16 @@ export async function handleCallTool(
   }
 
   if (evaluation.decision === 'escalate') {
-    // Whitelist check: see if a previously approved pattern matches
-    if (annotation) {
-      const whitelistMatch = deps.whitelist.match(toolInfo.serverName, toolInfo.name, argsForPolicy, annotation);
-      if (whitelistMatch.matched) {
-        whitelistApproved = true;
-        whitelistPatternId = whitelistMatch.patternId;
-        escalationResult = 'approved';
-        policyDecision.status = 'allow';
-        policyDecision.reason = `Whitelist-approved: ${whitelistMatch.pattern.description}`;
-      }
+    // Annotation is guaranteed non-null here: trusted servers always allow (never escalate),
+    // and missing-annotation returns early above. Narrow the type for TypeScript.
+    const resolvedAnnotation = annotation as ToolAnnotation;
+    const whitelistMatch = deps.whitelist.match(toolInfo.serverName, toolInfo.name, argsForPolicy, resolvedAnnotation);
+    if (whitelistMatch.matched) {
+      whitelistApproved = true;
+      whitelistPatternId = whitelistMatch.patternId;
+      escalationResult = 'approved';
+      policyDecision.status = 'allow';
+      policyDecision.reason = `Whitelist-approved: ${whitelistMatch.pattern.description}`;
     }
 
     if (!whitelistApproved) {
@@ -818,21 +820,18 @@ export async function handleCallTool(
       if (!autoApproved) {
         // Extract whitelist candidates just before human escalation (avoids
         // wasted work when auto-approve succeeds).
-        // Annotation is guaranteed non-null here (missing-annotation returned early above).
-        const { patterns: candidatePatterns, ipcs: candidateIpcs } = annotation
-          ? extractWhitelistCandidates(
-              toolInfo.serverName,
-              toolInfo.name,
-              argsForPolicy,
-              annotation,
-              evaluation.escalatedRoles,
-              escalationId,
-              evaluation.reason,
-            )
-          : { patterns: [] as Array<Omit<WhitelistPattern, 'id'>>, ipcs: [] as WhitelistCandidateIpc[] };
+        const { patterns: candidatePatterns, ipcs: candidateIpcs } = extractWhitelistCandidates(
+          toolInfo.serverName,
+          toolInfo.name,
+          argsForPolicy,
+          resolvedAnnotation,
+          evaluation.escalatedRoles,
+          escalationId,
+          evaluation.reason,
+        );
         if (candidatePatterns.length > 0) {
           // Store full patterns in proxy memory, keyed by escalation ID
-          deps.pendingWhitelistCandidates.set(escalationId, candidatePatterns);
+          pendingWhitelistCandidates.set(escalationId, candidatePatterns);
         }
 
         try {
@@ -860,7 +859,7 @@ export async function handleCallTool(
 
           // Handle whitelist selection from the response
           if (response.whitelistSelection !== undefined) {
-            const storedPatterns = deps.pendingWhitelistCandidates.get(escalationId);
+            const storedPatterns = pendingWhitelistCandidates.get(escalationId);
             if (
               storedPatterns &&
               response.whitelistSelection >= 0 &&
@@ -872,7 +871,7 @@ export async function handleCallTool(
           }
         } finally {
           // Issue 12: ensure cleanup even if waitForEscalationDecision throws
-          deps.pendingWhitelistCandidates.delete(escalationId);
+          pendingWhitelistCandidates.delete(escalationId);
         }
       }
     }
@@ -1170,7 +1169,6 @@ async function main(): Promise<void> {
     autoApproveModel,
     serverContextMap,
     whitelist: createApprovalWhitelist(),
-    pendingWhitelistCandidates: new Map(),
   };
 
   server.setRequestHandler(CallToolRequestSchema, async (req) => {

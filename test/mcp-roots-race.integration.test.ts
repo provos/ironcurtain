@@ -218,7 +218,6 @@ describe('MCP roots-expansion race -- handleCallTool retry', () => {
       autoApproveModel: null,
       serverContextMap: new Map(),
       whitelist: createApprovalWhitelist(),
-      pendingWhitelistCandidates: new Map(),
     };
   }
 

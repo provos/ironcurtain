@@ -9,8 +9,9 @@
 import { dirname } from 'node:path';
 import { v4 as uuidv4 } from 'uuid';
 import type { ArgumentRole } from '../types/argument-roles.js';
-import { resolveRealPath, isWithinDirectory, getRoleDefinition, getResourceRoles } from '../types/argument-roles.js';
+import { resolveRealPath, getRoleDefinition } from '../types/argument-roles.js';
 import { extractDomainForRole } from './domain-utils.js';
+import { extractAnnotatedPaths, collectDistinctRoles } from './policy-engine.js';
 import type { ToolAnnotation } from '../pipeline/types.js';
 
 // ---------------------------------------------------------------------------
@@ -83,6 +84,9 @@ export type WhitelistMatchResult =
   | { readonly matched: false }
   | { readonly matched: true; readonly patternId: WhitelistEntryId; readonly pattern: WhitelistPattern };
 
+/** Default whitelist options: select the first (and currently only) candidate. */
+export const DEFAULT_WHITELIST_OPTIONS = { whitelistSelection: 0 } as const;
+
 /**
  * The ephemeral whitelist store. Session-scoped, in-memory only.
  */
@@ -130,22 +134,25 @@ function constraintMatches(
   annotation: ToolAnnotation,
 ): boolean {
   // Find all argument values for the constraint's role
-  const values = extractValuesForRole(args, annotation, constraint.role);
+  const values = extractAnnotatedPaths(args, annotation, [constraint.role]);
   if (values.length === 0) return false;
 
   switch (constraint.kind) {
     case 'directory':
+      // constraint.directory is already resolved at pattern creation time,
+      // so we only need to resolve the candidate path and do a prefix check.
       return values.every((v) => {
         try {
-          return isWithinDirectory(v, constraint.directory);
+          const resolved = resolveRealPath(v);
+          return resolved === constraint.directory || resolved.startsWith(constraint.directory + '/');
         } catch {
           return false;
         }
       });
-    case 'domain':
+    case 'domain': {
+      const roleDef = getRoleDefinition(constraint.role);
       return values.every((v) => {
         try {
-          const roleDef = getRoleDefinition(constraint.role);
           const normalized = roleDef.canonicalize(v);
           const domain = extractDomainForRole(normalized, constraint.role);
           return domain.toLowerCase() === constraint.domain.toLowerCase();
@@ -153,28 +160,10 @@ function constraintMatches(
           return false;
         }
       });
+    }
     case 'exact':
       return values.every((v) => v.toLowerCase() === constraint.value.toLowerCase());
   }
-}
-
-/**
- * Extracts string values from arguments for a specific role.
- */
-function extractValuesForRole(args: Record<string, unknown>, annotation: ToolAnnotation, role: ArgumentRole): string[] {
-  const values: string[] = [];
-  for (const [argName, roles] of Object.entries(annotation.args)) {
-    if (!roles.includes(role)) continue;
-    const value = args[argName];
-    if (typeof value === 'string') {
-      values.push(value);
-    } else if (Array.isArray(value)) {
-      for (const item of value) {
-        if (typeof item === 'string') values.push(item);
-      }
-    }
-  }
-  return values;
 }
 
 // ---------------------------------------------------------------------------
@@ -204,7 +193,7 @@ export function extractWhitelistCandidates(
   escalationReason: string,
 ): { patterns: Array<Omit<WhitelistPattern, 'id'>>; ipcs: WhitelistCandidateIpc[] } {
   // Determine which roles to extract constraints for
-  const rolesToExtract = escalatedRoles ?? fallbackResourceRoles(annotation);
+  const rolesToExtract = escalatedRoles ?? collectDistinctRoles(annotation);
 
   const constraints = buildConstraints(rolesToExtract, args, annotation);
   const description = buildDescription(serverName, toolName, constraints);
@@ -232,21 +221,6 @@ export function extractWhitelistCandidates(
 }
 
 /**
- * Falls back to all resource-identifier roles on the annotation when
- * escalatedRoles is undefined.
- */
-function fallbackResourceRoles(annotation: ToolAnnotation): ArgumentRole[] {
-  const resourceRoleSet = new Set(getResourceRoles());
-  const roles = new Set<ArgumentRole>();
-  for (const argRoles of Object.values(annotation.args)) {
-    for (const role of argRoles) {
-      if (resourceRoleSet.has(role)) roles.add(role);
-    }
-  }
-  return [...roles];
-}
-
-/**
  * Builds constraints from escalated roles and argument values.
  */
 function buildConstraints(
@@ -259,7 +233,7 @@ function buildConstraints(
 
   for (const role of roles) {
     const roleDef = getRoleDefinition(role);
-    const values = extractValuesForRole(args, annotation, role);
+    const values = extractAnnotatedPaths(args, annotation, [role]);
 
     for (const value of values) {
       const constraint = buildConstraintForRole(role, roleDef.category, value);

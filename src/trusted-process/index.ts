@@ -18,6 +18,7 @@ import { prepareToolArgs } from './path-utils.js';
 import { extractPolicyRoots, toMcpRoots, directoryForPath } from './policy-roots.js';
 import * as logger from '../logger.js';
 import { extractMcpErrorMessage } from './mcp-error-utils.js';
+import type { ToolAnnotation } from '../pipeline/types.js';
 import { extractTextFromContent, buildAuditEntry } from './mcp-proxy-server.js';
 import { type ServerContextMap, updateServerContext, formatServerContext } from './server-context.js';
 import { buildTrustedServerSet } from '../memory/memory-annotations.js';
@@ -218,16 +219,21 @@ export class TrustedProcess {
     try {
       // Step 2: Handle escalation -- whitelist check, auto-approve, then human
       if (evaluation.decision === 'escalate') {
-        // Whitelist check: see if a previously approved pattern matches
-        if (annotation) {
-          const whitelistMatch = this.whitelist.match(request.serverName, request.toolName, argsForPolicy, annotation);
-          if (whitelistMatch.matched) {
-            whitelistApproved = true;
-            whitelistPatternId = whitelistMatch.patternId;
-            escalationResult = 'approved';
-            policyDecision.status = 'allow';
-            policyDecision.reason = `Whitelist-approved: ${whitelistMatch.pattern.description}`;
-          }
+        // Annotation is guaranteed non-null here: trusted servers always allow (never escalate),
+        // and missing-annotation returns early above. Narrow the type for TypeScript.
+        const resolvedAnnotation = annotation as ToolAnnotation;
+        const whitelistMatch = this.whitelist.match(
+          request.serverName,
+          request.toolName,
+          argsForPolicy,
+          resolvedAnnotation,
+        );
+        if (whitelistMatch.matched) {
+          whitelistApproved = true;
+          whitelistPatternId = whitelistMatch.patternId;
+          escalationResult = 'approved';
+          policyDecision.status = 'allow';
+          policyDecision.reason = `Whitelist-approved: ${whitelistMatch.pattern.description}`;
         }
 
         if (!whitelistApproved) {
@@ -253,23 +259,19 @@ export class TrustedProcess {
           // Fall through to human escalation if not auto-approved
           if (!autoApproved) {
             // Extract whitelist candidates for display
-            let candidateIpcs: readonly WhitelistCandidateIpc[] | undefined;
-            let candidatePatterns: Array<Omit<import('./approval-whitelist.js').WhitelistPattern, 'id'>> = [];
             const escalationId = `inprocess-${Date.now()}`;
-
-            if (annotation) {
-              const candidates = extractWhitelistCandidates(
-                request.serverName,
-                request.toolName,
-                argsForPolicy,
-                annotation,
-                evaluation.escalatedRoles,
-                escalationId,
-                evaluation.reason,
-              );
-              candidatePatterns = candidates.patterns;
-              candidateIpcs = candidates.ipcs.length > 0 ? candidates.ipcs : undefined;
-            }
+            const candidates = extractWhitelistCandidates(
+              request.serverName,
+              request.toolName,
+              argsForPolicy,
+              resolvedAnnotation,
+              evaluation.escalatedRoles,
+              escalationId,
+              evaluation.reason,
+            );
+            const candidatePatterns = candidates.patterns;
+            const candidateIpcs: readonly WhitelistCandidateIpc[] | undefined =
+              candidates.ipcs.length > 0 ? candidates.ipcs : undefined;
 
             const escalationContext = formatServerContext(this.serverContextMap, transportRequest.serverName);
             const escalationResponse: EscalationResult = this.onEscalation

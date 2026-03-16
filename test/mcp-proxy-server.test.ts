@@ -552,7 +552,6 @@ describe('handleCallTool', () => {
       autoApproveModel: null,
       serverContextMap: new Map(),
       whitelist: createApprovalWhitelist(),
-      pendingWhitelistCandidates: new Map(),
       ...overrides,
     };
   }

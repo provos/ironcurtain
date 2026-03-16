@@ -27,6 +27,7 @@ import {
   expireEscalation,
   type ListenerState,
 } from './listener-state.js';
+import { DEFAULT_WHITELIST_OPTIONS } from '../trusted-process/approval-whitelist.js';
 
 /** Poll interval for the session registry directory (ms). */
 const REGISTRY_POLL_INTERVAL_MS = 1000;
@@ -277,7 +278,7 @@ function approveOrDeny(
   }
 
   try {
-    const options = whitelist ? { whitelistSelection: 0 } : undefined;
+    const options = whitelist ? DEFAULT_WHITELIST_OPTIONS : undefined;
     const accepted = session.watcher.resolve(escalation.request.escalationId, decision, options);
     const newState = resolveEscalation(state, displayNumber, decision);
 

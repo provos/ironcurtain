@@ -186,7 +186,7 @@ function resolveUrlForDomainCheck(
 
 // Re-export utilities used by sibling modules (mcp-proxy-server, index, approval-whitelist).
 // Canonical location: isWithinDirectory is defined in src/types/argument-roles.ts.
-export { domainMatchesAllowlist, extractAnnotatedPaths, isIpAddress, isWithinDirectory };
+export { domainMatchesAllowlist, extractAnnotatedPaths, collectDistinctRoles, isIpAddress, isWithinDirectory };
 
 /**
  * Checks whether a rule has role-related conditions (roles, paths, or domains).
