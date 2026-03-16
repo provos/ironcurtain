@@ -136,4 +136,29 @@ describe('readActiveRegistrations', () => {
     expect(registrations).toHaveLength(1);
     expect(registrations[0].sessionId).toBe('sess-1');
   });
+
+  it('accepts registrations with muxId and muxPid fields', () => {
+    writeRegistration('sess-mux', {
+      muxId: 'mux-abc123',
+      muxPid: process.pid,
+    });
+
+    const registrations = readActiveRegistrations(registryDir);
+
+    expect(registrations).toHaveLength(1);
+    expect(registrations[0].sessionId).toBe('sess-mux');
+    expect(registrations[0].muxId).toBe('mux-abc123');
+    expect(registrations[0].muxPid).toBe(process.pid);
+  });
+
+  it('accepts registrations without muxId and muxPid fields', () => {
+    writeRegistration('sess-no-mux');
+
+    const registrations = readActiveRegistrations(registryDir);
+
+    expect(registrations).toHaveLength(1);
+    expect(registrations[0].sessionId).toBe('sess-no-mux');
+    expect(registrations[0].muxId).toBeUndefined();
+    expect(registrations[0].muxPid).toBeUndefined();
+  });
 });

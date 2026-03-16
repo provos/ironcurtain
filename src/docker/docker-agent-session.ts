@@ -34,7 +34,7 @@ import type { CertificateAuthority } from './ca.js';
 import { AuditLogTailer } from './audit-log-tailer.js';
 import { ensureImage } from './docker-infrastructure.js';
 import { prepareSession } from './orientation.js';
-import { INTERNAL_NETWORK_NAME, INTERNAL_NETWORK_SUBNET, INTERNAL_NETWORK_GATEWAY } from './platform.js';
+import { getInternalNetworkName } from './platform.js';
 import { SessionNotReadyError, SessionClosedError } from '../session/errors.js';
 import { createEscalationWatcher, atomicWriteJsonSync } from '../escalation/escalation-watcher.js';
 import type { EscalationWatcher } from '../escalation/escalation-watcher.js';
@@ -225,13 +225,12 @@ export class DockerAgentSession implements Session {
         HTTP_PROXY: `http://host.docker.internal:${mitmPort}`,
       };
 
-      // Create an --internal Docker network that blocks internet egress
-      await this.docker.createNetwork(INTERNAL_NETWORK_NAME, {
+      // Create a per-session --internal Docker network that blocks internet egress
+      const internalNetworkName = getInternalNetworkName(shortId);
+      await this.docker.createNetwork(internalNetworkName, {
         internal: true,
-        subnet: INTERNAL_NETWORK_SUBNET,
-        gateway: INTERNAL_NETWORK_GATEWAY,
       });
-      network = INTERNAL_NETWORK_NAME;
+      network = internalNetworkName;
 
       // Ensure the socat image is available
       const socatImage = 'alpine/socat';
@@ -260,8 +259,8 @@ export class DockerAgentSession implements Session {
       await this.docker.start(this.sidecarContainerId);
 
       // Connect sidecar to the internal network so the app container can reach it
-      await this.docker.connectNetwork(INTERNAL_NETWORK_NAME, this.sidecarContainerId);
-      const sidecarIp = await this.docker.getContainerIp(this.sidecarContainerId, INTERNAL_NETWORK_NAME);
+      await this.docker.connectNetwork(internalNetworkName, this.sidecarContainerId);
+      const sidecarIp = await this.docker.getContainerIp(this.sidecarContainerId, internalNetworkName);
       extraHosts = [`host.docker.internal:${sidecarIp}`];
       logger.info(`Sidecar ${sidecarName} bridging ports ${mcpPort},${mitmPort} at ${sidecarIp}`);
 
@@ -310,7 +309,7 @@ export class DockerAgentSession implements Session {
 
       // Connectivity check: verify the container can reach host proxies
       // through the internal network. Abort if unreachable.
-      if (this.useTcp && network === INTERNAL_NETWORK_NAME && this.proxy.port !== undefined) {
+      if (this.useTcp && this.networkName !== 'none' && this.proxy.port !== undefined) {
         await this.checkInternalNetworkConnectivity(this.containerId, this.proxy.port);
       }
     } catch (err) {
@@ -479,9 +478,9 @@ export class DockerAgentSession implements Session {
       await this.docker.remove(this.sidecarContainerId);
     }
 
-    // Remove internal network (ignore errors -- other sessions may use it)
-    if (this.networkName === INTERNAL_NETWORK_NAME) {
-      await this.docker.removeNetwork(INTERNAL_NETWORK_NAME);
+    // Remove per-session internal network
+    if (this.networkName && this.networkName !== 'none') {
+      await this.docker.removeNetwork(this.networkName);
     }
 
     // Stop proxies

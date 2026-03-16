@@ -34,6 +34,7 @@ import type { EscalationWatcher } from '../escalation/escalation-watcher.js';
 import { getSessionDir, getPtyRegistryDir } from '../config/paths.js';
 import * as logger from '../logger.js';
 import { buildDockerClaudeMd } from './claude-md-seed.js';
+import { getInternalNetworkName } from './platform.js';
 
 export interface PtySessionOptions {
   readonly config: IronCurtainConfig;
@@ -306,8 +307,8 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
 
     // Build container configuration
     const shortId = effectiveSessionId.substring(0, 12);
-    const { INTERNAL_NETWORK_NAME, INTERNAL_NETWORK_SUBNET, INTERNAL_NETWORK_GATEWAY } = await import('./platform.js');
     const { quote } = await import('shell-quote');
+    const internalNetworkName = getInternalNetworkName(shortId);
     let env: Record<string, string>;
     let network: string;
     let mounts: { source: string; target: string; readonly: boolean }[];
@@ -326,12 +327,10 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
         HTTP_PROXY: `http://host.docker.internal:${mitmPort}`,
       };
 
-      await docker.createNetwork(INTERNAL_NETWORK_NAME, {
+      await docker.createNetwork(internalNetworkName, {
         internal: true,
-        subnet: INTERNAL_NETWORK_SUBNET,
-        gateway: INTERNAL_NETWORK_GATEWAY,
       });
-      network = INTERNAL_NETWORK_NAME;
+      network = internalNetworkName;
 
       const socatImage = 'alpine/socat';
       if (!(await docker.imageExists(socatImage))) {
@@ -371,8 +370,8 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
         ],
       });
       await docker.start(sidecarContainerId);
-      await docker.connectNetwork(INTERNAL_NETWORK_NAME, sidecarContainerId);
-      const sidecarIp = await docker.getContainerIp(sidecarContainerId, INTERNAL_NETWORK_NAME);
+      await docker.connectNetwork(internalNetworkName, sidecarContainerId);
+      const sidecarIp = await docker.getContainerIp(sidecarContainerId, internalNetworkName);
       extraHosts = [`host.docker.internal:${sidecarIp}`];
 
       mounts = [
@@ -529,10 +528,10 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
       await docker.remove(sidecarContainerId).catch(() => {});
     }
 
-    // Remove internal network if used
+    // Remove per-session internal network if used
     if (docker && useTcp) {
-      const { INTERNAL_NETWORK_NAME } = await import('./platform.js');
-      await docker.removeNetwork(INTERNAL_NETWORK_NAME).catch(() => {});
+      const netName = getInternalNetworkName(effectiveSessionId.substring(0, 12));
+      await docker.removeNetwork(netName).catch(() => {});
     }
 
     // Stop proxies
@@ -928,12 +927,18 @@ function writeRegistration(sessionId: string, escalationDir: string, adapterDisp
   const registryDir = getPtyRegistryDir();
   mkdirSync(registryDir, { recursive: true, mode: 0o700 });
 
+  const muxId = process.env.IRONCURTAIN_MUX_ID;
+  const muxPidStr = process.env.IRONCURTAIN_MUX_PID;
+  const muxPid = muxPidStr ? parseInt(muxPidStr, 10) : undefined;
+
   const registration: PtySessionRegistration = {
     sessionId,
     escalationDir,
     label: `${adapterDisplayName} (interactive)`,
     startedAt: new Date().toISOString(),
     pid: process.pid,
+    ...(muxId !== undefined && { muxId }),
+    ...(muxPid !== undefined && !isNaN(muxPid) && { muxPid }),
   };
 
   const registrationPath = resolve(registryDir, `session-${sessionId}.json`);

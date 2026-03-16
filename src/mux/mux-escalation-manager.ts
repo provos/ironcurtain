@@ -6,12 +6,13 @@
  * optionally polls the PTY registry for externally-spawned sessions.
  */
 
-import { mkdirSync } from 'node:fs';
-import { getPtyRegistryDir } from '../config/paths.js';
+import { mkdirSync, readFileSync } from 'node:fs';
+import { getListenerLockPath, getPtyRegistryDir } from '../config/paths.js';
 import { readActiveRegistrations } from '../escalation/session-registry.js';
 import { createEscalationWatcher } from '../escalation/escalation-watcher.js';
 import type { EscalationWatcher } from '../escalation/escalation-watcher.js';
 import type { PtySessionRegistration } from '../docker/pty-types.js';
+import { isPidAlive } from '../escalation/listener-lock.js';
 import {
   createInitialState,
   addSession,
@@ -72,10 +73,31 @@ export interface MuxEscalationManager {
   claimSession(sessionId: string): void;
 }
 
+export interface MuxEscalationManagerOptions {
+  /** Mux instance ID for session ownership filtering. When absent, all sessions are claimed. */
+  readonly muxId?: string;
+}
+
+/**
+ * Checks whether the standalone escalation listener is currently running
+ * by reading its lock file and verifying PID liveness.
+ */
+function isStandaloneListenerRunning(): boolean {
+  const lockPath = getListenerLockPath();
+  try {
+    const content = readFileSync(lockPath, 'utf-8');
+    const pid = parseInt(content.trim(), 10);
+    return !isNaN(pid) && isPidAlive(pid);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Creates a new MuxEscalationManager.
  */
-export function createMuxEscalationManager(): MuxEscalationManager {
+export function createMuxEscalationManager(options?: MuxEscalationManagerOptions): MuxEscalationManager {
+  const ourMuxId = options?.muxId;
   let state = createInitialState();
   const changeCallbacks: Array<() => void> = [];
   const discoveryCallbacks: Array<(reg: PtySessionRegistration) => void> = [];
@@ -199,19 +221,38 @@ export function createMuxEscalationManager(): MuxEscalationManager {
 
         let changed = false;
 
-        // Add externally-spawned sessions (skip managed, tombstoned)
+        // Cache the standalone listener check once per poll cycle
+        const standaloneListenerRunning = ourMuxId ? isStandaloneListenerRunning() : false;
+
+        // Add sessions that belong to us (skip managed, tombstoned, other mux's sessions)
         for (const reg of registrations) {
           if (
-            !stateIds.has(reg.sessionId) &&
-            !managedSessionIds.has(reg.sessionId) &&
-            !removedSessionIds.has(reg.sessionId)
+            stateIds.has(reg.sessionId) ||
+            managedSessionIds.has(reg.sessionId) ||
+            removedSessionIds.has(reg.sessionId)
           ) {
-            const watcher = createWatcherForSession(reg.sessionId, reg.escalationDir);
-            state = addSession(state, reg, watcher);
-            watcher.start();
-            changed = true;
-            for (const cb of discoveryCallbacks) cb(reg);
+            continue;
           }
+
+          // Ownership filtering when this mux has a muxId
+          if (ourMuxId) {
+            const isOwned = reg.muxId !== undefined;
+            const isOurs = reg.muxId === ourMuxId;
+            const isOrphaned = isOwned && !isOurs && reg.muxPid !== undefined && !isPidAlive(reg.muxPid);
+            const isUnowned = !isOwned;
+
+            // Skip sessions owned by another live mux
+            if (!isOurs && !isOrphaned && !isUnowned) continue;
+
+            // Skip unowned/orphaned sessions if a standalone listener is handling them
+            if ((isUnowned || isOrphaned) && standaloneListenerRunning) continue;
+          }
+
+          const watcher = createWatcherForSession(reg.sessionId, reg.escalationDir);
+          state = addSession(state, reg, watcher);
+          watcher.start();
+          changed = true;
+          for (const cb of discoveryCallbacks) cb(reg);
         }
 
         // Clear tombstones once the registry entry disappears

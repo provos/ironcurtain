@@ -14,6 +14,10 @@ export interface PtySessionRegistration {
   readonly startedAt: string;
   /** PID of the ironcurtain process managing this session. */
   readonly pid: number;
+  /** ID of the mux instance that owns this session. Absent for standalone sessions. */
+  readonly muxId?: string;
+  /** PID of the mux process that owns this session. Used to detect orphaned sessions. */
+  readonly muxPid?: number;
 }
 
 /**
