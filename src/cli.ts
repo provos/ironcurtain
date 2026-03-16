@@ -26,6 +26,7 @@ const topLevelSpec: CommandSpec = {
     { name: 'escalation-listener', description: 'Aggregate escalation notifications from PTY sessions' },
     { name: 'bot', description: "Alias for 'daemon' (backward compatible)" },
     { name: 'persona', description: 'Manage personas (named policy profiles)' },
+    { name: 'auth', description: 'Manage OAuth providers (import credentials, authorize, revoke)' },
     { name: 'setup', description: 'Run the first-start wizard (always runs)' },
     { name: 'setup-signal', description: 'Interactive Signal transport onboarding' },
     { name: 'annotate-tools', description: 'Classify MCP tool arguments via LLM' },
@@ -119,6 +120,11 @@ switch (subcommand) {
   case 'persona': {
     const { main: personaMain } = await import('./persona/persona-command.js');
     await personaMain(process.argv.slice(3));
+    break;
+  }
+  case 'auth': {
+    const { runAuthCommand } = await import('./auth/auth-command.js');
+    await runAuthCommand(process.argv.slice(3));
     break;
   }
   case 'setup': {

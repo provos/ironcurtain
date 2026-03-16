@@ -2,6 +2,10 @@
 
 IronCurtain is a secure agent runtime that mediates between an AI agent and MCP servers. Every tool call passes through a trusted process that evaluates it against policy rules before forwarding. The policy engine and MCP proxy are the security boundary.
 
+## Platform Support
+
+IronCurtain runs on macOS and Linux. Windows is only supported under WSL2 — native Windows is not a target platform.
+
 ## Security Invariants
 
 - Every tool call MUST pass through `policyEngine.evaluate()` before forwarding to a real MCP server. Any code path that skips evaluation is a security bypass.
