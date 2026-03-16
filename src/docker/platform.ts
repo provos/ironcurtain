@@ -18,11 +18,11 @@ export function useTcpTransport(): boolean {
   return platform() === 'darwin';
 }
 
-/** Docker network name for the internal (no-egress) bridge used in TCP mode. */
-export const INTERNAL_NETWORK_NAME = 'ironcurtain-internal';
-
-/** Subnet for the internal bridge network. */
-export const INTERNAL_NETWORK_SUBNET = '172.30.0.0/24';
-
-/** Gateway IP for the internal bridge network (host-side). */
-export const INTERNAL_NETWORK_GATEWAY = '172.30.0.1';
+/**
+ * Returns a per-session Docker network name for the internal (no-egress)
+ * bridge used in TCP mode. Each session gets its own network to avoid
+ * conflicts when multiple sessions run concurrently.
+ */
+export function getInternalNetworkName(shortId: string): string {
+  return `ironcurtain-${shortId}`;
+}

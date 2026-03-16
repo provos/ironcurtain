@@ -1,17 +1,17 @@
 /**
  * CLI entry point for `ironcurtain mux`.
  *
- * Parses command-line options, loads config, acquires the listener lock,
- * creates the MuxApp, and runs until quit.
+ * Parses command-line options, loads config, generates a unique muxId
+ * for session ownership, creates the MuxApp, and runs until quit.
  */
 
 import chalk from 'chalk';
+import { randomBytes } from 'node:crypto';
 import { chmodSync, constants, mkdirSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { getListenerLockPath, getPtyRegistryDir } from '../config/paths.js';
-import { acquireLock, releaseLock } from '../escalation/listener-lock.js';
+import { getPtyRegistryDir } from '../config/paths.js';
 import { loadUserConfig } from '../config/user-config.js';
 import { parseModelId, resolveApiKeyForProvider } from '../config/model-provider.js';
 import { loadConfig } from '../config/index.js';
@@ -87,15 +87,8 @@ export async function main(args?: string[]): Promise<void> {
 
   const agent = (values.agent as string | undefined) ?? 'claude-code';
 
-  // Acquire single-instance lock
-  const lockPath = getListenerLockPath();
-  if (!acquireLock(lockPath)) {
-    process.stderr.write(
-      chalk.red('Another escalation listener or mux is already running.\n') +
-        'Only one instance can run at a time to prevent escalation conflicts.\n',
-    );
-    process.exit(1);
-  }
+  // Generate a unique mux instance ID for session ownership
+  const muxId = `mux-${randomBytes(4).toString('hex')}`;
 
   // Ensure registry directory exists
   const registryDir = getPtyRegistryDir();
@@ -135,15 +128,13 @@ export async function main(args?: string[]): Promise<void> {
     // Config load failure is not fatal; child sessions will report it.
   }
 
-  try {
-    const app = createMuxApp({
-      agent,
-      autoSpawn: false,
-      protectedPaths,
-    });
+  const app = createMuxApp({
+    agent,
+    autoSpawn: false,
+    protectedPaths,
+    muxId,
+    muxPid: process.pid,
+  });
 
-    await app.start();
-  } finally {
-    releaseLock(lockPath);
-  }
+  await app.start();
 }

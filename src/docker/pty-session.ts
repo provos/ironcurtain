@@ -34,6 +34,7 @@ import type { EscalationWatcher } from '../escalation/escalation-watcher.js';
 import { getSessionDir, getPtyRegistryDir } from '../config/paths.js';
 import * as logger from '../logger.js';
 import { buildDockerClaudeMd } from './claude-md-seed.js';
+import { getInternalNetworkName } from './platform.js';
 
 export interface PtySessionOptions {
   readonly config: IronCurtainConfig;
@@ -226,7 +227,8 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
   let proxy: Awaited<ReturnType<typeof prepareDockerInfrastructure>>['proxy'] | null = null;
   let mitmProxy: Awaited<ReturnType<typeof prepareDockerInfrastructure>>['mitmProxy'] | null = null;
   let docker: Awaited<ReturnType<typeof prepareDockerInfrastructure>>['docker'] | null = null;
-  let useTcp = false;
+  let useTcp: boolean;
+  let networkName: string | null = null;
   let ptyExitCode: number | null = null;
   let adapterIdForSnapshot: string | null = null;
   let adapterDisplayNameForSnapshot: string | null = null;
@@ -306,10 +308,10 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
 
     // Build container configuration
     const shortId = effectiveSessionId.substring(0, 12);
-    const { INTERNAL_NETWORK_NAME, INTERNAL_NETWORK_SUBNET, INTERNAL_NETWORK_GATEWAY } = await import('./platform.js');
     const { quote } = await import('shell-quote');
+    const internalNetworkName = getInternalNetworkName(shortId);
     let env: Record<string, string>;
-    let network: string;
+    let network: string | null;
     let mounts: { source: string; target: string; readonly: boolean }[];
     let extraHosts: string[] | undefined;
     let hostPtyPort: number | undefined;
@@ -326,12 +328,11 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
         HTTP_PROXY: `http://host.docker.internal:${mitmPort}`,
       };
 
-      await docker.createNetwork(INTERNAL_NETWORK_NAME, {
+      await docker.createNetwork(internalNetworkName, {
         internal: true,
-        subnet: INTERNAL_NETWORK_SUBNET,
-        gateway: INTERNAL_NETWORK_GATEWAY,
       });
-      network = INTERNAL_NETWORK_NAME;
+      network = internalNetworkName;
+      networkName = internalNetworkName;
 
       const socatImage = 'alpine/socat';
       if (!(await docker.imageExists(socatImage))) {
@@ -371,8 +372,8 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
         ],
       });
       await docker.start(sidecarContainerId);
-      await docker.connectNetwork(INTERNAL_NETWORK_NAME, sidecarContainerId);
-      const sidecarIp = await docker.getContainerIp(sidecarContainerId, INTERNAL_NETWORK_NAME);
+      await docker.connectNetwork(internalNetworkName, sidecarContainerId);
+      const sidecarIp = await docker.getContainerIp(sidecarContainerId, internalNetworkName);
       extraHosts = [`host.docker.internal:${sidecarIp}`];
 
       mounts = [
@@ -386,7 +387,7 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
         HTTPS_PROXY: 'http://127.0.0.1:18080',
         HTTP_PROXY: 'http://127.0.0.1:18080',
       };
-      network = 'none';
+      network = null;
       mounts = [
         { source: sandboxDir, target: CONTAINER_WORKSPACE_DIR, readonly: false },
         { source: socketsDir, target: '/run/ironcurtain', readonly: false },
@@ -425,7 +426,7 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
     containerId = await docker.create({
       image,
       name: mainContainerName,
-      network,
+      network: network ?? 'none',
       mounts,
       env,
       command: ptyCommand,
@@ -519,20 +520,34 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
       }
     }
 
-    // Stop and remove containers
-    if (docker && containerId) {
-      await docker.stop(containerId).catch(() => {});
-      await docker.remove(containerId).catch(() => {});
-    }
-    if (docker && sidecarContainerId) {
-      await docker.stop(sidecarContainerId).catch(() => {});
-      await docker.remove(sidecarContainerId).catch(() => {});
-    }
+    // Stop and remove containers in parallel
+    if (docker) {
+      const d = docker;
+      const cleanups: Promise<void>[] = [];
+      if (containerId) {
+        const cid = containerId;
+        cleanups.push(
+          d
+            .stop(cid)
+            .then(() => d.remove(cid))
+            .catch(() => {}),
+        );
+      }
+      if (sidecarContainerId) {
+        const sid = sidecarContainerId;
+        cleanups.push(
+          d
+            .stop(sid)
+            .then(() => d.remove(sid))
+            .catch(() => {}),
+        );
+      }
+      await Promise.all(cleanups);
 
-    // Remove internal network if used
-    if (docker && useTcp) {
-      const { INTERNAL_NETWORK_NAME } = await import('./platform.js');
-      await docker.removeNetwork(INTERNAL_NETWORK_NAME).catch(() => {});
+      // Remove per-session internal network after both containers are gone
+      if (networkName !== null) {
+        await d.removeNetwork(networkName).catch(() => {});
+      }
     }
 
     // Stop proxies
@@ -924,9 +939,26 @@ function findFreePort(): Promise<number> {
  * Writes a PTY session registration file to the registry directory.
  * Returns the absolute path of the registration file.
  */
+interface MuxContext {
+  readonly muxId: string;
+  readonly muxPid: number;
+}
+
+/** Reads mux ownership context from environment variables, if set. */
+function getMuxContext(): MuxContext | undefined {
+  const muxId = process.env.IRONCURTAIN_MUX_ID;
+  const muxPidStr = process.env.IRONCURTAIN_MUX_PID;
+  if (!muxId) return undefined;
+  const muxPid = muxPidStr ? parseInt(muxPidStr, 10) : undefined;
+  if (muxPid === undefined || isNaN(muxPid)) return undefined;
+  return { muxId, muxPid };
+}
+
 function writeRegistration(sessionId: string, escalationDir: string, adapterDisplayName: string): string {
   const registryDir = getPtyRegistryDir();
   mkdirSync(registryDir, { recursive: true, mode: 0o700 });
+
+  const mux = getMuxContext();
 
   const registration: PtySessionRegistration = {
     sessionId,
@@ -934,6 +966,7 @@ function writeRegistration(sessionId: string, escalationDir: string, adapterDisp
     label: `${adapterDisplayName} (interactive)`,
     startedAt: new Date().toISOString(),
     pid: process.pid,
+    ...(mux && { muxId: mux.muxId, muxPid: mux.muxPid }),
   };
 
   const registrationPath = resolve(registryDir, `session-${sessionId}.json`);

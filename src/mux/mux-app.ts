@@ -33,6 +33,10 @@ export interface MuxAppOptions {
   readonly autoSpawn?: boolean;
   /** Protected paths for workspace validation. */
   readonly protectedPaths?: string[];
+  /** Unique mux instance ID for session ownership. */
+  readonly muxId?: string;
+  /** PID of this mux process (for orphan detection by other mux instances). */
+  readonly muxPid?: number;
 }
 
 /**
@@ -98,6 +102,8 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
       workspacePath: opts?.workspacePath,
       resumeSessionId: opts?.resumeSessionId,
       persona: opts?.persona,
+      muxId: options.muxId,
+      muxPid: options.muxPid,
     });
 
     const tab: MuxTab = {
@@ -449,6 +455,8 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
     }
   }
 
+  let resolveShutdown: (() => void) | null = null;
+
   function doShutdown(): void {
     if (!running) return;
     running = false;
@@ -471,6 +479,7 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
     }
 
     renderer.destroy();
+    resolveShutdown?.();
   }
 
   return {
@@ -494,7 +503,7 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
         void handleAction(action);
       });
       pasteInterceptor.install();
-      escalationManager = createMuxEscalationManager();
+      escalationManager = createMuxEscalationManager({ muxId: options.muxId });
 
       const { columns, rows } = process.stdout;
       const cols = columns || 80;
@@ -594,12 +603,11 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
       renderer.fullRedraw();
 
       await new Promise<void>((resolve) => {
-        const checkInterval = setInterval(() => {
-          if (!running) {
-            clearInterval(checkInterval);
-            resolve();
-          }
-        }, 100);
+        if (!running) {
+          resolve();
+          return;
+        }
+        resolveShutdown = resolve;
       });
     },
 

@@ -94,6 +94,10 @@ export interface PtyBridgeOptions {
   readonly resumeSessionId?: string;
   /** Optional persona name (passed as --persona to the child). */
   readonly persona?: string;
+  /** Mux instance ID to propagate to child sessions via env var. */
+  readonly muxId?: string;
+  /** Mux process PID to propagate to child sessions via env var. */
+  readonly muxPid?: number;
 }
 
 /** Session discovery timeout (ms). */
@@ -124,11 +128,20 @@ export async function createPtyBridge(options: PtyBridgeOptions): Promise<PtyBri
   if (options.persona) {
     spawnArgs.push('--persona', options.persona);
   }
+  // Create a copy of process.env so we don't mutate the shared object
+  const childEnv: Record<string, string> = { ...(process.env as Record<string, string>) };
+  if (options.muxId) {
+    childEnv.IRONCURTAIN_MUX_ID = options.muxId;
+  }
+  if (options.muxPid !== undefined) {
+    childEnv.IRONCURTAIN_MUX_PID = String(options.muxPid);
+  }
+
   const child = nodePty.spawn(options.ironcurtainBin, spawnArgs, {
     cols: options.cols,
     rows: options.rows,
     name: 'xterm-256color',
-    env: process.env as Record<string, string>,
+    env: childEnv,
   });
 
   const outputCallbacks: Array<() => void> = [];

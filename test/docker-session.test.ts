@@ -12,7 +12,7 @@ import type { ProviderConfig } from '../src/docker/provider-config.js';
 import type { DockerManager, DockerContainerConfig } from '../src/docker/types.js';
 import type { IronCurtainConfig } from '../src/config/types.js';
 import type { DiagnosticEvent, EscalationRequest } from '../src/session/types.js';
-import { INTERNAL_NETWORK_NAME, INTERNAL_NETWORK_SUBNET, INTERNAL_NETWORK_GATEWAY } from '../src/docker/platform.js';
+import { getInternalNetworkName } from '../src/docker/platform.js';
 
 // --- AuditLogTailer tests ---
 
@@ -680,13 +680,12 @@ describe('DockerAgentSession', () => {
       session = new DockerAgentSession({ ...tcpDeps, docker });
       await session.initialize();
 
-      // Verify internal network was created
+      // Verify per-session internal network was created (name derived from session ID)
+      const expectedNetworkName = getInternalNetworkName('test-session'.substring(0, 12));
       expect(createNetworkCalls).toHaveLength(1);
-      expect(createNetworkCalls[0].name).toBe(INTERNAL_NETWORK_NAME);
+      expect(createNetworkCalls[0].name).toBe(expectedNetworkName);
       expect(createNetworkCalls[0].options).toEqual({
         internal: true,
-        subnet: INTERNAL_NETWORK_SUBNET,
-        gateway: INTERNAL_NETWORK_GATEWAY,
       });
 
       // Verify two containers created: sidecar first, then app
@@ -699,12 +698,12 @@ describe('DockerAgentSession', () => {
 
       // Sidecar connected to internal network
       expect(connectNetworkCalls).toHaveLength(1);
-      expect(connectNetworkCalls[0].network).toBe(INTERNAL_NETWORK_NAME);
+      expect(connectNetworkCalls[0].network).toBe(expectedNetworkName);
       expect(connectNetworkCalls[0].container).toBe('sidecar-123');
 
       // App container: created on internal network with sidecar IP as host
       const appConfig = createCalls[1];
-      expect(appConfig.network).toBe(INTERNAL_NETWORK_NAME);
+      expect(appConfig.network).toBe(expectedNetworkName);
       expect(appConfig.extraHosts).toEqual(['host.docker.internal:172.30.0.3']);
     });
 
@@ -761,7 +760,7 @@ describe('DockerAgentSession', () => {
       expect(stoppedContainers).toContain('sidecar-cleanup');
       expect(removedContainers).toContain('container-cleanup');
       expect(removedContainers).toContain('sidecar-cleanup');
-      expect(removedNetworks).toContain(INTERNAL_NETWORK_NAME);
+      expect(removedNetworks).toContain(getInternalNetworkName('test-session'.substring(0, 12)));
     });
   });
 });

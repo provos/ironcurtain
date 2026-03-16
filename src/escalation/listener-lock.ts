@@ -66,3 +66,17 @@ export function isPidAlive(pid: number): boolean {
     return false;
   }
 }
+
+/**
+ * Checks whether the process holding the given lock file is still alive.
+ * Returns false if the lock file doesn't exist, can't be read, or the PID is dead.
+ */
+export function isLockHolderAlive(lockPath: string): boolean {
+  try {
+    const content = readFileSync(lockPath, 'utf-8');
+    const pid = parseInt(content.trim(), 10);
+    return !isNaN(pid) && isPidAlive(pid);
+  } catch {
+    return false;
+  }
+}

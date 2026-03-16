@@ -1,15 +1,42 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createMuxEscalationManager } from '../src/mux/mux-escalation-manager.js';
 import { atomicWriteJsonSync } from '../src/escalation/escalation-watcher.js';
+import type { PtySessionRegistration } from '../src/docker/pty-types.js';
+
+// Dynamic path updated per-test in beforeEach so the mock registry dir
+// lives under tempDir and gets cleaned up automatically.
+let mockRegistryDir = '/tmp/ironcurtain-test-registry';
+
+// Mock modules used by registry polling
+vi.mock('../src/escalation/session-registry.js', () => ({
+  readActiveRegistrations: vi.fn().mockReturnValue([]),
+}));
+
+vi.mock('../src/config/paths.js', () => ({
+  getListenerLockPath: vi.fn().mockReturnValue('/tmp/nonexistent-lock'),
+  getPtyRegistryDir: vi.fn(() => mockRegistryDir),
+}));
+
+// Partial mock: keep isPidAlive and isLockHolderAlive mockable
+vi.mock('../src/escalation/listener-lock.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/escalation/listener-lock.js')>();
+  return {
+    ...actual,
+    isPidAlive: vi.fn().mockReturnValue(true),
+    isLockHolderAlive: vi.fn().mockReturnValue(false),
+  };
+});
 
 describe('MuxEscalationManager', () => {
   let tempDir: string;
 
   beforeEach(() => {
     tempDir = mkdtempSync(resolve(tmpdir(), 'ironcurtain-mux-esc-'));
+    mockRegistryDir = resolve(tempDir, 'registry');
+    vi.clearAllMocks();
   });
 
   afterEach(() => {
@@ -179,5 +206,143 @@ describe('MuxEscalationManager', () => {
     const result = manager.resolveAll('approved');
     expect(result).toBe('No pending escalations');
     manager.stop();
+  });
+
+  describe('ownership filtering during registry polling', () => {
+    const OUR_MUX_ID = 'mux-aaaa1111';
+    const OTHER_MUX_ID = 'mux-bbbb2222';
+
+    function makeRegistration(
+      sessionId: string,
+      overrides: Partial<PtySessionRegistration> = {},
+    ): PtySessionRegistration {
+      const escalationDir = resolve(tempDir, sessionId);
+      mkdirSync(escalationDir, { recursive: true });
+      return {
+        sessionId,
+        escalationDir,
+        label: `test ${sessionId}`,
+        startedAt: new Date().toISOString(),
+        pid: process.pid,
+        ...overrides,
+      };
+    }
+
+    /** Triggers one registry poll tick by advancing the fake timer. */
+    async function triggerPoll(): Promise<void> {
+      await vi.advanceTimersByTimeAsync(1100);
+    }
+
+    let readActiveRegistrationsMock: ReturnType<typeof vi.fn>;
+    let isPidAliveMock: ReturnType<typeof vi.fn>;
+    let isLockHolderAliveMock: ReturnType<typeof vi.fn>;
+
+    beforeEach(async () => {
+      vi.useFakeTimers();
+      const sessionRegistry = await import('../src/escalation/session-registry.js');
+      readActiveRegistrationsMock = sessionRegistry.readActiveRegistrations as ReturnType<typeof vi.fn>;
+      const listenerLock = await import('../src/escalation/listener-lock.js');
+      isPidAliveMock = listenerLock.isPidAlive as ReturnType<typeof vi.fn>;
+      isLockHolderAliveMock = listenerLock.isLockHolderAlive as ReturnType<typeof vi.fn>;
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('picks up registrations with matching muxId', async () => {
+      const reg = makeRegistration('sess-own', { muxId: OUR_MUX_ID, muxPid: process.pid });
+      readActiveRegistrationsMock.mockReturnValue([reg]);
+
+      const manager = createMuxEscalationManager({ muxId: OUR_MUX_ID });
+      manager.startRegistryPolling();
+
+      await triggerPoll();
+
+      expect(manager.state.sessions.size).toBe(1);
+      expect(manager.state.sessions.has('sess-own')).toBe(true);
+      manager.stop();
+    });
+
+    it('ignores registrations with different muxId when owning mux is alive', async () => {
+      const reg = makeRegistration('sess-other', { muxId: OTHER_MUX_ID, muxPid: 12345 });
+      readActiveRegistrationsMock.mockReturnValue([reg]);
+      // The other mux process is alive
+      isPidAliveMock.mockReturnValue(true);
+
+      const manager = createMuxEscalationManager({ muxId: OUR_MUX_ID });
+      manager.startRegistryPolling();
+
+      await triggerPoll();
+
+      expect(manager.state.sessions.size).toBe(0);
+      manager.stop();
+    });
+
+    it('reclaims orphaned registrations (different muxId, dead muxPid)', async () => {
+      const reg = makeRegistration('sess-orphan', { muxId: OTHER_MUX_ID, muxPid: 999999999 });
+      readActiveRegistrationsMock.mockReturnValue([reg]);
+      // The other mux process is dead
+      isPidAliveMock.mockReturnValue(false);
+      // No standalone listener running
+      isLockHolderAliveMock.mockReturnValue(false);
+
+      const manager = createMuxEscalationManager({ muxId: OUR_MUX_ID });
+      manager.startRegistryPolling();
+
+      await triggerPoll();
+
+      expect(manager.state.sessions.size).toBe(1);
+      expect(manager.state.sessions.has('sess-orphan')).toBe(true);
+      manager.stop();
+    });
+
+    it('picks up unowned registrations (no muxId) when no standalone listener is running', async () => {
+      const reg = makeRegistration('sess-unowned');
+      readActiveRegistrationsMock.mockReturnValue([reg]);
+      // No standalone listener running
+      isLockHolderAliveMock.mockReturnValue(false);
+
+      const manager = createMuxEscalationManager({ muxId: OUR_MUX_ID });
+      manager.startRegistryPolling();
+
+      await triggerPoll();
+
+      expect(manager.state.sessions.size).toBe(1);
+      expect(manager.state.sessions.has('sess-unowned')).toBe(true);
+      manager.stop();
+    });
+
+    it('ignores unowned registrations when a standalone listener is running', async () => {
+      const reg = makeRegistration('sess-unowned-skip');
+      readActiveRegistrationsMock.mockReturnValue([reg]);
+      // Standalone listener IS running
+      isLockHolderAliveMock.mockReturnValue(true);
+
+      const manager = createMuxEscalationManager({ muxId: OUR_MUX_ID });
+      manager.startRegistryPolling();
+
+      await triggerPoll();
+
+      expect(manager.state.sessions.size).toBe(0);
+      manager.stop();
+    });
+
+    it('ignores orphaned registrations when a standalone listener is running', async () => {
+      const reg = makeRegistration('sess-orphan-skip', { muxId: OTHER_MUX_ID, muxPid: 999999999 });
+      readActiveRegistrationsMock.mockReturnValue([reg]);
+      // Standalone listener IS running
+      isLockHolderAliveMock.mockReturnValue(true);
+      // The other mux process is dead (orphaned)
+      isPidAliveMock.mockReturnValue(false);
+
+      const manager = createMuxEscalationManager({ muxId: OUR_MUX_ID });
+      manager.startRegistryPolling();
+
+      await triggerPoll();
+
+      expect(manager.state.sessions.size).toBe(0);
+      manager.stop();
+    });
   });
 });

@@ -7,11 +7,12 @@
  */
 
 import { mkdirSync } from 'node:fs';
-import { getPtyRegistryDir } from '../config/paths.js';
+import { getListenerLockPath, getPtyRegistryDir } from '../config/paths.js';
 import { readActiveRegistrations } from '../escalation/session-registry.js';
 import { createEscalationWatcher } from '../escalation/escalation-watcher.js';
 import type { EscalationWatcher } from '../escalation/escalation-watcher.js';
 import type { PtySessionRegistration } from '../docker/pty-types.js';
+import { isPidAlive, isLockHolderAlive } from '../escalation/listener-lock.js';
 import {
   createInitialState,
   addSession,
@@ -72,10 +73,47 @@ export interface MuxEscalationManager {
   claimSession(sessionId: string): void;
 }
 
+export interface MuxEscalationManagerOptions {
+  /** Mux instance ID for session ownership filtering. When absent, all sessions are claimed. */
+  readonly muxId?: string;
+}
+
+/**
+ * Checks whether the standalone escalation listener is currently running
+ * by reading its lock file and verifying PID liveness.
+ */
+function isStandaloneListenerRunning(): boolean {
+  return isLockHolderAlive(getListenerLockPath());
+}
+
+/**
+ * Determines whether this mux should claim a registry entry based on ownership.
+ * Returns true if the session should be watched by this mux instance.
+ */
+function shouldClaimSession(
+  reg: PtySessionRegistration,
+  ourMuxId: string,
+  standaloneListenerRunning: boolean,
+): boolean {
+  const isOwned = reg.muxId !== undefined;
+  const isOurs = reg.muxId === ourMuxId;
+  if (isOurs) return true;
+
+  const isOrphaned = isOwned && reg.muxPid !== undefined && !isPidAlive(reg.muxPid);
+  const isUnowned = !isOwned;
+
+  // Skip sessions owned by another live mux
+  if (!isOrphaned && !isUnowned) return false;
+
+  // Skip unowned/orphaned sessions if a standalone listener is handling them
+  return !standaloneListenerRunning;
+}
+
 /**
  * Creates a new MuxEscalationManager.
  */
-export function createMuxEscalationManager(): MuxEscalationManager {
+export function createMuxEscalationManager(options?: MuxEscalationManagerOptions): MuxEscalationManager {
+  const ourMuxId = options?.muxId;
   let state = createInitialState();
   const changeCallbacks: Array<() => void> = [];
   const discoveryCallbacks: Array<(reg: PtySessionRegistration) => void> = [];
@@ -199,25 +237,40 @@ export function createMuxEscalationManager(): MuxEscalationManager {
 
         let changed = false;
 
-        // Add externally-spawned sessions (skip managed, tombstoned)
+        // Cache the standalone listener check once per poll cycle
+        const standaloneListenerRunning = ourMuxId ? isStandaloneListenerRunning() : false;
+
+        // Add sessions that belong to us (skip managed, tombstoned, other mux's sessions)
         for (const reg of registrations) {
           if (
-            !stateIds.has(reg.sessionId) &&
-            !managedSessionIds.has(reg.sessionId) &&
-            !removedSessionIds.has(reg.sessionId)
+            stateIds.has(reg.sessionId) ||
+            managedSessionIds.has(reg.sessionId) ||
+            removedSessionIds.has(reg.sessionId)
           ) {
-            const watcher = createWatcherForSession(reg.sessionId, reg.escalationDir);
-            state = addSession(state, reg, watcher);
-            watcher.start();
-            changed = true;
-            for (const cb of discoveryCallbacks) cb(reg);
+            continue;
           }
+
+          // Ownership filtering when this mux has a muxId
+          if (ourMuxId && !shouldClaimSession(reg, ourMuxId, standaloneListenerRunning)) {
+            continue;
+          }
+
+          const watcher = createWatcherForSession(reg.sessionId, reg.escalationDir);
+          state = addSession(state, reg, watcher);
+          watcher.start();
+          changed = true;
+          for (const cb of discoveryCallbacks) cb(reg);
         }
 
-        // Clear tombstones once the registry entry disappears
+        // Clear tombstones and managed IDs once the registry entry disappears
         for (const id of removedSessionIds) {
           if (!currentIds.has(id)) {
             removedSessionIds.delete(id);
+          }
+        }
+        for (const id of managedSessionIds) {
+          if (!currentIds.has(id) && !stateIds.has(id)) {
+            managedSessionIds.delete(id);
           }
         }
 
