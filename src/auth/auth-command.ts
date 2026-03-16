@@ -13,6 +13,8 @@ import { getOAuthTokenPath } from '../config/paths.js';
 import { loadClientCredentials } from './oauth-provider.js';
 import type { OAuthProviderId } from './oauth-provider.js';
 import { getOAuthProvider, getAllOAuthProviders } from './oauth-registry.js';
+import { runOAuthFlow } from './oauth-flow.js';
+import { saveOAuthToken } from './oauth-token-store.js';
 
 const VALID_PROVIDER_IDS = new Set<string>(['google', 'microsoft', 'github-oauth']);
 
@@ -84,7 +86,7 @@ function revokeToken(providerId: string): void {
 // Authorize
 // ---------------------------------------------------------------------------
 
-function authorize(providerId: string): void {
+async function authorize(providerId: string): Promise<void> {
   const provider = resolveProvider(providerId);
 
   const credentials = loadClientCredentials(provider);
@@ -96,16 +98,17 @@ function authorize(providerId: string): void {
     process.exit(1);
   }
 
-  // TODO: WP5 integration -- call runOAuthFlow() here
-  process.stdout.write('OAuth flow not yet implemented. Credentials are configured.\n');
-  process.stdout.write(`Run 'ironcurtain auth ${provider.id}' again after the flow runner is integrated.\n`);
+  const result = await runOAuthFlow(provider, credentials);
+  saveOAuthToken(provider.id, result.token);
+  process.stdout.write(`\n  Authorization successful!\n`);
+  process.stdout.write(`  Granted scopes: ${result.grantedScopes.join(', ')}\n`);
 }
 
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
-export function runAuthCommand(args: string[]): void {
+export async function runAuthCommand(args: string[]): Promise<void> {
   const subcommand = args[0];
 
   if (!subcommand || subcommand === 'status') {
@@ -123,5 +126,5 @@ export function runAuthCommand(args: string[]): void {
     return;
   }
 
-  authorize(subcommand);
+  await authorize(subcommand);
 }

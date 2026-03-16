@@ -120,7 +120,7 @@ describe('auth-command', () => {
     rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it('shows status with no args', () => {
+  it('shows status with no args', async () => {
     const writes: string[] = [];
     const origWrite = process.stdout.write;
     process.stdout.write = ((chunk: string) => {
@@ -129,7 +129,7 @@ describe('auth-command', () => {
     }) as typeof process.stdout.write;
 
     try {
-      runAuthCommand([]);
+      await runAuthCommand([]);
     } finally {
       process.stdout.write = origWrite;
     }
@@ -140,7 +140,7 @@ describe('auth-command', () => {
     expect(output).toContain('not authorized');
   });
 
-  it('shows configured status when credentials exist', () => {
+  it('shows configured status when credentials exist', async () => {
     const provider = getOAuthProvider('google');
     writeFileSync(
       resolve(tempDir, 'oauth', provider.credentialsFilename),
@@ -155,7 +155,7 @@ describe('auth-command', () => {
     }) as typeof process.stdout.write;
 
     try {
-      runAuthCommand(['status']);
+      await runAuthCommand(['status']);
     } finally {
       process.stdout.write = origWrite;
     }
@@ -164,7 +164,7 @@ describe('auth-command', () => {
     expect(output).toContain('configured');
   });
 
-  it('revokes a stored token', () => {
+  it('revokes a stored token', async () => {
     const tokenPath = resolve(tempDir, 'oauth', 'google.json');
     writeFileSync(tokenPath, JSON.stringify({ accessToken: 'fake' }));
     expect(existsSync(tokenPath)).toBe(true);
@@ -177,7 +177,7 @@ describe('auth-command', () => {
     }) as typeof process.stdout.write;
 
     try {
-      runAuthCommand(['revoke', 'google']);
+      await runAuthCommand(['revoke', 'google']);
     } finally {
       process.stdout.write = origWrite;
     }
@@ -187,7 +187,7 @@ describe('auth-command', () => {
     expect(output).toContain('Token revoked');
   });
 
-  it('handles revoke when no token exists', () => {
+  it('handles revoke when no token exists', async () => {
     const writes: string[] = [];
     const origWrite = process.stdout.write;
     process.stdout.write = ((chunk: string) => {
@@ -196,7 +196,7 @@ describe('auth-command', () => {
     }) as typeof process.stdout.write;
 
     try {
-      runAuthCommand(['revoke', 'google']);
+      await runAuthCommand(['revoke', 'google']);
     } finally {
       process.stdout.write = origWrite;
     }

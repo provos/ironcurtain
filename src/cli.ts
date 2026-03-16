@@ -137,7 +137,7 @@ switch (subcommand) {
   }
   case 'auth': {
     const { runAuthCommand } = await import('./auth/auth-command.js');
-    runAuthCommand(process.argv.slice(3));
+    await runAuthCommand(process.argv.slice(3));
     break;
   }
   case 'daemon': {
