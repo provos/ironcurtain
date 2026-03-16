@@ -16,29 +16,13 @@ vi.mock('../src/config/paths.js', () => ({
   getPtyRegistryDir: vi.fn().mockReturnValue('/tmp/ironcurtain-test-registry'),
 }));
 
-// Partial mock: keep isPidAlive mockable while preserving acquireLock/releaseLock
+// Partial mock: keep isPidAlive and isLockHolderAlive mockable
 vi.mock('../src/escalation/listener-lock.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/escalation/listener-lock.js')>();
   return {
     ...actual,
     isPidAlive: vi.fn().mockReturnValue(true),
-  };
-});
-
-// Partial mock for node:fs: keep real implementations except readFileSync for lock file checks
-vi.mock('node:fs', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:fs')>();
-  return {
-    ...actual,
-    // readFileSync is overridden so isStandaloneListenerRunning() can be controlled
-    readFileSync: vi.fn((...args: Parameters<typeof actual.readFileSync>) => {
-      const path = typeof args[0] === 'string' ? args[0] : '';
-      // Intercept only the lock file path reads
-      if (path.includes('nonexistent-lock') || path.includes('escalation-listener.lock')) {
-        throw new Error('ENOENT');
-      }
-      return actual.readFileSync(...args);
-    }),
+    isLockHolderAlive: vi.fn().mockReturnValue(false),
   };
 });
 
@@ -248,7 +232,7 @@ describe('MuxEscalationManager', () => {
 
     let readActiveRegistrationsMock: ReturnType<typeof vi.fn>;
     let isPidAliveMock: ReturnType<typeof vi.fn>;
-    let readFileSyncMock: ReturnType<typeof vi.fn>;
+    let isLockHolderAliveMock: ReturnType<typeof vi.fn>;
 
     beforeEach(async () => {
       vi.useFakeTimers();
@@ -256,8 +240,7 @@ describe('MuxEscalationManager', () => {
       readActiveRegistrationsMock = sessionRegistry.readActiveRegistrations as ReturnType<typeof vi.fn>;
       const listenerLock = await import('../src/escalation/listener-lock.js');
       isPidAliveMock = listenerLock.isPidAlive as ReturnType<typeof vi.fn>;
-      const fs = await import('node:fs');
-      readFileSyncMock = fs.readFileSync as ReturnType<typeof vi.fn>;
+      isLockHolderAliveMock = listenerLock.isLockHolderAlive as ReturnType<typeof vi.fn>;
     });
 
     afterEach(() => {
@@ -298,10 +281,8 @@ describe('MuxEscalationManager', () => {
       readActiveRegistrationsMock.mockReturnValue([reg]);
       // The other mux process is dead
       isPidAliveMock.mockReturnValue(false);
-      // No standalone listener running (lock file read throws)
-      readFileSyncMock.mockImplementation(() => {
-        throw new Error('ENOENT');
-      });
+      // No standalone listener running
+      isLockHolderAliveMock.mockReturnValue(false);
 
       const manager = createMuxEscalationManager({ muxId: OUR_MUX_ID });
       manager.startRegistryPolling();
@@ -316,10 +297,8 @@ describe('MuxEscalationManager', () => {
     it('picks up unowned registrations (no muxId) when no standalone listener is running', async () => {
       const reg = makeRegistration('sess-unowned');
       readActiveRegistrationsMock.mockReturnValue([reg]);
-      // No standalone listener running (lock file read throws)
-      readFileSyncMock.mockImplementation(() => {
-        throw new Error('ENOENT');
-      });
+      // No standalone listener running
+      isLockHolderAliveMock.mockReturnValue(false);
 
       const manager = createMuxEscalationManager({ muxId: OUR_MUX_ID });
       manager.startRegistryPolling();
@@ -334,9 +313,8 @@ describe('MuxEscalationManager', () => {
     it('ignores unowned registrations when a standalone listener is running', async () => {
       const reg = makeRegistration('sess-unowned-skip');
       readActiveRegistrationsMock.mockReturnValue([reg]);
-      // Standalone listener IS running: lock file contains a live PID
-      readFileSyncMock.mockReturnValue(String(process.pid));
-      isPidAliveMock.mockReturnValue(true);
+      // Standalone listener IS running
+      isLockHolderAliveMock.mockReturnValue(true);
 
       const manager = createMuxEscalationManager({ muxId: OUR_MUX_ID });
       manager.startRegistryPolling();
@@ -350,13 +328,10 @@ describe('MuxEscalationManager', () => {
     it('ignores orphaned registrations when a standalone listener is running', async () => {
       const reg = makeRegistration('sess-orphan-skip', { muxId: OTHER_MUX_ID, muxPid: 999999999 });
       readActiveRegistrationsMock.mockReturnValue([reg]);
-      // Standalone listener IS running: lock file contains a live PID
-      readFileSyncMock.mockReturnValue(String(process.pid));
-      // isPidAlive is called for both the lock file PID and the muxPid.
-      // Lock file PID (our process.pid) should be alive; muxPid (999999999) should be dead.
-      isPidAliveMock.mockImplementation((pid: number) => {
-        return pid !== 999999999;
-      });
+      // Standalone listener IS running
+      isLockHolderAliveMock.mockReturnValue(true);
+      // The other mux process is dead (orphaned)
+      isPidAliveMock.mockReturnValue(false);
 
       const manager = createMuxEscalationManager({ muxId: OUR_MUX_ID });
       manager.startRegistryPolling();

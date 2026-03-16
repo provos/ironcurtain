@@ -923,13 +923,26 @@ function findFreePort(): Promise<number> {
  * Writes a PTY session registration file to the registry directory.
  * Returns the absolute path of the registration file.
  */
+interface MuxContext {
+  readonly muxId: string;
+  readonly muxPid: number;
+}
+
+/** Reads mux ownership context from environment variables, if set. */
+function getMuxContext(): MuxContext | undefined {
+  const muxId = process.env.IRONCURTAIN_MUX_ID;
+  const muxPidStr = process.env.IRONCURTAIN_MUX_PID;
+  if (!muxId) return undefined;
+  const muxPid = muxPidStr ? parseInt(muxPidStr, 10) : undefined;
+  if (muxPid === undefined || isNaN(muxPid)) return undefined;
+  return { muxId, muxPid };
+}
+
 function writeRegistration(sessionId: string, escalationDir: string, adapterDisplayName: string): string {
   const registryDir = getPtyRegistryDir();
   mkdirSync(registryDir, { recursive: true, mode: 0o700 });
 
-  const muxId = process.env.IRONCURTAIN_MUX_ID;
-  const muxPidStr = process.env.IRONCURTAIN_MUX_PID;
-  const muxPid = muxPidStr ? parseInt(muxPidStr, 10) : undefined;
+  const mux = getMuxContext();
 
   const registration: PtySessionRegistration = {
     sessionId,
@@ -937,8 +950,7 @@ function writeRegistration(sessionId: string, escalationDir: string, adapterDisp
     label: `${adapterDisplayName} (interactive)`,
     startedAt: new Date().toISOString(),
     pid: process.pid,
-    ...(muxId !== undefined && { muxId }),
-    ...(muxPid !== undefined && !isNaN(muxPid) && { muxPid }),
+    ...(mux && { muxId: mux.muxId, muxPid: mux.muxPid }),
   };
 
   const registrationPath = resolve(registryDir, `session-${sessionId}.json`);
