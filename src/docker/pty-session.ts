@@ -430,7 +430,7 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
       env,
       command: ptyCommand,
       sessionLabel: effectiveSessionId,
-      resources: { memoryMb: 4096, cpus: 2 },
+      resources: { memoryMb: 8192, cpus: 4 },
       extraHosts,
       tty: true,
     });

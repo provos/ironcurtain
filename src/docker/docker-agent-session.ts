@@ -300,7 +300,7 @@ export class DockerAgentSession implements Session {
         env,
         command: ['sleep', 'infinity'],
         sessionLabel: this.sessionId,
-        resources: { memoryMb: 4096, cpus: 2 },
+        resources: { memoryMb: 8192, cpus: 4 },
         extraHosts,
       });
 
