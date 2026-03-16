@@ -23,4 +23,8 @@ export const googleOAuthProvider: OAuthProviderConfig = {
   extraAuthParams: { access_type: 'offline', prompt: 'consent', include_granted_scopes: 'true' },
   scopePicker: promptGoogleScopes,
   resolveShortScopes: resolveGoogleShortScopes,
+  nonDefaultScopeWarning:
+    'Make sure these scopes are enabled in your Google Cloud\n' +
+    "project's OAuth consent screen before proceeding.\n" +
+    'See: APIs & Services > OAuth consent screen > Scopes',
 };

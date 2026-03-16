@@ -39,6 +39,8 @@ export interface OAuthProviderConfig {
   readonly scopePicker?: (existingScopes: readonly string[]) => Promise<readonly string[] | symbol>;
   /** Resolves short scope names (e.g. "gmail.send") to full scope URLs for --scopes flag. */
   readonly resolveShortScopes?: (shortNames: readonly string[]) => readonly string[];
+  /** Provider-specific guidance shown when non-default scopes are requested. */
+  readonly nonDefaultScopeWarning?: string;
 }
 
 export interface OAuthClientCredentials {

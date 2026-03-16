@@ -22,7 +22,7 @@ import { getOAuthDir, getOAuthTokenPath } from '../config/paths.js';
 import type { OAuthProviderConfig, StoredOAuthToken } from './oauth-provider.js';
 import { loadClientCredentials } from './oauth-provider.js';
 import { getAllOAuthProviders, printAvailableProviders, resolveProviderOrExit } from './oauth-registry.js';
-import { runOAuthFlow } from './oauth-flow.js';
+import { runOAuthFlow, fetchWithTimeout } from './oauth-flow.js';
 import { deleteOAuthToken, loadOAuthToken, saveOAuthToken } from './oauth-token-store.js';
 
 // ---------------------------------------------------------------------------
@@ -252,20 +252,29 @@ async function revokeTokenRemotely(provider: OAuthProviderConfig, token: StoredO
   // Prefer revoking the refresh token (invalidates both access and refresh)
   const tokenToRevoke = token.refreshToken || token.accessToken;
 
+  const REVOCATION_TIMEOUT_MS = 10_000;
   try {
-    const response = await fetch(provider.revocationUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ token: tokenToRevoke }).toString(),
-    });
+    const response = await fetchWithTimeout(
+      provider.revocationUrl,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ token: tokenToRevoke }).toString(),
+      },
+      REVOCATION_TIMEOUT_MS,
+    );
 
     if (!response.ok) {
       const text = await response.text();
       process.stdout.write(`Warning: Server-side revocation returned ${response.status}: ${text}\n`);
     }
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    process.stdout.write(`Warning: Could not reach revocation endpoint: ${message}\n`);
+    if (err instanceof Error && err.name === 'TimeoutError') {
+      process.stdout.write(`Warning: Revocation request timed out after ${REVOCATION_TIMEOUT_MS}ms\n`);
+    } else {
+      const message = err instanceof Error ? err.message : String(err);
+      process.stdout.write(`Warning: Could not reach revocation endpoint: ${message}\n`);
+    }
   }
 }
 
@@ -283,6 +292,8 @@ function parseScopesArg(args: string[]): readonly string[] | undefined {
     return undefined;
   }
 
+  const scopesFlagPresent = args.includes('--scopes');
+
   try {
     const { values } = parseArgs({
       args,
@@ -298,8 +309,12 @@ function parseScopesArg(args: string[]): readonly string[] | undefined {
         .map((s) => s.trim())
         .filter((s) => s.length > 0);
     }
-  } catch {
-    // Ignore parse errors -- treat as no scopes
+  } catch (err) {
+    if (scopesFlagPresent) {
+      const message = err instanceof Error ? err.message : String(err);
+      throw new Error(`Failed to parse --scopes: ${message}`, { cause: err });
+    }
+    // --scopes not present: ignore unrelated parse errors
   }
 
   return undefined;
@@ -315,8 +330,8 @@ function hasNonDefaultScopes(provider: OAuthProviderConfig, scopes: readonly str
 }
 
 /**
- * Shows a warning note about non-default scopes requiring Google Cloud
- * consent screen configuration, then prompts for confirmation.
+ * Shows a warning note about non-default scopes, with optional
+ * provider-specific guidance, then prompts for confirmation.
  * Returns false if the user cancels.
  */
 async function confirmNonDefaultScopes(provider: OAuthProviderConfig, scopes: readonly string[]): Promise<boolean> {
@@ -327,13 +342,13 @@ async function confirmNonDefaultScopes(provider: OAuthProviderConfig, scopes: re
   const defaults = new Set(provider.defaultScopes);
   const nonDefault = scopes.filter((s) => !defaults.has(s));
 
+  const scopeList = nonDefault.map((s) => `  ${s}`).join('\n');
+  const guidance =
+    provider.nonDefaultScopeWarning ??
+    'Ensure these scopes are configured with your OAuth provider\nbefore proceeding.';
+
   p.note(
-    'The following scopes require write access:\n\n' +
-      nonDefault.map((s) => `  ${s}`).join('\n') +
-      '\n\n' +
-      'Make sure these scopes are enabled in your Google Cloud\n' +
-      "project's OAuth consent screen before proceeding.\n" +
-      'See: APIs & Services > OAuth consent screen > Scopes',
+    `The following non-default scopes were selected:\n\n${scopeList}\n\n${guidance}`,
     'Non-default scopes selected',
   );
 

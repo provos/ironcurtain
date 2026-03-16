@@ -178,18 +178,36 @@ async function exchangeCodeForTokens(
     code_verifier: codeVerifier,
   });
 
-  const response = await fetch(provider.tokenUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: body.toString(),
-  });
+  const EXCHANGE_TIMEOUT_MS = 30_000;
+  let response: Response;
+  try {
+    response = await fetchWithTimeout(
+      provider.tokenUrl,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: body.toString(),
+      },
+      EXCHANGE_TIMEOUT_MS,
+    );
+  } catch (err) {
+    if (err instanceof Error && err.name === 'TimeoutError') {
+      throw new OAuthFlowError('Token exchange timed out', { cause: err });
+    }
+    throw err;
+  }
 
   if (!response.ok) {
     const text = await response.text();
     throw new OAuthFlowError(`Token exchange failed (${response.status}): ${text}`);
   }
 
-  const data = (await response.json()) as TokenResponse;
+  let data: TokenResponse;
+  try {
+    data = (await safeResponseJson(response)) as TokenResponse;
+  } catch (err) {
+    throw new OAuthFlowError('Token exchange returned non-JSON response', { cause: err });
+  }
 
   if (!data.access_token) {
     throw new OAuthFlowError('Token response missing access_token');
@@ -332,7 +350,7 @@ export async function runOAuthFlow(
 }
 
 // ---------------------------------------------------------------------------
-// Timeout helper
+// Timeout helpers
 // ---------------------------------------------------------------------------
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
@@ -352,4 +370,30 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
       },
     );
   });
+}
+
+/**
+ * Wraps fetch() with an AbortSignal-based timeout.
+ * Callers are responsible for catching the AbortError and rethrowing as
+ * the appropriate domain error (OAuthFlowError, OAuthTokenExpiredError, etc.).
+ */
+export async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+  const response = await fetch(url, {
+    ...init,
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  return response;
+}
+
+/**
+ * Safely parses a Response body as JSON.
+ * Returns the parsed value, or throws with a descriptive message on failure.
+ */
+export async function safeResponseJson(response: Response): Promise<unknown> {
+  const text = await response.text();
+  try {
+    return JSON.parse(text);
+  } catch (err) {
+    throw new SyntaxError(`Expected JSON response but got: ${text.slice(0, 200)}`, { cause: err });
+  }
 }

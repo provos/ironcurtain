@@ -10,6 +10,7 @@
 import { existsSync } from 'node:fs';
 import { getOAuthTokenPath } from '../config/paths.js';
 import type { OAuthProviderConfig, OAuthClientCredentials, StoredOAuthToken } from './oauth-provider.js';
+import { fetchWithTimeout, safeResponseJson } from './oauth-flow.js';
 import { loadOAuthToken, saveOAuthToken, isTokenExpired } from './oauth-token-store.js';
 
 // ---------------------------------------------------------------------------
@@ -59,11 +60,28 @@ async function refreshAccessToken(
     refresh_token: currentToken.refreshToken,
   });
 
-  const response = await fetch(provider.tokenUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: body.toString(),
-  });
+  const REFRESH_TIMEOUT_MS = 30_000;
+  let response: Response;
+  try {
+    response = await fetchWithTimeout(
+      provider.tokenUrl,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: body.toString(),
+      },
+      REFRESH_TIMEOUT_MS,
+    );
+  } catch (err) {
+    if (err instanceof Error && err.name === 'TimeoutError') {
+      throw new OAuthTokenExpiredError(
+        provider.id,
+        `Token refresh timed out for "${provider.id}". Run 'ironcurtain auth ${provider.id}' to re-authorize.`,
+        { cause: err },
+      );
+    }
+    throw err;
+  }
 
   if (!response.ok) {
     const text = await response.text();
@@ -73,7 +91,16 @@ async function refreshAccessToken(
     );
   }
 
-  const data = (await response.json()) as RefreshTokenResponse;
+  let data: RefreshTokenResponse;
+  try {
+    data = (await safeResponseJson(response)) as RefreshTokenResponse;
+  } catch (err) {
+    throw new OAuthTokenExpiredError(
+      provider.id,
+      `Token refresh returned non-JSON response for "${provider.id}". Run 'ironcurtain auth ${provider.id}' to re-authorize.`,
+      { cause: err },
+    );
+  }
 
   if (!data.access_token) {
     throw new OAuthTokenExpiredError(

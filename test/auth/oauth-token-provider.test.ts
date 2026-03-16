@@ -2,10 +2,11 @@ import { createServer, type Server } from 'node:http';
 import { mkdirSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { OAuthTokenProvider, OAuthTokenExpiredError } from '../../src/auth/oauth-token-provider.js';
 import type { OAuthProviderConfig, OAuthClientCredentials, StoredOAuthToken } from '../../src/auth/oauth-provider.js';
 import { saveOAuthToken, loadOAuthToken } from '../../src/auth/oauth-token-store.js';
+import * as tokenStoreModule from '../../src/auth/oauth-token-store.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -271,17 +272,15 @@ describe('OAuthTokenProvider', () => {
     // Re-read before refresh
     // ---------------------------------------------------------------------
 
-    it('re-reads from disk before refreshing (another process may have refreshed)', async () => {
-      // Start with an expired token
+    it('returns fresh token when another process refreshed (re-read-before-refresh)', async () => {
       const expiredToken = makeExpiredToken();
-      saveOAuthToken('google', expiredToken);
-
-      // Simulate another process refreshing the token: write a fresh token
-      // between when the provider sees the expired token and when it refreshes.
-      // We do this by saving a fresh token before creating the provider, then
-      // the re-read in executeRefresh will find a valid token and skip the HTTP call.
       const freshToken = makeToken({ accessToken: 'ya29.refreshed-by-other-process' });
-      saveOAuthToken('google', freshToken);
+
+      // Spy on loadOAuthToken to control what each call returns:
+      //   1st call (in getValidAccessToken): returns expired -> triggers refresh path
+      //   2nd call (in executeRefresh re-read): returns fresh -> skips HTTP refresh
+      const loadSpy = vi.spyOn(tokenStoreModule, 'loadOAuthToken');
+      loadSpy.mockReturnValueOnce(expiredToken).mockReturnValueOnce(freshToken);
 
       const { server, url, requests } = createMockTokenServer();
       try {
@@ -289,35 +288,16 @@ describe('OAuthTokenProvider', () => {
         const provider = makeProvider(tokenUrl);
         const tp = new OAuthTokenProvider(provider, TEST_CLIENT_CREDENTIALS);
 
-        // Force the initial check to see an expired token by overwriting with expired
-        // then immediately restoring the fresh one. The provider reads the expired token
-        // in getValidAccessToken(), then executeRefresh() re-reads and finds the fresh one.
-        saveOAuthToken('google', expiredToken);
-
-        // Now save the fresh token so the re-read in executeRefresh picks it up
-        // We need to be sneaky: save the fresh token right before the re-read.
-        // Since we can't intercept, we'll save it now and the initial read in
-        // getValidAccessToken() will see expired, but executeRefresh()'s re-read will see fresh.
-        // This works because we save the fresh token NOW, and the flow is:
-        //   1. getValidAccessToken() -> loadOAuthToken() -> expired (from the save above)
-        //   Actually no, we last saved expiredToken. Let's restructure.
-
-        // Correct approach: save expired token, then between the initial load (expired)
-        // and the re-read in executeRefresh, the token becomes fresh.
-        // Since both happen synchronously before the async refresh, we need to rely on
-        // the fact that the re-read in executeRefresh is a separate loadOAuthToken call.
-
-        // Save expired so initial check triggers refresh path
-        saveOAuthToken('google', expiredToken);
-        // Now immediately overwrite with fresh -- the re-read in executeRefresh will find this
-        saveOAuthToken('google', freshToken);
-
         const result = await tp.getValidAccessToken();
         expect(result).toBe('ya29.refreshed-by-other-process');
+
+        // Verify loadOAuthToken was called exactly twice (initial + re-read)
+        expect(loadSpy).toHaveBeenCalledTimes(2);
 
         // No HTTP refresh request should have been made
         expect(requests).toHaveLength(0);
       } finally {
+        loadSpy.mockRestore();
         server.close();
       }
     });
