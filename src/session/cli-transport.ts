@@ -15,6 +15,7 @@
  *   /logs         -- display accumulated diagnostic events
  *   /budget       -- show resource budget usage
  *   /approve      -- approve a pending escalation
+ *   /approve+     -- approve and whitelist the pattern for this session
  *   /deny         -- deny a pending escalation
  */
 
@@ -166,7 +167,7 @@ export class CliTransport extends BaseTransport {
     const rl = this.rl;
 
     process.stderr.write(chalk.dim('IronCurtain interactive mode. Type /quit to exit.\n\n'));
-    process.stderr.write(chalk.dim('Commands: /quit /logs /budget /approve /deny\n\n'));
+    process.stderr.write(chalk.dim('Commands: /quit /logs /budget /approve /approve+ /deny\n\n'));
     rl.prompt();
 
     let running = true;
@@ -244,28 +245,27 @@ export class CliTransport extends BaseTransport {
    * false if it should be treated as a regular message.
    */
   private handleSlashCommand(input: string, session: Session, onQuit: () => void): boolean {
-    switch (input) {
-      case '/quit':
-      case '/exit':
-        onQuit();
-        return true;
-
-      case '/logs':
-        this.displayDiagnosticLog(session.getDiagnosticLog());
-        return true;
-
-      case '/budget':
-        this.displayBudgetStatus(session.getBudgetStatus());
-        return true;
-
-      case '/approve':
-      case '/deny':
-        this.handleEscalationCommand(input, session);
-        return true;
-
-      default:
-        return false;
+    if (input === '/quit' || input === '/exit') {
+      onQuit();
+      return true;
     }
+
+    if (input === '/logs') {
+      this.displayDiagnosticLog(session.getDiagnosticLog());
+      return true;
+    }
+
+    if (input === '/budget') {
+      this.displayBudgetStatus(session.getBudgetStatus());
+      return true;
+    }
+
+    if (input === '/approve' || input === '/approve+' || input === '/deny' || input === '/deny+') {
+      this.handleEscalationCommand(input, session);
+      return true;
+    }
+
+    return false;
   }
 
   private displayDiagnosticLog(logs: readonly DiagnosticEvent[]): void {
@@ -304,12 +304,24 @@ export class CliTransport extends BaseTransport {
       return;
     }
 
-    const decision = command === '/approve' ? ('approved' as const) : ('denied' as const);
+    const isDeny = command === '/deny' || command === '/deny+';
+    // Only /approve+ enables whitelisting; /deny+ is treated as plain deny.
+    const withWhitelist = command === '/approve+';
+    const decision = isDeny ? ('denied' as const) : ('approved' as const);
+    const options = withWhitelist ? { whitelistSelection: 0 } : undefined;
+
     session
-      .resolveEscalation(pending.escalationId, decision)
+      .resolveEscalation(pending.escalationId, decision, options)
       .then(() => {
         const color = decision === 'approved' ? chalk.green : chalk.red;
         process.stderr.write(color(`  Escalation ${decision}.\n`));
+        if (withWhitelist && pending.whitelistCandidates && pending.whitelistCandidates.length > 0) {
+          const candidate = pending.whitelistCandidates[0];
+          process.stderr.write(chalk.green(`  Whitelisted: ${candidate.description}\n`));
+          if (candidate.warning) {
+            process.stderr.write(chalk.yellow(`  Warning: ${candidate.warning}\n`));
+          }
+        }
         // Restart the spinner — sendMessage() is still in-flight, waiting
         // for the proxy to process the escalation result and continue.
         this.startSpinner('Processing...');
@@ -394,11 +406,25 @@ export class CliTransport extends BaseTransport {
       chalk.yellow(`  Arguments: ${JSON.stringify(request.arguments, null, 2)}`),
       ...(request.context ? Object.entries(request.context).map(([k, v]) => chalk.yellow(`  ${k}: ${v}`)) : []),
       chalk.yellow(`  Reason:    ${request.reason}`),
-      border,
-      chalk.yellow.bold('  Type /approve or /deny'),
-      border,
-      '',
     ];
+
+    // Show whitelist candidates if available
+    if (request.whitelistCandidates && request.whitelistCandidates.length > 0) {
+      lines.push(border);
+      lines.push(chalk.cyan('  Whitelist pattern:'));
+      for (const candidate of request.whitelistCandidates) {
+        lines.push(chalk.cyan(`    ${candidate.description}`));
+        if (candidate.warning) {
+          lines.push(chalk.yellow(`    Warning: ${candidate.warning}`));
+        }
+      }
+    }
+
+    lines.push(border);
+    lines.push(chalk.yellow.bold('  Type /approve, /approve+ (approve & whitelist), or /deny'));
+    lines.push(border);
+    lines.push('');
+
     process.stderr.write(lines.join('\n') + '\n');
   }
 }

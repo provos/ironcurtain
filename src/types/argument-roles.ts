@@ -116,6 +116,17 @@ export function resolveRealPath(filePath: string): string {
   }
 }
 
+/**
+ * Checks whether a target path is contained within a directory.
+ * Both paths are resolved to their real canonical form (following symlinks)
+ * before comparison, which neutralizes both path traversal and symlink attacks.
+ */
+export function isWithinDirectory(targetPath: string, directory: string): boolean {
+  const resolved = resolveRealPath(targetPath);
+  const resolvedDir = resolveRealPath(directory);
+  return resolved === resolvedDir || resolved.startsWith(resolvedDir + '/');
+}
+
 /** Identity function -- returns the value unchanged. */
 function identity(value: string): string {
   return value;

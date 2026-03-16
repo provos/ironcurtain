@@ -349,7 +349,7 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
         term.styleReset();
         if (pendingCount > 0) {
           term.dim(
-            ` command mode \u00b7 ${pendingCount} escalation${pendingCount !== 1 ? 's' : ''} pending \u2014 /approve or /deny`,
+            ` command mode \u00b7 ${pendingCount} escalation${pendingCount !== 1 ? 's' : ''} pending \u2014 /approve, /approve+, or /deny`,
           );
         } else {
           term.dim(' command mode \u00b7 type a message to enable auto-approver \u00b7 Shift+drag to select');
@@ -428,6 +428,20 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
           clearLine(currentY);
           moveTo(6, currentY);
           term.dim(`Reason: ${esc.request.reason}`);
+          currentY++;
+          rowsUsed++;
+        }
+
+        // Whitelist candidate line
+        if (
+          rowsUsed < _layout.escalationPanelRows &&
+          esc.request.whitelistCandidates &&
+          esc.request.whitelistCandidates.length > 0
+        ) {
+          const candidate = esc.request.whitelistCandidates[0];
+          clearLine(currentY);
+          moveTo(6, currentY);
+          term.cyan(`Whitelist: ${candidate.description}`);
           currentY++;
           rowsUsed++;
         }

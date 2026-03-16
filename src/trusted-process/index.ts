@@ -21,6 +21,12 @@ import { extractMcpErrorMessage } from './mcp-error-utils.js';
 import { extractTextFromContent, buildAuditEntry } from './mcp-proxy-server.js';
 import { type ServerContextMap, updateServerContext, formatServerContext } from './server-context.js';
 import { buildTrustedServerSet } from '../memory/memory-annotations.js';
+import {
+  createApprovalWhitelist,
+  extractWhitelistCandidates,
+  type ApprovalWhitelist,
+  type WhitelistCandidateIpc,
+} from './approval-whitelist.js';
 
 /**
  * Detects Docker-style `-e VAR_NAME` args (no `=`) where the env var is unset.
@@ -39,11 +45,20 @@ function getMissingEnvVars(args: string[]): string[] {
   return missing;
 }
 
+/** Result from an escalation callback, optionally including whitelist selection. */
+export interface EscalationResult {
+  readonly decision: 'approved' | 'denied';
+  /** Index into whitelistCandidates to whitelist. Absent = no whitelisting. */
+  readonly whitelistSelection?: number;
+}
+
 export type EscalationPromptFn = (
   request: ToolCallRequest,
   reason: string,
   context?: Readonly<Record<string, string>>,
-) => Promise<'approved' | 'denied'>;
+  /** Whitelist candidates for display to the user. */
+  whitelistCandidates?: readonly WhitelistCandidateIpc[],
+) => Promise<EscalationResult>;
 
 export interface TrustedProcessOptions {
   onEscalation?: EscalationPromptFn;
@@ -56,6 +71,7 @@ export class TrustedProcess {
   private auditLog: AuditLog;
   private escalation: EscalationHandler;
   private onEscalation?: EscalationPromptFn;
+  private readonly whitelist: ApprovalWhitelist;
   private autoApproveModel: LanguageModelV3 | null = null;
   private lastUserMessage: string | null = null;
   private serverContextMap: ServerContextMap = new Map();
@@ -92,6 +108,7 @@ export class TrustedProcess {
     });
     this.escalation = new EscalationHandler();
     this.onEscalation = options?.onEscalation;
+    this.whitelist = createApprovalWhitelist();
   }
 
   /**
@@ -192,45 +209,92 @@ export class TrustedProcess {
 
     let escalationResult: 'approved' | 'denied' | undefined;
     let autoApproved = false;
+    let whitelistApproved = false;
+    let whitelistPatternId: string | undefined;
     let resultContent: unknown;
     let resultStatus: 'success' | 'denied' | 'error';
     let resultError: string | undefined;
 
     try {
-      // Step 2: Handle escalation -- try auto-approve first, then human
+      // Step 2: Handle escalation -- whitelist check, auto-approve, then human
       if (evaluation.decision === 'escalate') {
-        // Try auto-approve before prompting the human
-        if (this.autoApproveModel && this.lastUserMessage) {
-          const autoResult = await autoApprove(
-            {
-              userMessage: this.lastUserMessage,
-              toolName: `${request.serverName}/${request.toolName}`,
-              escalationReason: evaluation.reason,
-            },
-            this.autoApproveModel,
-          );
-
-          if (autoResult.decision === 'approve') {
-            autoApproved = true;
+        // Whitelist check: see if a previously approved pattern matches
+        if (annotation) {
+          const whitelistMatch = this.whitelist.match(request.serverName, request.toolName, argsForPolicy, annotation);
+          if (whitelistMatch.matched) {
+            whitelistApproved = true;
+            whitelistPatternId = whitelistMatch.patternId;
             escalationResult = 'approved';
             policyDecision.status = 'allow';
-            policyDecision.reason = `Auto-approved: ${autoResult.reasoning}`;
+            policyDecision.reason = `Whitelist-approved: ${whitelistMatch.pattern.description}`;
           }
         }
 
-        // Fall through to human escalation if not auto-approved
-        if (!autoApproved) {
-          const escalationContext = formatServerContext(this.serverContextMap, transportRequest.serverName);
-          escalationResult = this.onEscalation
-            ? await this.onEscalation(transportRequest, evaluation.reason, escalationContext)
-            : await this.escalation.prompt(transportRequest, evaluation.reason, escalationContext);
+        if (!whitelistApproved) {
+          // Try auto-approve before prompting the human
+          if (this.autoApproveModel && this.lastUserMessage) {
+            const autoResult = await autoApprove(
+              {
+                userMessage: this.lastUserMessage,
+                toolName: `${request.serverName}/${request.toolName}`,
+                escalationReason: evaluation.reason,
+              },
+              this.autoApproveModel,
+            );
 
-          if (escalationResult === 'approved') {
-            policyDecision.status = 'allow';
-            policyDecision.reason = 'Approved by human during escalation';
-          } else {
-            policyDecision.status = 'deny';
-            policyDecision.reason = 'Denied by human during escalation';
+            if (autoResult.decision === 'approve') {
+              autoApproved = true;
+              escalationResult = 'approved';
+              policyDecision.status = 'allow';
+              policyDecision.reason = `Auto-approved: ${autoResult.reasoning}`;
+            }
+          }
+
+          // Fall through to human escalation if not auto-approved
+          if (!autoApproved) {
+            // Extract whitelist candidates for display
+            let candidateIpcs: readonly WhitelistCandidateIpc[] | undefined;
+            let candidatePatterns: Array<Omit<import('./approval-whitelist.js').WhitelistPattern, 'id'>> = [];
+            const escalationId = `inprocess-${Date.now()}`;
+
+            if (annotation) {
+              const candidates = extractWhitelistCandidates(
+                request.serverName,
+                request.toolName,
+                argsForPolicy,
+                annotation,
+                evaluation.escalatedRoles,
+                escalationId,
+                evaluation.reason,
+              );
+              candidatePatterns = candidates.patterns;
+              candidateIpcs = candidates.ipcs.length > 0 ? candidates.ipcs : undefined;
+            }
+
+            const escalationContext = formatServerContext(this.serverContextMap, transportRequest.serverName);
+            const escalationResponse: EscalationResult = this.onEscalation
+              ? await this.onEscalation(transportRequest, evaluation.reason, escalationContext, candidateIpcs)
+              : { decision: await this.escalation.prompt(transportRequest, evaluation.reason, escalationContext) };
+
+            escalationResult = escalationResponse.decision;
+
+            if (escalationResponse.decision === 'approved') {
+              policyDecision.status = 'allow';
+              policyDecision.reason = 'Approved by human during escalation';
+
+              // Handle whitelist selection
+              if (
+                escalationResponse.whitelistSelection !== undefined &&
+                escalationResponse.whitelistSelection >= 0 &&
+                escalationResponse.whitelistSelection < candidatePatterns.length
+              ) {
+                const selectedPattern = candidatePatterns[escalationResponse.whitelistSelection];
+                this.whitelist.add(selectedPattern);
+              }
+            } else {
+              policyDecision.status = 'deny';
+              policyDecision.reason = 'Denied by human during escalation';
+            }
           }
         }
 
@@ -293,7 +357,12 @@ export class TrustedProcess {
           error: resultError,
         },
         durationMs,
-        { escalationResult, autoApproved: autoApproved || undefined },
+        {
+          escalationResult,
+          autoApproved: autoApproved || undefined,
+          whitelistApproved: whitelistApproved || undefined,
+          whitelistPatternId,
+        },
       ),
     );
 

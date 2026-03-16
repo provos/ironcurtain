@@ -72,7 +72,7 @@ describe('Integration: TrustedProcess with filesystem MCP server', () => {
 
   const mockEscalation: EscalationPromptFn = async (request) => {
     lastEscalationRequest = request;
-    return escalationResponse;
+    return { decision: escalationResponse };
   };
 
   const testGeneratedDir = `/tmp/ironcurtain-test-generated-${process.pid}`;

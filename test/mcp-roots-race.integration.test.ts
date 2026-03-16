@@ -10,6 +10,7 @@ import { AuditLog } from '../src/trusted-process/audit-log.js';
 import { CallCircuitBreaker } from '../src/trusted-process/call-circuit-breaker.js';
 import { toMcpRoots } from '../src/trusted-process/policy-roots.js';
 import { atomicWriteJsonSync } from '../src/escalation/escalation-watcher.js';
+import { createApprovalWhitelist } from '../src/trusted-process/approval-whitelist.js';
 import { permissiveJsonSchemaValidator } from '../src/trusted-process/permissive-output-validator.js';
 import { VERSION } from '../src/version.js';
 import {
@@ -216,6 +217,8 @@ describe('MCP roots-expansion race -- handleCallTool retry', () => {
       escalationDir: ESCALATION_DIR,
       autoApproveModel: null,
       serverContextMap: new Map(),
+      whitelist: createApprovalWhitelist(),
+      pendingWhitelistCandidates: new Map(),
     };
   }
 

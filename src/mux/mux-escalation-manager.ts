@@ -43,10 +43,10 @@ export interface MuxEscalationManager {
   removeSession(sessionId: string): void;
 
   /** Resolves a pending escalation by display number. */
-  resolve(displayNumber: number, decision: 'approved' | 'denied'): string;
+  resolve(displayNumber: number, decision: 'approved' | 'denied', whitelist?: boolean): string;
 
   /** Resolves all pending escalations. */
-  resolveAll(decision: 'approved' | 'denied'): string;
+  resolveAll(decision: 'approved' | 'denied', whitelist?: boolean): string;
 
   /** Starts polling for externally-spawned sessions. */
   startRegistryPolling(): void;
@@ -134,7 +134,7 @@ export function createMuxEscalationManager(): MuxEscalationManager {
       notifyChange();
     },
 
-    resolve(displayNumber: number, decision: 'approved' | 'denied'): string {
+    resolve(displayNumber: number, decision: 'approved' | 'denied', whitelist?: boolean): string {
       const escalation = state.pendingEscalations.get(displayNumber);
       if (!escalation) {
         return `No pending escalation #${displayNumber}`;
@@ -146,7 +146,8 @@ export function createMuxEscalationManager(): MuxEscalationManager {
       }
 
       try {
-        const accepted = session.watcher.resolve(escalation.request.escalationId, decision);
+        const options = whitelist ? { whitelistSelection: 0 } : undefined;
+        const accepted = session.watcher.resolve(escalation.request.escalationId, decision, options);
         state = resolveEscalation(state, displayNumber, decision);
         notifyChange();
 
@@ -155,13 +156,14 @@ export function createMuxEscalationManager(): MuxEscalationManager {
         }
 
         const label = decision === 'approved' ? 'APPROVED' : 'DENIED';
-        return `Escalation #${displayNumber} ${label}`;
+        const whitelistSuffix = whitelist ? ' (whitelisted)' : '';
+        return `Escalation #${displayNumber} ${label}${whitelistSuffix}`;
       } catch (err) {
         return `Error: ${err instanceof Error ? err.message : String(err)}`;
       }
     },
 
-    resolveAll(decision: 'approved' | 'denied'): string {
+    resolveAll(decision: 'approved' | 'denied', whitelist?: boolean): string {
       if (state.pendingEscalations.size === 0) {
         return 'No pending escalations';
       }
@@ -170,7 +172,7 @@ export function createMuxEscalationManager(): MuxEscalationManager {
       const nums = [...state.pendingEscalations.keys()].sort((a, b) => a - b);
 
       for (const num of nums) {
-        messages.push(this.resolve(num, decision));
+        messages.push(this.resolve(num, decision, whitelist));
       }
 
       return messages.join('\n');

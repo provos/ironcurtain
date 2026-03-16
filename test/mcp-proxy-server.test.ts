@@ -13,6 +13,7 @@ import {
   type ClientState,
 } from '../src/trusted-process/mcp-proxy-server.js';
 import { checkSandboxAvailability, type ResolvedSandboxConfig } from '../src/trusted-process/sandbox-integration.js';
+import { createApprovalWhitelist } from '../src/trusted-process/approval-whitelist.js';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 
 // ── Mock modules ───────────────────────────────────────────────────────
@@ -550,6 +551,8 @@ describe('handleCallTool', () => {
       escalationDir: undefined,
       autoApproveModel: null,
       serverContextMap: new Map(),
+      whitelist: createApprovalWhitelist(),
+      pendingWhitelistCandidates: new Map(),
       ...overrides,
     };
   }

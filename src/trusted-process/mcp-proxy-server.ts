@@ -87,6 +87,14 @@ export interface ProxiedTool {
   inputSchema: Record<string, unknown>;
 }
 
+import {
+  createApprovalWhitelist,
+  extractWhitelistCandidates,
+  type ApprovalWhitelist,
+  type WhitelistCandidateIpc,
+  type WhitelistPattern,
+} from './approval-whitelist.js';
+
 interface EscalationFileRequest {
   escalationId: string;
   serverName: string;
@@ -94,6 +102,8 @@ interface EscalationFileRequest {
   arguments: Record<string, unknown>;
   reason: string;
   context?: Record<string, string>;
+  /** Whitelist candidates extracted from this escalation's annotation. */
+  whitelistCandidates?: WhitelistCandidateIpc[];
 }
 
 export interface ClientState {
@@ -279,14 +289,30 @@ function cleanupEscalationFiles(requestPath: string, responsePath: string): void
   tryUnlink(responsePath);
 }
 
+/** Parsed escalation response with optional whitelist selection. */
+interface EscalationResponseData {
+  readonly decision: 'approved' | 'denied';
+  readonly whitelistSelection?: number;
+}
+
 /**
  * Reads and parses the escalation response file if it exists.
- * Returns the decision, or undefined if the file is not present.
+ * Returns the response data, or undefined if the file is not present.
  */
-function readEscalationResponse(responsePath: string): 'approved' | 'denied' | undefined {
+function readEscalationResponse(responsePath: string): EscalationResponseData | undefined {
   if (!existsSync(responsePath)) return undefined;
-  const response = JSON.parse(readFileSync(responsePath, 'utf-8')) as { decision: 'approved' | 'denied' };
-  return response.decision;
+  const raw = JSON.parse(readFileSync(responsePath, 'utf-8')) as Record<string, unknown>;
+
+  // Validate whitelistSelection: must be an integer if present, discard otherwise
+  let whitelistSelection: number | undefined;
+  if (typeof raw.whitelistSelection === 'number' && Number.isInteger(raw.whitelistSelection)) {
+    whitelistSelection = raw.whitelistSelection;
+  }
+
+  return {
+    decision: raw.decision as 'approved' | 'denied',
+    ...(whitelistSelection !== undefined ? { whitelistSelection } : {}),
+  };
 }
 
 /**
@@ -301,7 +327,7 @@ function readEscalationResponse(responsePath: string): 'approved' | 'denied' | u
 async function waitForEscalationDecision(
   escalationDir: string,
   request: EscalationFileRequest,
-): Promise<'approved' | 'denied'> {
+): Promise<EscalationResponseData> {
   const requestPath = resolve(escalationDir, `request-${request.escalationId}.json`);
   const responsePath = resolve(escalationDir, `response-${request.escalationId}.json`);
 
@@ -310,18 +336,18 @@ async function waitForEscalationDecision(
   const deadline = Date.now() + getEscalationTimeoutMs();
 
   while (Date.now() < deadline) {
-    const decision = readEscalationResponse(responsePath);
-    if (decision) {
+    const response = readEscalationResponse(responsePath);
+    if (response) {
       cleanupEscalationFiles(requestPath, responsePath);
-      return decision;
+      return response;
     }
     await new Promise((r) => setTimeout(r, ESCALATION_POLL_INTERVAL_MS));
   }
 
   // Final check -- response may have arrived between last poll and deadline
-  const lateDecision = readEscalationResponse(responsePath);
+  const lateResponse = readEscalationResponse(responsePath);
   cleanupEscalationFiles(requestPath, responsePath);
-  return lateDecision ?? 'denied';
+  return lateResponse ?? { decision: 'denied' };
 }
 
 /**
@@ -403,6 +429,14 @@ export interface CallToolDeps {
   escalationDir: string | undefined;
   autoApproveModel: LanguageModelV3 | null;
   serverContextMap: ServerContextMap;
+  /** Ephemeral approval whitelist for this session. */
+  whitelist: ApprovalWhitelist;
+  /**
+   * Pending whitelist candidates keyed by escalation ID.
+   * Populated when a request file is written with candidates;
+   * consumed when the response comes back with a selection.
+   */
+  pendingWhitelistCandidates: Map<string, Array<Omit<WhitelistPattern, 'id'>>>;
 }
 
 // ── Extracted functions ────────────────────────────────────────────────
@@ -572,6 +606,8 @@ export function buildAuditEntry(
     escalationResult?: 'approved' | 'denied';
     sandboxed?: boolean;
     autoApproved?: boolean;
+    whitelistApproved?: boolean;
+    whitelistPatternId?: string;
   },
 ): AuditEntry {
   return {
@@ -586,6 +622,8 @@ export function buildAuditEntry(
     durationMs,
     sandboxed: options.sandboxed || undefined,
     autoApproved: options.autoApproved || undefined,
+    whitelistApproved: options.whitelistApproved || undefined,
+    whitelistPatternId: options.whitelistPatternId,
   };
 }
 
@@ -700,6 +738,8 @@ export async function handleCallTool(
 
   let escalationResult: 'approved' | 'denied' | undefined;
   let autoApproved = false;
+  let whitelistApproved = false;
+  let whitelistPatternId: string | undefined;
   let rootsExpanded = false;
 
   const serverSandboxConfig = deps.resolvedSandboxConfigs.get(toolInfo.serverName);
@@ -714,72 +754,127 @@ export async function handleCallTool(
       escalationResult: overrideEscalation ?? escalationResult,
       sandboxed: serverIsSandboxed,
       autoApproved,
+      whitelistApproved: whitelistApproved || undefined,
+      whitelistPatternId,
     });
     deps.auditLog.log(entry);
   }
 
   if (evaluation.decision === 'escalate') {
-    if (!deps.escalationDir) {
-      logAudit({ status: 'denied', error: evaluation.reason }, 0, 'denied');
-      return {
-        content: [
-          {
-            type: 'text',
-            text: `ESCALATION REQUIRED: ${evaluation.reason}. Action denied (no escalation handler).`,
-          },
-        ],
-        isError: true,
-      };
-    }
-
-    // Try auto-approve before falling through to human escalation
-    if (deps.autoApproveModel) {
-      const userContext = readUserContext(deps.escalationDir);
-      if (userContext) {
-        const isPtySession = process.env.IRONCURTAIN_PTY_SESSION === '1';
-        if (isUserContextTrusted(userContext, isPtySession)) {
-          const autoResult = await autoApprove(
-            {
-              userMessage: userContext.userMessage,
-              toolName: `${toolInfo.serverName}/${toolInfo.name}`,
-              escalationReason: evaluation.reason,
-              arguments: extractArgsForAutoApprove(argsForPolicy, annotation),
-            },
-            deps.autoApproveModel,
-          );
-
-          if (autoResult.decision === 'approve') {
-            autoApproved = true;
-            escalationResult = 'approved';
-            policyDecision.status = 'allow';
-            policyDecision.reason = `Auto-approved: ${autoResult.reasoning}`;
-          }
-        }
+    // Whitelist check: see if a previously approved pattern matches
+    if (annotation) {
+      const whitelistMatch = deps.whitelist.match(toolInfo.serverName, toolInfo.name, argsForPolicy, annotation);
+      if (whitelistMatch.matched) {
+        whitelistApproved = true;
+        whitelistPatternId = whitelistMatch.patternId;
+        escalationResult = 'approved';
+        policyDecision.status = 'allow';
+        policyDecision.reason = `Whitelist-approved: ${whitelistMatch.pattern.description}`;
       }
     }
 
-    if (!autoApproved) {
-      const escalationId = uuidv4();
-      const decision = await waitForEscalationDecision(deps.escalationDir, {
-        escalationId,
-        serverName: request.serverName,
-        toolName: request.toolName,
-        arguments: argsForTransport,
-        reason: evaluation.reason,
-        context: formatServerContext(deps.serverContextMap, toolInfo.serverName),
-      });
-
-      if (decision === 'denied') {
+    if (!whitelistApproved) {
+      if (!deps.escalationDir) {
         logAudit({ status: 'denied', error: evaluation.reason }, 0, 'denied');
         return {
-          content: [{ type: 'text', text: `ESCALATION DENIED: ${evaluation.reason}` }],
+          content: [
+            {
+              type: 'text',
+              text: `ESCALATION REQUIRED: ${evaluation.reason}. Action denied (no escalation handler).`,
+            },
+          ],
           isError: true,
         };
       }
 
-      escalationResult = 'approved';
-      policyDecision.status = 'allow';
-      policyDecision.reason = 'Approved by human during escalation';
+      const escalationId = uuidv4();
+
+      // Try auto-approve before falling through to human escalation
+      if (deps.autoApproveModel) {
+        const userContext = readUserContext(deps.escalationDir);
+        if (userContext) {
+          const isPtySession = process.env.IRONCURTAIN_PTY_SESSION === '1';
+          if (isUserContextTrusted(userContext, isPtySession)) {
+            const autoResult = await autoApprove(
+              {
+                userMessage: userContext.userMessage,
+                toolName: `${toolInfo.serverName}/${toolInfo.name}`,
+                escalationReason: evaluation.reason,
+                arguments: extractArgsForAutoApprove(argsForPolicy, annotation),
+              },
+              deps.autoApproveModel,
+            );
+
+            if (autoResult.decision === 'approve') {
+              autoApproved = true;
+              escalationResult = 'approved';
+              policyDecision.status = 'allow';
+              policyDecision.reason = `Auto-approved: ${autoResult.reasoning}`;
+            }
+          }
+        }
+      }
+
+      if (!autoApproved) {
+        // Extract whitelist candidates just before human escalation (avoids
+        // wasted work when auto-approve succeeds).
+        // Annotation is guaranteed non-null here (missing-annotation returned early above).
+        const { patterns: candidatePatterns, ipcs: candidateIpcs } = annotation
+          ? extractWhitelistCandidates(
+              toolInfo.serverName,
+              toolInfo.name,
+              argsForPolicy,
+              annotation,
+              evaluation.escalatedRoles,
+              escalationId,
+              evaluation.reason,
+            )
+          : { patterns: [] as Array<Omit<WhitelistPattern, 'id'>>, ipcs: [] as WhitelistCandidateIpc[] };
+        if (candidatePatterns.length > 0) {
+          // Store full patterns in proxy memory, keyed by escalation ID
+          deps.pendingWhitelistCandidates.set(escalationId, candidatePatterns);
+        }
+
+        try {
+          const response = await waitForEscalationDecision(deps.escalationDir, {
+            escalationId,
+            serverName: request.serverName,
+            toolName: request.toolName,
+            arguments: argsForTransport,
+            reason: evaluation.reason,
+            context: formatServerContext(deps.serverContextMap, toolInfo.serverName),
+            whitelistCandidates: candidateIpcs.length > 0 ? candidateIpcs : undefined,
+          });
+
+          if (response.decision === 'denied') {
+            logAudit({ status: 'denied', error: evaluation.reason }, 0, 'denied');
+            return {
+              content: [{ type: 'text', text: `ESCALATION DENIED: ${evaluation.reason}` }],
+              isError: true,
+            };
+          }
+
+          escalationResult = 'approved';
+          policyDecision.status = 'allow';
+          policyDecision.reason = 'Approved by human during escalation';
+
+          // Handle whitelist selection from the response
+          if (response.whitelistSelection !== undefined) {
+            const storedPatterns = deps.pendingWhitelistCandidates.get(escalationId);
+            if (
+              storedPatterns &&
+              response.whitelistSelection >= 0 &&
+              response.whitelistSelection < storedPatterns.length
+            ) {
+              const selectedPattern = storedPatterns[response.whitelistSelection];
+              deps.whitelist.add(selectedPattern);
+            }
+          }
+        } finally {
+          // Issue 12: ensure cleanup even if waitForEscalationDecision throws
+          deps.pendingWhitelistCandidates.delete(escalationId);
+        }
+      }
     }
 
     // Expand roots for approved path arguments only (skip URLs, opaques)
@@ -1074,6 +1169,8 @@ async function main(): Promise<void> {
     escalationDir,
     autoApproveModel,
     serverContextMap,
+    whitelist: createApprovalWhitelist(),
+    pendingWhitelistCandidates: new Map(),
   };
 
   server.setRequestHandler(CallToolRequestSchema, async (req) => {

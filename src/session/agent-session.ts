@@ -5,8 +5,10 @@
  * via createSession() in index.ts.
  */
 
-import { readFileSync, writeFileSync, readdirSync, existsSync } from 'node:fs';
+import { writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { createEscalationWatcher, atomicWriteJsonSync } from '../escalation/escalation-watcher.js';
+import type { EscalationWatcher } from '../escalation/escalation-watcher.js';
 import {
   generateText,
   stepCountIs,
@@ -45,7 +47,6 @@ import type {
 } from './types.js';
 
 const MAX_AGENT_STEPS = 100;
-const ESCALATION_POLL_INTERVAL_MS = 300;
 
 /** Default sandbox factory: creates a real UTCP Code Mode sandbox. */
 async function defaultSandboxFactory(config: IronCurtainConfig): Promise<Sandbox> {
@@ -83,14 +84,8 @@ export class AgentSession implements Session {
   /** Language model, optionally wrapped with logging middleware. */
   private model: LanguageModel | null = null;
 
-  /** Currently pending escalation, if any. */
-  private pendingEscalation: EscalationRequest | undefined;
-
-  /** Interval handle for polling the escalation directory. */
-  private escalationPollInterval: ReturnType<typeof setInterval> | null = null;
-
-  /** Escalation IDs already detected, to prevent re-detection after resolution. */
-  private seenEscalationIds = new Set<string>();
+  /** Shared escalation watcher (replaces inline polling). */
+  private escalationWatcher: EscalationWatcher | null = null;
 
   /** Step-level loop detector for the agent. */
   private loopDetector = new StepLoopDetector();
@@ -270,7 +265,7 @@ export class AgentSession implements Session {
   }
 
   getPendingEscalation(): EscalationRequest | undefined {
-    return this.pendingEscalation;
+    return this.escalationWatcher?.getPending();
   }
 
   getBudgetStatus(): BudgetStatus {
@@ -282,15 +277,15 @@ export class AgentSession implements Session {
   }
 
   // eslint-disable-next-line @typescript-eslint/require-await -- must be async to satisfy Session interface
-  async resolveEscalation(escalationId: string, decision: 'approved' | 'denied'): Promise<void> {
-    if (!this.pendingEscalation || this.pendingEscalation.escalationId !== escalationId) {
+  async resolveEscalation(
+    escalationId: string,
+    decision: 'approved' | 'denied',
+    options?: { whitelistSelection?: number },
+  ): Promise<void> {
+    if (!this.escalationWatcher) {
       throw new Error(`No pending escalation with ID: ${escalationId}`);
     }
-
-    const responsePath = resolve(this.escalationDir, `response-${escalationId}.json`);
-    writeFileSync(responsePath, JSON.stringify({ decision }));
-    this.pendingEscalation = undefined;
-    this.onEscalationResolved?.(escalationId, decision);
+    this.escalationWatcher.resolve(escalationId, decision, options);
   }
 
   async close(): Promise<void> {
@@ -455,57 +450,15 @@ export class AgentSession implements Session {
   }
 
   /**
-   * Starts polling the escalation directory for new request files.
-   * When a request is detected, sets pendingEscalation and fires
-   * the onEscalation callback.
+   * Starts the shared escalation watcher for this session's escalation directory.
    */
   private startEscalationWatcher(): void {
-    this.escalationPollInterval = setInterval(() => {
-      this.pollEscalationDirectory();
-    }, ESCALATION_POLL_INTERVAL_MS);
-    // Don't keep the process alive just for escalation polling.
-    // The session owner is responsible for the process lifecycle.
-    this.escalationPollInterval.unref();
-  }
-
-  private pollEscalationDirectory(): void {
-    if (this.pendingEscalation) {
-      this.checkEscalationExpiry();
-      return;
-    }
-
-    try {
-      const files = readdirSync(this.escalationDir);
-      const requestFile = files.find(
-        (f) =>
-          f.startsWith('request-') && f.endsWith('.json') && !this.seenEscalationIds.has(this.extractEscalationId(f)),
-      );
-      if (!requestFile) return;
-
-      const requestPath = resolve(this.escalationDir, requestFile);
-      const request = JSON.parse(readFileSync(requestPath, 'utf-8')) as EscalationRequest;
-      this.seenEscalationIds.add(request.escalationId);
-      this.pendingEscalation = request;
-      this.onEscalation?.(request);
-    } catch {
-      // Directory may not exist yet or be empty -- ignore
-    }
-  }
-
-  /**
-   * Detects proxy-side escalation timeout: both request and response files
-   * are gone, meaning the proxy cleaned up after its deadline expired.
-   * When detected, clears the pending escalation and notifies the transport.
-   */
-  private checkEscalationExpiry(): void {
-    if (!this.pendingEscalation) return;
-    const escalationId = this.pendingEscalation.escalationId;
-    const requestExists = existsSync(resolve(this.escalationDir, `request-${escalationId}.json`));
-    const responseExists = existsSync(resolve(this.escalationDir, `response-${escalationId}.json`));
-    if (!requestExists && !responseExists) {
-      this.pendingEscalation = undefined;
-      this.onEscalationExpired?.();
-    }
+    this.escalationWatcher = createEscalationWatcher(this.escalationDir, {
+      onEscalation: (request) => this.onEscalation?.(request),
+      onEscalationExpired: () => this.onEscalationExpired?.(),
+      onEscalationResolved: (id, decision) => this.onEscalationResolved?.(id, decision),
+    });
+    this.escalationWatcher.start();
   }
 
   /**
@@ -516,21 +469,14 @@ export class AgentSession implements Session {
   private writeUserContext(userMessage: string): void {
     try {
       const contextPath = resolve(this.escalationDir, 'user-context.json');
-      writeFileSync(contextPath, JSON.stringify({ userMessage }));
+      atomicWriteJsonSync(contextPath, { userMessage });
     } catch {
       // Escalation directory may not exist yet -- ignore
     }
   }
 
-  /** Extracts the escalation ID from a request filename like "request-abc123.json". */
-  private extractEscalationId(filename: string): string {
-    return filename.replace(/^request-/, '').replace(/\.json$/, '');
-  }
-
   private stopEscalationWatcher(): void {
-    if (this.escalationPollInterval) {
-      clearInterval(this.escalationPollInterval);
-      this.escalationPollInterval = null;
-    }
+    this.escalationWatcher?.stop();
+    this.escalationWatcher = null;
   }
 }
