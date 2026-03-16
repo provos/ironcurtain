@@ -771,7 +771,7 @@ gcloud services enable gmail.googleapis.com calendar-json.googleapis.com drive.g
    - **App name**: e.g., "IronCurtain"
    - **User support email**: your email
    - **Developer contact email**: your email
-5. Add the scopes your MCP server needs (e.g., `gmail.readonly`, `calendar.readonly`, `drive.readonly`)
+5. Add the scopes you need. Read-only scopes (`gmail.readonly`, `calendar.readonly`, `drive.readonly`) are requested by default. For write access, also add `gmail.send`, `calendar.events`, and/or `drive.file` — these are optional and can be added later via `ironcurtain auth google --scopes gmail.send,calendar.events`
 6. Under **Audience** (or **Test users**), add your Google account email as a test user
 
 > **Note**: For "External" apps in "Testing" mode, only explicitly-listed test users can authorize, and refresh tokens expire after 7 days. For personal use this is acceptable -- just re-run `ironcurtain auth google` weekly. For organization use, publish to "Production" and complete Google's verification process to remove these limitations.

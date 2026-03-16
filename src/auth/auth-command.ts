@@ -16,6 +16,7 @@
 import { copyFileSync, existsSync, chmodSync, mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
+import * as p from '@clack/prompts';
 import { printHelp, type CommandSpec } from '../cli-help.js';
 import { getOAuthDir, getOAuthTokenPath } from '../config/paths.js';
 import type { OAuthProviderConfig, StoredOAuthToken } from './oauth-provider.js';
@@ -83,11 +84,17 @@ const GOOGLE_SETUP_GUIDE = `
     Navigate to APIs & Services > OAuth consent screen
     Set User type to "External" (or "Internal" for Google Workspace orgs)
     Fill in App name, support email, and developer contact email.
-    Add scopes: gmail.readonly, calendar.readonly, drive.readonly
+    Add scopes based on what you need:
+      Read-only (default):  gmail.readonly, calendar.readonly, drive.readonly
+      Write access:         gmail.send, calendar.events, drive.file
+    You choose which scopes to enable — write scopes are optional.
     Under Test users, add your Google account email.
 
     Note: In "Testing" mode, refresh tokens expire after 7 days.
     You will need to re-authorize weekly.
+
+    To add write scopes after initial authorization:
+      ironcurtain auth google --scopes gmail.send,calendar.events
 
   Step 4: Create OAuth Client Credentials
     Navigate to APIs & Services > Credentials
@@ -291,6 +298,50 @@ function parseScopesArg(args: string[]): readonly string[] | undefined {
   return undefined;
 }
 
+/**
+ * Checks whether any of the selected scopes are non-default for this provider.
+ * Used to decide whether to show a consent-screen warning.
+ */
+function hasNonDefaultScopes(provider: OAuthProviderConfig, scopes: readonly string[]): boolean {
+  const defaults = new Set(provider.defaultScopes);
+  return scopes.some((s) => !defaults.has(s));
+}
+
+/**
+ * Shows a warning note about non-default scopes requiring Google Cloud
+ * consent screen configuration, then prompts for confirmation.
+ * Returns false if the user cancels.
+ */
+async function confirmNonDefaultScopes(provider: OAuthProviderConfig, scopes: readonly string[]): Promise<boolean> {
+  if (!hasNonDefaultScopes(provider, scopes)) {
+    return true;
+  }
+
+  const defaults = new Set(provider.defaultScopes);
+  const nonDefault = scopes.filter((s) => !defaults.has(s));
+
+  p.note(
+    'The following scopes require write access:\n\n' +
+      nonDefault.map((s) => `  ${s}`).join('\n') +
+      '\n\n' +
+      'Make sure these scopes are enabled in your Google Cloud\n' +
+      "project's OAuth consent screen before proceeding.\n" +
+      'See: APIs & Services > OAuth consent screen > Scopes',
+    'Non-default scopes selected',
+  );
+
+  const confirmed = await p.confirm({
+    message: 'Continue with authorization?',
+    initialValue: true,
+  });
+
+  if (p.isCancel(confirmed) || !confirmed) {
+    return false;
+  }
+
+  return true;
+}
+
 async function authorize(providerId: string, extraArgs: string[]): Promise<void> {
   const provider = resolveProviderOrExit(providerId);
 
@@ -308,11 +359,16 @@ async function authorize(providerId: string, extraArgs: string[]): Promise<void>
 
   // Determine effective scopes (merge default + existing + requested for incremental consent)
   let effectiveScopes: readonly string[] | undefined;
+  let needsConfirmation = false;
+
   if (requestedScopes) {
+    // --scopes flag: resolve short names and merge with existing
+    const resolved = provider.resolveShortScopes ? provider.resolveShortScopes(requestedScopes) : requestedScopes;
+
     const existingToken = loadOAuthToken(provider.id);
     const existingScopes = existingToken?.scopes ?? [];
     // Always include provider defaults as baseline so --scopes only adds, never drops
-    const merged = [...new Set([...provider.defaultScopes, ...existingScopes, ...requestedScopes])];
+    const merged = [...new Set([...provider.defaultScopes, ...existingScopes, ...resolved])];
     effectiveScopes = merged;
 
     process.stdout.write(`\n  ${provider.displayName} OAuth -- Incremental Consent\n\n`);
@@ -322,17 +378,40 @@ async function authorize(providerId: string, extraArgs: string[]): Promise<void>
         process.stdout.write(`    - ${scope}\n`);
       }
       process.stdout.write('\n  Requesting additional scopes:\n');
-      for (const scope of requestedScopes) {
+      for (const scope of resolved) {
         if (!existingScopes.includes(scope)) {
           process.stdout.write(`    + ${scope}\n`);
         }
       }
       process.stdout.write('\n');
     }
+  } else if (process.stdin.isTTY && provider.scopePicker) {
+    // Interactive TTY: show the scope picker
+    const existingToken = loadOAuthToken(provider.id);
+    const existingScopes = existingToken?.scopes ?? [];
+
+    const selected = await provider.scopePicker(existingScopes);
+    if (p.isCancel(selected)) {
+      p.cancel('Authorization cancelled.');
+      return;
+    }
+
+    effectiveScopes = selected;
+    needsConfirmation = true;
   } else {
+    // Non-interactive: use defaults
     process.stdout.write(`\n  ${provider.displayName} OAuth\n\n`);
     process.stdout.write(`  Using credentials: ${truncate(credentials.clientId, 30)}\n`);
     process.stdout.write(`  Requesting scopes: ${provider.defaultScopes.join(', ')}\n\n`);
+  }
+
+  // Warn about non-default scopes and confirm (for interactive picker only)
+  if (effectiveScopes && needsConfirmation) {
+    const confirmed = await confirmNonDefaultScopes(provider, effectiveScopes);
+    if (!confirmed) {
+      p.cancel('Authorization cancelled.');
+      return;
+    }
   }
 
   process.stdout.write('  Opening browser for authorization...\n');

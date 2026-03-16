@@ -1,4 +1,5 @@
 import type { OAuthProviderConfig } from '../oauth-provider.js';
+import { promptGoogleScopes, resolveGoogleShortScopes } from './google-scopes.js';
 
 export const googleOAuthProvider: OAuthProviderConfig = {
   id: 'google',
@@ -19,4 +20,6 @@ export const googleOAuthProvider: OAuthProviderConfig = {
   clientSecretEnvVar: 'GOOGLE_CLIENT_SECRET',
   credentialsFilename: 'google-credentials.json',
   revocationUrl: 'https://oauth2.googleapis.com/revoke',
+  scopePicker: promptGoogleScopes,
+  resolveShortScopes: resolveGoogleShortScopes,
 };
