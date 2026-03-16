@@ -211,6 +211,8 @@ Both use the same PolicyEngine with compiled artifacts.
 ## Goose Agent Integration -- see `goose-integration.md` topic file
 ## Conditional Argument Roles -- `docs/designs/conditional-argument-roles.md`
 
+## Mux Terminal Multiplexer -- see `mux-architecture.md` topic file
+
 ## Cron Job System (implemented)
 - `src/cron/` module: job-commands.ts, job-store.ts, compile-task-policy.ts, headless-transport.ts
 - `src/daemon/ironcurtain-daemon.ts` -- orchestrates cron scheduling + Signal + sessions
