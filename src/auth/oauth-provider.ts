@@ -13,7 +13,8 @@ import { getOAuthDir } from '../config/paths.js';
 // Types
 // ---------------------------------------------------------------------------
 
-export type OAuthProviderId = 'google' | 'microsoft' | 'github-oauth';
+/** Expand this union as new providers are registered in oauth-registry.ts. */
+export type OAuthProviderId = 'google';
 
 export interface OAuthProviderConfig {
   readonly id: OAuthProviderId;

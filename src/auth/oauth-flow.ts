@@ -8,7 +8,7 @@
 
 import { createHash, randomBytes } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { exec } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { URL } from 'node:url';
 import type { OAuthProviderConfig, OAuthClientCredentials, StoredOAuthToken } from './oauth-provider.js';
 
@@ -64,8 +64,8 @@ function generateState(): string {
 // ---------------------------------------------------------------------------
 
 function openBrowser(url: string): void {
-  const command = process.platform === 'darwin' ? `open "${url}"` : `xdg-open "${url}"`;
-  exec(command, (err) => {
+  const cmd = process.platform === 'darwin' ? 'open' : 'xdg-open';
+  execFile(cmd, [url], (err) => {
     // Best-effort: if browser fails to open, user can copy the URL from terminal
     if (err) {
       console.error(`Could not open browser automatically. Please visit:\n${url}`);
@@ -195,12 +195,24 @@ async function exchangeCodeForTokens(
     throw new OAuthFlowError('Token response missing access_token');
   }
 
-  const expiresAt = data.expires_in ? Date.now() + data.expires_in * 1000 : 0;
+  if (!data.refresh_token) {
+    throw new OAuthFlowError(
+      'Token response missing refresh_token. ' +
+        'This usually means the provider did not issue a refresh token. ' +
+        'For Google, ensure prompt=consent and access_type=offline are set.',
+    );
+  }
+
+  if (!data.expires_in || data.expires_in <= 0) {
+    throw new OAuthFlowError('Token response missing or invalid expires_in');
+  }
+
+  const expiresAt = Date.now() + data.expires_in * 1000;
   const grantedScopes = data.scope ? data.scope.split(' ') : [];
 
   const token: StoredOAuthToken = {
     accessToken: data.access_token,
-    refreshToken: data.refresh_token ?? '',
+    refreshToken: data.refresh_token,
     expiresAt,
     scopes: grantedScopes,
   };

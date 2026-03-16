@@ -13,7 +13,7 @@
  *   ironcurtain auth revoke <provider>         - revoke and delete stored token
  */
 
-import { copyFileSync, existsSync, unlinkSync, chmodSync, mkdirSync } from 'node:fs';
+import { copyFileSync, existsSync, chmodSync, mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { printHelp, type CommandSpec } from '../cli-help.js';
@@ -22,7 +22,7 @@ import type { OAuthProviderConfig, StoredOAuthToken } from './oauth-provider.js'
 import { loadClientCredentials } from './oauth-provider.js';
 import { getAllOAuthProviders, printAvailableProviders, resolveProviderOrExit } from './oauth-registry.js';
 import { runOAuthFlow } from './oauth-flow.js';
-import { loadOAuthToken, saveOAuthToken } from './oauth-token-store.js';
+import { deleteOAuthToken, loadOAuthToken, saveOAuthToken } from './oauth-token-store.js';
 
 // ---------------------------------------------------------------------------
 // Help specs
@@ -102,6 +102,18 @@ const GOOGLE_SETUP_GUIDE = `
   For more details, see: docs/designs/third-party-oauth.md
 `;
 
+/** Provider-specific setup guides, keyed by provider ID. */
+const SETUP_GUIDES: Readonly<Record<string, string>> = {
+  google: GOOGLE_SETUP_GUIDE,
+};
+
+function showSetupGuide(providerId: string): void {
+  const guide = SETUP_GUIDES[providerId];
+  if (guide) {
+    process.stdout.write(guide);
+  }
+}
+
 function truncate(value: string, maxLen: number): string {
   return value.length > maxLen ? value.slice(0, maxLen) + '...' : value;
 }
@@ -129,9 +141,7 @@ function importCredentials(args: string[]): void {
   if (!credentialsPath) {
     process.stdout.write(`Usage: ironcurtain auth import ${providerId} <credentials-file>\n`);
     process.stdout.write('\nProvide the path to the credentials JSON file downloaded from your provider.\n');
-    if (provider.id === 'google') {
-      process.stdout.write(GOOGLE_SETUP_GUIDE);
-    }
+    showSetupGuide(provider.id);
     process.exit(1);
     return;
   }
@@ -214,10 +224,9 @@ async function revokeToken(providerId: string): Promise<void> {
   // Attempt server-side revocation if the provider has a revocation endpoint
   await revokeTokenRemotely(provider, token);
 
-  const tokenPath = getOAuthTokenPath(provider.id);
-  unlinkSync(tokenPath);
+  deleteOAuthToken(provider.id);
   process.stdout.write(`Token revoked for ${provider.displayName}.\n`);
-  process.stdout.write(`Deleted: ${tokenPath}\n`);
+  process.stdout.write(`Deleted: ${getOAuthTokenPath(provider.id)}\n`);
 }
 
 /**
@@ -291,20 +300,19 @@ async function authorize(providerId: string, extraArgs: string[]): Promise<void>
       `No credentials configured for ${provider.displayName}.\n` +
         `Run 'ironcurtain auth import ${provider.id} <credentials-file>' first.\n`,
     );
-    if (provider.id === 'google') {
-      process.stdout.write(GOOGLE_SETUP_GUIDE);
-    }
+    showSetupGuide(provider.id);
     process.exit(1);
   }
 
   const requestedScopes = parseScopesArg(extraArgs);
 
-  // Determine effective scopes (merge existing + requested for incremental consent)
+  // Determine effective scopes (merge default + existing + requested for incremental consent)
   let effectiveScopes: readonly string[] | undefined;
   if (requestedScopes) {
     const existingToken = loadOAuthToken(provider.id);
     const existingScopes = existingToken?.scopes ?? [];
-    const merged = [...new Set([...existingScopes, ...requestedScopes])];
+    // Always include provider defaults as baseline so --scopes only adds, never drops
+    const merged = [...new Set([...provider.defaultScopes, ...existingScopes, ...requestedScopes])];
     effectiveScopes = merged;
 
     process.stdout.write(`\n  ${provider.displayName} OAuth -- Incremental Consent\n\n`);

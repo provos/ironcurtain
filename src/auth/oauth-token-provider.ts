@@ -82,7 +82,14 @@ async function refreshAccessToken(
     );
   }
 
-  const expiresAt = data.expires_in ? Date.now() + data.expires_in * 1000 : 0;
+  if (!data.expires_in || data.expires_in <= 0) {
+    throw new OAuthTokenExpiredError(
+      provider.id,
+      `Token refresh response missing expires_in for "${provider.id}". Run 'ironcurtain auth ${provider.id}' to re-authorize.`,
+    );
+  }
+
+  const expiresAt = Date.now() + data.expires_in * 1000;
 
   return {
     accessToken: data.access_token,
