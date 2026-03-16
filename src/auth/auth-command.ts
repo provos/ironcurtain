@@ -1,0 +1,127 @@
+/**
+ * Handles `ironcurtain auth [provider] [--scopes ...] [--revoke]`.
+ *
+ * Subcommands:
+ *   ironcurtain auth              - show status of all providers
+ *   ironcurtain auth status       - same as no args
+ *   ironcurtain auth <provider>   - run OAuth flow for provider
+ *   ironcurtain auth revoke <id>  - delete stored token for provider
+ */
+
+import { existsSync, unlinkSync } from 'node:fs';
+import { getOAuthTokenPath } from '../config/paths.js';
+import { loadClientCredentials } from './oauth-provider.js';
+import type { OAuthProviderId } from './oauth-provider.js';
+import { getOAuthProvider, getAllOAuthProviders } from './oauth-registry.js';
+
+const VALID_PROVIDER_IDS = new Set<string>(['google', 'microsoft', 'github-oauth']);
+
+function printAvailableProviders(): void {
+  process.stdout.write('Available providers:\n');
+  for (const p of getAllOAuthProviders()) {
+    process.stdout.write(`  ${p.id}  ${p.displayName}\n`);
+  }
+  process.stdout.write('\n');
+}
+
+function resolveProvider(providerId: string): ReturnType<typeof getOAuthProvider> {
+  if (!VALID_PROVIDER_IDS.has(providerId)) {
+    process.stdout.write(`Unknown provider: ${providerId}\n\n`);
+    printAvailableProviders();
+    process.exit(1);
+  }
+  return getOAuthProvider(providerId as OAuthProviderId);
+}
+
+// ---------------------------------------------------------------------------
+// Status display
+// ---------------------------------------------------------------------------
+
+function showStatus(): void {
+  const providers = getAllOAuthProviders();
+
+  if (providers.length === 0) {
+    process.stdout.write('No OAuth providers registered.\n');
+    return;
+  }
+
+  process.stdout.write('\nOAuth Provider Status:\n\n');
+
+  for (const provider of providers) {
+    const hasCredentials = loadClientCredentials(provider) !== null;
+    const tokenPath = getOAuthTokenPath(provider.id);
+    const hasToken = existsSync(tokenPath);
+
+    const credStatus = hasCredentials ? 'configured' : 'not configured';
+    const tokenStatus = hasToken ? 'authorized' : 'not authorized';
+
+    process.stdout.write(`  ${provider.displayName} (${provider.id})\n`);
+    process.stdout.write(`    Credentials: ${credStatus}\n`);
+    process.stdout.write(`    Token:       ${tokenStatus}\n`);
+    process.stdout.write('\n');
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Revoke
+// ---------------------------------------------------------------------------
+
+function revokeToken(providerId: string): void {
+  const provider = resolveProvider(providerId);
+
+  const tokenPath = getOAuthTokenPath(provider.id);
+  if (!existsSync(tokenPath)) {
+    process.stdout.write(`No stored token found for ${provider.displayName}.\n`);
+    return;
+  }
+
+  unlinkSync(tokenPath);
+  process.stdout.write(`Token revoked for ${provider.displayName}.\n`);
+  process.stdout.write(`Deleted: ${tokenPath}\n`);
+}
+
+// ---------------------------------------------------------------------------
+// Authorize
+// ---------------------------------------------------------------------------
+
+function authorize(providerId: string): void {
+  const provider = resolveProvider(providerId);
+
+  const credentials = loadClientCredentials(provider);
+  if (!credentials) {
+    process.stdout.write(
+      `No credentials configured for ${provider.displayName}.\n` +
+        `Run 'ironcurtain setup ${provider.id} <credentials-file>' first.\n`,
+    );
+    process.exit(1);
+  }
+
+  // TODO: WP5 integration -- call runOAuthFlow() here
+  process.stdout.write('OAuth flow not yet implemented. Credentials are configured.\n');
+  process.stdout.write(`Run 'ironcurtain auth ${provider.id}' again after the flow runner is integrated.\n`);
+}
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+
+export function runAuthCommand(args: string[]): void {
+  const subcommand = args[0];
+
+  if (!subcommand || subcommand === 'status') {
+    showStatus();
+    return;
+  }
+
+  if (subcommand === 'revoke') {
+    const providerId = args[1];
+    if (!providerId) {
+      process.stdout.write('Usage: ironcurtain auth revoke <provider>\n');
+      process.exit(1);
+    }
+    revokeToken(providerId);
+    return;
+  }
+
+  authorize(subcommand);
+}
