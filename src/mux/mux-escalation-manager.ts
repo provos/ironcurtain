@@ -121,6 +121,13 @@ export function createMuxEscalationManager(): MuxEscalationManager {
     addSession(registration: PtySessionRegistration): void {
       managedSessionIds.add(registration.sessionId);
 
+      // If a watcher already exists for this session (e.g., registry polling
+      // discovered it before the bridge did), stop the old watcher first.
+      const existing = state.sessions.get(registration.sessionId);
+      if (existing) {
+        existing.watcher.stop();
+      }
+
       const watcher = createWatcherForSession(registration.sessionId, registration.escalationDir);
       state = addSession(state, registration, watcher);
       watcher.start();

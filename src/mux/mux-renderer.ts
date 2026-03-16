@@ -432,7 +432,7 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
           rowsUsed++;
         }
 
-        // Whitelist candidate line
+        // Whitelist candidate line (shows what /approve+ would whitelist)
         if (
           rowsUsed < _layout.escalationPanelRows &&
           esc.request.whitelistCandidates &&
@@ -441,7 +441,11 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
           const candidate = esc.request.whitelistCandidates[0];
           clearLine(currentY);
           moveTo(6, currentY);
-          term.cyan(`Whitelist: ${candidate.description}`);
+          term.dim('/approve+ ');
+          term.cyan(candidate.description);
+          if (candidate.warning) {
+            term.yellow(` (${candidate.warning})`);
+          }
           currentY++;
           rowsUsed++;
         }
@@ -463,6 +467,8 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
     const pendingCount = deps.getPendingCount();
     if (pendingCount > 0) {
       term.cyan('/approve');
+      term.dim(' N  ');
+      term.cyan('/approve+');
       term.dim(' N  ');
       term.cyan('/deny');
       term.dim(' N  ');
