@@ -6,6 +6,10 @@ import { createMuxEscalationManager } from '../src/mux/mux-escalation-manager.js
 import { atomicWriteJsonSync } from '../src/escalation/escalation-watcher.js';
 import type { PtySessionRegistration } from '../src/docker/pty-types.js';
 
+// Dynamic path updated per-test in beforeEach so the mock registry dir
+// lives under tempDir and gets cleaned up automatically.
+let mockRegistryDir = '/tmp/ironcurtain-test-registry';
+
 // Mock modules used by registry polling
 vi.mock('../src/escalation/session-registry.js', () => ({
   readActiveRegistrations: vi.fn().mockReturnValue([]),
@@ -13,7 +17,7 @@ vi.mock('../src/escalation/session-registry.js', () => ({
 
 vi.mock('../src/config/paths.js', () => ({
   getListenerLockPath: vi.fn().mockReturnValue('/tmp/nonexistent-lock'),
-  getPtyRegistryDir: vi.fn().mockReturnValue('/tmp/ironcurtain-test-registry'),
+  getPtyRegistryDir: vi.fn(() => mockRegistryDir),
 }));
 
 // Partial mock: keep isPidAlive and isLockHolderAlive mockable
@@ -31,6 +35,7 @@ describe('MuxEscalationManager', () => {
 
   beforeEach(() => {
     tempDir = mkdtempSync(resolve(tmpdir(), 'ironcurtain-mux-esc-'));
+    mockRegistryDir = resolve(tempDir, 'registry');
     vi.clearAllMocks();
   });
 
