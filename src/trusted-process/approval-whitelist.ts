@@ -9,7 +9,7 @@
 import { dirname } from 'node:path';
 import { v4 as uuidv4 } from 'uuid';
 import type { ArgumentRole } from '../types/argument-roles.js';
-import { resolveRealPath, getRoleDefinition } from '../types/argument-roles.js';
+import { resolveRealPath, getRoleDefinition, isWithinDirectory } from '../types/argument-roles.js';
 import { extractDomainForRole } from './domain-utils.js';
 import { extractAnnotatedPaths, collectDistinctRoles } from './policy-engine.js';
 import type { ToolAnnotation } from '../pipeline/types.js';
@@ -139,12 +139,9 @@ function constraintMatches(
 
   switch (constraint.kind) {
     case 'directory':
-      // constraint.directory is already resolved at pattern creation time,
-      // so we only need to resolve the candidate path and do a prefix check.
       return values.every((v) => {
         try {
-          const resolved = resolveRealPath(v);
-          return resolved === constraint.directory || resolved.startsWith(constraint.directory + '/');
+          return isWithinDirectory(v, constraint.directory);
         } catch {
           return false;
         }

@@ -79,14 +79,6 @@ import type { ToolAnnotation } from '../pipeline/types.js';
 import { VERSION } from '../version.js';
 import { buildTrustedServerSet } from '../memory/memory-annotations.js';
 import { loadToolDescriptionHints, applyToolDescriptionHints } from './tool-description-hints.js';
-
-export interface ProxiedTool {
-  serverName: string;
-  name: string;
-  description?: string;
-  inputSchema: Record<string, unknown>;
-}
-
 import {
   createApprovalWhitelist,
   extractWhitelistCandidates,
@@ -94,6 +86,13 @@ import {
   type WhitelistCandidateIpc,
   type WhitelistPattern,
 } from './approval-whitelist.js';
+
+export interface ProxiedTool {
+  serverName: string;
+  name: string;
+  description?: string;
+  inputSchema: Record<string, unknown>;
+}
 
 /**
  * Pending whitelist candidates keyed by escalation ID.

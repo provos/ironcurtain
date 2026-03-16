@@ -363,7 +363,7 @@ function readEscalationResponse(responsePath: string): EscalationResponseData | 
 async function waitForEscalationDecision(escalationDir: string, request: EscalationFileRequest): Promise<EscalationResponseData>;
 ```
 
-The proxy holds `pendingWhitelistCandidates: Map<string, WhitelistPattern[]>` keyed by escalation ID. After writing the request file with candidates, the proxy stores the full pattern objects. When the response comes back with `whitelistSelection`, it looks up the candidate by index from this map.
+The proxy holds a module-level `pendingWhitelistCandidates: Map<string, WhitelistPattern[]>` keyed by escalation ID (not on `CallToolDeps` -- it's internal mutable state acting as a side-channel between writing the escalation request and reading the response). After writing the request file with candidates, the proxy stores the full pattern objects. When the response comes back with `whitelistSelection`, it looks up the candidate by index from this map.
 
 ### 3.12 Command parsing: prefix-based, not exact match (Flaw 5)
 
@@ -763,15 +763,14 @@ export interface CallToolDeps {
 
   /** Ephemeral approval whitelist for this session. */
   whitelist: ApprovalWhitelist;
-
-  /**
-   * Pending whitelist candidates keyed by escalation ID.
-   * Populated when a request file is written with candidates;
-   * consumed when the response comes back with a selection.
-   */
-  pendingWhitelistCandidates: Map<string, WhitelistPattern[]>;
 }
 ```
+
+> **Note:** `pendingWhitelistCandidates` is module-level state in the proxy process
+> (`const pendingWhitelistCandidates = new Map<...>()`), not a `CallToolDeps` field.
+> It is internal mutable state acting as a side-channel between writing the escalation
+> request and reading the response -- putting it on `CallToolDeps` would leak
+> implementation details into the interface.
 
 ## 5. Component Diagram
 
@@ -999,7 +998,7 @@ The whitelist runs BEFORE the auto-approver. When both are enabled:
 - Extend `EscalationFileRequest` with `whitelistCandidates`.
 - Widen `readEscalationResponse()` return type to `EscalationResponseData`.
 - Widen `waitForEscalationDecision()` return type to `EscalationResponseData`.
-- Add `ApprovalWhitelist` and `pendingWhitelistCandidates` to `CallToolDeps`.
+- Add `ApprovalWhitelist` to `CallToolDeps`; `pendingWhitelistCandidates` is module-level state (not on `CallToolDeps` -- it's an internal side-channel, not a dependency).
 - Insert whitelist check in `handleCallTool()` between policy evaluation and escalation flow.
 - Pass `evaluation.escalatedRoles` to `extractWhitelistCandidates()` to scope extraction to only the causal roles.
 - Store candidates in `pendingWhitelistCandidates` map.

@@ -3,7 +3,7 @@
  * matching, and candidate extraction from escalated tool calls.
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { realpathSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -167,9 +167,6 @@ describe('directory constraint matching', () => {
     expect(result.matched).toBe(true);
   });
 });
-
-// Need afterEach imported
-import { afterEach } from 'vitest';
 
 // ---------------------------------------------------------------------------
 // Domain constraint matching
