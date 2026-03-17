@@ -216,7 +216,7 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
     const eps = inputHandler.escalationPickerState;
     if (!eps) return;
 
-    const sortedNums = [...escalationManager.state.pendingEscalations.keys()].sort((a, b) => a - b);
+    const sortedNums = escalationManager.sortedDisplayNumbers();
     if (sortedNums.length === 0) return;
 
     const currentIdx = sortedNums.indexOf(eps.focusedDisplayNumber);
@@ -344,7 +344,7 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
           showMessage('No pending escalations');
           break;
         }
-        const sortedNums = [...escalationManager.state.pendingEscalations.keys()].sort((a, b) => a - b);
+        const sortedNums = escalationManager.sortedDisplayNumbers();
         const previousMode: 'pty' | 'command' = inputHandler.mode === 'command' ? 'command' : 'pty';
         inputHandler.enterEscalationPickerMode(sortedNums[0], previousMode);
         renderer.fullRedraw();
@@ -368,18 +368,15 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
       case 'escalation-resolve': {
         const message = escalationManager.resolve(action.displayNumber, action.decision, action.whitelist);
         showMessage(message);
-        // After resolve, the onChange callback handles focus adjustment and auto-close.
-        renderer.redrawTabBar();
-        renderer.redrawCommandArea();
+        // onChange callback (fired synchronously by resolve) handles focus adjustment,
+        // auto-close, and redraws — no additional redraw needed here.
         break;
       }
 
       case 'escalation-resolve-all': {
         const message = escalationManager.resolveAll(action.decision, action.whitelist);
         showMessage(message);
-        // onChange callback will auto-close the picker since pendingCount -> 0
-        renderer.redrawTabBar();
-        renderer.redrawCommandArea();
+        // onChange callback handles auto-close and redraws.
         break;
       }
 
@@ -670,7 +667,7 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
           const eps = inputHandler.escalationPickerState;
           if (eps && !escalationManager.state.pendingEscalations.has(eps.focusedDisplayNumber)) {
             // Focused escalation was resolved or expired -- snap to nearest
-            const sortedNums = [...escalationManager.state.pendingEscalations.keys()].sort((a, b) => a - b);
+            const sortedNums = escalationManager.sortedDisplayNumbers();
             if (sortedNums.length > 0) {
               eps.focusedDisplayNumber = sortedNums[0];
             }

@@ -667,7 +667,7 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
 
     // Tool header
     drawBoxRow(currentY, boxX, innerWidth, (w) => {
-      const timeAgo = formatTimeSince(focused.receivedAt);
+      const timeAgo = formatRelativeTime(focused.receivedAt.toISOString());
       const headerText = `Session #${focused.sessionDisplayNumber}  ${focused.request.serverName}/${focused.request.toolName}  ${timeAgo}`;
       // Render with colors using terminal-kit chaining
       term(`Session #${focused.sessionDisplayNumber}  `);
@@ -687,18 +687,18 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
     });
     currentY++;
 
-    // Detail rows
+    // Detail rows — drawBoxRow handles right-border positioning via
+    // eraseLineAfter + moveTo, so callbacks only need to write content
+    // (no manual padding required).
     for (let i = 0; i < actualDetailRows; i++) {
       const detail = detailLines[i];
       drawBoxRow(currentY, boxX, innerWidth, (w) => {
         const indent = detail.kind === 'arg' ? 2 : 0;
         const maxTextWidth = w - indent;
-        const text = truncate(detail.text, maxTextWidth);
         if (indent > 0) term(' '.repeat(indent));
         if (detail.kind === 'label') {
-          term.dim(text);
+          term.dim(truncate(detail.text, maxTextWidth));
         } else if (detail.kind === 'reason') {
-          // Render "Reason: " dim, rest normal
           term.dim('Reason: ');
           term.styleReset();
           term(truncate(focused.request.reason, maxTextWidth - 8));
@@ -707,19 +707,19 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
           term.styleReset();
           const candidate = focused.request.whitelistCandidates?.[0];
           if (candidate) {
-            term.cyan(truncate(candidate.description, maxTextWidth - 10));
+            const descBudget = maxTextWidth - 10;
             if (candidate.warning) {
-              term.yellow(` (${candidate.warning})`);
+              const warnText = ` (${candidate.warning})`;
+              term.cyan(truncate(candidate.description, Math.max(1, descBudget - warnText.length)));
+              term.yellow(truncate(warnText, descBudget));
+            } else {
+              term.cyan(truncate(candidate.description, descBudget));
             }
           }
         } else {
-          term(text);
+          term(truncate(detail.text, maxTextWidth));
         }
         term.styleReset();
-        // Pad to fill -- compute remaining based on what was written
-        const writtenLen = indent + text.length;
-        const pad = Math.max(0, w - writtenLen);
-        if (pad > 0) term(' '.repeat(pad));
       });
       currentY++;
     }
@@ -1404,14 +1404,6 @@ function formatArgLines(args: Record<string, unknown>, maxWidth: number): string
   }
 
   return lines;
-}
-
-function formatTimeSince(date: Date): string {
-  const seconds = Math.floor((Date.now() - date.getTime()) / 1000);
-  if (seconds < 60) return `${seconds}s ago`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  return `${Math.floor(minutes / 60)}h ago`;
 }
 
 function formatArgValue(value: unknown): string {
