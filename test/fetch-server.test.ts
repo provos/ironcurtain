@@ -141,6 +141,9 @@ interface FetchResult {
 }
 
 function resultJson(result: Awaited<ReturnType<typeof client.callTool>>): FetchResult {
+  if (result.isError) {
+    throw new Error(`Expected success but got error: ${resultText(result)}`);
+  }
   return JSON.parse(resultText(result)) as FetchResult;
 }
 
@@ -255,7 +258,8 @@ describe('fetch-server', () => {
         arguments: { url: `${baseUrl}/slow`, timeout: 1 },
       });
       expect(result.isError).toBe(true);
-      expect(resultText(result)).toMatch(/Fetch error:.*abort/i);
+      const errorJson = JSON.parse(resultText(result)) as { error: string };
+      expect(errorJson.error).toMatch(/abort/i);
     }, 10_000);
   });
 

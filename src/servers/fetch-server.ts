@@ -254,7 +254,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
       name: 'http_fetch',
-      description: 'Fetch content from a URL via HTTP GET',
+      description:
+        'Fetch content from a URL via HTTP GET. Returns JSON: { status, headers, body, truncated }. On error, returns JSON: { error }.',
       inputSchema: {
         type: 'object' as const,
         properties: {
@@ -371,7 +372,7 @@ async function handleHttpFetch(
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return {
-      content: [{ type: 'text', text: `Fetch error: ${message}` }],
+      content: [{ type: 'text', text: JSON.stringify({ error: message }) }],
       isError: true,
     };
   }
