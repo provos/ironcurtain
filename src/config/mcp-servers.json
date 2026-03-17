@@ -46,7 +46,7 @@
     "sandbox": {
       "filesystem": {
         "denyRead": ["~"],
-        "allowRead": ["/usr", "/lib", "/etc", "/opt/homebrew"]
+        "allowRead": ["/usr", "/lib", "/etc"]
       },
       "network": {
         "allowedDomains": [

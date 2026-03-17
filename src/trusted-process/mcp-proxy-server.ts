@@ -48,7 +48,7 @@ import { tmpdir, homedir } from 'node:os';
 import { v4 as uuidv4 } from 'uuid';
 import { loadGeneratedPolicy, extractServerDomainAllowlists, getPackageGeneratedDir } from '../config/index.js';
 import { PolicyEngine, extractAnnotatedPaths } from './policy-engine.js';
-import { getPathRoles } from '../types/argument-roles.js';
+import { getPathRoles, expandTilde } from '../types/argument-roles.js';
 import { AuditLog } from './audit-log.js';
 import { prepareToolArgs, rewriteResultContent } from './path-utils.js';
 import { CONTAINER_WORKSPACE_DIR } from '../docker/agent-adapter.js';
@@ -1059,20 +1059,8 @@ async function main(): Promise<void> {
     sandboxPolicy,
   );
 
-  // ── Inject dynamic node/npm paths into strict sandboxes ──────────
-  // Servers with denyRead: ["~"] need the node installation path
-  // allowed back so npx/node can execute. Discover once, inject for all.
+  // Discover node/npm paths once for all sandboxed servers with denyRead: ["~"]
   const dynamicNodePaths = discoverNodePaths();
-  if (dynamicNodePaths.length > 0) {
-    for (const [serverName, resolved] of resolvedSandboxConfigs) {
-      if (!resolved.sandboxed) continue;
-      const hasDenyHome = resolved.config.denyRead.some((p) => p === '~' || p === '~/' || p === homedir());
-      if (hasDenyHome) {
-        const settingsPath = join(settingsDir, `${serverName}.srt-settings.json`);
-        rewriteServerSettings(settingsPath, { allowRead: dynamicNodePaths });
-      }
-    }
-  }
 
   // ── Connect to real MCP servers ───────────────────────────────────
   const clientStates = new Map<string, ClientState>();
@@ -1150,13 +1138,15 @@ async function main(): Promise<void> {
         refresher.start();
         tokenRefreshers.set(serverName, refresher);
 
-        // Rewrite srt settings to allow the credential directory --
-        // it was created after the initial writeServerSettings() call
-        const resolved = resolvedSandboxConfigs.get(serverName);
-        if (resolved?.sandboxed) {
+        // Rewrite srt settings to allow the credential directory and
+        // node paths (for denyRead: ["~"] servers) in a single call
+        const resolvedOAuth = resolvedSandboxConfigs.get(serverName);
+        if (resolvedOAuth?.sandboxed) {
+          const hasDenyHome = resolvedOAuth.config.denyRead.some((p) => expandTilde(p) === homedir());
+          const extraAllowRead = hasDenyHome ? [...dynamicNodePaths, credsDir] : [credsDir];
           const settingsPath = join(settingsDir, `${serverName}.srt-settings.json`);
           rewriteServerSettings(settingsPath, {
-            allowRead: [credsDir],
+            allowRead: extraAllowRead,
             allowWrite: [credsDir],
           });
         }
@@ -1178,6 +1168,16 @@ async function main(): Promise<void> {
 
     const resolved = resolvedSandboxConfigs.get(serverName);
     if (!resolved) throw new Error(`Missing sandbox config for server "${serverName}"`);
+
+    // For non-OAuth sandboxed servers with denyRead: ["~"], inject node paths
+    if (!oauthProvider && resolved.sandboxed && dynamicNodePaths.length > 0) {
+      const hasDenyHome = resolved.config.denyRead.some((p) => expandTilde(p) === homedir());
+      if (hasDenyHome) {
+        const settingsPath = join(settingsDir, `${serverName}.srt-settings.json`);
+        rewriteServerSettings(settingsPath, { allowRead: dynamicNodePaths });
+      }
+    }
+
     const wrapped = wrapServerCommand(serverName, config.command, config.args, resolved, settingsDir);
 
     const transport = new StdioClientTransport({
@@ -1185,9 +1185,9 @@ async function main(): Promise<void> {
       args: wrapped.args,
       env: {
         ...(process.env as Record<string, string>),
-        // Strip NODE_OPTIONS to prevent IDE debugger preloads (e.g., Cursor/VS Code)
-        // from referencing paths under ~ that a strict denyRead sandbox would block.
-        NODE_OPTIONS: '',
+        // Strip NODE_OPTIONS for sandboxed servers to prevent IDE debugger preloads
+        // (e.g., Cursor/VS Code) from referencing paths under ~ that denyRead blocks.
+        ...(resolved.sandboxed ? { NODE_OPTIONS: '' } : {}),
         ...(config.env ?? {}),
         ...serverCredentials,
         ...oauthEnv,

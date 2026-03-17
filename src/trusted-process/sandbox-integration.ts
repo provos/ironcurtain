@@ -13,6 +13,7 @@
 import { SandboxManager } from '@anthropic-ai/sandbox-runtime';
 import { writeFileSync, readFileSync, mkdirSync, rmSync, existsSync, realpathSync } from 'node:fs';
 import { join, resolve, dirname, isAbsolute } from 'node:path';
+import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { quote } from 'shell-quote';
 import type { MCPServerConfig, SandboxAvailabilityPolicy, SandboxNetworkConfig } from '../config/types.js';
@@ -240,7 +241,7 @@ export function annotateSandboxViolation(errorMessage: string, serverSandboxed: 
  */
 export function discoverNodePaths(): string[] {
   const paths = new Set<string>();
-  const home = process.env.HOME ?? process.env.USERPROFILE ?? '';
+  const home = homedir();
 
   // 1. Node.js binary -- follow symlinks to the real location
   const execPath = safeRealPath(process.execPath);
@@ -278,15 +279,6 @@ export function discoverNodePaths(): string[] {
   if (fnmDir && existsSync(fnmDir)) {
     const realDir = safeRealPath(fnmDir);
     if (realDir) addIfUnderHome(paths, realDir, home);
-  }
-
-  // 4. Homebrew Cellar on macOS (node may be a Cellar symlink)
-  if (process.platform === 'darwin') {
-    for (const brewPrefix of ['/opt/homebrew', '/usr/local']) {
-      if (existsSync(join(brewPrefix, 'Cellar'))) {
-        paths.add(brewPrefix);
-      }
-    }
   }
 
   return [...paths];
