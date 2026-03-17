@@ -260,6 +260,7 @@ describe('normalizers via registry', () => {
       'branch-name',
       'commit-message',
       'google-resource-id',
+      'email-address',
       'email-body',
       'calendar-datetime',
       'none',
@@ -267,12 +268,6 @@ describe('normalizers via registry', () => {
       const def = getRoleDefinition(role);
       expect(def.canonicalize('anything')).toBe('anything');
     }
-  });
-
-  it('email-address role uses lowercase canonicalization', () => {
-    const def = getRoleDefinition('email-address');
-    expect(def.canonicalize('User@Example.COM')).toBe('user@example.com');
-    expect(def.canonicalize('already@lower.case')).toBe('already@lower.case');
   });
 });
 

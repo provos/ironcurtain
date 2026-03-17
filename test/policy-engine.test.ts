@@ -2125,7 +2125,7 @@ describe('PolicyEngine', () => {
       const result = engine.evaluate(
         makeRequest({
           serverName: 'google-workspace',
-          toolName: 'gmail_list_messages',
+          toolName: 'gmail_search_messages',
           arguments: { query: 'is:unread', maxResults: 10 },
         }),
       );

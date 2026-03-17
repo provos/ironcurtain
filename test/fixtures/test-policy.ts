@@ -492,9 +492,9 @@ export const testToolAnnotations: ToolAnnotationsFile = {
       tools: [
         // Read-only operations
         {
-          toolName: 'gmail_list_messages',
+          toolName: 'gmail_search_messages',
           serverName: 'google-workspace',
-          comment: 'Lists Gmail messages matching a query.',
+          comment: 'Searches Gmail messages matching a query.',
           sideEffects: false,
           args: { query: ['none'], maxResults: ['none'] },
         },

@@ -1206,7 +1206,7 @@ async function main(): Promise<void> {
         if (sessionLogPath) {
           const lines = text.trimEnd();
           if (lines) {
-            const redacted = redactCredentials(lines, serverCredentials);
+            const redacted = redactCredentials(redactCredentials(lines, serverCredentials), oauthEnv);
             logToSessionFile(sessionLogPath, `[mcp:${serverName}] ${redacted}`);
           }
         }

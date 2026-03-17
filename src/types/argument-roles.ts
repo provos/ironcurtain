@@ -312,7 +312,7 @@ const registryEntries: [ArgumentRole, RoleDefinition][] = [
       description: 'Email address (recipient, attendee, share target)',
       isResourceIdentifier: false,
       category: 'opaque',
-      canonicalize: lowercase,
+      canonicalize: identity,
       annotationGuidance:
         'Assign to arguments that are email addresses (recipients, attendees, share targets). ' +
         'Includes the "to" field on send/draft, "attendees" on calendar events, "email" on file sharing.',

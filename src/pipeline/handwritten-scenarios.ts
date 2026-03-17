@@ -81,7 +81,7 @@ export function getHandwrittenScenarios(sandboxDir: string): TestScenario[] {
       description: 'List Gmail messages -- allowed (read-only)',
       request: {
         serverName: 'google-workspace',
-        toolName: 'gmail_list_messages',
+        toolName: 'gmail_search_messages',
         arguments: { query: 'is:unread', maxResults: 10 },
       },
       expectedDecision: 'allow',

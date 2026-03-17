@@ -152,7 +152,7 @@ if (transport.stderr) {
 }
 
 // ---------------------------------------------------------------------------
-// 5. Connect MCP client and call gmail_list_messages
+// 5. Connect MCP client and call gmail_search_messages
 // ---------------------------------------------------------------------------
 
 const client = new Client({ name: 'gws-test', version: '1.0.0' });
