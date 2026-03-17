@@ -37,5 +37,27 @@
       "ghcr.io/github/github-mcp-server"
     ],
     "sandbox": false
+  },
+  "google-workspace": {
+    "description": "Google Workspace tools (Gmail, Calendar, Drive, Docs, Sheets, Slides)",
+    "command": "npx",
+    "args": ["-y", "@alanse/mcp-server-google-workspace"],
+    "env": {},
+    "sandbox": {
+      "filesystem": {
+        "denyRead": ["~"],
+        "allowRead": ["/usr", "/lib", "/etc", "/opt/homebrew"]
+      },
+      "network": {
+        "allowedDomains": [
+          "googleapis.com",
+          "*.googleapis.com",
+          "accounts.google.com",
+          "oauth2.googleapis.com",
+          "registry.npmjs.org",
+          "*.npmjs.org"
+        ]
+      }
+    }
   }
 }

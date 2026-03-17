@@ -44,7 +44,7 @@ import { appendFileSync, existsSync, mkdtempSync, readFileSync, writeFileSync, u
 import { atomicWriteJsonSync } from '../escalation/escalation-watcher.js';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { tmpdir } from 'node:os';
+import { tmpdir, homedir } from 'node:os';
 import { v4 as uuidv4 } from 'uuid';
 import { loadGeneratedPolicy, extractServerDomainAllowlists, getPackageGeneratedDir } from '../config/index.js';
 import { PolicyEngine, extractAnnotatedPaths } from './policy-engine.js';
@@ -60,6 +60,8 @@ import {
   wrapServerCommand,
   cleanupSettingsFiles,
   annotateSandboxViolation,
+  discoverNodePaths,
+  rewriteServerSettings,
   type ResolvedSandboxConfig,
 } from './sandbox-integration.js';
 import type { ToolCallRequest, PolicyDecision } from '../types/mcp.js';
@@ -86,6 +88,12 @@ import {
   type WhitelistCandidateIpc,
   type WhitelistPattern,
 } from './approval-whitelist.js';
+import { getProviderForServer } from '../auth/oauth-registry.js';
+import { loadClientCredentials } from '../auth/oauth-provider.js';
+import { OAuthTokenProvider } from '../auth/oauth-token-provider.js';
+import { loadOAuthToken } from '../auth/oauth-token-store.js';
+import { writeGWorkspaceCredentialFile } from './gworkspace-credentials.js';
+import { TokenFileRefresher } from './token-file-refresher.js';
 
 export interface ProxiedTool {
   serverName: string;
@@ -1051,9 +1059,25 @@ async function main(): Promise<void> {
     sandboxPolicy,
   );
 
+  // ── Inject dynamic node/npm paths into strict sandboxes ──────────
+  // Servers with denyRead: ["~"] need the node installation path
+  // allowed back so npx/node can execute. Discover once, inject for all.
+  const dynamicNodePaths = discoverNodePaths();
+  if (dynamicNodePaths.length > 0) {
+    for (const [serverName, resolved] of resolvedSandboxConfigs) {
+      if (!resolved.sandboxed) continue;
+      const hasDenyHome = resolved.config.denyRead.some((p) => p === '~' || p === '~/' || p === homedir());
+      if (hasDenyHome) {
+        const settingsPath = join(settingsDir, `${serverName}.srt-settings.json`);
+        rewriteServerSettings(settingsPath, { allowRead: dynamicNodePaths });
+      }
+    }
+  }
+
   // ── Connect to real MCP servers ───────────────────────────────────
   const clientStates = new Map<string, ClientState>();
   const allTools: ProxiedTool[] = [];
+  const tokenRefreshers = new Map<string, TokenFileRefresher>();
 
   for (const [serverName, config] of Object.entries(serversConfig)) {
     // Skip servers whose args reference env vars (Docker -e VAR_NAME syntax)
@@ -1066,6 +1090,92 @@ async function main(): Promise<void> {
       continue;
     }
 
+    // ── OAuth token injection for servers backed by OAuth providers ──
+    const oauthEnv: Record<string, string> = {};
+    const oauthProvider = getProviderForServer(serverName);
+    if (oauthProvider) {
+      const clientCreds = loadClientCredentials(oauthProvider);
+      if (!clientCreds) {
+        const warning = `Skipping MCP server "${serverName}": no OAuth credentials. Run 'ironcurtain auth import ${oauthProvider.id} <file>'`;
+        process.stderr.write(`WARNING: ${warning}\n`);
+        if (sessionLogPath) logToSessionFile(sessionLogPath, `[proxy] ${warning}`);
+        continue;
+      }
+
+      const tokenProvider = new OAuthTokenProvider(oauthProvider, clientCreds);
+      if (!tokenProvider.isAuthorized()) {
+        const warning = `Skipping MCP server "${serverName}": not authorized. Run 'ironcurtain auth ${oauthProvider.id}'`;
+        process.stderr.write(`WARNING: ${warning}\n`);
+        if (sessionLogPath) logToSessionFile(sessionLogPath, `[proxy] ${warning}`);
+        continue;
+      }
+
+      try {
+        const accessToken = await tokenProvider.getValidAccessToken();
+        const storedToken = loadOAuthToken(oauthProvider.id);
+        if (!storedToken) {
+          throw new Error(`Token file disappeared after validation for "${oauthProvider.id}"`);
+        }
+
+        // Create per-session credential directory
+        const credsDir = join(settingsDir, `${serverName}-creds`);
+        writeGWorkspaceCredentialFile(credsDir, accessToken, storedToken.expiresAt, storedToken.scopes);
+
+        // Inject env vars for the MCP server
+        oauthEnv.GWORKSPACE_CREDS_DIR = credsDir;
+        oauthEnv.CLIENT_ID = clientCreds.clientId;
+        oauthEnv.CLIENT_SECRET = clientCreds.clientSecret;
+
+        // Redirect npm cache into the credential directory for npx sandbox compatibility
+        oauthEnv.npm_config_cache = join(credsDir, '.npm-cache');
+
+        // Start proactive token refresh
+        const refresher = new TokenFileRefresher(
+          {
+            providerId: oauthProvider.id,
+            getAccessToken: async () => {
+              const token = await tokenProvider.getValidAccessToken();
+              const stored = loadOAuthToken(oauthProvider.id);
+              if (!stored) {
+                throw new Error(`Token file missing for "${oauthProvider.id}"`);
+              }
+              return { accessToken: token, expiresAt: stored.expiresAt, scopes: stored.scopes };
+            },
+            writeCredentialFile: (token, expiry, scopes) => {
+              writeGWorkspaceCredentialFile(credsDir, token, expiry, scopes);
+            },
+          },
+          storedToken.expiresAt,
+        );
+        refresher.start();
+        tokenRefreshers.set(serverName, refresher);
+
+        // Rewrite srt settings to allow the credential directory --
+        // it was created after the initial writeServerSettings() call
+        const resolved = resolvedSandboxConfigs.get(serverName);
+        if (resolved?.sandboxed) {
+          const settingsPath = join(settingsDir, `${serverName}.srt-settings.json`);
+          rewriteServerSettings(settingsPath, {
+            allowRead: [credsDir],
+            allowWrite: [credsDir],
+          });
+        }
+
+        if (sessionLogPath) {
+          logToSessionFile(
+            sessionLogPath,
+            `[proxy] OAuth token prepared for "${serverName}" (provider: ${oauthProvider.id})`,
+          );
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        const warning = `Skipping MCP server "${serverName}": OAuth token error: ${message}. Run 'ironcurtain auth ${oauthProvider.id}'`;
+        process.stderr.write(`WARNING: ${warning}\n`);
+        if (sessionLogPath) logToSessionFile(sessionLogPath, `[proxy] ${warning}`);
+        continue;
+      }
+    }
+
     const resolved = resolvedSandboxConfigs.get(serverName);
     if (!resolved) throw new Error(`Missing sandbox config for server "${serverName}"`);
     const wrapped = wrapServerCommand(serverName, config.command, config.args, resolved, settingsDir);
@@ -1073,7 +1183,15 @@ async function main(): Promise<void> {
     const transport = new StdioClientTransport({
       command: wrapped.command,
       args: wrapped.args,
-      env: { ...(process.env as Record<string, string>), ...(config.env ?? {}), ...serverCredentials },
+      env: {
+        ...(process.env as Record<string, string>),
+        // Strip NODE_OPTIONS to prevent IDE debugger preloads (e.g., Cursor/VS Code)
+        // from referencing paths under ~ that a strict denyRead sandbox would block.
+        NODE_OPTIONS: '',
+        ...(config.env ?? {}),
+        ...serverCredentials,
+        ...oauthEnv,
+      },
       stderr: 'pipe',
       // Sandboxed servers use a per-server temp dir as CWD (not the sandbox)
       // to prevent srt/bwrap ghost dotfiles from polluting the sandbox directory.
@@ -1196,6 +1314,12 @@ async function main(): Promise<void> {
 
   // ── Shutdown handler ──────────────────────────────────────────────
   async function shutdown(): Promise<void> {
+    // Stop token refreshers before closing clients
+    for (const refresher of tokenRefreshers.values()) {
+      refresher.stop();
+    }
+    tokenRefreshers.clear();
+
     for (const state of clientStates.values()) {
       try {
         await state.client.close();

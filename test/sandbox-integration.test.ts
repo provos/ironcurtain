@@ -10,6 +10,8 @@ import {
   cleanupSettingsFiles,
   annotateSandboxViolation,
   resolveNodeModulesBin,
+  discoverNodePaths,
+  rewriteServerSettings,
   type ResolvedSandboxConfig,
   type ResolvedSandboxParams,
 } from '../src/trusted-process/sandbox-integration.js';
@@ -30,6 +32,7 @@ function makeSandboxedConfig(overrides: Partial<ResolvedSandboxParams> = {}): Re
     sandboxed: true,
     config: {
       allowWrite: ['/sandbox'],
+      allowRead: [],
       denyRead: ['~/.ssh'],
       denyWrite: [],
       network: false,
@@ -207,6 +210,7 @@ describe('writeServerSettings', () => {
       'exec',
       {
         allowWrite: ['/sandbox'],
+        allowRead: [],
         denyRead: ['~/.ssh'],
         denyWrite: [],
         network: false,
@@ -229,6 +233,7 @@ describe('writeServerSettings', () => {
       'exec',
       {
         allowWrite: ['/sandbox'],
+        allowRead: [],
         denyRead: [],
         denyWrite: [],
         network: false,
@@ -248,6 +253,7 @@ describe('writeServerSettings', () => {
       'git',
       {
         allowWrite: ['/sandbox'],
+        allowRead: [],
         denyRead: [],
         denyWrite: [],
         network: {
@@ -268,6 +274,7 @@ describe('writeServerSettings', () => {
       'test',
       {
         allowWrite: ['/sandbox', '/sandbox/.git'],
+        allowRead: [],
         denyRead: ['~/.ssh', '~/.gnupg'],
         denyWrite: ['/var/log'],
         network: false,
@@ -279,6 +286,193 @@ describe('writeServerSettings', () => {
     expect(content.filesystem.allowWrite).toEqual(['/sandbox', '/sandbox/.git', cwdPath]);
     expect(content.filesystem.denyRead).toEqual(['~/.ssh', '~/.gnupg']);
     expect(content.filesystem.denyWrite).toEqual(['/var/log']);
+  });
+
+  it('writes allowRead to settings file', () => {
+    const { settingsPath } = writeServerSettings(
+      'gws',
+      {
+        allowWrite: ['/sandbox'],
+        allowRead: ['/usr', '/etc', '/home/user/.nvm'],
+        denyRead: ['~'],
+        denyWrite: [],
+        network: false,
+      },
+      settingsDir,
+    );
+
+    const content = JSON.parse(readFileSync(settingsPath, 'utf-8'));
+    expect(content.filesystem.allowRead).toEqual(['/usr', '/etc', '/home/user/.nvm']);
+    expect(content.filesystem.denyRead).toEqual(['~']);
+  });
+});
+
+// ── rewriteServerSettings ─────────────────────────────────────────────────
+
+describe('rewriteServerSettings', () => {
+  let settingsDir: string;
+
+  beforeEach(() => {
+    settingsDir = mkdtempSync(join(tmpdir(), 'test-srt-rewrite-'));
+  });
+
+  afterEach(() => {
+    rmSync(settingsDir, { recursive: true, force: true });
+  });
+
+  it('adds allowRead paths to existing settings', () => {
+    const { settingsPath } = writeServerSettings(
+      'test',
+      {
+        allowWrite: ['/sandbox'],
+        allowRead: ['/usr'],
+        denyRead: ['~'],
+        denyWrite: [],
+        network: false,
+      },
+      settingsDir,
+    );
+
+    rewriteServerSettings(settingsPath, { allowRead: ['/home/user/.nvm'] });
+
+    const content = JSON.parse(readFileSync(settingsPath, 'utf-8'));
+    expect(content.filesystem.allowRead).toContain('/usr');
+    expect(content.filesystem.allowRead).toContain('/home/user/.nvm');
+  });
+
+  it('adds allowWrite paths to existing settings', () => {
+    const { settingsPath } = writeServerSettings(
+      'test',
+      {
+        allowWrite: ['/sandbox'],
+        allowRead: [],
+        denyRead: [],
+        denyWrite: [],
+        network: false,
+      },
+      settingsDir,
+    );
+
+    rewriteServerSettings(settingsPath, { allowWrite: ['/tmp/creds'] });
+
+    const content = JSON.parse(readFileSync(settingsPath, 'utf-8'));
+    expect(content.filesystem.allowWrite).toContain('/tmp/creds');
+    expect(content.filesystem.allowWrite).toContain('/sandbox');
+  });
+
+  it('deduplicates paths', () => {
+    const { settingsPath } = writeServerSettings(
+      'test',
+      {
+        allowWrite: ['/sandbox'],
+        allowRead: ['/usr'],
+        denyRead: [],
+        denyWrite: [],
+        network: false,
+      },
+      settingsDir,
+    );
+
+    rewriteServerSettings(settingsPath, { allowRead: ['/usr', '/etc'] });
+
+    const content = JSON.parse(readFileSync(settingsPath, 'utf-8')) as {
+      filesystem: { allowRead: string[] };
+    };
+    const usrCount = content.filesystem.allowRead.filter((p) => p === '/usr').length;
+    expect(usrCount).toBe(1);
+    expect(content.filesystem.allowRead).toContain('/etc');
+  });
+
+  it('handles both allowRead and allowWrite in one call', () => {
+    const { settingsPath } = writeServerSettings(
+      'test',
+      {
+        allowWrite: ['/sandbox'],
+        allowRead: [],
+        denyRead: ['~'],
+        denyWrite: [],
+        network: false,
+      },
+      settingsDir,
+    );
+
+    rewriteServerSettings(settingsPath, {
+      allowRead: ['/tmp/creds'],
+      allowWrite: ['/tmp/creds'],
+    });
+
+    const content = JSON.parse(readFileSync(settingsPath, 'utf-8'));
+    expect(content.filesystem.allowRead).toContain('/tmp/creds');
+    expect(content.filesystem.allowWrite).toContain('/tmp/creds');
+  });
+});
+
+// ── discoverNodePaths ─────────────────────────────────────────────────────
+
+describe('discoverNodePaths', () => {
+  it('returns an array of strings', () => {
+    const paths = discoverNodePaths();
+    expect(Array.isArray(paths)).toBe(true);
+    for (const p of paths) {
+      expect(typeof p).toBe('string');
+      expect(p).toMatch(/^\//); // absolute paths
+    }
+  });
+
+  it('returns paths under home directory only', () => {
+    const home = process.env.HOME ?? '';
+    if (!home) return; // skip if no HOME
+    const paths = discoverNodePaths();
+    for (const p of paths) {
+      // All returned paths should be under home (since only those need allowRead)
+      // except macOS Homebrew paths which are system-wide
+      if (!p.startsWith('/opt/homebrew') && !p.startsWith('/usr/local')) {
+        expect(p.startsWith(home + '/')).toBe(true);
+      }
+    }
+  });
+
+  it('includes node installation prefix when node is under home', () => {
+    const home = process.env.HOME ?? '';
+    if (!home || !process.execPath.startsWith(home + '/')) return;
+    const paths = discoverNodePaths();
+    // Should include at least one path that contains the node binary
+    expect(paths.length).toBeGreaterThan(0);
+  });
+});
+
+// ── resolveSandboxConfig with allowRead ───────────────────────────────────
+
+describe('resolveSandboxConfig allowRead', () => {
+  const sessionSandboxDir = '/sessions/abc/sandbox';
+
+  it('defaults allowRead to empty array', () => {
+    const result = resolveSandboxConfig(makeServerConfig(), sessionSandboxDir, true, 'warn');
+    expect(result.sandboxed).toBe(true);
+    if (result.sandboxed) {
+      expect(result.config.allowRead).toEqual([]);
+    }
+  });
+
+  it('passes through allowRead from config', () => {
+    const result = resolveSandboxConfig(
+      makeServerConfig({
+        sandbox: {
+          filesystem: {
+            denyRead: ['~'],
+            allowRead: ['/usr', '/etc', '/opt/homebrew'],
+          },
+        },
+      }),
+      sessionSandboxDir,
+      true,
+      'warn',
+    );
+    expect(result.sandboxed).toBe(true);
+    if (result.sandboxed) {
+      expect(result.config.allowRead).toEqual(['/usr', '/etc', '/opt/homebrew']);
+      expect(result.config.denyRead).toEqual(['~']);
+    }
   });
 });
 
@@ -476,6 +670,7 @@ describe.skipIf(!sandboxAvailable)('sandbox integration (requires bubblewrap+soc
   function defaultSandboxParams(overrides: Partial<ResolvedSandboxParams> = {}): ResolvedSandboxParams {
     return {
       allowWrite: [sandboxDir],
+      allowRead: [],
       denyRead: [],
       denyWrite: [],
       network: false,
