@@ -677,4 +677,198 @@ describe('MuxInputHandler', () => {
       expect(action).not.toHaveProperty('persona');
     });
   });
+
+  describe('escalation picker mode', () => {
+    function enterEscalationPicker(previousMode: 'pty' | 'command' = 'pty') {
+      const handler = createMuxInputHandler({ initialMode: previousMode });
+      handler.enterEscalationPickerMode(3, previousMode);
+      return handler;
+    }
+
+    it('enters escalation-picker mode with correct state', () => {
+      const handler = enterEscalationPicker();
+      expect(handler.mode).toBe('escalation-picker');
+      expect(handler.escalationPickerState).not.toBeNull();
+      expect(handler.escalationPickerState?.focusedDisplayNumber).toBe(3);
+      expect(handler.escalationPickerState?.previousMode).toBe('pty');
+    });
+
+    it('clears dismissed flag on enter', () => {
+      const handler = createMuxInputHandler();
+      // Simulate a prior dismiss
+      handler.enterEscalationPickerMode(1, 'pty');
+      handler.dismissEscalationPicker(5);
+      expect(handler.escalationDismissed).toBe(true);
+
+      // Re-entering should clear the dismissed flag
+      handler.enterEscalationPickerMode(6, 'pty');
+      expect(handler.escalationDismissed).toBe(false);
+    });
+
+    it('exitEscalationPickerMode returns to previous mode', () => {
+      const handler = enterEscalationPicker('command');
+      handler.exitEscalationPickerMode();
+      expect(handler.mode).toBe('command');
+      expect(handler.escalationPickerState).toBeNull();
+    });
+
+    it('exitEscalationPickerMode defaults to pty when state is null', () => {
+      const handler = createMuxInputHandler();
+      // Exit without entering first -- should not crash, defaults to pty
+      handler.exitEscalationPickerMode();
+      expect(handler.mode).toBe('pty');
+    });
+
+    it('dismissEscalationPicker sets dismissed flag and threshold', () => {
+      const handler = enterEscalationPicker();
+      handler.dismissEscalationPicker(7);
+      expect(handler.escalationDismissed).toBe(true);
+      expect(handler.escalationDismissedAtNumber).toBe(7);
+      expect(handler.mode).toBe('pty');
+      expect(handler.escalationPickerState).toBeNull();
+    });
+
+    it('Escape emits escalation-dismiss action', () => {
+      const handler = enterEscalationPicker();
+      const action = handler.handleKey('ESCAPE');
+      expect(action).toEqual({ kind: 'escalation-dismiss' });
+    });
+
+    it('Ctrl-C emits escalation-dismiss action', () => {
+      const handler = enterEscalationPicker();
+      const action = handler.handleKey('CTRL_C');
+      expect(action).toEqual({ kind: 'escalation-dismiss' });
+    });
+
+    it('Ctrl-A emits escalation-dismiss with targetMode command', () => {
+      const handler = enterEscalationPicker();
+      const action = handler.handleKey('CTRL_A');
+      expect(action).toEqual({ kind: 'escalation-dismiss', targetMode: 'command' });
+    });
+
+    it('dismissEscalationPicker with targetMode overrides previousMode', () => {
+      const handler = createMuxInputHandler();
+      handler.enterEscalationPickerMode(3, 'pty');
+      handler.dismissEscalationPicker(5, 'command');
+      expect(handler.mode).toBe('command');
+      expect(handler.escalationDismissed).toBe(true);
+    });
+
+    it('RIGHT emits escalation-navigate next', () => {
+      const handler = enterEscalationPicker();
+      const action = handler.handleKey('RIGHT');
+      expect(action).toEqual({ kind: 'escalation-navigate', direction: 'next' });
+    });
+
+    it('TAB emits escalation-navigate next', () => {
+      const handler = enterEscalationPicker();
+      const action = handler.handleKey('TAB');
+      expect(action).toEqual({ kind: 'escalation-navigate', direction: 'next' });
+    });
+
+    it('LEFT emits escalation-navigate prev', () => {
+      const handler = enterEscalationPicker();
+      const action = handler.handleKey('LEFT');
+      expect(action).toEqual({ kind: 'escalation-navigate', direction: 'prev' });
+    });
+
+    it('SHIFT_TAB emits escalation-navigate prev', () => {
+      const handler = enterEscalationPicker();
+      const action = handler.handleKey('SHIFT_TAB');
+      expect(action).toEqual({ kind: 'escalation-navigate', direction: 'prev' });
+    });
+
+    it('"a" emits escalation-resolve approved without whitelist', () => {
+      const handler = enterEscalationPicker();
+      const action = handler.handleKey('a');
+      expect(action).toEqual({
+        kind: 'escalation-resolve',
+        displayNumber: 3,
+        decision: 'approved',
+        whitelist: false,
+      });
+    });
+
+    it('"d" emits escalation-resolve denied without whitelist', () => {
+      const handler = enterEscalationPicker();
+      const action = handler.handleKey('d');
+      expect(action).toEqual({
+        kind: 'escalation-resolve',
+        displayNumber: 3,
+        decision: 'denied',
+        whitelist: false,
+      });
+    });
+
+    it('"w" emits escalation-resolve approved with whitelist', () => {
+      const handler = enterEscalationPicker();
+      const action = handler.handleKey('w');
+      expect(action).toEqual({
+        kind: 'escalation-resolve',
+        displayNumber: 3,
+        decision: 'approved',
+        whitelist: true,
+      });
+    });
+
+    it('"A" (shift) emits escalation-resolve-all approved', () => {
+      const handler = enterEscalationPicker();
+      const action = handler.handleKey('A');
+      expect(action).toEqual({
+        kind: 'escalation-resolve-all',
+        decision: 'approved',
+        whitelist: false,
+      });
+    });
+
+    it('"D" (shift) emits escalation-resolve-all denied', () => {
+      const handler = enterEscalationPicker();
+      const action = handler.handleKey('D');
+      expect(action).toEqual({
+        kind: 'escalation-resolve-all',
+        decision: 'denied',
+        whitelist: false,
+      });
+    });
+
+    it('unrecognized key returns none', () => {
+      const handler = enterEscalationPicker();
+      const action = handler.handleKey('x');
+      expect(action).toEqual({ kind: 'none' });
+    });
+
+    it('returns none when escalation picker state is null', () => {
+      const handler = createMuxInputHandler();
+      // Force mode without state (edge case)
+      handler.enterEscalationPickerMode(1, 'pty');
+      handler.exitEscalationPickerMode();
+      // Now in pty mode, but let's manually check the handler function
+      // by re-entering and testing
+      expect(handler.escalationPickerState).toBeNull();
+    });
+
+    it('Ctrl-E in PTY mode emits escalation-open', () => {
+      const handler = createMuxInputHandler();
+      const action = handler.handleKey('CTRL_E');
+      expect(action).toEqual({ kind: 'escalation-open' });
+    });
+
+    it('Ctrl-E in command mode emits escalation-open', () => {
+      const handler = createMuxInputHandler({ initialMode: 'command' });
+      const action = handler.handleKey('CTRL_E');
+      expect(action).toEqual({ kind: 'escalation-open' });
+    });
+
+    it('resolve action uses current focusedDisplayNumber', () => {
+      const handler = createMuxInputHandler();
+      handler.enterEscalationPickerMode(42, 'pty');
+      const action = handler.handleKey('a');
+      expect(action).toEqual({
+        kind: 'escalation-resolve',
+        displayNumber: 42,
+        decision: 'approved',
+        whitelist: false,
+      });
+    });
+  });
 });

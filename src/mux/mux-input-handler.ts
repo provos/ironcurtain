@@ -49,6 +49,21 @@ export interface PersonaPickerState {
   scrollOffset: number;
 }
 
+export interface EscalationPickerState {
+  /**
+   * The display number of the currently focused escalation tab.
+   * This is NOT an array index -- it's the monotonic displayNumber from
+   * PendingEscalation, which survives additions and removals.
+   */
+  focusedDisplayNumber: number;
+
+  /**
+   * The mode the user was in before the picker opened.
+   * Used to restore when the picker is dismissed with Esc.
+   */
+  previousMode: 'pty' | 'command';
+}
+
 export interface MuxInputHandler {
   /** Current input mode. */
   readonly mode: InputMode;
@@ -89,6 +104,24 @@ export interface MuxInputHandler {
   /** Exit persona picker mode and return to command mode. */
   exitPersonaPickerMode(): void;
 
+  /** Current escalation picker state (null when not in escalation picker mode). */
+  readonly escalationPickerState: EscalationPickerState | null;
+
+  /** Whether the escalation picker was dismissed by the user. */
+  readonly escalationDismissed: boolean;
+
+  /** The highest display number when the picker was last dismissed. */
+  readonly escalationDismissedAtNumber: number;
+
+  /** Enter escalation picker mode. */
+  enterEscalationPickerMode(focusedDisplayNumber: number, previousMode: 'pty' | 'command'): void;
+
+  /** Exit escalation picker mode (return to previous mode). */
+  exitEscalationPickerMode(): void;
+
+  /** Dismiss (Esc) the escalation picker, suppressing auto-open until new escalation. */
+  dismissEscalationPicker(highestPendingNumber: number, targetMode?: 'pty' | 'command'): void;
+
   /**
    * Processes a key event from terminal-kit.
    * Returns a MuxAction describing what the orchestrator should do.
@@ -116,6 +149,8 @@ const DOWN = 'DOWN';
 const TAB = 'TAB';
 const HOME = 'HOME';
 const END = 'END';
+const CTRL_E = 'CTRL_E';
+const SHIFT_TAB = 'SHIFT_TAB';
 
 /**
  * Maps terminal-kit key names to raw escape sequences for the PTY.
@@ -219,6 +254,9 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
   let _pickerState: PickerState | null = null;
   let _resumePickerState: ResumePickerState | null = null;
   let _personaPickerState: PersonaPickerState | null = null;
+  let _escalationPickerState: EscalationPickerState | null = null;
+  let _escalationDismissed = false;
+  let _escalationDismissedAtNumber = 0;
 
   let _cachedPersonas: PersonaSnapshot[] = [];
 
@@ -610,10 +648,92 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
     return handleBrowseKey(key);
   }
 
+  function enterEscalationPickerMode(focusedDisplayNumber: number, previousMode: 'pty' | 'command'): void {
+    _mode = 'escalation-picker';
+    _escalationPickerState = { focusedDisplayNumber, previousMode };
+    _escalationDismissed = false;
+  }
+
+  function exitEscalationPickerMode(): void {
+    const prev = _escalationPickerState?.previousMode ?? 'pty';
+    _mode = prev;
+    _escalationPickerState = null;
+  }
+
+  function dismissEscalationPicker(highestPendingNumber: number, targetMode?: 'pty' | 'command'): void {
+    _escalationDismissed = true;
+    _escalationDismissedAtNumber = highestPendingNumber;
+    exitEscalationPickerMode();
+    if (targetMode) {
+      _mode = targetMode;
+    }
+  }
+
+  function handleEscalationPickerKey(key: string): MuxAction {
+    const eps = _escalationPickerState;
+    if (!eps) return { kind: 'none' };
+
+    if (key === ESCAPE || key === CTRL_C) {
+      return { kind: 'escalation-dismiss' };
+    }
+
+    if (key === CTRL_A) {
+      return { kind: 'escalation-dismiss', targetMode: 'command' };
+    }
+
+    // Tab navigation: LEFT/SHIFT_TAB = prev, RIGHT/TAB = next
+    if (key === RIGHT || key === TAB) {
+      return { kind: 'escalation-navigate', direction: 'next' };
+    }
+    if (key === LEFT || key === SHIFT_TAB) {
+      return { kind: 'escalation-navigate', direction: 'prev' };
+    }
+
+    // Single-key resolve actions
+    if (key === 'a') {
+      return {
+        kind: 'escalation-resolve',
+        displayNumber: eps.focusedDisplayNumber,
+        decision: 'approved',
+        whitelist: false,
+      };
+    }
+    if (key === 'd') {
+      return {
+        kind: 'escalation-resolve',
+        displayNumber: eps.focusedDisplayNumber,
+        decision: 'denied',
+        whitelist: false,
+      };
+    }
+    if (key === 'w') {
+      return {
+        kind: 'escalation-resolve',
+        displayNumber: eps.focusedDisplayNumber,
+        decision: 'approved',
+        whitelist: true,
+      };
+    }
+
+    // Batch resolve (shift keys)
+    if (key === 'A') {
+      return { kind: 'escalation-resolve-all', decision: 'approved', whitelist: false };
+    }
+    if (key === 'D') {
+      return { kind: 'escalation-resolve-all', decision: 'denied', whitelist: false };
+    }
+
+    return { kind: 'none' };
+  }
+
   function handlePtyKey(key: string): MuxAction {
     if (key === CTRL_A) {
       _mode = 'command';
       return { kind: 'enter-command-mode' };
+    }
+
+    if (key === CTRL_E) {
+      return { kind: 'escalation-open' };
     }
 
     return { kind: 'write-pty', data: KEY_TO_SEQUENCE[key] ?? key };
@@ -624,6 +744,11 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
     if (key === CTRL_A) {
       _mode = 'pty';
       return { kind: 'enter-pty-mode' };
+    }
+
+    // Ctrl-E opens escalation picker
+    if (key === CTRL_E) {
+      return { kind: 'escalation-open' };
     }
 
     // Escape or Ctrl-C: clear buffer, stay in command mode
@@ -769,6 +894,19 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
     exitPersonaPickerMode,
     enterBrowseWithError,
     exitPickerMode,
+    enterEscalationPickerMode,
+    exitEscalationPickerMode,
+    dismissEscalationPicker,
+
+    get escalationPickerState() {
+      return _escalationPickerState;
+    },
+    get escalationDismissed() {
+      return _escalationDismissed;
+    },
+    get escalationDismissedAtNumber() {
+      return _escalationDismissedAtNumber;
+    },
 
     handleKey(key: string): MuxAction {
       if (_mode === 'pty') {
@@ -782,6 +920,9 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
       }
       if (_mode === 'persona-picker') {
         return handlePersonaPickerKey(key);
+      }
+      if (_mode === 'escalation-picker') {
+        return handleEscalationPickerKey(key);
       }
       return handleCommandKey(key);
     },

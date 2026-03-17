@@ -5,10 +5,19 @@
 import type { PtyBridge } from './pty-bridge.js';
 
 /** Input mode for the mux. */
-export type InputMode = 'pty' | 'command' | 'picker' | 'resume-picker' | 'persona-picker';
+export type InputMode = 'pty' | 'command' | 'picker' | 'resume-picker' | 'persona-picker' | 'escalation-picker';
 
 /** Whether the mode is any picker variant. */
 export function isPickerMode(mode: InputMode): boolean {
+  return mode === 'picker' || mode === 'resume-picker' || mode === 'persona-picker' || mode === 'escalation-picker';
+}
+
+/**
+ * Whether the mode is a bottom-panel picker that claims viewport rows.
+ * The escalation picker is excluded -- it renders as a floating overlay
+ * on top of the full PTY viewport.
+ */
+export function isBottomPanelPicker(mode: InputMode): boolean {
   return mode === 'picker' || mode === 'resume-picker' || mode === 'persona-picker';
 }
 
@@ -49,6 +58,16 @@ export type MuxAction =
   | { readonly kind: 'redraw-picker' }
   | { readonly kind: 'resume-spawn'; readonly sessionId: string; readonly agent: string }
   | { readonly kind: 'persona-spawn'; readonly persona: string }
+  | { readonly kind: 'escalation-open' }
+  | { readonly kind: 'escalation-dismiss'; readonly targetMode?: 'command' }
+  | { readonly kind: 'escalation-navigate'; readonly direction: 'next' | 'prev' }
+  | {
+      readonly kind: 'escalation-resolve';
+      readonly displayNumber: number;
+      readonly decision: 'approved' | 'denied';
+      readonly whitelist: boolean;
+    }
+  | { readonly kind: 'escalation-resolve-all'; readonly decision: 'approved' | 'denied'; readonly whitelist: boolean }
   | { readonly kind: 'scroll-up'; readonly amount: number }
   | { readonly kind: 'scroll-down'; readonly amount: number }
   | { readonly kind: 'quit' };
@@ -124,7 +143,8 @@ export function calculateLayout(totalRows: number, mode: InputMode, pendingCount
     allocatedInputRows = Math.max(MIN_INPUT_LINE_ROWS, overlayRows - escalationPanelRows - HINT_BAR_ROWS);
   }
 
-  const pickerRows = isPickerMode(mode) ? Math.min(Math.floor(ptyViewportRows / 2), ptyViewportRows) : 0;
+  // Bottom-panel pickers claim viewport rows; escalation-picker floats over the full viewport.
+  const pickerRows = isBottomPanelPicker(mode) ? Math.min(Math.floor(ptyViewportRows / 2), ptyViewportRows) : 0;
   const pickerY = TAB_BAR_ROWS + ptyViewportRows - pickerRows;
 
   return {

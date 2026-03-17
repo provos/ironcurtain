@@ -212,6 +212,28 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
     renderer.showMessage(message);
   }
 
+  function navigateEscalationTab(direction: 'next' | 'prev'): void {
+    const eps = inputHandler.escalationPickerState;
+    if (!eps) return;
+
+    const sortedNums = [...escalationManager.state.pendingEscalations.keys()].sort((a, b) => a - b);
+    if (sortedNums.length === 0) return;
+
+    const currentIdx = sortedNums.indexOf(eps.focusedDisplayNumber);
+    let newIdx: number;
+
+    if (currentIdx === -1) {
+      // Focused escalation was resolved/expired -- snap to first
+      newIdx = 0;
+    } else if (direction === 'next') {
+      newIdx = (currentIdx + 1) % sortedNums.length;
+    } else {
+      newIdx = (currentIdx - 1 + sortedNums.length) % sortedNums.length;
+    }
+
+    eps.focusedDisplayNumber = sortedNums[newIdx];
+  }
+
   async function handleAction(action: MuxAction): Promise<void> {
     switch (action.kind) {
       case 'none':
@@ -316,6 +338,50 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
       case 'redraw-picker':
         renderer.redrawCommandArea();
         break;
+
+      case 'escalation-open': {
+        if (escalationManager.pendingCount === 0) {
+          showMessage('No pending escalations');
+          break;
+        }
+        const sortedNums = [...escalationManager.state.pendingEscalations.keys()].sort((a, b) => a - b);
+        const previousMode: 'pty' | 'command' = inputHandler.mode === 'command' ? 'command' : 'pty';
+        inputHandler.enterEscalationPickerMode(sortedNums[0], previousMode);
+        renderer.fullRedraw();
+        break;
+      }
+
+      case 'escalation-dismiss': {
+        const highestPending =
+          escalationManager.pendingCount > 0 ? Math.max(...escalationManager.state.pendingEscalations.keys()) : 0;
+        inputHandler.dismissEscalationPicker(highestPending, action.targetMode);
+        renderer.fullRedraw();
+        break;
+      }
+
+      case 'escalation-navigate': {
+        navigateEscalationTab(action.direction);
+        renderer.redrawCommandArea();
+        break;
+      }
+
+      case 'escalation-resolve': {
+        const message = escalationManager.resolve(action.displayNumber, action.decision, action.whitelist);
+        showMessage(message);
+        // After resolve, the onChange callback handles focus adjustment and auto-close.
+        renderer.redrawTabBar();
+        renderer.redrawCommandArea();
+        break;
+      }
+
+      case 'escalation-resolve-all': {
+        const message = escalationManager.resolveAll(action.decision, action.whitelist);
+        showMessage(message);
+        // onChange callback will auto-close the picker since pendingCount -> 0
+        renderer.redrawTabBar();
+        renderer.redrawCommandArea();
+        break;
+      }
 
       case 'scroll-up':
       case 'scroll-down': {
@@ -521,6 +587,7 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
         getPickerState: () => inputHandler.pickerState,
         getResumePickerState: () => inputHandler.resumePickerState,
         getPersonaPickerState: () => inputHandler.personaPickerState,
+        getEscalationPickerState: () => inputHandler.escalationPickerState,
         getScrollOffset: () => {
           const active = getActiveTab();
           return active?.scrollOffset ?? null;
@@ -560,6 +627,57 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
       });
 
       escalationManager.onChange(() => {
+        const pendingCount = escalationManager.pendingCount;
+        const mode = inputHandler.mode;
+
+        // Auto-close: picker is open but nothing left
+        if (mode === 'escalation-picker' && pendingCount === 0) {
+          inputHandler.exitEscalationPickerMode();
+          renderer.fullRedraw();
+          return;
+        }
+
+        // Auto-open: new escalation arrived, picker not already open
+        if (pendingCount > 0 && mode !== 'escalation-picker') {
+          const highestPending = Math.max(...escalationManager.state.pendingEscalations.keys());
+
+          // Only auto-open if the user hasn't dismissed, OR if a genuinely new
+          // escalation arrived (higher display number than when they dismissed).
+          const shouldAutoOpen =
+            !inputHandler.escalationDismissed || highestPending > inputHandler.escalationDismissedAtNumber;
+
+          if (shouldAutoOpen) {
+            const previousMode: 'pty' | 'command' = mode === 'pty' ? 'pty' : mode === 'command' ? 'command' : 'pty'; // if in another picker, treat as pty
+
+            // If user is in another picker, cancel it first
+            if (mode === 'picker') {
+              inputHandler.exitPickerMode();
+            } else if (mode === 'resume-picker') {
+              inputHandler.exitResumePickerMode();
+            } else if (mode === 'persona-picker') {
+              inputHandler.exitPersonaPickerMode();
+            }
+
+            inputHandler.enterEscalationPickerMode(highestPending, previousMode);
+            renderer.fullRedraw();
+            process.stderr.write('\x07'); // BEL
+            return;
+          }
+        }
+
+        // Live update while picker is open: re-validate focused tab
+        if (mode === 'escalation-picker') {
+          const eps = inputHandler.escalationPickerState;
+          if (eps && !escalationManager.state.pendingEscalations.has(eps.focusedDisplayNumber)) {
+            // Focused escalation was resolved or expired -- snap to nearest
+            const sortedNums = [...escalationManager.state.pendingEscalations.keys()].sort((a, b) => a - b);
+            if (sortedNums.length > 0) {
+              eps.focusedDisplayNumber = sortedNums[0];
+            }
+            // If sortedNums is empty, auto-close above will handle it on next tick
+          }
+        }
+
         renderer.redrawTabBar();
         renderer.redrawCommandArea();
       });
