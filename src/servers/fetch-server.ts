@@ -254,7 +254,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
       name: 'http_fetch',
-      description: 'Fetch content from a URL via HTTP GET',
+      description:
+        'Fetch content from a URL via HTTP GET. Returns JSON: { status, headers, body, truncated }. On error, returns JSON: { error }.',
       inputSchema: {
         type: 'object' as const,
         properties: {
@@ -323,7 +324,7 @@ async function handleHttpFetch(
   const url = args?.url as string | undefined;
   if (!url || typeof url !== 'string') {
     return {
-      content: [{ type: 'text', text: 'Missing required parameter: url' }],
+      content: [{ type: 'text', text: JSON.stringify({ error: 'Missing required parameter: url' }) }],
       isError: true,
     };
   }
@@ -340,7 +341,9 @@ async function handleHttpFetch(
       content: [
         {
           type: 'text',
-          text: `Invalid format: ${typeof rawFormat === 'string' ? rawFormat : JSON.stringify(rawFormat)}. Supported formats are: ${VALID_FORMATS.join(', ')}.`,
+          text: JSON.stringify({
+            error: `Invalid format: ${typeof rawFormat === 'string' ? rawFormat : JSON.stringify(rawFormat)}. Supported formats are: ${VALID_FORMATS.join(', ')}.`,
+          }),
         },
       ],
       isError: true,
@@ -371,7 +374,7 @@ async function handleHttpFetch(
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return {
-      content: [{ type: 'text', text: `Fetch error: ${message}` }],
+      content: [{ type: 'text', text: JSON.stringify({ error: message }) }],
       isError: true,
     };
   }
