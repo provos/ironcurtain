@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { calculateLayout, MAX_INPUT_LINE_ROWS } from '../src/mux/types.js';
+import { calculateLayout, isPickerMode, isBottomPanelPicker, MAX_INPUT_LINE_ROWS } from '../src/mux/types.js';
 
 describe('calculateLayout', () => {
   it('PTY mode: viewport = totalRows - 3 (tab bar + 2-row footer)', () => {
@@ -87,5 +87,29 @@ describe('calculateLayout', () => {
   it('inputLineRows is 1 in PTY mode', () => {
     const layout = calculateLayout(24, 'pty', 0);
     expect(layout.inputLineRows).toBe(1);
+  });
+
+  it('escalation-picker does not claim picker rows (floats over viewport)', () => {
+    const layout = calculateLayout(24, 'escalation-picker', 0);
+    expect(layout.pickerRows).toBe(0);
+    expect(layout.overlayRows).toBe(0); // no command overlay
+  });
+
+  it('isPickerMode includes escalation-picker', () => {
+    expect(isPickerMode('escalation-picker')).toBe(true);
+    expect(isPickerMode('picker')).toBe(true);
+    expect(isPickerMode('resume-picker')).toBe(true);
+    expect(isPickerMode('persona-picker')).toBe(true);
+    expect(isPickerMode('pty')).toBe(false);
+    expect(isPickerMode('command')).toBe(false);
+  });
+
+  it('isBottomPanelPicker excludes escalation-picker', () => {
+    expect(isBottomPanelPicker('escalation-picker')).toBe(false);
+    expect(isBottomPanelPicker('picker')).toBe(true);
+    expect(isBottomPanelPicker('resume-picker')).toBe(true);
+    expect(isBottomPanelPicker('persona-picker')).toBe(true);
+    expect(isBottomPanelPicker('pty')).toBe(false);
+    expect(isBottomPanelPicker('command')).toBe(false);
   });
 });

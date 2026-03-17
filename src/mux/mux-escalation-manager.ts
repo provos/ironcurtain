@@ -44,6 +44,9 @@ export interface MuxEscalationManager {
    */
   removeSession(sessionId: string): void;
 
+  /** Returns pending display numbers in ascending order. */
+  sortedDisplayNumbers(): number[];
+
   /** Resolves a pending escalation by display number. */
   resolve(displayNumber: number, decision: 'approved' | 'denied', whitelist?: boolean): string;
 
@@ -156,6 +159,10 @@ export function createMuxEscalationManager(options?: MuxEscalationManagerOptions
       return state.pendingEscalations.size;
     },
 
+    sortedDisplayNumbers(): number[] {
+      return [...state.pendingEscalations.keys()].sort((a, b) => a - b);
+    },
+
     addSession(registration: PtySessionRegistration): void {
       managedSessionIds.add(registration.sessionId);
 
@@ -215,7 +222,7 @@ export function createMuxEscalationManager(options?: MuxEscalationManagerOptions
       }
 
       const messages: string[] = [];
-      const nums = [...state.pendingEscalations.keys()].sort((a, b) => a - b);
+      const nums = this.sortedDisplayNumbers();
 
       for (const num of nums) {
         messages.push(this.resolve(num, decision, whitelist));

@@ -16,9 +16,16 @@
 /* eslint-disable @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access */
 
 import type { Terminal as TerminalType } from '@xterm/headless';
-import { calculateLayout, isPickerMode, type InputMode, type Layout, type MuxTab } from './types.js';
+import {
+  calculateLayout,
+  isPickerMode,
+  isBottomPanelPicker,
+  type InputMode,
+  type Layout,
+  type MuxTab,
+} from './types.js';
 import type { ListenerState } from '../escalation/listener-state.js';
-import type { PickerState, ResumePickerState, PersonaPickerState } from './mux-input-handler.js';
+import type { PickerState, ResumePickerState, PersonaPickerState, EscalationPickerState } from './mux-input-handler.js';
 import { createSplashScreen, type SplashScreen } from './mux-splash.js';
 import { formatRelativeTime } from './session-scanner.js';
 
@@ -140,6 +147,7 @@ export interface MuxRendererDeps {
   getPickerState: () => PickerState | null;
   getResumePickerState: () => ResumePickerState | null;
   getPersonaPickerState: () => PersonaPickerState | null;
+  getEscalationPickerState: () => EscalationPickerState | null;
   /** Returns the active tab's scroll offset (null = live/bottom). */
   getScrollOffset: () => number | null;
 }
@@ -239,7 +247,8 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
   function activeOverlayRows(): number {
     const mode = deps.getMode();
     if (mode === 'command') return _layout.overlayRows;
-    if (isPickerMode(mode)) return _layout.pickerRows;
+    // Escalation picker floats over the full viewport -- no rows reserved.
+    if (isBottomPanelPicker(mode)) return _layout.pickerRows;
     return 0;
   }
 
@@ -274,11 +283,12 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
     const readFrom = scrollOffset ?? baseY;
     const cells = readTerminalBuffer(xtermTerminal, readFrom, _layout.ptyViewportRows, _cols);
 
-    // Determine how many rows to render (skip overlay in command/picker mode)
+    // Determine how many rows to render (skip overlay in command/bottom-panel picker mode).
+    // Escalation picker floats over the full viewport -- no rows subtracted.
     const mode = deps.getMode();
     let visibleRows = _layout.ptyViewportRows;
     if (mode === 'command') visibleRows -= _layout.overlayRows;
-    else if (isPickerMode(mode)) visibleRows -= _layout.pickerRows;
+    else if (isBottomPanelPicker(mode)) visibleRows -= _layout.pickerRows;
 
     let lastStyle: TranslatedCell | null = null;
     for (let y = 0; y < visibleRows; y++) {
@@ -349,7 +359,7 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
         term.styleReset();
         if (pendingCount > 0) {
           term.dim(
-            ` command mode \u00b7 ${pendingCount} escalation${pendingCount !== 1 ? 's' : ''} pending \u2014 /approve, /approve+, or /deny`,
+            ` command mode \u00b7 ${pendingCount} escalation${pendingCount !== 1 ? 's' : ''} pending \u2014 Ctrl-E to review`,
           );
         } else {
           term.dim(' command mode \u00b7 type a message to enable auto-approver \u00b7 Shift+drag to select');
@@ -545,6 +555,219 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
     moveTo(2 + 2 + cursorVis.col, cursorScreenRow);
   }
 
+  /**
+   * Draws a single row of the escalation dialog box at the given screen
+   * position, wrapped in box-drawing side borders. Content is rendered
+   * by the `renderContent` callback which receives the inner width.
+   */
+  function drawBoxRow(y: number, boxX: number, innerWidth: number, renderContent: (w: number) => void): void {
+    moveTo(boxX, y);
+    term.brightCyan('\u2502');
+    term(' ');
+    renderContent(innerWidth);
+    // Pad remaining inner width with spaces (avoid eraseLineAfter which
+    // would wipe PTY content to the right of the floating overlay).
+    moveTo(boxX + innerWidth + 2, y);
+    term(' ');
+    term.brightCyan('\u2502');
+  }
+
+  function drawEscalationPickerOverlay(): void {
+    const eps = deps.getEscalationPickerState();
+    if (!eps) return;
+
+    const pending = deps.getEscalationState().pendingEscalations;
+    const sortedEscalations = [...pending.values()].sort((a, b) => a.displayNumber - b.displayNumber);
+    if (sortedEscalations.length === 0) return;
+
+    const focused = pending.get(eps.focusedDisplayNumber);
+    if (!focused) return;
+
+    // Compute dialog dimensions -- centered in the PTY viewport
+    const viewportRows = _layout.ptyViewportRows;
+    const viewportY = _layout.ptyViewportY;
+
+    // Horizontal sizing: leave 3-column margin on each side, max 80 inner width.
+    // Clamp to available columns so we never draw past the right edge.
+    const boxMargin = 3;
+    const maxInnerWidth = 80;
+    const minBoxWidth = 12; // absolute minimum to show anything useful
+    const innerWidth = Math.min(maxInnerWidth, Math.max(minBoxWidth - 4, _cols - boxMargin * 2 - 4));
+    const boxWidth = innerWidth + 4; // 4 = border + space on each side
+    if (boxWidth > _cols) return; // terminal too narrow for overlay
+    const boxX = Math.max(0, Math.floor((_cols - boxWidth) / 2));
+
+    // Content rows: tab bar + separator + header + separator + detail area + separator + hint bar
+    const minContentRows = 7; // minimum: tab + sep + header + sep + 1 detail + sep + hints
+    const maxContentRows = Math.max(minContentRows, viewportRows - 4); // leave 2 rows margin top+bottom
+    const detailBudget = maxContentRows - 6; // 6 = tab bar + 2 separators + header + separator + hint bar
+
+    // Collect detail lines — use innerWidth (minus arg indent) so line
+    // packing matches the actual box geometry.
+    const argLines = formatArgLines(focused.request.arguments, innerWidth - 2);
+    const detailLines: Array<{ kind: 'label' | 'arg' | 'reason' | 'whitelist'; text: string }> = [];
+
+    if (argLines.length > 0) {
+      detailLines.push({ kind: 'label', text: 'Arguments:' });
+      for (const line of argLines) {
+        detailLines.push({ kind: 'arg', text: line });
+      }
+    }
+    detailLines.push({ kind: 'reason', text: `Reason: ${focused.request.reason}` });
+    if (focused.request.whitelistCandidates && focused.request.whitelistCandidates.length > 0) {
+      const candidate = focused.request.whitelistCandidates[0];
+      const wlText = candidate.warning ? `${candidate.description} (${candidate.warning})` : candidate.description;
+      detailLines.push({ kind: 'whitelist', text: `/approve+ ${wlText}` });
+    }
+
+    const actualDetailRows = Math.min(detailLines.length, detailBudget);
+    const totalBoxRows = 6 + actualDetailRows; // includes top+bottom border
+    const totalBoxHeight = totalBoxRows + 2; // +2 for top and bottom border lines
+
+    if (totalBoxHeight > viewportRows) return; // terminal too small
+
+    // Vertical centering within the viewport
+    const startY = viewportY + Math.max(0, Math.floor((viewportRows - totalBoxHeight) / 2));
+
+    let currentY = startY;
+
+    // Top border with title
+    moveTo(boxX, currentY);
+    const title = ' Escalation ';
+    const borderAfterTitle = Math.max(0, boxWidth - 2 - title.length);
+    term.brightCyan('\u250c' + title);
+    term.brightCyan('\u2500'.repeat(borderAfterTitle) + '\u2510');
+    term.styleReset();
+    currentY++;
+
+    // Escalation tab bar
+    drawBoxRow(currentY, boxX, innerWidth, (w) => {
+      let written = 0;
+      for (const esc of sortedEscalations) {
+        const isFocused = esc.displayNumber === eps.focusedDisplayNumber;
+        const label = `[${esc.displayNumber}] ${esc.request.serverName}/${esc.request.toolName}`;
+        if (written + label.length + 2 > w) break;
+        if (isFocused) {
+          term.bgCyan.black(' ' + label + ' ');
+          term.styleReset();
+        } else {
+          term.dim(' ' + label + ' ');
+          term.styleReset();
+        }
+        written += label.length + 2;
+      }
+      const pad = Math.max(0, w - written);
+      if (pad > 0) term(' '.repeat(pad));
+    });
+    currentY++;
+
+    // Separator
+    drawBoxRow(currentY, boxX, innerWidth, (w) => {
+      term.dim('\u2500'.repeat(w));
+      term.styleReset();
+    });
+    currentY++;
+
+    // Tool header
+    drawBoxRow(currentY, boxX, innerWidth, (w) => {
+      const timeAgo = formatRelativeTime(focused.receivedAt.toISOString());
+      const headerText = `Session #${focused.sessionDisplayNumber}  ${focused.request.serverName}/${focused.request.toolName}  ${timeAgo}`;
+      // Render with colors using terminal-kit chaining
+      term(`Session #${focused.sessionDisplayNumber}  `);
+      term.cyan(`${focused.request.serverName}/${focused.request.toolName}`);
+      term.dim(`  ${timeAgo}`);
+      // Pad remainder
+      const textLen = headerText.length;
+      const pad = Math.max(0, w - textLen);
+      if (pad > 0) term(' '.repeat(pad));
+    });
+    currentY++;
+
+    // Separator
+    drawBoxRow(currentY, boxX, innerWidth, (w) => {
+      term.dim('\u2500'.repeat(w));
+      term.styleReset();
+    });
+    currentY++;
+
+    // Detail rows — drawBoxRow handles right-border positioning via
+    // eraseLineAfter + moveTo, so callbacks only need to write content
+    // (no manual padding required).
+    for (let i = 0; i < actualDetailRows; i++) {
+      const detail = detailLines[i];
+      drawBoxRow(currentY, boxX, innerWidth, (w) => {
+        const indent = detail.kind === 'arg' ? 2 : 0;
+        const maxTextWidth = w - indent;
+        if (indent > 0) term(' '.repeat(indent));
+        if (detail.kind === 'label') {
+          term.dim(truncate(detail.text, maxTextWidth));
+        } else if (detail.kind === 'reason') {
+          term.dim('Reason: ');
+          term.styleReset();
+          term(truncate(focused.request.reason, maxTextWidth - 8));
+        } else if (detail.kind === 'whitelist') {
+          term.dim('/approve+ ');
+          term.styleReset();
+          const candidate = focused.request.whitelistCandidates?.[0];
+          if (candidate) {
+            const descBudget = maxTextWidth - 10;
+            if (candidate.warning) {
+              const warnText = ` (${candidate.warning})`;
+              term.cyan(truncate(candidate.description, Math.max(1, descBudget - warnText.length)));
+              term.yellow(truncate(warnText, descBudget));
+            } else {
+              term.cyan(truncate(candidate.description, descBudget));
+            }
+          }
+        } else {
+          term(truncate(detail.text, maxTextWidth));
+        }
+        term.styleReset();
+      });
+      currentY++;
+    }
+
+    // Separator before hint bar
+    drawBoxRow(currentY, boxX, innerWidth, (w) => {
+      term.dim('\u2500'.repeat(w));
+      term.styleReset();
+    });
+    currentY++;
+
+    // Hint bar
+    drawBoxRow(currentY, boxX, innerWidth, () => {
+      term.bgWhite.black(' a ');
+      term.styleReset();
+      term.dim(' approve ');
+      term.bgWhite.black(' d ');
+      term.styleReset();
+      term.dim(' deny ');
+      term.bgWhite.black(' w ');
+      term.styleReset();
+      term.dim(' approve+ ');
+      if (sortedEscalations.length > 1) {
+        term.bgWhite.black(' A ');
+        term.styleReset();
+        term.dim(' all ');
+        term.bgWhite.black(' D ');
+        term.styleReset();
+        term.dim(' deny all ');
+        term.bgWhite.black(' \u2190\u2192 ');
+        term.styleReset();
+        term.dim(' switch ');
+      }
+      term.bgWhite.black(' Esc ');
+      term.styleReset();
+      term.dim(' dismiss');
+    });
+    currentY++;
+
+    // Bottom border
+    moveTo(boxX, currentY);
+    term.brightCyan('\u2514' + '\u2500'.repeat(boxWidth - 2) + '\u2518');
+    term.styleReset();
+  }
+
   function drawActiveOverlay(): void {
     const mode = deps.getMode();
     if (mode === 'command') {
@@ -555,6 +778,8 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
       drawResumePickerOverlay();
     } else if (mode === 'persona-picker') {
       drawPersonaPickerOverlay();
+    } else if (mode === 'escalation-picker') {
+      drawEscalationPickerOverlay();
     }
   }
 
