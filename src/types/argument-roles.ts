@@ -42,6 +42,11 @@ export type ArgumentRole =
   // Opaque roles (semantic meaning but not resource identifiers)
   | 'branch-name'
   | 'commit-message'
+  // Google Workspace opaque roles
+  | 'google-resource-id'
+  | 'email-address'
+  | 'email-body'
+  | 'calendar-datetime'
   // Catch-all
   | 'none';
 
@@ -287,6 +292,57 @@ const registryEntries: [ArgumentRole, RoleDefinition][] = [
       serverNames: ['git'],
     },
   ],
+  // ── Google Workspace roles ──────────────────────────────────────
+  [
+    'google-resource-id',
+    {
+      description: 'Google Workspace resource identifier (message ID, file ID, calendar ID, etc.)',
+      isResourceIdentifier: false,
+      category: 'opaque',
+      canonicalize: identity,
+      annotationGuidance:
+        'Assign to arguments that are Google Workspace resource identifiers (message IDs, file IDs, ' +
+        'calendar IDs, document IDs, etc.). These are opaque Google-internal identifiers.',
+      serverNames: ['google-workspace'],
+    },
+  ],
+  [
+    'email-address',
+    {
+      description: 'Email address (recipient, attendee, share target)',
+      isResourceIdentifier: false,
+      category: 'opaque',
+      canonicalize: lowercase,
+      annotationGuidance:
+        'Assign to arguments that are email addresses (recipients, attendees, share targets). ' +
+        'Includes the "to" field on send/draft, "attendees" on calendar events, "email" on file sharing.',
+      serverNames: ['google-workspace'],
+    },
+  ],
+  [
+    'email-body',
+    {
+      description: 'Email message body content',
+      isResourceIdentifier: false,
+      category: 'opaque',
+      canonicalize: identity,
+      annotationGuidance:
+        'Assign to arguments that contain email body text or rich content. ' +
+        'Includes the "body" field on send/draft message tools.',
+      serverNames: ['google-workspace'],
+    },
+  ],
+  [
+    'calendar-datetime',
+    {
+      description: 'Calendar date/time value (event start, end, etc.)',
+      isResourceIdentifier: false,
+      category: 'opaque',
+      canonicalize: identity,
+      annotationGuidance: 'Assign to arguments that are calendar date/time values (event start time, end time, etc.).',
+      serverNames: ['google-workspace'],
+    },
+  ],
   [
     'none',
     {
@@ -320,6 +376,10 @@ const _ROLE_COMPLETENESS_CHECK: Record<ArgumentRole, true> = {
   'github-repo': true,
   'branch-name': true,
   'commit-message': true,
+  'google-resource-id': true,
+  'email-address': true,
+  'email-body': true,
+  'calendar-datetime': true,
   none: true,
 };
 

@@ -8,9 +8,11 @@ import { googleOAuthProvider } from '../../src/auth/providers/google.js';
 // ---------------------------------------------------------------------------
 
 describe('GOOGLE_SCOPES registry', () => {
-  it('has entries for all three services', () => {
+  it('has entries for all six services', () => {
     const groups = new Set(GOOGLE_SCOPES.map((s) => s.group));
-    expect(groups).toEqual(new Set(['Gmail', 'Google Calendar', 'Google Drive']));
+    expect(groups).toEqual(
+      new Set(['Gmail', 'Google Calendar', 'Google Drive', 'Google Docs', 'Google Sheets', 'Google Slides']),
+    );
   });
 
   it('has unique short names', () => {
@@ -23,7 +25,7 @@ describe('GOOGLE_SCOPES registry', () => {
     expect(new Set(fullScopes).size).toBe(fullScopes.length);
   });
 
-  it('flags exactly one default per service group', () => {
+  it('flags at most one default per service group', () => {
     const defaultsByGroup = new Map<string, number>();
     for (const entry of GOOGLE_SCOPES) {
       if (entry.isDefault) {
@@ -31,14 +33,15 @@ describe('GOOGLE_SCOPES registry', () => {
       }
     }
 
-    // Each group should have exactly one default
+    // Each group with defaults should have exactly one
     for (const [group, count] of defaultsByGroup) {
       expect(count, `${group} should have exactly one default`).toBe(1);
     }
 
-    // All groups should have a default
-    const allGroups = new Set(GOOGLE_SCOPES.map((s) => s.group));
-    expect(defaultsByGroup.size).toBe(allGroups.size);
+    // The three core services (Gmail, Calendar, Drive) must have defaults
+    expect(defaultsByGroup.has('Gmail')).toBe(true);
+    expect(defaultsByGroup.has('Google Calendar')).toBe(true);
+    expect(defaultsByGroup.has('Google Drive')).toBe(true);
   });
 
   it('default scopes match googleOAuthProvider.defaultScopes', () => {

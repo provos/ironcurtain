@@ -31,8 +31,8 @@ import {
 } from '../src/trusted-process/domain-utils.js';
 
 describe('ARGUMENT_ROLE_REGISTRY', () => {
-  it('contains all twelve roles', () => {
-    expect(ARGUMENT_ROLE_REGISTRY.size).toBe(12);
+  it('contains all sixteen roles', () => {
+    expect(ARGUMENT_ROLE_REGISTRY.size).toBe(16);
   });
 
   it('has entries for all known roles', () => {
@@ -48,6 +48,10 @@ describe('ARGUMENT_ROLE_REGISTRY', () => {
       'github-repo',
       'branch-name',
       'commit-message',
+      'google-resource-id',
+      'email-address',
+      'email-body',
+      'calendar-datetime',
       'none',
     ];
     for (const role of expectedRoles) {
@@ -124,6 +128,10 @@ describe('isArgumentRole', () => {
     expect(isArgumentRole('github-owner')).toBe(true);
     expect(isArgumentRole('branch-name')).toBe(true);
     expect(isArgumentRole('commit-message')).toBe(true);
+    expect(isArgumentRole('google-resource-id')).toBe(true);
+    expect(isArgumentRole('email-address')).toBe(true);
+    expect(isArgumentRole('email-body')).toBe(true);
+    expect(isArgumentRole('calendar-datetime')).toBe(true);
     expect(isArgumentRole('none')).toBe(true);
   });
 
@@ -140,7 +148,7 @@ describe('getArgumentRoleValues', () => {
     expect(values.length).toBeGreaterThanOrEqual(1);
   });
 
-  it('contains all twelve roles', () => {
+  it('contains all sixteen roles', () => {
     const values = getArgumentRoleValues();
     expect(values).toContain('read-path');
     expect(values).toContain('write-path');
@@ -153,6 +161,10 @@ describe('getArgumentRoleValues', () => {
     expect(values).toContain('github-repo');
     expect(values).toContain('branch-name');
     expect(values).toContain('commit-message');
+    expect(values).toContain('google-resource-id');
+    expect(values).toContain('email-address');
+    expect(values).toContain('email-body');
+    expect(values).toContain('calendar-datetime');
     expect(values).toContain('none');
   });
 });
@@ -244,10 +256,23 @@ describe('normalizers via registry', () => {
   });
 
   it('opaque roles use identity', () => {
-    for (const role of ['branch-name', 'commit-message', 'none'] as ArgumentRole[]) {
+    for (const role of [
+      'branch-name',
+      'commit-message',
+      'google-resource-id',
+      'email-body',
+      'calendar-datetime',
+      'none',
+    ] as ArgumentRole[]) {
       const def = getRoleDefinition(role);
       expect(def.canonicalize('anything')).toBe('anything');
     }
+  });
+
+  it('email-address role uses lowercase canonicalization', () => {
+    const def = getRoleDefinition('email-address');
+    expect(def.canonicalize('User@Example.COM')).toBe('user@example.com');
+    expect(def.canonicalize('already@lower.case')).toBe('already@lower.case');
   });
 });
 
@@ -374,8 +399,12 @@ describe('getRolesByCategory', () => {
     const opaques = getRolesByCategory('opaque');
     expect(opaques).toContain('branch-name');
     expect(opaques).toContain('commit-message');
+    expect(opaques).toContain('google-resource-id');
+    expect(opaques).toContain('email-address');
+    expect(opaques).toContain('email-body');
+    expect(opaques).toContain('calendar-datetime');
     expect(opaques).toContain('none');
-    expect(opaques).toHaveLength(3);
+    expect(opaques).toHaveLength(7);
   });
 });
 

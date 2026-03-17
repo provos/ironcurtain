@@ -75,5 +75,62 @@ export function getHandwrittenScenarios(sandboxDir: string): TestScenario[] {
       reasoning: 'Unknown tools are denied by the structural invariant.',
       source: 'handwritten',
     },
+
+    // ── Google Workspace scenarios ──────────────────────────────────
+    {
+      description: 'List Gmail messages -- allowed (read-only)',
+      request: {
+        serverName: 'google-workspace',
+        toolName: 'gmail_list_messages',
+        arguments: { query: 'is:unread', maxResults: 10 },
+      },
+      expectedDecision: 'allow',
+      reasoning: 'Reading email listings is a safe read-only operation.',
+      source: 'handwritten',
+    },
+    {
+      description: 'Send Gmail message -- not allowed (mutation)',
+      request: {
+        serverName: 'google-workspace',
+        toolName: 'gmail_send_message',
+        arguments: { to: 'user@example.com', subject: 'Hello', body: 'Hi there' },
+      },
+      expectedDecision: 'not-allow',
+      reasoning: 'Sending email is a side-effect operation requiring human approval.',
+      source: 'handwritten',
+    },
+    {
+      description: 'Read calendar events -- allowed (read-only)',
+      request: {
+        serverName: 'google-workspace',
+        toolName: 'calendar_list_events',
+        arguments: { calendarId: 'primary', maxResults: 10 },
+      },
+      expectedDecision: 'allow',
+      reasoning: 'Reading calendar events is a safe read-only operation.',
+      source: 'handwritten',
+    },
+    {
+      description: 'Share Drive file -- not allowed (permission change)',
+      request: {
+        serverName: 'google-workspace',
+        toolName: 'drive_share_file',
+        arguments: { fileId: 'abc123', email: 'user@example.com', role: 'writer' },
+      },
+      expectedDecision: 'not-allow',
+      reasoning: 'Sharing files changes permissions and must be escalated.',
+      source: 'handwritten',
+    },
+    {
+      description: 'Unknown Google Workspace tool -- not allowed (structural invariant)',
+      request: {
+        serverName: 'google-workspace',
+        toolName: 'unknown_gworkspace_tool',
+        arguments: {},
+      },
+      expectedDecision: 'not-allow',
+      reasoning: 'Unknown tools are denied by the structural invariant.',
+      source: 'handwritten',
+    },
   ];
 }
