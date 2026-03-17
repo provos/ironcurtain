@@ -9,6 +9,8 @@ import {
   colorEquals,
   computeVisualLines,
   cursorToVisualPosition,
+  truncate,
+  fitTabLabels,
   type TranslatedCell,
   type TermkitColor,
 } from '../src/mux/mux-renderer.js';
@@ -359,5 +361,84 @@ describe('cursorToVisualPosition', () => {
     const lines = computeVisualLines('abcdefghij', 5);
     // Position 7 is 'h', col 2 of second visual line
     expect(cursorToVisualPosition(lines, 7)).toEqual({ row: 1, col: 2 });
+  });
+});
+
+describe('truncate', () => {
+  it('returns string unchanged when within limit', () => {
+    expect(truncate('hello', 10)).toBe('hello');
+    expect(truncate('hello', 5)).toBe('hello');
+  });
+
+  it('truncates with ellipsis when over limit', () => {
+    expect(truncate('hello world', 5)).toBe('hell\u2026');
+    expect(truncate('abcdef', 3)).toBe('ab\u2026');
+  });
+});
+
+describe('fitTabLabels', () => {
+  const makeTabs = (...names: string[]) =>
+    names.map((name, i) => ({ displayNumber: i + 1, label: `[${i + 1}] ${name}` }));
+
+  it('fits all tabs when width is sufficient', () => {
+    const tabs = makeTabs('server/tool');
+    const result = fitTabLabels(tabs, 1, 50);
+    expect(result).toHaveLength(1);
+    expect(result[0]).toEqual({ label: '[1] server/tool', isFocused: true });
+  });
+
+  it('fits multiple tabs', () => {
+    const tabs = makeTabs('a/b', 'c/d');
+    // [1] a/b = 7 chars + 2 spaces = 9; [2] c/d = 7 + 2 = 9; total = 18
+    const result = fitTabLabels(tabs, 2, 20);
+    expect(result).toHaveLength(2);
+    expect(result[0].isFocused).toBe(false);
+    expect(result[1].isFocused).toBe(true);
+  });
+
+  it('truncates focused tab when it overflows', () => {
+    const tabs = makeTabs('longservername/longtoolname');
+    // Label: "[1] longservername/longtoolname" = 30 chars, needs 32 with spaces
+    const result = fitTabLabels(tabs, 1, 15);
+    expect(result).toHaveLength(1);
+    expect(result[0].isFocused).toBe(true);
+    // 15 width - 2 spaces = 13 chars for label, truncated with ellipsis
+    expect(result[0].label.length).toBe(13);
+    expect(result[0].label).toMatch(/\u2026$/);
+  });
+
+  it('does not render focused tab when remaining space is less than 3', () => {
+    const tabs = makeTabs('a/b', 'longservername/longtoolname');
+    // First tab "[1] a/b" = 7 + 2 = 9 written
+    // Remaining = 10 - 9 = 1, which is < 3
+    const result = fitTabLabels(tabs, 2, 10);
+    expect(result).toHaveLength(1);
+    expect(result[0].isFocused).toBe(false);
+  });
+
+  it('renders focused tab with exactly 3 remaining columns', () => {
+    const tabs = makeTabs('a/b', 'longservername/longtoolname');
+    // First tab "[1] a/b" = 7 + 2 = 9 written
+    // Remaining = 12 - 9 = 3, which is exactly 3 → fits 1 char
+    const result = fitTabLabels(tabs, 2, 12);
+    expect(result).toHaveLength(2);
+    expect(result[1].isFocused).toBe(true);
+    expect(result[1].label.length).toBe(1);
+  });
+
+  it('never exceeds width', () => {
+    const tabs = makeTabs('server/tool', 'another/tool', 'third/tool');
+    for (const width of [3, 5, 10, 15, 20, 30, 50]) {
+      const result = fitTabLabels(tabs, 2, width);
+      const totalWritten = result.reduce((sum, t) => sum + t.label.length + 2, 0);
+      expect(totalWritten).toBeLessThanOrEqual(width);
+    }
+  });
+
+  it('skips non-focused tabs that do not fit', () => {
+    const tabs = makeTabs('longservername/longtoolname');
+    // Not focused, so don't truncate — just skip
+    const result = fitTabLabels(tabs, 999, 10);
+    expect(result).toHaveLength(0);
   });
 });

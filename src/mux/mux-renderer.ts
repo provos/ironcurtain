@@ -646,30 +646,20 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
 
     // Escalation tab bar
     drawBoxRow(currentY, boxX, innerWidth, (w) => {
+      const tabs = sortedEscalations.map((esc) => ({
+        displayNumber: esc.displayNumber,
+        label: `[${esc.displayNumber}] ${esc.request.serverName}/${esc.request.toolName}`,
+      }));
+      const fitted = fitTabLabels(tabs, eps.focusedDisplayNumber, w);
       let written = 0;
-      for (const esc of sortedEscalations) {
-        const isFocused = esc.displayNumber === eps.focusedDisplayNumber;
-        const label = `[${esc.displayNumber}] ${esc.request.serverName}/${esc.request.toolName}`;
-        const cellWidth = label.length + 2; // +2 for surrounding spaces
-        if (written + cellWidth > w) {
-          // If this is the focused tab, truncate it to fit rather than skipping
-          if (isFocused && written < w) {
-            const available = w - written - 2; // -2 for surrounding spaces
-            const truncatedLabel = truncate(label, Math.max(1, available));
-            term.bgCyan.black(' ' + truncatedLabel + ' ');
-            term.styleReset();
-            written += truncatedLabel.length + 2;
-          }
-          break;
-        }
-        if (isFocused) {
-          term.bgCyan.black(' ' + label + ' ');
-          term.styleReset();
+      for (const tab of fitted) {
+        if (tab.isFocused) {
+          term.bgCyan.black(' ' + tab.label + ' ');
         } else {
-          term.dim(' ' + label + ' ');
-          term.styleReset();
+          term.dim(' ' + tab.label + ' ');
         }
-        written += cellWidth;
+        term.styleReset();
+        written += tab.label.length + 2;
       }
       const pad = Math.max(0, w - written);
       if (pad > 0) term(' '.repeat(pad));
@@ -1451,7 +1441,39 @@ function formatArgValue(value: unknown): string {
   return JSON.stringify(value);
 }
 
-function truncate(str: string, maxLen: number): string {
+export function truncate(str: string, maxLen: number): string {
   if (str.length <= maxLen) return str;
   return str.slice(0, maxLen - 1) + '\u2026';
+}
+
+/**
+ * Computes which tab labels to render in the escalation tab bar,
+ * truncating the focused tab if needed. Returns an array of
+ * { label, isFocused } entries that fit within `width`.
+ *
+ * Exported for testing.
+ */
+export function fitTabLabels(
+  tabs: { displayNumber: number; label: string }[],
+  focusedDisplayNumber: number,
+  width: number,
+): { label: string; isFocused: boolean }[] {
+  const result: { label: string; isFocused: boolean }[] = [];
+  let written = 0;
+  for (const tab of tabs) {
+    const isFocused = tab.displayNumber === focusedDisplayNumber;
+    const cellWidth = tab.label.length + 2; // +2 for surrounding spaces
+    if (written + cellWidth > width) {
+      // Truncate the focused tab to fit; need at least 3 cols: space + 1 char + space
+      const remaining = width - written;
+      if (isFocused && remaining >= 3) {
+        const truncatedLabel = truncate(tab.label, remaining - 2);
+        result.push({ label: truncatedLabel, isFocused: true });
+      }
+      break;
+    }
+    result.push({ label: tab.label, isFocused });
+    written += cellWidth;
+  }
+  return result;
 }
