@@ -565,12 +565,11 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
     term.brightCyan('\u2502');
     term(' ');
     renderContent(innerWidth);
-    // Pad to fill the inner width, then close with right border
-    term.eraseLineAfter(); // clear rest first
+    // Pad remaining inner width with spaces (avoid eraseLineAfter which
+    // would wipe PTY content to the right of the floating overlay).
     moveTo(boxX + innerWidth + 2, y);
     term(' ');
     term.brightCyan('\u2502');
-    term.eraseLineAfter();
   }
 
   function drawEscalationPickerOverlay(): void {
@@ -588,13 +587,24 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
     const viewportRows = _layout.ptyViewportRows;
     const viewportY = _layout.ptyViewportY;
 
+    // Horizontal sizing: leave 3-column margin on each side, max 80 inner width.
+    // Clamp to available columns so we never draw past the right edge.
+    const boxMargin = 3;
+    const maxInnerWidth = 80;
+    const minBoxWidth = 12; // absolute minimum to show anything useful
+    const innerWidth = Math.min(maxInnerWidth, Math.max(minBoxWidth - 4, _cols - boxMargin * 2 - 4));
+    const boxWidth = innerWidth + 4; // 4 = border + space on each side
+    if (boxWidth > _cols) return; // terminal too narrow for overlay
+    const boxX = Math.max(0, Math.floor((_cols - boxWidth) / 2));
+
     // Content rows: tab bar + separator + header + separator + detail area + separator + hint bar
     const minContentRows = 7; // minimum: tab + sep + header + sep + 1 detail + sep + hints
     const maxContentRows = Math.max(minContentRows, viewportRows - 4); // leave 2 rows margin top+bottom
     const detailBudget = maxContentRows - 6; // 6 = tab bar + 2 separators + header + separator + hint bar
 
-    // Collect detail lines to determine actual height needed
-    const argLines = formatArgLines(focused.request.arguments, _cols - 12);
+    // Collect detail lines — use innerWidth (minus arg indent) so line
+    // packing matches the actual box geometry.
+    const argLines = formatArgLines(focused.request.arguments, innerWidth - 2);
     const detailLines: Array<{ kind: 'label' | 'arg' | 'reason' | 'whitelist'; text: string }> = [];
 
     if (argLines.length > 0) {
@@ -618,13 +628,6 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
 
     // Vertical centering within the viewport
     const startY = viewportY + Math.max(0, Math.floor((viewportRows - totalBoxHeight) / 2));
-
-    // Horizontal sizing: leave 3-column margin on each side, max 80 inner width
-    const boxMargin = 3;
-    const maxInnerWidth = 80;
-    const innerWidth = Math.min(maxInnerWidth, Math.max(20, _cols - boxMargin * 2 - 4));
-    const boxWidth = innerWidth + 4; // 4 = border + space on each side
-    const boxX = Math.max(0, Math.floor((_cols - boxWidth) / 2));
 
     let currentY = startY;
 

@@ -657,7 +657,7 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
 
             inputHandler.enterEscalationPickerMode(highestPending, previousMode);
             renderer.fullRedraw();
-            process.stderr.write('\x07'); // BEL
+            // BEL is already emitted by the escalation manager's onEscalation handler.
             return;
           }
         }

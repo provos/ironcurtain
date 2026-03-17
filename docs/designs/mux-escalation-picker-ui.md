@@ -69,14 +69,15 @@ All three pickers follow this architecture:
 - `isPickerMode()` helper that matches all picker variants
 
 **Renderer** (`mux-renderer.ts`):
-- Dedicated `draw*PickerOverlay()` function
-- Uses `_layout.pickerY` and `_layout.pickerRows` for positioning (bottom half of viewport)
-- Title row, scrollable item list, hint bar at bottom
+- Dedicated `draw*PickerOverlay()` function per picker type
+- Bottom-panel pickers use `_layout.pickerY` and `_layout.pickerRows` for positioning (bottom half of viewport)
+- The escalation picker is a floating overlay that renders centered over the full PTY viewport (no reserved rows)
 - Highlighted item shown with `term.bgCyan.black('> ...')`
 
 **Types** (`types.ts`):
-- `Layout.pickerRows` and `Layout.pickerY` are computed for all picker modes identically
-- Picker overlays occupy up to half the PTY viewport
+- `isBottomPanelPicker()` matches picker/resume-picker/persona-picker (claim viewport rows)
+- `isPickerMode()` matches all pickers including escalation-picker
+- `calculateLayout()` only reserves `pickerRows` for bottom-panel pickers
 
 **App** (`mux-app.ts`):
 - `handleAction()` dispatches picker actions (`enter-picker-mode`, `picker-cancel`, `picker-spawn`, etc.)
@@ -507,7 +508,7 @@ case 'escalation-resolve-all': {
 
 #### Overlay sizing
 
-The escalation picker uses `_layout.pickerRows` and `_layout.pickerY`, same as all other pickers (half the viewport). This is already computed by `calculateLayout()` when `isPickerMode()` returns true. No layout changes needed.
+The escalation picker renders as a **floating overlay** centered over the full PTY viewport. Unlike bottom-panel pickers (which claim `_layout.pickerRows`), the escalation picker does not reserve any viewport rows — `isBottomPanelPicker()` excludes `'escalation-picker'`, so `calculateLayout()` sets `pickerRows = 0`. The overlay dimensions are computed dynamically in `drawEscalationPickerOverlay()` based on content and terminal size.
 
 #### Visual layout: single escalation
 
@@ -563,9 +564,8 @@ function drawEscalationPickerOverlay(): void {
   const eps = deps.getEscalationPickerState();
   if (!eps) return;
 
-  const startY = _layout.pickerY;
-  const totalRows = _layout.pickerRows;
-  if (totalRows < 6) return; // not enough space for minimal display
+  // Floating overlay: compute dimensions dynamically (no reserved layout rows).
+  // See actual implementation for full sizing/centering logic.
 
   const pending = deps.getEscalationState().pendingEscalations;
   const sortedEscalations = [...pending.values()].sort((a, b) => a.displayNumber - b.displayNumber);

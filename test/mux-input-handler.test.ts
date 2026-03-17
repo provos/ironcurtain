@@ -837,14 +837,12 @@ describe('MuxInputHandler', () => {
       expect(action).toEqual({ kind: 'none' });
     });
 
-    it('returns none when escalation picker state is null', () => {
+    it('escalationPickerState is null after exiting', () => {
       const handler = createMuxInputHandler();
-      // Force mode without state (edge case)
       handler.enterEscalationPickerMode(1, 'pty');
       handler.exitEscalationPickerMode();
-      // Now in pty mode, but let's manually check the handler function
-      // by re-entering and testing
       expect(handler.escalationPickerState).toBeNull();
+      expect(handler.mode).toBe('pty');
     });
 
     it('Ctrl-E in PTY mode emits escalation-open', () => {
