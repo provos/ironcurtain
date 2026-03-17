@@ -31,8 +31,8 @@ import {
 } from '../src/trusted-process/domain-utils.js';
 
 describe('ARGUMENT_ROLE_REGISTRY', () => {
-  it('contains all sixteen roles', () => {
-    expect(ARGUMENT_ROLE_REGISTRY.size).toBe(16);
+  it('contains all fifteen roles', () => {
+    expect(ARGUMENT_ROLE_REGISTRY.size).toBe(15);
   });
 
   it('has entries for all known roles', () => {
@@ -48,10 +48,9 @@ describe('ARGUMENT_ROLE_REGISTRY', () => {
       'github-repo',
       'branch-name',
       'commit-message',
-      'google-resource-id',
       'email-address',
       'email-body',
-      'calendar-datetime',
+      'share-permission',
       'none',
     ];
     for (const role of expectedRoles) {
@@ -128,10 +127,9 @@ describe('isArgumentRole', () => {
     expect(isArgumentRole('github-owner')).toBe(true);
     expect(isArgumentRole('branch-name')).toBe(true);
     expect(isArgumentRole('commit-message')).toBe(true);
-    expect(isArgumentRole('google-resource-id')).toBe(true);
     expect(isArgumentRole('email-address')).toBe(true);
     expect(isArgumentRole('email-body')).toBe(true);
-    expect(isArgumentRole('calendar-datetime')).toBe(true);
+    expect(isArgumentRole('share-permission')).toBe(true);
     expect(isArgumentRole('none')).toBe(true);
   });
 
@@ -148,7 +146,7 @@ describe('getArgumentRoleValues', () => {
     expect(values.length).toBeGreaterThanOrEqual(1);
   });
 
-  it('contains all sixteen roles', () => {
+  it('contains all fifteen roles', () => {
     const values = getArgumentRoleValues();
     expect(values).toContain('read-path');
     expect(values).toContain('write-path');
@@ -161,10 +159,9 @@ describe('getArgumentRoleValues', () => {
     expect(values).toContain('github-repo');
     expect(values).toContain('branch-name');
     expect(values).toContain('commit-message');
-    expect(values).toContain('google-resource-id');
     expect(values).toContain('email-address');
     expect(values).toContain('email-body');
-    expect(values).toContain('calendar-datetime');
+    expect(values).toContain('share-permission');
     expect(values).toContain('none');
   });
 });
@@ -256,18 +253,17 @@ describe('normalizers via registry', () => {
   });
 
   it('opaque roles use identity', () => {
-    for (const role of [
-      'branch-name',
-      'commit-message',
-      'google-resource-id',
-      'email-address',
-      'email-body',
-      'calendar-datetime',
-      'none',
-    ] as ArgumentRole[]) {
+    for (const role of ['branch-name', 'commit-message', 'email-address', 'email-body', 'none'] as ArgumentRole[]) {
       const def = getRoleDefinition(role);
       expect(def.canonicalize('anything')).toBe('anything');
     }
+  });
+
+  it('share-permission uses lowercase canonicalization', () => {
+    const def = getRoleDefinition('share-permission');
+    expect(def.canonicalize('Editor')).toBe('editor');
+    expect(def.canonicalize('VIEWER')).toBe('viewer');
+    expect(def.canonicalize('commenter')).toBe('commenter');
   });
 });
 
@@ -394,12 +390,11 @@ describe('getRolesByCategory', () => {
     const opaques = getRolesByCategory('opaque');
     expect(opaques).toContain('branch-name');
     expect(opaques).toContain('commit-message');
-    expect(opaques).toContain('google-resource-id');
     expect(opaques).toContain('email-address');
     expect(opaques).toContain('email-body');
-    expect(opaques).toContain('calendar-datetime');
+    expect(opaques).toContain('share-permission');
     expect(opaques).toContain('none');
-    expect(opaques).toHaveLength(7);
+    expect(opaques).toHaveLength(6);
   });
 });
 

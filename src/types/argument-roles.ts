@@ -43,10 +43,9 @@ export type ArgumentRole =
   | 'branch-name'
   | 'commit-message'
   // Google Workspace opaque roles
-  | 'google-resource-id'
   | 'email-address'
   | 'email-body'
-  | 'calendar-datetime'
+  | 'share-permission'
   // Catch-all
   | 'none';
 
@@ -294,19 +293,6 @@ const registryEntries: [ArgumentRole, RoleDefinition][] = [
   ],
   // ── Google Workspace roles ──────────────────────────────────────
   [
-    'google-resource-id',
-    {
-      description: 'Google Workspace resource identifier (message ID, file ID, calendar ID, etc.)',
-      isResourceIdentifier: false,
-      category: 'opaque',
-      canonicalize: identity,
-      annotationGuidance:
-        'Assign to arguments that are Google Workspace resource identifiers (message IDs, file IDs, ' +
-        'calendar IDs, document IDs, etc.). These are opaque Google-internal identifiers.',
-      serverNames: ['google-workspace'],
-    },
-  ],
-  [
     'email-address',
     {
       description: 'Email address (recipient, attendee, share target)',
@@ -333,13 +319,15 @@ const registryEntries: [ArgumentRole, RoleDefinition][] = [
     },
   ],
   [
-    'calendar-datetime',
+    'share-permission',
     {
-      description: 'Calendar date/time value (event start, end, etc.)',
+      description: 'Sharing permission level (viewer, commenter, editor, organizer)',
       isResourceIdentifier: false,
       category: 'opaque',
-      canonicalize: identity,
-      annotationGuidance: 'Assign to arguments that are calendar date/time values (event start time, end time, etc.).',
+      canonicalize: lowercase,
+      annotationGuidance:
+        'Assign to arguments that specify a sharing or permission level on shared resources ' +
+        '(e.g., the role parameter on Drive file sharing).',
       serverNames: ['google-workspace'],
     },
   ],
@@ -376,10 +364,9 @@ const _ROLE_COMPLETENESS_CHECK: Record<ArgumentRole, true> = {
   'github-repo': true,
   'branch-name': true,
   'commit-message': true,
-  'google-resource-id': true,
   'email-address': true,
   'email-body': true,
-  'calendar-datetime': true,
+  'share-permission': true,
   none: true,
 };
 
