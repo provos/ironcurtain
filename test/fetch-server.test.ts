@@ -133,6 +133,17 @@ function resultText(result: Awaited<ReturnType<typeof client.callTool>>): string
   return (result.content as { text: string }[])[0].text;
 }
 
+interface FetchResult {
+  status: number;
+  headers: Record<string, string>;
+  body: string;
+  truncated: boolean;
+}
+
+function resultJson(result: Awaited<ReturnType<typeof client.callTool>>): FetchResult {
+  return JSON.parse(resultText(result)) as FetchResult;
+}
+
 describe('fetch-server', () => {
   describe('tool schema', () => {
     it('lists both http_fetch and web_search tools', async () => {
@@ -177,13 +188,14 @@ describe('fetch-server', () => {
         name: 'http_fetch',
         arguments: { url: `${baseUrl}/html` },
       });
-      const text = resultText(result);
-      expect(text).toContain('# Hello World');
-      expect(text).toContain('**test**');
+      const json = resultJson(result);
+      expect(json.status).toBe(200);
+      expect(json.body).toContain('# Hello World');
+      expect(json.body).toContain('**test**');
       // Boilerplate should be stripped by turndown.remove()
-      expect(text).not.toContain('var x = 1');
-      expect(text).not.toContain('Copyright 2026');
-      expect(text).not.toContain('Sidebar content');
+      expect(json.body).not.toContain('var x = 1');
+      expect(json.body).not.toContain('Copyright 2026');
+      expect(json.body).not.toContain('Sidebar content');
     });
 
     it('returns raw HTML with format=html', async () => {
@@ -191,10 +203,10 @@ describe('fetch-server', () => {
         name: 'http_fetch',
         arguments: { url: `${baseUrl}/html`, format: 'html' },
       });
-      const text = resultText(result);
-      expect(text).toContain('<!DOCTYPE html>');
-      expect(text).toContain('<h1>Hello World</h1>');
-      expect(text).toContain('<script>var x = 1;</script>');
+      const json = resultJson(result);
+      expect(json.body).toContain('<!DOCTYPE html>');
+      expect(json.body).toContain('<h1>Hello World</h1>');
+      expect(json.body).toContain('<script>var x = 1;</script>');
     });
 
     it('returns plain text with format=text, stripping tags and boilerplate', async () => {
@@ -202,18 +214,18 @@ describe('fetch-server', () => {
         name: 'http_fetch',
         arguments: { url: `${baseUrl}/html`, format: 'text' },
       });
-      const text = resultText(result);
+      const json = resultJson(result);
       // Should contain visible text
-      expect(text).toContain('Hello World');
-      expect(text).toContain('test');
+      expect(json.body).toContain('Hello World');
+      expect(json.body).toContain('test');
       // Script/style/nav/footer/aside content should be stripped
-      expect(text).not.toContain('var x = 1');
-      expect(text).not.toContain('.hidden');
-      expect(text).not.toContain('Copyright 2026');
-      expect(text).not.toContain('Sidebar content');
+      expect(json.body).not.toContain('var x = 1');
+      expect(json.body).not.toContain('.hidden');
+      expect(json.body).not.toContain('Copyright 2026');
+      expect(json.body).not.toContain('Sidebar content');
       // Should not contain HTML tags
-      expect(text).not.toContain('<h1>');
-      expect(text).not.toContain('<p>');
+      expect(json.body).not.toContain('<h1>');
+      expect(json.body).not.toContain('<p>');
     });
 
     it('decodes HTML entities in text mode', async () => {
@@ -221,9 +233,9 @@ describe('fetch-server', () => {
         name: 'http_fetch',
         arguments: { url: `${baseUrl}/html`, format: 'text' },
       });
-      const text = resultText(result);
-      expect(text).toContain('&');
-      expect(text).not.toContain('&amp;');
+      const json = resultJson(result);
+      expect(json.body).toContain('&');
+      expect(json.body).not.toContain('&amp;');
     });
 
     it('passes non-HTML through unchanged in markdown mode', async () => {
@@ -231,8 +243,8 @@ describe('fetch-server', () => {
         name: 'http_fetch',
         arguments: { url: `${baseUrl}/plain` },
       });
-      const text = resultText(result);
-      expect(text).toContain('Plain text response');
+      const json = resultJson(result);
+      expect(json.body).toContain('Plain text response');
     });
   });
 
@@ -253,13 +265,13 @@ describe('fetch-server', () => {
         name: 'http_fetch',
         arguments: { url: `${baseUrl}/html` },
       });
-      const text = resultText(result);
+      const json = resultJson(result);
       // nav link should be gone
-      expect(text).not.toContain('Home');
+      expect(json.body).not.toContain('Home');
       // script content should be gone
-      expect(text).not.toContain('var x');
+      expect(json.body).not.toContain('var x');
       // style content should be gone
-      expect(text).not.toContain('.hidden');
+      expect(json.body).not.toContain('.hidden');
     });
   });
 
@@ -269,8 +281,9 @@ describe('fetch-server', () => {
         name: 'http_fetch',
         arguments: { url: `${baseUrl}/html`, max_length: 50 },
       });
-      const text = resultText(result);
-      expect(text).toContain('[Truncated]');
+      const json = resultJson(result);
+      expect(json.body).toContain('[Truncated]');
+      expect(json.truncated).toBe(true);
     });
   });
 
@@ -280,15 +293,15 @@ describe('fetch-server', () => {
         name: 'http_fetch',
         arguments: { url: `${baseUrl}/article`, max_length: 50000 },
       });
-      const text = resultText(result);
+      const json = resultJson(result);
       // Article content should be present
-      expect(text).toContain('perovskite-silicon tandem cells');
-      expect(text).toContain('Dr. Maria Chen');
+      expect(json.body).toContain('perovskite-silicon tandem cells');
+      expect(json.body).toContain('Dr. Maria Chen');
       // Boilerplate should be stripped
-      expect(text).not.toContain('ADVERTISEMENT');
-      expect(text).not.toContain('cookie');
-      expect(text).not.toContain('Related Articles');
-      expect(text).not.toContain('Privacy Policy');
+      expect(json.body).not.toContain('ADVERTISEMENT');
+      expect(json.body).not.toContain('cookie');
+      expect(json.body).not.toContain('Related Articles');
+      expect(json.body).not.toContain('Privacy Policy');
     });
 
     it('includes metadata header when readability succeeds', async () => {
@@ -296,8 +309,8 @@ describe('fetch-server', () => {
         name: 'http_fetch',
         arguments: { url: `${baseUrl}/article`, max_length: 50000 },
       });
-      const text = resultText(result);
-      expect(text).toContain('Title: Breaking Discovery in Solar Energy');
+      const json = resultJson(result);
+      expect(json.body).toContain('Title: Breaking Discovery in Solar Energy');
     });
 
     it('uses readability textContent for text format', async () => {
@@ -305,16 +318,16 @@ describe('fetch-server', () => {
         name: 'http_fetch',
         arguments: { url: `${baseUrl}/article`, format: 'text', max_length: 50000 },
       });
-      const text = resultText(result);
+      const json = resultJson(result);
       // Should have article content as plain text
-      expect(text).toContain('perovskite-silicon tandem cells');
-      expect(text).toContain('Title: Breaking Discovery in Solar Energy');
+      expect(json.body).toContain('perovskite-silicon tandem cells');
+      expect(json.body).toContain('Title: Breaking Discovery in Solar Energy');
       // Should not have HTML tags
-      expect(text).not.toContain('<p>');
-      expect(text).not.toContain('<h1>');
+      expect(json.body).not.toContain('<p>');
+      expect(json.body).not.toContain('<h1>');
       // Boilerplate should be stripped
-      expect(text).not.toContain('ADVERTISEMENT');
-      expect(text).not.toContain('cookie');
+      expect(json.body).not.toContain('ADVERTISEMENT');
+      expect(json.body).not.toContain('cookie');
     });
 
     it('falls back to turndown for non-article pages', async () => {
@@ -322,9 +335,9 @@ describe('fetch-server', () => {
         name: 'http_fetch',
         arguments: { url: `${baseUrl}/html` },
       });
-      const text = resultText(result);
+      const json = resultJson(result);
       // Should still work via turndown fallback
-      expect(text).toContain('Hello World');
+      expect(json.body).toContain('Hello World');
     });
 
     it('skips readability for HTML over 1MB and falls back to turndown', async () => {
@@ -332,11 +345,11 @@ describe('fetch-server', () => {
         name: 'http_fetch',
         arguments: { url: `${baseUrl}/large-html`, max_length: 50000 },
       });
-      const text = resultText(result);
+      const json = resultJson(result);
       // Content should still be present via turndown fallback
-      expect(text).toContain('Large Article');
+      expect(json.body).toContain('Large Article');
       // No readability metadata header since extraction was skipped
-      expect(text).not.toContain('Title:');
+      expect(json.body).not.toContain('Title:');
     });
 
     it('skips readability when element count exceeds limit', async () => {
@@ -344,11 +357,11 @@ describe('fetch-server', () => {
         name: 'http_fetch',
         arguments: { url: `${baseUrl}/many-elements`, max_length: 50000 },
       });
-      const text = resultText(result);
+      const json = resultJson(result);
       // Content should still be present via turndown fallback
-      expect(text).toContain('Element Heavy');
+      expect(json.body).toContain('Element Heavy');
       // No readability metadata header since maxElemsToParse was exceeded
-      expect(text).not.toContain('Title:');
+      expect(json.body).not.toContain('Title:');
     });
   });
 

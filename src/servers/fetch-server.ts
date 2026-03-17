@@ -362,7 +362,10 @@ async function handleHttpFetch(
     const truncated = processedBody.length > maxLength;
     const finalBody = truncated ? processedBody.slice(0, maxLength) + '\n\n[Truncated]' : processedBody;
 
-    const result = [`Status: ${status}`, `Headers: ${JSON.stringify(headers)}`, '', finalBody].join('\n');
+    // Return structured JSON so agents can access status, headers, and body
+    // as parsed fields. MCP requires text content, so we JSON.stringify the
+    // result — UTCP extracts the text and the agent can JSON.parse() it.
+    const result = JSON.stringify({ status, headers, body: finalBody, truncated });
 
     return { content: [{ type: 'text', text: result }] };
   } catch (err) {
