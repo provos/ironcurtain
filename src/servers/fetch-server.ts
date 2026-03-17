@@ -324,7 +324,7 @@ async function handleHttpFetch(
   const url = args?.url as string | undefined;
   if (!url || typeof url !== 'string') {
     return {
-      content: [{ type: 'text', text: 'Missing required parameter: url' }],
+      content: [{ type: 'text', text: JSON.stringify({ error: 'Missing required parameter: url' }) }],
       isError: true,
     };
   }
@@ -341,7 +341,9 @@ async function handleHttpFetch(
       content: [
         {
           type: 'text',
-          text: `Invalid format: ${typeof rawFormat === 'string' ? rawFormat : JSON.stringify(rawFormat)}. Supported formats are: ${VALID_FORMATS.join(', ')}.`,
+          text: JSON.stringify({
+            error: `Invalid format: ${typeof rawFormat === 'string' ? rawFormat : JSON.stringify(rawFormat)}. Supported formats are: ${VALID_FORMATS.join(', ')}.`,
+          }),
         },
       ],
       isError: true,
