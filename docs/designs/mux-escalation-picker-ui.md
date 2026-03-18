@@ -270,19 +270,7 @@ function handleEscalationPickerKey(key: string): MuxAction {
 }
 ```
 
-Note: the `escalation-navigate` action is handled entirely within the input handler (it updates `focusedDisplayNumber` and returns `{ kind: 'redraw-picker' }`). The snippet above shows the logical intent; the actual implementation does not emit a separate navigate action -- it mutates `eps.focusedDisplayNumber` in-place and returns `{ kind: 'redraw-picker' }`, matching the pattern used by all other pickers.
-
-Actual implementation of navigation (inside handleEscalationPickerKey):
-
-```typescript
-if (key === RIGHT || key === TAB || key === LEFT || key === 'SHIFT_TAB') {
-  // Navigation is handled by mux-app.ts via 'escalation-navigate' action,
-  // because the input handler does not have access to the live pending
-  // escalations list. The app calls updateFocusedTab() on the state.
-  const direction = (key === RIGHT || key === TAB) ? 'next' : 'prev';
-  return { kind: 'escalation-navigate', direction };
-}
-```
+Note: unlike other pickers where the input handler mutates state in-place and returns `{ kind: 'redraw-picker' }`, the escalation picker emits `{ kind: 'escalation-navigate', direction }` because the input handler does not have access to the live pending escalations list. Navigation is handled by `mux-app.ts` which reads the sorted display numbers from `escalationManager` and updates `eps.focusedDisplayNumber`.
 
 This requires one additional MuxAction variant:
 

@@ -564,9 +564,13 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
     moveTo(boxX, y);
     term.brightCyan('\u2502');
     term(' ');
+    // Clear the full inner area with spaces first to avoid stale characters
+    // from previous redraws. We cannot use eraseLineAfter because that would
+    // wipe PTY content to the right of the floating overlay.
+    term(' '.repeat(innerWidth));
+    // Move back and render content over the cleared area
+    moveTo(boxX + 2, y);
     renderContent(innerWidth);
-    // Pad remaining inner width with spaces (avoid eraseLineAfter which
-    // would wipe PTY content to the right of the floating overlay).
     moveTo(boxX + innerWidth + 2, y);
     term(' ');
     term.brightCyan('\u2502');
@@ -642,19 +646,20 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
 
     // Escalation tab bar
     drawBoxRow(currentY, boxX, innerWidth, (w) => {
+      const tabs = sortedEscalations.map((esc) => ({
+        displayNumber: esc.displayNumber,
+        label: `[${esc.displayNumber}] ${esc.request.serverName}/${esc.request.toolName}`,
+      }));
+      const fitted = fitTabLabels(tabs, eps.focusedDisplayNumber, w);
       let written = 0;
-      for (const esc of sortedEscalations) {
-        const isFocused = esc.displayNumber === eps.focusedDisplayNumber;
-        const label = `[${esc.displayNumber}] ${esc.request.serverName}/${esc.request.toolName}`;
-        if (written + label.length + 2 > w) break;
-        if (isFocused) {
-          term.bgCyan.black(' ' + label + ' ');
-          term.styleReset();
+      for (const tab of fitted) {
+        if (tab.isFocused) {
+          term.bgCyan.black(' ' + tab.label + ' ');
         } else {
-          term.dim(' ' + label + ' ');
-          term.styleReset();
+          term.dim(' ' + tab.label + ' ');
         }
-        written += label.length + 2;
+        term.styleReset();
+        written += tab.label.length + 2;
       }
       const pad = Math.max(0, w - written);
       if (pad > 0) term(' '.repeat(pad));
@@ -668,18 +673,38 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
     });
     currentY++;
 
-    // Tool header
+    // Tool header (truncated to fit within inner width)
     drawBoxRow(currentY, boxX, innerWidth, (w) => {
       const timeAgo = formatRelativeTime(focused.receivedAt.toISOString());
-      const headerText = `Session #${focused.sessionDisplayNumber}  ${focused.request.serverName}/${focused.request.toolName}  ${timeAgo}`;
-      // Render with colors using terminal-kit chaining
-      term(`Session #${focused.sessionDisplayNumber}  `);
-      term.cyan(`${focused.request.serverName}/${focused.request.toolName}`);
-      term.dim(`  ${timeAgo}`);
-      // Pad remainder
-      const textLen = headerText.length;
-      const pad = Math.max(0, w - textLen);
-      if (pad > 0) term(' '.repeat(pad));
+      const sessionPrefix = `Session #${focused.sessionDisplayNumber}  `;
+      const toolName = `${focused.request.serverName}/${focused.request.toolName}`;
+      const timeSuffix = `  ${timeAgo}`;
+      const totalLen = sessionPrefix.length + toolName.length + timeSuffix.length;
+
+      if (totalLen <= w) {
+        // Everything fits
+        term(sessionPrefix);
+        term.cyan(toolName);
+        term.dim(timeSuffix);
+      } else {
+        // Truncate the tool name to fit; drop time suffix if still too long
+        const budgetForTool = w - sessionPrefix.length - timeSuffix.length;
+        if (budgetForTool >= 4) {
+          term(sessionPrefix);
+          term.cyan(truncate(toolName, budgetForTool));
+          term.dim(timeSuffix);
+        } else {
+          // Not enough room for time suffix -- drop it entirely
+          const toolBudget = w - sessionPrefix.length;
+          if (toolBudget > 0) {
+            term(sessionPrefix);
+            term.cyan(truncate(toolName, toolBudget));
+          } else {
+            term(truncate(sessionPrefix, w));
+          }
+        }
+      }
+      term.styleReset();
     });
     currentY++;
 
@@ -690,9 +715,9 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
     });
     currentY++;
 
-    // Detail rows — drawBoxRow handles right-border positioning via
-    // eraseLineAfter + moveTo, so callbacks only need to write content
-    // (no manual padding required).
+    // Detail rows — drawBoxRow pre-clears the inner area with spaces and
+    // handles right-border positioning, so callbacks only need to write
+    // content (no manual padding required).
     for (let i = 0; i < actualDetailRows; i++) {
       const detail = detailLines[i];
       drawBoxRow(currentY, boxX, innerWidth, (w) => {
@@ -1416,7 +1441,39 @@ function formatArgValue(value: unknown): string {
   return JSON.stringify(value);
 }
 
-function truncate(str: string, maxLen: number): string {
+export function truncate(str: string, maxLen: number): string {
   if (str.length <= maxLen) return str;
   return str.slice(0, maxLen - 1) + '\u2026';
+}
+
+/**
+ * Computes which tab labels to render in the escalation tab bar,
+ * truncating the focused tab if needed. Returns an array of
+ * { label, isFocused } entries that fit within `width`.
+ *
+ * Exported for testing.
+ */
+export function fitTabLabels(
+  tabs: { displayNumber: number; label: string }[],
+  focusedDisplayNumber: number,
+  width: number,
+): { label: string; isFocused: boolean }[] {
+  const result: { label: string; isFocused: boolean }[] = [];
+  let written = 0;
+  for (const tab of tabs) {
+    const isFocused = tab.displayNumber === focusedDisplayNumber;
+    const cellWidth = tab.label.length + 2; // +2 for surrounding spaces
+    if (written + cellWidth > width) {
+      // Truncate the focused tab to fit; need at least 3 cols: space + 1 char + space
+      const remaining = width - written;
+      if (isFocused && remaining >= 3) {
+        const truncatedLabel = truncate(tab.label, remaining - 2);
+        result.push({ label: truncatedLabel, isFocused: true });
+      }
+      break;
+    }
+    result.push({ label: tab.label, isFocused });
+    written += cellWidth;
+  }
+  return result;
 }

@@ -352,8 +352,8 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
       }
 
       case 'escalation-dismiss': {
-        const highestPending =
-          escalationManager.pendingCount > 0 ? Math.max(...escalationManager.state.pendingEscalations.keys()) : 0;
+        const sortedNums = escalationManager.sortedDisplayNumbers();
+        const highestPending = sortedNums.length > 0 ? sortedNums[sortedNums.length - 1] : 0;
         inputHandler.dismissEscalationPicker(highestPending, action.targetMode);
         renderer.fullRedraw();
         break;
@@ -636,7 +636,8 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
 
         // Auto-open: new escalation arrived, picker not already open
         if (pendingCount > 0 && mode !== 'escalation-picker') {
-          const highestPending = Math.max(...escalationManager.state.pendingEscalations.keys());
+          const sortedNums = escalationManager.sortedDisplayNumbers();
+          const highestPending = sortedNums[sortedNums.length - 1];
 
           // Only auto-open if the user hasn't dismissed, OR if a genuinely new
           // escalation arrived (higher display number than when they dismissed).
