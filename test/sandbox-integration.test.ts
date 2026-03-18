@@ -420,21 +420,28 @@ describe('discoverNodePaths', () => {
   });
 
   it('returns paths under home directory only', () => {
-    const home = process.env.HOME ?? '';
-    if (!home) return; // skip if no HOME
+    // Use realpath-resolved home to match the implementation (discoverNodePaths
+    // resolves homedir() through realpath for symlink-safe prefix comparison)
+    let home: string;
+    try {
+      home = realpathSync(homedir());
+    } catch {
+      return; // skip if home can't be resolved
+    }
     const paths = discoverNodePaths();
     for (const p of paths) {
-      // All returned paths should be under home (since only those need allowRead)
-      // except macOS Homebrew paths which are system-wide
-      if (!p.startsWith('/opt/homebrew') && !p.startsWith('/usr/local')) {
-        expect(p.startsWith(home + '/')).toBe(true);
-      }
+      expect(p.startsWith(home + '/')).toBe(true);
     }
   });
 
   it('includes node installation prefix when node is under home', () => {
-    const home = process.env.HOME ?? '';
-    if (!home || !process.execPath.startsWith(home + '/')) return;
+    let home: string;
+    try {
+      home = realpathSync(homedir());
+    } catch {
+      return;
+    }
+    if (!process.execPath.startsWith(home + '/')) return;
     const paths = discoverNodePaths();
     // Should include at least one path that contains the node binary
     expect(paths.length).toBeGreaterThan(0);
@@ -472,6 +479,29 @@ describe('resolveSandboxConfig allowRead', () => {
     if (result.sandboxed) {
       expect(result.config.allowRead).toEqual(['/usr', '/etc', '/opt/homebrew']);
       expect(result.config.denyRead).toEqual(['~']);
+    }
+  });
+
+  it('expands tildes in allowRead paths', () => {
+    const result = resolveSandboxConfig(
+      makeServerConfig({
+        sandbox: {
+          filesystem: {
+            denyRead: ['~'],
+            allowRead: ['~/.nvm', '/usr'],
+          },
+        },
+      }),
+      sessionSandboxDir,
+      true,
+      'warn',
+    );
+    expect(result.sandboxed).toBe(true);
+    if (result.sandboxed) {
+      expect(result.config.allowRead).toContain(homedir() + '/.nvm');
+      expect(result.config.allowRead).toContain('/usr');
+      // Should not contain the unexpanded tilde
+      expect(result.config.allowRead).not.toContain('~/.nvm');
     }
   });
 });

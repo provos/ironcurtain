@@ -43,6 +43,7 @@
     "command": "npx",
     "args": ["-y", "@alanse/mcp-server-google-workspace@1.0.2"],
     "env": {},
+    "_comment": "npm registry domains are needed for the initial npx -y install. To remove them, vendor the package as a local dependency instead.",
     "sandbox": {
       "filesystem": {
         "denyRead": ["~"],

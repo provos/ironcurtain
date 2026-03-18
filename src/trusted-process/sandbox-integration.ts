@@ -17,6 +17,7 @@ import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { quote } from 'shell-quote';
 import type { MCPServerConfig, SandboxAvailabilityPolicy, SandboxNetworkConfig } from '../config/types.js';
+import { expandTilde } from '../types/argument-roles.js';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -120,7 +121,7 @@ export function resolveSandboxConfig(
   const networkConfig = sandboxConfig.network;
 
   const allowWrite = buildAllowWrite(sessionSandboxDir, fsConfig.allowWrite ?? []);
-  const allowRead = fsConfig.allowRead ?? [];
+  const allowRead = (fsConfig.allowRead ?? []).map((p) => expandTilde(p));
 
   const denyRead = fsConfig.denyRead ?? DEFAULT_DENY_READ;
   const denyWrite = fsConfig.denyWrite ?? [];
