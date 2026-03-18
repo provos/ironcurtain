@@ -41,7 +41,7 @@
   "google-workspace": {
     "description": "Google Workspace tools (Gmail, Calendar, Drive, Docs, Sheets, Slides)",
     "command": "npx",
-    "args": ["-y", "@alanse/mcp-server-google-workspace"],
+    "args": ["-y", "@alanse/mcp-server-google-workspace@1.0.2"],
     "env": {},
     "sandbox": {
       "filesystem": {

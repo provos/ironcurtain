@@ -125,7 +125,7 @@ const npxPath = process.env.NPX_PATH ?? 'npx';
 // srt -s <settings> -c "<command>"
 // The -c flag runs the command string through a shell, so no escaping needed
 // for the simple npx invocation.
-const serverCommand = `${npxPath} -y @alanse/mcp-server-google-workspace`;
+const serverCommand = `${npxPath} -y @alanse/mcp-server-google-workspace@1.0.2`;
 
 process.stderr.write(`Spawning MCP server in srt sandbox...\n`);
 

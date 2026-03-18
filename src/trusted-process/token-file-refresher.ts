@@ -51,6 +51,7 @@ export const REFRESH_THRESHOLD_MS = 10 * 60 * 1000;
  */
 export class TokenFileRefresher {
   private intervalHandle: ReturnType<typeof setInterval> | null = null;
+  private inflight: Promise<void> | null = null;
   private currentExpiresAt: number;
   private readonly config: TokenRefreshConfig;
 
@@ -86,6 +87,9 @@ export class TokenFileRefresher {
    * Errors are caught and logged to stderr -- never propagated.
    */
   async refreshIfNeeded(): Promise<void> {
+    // Guard against concurrent refreshes (slow network can overlap next tick)
+    if (this.inflight) return;
+
     try {
       const now = Date.now();
       const timeUntilExpiry = this.currentExpiresAt - now;
@@ -94,13 +98,19 @@ export class TokenFileRefresher {
         return; // Token still has plenty of time
       }
 
-      const { accessToken, expiresAt, scopes } = await this.config.getAccessToken();
-      this.config.writeCredentialFile(accessToken, expiresAt, scopes);
-      this.currentExpiresAt = expiresAt;
+      const refresh = (async () => {
+        const { accessToken, expiresAt, scopes } = await this.config.getAccessToken();
+        this.config.writeCredentialFile(accessToken, expiresAt, scopes);
+        this.currentExpiresAt = expiresAt;
+      })();
+      this.inflight = refresh;
+      await refresh;
     } catch (err) {
       // Log but don't throw -- this runs on an interval
       const message = err instanceof Error ? err.message : String(err);
       process.stderr.write(`[token-refresher] Failed to refresh token for "${this.config.providerId}": ${message}\n`);
+    } finally {
+      this.inflight = null;
     }
   }
 }

@@ -241,7 +241,9 @@ export function annotateSandboxViolation(errorMessage: string, serverSandboxed: 
  */
 export function discoverNodePaths(): string[] {
   const paths = new Set<string>();
-  const home = homedir();
+  // Resolve home through realpath so prefix comparisons work when
+  // homedir() involves symlinks (e.g., macOS /var → /private/var)
+  const home = safeRealPath(homedir()) ?? homedir();
 
   // 1. Node.js binary -- follow symlinks to the real location
   const execPath = safeRealPath(process.execPath);
