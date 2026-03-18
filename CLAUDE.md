@@ -82,6 +82,12 @@ Adding a new MCP server requires changes across configuration, policy, and tests
 7. **`test/policy-engine.test.ts`** — Add unit tests verifying the new server's tools are correctly allowed/escalated/denied.
 8. **Run the pipeline** — `npm run annotate-tools` (generates annotations), then `npm run compile-policy` (compiles policy rules). Both commands gracefully skip servers that fail to connect (e.g., Docker not available).
 
+## Publishing / Workspace Dependencies
+
+This is an npm workspaces monorepo (`"workspaces": ["packages/*"]` in the root `package.json`). **Do not use `workspace:*`** for workspace package references — that protocol is pnpm-specific and breaks `npm install -g`. Instead, use a normal semver range (e.g., `"^0.1.3"`) pointing at the published version. npm workspaces will still resolve it to the local package during development, and `npm install` from the registry will pull the published version.
+
+When bumping a workspace package version, remember to update the corresponding dependency range in the root `package.json`.
+
 ## Key Conventions
 
 - ESM modules throughout (`.js` extensions in imports, `"type": "module"` in package.json)

@@ -74,7 +74,7 @@
     "@cyanheads/git-mcp-server": "^2.8.4",
     "@modelcontextprotocol/sdk": "^1.27.1",
     "@mozilla/readability": "^0.6.0",
-    "@provos/memory-mcp-server": "workspace:*",
+    "@provos/memory-mcp-server": "^0.1.3",
     "@utcp/code-mode": "^1.2.11",
     "@utcp/mcp": "^1.1.1",
     "@xterm/headless": "^6.0.0",

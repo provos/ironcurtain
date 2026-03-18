@@ -116,6 +116,14 @@ npm run format     # Auto-fix formatting
 npm run lint       # Check lint errors (fix manually)
 ```
 
+## Workspace Dependencies
+
+This project uses [npm workspaces](https://docs.npmjs.com/cli/using-npm/workspaces) to manage local packages under `packages/`. When the root `package.json` depends on a workspace package (e.g., `@provos/memory-mcp-server`), use a **normal semver range** like `"^0.1.3"` — **not** `"workspace:*"`.
+
+The `workspace:*` protocol is pnpm-specific and causes `npm install -g` and `npx` to fail with `EUNSUPPORTEDPROTOCOL`. npm workspaces automatically resolves matching local packages during development, so the standard version range works for both local dev and published installs.
+
+When publishing a new version of a workspace package, update the version range in the root `package.json` to match.
+
 ## Submitting Changes
 
 1. Create a feature branch from `main`.
