@@ -211,7 +211,18 @@ Both use the same PolicyEngine with compiled artifacts.
 ## Goose Agent Integration -- see `goose-integration.md` topic file
 ## Conditional Argument Roles -- `docs/designs/conditional-argument-roles.md`
 
-## Mux Terminal Multiplexer -- see `mux-architecture.md` topic file
+## Google Workspace MCP Server Integration (designed 2026-03-16)
+- See `docs/designs/google-workspace-integration.md` for full spec
+- Depends on third-party-oauth.md (Phases 1-3, already implemented)
+- **Credential-file rendezvous**: IronCurtain writes `.gworkspace-credentials.json` with access_token only (NO refresh_token)
+- Omitting refresh_token prevents MCP server from independently refreshing (avoids rotation races)
+- `TokenFileRefresher` in proxy process proactively writes fresh credential files before expiry
+- MCP server's `loadCredentialsQuietly()` re-reads file on each tool call, picks up refreshed tokens
+- Per-session credential directories: `{settingsDir}/{serverName}-creds/`
+- Sandbox: network allowlist `*.googleapis.com`, denyRead `~/.ironcurtain/oauth`
+- `npx -y` cache redirected via `npm_config_cache` env var to sandbox-writable location
+- New files: `gworkspace-credentials.ts`, `token-file-refresher.ts`
+- Modified: `mcp-proxy-server.ts` (OAuth injection in spawn loop), `mcp-servers.json`
 
 ## Cron Job System (implemented)
 - `src/cron/` module: job-commands.ts, job-store.ts, compile-task-policy.ts, headless-transport.ts
