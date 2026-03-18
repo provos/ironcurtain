@@ -15,7 +15,7 @@ describe('Handwritten Scenarios', () => {
   const scenarios = getHandwrittenScenarios(SANDBOX_DIR);
 
   it('returns the expected number of scenarios', () => {
-    expect(scenarios.length).toBe(10);
+    expect(scenarios.length).toBe(2);
   });
 
   it('all scenarios have source "handwritten"', () => {

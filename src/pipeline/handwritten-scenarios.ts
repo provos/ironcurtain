@@ -1,13 +1,26 @@
 /**
- * Mandatory handwritten test scenarios derived from existing policy engine tests.
+ * Mandatory handwritten test scenarios for the policy compilation pipeline.
  *
- * These provide human-authored ground truth that the verifier always checks,
- * mitigating circular reasoning where the compiler and scenario generator
- * share the same blind spots.
+ * These are fed to the LLM compiler as ground-truth constraints that the
+ * compiled rules MUST satisfy, and are verified after every compilation.
  *
- * Kept minimal: only universal invariants that any reasonable constitution
- * should satisfy. Constitution-dependent scenarios (git rules, fetch rules,
- * read/write escalation) are left to the LLM scenario generator.
+ * ╔═══════════════════════════════════════════════════════════════════╗
+ * ║  ONLY universal, constitution-independent invariants belong here.║
+ * ║                                                                  ║
+ * ║  These scenarios constrain what the LLM compiler can produce.    ║
+ * ║  Adding server-specific or constitution-dependent scenarios      ║
+ * ║  (e.g., "git push must escalate", "Gmail send must escalate")   ║
+ * ║  will CONFLICT with user constitutions that make different       ║
+ * ║  choices for those servers.                                      ║
+ * ║                                                                  ║
+ * ║  Server-specific policy tests belong in policy-engine.test.ts,  ║
+ * ║  where they validate the current compiled policy without         ║
+ * ║  constraining what the compiler can generate.                    ║
+ * ╚═══════════════════════════════════════════════════════════════════╝
+ *
+ * Current invariants:
+ *   1. Filesystem sandbox containment — writes/deletes outside the
+ *      sandbox must never be allowed regardless of constitution.
  */
 
 import type { TestScenario } from './types.js';
@@ -38,98 +51,6 @@ export function getHandwrittenScenarios(sandboxDir: string): TestScenario[] {
       },
       expectedDecision: 'not-allow',
       reasoning: 'Writes outside permitted areas must not be allowed without human intervention.',
-      source: 'handwritten',
-    },
-
-    // ── GitHub scenarios ──────────────────────────────────────────────
-    {
-      description: 'List GitHub issues -- allowed (read-only)',
-      request: {
-        serverName: 'github',
-        toolName: 'list_issues',
-        arguments: { owner: 'octocat', repo: 'hello-world' },
-      },
-      expectedDecision: 'allow',
-      reasoning: 'Read-only GitHub operations are safe and should be allowed without escalation.',
-      source: 'handwritten',
-    },
-    {
-      description: 'Create pull request on GitHub -- not allowed (mutation)',
-      request: {
-        serverName: 'github',
-        toolName: 'create_pull_request',
-        arguments: { owner: 'octocat', repo: 'hello-world', title: 'Fix bug', head: 'fix-branch', base: 'main' },
-      },
-      expectedDecision: 'not-allow',
-      reasoning: 'Creating a pull request is a mutation that requires human approval.',
-      source: 'handwritten',
-    },
-    {
-      description: 'Unknown tool on GitHub server -- not allowed (structural invariant)',
-      request: {
-        serverName: 'github',
-        toolName: 'completely_unknown_tool',
-        arguments: {},
-      },
-      expectedDecision: 'not-allow',
-      reasoning: 'Unknown tools are denied by the structural invariant.',
-      source: 'handwritten',
-    },
-
-    // ── Google Workspace scenarios ──────────────────────────────────
-    {
-      description: 'List Gmail messages -- allowed (read-only)',
-      request: {
-        serverName: 'google-workspace',
-        toolName: 'gmail_search_messages',
-        arguments: { query: 'is:unread', maxResults: 10 },
-      },
-      expectedDecision: 'allow',
-      reasoning: 'Reading email listings is a safe read-only operation.',
-      source: 'handwritten',
-    },
-    {
-      description: 'Send Gmail message -- not allowed (mutation)',
-      request: {
-        serverName: 'google-workspace',
-        toolName: 'gmail_send_message',
-        arguments: { to: 'user@example.com', subject: 'Hello', body: 'Hi there' },
-      },
-      expectedDecision: 'not-allow',
-      reasoning: 'Sending email is a side-effect operation requiring human approval.',
-      source: 'handwritten',
-    },
-    {
-      description: 'Read calendar events -- allowed (read-only)',
-      request: {
-        serverName: 'google-workspace',
-        toolName: 'calendar_list_events',
-        arguments: { calendarId: 'primary', maxResults: 10 },
-      },
-      expectedDecision: 'allow',
-      reasoning: 'Reading calendar events is a safe read-only operation.',
-      source: 'handwritten',
-    },
-    {
-      description: 'Share Drive file -- not allowed (permission change)',
-      request: {
-        serverName: 'google-workspace',
-        toolName: 'drive_share_file',
-        arguments: { fileId: 'abc123', email: 'user@example.com', role: 'writer' },
-      },
-      expectedDecision: 'not-allow',
-      reasoning: 'Sharing files changes permissions and must be escalated.',
-      source: 'handwritten',
-    },
-    {
-      description: 'Unknown Google Workspace tool -- not allowed (structural invariant)',
-      request: {
-        serverName: 'google-workspace',
-        toolName: 'unknown_gworkspace_tool',
-        arguments: {},
-      },
-      expectedDecision: 'not-allow',
-      reasoning: 'Unknown tools are denied by the structural invariant.',
       source: 'handwritten',
     },
   ];
