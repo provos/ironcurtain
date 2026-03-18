@@ -231,6 +231,19 @@ export interface CompiledPolicyFile {
   listDefinitions?: ListDefinition[];
 }
 
+/**
+ * Per-server compiled policy artifact.
+ * Written to generated/servers/{serverName}/compiled-policy.json.
+ */
+export interface ServerCompiledPolicyFile {
+  readonly generatedAt: string;
+  readonly serverName: string;
+  readonly constitutionHash: string;
+  readonly inputHash: string;
+  readonly rules: CompiledRule[];
+  readonly listDefinitions?: ListDefinition[];
+}
+
 // ---------------------------------------------------------------------------
 // Test Scenarios
 // ---------------------------------------------------------------------------

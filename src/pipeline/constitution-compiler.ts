@@ -54,7 +54,23 @@ const listDefinitionSchema = z.object({
   mcpServerHint: z.string().optional(),
 });
 
-function buildCompilerResponseSchema(serverNames: [string, ...string[]], toolNames: [string, ...string[]]) {
+/**
+ * Options for building the compiler response schema.
+ */
+export interface CompilerSchemaOptions {
+  /**
+   * When true, the `server` field in rule conditions is required (not optional).
+   * Used by per-server compilation to enforce server scoping at the schema level.
+   */
+  requireServer?: boolean;
+}
+
+function buildCompilerResponseSchema(
+  serverNames: [string, ...string[]],
+  toolNames: [string, ...string[]],
+  options?: CompilerSchemaOptions,
+) {
+  const serverField = z.array(z.enum(serverNames));
   const compiledRuleSchema = z.object({
     name: z.string(),
     description: z.string(),
@@ -62,14 +78,13 @@ function buildCompilerResponseSchema(serverNames: [string, ...string[]], toolNam
     if: z
       .object({
         roles: z.array(z.enum(getArgumentRoleValues())).optional(),
-        server: z.array(z.enum(serverNames)).optional(),
+        server: options?.requireServer ? serverField : serverField.optional(),
         tool: z.array(z.enum(toolNames)).optional(),
         sideEffects: z.boolean().optional(),
         paths: pathConditionSchema.optional(),
         domains: domainConditionSchema.optional(),
         lists: z.array(listConditionSchema).optional(),
       })
-      // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- runtime check: all fields are optional, Object.values may be all undefined
       .refine((cond) => Object.values(cond).some((v) => v !== undefined), {
         message: 'Rule condition must have at least one field — catch-all rules are not allowed',
       }),
@@ -81,6 +96,23 @@ function buildCompilerResponseSchema(serverNames: [string, ...string[]], toolNam
     rules: z.array(compiledRuleSchema),
     listDefinitions: z.array(listDefinitionSchema).optional().default([]),
   });
+}
+
+/**
+ * Formats the server scope section for per-server compilation prompts.
+ * When serverScope is provided, appends a directive telling the LLM to emit
+ * rules only for that server with required server conditions.
+ */
+function formatServerScopeSection(serverScope?: string): string {
+  if (!serverScope) return '';
+
+  return `
+## Server Scope
+
+You are compiling rules for the "${serverScope}" server ONLY.
+Every rule you emit MUST include "server": ["${serverScope}"] in the "if" condition.
+Do NOT emit rules for other servers or tools not listed in the annotations above.
+`;
 }
 
 /**
@@ -125,11 +157,24 @@ export function formatAnnotationsSummary(annotations: ToolAnnotation[]): string 
  * Contains: role preamble, constitution, annotations, structural invariants, and instructions.
  * This is the cacheable part — it stays the same across repair rounds.
  */
+/**
+ * Options for customizing the compiler system prompt.
+ */
+export interface CompilerPromptOptions {
+  /**
+   * When set, appends a "Server Scope" section to the prompt telling the LLM
+   * it is compiling rules for this single server only. Every emitted rule must
+   * include `"server": [serverScope]` in its condition.
+   */
+  serverScope?: string;
+}
+
 export function buildCompilerSystemPrompt(
   constitutionText: string,
   annotations: ToolAnnotation[],
   config: CompilerConfig,
   handwrittenScenarios?: TestScenario[],
+  promptOptions?: CompilerPromptOptions,
 ): string {
   const annotationsSummary = formatAnnotationsSummary(annotations);
 
@@ -220,7 +265,7 @@ For multi-mode tools:
   mutations.
 
 Be concise in descriptions and reasons -- one sentence each.
-${formatGroundTruthSection(handwrittenScenarios)}
+${formatServerScopeSection(promptOptions?.serverScope)}${formatGroundTruthSection(handwrittenScenarios)}
 ## Dynamic Lists
 
 When the constitution references a CATEGORY of things (e.g., "major news sites",
@@ -351,13 +396,18 @@ export class ConstitutionCompilerSession {
   private readonly schemaHint: string;
   private turns = 0;
 
-  constructor(options: { system: string | SystemModelMessage; model: LanguageModel; annotations: ToolAnnotation[] }) {
+  constructor(options: {
+    system: string | SystemModelMessage;
+    model: LanguageModel;
+    annotations: ToolAnnotation[];
+    schemaOptions?: CompilerSchemaOptions;
+  }) {
     this.systemPrompt = options.system;
     this.model = options.model;
 
     const serverNames = [...new Set(options.annotations.map((a) => a.serverName))] as [string, ...string[]];
     const toolNames = [...new Set(options.annotations.map((a) => a.toolName))] as [string, ...string[]];
-    this.schema = buildCompilerResponseSchema(serverNames, toolNames);
+    this.schema = buildCompilerResponseSchema(serverNames, toolNames, options.schemaOptions);
     this.schemaHint = schemaToPromptHint(this.schema);
   }
 
