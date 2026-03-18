@@ -11,11 +11,13 @@
  */
 
 import { SandboxManager } from '@anthropic-ai/sandbox-runtime';
-import { writeFileSync, mkdirSync, rmSync, existsSync } from 'node:fs';
+import { writeFileSync, readFileSync, mkdirSync, rmSync, existsSync, realpathSync } from 'node:fs';
 import { join, resolve, dirname, isAbsolute } from 'node:path';
+import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { quote } from 'shell-quote';
 import type { MCPServerConfig, SandboxAvailabilityPolicy, SandboxNetworkConfig } from '../config/types.js';
+import { expandTilde } from '../types/argument-roles.js';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -35,6 +37,7 @@ export type ResolvedSandboxConfig =
  */
 export interface ResolvedSandboxParams {
   readonly allowWrite: readonly string[];
+  readonly allowRead: readonly string[];
   readonly denyRead: readonly string[];
   readonly denyWrite: readonly string[];
   readonly network:
@@ -118,6 +121,7 @@ export function resolveSandboxConfig(
   const networkConfig = sandboxConfig.network;
 
   const allowWrite = buildAllowWrite(sessionSandboxDir, fsConfig.allowWrite ?? []);
+  const allowRead = (fsConfig.allowRead ?? []).map((p) => expandTilde(p));
 
   const denyRead = fsConfig.denyRead ?? DEFAULT_DENY_READ;
   const denyWrite = fsConfig.denyWrite ?? [];
@@ -126,7 +130,7 @@ export function resolveSandboxConfig(
 
   return {
     sandboxed: true,
-    config: { allowWrite, denyRead, denyWrite, network },
+    config: { allowWrite, allowRead, denyRead, denyWrite, network },
   };
 }
 
@@ -160,6 +164,7 @@ export function writeServerSettings(
     network,
     filesystem: {
       denyRead: config.denyRead,
+      allowRead: config.allowRead,
       allowWrite: [...config.allowWrite, cwdPath],
       denyWrite: config.denyWrite,
     },
@@ -225,7 +230,119 @@ export function annotateSandboxViolation(errorMessage: string, serverSandboxed: 
   return `[SANDBOX BLOCKED] ${errorMessage}`;
 }
 
+/**
+ * Discovers filesystem paths required by the current Node.js installation.
+ *
+ * When a sandbox uses `denyRead: ["~"]`, node/npm installations under the
+ * home directory (nvm, volta, fnm, asdf) become unreadable. This function
+ * inspects the running process to find the actual installation paths and
+ * returns them for inclusion in `allowRead`.
+ *
+ * Returns deduplicated absolute real paths. Safe to call on any platform.
+ */
+export function discoverNodePaths(): string[] {
+  const paths = new Set<string>();
+  // Resolve home through realpath so prefix comparisons work when
+  // homedir() involves symlinks (e.g., macOS /var → /private/var)
+  const home = safeRealPath(homedir()) ?? homedir();
+
+  // 1. Node.js binary -- follow symlinks to the real location
+  const execPath = safeRealPath(process.execPath);
+  if (execPath) {
+    // The binary is typically at <prefix>/bin/node; we want <prefix>
+    const binDir = dirname(execPath);
+    const prefix = dirname(binDir);
+    addIfUnderHome(paths, prefix, home);
+  }
+
+  // 2. Version manager root directories -- these contain node versions,
+  //    global packages, and shims that the server process needs to read
+  const versionManagerRoots: Array<{ envVar: string; fallback: string }> = [
+    { envVar: 'NVM_DIR', fallback: '.nvm' },
+    { envVar: 'VOLTA_HOME', fallback: '.volta' },
+    { envVar: 'ASDF_DATA_DIR', fallback: '.asdf' },
+  ];
+
+  for (const { envVar, fallback } of versionManagerRoots) {
+    const dir = process.env[envVar] ?? (home ? join(home, fallback) : '');
+    if (dir && existsSync(dir)) {
+      const realDir = safeRealPath(dir);
+      if (realDir) addIfUnderHome(paths, realDir, home);
+    }
+  }
+
+  // 3. fnm uses a platform-specific default location
+  const fnmDir =
+    process.env.FNM_DIR ??
+    (process.platform === 'darwin' && home
+      ? join(home, 'Library', 'Application Support', 'fnm')
+      : home
+        ? join(home, '.local', 'share', 'fnm')
+        : '');
+  if (fnmDir && existsSync(fnmDir)) {
+    const realDir = safeRealPath(fnmDir);
+    if (realDir) addIfUnderHome(paths, realDir, home);
+  }
+
+  return [...paths];
+}
+
+/**
+ * Rewrites an existing srt settings file to add additional allowRead
+ * and/or allowWrite paths. Used after OAuth setup discovers credential
+ * directories that weren't known when the settings were first written.
+ *
+ * Merges new paths with existing ones (deduplicating).
+ */
+export function rewriteServerSettings(
+  settingsPath: string,
+  additions: { allowRead?: string[]; allowWrite?: string[] },
+): void {
+  const content = JSON.parse(readFileSync(settingsPath, 'utf-8')) as {
+    filesystem?: { allowRead?: string[]; allowWrite?: string[] };
+  };
+  const fs = content.filesystem ?? {};
+
+  if (additions.allowRead?.length) {
+    const existing = new Set<string>(fs.allowRead ?? []);
+    for (const p of additions.allowRead) existing.add(p);
+    fs.allowRead = [...existing];
+  }
+
+  if (additions.allowWrite?.length) {
+    const existing = new Set<string>(fs.allowWrite ?? []);
+    for (const p of additions.allowWrite) existing.add(p);
+    fs.allowWrite = [...existing];
+  }
+
+  content.filesystem = fs;
+  writeFileSync(settingsPath, JSON.stringify(content, null, 2));
+}
+
 // ── Internal helpers ───────────────────────────────────────────────────────
+
+/**
+ * Resolves a path to its real (canonical) path, returning null on failure.
+ * Silently handles paths that don't exist or can't be resolved.
+ */
+function safeRealPath(p: string): string | null {
+  try {
+    return realpathSync(p);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Adds a path to the set only if it's under the home directory.
+ * Paths outside home don't need to be in allowRead since they
+ * aren't blocked by `denyRead: ["~"]`.
+ */
+function addIfUnderHome(paths: Set<string>, dir: string, home: string): void {
+  if (home && dir.startsWith(home + '/')) {
+    paths.add(dir);
+  }
+}
 
 /**
  * Builds the allowWrite list with the session sandbox dir always included.

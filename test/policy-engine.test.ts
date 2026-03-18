@@ -2118,6 +2118,153 @@ describe('PolicyEngine', () => {
       expect(result.rule).toBe('structural-sandbox-allow');
     });
   });
+
+  // ── Google Workspace policy tests ─────────────────────────────────
+  describe('Google Workspace tools', () => {
+    it('allows read-only Gmail list messages', () => {
+      const result = engine.evaluate(
+        makeRequest({
+          serverName: 'google-workspace',
+          toolName: 'gmail_search_messages',
+          arguments: { query: 'is:unread', maxResults: 10 },
+        }),
+      );
+      expect(result.decision).toBe('allow');
+      expect(result.rule).toBe('allow-gworkspace-read-ops');
+    });
+
+    it('allows read-only Gmail get message', () => {
+      const result = engine.evaluate(
+        makeRequest({
+          serverName: 'google-workspace',
+          toolName: 'gmail_get_message',
+          arguments: { messageId: 'msg-123' },
+        }),
+      );
+      expect(result.decision).toBe('allow');
+      expect(result.rule).toBe('allow-gworkspace-read-ops');
+    });
+
+    it('allows read-only calendar list events', () => {
+      const result = engine.evaluate(
+        makeRequest({
+          serverName: 'google-workspace',
+          toolName: 'calendar_list_events',
+          arguments: { calendarId: 'primary', maxResults: 10 },
+        }),
+      );
+      expect(result.decision).toBe('allow');
+      expect(result.rule).toBe('allow-gworkspace-read-ops');
+    });
+
+    it('allows read-only Drive list files', () => {
+      const result = engine.evaluate(
+        makeRequest({
+          serverName: 'google-workspace',
+          toolName: 'drive_list_files',
+          arguments: { query: 'name contains "report"' },
+        }),
+      );
+      expect(result.decision).toBe('allow');
+      expect(result.rule).toBe('allow-gworkspace-read-ops');
+    });
+
+    it('allows read-only Drive read file', () => {
+      const result = engine.evaluate(
+        makeRequest({
+          serverName: 'google-workspace',
+          toolName: 'drive_read_file',
+          arguments: { fileId: 'file-abc123' },
+        }),
+      );
+      expect(result.decision).toBe('allow');
+      expect(result.rule).toBe('allow-gworkspace-read-ops');
+    });
+
+    it('escalates Gmail send message', () => {
+      const result = engine.evaluate(
+        makeRequest({
+          serverName: 'google-workspace',
+          toolName: 'gmail_send_message',
+          arguments: { to: 'user@example.com', subject: 'Hello', body: 'Hi' },
+        }),
+      );
+      expect(result.decision).toBe('escalate');
+      expect(result.rule).toBe('escalate-gworkspace-mutations');
+    });
+
+    it('escalates Gmail draft message', () => {
+      const result = engine.evaluate(
+        makeRequest({
+          serverName: 'google-workspace',
+          toolName: 'gmail_draft_message',
+          arguments: { to: 'user@example.com', subject: 'Draft', body: 'content' },
+        }),
+      );
+      expect(result.decision).toBe('escalate');
+      expect(result.rule).toBe('escalate-gworkspace-mutations');
+    });
+
+    it('escalates calendar event creation', () => {
+      const result = engine.evaluate(
+        makeRequest({
+          serverName: 'google-workspace',
+          toolName: 'calendar_create_event',
+          arguments: { summary: 'Meeting', start: '2026-01-01T10:00', end: '2026-01-01T11:00' },
+        }),
+      );
+      expect(result.decision).toBe('escalate');
+      expect(result.rule).toBe('escalate-gworkspace-mutations');
+    });
+
+    it('escalates Drive file sharing', () => {
+      const result = engine.evaluate(
+        makeRequest({
+          serverName: 'google-workspace',
+          toolName: 'drive_share_file',
+          arguments: { fileId: 'abc123', email: 'user@example.com', role: 'writer' },
+        }),
+      );
+      expect(result.decision).toBe('escalate');
+      expect(result.rule).toBe('escalate-gworkspace-mutations');
+    });
+
+    it('escalates Gmail delete message', () => {
+      const result = engine.evaluate(
+        makeRequest({
+          serverName: 'google-workspace',
+          toolName: 'gmail_delete_message',
+          arguments: { messageId: 'msg-456' },
+        }),
+      );
+      expect(result.decision).toBe('escalate');
+      expect(result.rule).toBe('escalate-gworkspace-mutations');
+    });
+
+    it('escalates batch label modification', () => {
+      const result = engine.evaluate(
+        makeRequest({
+          serverName: 'google-workspace',
+          toolName: 'gmail_batch_modify_labels',
+          arguments: { messageIds: ['msg-1', 'msg-2'], addLabels: ['STARRED'] },
+        }),
+      );
+      expect(result.decision).toBe('escalate');
+      expect(result.rule).toBe('escalate-gworkspace-mutations');
+    });
+
+    it('denies unknown Google Workspace tool (structural invariant)', () => {
+      const result = engine.evaluate(
+        makeRequest({
+          serverName: 'google-workspace',
+          toolName: 'unknown_gworkspace_tool',
+          arguments: {},
+        }),
+      );
+      expect(result.decision).toBe('deny');
+      expect(result.rule).toBe('structural-unknown-tool');
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

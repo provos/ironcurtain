@@ -131,6 +131,29 @@ export const testCompiledPolicy: CompiledPolicyFile = {
       then: 'escalate',
       reason: 'GitHub mutations require human approval.',
     },
+    // ── Google Workspace rules ──────────────────────────────────────
+    {
+      name: 'allow-gworkspace-read-ops',
+      description: 'Allow read-only Google Workspace operations.',
+      principle: 'Read-only Workspace operations are safe',
+      if: {
+        server: ['google-workspace'],
+        sideEffects: false,
+      },
+      then: 'allow',
+      reason: 'Read-only Google Workspace operations are safe.',
+    },
+    {
+      name: 'escalate-gworkspace-mutations',
+      description: 'Escalate Google Workspace mutations to human.',
+      principle: 'Google Workspace mutations require approval',
+      if: {
+        server: ['google-workspace'],
+        sideEffects: true,
+      },
+      then: 'escalate',
+      reason: 'Google Workspace mutations require human approval.',
+    },
     // ── Fetch rules ─────────────────────────────────────────────────
     {
       name: 'allow-fetch-get',
@@ -464,6 +487,95 @@ export const testToolAnnotations: ToolAnnotationsFile = {
         },
       ],
     },
+    'google-workspace': {
+      inputHash: 'test-fixture',
+      tools: [
+        // Read-only operations
+        {
+          toolName: 'gmail_search_messages',
+          serverName: 'google-workspace',
+          comment: 'Searches Gmail messages matching a query.',
+          sideEffects: false,
+          args: { query: ['none'], maxResults: ['none'] },
+        },
+        {
+          toolName: 'gmail_get_message',
+          serverName: 'google-workspace',
+          comment: 'Gets a single Gmail message.',
+          sideEffects: false,
+          args: { messageId: ['none'] },
+        },
+        {
+          toolName: 'calendar_list_events',
+          serverName: 'google-workspace',
+          comment: 'Lists calendar events.',
+          sideEffects: false,
+          args: { calendarId: ['none'], maxResults: ['none'] },
+        },
+        {
+          toolName: 'drive_list_files',
+          serverName: 'google-workspace',
+          comment: 'Lists Drive files.',
+          sideEffects: false,
+          args: { query: ['none'], maxResults: ['none'] },
+        },
+        {
+          toolName: 'drive_read_file',
+          serverName: 'google-workspace',
+          comment: 'Reads a Drive file.',
+          sideEffects: false,
+          args: { fileId: ['none'] },
+        },
+        // Mutation operations
+        {
+          toolName: 'gmail_send_message',
+          serverName: 'google-workspace',
+          comment: 'Sends an email via Gmail.',
+          sideEffects: true,
+          args: { to: ['email-address'], subject: ['none'], body: ['email-body'] },
+        },
+        {
+          toolName: 'gmail_draft_message',
+          serverName: 'google-workspace',
+          comment: 'Creates a Gmail draft.',
+          sideEffects: true,
+          args: { to: ['email-address'], subject: ['none'], body: ['email-body'] },
+        },
+        {
+          toolName: 'calendar_create_event',
+          serverName: 'google-workspace',
+          comment: 'Creates a calendar event.',
+          sideEffects: true,
+          args: {
+            summary: ['none'],
+            start: ['none'],
+            end: ['none'],
+            attendees: ['email-address'],
+          },
+        },
+        {
+          toolName: 'drive_share_file',
+          serverName: 'google-workspace',
+          comment: 'Shares a Drive file with another user.',
+          sideEffects: true,
+          args: { fileId: ['none'], email: ['email-address'], role: ['share-permission'] },
+        },
+        {
+          toolName: 'gmail_delete_message',
+          serverName: 'google-workspace',
+          comment: 'Permanently deletes a Gmail message.',
+          sideEffects: true,
+          args: { messageId: ['none'] },
+        },
+        {
+          toolName: 'gmail_batch_modify_labels',
+          serverName: 'google-workspace',
+          comment: 'Batch modifies labels on multiple messages.',
+          sideEffects: true,
+          args: { messageIds: ['none'], addLabels: ['none'], removeLabels: ['none'] },
+        },
+      ],
+    },
     fetch: {
       inputHash: 'test-fixture',
       tools: [
@@ -483,4 +595,5 @@ export const testToolAnnotations: ToolAnnotationsFile = {
 export const TEST_DOMAIN_ALLOWLISTS = new Map<string, string[]>([
   ['fetch', ['*']],
   ['git', ['github.com', '*.github.com', 'gitlab.com', '*.gitlab.com']],
+  ['google-workspace', ['googleapis.com', '*.googleapis.com', 'accounts.google.com', 'oauth2.googleapis.com']],
 ]);

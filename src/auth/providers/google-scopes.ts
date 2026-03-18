@@ -48,11 +48,27 @@ export const GOOGLE_SCOPES: readonly GoogleScopeEntry[] = [
     isDefault: false,
   },
   {
+    shortName: 'gmail.modify',
+    fullScope: `${SCOPE_BASE}/gmail.modify`,
+    label: 'Gmail (modify)',
+    group: 'Gmail',
+    access: 'write -- read, send, delete, manage labels',
+    isDefault: false,
+  },
+  {
     shortName: 'gmail.compose',
     fullScope: `${SCOPE_BASE}/gmail.compose`,
     label: 'Gmail (compose)',
     group: 'Gmail',
     access: 'write -- create & modify drafts',
+    isDefault: false,
+  },
+  {
+    shortName: 'gmail.labels',
+    fullScope: `${SCOPE_BASE}/gmail.labels`,
+    label: 'Gmail (labels)',
+    group: 'Gmail',
+    access: 'write -- create, update & delete labels',
     isDefault: false,
   },
 
@@ -89,6 +105,36 @@ export const GOOGLE_SCOPES: readonly GoogleScopeEntry[] = [
     label: 'Drive (per-file)',
     group: 'Google Drive',
     access: 'write -- files created or opened by the app',
+    isDefault: false,
+  },
+
+  // Docs
+  {
+    shortName: 'documents',
+    fullScope: `${SCOPE_BASE}/documents`,
+    label: 'Docs (read/write)',
+    group: 'Google Docs',
+    access: 'write -- read & edit documents',
+    isDefault: false,
+  },
+
+  // Sheets
+  {
+    shortName: 'spreadsheets',
+    fullScope: `${SCOPE_BASE}/spreadsheets`,
+    label: 'Sheets (read/write)',
+    group: 'Google Sheets',
+    access: 'write -- read & edit spreadsheets',
+    isDefault: false,
+  },
+
+  // Slides
+  {
+    shortName: 'presentations',
+    fullScope: `${SCOPE_BASE}/presentations`,
+    label: 'Slides (read/write)',
+    group: 'Google Slides',
+    access: 'write -- read & edit presentations',
     isDefault: false,
   },
 ];

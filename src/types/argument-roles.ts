@@ -42,6 +42,10 @@ export type ArgumentRole =
   // Opaque roles (semantic meaning but not resource identifiers)
   | 'branch-name'
   | 'commit-message'
+  // Google Workspace opaque roles
+  | 'email-address'
+  | 'email-body'
+  | 'share-permission'
   // Catch-all
   | 'none';
 
@@ -287,6 +291,46 @@ const registryEntries: [ArgumentRole, RoleDefinition][] = [
       serverNames: ['git'],
     },
   ],
+  // ── Google Workspace roles ──────────────────────────────────────
+  [
+    'email-address',
+    {
+      description: 'Email address (recipient, attendee, share target)',
+      isResourceIdentifier: false,
+      category: 'opaque',
+      canonicalize: identity,
+      annotationGuidance:
+        'Assign to arguments that are email addresses (recipients, attendees, share targets). ' +
+        'Includes the "to" field on send/draft, "attendees" on calendar events, "email" on file sharing.',
+      serverNames: ['google-workspace'],
+    },
+  ],
+  [
+    'email-body',
+    {
+      description: 'Email message body content',
+      isResourceIdentifier: false,
+      category: 'opaque',
+      canonicalize: identity,
+      annotationGuidance:
+        'Assign to arguments that contain email body text or rich content. ' +
+        'Includes the "body" field on send/draft message tools.',
+      serverNames: ['google-workspace'],
+    },
+  ],
+  [
+    'share-permission',
+    {
+      description: 'Sharing permission level (viewer, commenter, editor, organizer)',
+      isResourceIdentifier: false,
+      category: 'opaque',
+      canonicalize: lowercase,
+      annotationGuidance:
+        'Assign to arguments that specify a sharing or permission level on shared resources ' +
+        '(e.g., the role parameter on Drive file sharing).',
+      serverNames: ['google-workspace'],
+    },
+  ],
   [
     'none',
     {
@@ -320,6 +364,9 @@ const _ROLE_COMPLETENESS_CHECK: Record<ArgumentRole, true> = {
   'github-repo': true,
   'branch-name': true,
   'commit-message': true,
+  'email-address': true,
+  'email-body': true,
+  'share-permission': true,
   none: true,
 };
 

@@ -26,6 +26,8 @@ export interface SandboxNetworkConfig {
 export interface SandboxFilesystemConfig {
   /** Additional directories the server may write to, beyond the session sandbox. */
   readonly allowWrite?: string[];
+  /** Directories re-allowed for reads within denied regions (e.g., ~/.nvm within denyRead: ["~"]). */
+  readonly allowRead?: string[];
   /** Directories the server may not read. */
   readonly denyRead?: string[];
   /** Directories the server may not write to, even within allowed paths. */
