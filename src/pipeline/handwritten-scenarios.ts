@@ -5,17 +5,17 @@
  * compiled rules MUST satisfy, and are verified after every compilation.
  *
  * ╔═══════════════════════════════════════════════════════════════════╗
- * ║  ONLY universal, constitution-independent invariants belong here.║
- * ║                                                                  ║
- * ║  These scenarios constrain what the LLM compiler can produce.    ║
- * ║  Adding server-specific or constitution-dependent scenarios      ║
- * ║  (e.g., "git push must escalate", "Gmail send must escalate")   ║
- * ║  will CONFLICT with user constitutions that make different       ║
- * ║  choices for those servers.                                      ║
- * ║                                                                  ║
- * ║  Server-specific policy tests belong in policy-engine.test.ts,  ║
- * ║  where they validate the current compiled policy without         ║
- * ║  constraining what the compiler can generate.                    ║
+ * ║  ONLY universal, constitution-independent invariants belong here. ║
+ * ║                                                                   ║
+ * ║  These scenarios constrain what the LLM compiler can produce.     ║
+ * ║  Adding server-specific or constitution-dependent scenarios       ║
+ * ║  (e.g., "git push must escalate", "Gmail send must escalate")     ║
+ * ║  will CONFLICT with user constitutions that make different        ║
+ * ║  choices for those servers.                                       ║
+ * ║                                                                   ║
+ * ║  Server-specific policy tests belong in policy-engine.test.ts,    ║
+ * ║  where they validate the current compiled policy without          ║
+ * ║  constraining what the compiler can generate.                     ║
  * ╚═══════════════════════════════════════════════════════════════════╝
  *
  * Current invariants:

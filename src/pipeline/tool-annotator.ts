@@ -20,6 +20,22 @@ import {
 import { generateObjectWithRepair } from './generate-with-repair.js';
 import type { StoredToolAnnotation } from './types.js';
 
+/** Default number of tools per LLM call. */
+export const ANNOTATION_BATCH_SIZE = 25;
+
+/**
+ * Splits an array into chunks of at most `size` elements.
+ * Returns the original array (wrapped) if it fits in one chunk.
+ */
+export function chunk<T>(items: T[], size: number): T[][] {
+  if (items.length <= size) return [items];
+  const result: T[][] = [];
+  for (let i = 0; i < items.length; i += size) {
+    result.push(items.slice(i, i + size));
+  }
+  return result;
+}
+
 // Input type matching what MCP's listTools() returns
 export interface MCPToolSchema {
   name: string;
@@ -262,42 +278,131 @@ export async function annotateTools(
 ): Promise<StoredToolAnnotation[]> {
   if (tools.length === 0) return [];
 
-  const schema = buildAnnotationsResponseSchema(serverName, tools);
-  const prompt = buildAnnotationPrompt(serverName, tools);
+  const batches = chunk(tools, ANNOTATION_BATCH_SIZE);
+  const allAnnotations: StoredToolAnnotation[] = [];
 
-  const { output } = await generateObjectWithRepair({
-    model: llm,
-    schema,
-    prompt,
-    onProgress,
-  });
+  for (let i = 0; i < batches.length; i++) {
+    const batch = batches[i];
 
-  const annotations: StoredToolAnnotation[] = output.annotations.map((a) => ({
-    ...a,
-    serverName,
-  }));
+    if (batches.length > 1) {
+      onProgress?.(`Batch ${i + 1}/${batches.length} (${batch.length} tools)`);
+    }
 
-  // Validate all input tools are represented in the output
-  const annotatedNames = new Set(annotations.map((a) => a.toolName));
+    const schema = buildAnnotationsResponseSchema(serverName, batch);
+    const prompt = buildAnnotationPrompt(serverName, batch);
+
+    const { output } = await generateObjectWithRepair({
+      model: llm,
+      schema,
+      prompt,
+      onProgress: batches.length > 1 ? (msg) => onProgress?.(`Batch ${i + 1}/${batches.length}: ${msg}`) : onProgress,
+    });
+
+    const batchAnnotations: StoredToolAnnotation[] = output.annotations.map((a) => ({
+      ...a,
+      serverName,
+    }));
+
+    allAnnotations.push(...batchAnnotations);
+  }
+
+  // Validate all input tools are represented across all batches
+  const annotatedNames = new Set(allAnnotations.map((a) => a.toolName));
   const missingTools = tools.filter((t) => !annotatedNames.has(t.name));
   if (missingTools.length > 0) {
     const names = missingTools.map((t) => t.name).join(', ');
     throw new Error(`Annotation incomplete: missing tools: ${names}`);
   }
 
-  return annotations;
+  return allAnnotations;
 }
 
 // -----------------------------------------------------------------------
 // Compile-time heuristic validation
 // -----------------------------------------------------------------------
 
-/** Argument names that strongly suggest filesystem path arguments. */
-const PATH_INDICATOR_NAMES = ['path', 'file', 'dir', 'directory', 'source', 'destination'];
+/**
+ * Argument names that strongly suggest filesystem path arguments.
+ *
+ * Strong indicators are terms that almost always mean "filesystem path" --
+ * these trigger a warning even when the LLM explicitly annotated the
+ * argument with a non-path role (unless the schema description clearly
+ * indicates otherwise).
+ *
+ * Weak indicators ("source", "destination") are ambiguous across domains:
+ * in filesystem tools they mean paths, but in git tools "source" is a
+ * branch ref. For these, the heuristic defers to the schema description
+ * when the argument has an explicit annotation.
+ */
+const STRONG_PATH_INDICATORS = ['path', 'dir', 'directory'];
+const WEAK_PATH_INDICATORS = ['source', 'destination', 'file'];
 
-function looksLikePathArgument(argName: string): boolean {
-  const lower = argName.toLowerCase();
-  return PATH_INDICATOR_NAMES.some((indicator) => lower.includes(indicator));
+/**
+ * Description patterns that suggest an argument accepts a filesystem path
+ * value. Uses word-boundary regex to avoid false positives from incidental
+ * mentions (e.g., "whether to update files" vs "file path to read").
+ */
+const PATH_DESCRIPTION_PATTERNS = [/\bpath\b/i, /\bfilename\b/i, /\bfilepath\b/i, /\bdirectory\b/i, /\bfolder\b/i];
+
+/**
+ * Split an argument name into lowercase word segments by camelCase
+ * and snake_case boundaries.
+ *
+ *   "updateAgentMetaFiles" → ["update", "agent", "meta", "files"]
+ *   "source_path"          → ["source", "path"]
+ */
+function splitArgName(argName: string): string[] {
+  // Insert separator before uppercase letters (camelCase boundaries),
+  // then split on non-alpha characters (underscores, hyphens, etc.)
+  return argName
+    .replace(/([a-z])([A-Z])/g, '$1_$2')
+    .toLowerCase()
+    .split(/[^a-z]+/)
+    .filter(Boolean);
+}
+
+export type PathIndicatorStrength = 'strong' | 'weak' | false;
+
+/**
+ * Check if an argument name contains a path indicator as a whole word
+ * segment (not as an arbitrary substring). Matches plurals by checking
+ * if any segment equals the indicator or its plural form.
+ *
+ * Returns 'strong', 'weak', or false:
+ * - 'strong': short names where the indicator IS the argument (e.g.,
+ *   "path", "filePath", "source_dir"). These are flagged even with an
+ *   explicit non-path annotation.
+ * - 'weak': either uses an ambiguous indicator ("source", "destination")
+ *   OR is a long compound name where the indicator is incidental (e.g.,
+ *   "updateAgentMetaFiles"). For these, the heuristic defers to the
+ *   schema description when the LLM has assigned an explicit annotation.
+ */
+export function looksLikePathArgument(argName: string): PathIndicatorStrength {
+  const segments = splitArgName(argName);
+
+  const matchesIndicator = (indicators: string[]) =>
+    indicators.some((indicator) =>
+      segments.some((seg) => seg === indicator || seg === indicator + 's' || seg === indicator.replace(/y$/, 'ies')),
+    );
+
+  if (matchesIndicator(STRONG_PATH_INDICATORS)) {
+    // In long compound names (3+ segments), a path keyword is more likely
+    // to be incidental (e.g., "updateAgentMetaFiles") than in short names
+    // (e.g., "filePath"). Downgrade to weak so the description check applies.
+    return segments.length >= 3 ? 'weak' : 'strong';
+  }
+  if (matchesIndicator(WEAK_PATH_INDICATORS)) return 'weak';
+  return false;
+}
+
+/**
+ * Check if the schema description for an argument contains keywords
+ * suggesting it refers to a filesystem path.
+ */
+function descriptionSuggestsPath(argSchema: Record<string, unknown>): boolean {
+  const desc = argSchema['description'];
+  if (typeof desc !== 'string') return false;
+  return PATH_DESCRIPTION_PATTERNS.some((pattern) => pattern.test(desc));
 }
 
 function hasPathLikeValues(schema: Record<string, unknown>): boolean {
@@ -347,7 +452,8 @@ export function validateAnnotationsHeuristic(
     const properties = (tool.inputSchema['properties'] ?? {}) as Record<string, Record<string, unknown>>;
 
     for (const [argName, argSchema] of Object.entries(properties)) {
-      if (!looksLikePathArgument(argName)) continue;
+      const indicatorStrength = looksLikePathArgument(argName);
+      if (!indicatorStrength) continue;
 
       // Skip non-string arguments (booleans, enums, numbers named "directories" etc.)
       const argType = argSchema['type'];
@@ -357,6 +463,13 @@ export function validateAnnotationsHeuristic(
       const hasPathRole = roles && roles.some((r) => getRoleDefinition(r).isResourceIdentifier);
 
       if (!hasPathRole) {
+        // For weak indicators (e.g., "source", "destination"), defer to the
+        // schema description when the argument has an explicit annotation.
+        // These names are ambiguous: "source" means a path in filesystem
+        // tools but a branch ref in git tools.
+        if (indicatorStrength === 'weak' && roles && !descriptionSuggestsPath(argSchema)) {
+          continue;
+        }
         warnings.push(`Tool "${tool.name}" argument "${argName}" looks like a path but has no path role in annotation`);
       }
     }
