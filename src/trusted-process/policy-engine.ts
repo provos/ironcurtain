@@ -487,7 +487,7 @@ export class PolicyEngine {
       return finalDecision({
         decision: 'allow',
         rule: 'structural-introspection-allow',
-        reason: 'Introspection tool with no side effects is always allowed',
+        reason: 'Introspection tool is always allowed',
       });
     }
 

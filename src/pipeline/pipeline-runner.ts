@@ -642,15 +642,27 @@ export class PipelineRunner {
     const existingServerScenarios = loadExistingArtifact<TestScenariosFile>(serverOutputDir, 'test-scenarios.json');
 
     if (existingServerPolicy && existingServerPolicy.inputHash === inputHash && existingServerScenarios) {
-      showCached(`  ${unit.serverName}: compilation`);
-      return {
-        serverName: unit.serverName,
-        rules: resolveRulePaths(existingServerPolicy.rules),
-        listDefinitions: existingServerPolicy.listDefinitions ?? [],
-        scenarios: existingServerScenarios.scenarios,
-        inputHash,
-        constitutionHash,
-      };
+      // Verify scenario hash to detect stale scenarios (e.g., changed templates or handwritten scenarios)
+      const cachedPermittedDirs = extractPermittedDirectories(resolveRulePaths(existingServerPolicy.rules));
+      const cachedScenarioPrompt = buildGeneratorSystemPrompt(
+        unit.constitutionText,
+        unit.annotations,
+        unit.allowedDirectory,
+        cachedPermittedDirs,
+      );
+      const cachedScenarioHash = computeScenariosHash(cachedScenarioPrompt, unit.handwrittenScenarios);
+
+      if (existingServerScenarios.inputHash === cachedScenarioHash) {
+        showCached(`  ${unit.serverName}: compilation`);
+        return {
+          serverName: unit.serverName,
+          rules: resolveRulePaths(existingServerPolicy.rules),
+          listDefinitions: existingServerPolicy.listDefinitions ?? [],
+          scenarios: existingServerScenarios.scenarios,
+          inputHash,
+          constitutionHash,
+        };
+      }
     }
 
     const compilerSystem = this.cacheStrategy.wrapSystemPrompt(compilerPrompt);
@@ -954,13 +966,7 @@ export class PipelineRunner {
       }
     }
 
-    if (!verificationResult.pass) {
-      throw new Error(
-        `Verification FAILED for server "${unit.serverName}" — artifacts written but policy may need review.`,
-      );
-    }
-
-    // Write per-server artifacts
+    // Write per-server artifacts (before verification check so they can be inspected on failure)
     const finalScenarios = [...scenarioResult.scenarios, ...accumulatedProbes];
     const serverCompiledPolicyFile: ServerCompiledPolicyFile = {
       generatedAt: new Date().toISOString(),
@@ -977,6 +983,12 @@ export class PipelineRunner {
       inputHash: scenarioResult.inputHash,
       scenarios: finalScenarios,
     } satisfies TestScenariosFile);
+
+    if (!verificationResult.pass) {
+      throw new Error(
+        `Verification FAILED for server "${unit.serverName}" — artifacts written for inspection but policy may need review.`,
+      );
+    }
 
     console.error(
       `  ${chalk.green(unit.serverName)}: ${rules.length} rules, ${finalScenarios.length} scenarios` +

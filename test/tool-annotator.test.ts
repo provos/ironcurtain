@@ -250,6 +250,14 @@ describe('Tool Annotator', () => {
       const result = chunk([1, 2, 3, 4, 5, 6, 7], 3);
       expect(result).toEqual([[1, 2, 3], [4, 5, 6], [7]]);
     });
+
+    it('throws on zero size', () => {
+      expect(() => chunk([1, 2], 0)).toThrow(RangeError);
+    });
+
+    it('throws on negative size', () => {
+      expect(() => chunk([1, 2], -1)).toThrow(RangeError);
+    });
   });
 
   describe('ANNOTATION_BATCH_SIZE', () => {

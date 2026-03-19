@@ -2,8 +2,8 @@
  * Tool Annotator -- LLM-driven classification of MCP tool capabilities.
  *
  * Given a set of MCP tool schemas from a server, the annotator uses an LLM
- * to classify each tool's effect, side effects, and argument roles. Zod
- * schema validation and repair loops ensure annotation correctness.
+ * to classify each tool's argument roles. Results are processed in batches
+ * with Zod schema validation and repair loops to ensure correctness.
  */
 
 import type { LanguageModel } from 'ai';
@@ -25,6 +25,7 @@ export const ANNOTATION_BATCH_SIZE = 25;
  * Returns the original array (wrapped) if it fits in one chunk.
  */
 export function chunk<T>(items: T[], size: number): T[][] {
+  if (size <= 0) throw new RangeError(`chunk size must be positive, got ${size}`);
   if (items.length <= size) return [items];
   const result: T[][] = [];
   for (let i = 0; i < items.length; i += size) {

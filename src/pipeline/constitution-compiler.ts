@@ -78,7 +78,7 @@ function buildCompilerResponseSchema(
     if: z
       .object({
         roles: z.array(z.enum(getArgumentRoleValues())).optional(),
-        server: options?.requireServer ? serverField : serverField.optional(),
+        server: options?.requireServer ? serverField.length(1) : serverField.optional(),
         tool: z.array(z.enum(toolNames)).optional(),
         paths: pathConditionSchema.optional(),
         domains: domainConditionSchema.optional(),
