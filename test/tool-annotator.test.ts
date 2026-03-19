@@ -2,14 +2,11 @@ import { describe, it, expect } from 'vitest';
 import { MockLanguageModelV3 } from 'ai/test';
 import {
   annotateTools,
-  validateAnnotationsHeuristic,
   buildRoleDescriptions,
   chunk,
-  looksLikePathArgument,
   ANNOTATION_BATCH_SIZE,
   type MCPToolSchema,
 } from '../src/pipeline/tool-annotator.js';
-import type { StoredToolAnnotation } from '../src/pipeline/types.js';
 import { getRolesForServer } from '../src/types/argument-roles.js';
 
 const sampleTools: MCPToolSchema[] = [
@@ -60,25 +57,25 @@ const cannedAnnotations = {
     {
       toolName: 'read_file',
       comment: 'Reads the complete contents of a file from disk',
-      sideEffects: true,
+
       args: { path: ['read-path'] },
     },
     {
       toolName: 'write_file',
       comment: 'Creates or overwrites a file with new content',
-      sideEffects: true,
+
       args: { path: ['write-path'], content: ['none'] },
     },
     {
       toolName: 'move_file',
       comment: 'Moves a file from source to destination, deleting the source',
-      sideEffects: true,
+
       args: { source: ['read-path', 'delete-path'], destination: ['write-path'] },
     },
     {
       toolName: 'list_allowed_directories',
       comment: 'Lists directories the server is allowed to access',
-      sideEffects: false,
+
       args: {},
     },
   ],
@@ -145,268 +142,6 @@ describe('Tool Annotator', () => {
       const mockLLM = createMockModel({ annotations: [] });
       const result = await annotateTools('filesystem', [], mockLLM);
       expect(result).toEqual([]);
-    });
-  });
-
-  describe('validateAnnotationsHeuristic', () => {
-    const fullAnnotations: StoredToolAnnotation[] = cannedAnnotations.annotations.map((a) => ({
-      ...a,
-      serverName: 'filesystem',
-    }));
-
-    it('passes when all path arguments are annotated', () => {
-      const result = validateAnnotationsHeuristic(sampleTools, fullAnnotations);
-      expect(result.valid).toBe(true);
-      expect(result.warnings).toHaveLength(0);
-    });
-
-    it('warns when a path-like argument has no path role', () => {
-      const badAnnotations: StoredToolAnnotation[] = fullAnnotations.map((a) => {
-        if (a.toolName === 'read_file') {
-          return { ...a, args: { path: ['none'] } };
-        }
-        return a;
-      });
-
-      const result = validateAnnotationsHeuristic(sampleTools, badAnnotations);
-      expect(result.valid).toBe(false);
-      expect(result.warnings.length).toBeGreaterThan(0);
-      expect(result.warnings[0]).toContain('read_file');
-      expect(result.warnings[0]).toContain('path');
-    });
-
-    it('warns when tool has no annotation at all', () => {
-      const missingAnnotations = fullAnnotations.filter((a) => a.toolName !== 'write_file');
-      const result = validateAnnotationsHeuristic(sampleTools, missingAnnotations);
-      expect(result.valid).toBe(false);
-      expect(result.warnings.some((w) => w.includes('write_file'))).toBe(true);
-    });
-
-    it('detects path-like defaults in schema', () => {
-      const toolWithDefaults: MCPToolSchema[] = [
-        {
-          name: 'custom_tool',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              target: {
-                type: 'string',
-                default: '/home/user/file.txt',
-              },
-            },
-          },
-        },
-      ];
-
-      const noPathRoleAnnotations: StoredToolAnnotation[] = [
-        {
-          toolName: 'custom_tool',
-          serverName: 'test',
-          comment: 'A custom tool with path-like defaults',
-          sideEffects: false,
-          args: { target: ['none'] },
-        },
-      ];
-
-      const result = validateAnnotationsHeuristic(toolWithDefaults, noPathRoleAnnotations);
-      expect(result.valid).toBe(false);
-      expect(result.warnings.some((w) => w.includes('path-like defaults'))).toBe(true);
-    });
-  });
-
-  describe('looksLikePathArgument', () => {
-    it('returns "strong" for direct path terms', () => {
-      expect(looksLikePathArgument('path')).toBe('strong');
-      expect(looksLikePathArgument('dir')).toBe('strong');
-      expect(looksLikePathArgument('directory')).toBe('strong');
-    });
-
-    it('returns "strong" for camelCase names containing strong indicators', () => {
-      expect(looksLikePathArgument('sourcePath')).toBe('strong');
-      expect(looksLikePathArgument('sourceDir')).toBe('strong');
-      expect(looksLikePathArgument('outputDirectory')).toBe('strong');
-    });
-
-    it('returns "strong" for snake_case names containing strong indicators', () => {
-      expect(looksLikePathArgument('file_path')).toBe('strong');
-      expect(looksLikePathArgument('source_dir')).toBe('strong');
-    });
-
-    it('returns "strong" for plural path terms', () => {
-      expect(looksLikePathArgument('paths')).toBe('strong');
-      expect(looksLikePathArgument('directories')).toBe('strong');
-    });
-
-    it('returns "weak" for file (ambiguous in cloud APIs)', () => {
-      expect(looksLikePathArgument('file')).toBe('weak');
-      expect(looksLikePathArgument('files')).toBe('weak');
-      expect(looksLikePathArgument('fileId')).toBe('weak');
-      expect(looksLikePathArgument('filePath')).toBe('weak');
-    });
-
-    it('returns "weak" for source and destination', () => {
-      expect(looksLikePathArgument('source')).toBe('weak');
-      expect(looksLikePathArgument('destination')).toBe('weak');
-    });
-
-    it('returns false for compound names where indicator is a substring, not a segment', () => {
-      // "updateAgentMetaFiles" has "Files" as a segment (plural of "file") -> strong
-      // But "resource" contains "source" only as a substring, not a segment
-      expect(looksLikePathArgument('resource')).toBe(false);
-    });
-
-    it('returns false for names with no path indicators', () => {
-      expect(looksLikePathArgument('content')).toBe(false);
-      expect(looksLikePathArgument('message')).toBe(false);
-      expect(looksLikePathArgument('branch')).toBe(false);
-      expect(looksLikePathArgument('staged')).toBe(false);
-    });
-
-    it('downgrades long compound names to weak (e.g., updateAgentMetaFiles)', () => {
-      // "updateAgentMetaFiles" splits to ["update", "agent", "meta", "files"]
-      // "files" matches "file" + "s", but 4 segments => weak
-      expect(looksLikePathArgument('updateAgentMetaFiles')).toBe('weak');
-    });
-  });
-
-  describe('validateAnnotationsHeuristic — weak indicator handling', () => {
-    it('accepts weak indicator with non-path role when description does not suggest path', () => {
-      const tools: MCPToolSchema[] = [
-        {
-          name: 'git_diff',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              source: { type: 'string', description: 'Source branch or commit ref to diff from' },
-            },
-          },
-        },
-      ];
-      const annotations: StoredToolAnnotation[] = [
-        {
-          toolName: 'git_diff',
-          serverName: 'git',
-          comment: 'Shows diff between branches',
-          sideEffects: true,
-          args: { source: ['none'] },
-        },
-      ];
-
-      const result = validateAnnotationsHeuristic(tools, annotations);
-      expect(result.valid).toBe(true);
-      expect(result.warnings).toHaveLength(0);
-    });
-
-    it('warns for weak indicator when description mentions paths', () => {
-      const tools: MCPToolSchema[] = [
-        {
-          name: 'move_file',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              source: { type: 'string', description: 'Source file path to move from' },
-            },
-          },
-        },
-      ];
-      const annotations: StoredToolAnnotation[] = [
-        {
-          toolName: 'move_file',
-          serverName: 'filesystem',
-          comment: 'Moves a file',
-          sideEffects: true,
-          args: { source: ['none'] },
-        },
-      ];
-
-      const result = validateAnnotationsHeuristic(tools, annotations);
-      expect(result.valid).toBe(false);
-      expect(result.warnings[0]).toContain('source');
-    });
-
-    it('warns for weak indicator when argument has no annotation at all', () => {
-      const tools: MCPToolSchema[] = [
-        {
-          name: 'copy_file',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              source: { type: 'string', description: 'The source' },
-            },
-          },
-        },
-      ];
-      const annotations: StoredToolAnnotation[] = [
-        {
-          toolName: 'copy_file',
-          serverName: 'filesystem',
-          comment: 'Copies a file',
-          sideEffects: true,
-          args: {},
-        },
-      ];
-
-      const result = validateAnnotationsHeuristic(tools, annotations);
-      expect(result.valid).toBe(false);
-      expect(result.warnings[0]).toContain('source');
-    });
-
-    it('accepts long compound name with non-path role (e.g., updateAgentMetaFiles)', () => {
-      const tools: MCPToolSchema[] = [
-        {
-          name: 'git_wrapup_instructions',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              updateAgentMetaFiles: {
-                type: 'string',
-                description: 'Whether to update agent meta files during wrapup',
-              },
-            },
-          },
-        },
-      ];
-      const annotations: StoredToolAnnotation[] = [
-        {
-          toolName: 'git_wrapup_instructions',
-          serverName: 'git',
-          comment: 'Returns wrapup instructions',
-          sideEffects: false,
-          args: { updateAgentMetaFiles: ['none'] },
-        },
-      ];
-
-      const result = validateAnnotationsHeuristic(tools, annotations);
-      expect(result.valid).toBe(true);
-      expect(result.warnings).toHaveLength(0);
-    });
-
-    it('accepts weak indicator with explicit annotation and no description', () => {
-      const tools: MCPToolSchema[] = [
-        {
-          name: 'transfer',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              source: { type: 'string' },
-            },
-          },
-        },
-      ];
-      const annotations: StoredToolAnnotation[] = [
-        {
-          toolName: 'transfer',
-          serverName: 'test',
-          comment: 'Transfers data',
-          sideEffects: true,
-          args: { source: ['none'] },
-        },
-      ];
-
-      // Weak indicator + explicit annotation + no path-related description
-      // => trust the LLM's judgment
-      const result = validateAnnotationsHeuristic(tools, annotations);
-      expect(result.valid).toBe(true);
     });
   });
 
@@ -557,7 +292,7 @@ describe('Tool Annotator', () => {
           const annotations = batchTools.map((t) => ({
             toolName: t.name,
             comment: `Annotation for ${t.name}`,
-            sideEffects: true,
+
             args: { path: ['read-path'] },
           }));
 
@@ -653,7 +388,7 @@ describe('Tool Annotator', () => {
           const annotations = batchTools.map((t) => ({
             toolName: t.name,
             comment: `Annotation for ${t.name}`,
-            sideEffects: true,
+
             args: { path: ['read-path'] },
           }));
 
@@ -690,13 +425,13 @@ describe('Tool Annotator', () => {
               ? batchTools.slice(0, 2).map((t) => ({
                   toolName: t.name,
                   comment: `Annotation for ${t.name}`,
-                  sideEffects: true,
+
                   args: { path: ['read-path'] },
                 }))
               : batchTools.map((t) => ({
                   toolName: t.name,
                   comment: `Annotation for ${t.name}`,
-                  sideEffects: true,
+
                   args: { path: ['read-path'] },
                 }));
 

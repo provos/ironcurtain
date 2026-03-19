@@ -188,7 +188,7 @@ describe('computeServerPolicyHash', () => {
       toolName: 'read_file',
       serverName: 'filesystem',
       comment: 'reads a file',
-      sideEffects: false,
+
       args: { path: ['read-path' as const] },
     },
   ];

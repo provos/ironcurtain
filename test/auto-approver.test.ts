@@ -80,7 +80,7 @@ describe('extractArgsForAutoApprove', () => {
     toolName: 'read_file',
     serverName: 'filesystem',
     comment: 'Reads a file',
-    sideEffects: false,
+
     args: {
       path: ['read-path'],
     },

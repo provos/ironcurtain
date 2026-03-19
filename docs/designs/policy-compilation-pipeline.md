@@ -60,7 +60,6 @@ interface ToolAnnotation {
   toolName: string;
   serverName: string;
   comment: string;                // LLM-generated description of the tool's purpose
-  sideEffects: boolean;           // false = no security-relevant side effects (no state changes, no information disclosure)
   args: Record<string, ArgumentRole[]>;
 }
 
@@ -87,8 +86,6 @@ All path-bearing roles use symlink-aware `resolveRealPath()` for normalization, 
 
 **Conditional roles:** Multi-mode tools (e.g., `git_branch` with list/create/delete operations) use conditional role specs in the stored annotation format (`StoredToolAnnotation`). Instead of a static `ArgumentRole[]`, an argument's roles can be `{ default: ArgumentRole[], when: [{ condition: { arg, equals|in|is }, roles }] }`. The `default` is the most-restrictive union; `when` clauses narrow it based on sibling argument values. Resolution happens at the policy engine lookup boundary via `resolveStoredAnnotation()` — all downstream consumers see plain `ToolAnnotation`. See `docs/designs/conditional-argument-roles.md` for the full design.
 
-**Side effects:** `sideEffects` is framed in security terms, not just state mutation. A tool has `sideEffects: true` if it modifies state OR can disclose information from resource paths (information disclosure is a security-relevant side effect). Only tools with NO path arguments AND no state changes qualify as `sideEffects: false` -- e.g., `list_allowed_directories` which returns system configuration the agent already knows. Tools like `read_file` are `sideEffects: true` because they can disclose file contents from arbitrary paths. The compiled policy can allow `sideEffects: false` tools unconditionally (subject to structural invariants), while path-taking tools always go through path-based rules.
-
 **Example annotations:**
 
 ```json
@@ -96,7 +93,6 @@ All path-bearing roles use symlink-aware `resolveRealPath()` for normalization, 
   "toolName": "move_file",
   "serverName": "filesystem",
   "comment": "Moves a file from source to destination, deleting the source",
-  "sideEffects": true,
   "args": {
     "source": ["read-path", "delete-path"],
     "destination": ["write-path"]
@@ -111,7 +107,6 @@ The `source` of a move carries both `read-path` and `delete-path` roles. This me
   "toolName": "list_allowed_directories",
   "serverName": "filesystem",
   "comment": "Lists directories the server is allowed to access",
-  "sideEffects": false,
   "args": {}
 }
 ```
@@ -125,7 +120,7 @@ No arguments, no side effects. The compiled policy can include a rule allowing s
 **Process:** Single LLM call per server. The prompt provides:
 - The tool name, description, and input schema for every tool on that server.
 - The `ToolAnnotation` output schema with role definitions.
-- Instructions to determine whether each tool has side effects (in security terms: state changes OR information disclosure from resource paths) and map argument names to roles. An argument may have multiple roles. Tools with path arguments should be marked `sideEffects: true` even if they only read.
+- Instructions to map argument names to roles. An argument may have multiple roles.
 
 **Output:** `ToolAnnotation[]` for the server.
 
@@ -175,7 +170,6 @@ interface CompiledRuleCondition {
   roles?: ArgumentRole[];          // match tools with any argument having these roles (blanket rules)
   server?: string[];               // server names to match (omit = all)
   tool?: string[];                 // specific tool names (omit = all)
-  sideEffects?: boolean;           // match on side-effect annotation (omit = don't filter)
   paths?: PathCondition;           // if present, rule only fires when path condition is met
   // Note: `roles` and `paths` serve different purposes. `roles` is for blanket
   // matching (e.g., "deny all tools with delete-path args"). `paths` extracts
@@ -207,7 +201,6 @@ interface CompiledPolicyFile {
    - `roles` is absent OR the tool has at least one argument whose annotated roles include any role in the list.
    - `server` is absent OR the request's server is in the list.
    - `tool` is absent OR the request's tool is in the list.
-   - `sideEffects` is absent OR the tool's `sideEffects` annotation matches the value.
    - `paths` is absent OR the path condition evaluates to true (see below).
 3. If no rule matches, default deny.
 
@@ -215,7 +208,7 @@ interface CompiledPolicyFile {
 
 For each argument in the request whose annotated roles include any role in `paths.roles`, extract the path value. Then:
 
-- **Zero paths extracted:** The condition is **not satisfied** -- the rule does not match. Tools with no path arguments need a separate rule without a `paths` condition (e.g., matching on `sideEffects: false`).
+- **Zero paths extracted:** The condition is **not satisfied** -- the rule does not match. Tools with no path arguments need a separate rule without a `paths` condition (e.g., matching on specific tool names).
 - **`within`:** True if **ALL** extracted paths resolve to within the specified directory. (Conservative: one path outside fails the whole check.)
 
 Path resolution uses `node:path.resolve()` to neutralize traversal attacks.
@@ -229,14 +222,6 @@ In this example, the sandbox is at `/tmp/ironcurtain-sandbox`. A richer constitu
 ```json
 {
   "rules": [
-    {
-      "name": "allow-side-effect-free-tools",
-      "description": "Pure query tools can always be called",
-      "principle": "Least privilege",
-      "if": { "sideEffects": false },
-      "then": "allow",
-      "reason": "Tool has no side effects"
-    },
     {
       "name": "deny-delete-operations",
       "description": "Block all tools that carry a delete-path role argument",
@@ -452,8 +437,7 @@ The **most restrictive result** across all per-role evaluations wins: `deny > es
    a. Check `if.roles` -- does the tool have any argument with a matching role?
    b. Check `if.server` -- does the server match?
    c. Check `if.tool` -- does the tool name match?
-   d. Check `if.sideEffects` -- does the tool's side-effect annotation match?
-   e. If `if.paths` present:
+   d. If `if.paths` present:
       - Extract paths from `request.arguments` where any of the argument's annotated roles appears in `paths.roles`.
       - If zero paths extracted, condition not satisfied, rule does not match.
       - Resolve all extracted paths via `path.resolve()`.
@@ -610,11 +594,9 @@ Each pipeline component is independently testable:
 
 2. **Move semantics:** The `source` argument of `move_file` carries `["read-path", "delete-path"]` roles. All moves are denied by the blanket `deny-delete-operations` rule (which matches on `roles: ["delete-path"]`). No separate move-specific rules are needed. This prevents the move tool from being used as a backdoor around delete policies.
 
-3. **Side-effect-free tools:** `sideEffects` is framed as security-relevant side effects, not just state mutation. Tools that take path arguments are `sideEffects: true` even if they only read (information disclosure is a side effect). Only argument-less query tools like `list_allowed_directories` get `sideEffects: false`. The LLM compiler generates an explicit allow rule for them (e.g., `"if": { "sideEffects": false }, "then": "allow"`). This is a compiled rule, not a structural invariant, because which tools are side-effect-free is determined by the annotator LLM and may vary by MCP server.
+3. **Verifier executes real engine:** The verifier instantiates the actual PolicyEngine and runs scenarios through it. The LLM judge analyzes execution results rather than simulating rule evaluation. Multi-round: the LLM can generate additional probe scenarios, capped at 3 rounds.
 
-4. **Verifier executes real engine:** The verifier instantiates the actual PolicyEngine and runs scenarios through it. The LLM judge analyzes execution results rather than simulating rule evaluation. Multi-round: the LLM can generate additional probe scenarios, capped at 3 rounds.
-
-5. **Policy format:** Predicate rules with `if`/`then` structure. Links each rule to a constitution `principle`. Easier to read than match/pathConstraint while maintaining the same expressiveness.
+4. **Policy format:** Predicate rules with `if`/`then` structure. Links each rule to a constitution `principle`. Easier to read than match/pathConstraint while maintaining the same expressiveness.
 
 6. **Protected paths, not patterns:** Structural invariants use concrete filesystem paths and directory containment, not substring matching. Derived from system configuration at construction time.
 

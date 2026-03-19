@@ -26,7 +26,6 @@ function makeAnnotation(overrides: Partial<ToolAnnotation> = {}): ToolAnnotation
     toolName: 'write_file',
     serverName: 'filesystem',
     comment: 'test',
-    sideEffects: true,
     args: { path: ['write-path'], content: ['none'] },
     ...overrides,
   };
@@ -451,8 +450,8 @@ describe('extractWhitelistCandidates', () => {
     expect(patterns[0].constraints).toHaveLength(0);
   });
 
-  it('generates warning for side-effectful zero-constraint patterns', () => {
-    const annotation = makeAnnotation({ sideEffects: true, args: {} });
+  it('generates warning for zero-constraint patterns', () => {
+    const annotation = makeAnnotation({ args: {} });
     const { ipcs } = extractWhitelistCandidates(
       'filesystem',
       'write_file',
@@ -465,21 +464,6 @@ describe('extractWhitelistCandidates', () => {
 
     expect(ipcs[0].warning).toBeDefined();
     expect(ipcs[0].warning).toContain('auto-approve ALL');
-  });
-
-  it('does not generate warning for side-effect-free zero-constraint patterns', () => {
-    const annotation = makeAnnotation({ sideEffects: false, args: {} });
-    const { ipcs } = extractWhitelistCandidates(
-      'filesystem',
-      'list_allowed_directories',
-      {},
-      annotation,
-      [],
-      'esc-10',
-      'test reason',
-    );
-
-    expect(ipcs[0].warning).toBeUndefined();
   });
 });
 

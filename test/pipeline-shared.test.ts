@@ -237,7 +237,7 @@ function makeStoredAnnotations(): StoredToolAnnotationsFile {
             toolName: 'read_file',
             serverName: 'filesystem',
             comment: 'Reads a file',
-            sideEffects: false,
+
             args: {
               path: ['read-path'],
             },
@@ -246,7 +246,7 @@ function makeStoredAnnotations(): StoredToolAnnotationsFile {
             toolName: 'write_file',
             serverName: 'filesystem',
             comment: 'Writes a file',
-            sideEffects: true,
+
             args: {
               path: ['write-path'],
               content: ['none'],
@@ -270,7 +270,7 @@ function makeStoredAnnotationsWithConditional(): StoredToolAnnotationsFile {
             toolName: 'clone',
             serverName: 'git',
             comment: 'Clones a repo',
-            sideEffects: true,
+
             args: {
               url: {
                 default: ['git-remote-url'],
@@ -319,14 +319,14 @@ describe('loadToolAnnotationsFile', () => {
               toolName: 'read_file',
               serverName: 'filesystem',
               comment: 'Reads a file',
-              sideEffects: false,
+
               args: { path: ['read-path'] },
             },
             {
               toolName: 'write_file',
               serverName: 'filesystem',
               comment: 'Writes a file',
-              sideEffects: true,
+
               args: { path: ['write-path'], content: ['none'] },
             },
           ],

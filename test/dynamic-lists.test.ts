@@ -42,14 +42,14 @@ const sampleAnnotations: ToolAnnotation[] = [
     toolName: 'fetch',
     serverName: 'fetch',
     comment: 'Fetches a URL via HTTP',
-    sideEffects: false,
+
     args: { url: ['fetch-url'] },
   },
   {
     toolName: 'read_file',
     serverName: 'filesystem',
     comment: 'Reads a file',
-    sideEffects: false,
+
     args: { path: ['read-path'] },
   },
 ];
@@ -131,7 +131,6 @@ const fetchAnnotation: ToolAnnotation = {
   toolName: 'fetch',
   serverName: 'fetch',
   comment: 'Fetches URL',
-  sideEffects: false,
   args: { url: ['fetch-url'] },
 };
 
@@ -165,7 +164,7 @@ const plainReadRule: CompiledRule = {
   name: 'allow-reads',
   description: 'Allow reads',
   principle: 'open',
-  if: { sideEffects: false },
+  if: { tool: ['fetch', 'read_file'] },
   then: 'allow',
   reason: 'Safe',
 };
@@ -240,9 +239,9 @@ describe('Dynamic Lists Validation', () => {
           name: 'allow-all-reads',
           description: 'Allow reads',
           principle: 'open read',
-          if: { sideEffects: false },
+          if: { tool: ['fetch', 'read_file'] },
           then: 'allow',
-          reason: 'No side effects',
+          reason: 'Read tools are safe',
         },
       ];
 
@@ -1040,7 +1039,7 @@ describe('ListCondition Evaluation', () => {
       toolName: 'read_file',
       serverName: 'filesystem',
       comment: 'Reads file',
-      sideEffects: false,
+
       args: { path: ['read-path'] },
     };
     const policy = makePolicyFile([rule]);
@@ -1108,7 +1107,7 @@ describe('Per-Role Evaluation with Lists', () => {
       toolName: 'send_email',
       serverName: 'email',
       comment: 'Sends email',
-      sideEffects: true,
+
       // Tool has both a read-path arg (for attachment) and a fetch-url arg (for recipient)
       args: { recipient: ['fetch-url'], attachment: ['read-path'] },
     };

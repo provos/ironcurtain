@@ -49,7 +49,7 @@ describe('prepareToolArgs', () => {
     toolName: 'edit_file',
     serverName: 'filesystem',
     comment: 'Edits a file',
-    sideEffects: true,
+
     args: {
       path: ['read-path', 'write-path'],
       content: ['none'],
@@ -118,7 +118,7 @@ describe('prepareToolArgs', () => {
       toolName: 'multi_read',
       serverName: 'filesystem',
       comment: 'Reads multiple files',
-      sideEffects: false,
+
       args: { paths: ['read-path'] },
     };
     const { argsForTransport } = prepareToolArgs({ paths: ['~/a', '/tmp/b'] }, arrayAnnotation);
@@ -140,7 +140,7 @@ describe('prepareToolArgs with allowedDirectory (sandbox-aware)', () => {
     toolName: 'git_add',
     serverName: 'git',
     comment: 'Stages files',
-    sideEffects: true,
+
     args: {
       files: ['read-path'],
       message: ['none'],
@@ -151,7 +151,7 @@ describe('prepareToolArgs with allowedDirectory (sandbox-aware)', () => {
     toolName: 'write_file',
     serverName: 'filesystem',
     comment: 'Writes a file',
-    sideEffects: true,
+
     args: {
       path: ['write-path'],
       content: ['none'],
@@ -237,7 +237,7 @@ describe('prepareToolArgs with allowedDirectory (sandbox-aware)', () => {
       toolName: 'fetch',
       serverName: 'web',
       comment: 'Fetches a URL',
-      sideEffects: false,
+
       args: { url: ['fetch-url'] },
     };
     const { argsForTransport, argsForPolicy } = prepareToolArgs(
@@ -270,7 +270,7 @@ describe('prepareToolArgs with containerWorkspaceDir (Docker agent mode)', () =>
     toolName: 'write_file',
     serverName: 'filesystem',
     comment: 'Writes a file',
-    sideEffects: true,
+
     args: {
       path: ['write-path'],
       content: ['none'],
@@ -281,7 +281,7 @@ describe('prepareToolArgs with containerWorkspaceDir (Docker agent mode)', () =>
     toolName: 'git_add',
     serverName: 'git',
     comment: 'Stages files',
-    sideEffects: true,
+
     args: {
       files: ['read-path'],
       message: ['none'],
@@ -292,7 +292,6 @@ describe('prepareToolArgs with containerWorkspaceDir (Docker agent mode)', () =>
     toolName: 'fetch',
     serverName: 'web',
     comment: 'Fetches a URL',
-    sideEffects: false,
     args: { url: ['fetch-url'] },
   };
 

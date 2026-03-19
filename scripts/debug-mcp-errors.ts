@@ -82,7 +82,6 @@ function createE2EDeps(mockClient: { callTool: (...args: unknown[]) => Promise<u
     toolName: 'git_status',
     serverName: 'git',
     comment: 'Show status',
-    sideEffects: false,
     args: {},
   };
 

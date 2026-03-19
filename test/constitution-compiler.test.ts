@@ -14,47 +14,42 @@ const sampleAnnotations: ToolAnnotation[] = [
     toolName: 'read_file',
     serverName: 'filesystem',
     comment: 'Reads the complete contents of a file from disk',
-    sideEffects: true,
     args: { path: ['read-path'] },
   },
   {
     toolName: 'write_file',
     serverName: 'filesystem',
     comment: 'Creates or overwrites a file with new content',
-    sideEffects: true,
     args: { path: ['write-path'] },
   },
   {
     toolName: 'delete_file',
     serverName: 'filesystem',
     comment: 'Permanently deletes a file from disk',
-    sideEffects: true,
     args: { path: ['delete-path'] },
   },
   {
     toolName: 'move_file',
     serverName: 'filesystem',
     comment: 'Moves a file from source to destination, deleting the source',
-    sideEffects: true,
     args: { source: ['read-path', 'delete-path'], destination: ['write-path'] },
   },
   {
     toolName: 'list_allowed_directories',
     serverName: 'filesystem',
     comment: 'Lists directories the server is allowed to access',
-    sideEffects: false,
     args: {},
   },
 ];
 
 const cannedRules: CompiledRule[] = [
   {
-    name: 'allow-side-effect-free-tools',
+    name: 'allow-introspection-tools',
     description: 'Pure query tools can always be called',
     principle: 'Least privilege',
-    if: { sideEffects: false },
+    if: { tool: ['list_allowed_directories'] },
     then: 'allow',
-    reason: 'Tool has no side effects',
+    reason: 'Tool is a pure query with no arguments',
   },
   {
     name: 'allow-read-in-sandbox',
@@ -136,7 +131,7 @@ describe('Constitution Compiler', () => {
       const result = await compileConstitution(sampleConstitution, sampleAnnotations, compilerConfig, mockLLM);
 
       expect(result.rules).toHaveLength(3);
-      expect(result.rules[0].name).toBe('allow-side-effect-free-tools');
+      expect(result.rules[0].name).toBe('allow-introspection-tools');
       expect(result.rules[1].name).toBe('allow-read-in-sandbox');
       expect(result.listDefinitions).toEqual([]);
     });
@@ -147,7 +142,7 @@ describe('Constitution Compiler', () => {
       const result = await compileConstitution(sampleConstitution, sampleAnnotations, compilerConfig, mockLLM);
 
       const names = result.rules.map((r) => r.name);
-      expect(names).toEqual(['allow-side-effect-free-tools', 'allow-read-in-sandbox', 'escalate-read-elsewhere']);
+      expect(names).toEqual(['allow-introspection-tools', 'allow-read-in-sandbox', 'escalate-read-elsewhere']);
     });
 
     it('each rule has principle linking back to constitution', async () => {
@@ -241,7 +236,7 @@ describe('Constitution Compiler', () => {
           source: 'generated',
         },
         actualDecision: 'allow',
-        matchingRule: 'allow-side-effect-free-tools',
+        matchingRule: 'allow-introspection-tools',
         pass: false,
       },
       {
@@ -253,14 +248,14 @@ describe('Constitution Compiler', () => {
           source: 'handwritten',
         },
         actualDecision: 'allow',
-        matchingRule: 'allow-side-effect-free-tools',
+        matchingRule: 'allow-introspection-tools',
         pass: false,
       },
     ];
 
     const repairContext: RepairContext = {
       failedScenarios,
-      judgeAnalysis: 'The allow-side-effect-free-tools rule is too broad and matches before more specific rules.',
+      judgeAnalysis: 'The allow-introspection-tools rule is too broad and matches before more specific rules.',
       attemptNumber: 1,
     };
 
@@ -286,7 +281,7 @@ describe('Constitution Compiler', () => {
     it('includes judge analysis', () => {
       const prompt = buildRepairInstructions(repairContext);
 
-      expect(prompt).toContain('allow-side-effect-free-tools rule is too broad');
+      expect(prompt).toContain('allow-introspection-tools rule is too broad');
     });
 
     it('includes attempt number', () => {
@@ -319,7 +314,7 @@ describe('Constitution Compiler', () => {
               source: 'generated',
             },
             actualDecision: 'allow',
-            matchingRule: 'allow-side-effect-free-tools',
+            matchingRule: 'allow-introspection-tools',
             pass: false,
           },
         ],

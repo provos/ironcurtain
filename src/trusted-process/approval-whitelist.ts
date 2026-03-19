@@ -194,7 +194,7 @@ export function extractWhitelistCandidates(
 
   const constraints = buildConstraints(rolesToExtract, args, annotation);
   const description = buildDescription(serverName, toolName, constraints);
-  const warning = buildWarning(annotation, constraints);
+  const warning = buildWarning(constraints);
 
   const pattern: Omit<WhitelistPattern, 'id'> = {
     serverName,
@@ -320,10 +320,10 @@ function buildDescription(serverName: string, toolName: string, constraints: rea
 }
 
 /**
- * Generates a warning for zero-constraint side-effectful tools.
+ * Generates a warning for zero-constraint tools.
  */
-function buildWarning(annotation: ToolAnnotation, constraints: readonly WhitelistConstraint[]): string | undefined {
-  if (constraints.length === 0 && annotation.sideEffects) {
+function buildWarning(constraints: readonly WhitelistConstraint[]): string | undefined {
+  if (constraints.length === 0) {
     return 'Whitelisting will auto-approve ALL future calls to this tool for this session.';
   }
   return undefined;

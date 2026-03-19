@@ -151,9 +151,9 @@ The extraction algorithm:
 
 When the escalated roles have no resource-identifier arguments (or only history-rewriting roles), the extracted candidate has an empty `constraints` array. This means it matches ANY call to that exact server/tool combination.
 
-**Security concern:** For side-effectful tools like `github/create_issue`, this means approving one issue creation would auto-allow ALL future issue creations. This is dangerous.
+**Security concern:** For tools like `github/create_issue`, this means approving one issue creation would auto-allow ALL future issue creations. This is dangerous.
 
-**Mitigation:** When extracting candidates for a tool where `annotation.sideEffects === true` and the candidate has zero constraints, the proxy:
+**Mitigation:** When extracting candidates for a tool where the candidate has zero constraints, the proxy:
 1. Still includes the candidate in `whitelistCandidates` (the user can choose to whitelist it).
 2. Adds a `warning` field to the candidate: `"Whitelisting will auto-approve ALL future calls to this tool for this session."`.
 3. The transport displays this warning prominently in the escalation banner.

@@ -176,7 +176,7 @@ describe('MCP roots-expansion race -- handleCallTool retry', () => {
               toolName: 'read_file',
               serverName: 'filesystem',
               comment: 'Reads file contents.',
-              sideEffects: true,
+
               args: { path: ['read-path'] },
             },
           ],

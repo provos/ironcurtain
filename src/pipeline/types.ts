@@ -25,7 +25,6 @@ export interface ToolAnnotation {
   toolName: string;
   serverName: string;
   comment: string;
-  sideEffects: boolean;
   args: Record<string, ArgumentRole[]>;
 }
 
@@ -117,7 +116,6 @@ export interface CompiledRuleCondition {
   roles?: ArgumentRole[];
   server?: string[];
   tool?: string[];
-  sideEffects?: boolean;
   paths?: PathCondition;
   domains?: DomainCondition;
   /** Non-domain list conditions (emails, identifiers). */

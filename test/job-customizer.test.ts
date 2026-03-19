@@ -12,14 +12,14 @@ const sampleAnnotations: ToolAnnotation[] = [
     toolName: 'read_file',
     serverName: 'filesystem',
     comment: 'Read file contents',
-    sideEffects: false,
+
     args: { path: ['read-path'] },
   },
   {
     toolName: 'write_file',
     serverName: 'filesystem',
     comment: 'Write file contents',
-    sideEffects: true,
+
     args: { path: ['write-path'] },
   },
 ];

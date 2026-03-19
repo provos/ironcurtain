@@ -710,7 +710,7 @@ describe('PolicyEngine', () => {
               toolName: 'edit_file',
               serverName: 'filesystem',
               comment: 'test',
-              sideEffects: true,
+
               args: {
                 path: ['read-path', 'write-path'],
                 edits: ['none'],
@@ -720,7 +720,7 @@ describe('PolicyEngine', () => {
               toolName: 'read_file',
               serverName: 'filesystem',
               comment: 'test',
-              sideEffects: true,
+
               args: {
                 path: ['read-path'],
               },
@@ -916,7 +916,7 @@ describe('PolicyEngine', () => {
               toolName: 'git_push',
               serverName: 'git',
               comment: 'Push to remote',
-              sideEffects: true,
+
               args: {
                 path: ['read-path'],
                 remote: ['git-remote-url'],
@@ -927,7 +927,7 @@ describe('PolicyEngine', () => {
               toolName: 'git_clone',
               serverName: 'git',
               comment: 'Clone a repository',
-              sideEffects: true,
+
               args: {
                 url: ['git-remote-url'],
                 path: ['write-path'],
@@ -937,7 +937,7 @@ describe('PolicyEngine', () => {
               toolName: 'git_status',
               serverName: 'git',
               comment: 'Show git status',
-              sideEffects: false,
+
               args: {
                 path: ['read-path'],
               },
@@ -964,7 +964,7 @@ describe('PolicyEngine', () => {
           name: 'allow-git-read',
           description: 'Allow read-only git operations',
           principle: 'Least privilege',
-          if: { server: ['git'], sideEffects: false },
+          if: { server: ['git'], tool: ['git_status'] },
           then: 'allow',
           reason: 'Read-only git operations are safe',
         },
@@ -1138,7 +1138,7 @@ describe('PolicyEngine', () => {
               toolName: 'git_clone',
               serverName: 'git',
               comment: 'Clone a repository',
-              sideEffects: true,
+
               args: { url: ['git-remote-url'], path: ['write-path'] },
             },
           ],
@@ -1255,7 +1255,7 @@ describe('PolicyEngine', () => {
               toolName: 'git_push',
               serverName: 'git',
               comment: 'Push to remote',
-              sideEffects: true,
+
               args: { path: ['none'], remote: ['git-remote-url'], branch: ['branch-name'] },
             },
           ],
@@ -1338,7 +1338,7 @@ describe('PolicyEngine', () => {
                 toolName: 'push_op',
                 serverName: 'custom',
                 comment: 'custom push',
-                sideEffects: true,
+
                 args: { url: ['git-remote-url'] },
               },
             ],
@@ -1571,7 +1571,7 @@ describe('PolicyEngine', () => {
               toolName: 'fetch_url',
               serverName: 'fetch',
               comment: 'Fetch a URL',
-              sideEffects: true,
+
               args: {
                 url: ['fetch-url'],
               },
@@ -1673,7 +1673,7 @@ describe('PolicyEngine', () => {
                 toolName: 'git_clone',
                 serverName: 'git',
                 comment: 'Clone a repository',
-                sideEffects: true,
+
                 args: {
                   url: ['git-remote-url'],
                   path: ['write-path'],
@@ -1839,7 +1839,7 @@ describe('PolicyEngine', () => {
               toolName: 'git_clone',
               serverName: 'git',
               comment: 'Clone a repository',
-              sideEffects: true,
+
               args: {
                 url: ['git-remote-url'],
                 path: ['write-path'],
@@ -1889,7 +1889,7 @@ describe('PolicyEngine', () => {
   });
 
   describe('GitHub tools', () => {
-    it('allows read-only GitHub tools (sideEffects: false)', () => {
+    it('allows read-only GitHub tools', () => {
       const result = engine.evaluate(
         makeRequest({
           serverName: 'github',
@@ -1987,7 +1987,7 @@ describe('PolicyEngine', () => {
               toolName: 'create_branch',
               serverName: 'github',
               comment: 'Creates a branch.',
-              sideEffects: true,
+
               args: { owner: ['github-owner'], repo: ['github-repo'], branch: ['branch-name'] },
             },
           ],
@@ -2283,7 +2283,7 @@ describe('PolicyEngine with conditional roles', () => {
             toolName: 'git_branch',
             serverName: 'git',
             comment: 'Creates, lists, or deletes branches.',
-            sideEffects: true,
+
             args: {
               path: {
                 default: ['read-path', 'write-history', 'delete-history'],
@@ -2301,14 +2301,14 @@ describe('PolicyEngine with conditional roles', () => {
             toolName: 'git_status',
             serverName: 'git',
             comment: 'Shows working tree status.',
-            sideEffects: false,
+
             args: { path: ['read-path'] },
           },
           {
             toolName: 'git_clean',
             serverName: 'git',
             comment: 'Removes untracked files.',
-            sideEffects: true,
+
             args: {
               path: {
                 default: ['read-path', 'delete-path'],
@@ -2321,7 +2321,7 @@ describe('PolicyEngine with conditional roles', () => {
             toolName: 'git_stash',
             serverName: 'git',
             comment: 'Stash/pop/list/drop changes.',
-            sideEffects: true,
+
             args: {
               path: {
                 default: ['read-path', 'write-history'],
@@ -2339,7 +2339,7 @@ describe('PolicyEngine with conditional roles', () => {
             toolName: 'edit_file',
             serverName: 'filesystem',
             comment: 'Makes targeted edits to a file.',
-            sideEffects: true,
+
             args: {
               path: {
                 default: ['read-path', 'write-path'],
@@ -2364,7 +2364,7 @@ describe('PolicyEngine with conditional roles', () => {
         name: 'allow-git-read-ops',
         description: 'Allow read-only git operations.',
         principle: 'Least privilege',
-        if: { server: ['git'], sideEffects: false },
+        if: { server: ['git'], tool: ['git_status'] },
         then: 'allow',
         reason: 'Read-only git operations are safe.',
       },

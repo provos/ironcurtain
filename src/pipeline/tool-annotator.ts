@@ -2,17 +2,14 @@
  * Tool Annotator -- LLM-driven classification of MCP tool capabilities.
  *
  * Given a set of MCP tool schemas from a server, the annotator uses an LLM
- * to classify each tool's effect, side effects, and argument roles. A
- * compile-time heuristic validator catches annotation gaps before they
- * reach runtime.
+ * to classify each tool's effect, side effects, and argument roles. Zod
+ * schema validation and repair loops ensure annotation correctness.
  */
 
 import type { LanguageModel } from 'ai';
 import { z } from 'zod';
 import {
   ARGUMENT_ROLE_REGISTRY,
-  extractDefaultRoles,
-  getRoleDefinition,
   getRolesForServer,
   isConditionalRoles,
   type ArgumentRole,
@@ -102,7 +99,6 @@ function buildAnnotationsResponseSchema(serverName: string, tools: MCPToolSchema
   const toolAnnotationSchema = z.object({
     toolName: z.enum(toolNames),
     comment: z.string(),
-    sideEffects: z.boolean(),
     args: z.record(z.string(), argumentRoleSpecSchema),
   });
 
@@ -170,12 +166,7 @@ export function buildAnnotationPrompt(serverName: string, tools: MCPToolSchema[]
 
 1. **comment**: A brief one-sentence description of what the tool does.
 
-2. **sideEffects**: Whether the tool has security-relevant side effects.
-   - true if the tool modifies state OR can disclose information from resource paths (information disclosure is a security-relevant side effect)
-   - false ONLY if the tool has NO path arguments AND makes no state changes (e.g., a pure configuration query tool)
-   - When in doubt, mark as true (conservative)
-
-3. **args**: For each argument in the tool's input schema, assign an ARRAY of one or more roles:
+2. **args**: For each argument in the tool's input schema, assign an ARRAY of one or more roles:
 ${buildRoleDescriptions(serverName)}
 
    IMPORTANT: Each value in the args object MUST be an ARRAY of roles, even for single roles.
@@ -191,7 +182,6 @@ Here is a complete example annotation for a move_file tool that shows multi-role
 {
   "toolName": "move_file",
   "comment": "Moves or renames a file or directory from a source path to a destination path in a single operation.",
-  "sideEffects": true,
   "args": {
     "source": ["read-path", "delete-path"],
     "destination": ["write-path"]
@@ -315,178 +305,4 @@ export async function annotateTools(
   }
 
   return allAnnotations;
-}
-
-// -----------------------------------------------------------------------
-// Compile-time heuristic validation
-// -----------------------------------------------------------------------
-
-/**
- * Argument names that strongly suggest filesystem path arguments.
- *
- * Strong indicators are terms that almost always mean "filesystem path" --
- * these trigger a warning even when the LLM explicitly annotated the
- * argument with a non-path role (unless the schema description clearly
- * indicates otherwise).
- *
- * Weak indicators ("source", "destination") are ambiguous across domains:
- * in filesystem tools they mean paths, but in git tools "source" is a
- * branch ref. For these, the heuristic defers to the schema description
- * when the argument has an explicit annotation.
- */
-const STRONG_PATH_INDICATORS = ['path', 'dir', 'directory'];
-const WEAK_PATH_INDICATORS = ['source', 'destination', 'file'];
-
-/**
- * Description patterns that suggest an argument accepts a filesystem path
- * value. Uses word-boundary regex to avoid false positives from incidental
- * mentions (e.g., "whether to update files" vs "file path to read").
- */
-const PATH_DESCRIPTION_PATTERNS = [/\bpath\b/i, /\bfilename\b/i, /\bfilepath\b/i, /\bdirectory\b/i, /\bfolder\b/i];
-
-/**
- * Split an argument name into lowercase word segments by camelCase
- * and snake_case boundaries.
- *
- *   "updateAgentMetaFiles" → ["update", "agent", "meta", "files"]
- *   "source_path"          → ["source", "path"]
- */
-function splitArgName(argName: string): string[] {
-  // Insert separator before uppercase letters (camelCase boundaries),
-  // then split on non-alpha characters (underscores, hyphens, etc.)
-  return argName
-    .replace(/([a-z])([A-Z])/g, '$1_$2')
-    .toLowerCase()
-    .split(/[^a-z]+/)
-    .filter(Boolean);
-}
-
-export type PathIndicatorStrength = 'strong' | 'weak' | false;
-
-/**
- * Check if an argument name contains a path indicator as a whole word
- * segment (not as an arbitrary substring). Matches plurals by checking
- * if any segment equals the indicator or its plural form.
- *
- * Returns 'strong', 'weak', or false:
- * - 'strong': short names where the indicator IS the argument (e.g.,
- *   "path", "filePath", "source_dir"). These are flagged even with an
- *   explicit non-path annotation.
- * - 'weak': either uses an ambiguous indicator ("source", "destination")
- *   OR is a long compound name where the indicator is incidental (e.g.,
- *   "updateAgentMetaFiles"). For these, the heuristic defers to the
- *   schema description when the LLM has assigned an explicit annotation.
- */
-export function looksLikePathArgument(argName: string): PathIndicatorStrength {
-  const segments = splitArgName(argName);
-
-  const matchesIndicator = (indicators: string[]) =>
-    indicators.some((indicator) =>
-      segments.some((seg) => seg === indicator || seg === indicator + 's' || seg === indicator.replace(/y$/, 'ies')),
-    );
-
-  if (matchesIndicator(STRONG_PATH_INDICATORS)) {
-    // In long compound names (3+ segments), a path keyword is more likely
-    // to be incidental (e.g., "updateAgentMetaFiles") than in short names
-    // (e.g., "filePath"). Downgrade to weak so the description check applies.
-    return segments.length >= 3 ? 'weak' : 'strong';
-  }
-  if (matchesIndicator(WEAK_PATH_INDICATORS)) return 'weak';
-  return false;
-}
-
-/**
- * Check if the schema description for an argument contains keywords
- * suggesting it refers to a filesystem path.
- */
-function descriptionSuggestsPath(argSchema: Record<string, unknown>): boolean {
-  const desc = argSchema['description'];
-  if (typeof desc !== 'string') return false;
-  return PATH_DESCRIPTION_PATTERNS.some((pattern) => pattern.test(desc));
-}
-
-function hasPathLikeValues(schema: Record<string, unknown>): boolean {
-  const properties = schema['properties'] as Record<string, Record<string, unknown>> | undefined;
-  if (!properties) return false;
-
-  for (const prop of Object.values(properties)) {
-    const defaultVal = prop['default'];
-    if (typeof defaultVal === 'string' && (defaultVal.startsWith('/') || defaultVal.startsWith('.'))) {
-      return true;
-    }
-    const examples = prop['examples'];
-    if (Array.isArray(examples)) {
-      for (const ex of examples) {
-        if (typeof ex === 'string' && (ex.startsWith('/') || ex.startsWith('.'))) {
-          return true;
-        }
-      }
-    }
-  }
-  return false;
-}
-
-export interface HeuristicValidationResult {
-  valid: boolean;
-  warnings: string[];
-}
-
-export function validateAnnotationsHeuristic(
-  tools: MCPToolSchema[],
-  annotations: StoredToolAnnotation[],
-): HeuristicValidationResult {
-  const annotationsByName = new Map<string, StoredToolAnnotation>();
-  for (const a of annotations) {
-    annotationsByName.set(a.toolName, a);
-  }
-
-  const warnings: string[] = [];
-
-  for (const tool of tools) {
-    const annotation = annotationsByName.get(tool.name);
-    if (!annotation) {
-      warnings.push(`Tool "${tool.name}" has no annotation`);
-      continue;
-    }
-
-    const properties = (tool.inputSchema['properties'] ?? {}) as Record<string, Record<string, unknown>>;
-
-    for (const [argName, argSchema] of Object.entries(properties)) {
-      const indicatorStrength = looksLikePathArgument(argName);
-      if (!indicatorStrength) continue;
-
-      // Skip non-string arguments (booleans, enums, numbers named "directories" etc.)
-      const argType = argSchema['type'];
-      if (argType === 'boolean' || argType === 'number' || argType === 'integer') continue;
-
-      const roles = argName in annotation.args ? extractDefaultRoles(annotation.args[argName]) : undefined;
-      const hasPathRole = roles && roles.some((r) => getRoleDefinition(r).isResourceIdentifier);
-
-      if (!hasPathRole) {
-        // For weak indicators (e.g., "source", "destination"), defer to the
-        // schema description when the argument has an explicit annotation.
-        // These names are ambiguous: "source" means a path in filesystem
-        // tools but a branch ref in git tools.
-        if (indicatorStrength === 'weak' && roles && !descriptionSuggestsPath(argSchema)) {
-          continue;
-        }
-        warnings.push(`Tool "${tool.name}" argument "${argName}" looks like a path but has no path role in annotation`);
-      }
-    }
-
-    // Check for path-like default values or examples
-    if (hasPathLikeValues(tool.inputSchema)) {
-      const hasAnyPathRole = Object.values(annotation.args).some((spec) =>
-        extractDefaultRoles(spec).some((r) => getRoleDefinition(r).isResourceIdentifier),
-      );
-      if (!hasAnyPathRole) {
-        warnings.push(`Tool "${tool.name}" schema has path-like defaults/examples but no path roles in annotation`);
-      }
-    }
-  }
-
-  return {
-    valid: warnings.length === 0,
-    warnings,
-  };
 }

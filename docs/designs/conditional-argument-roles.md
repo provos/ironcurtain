@@ -193,7 +193,7 @@ export interface StoredToolAnnotation {
   toolName: string;
   serverName: string;
   comment: string;
-  sideEffects: boolean;
+
   args: Record<string, ArgumentRoleSpec>;
 }
 
@@ -217,7 +217,7 @@ export interface ToolAnnotation {
   toolName: string;
   serverName: string;
   comment: string;
-  sideEffects: boolean;
+
   args: Record<string, ArgumentRole[]>;
 }
 
@@ -253,7 +253,6 @@ The `tool-annotations.json` format extends naturally. Static annotations remain 
 {
   "toolName": "git_branch",
   "comment": "Lists, creates, deletes, or renames git branches.",
-  "sideEffects": true,
   "args": {
     "path": {
       "default": ["read-path", "write-history", "delete-history"],
@@ -357,7 +356,6 @@ export function resolveStoredAnnotation(
     toolName: stored.toolName,
     serverName: stored.serverName,
     comment: stored.comment,
-    sideEffects: stored.sideEffects,
     args: resolvedArgs,
   };
 }
@@ -550,10 +548,6 @@ Since they already have `rawArgs` in scope, this is a one-line change per call s
 ### 6.4 No changes to compiled rules
 
 Compiled rules continue to use role names (`"read-path"`, `"write-history"`, etc.) as conditions. The conditional role resolution happens **before** rules are consulted. From the rule evaluation perspective, a `git_branch` call with `operation: "list"` simply has `path: ["read-path"]` and matches the `allow-git-read-ops` rule (or similar). The rules do not need to know about mode arguments.
-
-### 6.5 `sideEffects` and conditional roles
-
-The `sideEffects` field remains unconditional. A tool like `git_clean` has `sideEffects: true` even when `dryRun: true`. This is conservative and correct: `sideEffects` is an intrinsic property of the tool's capability, not the specific invocation's behavior. The conditional role system handles the per-invocation distinction through role assignment rather than through `sideEffects` toggling.
 
 ## 7. Annotator Pipeline Changes
 
@@ -924,11 +918,7 @@ The previous version of this design changed the `ToolAnnotation` interface direc
 
 The boundary-resolution approach eliminates all of this by keeping the conditional specs contained in two files (types and engine).
 
-### B. Tool-level `sideEffects` conditional
-
-Instead of conditional roles on arguments, make `sideEffects` conditional on mode arguments. Rejected because `sideEffects` is a coarse binary signal. Multi-mode tools have a spectrum of effects (read vs. write-history vs. delete-path) that a boolean cannot express.
-
-### C. Virtual tool splitting
+### B. Virtual tool splitting
 
 Transform `git_branch` into virtual tools `git_branch_list`, `git_branch_create`, `git_branch_delete` at the proxy layer. Rejected because:
 - Requires the proxy to understand tool semantics, which is the annotation pipeline's job.

@@ -22,14 +22,14 @@ const sampleAnnotations: ToolAnnotation[] = [
     toolName: 'read_file',
     serverName: 'filesystem',
     comment: 'Reads the complete contents of a file from disk',
-    sideEffects: true,
+
     args: { path: ['read-path'] },
   },
   {
     toolName: 'write_file',
     serverName: 'filesystem',
     comment: 'Creates or overwrites a file with new content',
-    sideEffects: true,
+
     args: { path: ['write-path'] },
   },
 ];

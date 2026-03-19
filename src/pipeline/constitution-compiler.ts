@@ -80,7 +80,6 @@ function buildCompilerResponseSchema(
         roles: z.array(z.enum(getArgumentRoleValues())).optional(),
         server: options?.requireServer ? serverField : serverField.optional(),
         tool: z.array(z.enum(toolNames)).optional(),
-        sideEffects: z.boolean().optional(),
         paths: pathConditionSchema.optional(),
         domains: domainConditionSchema.optional(),
         lists: z.array(listConditionSchema).optional(),
@@ -138,7 +137,7 @@ ${lines.join('\n\n')}
 
 /**
  * Formats tool annotations into a multi-line summary for LLM system prompts.
- * Each entry shows server/tool name, comment, side-effects flag, and per-argument roles.
+ * Each entry shows server/tool name, comment, and per-argument roles.
  * Used by both the constitution compiler and task-policy compiler prompts.
  */
 export function formatAnnotationsSummary(annotations: ToolAnnotation[]): string {
@@ -147,7 +146,7 @@ export function formatAnnotationsSummary(annotations: ToolAnnotation[]): string 
       const argsDesc = Object.entries(a.args)
         .map(([name, roles]) => `    ${name}: [${roles.join(', ')}]`)
         .join('\n');
-      return `  ${a.serverName}/${a.toolName}: ${a.comment}, sideEffects=${a.sideEffects}\n    args:\n${argsDesc || '    (none)'}`;
+      return `  ${a.serverName}/${a.toolName}: ${a.comment}\n    args:\n${argsDesc || '    (none)'}`;
     })
     .join('\n');
 }
@@ -213,7 +212,6 @@ Produce an ORDERED list of policy rules (first match wins). Each rule has:
   - "roles": array of argument roles to match. The rule fires if the tool has ANY argument with ANY of these roles. Use this for blanket rules (e.g., deny all tools with delete-path arguments). Omit = any tool.
   - "server": array of server names (omit = any server)
   - "tool": array of specific tool names (omit = any matching tool)
-  - "sideEffects": match on the tool's sideEffects annotation (omit = don't filter)
   - "paths": path condition with "roles" (which argument roles to extract paths from) and "within" (concrete absolute directory). Rule fires only if ALL extracted paths are within that directory. If zero paths are extracted (tool has no matching path arguments), the condition is NOT satisfied and the rule does NOT match. This implicitly requires matching roles, so top-level "roles" is redundant when "paths" is present.
   - "domains": domain condition with "roles" (which URL argument roles to extract domains from) and "allowed" (list of allowed domain patterns, e.g. ["github.com", "*.github.com"]). Rule fires only if ALL extracted domains match an allowed pattern. Supports exact match, "*.example.com" prefix wildcards, and "*" (any domain). If zero URLs are extracted, the condition is NOT satisfied and the rule does NOT match. For git-remote-url roles, use hostname/owner/repo patterns for specific repos (e.g., "github.com/provos/ironcurtain") or hostname-only for any repo on that host (e.g., "github.com"). Matching is hierarchical: a hostname-only pattern matches any repo on that host.
 - "then": the policy decision:

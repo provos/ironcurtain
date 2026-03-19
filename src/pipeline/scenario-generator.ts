@@ -80,7 +80,7 @@ export function buildGeneratorSystemPrompt(
       const argsDesc = Object.entries(a.args)
         .map(([name, roles]) => `${name}: [${roles.join(', ')}]`)
         .join(', ');
-      return `  ${a.serverName}/${a.toolName}: ${a.comment}, sideEffects=${a.sideEffects}, args={${argsDesc || 'none'}}`;
+      return `  ${a.serverName}/${a.toolName}: ${a.comment}, args={${argsDesc || 'none'}}`;
     })
     .join('\n');
 

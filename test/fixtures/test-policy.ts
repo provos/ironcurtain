@@ -5,7 +5,7 @@
  * because those change with every pipeline run. This fixture provides a
  * stable, hand-crafted policy that exercises all the behaviors the tests
  * verify: sandbox containment, read escalation, write/delete denial,
- * move handling, and side-effect-free tool allowance.
+ * and move handling.
  */
 
 import { resolve, dirname } from 'node:path';
@@ -92,7 +92,7 @@ export const testCompiledPolicy: CompiledPolicyFile = {
       principle: 'Least privilege',
       if: {
         server: ['git'],
-        sideEffects: false,
+        tool: ['git_status', 'git_log', 'git_diff'],
       },
       then: 'allow',
       reason: 'Read-only git operations are safe.',
@@ -115,7 +115,7 @@ export const testCompiledPolicy: CompiledPolicyFile = {
       principle: 'Read-only GitHub operations are safe',
       if: {
         server: ['github'],
-        sideEffects: false,
+        tool: ['list_issues', 'get_issue', 'search_code'],
       },
       then: 'allow',
       reason: 'Read-only GitHub operations are safe.',
@@ -126,7 +126,7 @@ export const testCompiledPolicy: CompiledPolicyFile = {
       principle: 'GitHub mutations require approval',
       if: {
         server: ['github'],
-        sideEffects: true,
+        tool: ['create_issue', 'create_pull_request', 'merge_pull_request'],
       },
       then: 'escalate',
       reason: 'GitHub mutations require human approval.',
@@ -138,7 +138,13 @@ export const testCompiledPolicy: CompiledPolicyFile = {
       principle: 'Read-only Workspace operations are safe',
       if: {
         server: ['google-workspace'],
-        sideEffects: false,
+        tool: [
+          'gmail_search_messages',
+          'gmail_get_message',
+          'calendar_list_events',
+          'drive_list_files',
+          'drive_read_file',
+        ],
       },
       then: 'allow',
       reason: 'Read-only Google Workspace operations are safe.',
@@ -149,7 +155,14 @@ export const testCompiledPolicy: CompiledPolicyFile = {
       principle: 'Google Workspace mutations require approval',
       if: {
         server: ['google-workspace'],
-        sideEffects: true,
+        tool: [
+          'gmail_send_message',
+          'gmail_draft_message',
+          'calendar_create_event',
+          'drive_share_file',
+          'gmail_delete_message',
+          'gmail_batch_modify_labels',
+        ],
       },
       then: 'escalate',
       reason: 'Google Workspace mutations require human approval.',
@@ -242,98 +255,98 @@ export const testToolAnnotations: ToolAnnotationsFile = {
           toolName: 'read_file',
           serverName: 'filesystem',
           comment: 'Reads file contents.',
-          sideEffects: true,
+
           args: { path: ['read-path'], tail: ['none'], head: ['none'] },
         },
         {
           toolName: 'read_text_file',
           serverName: 'filesystem',
           comment: 'Reads text file contents.',
-          sideEffects: true,
+
           args: { path: ['read-path'], tail: ['none'], head: ['none'] },
         },
         {
           toolName: 'read_media_file',
           serverName: 'filesystem',
           comment: 'Reads image/audio file as base64.',
-          sideEffects: true,
+
           args: { path: ['read-path'] },
         },
         {
           toolName: 'read_multiple_files',
           serverName: 'filesystem',
           comment: 'Reads multiple files at once.',
-          sideEffects: true,
+
           args: { paths: ['read-path'] },
         },
         {
           toolName: 'write_file',
           serverName: 'filesystem',
           comment: 'Creates or overwrites a file.',
-          sideEffects: true,
+
           args: { path: ['write-path'], content: ['none'] },
         },
         {
           toolName: 'edit_file',
           serverName: 'filesystem',
           comment: 'Makes targeted edits to a file.',
-          sideEffects: true,
+
           args: { path: ['read-path', 'write-path'], edits: ['none'], dryRun: ['none'] },
         },
         {
           toolName: 'create_directory',
           serverName: 'filesystem',
           comment: 'Creates a directory.',
-          sideEffects: true,
+
           args: { path: ['write-path'] },
         },
         {
           toolName: 'list_directory',
           serverName: 'filesystem',
           comment: 'Lists directory contents.',
-          sideEffects: true,
+
           args: { path: ['read-path'] },
         },
         {
           toolName: 'list_directory_with_sizes',
           serverName: 'filesystem',
           comment: 'Lists directory contents with sizes.',
-          sideEffects: true,
+
           args: { path: ['read-path'], sortBy: ['none'] },
         },
         {
           toolName: 'directory_tree',
           serverName: 'filesystem',
           comment: 'Recursive directory tree view.',
-          sideEffects: true,
+
           args: { path: ['read-path'], excludePatterns: ['none'] },
         },
         {
           toolName: 'move_file',
           serverName: 'filesystem',
           comment: 'Moves or renames a file/directory.',
-          sideEffects: true,
+
           args: { source: ['read-path', 'delete-path'], destination: ['write-path'] },
         },
         {
           toolName: 'search_files',
           serverName: 'filesystem',
           comment: 'Searches for files matching a pattern.',
-          sideEffects: true,
+
           args: { path: ['read-path'], pattern: ['none'], excludePatterns: ['none'] },
         },
         {
           toolName: 'get_file_info',
           serverName: 'filesystem',
           comment: 'Gets file metadata.',
-          sideEffects: true,
+
           args: { path: ['read-path'] },
         },
         {
           toolName: 'list_allowed_directories',
           serverName: 'filesystem',
           comment: 'Lists allowed directories (no side effects).',
-          sideEffects: false,
+
           args: {},
         },
       ],
@@ -346,21 +359,21 @@ export const testToolAnnotations: ToolAnnotationsFile = {
           toolName: 'git_status',
           serverName: 'git',
           comment: 'Shows working tree status.',
-          sideEffects: false,
+
           args: { path: ['read-path'] },
         },
         {
           toolName: 'git_log',
           serverName: 'git',
           comment: 'Shows commit history.',
-          sideEffects: false,
+
           args: { path: ['read-path'] },
         },
         {
           toolName: 'git_diff',
           serverName: 'git',
           comment: 'Shows changes between commits or working tree.',
-          sideEffects: false,
+
           args: { path: ['read-path'] },
         },
         // Local write operations: path is write-path so sandbox containment auto-allows
@@ -368,14 +381,14 @@ export const testToolAnnotations: ToolAnnotationsFile = {
           toolName: 'git_add',
           serverName: 'git',
           comment: 'Stages files for commit.',
-          sideEffects: true,
+
           args: { path: ['write-path'], files: ['none'] },
         },
         {
           toolName: 'git_commit',
           serverName: 'git',
           comment: 'Creates a new commit.',
-          sideEffects: true,
+
           args: { path: ['write-path'], message: ['commit-message'] },
         },
         // Remote operations: path is none (repo locator), remote is git-remote-url
@@ -384,21 +397,21 @@ export const testToolAnnotations: ToolAnnotationsFile = {
           toolName: 'git_push',
           serverName: 'git',
           comment: 'Pushes commits to remote.',
-          sideEffects: true,
+
           args: { path: ['none'], remote: ['git-remote-url'], branch: ['branch-name'] },
         },
         {
           toolName: 'git_pull',
           serverName: 'git',
           comment: 'Pulls changes from remote.',
-          sideEffects: true,
+
           args: { path: ['none'], remote: ['git-remote-url'], branch: ['branch-name'] },
         },
         {
           toolName: 'git_fetch',
           serverName: 'git',
           comment: 'Fetches from remote without merging.',
-          sideEffects: true,
+
           args: { path: ['none'], remote: ['git-remote-url'] },
         },
         // History-rewriting operations: path has write-history (not sandbox-safe)
@@ -407,21 +420,21 @@ export const testToolAnnotations: ToolAnnotationsFile = {
           toolName: 'git_reset',
           serverName: 'git',
           comment: 'Resets HEAD to a commit.',
-          sideEffects: true,
+
           args: { path: ['read-path', 'write-history'], mode: ['none'] },
         },
         {
           toolName: 'git_rebase',
           serverName: 'git',
           comment: 'Reapplies commits on top of another branch.',
-          sideEffects: true,
+
           args: { path: ['read-path', 'write-history'], branch: ['branch-name'] },
         },
         {
           toolName: 'git_merge',
           serverName: 'git',
           comment: 'Merges branches.',
-          sideEffects: true,
+
           args: { path: ['read-path', 'write-history'], branch: ['branch-name'] },
         },
         // Branch management: path has both write-history and delete-history
@@ -429,7 +442,7 @@ export const testToolAnnotations: ToolAnnotationsFile = {
           toolName: 'git_branch',
           serverName: 'git',
           comment: 'Creates, lists, or deletes branches.',
-          sideEffects: true,
+
           args: { path: ['read-path', 'write-history', 'delete-history'], name: ['branch-name'], delete: ['none'] },
         },
       ],
@@ -441,35 +454,35 @@ export const testToolAnnotations: ToolAnnotationsFile = {
           toolName: 'list_issues',
           serverName: 'github',
           comment: 'Lists issues in a repository.',
-          sideEffects: false,
+
           args: { owner: ['github-owner'], repo: ['github-repo'] },
         },
         {
           toolName: 'get_issue',
           serverName: 'github',
           comment: 'Gets a single issue.',
-          sideEffects: false,
+
           args: { owner: ['github-owner'], repo: ['github-repo'], issue_number: ['none'] },
         },
         {
           toolName: 'search_code',
           serverName: 'github',
           comment: 'Searches code across repositories.',
-          sideEffects: false,
+
           args: { q: ['none'] },
         },
         {
           toolName: 'create_issue',
           serverName: 'github',
           comment: 'Creates an issue in a repository.',
-          sideEffects: true,
+
           args: { owner: ['github-owner'], repo: ['github-repo'], title: ['none'], body: ['none'] },
         },
         {
           toolName: 'create_pull_request',
           serverName: 'github',
           comment: 'Creates a pull request.',
-          sideEffects: true,
+
           args: {
             owner: ['github-owner'],
             repo: ['github-repo'],
@@ -482,7 +495,7 @@ export const testToolAnnotations: ToolAnnotationsFile = {
           toolName: 'merge_pull_request',
           serverName: 'github',
           comment: 'Merges a pull request.',
-          sideEffects: true,
+
           args: { owner: ['github-owner'], repo: ['github-repo'], pull_number: ['none'] },
         },
       ],
@@ -495,35 +508,35 @@ export const testToolAnnotations: ToolAnnotationsFile = {
           toolName: 'gmail_search_messages',
           serverName: 'google-workspace',
           comment: 'Searches Gmail messages matching a query.',
-          sideEffects: false,
+
           args: { query: ['none'], maxResults: ['none'] },
         },
         {
           toolName: 'gmail_get_message',
           serverName: 'google-workspace',
           comment: 'Gets a single Gmail message.',
-          sideEffects: false,
+
           args: { messageId: ['none'] },
         },
         {
           toolName: 'calendar_list_events',
           serverName: 'google-workspace',
           comment: 'Lists calendar events.',
-          sideEffects: false,
+
           args: { calendarId: ['none'], maxResults: ['none'] },
         },
         {
           toolName: 'drive_list_files',
           serverName: 'google-workspace',
           comment: 'Lists Drive files.',
-          sideEffects: false,
+
           args: { query: ['none'], maxResults: ['none'] },
         },
         {
           toolName: 'drive_read_file',
           serverName: 'google-workspace',
           comment: 'Reads a Drive file.',
-          sideEffects: false,
+
           args: { fileId: ['none'] },
         },
         // Mutation operations
@@ -531,21 +544,21 @@ export const testToolAnnotations: ToolAnnotationsFile = {
           toolName: 'gmail_send_message',
           serverName: 'google-workspace',
           comment: 'Sends an email via Gmail.',
-          sideEffects: true,
+
           args: { to: ['email-address'], subject: ['none'], body: ['email-body'] },
         },
         {
           toolName: 'gmail_draft_message',
           serverName: 'google-workspace',
           comment: 'Creates a Gmail draft.',
-          sideEffects: true,
+
           args: { to: ['email-address'], subject: ['none'], body: ['email-body'] },
         },
         {
           toolName: 'calendar_create_event',
           serverName: 'google-workspace',
           comment: 'Creates a calendar event.',
-          sideEffects: true,
+
           args: {
             summary: ['none'],
             start: ['none'],
@@ -557,21 +570,21 @@ export const testToolAnnotations: ToolAnnotationsFile = {
           toolName: 'drive_share_file',
           serverName: 'google-workspace',
           comment: 'Shares a Drive file with another user.',
-          sideEffects: true,
+
           args: { fileId: ['none'], email: ['email-address'], role: ['share-permission'] },
         },
         {
           toolName: 'gmail_delete_message',
           serverName: 'google-workspace',
           comment: 'Permanently deletes a Gmail message.',
-          sideEffects: true,
+
           args: { messageId: ['none'] },
         },
         {
           toolName: 'gmail_batch_modify_labels',
           serverName: 'google-workspace',
           comment: 'Batch modifies labels on multiple messages.',
-          sideEffects: true,
+
           args: { messageIds: ['none'], addLabels: ['none'], removeLabels: ['none'] },
         },
       ],
@@ -583,7 +596,7 @@ export const testToolAnnotations: ToolAnnotationsFile = {
           toolName: 'http_fetch',
           serverName: 'fetch',
           comment: 'Fetches web content via HTTP GET.',
-          sideEffects: true,
+
           args: { url: ['fetch-url'], headers: ['none'], max_length: ['none'], format: ['none'], timeout: ['none'] },
         },
       ],

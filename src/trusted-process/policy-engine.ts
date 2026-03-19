@@ -475,14 +475,13 @@ export class PolicyEngine {
     }
 
     // Introspection tool: allow list_allowed_directories from the filesystem
-    // server when it has no side effects and no arguments. Placed after the
-    // protected-path check and scoped to server + annotation to prevent a
-    // different server's tool with the same name from being auto-allowed.
+    // server when it has no arguments. Placed after the protected-path check
+    // and scoped to server + annotation to prevent a different server's tool
+    // with the same name from being auto-allowed.
     if (
       request.toolName === 'list_allowed_directories' &&
       request.serverName === 'filesystem' &&
       annotation &&
-      !annotation.sideEffects &&
       Object.keys(request.arguments).length === 0
     ) {
       return finalDecision({
@@ -778,7 +777,7 @@ export class PolicyEngine {
   }
 
   /**
-   * Checks non-path conditions in a rule's `if` block: roles, server, tool, sideEffects.
+   * Checks non-path conditions in a rule's `if` block: roles, server, tool.
    */
   private ruleMatchesNonPathConditions(
     rule: CompiledRule,
@@ -800,10 +799,6 @@ export class PolicyEngine {
     }
 
     if (cond.tool !== undefined && !cond.tool.includes(request.toolName)) {
-      return false;
-    }
-
-    if (cond.sideEffects !== undefined && annotation.sideEffects !== cond.sideEffects) {
       return false;
     }
 

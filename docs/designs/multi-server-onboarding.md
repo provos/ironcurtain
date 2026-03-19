@@ -357,7 +357,6 @@ export interface CompiledRuleCondition {
   roles?: ArgumentRole[];
   server?: string[];
   tool?: string[];
-  sideEffects?: boolean;
   paths?: PathCondition;
   domains?: DomainCondition;  // NEW
 }
