@@ -57,6 +57,7 @@ import type {
   DynamicListsFile,
   ListDefinition,
   RepairContext,
+  ResolvedList,
   ServerCompiledPolicyFile,
   TestScenario,
   TestScenariosFile,
@@ -166,6 +167,7 @@ interface ServerCompilationResult {
   readonly scenarios: TestScenario[];
   readonly inputHash: string;
   readonly constitutionHash: string;
+  readonly resolvedLists?: DynamicListsFile;
 }
 
 // ---------------------------------------------------------------------------
@@ -493,40 +495,22 @@ export class PipelineRunner {
     };
     writeArtifact(config.outputDir, 'test-scenarios.json', mergedScenariosFile);
 
-    // Phase 3: Dynamic list resolution (global, post-merge)
+    // Phase 3: Merge per-server resolved lists into global dynamic-lists.json
+    // Each server resolved its own lists during compileServer(); merge them here.
     const listDefinitions = mergedPolicy.listDefinitions ?? [];
-    let dynamicLists: DynamicListsFile | undefined;
 
     if (listDefinitions.length > 0) {
-      this.logContext.stepName = 'resolve-lists';
-      const existingLists = loadExistingArtifact<DynamicListsFile>(config.outputDir, 'dynamic-lists.json');
-
-      const needsMcp = listDefinitions.some((d) => d.requiresMcp);
-      let mcpConnections: Map<string, McpServerConnection> | undefined;
-      if (needsMcp && config.mcpServers) {
-        mcpConnections = await connectMcpServersForLists(listDefinitions, config.mcpServers);
-      }
-
-      const listStepText = 'Resolving dynamic lists';
-      try {
-        const { result: resolvedLists } = await withSpinner(
-          listStepText,
-          async (spinner) =>
-            resolveAllLists(listDefinitions, { model: this.model, mcpConnections }, existingLists, (msg) => {
-              spinner.text = `${listStepText} — ${msg}`;
-            }),
-          (result, elapsed) => {
-            const count = Object.keys(result.lists).length;
-            return `${listStepText}: ${count} list(s) resolved (${elapsed.toFixed(1)}s)`;
-          },
-        );
-        dynamicLists = resolvedLists;
-        writeArtifact(config.outputDir, 'dynamic-lists.json', dynamicLists);
-      } finally {
-        if (mcpConnections) {
-          await disconnectMcpServers(mcpConnections);
+      const mergedListEntries: Record<string, ResolvedList> = {};
+      for (const result of serverResults) {
+        if (result.resolvedLists) {
+          Object.assign(mergedListEntries, result.resolvedLists.lists);
         }
       }
+      const mergedDynamicLists: DynamicListsFile = {
+        generatedAt: new Date().toISOString(),
+        lists: mergedListEntries,
+      };
+      writeArtifact(config.outputDir, 'dynamic-lists.json', mergedDynamicLists);
     }
 
     // Cross-server verification is intentionally omitted. Per-server rules compose
@@ -642,11 +626,13 @@ export class PipelineRunner {
     if (existingServerPolicy && existingServerPolicy.inputHash === inputHash && existingServerScenarios) {
       // Verify scenario hash to detect stale scenarios (e.g., changed templates or handwritten scenarios)
       const cachedPermittedDirs = extractPermittedDirectories(resolveRulePaths(existingServerPolicy.rules));
+      const cachedDynamicLists = loadExistingArtifact<DynamicListsFile>(serverOutputDir, 'dynamic-lists.json');
       const cachedScenarioPrompt = buildGeneratorSystemPrompt(
         unit.constitutionText,
         unit.annotations,
         unit.allowedDirectory,
         cachedPermittedDirs,
+        cachedDynamicLists,
       );
       const cachedScenarioHash = computeScenariosHash(cachedScenarioPrompt, unit.handwrittenScenarios);
 
@@ -659,6 +645,7 @@ export class PipelineRunner {
           scenarios: existingServerScenarios.scenarios,
           inputHash,
           constitutionHash,
+          resolvedLists: cachedDynamicLists,
         };
       }
     }
@@ -675,6 +662,12 @@ export class PipelineRunner {
 
     // Validate server scoping (debug assertion)
     validateServerScoping(unit.serverName, rules);
+
+    // Resolve dynamic lists for this server (before scenario generation so lists are available)
+    let dynamicLists: DynamicListsFile | undefined;
+    if (listDefinitions.length > 0) {
+      dynamicLists = await this.resolveServerLists(listDefinitions, serverOutputDir, config, `  ${unit.serverName}`);
+    }
 
     // Build per-server policy artifact for engine construction
     let serverPolicyFile = buildPolicyArtifact(constitutionHash, rules, listDefinitions, inputHash);
@@ -699,6 +692,7 @@ export class PipelineRunner {
       unit.annotations,
       unit.allowedDirectory,
       permittedDirectories,
+      dynamicLists,
     );
     const scenarioHash = computeScenariosHash(scenarioPrompt, unit.handwrittenScenarios);
 
@@ -711,6 +705,7 @@ export class PipelineRunner {
       existingServerScenarios,
       `  ${unit.serverName}`,
       permittedDirectories,
+      dynamicLists,
     );
 
     // Step 3: Verify compiled rules against scenarios
@@ -722,6 +717,7 @@ export class PipelineRunner {
       unit.protectedPaths,
       unit.allowedDirectory,
       undefined,
+      dynamicLists,
     );
     const { valid: filteredScenarios, discarded: discardedScenarios } = filterAndLogStructuralConflicts(
       filterEngine,
@@ -742,7 +738,7 @@ export class PipelineRunner {
         unit.allowedDirectory,
         this.model,
         permittedDirectories,
-        undefined,
+        dynamicLists,
         (msg) => console.error(`  ${chalk.dim(msg)}`),
       );
       if (replacementScenarios.length > 0) {
@@ -770,7 +766,7 @@ export class PipelineRunner {
         serverPolicyFile,
         unit.protectedPaths,
         serverTools,
-        undefined,
+        dynamicLists,
         unit.allowedDirectory,
       ),
     );
@@ -798,7 +794,7 @@ export class PipelineRunner {
             spinner.text = `${verifyLabel} — ${msg}`;
           },
           serverDomainAllowlists,
-          undefined,
+          dynamicLists,
           verifierSystem,
           verifierSession,
         ),
@@ -894,6 +890,16 @@ export class PipelineRunner {
           // Re-validate server scoping after repair
           validateServerScoping(unit.serverName, rules);
 
+          // Re-resolve dynamic lists if repair changed list definitions
+          if (listDefinitions.length > 0) {
+            dynamicLists = await this.resolveServerLists(
+              listDefinitions,
+              serverOutputDir,
+              config,
+              `  ${unit.serverName}`,
+            );
+          }
+
           serverPolicyFile = buildPolicyArtifact(constitutionHash, rules, listDefinitions, inputHash);
 
           verifierSystem = this.cacheStrategy.wrapSystemPrompt(
@@ -902,7 +908,7 @@ export class PipelineRunner {
               serverPolicyFile,
               unit.protectedPaths,
               serverTools,
-              undefined,
+              dynamicLists,
               unit.allowedDirectory,
             ),
           );
@@ -935,7 +941,7 @@ export class PipelineRunner {
                 spinner.text = `${repairVerifyText} — ${msg}`;
               },
               serverDomainAllowlists,
-              undefined,
+              dynamicLists,
               verifierSystem,
               verifierSession,
             ),
@@ -1001,6 +1007,7 @@ export class PipelineRunner {
       scenarios: finalScenarios,
       inputHash,
       constitutionHash,
+      resolvedLists: dynamicLists,
     };
   }
 
@@ -1643,6 +1650,48 @@ export class PipelineRunner {
       inputHash: `${baseInputHash}-repair`,
       session,
     };
+  }
+
+  /**
+   * Resolves dynamic lists for a single server's list definitions.
+   * Loads existing per-server dynamic-lists.json for cache comparison,
+   * connects MCP servers if needed, and writes results to serverOutputDir.
+   */
+  private async resolveServerLists(
+    listDefinitions: ListDefinition[],
+    serverOutputDir: string,
+    config: PipelineRunConfig,
+    labelPrefix: string,
+  ): Promise<DynamicListsFile> {
+    this.logContext.stepName = `resolve-lists-${labelPrefix.trim()}`;
+    const existingLists = loadExistingArtifact<DynamicListsFile>(serverOutputDir, 'dynamic-lists.json');
+
+    const needsMcp = listDefinitions.some((d) => d.requiresMcp);
+    let mcpConnections: Map<string, McpServerConnection> | undefined;
+    if (needsMcp && config.mcpServers) {
+      mcpConnections = await connectMcpServersForLists(listDefinitions, config.mcpServers);
+    }
+
+    const listStepText = `${labelPrefix}: Resolving dynamic lists`;
+    try {
+      const { result: resolvedLists } = await withSpinner(
+        listStepText,
+        async (spinner) =>
+          resolveAllLists(listDefinitions, { model: this.model, mcpConnections }, existingLists, (msg) => {
+            spinner.text = `${listStepText} — ${msg}`;
+          }),
+        (result, elapsed) => {
+          const count = Object.keys(result.lists).length;
+          return `${listStepText}: ${count} list(s) resolved (${elapsed.toFixed(1)}s)`;
+        },
+      );
+      writeArtifact(serverOutputDir, 'dynamic-lists.json', resolvedLists);
+      return resolvedLists;
+    } finally {
+      if (mcpConnections) {
+        await disconnectMcpServers(mcpConnections);
+      }
+    }
   }
 
   private async generateTestScenarios(

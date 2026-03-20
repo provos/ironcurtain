@@ -705,18 +705,16 @@ describe('Batched generateScenarios', () => {
     expect(result).toHaveLength(2);
   });
 
-  it('0 annotations returns only handwritten scenarios', async () => {
-    // chunk([]) returns [[]] (one empty batch), which would fail at
-    // z.enum construction. With 0 annotations we still get one LLM call,
-    // but the empty batch produces a valid empty-scenario response.
-    const batchResponse = { scenarios: [] };
-    const { model, calls } = createCallTrackingMockModel([batchResponse]);
+  it('0 annotations returns only handwritten scenarios without LLM call', async () => {
+    // Empty annotations should early-return without calling the LLM,
+    // since chunk([]) returns [[]] and z.enum([]) would throw.
+    const { model, calls } = createCallTrackingMockModel([]);
 
     const result = await generateScenarios(sampleConstitution, [], handwrittenScenarios, SANDBOX_DIR, model);
 
-    // One LLM call for the single (empty) batch
-    expect(calls).toHaveLength(1);
-    // Only handwritten scenarios returned (LLM generated nothing)
+    // No LLM calls made
+    expect(calls).toHaveLength(0);
+    // Only handwritten scenarios returned
     expect(result).toHaveLength(2);
     expect(result.every((s) => s.source === 'handwritten')).toBe(true);
   });

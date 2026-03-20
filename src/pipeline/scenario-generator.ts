@@ -118,7 +118,7 @@ Generate diverse test scenarios covering:
 2. **Negative cases**: operations that SHOULD be denied (categorically forbidden by the constitution, e.g., deletes outside sandbox)
 3. **Escalation cases**: operations outside the sandbox and permitted directories that are NOT categorically forbidden — these require human approval
 4. **Edge cases**: path traversal attacks, boundary conditions
-5. **Side-effect-free tools**: tools with no path arguments (should be allowed)
+5. **Read-only tools**: tools where all arguments have \`none\`-role (no resource-identifier arguments) — these should typically be allowed
 6. **Move operations**: all moves involve a delete-path role on the source argument
 7. **Domain-based operations**: if any tools have URL roles (fetch-url, git-remote-url), generate scenarios for allowed domains, disallowed domains, and named remote resolution. For git-remote-url args, always supply an explicit URL (https:// or git@ form) — never omit them (see IMPORTANT below)
 
@@ -200,6 +200,8 @@ export async function generateScenarios(
   dynamicLists?: DynamicListsFile,
   wrapSystemPrompt?: (prompt: string) => string | SystemModelMessage,
 ): Promise<TestScenario[]> {
+  if (annotations.length === 0) return [...handwrittenScenarios];
+
   const batches = chunk(annotations, SCENARIO_BATCH_SIZE);
   const allGenerated: TestScenario[] = [];
 
@@ -226,9 +228,11 @@ export async function generateScenarios(
     // Apply cache strategy wrapping if provided
     const batchSystem = wrapSystemPrompt ? wrapSystemPrompt(batchPromptText) : batchPromptText;
 
-    // Filter handwritten scenarios to those relevant to this batch
-    const toolNameSet = new Set(toolNames);
-    const batchHandwritten = handwrittenScenarios.filter((s) => toolNameSet.has(s.request.toolName));
+    // Filter handwritten scenarios to those relevant to this batch (composite key avoids cross-server collisions)
+    const batchToolKeySet = new Set(batch.map((a) => `${a.serverName}:::${a.toolName}`));
+    const batchHandwritten = handwrittenScenarios.filter((s) =>
+      batchToolKeySet.has(`${s.request.serverName}:::${s.request.toolName}`),
+    );
 
     const { output } = await generateObjectWithRepair({
       model: llm,
