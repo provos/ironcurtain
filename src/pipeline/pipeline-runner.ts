@@ -32,7 +32,6 @@ import {
   computeHash,
   loadExistingArtifact,
   loadToolAnnotationsFile,
-  mergeReplacements,
   resolveRulePaths,
   writeArtifact,
   withSpinner,
@@ -47,7 +46,7 @@ import {
   PolicyVerifierSession,
   verifyPolicy,
 } from './policy-verifier.js';
-import { buildGeneratorSystemPrompt, ScenarioGeneratorSession } from './scenario-generator.js';
+import { buildGeneratorSystemPrompt, generateScenarios, repairScenarios } from './scenario-generator.js';
 import type { LlmLogContext } from './llm-logger.js';
 import type { PromptCacheStrategy } from '../session/prompt-cache.js';
 import { connectMcpServersForLists, disconnectMcpServers } from './mcp-connections.js';
@@ -58,7 +57,6 @@ import type {
   DynamicListsFile,
   ListDefinition,
   RepairContext,
-  ScenarioFeedback,
   ServerCompiledPolicyFile,
   TestScenario,
   TestScenariosFile,
@@ -703,16 +701,16 @@ export class PipelineRunner {
       permittedDirectories,
     );
     const scenarioHash = computeScenariosHash(scenarioPrompt, unit.handwrittenScenarios);
-    const scenarioSystem = this.cacheStrategy.wrapSystemPrompt(scenarioPrompt);
 
     const scenarioResult = await this.generateTestScenarios(
+      unit.constitutionText,
       unit.annotations,
       unit.allowedDirectory,
       unit.handwrittenScenarios,
       scenarioHash,
       existingServerScenarios,
       `  ${unit.serverName}`,
-      scenarioSystem,
+      permittedDirectories,
     );
 
     // Step 3: Verify compiled rules against scenarios
@@ -729,6 +727,38 @@ export class PipelineRunner {
       filterEngine,
       scenarioResult.scenarios,
     );
+
+    // Generate replacement scenarios for structurally discarded ones (pre-loop, one-time)
+    if (discardedScenarios.length > 0) {
+      const discardedForRepair = discardedScenarios.map((d) => ({
+        scenario: d.scenario,
+        feedback: `${d.rule} always returns ${d.actual}`,
+      }));
+      this.logContext.stepName = `repair-scenarios-${unit.serverName}`;
+      const replacementScenarios = await repairScenarios(
+        discardedForRepair,
+        unit.constitutionText,
+        unit.annotations,
+        unit.allowedDirectory,
+        this.model,
+        permittedDirectories,
+        undefined,
+        (msg) => console.error(`  ${chalk.dim(msg)}`),
+      );
+      if (replacementScenarios.length > 0) {
+        // Filter replacements through structural invariants too
+        const { valid: validReplacements } = filterAndLogStructuralConflicts(
+          filterEngine,
+          replacementScenarios,
+          'Discarded replacement (structural conflict)',
+        );
+        scenarioResult.scenarios.push(...validReplacements);
+        filteredScenarios.push(...validReplacements);
+        console.error(
+          `  ${chalk.dim(`Repaired ${discardedScenarios.length} discarded scenario(s) → ${validReplacements.length} replacement(s)`)}`,
+        );
+      }
+    }
 
     const serverToolNames = [...new Set(unit.annotations.map((a) => a.toolName))] as [string, ...string[]];
     const serverNames = [unit.serverName] as [string, ...string[]];
@@ -822,37 +852,6 @@ export class PipelineRunner {
           console.error(`  ${chalk.dim(`Corrected ${corrections.length} scenario expectation(s)`)}`);
         }
 
-        // Feed corrections back to the scenario generator session
-        const { session: scenarioSession } = scenarioResult;
-        if (
-          scenarioSession &&
-          (corrections.length > 0 || discardedScenarios.length > 0 || accumulatedProbes.length > 0)
-        ) {
-          const feedback: ScenarioFeedback = {
-            corrections,
-            discardedScenarios,
-            probeScenarios: accumulatedProbes,
-          };
-
-          this.logContext.stepName = `repair-regenerate-${unit.serverName}-${attempt}`;
-          const regenText = `  ${unit.serverName} repair ${attempt}/${MAX_REPAIRS}: Regenerating`;
-          const { result: replacements } = await withSpinner(
-            regenText,
-            async (spinner) =>
-              scenarioSession.regenerate(feedback, (msg) => {
-                spinner.text = `${regenText} — ${msg}`;
-              }),
-            (r, elapsed) => `${regenText}: ${r.length} replacement(s) (${elapsed.toFixed(1)}s)`,
-          );
-
-          scenarioResult.scenarios = mergeReplacements(
-            scenarioResult.scenarios,
-            replacements,
-            corrections,
-            discardedScenarios,
-          );
-        }
-
         ({ valid: currentFilteredScenarios } = filterAndLogStructuralConflicts(filterEngine, scenarioResult.scenarios));
 
         const allRuleBlamedFailures = verificationResult.failedScenarios.filter((f) => {
@@ -918,7 +917,7 @@ export class PipelineRunner {
         }
 
         this.logContext.stepName = `repair-verify-${unit.serverName}-${attempt}`;
-        const repairScenarios = [...currentFilteredScenarios, ...accumulatedProbes];
+        const scenariosForRepairVerify = [...currentFilteredScenarios, ...accumulatedProbes];
         const repairVerifyText = `  ${unit.serverName} repair ${attempt}/${MAX_REPAIRS}: Verifying`;
         const { result: repairVerifyResult } = await withSpinner(
           repairVerifyText,
@@ -928,7 +927,7 @@ export class PipelineRunner {
               serverPolicyFile,
               serverAnnotationsFile,
               unit.protectedPaths,
-              repairScenarios,
+              scenariosForRepairVerify,
               this.model,
               1,
               unit.allowedDirectory,
@@ -1162,16 +1161,17 @@ export class PipelineRunner {
       dynamicLists,
     );
     const scenarioHash = computeScenariosHash(scenarioPrompt, handwrittenScenarios);
-    const scenarioSystem = this.cacheStrategy.wrapSystemPrompt(scenarioPrompt);
 
     const scenarioResult = await this.generateTestScenarios(
+      config.constitutionInput,
       allAnnotations,
       config.allowedDirectory,
       handwrittenScenarios,
       scenarioHash,
       existingScenarios,
       scenarioStepLabel,
-      scenarioSystem,
+      permittedDirectories,
+      dynamicLists,
     );
 
     writeArtifact(config.outputDir, 'test-scenarios.json', {
@@ -1195,6 +1195,37 @@ export class PipelineRunner {
       scenarioResult.scenarios,
     );
     let filteredScenarios = initialValid;
+
+    // Generate replacement scenarios for structurally discarded ones (pre-loop, one-time)
+    if (discardedScenarios.length > 0) {
+      const discardedForRepair = discardedScenarios.map((d) => ({
+        scenario: d.scenario,
+        feedback: `${d.rule} always returns ${d.actual}`,
+      }));
+      this.logContext.stepName = 'repair-scenarios';
+      const replacementScenarios = await repairScenarios(
+        discardedForRepair,
+        config.constitutionInput,
+        allAnnotations,
+        config.allowedDirectory,
+        this.model,
+        permittedDirectories,
+        dynamicLists,
+        (msg) => console.error(`  ${chalk.dim(msg)}`),
+      );
+      if (replacementScenarios.length > 0) {
+        const { valid: validReplacements } = filterAndLogStructuralConflicts(
+          filterEngine,
+          replacementScenarios,
+          'Discarded replacement (structural conflict)',
+        );
+        scenarioResult.scenarios.push(...validReplacements);
+        filteredScenarios = [...filteredScenarios, ...validReplacements];
+        console.error(
+          `  ${chalk.dim(`Repaired ${discardedScenarios.length} discarded scenario(s) → ${validReplacements.length} replacement(s)`)}`,
+        );
+      }
+    }
 
     // Step 3: Verify compiled policy against scenarios
     const verifyStepLabel = `[${totalSteps}/${totalSteps}]`;
@@ -1292,37 +1323,6 @@ export class PipelineRunner {
           console.error(`  ${chalk.dim(`Corrected ${corrections.length} scenario expectation(s)`)}`);
         }
 
-        // Feed corrections back to the scenario generator session
-        const { session: scenarioSession } = scenarioResult;
-        if (
-          scenarioSession &&
-          (corrections.length > 0 || discardedScenarios.length > 0 || accumulatedProbes.length > 0)
-        ) {
-          const feedback: ScenarioFeedback = {
-            corrections,
-            discardedScenarios,
-            probeScenarios: accumulatedProbes,
-          };
-
-          this.logContext.stepName = `repair-regenerate-${attempt}`;
-          const regenText = `Repair ${attempt}/${MAX_REPAIRS}: Regenerating scenarios`;
-          const { result: replacements } = await withSpinner(
-            regenText,
-            async (spinner) =>
-              scenarioSession.regenerate(feedback, (msg) => {
-                spinner.text = `${regenText} — ${msg}`;
-              }),
-            (r, elapsed) => `${regenText}: ${r.length} replacement(s) (${elapsed.toFixed(1)}s)`,
-          );
-
-          scenarioResult.scenarios = mergeReplacements(
-            scenarioResult.scenarios,
-            replacements,
-            corrections,
-            discardedScenarios,
-          );
-        }
-
         ({ valid: filteredScenarios } = filterAndLogStructuralConflicts(filterEngine, scenarioResult.scenarios));
 
         const allRuleBlamedFailures = verificationResult.failedScenarios.filter((f) => {
@@ -1412,7 +1412,7 @@ export class PipelineRunner {
         }
 
         this.logContext.stepName = `repair-verify-${attempt}`;
-        const repairScenarios = [...filteredScenarios, ...accumulatedProbes];
+        const scenariosForRepairVerify = [...filteredScenarios, ...accumulatedProbes];
         const repairVerifyText = `Repair ${attempt}/${MAX_REPAIRS}: Verifying`;
         const { result: repairVerifyResult } = await withSpinner(
           repairVerifyText,
@@ -1422,7 +1422,7 @@ export class PipelineRunner {
               compiledPolicyFile,
               toolAnnotationsFile,
               config.protectedPaths,
-              repairScenarios,
+              scenariosForRepairVerify,
               this.model,
               1,
               config.allowedDirectory,
@@ -1646,17 +1646,18 @@ export class PipelineRunner {
   }
 
   private async generateTestScenarios(
+    constitutionText: string,
     annotations: ToolAnnotation[],
     allowedDirectory: string,
     handwrittenScenarios: TestScenario[],
     inputHash: string,
     existingScenarios: TestScenariosFile | undefined,
     stepLabel: string,
-    system: string | SystemModelMessage,
+    permittedDirectories?: string[],
+    dynamicLists?: DynamicListsFile,
   ): Promise<{
     scenarios: TestScenario[];
     inputHash: string;
-    session?: ScenarioGeneratorSession;
   }> {
     const stepText = `${stepLabel} Generating test scenarios`;
 
@@ -1665,26 +1666,29 @@ export class PipelineRunner {
       return { scenarios: existingScenarios.scenarios, inputHash };
     }
 
-    const session = new ScenarioGeneratorSession({
-      system,
-      model: this.model,
-      annotations,
-      handwrittenScenarios,
-    });
-
     const { result: scenarios } = await withSpinner(
       stepText,
       async (spinner) =>
-        session.generate((msg) => {
-          spinner.text = `${stepText} — ${msg}`;
-        }),
+        generateScenarios(
+          constitutionText,
+          annotations,
+          handwrittenScenarios,
+          allowedDirectory,
+          this.model,
+          permittedDirectories,
+          (msg: string) => {
+            spinner.text = `${stepText} — ${msg}`;
+          },
+          dynamicLists,
+          (prompt: string) => this.cacheStrategy.wrapSystemPrompt(prompt),
+        ),
       (scenarios, elapsed) => {
         const generatedCount = scenarios.length - handwrittenScenarios.length;
         return `${stepText}: ${scenarios.length} scenarios (${handwrittenScenarios.length} handwritten + ${generatedCount} generated) (${elapsed.toFixed(1)}s)`;
       },
     );
 
-    return { scenarios, inputHash, session };
+    return { scenarios, inputHash };
   }
 
   private logVerboseFailures(result: VerificationResult): void {

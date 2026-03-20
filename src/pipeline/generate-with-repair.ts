@@ -55,8 +55,8 @@ export function extractJson(text: string): string {
  * Extracts and validates JSON from LLM text output against a Zod schema.
  * Handles markdown fences, surrounding prose, and schema validation.
  *
- * Exported for use by ScenarioGeneratorSession which manages its own
- * message history but needs the same extraction+validation logic.
+ * Exported for reuse by callers that manage their own message history
+ * but need the same extraction+validation logic.
  */
 export function parseJsonWithSchema<T extends z.ZodType>(text: string, schema: T): z.infer<T> {
   const json: unknown = JSON.parse(extractJson(text));

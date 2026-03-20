@@ -20,7 +20,7 @@ import { loadPipelineConfig, loadToolAnnotationsFile } from './pipeline-shared.j
 import { PipelineRunner, createPipelineModels } from './pipeline-runner.js';
 
 // Re-export utilities that test files import from this file.
-export { resolveRulePaths, mergeReplacements } from './pipeline-shared.js';
+export { resolveRulePaths } from './pipeline-shared.js';
 
 // ---------------------------------------------------------------------------
 // CLI Argument Parsing

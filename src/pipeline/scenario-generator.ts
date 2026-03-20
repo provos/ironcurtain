@@ -4,18 +4,20 @@
  * Generates concrete test scenarios (tool call + expected decision) from
  * the constitution and tool annotations. Always includes mandatory
  * handwritten scenarios alongside LLM-generated ones.
+ *
+ * Large servers (100+ tools) are handled via batching: annotations are
+ * split into batches of SCENARIO_BATCH_SIZE, each batch gets its own
+ * scoped system prompt and Zod schema, and results are deduplicated
+ * across batches.
  */
 
 import type { LanguageModel, SystemModelMessage } from 'ai';
-import { generateText } from 'ai';
 import { z } from 'zod';
-import {
-  DEFAULT_MAX_TOKENS,
-  generateObjectWithRepair,
-  parseJsonWithSchema,
-  schemaToPromptHint,
-} from './generate-with-repair.js';
-import type { DynamicListsFile, ScenarioFeedback, ToolAnnotation, TestScenario } from './types.js';
+import { DEFAULT_MAX_TOKENS, generateObjectWithRepair } from './generate-with-repair.js';
+import { chunk } from './tool-annotator.js';
+import type { DynamicListsFile, ToolAnnotation, TestScenario } from './types.js';
+
+export const SCENARIO_BATCH_SIZE = 25;
 
 function buildGeneratorResponseSchema(serverNames: [string, ...string[]], toolNames: [string, ...string[]]) {
   const scenarioSchema = z.object({
@@ -161,6 +163,32 @@ function areSimilar(a: TestScenario, b: TestScenario): boolean {
   return aArgs === bArgs;
 }
 
+/**
+ * Builds the user-message prompt for a single scenario generation batch.
+ * When handwritten scenarios exist for this batch's tools, they are
+ * included so the LLM avoids duplicating their coverage.
+ */
+function buildBatchPrompt(batchHandwritten: TestScenario[]): string {
+  if (batchHandwritten.length === 0) {
+    return 'Generate test scenarios following the instructions above.';
+  }
+
+  const handwrittenSummary = batchHandwritten
+    .map((s) => `- ${s.request.serverName}/${s.request.toolName}: "${s.description}" (${s.expectedDecision})`)
+    .join('\n');
+
+  return `The following handwritten scenarios already exist for these tools. Generate additional scenarios that complement them without duplicating their coverage.
+
+${handwrittenSummary}
+
+Generate test scenarios following the instructions above.`;
+}
+
+/**
+ * Generates test scenarios by batching annotations into groups of
+ * SCENARIO_BATCH_SIZE, running generateObjectWithRepair per batch with
+ * scoped system prompts and Zod schemas, then deduplicating results.
+ */
 export async function generateScenarios(
   constitutionText: string,
   annotations: ToolAnnotation[],
@@ -169,198 +197,121 @@ export async function generateScenarios(
   llm: LanguageModel,
   permittedDirectories?: string[],
   onProgress?: (message: string) => void,
-  system?: string | SystemModelMessage,
   dynamicLists?: DynamicListsFile,
+  wrapSystemPrompt?: (prompt: string) => string | SystemModelMessage,
+): Promise<TestScenario[]> {
+  const batches = chunk(annotations, SCENARIO_BATCH_SIZE);
+  const allGenerated: TestScenario[] = [];
+
+  for (let i = 0; i < batches.length; i++) {
+    const batch = batches[i];
+    if (batches.length > 1) {
+      onProgress?.(`Batch ${i + 1}/${batches.length} (${batch.length} tools)`);
+    }
+
+    // Scoped schema: only this batch's server/tool names
+    const serverNames = [...new Set(batch.map((a) => a.serverName))] as [string, ...string[]];
+    const toolNames = [...new Set(batch.map((a) => a.toolName))] as [string, ...string[]];
+    const schema = buildGeneratorResponseSchema(serverNames, toolNames);
+
+    // Per-batch system prompt with only this batch's annotations
+    const batchPromptText = buildGeneratorSystemPrompt(
+      constitutionText,
+      batch,
+      sandboxDirectory,
+      permittedDirectories,
+      dynamicLists,
+    );
+
+    // Apply cache strategy wrapping if provided
+    const batchSystem = wrapSystemPrompt ? wrapSystemPrompt(batchPromptText) : batchPromptText;
+
+    // Filter handwritten scenarios to those relevant to this batch
+    const toolNameSet = new Set(toolNames);
+    const batchHandwritten = handwrittenScenarios.filter((s) => toolNameSet.has(s.request.toolName));
+
+    const { output } = await generateObjectWithRepair({
+      model: llm,
+      schema,
+      system: batchSystem,
+      prompt: buildBatchPrompt(batchHandwritten),
+      maxOutputTokens: 16384,
+      onProgress: batches.length > 1 ? (msg) => onProgress?.(`Batch ${i + 1}/${batches.length}: ${msg}`) : onProgress,
+    });
+
+    allGenerated.push(
+      ...output.scenarios.map((s) => ({
+        ...s,
+        source: 'generated' as const,
+      })),
+    );
+  }
+
+  // Deduplicate generated against handwritten AND across batches
+  const seen = new Set<string>();
+  const unique = allGenerated.filter((g) => {
+    if (handwrittenScenarios.some((h) => areSimilar(g, h))) return false;
+    const key = `${g.request.serverName}/${g.request.toolName}/${JSON.stringify(g.request.arguments)}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+
+  return [...handwrittenScenarios, ...unique];
+}
+
+/**
+ * Generates replacement scenarios for structurally discarded ones.
+ * Uses a single-shot generateObjectWithRepair call (no batching needed
+ * since the discarded set is typically small).
+ */
+export async function repairScenarios(
+  discardedScenarios: { scenario: TestScenario; feedback: string }[],
+  constitutionText: string,
+  annotations: ToolAnnotation[],
+  sandboxDirectory: string,
+  llm: LanguageModel,
+  permittedDirectories?: string[],
+  dynamicLists?: DynamicListsFile,
+  onProgress?: (message: string) => void,
 ): Promise<TestScenario[]> {
   const serverNames = [...new Set(annotations.map((a) => a.serverName))] as [string, ...string[]];
   const toolNames = [...new Set(annotations.map((a) => a.toolName))] as [string, ...string[]];
   const schema = buildGeneratorResponseSchema(serverNames, toolNames);
 
-  const effectiveSystem =
-    system ??
-    buildGeneratorSystemPrompt(constitutionText, annotations, sandboxDirectory, permittedDirectories, dynamicLists);
+  const discardedList = discardedScenarios
+    .map(
+      (b, i) =>
+        `${i + 1}. "${b.scenario.description}" (${b.scenario.request.serverName}/${b.scenario.request.toolName}): ${b.feedback}`,
+    )
+    .join('\n');
+
+  const prompt = `The following scenarios were discarded because they conflict with structural invariants (hardcoded engine behavior that cannot be overridden by compiled rules).
+Generate replacement scenarios that cover similar tools and decision types but with correct expectations.
+
+${discardedList}
+
+Generate one replacement scenario per discarded scenario.`;
+
+  const system = buildGeneratorSystemPrompt(
+    constitutionText,
+    annotations,
+    sandboxDirectory,
+    permittedDirectories,
+    dynamicLists,
+  );
 
   const { output } = await generateObjectWithRepair({
     model: llm,
     schema,
-    system: effectiveSystem,
-    prompt: 'Generate test scenarios following the instructions above.',
+    system,
+    prompt,
+    maxOutputTokens: DEFAULT_MAX_TOKENS,
     onProgress,
   });
 
-  // Mark all LLM-generated scenarios with source: 'generated'
-  const generated: TestScenario[] = output.scenarios.map((s) => ({
+  return output.scenarios.map((s) => ({
     ...s,
     source: 'generated' as const,
   }));
-
-  // Deduplicate: remove generated scenarios that are substantially
-  // similar to handwritten ones
-  const unique = generated.filter((g) => !handwrittenScenarios.some((h) => areSimilar(g, h)));
-
-  // Handwritten first, then generated
-  return [...handwrittenScenarios, ...unique];
-}
-
-// ---------------------------------------------------------------------------
-// Multi-Turn Scenario Generator Session
-// ---------------------------------------------------------------------------
-
-const INITIAL_USER_MESSAGE = 'Generate test scenarios following the instructions above.';
-
-/**
- * Formats feedback from the verify-repair loop into a user message
- * for the next turn of the scenario generator conversation.
- */
-export function formatFeedbackMessage(feedback: ScenarioFeedback): string {
-  const sections: string[] = [];
-
-  if (feedback.corrections.length > 0) {
-    const lines = feedback.corrections.map(
-      (c) => `- "${c.scenarioDescription}": correct decision is ${c.correctedDecision} (${c.correctedReasoning})`,
-    );
-    sections.push(
-      '## Corrected Scenarios\n\n' +
-        'These scenarios had wrong expectedDecision values. The verifier determined the correct decisions:\n\n' +
-        lines.join('\n'),
-    );
-  }
-
-  if (feedback.discardedScenarios.length > 0) {
-    const lines = feedback.discardedScenarios.map(
-      (d) => `- "${d.scenario.description}": ${d.rule} always returns ${d.actual}`,
-    );
-    sections.push(
-      '## Discarded Scenarios (Structural Conflicts)\n\n' +
-        'These scenarios conflict with hardcoded structural invariants and were removed. Do NOT regenerate them:\n\n' +
-        lines.join('\n'),
-    );
-  }
-
-  if (feedback.probeScenarios.length > 0) {
-    const lines = feedback.probeScenarios.map(
-      (p) =>
-        `- ${p.request.serverName}/${p.request.toolName} ${JSON.stringify(p.request.arguments)} -> ${p.expectedDecision}`,
-    );
-    sections.push(
-      '## Coverage Gaps Found by Verifier\n\n' +
-        'The verifier generated probe scenarios that found gaps. Consider these areas:\n\n' +
-        lines.join('\n'),
-    );
-  }
-
-  return (
-    sections.join('\n\n') +
-    '\n\nGenerate replacement scenarios for the corrected and discarded ones above. ' +
-    'Keep your new scenarios consistent with the corrections. ' +
-    'Do not repeat discarded scenarios or reproduce the original wrong expectations.\n'
-  );
-}
-
-/**
- * A stateful multi-turn wrapper around the scenario generator.
- *
- * Maintains a conversation history so that feedback from the verify-repair
- * loop (corrections, discarded scenarios, probes) can be communicated to
- * the LLM in follow-up turns. The system prompt is fixed at construction
- * and never changes, enabling prompt caching.
- *
- * Lifecycle:
- *   1. Construct with system prompt and config (once per pipeline run)
- *   2. Call generate() for the initial scenario set
- *   3. After verification, call regenerate(feedback) with repair feedback
- *   4. Session is GC'd when the pipeline finishes (no explicit close needed)
- */
-export class ScenarioGeneratorSession {
-  private readonly systemPrompt: string | SystemModelMessage;
-  private readonly model: LanguageModel;
-  private readonly schema: ReturnType<typeof buildGeneratorResponseSchema>;
-  private readonly handwrittenScenarios: TestScenario[];
-  private readonly history: Array<{ role: 'user' | 'assistant'; content: string }> = [];
-  private readonly schemaHint: string;
-  private turns = 0;
-
-  constructor(options: {
-    system: string | SystemModelMessage;
-    model: LanguageModel;
-    annotations: ToolAnnotation[];
-    handwrittenScenarios: TestScenario[];
-  }) {
-    this.systemPrompt = options.system;
-    this.model = options.model;
-    this.handwrittenScenarios = options.handwrittenScenarios;
-
-    const serverNames = [...new Set(options.annotations.map((a) => a.serverName))] as [string, ...string[]];
-    const toolNames = [...new Set(options.annotations.map((a) => a.toolName))] as [string, ...string[]];
-    this.schema = buildGeneratorResponseSchema(serverNames, toolNames);
-    this.schemaHint = schemaToPromptHint(this.schema);
-  }
-
-  /**
-   * Initial generation: sends the first user message and returns scenarios.
-   * Semantically equivalent to the existing single-shot generateScenarios().
-   */
-  async generate(onProgress?: (message: string) => void): Promise<TestScenario[]> {
-    const userMessage = INITIAL_USER_MESSAGE + this.schemaHint;
-    this.history.push({ role: 'user', content: userMessage });
-
-    onProgress?.('Generating scenarios...');
-
-    const result = await generateText({
-      model: this.model,
-      system: this.systemPrompt,
-      messages: this.history,
-      maxOutputTokens: DEFAULT_MAX_TOKENS,
-    });
-
-    this.history.push({ role: 'assistant', content: result.text });
-    this.turns++;
-
-    const output = parseJsonWithSchema(result.text, this.schema);
-    const generated: TestScenario[] = output.scenarios.map((s) => ({
-      ...s,
-      source: 'generated' as const,
-    }));
-
-    // Deduplicate against handwritten scenarios
-    const unique = generated.filter((g) => !this.handwrittenScenarios.some((h) => areSimilar(g, h)));
-    return [...this.handwrittenScenarios, ...unique];
-  }
-
-  /**
-   * Follow-up generation: feeds back corrections and requests replacement
-   * scenarios for the ones that were wrong.
-   *
-   * Returns ONLY the new/replacement scenarios (not handwritten, not
-   * previously-generated-and-still-valid ones). The caller is responsible
-   * for merging these into the full scenario set.
-   */
-  async regenerate(feedback: ScenarioFeedback, onProgress?: (message: string) => void): Promise<TestScenario[]> {
-    // Schema hint is already in the conversation history from generate().
-    const feedbackMessage = formatFeedbackMessage(feedback);
-    this.history.push({ role: 'user', content: feedbackMessage });
-
-    onProgress?.(`Regenerating scenarios (turn ${this.turns + 1})...`);
-
-    const result = await generateText({
-      model: this.model,
-      system: this.systemPrompt,
-      messages: this.history,
-      maxOutputTokens: DEFAULT_MAX_TOKENS,
-    });
-
-    this.history.push({ role: 'assistant', content: result.text });
-    this.turns++;
-
-    const output = parseJsonWithSchema(result.text, this.schema);
-    return output.scenarios.map((s) => ({
-      ...s,
-      source: 'generated' as const,
-    }));
-  }
-
-  /** Returns the number of turns completed so far. */
-  get turnCount(): number {
-    return this.turns;
-  }
 }
