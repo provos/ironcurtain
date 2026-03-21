@@ -82,6 +82,8 @@ export type ArgumentRoleSpec = ArgumentRole[] | ConditionalRoles;
  */
 export interface StoredToolAnnotation extends Omit<ToolAnnotation, 'args'> {
   args: Record<string, ArgumentRoleSpec>;
+  /** JSON Schema for the tool's input, captured from the MCP server at annotation time. */
+  inputSchema?: Record<string, unknown>;
 }
 
 /**

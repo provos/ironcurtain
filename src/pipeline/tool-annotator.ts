@@ -289,9 +289,13 @@ export async function annotateTools(
       onProgress: batches.length > 1 ? (msg) => onProgress?.(`Batch ${i + 1}/${batches.length}: ${msg}`) : onProgress,
     });
 
+    // Build a lookup from tool name to inputSchema for this batch
+    const schemaByName = new Map(batch.map((t) => [t.name, t.inputSchema]));
+
     const batchAnnotations: StoredToolAnnotation[] = output.annotations.map((a) => ({
       ...a,
       serverName,
+      inputSchema: schemaByName.get(a.toolName),
     }));
 
     allAnnotations.push(...batchAnnotations);

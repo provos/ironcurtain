@@ -49,6 +49,7 @@ import {
   PolicyVerifierSession,
   verifyPolicy,
 } from './policy-verifier.js';
+import { filterInvalidSchemaScenarios } from './scenario-schema-validator.js';
 import { buildGeneratorSystemPrompt, generateScenarios, repairScenarios } from './scenario-generator.js';
 import type { LlmLogContext } from './llm-logger.js';
 import type { PromptCacheStrategy } from '../session/prompt-cache.js';
@@ -238,6 +239,17 @@ function filterAndLogStructuralConflicts(
         }
       }
       valid = kept;
+    }
+
+    // Discard scenarios whose arguments violate the tool's input schema
+    // (unknown arg names, missing required fields, invalid enum values).
+    const schemaResult = filterInvalidSchemaScenarios(valid, storedAnnotations);
+    if (schemaResult.discarded.length > 0) {
+      for (const d of schemaResult.discarded) {
+        console.error(`  ${chalk.dim('Discarded (schema mismatch):')} "${d.scenario.description}" — ${d.rule}`);
+      }
+      discarded.push(...schemaResult.discarded);
+      valid = schemaResult.valid;
     }
   }
 
