@@ -24,7 +24,7 @@ import {
   writeArtifact,
   withSpinner,
 } from './pipeline-shared.js';
-import { annotateTools, buildAnnotationPrompt, validateAnnotationsHeuristic } from './tool-annotator.js';
+import { annotateTools, buildAnnotationPrompt } from './tool-annotator.js';
 import type { StoredToolAnnotation, StoredToolAnnotationsFile } from './types.js';
 import { VERSION } from '../version.js';
 
@@ -132,14 +132,6 @@ async function annotateServerTools(
         spinner.text = `${stepText} — ${msg}`;
       });
 
-      const validation = validateAnnotationsHeuristic(tools, annotations);
-      if (!validation.valid) {
-        const summary = validation.warnings.join('\n  - ');
-        throw new Error(
-          `Path-gap validation failed for server "${serverName}":\n  - ${summary}\n` +
-            'Annotations are part of the TCB — every path-bearing argument must have a path role.',
-        );
-      }
       return annotations;
     },
     (annotations, elapsed) => `${stepText}: ${annotations.length} tools annotated (${elapsed.toFixed(1)}s)`,

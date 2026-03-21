@@ -22,7 +22,7 @@ const annotations: StoredToolAnnotationsFile = {
           toolName: 'git_branch',
           serverName: 'git',
           comment: 'List, create, or delete branches.',
-          sideEffects: true,
+
           args: {
             path: {
               default: ['read-path', 'write-history', 'delete-history'],

@@ -16,12 +16,21 @@ import {
   parseJsonWithSchema,
   schemaToPromptHint,
 } from './generate-with-repair.js';
-import type { ToolAnnotation, CompiledRule, RepairContext, ListDefinition, TestScenario } from './types.js';
+import type {
+  ToolAnnotation,
+  CompiledRule,
+  RepairContext,
+  ListDefinition,
+  TestScenario,
+  RulePatchOp,
+  RulePatch,
+} from './types.js';
 import { isArgumentRole, getArgumentRoleValues } from '../types/argument-roles.js';
 import { formatFailedResults } from './policy-verifier.js';
 
 export interface CompilerConfig {
   protectedPaths: string[];
+  allowedDirectory?: string;
 }
 
 export interface CompilationOutput {
@@ -54,33 +63,76 @@ const listDefinitionSchema = z.object({
   mcpServerHint: z.string().optional(),
 });
 
-function buildCompilerResponseSchema(serverNames: [string, ...string[]], toolNames: [string, ...string[]]) {
-  const compiledRuleSchema = z.object({
+/**
+ * Options for building the compiler response schema.
+ */
+export interface CompilerSchemaOptions {
+  /**
+   * When true, the `server` field in rule conditions is required (not optional).
+   * Used by per-server compilation to enforce server scoping at the schema level.
+   */
+  requireServer?: boolean;
+}
+
+/**
+ * Builds the Zod schema for a single compiled rule. Shared by both the
+ * full compilation schema and the patch response schema to avoid duplication.
+ */
+function buildCompiledRuleSchema(
+  serverNames: [string, ...string[]],
+  toolNames: [string, ...string[]],
+  options?: CompilerSchemaOptions,
+) {
+  const serverField = z.array(z.enum(serverNames));
+  return z.object({
     name: z.string(),
     description: z.string(),
     principle: z.string(),
     if: z
       .object({
         roles: z.array(z.enum(getArgumentRoleValues())).optional(),
-        server: z.array(z.enum(serverNames)).optional(),
+        server: options?.requireServer ? serverField.length(1) : serverField.optional(),
         tool: z.array(z.enum(toolNames)).optional(),
-        sideEffects: z.boolean().optional(),
         paths: pathConditionSchema.optional(),
         domains: domainConditionSchema.optional(),
         lists: z.array(listConditionSchema).optional(),
       })
-      // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- runtime check: all fields are optional, Object.values may be all undefined
       .refine((cond) => Object.values(cond).some((v) => v !== undefined), {
         message: 'Rule condition must have at least one field — catch-all rules are not allowed',
       }),
     then: z.enum(['allow', 'escalate']),
     reason: z.string(),
   });
+}
+
+function buildCompilerResponseSchema(
+  serverNames: [string, ...string[]],
+  toolNames: [string, ...string[]],
+  options?: CompilerSchemaOptions,
+) {
+  const compiledRuleSchema = buildCompiledRuleSchema(serverNames, toolNames, options);
 
   return z.object({
     rules: z.array(compiledRuleSchema),
     listDefinitions: z.array(listDefinitionSchema).optional().default([]),
   });
+}
+
+/**
+ * Formats the server scope section for per-server compilation prompts.
+ * When serverScope is provided, appends a directive telling the LLM to emit
+ * rules only for that server with required server conditions.
+ */
+function formatServerScopeSection(serverScope?: string): string {
+  if (!serverScope) return '';
+
+  return `
+## Server Scope
+
+You are compiling rules for the "${serverScope}" server ONLY.
+Every rule you emit MUST include "server": ["${serverScope}"] in the "if" condition.
+Do NOT emit rules for other servers or tools not listed in the annotations above.
+`;
 }
 
 /**
@@ -106,7 +158,7 @@ ${lines.join('\n\n')}
 
 /**
  * Formats tool annotations into a multi-line summary for LLM system prompts.
- * Each entry shows server/tool name, comment, side-effects flag, and per-argument roles.
+ * Each entry shows server/tool name, comment, and per-argument roles.
  * Used by both the constitution compiler and task-policy compiler prompts.
  */
 export function formatAnnotationsSummary(annotations: ToolAnnotation[]): string {
@@ -115,7 +167,7 @@ export function formatAnnotationsSummary(annotations: ToolAnnotation[]): string 
       const argsDesc = Object.entries(a.args)
         .map(([name, roles]) => `    ${name}: [${roles.join(', ')}]`)
         .join('\n');
-      return `  ${a.serverName}/${a.toolName}: ${a.comment}, sideEffects=${a.sideEffects}\n    args:\n${argsDesc || '    (none)'}`;
+      return `  ${a.serverName}/${a.toolName}: ${a.comment}\n    args:\n${argsDesc || '    (none)'}`;
     })
     .join('\n');
 }
@@ -125,11 +177,24 @@ export function formatAnnotationsSummary(annotations: ToolAnnotation[]): string 
  * Contains: role preamble, constitution, annotations, structural invariants, and instructions.
  * This is the cacheable part — it stays the same across repair rounds.
  */
+/**
+ * Options for customizing the compiler system prompt.
+ */
+export interface CompilerPromptOptions {
+  /**
+   * When set, appends a "Server Scope" section to the prompt telling the LLM
+   * it is compiling rules for this single server only. Every emitted rule must
+   * include `"server": [serverScope]` in its condition.
+   */
+  serverScope?: string;
+}
+
 export function buildCompilerSystemPrompt(
   constitutionText: string,
   annotations: ToolAnnotation[],
   config: CompilerConfig,
   handwrittenScenarios?: TestScenario[],
+  promptOptions?: CompilerPromptOptions,
 ): string {
   const annotationsSummary = formatAnnotationsSummary(annotations);
 
@@ -152,7 +217,8 @@ The following checks are hardcoded and evaluated BEFORE compiled rules:
 1. **Protected paths** -- any read, write, or delete targeting these paths is automatically denied:
 ${config.protectedPaths.map((p) => `- ${p}`).join('\n')}
 
-2. **Sandbox containment** -- any tool call where ALL paths are within the sandbox directory is automatically allowed. Do NOT generate rules for sandbox-internal operations; the engine handles this at runtime with the dynamically configured sandbox path.
+2. **Sandbox containment** -- the sandbox directory is \`${config.allowedDirectory ?? '(configured at runtime)'}\`. Any tool call where ALL sandbox-safe path-role arguments are within the sandbox is automatically allowed by the engine, and those roles are structurally resolved (compiled rules are not evaluated for them). Do NOT generate \`paths.within\` rules for filesystem tools targeting the sandbox -- that behavior is structural.
+   URL-category roles (e.g., \`git-remote-url\`) are NOT structurally resolved. To control git and other networked operations, constrain them primarily via \`domains\` conditions on their URL roles (for example, using \`domains.allowed\` patterns on \`git-remote-url\`), rather than relying on \`paths.within\` for sandbox paths.
 
 3. **Default deny** -- if no compiled rule matches, the engine denies the operation.
    You do NOT need catch-all deny or escalate rules; uncovered operations are
@@ -168,7 +234,6 @@ Produce an ORDERED list of policy rules (first match wins). Each rule has:
   - "roles": array of argument roles to match. The rule fires if the tool has ANY argument with ANY of these roles. Use this for blanket rules (e.g., deny all tools with delete-path arguments). Omit = any tool.
   - "server": array of server names (omit = any server)
   - "tool": array of specific tool names (omit = any matching tool)
-  - "sideEffects": match on the tool's sideEffects annotation (omit = don't filter)
   - "paths": path condition with "roles" (which argument roles to extract paths from) and "within" (concrete absolute directory). Rule fires only if ALL extracted paths are within that directory. If zero paths are extracted (tool has no matching path arguments), the condition is NOT satisfied and the rule does NOT match. This implicitly requires matching roles, so top-level "roles" is redundant when "paths" is present.
   - "domains": domain condition with "roles" (which URL argument roles to extract domains from) and "allowed" (list of allowed domain patterns, e.g. ["github.com", "*.github.com"]). Rule fires only if ALL extracted domains match an allowed pattern. Supports exact match, "*.example.com" prefix wildcards, and "*" (any domain). If zero URLs are extracted, the condition is NOT satisfied and the rule does NOT match. For git-remote-url roles, use hostname/owner/repo patterns for specific repos (e.g., "github.com/provos/ironcurtain") or hostname-only for any repo on that host (e.g., "github.com"). Matching is hierarchical: a hostname-only pattern matches any repo on that host.
 - "then": the policy decision:
@@ -220,7 +285,7 @@ For multi-mode tools:
   mutations.
 
 Be concise in descriptions and reasons -- one sentence each.
-${formatGroundTruthSection(handwrittenScenarios)}
+${formatServerScopeSection(promptOptions?.serverScope)}${formatGroundTruthSection(handwrittenScenarios)}
 ## Dynamic Lists
 
 When the constitution references a CATEGORY of things (e.g., "major news sites",
@@ -346,18 +411,27 @@ const INITIAL_COMPILE_MESSAGE = 'Compile the constitution into policy rules foll
 export class ConstitutionCompilerSession {
   private readonly systemPrompt: string | SystemModelMessage;
   private readonly model: LanguageModel;
+  private readonly serverNames: [string, ...string[]];
+  private readonly toolNames: [string, ...string[]];
   private readonly schema: ReturnType<typeof buildCompilerResponseSchema>;
   private readonly history: Array<{ role: 'user' | 'assistant'; content: string }> = [];
   private readonly schemaHint: string;
+  private readonly schemaOptions?: CompilerSchemaOptions;
   private turns = 0;
 
-  constructor(options: { system: string | SystemModelMessage; model: LanguageModel; annotations: ToolAnnotation[] }) {
+  constructor(options: {
+    system: string | SystemModelMessage;
+    model: LanguageModel;
+    annotations: ToolAnnotation[];
+    schemaOptions?: CompilerSchemaOptions;
+  }) {
     this.systemPrompt = options.system;
     this.model = options.model;
+    this.schemaOptions = options.schemaOptions;
 
-    const serverNames = [...new Set(options.annotations.map((a) => a.serverName))] as [string, ...string[]];
-    const toolNames = [...new Set(options.annotations.map((a) => a.toolName))] as [string, ...string[]];
-    this.schema = buildCompilerResponseSchema(serverNames, toolNames);
+    this.serverNames = [...new Set(options.annotations.map((a) => a.serverName))] as [string, ...string[]];
+    this.toolNames = [...new Set(options.annotations.map((a) => a.toolName))] as [string, ...string[]];
+    this.schema = buildCompilerResponseSchema(this.serverNames, this.toolNames, options.schemaOptions);
     this.schemaHint = schemaToPromptHint(this.schema);
   }
 
@@ -447,9 +521,291 @@ export class ConstitutionCompilerSession {
     }
   }
 
+  /**
+   * Point-fix repair: sends patch instructions instead of requesting a full
+   * recompilation. The LLM returns a small set of update/add/delete operations
+   * that are mechanically applied to the existing rules, avoiding oscillation.
+   *
+   * Falls back to full recompile if the patch cannot be applied.
+   */
+  async repairPointFix(
+    existingRules: CompiledRule[],
+    repairContext: RepairContext,
+    existingListDefinitions: ListDefinition[] = [],
+    onProgress?: (message: string) => void,
+  ): Promise<CompilationOutput> {
+    const existingRuleNames = existingRules.map((r) => r.name);
+    if (existingRuleNames.length === 0) {
+      return this.recompile(repairContext, onProgress);
+    }
+
+    const { serverNames, toolNames } = this;
+
+    const patchSchema = buildPatchResponseSchema(
+      serverNames,
+      toolNames,
+      existingRuleNames as [string, ...string[]],
+      this.schemaOptions,
+    );
+    const patchSchemaHint = schemaToPromptHint(patchSchema);
+
+    const userMessage = buildPointFixRepairInstructions(existingRules, repairContext) + patchSchemaHint;
+    this.history.push({ role: 'user', content: userMessage });
+
+    onProgress?.('Point-fix repair...');
+
+    const result = await generateText({
+      model: this.model,
+      system: this.systemPrompt,
+      messages: this.history,
+      maxOutputTokens: DEFAULT_MAX_TOKENS,
+    });
+
+    const firstAttempt = tryParsePatch(result.text, patchSchema);
+    if (firstAttempt.ok) {
+      const applyResult = applyRulePatch(existingRules, firstAttempt.value.operations);
+      if (applyResult.ok) {
+        this.history.push({ role: 'assistant', content: result.text });
+        this.turns++;
+        return {
+          rules: applyResult.rules,
+          listDefinitions: mergeListDefinitions(existingListDefinitions, firstAttempt.value.listDefinitions),
+        };
+      }
+      // Patch apply failed -- fall back to full recompile
+      onProgress?.('Patch apply failed, falling back to full recompile...');
+      this.history.pop(); // remove the point-fix user message
+      return this.recompile(repairContext, onProgress);
+    }
+
+    // First parse failed -- attempt one schema repair retry
+    onProgress?.('Patch schema repair 1/1...');
+
+    const retryResult = await generateText({
+      model: this.model,
+      system: this.systemPrompt,
+      messages: [
+        ...this.history,
+        { role: 'assistant' as const, content: result.text },
+        {
+          role: 'user' as const,
+          content: `Your response failed schema validation:\n${firstAttempt.error}\n\nPlease fix the errors and return valid JSON matching the patch schema.`,
+        },
+      ],
+      maxOutputTokens: DEFAULT_MAX_TOKENS,
+    });
+
+    const retryParsed = tryParsePatch(retryResult.text, patchSchema);
+    if (retryParsed.ok) {
+      const applyResult = applyRulePatch(existingRules, retryParsed.value.operations);
+      if (applyResult.ok) {
+        this.history.push({ role: 'assistant', content: retryResult.text });
+        this.turns++;
+        return {
+          rules: applyResult.rules,
+          listDefinitions: mergeListDefinitions(existingListDefinitions, retryParsed.value.listDefinitions),
+        };
+      }
+    }
+
+    // All patch attempts failed -- fall back to full recompile
+    onProgress?.('Patch failed, falling back to full recompile...');
+    this.history.pop(); // remove the point-fix user message
+    return this.recompile(repairContext, onProgress);
+  }
+
   private parseOutput(text: string): CompilationOutput {
     const parsed = parseJsonWithSchema(text, this.schema);
     return { rules: parsed.rules, listDefinitions: parsed.listDefinitions };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Point-Fix Repair -- patch-based rule repair
+// ---------------------------------------------------------------------------
+
+/**
+ * Builds the Zod schema for patch responses. Reuses the same compiled rule
+ * field schemas as the full compilation schema, but wraps them in a
+ * discriminated union of update/add/delete operations.
+ */
+export function buildPatchResponseSchema(
+  serverNames: [string, ...string[]],
+  toolNames: [string, ...string[]],
+  existingRuleNames: [string, ...string[]],
+  options?: CompilerSchemaOptions,
+) {
+  const compiledRuleSchema = buildCompiledRuleSchema(serverNames, toolNames, options);
+
+  const updateOp = z
+    .object({
+      op: z.literal('update'),
+      ruleName: z.enum(existingRuleNames),
+      rule: compiledRuleSchema,
+    })
+    .superRefine((value, ctx) => {
+      if (value.rule.name !== value.ruleName) {
+        ctx.addIssue({
+          code: 'custom',
+          message: `rule.name "${value.rule.name}" must match ruleName "${value.ruleName}" (use delete+add to rename)`,
+          path: ['rule', 'name'],
+        });
+      }
+    });
+  const addOp = z.object({
+    op: z.literal('add'),
+    afterRule: z.enum(existingRuleNames).optional(),
+    rule: compiledRuleSchema,
+  });
+  const deleteOp = z.object({
+    op: z.literal('delete'),
+    ruleName: z.enum(existingRuleNames),
+  });
+
+  return z.object({
+    reasoning: z.string(),
+    operations: z.array(z.discriminatedUnion('op', [updateOp, addOp, deleteOp])),
+    listDefinitions: z.array(listDefinitionSchema).optional(),
+  });
+}
+
+/**
+ * Builds the user prompt for point-fix repair. Shows the existing rules in
+ * a compact numbered format, failed scenarios, and judge analysis. Instructs
+ * the LLM to emit a minimal patch rather than a full rule set.
+ */
+export function buildPointFixRepairInstructions(existingRules: CompiledRule[], repairContext: RepairContext): string {
+  const rulesText = existingRules
+    .map((r, i) => {
+      const conditions = Object.entries(r.if)
+        .filter(([, v]) => v !== undefined)
+        .map(([k, v]) => `${k}: ${JSON.stringify(v)}`)
+        .join(', ');
+      return `${i + 1}. "${r.name}" — if { ${conditions} } → ${r.then} (${r.reason})`;
+    })
+    .join('\n');
+
+  const failuresText = formatFailedResults(repairContext.failedScenarios);
+
+  let existingListsText = '';
+  if (repairContext.existingListDefinitions && repairContext.existingListDefinitions.length > 0) {
+    const listLines = repairContext.existingListDefinitions.map((d) => `- @${d.name} (type: ${d.type})`).join('\n');
+    existingListsText = `
+### Available Dynamic Lists
+
+These lists are already defined and will be preserved automatically. You may reference them in rules using @list-name. You may add NEW list definitions in your response if your fix requires them, but do NOT redefine existing lists.
+
+${listLines}
+`;
+  }
+
+  return `## POINT-FIX REPAIR (attempt ${repairContext.attemptNumber})
+
+Your previous rules failed verification. You must fix the failures by emitting a PATCH — a minimal set of update, add, or delete operations.
+
+### Current Rules
+
+${rulesText}
+
+### Failed Scenarios
+
+${failuresText}
+
+### Judge Analysis
+
+${repairContext.judgeAnalysis}
+${existingListsText}${formatGroundTruthSection(repairContext.handwrittenScenarios)}
+### Instructions
+
+1. Only modify rules that are DIRECTLY responsible for the failures. Do NOT touch passing rules.
+2. Use "update" to replace a rule by name, "add" to insert a new rule (optionally after an existing rule), or "delete" to remove a rule.
+3. Operations are applied sequentially: an "add" after a rule that was "delete"d earlier in the same patch will fail.
+4. Return a patch object with "reasoning", "operations", and optionally "listDefinitions" (only for NEW lists — existing lists are preserved automatically).
+5. Keep the patch as small as possible — fewer operations means less risk of breaking passing rules.`;
+}
+
+/**
+ * Mechanically applies patch operations to an existing rule list.
+ * Operations are applied sequentially in order. Returns the new rule list
+ * or an error if an operation references a nonexistent rule.
+ */
+export function applyRulePatch(
+  existingRules: CompiledRule[],
+  operations: RulePatchOp[],
+): { ok: true; rules: CompiledRule[] } | { ok: false; error: string } {
+  const rules = [...existingRules];
+
+  for (const op of operations) {
+    switch (op.op) {
+      case 'update': {
+        const idx = rules.findIndex((r) => r.name === op.ruleName);
+        if (idx === -1) {
+          return { ok: false, error: `Cannot update rule "${op.ruleName}": not found` };
+        }
+        if (op.rule.name !== op.ruleName) {
+          return {
+            ok: false,
+            error: `Cannot update rule "${op.ruleName}": rule.name "${op.rule.name}" does not match ruleName (use delete+add to rename)`,
+          };
+        }
+        rules[idx] = op.rule;
+        break;
+      }
+      case 'add': {
+        if (rules.some((r) => r.name === op.rule.name)) {
+          return { ok: false, error: `Cannot add rule "${op.rule.name}": a rule with that name already exists` };
+        }
+        if (op.afterRule !== undefined) {
+          const idx = rules.findIndex((r) => r.name === op.afterRule);
+          if (idx === -1) {
+            return { ok: false, error: `Cannot add after rule "${op.afterRule}": not found` };
+          }
+          rules.splice(idx + 1, 0, op.rule);
+        } else {
+          // No afterRule specified -- prepend
+          rules.unshift(op.rule);
+        }
+        break;
+      }
+      case 'delete': {
+        const idx = rules.findIndex((r) => r.name === op.ruleName);
+        if (idx === -1) {
+          return { ok: false, error: `Cannot delete rule "${op.ruleName}": not found` };
+        }
+        rules.splice(idx, 1);
+        break;
+      }
+    }
+  }
+
+  return { ok: true, rules };
+}
+
+/**
+ * Merges existing list definitions with new ones from a patch.
+ * Existing lists are always preserved; new lists (by name) are appended.
+ * Duplicates (same name as an existing list) are silently ignored.
+ */
+export function mergeListDefinitions(
+  existing: ListDefinition[],
+  patchLists: ListDefinition[] | undefined,
+): ListDefinition[] {
+  if (!patchLists || patchLists.length === 0) return existing;
+  const existingNames = new Set(existing.map((d) => d.name));
+  const newLists = patchLists.filter((d) => !existingNames.has(d.name));
+  return [...existing, ...newLists];
+}
+
+/** Attempts to parse LLM text as a RulePatch, returning a discriminated result. */
+function tryParsePatch(
+  text: string,
+  schema: ReturnType<typeof buildPatchResponseSchema>,
+): { ok: true; value: RulePatch } | { ok: false; error: string } {
+  try {
+    const parsed = parseJsonWithSchema(text, schema);
+    return { ok: true, value: parsed as RulePatch };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
 }
 

@@ -1,20 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import { MockLanguageModelV3 } from 'ai/test';
-import {
-  generateScenarios,
-  formatFeedbackMessage,
-  ScenarioGeneratorSession,
-} from '../src/pipeline/scenario-generator.js';
+import { generateScenarios, repairScenarios, SCENARIO_BATCH_SIZE } from '../src/pipeline/scenario-generator.js';
 import { ConstitutionCompilerSession } from '../src/pipeline/constitution-compiler.js';
 import { parseJsonWithSchema } from '../src/pipeline/generate-with-repair.js';
-import { mergeReplacements } from '../src/pipeline/compile.js';
-import type {
-  ToolAnnotation,
-  TestScenario,
-  ScenarioFeedback,
-  DiscardedScenario,
-  RepairContext,
-} from '../src/pipeline/types.js';
+import type { ToolAnnotation, TestScenario, RepairContext } from '../src/pipeline/types.js';
 import { z } from 'zod';
 
 const sampleAnnotations: ToolAnnotation[] = [
@@ -22,14 +11,14 @@ const sampleAnnotations: ToolAnnotation[] = [
     toolName: 'read_file',
     serverName: 'filesystem',
     comment: 'Reads the complete contents of a file from disk',
-    sideEffects: true,
+
     args: { path: ['read-path'] },
   },
   {
     toolName: 'write_file',
     serverName: 'filesystem',
     comment: 'Creates or overwrites a file with new content',
-    sideEffects: true,
+
     args: { path: ['write-path'] },
   },
 ];
@@ -242,126 +231,7 @@ describe('parseJsonWithSchema', () => {
 });
 
 // ---------------------------------------------------------------------------
-// formatFeedbackMessage tests
-// ---------------------------------------------------------------------------
-
-describe('formatFeedbackMessage', () => {
-  it('includes corrections section when corrections are present', () => {
-    const feedback: ScenarioFeedback = {
-      corrections: [
-        {
-          scenarioDescription: 'Read /etc/passwd',
-          correctedDecision: 'escalate',
-          correctedReasoning: 'Not categorically forbidden',
-        },
-      ],
-      discardedScenarios: [],
-      probeScenarios: [],
-    };
-
-    const msg = formatFeedbackMessage(feedback);
-    expect(msg).toContain('## Corrected Scenarios');
-    expect(msg).toContain('Read /etc/passwd');
-    expect(msg).toContain('escalate');
-    expect(msg).toContain('Not categorically forbidden');
-  });
-
-  it('includes discarded section when discarded scenarios are present', () => {
-    const feedback: ScenarioFeedback = {
-      corrections: [],
-      discardedScenarios: [
-        {
-          scenario: {
-            description: 'Write to audit.jsonl',
-            request: { serverName: 'filesystem', toolName: 'write_file', arguments: {} },
-            expectedDecision: 'allow',
-            reasoning: 'test',
-            source: 'generated',
-          },
-          actual: 'deny',
-          rule: 'structural-protected-paths',
-        },
-      ],
-      probeScenarios: [],
-    };
-
-    const msg = formatFeedbackMessage(feedback);
-    expect(msg).toContain('## Discarded Scenarios');
-    expect(msg).toContain('Write to audit.jsonl');
-    expect(msg).toContain('structural-protected-paths');
-    expect(msg).toContain('deny');
-  });
-
-  it('includes probe section when probe scenarios are present', () => {
-    const feedback: ScenarioFeedback = {
-      corrections: [],
-      discardedScenarios: [],
-      probeScenarios: [
-        {
-          description: 'Read auth log',
-          request: { serverName: 'filesystem', toolName: 'read_file', arguments: { path: '/var/log/auth.log' } },
-          expectedDecision: 'escalate',
-          reasoning: 'Coverage gap',
-          source: 'generated',
-        },
-      ],
-    };
-
-    const msg = formatFeedbackMessage(feedback);
-    expect(msg).toContain('## Coverage Gaps');
-    expect(msg).toContain('filesystem/read_file');
-    expect(msg).toContain('/var/log/auth.log');
-    expect(msg).toContain('escalate');
-  });
-
-  it('includes all sections when all feedback types are present', () => {
-    const feedback: ScenarioFeedback = {
-      corrections: [{ scenarioDescription: 'test1', correctedDecision: 'deny', correctedReasoning: 'reason1' }],
-      discardedScenarios: [
-        {
-          scenario: {
-            description: 'test2',
-            request: { serverName: 'filesystem', toolName: 'read_file', arguments: {} },
-            expectedDecision: 'allow',
-            reasoning: 'test',
-            source: 'generated',
-          },
-          actual: 'deny',
-          rule: 'structural-unknown-tool',
-        },
-      ],
-      probeScenarios: [
-        {
-          description: 'test3',
-          request: { serverName: 'filesystem', toolName: 'write_file', arguments: { path: '/tmp/test' } },
-          expectedDecision: 'allow',
-          reasoning: 'probe',
-          source: 'generated',
-        },
-      ],
-    };
-
-    const msg = formatFeedbackMessage(feedback);
-    expect(msg).toContain('## Corrected Scenarios');
-    expect(msg).toContain('## Discarded Scenarios');
-    expect(msg).toContain('## Coverage Gaps');
-    expect(msg).toContain('Generate replacement scenarios');
-  });
-
-  it('includes replacement instruction even with empty feedback', () => {
-    const feedback: ScenarioFeedback = {
-      corrections: [],
-      discardedScenarios: [],
-      probeScenarios: [],
-    };
-
-    const msg = formatFeedbackMessage(feedback);
-    expect(msg).toContain('Generate replacement scenarios');
-  });
-});
-
-// ---------------------------------------------------------------------------
-// ScenarioGeneratorSession tests
+// Batched generateScenarios tests
 // ---------------------------------------------------------------------------
 
 /** Creates a mock model that tracks calls and returns sequential responses. */
@@ -404,313 +274,533 @@ function createCallTrackingMockModel(responses: unknown[]) {
   return { model, calls };
 }
 
-describe('ScenarioGeneratorSession', () => {
-  const initialScenarios = [
-    {
-      description: 'Write file inside sandbox',
-      request: {
-        serverName: 'filesystem',
-        toolName: 'write_file',
-        arguments: { path: '/tmp/sandbox/out.txt', content: 'hello' },
-      },
-      expectedDecision: 'allow' as const,
-      reasoning: 'Within sandbox',
-    },
-  ];
-
-  const replacementScenarios = [
-    {
-      description: 'Read config file (escalate)',
-      request: {
-        serverName: 'filesystem',
-        toolName: 'read_file',
-        arguments: { path: '/etc/config.yaml' },
-      },
-      expectedDecision: 'escalate' as const,
-      reasoning: 'Not categorically forbidden',
-    },
-  ];
-
-  it('generate() returns handwritten + unique generated scenarios', async () => {
-    const { model } = createCallTrackingMockModel([{ scenarios: initialScenarios }]);
-
-    const session = new ScenarioGeneratorSession({
-      system: 'Test system prompt',
-      model,
-      annotations: sampleAnnotations,
-      handwrittenScenarios,
+/** Generates N unique annotations across serverA and serverB. */
+function generateAnnotations(count: number): ToolAnnotation[] {
+  const annotations: ToolAnnotation[] = [];
+  for (let i = 0; i < count; i++) {
+    annotations.push({
+      toolName: `tool_${i}`,
+      serverName: i % 2 === 0 ? 'serverA' : 'serverB',
+      comment: `Tool ${i} description`,
+      args: { path: ['read-path'] },
     });
+  }
+  return annotations;
+}
 
-    const result = await session.generate();
+describe('Batched generateScenarios', () => {
+  it('single batch: <=25 annotations produces exactly one generateObjectWithRepair call', async () => {
+    const smallAnnotations = generateAnnotations(10);
 
-    // 2 handwritten + 1 generated
-    expect(result).toHaveLength(3);
-    expect(result[0].source).toBe('handwritten');
-    expect(result[1].source).toBe('handwritten');
-    expect(result[2].source).toBe('generated');
-    expect(result[2].description).toBe('Write file inside sandbox');
-  });
-
-  it('generate() marks all LLM scenarios with source "generated"', async () => {
-    const { model } = createCallTrackingMockModel([{ scenarios: initialScenarios }]);
-
-    const session = new ScenarioGeneratorSession({
-      system: 'Test system prompt',
-      model,
-      annotations: sampleAnnotations,
-      handwrittenScenarios,
-    });
-
-    const result = await session.generate();
-    const generated = result.filter((s) => s.source === 'generated');
-    expect(generated).toHaveLength(1);
-    expect(generated[0].source).toBe('generated');
-  });
-
-  it('regenerate() returns only replacement scenarios', async () => {
-    const { model } = createCallTrackingMockModel([
-      { scenarios: initialScenarios },
-      { scenarios: replacementScenarios },
-    ]);
-
-    const session = new ScenarioGeneratorSession({
-      system: 'Test system prompt',
-      model,
-      annotations: sampleAnnotations,
-      handwrittenScenarios,
-    });
-
-    await session.generate();
-
-    const feedback: ScenarioFeedback = {
-      corrections: [
-        { scenarioDescription: 'Write file inside sandbox', correctedDecision: 'deny', correctedReasoning: 'wrong' },
-      ],
-      discardedScenarios: [],
-      probeScenarios: [],
-    };
-
-    const replacements = await session.regenerate(feedback);
-
-    // Returns only replacement scenarios, NOT handwritten
-    expect(replacements).toHaveLength(1);
-    expect(replacements[0].description).toBe('Read config file (escalate)');
-    expect(replacements[0].source).toBe('generated');
-  });
-
-  it('turnCount tracks the number of completed turns', async () => {
-    const { model } = createCallTrackingMockModel([
-      { scenarios: initialScenarios },
-      { scenarios: replacementScenarios },
-    ]);
-
-    const session = new ScenarioGeneratorSession({
-      system: 'Test system prompt',
-      model,
-      annotations: sampleAnnotations,
-      handwrittenScenarios,
-    });
-
-    expect(session.turnCount).toBe(0);
-    await session.generate();
-    expect(session.turnCount).toBe(1);
-
-    await session.regenerate({ corrections: [], discardedScenarios: [], probeScenarios: [] });
-    expect(session.turnCount).toBe(2);
-  });
-
-  it('system prompt is identical across all turns', async () => {
-    const { model, calls } = createCallTrackingMockModel([
-      { scenarios: initialScenarios },
-      { scenarios: replacementScenarios },
-    ]);
-
-    const session = new ScenarioGeneratorSession({
-      system: 'Stable system prompt for caching',
-      model,
-      annotations: sampleAnnotations,
-      handwrittenScenarios,
-    });
-
-    await session.generate();
-    await session.regenerate({ corrections: [], discardedScenarios: [], probeScenarios: [] });
-
-    // Both calls should have the same system prompt
-    expect(calls).toHaveLength(2);
-    expect(calls[0].system).toEqual(calls[1].system);
-  });
-
-  it('message history grows across turns', async () => {
-    const { model, calls } = createCallTrackingMockModel([
-      { scenarios: initialScenarios },
-      { scenarios: replacementScenarios },
-    ]);
-
-    const session = new ScenarioGeneratorSession({
-      system: 'Test prompt',
-      model,
-      annotations: sampleAnnotations,
-      handwrittenScenarios,
-    });
-
-    await session.generate();
-    // Turn 1: 1 user message
-    expect(calls[0].messages).toHaveLength(1);
-    expect(calls[0].messages[0].role).toBe('user');
-
-    await session.regenerate({ corrections: [], discardedScenarios: [], probeScenarios: [] });
-    // Turn 2: user + assistant (turn 1) + user (turn 2) = 3 messages
-    expect(calls[1].messages).toHaveLength(3);
-    expect(calls[1].messages[0].role).toBe('user');
-    expect(calls[1].messages[1].role).toBe('assistant');
-    expect(calls[1].messages[2].role).toBe('user');
-  });
-
-  it('regenerate feedback message includes corrections', async () => {
-    const { model, calls } = createCallTrackingMockModel([
-      { scenarios: initialScenarios },
-      { scenarios: replacementScenarios },
-    ]);
-
-    const session = new ScenarioGeneratorSession({
-      system: 'Test prompt',
-      model,
-      annotations: sampleAnnotations,
-      handwrittenScenarios,
-    });
-
-    await session.generate();
-
-    const feedback: ScenarioFeedback = {
-      corrections: [
+    // Build a valid response for these annotations
+    const batchResponse = {
+      scenarios: [
         {
-          scenarioDescription: 'Read /etc/passwd',
-          correctedDecision: 'escalate',
-          correctedReasoning: 'Not categorically forbidden',
+          description: 'Test tool_0',
+          request: { serverName: 'serverA', toolName: 'tool_0', arguments: { path: '/tmp/sandbox/f' } },
+          expectedDecision: 'allow',
+          reasoning: 'Within sandbox',
         },
       ],
-      discardedScenarios: [],
-      probeScenarios: [],
     };
 
-    await session.regenerate(feedback);
+    const { model, calls } = createCallTrackingMockModel([batchResponse]);
 
-    // The second call's last user message should contain the correction info
-    const lastUserMsg = calls[1].messages[2].content;
-    expect(lastUserMsg).toContain('Corrected Scenarios');
-    expect(lastUserMsg).toContain('Read /etc/passwd');
-    expect(lastUserMsg).toContain('escalate');
+    await generateScenarios(sampleConstitution, smallAnnotations, [], SANDBOX_DIR, model);
+
+    expect(calls).toHaveLength(1);
+  });
+
+  it('batch splitting: >25 annotations produces multiple generateObjectWithRepair calls', async () => {
+    const manyAnnotations = generateAnnotations(30);
+
+    // batch 1 has 25 tools, batch 2 has 5 tools
+    const batch1Response = {
+      scenarios: [
+        {
+          description: 'Test batch 1 tool',
+          request: { serverName: 'serverA', toolName: 'tool_0', arguments: { path: '/tmp/sandbox/a' } },
+          expectedDecision: 'allow',
+          reasoning: 'ok',
+        },
+      ],
+    };
+    const batch2Response = {
+      scenarios: [
+        {
+          description: 'Test batch 2 tool',
+          request: { serverName: 'serverB', toolName: 'tool_25', arguments: { path: '/tmp/sandbox/b' } },
+          expectedDecision: 'allow',
+          reasoning: 'ok',
+        },
+      ],
+    };
+
+    const { model, calls } = createCallTrackingMockModel([batch1Response, batch2Response]);
+
+    const result = await generateScenarios(sampleConstitution, manyAnnotations, [], SANDBOX_DIR, model);
+
+    // Two LLM calls: one per batch
+    expect(calls).toHaveLength(2);
+    // Both batch results combined
+    expect(result).toHaveLength(2);
+  });
+
+  it('schema scoping: each batch schema only accepts that batch tool names', async () => {
+    const manyAnnotations = generateAnnotations(30);
+
+    // Batch 1 tools: tool_0 to tool_24. Return a scenario with tool_0 (valid for batch 1).
+    const batch1Response = {
+      scenarios: [
+        {
+          description: 'B1 scenario',
+          request: { serverName: 'serverA', toolName: 'tool_0', arguments: { path: '/tmp/sandbox/a' } },
+          expectedDecision: 'allow',
+          reasoning: 'ok',
+        },
+      ],
+    };
+
+    // Batch 2 tools: tool_25 to tool_29. Return a scenario with tool_26 (valid for batch 2).
+    const batch2Response = {
+      scenarios: [
+        {
+          description: 'B2 scenario',
+          request: { serverName: 'serverA', toolName: 'tool_26', arguments: { path: '/tmp/sandbox/b' } },
+          expectedDecision: 'allow',
+          reasoning: 'ok',
+        },
+      ],
+    };
+
+    const { model, calls } = createCallTrackingMockModel([batch1Response, batch2Response]);
+
+    const result = await generateScenarios(sampleConstitution, manyAnnotations, [], SANDBOX_DIR, model);
+
+    // Both calls succeeded (schemas accepted the tool names)
+    expect(calls).toHaveLength(2);
+    expect(result).toHaveLength(2);
+    expect(result.find((s) => s.description === 'B1 scenario')).toBeDefined();
+    expect(result.find((s) => s.description === 'B2 scenario')).toBeDefined();
+  });
+
+  it('per-batch system prompt contains only that batch annotations', async () => {
+    const manyAnnotations = generateAnnotations(30);
+
+    const batch1Response = {
+      scenarios: [
+        {
+          description: 'B1',
+          request: { serverName: 'serverA', toolName: 'tool_0', arguments: { path: '/tmp/sandbox/a' } },
+          expectedDecision: 'allow',
+          reasoning: 'ok',
+        },
+      ],
+    };
+    const batch2Response = {
+      scenarios: [
+        {
+          description: 'B2',
+          request: { serverName: 'serverB', toolName: 'tool_25', arguments: { path: '/tmp/sandbox/b' } },
+          expectedDecision: 'allow',
+          reasoning: 'ok',
+        },
+      ],
+    };
+
+    // Capture the system prompts via wrapSystemPrompt
+    const capturedSystems: string[] = [];
+    const wrapSystemPrompt = (prompt: string) => {
+      capturedSystems.push(prompt);
+      return prompt;
+    };
+
+    const { model } = createCallTrackingMockModel([batch1Response, batch2Response]);
+
+    await generateScenarios(
+      sampleConstitution,
+      manyAnnotations,
+      [],
+      SANDBOX_DIR,
+      model,
+      undefined,
+      undefined,
+      undefined,
+      wrapSystemPrompt,
+    );
+
+    expect(capturedSystems).toHaveLength(2);
+
+    // Batch 1 prompt should mention tool_0 but NOT tool_25
+    expect(capturedSystems[0]).toContain('tool_0');
+    expect(capturedSystems[0]).not.toContain('tool_25');
+
+    // Batch 2 prompt should mention tool_25 but NOT tool_0
+    expect(capturedSystems[1]).toContain('tool_25');
+    expect(capturedSystems[1]).not.toContain('tool_0');
+  });
+
+  it('handwritten scenarios filtered to correct batch by toolName', async () => {
+    // Create annotations spanning two batches: tool_0 to tool_29
+    const manyAnnotations = generateAnnotations(30);
+
+    // Handwritten scenario for tool_0 (in batch 1)
+    const hwBatch1: TestScenario = {
+      description: 'Handwritten for tool_0',
+      request: { serverName: 'serverA', toolName: 'tool_0', arguments: { path: '/tmp/sandbox/hw' } },
+      expectedDecision: 'allow',
+      reasoning: 'Handwritten',
+      source: 'handwritten',
+    };
+    // Handwritten scenario for tool_26 (in batch 2)
+    const hwBatch2: TestScenario = {
+      description: 'Handwritten for tool_26',
+      request: { serverName: 'serverA', toolName: 'tool_26', arguments: { path: '/tmp/sandbox/hw2' } },
+      expectedDecision: 'allow',
+      reasoning: 'Handwritten',
+      source: 'handwritten',
+    };
+
+    const batch1Response = {
+      scenarios: [
+        {
+          description: 'Gen B1',
+          request: { serverName: 'serverA', toolName: 'tool_0', arguments: { path: '/tmp/sandbox/g1' } },
+          expectedDecision: 'allow',
+          reasoning: 'ok',
+        },
+      ],
+    };
+    const batch2Response = {
+      scenarios: [
+        {
+          description: 'Gen B2',
+          request: { serverName: 'serverA', toolName: 'tool_26', arguments: { path: '/tmp/sandbox/g2' } },
+          expectedDecision: 'allow',
+          reasoning: 'ok',
+        },
+      ],
+    };
+
+    const { model, calls } = createCallTrackingMockModel([batch1Response, batch2Response]);
+
+    const result = await generateScenarios(
+      sampleConstitution,
+      manyAnnotations,
+      [hwBatch1, hwBatch2],
+      SANDBOX_DIR,
+      model,
+    );
+
+    // Batch 1 user prompt should mention tool_0 handwritten, not tool_26
+    const userMsg1 = calls[0].messages.find((m) => m.role === 'user')?.content ?? '';
+    expect(userMsg1).toContain('Handwritten for tool_0');
+    expect(userMsg1).not.toContain('Handwritten for tool_26');
+
+    // Batch 2 user prompt should mention tool_26 handwritten, not tool_0
+    const userMsg2 = calls[1].messages.find((m) => m.role === 'user')?.content ?? '';
+    expect(userMsg2).toContain('Handwritten for tool_26');
+    expect(userMsg2).not.toContain('Handwritten for tool_0');
+
+    // Handwritten scenarios are included in results
+    expect(result.filter((s) => s.source === 'handwritten')).toHaveLength(2);
+  });
+
+  it('cross-batch dedup removes duplicate scenarios across batches', async () => {
+    const manyAnnotations = generateAnnotations(30);
+
+    // Both batches produce a scenario with identical tool/args (cross-batch dup)
+    // tool_0 is in batch 1, but suppose both batches return a scenario for the same
+    // tool on different batches -- actually for cross-batch dedup, same tool+args matters.
+    // We need both batches to produce scenarios with the same serverName/toolName/args.
+    // Since schema is scoped, we need a tool that appears in both batches. All tools
+    // are unique, so we test dedup of identical entries within a single batch too.
+    // Actually cross-batch dedup is about the dedup filter after all batches run.
+    // Let's have batch 1 produce two identical scenarios.
+    const batch1Response = {
+      scenarios: [
+        {
+          description: 'First occurrence',
+          request: { serverName: 'serverA', toolName: 'tool_0', arguments: { path: '/tmp/sandbox/dup' } },
+          expectedDecision: 'allow',
+          reasoning: 'ok',
+        },
+        {
+          description: 'Second occurrence (same tool+args)',
+          request: { serverName: 'serverA', toolName: 'tool_0', arguments: { path: '/tmp/sandbox/dup' } },
+          expectedDecision: 'allow',
+          reasoning: 'ok',
+        },
+      ],
+    };
+    const batch2Response = { scenarios: [] };
+
+    const { model } = createCallTrackingMockModel([batch1Response, batch2Response]);
+
+    const result = await generateScenarios(sampleConstitution, manyAnnotations, [], SANDBOX_DIR, model);
+
+    // Only first occurrence should survive dedup
+    const matching = result.filter(
+      (s) => s.request.toolName === 'tool_0' && s.request.arguments.path === '/tmp/sandbox/dup',
+    );
+    expect(matching).toHaveLength(1);
+    expect(matching[0].description).toBe('First occurrence');
+  });
+
+  it('wrapSystemPrompt callback is applied per-batch', async () => {
+    const wrappedSystems: string[] = [];
+    const wrapSystemPrompt = (prompt: string) => {
+      wrappedSystems.push(prompt);
+      // Return as-is (string) so schema validation still works
+      return prompt;
+    };
+
+    const manyAnnotations = generateAnnotations(30);
+
+    const batch1Response = {
+      scenarios: [
+        {
+          description: 'Test B1',
+          request: { serverName: 'serverA', toolName: 'tool_0', arguments: { path: '/tmp/sandbox/a' } },
+          expectedDecision: 'allow',
+          reasoning: 'ok',
+        },
+      ],
+    };
+    const batch2Response = {
+      scenarios: [
+        {
+          description: 'Test B2',
+          request: { serverName: 'serverB', toolName: 'tool_25', arguments: { path: '/tmp/sandbox/b' } },
+          expectedDecision: 'allow',
+          reasoning: 'ok',
+        },
+      ],
+    };
+
+    const { model } = createCallTrackingMockModel([batch1Response, batch2Response]);
+
+    await generateScenarios(
+      sampleConstitution,
+      manyAnnotations,
+      [],
+      SANDBOX_DIR,
+      model,
+      undefined,
+      undefined,
+      undefined,
+      wrapSystemPrompt,
+    );
+
+    // wrapSystemPrompt was called once per batch
+    expect(wrappedSystems).toHaveLength(2);
+
+    // Each batch's system prompt should be different (different annotations)
+    expect(wrappedSystems[0]).not.toEqual(wrappedSystems[1]);
+
+    // Each wrapped prompt should contain the constitution (proves it received real prompts)
+    expect(wrappedSystems[0]).toContain('Constitution');
+    expect(wrappedSystems[1]).toContain('Constitution');
+  });
+
+  it('buildBatchPrompt: no handwritten produces generic prompt', async () => {
+    const { model, calls } = createCallTrackingMockModel([
+      {
+        scenarios: [
+          {
+            description: 'Test',
+            request: { serverName: 'filesystem', toolName: 'read_file', arguments: { path: '/tmp/sandbox/a' } },
+            expectedDecision: 'allow',
+            reasoning: 'ok',
+          },
+        ],
+      },
+    ]);
+
+    // No handwritten scenarios -- prompt should be the generic one
+    await generateScenarios(sampleConstitution, sampleAnnotations, [], SANDBOX_DIR, model);
+
+    const userMsg = calls[0].messages.find((m) => m.role === 'user')?.content ?? '';
+    expect(userMsg).toContain('Generate test scenarios following the instructions above.');
+    expect(userMsg).not.toContain('handwritten scenarios already exist');
+  });
+
+  it('buildBatchPrompt: with handwritten includes their summary', async () => {
+    const { model, calls } = createCallTrackingMockModel([
+      {
+        scenarios: [
+          {
+            description: 'Test',
+            request: { serverName: 'filesystem', toolName: 'write_file', arguments: { path: '/tmp/sandbox/a' } },
+            expectedDecision: 'allow',
+            reasoning: 'ok',
+          },
+        ],
+      },
+    ]);
+
+    await generateScenarios(sampleConstitution, sampleAnnotations, handwrittenScenarios, SANDBOX_DIR, model);
+
+    const userMsg = calls[0].messages.find((m) => m.role === 'user')?.content ?? '';
+    expect(userMsg).toContain('handwritten scenarios already exist');
+    expect(userMsg).toContain('Read file inside sandbox');
+    expect(userMsg).toContain('Read file outside sandbox');
+  });
+
+  it('SCENARIO_BATCH_SIZE is exported and equals 25', () => {
+    expect(SCENARIO_BATCH_SIZE).toBe(25);
+  });
+
+  it('exactly 25 annotations produces 1 batch (boundary)', async () => {
+    const annotations = generateAnnotations(25);
+
+    const batchResponse = {
+      scenarios: [
+        {
+          description: 'Boundary test',
+          request: { serverName: 'serverA', toolName: 'tool_0', arguments: { path: '/tmp/sandbox/f' } },
+          expectedDecision: 'allow',
+          reasoning: 'ok',
+        },
+      ],
+    };
+
+    const { model, calls } = createCallTrackingMockModel([batchResponse]);
+
+    await generateScenarios(sampleConstitution, annotations, [], SANDBOX_DIR, model);
+
+    expect(calls).toHaveLength(1);
+  });
+
+  it('26 annotations produces 2 batches (just over boundary)', async () => {
+    const annotations = generateAnnotations(26);
+
+    // Batch 1: tool_0 to tool_24 (25 tools). Batch 2: tool_25 (1 tool).
+    const batch1Response = {
+      scenarios: [
+        {
+          description: 'Batch 1 scenario',
+          request: { serverName: 'serverA', toolName: 'tool_0', arguments: { path: '/tmp/sandbox/a' } },
+          expectedDecision: 'allow',
+          reasoning: 'ok',
+        },
+      ],
+    };
+    const batch2Response = {
+      scenarios: [
+        {
+          description: 'Batch 2 scenario',
+          request: { serverName: 'serverB', toolName: 'tool_25', arguments: { path: '/tmp/sandbox/b' } },
+          expectedDecision: 'allow',
+          reasoning: 'ok',
+        },
+      ],
+    };
+
+    const { model, calls } = createCallTrackingMockModel([batch1Response, batch2Response]);
+
+    const result = await generateScenarios(sampleConstitution, annotations, [], SANDBOX_DIR, model);
+
+    expect(calls).toHaveLength(2);
+    expect(result).toHaveLength(2);
+  });
+
+  it('0 annotations returns only handwritten scenarios without LLM call', async () => {
+    // Empty annotations should early-return without calling the LLM,
+    // since chunk([]) returns [[]] and z.enum([]) would throw.
+    const { model, calls } = createCallTrackingMockModel([]);
+
+    const result = await generateScenarios(sampleConstitution, [], handwrittenScenarios, SANDBOX_DIR, model);
+
+    // No LLM calls made
+    expect(calls).toHaveLength(0);
+    // Only handwritten scenarios returned
+    expect(result).toHaveLength(2);
+    expect(result.every((s) => s.source === 'handwritten')).toBe(true);
   });
 });
 
 // ---------------------------------------------------------------------------
-// mergeReplacements tests
+// repairScenarios tests
 // ---------------------------------------------------------------------------
 
-describe('mergeReplacements', () => {
-  const baseScenarios: TestScenario[] = [
-    {
-      description: 'Handwritten scenario',
-      request: { serverName: 'filesystem', toolName: 'read_file', arguments: { path: '/sandbox/test' } },
-      expectedDecision: 'allow',
-      reasoning: 'ok',
-      source: 'handwritten',
-    },
-    {
-      description: 'Generated allow',
-      request: { serverName: 'filesystem', toolName: 'write_file', arguments: { path: '/sandbox/out.txt' } },
-      expectedDecision: 'allow',
-      reasoning: 'within sandbox',
-      source: 'generated',
-    },
-    {
-      description: 'Generated deny',
-      request: { serverName: 'filesystem', toolName: 'read_file', arguments: { path: '/etc/passwd' } },
-      expectedDecision: 'deny',
-      reasoning: 'categorically forbidden',
-      source: 'generated',
-    },
-  ];
-
-  it('removes corrected scenarios and adds replacements', () => {
-    const replacements: TestScenario[] = [
+describe('repairScenarios', () => {
+  it('generates replacement scenarios for discarded ones', async () => {
+    const discarded = [
       {
-        description: 'Replacement escalate',
-        request: { serverName: 'filesystem', toolName: 'read_file', arguments: { path: '/etc/config' } },
-        expectedDecision: 'escalate',
-        reasoning: 'not forbidden',
-        source: 'generated',
+        scenario: {
+          description: 'Write to audit log',
+          request: { serverName: 'filesystem', toolName: 'write_file', arguments: { path: '/var/log/audit.jsonl' } },
+          expectedDecision: 'allow' as const,
+          reasoning: 'test',
+          source: 'generated' as const,
+        },
+        feedback: 'structural-protected-paths always returns deny',
       },
     ];
 
-    const result = mergeReplacements(baseScenarios, replacements, [{ scenarioDescription: 'Generated deny' }], []);
+    const replacementScenario = {
+      description: 'Write file in sandbox',
+      request: {
+        serverName: 'filesystem',
+        toolName: 'write_file',
+        arguments: { path: '/tmp/sandbox/output.txt' },
+      },
+      expectedDecision: 'allow' as const,
+      reasoning: 'Within sandbox',
+    };
 
-    expect(result.map((s) => s.description)).toEqual([
-      'Handwritten scenario',
-      'Generated allow',
-      'Replacement escalate',
-    ]);
+    const { model } = createCallTrackingMockModel([{ scenarios: [replacementScenario] }]);
+
+    const result = await repairScenarios(discarded, sampleConstitution, sampleAnnotations, SANDBOX_DIR, model);
+
+    expect(result).toHaveLength(1);
+    expect(result[0].source).toBe('generated');
+    expect(result[0].description).toBe('Write file in sandbox');
   });
 
-  it('removes discarded scenarios (non-handwritten only)', () => {
-    const discarded: DiscardedScenario[] = [
+  it('passes discarded scenario details in the prompt', async () => {
+    const discarded = [
       {
-        scenario: baseScenarios[2], // Generated deny
-        actual: 'deny',
-        rule: 'structural-protected-paths',
+        scenario: {
+          description: 'Write to audit log',
+          request: { serverName: 'filesystem', toolName: 'write_file', arguments: { path: '/var/log/audit.jsonl' } },
+          expectedDecision: 'allow' as const,
+          reasoning: 'test',
+          source: 'generated' as const,
+        },
+        feedback: 'structural-protected-paths always returns deny',
       },
     ];
 
-    const result = mergeReplacements(baseScenarios, [], [], discarded);
+    const { model, calls } = createCallTrackingMockModel([{ scenarios: [] }]);
 
-    expect(result.map((s) => s.description)).toEqual(['Handwritten scenario', 'Generated allow']);
+    await repairScenarios(discarded, sampleConstitution, sampleAnnotations, SANDBOX_DIR, model);
+
+    const userMsg = calls[0].messages.find((m) => m.role === 'user')?.content ?? '';
+    expect(userMsg).toContain('Write to audit log');
+    expect(userMsg).toContain('structural-protected-paths always returns deny');
+    expect(userMsg).toContain('structural invariants');
   });
 
-  it('never removes handwritten scenarios via discarded', () => {
-    const discarded: DiscardedScenario[] = [
+  it('returns empty array when LLM returns no scenarios', async () => {
+    const discarded = [
       {
-        scenario: baseScenarios[0], // Handwritten
-        actual: 'deny',
-        rule: 'structural-something',
+        scenario: {
+          description: 'test',
+          request: { serverName: 'filesystem', toolName: 'read_file', arguments: {} },
+          expectedDecision: 'deny' as const,
+          reasoning: 'test',
+          source: 'generated' as const,
+        },
+        feedback: 'conflict',
       },
     ];
 
-    const result = mergeReplacements(baseScenarios, [], [], discarded);
+    const { model } = createCallTrackingMockModel([{ scenarios: [] }]);
 
-    // Handwritten should still be present
-    expect(result.find((s) => s.description === 'Handwritten scenario')).toBeDefined();
-  });
-
-  it('deduplicates replacements against kept scenarios', () => {
-    const replacements: TestScenario[] = [
-      {
-        // Same description as an existing kept scenario
-        description: 'Generated allow',
-        request: { serverName: 'filesystem', toolName: 'write_file', arguments: { path: '/other' } },
-        expectedDecision: 'allow',
-        reasoning: 'dup',
-        source: 'generated',
-      },
-      {
-        description: 'Unique replacement',
-        request: { serverName: 'filesystem', toolName: 'read_file', arguments: { path: '/new' } },
-        expectedDecision: 'escalate',
-        reasoning: 'new',
-        source: 'generated',
-      },
-    ];
-
-    const result = mergeReplacements(baseScenarios, replacements, [], []);
-
-    // Duplicate "Generated allow" replacement should be filtered out
-    const descriptions = result.map((s) => s.description);
-    expect(descriptions.filter((d) => d === 'Generated allow')).toHaveLength(1);
-    expect(descriptions).toContain('Unique replacement');
-  });
-
-  it('handles empty corrections and discards gracefully', () => {
-    const result = mergeReplacements(baseScenarios, [], [], []);
-    expect(result).toEqual(baseScenarios);
+    const result = await repairScenarios(discarded, sampleConstitution, sampleAnnotations, SANDBOX_DIR, model);
+    expect(result).toHaveLength(0);
   });
 });
 

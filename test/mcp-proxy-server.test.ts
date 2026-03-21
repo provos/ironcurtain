@@ -508,7 +508,6 @@ describe('handleCallTool', () => {
       toolName: 'read_file',
       serverName: 'fs',
       comment: 'Reads a file',
-      sideEffects: false,
       args: { path: ['read-path'] },
     };
 
@@ -732,7 +731,6 @@ describe('handleCallTool', () => {
       toolName: 'git_set_working_dir',
       serverName: 'git',
       comment: 'Sets working dir',
-      sideEffects: false,
       args: { path: ['none'] },
     };
     vi.mocked(deps.policyEngine.getAnnotation).mockReturnValue(gitAnnotation);
@@ -764,7 +762,6 @@ describe('handleCallTool', () => {
         toolName: 'git_push',
         serverName: 'git',
         comment: 'Pushes commits',
-        sideEffects: true,
         args: { path: ['read-path'], remote: ['git-remote-url'], branch: ['branch-name'] },
       };
 

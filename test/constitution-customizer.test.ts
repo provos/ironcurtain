@@ -101,21 +101,21 @@ const sampleAnnotations: ToolAnnotation[] = [
     toolName: 'read_file',
     serverName: 'filesystem',
     comment: 'Reads the contents of a file',
-    sideEffects: false,
+
     args: { path: ['read-path'] },
   },
   {
     toolName: 'write_file',
     serverName: 'filesystem',
     comment: 'Writes content to a file',
-    sideEffects: true,
+
     args: { path: ['write-path'], content: ['none'] },
   },
   {
     toolName: 'git_status',
     serverName: 'git',
     comment: 'Shows the current git status',
-    sideEffects: false,
+
     args: { path: ['read-path'] },
   },
 ];
@@ -258,7 +258,7 @@ describe('formatAnnotationsForPrompt', () => {
         toolName: 'ping',
         serverName: 'util',
         comment: 'Pings a service',
-        sideEffects: false,
+
         args: { target: ['none'] },
       },
     ];
@@ -274,7 +274,7 @@ describe('formatAnnotationsForPrompt', () => {
       toolName: `tool_with_a_long_name_${i}`,
       serverName: `server_${i}`,
       comment: `This is a detailed description of tool number ${i} that takes up space`,
-      sideEffects: false,
+
       args: {
         longArgName1: ['read-path'],
         longArgName2: ['write-path'],

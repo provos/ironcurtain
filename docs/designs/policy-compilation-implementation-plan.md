@@ -41,7 +41,6 @@ interface ToolAnnotation {
   toolName: string;
   serverName: string;
   comment: string;               // LLM-generated description
-  sideEffects: boolean;
   args: Record<string, ArgumentRole[]>;
 }
 
@@ -60,7 +59,6 @@ interface CompiledRuleCondition {
   roles?: ArgumentRole[];        // match tools with any argument having these roles
   server?: string[];
   tool?: string[];
-  sideEffects?: boolean;
   paths?: PathCondition;
 }
 

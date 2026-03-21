@@ -21,13 +21,7 @@ import { getIronCurtainHome, getUserGeneratedDir, loadConstitutionText } from '.
 // Re-export so existing pipeline callers (loadPipelineConfig) don't need updating.
 import type { MCPServerConfig } from '../config/types.js';
 import { loadUserConfig } from '../config/user-config.js';
-import type {
-  CompiledRule,
-  DiscardedScenario,
-  TestScenario,
-  ToolAnnotationsFile,
-  StoredToolAnnotationsFile,
-} from './types.js';
+import type { CompiledRule, ToolAnnotationsFile, StoredToolAnnotationsFile } from './types.js';
 import { resolveRealPath, resolveStoredAnnotationsFile } from '../types/argument-roles.js';
 import { createLlmLoggingMiddleware, type LlmLogContext } from './llm-logger.js';
 import { createCacheStrategy, type PromptCacheStrategy } from '../session/prompt-cache.js';
@@ -223,33 +217,6 @@ export function resolveRulePaths(rules: CompiledRule[]): CompiledRule[] {
       },
     };
   });
-}
-
-// ---------------------------------------------------------------------------
-// Scenario Merge
-// ---------------------------------------------------------------------------
-
-/**
- * Merges replacement scenarios from the regeneration session into the
- * scenario list. Removes corrected and discarded scenarios, then adds
- * unique replacements that don't duplicate any remaining scenario.
- */
-export function mergeReplacements(
-  scenarios: TestScenario[],
-  replacements: TestScenario[],
-  corrections: ReadonlyArray<{ scenarioDescription: string }>,
-  discardedScenarios: ReadonlyArray<DiscardedScenario>,
-): TestScenario[] {
-  const removedDescriptions = new Set([
-    ...corrections.map((c) => c.scenarioDescription),
-    ...discardedScenarios.filter((d) => d.scenario.source !== 'handwritten').map((d) => d.scenario.description),
-  ]);
-
-  const kept = scenarios.filter((s) => !removedDescriptions.has(s.description));
-  const keptDescriptions = new Set(kept.map((s) => s.description));
-  const uniqueReplacements = replacements.filter((r) => !keptDescriptions.has(r.description));
-
-  return [...kept, ...uniqueReplacements];
 }
 
 // ---------------------------------------------------------------------------

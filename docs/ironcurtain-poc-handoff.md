@@ -46,8 +46,8 @@ For each request, the trusted process:
 The constitution is an English-language document (`src/config/constitution.md`) that describes what the agent may and may not do. Example sections cover filesystem access rules (read/write within sandbox, deny outside, never delete), protected paths, and unknown tool handling.
 
 **Compilation (four-stage offline pipeline, `npm run compile-policy`):**
-- Stage 1 -- **Tool annotation**: An LLM classifies each MCP tool's arguments with semantic roles (`read-path`, `write-path`, `delete-path`, `none`) and whether the tool has side effects. Produces `tool-annotations.json`.
-- Stage 2 -- **Constitution compilation**: An LLM translates the English constitution into declarative `if`/`then` rules. Each rule has conditions (`roles`, `paths`, `sideEffects`, `tool`, `server`) and a decision (`allow`, `deny`, `escalate`). Produces `compiled-policy.json`.
+- Stage 1 -- **Tool annotation**: An LLM classifies each MCP tool's arguments with semantic roles (`read-path`, `write-path`, `delete-path`, `none`). Produces `tool-annotations.json`.
+- Stage 2 -- **Constitution compilation**: An LLM translates the English constitution into declarative `if`/`then` rules. Each rule has conditions (`roles`, `paths`, `tool`, `server`) and a decision (`allow`, `deny`, `escalate`). Produces `compiled-policy.json`.
 - Stage 3 -- **Scenario generation**: An LLM generates test scenarios, combined with 15 handwritten mandatory scenarios. Produces `test-scenarios.json`.
 - Stage 4 -- **Multi-round verification**: Scenarios are executed against the real PolicyEngine. An LLM judge analyzes failures and generates additional adversarial scenarios across up to 3 rounds.
 

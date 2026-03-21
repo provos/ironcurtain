@@ -425,7 +425,6 @@ function makeStored(args: Record<string, ArgumentRoleSpec>): StoredToolAnnotatio
     toolName: 'test_tool',
     serverName: 'test',
     comment: 'Test tool',
-    sideEffects: true,
     args,
   };
 }
@@ -475,7 +474,6 @@ describe('resolveStoredAnnotation', () => {
     expect(resolved.toolName).toBe('test_tool');
     expect(resolved.serverName).toBe('test');
     expect(resolved.comment).toBe('Test tool');
-    expect(resolved.sideEffects).toBe(true);
   });
 
   it('returns default roles when no conditions match', () => {

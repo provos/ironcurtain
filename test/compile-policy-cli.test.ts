@@ -54,4 +54,23 @@ describe('parseCompilePolicyArgs', () => {
     expect(result.outputDir).toBe(resolve('./relative/dir'));
     expect(result.outputDir).toMatch(/^\//);
   });
+
+  it('parses --server flag', () => {
+    const result = parseCompilePolicyArgs(['--server', 'filesystem']);
+    expect(result.server).toBe('filesystem');
+  });
+
+  it('parses --server with other flags', () => {
+    const result = parseCompilePolicyArgs([
+      '--constitution',
+      '/path/to/c.md',
+      '--server',
+      'git',
+      '--output-dir',
+      '/tmp/out',
+    ]);
+    expect(result.server).toBe('git');
+    expect(result.constitution).toBe('/path/to/c.md');
+    expect(result.outputDir).toBe('/tmp/out');
+  });
 });

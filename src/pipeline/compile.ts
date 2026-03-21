@@ -9,6 +9,7 @@
  * CLI flags:
  *   --constitution <path>  Use an alternative constitution file
  *   --output-dir <path>    Write compiled artifacts to this directory
+ *   --server <name>        Compile only this server (for debugging)
  */
 
 import { resolve } from 'node:path';
@@ -19,7 +20,7 @@ import { loadPipelineConfig, loadToolAnnotationsFile } from './pipeline-shared.j
 import { PipelineRunner, createPipelineModels } from './pipeline-runner.js';
 
 // Re-export utilities that test files import from this file.
-export { resolveRulePaths, mergeReplacements } from './pipeline-shared.js';
+export { resolveRulePaths } from './pipeline-shared.js';
 
 // ---------------------------------------------------------------------------
 // CLI Argument Parsing
@@ -28,10 +29,11 @@ export { resolveRulePaths, mergeReplacements } from './pipeline-shared.js';
 export interface CompilePolicyCliArgs {
   constitution?: string;
   outputDir?: string;
+  server?: string;
 }
 
 /**
- * Parses --constitution and --output-dir from process.argv.
+ * Parses --constitution, --output-dir, and --server from process.argv.
  * Returns resolved absolute paths when provided.
  */
 export function parseCompilePolicyArgs(argv: string[] = process.argv.slice(2)): CompilePolicyCliArgs {
@@ -40,14 +42,17 @@ export function parseCompilePolicyArgs(argv: string[] = process.argv.slice(2)): 
     options: {
       constitution: { type: 'string' },
       'output-dir': { type: 'string' },
+      server: { type: 'string' },
     },
     strict: false,
   });
   const constitution = typeof values.constitution === 'string' ? values.constitution : undefined;
   const outputDir = typeof values['output-dir'] === 'string' ? values['output-dir'] : undefined;
+  const server = typeof values.server === 'string' ? values.server : undefined;
   return {
     constitution: constitution ? resolve(constitution) : undefined,
     outputDir: outputDir ? resolve(outputDir) : undefined,
+    server,
   };
 }
 
@@ -71,15 +76,19 @@ export async function main(): Promise<void> {
   }
 
   const allAnnotations = Object.values(toolAnnotationsFile.servers).flatMap((server) => server.tools);
+  const serverNames = Object.keys(toolAnnotationsFile.servers);
 
-  console.error(chalk.bold('Policy Compilation Pipeline'));
-  console.error(chalk.bold('==========================='));
+  console.error(chalk.bold('Policy Compilation Pipeline (per-server)'));
+  console.error(chalk.bold('========================================='));
   console.error(`Constitution: ${chalk.dim(config.constitutionPath)}`);
   console.error(`Sandbox:      ${chalk.dim(config.allowedDirectory)}`);
   console.error(`Output:       ${chalk.dim(config.generatedDir + '/')}`);
   console.error(
-    `Annotations:  ${chalk.dim(`${allAnnotations.length} tools from ${Object.keys(toolAnnotationsFile.servers).length} server(s)`)}`,
+    `Annotations:  ${chalk.dim(`${allAnnotations.length} tools from ${serverNames.length} server(s): ${serverNames.join(', ')}`)}`,
   );
+  if (cliArgs.server) {
+    console.error(`Server filter: ${chalk.cyan(cliArgs.server)}`);
+  }
   console.error('');
 
   const models = await createPipelineModels(config.generatedDir);
@@ -98,6 +107,7 @@ export async function main(): Promise<void> {
       mcpServers: config.mcpServers,
       llmLogPath: models.logPath,
       preloadedToolAnnotations: toolAnnotationsFile,
+      serverFilter: cliArgs.server ? [cliArgs.server] : undefined,
     });
   } catch (err) {
     if (err instanceof Error && err.message.includes('Verification FAILED')) {

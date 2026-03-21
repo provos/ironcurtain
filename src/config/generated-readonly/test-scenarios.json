@@ -422,7 +422,7 @@
         "arguments": {}
       },
       "expectedDecision": "allow",
-      "reasoning": "get_me has sideEffects=false and is a read-only identity query, always permitted.",
+      "reasoning": "get_me is a read-only identity query, always permitted.",
       "source": "generated"
     },
     {

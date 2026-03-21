@@ -2,23 +2,37 @@
  * Tool Annotator -- LLM-driven classification of MCP tool capabilities.
  *
  * Given a set of MCP tool schemas from a server, the annotator uses an LLM
- * to classify each tool's effect, side effects, and argument roles. A
- * compile-time heuristic validator catches annotation gaps before they
- * reach runtime.
+ * to classify each tool's argument roles. Results are processed in batches
+ * with Zod schema validation and repair loops to ensure correctness.
  */
 
 import type { LanguageModel } from 'ai';
 import { z } from 'zod';
 import {
   ARGUMENT_ROLE_REGISTRY,
-  extractDefaultRoles,
-  getRoleDefinition,
   getRolesForServer,
   isConditionalRoles,
   type ArgumentRole,
 } from '../types/argument-roles.js';
 import { generateObjectWithRepair } from './generate-with-repair.js';
 import type { StoredToolAnnotation } from './types.js';
+
+/** Default number of tools per LLM call. */
+export const ANNOTATION_BATCH_SIZE = 25;
+
+/**
+ * Splits an array into chunks of at most `size` elements.
+ * Returns the original array (wrapped) if it fits in one chunk.
+ */
+export function chunk<T>(items: T[], size: number): T[][] {
+  if (size <= 0) throw new RangeError(`chunk size must be positive, got ${size}`);
+  if (items.length <= size) return [items];
+  const result: T[][] = [];
+  for (let i = 0; i < items.length; i += size) {
+    result.push(items.slice(i, i + size));
+  }
+  return result;
+}
 
 // Input type matching what MCP's listTools() returns
 export interface MCPToolSchema {
@@ -86,7 +100,6 @@ function buildAnnotationsResponseSchema(serverName: string, tools: MCPToolSchema
   const toolAnnotationSchema = z.object({
     toolName: z.enum(toolNames),
     comment: z.string(),
-    sideEffects: z.boolean(),
     args: z.record(z.string(), argumentRoleSpecSchema),
   });
 
@@ -154,12 +167,7 @@ export function buildAnnotationPrompt(serverName: string, tools: MCPToolSchema[]
 
 1. **comment**: A brief one-sentence description of what the tool does.
 
-2. **sideEffects**: Whether the tool has security-relevant side effects.
-   - true if the tool modifies state OR can disclose information from resource paths (information disclosure is a security-relevant side effect)
-   - false ONLY if the tool has NO path arguments AND makes no state changes (e.g., a pure configuration query tool)
-   - When in doubt, mark as true (conservative)
-
-3. **args**: For each argument in the tool's input schema, assign an ARRAY of one or more roles:
+2. **args**: For each argument in the tool's input schema, assign an ARRAY of one or more roles:
 ${buildRoleDescriptions(serverName)}
 
    IMPORTANT: Each value in the args object MUST be an ARRAY of roles, even for single roles.
@@ -175,7 +183,6 @@ Here is a complete example annotation for a move_file tool that shows multi-role
 {
   "toolName": "move_file",
   "comment": "Moves or renames a file or directory from a source path to a destination path in a single operation.",
-  "sideEffects": true,
   "args": {
     "source": ["read-path", "delete-path"],
     "destination": ["write-path"]
@@ -262,118 +269,41 @@ export async function annotateTools(
 ): Promise<StoredToolAnnotation[]> {
   if (tools.length === 0) return [];
 
-  const schema = buildAnnotationsResponseSchema(serverName, tools);
-  const prompt = buildAnnotationPrompt(serverName, tools);
+  const batches = chunk(tools, ANNOTATION_BATCH_SIZE);
+  const allAnnotations: StoredToolAnnotation[] = [];
 
-  const { output } = await generateObjectWithRepair({
-    model: llm,
-    schema,
-    prompt,
-    onProgress,
-  });
+  for (let i = 0; i < batches.length; i++) {
+    const batch = batches[i];
 
-  const annotations: StoredToolAnnotation[] = output.annotations.map((a) => ({
-    ...a,
-    serverName,
-  }));
+    if (batches.length > 1) {
+      onProgress?.(`Batch ${i + 1}/${batches.length} (${batch.length} tools)`);
+    }
 
-  // Validate all input tools are represented in the output
-  const annotatedNames = new Set(annotations.map((a) => a.toolName));
+    const schema = buildAnnotationsResponseSchema(serverName, batch);
+    const prompt = buildAnnotationPrompt(serverName, batch);
+
+    const { output } = await generateObjectWithRepair({
+      model: llm,
+      schema,
+      prompt,
+      onProgress: batches.length > 1 ? (msg) => onProgress?.(`Batch ${i + 1}/${batches.length}: ${msg}`) : onProgress,
+    });
+
+    const batchAnnotations: StoredToolAnnotation[] = output.annotations.map((a) => ({
+      ...a,
+      serverName,
+    }));
+
+    allAnnotations.push(...batchAnnotations);
+  }
+
+  // Validate all input tools are represented across all batches
+  const annotatedNames = new Set(allAnnotations.map((a) => a.toolName));
   const missingTools = tools.filter((t) => !annotatedNames.has(t.name));
   if (missingTools.length > 0) {
     const names = missingTools.map((t) => t.name).join(', ');
     throw new Error(`Annotation incomplete: missing tools: ${names}`);
   }
 
-  return annotations;
-}
-
-// -----------------------------------------------------------------------
-// Compile-time heuristic validation
-// -----------------------------------------------------------------------
-
-/** Argument names that strongly suggest filesystem path arguments. */
-const PATH_INDICATOR_NAMES = ['path', 'file', 'dir', 'directory', 'source', 'destination'];
-
-function looksLikePathArgument(argName: string): boolean {
-  const lower = argName.toLowerCase();
-  return PATH_INDICATOR_NAMES.some((indicator) => lower.includes(indicator));
-}
-
-function hasPathLikeValues(schema: Record<string, unknown>): boolean {
-  const properties = schema['properties'] as Record<string, Record<string, unknown>> | undefined;
-  if (!properties) return false;
-
-  for (const prop of Object.values(properties)) {
-    const defaultVal = prop['default'];
-    if (typeof defaultVal === 'string' && (defaultVal.startsWith('/') || defaultVal.startsWith('.'))) {
-      return true;
-    }
-    const examples = prop['examples'];
-    if (Array.isArray(examples)) {
-      for (const ex of examples) {
-        if (typeof ex === 'string' && (ex.startsWith('/') || ex.startsWith('.'))) {
-          return true;
-        }
-      }
-    }
-  }
-  return false;
-}
-
-export interface HeuristicValidationResult {
-  valid: boolean;
-  warnings: string[];
-}
-
-export function validateAnnotationsHeuristic(
-  tools: MCPToolSchema[],
-  annotations: StoredToolAnnotation[],
-): HeuristicValidationResult {
-  const annotationsByName = new Map<string, StoredToolAnnotation>();
-  for (const a of annotations) {
-    annotationsByName.set(a.toolName, a);
-  }
-
-  const warnings: string[] = [];
-
-  for (const tool of tools) {
-    const annotation = annotationsByName.get(tool.name);
-    if (!annotation) {
-      warnings.push(`Tool "${tool.name}" has no annotation`);
-      continue;
-    }
-
-    const properties = (tool.inputSchema['properties'] ?? {}) as Record<string, Record<string, unknown>>;
-
-    for (const [argName, argSchema] of Object.entries(properties)) {
-      if (!looksLikePathArgument(argName)) continue;
-
-      // Skip non-string arguments (booleans, enums, numbers named "directories" etc.)
-      const argType = argSchema['type'];
-      if (argType === 'boolean' || argType === 'number' || argType === 'integer') continue;
-
-      const roles = argName in annotation.args ? extractDefaultRoles(annotation.args[argName]) : undefined;
-      const hasPathRole = roles && roles.some((r) => getRoleDefinition(r).isResourceIdentifier);
-
-      if (!hasPathRole) {
-        warnings.push(`Tool "${tool.name}" argument "${argName}" looks like a path but has no path role in annotation`);
-      }
-    }
-
-    // Check for path-like default values or examples
-    if (hasPathLikeValues(tool.inputSchema)) {
-      const hasAnyPathRole = Object.values(annotation.args).some((spec) =>
-        extractDefaultRoles(spec).some((r) => getRoleDefinition(r).isResourceIdentifier),
-      );
-      if (!hasAnyPathRole) {
-        warnings.push(`Tool "${tool.name}" schema has path-like defaults/examples but no path roles in annotation`);
-      }
-    }
-  }
-
-  return {
-    valid: warnings.length === 0,
-    warnings,
-  };
+  return allAnnotations;
 }

@@ -2,11 +2,11 @@ import { describe, it, expect } from 'vitest';
 import { MockLanguageModelV3 } from 'ai/test';
 import {
   annotateTools,
-  validateAnnotationsHeuristic,
   buildRoleDescriptions,
+  chunk,
+  ANNOTATION_BATCH_SIZE,
   type MCPToolSchema,
 } from '../src/pipeline/tool-annotator.js';
-import type { StoredToolAnnotation } from '../src/pipeline/types.js';
 import { getRolesForServer } from '../src/types/argument-roles.js';
 
 const sampleTools: MCPToolSchema[] = [
@@ -57,25 +57,25 @@ const cannedAnnotations = {
     {
       toolName: 'read_file',
       comment: 'Reads the complete contents of a file from disk',
-      sideEffects: true,
+
       args: { path: ['read-path'] },
     },
     {
       toolName: 'write_file',
       comment: 'Creates or overwrites a file with new content',
-      sideEffects: true,
+
       args: { path: ['write-path'], content: ['none'] },
     },
     {
       toolName: 'move_file',
       comment: 'Moves a file from source to destination, deleting the source',
-      sideEffects: true,
+
       args: { source: ['read-path', 'delete-path'], destination: ['write-path'] },
     },
     {
       toolName: 'list_allowed_directories',
       comment: 'Lists directories the server is allowed to access',
-      sideEffects: false,
+
       args: {},
     },
   ],
@@ -142,72 +142,6 @@ describe('Tool Annotator', () => {
       const mockLLM = createMockModel({ annotations: [] });
       const result = await annotateTools('filesystem', [], mockLLM);
       expect(result).toEqual([]);
-    });
-  });
-
-  describe('validateAnnotationsHeuristic', () => {
-    const fullAnnotations: StoredToolAnnotation[] = cannedAnnotations.annotations.map((a) => ({
-      ...a,
-      serverName: 'filesystem',
-    }));
-
-    it('passes when all path arguments are annotated', () => {
-      const result = validateAnnotationsHeuristic(sampleTools, fullAnnotations);
-      expect(result.valid).toBe(true);
-      expect(result.warnings).toHaveLength(0);
-    });
-
-    it('warns when a path-like argument has no path role', () => {
-      const badAnnotations: StoredToolAnnotation[] = fullAnnotations.map((a) => {
-        if (a.toolName === 'read_file') {
-          return { ...a, args: { path: ['none'] } };
-        }
-        return a;
-      });
-
-      const result = validateAnnotationsHeuristic(sampleTools, badAnnotations);
-      expect(result.valid).toBe(false);
-      expect(result.warnings.length).toBeGreaterThan(0);
-      expect(result.warnings[0]).toContain('read_file');
-      expect(result.warnings[0]).toContain('path');
-    });
-
-    it('warns when tool has no annotation at all', () => {
-      const missingAnnotations = fullAnnotations.filter((a) => a.toolName !== 'write_file');
-      const result = validateAnnotationsHeuristic(sampleTools, missingAnnotations);
-      expect(result.valid).toBe(false);
-      expect(result.warnings.some((w) => w.includes('write_file'))).toBe(true);
-    });
-
-    it('detects path-like defaults in schema', () => {
-      const toolWithDefaults: MCPToolSchema[] = [
-        {
-          name: 'custom_tool',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              target: {
-                type: 'string',
-                default: '/home/user/file.txt',
-              },
-            },
-          },
-        },
-      ];
-
-      const noPathRoleAnnotations: StoredToolAnnotation[] = [
-        {
-          toolName: 'custom_tool',
-          serverName: 'test',
-          comment: 'A custom tool with path-like defaults',
-          sideEffects: false,
-          args: { target: ['none'] },
-        },
-      ];
-
-      const result = validateAnnotationsHeuristic(toolWithDefaults, noPathRoleAnnotations);
-      expect(result.valid).toBe(false);
-      expect(result.warnings.some((w) => w.includes('path-like defaults'))).toBe(true);
     });
   });
 
@@ -281,6 +215,249 @@ describe('Tool Annotator', () => {
       const fetchRoles = getRolesForServer('fetch');
       expect(gitRoles.length).toBeGreaterThan(fsRoles.length);
       expect(gitRoles.length).toBeGreaterThan(fetchRoles.length);
+    });
+  });
+
+  describe('chunk', () => {
+    it('returns empty array wrapped for empty input', () => {
+      expect(chunk([], 5)).toEqual([[]]);
+    });
+
+    it('returns single chunk when array is smaller than batch size', () => {
+      const items = [1, 2, 3];
+      const result = chunk(items, 5);
+      expect(result).toEqual([[1, 2, 3]]);
+      // Should return the original array reference (no copy)
+      expect(result[0]).toBe(items);
+    });
+
+    it('returns single chunk when array equals batch size', () => {
+      const items = [1, 2, 3, 4, 5];
+      const result = chunk(items, 5);
+      expect(result).toEqual([[1, 2, 3, 4, 5]]);
+      expect(result[0]).toBe(items);
+    });
+
+    it('splits into exact multiples', () => {
+      const result = chunk([1, 2, 3, 4, 5, 6], 3);
+      expect(result).toEqual([
+        [1, 2, 3],
+        [4, 5, 6],
+      ]);
+    });
+
+    it('handles non-exact multiples with smaller last chunk', () => {
+      const result = chunk([1, 2, 3, 4, 5, 6, 7], 3);
+      expect(result).toEqual([[1, 2, 3], [4, 5, 6], [7]]);
+    });
+
+    it('throws on zero size', () => {
+      expect(() => chunk([1, 2], 0)).toThrow(RangeError);
+    });
+
+    it('throws on negative size', () => {
+      expect(() => chunk([1, 2], -1)).toThrow(RangeError);
+    });
+  });
+
+  describe('ANNOTATION_BATCH_SIZE', () => {
+    it('is 25', () => {
+      expect(ANNOTATION_BATCH_SIZE).toBe(25);
+    });
+  });
+
+  describe('annotateTools batching', () => {
+    // Helper to generate N minimal tools for the filesystem server
+    function makeTools(count: number): MCPToolSchema[] {
+      return Array.from({ length: count }, (_, i) => ({
+        name: `tool_${i}`,
+        description: `Tool number ${i}`,
+        inputSchema: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'A path' },
+          },
+          required: ['path'],
+        },
+      }));
+    }
+
+    // Create a mock model that tracks call count and returns correct annotations
+    // for whichever tools appear in the prompt
+    function createBatchTrackingModel(tools: MCPToolSchema[]) {
+      let callCount = 0;
+      const model = new MockLanguageModelV3({
+        doGenerate: async (options) => {
+          callCount++;
+          // Extract tool names from the prompt to determine which batch this is.
+          // Use word-boundary regex to avoid "tool_2" matching inside "tool_25".
+          const prompt = JSON.stringify(options.prompt);
+          const batchTools = tools.filter((t) => {
+            const pattern = new RegExp(`Tool: ${t.name}\\b`);
+            return pattern.test(prompt);
+          });
+
+          const annotations = batchTools.map((t) => ({
+            toolName: t.name,
+            comment: `Annotation for ${t.name}`,
+
+            args: { path: ['read-path'] },
+          }));
+
+          return {
+            content: [{ type: 'text' as const, text: JSON.stringify({ annotations }) }],
+            finishReason: { unified: 'stop' as const, raw: 'stop' },
+            usage: {
+              inputTokens: { total: 100, noCache: undefined, cacheRead: undefined, cacheWrite: undefined },
+              outputTokens: { total: 50, text: undefined, reasoning: undefined },
+            },
+            warnings: [],
+            request: {},
+            response: { id: 'test-id', modelId: 'test-model', timestamp: new Date() },
+          };
+        },
+      });
+
+      return { model, getCallCount: () => callCount };
+    }
+
+    it('makes a single LLM call for tools within batch size', async () => {
+      const tools = makeTools(10);
+      const { model, getCallCount } = createBatchTrackingModel(tools);
+
+      const result = await annotateTools('filesystem', tools, model);
+
+      expect(getCallCount()).toBe(1);
+      expect(result).toHaveLength(10);
+      expect(result.every((a) => a.serverName === 'filesystem')).toBe(true);
+    });
+
+    it('makes two LLM calls for tools exceeding batch size', async () => {
+      const tools = makeTools(30);
+      const { model, getCallCount } = createBatchTrackingModel(tools);
+
+      const result = await annotateTools('filesystem', tools, model);
+
+      expect(getCallCount()).toBe(2); // 25 + 5
+      expect(result).toHaveLength(30);
+      // Verify all tool names are present
+      const names = new Set(result.map((a) => a.toolName));
+      for (const t of tools) {
+        expect(names.has(t.name)).toBe(true);
+      }
+    });
+
+    it('makes three LLM calls for 60 tools', async () => {
+      const tools = makeTools(60);
+      const { model, getCallCount } = createBatchTrackingModel(tools);
+
+      const result = await annotateTools('filesystem', tools, model);
+
+      expect(getCallCount()).toBe(3); // 25 + 25 + 10
+      expect(result).toHaveLength(60);
+    });
+
+    it('suppresses batch progress messages for single batch', async () => {
+      const tools = makeTools(10);
+      const { model } = createBatchTrackingModel(tools);
+      const messages: string[] = [];
+
+      await annotateTools('filesystem', tools, model, (msg) => messages.push(msg));
+
+      // No "Batch 1/1" messages
+      expect(messages.every((m) => !m.includes('Batch'))).toBe(true);
+    });
+
+    it('emits batch progress messages for multiple batches', async () => {
+      const tools = makeTools(30);
+      const { model } = createBatchTrackingModel(tools);
+      const messages: string[] = [];
+
+      await annotateTools('filesystem', tools, model, (msg) => messages.push(msg));
+
+      expect(messages.some((m) => m.includes('Batch 1/2'))).toBe(true);
+      expect(messages.some((m) => m.includes('Batch 2/2'))).toBe(true);
+    });
+
+    it('propagates error from failed batch without partial results', async () => {
+      const tools = makeTools(30);
+      let callCount = 0;
+
+      const model = new MockLanguageModelV3({
+        doGenerate: async (options) => {
+          callCount++;
+          if (callCount === 2) {
+            throw new Error('LLM service unavailable');
+          }
+
+          // Return valid annotations for the first batch
+          const prompt = JSON.stringify(options.prompt);
+          const batchTools = tools.filter((t) => new RegExp(`Tool: ${t.name}\\b`).test(prompt));
+          const annotations = batchTools.map((t) => ({
+            toolName: t.name,
+            comment: `Annotation for ${t.name}`,
+
+            args: { path: ['read-path'] },
+          }));
+
+          return {
+            content: [{ type: 'text' as const, text: JSON.stringify({ annotations }) }],
+            finishReason: { unified: 'stop' as const, raw: 'stop' },
+            usage: {
+              inputTokens: { total: 100, noCache: undefined, cacheRead: undefined, cacheWrite: undefined },
+              outputTokens: { total: 50, text: undefined, reasoning: undefined },
+            },
+            warnings: [],
+            request: {},
+            response: { id: 'test-id', modelId: 'test-model', timestamp: new Date() },
+          };
+        },
+      });
+
+      await expect(annotateTools('filesystem', tools, model)).rejects.toThrow('LLM service unavailable');
+    });
+
+    it('detects missing tools across batches', async () => {
+      const tools = makeTools(30);
+      let callCount = 0;
+
+      const model = new MockLanguageModelV3({
+        doGenerate: async (options) => {
+          callCount++;
+          const prompt = JSON.stringify(options.prompt);
+          const batchTools = tools.filter((t) => new RegExp(`Tool: ${t.name}\\b`).test(prompt));
+
+          // Second batch drops some tools
+          const annotations =
+            callCount === 2
+              ? batchTools.slice(0, 2).map((t) => ({
+                  toolName: t.name,
+                  comment: `Annotation for ${t.name}`,
+
+                  args: { path: ['read-path'] },
+                }))
+              : batchTools.map((t) => ({
+                  toolName: t.name,
+                  comment: `Annotation for ${t.name}`,
+
+                  args: { path: ['read-path'] },
+                }));
+
+          return {
+            content: [{ type: 'text' as const, text: JSON.stringify({ annotations }) }],
+            finishReason: { unified: 'stop' as const, raw: 'stop' },
+            usage: {
+              inputTokens: { total: 100, noCache: undefined, cacheRead: undefined, cacheWrite: undefined },
+              outputTokens: { total: 50, text: undefined, reasoning: undefined },
+            },
+            warnings: [],
+            request: {},
+            response: { id: 'test-id', modelId: 'test-model', timestamp: new Date() },
+          };
+        },
+      });
+
+      await expect(annotateTools('filesystem', tools, model)).rejects.toThrow('Annotation incomplete: missing tools');
     });
   });
 

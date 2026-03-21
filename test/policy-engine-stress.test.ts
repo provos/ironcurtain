@@ -53,9 +53,8 @@ function makeTool(
   serverName: string,
   toolName: string,
   args: Record<string, ToolAnnotation['args'][string]>,
-  sideEffects = true,
 ): ToolAnnotation {
-  return { toolName, serverName, comment: 'test', sideEffects, args };
+  return { toolName, serverName, comment: 'test', args };
 }
 
 // ---------------------------------------------------------------------------
@@ -79,7 +78,7 @@ describe('Role-agnostic rules after structural resolution', () => {
         url: ['git-remote-url'],
         path: ['write-path'],
       }),
-      makeTool('git', 'git_status', { path: ['read-path'] }, false),
+      makeTool('git', 'git_status', { path: ['read-path'] }),
     ],
   });
 
@@ -444,7 +443,7 @@ describe('Sandbox containment edge cases', () => {
         name: ['branch-name'],
         delete: ['none'],
       }),
-      makeTool('git', 'git_status', { path: ['read-path'] }, false),
+      makeTool('git', 'git_status', { path: ['read-path'] }),
     ],
   });
 
@@ -461,7 +460,7 @@ describe('Sandbox containment edge cases', () => {
       name: 'allow-git-read',
       description: 'Allow git reads',
       principle: 'test',
-      if: { server: ['git'], sideEffects: false },
+      if: { server: ['git'], tool: ['git_status'] },
       then: 'allow',
       reason: 'Reads are safe',
     },
@@ -714,7 +713,7 @@ describe('Compiled rule evaluation: rule matching', () => {
     filesystem: [
       makeTool('filesystem', 'read_file', { path: ['read-path'] }),
       makeTool('filesystem', 'write_file', { path: ['write-path'], content: ['none'] }),
-      makeTool('filesystem', 'list_dirs', {}, false),
+      makeTool('filesystem', 'list_dirs', {}),
     ],
     myserver: [makeTool('myserver', 'my_tool', { data: ['none'] })],
   });
@@ -743,70 +742,6 @@ describe('Compiled rule evaluation: rule matching', () => {
     const result = engine.evaluate(makeRequest({ arguments: { path: '/etc/file.txt' } }));
     expect(result.decision).toBe('allow');
     expect(result.rule).toBe('allow-all-reads');
-  });
-
-  it('sideEffects: false matches side-effect-free tools', () => {
-    const policy = makePolicy([
-      {
-        name: 'allow-pure',
-        description: 'Allow pure',
-        principle: 'test',
-        if: { sideEffects: false },
-        then: 'allow',
-        reason: 'Pure tools are safe',
-      },
-      {
-        name: 'deny-all',
-        description: 'Default deny',
-        principle: 'test',
-        if: {},
-        then: 'deny',
-        reason: 'Denied',
-      },
-    ]);
-
-    const engine = new PolicyEngine(policy, annotations, []);
-    const result = engine.evaluate(
-      makeRequest({
-        serverName: 'filesystem',
-        toolName: 'list_dirs',
-        arguments: {},
-      }),
-    );
-    expect(result.decision).toBe('allow');
-    expect(result.rule).toBe('allow-pure');
-  });
-
-  it('sideEffects: true does not match side-effect-free tools', () => {
-    const policy = makePolicy([
-      {
-        name: 'deny-side-effects',
-        description: 'Deny side effects',
-        principle: 'test',
-        if: { sideEffects: true },
-        then: 'deny',
-        reason: 'Side effects denied',
-      },
-      {
-        name: 'allow-all',
-        description: 'Allow all',
-        principle: 'test',
-        if: {},
-        then: 'allow',
-        reason: 'Allowed',
-      },
-    ]);
-
-    const engine = new PolicyEngine(policy, annotations, []);
-    const result = engine.evaluate(
-      makeRequest({
-        serverName: 'filesystem',
-        toolName: 'list_dirs',
-        arguments: {},
-      }),
-    );
-    expect(result.decision).toBe('allow');
-    expect(result.rule).toBe('allow-all');
   });
 
   it('paths.within condition with nested directories', () => {
@@ -877,13 +812,13 @@ describe('Compiled rule evaluation: rule matching', () => {
     expect(readResult.decision).toBe('allow');
   });
 
-  it('combined conditions: server + tool + sideEffects all must match', () => {
+  it('combined conditions: server + tool all must match', () => {
     const policy = makePolicy([
       {
         name: 'allow-specific',
         description: 'Allow specific combo',
         principle: 'test',
-        if: { server: ['filesystem'], tool: ['read_file'], sideEffects: true },
+        if: { server: ['filesystem'], tool: ['read_file'] },
         then: 'allow',
         reason: 'Specific match',
       },
@@ -1473,7 +1408,7 @@ describe('Argument edge cases', () => {
     filesystem: [
       makeTool('filesystem', 'read_file', { path: ['read-path'] }),
       makeTool('filesystem', 'read_multiple_files', { paths: ['read-path'] }),
-      makeTool('filesystem', 'list_dirs', {}, false),
+      makeTool('filesystem', 'list_dirs', {}),
     ],
   });
 
@@ -1482,7 +1417,7 @@ describe('Argument edge cases', () => {
       name: 'allow-pure',
       description: 'Allow pure tools',
       principle: 'test',
-      if: { sideEffects: false },
+      if: { tool: ['list_dirs'] },
       then: 'allow',
       reason: 'Pure tools safe',
     },

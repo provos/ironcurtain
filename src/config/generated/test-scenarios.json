@@ -262,7 +262,7 @@
         "arguments": {}
       },
       "expectedDecision": "allow",
-      "reasoning": "list_allowed_directories has sideEffects=false and requires no path arguments, so it is always permitted.",
+      "reasoning": "list_allowed_directories requires no path arguments, so it is always permitted.",
       "source": "generated"
     },
     {
