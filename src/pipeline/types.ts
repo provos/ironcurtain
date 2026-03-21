@@ -335,3 +335,18 @@ export interface RepairContext {
   existingListDefinitions?: ListDefinition[];
   handwrittenScenarios?: TestScenario[];
 }
+
+// ---------------------------------------------------------------------------
+// Point-Fix Repair (patch-based rule repair)
+// ---------------------------------------------------------------------------
+
+export type RulePatchOp =
+  | { op: 'update'; ruleName: string; rule: CompiledRule }
+  | { op: 'add'; afterRule?: string; rule: CompiledRule }
+  | { op: 'delete'; ruleName: string };
+
+export interface RulePatch {
+  reasoning: string;
+  operations: RulePatchOp[];
+  listDefinitions?: ListDefinition[];
+}

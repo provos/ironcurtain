@@ -870,13 +870,15 @@ export class PipelineRunner {
           const { result: repairResult } = await withSpinner(
             repairText,
             async (spinner) =>
-              this.compilePolicyRulesWithRepair(
+              this.compilePolicyRulesWithPointFix(
+                rules,
                 unit.annotations,
                 unit.protectedPaths,
                 baseInputHash,
                 repairContext,
                 compilerSystem,
                 compilerSession,
+                listDefinitions,
                 (msg) => {
                   spinner.text = `${repairText} — ${msg}`;
                 },
@@ -1639,6 +1641,54 @@ export class PipelineRunner {
         repairContext,
         onProgress,
         system,
+      );
+    }
+    const compiledRules = resolveRulePaths(output.rules);
+    validateRulesOrThrow(compiledRules, output.listDefinitions);
+
+    return {
+      rules: compiledRules,
+      listDefinitions: output.listDefinitions,
+      inputHash: `${baseInputHash}-repair`,
+      session,
+    };
+  }
+
+  /**
+   * Attempts point-fix repair via the session, falling back to full recompile.
+   * When a compiler session exists, uses repairPointFix() to emit a minimal
+   * patch instead of regenerating the entire rule set. This avoids oscillation
+   * where fixing one failure breaks previously-passing rules.
+   */
+  private async compilePolicyRulesWithPointFix(
+    existingRules: CompiledRule[],
+    annotations: ToolAnnotation[],
+    protectedPaths: string[],
+    baseInputHash: string,
+    repairContext: RepairContext,
+    system: string | SystemModelMessage,
+    session: ConstitutionCompilerSession | undefined,
+    existingListDefinitions: ListDefinition[],
+    onProgress?: (message: string) => void,
+  ): Promise<{
+    rules: CompiledRule[];
+    listDefinitions: ListDefinition[];
+    inputHash: string;
+    session?: ConstitutionCompilerSession;
+  }> {
+    let output;
+    if (session) {
+      output = await session.repairPointFix(existingRules, repairContext, existingListDefinitions, onProgress);
+    } else {
+      // No session available -- fall back to full recompile
+      return this.compilePolicyRulesWithRepair(
+        annotations,
+        protectedPaths,
+        baseInputHash,
+        repairContext,
+        system,
+        session,
+        onProgress,
       );
     }
     const compiledRules = resolveRulePaths(output.rules);

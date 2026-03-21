@@ -16,7 +16,15 @@ import {
   parseJsonWithSchema,
   schemaToPromptHint,
 } from './generate-with-repair.js';
-import type { ToolAnnotation, CompiledRule, RepairContext, ListDefinition, TestScenario } from './types.js';
+import type {
+  ToolAnnotation,
+  CompiledRule,
+  RepairContext,
+  ListDefinition,
+  TestScenario,
+  RulePatchOp,
+  RulePatch,
+} from './types.js';
 import { isArgumentRole, getArgumentRoleValues } from '../types/argument-roles.js';
 import { formatFailedResults } from './policy-verifier.js';
 
@@ -66,13 +74,17 @@ export interface CompilerSchemaOptions {
   requireServer?: boolean;
 }
 
-function buildCompilerResponseSchema(
+/**
+ * Builds the Zod schema for a single compiled rule. Shared by both the
+ * full compilation schema and the patch response schema to avoid duplication.
+ */
+function buildCompiledRuleSchema(
   serverNames: [string, ...string[]],
   toolNames: [string, ...string[]],
   options?: CompilerSchemaOptions,
 ) {
   const serverField = z.array(z.enum(serverNames));
-  const compiledRuleSchema = z.object({
+  return z.object({
     name: z.string(),
     description: z.string(),
     principle: z.string(),
@@ -91,6 +103,14 @@ function buildCompilerResponseSchema(
     then: z.enum(['allow', 'escalate']),
     reason: z.string(),
   });
+}
+
+function buildCompilerResponseSchema(
+  serverNames: [string, ...string[]],
+  toolNames: [string, ...string[]],
+  options?: CompilerSchemaOptions,
+) {
+  const compiledRuleSchema = buildCompiledRuleSchema(serverNames, toolNames, options);
 
   return z.object({
     rules: z.array(compiledRuleSchema),
@@ -391,9 +411,11 @@ const INITIAL_COMPILE_MESSAGE = 'Compile the constitution into policy rules foll
 export class ConstitutionCompilerSession {
   private readonly systemPrompt: string | SystemModelMessage;
   private readonly model: LanguageModel;
+  private readonly annotations: ToolAnnotation[];
   private readonly schema: ReturnType<typeof buildCompilerResponseSchema>;
   private readonly history: Array<{ role: 'user' | 'assistant'; content: string }> = [];
   private readonly schemaHint: string;
+  private readonly schemaOptions?: CompilerSchemaOptions;
   private turns = 0;
 
   constructor(options: {
@@ -404,6 +426,8 @@ export class ConstitutionCompilerSession {
   }) {
     this.systemPrompt = options.system;
     this.model = options.model;
+    this.annotations = options.annotations;
+    this.schemaOptions = options.schemaOptions;
 
     const serverNames = [...new Set(options.annotations.map((a) => a.serverName))] as [string, ...string[]];
     const toolNames = [...new Set(options.annotations.map((a) => a.toolName))] as [string, ...string[]];
@@ -497,9 +521,282 @@ export class ConstitutionCompilerSession {
     }
   }
 
+  /**
+   * Point-fix repair: sends patch instructions instead of requesting a full
+   * recompilation. The LLM returns a small set of update/add/delete operations
+   * that are mechanically applied to the existing rules, avoiding oscillation.
+   *
+   * Falls back to full recompile if the patch cannot be applied.
+   */
+  async repairPointFix(
+    existingRules: CompiledRule[],
+    repairContext: RepairContext,
+    existingListDefinitions: ListDefinition[] = [],
+    onProgress?: (message: string) => void,
+  ): Promise<CompilationOutput> {
+    const existingRuleNames = existingRules.map((r) => r.name);
+    if (existingRuleNames.length === 0) {
+      return this.recompile(repairContext, onProgress);
+    }
+
+    const serverNames = [...new Set(this.annotations.map((a) => a.serverName))] as [string, ...string[]];
+    const toolNames = [...new Set(this.annotations.map((a) => a.toolName))] as [string, ...string[]];
+
+    const patchSchema = buildPatchResponseSchema(
+      serverNames,
+      toolNames,
+      existingRuleNames as [string, ...string[]],
+      this.schemaOptions,
+    );
+    const patchSchemaHint = schemaToPromptHint(patchSchema);
+
+    const userMessage = buildPointFixRepairInstructions(existingRules, repairContext) + patchSchemaHint;
+    this.history.push({ role: 'user', content: userMessage });
+
+    onProgress?.('Point-fix repair...');
+
+    const result = await generateText({
+      model: this.model,
+      system: this.systemPrompt,
+      messages: this.history,
+      maxOutputTokens: DEFAULT_MAX_TOKENS,
+    });
+
+    const firstAttempt = tryParsePatch(result.text, patchSchema);
+    if (firstAttempt.ok) {
+      const applyResult = applyRulePatch(existingRules, firstAttempt.value.operations);
+      if (applyResult.ok) {
+        this.history.push({ role: 'assistant', content: result.text });
+        this.turns++;
+        return {
+          rules: applyResult.rules,
+          listDefinitions: mergeListDefinitions(existingListDefinitions, firstAttempt.value.listDefinitions),
+        };
+      }
+      // Patch apply failed -- fall back to full recompile
+      onProgress?.('Patch apply failed, falling back to full recompile...');
+      this.history.pop(); // remove the point-fix user message
+      return this.recompile(repairContext, onProgress);
+    }
+
+    // First parse failed -- attempt one schema repair retry
+    onProgress?.('Patch schema repair 1/1...');
+
+    const retryResult = await generateText({
+      model: this.model,
+      system: this.systemPrompt,
+      messages: [
+        ...this.history,
+        { role: 'assistant' as const, content: result.text },
+        {
+          role: 'user' as const,
+          content: `Your response failed schema validation:\n${firstAttempt.error}\n\nPlease fix the errors and return valid JSON matching the patch schema.`,
+        },
+      ],
+      maxOutputTokens: DEFAULT_MAX_TOKENS,
+    });
+
+    const retryParsed = tryParsePatch(retryResult.text, patchSchema);
+    if (retryParsed.ok) {
+      const applyResult = applyRulePatch(existingRules, retryParsed.value.operations);
+      if (applyResult.ok) {
+        this.history.push({ role: 'assistant', content: retryResult.text });
+        this.turns++;
+        return {
+          rules: applyResult.rules,
+          listDefinitions: mergeListDefinitions(existingListDefinitions, retryParsed.value.listDefinitions),
+        };
+      }
+    }
+
+    // All patch attempts failed -- fall back to full recompile
+    onProgress?.('Patch failed, falling back to full recompile...');
+    this.history.pop(); // remove the point-fix user message
+    return this.recompile(repairContext, onProgress);
+  }
+
   private parseOutput(text: string): CompilationOutput {
     const parsed = parseJsonWithSchema(text, this.schema);
     return { rules: parsed.rules, listDefinitions: parsed.listDefinitions };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Point-Fix Repair -- patch-based rule repair
+// ---------------------------------------------------------------------------
+
+/**
+ * Builds the Zod schema for patch responses. Reuses the same compiled rule
+ * field schemas as the full compilation schema, but wraps them in a
+ * discriminated union of update/add/delete operations.
+ */
+export function buildPatchResponseSchema(
+  serverNames: [string, ...string[]],
+  toolNames: [string, ...string[]],
+  existingRuleNames: [string, ...string[]],
+  options?: CompilerSchemaOptions,
+) {
+  const compiledRuleSchema = buildCompiledRuleSchema(serverNames, toolNames, options);
+
+  const updateOp = z.object({
+    op: z.literal('update'),
+    ruleName: z.enum(existingRuleNames),
+    rule: compiledRuleSchema,
+  });
+  const addOp = z.object({
+    op: z.literal('add'),
+    afterRule: z.enum(existingRuleNames).optional(),
+    rule: compiledRuleSchema,
+  });
+  const deleteOp = z.object({
+    op: z.literal('delete'),
+    ruleName: z.enum(existingRuleNames),
+  });
+
+  return z.object({
+    reasoning: z.string(),
+    operations: z.array(z.discriminatedUnion('op', [updateOp, addOp, deleteOp])),
+    listDefinitions: z.array(listDefinitionSchema).optional(),
+  });
+}
+
+/**
+ * Builds the user prompt for point-fix repair. Shows the existing rules in
+ * a compact numbered format, failed scenarios, and judge analysis. Instructs
+ * the LLM to emit a minimal patch rather than a full rule set.
+ */
+export function buildPointFixRepairInstructions(existingRules: CompiledRule[], repairContext: RepairContext): string {
+  const rulesText = existingRules
+    .map((r, i) => {
+      const conditions = Object.entries(r.if)
+        .filter(([, v]) => v !== undefined)
+        .map(([k, v]) => `${k}: ${JSON.stringify(v)}`)
+        .join(', ');
+      return `${i + 1}. "${r.name}" — if { ${conditions} } → ${r.then} (${r.reason})`;
+    })
+    .join('\n');
+
+  const failuresText = formatFailedResults(repairContext.failedScenarios);
+
+  let existingListsText = '';
+  if (repairContext.existingListDefinitions && repairContext.existingListDefinitions.length > 0) {
+    const listLines = repairContext.existingListDefinitions.map((d) => `- @${d.name} (type: ${d.type})`).join('\n');
+    existingListsText = `
+### Available Dynamic Lists
+
+These lists are already defined and will be preserved automatically. You may reference them in rules using @list-name. You may add NEW list definitions in your response if your fix requires them, but do NOT redefine existing lists.
+
+${listLines}
+`;
+  }
+
+  return `## POINT-FIX REPAIR (attempt ${repairContext.attemptNumber})
+
+Your previous rules failed verification. You must fix the failures by emitting a PATCH — a minimal set of update, add, or delete operations.
+
+### Current Rules
+
+${rulesText}
+
+### Failed Scenarios
+
+${failuresText}
+
+### Judge Analysis
+
+${repairContext.judgeAnalysis}
+${existingListsText}${formatGroundTruthSection(repairContext.handwrittenScenarios)}
+### Instructions
+
+1. Only modify rules that are DIRECTLY responsible for the failures. Do NOT touch passing rules.
+2. Use "update" to replace a rule by name, "add" to insert a new rule (optionally after an existing rule), or "delete" to remove a rule.
+3. Operations are applied sequentially: an "add" after a rule that was "delete"d earlier in the same patch will fail.
+4. Return a patch object with "reasoning", "operations", and optionally "listDefinitions" (only for NEW lists — existing lists are preserved automatically).
+5. Keep the patch as small as possible — fewer operations means less risk of breaking passing rules.`;
+}
+
+/**
+ * Mechanically applies patch operations to an existing rule list.
+ * Operations are applied sequentially in order. Returns the new rule list
+ * or an error if an operation references a nonexistent rule.
+ */
+export function applyRulePatch(
+  existingRules: CompiledRule[],
+  operations: RulePatchOp[],
+): { ok: true; rules: CompiledRule[] } | { ok: false; error: string } {
+  const rules = [...existingRules];
+
+  for (const op of operations) {
+    switch (op.op) {
+      case 'update': {
+        const idx = rules.findIndex((r) => r.name === op.ruleName);
+        if (idx === -1) {
+          return { ok: false, error: `Cannot update rule "${op.ruleName}": not found` };
+        }
+        if (op.rule.name !== op.ruleName) {
+          return {
+            ok: false,
+            error: `Cannot update rule "${op.ruleName}": rule.name "${op.rule.name}" does not match ruleName (use delete+add to rename)`,
+          };
+        }
+        rules[idx] = op.rule;
+        break;
+      }
+      case 'add': {
+        if (rules.some((r) => r.name === op.rule.name)) {
+          return { ok: false, error: `Cannot add rule "${op.rule.name}": a rule with that name already exists` };
+        }
+        if (op.afterRule !== undefined) {
+          const idx = rules.findIndex((r) => r.name === op.afterRule);
+          if (idx === -1) {
+            return { ok: false, error: `Cannot add after rule "${op.afterRule}": not found` };
+          }
+          rules.splice(idx + 1, 0, op.rule);
+        } else {
+          // No afterRule specified -- prepend
+          rules.unshift(op.rule);
+        }
+        break;
+      }
+      case 'delete': {
+        const idx = rules.findIndex((r) => r.name === op.ruleName);
+        if (idx === -1) {
+          return { ok: false, error: `Cannot delete rule "${op.ruleName}": not found` };
+        }
+        rules.splice(idx, 1);
+        break;
+      }
+    }
+  }
+
+  return { ok: true, rules };
+}
+
+/**
+ * Merges existing list definitions with new ones from a patch.
+ * Existing lists are always preserved; new lists (by name) are appended.
+ * Duplicates (same name as an existing list) are silently ignored.
+ */
+export function mergeListDefinitions(
+  existing: ListDefinition[],
+  patchLists: ListDefinition[] | undefined,
+): ListDefinition[] {
+  if (!patchLists || patchLists.length === 0) return existing;
+  const existingNames = new Set(existing.map((d) => d.name));
+  const newLists = patchLists.filter((d) => !existingNames.has(d.name));
+  return [...existing, ...newLists];
+}
+
+/** Attempts to parse LLM text as a RulePatch, returning a discriminated result. */
+function tryParsePatch(
+  text: string,
+  schema: ReturnType<typeof buildPatchResponseSchema>,
+): { ok: true; value: RulePatch } | { ok: false; error: string } {
+  try {
+    const parsed = parseJsonWithSchema(text, schema);
+    return { ok: true, value: parsed as RulePatch };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
 }
 
