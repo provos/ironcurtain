@@ -500,10 +500,17 @@ export class PipelineRunner {
     const listDefinitions = mergedPolicy.listDefinitions ?? [];
 
     if (listDefinitions.length > 0) {
+      const deduplicatedNames = new Set(listDefinitions.map((d) => d.name));
       const mergedListEntries: Record<string, ResolvedList> = {};
+      // serverResults are already in alphabetical order -- use first-wins
+      // to match deduplicateListDefinitions() merge semantics.
       for (const result of serverResults) {
         if (result.resolvedLists) {
-          Object.assign(mergedListEntries, result.resolvedLists.lists);
+          for (const [name, list] of Object.entries(result.resolvedLists.lists)) {
+            if (deduplicatedNames.has(name) && !(name in mergedListEntries)) {
+              mergedListEntries[name] = list;
+            }
+          }
         }
       }
       const mergedDynamicLists: DynamicListsFile = {
@@ -671,6 +678,16 @@ export class PipelineRunner {
 
     // Build per-server policy artifact for engine construction
     let serverPolicyFile = buildPolicyArtifact(constitutionHash, rules, listDefinitions, inputHash);
+
+    // Persist early so intermediate results survive scenario/verification failures
+    writeArtifact(serverOutputDir, 'compiled-policy.json', {
+      generatedAt: new Date().toISOString(),
+      serverName: unit.serverName,
+      constitutionHash,
+      inputHash,
+      rules,
+      listDefinitions: listDefinitions.length > 0 ? listDefinitions : undefined,
+    } satisfies ServerCompiledPolicyFile);
 
     // Build per-server tool annotations file (wrap in servers record)
     const serverAnnotationsFile: ToolAnnotationsFile = {
@@ -903,6 +920,16 @@ export class PipelineRunner {
           }
 
           serverPolicyFile = buildPolicyArtifact(constitutionHash, rules, listDefinitions, inputHash);
+
+          // Persist repaired rules immediately
+          writeArtifact(serverOutputDir, 'compiled-policy.json', {
+            generatedAt: new Date().toISOString(),
+            serverName: unit.serverName,
+            constitutionHash,
+            inputHash,
+            rules,
+            listDefinitions: listDefinitions.length > 0 ? listDefinitions : undefined,
+          } satisfies ServerCompiledPolicyFile);
 
           verifierSystem = this.cacheStrategy.wrapSystemPrompt(
             buildJudgeSystemPrompt(

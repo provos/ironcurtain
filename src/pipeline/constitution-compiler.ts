@@ -217,8 +217,8 @@ The following checks are hardcoded and evaluated BEFORE compiled rules:
 1. **Protected paths** -- any read, write, or delete targeting these paths is automatically denied:
 ${config.protectedPaths.map((p) => `- ${p}`).join('\n')}
 
-2. **Sandbox containment** -- the sandbox directory is \`${config.allowedDirectory ?? '(configured at runtime)'}\`. Any tool call where ALL path-role arguments are within the sandbox is automatically allowed by the engine. Do NOT generate \`paths.within\` rules for filesystem tools targeting the sandbox -- that is structural.
-   However, URL-category roles (e.g., \`git-remote-url\`) are NOT structurally resolved. Git rules that should allow operations referencing paths inside the sandbox MUST use \`paths.within: ["${config.allowedDirectory ?? '/path/to/sandbox'}"]\` so the engine can match them via compiled-rule evaluation.
+2. **Sandbox containment** -- the sandbox directory is \`${config.allowedDirectory ?? '(configured at runtime)'}\`. Any tool call where ALL sandbox-safe path-role arguments are within the sandbox is automatically allowed by the engine, and those roles are structurally resolved (compiled rules are not evaluated for them). Do NOT generate \`paths.within\` rules for filesystem tools targeting the sandbox -- that behavior is structural.
+   URL-category roles (e.g., \`git-remote-url\`) are NOT structurally resolved. To control git and other networked operations, constrain them primarily via \`domains\` conditions on their URL roles (for example, using \`domains.allowed\` patterns on \`git-remote-url\`), rather than relying on \`paths.within\` for sandbox paths.
 
 3. **Default deny** -- if no compiled rule matches, the engine denies the operation.
    You do NOT need catch-all deny or escalate rules; uncovered operations are
