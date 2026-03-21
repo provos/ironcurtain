@@ -637,11 +637,21 @@ export function buildPatchResponseSchema(
 ) {
   const compiledRuleSchema = buildCompiledRuleSchema(serverNames, toolNames, options);
 
-  const updateOp = z.object({
-    op: z.literal('update'),
-    ruleName: z.enum(existingRuleNames),
-    rule: compiledRuleSchema,
-  });
+  const updateOp = z
+    .object({
+      op: z.literal('update'),
+      ruleName: z.enum(existingRuleNames),
+      rule: compiledRuleSchema,
+    })
+    .superRefine((value, ctx) => {
+      if (value.rule.name !== value.ruleName) {
+        ctx.addIssue({
+          code: 'custom',
+          message: `rule.name "${value.rule.name}" must match ruleName "${value.ruleName}" (use delete+add to rename)`,
+          path: ['rule', 'name'],
+        });
+      }
+    });
   const addOp = z.object({
     op: z.literal('add'),
     afterRule: z.enum(existingRuleNames).optional(),

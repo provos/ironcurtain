@@ -336,7 +336,7 @@ describe('buildPatchResponseSchema', () => {
           op: 'update',
           ruleName: 'escalate-write',
           rule: {
-            name: 'allow-write',
+            name: 'escalate-write',
             description: 'Allow writes',
             principle: 'Containment',
             if: { server: ['filesystem'] },
@@ -424,6 +424,29 @@ describe('buildPatchResponseSchema', () => {
     };
 
     expect(() => schema.parse(patch)).not.toThrow();
+  });
+
+  it('rejects update where rule.name differs from ruleName', () => {
+    const schema = buildPatchResponseSchema(serverNames, toolNames, ruleNames);
+    const patch = {
+      reasoning: 'Fix the write rule',
+      operations: [
+        {
+          op: 'update',
+          ruleName: 'escalate-write',
+          rule: {
+            name: 'renamed-write',
+            description: 'Allow writes',
+            principle: 'Containment',
+            if: { server: ['filesystem'] },
+            then: 'allow',
+            reason: 'Fixed',
+          },
+        },
+      ],
+    };
+
+    expect(() => schema.parse(patch)).toThrow(/must match ruleName/);
   });
 
   it('rejects empty rule conditions (catch-all prevention)', () => {
