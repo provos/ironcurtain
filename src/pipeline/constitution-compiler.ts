@@ -411,7 +411,8 @@ const INITIAL_COMPILE_MESSAGE = 'Compile the constitution into policy rules foll
 export class ConstitutionCompilerSession {
   private readonly systemPrompt: string | SystemModelMessage;
   private readonly model: LanguageModel;
-  private readonly annotations: ToolAnnotation[];
+  private readonly serverNames: [string, ...string[]];
+  private readonly toolNames: [string, ...string[]];
   private readonly schema: ReturnType<typeof buildCompilerResponseSchema>;
   private readonly history: Array<{ role: 'user' | 'assistant'; content: string }> = [];
   private readonly schemaHint: string;
@@ -426,12 +427,11 @@ export class ConstitutionCompilerSession {
   }) {
     this.systemPrompt = options.system;
     this.model = options.model;
-    this.annotations = options.annotations;
     this.schemaOptions = options.schemaOptions;
 
-    const serverNames = [...new Set(options.annotations.map((a) => a.serverName))] as [string, ...string[]];
-    const toolNames = [...new Set(options.annotations.map((a) => a.toolName))] as [string, ...string[]];
-    this.schema = buildCompilerResponseSchema(serverNames, toolNames, options.schemaOptions);
+    this.serverNames = [...new Set(options.annotations.map((a) => a.serverName))] as [string, ...string[]];
+    this.toolNames = [...new Set(options.annotations.map((a) => a.toolName))] as [string, ...string[]];
+    this.schema = buildCompilerResponseSchema(this.serverNames, this.toolNames, options.schemaOptions);
     this.schemaHint = schemaToPromptHint(this.schema);
   }
 
@@ -539,8 +539,7 @@ export class ConstitutionCompilerSession {
       return this.recompile(repairContext, onProgress);
     }
 
-    const serverNames = [...new Set(this.annotations.map((a) => a.serverName))] as [string, ...string[]];
-    const toolNames = [...new Set(this.annotations.map((a) => a.toolName))] as [string, ...string[]];
+    const { serverNames, toolNames } = this;
 
     const patchSchema = buildPatchResponseSchema(
       serverNames,

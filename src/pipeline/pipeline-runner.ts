@@ -500,14 +500,14 @@ export class PipelineRunner {
     const listDefinitions = mergedPolicy.listDefinitions ?? [];
 
     if (listDefinitions.length > 0) {
-      const deduplicatedNames = new Set(listDefinitions.map((d) => d.name));
+      const keptListNames = new Set(listDefinitions.map((d) => d.name));
       const mergedListEntries: Record<string, ResolvedList> = {};
       // serverResults are already in alphabetical order -- use first-wins
       // to match deduplicateListDefinitions() merge semantics.
       for (const result of serverResults) {
         if (result.resolvedLists) {
           for (const [name, list] of Object.entries(result.resolvedLists.lists)) {
-            if (deduplicatedNames.has(name) && !(name in mergedListEntries)) {
+            if (keptListNames.has(name) && !(name in mergedListEntries)) {
               mergedListEntries[name] = list;
             }
           }
@@ -680,14 +680,16 @@ export class PipelineRunner {
     let serverPolicyFile = buildPolicyArtifact(constitutionHash, rules, listDefinitions, inputHash);
 
     // Persist early so intermediate results survive scenario/verification failures
-    writeArtifact(serverOutputDir, 'compiled-policy.json', {
-      generatedAt: new Date().toISOString(),
-      serverName: unit.serverName,
-      constitutionHash,
-      inputHash,
-      rules,
-      listDefinitions: listDefinitions.length > 0 ? listDefinitions : undefined,
-    } satisfies ServerCompiledPolicyFile);
+    const writeServerPolicy = () =>
+      writeArtifact(serverOutputDir, 'compiled-policy.json', {
+        generatedAt: new Date().toISOString(),
+        serverName: unit.serverName,
+        constitutionHash,
+        inputHash,
+        rules,
+        listDefinitions: listDefinitions.length > 0 ? listDefinitions : undefined,
+      } satisfies ServerCompiledPolicyFile);
+    writeServerPolicy();
 
     // Build per-server tool annotations file (wrap in servers record)
     const serverAnnotationsFile: ToolAnnotationsFile = {
@@ -922,14 +924,7 @@ export class PipelineRunner {
           serverPolicyFile = buildPolicyArtifact(constitutionHash, rules, listDefinitions, inputHash);
 
           // Persist repaired rules immediately
-          writeArtifact(serverOutputDir, 'compiled-policy.json', {
-            generatedAt: new Date().toISOString(),
-            serverName: unit.serverName,
-            constitutionHash,
-            inputHash,
-            rules,
-            listDefinitions: listDefinitions.length > 0 ? listDefinitions : undefined,
-          } satisfies ServerCompiledPolicyFile);
+          writeServerPolicy();
 
           verifierSystem = this.cacheStrategy.wrapSystemPrompt(
             buildJudgeSystemPrompt(
@@ -1002,15 +997,7 @@ export class PipelineRunner {
 
     // Write per-server artifacts (before verification check so they can be inspected on failure)
     const finalScenarios = [...scenarioResult.scenarios, ...accumulatedProbes];
-    const serverCompiledPolicyFile: ServerCompiledPolicyFile = {
-      generatedAt: new Date().toISOString(),
-      serverName: unit.serverName,
-      constitutionHash,
-      inputHash,
-      rules,
-      listDefinitions: listDefinitions.length > 0 ? listDefinitions : undefined,
-    };
-    writeArtifact(serverOutputDir, 'compiled-policy.json', serverCompiledPolicyFile);
+    writeServerPolicy();
     writeArtifact(serverOutputDir, 'test-scenarios.json', {
       generatedAt: new Date().toISOString(),
       constitutionHash,
