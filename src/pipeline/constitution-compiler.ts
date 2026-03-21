@@ -22,6 +22,7 @@ import { formatFailedResults } from './policy-verifier.js';
 
 export interface CompilerConfig {
   protectedPaths: string[];
+  allowedDirectory?: string;
 }
 
 export interface CompilationOutput {
@@ -196,7 +197,8 @@ The following checks are hardcoded and evaluated BEFORE compiled rules:
 1. **Protected paths** -- any read, write, or delete targeting these paths is automatically denied:
 ${config.protectedPaths.map((p) => `- ${p}`).join('\n')}
 
-2. **Sandbox containment** -- any tool call where ALL paths are within the sandbox directory is automatically allowed. Do NOT generate rules for sandbox-internal operations; the engine handles this at runtime with the dynamically configured sandbox path.
+2. **Sandbox containment** -- the sandbox directory is \`${config.allowedDirectory ?? '(configured at runtime)'}\`. Any tool call where ALL path-role arguments are within the sandbox is automatically allowed by the engine. Do NOT generate \`paths.within\` rules for filesystem tools targeting the sandbox -- that is structural.
+   However, URL-category roles (e.g., \`git-remote-url\`) are NOT structurally resolved. Git rules that should allow operations referencing paths inside the sandbox MUST use \`paths.within: ["${config.allowedDirectory ?? '/path/to/sandbox'}"]\` so the engine can match them via compiled-rule evaluation.
 
 3. **Default deny** -- if no compiled rule matches, the engine denies the operation.
    You do NOT need catch-all deny or escalate rules; uncovered operations are

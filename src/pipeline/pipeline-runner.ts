@@ -610,7 +610,7 @@ export class PipelineRunner {
     const compilerPrompt = buildCompilerSystemPrompt(
       unit.constitutionText,
       unit.annotations,
-      { protectedPaths: unit.protectedPaths },
+      { protectedPaths: unit.protectedPaths, allowedDirectory: unit.allowedDirectory },
       unit.handwrittenScenarios.length > 0 ? unit.handwrittenScenarios : undefined,
       { serverScope: unit.serverName },
     );
@@ -1093,7 +1093,7 @@ export class PipelineRunner {
         : buildCompilerSystemPrompt(
             config.constitutionInput,
             allAnnotations,
-            { protectedPaths: config.protectedPaths },
+            { protectedPaths: config.protectedPaths, allowedDirectory: config.allowedDirectory },
             handwrittenScenarios.length > 0 ? handwrittenScenarios : undefined,
           );
 
