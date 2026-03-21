@@ -764,18 +764,90 @@
           "toolName": "git_remote",
           "comment": "Manages remote repository configurations by listing, adding, removing, renaming, or updating remote URLs.",
           "args": {
-            "path": [
-              "read-path"
-            ],
+            "path": {
+              "default": [
+                "read-path",
+                "write-history",
+                "delete-history"
+              ],
+              "when": [
+                {
+                  "condition": {
+                    "arg": "mode",
+                    "in": [
+                      "list",
+                      "get-url"
+                    ]
+                  },
+                  "roles": [
+                    "read-path"
+                  ]
+                },
+                {
+                  "condition": {
+                    "arg": "mode",
+                    "in": [
+                      "add",
+                      "rename",
+                      "set-url"
+                    ]
+                  },
+                  "roles": [
+                    "read-path",
+                    "write-history"
+                  ]
+                },
+                {
+                  "condition": {
+                    "arg": "mode",
+                    "equals": "remove"
+                  },
+                  "roles": [
+                    "read-path",
+                    "delete-history"
+                  ]
+                }
+              ]
+            },
             "mode": [
               "none"
             ],
             "name": [
               "none"
             ],
-            "url": [
-              "git-remote-url"
-            ],
+            "url": {
+              "default": [
+                "git-remote-url"
+              ],
+              "when": [
+                {
+                  "condition": {
+                    "arg": "mode",
+                    "in": [
+                      "list",
+                      "get-url"
+                    ]
+                  },
+                  "roles": [
+                    "none"
+                  ]
+                },
+                {
+                  "condition": {
+                    "arg": "mode",
+                    "in": [
+                      "add",
+                      "rename",
+                      "set-url",
+                      "remove"
+                    ]
+                  },
+                  "roles": [
+                    "git-remote-url"
+                  ]
+                }
+              ]
+            },
             "newName": [
               "none"
             ],
@@ -853,10 +925,60 @@
           "toolName": "git_stash",
           "comment": "Manages stashes by listing, saving, restoring, or removing stashed working directory changes.",
           "args": {
-            "path": [
-              "read-path",
-              "write-history"
-            ],
+            "path": {
+              "default": [
+                "read-path",
+                "write-history",
+                "delete-history"
+              ],
+              "when": [
+                {
+                  "condition": {
+                    "arg": "mode",
+                    "equals": "list"
+                  },
+                  "roles": [
+                    "read-path"
+                  ]
+                },
+                {
+                  "condition": {
+                    "arg": "mode",
+                    "equals": "push"
+                  },
+                  "roles": [
+                    "read-path",
+                    "write-history"
+                  ]
+                },
+                {
+                  "condition": {
+                    "arg": "mode",
+                    "in": [
+                      "pop",
+                      "apply"
+                    ]
+                  },
+                  "roles": [
+                    "read-path",
+                    "write-history"
+                  ]
+                },
+                {
+                  "condition": {
+                    "arg": "mode",
+                    "in": [
+                      "drop",
+                      "clear"
+                    ]
+                  },
+                  "roles": [
+                    "read-path",
+                    "delete-history"
+                  ]
+                }
+              ]
+            },
             "mode": [
               "none"
             ],

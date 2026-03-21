@@ -1,9 +1,22 @@
 import { describe, it, expect } from 'vitest';
 import { MockLanguageModelV3 } from 'ai/test';
-import { generateScenarios, repairScenarios, SCENARIO_BATCH_SIZE } from '../src/pipeline/scenario-generator.js';
+import {
+  buildGeneratorSystemPrompt,
+  formatConditionalRoles,
+  generateScenarios,
+  repairScenarios,
+  SCENARIO_BATCH_SIZE,
+} from '../src/pipeline/scenario-generator.js';
 import { ConstitutionCompilerSession } from '../src/pipeline/constitution-compiler.js';
 import { parseJsonWithSchema } from '../src/pipeline/generate-with-repair.js';
-import type { ToolAnnotation, TestScenario, RepairContext } from '../src/pipeline/types.js';
+import { detectDefaultRoleFallback, detectAllDefaultRoleFallbacks } from '../src/pipeline/policy-verifier.js';
+import type {
+  ConditionalRoles,
+  StoredToolAnnotation,
+  ToolAnnotation,
+  TestScenario,
+  RepairContext,
+} from '../src/pipeline/types.js';
 import { z } from 'zod';
 
 const sampleAnnotations: ToolAnnotation[] = [
@@ -1027,5 +1040,266 @@ describe('ConstitutionCompilerSession', () => {
     });
 
     await expect(session.compile()).rejects.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Conditional role formatting tests
+// ---------------------------------------------------------------------------
+
+describe('formatConditionalRoles', () => {
+  it('formats equals conditions', () => {
+    const spec: ConditionalRoles = {
+      default: ['read-path', 'delete-history'],
+      when: [{ condition: { arg: 'mode', equals: 'list' }, roles: ['read-path'] }],
+    };
+    const result = formatConditionalRoles('path', spec);
+    expect(result).toContain('default=[read-path, delete-history]');
+    expect(result).toContain('when mode="list"');
+    expect(result).toContain('[read-path]');
+  });
+
+  it('formats in conditions', () => {
+    const spec: ConditionalRoles = {
+      default: ['read-path', 'write-history', 'delete-history'],
+      when: [
+        { condition: { arg: 'operation', in: ['list', 'show-current'] }, roles: ['read-path'] },
+        { condition: { arg: 'operation', in: ['create', 'rename'] }, roles: ['read-path', 'write-history'] },
+      ],
+    };
+    const result = formatConditionalRoles('path', spec);
+    expect(result).toContain('operation in ["list","show-current"]');
+    expect(result).toContain('operation in ["create","rename"]');
+  });
+
+  it('formats is conditions', () => {
+    const spec: ConditionalRoles = {
+      default: ['read-path', 'write-path'],
+      when: [{ condition: { arg: 'dryRun', is: 'truthy' }, roles: ['read-path'] }],
+    };
+    const result = formatConditionalRoles('path', spec);
+    expect(result).toContain('dryRun is truthy');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildGeneratorSystemPrompt with stored annotations tests
+// ---------------------------------------------------------------------------
+
+describe('buildGeneratorSystemPrompt with stored annotations', () => {
+  const storedAnnotations: StoredToolAnnotation[] = [
+    {
+      toolName: 'git_branch',
+      serverName: 'git',
+      comment: 'Manages branches',
+      args: {
+        path: {
+          default: ['read-path', 'write-history', 'delete-history'],
+          when: [
+            { condition: { arg: 'operation', in: ['list', 'show-current'] }, roles: ['read-path'] },
+            { condition: { arg: 'operation', equals: 'delete' }, roles: ['read-path', 'delete-history'] },
+          ],
+        },
+        operation: ['none'],
+        name: ['none'],
+      },
+    },
+  ];
+
+  const resolvedAnnotations: ToolAnnotation[] = [
+    {
+      toolName: 'git_branch',
+      serverName: 'git',
+      comment: 'Manages branches',
+      args: {
+        path: ['read-path', 'write-history', 'delete-history'],
+        operation: ['none'],
+        name: ['none'],
+      },
+    },
+  ];
+
+  it('includes conditional role details when stored annotations provided', () => {
+    const prompt = buildGeneratorSystemPrompt(
+      'Test constitution',
+      resolvedAnnotations,
+      '/tmp/sandbox',
+      undefined,
+      undefined,
+      storedAnnotations,
+    );
+    expect(prompt).toContain('default=[read-path, write-history, delete-history]');
+    expect(prompt).toContain('operation in ["list","show-current"]');
+    expect(prompt).toContain('operation="delete"');
+  });
+
+  it('falls back to simple format without stored annotations', () => {
+    const prompt = buildGeneratorSystemPrompt('Test constitution', resolvedAnnotations, '/tmp/sandbox');
+    expect(prompt).toContain('path: [read-path, write-history, delete-history]');
+    expect(prompt).not.toContain('default=');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Default role fallback detection tests
+// ---------------------------------------------------------------------------
+
+describe('detectDefaultRoleFallback', () => {
+  const storedAnnotations: StoredToolAnnotation[] = [
+    {
+      toolName: 'git_branch',
+      serverName: 'git',
+      comment: 'Manages branches',
+      args: {
+        path: {
+          default: ['read-path', 'write-history', 'delete-history'],
+          when: [
+            { condition: { arg: 'operation', in: ['list', 'show-current'] }, roles: ['read-path'] },
+            { condition: { arg: 'operation', in: ['create', 'rename'] }, roles: ['read-path', 'write-history'] },
+            { condition: { arg: 'operation', equals: 'delete' }, roles: ['read-path', 'delete-history'] },
+          ],
+        },
+        operation: ['none'],
+        name: ['none'],
+      },
+    },
+    {
+      toolName: 'read_file',
+      serverName: 'filesystem',
+      comment: 'Reads a file',
+      args: { path: ['read-path'] },
+    },
+  ];
+
+  it('returns warning when discriminator arg is missing', () => {
+    const scenario: TestScenario = {
+      description: 'Test git branch',
+      request: { serverName: 'git', toolName: 'git_branch', arguments: { path: '/repo' } },
+      expectedDecision: 'allow',
+      reasoning: 'test',
+      source: 'generated',
+    };
+    const result = detectDefaultRoleFallback(scenario, storedAnnotations);
+    expect(result).toBeDefined();
+    expect(result!.toolKey).toBe('git/git_branch');
+    expect(result!.details[0]).toContain('arg "operation" is missing');
+  });
+
+  it('returns warning when discriminator has wrong value', () => {
+    const scenario: TestScenario = {
+      description: 'Test git branch with wrong mode',
+      request: { serverName: 'git', toolName: 'git_branch', arguments: { path: '/repo', operation: 'squash' } },
+      expectedDecision: 'allow',
+      reasoning: 'test',
+      source: 'generated',
+    };
+    const result = detectDefaultRoleFallback(scenario, storedAnnotations);
+    expect(result).toBeDefined();
+    expect(result!.details[0]).toContain('operation="squash"');
+  });
+
+  it('returns undefined when discriminator matches a when clause', () => {
+    const scenario: TestScenario = {
+      description: 'Test git branch list',
+      request: { serverName: 'git', toolName: 'git_branch', arguments: { path: '/repo', operation: 'list' } },
+      expectedDecision: 'allow',
+      reasoning: 'test',
+      source: 'generated',
+    };
+    const result = detectDefaultRoleFallback(scenario, storedAnnotations);
+    expect(result).toBeUndefined();
+  });
+
+  it('returns undefined for tools without conditional specs', () => {
+    const scenario: TestScenario = {
+      description: 'Test read file',
+      request: { serverName: 'filesystem', toolName: 'read_file', arguments: { path: '/test' } },
+      expectedDecision: 'allow',
+      reasoning: 'test',
+      source: 'generated',
+    };
+    const result = detectDefaultRoleFallback(scenario, storedAnnotations);
+    expect(result).toBeUndefined();
+  });
+
+  it('returns undefined for tools not in stored annotations', () => {
+    const scenario: TestScenario = {
+      description: 'Test unknown tool',
+      request: { serverName: 'unknown', toolName: 'unknown_tool', arguments: {} },
+      expectedDecision: 'deny',
+      reasoning: 'test',
+      source: 'generated',
+    };
+    const result = detectDefaultRoleFallback(scenario, storedAnnotations);
+    expect(result).toBeUndefined();
+  });
+});
+
+describe('detectAllDefaultRoleFallbacks', () => {
+  const storedAnnotations: StoredToolAnnotation[] = [
+    {
+      toolName: 'git_branch',
+      serverName: 'git',
+      comment: 'Manages branches',
+      args: {
+        path: {
+          default: ['read-path', 'write-history', 'delete-history'],
+          when: [
+            { condition: { arg: 'operation', in: ['list', 'show-current'] }, roles: ['read-path'] },
+            { condition: { arg: 'operation', equals: 'delete' }, roles: ['read-path', 'delete-history'] },
+          ],
+        },
+        operation: ['none'],
+      },
+    },
+    {
+      toolName: 'read_file',
+      serverName: 'filesystem',
+      comment: 'Reads a file',
+      args: { path: ['read-path'] },
+    },
+  ];
+
+  it('finds warnings only for scenarios with conditional tools', () => {
+    const scenarios: TestScenario[] = [
+      {
+        description: 'Branch with wrong arg',
+        request: { serverName: 'git', toolName: 'git_branch', arguments: { path: '/repo', mode: 'list' } },
+        expectedDecision: 'allow',
+        reasoning: 'test',
+        source: 'generated',
+      },
+      {
+        description: 'Branch with correct arg',
+        request: { serverName: 'git', toolName: 'git_branch', arguments: { path: '/repo', operation: 'list' } },
+        expectedDecision: 'allow',
+        reasoning: 'test',
+        source: 'generated',
+      },
+      {
+        description: 'Read file',
+        request: { serverName: 'filesystem', toolName: 'read_file', arguments: { path: '/test' } },
+        expectedDecision: 'allow',
+        reasoning: 'test',
+        source: 'generated',
+      },
+    ];
+    const warnings = detectAllDefaultRoleFallbacks(scenarios, storedAnnotations);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0].scenario.description).toBe('Branch with wrong arg');
+  });
+
+  it('returns empty array when no fallback issues', () => {
+    const scenarios: TestScenario[] = [
+      {
+        description: 'Branch list',
+        request: { serverName: 'git', toolName: 'git_branch', arguments: { path: '/repo', operation: 'list' } },
+        expectedDecision: 'allow',
+        reasoning: 'test',
+        source: 'generated',
+      },
+    ];
+    const warnings = detectAllDefaultRoleFallbacks(scenarios, storedAnnotations);
+    expect(warnings).toHaveLength(0);
   });
 });

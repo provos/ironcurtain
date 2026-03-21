@@ -32,6 +32,7 @@ import {
   computeHash,
   loadExistingArtifact,
   loadReadOnlyPolicyEngine,
+  loadStoredToolAnnotationsFile,
   loadToolAnnotationsFile,
   resolveRulePaths,
   writeArtifact,
@@ -42,6 +43,7 @@ import {
 import {
   applyScenarioCorrections,
   buildJudgeSystemPrompt,
+  detectAllDefaultRoleFallbacks,
   extractScenarioCorrections,
   filterStructuralConflicts,
   PolicyVerifierSession,
@@ -60,6 +62,8 @@ import type {
   RepairContext,
   ResolvedList,
   ServerCompiledPolicyFile,
+  StoredToolAnnotation,
+  StoredToolAnnotationsFile,
   TestScenario,
   TestScenariosFile,
   ToolAnnotation,
@@ -153,6 +157,7 @@ export async function createPipelineModels(logDir?: string): Promise<PipelineMod
 interface ServerCompilationUnit {
   readonly serverName: string;
   readonly annotations: ToolAnnotation[];
+  readonly storedAnnotations?: StoredToolAnnotation[];
   readonly constitutionText: string;
   readonly allowedDirectory: string;
   readonly protectedPaths: string[];
@@ -201,8 +206,11 @@ function filterAndLogStructuralConflicts(
   engine: PolicyEngine,
   scenarios: TestScenario[],
   label: string = 'Discarded scenario (structural conflict)',
+  storedAnnotations?: StoredToolAnnotation[],
 ): { valid: TestScenario[]; discarded: DiscardedScenario[] } {
-  const { valid, discarded } = filterStructuralConflicts(engine, scenarios);
+  const filterResult = filterStructuralConflicts(engine, scenarios);
+  let valid = filterResult.valid;
+  const discarded = filterResult.discarded;
   for (const d of discarded) {
     const prefix =
       d.scenario.source === 'handwritten'
@@ -210,6 +218,29 @@ function filterAndLogStructuralConflicts(
         : chalk.dim(`${label}:`);
     console.error(`  ${prefix} "${d.scenario.description}" — ${d.rule} always returns ${d.actual}`);
   }
+
+  // Discard scenarios whose arguments don't match any conditional role spec —
+  // they fall back to all default roles and test the wrong thing.
+  if (storedAnnotations && storedAnnotations.length > 0) {
+    const fallbackWarnings = detectAllDefaultRoleFallbacks(valid, storedAnnotations);
+    const fallbackDescriptions = new Set(fallbackWarnings.map((w) => w.scenario.description));
+    if (fallbackDescriptions.size > 0) {
+      const kept: TestScenario[] = [];
+      for (const s of valid) {
+        if (fallbackDescriptions.has(s.description)) {
+          const w = fallbackWarnings.find((fw) => fw.scenario.description === s.description);
+          const details = w?.details.join('; ') ?? 'unknown conditional mismatch';
+          const discardLabel = 'Discarded (default role fallback)';
+          console.error(`  ${chalk.dim(`${discardLabel}:`)} "${s.description}" — ${details}`);
+          discarded.push({ scenario: s, rule: 'default-role-fallback', actual: 'deny' });
+        } else {
+          kept.push(s);
+        }
+      }
+      valid = kept;
+    }
+  }
+
   return { valid, discarded };
 }
 
@@ -477,10 +508,20 @@ export class PipelineRunner {
       throw new Error("tool-annotations.json not found. Run 'ironcurtain annotate-tools' first.");
     }
 
+    // Load raw stored annotations (with conditional role specs) for scenario generation prompts
+    const storedAnnotationsFile = config.preloadedToolAnnotations
+      ? undefined
+      : loadStoredToolAnnotationsFile(config.toolAnnotationsDir, config.toolAnnotationsFallbackDir);
+
     const constitutionHash = computeHash(config.constitutionInput);
 
     // Phase 1: Per-server compilation
-    const serverResults = await this.compileAllServers(config, toolAnnotationsFile, constitutionHash);
+    const serverResults = await this.compileAllServers(
+      config,
+      toolAnnotationsFile,
+      constitutionHash,
+      storedAnnotationsFile,
+    );
 
     // Phase 2: Merge
     const mergedPolicy = mergeServerResults(serverResults, constitutionHash);
@@ -557,6 +598,7 @@ export class PipelineRunner {
     config: PipelineRunConfig,
     toolAnnotationsFile: ToolAnnotationsFile,
     constitutionHash: string,
+    storedAnnotationsFile?: StoredToolAnnotationsFile,
   ): Promise<ServerCompilationResult[]> {
     const results: ServerCompilationResult[] = [];
     const serverEntries = Object.entries(toolAnnotationsFile.servers);
@@ -588,6 +630,7 @@ export class PipelineRunner {
         {
           serverName,
           annotations: serverData.tools,
+          storedAnnotations: storedAnnotationsFile?.servers[serverName]?.tools,
           constitutionText: config.constitutionInput,
           allowedDirectory: config.allowedDirectory,
           protectedPaths: config.protectedPaths,
@@ -641,6 +684,7 @@ export class PipelineRunner {
         unit.allowedDirectory,
         cachedPermittedDirs,
         cachedDynamicLists,
+        unit.storedAnnotations,
       );
       const cachedScenarioHash = computeScenariosHash(cachedScenarioPrompt, unit.handwrittenScenarios);
 
@@ -713,6 +757,7 @@ export class PipelineRunner {
       unit.allowedDirectory,
       permittedDirectories,
       dynamicLists,
+      unit.storedAnnotations,
     );
     const scenarioHash = computeScenariosHash(scenarioPrompt, unit.handwrittenScenarios);
 
@@ -726,6 +771,7 @@ export class PipelineRunner {
       `  ${unit.serverName}`,
       permittedDirectories,
       dynamicLists,
+      unit.storedAnnotations,
     );
 
     // Step 3: Verify compiled rules against scenarios
@@ -742,6 +788,8 @@ export class PipelineRunner {
     const { valid: filteredScenarios, discarded: discardedScenarios } = filterAndLogStructuralConflicts(
       filterEngine,
       scenarioResult.scenarios,
+      undefined,
+      unit.storedAnnotations,
     );
 
     // Generate replacement scenarios for structurally discarded ones (pre-loop, one-time)
@@ -760,6 +808,7 @@ export class PipelineRunner {
         permittedDirectories,
         dynamicLists,
         (msg) => console.error(`  ${chalk.dim(msg)}`),
+        unit.storedAnnotations,
       );
       if (replacementScenarios.length > 0) {
         // Filter replacements through structural invariants too
@@ -868,7 +917,12 @@ export class PipelineRunner {
           console.error(`  ${chalk.dim(`Corrected ${corrections.length} scenario expectation(s)`)}`);
         }
 
-        ({ valid: currentFilteredScenarios } = filterAndLogStructuralConflicts(filterEngine, scenarioResult.scenarios));
+        ({ valid: currentFilteredScenarios } = filterAndLogStructuralConflicts(
+          filterEngine,
+          scenarioResult.scenarios,
+          undefined,
+          unit.storedAnnotations,
+        ));
 
         const allRuleBlamedFailures = verificationResult.failedScenarios.filter((f) => {
           const attr = attributedFailures.find((a) => a.scenarioDescription === f.scenario.description);
@@ -1090,6 +1144,14 @@ export class PipelineRunner {
     }
 
     const allAnnotations = Object.values(toolAnnotationsFile.servers).flatMap((server) => server.tools);
+
+    // Load raw stored annotations for scenario generation prompts
+    const storedAnnotationsFile = config.preloadedToolAnnotations
+      ? undefined
+      : loadStoredToolAnnotationsFile(config.toolAnnotationsDir, config.toolAnnotationsFallbackDir);
+    const allStoredAnnotations = storedAnnotationsFile
+      ? Object.values(storedAnnotationsFile.servers).flatMap((server) => server.tools)
+      : undefined;
     const serverDomainAllowlists = config.mcpServers ? extractServerDomainAllowlists(config.mcpServers) : undefined;
 
     const includeHandwritten = config.includeHandwrittenScenarios ?? config.constitutionKind === 'constitution';
@@ -1194,6 +1256,7 @@ export class PipelineRunner {
       config.allowedDirectory,
       permittedDirectories,
       dynamicLists,
+      allStoredAnnotations,
     );
     const scenarioHash = computeScenariosHash(scenarioPrompt, handwrittenScenarios);
 
@@ -1207,6 +1270,7 @@ export class PipelineRunner {
       scenarioStepLabel,
       permittedDirectories,
       dynamicLists,
+      allStoredAnnotations,
     );
 
     writeArtifact(config.outputDir, 'test-scenarios.json', {
@@ -1228,6 +1292,8 @@ export class PipelineRunner {
     const { valid: initialValid, discarded: discardedScenarios } = filterAndLogStructuralConflicts(
       filterEngine,
       scenarioResult.scenarios,
+      undefined,
+      allStoredAnnotations,
     );
     let filteredScenarios = initialValid;
 
@@ -1247,6 +1313,7 @@ export class PipelineRunner {
         permittedDirectories,
         dynamicLists,
         (msg) => console.error(`  ${chalk.dim(msg)}`),
+        allStoredAnnotations,
       );
       if (replacementScenarios.length > 0) {
         const { valid: validReplacements } = filterAndLogStructuralConflicts(
@@ -1358,7 +1425,12 @@ export class PipelineRunner {
           console.error(`  ${chalk.dim(`Corrected ${corrections.length} scenario expectation(s)`)}`);
         }
 
-        ({ valid: filteredScenarios } = filterAndLogStructuralConflicts(filterEngine, scenarioResult.scenarios));
+        ({ valid: filteredScenarios } = filterAndLogStructuralConflicts(
+          filterEngine,
+          scenarioResult.scenarios,
+          undefined,
+          allStoredAnnotations,
+        ));
 
         const allRuleBlamedFailures = verificationResult.failedScenarios.filter((f) => {
           const attr = attributedFailures.find((a) => a.scenarioDescription === f.scenario.description);
@@ -1791,6 +1863,7 @@ export class PipelineRunner {
     stepLabel: string,
     permittedDirectories?: string[],
     dynamicLists?: DynamicListsFile,
+    storedAnnotations?: StoredToolAnnotation[],
   ): Promise<{
     scenarios: TestScenario[];
     inputHash: string;
@@ -1817,6 +1890,7 @@ export class PipelineRunner {
           },
           dynamicLists,
           (prompt: string) => this.cacheStrategy.wrapSystemPrompt(prompt),
+          storedAnnotations,
         ),
       (scenarios, elapsed) => {
         const generatedCount = scenarios.length - handwrittenScenarios.length;

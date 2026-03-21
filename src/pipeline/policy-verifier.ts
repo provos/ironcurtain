@@ -13,11 +13,14 @@ import { z } from 'zod';
 import { DEFAULT_MAX_TOKENS, parseJsonWithSchema, schemaToPromptHint } from './generate-with-repair.js';
 import { PolicyEngine } from '../trusted-process/policy-engine.js';
 import type { ToolCallRequest } from '../types/mcp.js';
+import { isConditionalRoles } from '../types/argument-roles.js';
 import { formatDynamicListsSection } from './scenario-generator.js';
 import type {
   CompiledPolicyFile,
+  ConditionalRoles,
   DiscardedScenario,
   DynamicListsFile,
+  StoredToolAnnotation,
   ToolAnnotationsFile,
   TestScenario,
   ExecutionResult,
@@ -479,6 +482,124 @@ export function filterStructuralConflicts(
   }
 
   return { valid, discarded };
+}
+
+// ---------------------------------------------------------------------------
+// Default Role Fallback Detection
+// ---------------------------------------------------------------------------
+
+/**
+ * Warning info for a scenario where all conditional role specs fall to defaults.
+ */
+export interface DefaultRoleFallbackWarning {
+  readonly scenario: TestScenario;
+  readonly toolKey: string;
+  readonly details: string[];
+}
+
+/**
+ * Checks whether a scenario's arguments cause ALL conditional role specs
+ * to fall to their default (most-restrictive) roles. This happens when
+ * the discriminator argument is missing or has a value not matching any
+ * `when` clause. The scenario may still produce a valid policy decision,
+ * but it likely doesn't test the intended tool mode.
+ *
+ * @param scenario - The test scenario to check
+ * @param storedAnnotations - Raw annotations with conditional role specs
+ * @returns A warning if all conditionals fall to defaults, or undefined
+ */
+export function detectDefaultRoleFallback(
+  scenario: TestScenario,
+  storedAnnotations: StoredToolAnnotation[],
+): DefaultRoleFallbackWarning | undefined {
+  const toolKey = `${scenario.request.serverName}/${scenario.request.toolName}`;
+  const annotation = storedAnnotations.find(
+    (a) => a.serverName === scenario.request.serverName && a.toolName === scenario.request.toolName,
+  );
+  if (!annotation) return undefined;
+
+  // Find all args with conditional role specs
+  const conditionalArgs = Object.entries(annotation.args).filter((entry): entry is [string, ConditionalRoles] =>
+    isConditionalRoles(entry[1]),
+  );
+  if (conditionalArgs.length === 0) return undefined;
+
+  // Check each conditional arg: does ANY when clause match?
+  const details: string[] = [];
+  for (const [argName, spec] of conditionalArgs) {
+    const matchesAny = spec.when.some((entry) => {
+      const cond = entry.condition;
+      const value = scenario.request.arguments[cond.arg];
+
+      if (cond.equals !== undefined) return value === cond.equals;
+      if (cond.in !== undefined) return cond.in.includes(value as string | number | boolean);
+      if (cond.is !== undefined) {
+        switch (cond.is) {
+          case 'present':
+            return cond.arg in scenario.request.arguments && value !== null && value !== undefined;
+          case 'absent':
+            return !(cond.arg in scenario.request.arguments) || value === null || value === undefined;
+          case 'truthy':
+            return cond.arg in scenario.request.arguments && !!value;
+          case 'falsy':
+            return !(cond.arg in scenario.request.arguments) || !value;
+        }
+      }
+      return false;
+    });
+
+    if (!matchesAny) {
+      // Describe what went wrong
+      const discriminators = [...new Set(spec.when.map((w) => w.condition.arg))];
+      const validValues = spec.when.flatMap((w) => {
+        const c = w.condition;
+        if (c.equals !== undefined) return [JSON.stringify(c.equals)];
+        if (c.in !== undefined) return c.in.map((v) => JSON.stringify(v));
+        if (c.is !== undefined) return [`<${c.is}>`];
+        return [];
+      });
+      const discriminatorArg = discriminators[0] ?? argName;
+      const actualValue = scenario.request.arguments[discriminatorArg];
+      const actualDesc =
+        actualValue === undefined
+          ? `arg "${discriminatorArg}" is missing`
+          : `${discriminatorArg}=${JSON.stringify(actualValue)}`;
+      details.push(`${argName}: ${actualDesc}, valid values: [${validValues.join(', ')}]`);
+    }
+  }
+
+  if (details.length === conditionalArgs.length) {
+    return { scenario, toolKey, details };
+  }
+  return undefined;
+}
+
+/**
+ * Scans scenarios for default role fallback issues and returns warnings.
+ * Only checks scenarios for tools that have conditional role specs.
+ */
+export function detectAllDefaultRoleFallbacks(
+  scenarios: TestScenario[],
+  storedAnnotations: StoredToolAnnotation[],
+): DefaultRoleFallbackWarning[] {
+  // Pre-filter: only check tools that have conditional specs
+  const toolsWithConditionals = new Set(
+    storedAnnotations
+      .filter((a) => Object.values(a.args).some((spec) => isConditionalRoles(spec)))
+      .map((a) => `${a.serverName}/${a.toolName}`),
+  );
+
+  const warnings: DefaultRoleFallbackWarning[] = [];
+  for (const scenario of scenarios) {
+    const toolKey = `${scenario.request.serverName}/${scenario.request.toolName}`;
+    if (!toolsWithConditionals.has(toolKey)) continue;
+
+    const warning = detectDefaultRoleFallback(scenario, storedAnnotations);
+    if (warning) {
+      warnings.push(warning);
+    }
+  }
+  return warnings;
 }
 
 // ---------------------------------------------------------------------------

@@ -275,10 +275,14 @@ delete-history), it is a **multi-mode tool** — its behavior depends on how it 
 At runtime, the engine resolves which roles are active based on the actual arguments.
 
 For multi-mode tools:
-- If the roles are distinct (e.g., read-path vs write-history), you CAN scope rules
-  using the "roles" condition. Example: {"tool": ["X"], "roles": ["read-path"]} allows
-  read-only calls; mutation calls fall to default-deny because their write/delete roles
-  have no matching rule.
+- If the roles are distinct (e.g., read-path vs write-history), you MUST scope allow
+  rules using the "roles" condition. Example: {"tool": ["X"], "roles": ["read-path"]}
+  allows read-only calls; mutation calls fall to default-deny because their write/delete
+  roles have no matching rule.
+- NEVER create an unconditional allow rule (without "roles") for a multi-mode tool.
+  An unconditional allow fires during mutation-role evaluation too, making it impossible
+  for any escalate or deny to take effect. Always include "roles": ["read-path"] on
+  allow rules for tools that also have mutation roles.
 - If all modes share the same roles (e.g., a tool always has both read-path and
   write-path regardless of operation), role scoping cannot distinguish modes. Choose
   one disposition for the entire tool — prefer escalate if the constitution restricts
