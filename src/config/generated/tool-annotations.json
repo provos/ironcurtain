@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-03-05T00:53:56.055Z",
+  "generatedAt": "2026-03-21T18:08:21.117403+00:00",
   "servers": {
     "filesystem": {
       "inputHash": "4efe924aad6d0b55f7128efebd2b9e23689dad318dafa05fd71913bcb6f85ee9",
@@ -2041,6 +2041,2602 @@
             ]
           },
           "serverName": "github"
+        }
+      ]
+    },
+    "google-workspace": {
+      "inputHash": "f7ce4acb3ef13bc7a8a3c7a477075d35a47a1c2ec67d9a497b8105a1dddf4852",
+      "tools": [
+        {
+          "toolName": "drive_search",
+          "comment": "Searches for files in Google Drive using a query string.",
+          "args": {
+            "query": [
+              "none"
+            ],
+            "pageToken": [
+              "none"
+            ],
+            "pageSize": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "drive_read_file",
+          "comment": "Reads and returns the contents of a file from Google Drive by file ID.",
+          "args": {
+            "fileId": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "drive_list_files",
+          "comment": "Lists files in Google Drive with optional filtering, pagination, and sorting.",
+          "args": {
+            "query": [
+              "none"
+            ],
+            "folderId": [
+              "none"
+            ],
+            "pageSize": [
+              "none"
+            ],
+            "pageToken": [
+              "none"
+            ],
+            "orderBy": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "drive_get_metadata",
+          "comment": "Retrieves detailed metadata for a specific file in Google Drive.",
+          "args": {
+            "fileId": [
+              "none"
+            ],
+            "fields": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "drive_upload_file",
+          "comment": "Uploads a new file with content to Google Drive.",
+          "args": {
+            "name": [
+              "none"
+            ],
+            "mimeType": [
+              "none"
+            ],
+            "content": [
+              "none"
+            ],
+            "parents": [
+              "none"
+            ],
+            "description": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "drive_create_file",
+          "comment": "Creates an empty file or Google Workspace document in Google Drive without content.",
+          "args": {
+            "name": [
+              "none"
+            ],
+            "mimeType": [
+              "none"
+            ],
+            "parents": [
+              "none"
+            ],
+            "description": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "drive_delete_file",
+          "comment": "Moves a file to trash in Google Drive by file ID.",
+          "args": {
+            "fileId": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "drive_copy_file",
+          "comment": "Creates a duplicate of a file in Google Drive with an optional new name and location.",
+          "args": {
+            "fileId": [
+              "none"
+            ],
+            "name": [
+              "none"
+            ],
+            "parents": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "drive_move_file",
+          "comment": "Moves a file to a different folder in Google Drive by updating its parent folder(s).",
+          "args": {
+            "fileId": [
+              "none"
+            ],
+            "newParents": [
+              "none"
+            ],
+            "removeParents": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "drive_rename_file",
+          "comment": "Renames a file in Google Drive while keeping all other properties unchanged.",
+          "args": {
+            "fileId": [
+              "none"
+            ],
+            "newName": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "drive_update_file",
+          "comment": "Updates a file's metadata and/or content in Google Drive.",
+          "args": {
+            "fileId": [
+              "none"
+            ],
+            "name": [
+              "none"
+            ],
+            "description": [
+              "none"
+            ],
+            "mimeType": [
+              "none"
+            ],
+            "content": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "drive_create_folder",
+          "comment": "Creates a new folder in Google Drive, optionally inside a specified parent folder.",
+          "args": {
+            "name": [
+              "none"
+            ],
+            "parents": [
+              "none"
+            ],
+            "description": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "drive_list_folder_contents",
+          "comment": "Lists all files and folders inside a specific Google Drive folder.",
+          "args": {
+            "folderId": [
+              "none"
+            ],
+            "pageSize": [
+              "none"
+            ],
+            "pageToken": [
+              "none"
+            ],
+            "orderBy": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "drive_move_to_folder",
+          "comment": "Moves a file into a specified destination folder in Google Drive.",
+          "args": {
+            "fileId": [
+              "none"
+            ],
+            "folderId": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "drive_share_file",
+          "comment": "Shares a Google Drive file by adding permissions for a user, group, domain, or anyone with the link.",
+          "args": {
+            "fileId": [
+              "none"
+            ],
+            "role": [
+              "share-permission"
+            ],
+            "type": [
+              "none"
+            ],
+            "emailAddress": [
+              "email-address"
+            ],
+            "domain": [
+              "none"
+            ],
+            "sendNotificationEmail": [
+              "none"
+            ],
+            "emailMessage": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "drive_list_permissions",
+          "comment": "Lists all permissions for a Google Drive file, showing who has access and at what level.",
+          "args": {
+            "fileId": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "drive_update_permission",
+          "comment": "Updates an existing permission's role on a Google Drive file.",
+          "args": {
+            "fileId": [
+              "none"
+            ],
+            "permissionId": [
+              "none"
+            ],
+            "role": [
+              "share-permission"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "drive_remove_permission",
+          "comment": "Removes a permission from a Google Drive file, revoking the associated user or group's access.",
+          "args": {
+            "fileId": [
+              "none"
+            ],
+            "permissionId": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "drive_export_file",
+          "comment": "Exports a Google Workspace document to a specified format such as PDF, DOCX, or CSV.",
+          "args": {
+            "fileId": [
+              "none"
+            ],
+            "mimeType": [
+              "none"
+            ],
+            "format": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "drive_list_revisions",
+          "comment": "Lists all revisions of a file in Google Drive with timestamps and modification details.",
+          "args": {
+            "fileId": [
+              "none"
+            ],
+            "pageSize": [
+              "none"
+            ],
+            "pageToken": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "drive_empty_trash",
+          "comment": "Permanently deletes all files in the authenticated user's Google Drive trash.",
+          "args": {},
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_update_cell",
+          "comment": "Updates the value of a specific cell in a Google Spreadsheet.",
+          "args": {
+            "fileId": [
+              "none"
+            ],
+            "range": [
+              "none"
+            ],
+            "value": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_read",
+          "comment": "Reads data from a Google Spreadsheet with optional range and sheet filtering.",
+          "args": {
+            "spreadsheetId": [
+              "none"
+            ],
+            "ranges": [
+              "none"
+            ],
+            "sheetId": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_list_sheets",
+          "comment": "Lists all sheets (tabs) within a Google Spreadsheet.",
+          "args": {
+            "spreadsheetId": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_add_sheet",
+          "comment": "Adds a new sheet (tab) to a Google Spreadsheet at an optional position.",
+          "args": {
+            "spreadsheetId": [
+              "none"
+            ],
+            "title": [
+              "none"
+            ],
+            "index": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_delete_sheet",
+          "comment": "Deletes a specific sheet (tab) from a Google Spreadsheet by its ID.",
+          "args": {
+            "spreadsheetId": [
+              "none"
+            ],
+            "sheetId": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_insert_rows",
+          "comment": "Inserts a specified number of empty rows at a given index in a Google Spreadsheet sheet.",
+          "args": {
+            "spreadsheetId": [
+              "none"
+            ],
+            "sheetId": [
+              "none"
+            ],
+            "startIndex": [
+              "none"
+            ],
+            "count": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_insert_columns",
+          "comment": "Inserts a specified number of empty columns at a given index in a Google Spreadsheet sheet.",
+          "args": {
+            "spreadsheetId": [
+              "none"
+            ],
+            "sheetId": [
+              "none"
+            ],
+            "startIndex": [
+              "none"
+            ],
+            "count": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_delete_rows",
+          "comment": "Deletes a specified number of rows starting at a given index from a Google Spreadsheet sheet.",
+          "args": {
+            "spreadsheetId": [
+              "none"
+            ],
+            "sheetId": [
+              "none"
+            ],
+            "startIndex": [
+              "none"
+            ],
+            "count": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_delete_columns",
+          "comment": "Deletes a specified number of columns starting at a given index from a Google Spreadsheet sheet.",
+          "args": {
+            "spreadsheetId": [
+              "none"
+            ],
+            "sheetId": [
+              "none"
+            ],
+            "startIndex": [
+              "none"
+            ],
+            "count": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_append_data",
+          "comment": "Appends rows of data to the end of a specified range in a Google Spreadsheet.",
+          "args": {
+            "spreadsheetId": [
+              "none"
+            ],
+            "range": [
+              "none"
+            ],
+            "values": [
+              "none"
+            ],
+            "valueInputOption": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_batch_update",
+          "comment": "Updates multiple cell ranges with new values in a single batch operation on a Google Spreadsheet.",
+          "args": {
+            "spreadsheetId": [
+              "none"
+            ],
+            "updates": [
+              "none"
+            ],
+            "valueInputOption": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_clear_data",
+          "comment": "Clears all data from one or more specified ranges in a Google Spreadsheet.",
+          "args": {
+            "spreadsheetId": [
+              "none"
+            ],
+            "ranges": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_copy_sheet",
+          "comment": "Copies a sheet from one Google Spreadsheet to another (or within the same spreadsheet).",
+          "args": {
+            "sourceSpreadsheetId": [
+              "none"
+            ],
+            "sourceSheetId": [
+              "none"
+            ],
+            "destinationSpreadsheetId": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_copy_to",
+          "comment": "Copies data from one range to another range within a Google Spreadsheet using cut/paste.",
+          "args": {
+            "spreadsheetId": [
+              "none"
+            ],
+            "sourceSheetId": [
+              "none"
+            ],
+            "sourceStartRow": [
+              "none"
+            ],
+            "sourceStartColumn": [
+              "none"
+            ],
+            "sourceEndRow": [
+              "none"
+            ],
+            "sourceEndColumn": [
+              "none"
+            ],
+            "destinationSheetId": [
+              "none"
+            ],
+            "destinationStartRow": [
+              "none"
+            ],
+            "destinationStartColumn": [
+              "none"
+            ],
+            "pasteType": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_merge_cells",
+          "comment": "Merges a range of cells in a Google Spreadsheet using the specified merge type.",
+          "args": {
+            "spreadsheetId": [
+              "none"
+            ],
+            "sheetId": [
+              "none"
+            ],
+            "startRow": [
+              "none"
+            ],
+            "endRow": [
+              "none"
+            ],
+            "startColumn": [
+              "none"
+            ],
+            "endColumn": [
+              "none"
+            ],
+            "mergeType": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_unmerge_cells",
+          "comment": "Unmerges previously merged cells in a specified range of a Google Spreadsheet.",
+          "args": {
+            "spreadsheetId": [
+              "none"
+            ],
+            "sheetId": [
+              "none"
+            ],
+            "startRow": [
+              "none"
+            ],
+            "endRow": [
+              "none"
+            ],
+            "startColumn": [
+              "none"
+            ],
+            "endColumn": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_update_borders",
+          "comment": "Updates the border styles (top, bottom, left, right, inner) for a range of cells in a Google Spreadsheet.",
+          "args": {
+            "spreadsheetId": [
+              "none"
+            ],
+            "sheetId": [
+              "none"
+            ],
+            "startRow": [
+              "none"
+            ],
+            "endRow": [
+              "none"
+            ],
+            "startColumn": [
+              "none"
+            ],
+            "endColumn": [
+              "none"
+            ],
+            "top": [
+              "none"
+            ],
+            "bottom": [
+              "none"
+            ],
+            "left": [
+              "none"
+            ],
+            "right": [
+              "none"
+            ],
+            "innerHorizontal": [
+              "none"
+            ],
+            "innerVertical": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_format_cells",
+          "comment": "Applies font, color, alignment, and other formatting to a range of cells in a Google Spreadsheet.",
+          "args": {
+            "spreadsheetId": [
+              "none"
+            ],
+            "sheetId": [
+              "none"
+            ],
+            "startRow": [
+              "none"
+            ],
+            "endRow": [
+              "none"
+            ],
+            "startColumn": [
+              "none"
+            ],
+            "endColumn": [
+              "none"
+            ],
+            "format": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_sort_range",
+          "comment": "Sorts a range of data in a Google Spreadsheet according to one or more sort specifications.",
+          "args": {
+            "spreadsheetId": [
+              "none"
+            ],
+            "sheetId": [
+              "none"
+            ],
+            "startRow": [
+              "none"
+            ],
+            "endRow": [
+              "none"
+            ],
+            "startColumn": [
+              "none"
+            ],
+            "endColumn": [
+              "none"
+            ],
+            "sortSpecs": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_create_spreadsheet",
+          "comment": "Creates a new Google Spreadsheet with a specified title and optional initial sheets.",
+          "args": {
+            "title": [
+              "none"
+            ],
+            "sheets": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_duplicate_sheet",
+          "comment": "Duplicates an existing sheet within the same Google Spreadsheet, optionally naming and positioning the copy.",
+          "args": {
+            "spreadsheetId": [
+              "none"
+            ],
+            "sourceSheetId": [
+              "none"
+            ],
+            "newSheetName": [
+              "none"
+            ],
+            "insertSheetIndex": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_rename_sheet",
+          "comment": "Renames a sheet tab in a Google Spreadsheet to a new title.",
+          "args": {
+            "spreadsheetId": [
+              "none"
+            ],
+            "sheetId": [
+              "none"
+            ],
+            "newTitle": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_batch_clear",
+          "comment": "Clears data from multiple specified ranges in a Google Spreadsheet in a single batch operation.",
+          "args": {
+            "spreadsheetId": [
+              "none"
+            ],
+            "ranges": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_auto_resize",
+          "comment": "Automatically resizes rows or columns in a Google Spreadsheet to fit their content.",
+          "args": {
+            "spreadsheetId": [
+              "none"
+            ],
+            "sheetId": [
+              "none"
+            ],
+            "dimension": [
+              "none"
+            ],
+            "startIndex": [
+              "none"
+            ],
+            "endIndex": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_set_number_format",
+          "comment": "Sets the number format (currency, percentage, date, etc.) for a range of cells in a Google Spreadsheet.",
+          "args": {
+            "spreadsheetId": [
+              "none"
+            ],
+            "sheetId": [
+              "none"
+            ],
+            "startRow": [
+              "none"
+            ],
+            "endRow": [
+              "none"
+            ],
+            "startColumn": [
+              "none"
+            ],
+            "endColumn": [
+              "none"
+            ],
+            "numberFormat": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_set_data_validation",
+          "comment": "Sets data validation rules (dropdowns, number ranges, custom formulas, etc.) for a range of cells in a Google Spreadsheet.",
+          "args": {
+            "spreadsheetId": [
+              "none"
+            ],
+            "sheetId": [
+              "none"
+            ],
+            "startRow": [
+              "none"
+            ],
+            "endRow": [
+              "none"
+            ],
+            "startColumn": [
+              "none"
+            ],
+            "endColumn": [
+              "none"
+            ],
+            "validation": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_add_conditional_format",
+          "comment": "Adds a conditional formatting rule to a range of cells in a Google Spreadsheet.",
+          "args": {
+            "spreadsheetId": [
+              "none"
+            ],
+            "sheetId": [
+              "none"
+            ],
+            "startRow": [
+              "none"
+            ],
+            "endRow": [
+              "none"
+            ],
+            "startColumn": [
+              "none"
+            ],
+            "endColumn": [
+              "none"
+            ],
+            "rule": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_create_filter",
+          "comment": "Creates a basic filter on a specified range in a Google Spreadsheet.",
+          "args": {
+            "spreadsheetId": [
+              "none"
+            ],
+            "sheetId": [
+              "none"
+            ],
+            "startRow": [
+              "none"
+            ],
+            "endRow": [
+              "none"
+            ],
+            "startColumn": [
+              "none"
+            ],
+            "endColumn": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_add_protected_range",
+          "comment": "Adds protection to a range of cells in a Google Spreadsheet to restrict or warn on editing, optionally specifying allowed editors by email.",
+          "args": {
+            "spreadsheetId": [
+              "none"
+            ],
+            "sheetId": [
+              "none"
+            ],
+            "startRow": [
+              "none"
+            ],
+            "endRow": [
+              "none"
+            ],
+            "startColumn": [
+              "none"
+            ],
+            "endColumn": [
+              "none"
+            ],
+            "description": [
+              "none"
+            ],
+            "warningOnly": [
+              "none"
+            ],
+            "editors": [
+              "email-address"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_delete_protected_range",
+          "comment": "Removes protection from a specified protected range in a spreadsheet.",
+          "args": {
+            "spreadsheetId": [
+              "none"
+            ],
+            "protectedRangeId": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_update_protected_range",
+          "comment": "Updates the protection settings, description, and editors for a protected range in a spreadsheet.",
+          "args": {
+            "spreadsheetId": [
+              "none"
+            ],
+            "protectedRangeId": [
+              "none"
+            ],
+            "description": [
+              "none"
+            ],
+            "warningOnly": [
+              "none"
+            ],
+            "editors": [
+              "email-address"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_find_replace",
+          "comment": "Finds and replaces text within a specified range or entire sheet in a spreadsheet.",
+          "args": {
+            "spreadsheetId": [
+              "none"
+            ],
+            "sheetId": [
+              "none"
+            ],
+            "find": [
+              "none"
+            ],
+            "replacement": [
+              "none"
+            ],
+            "matchCase": [
+              "none"
+            ],
+            "matchEntireCell": [
+              "none"
+            ],
+            "searchByRegex": [
+              "none"
+            ],
+            "startRow": [
+              "none"
+            ],
+            "endRow": [
+              "none"
+            ],
+            "startColumn": [
+              "none"
+            ],
+            "endColumn": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_add_named_range",
+          "comment": "Creates a named range with a specified name and cell boundaries in a spreadsheet.",
+          "args": {
+            "spreadsheetId": [
+              "none"
+            ],
+            "name": [
+              "none"
+            ],
+            "sheetId": [
+              "none"
+            ],
+            "startRow": [
+              "none"
+            ],
+            "endRow": [
+              "none"
+            ],
+            "startColumn": [
+              "none"
+            ],
+            "endColumn": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_update_named_range",
+          "comment": "Updates the name or cell boundaries of an existing named range in a spreadsheet.",
+          "args": {
+            "spreadsheetId": [
+              "none"
+            ],
+            "namedRangeId": [
+              "none"
+            ],
+            "name": [
+              "none"
+            ],
+            "sheetId": [
+              "none"
+            ],
+            "startRow": [
+              "none"
+            ],
+            "endRow": [
+              "none"
+            ],
+            "startColumn": [
+              "none"
+            ],
+            "endColumn": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_delete_named_range",
+          "comment": "Deletes a named range from a spreadsheet by its ID.",
+          "args": {
+            "spreadsheetId": [
+              "none"
+            ],
+            "namedRangeId": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_freeze_rows",
+          "comment": "Freezes a specified number of rows at the top of a sheet.",
+          "args": {
+            "spreadsheetId": [
+              "none"
+            ],
+            "sheetId": [
+              "none"
+            ],
+            "count": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_freeze_columns",
+          "comment": "Freezes a specified number of columns at the left of a sheet.",
+          "args": {
+            "spreadsheetId": [
+              "none"
+            ],
+            "sheetId": [
+              "none"
+            ],
+            "count": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_add_chart",
+          "comment": "Adds a new chart of a specified type to a sheet using data from a defined range.",
+          "args": {
+            "spreadsheetId": [
+              "none"
+            ],
+            "sheetId": [
+              "none"
+            ],
+            "chartType": [
+              "none"
+            ],
+            "title": [
+              "none"
+            ],
+            "dataSheetId": [
+              "none"
+            ],
+            "dataStartRow": [
+              "none"
+            ],
+            "dataEndRow": [
+              "none"
+            ],
+            "dataStartColumn": [
+              "none"
+            ],
+            "dataEndColumn": [
+              "none"
+            ],
+            "position": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_update_chart",
+          "comment": "Updates the title or position of an existing chart in a spreadsheet.",
+          "args": {
+            "spreadsheetId": [
+              "none"
+            ],
+            "chartId": [
+              "none"
+            ],
+            "title": [
+              "none"
+            ],
+            "position": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_delete_chart",
+          "comment": "Deletes a chart from a spreadsheet by its chart ID.",
+          "args": {
+            "spreadsheetId": [
+              "none"
+            ],
+            "chartId": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_add_histogram",
+          "comment": "Adds a histogram chart to a sheet using data from a specified range.",
+          "args": {
+            "spreadsheetId": [
+              "none"
+            ],
+            "sheetId": [
+              "none"
+            ],
+            "title": [
+              "none"
+            ],
+            "dataSheetId": [
+              "none"
+            ],
+            "dataStartRow": [
+              "none"
+            ],
+            "dataEndRow": [
+              "none"
+            ],
+            "dataStartColumn": [
+              "none"
+            ],
+            "dataEndColumn": [
+              "none"
+            ],
+            "bucketSize": [
+              "none"
+            ],
+            "outlierPercentile": [
+              "none"
+            ],
+            "position": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_add_waterfall",
+          "comment": "Adds a waterfall chart to a sheet using data from a specified range.",
+          "args": {
+            "spreadsheetId": [
+              "none"
+            ],
+            "sheetId": [
+              "none"
+            ],
+            "title": [
+              "none"
+            ],
+            "dataSheetId": [
+              "none"
+            ],
+            "dataStartRow": [
+              "none"
+            ],
+            "dataEndRow": [
+              "none"
+            ],
+            "dataStartColumn": [
+              "none"
+            ],
+            "dataEndColumn": [
+              "none"
+            ],
+            "firstValueIsTotal": [
+              "none"
+            ],
+            "hideConnectorLines": [
+              "none"
+            ],
+            "position": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_add_candlestick",
+          "comment": "Adds a candlestick chart for financial data with open/high/low/close values to a sheet.",
+          "args": {
+            "spreadsheetId": [
+              "none"
+            ],
+            "sheetId": [
+              "none"
+            ],
+            "title": [
+              "none"
+            ],
+            "dataSheetId": [
+              "none"
+            ],
+            "dataStartRow": [
+              "none"
+            ],
+            "dataEndRow": [
+              "none"
+            ],
+            "domainColumn": [
+              "none"
+            ],
+            "lowColumn": [
+              "none"
+            ],
+            "openColumn": [
+              "none"
+            ],
+            "closeColumn": [
+              "none"
+            ],
+            "highColumn": [
+              "none"
+            ],
+            "position": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_add_combo",
+          "comment": "Adds a combo chart combining multiple chart types (e.g., column and line) to a sheet.",
+          "args": {
+            "spreadsheetId": [
+              "none"
+            ],
+            "sheetId": [
+              "none"
+            ],
+            "title": [
+              "none"
+            ],
+            "dataSheetId": [
+              "none"
+            ],
+            "dataStartRow": [
+              "none"
+            ],
+            "dataEndRow": [
+              "none"
+            ],
+            "dataStartColumn": [
+              "none"
+            ],
+            "dataEndColumn": [
+              "none"
+            ],
+            "seriesTypes": [
+              "none"
+            ],
+            "position": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_add_bubble",
+          "comment": "Adds a bubble chart displaying 3D data with bubble size to a sheet.",
+          "args": {
+            "spreadsheetId": [
+              "none"
+            ],
+            "sheetId": [
+              "none"
+            ],
+            "title": [
+              "none"
+            ],
+            "dataSheetId": [
+              "none"
+            ],
+            "dataStartRow": [
+              "none"
+            ],
+            "dataEndRow": [
+              "none"
+            ],
+            "labelsColumn": [
+              "none"
+            ],
+            "xValuesColumn": [
+              "none"
+            ],
+            "yValuesColumn": [
+              "none"
+            ],
+            "sizeColumn": [
+              "none"
+            ],
+            "position": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_add_treemap",
+          "comment": "Adds a treemap chart displaying hierarchical data as nested rectangles to a sheet.",
+          "args": {
+            "spreadsheetId": [
+              "none"
+            ],
+            "sheetId": [
+              "none"
+            ],
+            "title": [
+              "none"
+            ],
+            "dataSheetId": [
+              "none"
+            ],
+            "dataStartRow": [
+              "none"
+            ],
+            "dataEndRow": [
+              "none"
+            ],
+            "labelsColumn": [
+              "none"
+            ],
+            "parentLabelsColumn": [
+              "none"
+            ],
+            "sizeColumn": [
+              "none"
+            ],
+            "colorColumn": [
+              "none"
+            ],
+            "position": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_add_org_chart",
+          "comment": "Adds an organizational chart displaying hierarchical relationships to a sheet.",
+          "args": {
+            "spreadsheetId": [
+              "none"
+            ],
+            "sheetId": [
+              "none"
+            ],
+            "title": [
+              "none"
+            ],
+            "dataSheetId": [
+              "none"
+            ],
+            "dataStartRow": [
+              "none"
+            ],
+            "dataEndRow": [
+              "none"
+            ],
+            "labelsColumn": [
+              "none"
+            ],
+            "parentLabelsColumn": [
+              "none"
+            ],
+            "tooltipsColumn": [
+              "none"
+            ],
+            "position": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_add_filter_view",
+          "comment": "Creates a named filter view over a specified range in a spreadsheet.",
+          "args": {
+            "spreadsheetId": [
+              "none"
+            ],
+            "sheetId": [
+              "none"
+            ],
+            "title": [
+              "none"
+            ],
+            "startRow": [
+              "none"
+            ],
+            "endRow": [
+              "none"
+            ],
+            "startColumn": [
+              "none"
+            ],
+            "endColumn": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_add_pivot_table",
+          "comment": "Creates a pivot table in a spreadsheet from a source data range with specified row groups, column groups, and aggregated values.",
+          "args": {
+            "spreadsheetId": [
+              "none"
+            ],
+            "sourceSheetId": [
+              "none"
+            ],
+            "sourceStartRow": [
+              "none"
+            ],
+            "sourceEndRow": [
+              "none"
+            ],
+            "sourceStartColumn": [
+              "none"
+            ],
+            "sourceEndColumn": [
+              "none"
+            ],
+            "targetSheetId": [
+              "none"
+            ],
+            "targetRow": [
+              "none"
+            ],
+            "targetColumn": [
+              "none"
+            ],
+            "rows": [
+              "none"
+            ],
+            "columns": [
+              "none"
+            ],
+            "values": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_add_dimension_group",
+          "comment": "Adds a collapsible row or column group to a Google Sheet.",
+          "args": {
+            "spreadsheetId": [
+              "none"
+            ],
+            "sheetId": [
+              "none"
+            ],
+            "dimension": [
+              "none"
+            ],
+            "startIndex": [
+              "none"
+            ],
+            "endIndex": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_delete_dimension_group",
+          "comment": "Deletes a row or column group from a Google Sheet.",
+          "args": {
+            "spreadsheetId": [
+              "none"
+            ],
+            "sheetId": [
+              "none"
+            ],
+            "dimension": [
+              "none"
+            ],
+            "startIndex": [
+              "none"
+            ],
+            "endIndex": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_update_dimension_group",
+          "comment": "Updates properties such as collapse state of a row or column group in a Google Sheet.",
+          "args": {
+            "spreadsheetId": [
+              "none"
+            ],
+            "sheetId": [
+              "none"
+            ],
+            "dimension": [
+              "none"
+            ],
+            "startIndex": [
+              "none"
+            ],
+            "endIndex": [
+              "none"
+            ],
+            "collapsed": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_create_developer_metadata",
+          "comment": "Creates custom key-value developer metadata attached to a spreadsheet, sheet, row, or column.",
+          "args": {
+            "spreadsheetId": [
+              "none"
+            ],
+            "location": [
+              "none"
+            ],
+            "metadataKey": [
+              "none"
+            ],
+            "metadataValue": [
+              "none"
+            ],
+            "visibility": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_update_developer_metadata",
+          "comment": "Updates the key, value, or visibility of existing developer metadata by its ID.",
+          "args": {
+            "spreadsheetId": [
+              "none"
+            ],
+            "metadataId": [
+              "none"
+            ],
+            "metadataKey": [
+              "none"
+            ],
+            "metadataValue": [
+              "none"
+            ],
+            "visibility": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gsheets_delete_developer_metadata",
+          "comment": "Deletes developer metadata from a spreadsheet by its metadata ID.",
+          "args": {
+            "spreadsheetId": [
+              "none"
+            ],
+            "metadataId": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gdocs_create",
+          "comment": "Creates a new Google Document with the specified title.",
+          "args": {
+            "title": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gdocs_read",
+          "comment": "Reads and returns the content of a Google Document by its ID or URL.",
+          "args": {
+            "documentId": [
+              "none"
+            ],
+            "includeFormatting": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gdocs_get_metadata",
+          "comment": "Retrieves metadata (title, revision ID, document style) for a Google Document.",
+          "args": {
+            "documentId": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gdocs_list_documents",
+          "comment": "Lists Google Documents from Drive, optionally filtered by a search query.",
+          "args": {
+            "query": [
+              "none"
+            ],
+            "pageToken": [
+              "none"
+            ],
+            "pageSize": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gdocs_insert_text",
+          "comment": "Inserts text at a specific position in a Google Document.",
+          "args": {
+            "documentId": [
+              "none"
+            ],
+            "text": [
+              "none"
+            ],
+            "index": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gdocs_update_text",
+          "comment": "Replaces text within a specific range in a Google Document.",
+          "args": {
+            "documentId": [
+              "none"
+            ],
+            "startIndex": [
+              "none"
+            ],
+            "endIndex": [
+              "none"
+            ],
+            "text": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gdocs_delete_text",
+          "comment": "Deletes text within a specific range from a Google Document.",
+          "args": {
+            "documentId": [
+              "none"
+            ],
+            "startIndex": [
+              "none"
+            ],
+            "endIndex": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gdocs_replace_text",
+          "comment": "Finds and replaces all occurrences of a text string in a Google Document.",
+          "args": {
+            "documentId": [
+              "none"
+            ],
+            "findText": [
+              "none"
+            ],
+            "replaceText": [
+              "none"
+            ],
+            "matchCase": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gdocs_append_text",
+          "comment": "Appends text to the end of a Google Document.",
+          "args": {
+            "documentId": [
+              "none"
+            ],
+            "text": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gdocs_format_text",
+          "comment": "Applies text formatting (bold, italic, font, color, etc.) to a range in a Google Document.",
+          "args": {
+            "documentId": [
+              "none"
+            ],
+            "startIndex": [
+              "none"
+            ],
+            "endIndex": [
+              "none"
+            ],
+            "format": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gdocs_create_heading",
+          "comment": "Creates a heading of a specified level (H1-H6) at a position in a Google Document.",
+          "args": {
+            "documentId": [
+              "none"
+            ],
+            "text": [
+              "none"
+            ],
+            "level": [
+              "none"
+            ],
+            "index": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gdocs_create_list",
+          "comment": "Converts a range of paragraphs into a bulleted or numbered list in a Google Document.",
+          "args": {
+            "documentId": [
+              "none"
+            ],
+            "startIndex": [
+              "none"
+            ],
+            "endIndex": [
+              "none"
+            ],
+            "listType": [
+              "none"
+            ],
+            "nestingLevel": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gdocs_set_alignment",
+          "comment": "Sets the paragraph alignment for a range of text in a Google Document.",
+          "args": {
+            "documentId": [
+              "none"
+            ],
+            "startIndex": [
+              "none"
+            ],
+            "endIndex": [
+              "none"
+            ],
+            "alignment": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gdocs_apply_style",
+          "comment": "Applies a named paragraph style (Normal, Heading 1-6, Title, Subtitle) to a range in a Google Document.",
+          "args": {
+            "documentId": [
+              "none"
+            ],
+            "startIndex": [
+              "none"
+            ],
+            "endIndex": [
+              "none"
+            ],
+            "namedStyleType": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gdocs_insert_image",
+          "comment": "Inserts an image from a URL at a specific position in a Google Document.",
+          "args": {
+            "documentId": [
+              "none"
+            ],
+            "imageUrl": [
+              "none"
+            ],
+            "index": [
+              "none"
+            ],
+            "width": [
+              "none"
+            ],
+            "height": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gdocs_create_table",
+          "comment": "Creates a table with specified rows and columns at a position in a Google Document.",
+          "args": {
+            "documentId": [
+              "none"
+            ],
+            "rows": [
+              "none"
+            ],
+            "columns": [
+              "none"
+            ],
+            "index": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gdocs_insert_page_break",
+          "comment": "Inserts a page break at a specific position in a Google Document.",
+          "args": {
+            "documentId": [
+              "none"
+            ],
+            "index": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gdocs_insert_link",
+          "comment": "Inserts a hyperlink on a text range in a Google Document.",
+          "args": {
+            "documentId": [
+              "none"
+            ],
+            "startIndex": [
+              "none"
+            ],
+            "endIndex": [
+              "none"
+            ],
+            "url": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gdocs_insert_toc",
+          "comment": "Inserts a 'Table of Contents' heading placeholder at a specific position in a Google Document.",
+          "args": {
+            "documentId": [
+              "none"
+            ],
+            "index": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gdocs_batch_update",
+          "comment": "Executes multiple update operations on a Google Document in a single API call.",
+          "args": {
+            "documentId": [
+              "none"
+            ],
+            "requests": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gdocs_merge_documents",
+          "comment": "Merges multiple Google Documents into a single new or existing target document.",
+          "args": {
+            "sourceDocumentIds": [
+              "none"
+            ],
+            "targetDocumentId": [
+              "none"
+            ],
+            "title": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gdocs_export",
+          "comment": "Exports a Google Document to a specified format such as PDF, DOCX, or plain text.",
+          "args": {
+            "documentId": [
+              "none"
+            ],
+            "mimeType": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gdocs_suggest_mode",
+          "comment": "Provides information about enabling or disabling suggestion mode in a Google Document (not programmatically controllable via API).",
+          "args": {
+            "documentId": [
+              "none"
+            ],
+            "enabled": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gmail_list_labels",
+          "comment": "Lists all labels (system and user-created) in the user's Gmail account.",
+          "args": {},
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gmail_search_messages",
+          "comment": "Searches Gmail messages using Gmail query syntax and returns matching message IDs, thread IDs, and URLs.",
+          "args": {
+            "query": [
+              "none"
+            ],
+            "pageSize": [
+              "none"
+            ],
+            "pageToken": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gmail_get_message",
+          "comment": "Retrieves the full content and metadata of a specific Gmail message by its ID.",
+          "args": {
+            "messageId": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gmail_get_thread",
+          "comment": "Retrieves all messages in a Gmail thread (conversation) in chronological order.",
+          "args": {
+            "threadId": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gmail_modify_labels",
+          "comment": "Adds or removes labels from a specific Gmail message in a single operation.",
+          "args": {
+            "messageId": [
+              "none"
+            ],
+            "addLabelIds": [
+              "none"
+            ],
+            "removeLabelIds": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gmail_manage_label",
+          "comment": "Creates, updates, or deletes Gmail labels with configurable visibility settings.",
+          "args": {
+            "action": [
+              "none"
+            ],
+            "name": [
+              "none"
+            ],
+            "labelId": [
+              "none"
+            ],
+            "labelListVisibility": [
+              "none"
+            ],
+            "messageListVisibility": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gmail_send_message",
+          "comment": "Sends an email message immediately via Gmail with support for plain text or HTML, CC/BCC, and threading.",
+          "args": {
+            "to": [
+              "email-address"
+            ],
+            "subject": [
+              "none"
+            ],
+            "body": [
+              "email-body"
+            ],
+            "bodyFormat": [
+              "none"
+            ],
+            "cc": [
+              "email-address"
+            ],
+            "bcc": [
+              "email-address"
+            ],
+            "threadId": [
+              "none"
+            ],
+            "inReplyTo": [
+              "none"
+            ],
+            "references": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gmail_draft_message",
+          "comment": "Creates a draft email message in Gmail that is saved but not sent, supporting plain text or HTML and threading.",
+          "args": {
+            "subject": [
+              "none"
+            ],
+            "body": [
+              "email-body"
+            ],
+            "bodyFormat": [
+              "none"
+            ],
+            "to": [
+              "email-address"
+            ],
+            "cc": [
+              "email-address"
+            ],
+            "bcc": [
+              "email-address"
+            ],
+            "threadId": [
+              "none"
+            ],
+            "inReplyTo": [
+              "none"
+            ],
+            "references": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gmail_get_messages_batch",
+          "comment": "Retrieves multiple Gmail messages in a single batch request for efficiency.",
+          "args": {
+            "messageIds": [
+              "none"
+            ],
+            "format": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gmail_get_threads_batch",
+          "comment": "Retrieves multiple Gmail threads in a single batch request, returning all messages in each thread.",
+          "args": {
+            "threadIds": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "gmail_batch_modify_labels",
+          "comment": "Adds or removes labels from multiple Gmail messages in a single batch operation.",
+          "args": {
+            "messageIds": [
+              "none"
+            ],
+            "addLabelIds": [
+              "none"
+            ],
+            "removeLabelIds": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "calendar_list_events",
+          "comment": "Lists events from a Google Calendar with optional filtering by time range, search query, and pagination.",
+          "args": {
+            "calendarId": [
+              "none"
+            ],
+            "timeMin": [
+              "none"
+            ],
+            "timeMax": [
+              "none"
+            ],
+            "q": [
+              "none"
+            ],
+            "maxResults": [
+              "none"
+            ],
+            "pageToken": [
+              "none"
+            ],
+            "singleEvents": [
+              "none"
+            ],
+            "orderBy": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "calendar_get_event",
+          "comment": "Retrieves detailed information about a specific calendar event by its ID.",
+          "args": {
+            "calendarId": [
+              "none"
+            ],
+            "eventId": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "calendar_create_event",
+          "comment": "Creates a new event in Google Calendar with title, time, location, attendees, and optional Google Meet link.",
+          "args": {
+            "calendarId": [
+              "none"
+            ],
+            "summary": [
+              "none"
+            ],
+            "startTime": [
+              "none"
+            ],
+            "endTime": [
+              "none"
+            ],
+            "location": [
+              "none"
+            ],
+            "description": [
+              "none"
+            ],
+            "attendees": [
+              "email-address"
+            ],
+            "sendUpdates": [
+              "none"
+            ],
+            "conferenceData": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "calendar_update_event",
+          "comment": "Updates an existing calendar event's properties, only modifying the specified fields.",
+          "args": {
+            "calendarId": [
+              "none"
+            ],
+            "eventId": [
+              "none"
+            ],
+            "summary": [
+              "none"
+            ],
+            "startTime": [
+              "none"
+            ],
+            "endTime": [
+              "none"
+            ],
+            "location": [
+              "none"
+            ],
+            "description": [
+              "none"
+            ],
+            "attendees": [
+              "email-address"
+            ],
+            "sendUpdates": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "calendar_delete_event",
+          "comment": "Permanently deletes a calendar event with an option to notify attendees of the cancellation.",
+          "args": {
+            "calendarId": [
+              "none"
+            ],
+            "eventId": [
+              "none"
+            ],
+            "sendUpdates": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "calendar_freebusy_query",
+          "comment": "Queries free/busy availability for one or more calendars within a specified time range.",
+          "args": {
+            "timeMin": [
+              "none"
+            ],
+            "timeMax": [
+              "none"
+            ],
+            "calendars": [
+              "none"
+            ],
+            "timeZone": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "calendar_calendarlist_list",
+          "comment": "Lists all calendars in the user's calendar list with metadata and access roles, supporting pagination and filtering.",
+          "args": {
+            "maxResults": [
+              "none"
+            ],
+            "minAccessRole": [
+              "none"
+            ],
+            "pageToken": [
+              "none"
+            ],
+            "showDeleted": [
+              "none"
+            ],
+            "showHidden": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "calendar_calendarlist_get",
+          "comment": "Retrieves detailed metadata about a specific calendar from the user's calendar list.",
+          "args": {
+            "calendarId": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "calendar_events_quickadd",
+          "comment": "Creates a calendar event from a natural language text description using Google Calendar's quick-add parsing.",
+          "args": {
+            "calendarId": [
+              "none"
+            ],
+            "text": [
+              "none"
+            ],
+            "sendUpdates": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "calendar_events_instances",
+          "comment": "Retrieves all individual instances of a recurring calendar event within an optional time range.",
+          "args": {
+            "calendarId": [
+              "none"
+            ],
+            "eventId": [
+              "none"
+            ],
+            "timeMin": [
+              "none"
+            ],
+            "timeMax": [
+              "none"
+            ],
+            "maxResults": [
+              "none"
+            ],
+            "pageToken": [
+              "none"
+            ],
+            "showDeleted": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "calendar_events_move",
+          "comment": "Moves an event from one calendar to another, removing it from the source and placing it in the destination.",
+          "args": {
+            "calendarId": [
+              "none"
+            ],
+            "eventId": [
+              "none"
+            ],
+            "destination": [
+              "none"
+            ],
+            "sendUpdates": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "calendar_colors_get",
+          "comment": "Retrieves the available color definitions (IDs and hex values) for calendars and events.",
+          "args": {},
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "calendar_calendars_insert",
+          "comment": "Creates a new secondary Google Calendar with specified title, description, location, and timezone.",
+          "args": {
+            "summary": [
+              "none"
+            ],
+            "description": [
+              "none"
+            ],
+            "location": [
+              "none"
+            ],
+            "timeZone": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "calendar_calendars_get",
+          "comment": "Retrieves metadata for a specific calendar including title, description, location, and timezone.",
+          "args": {
+            "calendarId": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "calendar_calendars_update",
+          "comment": "Updates metadata for an existing calendar such as its title, description, location, and timezone.",
+          "args": {
+            "calendarId": [
+              "none"
+            ],
+            "summary": [
+              "none"
+            ],
+            "description": [
+              "none"
+            ],
+            "location": [
+              "none"
+            ],
+            "timeZone": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "calendar_acl_list",
+          "comment": "Lists all access control rules for a specified calendar, showing who has access and at what permission level.",
+          "args": {
+            "calendarId": [
+              "none"
+            ],
+            "maxResults": [
+              "none"
+            ],
+            "pageToken": [
+              "none"
+            ],
+            "showDeleted": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "calendar_acl_insert",
+          "comment": "Adds a new access control rule to share a calendar with a user, group, or domain at a specified permission level.",
+          "args": {
+            "calendarId": [
+              "none"
+            ],
+            "role": [
+              "share-permission"
+            ],
+            "scopeType": [
+              "none"
+            ],
+            "scopeValue": [
+              "email-address"
+            ],
+            "sendNotifications": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
+        },
+        {
+          "toolName": "calendar_settings_list",
+          "comment": "Lists all user settings for the authenticated user's Google Calendar, such as timezone, date format, and other preferences.",
+          "args": {
+            "maxResults": [
+              "none"
+            ],
+            "pageToken": [
+              "none"
+            ]
+          },
+          "serverName": "google-workspace"
         }
       ]
     }

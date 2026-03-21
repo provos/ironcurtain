@@ -29,6 +29,9 @@ import { PolicyEngine } from '../trusted-process/policy-engine.js';
 import { createLlmLoggingMiddleware, type LlmLogContext } from './llm-logger.js';
 import { createCacheStrategy, type PromptCacheStrategy } from '../session/prompt-cache.js';
 
+/** Canonical command to compile the read-only policy. Used in error/warning messages. */
+export const COMPILE_READONLY_CMD = 'npm run compile-policy:readonly';
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // ---------------------------------------------------------------------------
@@ -276,7 +279,7 @@ export function checkReadonlyPolicyStaleness(
     if (!coveredServers.has(server)) {
       console.error(
         `  ${chalk.yellow('Warning:')} Read-only policy has no rules for server "${server}". ` +
-          `Run "npm run compile-policy:readonly" to update.`,
+          `Run "${COMPILE_READONLY_CMD}" to update.`,
       );
     }
   }
@@ -306,7 +309,7 @@ export function loadReadOnlyPolicyEngine(
   } catch {
     console.error(
       `  ${chalk.yellow('Warning:')} Read-only policy not found at ${readonlyPolicyDir}. ` +
-        `Run "npm run compile-policy:readonly" to generate it.`,
+        `Run "${COMPILE_READONLY_CMD}" to generate it.`,
     );
     return undefined;
   }

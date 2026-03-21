@@ -22,6 +22,7 @@ import {
   loadExistingArtifact,
   loadPipelineConfig,
   loadReadOnlyPolicyEngine,
+  COMPILE_READONLY_CMD,
   writeArtifact,
   withSpinner,
 } from './pipeline-shared.js';
@@ -168,7 +169,7 @@ export async function main(args: string[] = []): Promise<void> {
     policyEngine = loadReadOnlyPolicyEngine(config.generatedDir, config.packageGeneratedDir, config.mcpServers);
     if (!policyEngine) {
       console.error(chalk.red.bold('Error: Read-only policy is required for MCP-backed list resolution.'));
-      console.error(`Run "npm run compile-policy:readonly" to generate it, or use --no-mcp to skip MCP-backed lists.`);
+      console.error(`Run "${COMPILE_READONLY_CMD}" to generate it, or use --no-mcp to skip MCP-backed lists.`);
       process.exit(1);
     }
 

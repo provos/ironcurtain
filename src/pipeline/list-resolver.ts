@@ -23,7 +23,7 @@ import type { PolicyEngine } from '../trusted-process/policy-engine.js';
 import type { ToolCallRequest } from '../types/mcp.js';
 import { generateObjectWithRepair } from './generate-with-repair.js';
 import { LIST_TYPE_REGISTRY } from './dynamic-list-types.js';
-import { computeHash } from './pipeline-shared.js';
+import { computeHash, COMPILE_READONLY_CMD } from './pipeline-shared.js';
 import type { ListDefinition, ResolvedList, DynamicListsFile } from './types.js';
 
 /**
@@ -306,7 +306,7 @@ export async function resolveList(
       throw new Error(
         `List "@${definition.name}" requires MCP access but no read-only PolicyEngine ` +
           `was provided. Ensure the read-only policy is compiled first ` +
-          `(npm run compile-policy:readonly).`,
+          `(${COMPILE_READONLY_CMD}).`,
       );
     }
 
