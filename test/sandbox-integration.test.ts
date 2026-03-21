@@ -582,6 +582,13 @@ describe('wrapServerCommand', () => {
     expect(cmdString).toContain('mcp-server-google-workspace');
   });
 
+  it('preserves unscoped npm package specifiers with pinned versions', () => {
+    const result = wrapServerCommand('some-tool', 'npx', ['-y', 'somepkg@1.2.3'], makeSandboxedConfig(), settingsDir);
+    const cmdString = result.args[3];
+    expect(cmdString).not.toContain(process.cwd());
+    expect(cmdString).toContain('somepkg');
+  });
+
   it('still resolves relative file paths to absolute', () => {
     const result = wrapServerCommand(
       'git',
