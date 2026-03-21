@@ -45,25 +45,32 @@ export async function connectMcpServersForLists(
         return null;
       }
 
-      const transport = new StdioClientTransport({
-        command: serverConfig.command,
-        args: serverConfig.args,
-        env: serverConfig.env ? { ...(process.env as Record<string, string>), ...serverConfig.env } : undefined,
-        stderr: 'pipe',
-      });
-      // Drain piped stderr to prevent backpressure
-      if (transport.stderr) {
-        transport.stderr.on('data', () => {});
+      try {
+        const transport = new StdioClientTransport({
+          command: serverConfig.command,
+          args: serverConfig.args,
+          env: serverConfig.env ? { ...(process.env as Record<string, string>), ...serverConfig.env } : undefined,
+          stderr: 'pipe',
+        });
+        // Drain piped stderr to prevent backpressure
+        if (transport.stderr) {
+          transport.stderr.on('data', () => {});
+        }
+
+        const client = new Client(
+          { name: 'ironcurtain-list-resolver', version: VERSION },
+          { jsonSchemaValidator: permissiveJsonSchemaValidator },
+        );
+        await client.connect(transport);
+        const toolsResult = await client.listTools();
+
+        return [serverName, { client, tools: toolsResult.tools }];
+      } catch (err) {
+        console.error(
+          `  ${chalk.yellow('Warning:')} Failed to connect to MCP server "${serverName}" — skipping: ${(err as Error).message}`,
+        );
+        return null;
       }
-
-      const client = new Client(
-        { name: 'ironcurtain-list-resolver', version: VERSION },
-        { jsonSchemaValidator: permissiveJsonSchemaValidator },
-      );
-      await client.connect(transport);
-      const toolsResult = await client.listTools();
-
-      return [serverName, { client, tools: toolsResult.tools }];
     }),
   );
 

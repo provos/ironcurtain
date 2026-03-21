@@ -14,12 +14,14 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import chalk from 'chalk';
 import { checkHelp, type CommandSpec } from '../cli-help.js';
+import type { PolicyEngine } from '../trusted-process/policy-engine.js';
 import { resolveAllLists, type McpServerConnection } from './list-resolver.js';
 import { connectMcpServersForLists, disconnectMcpServers } from './mcp-connections.js';
 import {
   createPipelineLlm,
   loadExistingArtifact,
   loadPipelineConfig,
+  loadReadOnlyPolicyEngine,
   writeArtifact,
   withSpinner,
 } from './pipeline-shared.js';
@@ -35,12 +37,16 @@ const refreshListsSpec: CommandSpec = {
   usage: ['ironcurtain refresh-lists [options]'],
   options: [
     { flag: 'list', description: 'Refresh only the named list', placeholder: '<name>' },
-    { flag: 'with-mcp', description: 'Connect to MCP servers for data-backed lists' },
+    {
+      flag: 'with-mcp',
+      description: 'Connect to MCP servers for data-backed lists (default; kept for backward compatibility)',
+    },
+    { flag: 'no-mcp', description: 'Skip MCP server connections' },
   ],
   examples: [
-    'ironcurtain refresh-lists                      # Refresh all knowledge-based lists',
+    'ironcurtain refresh-lists                      # Refresh all lists (including MCP-backed)',
     'ironcurtain refresh-lists --list major-news    # Refresh a single list',
-    'ironcurtain refresh-lists --with-mcp           # Include MCP-backed lists',
+    'ironcurtain refresh-lists --no-mcp             # Skip MCP-backed lists',
   ],
 };
 
@@ -58,6 +64,7 @@ function parseRefreshArgs(args: string[]): RefreshListsOptions | null {
       help: { type: 'boolean', short: 'h' },
       list: { type: 'string' },
       'with-mcp': { type: 'boolean' },
+      'no-mcp': { type: 'boolean' },
     },
     allowPositionals: true,
     strict: false,
@@ -67,7 +74,7 @@ function parseRefreshArgs(args: string[]): RefreshListsOptions | null {
 
   return {
     listName: values.list as string | undefined,
-    withMcp: (values['with-mcp'] as boolean | undefined) ?? false,
+    withMcp: values['no-mcp'] ? false : true,
   };
 }
 
@@ -93,10 +100,10 @@ function selectListsToRefresh(definitions: ListDefinition[], options: RefreshLis
     }
   }
 
-  // Without --with-mcp, skip data-backed lists
+  // With --no-mcp, skip data-backed lists
   if (!options.withMcp) {
     for (const def of selected.filter((d) => d.requiresMcp)) {
-      console.error(`  ${chalk.yellow('Skipping:')} @${def.name} (requires MCP — use --with-mcp to include)`);
+      console.error(`  ${chalk.yellow('Skipping:')} @${def.name} (requires MCP — omit --no-mcp to include)`);
     }
     selected = selected.filter((d) => !d.requiresMcp);
   }
@@ -154,7 +161,17 @@ export async function main(args: string[] = []): Promise<void> {
   // Connect to MCP servers if needed
   const needsMcp = options.withMcp && definitionsToRefresh.some((d) => d.requiresMcp);
   let mcpConnections: Map<string, McpServerConnection> | undefined;
+  let policyEngine: PolicyEngine | undefined;
   if (needsMcp) {
+    // H1: Load the read-only policy engine first -- abort before connecting
+    // to MCP servers if it's unavailable, since every MCP call requires it.
+    policyEngine = loadReadOnlyPolicyEngine(config.generatedDir, config.packageGeneratedDir, config.mcpServers);
+    if (!policyEngine) {
+      console.error(chalk.red.bold('Error: Read-only policy is required for MCP-backed list resolution.'));
+      console.error(`Run "npm run compile-policy:readonly" to generate it, or use --no-mcp to skip MCP-backed lists.`);
+      process.exit(1);
+    }
+
     mcpConnections = await connectMcpServersForLists(definitionsToRefresh, config.mcpServers);
   }
 
@@ -165,7 +182,7 @@ export async function main(args: string[] = []): Promise<void> {
       async (spinner) =>
         resolveAllLists(
           definitionsToRefresh,
-          { model: llm, mcpConnections },
+          { model: llm, mcpConnections, policyEngine },
           existingLists,
           (msg) => {
             spinner.text = `${stepText} — ${msg}`;

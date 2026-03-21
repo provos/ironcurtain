@@ -28,7 +28,7 @@ IronCurtain is a secure agent runtime that mediates between an AI agent and MCP 
 - `ironcurtain start -w ./path "task"` - run the agent in an existing directory instead of a fresh sandbox
 - `ironcurtain config` - interactively edit `~/.ironcurtain/config.json` (or `npm run config`)
 - `ironcurtain annotate-tools` - classify MCP tool arguments via LLM (or `npm run annotate-tools`)
-- `ironcurtain compile-policy` - compile constitution into policy rules (or `npm run compile-policy`)
+- `ironcurtain compile-policy` - compile constitution into policy rules (or `npm run compile-policy`). Supports `--constitution <path>`, `--output-dir <path>`, and `--server <name>` flags for alternative constitutions, output directories, and single-server debugging. The read-only policy is compiled via `npm run compile-policy -- --no-mcp --constitution src/config/constitution-readonly.md --output-dir src/config/generated-readonly`.
 - `ironcurtain refresh-lists [--list <name>] [--with-mcp]` - re-resolve dynamic lists without full recompilation
 - `npm run build` - TypeScript compilation + copy config assets to `dist/`
 - `npm test` - run all tests (vitest)

@@ -31,6 +31,7 @@ import { resolveAllLists, type McpServerConnection } from './list-resolver.js';
 import {
   computeHash,
   loadExistingArtifact,
+  loadReadOnlyPolicyEngine,
   loadToolAnnotationsFile,
   resolveRulePaths,
   writeArtifact,
@@ -1143,8 +1144,14 @@ export class PipelineRunner {
 
       const needsMcp = listDefinitions.some((d) => d.requiresMcp);
       let mcpConnections: Map<string, McpServerConnection> | undefined;
+      let policyEngine: PolicyEngine | undefined;
       if (needsMcp && config.mcpServers) {
         mcpConnections = await connectMcpServersForLists(listDefinitions, config.mcpServers);
+        policyEngine = loadReadOnlyPolicyEngine(
+          config.toolAnnotationsDir,
+          config.toolAnnotationsFallbackDir,
+          config.mcpServers,
+        );
       }
 
       const listStepText = `[2/${totalSteps}] Resolving dynamic lists`;
@@ -1152,9 +1159,14 @@ export class PipelineRunner {
         const { result: resolvedLists } = await withSpinner(
           listStepText,
           async (spinner) =>
-            resolveAllLists(listDefinitions, { model: this.model, mcpConnections }, existingLists, (msg) => {
-              spinner.text = `${listStepText} — ${msg}`;
-            }),
+            resolveAllLists(
+              listDefinitions,
+              { model: this.model, mcpConnections, policyEngine },
+              existingLists,
+              (msg) => {
+                spinner.text = `${listStepText} — ${msg}`;
+              },
+            ),
           (result, elapsed) => {
             const count = Object.keys(result.lists).length;
             return `${listStepText}: ${count} list(s) resolved (${elapsed.toFixed(1)}s)`;
@@ -1732,8 +1744,14 @@ export class PipelineRunner {
 
     const needsMcp = listDefinitions.some((d) => d.requiresMcp);
     let mcpConnections: Map<string, McpServerConnection> | undefined;
+    let policyEngine: PolicyEngine | undefined;
     if (needsMcp && config.mcpServers) {
       mcpConnections = await connectMcpServersForLists(listDefinitions, config.mcpServers);
+      policyEngine = loadReadOnlyPolicyEngine(
+        config.toolAnnotationsDir,
+        config.toolAnnotationsFallbackDir,
+        config.mcpServers,
+      );
     }
 
     const listStepText = `${labelPrefix}: Resolving dynamic lists`;
@@ -1741,9 +1759,14 @@ export class PipelineRunner {
       const { result: resolvedLists } = await withSpinner(
         listStepText,
         async (spinner) =>
-          resolveAllLists(listDefinitions, { model: this.model, mcpConnections }, existingLists, (msg) => {
-            spinner.text = `${listStepText} — ${msg}`;
-          }),
+          resolveAllLists(
+            listDefinitions,
+            { model: this.model, mcpConnections, policyEngine },
+            existingLists,
+            (msg) => {
+              spinner.text = `${listStepText} — ${msg}`;
+            },
+          ),
         (result, elapsed) => {
           const count = Object.keys(result.lists).length;
           return `${listStepText}: ${count} list(s) resolved (${elapsed.toFixed(1)}s)`;

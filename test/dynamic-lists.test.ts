@@ -29,6 +29,7 @@ import type {
   ListDefinition,
   RepairContext,
   ResolvedList,
+  StoredToolAnnotationsFile,
   ToolAnnotation,
   ToolAnnotationsFile,
 } from '../src/pipeline/types.js';
@@ -57,6 +58,35 @@ const sampleAnnotations: ToolAnnotation[] = [
 const compilerConfig: CompilerConfig = {
   protectedPaths: ['/etc/ironcurtain'],
 };
+
+/**
+ * Creates a permissive PolicyEngine that allows all tool calls.
+ * Used in MCP-backed list resolution tests where policy mediation
+ * must be present but should not block test tool calls.
+ */
+function createPermissivePolicyEngine(): PolicyEngine {
+  const policy: CompiledPolicyFile = {
+    generatedAt: new Date().toISOString(),
+    constitutionHash: 'test',
+    inputHash: 'test',
+    rules: [
+      {
+        if: { server: ['contacts', 'some-server', 'fetch', 'filesystem'] },
+        then: 'allow',
+        description: 'Allow all for tests',
+      },
+    ],
+  };
+  const annotations: StoredToolAnnotationsFile = {
+    servers: {
+      contacts: { inputHash: 'test', tools: [] },
+      'some-server': { inputHash: 'test', tools: [] },
+      fetch: { inputHash: 'test', tools: [] },
+      filesystem: { inputHash: 'test', tools: [] },
+    },
+  };
+  return new PolicyEngine(policy, annotations, []);
+}
 
 const MOCK_GENERATE_RESULT = {
   finishReason: { unified: 'stop' as const, raw: 'stop' },
@@ -734,10 +764,10 @@ describe('List Resolver', () => {
     expect(result.manualRemovals).toEqual(['bbc.com']);
   });
 
-  it('fails with descriptive error for requiresMcp lists without MCP clients', async () => {
+  it('fails with descriptive error for requiresMcp lists without PolicyEngine', async () => {
     const mockLLM = createMockModel({ values: [] });
 
-    await expect(resolveList(contactsListDef, { model: mockLLM })).rejects.toThrow(/requires MCP server access/);
+    await expect(resolveList(contactsListDef, { model: mockLLM })).rejects.toThrow(/no read-only PolicyEngine/);
   });
 
   describe('resolveAllLists', () => {
@@ -1241,7 +1271,8 @@ describe('MCP-Backed List Resolution', () => {
     const mcpConnections = new Map([['contacts', connection]]);
     const model = createToolUseModel('contacts__list_contacts', {}, ['alice@example.com', 'bob@company.org']);
 
-    const config: ListResolverConfig = { model, mcpConnections };
+    const policyEngine = createPermissivePolicyEngine();
+    const config: ListResolverConfig = { model, mcpConnections, policyEngine };
     const result = await resolveList(contactsListDef, config);
 
     expect(result.values).toContain('alice@example.com');
@@ -1250,13 +1281,23 @@ describe('MCP-Backed List Resolution', () => {
     expect(result.inputHash).toBeTruthy();
   });
 
+  it('fails when requiresMcp but no policyEngine is provided', async () => {
+    const model = createMockModel({ values: [] });
+    const mcpConnections = new Map<string, McpServerConnection>([
+      ['contacts', createMockMcpConnection(['list_contacts'])],
+    ]);
+
+    await expect(resolveList(contactsListDef, { model, mcpConnections })).rejects.toThrow(/no read-only PolicyEngine/);
+  });
+
   it('fails when requiresMcp but mcpConnections is empty', async () => {
     const model = createMockModel({ values: [] });
     const emptyConnections = new Map<string, McpServerConnection>();
+    const policyEngine = createPermissivePolicyEngine();
 
-    await expect(resolveList(contactsListDef, { model, mcpConnections: emptyConnections })).rejects.toThrow(
-      /requires MCP server access/,
-    );
+    await expect(
+      resolveList(contactsListDef, { model, mcpConnections: emptyConnections, policyEngine }),
+    ).rejects.toThrow(/requires MCP server access/);
   });
 
   it('uses mcpServerHint to select the correct connection', async () => {
@@ -1277,7 +1318,7 @@ describe('MCP-Backed List Resolution', () => {
 
     const model = createToolUseModel('contacts__list_contacts', {}, ['alice@example.com']);
 
-    const config: ListResolverConfig = { model, mcpConnections };
+    const config: ListResolverConfig = { model, mcpConnections, policyEngine: createPermissivePolicyEngine() };
     const result = await resolveList(contactsListDef, config);
 
     expect(result.values).toContain('alice@example.com');
@@ -1298,7 +1339,7 @@ describe('MCP-Backed List Resolution', () => {
     // contactsListDef has mcpServerHint: 'contacts' but we only have 'some-server'
     const model = createToolUseModel('some-server__query_data', {}, ['fallback@example.com']);
 
-    const config: ListResolverConfig = { model, mcpConnections };
+    const config: ListResolverConfig = { model, mcpConnections, policyEngine: createPermissivePolicyEngine() };
     const result = await resolveList(contactsListDef, config);
 
     expect(result.values).toContain('fallback@example.com');
@@ -1315,7 +1356,7 @@ describe('MCP-Backed List Resolution', () => {
       'bob@company.org',
     ]);
 
-    const config: ListResolverConfig = { model, mcpConnections };
+    const config: ListResolverConfig = { model, mcpConnections, policyEngine: createPermissivePolicyEngine() };
     const result = await resolveList(contactsListDef, config);
 
     expect(result.values).toContain('alice@example.com');
@@ -1337,13 +1378,56 @@ describe('MCP-Backed List Resolution', () => {
       inputHash: 'old-hash',
     };
 
-    const config: ListResolverConfig = { model, mcpConnections };
+    const config: ListResolverConfig = { model, mcpConnections, policyEngine: createPermissivePolicyEngine() };
     const result = await resolveList(contactsListDef, config, existing);
 
     expect(result.values).toContain('manual@example.com');
     expect(result.values).not.toContain('alice@example.com');
     expect(result.manualAdditions).toEqual(['manual@example.com']);
     expect(result.manualRemovals).toEqual(['alice@example.com']);
+  });
+
+  it('policy blocks a mutating MCP tool call and returns POLICY BLOCKED', async () => {
+    // Create a restrictive policy engine that only allows list_contacts
+    const restrictivePolicy: CompiledPolicyFile = {
+      generatedAt: new Date().toISOString(),
+      constitutionHash: 'test',
+      inputHash: 'test',
+      rules: [
+        {
+          if: { server: ['contacts'], tools: ['list_contacts'] },
+          then: 'allow',
+          description: 'Allow only list_contacts',
+        },
+        // delete_contact is NOT allowed -- falls through to default deny
+      ],
+    };
+    const annotations: StoredToolAnnotationsFile = {
+      servers: {
+        contacts: { inputHash: 'test', tools: [] },
+      },
+    };
+    const restrictiveEngine = new PolicyEngine(restrictivePolicy, annotations, []);
+
+    // Create a connection that exposes a mutating tool
+    const connection = createMockMcpConnection(['delete_contact'], {
+      content: [{ type: 'text', text: 'deleted!' }],
+    });
+    const mcpConnections = new Map([['contacts', connection]]);
+
+    // Model calls delete_contact (which policy should block),
+    // then returns final values from its own knowledge
+    const model = createToolUseModel('contacts__delete_contact', { id: '123' }, ['alice@example.com']);
+
+    const config: ListResolverConfig = { model, mcpConnections, policyEngine: restrictiveEngine };
+    const result = await resolveList(contactsListDef, config);
+
+    // The mutating call should have been blocked -- callTool never invoked
+    const callToolFn = connection.client.callTool as ReturnType<typeof vi.fn>;
+    expect(callToolFn).not.toHaveBeenCalled();
+
+    // Resolution still succeeds (LLM returned values in text)
+    expect(result.values).toContain('alice@example.com');
   });
 
   it('knowledge-based lists ignore mcpConnections', async () => {
@@ -1354,7 +1438,7 @@ describe('MCP-Backed List Resolution', () => {
     });
 
     // newsListDef has requiresMcp: false -- should use LLM directly
-    const config: ListResolverConfig = { model, mcpConnections };
+    const config: ListResolverConfig = { model, mcpConnections, policyEngine: createPermissivePolicyEngine() };
     const result = await resolveList(newsListDef, config);
 
     expect(result.values).toContain('cnn.com');
@@ -1410,7 +1494,8 @@ describe('MCP-Backed resolveAllLists', () => {
       },
     });
 
-    const result = await resolveAllLists([stocksListDef, contactsListDef], { model, mcpConnections });
+    const policyEngine = createPermissivePolicyEngine();
+    const result = await resolveAllLists([stocksListDef, contactsListDef], { model, mcpConnections, policyEngine });
 
     expect(result.lists['tech-stock-tickers']).toBeDefined();
     expect(result.lists['tech-stock-tickers'].values).toContain('AAPL');

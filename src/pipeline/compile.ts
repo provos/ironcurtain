@@ -30,6 +30,7 @@ export interface CompilePolicyCliArgs {
   constitution?: string;
   outputDir?: string;
   server?: string;
+  noMcp?: boolean;
 }
 
 /**
@@ -43,16 +44,19 @@ export function parseCompilePolicyArgs(argv: string[] = process.argv.slice(2)): 
       constitution: { type: 'string' },
       'output-dir': { type: 'string' },
       server: { type: 'string' },
+      'no-mcp': { type: 'boolean' },
     },
     strict: false,
   });
   const constitution = typeof values.constitution === 'string' ? values.constitution : undefined;
   const outputDir = typeof values['output-dir'] === 'string' ? values['output-dir'] : undefined;
   const server = typeof values.server === 'string' ? values.server : undefined;
+  const noMcp = (values['no-mcp'] as boolean | undefined) ?? false;
   return {
     constitution: constitution ? resolve(constitution) : undefined,
     outputDir: outputDir ? resolve(outputDir) : undefined,
     server,
+    noMcp,
   };
 }
 
@@ -104,7 +108,7 @@ export async function main(): Promise<void> {
       toolAnnotationsFallbackDir: config.packageGeneratedDir,
       allowedDirectory: config.allowedDirectory,
       protectedPaths: config.protectedPaths,
-      mcpServers: config.mcpServers,
+      mcpServers: cliArgs.noMcp ? undefined : config.mcpServers,
       llmLogPath: models.logPath,
       preloadedToolAnnotations: toolAnnotationsFile,
       serverFilter: cliArgs.server ? [cliArgs.server] : undefined,

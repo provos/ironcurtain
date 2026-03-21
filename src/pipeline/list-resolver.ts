@@ -14,10 +14,13 @@
  * Preserves manual overrides from any existing resolution.
  */
 
+import { randomUUID } from 'node:crypto';
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import type { LanguageModel, ToolSet } from 'ai';
 import { generateText, jsonSchema, stepCountIs, tool } from 'ai';
 import { z } from 'zod';
+import type { PolicyEngine } from '../trusted-process/policy-engine.js';
+import type { ToolCallRequest } from '../types/mcp.js';
 import { generateObjectWithRepair } from './generate-with-repair.js';
 import { LIST_TYPE_REGISTRY } from './dynamic-list-types.js';
 import { computeHash } from './pipeline-shared.js';
@@ -45,6 +48,13 @@ export interface ListResolverConfig {
    * fail with a descriptive error.
    */
   readonly mcpConnections?: ReadonlyMap<string, McpServerConnection>;
+
+  /**
+   * PolicyEngine loaded with the read-only policy. Required for MCP-backed
+   * list resolution -- ensures only read-only operations are permitted.
+   * When absent and MCP resolution is attempted, an error is thrown.
+   */
+  readonly policyEngine?: PolicyEngine;
 }
 
 const listResponseSchema = z.object({
@@ -138,9 +148,10 @@ const MAX_MCP_TOOL_STEPS = 5;
 
 /**
  * Bridges MCP server tools as AI SDK tools with execute functions
- * that forward calls to the MCP client.
+ * that route calls through the policy engine before forwarding to
+ * the MCP client. Both deny and escalate results block the call.
  */
-function bridgeMcpTools(serverName: string, connection: McpServerConnection): ToolSet {
+function bridgeMcpTools(serverName: string, connection: McpServerConnection, policyEngine: PolicyEngine): ToolSet {
   const tools: ToolSet = {};
   for (const mcpTool of connection.tools) {
     const qualifiedName = `${serverName}__${mcpTool.name}`;
@@ -151,6 +162,20 @@ function bridgeMcpTools(serverName: string, connection: McpServerConnection): To
       description: mcpTool.description ?? `Tool: ${mcpTool.name}`,
       inputSchema: jsonSchema(schema),
       execute: async (args: unknown) => {
+        // Evaluate the call against the read-only policy before forwarding.
+        const request: ToolCallRequest = {
+          requestId: `list-resolver-${randomUUID()}`,
+          serverName,
+          toolName: mcpTool.name,
+          arguments: args as Record<string, unknown>,
+          timestamp: new Date().toISOString(),
+        };
+        const decision = policyEngine.evaluate(request);
+
+        if (decision.decision !== 'allow') {
+          return `[POLICY BLOCKED] ${decision.reason}`;
+        }
+
         const result = await connection.client.callTool({
           name: mcpTool.name,
           arguments: args as Record<string, unknown>,
@@ -277,17 +302,25 @@ export async function resolveList(
   let rawValues: string[];
 
   if (definition.requiresMcp) {
+    if (!config.policyEngine) {
+      throw new Error(
+        `List "@${definition.name}" requires MCP access but no read-only PolicyEngine ` +
+          `was provided. Ensure the read-only policy is compiled first ` +
+          `(npm run compile-policy:readonly).`,
+      );
+    }
+
     const selected = config.mcpConnections ? selectMcpConnection(definition, config.mcpConnections) : undefined;
 
     if (!selected) {
       throw new Error(
         `List "@${definition.name}" requires MCP server access (requiresMcp: true) ` +
-          `but no MCP clients are available. Run with --with-mcp or ensure the ` +
-          `"${definition.mcpServerHint ?? 'required'}" MCP server is configured and reachable.`,
+          `but no MCP clients are available. MCP is enabled by default (use --no-mcp to skip). ` +
+          `Ensure the "${definition.mcpServerHint ?? 'required'}" MCP server is configured and reachable.`,
       );
     }
 
-    const mcpTools = bridgeMcpTools(selected.serverName, selected.connection);
+    const mcpTools = bridgeMcpTools(selected.serverName, selected.connection, config.policyEngine);
     rawValues = await resolveViaMcpTools(prompt, config.model, mcpTools, onProgress);
   } else {
     rawValues = await resolveViaLlm(prompt, config.model, onProgress);
