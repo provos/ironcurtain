@@ -671,6 +671,13 @@ export class PipelineRunner {
       console.error(chalk.yellow('Continuing with successfully compiled servers.'));
     }
 
+    if (results.length === 0) {
+      throw new Error(
+        `All ${failedServers.length} server(s) failed compilation: ${failedServers.join(', ')}. ` +
+          'No policy rules were produced.',
+      );
+    }
+
     return results;
   }
 

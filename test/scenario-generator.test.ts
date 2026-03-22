@@ -1154,6 +1154,10 @@ describe('detectDefaultRoleFallback', () => {
       toolName: 'git_branch',
       serverName: 'git',
       comment: 'Manages branches',
+      inputSchema: {
+        type: 'object',
+        properties: { path: { type: 'string' }, operation: { type: 'string' }, name: { type: 'string' } },
+      },
       args: {
         path: {
           default: ['read-path', 'write-history', 'delete-history'],
@@ -1172,6 +1176,7 @@ describe('detectDefaultRoleFallback', () => {
       serverName: 'filesystem',
       comment: 'Reads a file',
       args: { path: ['read-path'] },
+      inputSchema: { type: 'object', properties: { path: { type: 'string' } } },
     },
   ];
 
@@ -1245,6 +1250,10 @@ describe('detectAllDefaultRoleFallbacks', () => {
       toolName: 'git_branch',
       serverName: 'git',
       comment: 'Manages branches',
+      inputSchema: {
+        type: 'object',
+        properties: { path: { type: 'string' }, operation: { type: 'string' } },
+      },
       args: {
         path: {
           default: ['read-path', 'write-history', 'delete-history'],
@@ -1261,6 +1270,7 @@ describe('detectAllDefaultRoleFallbacks', () => {
       serverName: 'filesystem',
       comment: 'Reads a file',
       args: { path: ['read-path'] },
+      inputSchema: { type: 'object', properties: { path: { type: 'string' } } },
     },
   ];
 

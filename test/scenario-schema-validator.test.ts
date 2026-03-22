@@ -47,8 +47,9 @@ const readFileAnnotation: StoredToolAnnotation = {
 const noSchemaAnnotation: StoredToolAnnotation = {
   toolName: 'custom_tool',
   serverName: 'custom',
-  comment: 'A tool without inputSchema',
+  comment: 'A tool with empty inputSchema',
   args: { arg1: ['none'] },
+  inputSchema: {},
 };
 
 const annotations = [gitBranchAnnotation, readFileAnnotation, noSchemaAnnotation];
@@ -141,7 +142,7 @@ describe('validateScenarioArgs', () => {
     expect(errors).toEqual([]);
   });
 
-  it('skips validation when annotation has no inputSchema', () => {
+  it('skips validation when inputSchema is empty object (no properties key)', () => {
     const scenario = makeScenario('custom', 'custom_tool', {
       bogus_arg: 'value',
     });
@@ -149,7 +150,7 @@ describe('validateScenarioArgs', () => {
     expect(errors).toEqual([]);
   });
 
-  it('skips validation when inputSchema has no properties', () => {
+  it('skips validation when inputSchema has type but no properties', () => {
     const annotationsWithEmpty: StoredToolAnnotation[] = [
       {
         toolName: 'bare_tool',

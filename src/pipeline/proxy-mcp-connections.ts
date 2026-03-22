@@ -60,6 +60,8 @@ function selectNeededServers(
     // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- name may come from mcpServerHint and not exist in mcpServers
     if (mcpServers[name]) {
       filtered[name] = mcpServers[name];
+    } else {
+      console.error(`  Warning: mcpServerHint "${name}" does not match any configured MCP server`);
     }
   }
   return filtered;
