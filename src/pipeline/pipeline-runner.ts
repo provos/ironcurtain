@@ -879,6 +879,7 @@ export class PipelineRunner {
           dynamicLists,
           verifierSystem,
           verifierSession,
+          unit.storedAnnotations,
         ),
       (r, elapsed) =>
         r.pass
@@ -1037,6 +1038,7 @@ export class PipelineRunner {
               dynamicLists,
               verifierSystem,
               verifierSession,
+              unit.storedAnnotations,
             ),
           (r, elapsed) =>
             r.pass
@@ -1391,6 +1393,7 @@ export class PipelineRunner {
           dynamicLists,
           verifierSystem,
           verifierSession,
+          allStoredAnnotations,
         ),
       (r, elapsed) =>
         r.pass
@@ -1559,6 +1562,7 @@ export class PipelineRunner {
               dynamicLists,
               verifierSystem,
               verifierSession,
+              allStoredAnnotations,
             ),
           (r, elapsed) =>
             r.pass
@@ -1610,6 +1614,7 @@ export class PipelineRunner {
                 dynamicLists,
                 verifierSystem,
                 finalSession,
+                allStoredAnnotations,
               ),
             (r, elapsed) =>
               r.pass

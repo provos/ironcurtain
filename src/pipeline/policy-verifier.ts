@@ -15,6 +15,7 @@ import { PolicyEngine } from '../trusted-process/policy-engine.js';
 import type { ToolCallRequest } from '../types/mcp.js';
 import { isConditionalRoles } from '../types/argument-roles.js';
 import { formatDynamicListsSection } from './scenario-generator.js';
+import { filterInvalidSchemaScenarios } from './scenario-schema-validator.js';
 import type {
   CompiledPolicyFile,
   ConditionalRoles,
@@ -162,6 +163,8 @@ When analyzing FAIL results:
   This is wrong if the constitution explicitly allows the operation (should be "allow")
   or explicitly prohibits it (should be "deny" via default-deny, meaning the escalate
   rule is too broad).
+
+CRITICAL: If a compiled escalate rule matches an operation (even outside the sandbox), the result is "escalate", NOT "deny". The "deny" outcome ONLY occurs when NO compiled rule matches at all (default-deny) or when a structural invariant denies the operation. When generating probe scenarios for operations that have explicit escalate rules (e.g., mutations on tools like git_tag, git_worktree), the expected outcome should be "escalate", not "deny", regardless of whether the path is inside or outside the sandbox.
 
 ## Instructions
 
@@ -359,6 +362,7 @@ export async function verifyPolicy(
   dynamicLists?: DynamicListsFile,
   system?: string | SystemModelMessage,
   session?: PolicyVerifierSession,
+  storedAnnotations?: StoredToolAnnotation[],
 ): Promise<VerificationResult> {
   const engine = new PolicyEngine(
     compiledPolicy,
@@ -406,10 +410,37 @@ export async function verifyPolicy(
 
     const judgment = await effectiveSession.judgeRound(executionResults, onProgress);
 
-    const newScenarios: TestScenario[] = judgment.additionalScenarios.map((s) => ({
+    let newScenarios: TestScenario[] = judgment.additionalScenarios.map((s) => ({
       ...s,
       source: 'generated' as const,
     }));
+
+    // Filter probe scenarios through schema validation and default-role-fallback
+    // detection — the same filtering applied to externally generated scenarios.
+    if (storedAnnotations && storedAnnotations.length > 0) {
+      const schemaResult = filterInvalidSchemaScenarios(newScenarios, storedAnnotations);
+      if (schemaResult.discarded.length > 0) {
+        for (const d of schemaResult.discarded) {
+          onProgress?.(`Discarded probe (schema mismatch): "${d.scenario.description}" — ${d.rule}`);
+        }
+        newScenarios = schemaResult.valid;
+      }
+
+      const fallbackWarnings = detectAllDefaultRoleFallbacks(newScenarios, storedAnnotations);
+      if (fallbackWarnings.length > 0) {
+        const fallbackDescriptions = new Set(fallbackWarnings.map((w) => w.scenario.description));
+        newScenarios = newScenarios.filter((s) => {
+          if (fallbackDescriptions.has(s.description)) {
+            const w = fallbackWarnings.find((fw) => fw.scenario.description === s.description);
+            onProgress?.(
+              `Discarded probe (default role fallback): "${s.description}" — ${w?.details.join('; ') ?? 'unknown'}`,
+            );
+            return false;
+          }
+          return true;
+        });
+      }
+    }
 
     rounds.push({
       round,
