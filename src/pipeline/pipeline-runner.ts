@@ -748,10 +748,10 @@ export class PipelineRunner {
       } satisfies ServerCompiledPolicyFile);
     writeServerPolicy();
 
-    // Build per-server tool annotations file (wrap in servers record)
-    const serverAnnotationsFile: ToolAnnotationsFile = {
+    // Build per-server tool annotations file with conditional role specs preserved
+    const serverAnnotationsFile: StoredToolAnnotationsFile = {
       generatedAt: new Date().toISOString(),
-      servers: { [unit.serverName]: { inputHash, tools: unit.annotations } },
+      servers: { [unit.serverName]: { inputHash, tools: unit.storedAnnotations ?? unit.annotations } },
     };
 
     // Extract domain allowlists for this server
@@ -828,6 +828,7 @@ export class PipelineRunner {
           filterEngine,
           replacementScenarios,
           'Discarded replacement (structural conflict)',
+          unit.storedAnnotations,
         );
         scenarioResult.scenarios.push(...validReplacements);
         filteredScenarios.push(...validReplacements);
@@ -895,6 +896,7 @@ export class PipelineRunner {
       filterEngine,
       collectProbeScenarios(verificationResult),
       'Discarded probe (structural conflict)',
+      unit.storedAnnotations,
     );
     const accumulatedProbes: TestScenario[] = filteredInitialProbes;
 
@@ -1051,6 +1053,7 @@ export class PipelineRunner {
           filterEngine,
           collectProbeScenarios(verificationResult),
           'Discarded probe (structural conflict)',
+          unit.storedAnnotations,
         );
         accumulatedProbes.push(...validRepairProbes);
 
@@ -1293,9 +1296,11 @@ export class PipelineRunner {
     } satisfies TestScenariosFile);
 
     // Filter scenarios against structural invariants
+    // Use stored annotations (with conditional role specs) when available
+    const storedOrFlatAnnotations = storedAnnotationsFile ?? toolAnnotationsFile;
     const filterEngine = new PolicyEngine(
       compiledPolicyFile,
-      toolAnnotationsFile,
+      storedOrFlatAnnotations,
       config.protectedPaths,
       config.allowedDirectory,
       undefined,
@@ -1332,6 +1337,7 @@ export class PipelineRunner {
           filterEngine,
           replacementScenarios,
           'Discarded replacement (structural conflict)',
+          allStoredAnnotations,
         );
         scenarioResult.scenarios.push(...validReplacements);
         filteredScenarios = [...filteredScenarios, ...validReplacements];
@@ -1372,7 +1378,7 @@ export class PipelineRunner {
         verifyPolicy(
           config.constitutionInput,
           compiledPolicyFile,
-          toolAnnotationsFile,
+          storedOrFlatAnnotations,
           config.protectedPaths,
           filteredScenarios,
           this.model,
@@ -1402,6 +1408,7 @@ export class PipelineRunner {
       filterEngine,
       collectProbeScenarios(verificationResult),
       'Discarded probe (structural conflict)',
+      allStoredAnnotations,
     );
     const accumulatedProbes: TestScenario[] = filteredInitialProbes;
 
@@ -1568,6 +1575,7 @@ export class PipelineRunner {
           filterEngine,
           collectProbeScenarios(verificationResult),
           'Discarded probe (structural conflict)',
+          allStoredAnnotations,
         );
         accumulatedProbes.push(...validRepairProbes);
 
@@ -1614,6 +1622,7 @@ export class PipelineRunner {
             filterEngine,
             collectProbeScenarios(verificationResult),
             'Discarded probe (structural conflict)',
+            allStoredAnnotations,
           );
           accumulatedProbes.push(...validFinalProbes);
           break;

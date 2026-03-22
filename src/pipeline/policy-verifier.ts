@@ -21,7 +21,7 @@ import type {
   DiscardedScenario,
   DynamicListsFile,
   StoredToolAnnotation,
-  ToolAnnotationsFile,
+  StoredToolAnnotationsFile,
   TestScenario,
   ExecutionResult,
   VerifierRound,
@@ -348,7 +348,7 @@ export class PolicyVerifierSession {
 export async function verifyPolicy(
   constitutionText: string,
   compiledPolicy: CompiledPolicyFile,
-  toolAnnotations: ToolAnnotationsFile,
+  toolAnnotations: StoredToolAnnotationsFile,
   protectedPaths: string[],
   scenarios: TestScenario[],
   llm: LanguageModel,
