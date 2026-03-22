@@ -2469,6 +2469,15 @@
               "when": [
                 {
                   "condition": {
+                    "arg": "dryRun",
+                    "equals": true
+                  },
+                  "roles": [
+                    "read-path"
+                  ]
+                },
+                {
+                  "condition": {
                     "arg": "mode",
                     "equals": "list"
                   },
@@ -2562,6 +2571,15 @@
                   "roles": [
                     "read-path",
                     "delete-path"
+                  ]
+                },
+                {
+                  "condition": {
+                    "arg": "mode",
+                    "equals": "prune"
+                  },
+                  "roles": [
+                    "none"
                   ]
                 }
               ]
