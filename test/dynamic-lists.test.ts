@@ -1616,6 +1616,8 @@ describe('Dynamic List Values in Prompts', () => {
         ['/etc/ironcurtain'],
         [],
         testDynamicLists,
+        undefined,
+        [],
       );
 
       expect(prompt).toContain('## Dynamic List Values');
@@ -1625,7 +1627,15 @@ describe('Dynamic List Values in Prompts', () => {
     });
 
     it('omits dynamic list section when dynamicLists is undefined', () => {
-      const prompt = buildJudgeSystemPrompt('Allow news sites.', compiledPolicy, ['/etc/ironcurtain']);
+      const prompt = buildJudgeSystemPrompt(
+        'Allow news sites.',
+        compiledPolicy,
+        ['/etc/ironcurtain'],
+        undefined,
+        undefined,
+        undefined,
+        [],
+      );
 
       expect(prompt).not.toContain('## Dynamic List Values');
     });

@@ -118,10 +118,10 @@ export function buildJudgeSystemPrompt(
   constitutionText: string,
   compiledPolicy: CompiledPolicyFile,
   protectedPaths: string[],
-  availableTools?: { serverName: string; toolName: string }[],
-  dynamicLists?: DynamicListsFile,
-  sandboxDirectory?: string,
-  storedAnnotations?: StoredToolAnnotation[],
+  availableTools: { serverName: string; toolName: string }[] | undefined,
+  dynamicLists: DynamicListsFile | undefined,
+  sandboxDirectory: string | undefined,
+  storedAnnotations: StoredToolAnnotation[],
 ): string {
   const rulesText = compiledPolicy.rules
     .map((r, i) => `  ${i + 1}. [${r.name}] if: ${JSON.stringify(r.if)} then: ${r.then} -- ${r.reason}`)
@@ -194,7 +194,12 @@ IMPORTANT: Only use these exact server/tool combinations in additional scenarios
 ALL tools listed here are known/annotated — the "unknown tool → deny" structural invariant CANNOT apply to any of them. NEVER generate scenarios expecting "deny" due to the unknown tool invariant.
 
 ${(availableTools ?? []).map((t) => `- ${t.serverName}/${t.toolName}`).join('\n')}
-${storedAnnotations ? `\n## Valid Tool Arguments\n\nCRITICAL: Only use these argument names in additional scenarios. Using unlisted arguments will cause validation failure.\n\n${formatToolArgNames(storedAnnotations)}\n` : ''}
+
+## Valid Tool Arguments
+
+CRITICAL: Only use these argument names in additional scenarios. Using unlisted arguments will cause validation failure.
+
+${formatToolArgNames(storedAnnotations)}
 ## Response Format
 
 Be concise. Keep the analysis to 2-3 sentences per issue found. Only generate additional scenarios that test genuinely untested gaps -- do not duplicate existing coverage. Limit additional scenarios to at most 5.`;
@@ -371,14 +376,14 @@ export async function verifyPolicy(
   protectedPaths: string[],
   scenarios: TestScenario[],
   llm: LanguageModel,
-  maxRounds: number = DEFAULT_MAX_ROUNDS,
-  allowedDirectory?: string,
-  onProgress?: (message: string) => void,
-  serverDomainAllowlists?: ReadonlyMap<string, readonly string[]>,
-  dynamicLists?: DynamicListsFile,
-  system?: string | SystemModelMessage,
-  session?: PolicyVerifierSession,
-  storedAnnotations?: StoredToolAnnotation[],
+  maxRounds: number | undefined = DEFAULT_MAX_ROUNDS,
+  allowedDirectory: string | undefined,
+  onProgress: ((message: string) => void) | undefined,
+  serverDomainAllowlists: ReadonlyMap<string, readonly string[]> | undefined,
+  dynamicLists: DynamicListsFile | undefined,
+  system: string | SystemModelMessage | undefined,
+  session: PolicyVerifierSession | undefined,
+  storedAnnotations: StoredToolAnnotation[],
 ): Promise<VerificationResult> {
   const engine = new PolicyEngine(
     compiledPolicy,
@@ -435,29 +440,29 @@ export async function verifyPolicy(
 
     // Filter probe scenarios through schema validation and default-role-fallback
     // detection — the same filtering applied to externally generated scenarios.
-    if (storedAnnotations && storedAnnotations.length > 0) {
-      const schemaResult = filterInvalidSchemaScenarios(newScenarios, storedAnnotations);
-      if (schemaResult.discarded.length > 0) {
-        for (const d of schemaResult.discarded) {
-          onProgress?.(`Discarded probe (schema mismatch): "${d.scenario.description}" — ${d.rule}`);
-        }
-        newScenarios = schemaResult.valid;
+    // Filter probe scenarios through schema validation and default-role-fallback
+    // detection — same filtering applied to externally generated scenarios.
+    const schemaResult = filterInvalidSchemaScenarios(newScenarios, storedAnnotations);
+    if (schemaResult.discarded.length > 0) {
+      for (const d of schemaResult.discarded) {
+        onProgress?.(`Discarded probe (schema mismatch): "${d.scenario.description}" — ${d.rule}`);
       }
+      newScenarios = schemaResult.valid;
+    }
 
-      const fallbackWarnings = detectAllDefaultRoleFallbacks(newScenarios, storedAnnotations);
-      if (fallbackWarnings.length > 0) {
-        const fallbackDescriptions = new Set(fallbackWarnings.map((w) => w.scenario.description));
-        newScenarios = newScenarios.filter((s) => {
-          if (fallbackDescriptions.has(s.description)) {
-            const w = fallbackWarnings.find((fw) => fw.scenario.description === s.description);
-            onProgress?.(
-              `Discarded probe (default role fallback): "${s.description}" — ${w?.details.join('; ') ?? 'unknown'}`,
-            );
-            return false;
-          }
-          return true;
-        });
-      }
+    const fallbackWarnings = detectAllDefaultRoleFallbacks(newScenarios, storedAnnotations);
+    if (fallbackWarnings.length > 0) {
+      const fallbackDescriptions = new Set(fallbackWarnings.map((w) => w.scenario.description));
+      newScenarios = newScenarios.filter((s) => {
+        if (fallbackDescriptions.has(s.description)) {
+          const w = fallbackWarnings.find((fw) => fw.scenario.description === s.description);
+          onProgress?.(
+            `Discarded probe (default role fallback): "${s.description}" — ${w?.details.join('; ') ?? 'unknown'}`,
+          );
+          return false;
+        }
+        return true;
+      });
     }
 
     rounds.push({
