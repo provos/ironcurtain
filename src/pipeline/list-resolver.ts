@@ -184,7 +184,15 @@ async function resolveViaMcpTools(
   const parsed = parseValuesFromText(result.text);
   if (parsed.length > 0) return parsed;
 
-  // If parsing failed, return empty with a warning
+  // Check if the LLM's response indicates all tool calls failed (e.g., missing OAuth, auth errors)
+  const errorPatterns = /\b(Error|Login Required|No refresh token|authentication failed|unauthorized)\b/i;
+  if (errorPatterns.test(result.text)) {
+    // Extract a short excerpt for the error message
+    const excerpt = result.text.slice(0, 300).replace(/\n/g, ' ').trim();
+    throw new Error(`MCP-backed list resolution failed — LLM reported errors: ${excerpt}`);
+  }
+
+  // If parsing failed but no errors detected, warn and return empty
   console.error(`  Warning: Could not parse list values from MCP-backed resolution text`);
   return [];
 }
