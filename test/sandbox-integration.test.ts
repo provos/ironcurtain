@@ -567,6 +567,42 @@ describe('wrapServerCommand', () => {
     expect(cmdString).toContain('\\*');
   });
 
+  it('preserves npm package specifiers instead of resolving them as paths', () => {
+    const result = wrapServerCommand(
+      'google-workspace',
+      'npx',
+      ['-y', '@alanse/mcp-server-google-workspace@1.0.2'],
+      makeSandboxedConfig(),
+      settingsDir,
+    );
+    const cmdString = result.args[3];
+    // Scoped package specifiers must not be resolved to absolute paths.
+    // shell-quote escapes @ to \@, so check the unescaped form isn't an absolute path.
+    expect(cmdString).not.toContain(process.cwd());
+    expect(cmdString).toContain('mcp-server-google-workspace');
+  });
+
+  it('preserves unscoped npm package specifiers with pinned versions', () => {
+    const result = wrapServerCommand('some-tool', 'npx', ['-y', 'somepkg@1.2.3'], makeSandboxedConfig(), settingsDir);
+    const cmdString = result.args[3];
+    expect(cmdString).not.toContain(process.cwd());
+    expect(cmdString).toContain('somepkg');
+  });
+
+  it('still resolves relative file paths to absolute', () => {
+    const result = wrapServerCommand(
+      'git',
+      'node',
+      ['node_modules/.bin/git-mcp-server'],
+      makeSandboxedConfig(),
+      settingsDir,
+    );
+    const cmdString = result.args[3];
+    // Relative file paths should be resolved to absolute
+    expect(cmdString).toContain(resolve('node_modules/.bin/git-mcp-server'));
+    expect(cmdString).not.toContain(' node_modules/');
+  });
+
   it('uses correct settings file path per server name', () => {
     const resultA = wrapServerCommand('server-a', 'node', ['a.js'], makeSandboxedConfig(), settingsDir);
     const resultB = wrapServerCommand('server-b', 'node', ['b.js'], makeSandboxedConfig(), settingsDir);

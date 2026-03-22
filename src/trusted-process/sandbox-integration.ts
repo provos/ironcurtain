@@ -195,7 +195,14 @@ export function wrapServerCommand(
   const settingsPath = join(settingsDir, `${serverName}.srt-settings.json`);
   // Resolve relative paths in args to absolute so the command works when
   // the proxy sets cwd to the per-server temp directory.
-  const resolvedArgs = args.map((a) => (!isAbsolute(a) && !a.startsWith('-') ? resolve(a) : a));
+  // Skip flags (-y, --foo) and npm package specifiers (contain @, e.g.
+  // @org/pkg, @org/pkg@1.0.0, or unscoped pkg@1.0.0).
+  const resolvedArgs = args.map((a) => {
+    if (isAbsolute(a) || a.startsWith('-') || a.includes('@')) return a;
+    // Only resolve args that look like filesystem paths (contain / or .)
+    if (a.includes('/') || a.includes('.')) return resolve(a);
+    return a;
+  });
   const cmdString = quote([command, ...resolvedArgs]);
 
   return {
