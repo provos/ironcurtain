@@ -122,14 +122,6 @@ async function annotateServerTools(
   const cached = existingAnnotations?.servers[serverName];
   if (cached && cached.inputHash === inputHash) {
     showCached(stepText);
-    // Backfill inputSchema from MCP tools onto cached annotations (added after initial caching)
-    const toolSchemaMap = new Map(tools.map((t) => [t.name, t.inputSchema]));
-    for (const ann of cached.tools) {
-      if (!ann.inputSchema) {
-        const schema = toolSchemaMap.get(ann.toolName);
-        if (schema) ann.inputSchema = schema;
-      }
-    }
     return { annotations: cached.tools, inputHash };
   }
 

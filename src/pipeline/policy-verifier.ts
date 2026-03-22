@@ -15,7 +15,12 @@ import { PolicyEngine } from '../trusted-process/policy-engine.js';
 import type { ToolCallRequest } from '../types/mcp.js';
 import { isConditionalRoles } from '../types/argument-roles.js';
 import { formatDynamicListsSection } from './scenario-generator.js';
-import { filterInvalidSchemaScenarios } from './scenario-schema-validator.js';
+import {
+  filterInvalidSchemaScenarios,
+  buildScenarioArgsSuperRefine,
+  buildToolArgNamesMap,
+  formatToolArgNames,
+} from './scenario-schema-validator.js';
 import type {
   CompiledPolicyFile,
   ConditionalRoles,
@@ -116,6 +121,7 @@ export function buildJudgeSystemPrompt(
   availableTools?: { serverName: string; toolName: string }[],
   dynamicLists?: DynamicListsFile,
   sandboxDirectory?: string,
+  storedAnnotations?: StoredToolAnnotation[],
 ): string {
   const rulesText = compiledPolicy.rules
     .map((r, i) => `  ${i + 1}. [${r.name}] if: ${JSON.stringify(r.if)} then: ${r.then} -- ${r.reason}`)
@@ -188,7 +194,7 @@ IMPORTANT: Only use these exact server/tool combinations in additional scenarios
 ALL tools listed here are known/annotated — the "unknown tool → deny" structural invariant CANNOT apply to any of them. NEVER generate scenarios expecting "deny" due to the unknown tool invariant.
 
 ${(availableTools ?? []).map((t) => `- ${t.serverName}/${t.toolName}`).join('\n')}
-
+${storedAnnotations ? `\n## Valid Tool Arguments\n\nCRITICAL: Only use these argument names in additional scenarios. Using unlisted arguments will cause validation failure.\n\n${formatToolArgNames(storedAnnotations)}\n` : ''}
 ## Response Format
 
 Be concise. Keep the analysis to 2-3 sentences per issue found. Only generate additional scenarios that test genuinely untested gaps -- do not duplicate existing coverage. Limit additional scenarios to at most 5.`;
@@ -198,7 +204,11 @@ Be concise. Keep the analysis to 2-3 sentences per issue found. Only generate ad
 // Response Schema + Session
 // ---------------------------------------------------------------------------
 
-function buildJudgeResponseSchema(serverNames: [string, ...string[]], toolNames: [string, ...string[]]) {
+function buildJudgeResponseSchema(
+  serverNames: [string, ...string[]],
+  toolNames: [string, ...string[]],
+  argsSuperRefine?: ReturnType<typeof buildScenarioArgsSuperRefine>,
+) {
   const blameSchema = z.discriminatedUnion('kind', [
     z.object({
       kind: z.literal('rule'),
@@ -228,16 +238,18 @@ function buildJudgeResponseSchema(serverNames: [string, ...string[]], toolNames:
       }),
     ),
     additionalScenarios: z.array(
-      z.object({
-        description: z.string(),
-        request: z.object({
-          serverName: z.enum(serverNames),
-          toolName: z.enum(toolNames),
-          arguments: z.record(z.string(), z.unknown()),
-        }),
-        expectedDecision: z.enum(['allow', 'deny', 'escalate']),
-        reasoning: z.string(),
-      }),
+      z
+        .object({
+          description: z.string(),
+          request: z.object({
+            serverName: z.enum(serverNames),
+            toolName: z.enum(toolNames),
+            arguments: z.record(z.string(), z.unknown()),
+          }),
+          expectedDecision: z.enum(['allow', 'deny', 'escalate']),
+          reasoning: z.string(),
+        })
+        .superRefine(argsSuperRefine ?? (() => {})),
     ),
   });
 }
@@ -264,10 +276,14 @@ export class PolicyVerifierSession {
     model: LanguageModel;
     serverNames: [string, ...string[]];
     toolNames: [string, ...string[]];
+    storedAnnotations?: StoredToolAnnotation[];
   }) {
     this.systemPrompt = options.system;
     this.model = options.model;
-    this.schema = buildJudgeResponseSchema(options.serverNames, options.toolNames);
+    const argsSuperRefine = options.storedAnnotations
+      ? buildScenarioArgsSuperRefine(buildToolArgNamesMap(options.storedAnnotations))
+      : undefined;
+    this.schema = buildJudgeResponseSchema(options.serverNames, options.toolNames, argsSuperRefine);
     this.schemaHint = schemaToPromptHint(this.schema);
   }
 
@@ -391,10 +407,12 @@ export async function verifyPolicy(
           allAnnotations.map((a) => ({ serverName: a.serverName, toolName: a.toolName })),
           dynamicLists,
           allowedDirectory,
+          storedAnnotations,
         ),
       model: llm,
       serverNames: serverNamesList,
       toolNames: toolNamesList,
+      storedAnnotations,
     });
   }
 

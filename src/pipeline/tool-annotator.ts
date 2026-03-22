@@ -295,7 +295,7 @@ export async function annotateTools(
     const batchAnnotations: StoredToolAnnotation[] = output.annotations.map((a) => ({
       ...a,
       serverName,
-      inputSchema: schemaByName.get(a.toolName),
+      inputSchema: schemaByName.get(a.toolName) ?? { type: 'object' },
     }));
 
     allAnnotations.push(...batchAnnotations);

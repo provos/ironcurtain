@@ -24,10 +24,15 @@ import type {
   TestScenario,
 } from './types.js';
 import { isConditionalRoles } from '../types/argument-roles.js';
+import { buildScenarioArgsSuperRefine, buildToolArgNamesMap, formatToolArgNames } from './scenario-schema-validator.js';
 
 export const SCENARIO_BATCH_SIZE = 25;
 
-function buildGeneratorResponseSchema(serverNames: [string, ...string[]], toolNames: [string, ...string[]]) {
+function buildGeneratorResponseSchema(
+  serverNames: [string, ...string[]],
+  toolNames: [string, ...string[]],
+  argsSuperRefine?: ReturnType<typeof buildScenarioArgsSuperRefine>,
+) {
   const scenarioSchema = z.object({
     description: z.string(),
     request: z.object({
@@ -39,8 +44,10 @@ function buildGeneratorResponseSchema(serverNames: [string, ...string[]], toolNa
     reasoning: z.string(),
   });
 
+  const finalSchema = argsSuperRefine ? scenarioSchema.superRefine(argsSuperRefine) : scenarioSchema;
+
   return z.object({
-    scenarios: z.array(scenarioSchema),
+    scenarios: z.array(finalSchema),
   });
 }
 
@@ -157,6 +164,7 @@ ${constitutionText}
 
 ${annotationsSummary}
 
+${storedAnnotations ? `## Valid Tool Arguments (from MCP input schemas)\n\n${formatToolArgNames(storedAnnotations)}\n\nCRITICAL: Only use argument names listed above for each tool. Using unlisted argument names will cause validation failure.\n` : ''}
 ## System Configuration
 
 - Sandbox directory: ${sandboxDirectory}
@@ -284,14 +292,16 @@ export async function generateScenarios(
     // Scoped schema: only this batch's server/tool names
     const serverNames = [...new Set(batch.map((a) => a.serverName))] as [string, ...string[]];
     const toolNames = [...new Set(batch.map((a) => a.toolName))] as [string, ...string[]];
-    const schema = buildGeneratorResponseSchema(serverNames, toolNames);
-
     // Filter stored annotations to this batch
     const batchStored = storedAnnotations
       ? batch
           .map((a) => storedByKey.get(`${a.serverName}/${a.toolName}`))
           .filter((sa): sa is StoredToolAnnotation => sa !== undefined)
       : undefined;
+
+    // Build Zod schema with superRefine that validates argument names at parse time
+    const argsSuperRefine = batchStored ? buildScenarioArgsSuperRefine(buildToolArgNamesMap(batchStored)) : undefined;
+    const schema = buildGeneratorResponseSchema(serverNames, toolNames, argsSuperRefine);
 
     // Per-batch system prompt with only this batch's annotations
     const batchPromptText = buildGeneratorSystemPrompt(
@@ -360,7 +370,10 @@ export async function repairScenarios(
 ): Promise<TestScenario[]> {
   const serverNames = [...new Set(annotations.map((a) => a.serverName))] as [string, ...string[]];
   const toolNames = [...new Set(annotations.map((a) => a.toolName))] as [string, ...string[]];
-  const schema = buildGeneratorResponseSchema(serverNames, toolNames);
+  const argsSuperRefine = storedAnnotations
+    ? buildScenarioArgsSuperRefine(buildToolArgNamesMap(storedAnnotations))
+    : undefined;
+  const schema = buildGeneratorResponseSchema(serverNames, toolNames, argsSuperRefine);
 
   const discardedList = discardedScenarios
     .map(

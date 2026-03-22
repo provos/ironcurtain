@@ -2,7 +2,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { IronCurtainConfig, MCPServerConfig } from './types.js';
-import type { CompiledPolicyFile, DynamicListsFile, ToolAnnotationsFile } from '../pipeline/types.js';
+import type { CompiledPolicyFile, DynamicListsFile, StoredToolAnnotationsFile } from '../pipeline/types.js';
 import {
   computeConstitutionHash,
   getIronCurtainHome,
@@ -300,7 +300,7 @@ export interface PolicyLoadOptions {
 
 export function loadGeneratedPolicy(options: PolicyLoadOptions): {
   compiledPolicy: CompiledPolicyFile;
-  toolAnnotations: ToolAnnotationsFile;
+  toolAnnotations: StoredToolAnnotationsFile;
   dynamicLists: DynamicListsFile | undefined;
 } {
   const compiledPolicy = JSON.parse(
@@ -308,7 +308,7 @@ export function loadGeneratedPolicy(options: PolicyLoadOptions): {
   ) as CompiledPolicyFile;
   const toolAnnotations = JSON.parse(
     readGeneratedFile(options.toolAnnotationsDir, 'tool-annotations.json', options.fallbackDir),
-  ) as ToolAnnotationsFile;
+  ) as StoredToolAnnotationsFile;
   const dynamicLists = loadOptionalGeneratedFile(options.policyDir, 'dynamic-lists.json', options.fallbackDir);
 
   return { compiledPolicy, toolAnnotations, dynamicLists };

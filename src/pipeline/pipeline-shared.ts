@@ -276,7 +276,7 @@ export async function createPipelineLlm(generatedDir: string, initialStepName: s
  */
 export function checkReadonlyPolicyStaleness(
   compiledPolicy: CompiledPolicyFile,
-  toolAnnotations: ToolAnnotationsFile,
+  toolAnnotations: ToolAnnotationsFile | StoredToolAnnotationsFile,
 ): void {
   const annotatedServers = new Set(Object.keys(toolAnnotations.servers));
 
@@ -332,7 +332,7 @@ export function loadReadOnlyPolicyEngine(
 
   return new PolicyEngine(
     readonlyArtifacts.compiledPolicy,
-    readonlyArtifacts.toolAnnotations as StoredToolAnnotationsFile,
+    readonlyArtifacts.toolAnnotations,
     [], // protectedPaths: not relevant for cloud service calls
     undefined, // allowedDirectory: not relevant for cloud service calls
     serverDomainAllowlists,

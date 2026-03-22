@@ -6,6 +6,7 @@
  * (captured from MCP servers at annotation time).
  */
 
+import { z } from 'zod';
 import type { StoredToolAnnotation, TestScenario, DiscardedScenario } from './types.js';
 
 // ---------------------------------------------------------------------------
@@ -112,4 +113,65 @@ export function filterInvalidSchemaScenarios(
   }
 
   return { valid, discarded };
+}
+
+// ---------------------------------------------------------------------------
+// Zod integration: validate scenario arguments at schema parse time
+// ---------------------------------------------------------------------------
+
+/**
+ * Builds a Map from toolName → Set of valid argument names, extracted from inputSchema.
+ * Used by Zod superRefine to reject scenarios with invalid argument names at parse time.
+ */
+export function buildToolArgNamesMap(annotations: StoredToolAnnotation[]): Map<string, Set<string>> {
+  const map = new Map<string, Set<string>>();
+  for (const ann of annotations) {
+    const schema = asJsonSchema(ann.inputSchema);
+    if (schema.properties) {
+      map.set(ann.toolName, new Set(Object.keys(schema.properties)));
+    }
+  }
+  return map;
+}
+
+/**
+ * Creates a Zod superRefine function that validates scenario arguments against
+ * tool input schemas. When integrated into the scenario Zod schema, validation
+ * errors are returned to the LLM via generateObjectWithRepair for automatic fix.
+ *
+ * This is the PRIMARY validation point — it replaces post-hoc filtering.
+ */
+export function buildScenarioArgsSuperRefine(
+  toolArgNames: Map<string, Set<string>>,
+): (scenario: { request: { toolName: string; arguments: Record<string, unknown> } }, ctx: z.RefinementCtx) => void {
+  return (scenario, ctx) => {
+    const validArgs = toolArgNames.get(scenario.request.toolName);
+    if (!validArgs) return; // unknown tool — can't validate, Zod enum on toolName catches it
+
+    for (const argName of Object.keys(scenario.request.arguments)) {
+      if (!validArgs.has(argName)) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['request', 'arguments', argName],
+          message: `Unknown argument "${argName}" for tool "${scenario.request.toolName}". Valid arguments: ${[...validArgs].join(', ')}`,
+        });
+      }
+    }
+  };
+}
+
+/**
+ * Formats tool argument names for inclusion in LLM prompts, so the LLM knows
+ * which argument names are valid per tool.
+ */
+export function formatToolArgNames(annotations: StoredToolAnnotation[]): string {
+  const lines: string[] = [];
+  for (const ann of annotations) {
+    const schema = asJsonSchema(ann.inputSchema);
+    if (schema.properties) {
+      const args = Object.keys(schema.properties).join(', ');
+      lines.push(`- ${ann.toolName}: args=[${args}]`);
+    }
+  }
+  return lines.join('\n');
 }

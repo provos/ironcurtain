@@ -1092,6 +1092,10 @@ describe('buildGeneratorSystemPrompt with stored annotations', () => {
       toolName: 'git_branch',
       serverName: 'git',
       comment: 'Manages branches',
+      inputSchema: {
+        type: 'object',
+        properties: { path: { type: 'string' }, operation: { type: 'string' }, name: { type: 'string' } },
+      },
       args: {
         path: {
           default: ['read-path', 'write-history', 'delete-history'],

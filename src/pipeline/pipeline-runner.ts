@@ -33,13 +33,13 @@ import {
   loadExistingArtifact,
   loadReadOnlyPolicyEngine,
   loadStoredToolAnnotationsFile,
-  loadToolAnnotationsFile,
   resolveRulePaths,
   writeArtifact,
   withSpinner,
   showCached,
   createPipelineLlm,
 } from './pipeline-shared.js';
+import { resolveStoredAnnotationsFile } from '../types/argument-roles.js';
 import {
   applyScenarioCorrections,
   buildJudgeSystemPrompt,
@@ -120,8 +120,8 @@ export interface PipelineRunConfig {
   /** Progress callback for CLI output. */
   readonly onProgress?: (message: string) => void;
 
-  /** Pre-loaded tool annotations (avoids re-reading from disk). */
-  readonly preloadedToolAnnotations?: ToolAnnotationsFile;
+  /** Pre-loaded stored tool annotations (avoids re-reading from disk). */
+  readonly preloadedStoredAnnotations?: StoredToolAnnotationsFile;
 
   /** Compile only these servers (default: all servers in annotations). */
   readonly serverFilter?: string[];
@@ -158,7 +158,7 @@ export async function createPipelineModels(logDir?: string): Promise<PipelineMod
 interface ServerCompilationUnit {
   readonly serverName: string;
   readonly annotations: ToolAnnotation[];
-  readonly storedAnnotations?: StoredToolAnnotation[];
+  readonly storedAnnotations: StoredToolAnnotation[];
   readonly constitutionText: string;
   readonly allowedDirectory: string;
   readonly protectedPaths: string[];
@@ -512,18 +512,16 @@ export class PipelineRunner {
    * Phase 3: Resolve dynamic lists (global, post-merge)
    */
   private async runPerServer(config: PipelineRunConfig): Promise<CompiledPolicyFile> {
-    const toolAnnotationsFile =
-      config.preloadedToolAnnotations ??
-      loadToolAnnotationsFile(config.toolAnnotationsDir, config.toolAnnotationsFallbackDir);
+    const storedAnnotationsFile =
+      config.preloadedStoredAnnotations ??
+      loadStoredToolAnnotationsFile(config.toolAnnotationsDir, config.toolAnnotationsFallbackDir);
 
-    if (!toolAnnotationsFile) {
+    if (!storedAnnotationsFile) {
       throw new Error("tool-annotations.json not found. Run 'ironcurtain annotate-tools' first.");
     }
 
-    // Load raw stored annotations (with conditional role specs) for scenario generation prompts
-    const storedAnnotationsFile = config.preloadedToolAnnotations
-      ? undefined
-      : loadStoredToolAnnotationsFile(config.toolAnnotationsDir, config.toolAnnotationsFallbackDir);
+    // Resolve conditional role specs to flat annotations for compiler prompts
+    const toolAnnotationsFile = resolveStoredAnnotationsFile(storedAnnotationsFile);
 
     const constitutionHash = computeHash(config.constitutionInput);
 
@@ -610,7 +608,7 @@ export class PipelineRunner {
     config: PipelineRunConfig,
     toolAnnotationsFile: ToolAnnotationsFile,
     constitutionHash: string,
-    storedAnnotationsFile?: StoredToolAnnotationsFile,
+    storedAnnotationsFile: StoredToolAnnotationsFile,
   ): Promise<ServerCompilationResult[]> {
     const results: ServerCompilationResult[] = [];
     const serverEntries = Object.entries(toolAnnotationsFile.servers);
@@ -642,7 +640,7 @@ export class PipelineRunner {
         {
           serverName,
           annotations: serverData.tools,
-          storedAnnotations: storedAnnotationsFile?.servers[serverName]?.tools,
+          storedAnnotations: storedAnnotationsFile.servers[serverName].tools,
           constitutionText: config.constitutionInput,
           allowedDirectory: config.allowedDirectory,
           protectedPaths: config.protectedPaths,
@@ -751,7 +749,7 @@ export class PipelineRunner {
     // Build per-server tool annotations file with conditional role specs preserved
     const serverAnnotationsFile: StoredToolAnnotationsFile = {
       generatedAt: new Date().toISOString(),
-      servers: { [unit.serverName]: { inputHash, tools: unit.storedAnnotations ?? unit.annotations } },
+      servers: { [unit.serverName]: { inputHash, tools: unit.storedAnnotations } },
     };
 
     // Extract domain allowlists for this server
@@ -850,6 +848,7 @@ export class PipelineRunner {
         serverTools,
         dynamicLists,
         unit.allowedDirectory,
+        unit.storedAnnotations,
       ),
     );
     let verifierSession = new PolicyVerifierSession({
@@ -857,6 +856,7 @@ export class PipelineRunner {
       model: this.model,
       serverNames,
       toolNames: serverToolNames,
+      storedAnnotations: unit.storedAnnotations,
     });
 
     const verifyLabel = `  ${unit.serverName}: Verifying`;
@@ -1004,6 +1004,7 @@ export class PipelineRunner {
               serverTools,
               dynamicLists,
               unit.allowedDirectory,
+              unit.storedAnnotations,
             ),
           );
           verifierSession = new PolicyVerifierSession({
@@ -1011,6 +1012,7 @@ export class PipelineRunner {
             model: this.model,
             serverNames,
             toolNames: serverToolNames,
+            storedAnnotations: unit.storedAnnotations,
           });
         } else {
           console.error(`  ${chalk.dim('No rule-blamed failures — skipping recompilation')}`);
@@ -1152,23 +1154,20 @@ export class PipelineRunner {
    * all servers are compiled in a single LLM call.
    */
   private async runMonolithic(config: PipelineRunConfig): Promise<CompiledPolicyFile> {
-    const toolAnnotationsFile =
-      config.preloadedToolAnnotations ??
-      loadToolAnnotationsFile(config.toolAnnotationsDir, config.toolAnnotationsFallbackDir);
+    const storedAnnotationsFile =
+      config.preloadedStoredAnnotations ??
+      loadStoredToolAnnotationsFile(config.toolAnnotationsDir, config.toolAnnotationsFallbackDir);
 
-    if (!toolAnnotationsFile) {
+    if (!storedAnnotationsFile) {
       throw new Error("tool-annotations.json not found. Run 'ironcurtain annotate-tools' first.");
     }
 
+    // Resolve conditional role specs to flat annotations for compiler prompts
+    const toolAnnotationsFile = resolveStoredAnnotationsFile(storedAnnotationsFile);
+
     const allAnnotations = Object.values(toolAnnotationsFile.servers).flatMap((server) => server.tools);
 
-    // Load raw stored annotations for scenario generation prompts
-    const storedAnnotationsFile = config.preloadedToolAnnotations
-      ? undefined
-      : loadStoredToolAnnotationsFile(config.toolAnnotationsDir, config.toolAnnotationsFallbackDir);
-    const allStoredAnnotations = storedAnnotationsFile
-      ? Object.values(storedAnnotationsFile.servers).flatMap((server) => server.tools)
-      : undefined;
+    const allStoredAnnotations = Object.values(storedAnnotationsFile.servers).flatMap((server) => server.tools);
     const serverDomainAllowlists = config.mcpServers ? extractServerDomainAllowlists(config.mcpServers) : undefined;
 
     const includeHandwritten = config.includeHandwrittenScenarios ?? config.constitutionKind === 'constitution';
@@ -1298,11 +1297,9 @@ export class PipelineRunner {
     } satisfies TestScenariosFile);
 
     // Filter scenarios against structural invariants
-    // Use stored annotations (with conditional role specs) when available
-    const storedOrFlatAnnotations = storedAnnotationsFile ?? toolAnnotationsFile;
     const filterEngine = new PolicyEngine(
       compiledPolicyFile,
-      storedOrFlatAnnotations,
+      storedAnnotationsFile,
       config.protectedPaths,
       config.allowedDirectory,
       undefined,
@@ -1365,6 +1362,7 @@ export class PipelineRunner {
         allAvailableTools,
         dynamicLists,
         config.allowedDirectory,
+        allStoredAnnotations,
       ),
     );
     let verifierSession = new PolicyVerifierSession({
@@ -1372,6 +1370,7 @@ export class PipelineRunner {
       model: this.model,
       serverNames: serverNamesList,
       toolNames: toolNamesList,
+      storedAnnotations: allStoredAnnotations,
     });
 
     const { result: verificationResultInitial } = await withSpinner(
@@ -1380,7 +1379,7 @@ export class PipelineRunner {
         verifyPolicy(
           config.constitutionInput,
           compiledPolicyFile,
-          storedOrFlatAnnotations,
+          storedAnnotationsFile,
           config.protectedPaths,
           filteredScenarios,
           this.model,
@@ -1528,6 +1527,7 @@ export class PipelineRunner {
               allAvailableTools,
               dynamicLists,
               config.allowedDirectory,
+              allStoredAnnotations,
             ),
           );
           verifierSession = new PolicyVerifierSession({
@@ -1535,6 +1535,7 @@ export class PipelineRunner {
             model: this.model,
             serverNames: serverNamesList,
             toolNames: toolNamesList,
+            storedAnnotations: allStoredAnnotations,
           });
         } else {
           console.error(`  ${chalk.dim('No rule-blamed failures — skipping recompilation')}`);
@@ -1549,7 +1550,7 @@ export class PipelineRunner {
             verifyPolicy(
               config.constitutionInput,
               compiledPolicyFile,
-              toolAnnotationsFile,
+              storedAnnotationsFile,
               config.protectedPaths,
               scenariosForRepairVerify,
               this.model,
@@ -1601,7 +1602,7 @@ export class PipelineRunner {
               verifyPolicy(
                 config.constitutionInput,
                 compiledPolicyFile,
-                toolAnnotationsFile,
+                storedAnnotationsFile,
                 config.protectedPaths,
                 finalScenarios,
                 this.model,
