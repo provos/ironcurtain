@@ -16,6 +16,7 @@ import type { IronCurtainConfig } from '../src/config/types.js';
 import type { CompiledPolicyFile, ToolAnnotationsFile } from '../src/pipeline/types.js';
 import { testCompiledPolicy, testToolAnnotations, REAL_TMP } from './fixtures/test-policy.js';
 import { UdsClientTransport } from './helpers/uds-client-transport.js';
+import { isIsolatedVmAvailable } from './helpers/isolated-vm-available.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(__dirname, '..');
@@ -50,7 +51,7 @@ async function withClient<T>(socketPath: string, name: string, fn: (client: Clie
   }
 }
 
-describe('Docker Code Mode proxy integration', () => {
+describe.skipIf(!isIsolatedVmAvailable())('Docker Code Mode proxy integration', () => {
   let proxy: DockerProxy;
 
   const config: IronCurtainConfig = {

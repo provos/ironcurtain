@@ -88,6 +88,30 @@ This is an npm workspaces monorepo (`"workspaces": ["packages/*"]` in the root `
 
 When bumping a workspace package version, remember to update the corresponding dependency range in the root `package.json`.
 
+## Validating Policy Engine and Tool Annotations
+
+Quick validation of compiled policies and annotations using the engine directly:
+
+```bash
+node --import tsx/esm -e "
+import { PolicyEngine } from './src/trusted-process/policy-engine.js';
+import { readFileSync } from 'fs';
+const policy = JSON.parse(readFileSync('PATH_TO/compiled-policy.json', 'utf-8'));
+const annotations = JSON.parse(readFileSync('src/config/generated/tool-annotations.json', 'utf-8'));
+const engine = new PolicyEngine(policy, annotations, [], undefined);
+const r = engine.evaluate({requestId: 't', serverName: 'git', toolName: 'git_branch',
+  arguments: { path: '/some/path', operation: 'list' }, timestamp: ''});
+console.log(r.decision, r.rule);
+"
+```
+
+**Multi-mode tool annotations** — Tools with read AND mutation modes (e.g., `git_branch`, `git_stash`, `git_remote`, `git_worktree`, `git_tag`) must have conditional `when` clauses on their path/url arguments so the engine resolves `read-path` only for read operations. Without conditionals, the default roles include all modes (read + write + delete), causing escalate rules to fire even for read-only calls. The discriminator argument name must match the MCP tool's actual input schema (e.g., `operation` for `git_branch`, `mode` for `git_stash`). All arguments with mutation roles that are absent in read-only modes also need conditional specs (e.g., `git_worktree.newPath`, `git_remote.url`).
+
+**Common validation failures and causes:**
+- Read-only operation gets `escalate` → annotation missing conditional `when` clause; mutation roles always active
+- Scenario uses wrong argument name (e.g., `mode` vs `operation`) → conditional roles fall to default (most restrictive). The `filterInvalidSchemaScenarios` validator catches this using `inputSchema`
+- Unconditional allow rule on multi-mode tool → allows mutations too. Compiler prompt forbids this; allow rules must include `roles: ["read-path"]`
+
 ## Key Conventions
 
 - ESM modules throughout (`.js` extensions in imports, `"type": "module"` in package.json)
