@@ -635,27 +635,41 @@ export class PipelineRunner {
     const allHandwrittenScenarios = includeHandwritten ? getHandwrittenScenarios(config.allowedDirectory) : [];
 
     const totalServers = filteredEntries.length;
+    const failedServers: string[] = [];
     for (let i = 0; i < filteredEntries.length; i++) {
       const [serverName, serverData] = filteredEntries[i];
       console.error('');
       console.error(chalk.bold(`[${i + 1}/${totalServers}] Compiling server: ${serverName}`));
 
-      const result = await this.compileServer(
-        {
-          serverName,
-          annotations: serverData.tools,
-          storedAnnotations: storedAnnotationsFile.servers[serverName].tools,
-          constitutionText: config.constitutionInput,
-          constitutionKind: config.constitutionKind,
-          allowedDirectory: config.allowedDirectory,
-          protectedPaths: config.protectedPaths,
-          mcpServerConfig: config.mcpServers?.[serverName],
-          handwrittenScenarios: allHandwrittenScenarios.filter((s) => s.request.serverName === serverName),
-        },
-        config,
-        constitutionHash,
+      try {
+        const result = await this.compileServer(
+          {
+            serverName,
+            annotations: serverData.tools,
+            storedAnnotations: storedAnnotationsFile.servers[serverName].tools,
+            constitutionText: config.constitutionInput,
+            constitutionKind: config.constitutionKind,
+            allowedDirectory: config.allowedDirectory,
+            protectedPaths: config.protectedPaths,
+            mcpServerConfig: config.mcpServers?.[serverName],
+            handwrittenScenarios: allHandwrittenScenarios.filter((s) => s.request.serverName === serverName),
+          },
+          config,
+          constitutionHash,
+        );
+        results.push(result);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`  ${chalk.red(`Server "${serverName}" failed:`)} ${msg}`);
+        failedServers.push(serverName);
+      }
+    }
+
+    if (failedServers.length > 0) {
+      console.error(
+        `\n${chalk.yellow(`Warning: ${failedServers.length} server(s) failed verification: ${failedServers.join(', ')}`)}`,
       );
-      results.push(result);
+      console.error(chalk.yellow('Continuing with successfully compiled servers.'));
     }
 
     return results;

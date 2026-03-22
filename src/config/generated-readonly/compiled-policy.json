@@ -1,13 +1,49 @@
 {
-  "generatedAt": "2026-03-06T22:53:18.790Z",
-  "constitutionHash": "750295d07a6b1a5dba6ab44d3fa62b2b5a3426340ada35f2cf300b04c418b49b",
-  "inputHash": "0536def5e41fbc6f740995d8e9e211b58b4cc40ea7157d053f42ab7931b6fadc-repair",
+  "generatedAt": "2026-03-22T20:08:37.921Z",
+  "constitutionHash": "3a2fca5ca6489fc9e766b906764c58c082305b74fad84681d5088f16960198df",
+  "inputHash": "3be01d05b84bde1648f2e0aafc9354e67e0b3893f5289db3433becd4b2ab49b7",
   "rules": [
     {
-      "name": "allow-filesystem-reads",
-      "description": "Allow reading files, listing directories, and querying metadata anywhere on the filesystem.",
-      "principle": "Broad read access: Reading files, listing directories, and querying metadata is permitted anywhere.",
+      "name": "allow-web-search",
+      "description": "Permit web searches for data gathering purposes.",
+      "principle": "Controlled web access: Web search is permitted.",
       "if": {
+        "server": [
+          "fetch"
+        ],
+        "tool": [
+          "web_search"
+        ]
+      },
+      "then": "allow",
+      "reason": "The constitution explicitly permits web search for data gathering."
+    },
+    {
+      "name": "allow-http-fetch-known-domains",
+      "description": "Permit fetching any URL via HTTP for data gathering, including IP-based URLs.",
+      "principle": "Controlled web access: Fetching URLs from known safe domains is permitted for data gathering.",
+      "if": {
+        "roles": [
+          "fetch-url"
+        ],
+        "server": [
+          "fetch"
+        ],
+        "tool": [
+          "http_fetch"
+        ]
+      },
+      "then": "allow",
+      "reason": "The constitution permits fetching URLs for data gathering; no domain restrictions are specified, so all URLs including raw IP addresses are allowed."
+    },
+    {
+      "name": "allow-read-only-operations",
+      "description": "Allow all read-only filesystem operations including reading files, listing directories, and querying metadata.",
+      "principle": "Read-only exploration: The agent may only observe and query -- never modify, create, or delete.",
+      "if": {
+        "server": [
+          "filesystem"
+        ],
         "tool": [
           "read_file",
           "read_text_file",
@@ -17,395 +53,99 @@
           "list_directory_with_sizes",
           "directory_tree",
           "search_files",
-          "get_file_info"
-        ]
-      },
-      "then": "allow",
-      "reason": "Constitution explicitly permits reading files and listing directories anywhere on the filesystem."
-    },
-    {
-      "name": "allow-list-allowed-directories",
-      "description": "Allow querying which directories the filesystem server can access.",
-      "principle": "Broad read access: Reading files, listing directories, and querying metadata is permitted anywhere.",
-      "if": {
-        "tool": [
+          "get_file_info",
           "list_allowed_directories"
         ]
       },
       "then": "allow",
-      "reason": "Listing allowed directories is a read-only metadata query explicitly permitted."
+      "reason": "Constitution explicitly permits reading files, listing directories, and querying metadata anywhere on the filesystem."
     },
     {
-      "name": "escalate-filesystem-writes",
-      "description": "Escalate any file write, edit, or create operation for human approval.",
-      "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
+      "name": "allow-edit-file-read",
+      "description": "Allow the read-path role of edit_file so the file can be inspected, but not the write-path role.",
+      "principle": "Read-only exploration: The agent may only observe and query -- never modify, create, or delete.",
       "if": {
+        "roles": [
+          "read-path"
+        ],
+        "server": [
+          "filesystem"
+        ],
         "tool": [
-          "write_file",
-          "edit_file",
-          "create_directory"
+          "edit_file"
         ]
       },
-      "then": "escalate",
-      "reason": "Constitution requires human approval before any write or create operation."
+      "then": "allow",
+      "reason": "edit_file has a read-path role for inspecting the file; reading is permitted, but the write-path role falls through to default-deny."
     },
     {
-      "name": "escalate-filesystem-move",
-      "description": "Escalate any file move/rename operation for human approval.",
+      "name": "escalate-move-file",
+      "description": "Escalate any move_file operation for human approval since it moves or renames files and directories.",
       "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
       "if": {
+        "server": [
+          "filesystem"
+        ],
         "tool": [
           "move_file"
         ]
       },
       "then": "escalate",
-      "reason": "Move operations modify the filesystem by deleting the source and creating the destination, requiring human approval."
+      "reason": "Moving files involves deletion and creation of data; all move operations require human approval per the constitution."
     },
     {
-      "name": "allow-git-read-only-tools",
-      "description": "Allow reading git log, status, diff, blame, show, reflog, and changelog analysis.",
-      "principle": "The agent is allowed to read git log, status, diff, and branch information.",
-      "if": {
-        "tool": [
-          "git_log",
-          "git_status",
-          "git_diff",
-          "git_blame",
-          "git_show",
-          "git_reflog",
-          "git_changelog_analyze"
-        ]
-      },
-      "then": "allow",
-      "reason": "Constitution explicitly permits reading git log, status, diff, and branch information."
-    },
-    {
-      "name": "allow-git-set-working-dir",
-      "description": "Allow setting or clearing the git working directory for navigation.",
-      "principle": "The agent is allowed to set the git working directory for navigation.",
-      "if": {
-        "tool": [
-          "git_set_working_dir",
-          "git_clear_working_dir"
-        ]
-      },
-      "then": "allow",
-      "reason": "Constitution explicitly permits setting the git working directory for navigation."
-    },
-    {
-      "name": "allow-git-wrapup-instructions",
-      "description": "Allow querying git wrap-up workflow instructions (read-only, no side effects).",
-      "principle": "Read-only exploration: The agent may only observe and query.",
-      "if": {
-        "tool": [
-          "git_wrapup_instructions"
-        ]
-      },
-      "then": "allow",
-      "reason": "git_wrapup_instructions is a read-only query with no side effects."
-    },
-    {
-      "name": "allow-git-branch-read",
-      "description": "Allow listing git branches (read-only).",
-      "principle": "The agent is allowed to read git log, status, diff, and branch information.",
-      "if": {
-        "roles": [
-          "read-path"
-        ],
-        "tool": [
-          "git_branch"
-        ]
-      },
-      "then": "allow",
-      "reason": "Constitution permits reading branch information; listing only activates read-path role."
-    },
-    {
-      "name": "allow-git-remote-list",
-      "description": "Allow listing git remotes (read-only, no remote URL argument present).",
-      "principle": "The agent is allowed to read git log, status, diff, and branch information.",
-      "if": {
-        "roles": [
-          "read-path"
-        ],
-        "tool": [
-          "git_remote"
-        ]
-      },
-      "then": "allow",
-      "reason": "Listing remotes only activates read-path; constitution only requires approval for mutations to remote config."
-    },
-    {
-      "name": "escalate-git-remote-mutations",
-      "description": "Escalate adding, removing, or renaming git remotes (when a remote URL is provided).",
-      "principle": "The agent must ask for approval before adding, removing, or renaming git remotes.",
-      "if": {
-        "roles": [
-          "git-remote-url"
-        ],
-        "tool": [
-          "git_remote"
-        ]
-      },
-      "then": "escalate",
-      "reason": "Constitution requires human approval before modifying git remote configuration."
-    },
-    {
-      "name": "allow-git-fetch-from-github",
-      "description": "Allow git fetch from GitHub remotes.",
-      "principle": "GitHub read access: Querying GitHub repositories, issues, and pull requests is permitted for reading.",
-      "if": {
-        "tool": [
-          "git_fetch"
-        ],
-        "domains": {
-          "roles": [
-            "git-remote-url"
-          ],
-          "allowed": [
-            "github.com"
-          ]
-        }
-      },
-      "then": "allow",
-      "reason": "Constitution permits GitHub read access; git fetch downloads objects without merging."
-    },
-    {
-      "name": "allow-git-clone-from-github",
-      "description": "Allow git clone from GitHub.",
-      "principle": "GitHub read access: Querying GitHub repositories, issues, and pull requests is permitted for reading.",
-      "if": {
-        "tool": [
-          "git_clone"
-        ],
-        "domains": {
-          "roles": [
-            "git-remote-url"
-          ],
-          "allowed": [
-            "github.com"
-          ]
-        }
-      },
-      "then": "allow",
-      "reason": "Constitution permits GitHub read access; cloning from GitHub is a read operation."
-    },
-    {
-      "name": "allow-git-stash-list",
-      "description": "Allow listing git stashes (read-only stash inspection with no write-history argument active).",
-      "principle": "The agent is allowed to read git log, status, diff, and branch information.",
-      "if": {
-        "roles": [
-          "read-path"
-        ],
-        "tool": [
-          "git_stash"
-        ]
-      },
-      "then": "allow",
-      "reason": "Stash listing is read-only; constitution permits read-only git inspection."
-    },
-    {
-      "name": "escalate-git-stash-mutations",
-      "description": "Escalate git stash push/pop/apply/drop operations that modify git state.",
-      "principle": "The agent must ask for approval before modifying git state.",
-      "if": {
-        "roles": [
-          "write-history"
-        ],
-        "tool": [
-          "git_stash"
-        ]
-      },
-      "then": "escalate",
-      "reason": "Stash push/pop operations modify git state and require human approval."
-    },
-    {
-      "name": "allow-git-clean-dry-run",
-      "description": "Allow git clean in dry-run mode (preview only, read-path role only, no delete-path active).",
-      "principle": "Read-only exploration: The agent may only observe and query.",
-      "if": {
-        "roles": [
-          "read-path"
-        ],
-        "tool": [
-          "git_clean"
-        ]
-      },
-      "then": "allow",
-      "reason": "git_clean dry-run only reads the working tree without deleting anything."
-    },
-    {
-      "name": "escalate-git-clean-actual",
-      "description": "Escalate git clean when it would actually delete files (delete-path role active).",
+      "name": "escalate-edit-file",
+      "description": "Escalate any edit_file operation outside the sandbox for human approval.",
       "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
       "if": {
-        "roles": [
-          "delete-path"
+        "server": [
+          "filesystem"
         ],
         "tool": [
-          "git_clean"
+          "edit_file"
         ]
       },
       "then": "escalate",
-      "reason": "git_clean deletes untracked files from the working directory and requires human approval."
+      "reason": "Editing files modifies data and requires human approval per the constitution; sandbox calls are handled structurally before this rule fires."
     },
     {
-      "name": "escalate-git-checkout",
-      "description": "Escalate git checkout operations that modify git state.",
-      "principle": "The agent must ask for approval before modifying git state (commit, checkout, merge, rebase).",
+      "name": "escalate-create-directory",
+      "description": "Escalate any create_directory operation outside the sandbox for human approval.",
+      "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
       "if": {
-        "tool": [
-          "git_checkout"
-        ]
-      },
-      "then": "escalate",
-      "reason": "git_checkout modifies git working tree state and requires human approval."
-    },
-    {
-      "name": "escalate-git-commit",
-      "description": "Escalate git commit operations that modify git history.",
-      "principle": "The agent must ask for approval before modifying git state (commit, checkout, merge, rebase).",
-      "if": {
-        "tool": [
-          "git_commit"
-        ]
-      },
-      "then": "escalate",
-      "reason": "git_commit modifies git history and requires human approval."
-    },
-    {
-      "name": "escalate-git-merge",
-      "description": "Escalate git merge operations that modify git history.",
-      "principle": "The agent must ask for approval before modifying git state (commit, checkout, merge, rebase).",
-      "if": {
-        "tool": [
-          "git_merge"
-        ]
-      },
-      "then": "escalate",
-      "reason": "git_merge modifies git history and requires human approval."
-    },
-    {
-      "name": "escalate-git-rebase",
-      "description": "Escalate git rebase operations that modify git history.",
-      "principle": "The agent must ask for approval before modifying git state (commit, checkout, merge, rebase).",
-      "if": {
-        "tool": [
-          "git_rebase"
-        ]
-      },
-      "then": "escalate",
-      "reason": "git_rebase modifies git history and requires human approval."
-    },
-    {
-      "name": "escalate-git-reset",
-      "description": "Escalate git reset operations that modify git state.",
-      "principle": "The agent must ask for approval before modifying git state (commit, checkout, merge, rebase).",
-      "if": {
-        "tool": [
-          "git_reset"
-        ]
-      },
-      "then": "escalate",
-      "reason": "git_reset modifies git state and requires human approval."
-    },
-    {
-      "name": "escalate-git-cherry-pick",
-      "description": "Escalate git cherry-pick operations that modify git history.",
-      "principle": "The agent must ask for approval before modifying git state (commit, checkout, merge, rebase).",
-      "if": {
-        "tool": [
-          "git_cherry_pick"
-        ]
-      },
-      "then": "escalate",
-      "reason": "git_cherry_pick modifies git history and requires human approval."
-    },
-    {
-      "name": "escalate-git-pull",
-      "description": "Escalate git pull operations that modify git state.",
-      "principle": "The agent must ask for approval before modifying git state (commit, checkout, merge, rebase).",
-      "if": {
-        "tool": [
-          "git_pull"
-        ]
-      },
-      "then": "escalate",
-      "reason": "git_pull fetches and merges, modifying git state, and requires human approval."
-    },
-    {
-      "name": "escalate-git-push",
-      "description": "Escalate git push operations to GitHub for human approval.",
-      "principle": "The agent must ask for approval before any write, create, delete, or push operation.",
-      "if": {
-        "tool": [
-          "git_push"
+        "server": [
+          "filesystem"
         ],
-        "domains": {
-          "roles": [
-            "git-remote-url"
-          ],
-          "allowed": [
-            "github.com"
-          ]
-        }
-      },
-      "then": "escalate",
-      "reason": "Constitution requires human approval before push operations even to GitHub."
-    },
-    {
-      "name": "escalate-git-add",
-      "description": "Escalate git add (staging files modifies git index state).",
-      "principle": "The agent must ask for approval before modifying git state.",
-      "if": {
         "tool": [
-          "git_add"
+          "create_directory"
         ]
       },
       "then": "escalate",
-      "reason": "Staging files modifies the git index and requires human approval per the constitution."
+      "reason": "Creating directories is a mutation that requires human approval per the constitution; sandbox calls are handled structurally before this rule fires."
     },
     {
-      "name": "escalate-git-tag",
-      "description": "Escalate git tag operations that create or delete tags.",
-      "principle": "The agent must ask for approval before modifying git state.",
-      "if": {
-        "tool": [
-          "git_tag"
-        ]
-      },
-      "then": "escalate",
-      "reason": "Creating or deleting tags modifies git state and requires human approval."
-    },
-    {
-      "name": "escalate-git-worktree",
-      "description": "Escalate git worktree operations that create or delete working trees.",
+      "name": "escalate-write-file",
+      "description": "Escalate any write_file operation outside the sandbox for human approval.",
       "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
       "if": {
+        "server": [
+          "filesystem"
+        ],
         "tool": [
-          "git_worktree"
+          "write_file"
         ]
       },
       "then": "escalate",
-      "reason": "git_worktree can create or delete working trees and requires human approval."
+      "reason": "Writing files is a mutation that requires human approval per the constitution; sandbox calls are handled structurally before this rule fires."
     },
     {
-      "name": "escalate-git-init",
-      "description": "Escalate git init that creates a new repository.",
-      "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
-      "if": {
-        "tool": [
-          "git_init"
-        ]
-      },
-      "then": "escalate",
-      "reason": "git_init creates a new git repository on disk and requires human approval."
-    },
-    {
-      "name": "allow-github-read-operations",
-      "description": "Allow read-only GitHub API operations: listing/reading issues, PRs, repos, commits, tags, releases, users, teams, and code search.",
+      "name": "allow-github-read-tools",
+      "description": "Allow all read-only GitHub tools that only retrieve repository, issue, PR, release, tag, branch, commit, user, and team metadata.",
       "principle": "GitHub read access: Querying GitHub repositories, issues, and pull requests is permitted for reading.",
       "if": {
+        "server": [
+          "github"
+        ],
         "tool": [
           "get_commit",
           "get_file_contents",
@@ -433,36 +173,839 @@
         ]
       },
       "then": "allow",
-      "reason": "Constitution explicitly permits querying GitHub repositories, issues, and pull requests for reading."
+      "reason": "These tools are purely read-only and directly permitted by the constitution's GitHub read access principle."
     },
     {
-      "name": "escalate-github-write-operations",
-      "description": "Escalate all GitHub mutation operations for human approval.",
+      "name": "escalate-github-write-issue",
+      "description": "Escalate issue write operations (create/update issues) for human approval.",
       "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
       "if": {
+        "server": [
+          "github"
+        ],
         "tool": [
-          "add_comment_to_pending_review",
-          "add_issue_comment",
-          "add_reply_to_pull_request_comment",
-          "assign_copilot_to_issue",
-          "create_branch",
-          "create_or_update_file",
-          "create_pull_request",
-          "create_repository",
-          "delete_file",
-          "fork_repository",
-          "issue_write",
-          "merge_pull_request",
-          "pull_request_review_write",
-          "push_files",
-          "request_copilot_review",
-          "sub_issue_write",
-          "update_pull_request",
+          "issue_write"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Creating or updating issues modifies GitHub data and requires human approval per the no-mutations principle."
+    },
+    {
+      "name": "escalate-github-add-issue-comment",
+      "description": "Escalate adding comments to issues or PRs for human approval.",
+      "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
+      "if": {
+        "server": [
+          "github"
+        ],
+        "tool": [
+          "add_issue_comment"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Adding a comment to an issue or PR creates new data and requires human approval."
+    },
+    {
+      "name": "escalate-github-add-comment-to-pending-review",
+      "description": "Escalate adding comments to pending PR reviews for human approval.",
+      "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
+      "if": {
+        "server": [
+          "github"
+        ],
+        "tool": [
+          "add_comment_to_pending_review"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Adding a review comment modifies PR review data and requires human approval."
+    },
+    {
+      "name": "escalate-github-add-reply-to-pr-comment",
+      "description": "Escalate adding replies to PR comments for human approval.",
+      "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
+      "if": {
+        "server": [
+          "github"
+        ],
+        "tool": [
+          "add_reply_to_pull_request_comment"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Replying to a PR comment creates new data and requires human approval."
+    },
+    {
+      "name": "escalate-github-assign-copilot-to-issue",
+      "description": "Escalate assigning Copilot to an issue for human approval.",
+      "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
+      "if": {
+        "server": [
+          "github"
+        ],
+        "tool": [
+          "assign_copilot_to_issue"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Assigning Copilot to an issue triggers automated changes and requires human approval."
+    },
+    {
+      "name": "escalate-github-create-branch",
+      "description": "Escalate branch creation for human approval.",
+      "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
+      "if": {
+        "server": [
+          "github"
+        ],
+        "tool": [
+          "create_branch"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Creating a branch modifies the repository and requires human approval."
+    },
+    {
+      "name": "escalate-github-create-or-update-file",
+      "description": "Escalate file creation or update operations for human approval.",
+      "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
+      "if": {
+        "server": [
+          "github"
+        ],
+        "tool": [
+          "create_or_update_file"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Creating or updating a file in a repository is a write operation requiring human approval."
+    },
+    {
+      "name": "escalate-github-create-pull-request",
+      "description": "Escalate pull request creation for human approval.",
+      "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
+      "if": {
+        "server": [
+          "github"
+        ],
+        "tool": [
+          "create_pull_request"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Creating a pull request modifies the repository state and requires human approval."
+    },
+    {
+      "name": "escalate-github-create-repository",
+      "description": "Escalate repository creation for human approval.",
+      "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
+      "if": {
+        "server": [
+          "github"
+        ],
+        "tool": [
+          "create_repository"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Creating a new repository is a write operation requiring human approval."
+    },
+    {
+      "name": "escalate-github-delete-file",
+      "description": "Escalate file deletion for human approval.",
+      "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
+      "if": {
+        "server": [
+          "github"
+        ],
+        "tool": [
+          "delete_file"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Deleting a file from a repository is a destructive write operation requiring human approval."
+    },
+    {
+      "name": "escalate-github-fork-repository",
+      "description": "Escalate repository forking for human approval.",
+      "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
+      "if": {
+        "server": [
+          "github"
+        ],
+        "tool": [
+          "fork_repository"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Forking a repository creates a new repository and requires human approval."
+    },
+    {
+      "name": "escalate-github-merge-pull-request",
+      "description": "Escalate PR merges for human approval.",
+      "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
+      "if": {
+        "server": [
+          "github"
+        ],
+        "tool": [
+          "merge_pull_request"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Merging a pull request permanently modifies the repository history and requires human approval."
+    },
+    {
+      "name": "escalate-github-pull-request-review-write",
+      "description": "Escalate creating, submitting, or deleting PR reviews for human approval.",
+      "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
+      "if": {
+        "server": [
+          "github"
+        ],
+        "tool": [
+          "pull_request_review_write"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Writing, submitting, or deleting a PR review modifies GitHub data and requires human approval."
+    },
+    {
+      "name": "escalate-github-push-files",
+      "description": "Escalate pushing files to a repository branch for human approval.",
+      "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
+      "if": {
+        "server": [
+          "github"
+        ],
+        "tool": [
+          "push_files"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Pushing files to a repository is a write operation requiring human approval."
+    },
+    {
+      "name": "escalate-github-request-copilot-review",
+      "description": "Escalate requesting a Copilot review for human approval.",
+      "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
+      "if": {
+        "server": [
+          "github"
+        ],
+        "tool": [
+          "request_copilot_review"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Requesting a Copilot review modifies the PR state and requires human approval."
+    },
+    {
+      "name": "escalate-github-sub-issue-write",
+      "description": "Escalate sub-issue relationship modifications for human approval.",
+      "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
+      "if": {
+        "server": [
+          "github"
+        ],
+        "tool": [
+          "sub_issue_write"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Adding, removing, or reprioritizing sub-issues modifies issue data and requires human approval."
+    },
+    {
+      "name": "escalate-github-update-pull-request",
+      "description": "Escalate updating pull request metadata for human approval.",
+      "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
+      "if": {
+        "server": [
+          "github"
+        ],
+        "tool": [
+          "update_pull_request"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Updating a pull request's metadata is a write operation requiring human approval."
+    },
+    {
+      "name": "escalate-github-update-pull-request-branch",
+      "description": "Escalate updating a PR's head branch for human approval.",
+      "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
+      "if": {
+        "server": [
+          "github"
+        ],
+        "tool": [
           "update_pull_request_branch"
         ]
       },
       "then": "escalate",
-      "reason": "Constitution requires human approval before any write, create, delete, or push operation on GitHub."
+      "reason": "Updating a PR branch modifies the repository state and requires human approval."
+    },
+    {
+      "name": "allow-drive-read-operations",
+      "description": "Allow reading, searching, listing, and getting metadata for Google Drive files.",
+      "principle": "Cloud service read access: Reading files and document content from connected cloud services is permitted.",
+      "if": {
+        "server": [
+          "google-workspace"
+        ],
+        "tool": [
+          "drive_search",
+          "drive_read_file",
+          "drive_list_files",
+          "drive_get_metadata",
+          "drive_list_folder_contents",
+          "drive_list_permissions",
+          "drive_export_file",
+          "drive_list_revisions"
+        ]
+      },
+      "then": "allow",
+      "reason": "Constitution explicitly permits reading files and document content from connected cloud services."
+    },
+    {
+      "name": "escalate-drive-upload-file",
+      "description": "Escalate uploading new files to Google Drive for human approval.",
+      "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
+      "if": {
+        "server": [
+          "google-workspace"
+        ],
+        "tool": [
+          "drive_upload_file"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Uploading files creates new data in cloud storage and requires human approval per the constitution."
+    },
+    {
+      "name": "escalate-drive-create-file",
+      "description": "Escalate creating new files or Google Workspace documents in Drive for human approval.",
+      "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
+      "if": {
+        "server": [
+          "google-workspace"
+        ],
+        "tool": [
+          "drive_create_file"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Creating files is a mutation that requires human approval per the constitution."
+    },
+    {
+      "name": "escalate-drive-delete-file",
+      "description": "Escalate moving a Drive file to trash for human approval.",
+      "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
+      "if": {
+        "server": [
+          "google-workspace"
+        ],
+        "tool": [
+          "drive_delete_file"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Deleting files is a destructive mutation that requires human approval per the constitution."
+    },
+    {
+      "name": "escalate-drive-copy-file",
+      "description": "Escalate copying a Drive file for human approval.",
+      "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
+      "if": {
+        "server": [
+          "google-workspace"
+        ],
+        "tool": [
+          "drive_copy_file"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Copying a file creates a new file in cloud storage, which is a mutation requiring human approval."
+    },
+    {
+      "name": "escalate-drive-move-file",
+      "description": "Escalate moving a Drive file to a different folder for human approval.",
+      "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
+      "if": {
+        "server": [
+          "google-workspace"
+        ],
+        "tool": [
+          "drive_move_file"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Moving a file modifies its location in cloud storage, requiring human approval."
+    },
+    {
+      "name": "escalate-drive-rename-file",
+      "description": "Escalate renaming a Drive file for human approval.",
+      "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
+      "if": {
+        "server": [
+          "google-workspace"
+        ],
+        "tool": [
+          "drive_rename_file"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Renaming a file is a modification that requires human approval per the constitution."
+    },
+    {
+      "name": "escalate-drive-update-file",
+      "description": "Escalate updating a Drive file's metadata or content for human approval.",
+      "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
+      "if": {
+        "server": [
+          "google-workspace"
+        ],
+        "tool": [
+          "drive_update_file"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Updating file content or metadata is a mutation requiring human approval per the constitution."
+    },
+    {
+      "name": "escalate-drive-create-folder",
+      "description": "Escalate creating a new folder in Google Drive for human approval.",
+      "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
+      "if": {
+        "server": [
+          "google-workspace"
+        ],
+        "tool": [
+          "drive_create_folder"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Creating a folder is a mutation requiring human approval per the constitution."
+    },
+    {
+      "name": "escalate-drive-move-to-folder",
+      "description": "Escalate moving a Drive file into a specific folder for human approval.",
+      "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
+      "if": {
+        "server": [
+          "google-workspace"
+        ],
+        "tool": [
+          "drive_move_to_folder"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Moving a file modifies its location, which is a mutation requiring human approval."
+    },
+    {
+      "name": "escalate-drive-share-file",
+      "description": "Escalate sharing a Drive file (adding permissions) for human approval.",
+      "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
+      "if": {
+        "server": [
+          "google-workspace"
+        ],
+        "tool": [
+          "drive_share_file"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Sharing a file modifies access permissions and requires human approval per the constitution."
+    },
+    {
+      "name": "escalate-drive-update-permission",
+      "description": "Escalate updating an existing Drive file permission for human approval.",
+      "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
+      "if": {
+        "server": [
+          "google-workspace"
+        ],
+        "tool": [
+          "drive_update_permission"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Modifying permissions is a mutation requiring human approval per the constitution."
+    },
+    {
+      "name": "escalate-drive-remove-permission",
+      "description": "Escalate removing a permission from a Drive file for human approval.",
+      "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
+      "if": {
+        "server": [
+          "google-workspace"
+        ],
+        "tool": [
+          "drive_remove_permission"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Removing permissions is a destructive mutation requiring human approval per the constitution."
+    },
+    {
+      "name": "escalate-drive-empty-trash",
+      "description": "Escalate permanently deleting all files in Drive trash for human approval.",
+      "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
+      "if": {
+        "server": [
+          "google-workspace"
+        ],
+        "tool": [
+          "drive_empty_trash"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Permanently deleting files is an irreversible destructive action requiring human approval."
+    },
+    {
+      "name": "allow-gsheets-read-operations",
+      "description": "Allow reading data and listing sheets from Google Spreadsheets.",
+      "principle": "Cloud service read access: Reading files and document content from connected cloud services is permitted.",
+      "if": {
+        "server": [
+          "google-workspace"
+        ],
+        "tool": [
+          "gsheets_read",
+          "gsheets_list_sheets"
+        ]
+      },
+      "then": "allow",
+      "reason": "Constitution explicitly permits reading document content from connected cloud services."
+    },
+    {
+      "name": "escalate-gsheets-mutations",
+      "description": "Escalate all Google Sheets mutation operations for human approval.",
+      "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
+      "if": {
+        "server": [
+          "google-workspace"
+        ],
+        "tool": [
+          "gsheets_update_cell",
+          "gsheets_add_sheet",
+          "gsheets_delete_sheet",
+          "gsheets_insert_rows",
+          "gsheets_insert_columns",
+          "gsheets_delete_rows",
+          "gsheets_delete_columns",
+          "gsheets_append_data",
+          "gsheets_batch_update",
+          "gsheets_clear_data",
+          "gsheets_copy_sheet",
+          "gsheets_copy_to",
+          "gsheets_merge_cells",
+          "gsheets_unmerge_cells",
+          "gsheets_update_borders",
+          "gsheets_format_cells",
+          "gsheets_sort_range",
+          "gsheets_create_spreadsheet",
+          "gsheets_duplicate_sheet",
+          "gsheets_rename_sheet",
+          "gsheets_batch_clear",
+          "gsheets_auto_resize",
+          "gsheets_set_number_format",
+          "gsheets_set_data_validation",
+          "gsheets_add_conditional_format",
+          "gsheets_create_filter",
+          "gsheets_add_protected_range",
+          "gsheets_delete_protected_range",
+          "gsheets_update_protected_range",
+          "gsheets_find_replace",
+          "gsheets_add_named_range",
+          "gsheets_update_named_range",
+          "gsheets_delete_named_range",
+          "gsheets_freeze_rows",
+          "gsheets_freeze_columns",
+          "gsheets_add_chart",
+          "gsheets_update_chart",
+          "gsheets_delete_chart",
+          "gsheets_add_histogram",
+          "gsheets_add_waterfall",
+          "gsheets_add_candlestick",
+          "gsheets_add_combo",
+          "gsheets_add_bubble",
+          "gsheets_add_treemap",
+          "gsheets_add_org_chart",
+          "gsheets_add_filter_view",
+          "gsheets_add_pivot_table",
+          "gsheets_add_dimension_group",
+          "gsheets_delete_dimension_group",
+          "gsheets_update_dimension_group",
+          "gsheets_create_developer_metadata",
+          "gsheets_update_developer_metadata",
+          "gsheets_delete_developer_metadata"
+        ]
+      },
+      "then": "escalate",
+      "reason": "All Sheets write, create, delete, and formatting operations modify cloud data and require human approval."
+    },
+    {
+      "name": "allow-gdocs-read-operations",
+      "description": "Allow reading Google Documents content, metadata, listing documents, and exporting to other formats.",
+      "principle": "Cloud service read access: Reading files and document content from connected cloud services is permitted.",
+      "if": {
+        "server": [
+          "google-workspace"
+        ],
+        "tool": [
+          "gdocs_read",
+          "gdocs_get_metadata",
+          "gdocs_list_documents",
+          "gdocs_export"
+        ]
+      },
+      "then": "allow",
+      "reason": "Constitution explicitly permits reading document content from connected cloud services; exporting converts content to another format without modifying cloud data."
+    },
+    {
+      "name": "escalate-gdocs-mutations",
+      "description": "Escalate all Google Docs mutation operations for human approval.",
+      "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
+      "if": {
+        "server": [
+          "google-workspace"
+        ],
+        "tool": [
+          "gdocs_create",
+          "gdocs_insert_text",
+          "gdocs_update_text",
+          "gdocs_delete_text",
+          "gdocs_replace_text",
+          "gdocs_append_text",
+          "gdocs_format_text",
+          "gdocs_create_heading",
+          "gdocs_create_list",
+          "gdocs_set_alignment",
+          "gdocs_apply_style",
+          "gdocs_insert_image",
+          "gdocs_create_table",
+          "gdocs_insert_page_break",
+          "gdocs_insert_link",
+          "gdocs_insert_toc",
+          "gdocs_batch_update",
+          "gdocs_merge_documents",
+          "gdocs_suggest_mode"
+        ]
+      },
+      "then": "escalate",
+      "reason": "All Docs write, create, and delete operations modify cloud data and require human approval per the constitution."
+    },
+    {
+      "name": "allow-gmail-read-operations",
+      "description": "Allow reading Gmail messages, threads, and labels.",
+      "principle": "Cloud service read access: Reading messages from connected cloud services is permitted.",
+      "if": {
+        "server": [
+          "google-workspace"
+        ],
+        "tool": [
+          "gmail_list_labels",
+          "gmail_search_messages",
+          "gmail_get_message",
+          "gmail_get_thread",
+          "gmail_get_messages_batch",
+          "gmail_get_threads_batch"
+        ]
+      },
+      "then": "allow",
+      "reason": "Constitution explicitly permits reading messages from connected cloud services."
+    },
+    {
+      "name": "escalate-gmail-send-message",
+      "description": "Escalate sending Gmail messages for human approval.",
+      "principle": "No mutations: The agent must ask for approval before sending messages.",
+      "if": {
+        "server": [
+          "google-workspace"
+        ],
+        "tool": [
+          "gmail_send_message"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Sending messages is explicitly called out as requiring human approval in the constitution."
+    },
+    {
+      "name": "escalate-gmail-draft-message",
+      "description": "Escalate creating Gmail draft messages for human approval.",
+      "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
+      "if": {
+        "server": [
+          "google-workspace"
+        ],
+        "tool": [
+          "gmail_draft_message"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Creating draft messages creates new data in cloud services and requires human approval."
+    },
+    {
+      "name": "escalate-gmail-modify-labels",
+      "description": "Escalate modifying labels on Gmail messages for human approval.",
+      "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
+      "if": {
+        "server": [
+          "google-workspace"
+        ],
+        "tool": [
+          "gmail_modify_labels",
+          "gmail_batch_modify_labels"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Modifying message labels is a mutation of cloud data requiring human approval."
+    },
+    {
+      "name": "escalate-gmail-manage-label",
+      "description": "Escalate creating, updating, or deleting Gmail labels for human approval.",
+      "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
+      "if": {
+        "server": [
+          "google-workspace"
+        ],
+        "tool": [
+          "gmail_manage_label"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Managing labels creates or modifies cloud data requiring human approval."
+    },
+    {
+      "name": "allow-calendar-read-operations",
+      "description": "Allow reading Google Calendar events, calendars, and settings.",
+      "principle": "Cloud service read access: Reading calendar events from connected cloud services is permitted.",
+      "if": {
+        "server": [
+          "google-workspace"
+        ],
+        "tool": [
+          "calendar_list_events",
+          "calendar_get_event",
+          "calendar_freebusy_query",
+          "calendar_calendarlist_list",
+          "calendar_calendarlist_get",
+          "calendar_events_instances",
+          "calendar_colors_get",
+          "calendar_calendars_get",
+          "calendar_acl_list",
+          "calendar_settings_list"
+        ]
+      },
+      "then": "allow",
+      "reason": "Constitution explicitly permits reading calendar events from connected cloud services."
+    },
+    {
+      "name": "escalate-calendar-create-event",
+      "description": "Escalate creating new calendar events for human approval.",
+      "principle": "No mutations: The agent must ask for approval before creating events.",
+      "if": {
+        "server": [
+          "google-workspace"
+        ],
+        "tool": [
+          "calendar_create_event",
+          "calendar_events_quickadd"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Creating calendar events is explicitly called out as requiring human approval in the constitution."
+    },
+    {
+      "name": "escalate-calendar-update-event",
+      "description": "Escalate updating existing calendar events for human approval.",
+      "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
+      "if": {
+        "server": [
+          "google-workspace"
+        ],
+        "tool": [
+          "calendar_update_event"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Modifying calendar events is a mutation requiring human approval per the constitution."
+    },
+    {
+      "name": "escalate-calendar-delete-event",
+      "description": "Escalate deleting calendar events for human approval.",
+      "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
+      "if": {
+        "server": [
+          "google-workspace"
+        ],
+        "tool": [
+          "calendar_delete_event"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Deleting calendar events is a destructive mutation requiring human approval per the constitution."
+    },
+    {
+      "name": "escalate-calendar-move-event",
+      "description": "Escalate moving a calendar event between calendars for human approval.",
+      "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
+      "if": {
+        "server": [
+          "google-workspace"
+        ],
+        "tool": [
+          "calendar_events_move"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Moving events between calendars modifies cloud data and requires human approval."
+    },
+    {
+      "name": "escalate-calendar-create-calendar",
+      "description": "Escalate creating a new secondary Google Calendar for human approval.",
+      "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
+      "if": {
+        "server": [
+          "google-workspace"
+        ],
+        "tool": [
+          "calendar_calendars_insert"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Creating a new calendar is a mutation requiring human approval per the constitution."
+    },
+    {
+      "name": "escalate-calendar-update-calendar",
+      "description": "Escalate updating calendar metadata for human approval.",
+      "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
+      "if": {
+        "server": [
+          "google-workspace"
+        ],
+        "tool": [
+          "calendar_calendars_update"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Updating calendar metadata is a mutation requiring human approval per the constitution."
+    },
+    {
+      "name": "escalate-calendar-acl-insert",
+      "description": "Escalate adding access control rules to a calendar for human approval.",
+      "principle": "No mutations: Any operation that creates, modifies, or deletes data must be escalated for human approval.",
+      "if": {
+        "server": [
+          "google-workspace"
+        ],
+        "tool": [
+          "calendar_acl_insert"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Sharing a calendar by adding ACL rules modifies permissions and requires human approval."
     }
   ]
 }
