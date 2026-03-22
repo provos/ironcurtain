@@ -7,54 +7,35 @@
  * structured response.
  *
  * For data-backed lists (requiresMcp: true): gives the LLM access to
- * MCP tools (via tool-use) so it can query live data sources, then
- * parses the final text response for the structured list values.
+ * MCP tools exposed through a proxy connection, then parses the final
+ * text response for the structured list values.
  *
  * Applies type-specific validation to filter malformed values.
  * Preserves manual overrides from any existing resolution.
  */
 
-import { randomUUID } from 'node:crypto';
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import type { LanguageModel, ToolSet } from 'ai';
 import { generateText, jsonSchema, stepCountIs, tool } from 'ai';
 import { z } from 'zod';
-import type { PolicyEngine } from '../trusted-process/policy-engine.js';
-import type { ToolCallRequest } from '../types/mcp.js';
 import { generateObjectWithRepair } from './generate-with-repair.js';
 import { LIST_TYPE_REGISTRY } from './dynamic-list-types.js';
-import { computeHash, COMPILE_READONLY_CMD } from './pipeline-shared.js';
+import { computeHash } from './pipeline-shared.js';
 import type { ListDefinition, ResolvedList, DynamicListsFile } from './types.js';
-
-/**
- * Shape of a pre-connected MCP server with its discovered tools.
- * Matches the ServerConnection pattern from annotate.ts.
- */
-export interface McpServerConnection {
-  readonly client: Client;
-  readonly tools: ReadonlyArray<{
-    name: string;
-    description?: string;
-    inputSchema: Record<string, unknown>;
-  }>;
-}
 
 export interface ListResolverConfig {
   readonly model: LanguageModel;
 
   /**
-   * Optional pre-connected MCP clients for data-backed list resolution.
-   * Keyed by server name. When undefined, lists with requiresMcp: true
-   * fail with a descriptive error.
+   * Optional proxy connection for data-backed list resolution.
+   * The proxy handles policy mediation, OAuth, and sandbox containment
+   * internally -- tools are already filtered.
    */
-  readonly mcpConnections?: ReadonlyMap<string, McpServerConnection>;
-
-  /**
-   * PolicyEngine loaded with the read-only policy. Required for MCP-backed
-   * list resolution -- ensures only read-only operations are permitted.
-   * When absent and MCP resolution is attempted, an error is thrown.
-   */
-  readonly policyEngine?: PolicyEngine;
+  readonly proxyConnection?: {
+    readonly client: Client;
+    readonly tools: ReadonlyArray<Tool>;
+  };
 }
 
 const listResponseSchema = z.object({
@@ -147,36 +128,21 @@ async function resolveViaLlm(
 const MAX_MCP_TOOL_STEPS = 5;
 
 /**
- * Bridges MCP server tools as AI SDK tools with execute functions
- * that route calls through the policy engine before forwarding to
- * the MCP client. Both deny and escalate results block the call.
+ * Bridges proxy-exposed MCP tools as AI SDK tools. The proxy handles
+ * policy evaluation internally, so these wrappers simply forward
+ * calls to the MCP client.
  */
-function bridgeMcpTools(serverName: string, connection: McpServerConnection, policyEngine: PolicyEngine): ToolSet {
-  const tools: ToolSet = {};
-  for (const mcpTool of connection.tools) {
-    const qualifiedName = `${serverName}__${mcpTool.name}`;
+export function bridgeProxyTools(client: Client, tools: ReadonlyArray<Tool>): ToolSet {
+  const bridged: ToolSet = {};
+  for (const mcpTool of tools) {
     // Ensure the input schema has "type": "object" (some MCP servers omit it)
-    const schema = { type: 'object' as const, ...mcpTool.inputSchema };
+    const schema = { type: 'object' as const, ...(mcpTool.inputSchema as Record<string, unknown>) };
 
-    tools[qualifiedName] = tool({
+    bridged[mcpTool.name] = tool({
       description: mcpTool.description ?? `Tool: ${mcpTool.name}`,
       inputSchema: jsonSchema(schema),
       execute: async (args: unknown) => {
-        // Evaluate the call against the read-only policy before forwarding.
-        const request: ToolCallRequest = {
-          requestId: `list-resolver-${randomUUID()}`,
-          serverName,
-          toolName: mcpTool.name,
-          arguments: args as Record<string, unknown>,
-          timestamp: new Date().toISOString(),
-        };
-        const decision = policyEngine.evaluate(request);
-
-        if (decision.decision !== 'allow') {
-          return `[POLICY BLOCKED] ${decision.reason}`;
-        }
-
-        const result = await connection.client.callTool({
+        const result = await client.callTool({
           name: mcpTool.name,
           arguments: args as Record<string, unknown>,
         });
@@ -191,28 +157,7 @@ function bridgeMcpTools(serverName: string, connection: McpServerConnection, pol
       },
     });
   }
-  return tools;
-}
-
-/**
- * Selects which MCP connection to use for a definition.
- * Prefers mcpServerHint if it matches a connected server; otherwise
- * uses the first available connection.
- */
-function selectMcpConnection(
-  definition: ListDefinition,
-  connections: ReadonlyMap<string, McpServerConnection>,
-): { serverName: string; connection: McpServerConnection } | undefined {
-  if (definition.mcpServerHint) {
-    const connection = connections.get(definition.mcpServerHint);
-    if (connection) return { serverName: definition.mcpServerHint, connection };
-  }
-  // Fall back to first available connection
-  const first = connections.entries().next();
-  if (!first.done) {
-    return { serverName: first.value[0], connection: first.value[1] };
-  }
-  return undefined;
+  return bridged;
 }
 
 /**
@@ -285,7 +230,7 @@ function parseValuesFromText(text: string): string[] {
  * Resolves a single list definition to concrete values.
  *
  * For knowledge-based lists: uses structured LLM output.
- * For data-backed lists: gives the LLM MCP tools, then parses the result.
+ * For data-backed lists: bridges proxy tools as AI SDK tools for LLM tool-use.
  *
  * Applies type-specific validation to filter malformed values.
  * Preserves manual overrides from any existing resolution.
@@ -302,25 +247,22 @@ export async function resolveList(
   let rawValues: string[];
 
   if (definition.requiresMcp) {
-    if (!config.policyEngine) {
+    if (!config.proxyConnection) {
       throw new Error(
-        `List "@${definition.name}" requires MCP access but no read-only PolicyEngine ` +
-          `was provided. Ensure the read-only policy is compiled first ` +
-          `(${COMPILE_READONLY_CMD}).`,
+        `List "@${definition.name}" requires MCP access but no proxy connection ` +
+          `was provided. Ensure MCP servers are available (use --no-mcp to skip).`,
       );
     }
 
-    const selected = config.mcpConnections ? selectMcpConnection(definition, config.mcpConnections) : undefined;
-
-    if (!selected) {
+    if (config.proxyConnection.tools.length === 0) {
       throw new Error(
         `List "@${definition.name}" requires MCP server access (requiresMcp: true) ` +
-          `but no MCP clients are available. MCP is enabled by default (use --no-mcp to skip). ` +
+          `but no MCP tools are available through the proxy. ` +
           `Ensure the "${definition.mcpServerHint ?? 'required'}" MCP server is configured and reachable.`,
       );
     }
 
-    const mcpTools = bridgeMcpTools(selected.serverName, selected.connection, config.policyEngine);
+    const mcpTools = bridgeProxyTools(config.proxyConnection.client, config.proxyConnection.tools);
     rawValues = await resolveViaMcpTools(prompt, config.model, mcpTools, onProgress);
   } else {
     rawValues = await resolveViaLlm(prompt, config.model, onProgress);

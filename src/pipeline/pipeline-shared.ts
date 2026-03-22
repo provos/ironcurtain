@@ -21,16 +21,10 @@ import { getIronCurtainHome, getUserGeneratedDir, loadConstitutionText } from '.
 // Re-export so existing pipeline callers (loadPipelineConfig) don't need updating.
 import type { MCPServerConfig } from '../config/types.js';
 import { loadUserConfig } from '../config/user-config.js';
-import type { CompiledPolicyFile, CompiledRule, ToolAnnotationsFile, StoredToolAnnotationsFile } from './types.js';
+import type { CompiledRule, ToolAnnotationsFile, StoredToolAnnotationsFile } from './types.js';
 import { resolveRealPath, resolveStoredAnnotationsFile } from '../types/argument-roles.js';
-import { extractServerDomainAllowlists, loadGeneratedPolicy, getPackageGeneratedDir } from '../config/index.js';
-import { getReadOnlyPolicyDir } from '../config/paths.js';
-import { PolicyEngine } from '../trusted-process/policy-engine.js';
 import { createLlmLoggingMiddleware, type LlmLogContext } from './llm-logger.js';
 import { createCacheStrategy, type PromptCacheStrategy } from '../session/prompt-cache.js';
-
-/** Canonical command to compile the read-only policy. Used in error/warning messages. */
-export const COMPILE_READONLY_CMD = 'npm run compile-policy:readonly';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -263,79 +257,4 @@ export async function createPipelineLlm(generatedDir: string, initialStepName: s
   });
   const cacheStrategy = createCacheStrategy(userConfig.policyModelId);
   return { model, logContext, logPath, cacheStrategy };
-}
-
-// ---------------------------------------------------------------------------
-// Read-Only Policy Engine
-// ---------------------------------------------------------------------------
-
-/**
- * Warns if the read-only compiled policy is missing rules for servers
- * that appear in tool-annotations.json. This indicates the read-only
- * policy needs recompilation after a new server was onboarded.
- */
-export function checkReadonlyPolicyStaleness(
-  compiledPolicy: CompiledPolicyFile,
-  toolAnnotations: ToolAnnotationsFile | StoredToolAnnotationsFile,
-): void {
-  const annotatedServers = new Set(Object.keys(toolAnnotations.servers));
-
-  const coveredServers = new Set<string>();
-  for (const rule of compiledPolicy.rules) {
-    if (rule.if.server) {
-      for (const s of rule.if.server) coveredServers.add(s);
-    }
-  }
-
-  for (const server of annotatedServers) {
-    if (!coveredServers.has(server)) {
-      console.error(
-        `  ${chalk.yellow('Warning:')} Read-only policy has no rules for server "${server}". ` +
-          `Run "${COMPILE_READONLY_CMD}" to update.`,
-      );
-    }
-  }
-}
-
-/**
- * Loads the read-only compiled policy and constructs a PolicyEngine for
- * mediating MCP calls during list resolution. Returns undefined if the
- * read-only policy is not available (e.g., not yet compiled).
- */
-export function loadReadOnlyPolicyEngine(
-  toolAnnotationsDir: string,
-  toolAnnotationsFallbackDir: string | undefined,
-  mcpServers: Record<string, MCPServerConfig> | undefined,
-): PolicyEngine | undefined {
-  const readonlyPolicyDir = getReadOnlyPolicyDir();
-  const mainAnnotationsDir = toolAnnotationsDir;
-  const fallbackDir = toolAnnotationsFallbackDir ?? getPackageGeneratedDir();
-
-  let readonlyArtifacts;
-  try {
-    readonlyArtifacts = loadGeneratedPolicy({
-      policyDir: readonlyPolicyDir,
-      toolAnnotationsDir: mainAnnotationsDir,
-      fallbackDir,
-    });
-  } catch {
-    console.error(
-      `  ${chalk.yellow('Warning:')} Read-only policy not found at ${readonlyPolicyDir}. ` +
-        `Run "${COMPILE_READONLY_CMD}" to generate it.`,
-    );
-    return undefined;
-  }
-
-  checkReadonlyPolicyStaleness(readonlyArtifacts.compiledPolicy, readonlyArtifacts.toolAnnotations);
-
-  const serverDomainAllowlists = mcpServers ? extractServerDomainAllowlists(mcpServers) : undefined;
-
-  return new PolicyEngine(
-    readonlyArtifacts.compiledPolicy,
-    readonlyArtifacts.toolAnnotations,
-    [], // protectedPaths: not relevant for cloud service calls
-    undefined, // allowedDirectory: not relevant for cloud service calls
-    serverDomainAllowlists,
-    readonlyArtifacts.dynamicLists, // H3: pass dynamicLists for list expansion
-  );
 }

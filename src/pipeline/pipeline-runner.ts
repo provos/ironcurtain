@@ -24,11 +24,10 @@ import {
   validateCompiledRules,
 } from './constitution-compiler.js';
 import { getHandwrittenScenarios } from './handwritten-scenarios.js';
-import { resolveAllLists, type McpServerConnection } from './list-resolver.js';
+import { resolveAllLists } from './list-resolver.js';
 import {
   computeHash,
   loadExistingArtifact,
-  loadReadOnlyPolicyEngine,
   loadStoredToolAnnotationsFile,
   resolveRulePaths,
   writeArtifact,
@@ -50,7 +49,7 @@ import { filterInvalidSchemaScenarios } from './scenario-schema-validator.js';
 import { buildGeneratorSystemPrompt, generateScenarios, repairScenarios } from './scenario-generator.js';
 import type { LlmLogContext } from './llm-logger.js';
 import type { PromptCacheStrategy } from '../session/prompt-cache.js';
-import { connectMcpServersForLists, disconnectMcpServers } from './mcp-connections.js';
+import { connectViaProxy, type ProxyConnection } from './proxy-mcp-connections.js';
 import type {
   CompiledPolicyFile,
   CompiledRule,
@@ -1280,15 +1279,9 @@ export class PipelineRunner {
     const existingLists = loadExistingArtifact<DynamicListsFile>(serverOutputDir, 'dynamic-lists.json');
 
     const needsMcp = listDefinitions.some((d) => d.requiresMcp);
-    let mcpConnections: Map<string, McpServerConnection> | undefined;
-    let policyEngine: PolicyEngine | undefined;
+    let proxy: ProxyConnection | undefined;
     if (needsMcp && config.mcpServers) {
-      mcpConnections = await connectMcpServersForLists(listDefinitions, config.mcpServers);
-      policyEngine = loadReadOnlyPolicyEngine(
-        config.toolAnnotationsDir,
-        config.toolAnnotationsFallbackDir,
-        config.mcpServers,
-      );
+      proxy = await connectViaProxy(listDefinitions, config.mcpServers, config.toolAnnotationsDir);
     }
 
     const listStepText = `${labelPrefix}: Resolving dynamic lists`;
@@ -1298,7 +1291,10 @@ export class PipelineRunner {
         async (spinner) =>
           resolveAllLists(
             listDefinitions,
-            { model: this.model, mcpConnections, policyEngine },
+            {
+              model: this.model,
+              proxyConnection: proxy ? { client: proxy.client, tools: proxy.tools } : undefined,
+            },
             existingLists,
             (msg) => {
               spinner.text = `${listStepText} — ${msg}`;
@@ -1312,8 +1308,8 @@ export class PipelineRunner {
       writeArtifact(serverOutputDir, 'dynamic-lists.json', resolvedLists);
       return resolvedLists;
     } finally {
-      if (mcpConnections) {
-        await disconnectMcpServers(mcpConnections);
+      if (proxy) {
+        await proxy.shutdown();
       }
     }
   }

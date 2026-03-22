@@ -261,22 +261,24 @@ describe('resolveList', () => {
   // MCP-required error cases
   // ---------------------------------------------------------------------------
 
-  describe('MCP-required list without connections', () => {
-    it('throws when requiresMcp is true and no policyEngine provided', async () => {
+  describe('MCP-required list without proxy connection', () => {
+    it('throws when requiresMcp is true and no proxyConnection provided', async () => {
       const def = makeDefinition({ requiresMcp: true, name: 'github-repos' });
       const config: ListResolverConfig = { model: createMockModel([]) };
-      await expect(resolveList(def, config)).rejects.toThrow(/no read-only PolicyEngine/);
+      await expect(resolveList(def, config)).rejects.toThrow(/no proxy connection/);
       await expect(resolveList(def, config)).rejects.toThrow(/github-repos/);
     });
 
-    it('throws when mcpConnections map is empty', async () => {
+    it('throws when proxyConnection has no tools', async () => {
       const def = makeDefinition({ requiresMcp: true });
       const config: ListResolverConfig = {
         model: createMockModel([]),
-        mcpConnections: new Map(),
+        proxyConnection: {
+          client: { callTool: vi.fn() } as never,
+          tools: [],
+        },
       };
-      // Without policyEngine, the policyEngine check fires first
-      await expect(resolveList(def, config)).rejects.toThrow(/no read-only PolicyEngine/);
+      await expect(resolveList(def, config)).rejects.toThrow(/no MCP tools are available/);
     });
   });
 

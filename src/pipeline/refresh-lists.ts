@@ -14,15 +14,12 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import chalk from 'chalk';
 import { checkHelp, type CommandSpec } from '../cli-help.js';
-import type { PolicyEngine } from '../trusted-process/policy-engine.js';
-import { resolveAllLists, type McpServerConnection } from './list-resolver.js';
-import { connectMcpServersForLists, disconnectMcpServers } from './mcp-connections.js';
+import { resolveAllLists } from './list-resolver.js';
+import { connectViaProxy, type ProxyConnection } from './proxy-mcp-connections.js';
 import {
   createPipelineLlm,
   loadExistingArtifact,
   loadPipelineConfig,
-  loadReadOnlyPolicyEngine,
-  COMPILE_READONLY_CMD,
   writeArtifact,
   withSpinner,
 } from './pipeline-shared.js';
@@ -159,21 +156,11 @@ export async function main(args: string[] = []): Promise<void> {
     config.packageGeneratedDir,
   );
 
-  // Connect to MCP servers if needed
+  // Connect to MCP servers via proxy if needed
   const needsMcp = options.withMcp && definitionsToRefresh.some((d) => d.requiresMcp);
-  let mcpConnections: Map<string, McpServerConnection> | undefined;
-  let policyEngine: PolicyEngine | undefined;
+  let proxy: ProxyConnection | undefined;
   if (needsMcp) {
-    // H1: Load the read-only policy engine first -- abort before connecting
-    // to MCP servers if it's unavailable, since every MCP call requires it.
-    policyEngine = loadReadOnlyPolicyEngine(config.generatedDir, config.packageGeneratedDir, config.mcpServers);
-    if (!policyEngine) {
-      console.error(chalk.red.bold('Error: Read-only policy is required for MCP-backed list resolution.'));
-      console.error(`Run "${COMPILE_READONLY_CMD}" to generate it, or use --no-mcp to skip MCP-backed lists.`);
-      process.exit(1);
-    }
-
-    mcpConnections = await connectMcpServersForLists(definitionsToRefresh, config.mcpServers);
+    proxy = await connectViaProxy(definitionsToRefresh, config.mcpServers, config.generatedDir);
   }
 
   try {
@@ -183,7 +170,10 @@ export async function main(args: string[] = []): Promise<void> {
       async (spinner) =>
         resolveAllLists(
           definitionsToRefresh,
-          { model: llm, mcpConnections, policyEngine },
+          {
+            model: llm,
+            proxyConnection: proxy ? { client: proxy.client, tools: proxy.tools } : undefined,
+          },
           existingLists,
           (msg) => {
             spinner.text = `${stepText} — ${msg}`;
@@ -213,8 +203,8 @@ export async function main(args: string[] = []): Promise<void> {
     console.error('');
     console.error(chalk.green.bold('List refresh successful!'));
   } finally {
-    if (mcpConnections) {
-      await disconnectMcpServers(mcpConnections);
+    if (proxy) {
+      await proxy.shutdown();
     }
   }
 }

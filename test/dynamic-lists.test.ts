@@ -13,12 +13,7 @@ import {
   type CompilerConfig,
 } from '../src/pipeline/constitution-compiler.js';
 import { LIST_TYPE_REGISTRY, getListMatcher } from '../src/pipeline/dynamic-list-types.js';
-import {
-  resolveList,
-  resolveAllLists,
-  type McpServerConnection,
-  type ListResolverConfig,
-} from '../src/pipeline/list-resolver.js';
+import { resolveList, resolveAllLists, type ListResolverConfig } from '../src/pipeline/list-resolver.js';
 import { buildGeneratorSystemPrompt, formatDynamicListsSection } from '../src/pipeline/scenario-generator.js';
 import { buildJudgeSystemPrompt } from '../src/pipeline/policy-verifier.js';
 import { PolicyEngine } from '../src/trusted-process/policy-engine.js';
@@ -29,7 +24,6 @@ import type {
   ListDefinition,
   RepairContext,
   ResolvedList,
-  StoredToolAnnotationsFile,
   ToolAnnotation,
   ToolAnnotationsFile,
 } from '../src/pipeline/types.js';
@@ -58,35 +52,6 @@ const sampleAnnotations: ToolAnnotation[] = [
 const compilerConfig: CompilerConfig = {
   protectedPaths: ['/etc/ironcurtain'],
 };
-
-/**
- * Creates a permissive PolicyEngine that allows all tool calls.
- * Used in MCP-backed list resolution tests where policy mediation
- * must be present but should not block test tool calls.
- */
-function createPermissivePolicyEngine(): PolicyEngine {
-  const policy: CompiledPolicyFile = {
-    generatedAt: new Date().toISOString(),
-    constitutionHash: 'test',
-    inputHash: 'test',
-    rules: [
-      {
-        if: { server: ['contacts', 'some-server', 'fetch', 'filesystem'] },
-        then: 'allow',
-        description: 'Allow all for tests',
-      },
-    ],
-  };
-  const annotations: StoredToolAnnotationsFile = {
-    servers: {
-      contacts: { inputHash: 'test', tools: [] },
-      'some-server': { inputHash: 'test', tools: [] },
-      fetch: { inputHash: 'test', tools: [] },
-      filesystem: { inputHash: 'test', tools: [] },
-    },
-  };
-  return new PolicyEngine(policy, annotations, []);
-}
 
 const MOCK_GENERATE_RESULT = {
   finishReason: { unified: 'stop' as const, raw: 'stop' },
@@ -764,10 +729,10 @@ describe('List Resolver', () => {
     expect(result.manualRemovals).toEqual(['bbc.com']);
   });
 
-  it('fails with descriptive error for requiresMcp lists without PolicyEngine', async () => {
+  it('fails with descriptive error for requiresMcp lists without proxy connection', async () => {
     const mockLLM = createMockModel({ values: [] });
 
-    await expect(resolveList(contactsListDef, { model: mockLLM })).rejects.toThrow(/no read-only PolicyEngine/);
+    await expect(resolveList(contactsListDef, { model: mockLLM })).rejects.toThrow(/no proxy connection/);
   });
 
   describe('resolveAllLists', () => {
@@ -1193,20 +1158,23 @@ describe('Per-Role Evaluation with Lists', () => {
 // Shared fixtures for Phase 3 tests
 // ---------------------------------------------------------------------------
 
-function createMockMcpConnection(
+/**
+ * Creates a mock proxy connection compatible with ListResolverConfig.proxyConnection.
+ * The proxy already handles policy mediation, so tools are exposed directly.
+ */
+function createMockProxyConnection(
   toolNames: string[] = ['list_contacts'],
   toolResult: unknown = { content: [{ type: 'text', text: '[]' }] },
-): McpServerConnection {
+): NonNullable<ListResolverConfig['proxyConnection']> {
   return {
     client: {
       callTool: vi.fn().mockResolvedValue(toolResult),
-      close: vi.fn().mockResolvedValue(undefined),
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any,
     tools: toolNames.map((name) => ({
       name,
       description: `Mock tool: ${name}`,
-      inputSchema: { type: 'object', properties: {} },
+      inputSchema: { type: 'object' as const, properties: {} },
     })),
   };
 }
@@ -1256,7 +1224,7 @@ function createToolUseModel(
 
 describe('MCP-Backed List Resolution', () => {
   it('resolves a data-backed list via MCP tools', async () => {
-    const connection = createMockMcpConnection(['list_contacts'], {
+    const proxyConnection = createMockProxyConnection(['list_contacts'], {
       content: [
         {
           type: 'text',
@@ -1268,11 +1236,9 @@ describe('MCP-Backed List Resolution', () => {
       ],
     });
 
-    const mcpConnections = new Map([['contacts', connection]]);
-    const model = createToolUseModel('contacts__list_contacts', {}, ['alice@example.com', 'bob@company.org']);
+    const model = createToolUseModel('list_contacts', {}, ['alice@example.com', 'bob@company.org']);
 
-    const policyEngine = createPermissivePolicyEngine();
-    const config: ListResolverConfig = { model, mcpConnections, policyEngine };
+    const config: ListResolverConfig = { model, proxyConnection };
     const result = await resolveList(contactsListDef, config);
 
     expect(result.values).toContain('alice@example.com');
@@ -1281,27 +1247,26 @@ describe('MCP-Backed List Resolution', () => {
     expect(result.inputHash).toBeTruthy();
   });
 
-  it('fails when requiresMcp but no policyEngine is provided', async () => {
+  it('fails when requiresMcp but no proxyConnection is provided', async () => {
     const model = createMockModel({ values: [] });
-    const mcpConnections = new Map<string, McpServerConnection>([
-      ['contacts', createMockMcpConnection(['list_contacts'])],
-    ]);
 
-    await expect(resolveList(contactsListDef, { model, mcpConnections })).rejects.toThrow(/no read-only PolicyEngine/);
+    await expect(resolveList(contactsListDef, { model })).rejects.toThrow(/no proxy connection/);
   });
 
-  it('fails when requiresMcp but mcpConnections is empty', async () => {
+  it('fails when requiresMcp but proxyConnection has no tools', async () => {
     const model = createMockModel({ values: [] });
-    const emptyConnections = new Map<string, McpServerConnection>();
-    const policyEngine = createPermissivePolicyEngine();
+    const proxyConnection = createMockProxyConnection([]);
 
-    await expect(
-      resolveList(contactsListDef, { model, mcpConnections: emptyConnections, policyEngine }),
-    ).rejects.toThrow(/requires MCP server access/);
+    await expect(resolveList(contactsListDef, { model, proxyConnection })).rejects.toThrow(
+      /no MCP tools are available/,
+    );
   });
 
   it('uses mcpServerHint to select the correct connection', async () => {
-    const contactsConn = createMockMcpConnection(['list_contacts'], {
+    // With the proxy-based approach, server selection happens before the resolver.
+    // The proxy exposes only the relevant tools. We verify that the resolver
+    // correctly uses the tools from the proxy connection.
+    const proxyConnection = createMockProxyConnection(['list_contacts'], {
       content: [
         {
           type: 'text',
@@ -1309,23 +1274,20 @@ describe('MCP-Backed List Resolution', () => {
         },
       ],
     });
-    const otherConn = createMockMcpConnection(['other_tool']);
 
-    const mcpConnections = new Map([
-      ['other-server', otherConn],
-      ['contacts', contactsConn],
-    ]);
+    const model = createToolUseModel('list_contacts', {}, ['alice@example.com']);
 
-    const model = createToolUseModel('contacts__list_contacts', {}, ['alice@example.com']);
-
-    const config: ListResolverConfig = { model, mcpConnections, policyEngine: createPermissivePolicyEngine() };
+    const config: ListResolverConfig = { model, proxyConnection };
     const result = await resolveList(contactsListDef, config);
 
     expect(result.values).toContain('alice@example.com');
   });
 
   it('falls back to first connection when mcpServerHint does not match', async () => {
-    const fallbackConn = createMockMcpConnection(['query_data'], {
+    // With the proxy-based approach, the proxy pre-selects tools.
+    // This test verifies that the resolver works with whatever tools the proxy provides,
+    // even if they come from a different server than the hint.
+    const proxyConnection = createMockProxyConnection(['query_data'], {
       content: [
         {
           type: 'text',
@@ -1334,29 +1296,21 @@ describe('MCP-Backed List Resolution', () => {
       ],
     });
 
-    const mcpConnections = new Map([['some-server', fallbackConn]]);
+    const model = createToolUseModel('query_data', {}, ['fallback@example.com']);
 
-    // contactsListDef has mcpServerHint: 'contacts' but we only have 'some-server'
-    const model = createToolUseModel('some-server__query_data', {}, ['fallback@example.com']);
-
-    const config: ListResolverConfig = { model, mcpConnections, policyEngine: createPermissivePolicyEngine() };
+    const config: ListResolverConfig = { model, proxyConnection };
     const result = await resolveList(contactsListDef, config);
 
     expect(result.values).toContain('fallback@example.com');
   });
 
   it('applies type validation to MCP-resolved values', async () => {
-    const connection = createMockMcpConnection(['list_contacts']);
-    const mcpConnections = new Map([['contacts', connection]]);
+    const proxyConnection = createMockProxyConnection(['list_contacts']);
 
     // LLM returns some invalid emails mixed with valid ones
-    const model = createToolUseModel('contacts__list_contacts', {}, [
-      'alice@example.com',
-      'not-an-email',
-      'bob@company.org',
-    ]);
+    const model = createToolUseModel('list_contacts', {}, ['alice@example.com', 'not-an-email', 'bob@company.org']);
 
-    const config: ListResolverConfig = { model, mcpConnections, policyEngine: createPermissivePolicyEngine() };
+    const config: ListResolverConfig = { model, proxyConnection };
     const result = await resolveList(contactsListDef, config);
 
     expect(result.values).toContain('alice@example.com');
@@ -1365,10 +1319,9 @@ describe('MCP-Backed List Resolution', () => {
   });
 
   it('preserves manual overrides for MCP-resolved lists', async () => {
-    const connection = createMockMcpConnection(['list_contacts']);
-    const mcpConnections = new Map([['contacts', connection]]);
+    const proxyConnection = createMockProxyConnection(['list_contacts']);
 
-    const model = createToolUseModel('contacts__list_contacts', {}, ['alice@example.com']);
+    const model = createToolUseModel('list_contacts', {}, ['alice@example.com']);
 
     const existing: ResolvedList = {
       values: ['old@example.com'],
@@ -1378,7 +1331,7 @@ describe('MCP-Backed List Resolution', () => {
       inputHash: 'old-hash',
     };
 
-    const config: ListResolverConfig = { model, mcpConnections, policyEngine: createPermissivePolicyEngine() };
+    const config: ListResolverConfig = { model, proxyConnection };
     const result = await resolveList(contactsListDef, config, existing);
 
     expect(result.values).toContain('manual@example.com');
@@ -1387,58 +1340,34 @@ describe('MCP-Backed List Resolution', () => {
     expect(result.manualRemovals).toEqual(['alice@example.com']);
   });
 
-  it('policy blocks a mutating MCP tool call and returns POLICY BLOCKED', async () => {
-    // Create a restrictive policy engine that only allows list_contacts
-    const restrictivePolicy: CompiledPolicyFile = {
-      generatedAt: new Date().toISOString(),
-      constitutionHash: 'test',
-      inputHash: 'test',
-      rules: [
-        {
-          if: { server: ['contacts'], tools: ['list_contacts'] },
-          then: 'allow',
-          description: 'Allow only list_contacts',
-        },
-        // delete_contact is NOT allowed -- falls through to default deny
-      ],
-    };
-    const annotations: StoredToolAnnotationsFile = {
-      servers: {
-        contacts: { inputHash: 'test', tools: [] },
-      },
-    };
-    const restrictiveEngine = new PolicyEngine(restrictivePolicy, annotations, []);
-
-    // Create a connection that exposes a mutating tool
-    const connection = createMockMcpConnection(['delete_contact'], {
-      content: [{ type: 'text', text: 'deleted!' }],
+  it('resolution succeeds even when proxy blocks a mutating tool call', async () => {
+    // With the proxy-based approach, policy evaluation happens inside the proxy.
+    // The proxy exposes only allowed tools, or returns "POLICY BLOCKED" for
+    // blocked calls. The resolver doesn't need to know about policy -- it just
+    // uses whatever tools the proxy provides. If the LLM calls a tool that
+    // gets blocked, it should still produce final values from its text response.
+    const proxyConnection = createMockProxyConnection(['delete_contact'], {
+      content: [{ type: 'text', text: 'POLICY BLOCKED: delete_contact is not allowed' }],
     });
-    const mcpConnections = new Map([['contacts', connection]]);
 
-    // Model calls delete_contact (which policy should block),
-    // then returns final values from its own knowledge
-    const model = createToolUseModel('contacts__delete_contact', { id: '123' }, ['alice@example.com']);
+    // Model calls delete_contact then returns final values in text
+    const model = createToolUseModel('delete_contact', { id: '123' }, ['alice@example.com']);
 
-    const config: ListResolverConfig = { model, mcpConnections, policyEngine: restrictiveEngine };
+    const config: ListResolverConfig = { model, proxyConnection };
     const result = await resolveList(contactsListDef, config);
-
-    // The mutating call should have been blocked -- callTool never invoked
-    const callToolFn = connection.client.callTool as ReturnType<typeof vi.fn>;
-    expect(callToolFn).not.toHaveBeenCalled();
 
     // Resolution still succeeds (LLM returned values in text)
     expect(result.values).toContain('alice@example.com');
   });
 
-  it('knowledge-based lists ignore mcpConnections', async () => {
-    const connection = createMockMcpConnection(['list_contacts']);
-    const mcpConnections = new Map([['contacts', connection]]);
+  it('knowledge-based lists ignore proxyConnection', async () => {
+    const proxyConnection = createMockProxyConnection(['list_contacts']);
     const model = createMockModel({
       values: ['cnn.com', 'bbc.com'],
     });
 
     // newsListDef has requiresMcp: false -- should use LLM directly
-    const config: ListResolverConfig = { model, mcpConnections, policyEngine: createPermissivePolicyEngine() };
+    const config: ListResolverConfig = { model, proxyConnection };
     const result = await resolveList(newsListDef, config);
 
     expect(result.values).toContain('cnn.com');
@@ -1448,8 +1377,7 @@ describe('MCP-Backed List Resolution', () => {
 
 describe('MCP-Backed resolveAllLists', () => {
   it('resolves mixed knowledge-based and MCP-backed lists', async () => {
-    const connection = createMockMcpConnection(['list_contacts']);
-    const mcpConnections = new Map([['contacts', connection]]);
+    const proxyConnection = createMockProxyConnection(['list_contacts']);
 
     let callIndex = 0;
     const model = new MockLanguageModelV3({
@@ -1475,7 +1403,7 @@ describe('MCP-Backed resolveAllLists', () => {
               {
                 type: 'tool-call' as const,
                 toolCallId: 'call-1',
-                toolName: 'contacts__list_contacts',
+                toolName: 'list_contacts',
                 args: '{}',
               },
             ],
@@ -1494,8 +1422,7 @@ describe('MCP-Backed resolveAllLists', () => {
       },
     });
 
-    const policyEngine = createPermissivePolicyEngine();
-    const result = await resolveAllLists([stocksListDef, contactsListDef], { model, mcpConnections, policyEngine });
+    const result = await resolveAllLists([stocksListDef, contactsListDef], { model, proxyConnection });
 
     expect(result.lists['tech-stock-tickers']).toBeDefined();
     expect(result.lists['tech-stock-tickers'].values).toContain('AAPL');
