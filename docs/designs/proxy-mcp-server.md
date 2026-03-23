@@ -2,7 +2,7 @@
 
 ## Overview
 
-The Proxy MCP Server gives the agent runtime control over which internet domains the MITM proxy allows through. Today, the MITM proxy's host allowlist is fixed at session start (derived from provider configs and registry configs). This design adds a dynamic layer: the agent can request access to additional domains -- subject to human approval via the escalation flow -- and the MITM proxy will accept CONNECT requests to those domains at runtime.
+The Proxy MCP Server gives the agent runtime control over which internet domains the MITM proxy allows through. Today, the MITM proxy's host allowlist is fixed at session start (derived from provider configs). This design adds a dynamic layer: the agent can request access to additional domains -- subject to human approval via the escalation flow -- and the MITM proxy will accept CONNECT requests to those domains at runtime.
 
 The proxy tools run in a **dedicated `mcp-proxy-server.ts` instance** spawned with `SERVER_FILTER=proxy`. Unlike other proxy instances (which each connect to a real backend MCP server), the `proxy` instance runs in "virtual-only" mode: it has no backend connection and serves only the three proxy domain tools. The sandbox sees `proxy` as just another MCP server, so tool calls like `proxy.add_proxy_domain()` route naturally through the existing UTCP plumbing. This is a **Docker Agent Mode-only** feature -- Code Mode sessions use the policy engine's domain allowlists and the fetch server.
 
@@ -12,7 +12,7 @@ The proxy tools run in a **dedicated `mcp-proxy-server.ts` instance** spawned wi
 
 2. **Passthrough mode for dynamically added domains.** Dynamically added domains are treated as "passthrough" hosts -- the MITM proxy terminates TLS (for auditability), but does NOT perform fake-key-to-real-key swapping or endpoint filtering. The agent's own credentials are forwarded unchanged. Requests to statically configured provider domains always go through the provider path (with endpoint filtering and the updated `validateAndSwapApiKey`); the passthrough path only applies to genuinely new domains that are not already in `providersByHost`.
 
-3. **Provider domains cannot be added as passthrough.** When `addHost()` is called with a domain that is already a static provider or registry, it returns `false`. The tool response says `"Domain is already accessible (built-in provider)"` to make this clear to the agent. The existing provider path (with key swap and endpoint filtering) handles those domains; there is no bypass via dynamic addition.
+3. **Provider domains cannot be added as passthrough.** When `addHost()` is called with a domain that is already a static provider, it returns `false`. The tool response says `"Domain is already accessible (built-in provider)"` to make this clear to the agent. The existing provider path (with key swap and endpoint filtering) handles those domains; there is no bypass via dynamic addition.
 
 4. **All domain additions require escalation.** Adding a domain is a security-sensitive operation that expands the container's network perimeter. The policy engine always escalates `add_proxy_domain` calls. The auto-approver can approve domain additions when the user's message clearly authorizes them.
 
@@ -28,7 +28,7 @@ The proxy tools run in a **dedicated `mcp-proxy-server.ts` instance** spawned wi
 
 ## Tool Interface Definitions
 
-### `proxy__add_proxy_domain`
+### `add_proxy_domain`
 
 ```typescript
 {
@@ -58,7 +58,7 @@ The proxy tools run in a **dedicated `mcp-proxy-server.ts` instance** spawned wi
 
 **Policy:** Always escalate. The auto-approver may approve if the user's message clearly authorizes the domain.
 
-### `proxy__remove_proxy_domain`
+### `remove_proxy_domain`
 
 ```typescript
 {
@@ -81,7 +81,7 @@ The proxy tools run in a **dedicated `mcp-proxy-server.ts` instance** spawned wi
 
 **Policy:** Allow. Removing access can only reduce the attack surface.
 
-### `proxy__list_proxy_domains`
+### `list_proxy_domains`
 
 ```typescript
 {
@@ -143,7 +143,6 @@ The proxy tools run in a **dedicated `mcp-proxy-server.ts` instance** spawned wi
   |                              +----------------------+                        |
   |                              |     MITM Proxy        |                       |
   |                              |  providersByHost      | (static, key swap)    |
-  |                              |  registriesByHost     | (static, pkg filter)  |
   |                              |  passthroughHosts <---+ (dynamic, passthru)   |
   |                              +----------------------+                        |
   |                                                                              |
@@ -316,9 +315,9 @@ const policyEngine = new PolicyEngine(compiledPolicy, toolAnnotations, ...);
  * filtering is performed. The agent's own headers are forwarded
  * as-is to the upstream server.
  *
- * Provider and registry domains that are already statically configured
- * cannot be added as passthrough. addHost() returns false for these
- * domains, and the tool handler surfaces a clear message to the agent.
+ * Provider domains that are already statically configured cannot be
+ * added as passthrough. addHost() returns false for these domains,
+ * and the tool handler surfaces a clear message to the agent.
  */
 export interface DynamicHostController {
   /**
@@ -328,13 +327,13 @@ export interface DynamicHostController {
    *
    * @throws Error if the domain fails validation.
    * @returns true if the domain was newly added, false if already present
-   *          (either as a static provider/registry or a previous dynamic addition).
+   *          (either as a static provider or a previous dynamic addition).
    */
   addHost(domain: string): boolean;
 
   /**
    * Remove a domain from the passthrough allowlist.
-   * Cannot remove statically configured providers or registries.
+   * Cannot remove statically configured providers.
    *
    * @returns true if the domain was removed, false if not found or static.
    */
@@ -349,8 +348,6 @@ export interface DynamicHostController {
 export interface DomainListing {
   /** Statically configured LLM provider hosts (with key swap). */
   readonly providers: readonly string[];
-  /** Statically configured package registry hosts. */
-  readonly registries: readonly string[];
   /** Dynamically added passthrough hosts (no key swap). */
   readonly dynamic: readonly string[];
 }
@@ -467,21 +464,19 @@ const canRetryAuth = keyResult.swapped && !!provider.tokenManager;
 ```typescript
 // Existing:
 const provider = providersByHost.get(host);
-const registry = registriesByHost.get(host);
-if (!provider && !registry) { /* DENIED */ }
+if (!provider) { /* DENIED */ }
 
 // New:
 const provider = providersByHost.get(host);
-const registry = registriesByHost.get(host);
 const isPassthrough = passthroughHosts.has(host);
-if (!provider && !registry && !isPassthrough) {
+if (!provider && !isPassthrough) {
   logger.info(`[mitm-proxy] #${connId} DENIED CONNECT ${host}:${port}`);
   clientSocket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
   clientSocket.destroy();
   return;
 }
 
-const connType = provider ? 'provider' : registry ? 'registry' : 'passthrough';
+const connType = provider ? 'provider' : 'passthrough';
 ```
 
 ### ConnectionMeta Extension
@@ -489,7 +484,6 @@ const connType = provider ? 'provider' : registry ? 'registry' : 'passthrough';
 ```typescript
 interface ConnectionMeta {
   readonly provider?: ProviderKeyMapping;
-  readonly registry?: RegistryConfig;
   readonly passthrough: boolean;  // new field
   readonly host: string;
   readonly port: number;
@@ -498,11 +492,11 @@ interface ConnectionMeta {
 
 ### Passthrough Request Forwarding
 
-For passthrough connections (no static provider, no registry), the inner HTTP server routes to a new `forwardPassthrough` function:
+For passthrough connections (no static provider), the inner HTTP server routes to a new `forwardPassthrough` function:
 
 ```typescript
-// In innerServer 'request' handler, after registry and provider checks:
-if (!meta.provider && !meta.registry) {
+// In innerServer 'request' handler, after provider checks:
+if (!meta.provider) {
   // Passthrough: forward request as-is, no key swap, no endpoint filter
   forwardPassthrough(clientReq, clientRes, meta.host, meta.port);
   return;
@@ -600,7 +594,7 @@ const passthroughHosts = new Set<string>();
 const controller: DynamicHostController = {
   addHost(domain: string): boolean {
     validateDomain(domain);
-    if (providersByHost.has(domain) || registriesByHost.has(domain)) return false;
+    if (providersByHost.has(domain)) return false;
     if (passthroughHosts.has(domain)) return false;
     passthroughHosts.add(domain);
     // Pre-warm cert cache for the new domain
@@ -615,7 +609,6 @@ const controller: DynamicHostController = {
   listHosts(): DomainListing {
     return {
       providers: [...providersByHost.keys()],
-      registries: [...registriesByHost.keys()],
       dynamic: [...passthroughHosts],
     };
   },
@@ -737,7 +730,7 @@ const proxyPolicyRules: CompiledRule[] = [
     name: 'proxy-add-domain-escalate',
     description: 'Adding network domains requires human review',
     principle: 'Human oversight',
-    if: { tool: ['proxy__add_proxy_domain'] },
+    if: { server: ['proxy'], tool: ['add_proxy_domain'] },
     then: 'escalate',
     reason: 'Adding network domains expands the container attack surface and requires human review',
   },
@@ -745,7 +738,7 @@ const proxyPolicyRules: CompiledRule[] = [
     name: 'proxy-remove-domain-allow',
     description: 'Removing domains reduces attack surface',
     principle: 'Least privilege',
-    if: { tool: ['proxy__remove_proxy_domain'] },
+    if: { server: ['proxy'], tool: ['remove_proxy_domain'] },
     then: 'allow',
     reason: 'Removing domains reduces the attack surface',
   },
@@ -753,7 +746,7 @@ const proxyPolicyRules: CompiledRule[] = [
     name: 'proxy-list-domains-allow',
     description: 'Listing domains is a read-only operation',
     principle: 'Least privilege',
-    if: { tool: ['proxy__list_proxy_domains'] },
+    if: { server: ['proxy'], tool: ['list_proxy_domains'] },
     then: 'allow',
     reason: 'Read-only operation with no side effects',
   },
@@ -882,16 +875,12 @@ const mitmProxy = useTcp
       listenPort: 0,
       ca,
       providers: providerMappings,
-      registries,
-      packageValidation,
       controlPort: 0,  // OS-assigned
     })
   : createMitmProxy({
       socketPath: resolve(socketsDir, 'mitm-proxy.sock'),
       ca,
       providers: providerMappings,
-      registries,
-      packageValidation,
       controlSocketPath: resolve(sessionDir, 'mitm-control.sock'),  // NOT in sockets/
     });
 

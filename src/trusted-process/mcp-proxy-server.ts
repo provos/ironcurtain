@@ -1358,9 +1358,13 @@ async function main(): Promise<void> {
     }
 
     const mitmControlAddr = process.env.MITM_CONTROL_ADDR;
-    if (mitmControlAddr) {
-      controlApiClient = createControlApiClient(mitmControlAddr);
+    if (!mitmControlAddr) {
+      throw new Error(
+        'MITM_CONTROL_ADDR must be set when running in virtual-only proxy mode ' +
+          '(SERVER_FILTER=proxy with no other MCP servers).',
+      );
     }
+    controlApiClient = createControlApiClient(mitmControlAddr);
   }
 
   const toolMap = buildToolMap(allTools);

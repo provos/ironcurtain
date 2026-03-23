@@ -141,7 +141,7 @@ export const proxyPolicyRules: CompiledRule[] = [
     name: 'proxy-add-domain-escalate',
     description: 'Adding network domains requires human review',
     principle: 'Human oversight',
-    if: { tool: ['add_proxy_domain'] },
+    if: { server: ['proxy'], tool: ['add_proxy_domain'] },
     then: 'escalate',
     reason: 'Adding network domains expands the container attack surface and requires human review',
   },
@@ -149,7 +149,7 @@ export const proxyPolicyRules: CompiledRule[] = [
     name: 'proxy-remove-domain-allow',
     description: 'Removing domains reduces attack surface',
     principle: 'Least privilege',
-    if: { tool: ['remove_proxy_domain'] },
+    if: { server: ['proxy'], tool: ['remove_proxy_domain'] },
     then: 'allow',
     reason: 'Removing domains reduces the attack surface',
   },
@@ -157,7 +157,7 @@ export const proxyPolicyRules: CompiledRule[] = [
     name: 'proxy-list-domains-allow',
     description: 'Listing domains is a read-only operation',
     principle: 'Least privilege',
-    if: { tool: ['list_proxy_domains'] },
+    if: { server: ['proxy'], tool: ['list_proxy_domains'] },
     then: 'allow',
     reason: 'Read-only operation with no side effects',
   },
@@ -264,6 +264,7 @@ export async function handleVirtualProxyTool(
   switch (toolName) {
     case 'add_proxy_domain': {
       const domain = requireStringArg(args, 'domain');
+      requireStringArg(args, 'justification');
       validateDomain(domain);
       const result = await client.addDomain(domain);
       if (!result.added) {

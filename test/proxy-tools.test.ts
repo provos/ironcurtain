@@ -91,10 +91,11 @@ describe('DynamicHostController', () => {
   let hosts: DynamicHostController;
 
   const testProvider: ProviderConfig = {
+    displayName: 'Anthropic Test',
     host: 'api.anthropic.com',
     fakeKeyPrefix: 'sk-ant-test',
     keyInjection: { type: 'header', headerName: 'x-api-key' },
-    allowedEndpoints: [{ method: 'POST', pathPattern: '/v1/messages' }],
+    allowedEndpoints: [{ method: 'POST', path: '/v1/messages' }],
   };
 
   beforeEach(() => {
@@ -251,6 +252,13 @@ describe('handleVirtualProxyTool', () => {
       handleVirtualProxyTool('add_proxy_domain', { domain: 123, justification: 'test' }, client),
     ).rejects.toThrow('Missing or invalid required argument: domain');
   });
+
+  it('rejects missing justification in add_proxy_domain', async () => {
+    const client = createMockClient();
+    await expect(
+      handleVirtualProxyTool('add_proxy_domain', { domain: 'api.example.com' }, client),
+    ).rejects.toThrow('Missing or invalid required argument: justification');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -357,22 +365,25 @@ describe('createControlApiClient', () => {
 // ---------------------------------------------------------------------------
 
 describe('proxyPolicyRules', () => {
-  it('has escalate rule for add_proxy_domain', () => {
+  it('has escalate rule for add_proxy_domain scoped to proxy server', () => {
     const addRule = proxyPolicyRules.find((r) => r.if.tool?.includes('add_proxy_domain'));
     expect(addRule).toBeDefined();
     expect(addRule!.then).toBe('escalate');
+    expect(addRule!.if.server).toEqual(['proxy']);
   });
 
-  it('has allow rule for remove_proxy_domain', () => {
+  it('has allow rule for remove_proxy_domain scoped to proxy server', () => {
     const removeRule = proxyPolicyRules.find((r) => r.if.tool?.includes('remove_proxy_domain'));
     expect(removeRule).toBeDefined();
     expect(removeRule!.then).toBe('allow');
+    expect(removeRule!.if.server).toEqual(['proxy']);
   });
 
-  it('has allow rule for list_proxy_domains', () => {
+  it('has allow rule for list_proxy_domains scoped to proxy server', () => {
     const listRule = proxyPolicyRules.find((r) => r.if.tool?.includes('list_proxy_domains'));
     expect(listRule).toBeDefined();
     expect(listRule!.then).toBe('allow');
+    expect(listRule!.if.server).toEqual(['proxy']);
   });
 });
 
@@ -443,10 +454,11 @@ describe('MITM proxy control API', () => {
   let proxy: MitmProxy;
 
   const testProvider: ProviderConfig = {
+    displayName: 'Anthropic Test',
     host: 'api.anthropic.com',
     fakeKeyPrefix: 'sk-ant-test',
     keyInjection: { type: 'header', headerName: 'x-api-key' },
-    allowedEndpoints: [{ method: 'POST', pathPattern: '/v1/messages' }],
+    allowedEndpoints: [{ method: 'POST', path: '/v1/messages' }],
   };
 
   beforeEach(async () => {
