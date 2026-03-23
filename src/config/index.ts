@@ -13,6 +13,7 @@ import {
 } from './paths.js';
 import { resolveRealPath } from '../types/argument-roles.js';
 import { loadUserConfig, type ResolvedWebSearchConfig } from './user-config.js';
+import { RESERVED_SERVER_NAMES } from '../docker/proxy-tools.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -172,6 +173,16 @@ export function loadConfig(): IronCurtainConfig {
 
   const mcpServersPath = resolve(__dirname, 'mcp-servers.json');
   const mcpServers = JSON.parse(readFileSync(mcpServersPath, 'utf-8')) as Record<string, MCPServerConfig>;
+
+  // Validate that no user-configured server uses a reserved name.
+  for (const name of Object.keys(mcpServers)) {
+    if (RESERVED_SERVER_NAMES.has(name)) {
+      throw new Error(
+        `MCP server name "${name}" is reserved for internal use. ` +
+          `Please choose a different name in mcp-servers.json.`,
+      );
+    }
+  }
 
   // Sync the filesystem server's allowed directory with the configured value.
   // The mcp-servers.json ships with a default path that may differ from

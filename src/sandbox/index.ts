@@ -311,6 +311,9 @@ export class Sandbox {
       PROTECTED_PATHS: JSON.stringify(config.protectedPaths),
       ALLOWED_DIRECTORY: config.allowedDirectory,
       CONTAINER_WORKSPACE_DIR,
+      // Forward SSH agent socket so MCP servers (e.g., git) can authenticate
+      // to remote hosts without prompting for credentials.
+      ...(process.env.SSH_AUTH_SOCK ? { SSH_AUTH_SOCK: process.env.SSH_AUTH_SOCK } : {}),
     };
 
     // Pass the escalation directory to the proxy when configured.
@@ -379,6 +382,24 @@ export class Sandbox {
           ...proxyEnv,
           SERVER_FILTER: serverName,
           ...(serverCreds ? { SERVER_CREDENTIALS: JSON.stringify(serverCreds) } : {}),
+        },
+        timeout: timeoutSeconds,
+      };
+    }
+
+    // Add a dedicated proxy instance for virtual proxy tools (domain management).
+    // This entry spawns mcp-proxy-server.ts with SERVER_FILTER=proxy and no
+    // matching backend server, so it enters virtual-only mode.
+    // MITM_CONTROL_ADDR is ONLY passed to this entry, not to other server instances.
+    if (config.mitmControlAddr) {
+      mcpServers['proxy'] = {
+        transport: 'stdio',
+        command: PROXY_COMMAND,
+        args: [...PROXY_ARGS],
+        env: {
+          ...proxyEnv,
+          SERVER_FILTER: 'proxy',
+          MITM_CONTROL_ADDR: config.mitmControlAddr,
         },
         timeout: timeoutSeconds,
       };

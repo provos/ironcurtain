@@ -185,6 +185,7 @@ export async function prepareDockerInfrastructure(
         providers: providerMappings,
         registries,
         packageValidation,
+        controlPort: 0,
       })
     : createMitmProxy({
         socketPath: resolve(socketsDir, 'mitm-proxy.sock'),
@@ -192,23 +193,40 @@ export async function prepareDockerInfrastructure(
         providers: providerMappings,
         registries,
         packageValidation,
+        controlSocketPath: resolve(sessionDir, 'mitm-control.sock'),
       });
 
   const docker = createDockerManager();
 
-  // Start proxies
-  await proxy.start();
-  if (useTcp && proxy.port !== undefined) {
-    logger.info(`Code Mode proxy listening on 127.0.0.1:${proxy.port}`);
-  } else {
-    logger.info(`Code Mode proxy listening on ${proxy.socketPath}`);
-  }
-
+  // Start MITM proxy FIRST so config.mitmControlAddr is set before proxy.start().
+  // proxy.start() initializes the UTCP sandbox, which checks config.mitmControlAddr
+  // to decide whether to register the proxy virtual MCP server for domain management.
   const mitmAddr = await mitmProxy.start();
   if (mitmAddr.port !== undefined) {
     logger.info(`MITM proxy listening on 127.0.0.1:${mitmAddr.port}`);
   } else {
     logger.info(`MITM proxy listening on ${mitmAddr.socketPath}`);
+  }
+
+  // Compute control address for the proxy tools MCP server instance
+  const controlAddr =
+    mitmAddr.controlPort !== undefined
+      ? `http://127.0.0.1:${mitmAddr.controlPort}`
+      : mitmAddr.controlSocketPath
+        ? `unix://${mitmAddr.controlSocketPath}`
+        : undefined;
+  if (controlAddr) {
+    config.mitmControlAddr = controlAddr;
+    logger.info(`MITM control API at ${controlAddr}`);
+  }
+
+  // Start Code Mode proxy AFTER mitmControlAddr is set so the sandbox
+  // registers the proxy virtual server for network domain management.
+  await proxy.start();
+  if (useTcp && proxy.port !== undefined) {
+    logger.info(`Code Mode proxy listening on 127.0.0.1:${proxy.port}`);
+  } else {
+    logger.info(`Code Mode proxy listening on ${proxy.socketPath}`);
   }
 
   // Remaining setup steps can fail -- clean up started proxies on error.
@@ -219,6 +237,15 @@ export async function prepareDockerInfrastructure(
       name,
       description,
     }));
+    // The proxy virtual server won't have an entry in config.mcpServers, so its
+    // description falls back to just "proxy". Add an explicit listing with a
+    // proper description for the help/orientation system.
+    if (config.mitmControlAddr && !serverListings.some((s) => s.name === 'proxy')) {
+      serverListings.push({
+        name: 'proxy',
+        description: 'Network proxy domain management (add/remove/list allowed domains)',
+      });
+    }
     logger.info(`Available servers: ${serverListings.map((s) => s.name).join(', ')}`);
 
     const proxyAddress = useTcp && proxy.port !== undefined ? `host.docker.internal:${proxy.port}` : undefined;
