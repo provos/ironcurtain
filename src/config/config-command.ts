@@ -114,7 +114,7 @@ export function computeDiff(resolved: ResolvedUserConfig, pending: UserConfig): 
     }
   }
 
-  const nestedSections = ['resourceBudget', 'autoCompact', 'autoApprove', 'auditRedaction'] as const;
+  const nestedSections = ['resourceBudget', 'autoCompact', 'autoApprove', 'auditRedaction', 'memory'] as const;
   for (const section of nestedSections) {
     const pendingSection = pending[section];
     if (!pendingSection) continue;
@@ -335,6 +335,37 @@ async function handleSecurity(resolved: ResolvedUserConfig, pending: UserConfig)
       const newModel = await promptModelId('Select auto-approve model:', currentAutoApproveModel);
       if (newModel !== undefined && newModel !== currentAutoApproveModel) {
         pending.autoApprove = { ...pending.autoApprove, modelId: newModel };
+      }
+    }
+  }
+}
+
+async function handleMemory(resolved: ResolvedUserConfig, pending: UserConfig): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- interactive loop exited via return
+  while (true) {
+    const currentAutoSave = pending.memory?.autoSave ?? resolved.memory.autoSave;
+
+    const field = await p.select({
+      message: 'Memory',
+      options: [
+        {
+          value: 'autoSave',
+          label: 'Auto-save session summary to memory',
+          hint: currentAutoSave ? 'on' : 'off',
+        },
+        { value: 'back', label: 'Back' },
+      ],
+    });
+    if (isCancelled(field) || field === 'back') return;
+
+    if (field === 'autoSave') {
+      const enabled = await p.confirm({
+        message: 'Auto-save a session summary to memory when sessions end?',
+        initialValue: currentAutoSave,
+      });
+      if (isCancelled(enabled)) continue;
+      if (enabled !== currentAutoSave) {
+        pending.memory = { ...pending.memory, autoSave: enabled as boolean };
       }
     }
   }
@@ -823,6 +854,11 @@ function serverCredentialsHint(resolved: ResolvedUserConfig, pending: UserConfig
   return configured.map(([name]) => name).join(', ');
 }
 
+function memoryHint(resolved: ResolvedUserConfig, pending: UserConfig): string {
+  const autoSave = pending.memory?.autoSave ?? resolved.memory.autoSave;
+  return `auto-save: ${autoSave ? 'on' : 'off'}`;
+}
+
 function dockerAgentHint(resolved: ResolvedUserConfig, pending: UserConfig): string {
   return DOCKER_AGENT_LABELS[pending.preferredDockerAgent ?? resolved.preferredDockerAgent];
 }
@@ -869,6 +905,7 @@ export async function runConfigCommand(): Promise<void> {
         { value: 'compact', label: `Auto-Compact (${autoCompactHint(resolved, pending)})` },
         { value: 'websearch', label: `Web Search (${webSearchHint(resolved, pending)})` },
         { value: 'credentials', label: `Server Credentials (${serverCredentialsHint(resolved, pending)})` },
+        { value: 'memory', label: `Memory (${memoryHint(resolved, pending)})` },
         { value: 'dockerAgent', label: `Docker Agent (${dockerAgentHint(resolved, pending)})` },
         { value: 'save', label: 'Save & Exit', hint: changeCount(resolved, pending) },
         { value: 'cancel', label: 'Cancel', hint: 'discard all changes' },
@@ -897,6 +934,9 @@ export async function runConfigCommand(): Promise<void> {
         break;
       case 'credentials':
         await handleServerCredentials(resolved, pending);
+        break;
+      case 'memory':
+        await handleMemory(resolved, pending);
         break;
       case 'dockerAgent':
         await handleDockerAgent(resolved, pending);

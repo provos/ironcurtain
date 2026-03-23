@@ -101,6 +101,7 @@ const auditRedactionSchema = z
 const memorySchema = z
   .object({
     enabled: z.boolean().optional(),
+    autoSave: z.boolean().optional(),
     llmBaseUrl: z.url().optional(),
     llmApiKey: z.string().min(1).optional(),
   })
@@ -236,6 +237,7 @@ export interface ResolvedAuditRedactionConfig {
 /** Resolved memory config with all fields present. */
 export interface ResolvedMemoryConfig {
   readonly enabled: boolean;
+  readonly autoSave: boolean;
   readonly llmBaseUrl: string | undefined;
   readonly llmApiKey: string | undefined;
 }
@@ -585,6 +587,7 @@ function mergeWithDefaults(config: UserConfig): ResolvedUserConfig {
     },
     memory: {
       enabled: config.memory?.enabled ?? true,
+      autoSave: config.memory?.autoSave ?? true,
       llmBaseUrl: config.memory?.llmBaseUrl,
       llmApiKey: config.memory?.llmApiKey,
     },

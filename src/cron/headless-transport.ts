@@ -12,21 +12,30 @@
 
 import { BaseTransport } from '../session/base-transport.js';
 import type { Session } from '../session/types.js';
+import { saveSessionMemory } from '../memory/auto-save.js';
 import * as logger from '../logger.js';
 
 export interface HeadlessTransportOptions {
   /** The initial task message to send. */
   readonly taskMessage: string;
+  /** When true, save session memory after the task completes. */
+  readonly autoSaveMemory?: boolean;
+  /** When true, session is running in Docker mode. */
+  readonly dockerMode?: boolean;
 }
 
 export class HeadlessTransport extends BaseTransport {
   private readonly taskMessage: string;
+  private readonly autoSaveMemory: boolean;
+  private readonly dockerMode: boolean;
   private response: string | undefined;
   private closed = false;
 
   constructor(options: HeadlessTransportOptions) {
     super();
     this.taskMessage = options.taskMessage;
+    this.autoSaveMemory = options.autoSaveMemory ?? false;
+    this.dockerMode = options.dockerMode ?? false;
   }
 
   protected async runSession(session: Session): Promise<void> {
@@ -36,6 +45,10 @@ export class HeadlessTransport extends BaseTransport {
       logger.info(`[HeadlessTransport] Sending task message (${this.taskMessage.length} chars)`);
       this.response = await this.sendAndLog(session, this.taskMessage);
       logger.info(`[HeadlessTransport] Task completed, response: ${this.response.length} chars`);
+
+      if (this.autoSaveMemory) {
+        await saveSessionMemory(session, { dockerMode: this.dockerMode });
+      }
     } catch (err) {
       logger.warn(`[HeadlessTransport] Task failed: ${err instanceof Error ? err.message : String(err)}`);
       throw err;
