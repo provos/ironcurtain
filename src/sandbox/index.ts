@@ -311,6 +311,9 @@ export class Sandbox {
       PROTECTED_PATHS: JSON.stringify(config.protectedPaths),
       ALLOWED_DIRECTORY: config.allowedDirectory,
       CONTAINER_WORKSPACE_DIR,
+      // Forward SSH agent socket so MCP servers (e.g., git) can authenticate
+      // to remote hosts without prompting for credentials.
+      ...(process.env.SSH_AUTH_SOCK ? { SSH_AUTH_SOCK: process.env.SSH_AUTH_SOCK } : {}),
     };
 
     // Pass the escalation directory to the proxy when configured.
