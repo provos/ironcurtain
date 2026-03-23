@@ -29,7 +29,6 @@ import type { Ora } from 'ora';
 import { BaseTransport } from './base-transport.js';
 import type { Session, DiagnosticEvent, EscalationRequest, BudgetStatus } from './types.js';
 import { DEFAULT_WHITELIST_OPTIONS } from '../trusted-process/approval-whitelist.js';
-import { saveSessionMemory } from '../memory/auto-save.js';
 
 /** Options for constructing a CliTransport. */
 export interface CliTransportOptions {
@@ -37,7 +36,7 @@ export interface CliTransportOptions {
   initialMessage?: string;
   /** Override stdin for testing. Defaults to process.stdin. */
   input?: Readable;
-  /** When true, save session memory after single-shot tasks complete. */
+  /** When true, save session memory when the session ends. */
   autoSaveMemory?: boolean;
   /** When true, session is running in Docker mode. */
   dockerMode?: boolean;
@@ -50,8 +49,6 @@ marked.use(markedTerminal());
 export class CliTransport extends BaseTransport {
   private readonly initialMessage?: string;
   private readonly input: Readable;
-  private readonly autoSaveMemory: boolean;
-  private readonly dockerMode: boolean;
 
   /** The spinner instance, managed across the message lifecycle. */
   private spinner: Ora | null = null;
@@ -60,11 +57,9 @@ export class CliTransport extends BaseTransport {
   private rl: ReturnType<typeof createInterface> | null = null;
 
   constructor(options: CliTransportOptions = {}) {
-    super();
+    super({ autoSaveMemory: options.autoSaveMemory, dockerMode: options.dockerMode });
     this.initialMessage = options.initialMessage;
     this.input = options.input ?? process.stdin;
-    this.autoSaveMemory = options.autoSaveMemory ?? false;
-    this.dockerMode = options.dockerMode ?? false;
   }
 
   protected async runSession(session: Session): Promise<void> {
@@ -159,12 +154,6 @@ export class CliTransport extends BaseTransport {
       this.spinner?.stop();
       process.stdout.write('\n');
       process.stdout.write(renderMarkdown(response));
-
-      if (this.autoSaveMemory) {
-        this.startSpinner('Saving session memory...');
-        await saveSessionMemory(session, { dockerMode: this.dockerMode });
-        this.spinner?.stop();
-      }
 
       this.displaySessionSummary(session.getBudgetStatus());
     } catch (error) {

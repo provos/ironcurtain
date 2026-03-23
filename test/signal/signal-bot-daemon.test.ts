@@ -312,6 +312,7 @@ vi.mock('../../src/config/index.js', () => ({
       },
       autoApprove: { enabled: false, modelId: 'anthropic:claude-haiku-4-5' },
       auditRedaction: { enabled: true },
+      memory: { enabled: false, autoSave: false, llmBaseUrl: undefined, llmApiKey: undefined },
       webSearch: { provider: null, brave: null, tavily: null, serpapi: null },
       serverCredentials: {},
       signal: null,

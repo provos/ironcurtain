@@ -45,6 +45,12 @@ export interface ManagedSession {
   messageInFlight: boolean;
   pendingEscalationId: string | null;
   escalationResolving: boolean;
+  /**
+   * The promise returned by transport.run(). When set, SessionManager.end()
+   * awaits it after closing the transport but before closing the session,
+   * giving the transport time to finish cleanup (e.g., auto-save).
+   */
+  runPromise: Promise<void> | null;
 }
 
 /**
@@ -88,6 +94,7 @@ export class SessionManager {
       messageInFlight: false,
       pendingEscalationId: null,
       escalationResolving: false,
+      runPromise: null,
     };
 
     this.sessions.set(label, managed);
@@ -115,6 +122,17 @@ export class SessionManager {
       managed.transport.close();
     } catch (err: unknown) {
       logger.warn(`[SessionManager] Error closing transport for session #${label}: ${String(err)}`);
+    }
+
+    // Wait for the transport's run() to finish (e.g., auto-save) before
+    // closing the session. The run promise resolves after transport.close()
+    // unblocks runSession() and any post-session cleanup completes.
+    if (managed.runPromise) {
+      try {
+        await managed.runPromise;
+      } catch {
+        // run() errors are already handled by the caller that started it
+      }
     }
 
     try {

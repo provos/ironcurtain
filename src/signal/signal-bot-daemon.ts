@@ -22,6 +22,7 @@ import { resolveSignalConfig, type ResolvedSignalConfig } from './signal-config.
 import type { SessionMode } from '../session/types.js';
 import type { SignalContainerManager } from './signal-container.js';
 import { SessionManager, type ManagedSession } from '../session/session-manager.js';
+import { shouldAutoSaveMemory } from '../memory/auto-save.js';
 import { SignalSessionTransport } from './signal-transport.js';
 import { markdownToSignal } from './markdown-to-signal.js';
 import {
@@ -460,9 +461,13 @@ export class SignalBotDaemon {
       throw new Error(`Session limit reached (max ${this.maxConcurrentSessions}). Use /quit to end a session first.`);
     }
 
-    const transport = new SignalSessionTransport(this);
-
     const config = loadConfig();
+
+    const transport = new SignalSessionTransport({
+      daemon: this,
+      autoSaveMemory: shouldAutoSaveMemory(config),
+      dockerMode: this.mode.kind === 'docker',
+    });
 
     const session = await createSession({
       config,
@@ -476,14 +481,22 @@ export class SignalBotDaemon {
     const label = this.sessionManager.register(session, transport, { kind: 'signal' });
     transport.sessionLabel = label;
 
-    // Start the transport in the background. When it resolves
-    // (session closed/budget exhausted), clean up.
-    transport
-      .run(session)
+    // Start the transport in the background. Store the run promise so
+    // SessionManager.end() can await it (giving auto-save time to finish)
+    // before closing the session.
+    const runPromise = transport.run(session);
+
+    const managed = this.sessionManager.get(label);
+    if (managed) {
+      managed.runPromise = runPromise;
+    }
+
+    // When the transport resolves (session closed/budget exhausted), clean up.
+    runPromise
       .then(() => {
         // Transport exited - remove session if still present
-        const managed = this.sessionManager.get(label);
-        if (managed) {
+        const m = this.sessionManager.get(label);
+        if (m) {
           this.sessionManager.end(label).catch((err: unknown) => {
             logger.error(`[Signal Daemon] Failed to clean up session #${label}: ${String(err)}`);
           });

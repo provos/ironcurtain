@@ -9,11 +9,15 @@
  * 2. Create callback factories that bridge session events to the daemon
  */
 
-import { BaseTransport } from '../session/base-transport.js';
+import { BaseTransport, type BaseTransportOptions } from '../session/base-transport.js';
 import type { Session, DiagnosticEvent, EscalationRequest } from '../session/types.js';
 import type { SignalBotDaemon } from './signal-bot-daemon.js';
 import { formatEscalationBanner } from './format.js';
 import * as logger from '../logger.js';
+
+export interface SignalSessionTransportOptions extends BaseTransportOptions {
+  readonly daemon: SignalBotDaemon;
+}
 
 export class SignalSessionTransport extends BaseTransport {
   private session: Session | null = null;
@@ -23,9 +27,9 @@ export class SignalSessionTransport extends BaseTransport {
   /** Session label assigned by the daemon after construction. */
   sessionLabel = 0;
 
-  constructor(daemon: SignalBotDaemon) {
-    super();
-    this.daemon = daemon;
+  constructor(options: SignalSessionTransportOptions) {
+    super(options);
+    this.daemon = options.daemon;
   }
 
   /**
