@@ -125,8 +125,13 @@ export interface MuxInputHandler {
   /**
    * Processes a key event from terminal-kit.
    * Returns a MuxAction describing what the orchestrator should do.
+   *
+   * @param rawCode - The raw bytes from terminal-kit's `data.code` field:
+   *   Buffer for escape sequences, number for single ASCII chars. When
+   *   provided, PTY mode forwards these bytes directly instead of mapping
+   *   through KEY_TO_SEQUENCE.
    */
-  handleKey(key: string): MuxAction;
+  handleKey(key: string, rawCode?: Buffer | number): MuxAction;
 
   /**
    * Processes a paste event (text delivered via bracketed paste).
@@ -153,30 +158,12 @@ const CTRL_E = 'CTRL_E';
 const SHIFT_TAB = 'SHIFT_TAB';
 
 /**
- * Maps terminal-kit key names to raw escape sequences for the PTY.
- * terminal-kit emits human-readable names (e.g. 'ENTER'), but the
- * child PTY expects raw bytes (e.g. '\r').
+ * Converts terminal-kit's raw code (from `data.code`) to a string
+ * suitable for writing to a PTY.
  */
-const KEY_TO_SEQUENCE: Record<string, string> = {
-  ENTER: '\r',
-  BACKSPACE: '\x7f',
-  ESCAPE: '\x1b',
-  DELETE: '\x1b[3~',
-  TAB: '\t',
-  UP: '\x1b[A',
-  DOWN: '\x1b[B',
-  RIGHT: '\x1b[C',
-  LEFT: '\x1b[D',
-  HOME: '\x1b[H',
-  END: '\x1b[F',
-  PAGE_UP: '\x1b[5~',
-  PAGE_DOWN: '\x1b[6~',
-  INSERT: '\x1b[2~',
-  // Ctrl keys -> raw bytes
-  ...Object.fromEntries(
-    Array.from({ length: 26 }, (_, i) => [`CTRL_${String.fromCharCode(65 + i)}`, String.fromCharCode(i + 1)]),
-  ),
-};
+function rawCodeToString(rawCode: Buffer | number): string {
+  return typeof rawCode === 'number' ? String.fromCharCode(rawCode) : rawCode.toString('binary');
+}
 
 /**
  * Splits a path input into the directory portion and the filename prefix.
@@ -726,7 +713,7 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
     return { kind: 'none' };
   }
 
-  function handlePtyKey(key: string): MuxAction {
+  function handlePtyKey(key: string, rawCode?: Buffer | number): MuxAction {
     if (key === CTRL_A) {
       _mode = 'command';
       return { kind: 'enter-command-mode' };
@@ -736,7 +723,8 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
       return { kind: 'escalation-open' };
     }
 
-    return { kind: 'write-pty', data: KEY_TO_SEQUENCE[key] ?? key };
+    const data = rawCode != null ? rawCodeToString(rawCode) : key;
+    return { kind: 'write-pty', data };
   }
 
   function handleCommandKey(key: string): MuxAction {
@@ -908,9 +896,9 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
       return _escalationDismissedAtNumber;
     },
 
-    handleKey(key: string): MuxAction {
+    handleKey(key: string, rawCode?: Buffer | number): MuxAction {
       if (_mode === 'pty') {
-        return handlePtyKey(key);
+        return handlePtyKey(key, rawCode);
       }
       if (_mode === 'picker') {
         return handlePickerKey(key);
