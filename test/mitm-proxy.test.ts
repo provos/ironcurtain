@@ -505,7 +505,7 @@ describe('MitmProxy', () => {
     expect(response.body).toContain('not an allowed endpoint');
   });
 
-  it('rejects requests with wrong fake key', async () => {
+  it('passes through requests with non-sentinel key (agent own credential)', async () => {
     proxy = createMitmProxy({
       socketPath,
       ca,
@@ -519,11 +519,11 @@ describe('MitmProxy', () => {
     const response = await makeHttpsRequest(socket!, ca, 'api.test.com', {
       method: 'POST',
       path: '/v1/messages',
-      headers: { 'x-api-key': 'wrong-key' },
+      headers: { 'x-api-key': 'agent-own-key' },
     });
 
-    expect(response.statusCode).toBe(403);
-    expect(response.body).toContain('does not match expected sentinel');
+    // Non-sentinel key is passed through unchanged; 502 because no real upstream
+    expect(response.statusCode).toBe(502);
   });
 
   it('forwards requests with no API key header (unauthenticated endpoint)', async () => {
@@ -582,15 +582,14 @@ describe('MitmProxy', () => {
     const { socket } = await sendConnect(socketPath, 'api.bearer-test.com', 443);
     expect(socket).not.toBeNull();
 
-    // Wrong bearer key should be rejected
+    // Non-sentinel bearer key is passed through unchanged; 502 because no real upstream
     const response = await makeHttpsRequest(socket!, ca, 'api.bearer-test.com', {
       method: 'POST',
       path: '/v1/chat/completions',
-      headers: { authorization: 'Bearer wrong-key' },
+      headers: { authorization: 'Bearer agent-own-key' },
     });
 
-    expect(response.statusCode).toBe(403);
-    expect(response.body).toContain('does not match expected sentinel');
+    expect(response.statusCode).toBe(502);
   });
 
   // --- P0: Crash prevention ---

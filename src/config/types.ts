@@ -119,4 +119,10 @@ export interface IronCurtainConfig {
    * Set by PTY session orchestration code.
    */
   isPtySession?: boolean;
+  /**
+   * Address of the MITM control API for dynamic domain management.
+   * Format: "unix:///path/to/socket" or "http://127.0.0.1:PORT".
+   * Only set in Docker Agent Mode sessions.
+   */
+  mitmControlAddr?: string;
 }
