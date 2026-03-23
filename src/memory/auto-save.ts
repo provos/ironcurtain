@@ -7,21 +7,25 @@
 
 import type { Session, ConversationTurn } from '../session/types.js';
 import type { IronCurtainConfig } from '../config/types.js';
-import { MEMORY_SERVER_NAME } from './memory-annotations.js';
 import { BudgetExhaustedError } from '../session/errors.js';
 import * as logger from '../logger.js';
 
 export interface AutoSaveOptions {
   readonly dockerMode?: boolean;
+  /** Optional send function. Defaults to session.sendMessage(). */
+  readonly sendFn?: (message: string) => Promise<string>;
 }
 
 const MAX_SUMMARY_CHARS = 2000;
 const MAX_TURNS_TO_SUMMARIZE = 50;
 
+/**
+ * Checks whether auto-save is enabled in user config. Callers must also
+ * verify the session has memory context (persona or jobId) since the
+ * memory server is injected inside createSession(), not in the base config.
+ */
 export function shouldAutoSaveMemory(config: IronCurtainConfig): boolean {
-  return (
-    config.userConfig.memory.enabled && config.userConfig.memory.autoSave && MEMORY_SERVER_NAME in config.mcpServers
-  );
+  return config.userConfig.memory.enabled && config.userConfig.memory.autoSave;
 }
 
 function truncate(text: string, maxLen: number): string {
@@ -70,11 +74,14 @@ function buildAutoSavePrompt(history: readonly ConversationTurn[], dockerMode: b
 /**
  * Saves session memory after a task completes.
  * Handles all errors internally — callers should not need try/catch.
- * Returns true if memory was saved, false if skipped or failed.
+ * Returns true if the auto-save prompt was sent, false if skipped or failed.
  */
 export async function saveSessionMemory(session: Session, options?: AutoSaveOptions): Promise<boolean> {
   let history = session.getHistory();
-  if (history.length === 0) return true;
+  if (history.length === 0) {
+    logger.info('[AutoSave] Skipping: no conversation history');
+    return false;
+  }
 
   // Cap to recent turns to keep the prompt small and avoid pathological cases.
   if (history.length > MAX_TURNS_TO_SUMMARIZE) {
@@ -83,9 +90,11 @@ export async function saveSessionMemory(session: Session, options?: AutoSaveOpti
 
   const prompt = buildAutoSavePrompt(history, options?.dockerMode ?? false);
 
+  const send = options?.sendFn ?? session.sendMessage.bind(session);
+
   try {
-    await session.sendMessage(prompt);
-    logger.info('[AutoSave] Session memory saved successfully');
+    await send(prompt);
+    logger.info('[AutoSave] Auto-save prompt sent');
     return true;
   } catch (err: unknown) {
     if (err instanceof BudgetExhaustedError) {

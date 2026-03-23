@@ -50,7 +50,10 @@ export abstract class BaseTransport implements Transport {
   private async autoSaveIfEnabled(session: Session): Promise<void> {
     if (!this.autoSaveMemory) return;
     logger.info('[BaseTransport] Auto-saving session memory...');
-    await saveSessionMemory(session, { dockerMode: this.dockerMode });
+    await saveSessionMemory(session, {
+      dockerMode: this.dockerMode,
+      sendFn: (msg) => this.sendAndLog(session, msg),
+    });
   }
 
   /** Subclasses implement this instead of run(). */

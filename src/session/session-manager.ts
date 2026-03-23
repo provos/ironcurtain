@@ -125,11 +125,11 @@ export class SessionManager {
     }
 
     // Wait for the transport's run() to finish (e.g., auto-save) before
-    // closing the session. The run promise resolves after transport.close()
-    // unblocks runSession() and any post-session cleanup completes.
+    // closing the session. Bounded to 30s to avoid hanging on stuck transports.
     if (managed.runPromise) {
       try {
-        await managed.runPromise;
+        const timeout = new Promise<void>((resolve) => setTimeout(resolve, 30_000));
+        await Promise.race([managed.runPromise, timeout]);
       } catch {
         // run() errors are already handled by the caller that started it
       }

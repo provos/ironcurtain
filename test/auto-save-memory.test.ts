@@ -19,22 +19,11 @@ import { BudgetExhaustedError } from '../src/session/errors.js';
 // ---------------------------------------------------------------------------
 
 /** Minimal IronCurtainConfig with only the fields relevant to auto-save. */
-function makeConfig(overrides: {
-  memoryEnabled?: boolean;
-  autoSave?: boolean;
-  hasMemoryServer?: boolean;
-}): IronCurtainConfig {
-  const { memoryEnabled = true, autoSave = true, hasMemoryServer = true } = overrides;
-
-  const mcpServers: Record<string, { command: string; args: string[] }> = {};
-  if (hasMemoryServer) {
-    mcpServers.memory = { command: 'memory-server', args: [] };
-  }
-  // Always include a non-memory server so the map is never empty by accident.
-  mcpServers.filesystem = { command: 'fs-server', args: [] };
+function makeConfig(overrides: { memoryEnabled?: boolean; autoSave?: boolean }): IronCurtainConfig {
+  const { memoryEnabled = true, autoSave = true } = overrides;
 
   return {
-    mcpServers,
+    mcpServers: {},
     userConfig: {
       memory: {
         enabled: memoryEnabled,
@@ -95,23 +84,18 @@ function stubSession(
 // ---------------------------------------------------------------------------
 
 describe('shouldAutoSaveMemory', () => {
-  it('returns true when memory enabled, autoSave true, and memory server present', () => {
-    const config = makeConfig({ memoryEnabled: true, autoSave: true, hasMemoryServer: true });
+  it('returns true when memory enabled and autoSave true', () => {
+    const config = makeConfig({ memoryEnabled: true, autoSave: true });
     expect(shouldAutoSaveMemory(config)).toBe(true);
   });
 
   it('returns false when memory is disabled', () => {
-    const config = makeConfig({ memoryEnabled: false, autoSave: true, hasMemoryServer: true });
+    const config = makeConfig({ memoryEnabled: false, autoSave: true });
     expect(shouldAutoSaveMemory(config)).toBe(false);
   });
 
   it('returns false when autoSave is explicitly false', () => {
-    const config = makeConfig({ memoryEnabled: true, autoSave: false, hasMemoryServer: true });
-    expect(shouldAutoSaveMemory(config)).toBe(false);
-  });
-
-  it('returns false when no memory server in mcpServers', () => {
-    const config = makeConfig({ memoryEnabled: true, autoSave: true, hasMemoryServer: false });
+    const config = makeConfig({ memoryEnabled: true, autoSave: false });
     expect(shouldAutoSaveMemory(config)).toBe(false);
   });
 });
@@ -190,13 +174,13 @@ describe('saveSessionMemory', () => {
     expect(result).toBe(false);
   });
 
-  it('returns true and skips sendMessage when history is empty', async () => {
+  it('returns false and skips sendMessage when history is empty', async () => {
     const sendMessage = vi.fn();
     const session = stubSession({ history: [], sendMessage });
 
     const result = await saveSessionMemory(session);
 
-    expect(result).toBe(true);
+    expect(result).toBe(false);
     expect(sendMessage).not.toHaveBeenCalled();
   });
 
