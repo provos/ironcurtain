@@ -6,6 +6,7 @@ import {
   buildToolMap,
   buildAuditEntry,
   handleCallTool,
+  validateToolArguments,
   selectTransportConfig,
   isUserContextTrusted,
   type ProxiedTool,
@@ -492,6 +493,52 @@ describe('buildAuditEntry', () => {
   });
 });
 
+// ── validateToolArguments tests ──────────────────────────────────────────
+
+describe('validateToolArguments', () => {
+  it('returns null when all args match schema properties', () => {
+    const result = validateToolArguments(
+      { path: '/tmp/foo', encoding: 'utf-8' },
+      { type: 'object', properties: { path: { type: 'string' }, encoding: { type: 'string' } } },
+    );
+    expect(result).toBeNull();
+  });
+
+  it('returns error listing unknown keys and valid keys', () => {
+    const result = validateToolArguments(
+      { calendar_id: '123', summary: 'test' },
+      { type: 'object', properties: { calendarId: { type: 'string' }, summary: { type: 'string' } } },
+    );
+    expect(result).toContain('Unknown argument(s): "calendar_id"');
+    expect(result).toContain('"calendarId"');
+    expect(result).toContain('"summary"');
+  });
+
+  it('skips validation when schema has no properties', () => {
+    expect(validateToolArguments({ anything: 'goes' }, { type: 'object' })).toBeNull();
+  });
+
+  it('skips validation when additionalProperties is true', () => {
+    const result = validateToolArguments(
+      { unknown_key: 'value' },
+      { type: 'object', properties: { known: { type: 'string' } }, additionalProperties: true },
+    );
+    expect(result).toBeNull();
+  });
+
+  it('skips validation when additionalProperties is a schema object', () => {
+    const result = validateToolArguments(
+      { unknown_key: 'value' },
+      { type: 'object', properties: { known: { type: 'string' } }, additionalProperties: { type: 'string' } },
+    );
+    expect(result).toBeNull();
+  });
+
+  it('returns null for empty args', () => {
+    expect(validateToolArguments({}, { type: 'object', properties: { path: { type: 'string' } } })).toBeNull();
+  });
+});
+
 // ── handleCallTool tests ───────────────────────────────────────────────
 
 describe('handleCallTool', () => {
@@ -574,6 +621,64 @@ describe('handleCallTool', () => {
     const content = result.content as Array<{ type: string; text: string }>;
     expect(content[0].text).toContain('Missing annotation for tool');
     expect(content[0].text).toContain("Re-run 'ironcurtain annotate-tools'");
+  });
+
+  it('returns error for unknown argument keys', async () => {
+    const tool: ProxiedTool = {
+      serverName: 'fs',
+      name: 'read_file',
+      inputSchema: { type: 'object', properties: { path: { type: 'string' } } },
+    };
+    const toolMap = new Map<string, ProxiedTool>();
+    toolMap.set('read_file', tool);
+    const deps = createMockDeps({ toolMap });
+
+    const result = await handleCallTool('read_file', { file_path: '/tmp/foo' }, deps);
+
+    expect(result.isError).toBe(true);
+    const content = result.content as Array<{ type: string; text: string }>;
+    expect(content[0].text).toContain('Unknown argument(s): "file_path"');
+    expect(content[0].text).toContain('"path"');
+    // Validation failures must be audit-logged
+    expect(deps.auditLog.log).toHaveBeenCalledTimes(1);
+    const logged = vi.mocked(deps.auditLog.log).mock.calls[0][0];
+    expect(logged.result.status).toBe('denied');
+    expect(logged.result.error).toContain('file_path');
+  });
+
+  it('skips argument validation for trusted servers', async () => {
+    const tool: ProxiedTool = {
+      serverName: 'memory',
+      name: 'store',
+      inputSchema: { type: 'object', properties: { key: { type: 'string' } } },
+    };
+    const toolMap = new Map<string, ProxiedTool>();
+    toolMap.set('store', tool);
+
+    const mockClient = {
+      callTool: vi.fn().mockResolvedValue({
+        content: [{ type: 'text', text: 'stored' }],
+        isError: false,
+      }),
+    };
+    const clientStates = new Map<string, ClientState>();
+    clientStates.set('memory', {
+      client: mockClient as unknown as ClientState['client'],
+      roots: [],
+    });
+
+    const resolvedSandboxConfigs = new Map();
+    resolvedSandboxConfigs.set('memory', { sandboxed: false, reason: 'opt-out' });
+
+    const deps = createMockDeps({ toolMap, clientStates, resolvedSandboxConfigs });
+    vi.mocked(deps.policyEngine.getAnnotation).mockReturnValue(undefined);
+    vi.mocked(deps.policyEngine.isTrustedServer).mockReturnValue(true);
+
+    const result = await handleCallTool('store', { unknown_arg: 'value' }, deps);
+
+    // Trusted servers bypass validation — call should reach the MCP server
+    expect(result.isError).toBeFalsy();
+    expect(mockClient.callTool).toHaveBeenCalled();
   });
 
   it('forwards allowed calls to the real MCP server', async () => {
