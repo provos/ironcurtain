@@ -8,7 +8,10 @@ The default and recommended way to use IronCurtain. See the main [README](README
 
 ```bash
 ironcurtain mux
+ironcurtain mux --agent claude-code   # Specify agent (default: claude-code)
 ```
+
+The mux supports session resume and persona selection through an interactive picker when spawning new tabs.
 
 See [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md) for the full walkthrough: input modes, trusted input security model, escalation workflow, and keyboard reference.
 
@@ -44,6 +47,17 @@ ironcurtain start --workspace /home/user/repos/my-app
 ```
 
 The workspace replaces the session sandbox as the agent's working area. All session infrastructure (logs, escalations, audit) still lives under `~/.ironcurtain/sessions/`. The path is validated to prevent use of sensitive directories.
+
+### Personas
+
+Use a named persona profile with its own constitution, compiled policy, and persistent workspace:
+
+```bash
+ironcurtain start -p exec-assistant "Check my email"
+ironcurtain start --persona coder "Refactor the auth module"
+```
+
+Manage personas with the `ironcurtain persona` subcommand (`create`, `list`, `compile`, `edit`, `show`, `delete`). See `ironcurtain persona --help` for details.
 
 ### Session resume
 
@@ -109,3 +123,22 @@ ironcurtain daemon logs <id>      # Show recent run summaries
 Each job has its own task description, security constitution (compiled into per-job policy rules), persistent workspace, optional git repo sync, and configurable resource budgets. Escalations are auto-denied in headless mode unless Signal is configured for approval routing.
 
 See [DAEMON.md](DAEMON.md) for the full setup guide, job definition reference, and troubleshooting.
+
+## OAuth Authentication
+
+IronCurtain supports third-party OAuth providers for MCP servers that require authenticated access (e.g., Google Workspace). Manage OAuth credentials with the `auth` subcommand:
+
+```bash
+ironcurtain auth                           # Show status of all providers
+ironcurtain auth import <provider> <file>  # Import OAuth client credentials
+ironcurtain auth <provider>                # Authorize a provider (opens browser)
+ironcurtain auth revoke <provider>         # Revoke and delete stored token
+```
+
+## Agent Selection
+
+Both `start` and `mux` accept `--agent` to choose which agent adapter to use. List registered agents with:
+
+```bash
+ironcurtain start --list-agents
+```

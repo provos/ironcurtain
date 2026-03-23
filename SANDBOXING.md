@@ -167,11 +167,16 @@ The agent needs to call its LLM provider's API (e.g., Anthropic's `/v1/messages`
    - Validates the fake sentinel key and swaps it for the real API key
    - Forwards the request to the upstream API and streams the response back
 
+**Dynamic domain management:** The agent can request access to additional internet domains at runtime via `add_proxy_domain` / `remove_proxy_domain` / `list_proxy_domains` MCP tools. Adding a domain always requires human approval (escalation); removing one is auto-allowed since it reduces the attack surface. Dynamically added hosts are passthrough-only -- TLS is still terminated for auditability, but no credential replacement or endpoint filtering is applied.
+
+**Package installation proxy:** The MITM proxy doubles as a filtering registry proxy for npm, PyPI, and Debian APT package installations. Packages are validated against configurable allowlists, denylists, and a quarantine age gate (default: 2 days) that blocks newly published versions. The proxy rewrites registry metadata to hide disallowed versions and blocks direct tarball downloads for packages that fail validation. See [docs/designs/package-installation-proxy.md](docs/designs/package-installation-proxy.md) for the full design.
+
 **What this blocks:**
 - Requests to non-allowlisted hosts (403 at CONNECT)
 - Requests to non-allowlisted endpoints on allowed hosts (403 at HTTP layer)
 - Requests with wrong or missing fake keys (403)
 - Any attempt to extract the real API key (it exists only in host process memory)
+- Installation of denied or too-recently-published packages
 
 ### Layer 3: MCP Policy Engine *(both modes)*
 
@@ -184,7 +189,11 @@ Policy decisions are:
 - **Deny** -- The tool call is blocked (default when no rule matches).
 - **Escalate** -- The user is prompted for approval before proceeding.
 
-Structural invariants are enforced regardless of compiled rules: protected system paths are always denied, unknown tools are always denied, and path traversal/symlink escape attempts are neutralized by resolving to canonical real paths before comparison.
+Structural invariants are enforced regardless of compiled rules: protected system paths are always denied, unknown tools are always denied, and path traversal/symlink escape attempts are neutralized by resolving to canonical real paths before comparison. Tool argument names are validated against each tool's declared `inputSchema` before policy evaluation -- calls with unknown argument keys are denied outright, preventing schema-smuggling attacks.
+
+Policy rules can reference **dynamic lists** -- named collections of domains, emails, or identifiers that are resolved at compile time (from LLM knowledge or MCP server queries) and expanded at runtime. This allows rules like "allow sending email to known team members" without hardcoding values in the constitution.
+
+When a user approves an escalated tool call, the **approval whitelist** extracts a scoped pattern (server, tool, argument constraints) and auto-approves future calls that match the same pattern within the session. This reduces approval fatigue without weakening the policy -- whitelisted patterns can only convert `escalate` to `allow`, never override `deny`.
 
 See the [README](README.md) for details on the policy compilation pipeline.
 
@@ -196,7 +205,7 @@ MCP server processes themselves can be sandboxed using `@anthropic-ai/sandbox-ru
 - **Network isolation** -- Per-server network proxy infrastructure. Servers that don't need network access get none.
 - **Process isolation** -- Linux namespaces via bubblewrap.
 
-This layer catches threats that the policy engine cannot see: compromised MCP servers, indirect code execution through tool calls, and side-channel attacks from within server processes.
+This layer catches threats that the policy engine cannot see: compromised MCP servers, indirect code execution through tool calls, and side-channel attacks from within server processes. For MCP servers that need OAuth credentials (e.g., Google Workspace), IronCurtain writes credential files into the sandbox and proactively refreshes them before expiry -- the MCP server never holds a refresh token and cannot independently obtain new credentials.
 
 See [docs/designs/execution-containment.md](docs/designs/execution-containment.md) for the full design specification.
 
@@ -212,13 +221,16 @@ Each layer addresses a different class of threat:
 | Unauthorized git operations | N/A | N/A | Blocked/Escalated | N/A |
 | Compromised MCP server | N/A | N/A | N/A | Contained |
 | Prompt injection → bad tool calls | N/A | N/A | Blocked/Escalated | N/A |
+| Malicious package install | N/A | Age gate + deny list | N/A | N/A |
 | Excessive API spending | N/A | Endpoint filter | Budget limits | N/A |
 
 No single layer handles everything. A prompt-injected agent might try to exfiltrate data via an API call, but Layer 2 blocks non-allowlisted endpoints. It might try to read sensitive files, but Layer 3 enforces the policy. It might try to exploit an MCP server, but Layer 4 contains the blast radius.
 
 ## Design Documents
 
-- [Docker Agent Broker](docs/design/docker-agent-broker.md) -- Full design for the Docker container + MITM proxy architecture
-- [TLS-Terminating API Proxy](docs/design/tls-terminating-api-proxy.md) -- Detailed MITM proxy design
+- [Docker Agent Broker](docs/designs/docker-agent-broker.md) -- Full design for the Docker container + MITM proxy architecture
+- [TLS-Terminating API Proxy](docs/designs/tls-terminating-api-proxy.md) -- Detailed MITM proxy design
+- [Package Installation Proxy](docs/designs/package-installation-proxy.md) -- Registry proxy for npm/PyPI/APT with age gate
+- [Google Workspace Integration](docs/designs/google-workspace-integration.md) -- OAuth credential management for Google MCP servers
 - [Execution Containment](docs/designs/execution-containment.md) -- OS-level sandboxing via bubblewrap/srt
 - [Security Concerns](docs/SECURITY_CONCERNS.md) -- Known threats, attack vectors, and residual risks

@@ -12,12 +12,17 @@ npm run format:check  # Check formatting
 
 | Category | Example files | Requirements | Runs by default |
 |----------|--------------|--------------|-----------------|
-| **Unit** | `policy-engine.test.ts`, `argument-roles.test.ts` | None | Yes |
-| **Component (mocked LLM)** | `auto-approver.test.ts`, `constitution-compiler.test.ts` | None (uses `MockLanguageModelV3`) | Yes |
-| **Integration (MCP servers)** | `integration.test.ts`, `mcp-proxy-server.test.ts` | Real MCP server processes spawn; ~30s timeout | Yes |
-| **Sandbox integration** | `sandbox-integration.test.ts` | `bubblewrap` + `socat` installed | Auto-skipped if unavailable |
-| **LLM integration** | `auto-approver-integration.test.ts`, `escalation-scenarios.test.ts` (Suite B) | `LLM_INTEGRATION_TEST=true` + `ANTHROPIC_API_KEY` | No |
-| **Docker integration** | `network-isolation.integration.test.ts` | `INTEGRATION_TEST=true` + Docker + `ironcurtain-base:latest` image | No |
+| **Unit** | `policy-engine.test.ts`, `argument-roles.test.ts`, `domain-utils.test.ts` | None | Yes |
+| **Component (mocked LLM)** | `auto-approver.test.ts`, `constitution-compiler.test.ts`, `constitution-generator.test.ts` | None (uses `MockLanguageModelV3`) | Yes |
+| **Integration (MCP servers)** | `integration.test.ts`, `mcp-proxy-server.test.ts`, `proxy-integration.test.ts` | Real MCP server processes spawn; ~30s timeout | Yes |
+| **Sandbox integration** | `sandbox-integration.test.ts` | `bubblewrap` + `socat` installed (Linux only) | Auto-skipped if unavailable |
+| **Isolated VM** | `help-integration.test.ts`, `docker-code-mode.integration.test.ts` | `isolated-vm` native module works on current Node version | Auto-skipped if unavailable |
+| **LLM integration** | `auto-approver-integration.test.ts`, `escalation-scenarios.test.ts` (Suite B), `help-llm-integration.test.ts` | `LLM_INTEGRATION_TEST=true` + `ANTHROPIC_API_KEY` | No |
+| **Docker integration** | `network-isolation.integration.test.ts`, `docker-uds-mount.spike.test.ts` | `INTEGRATION_TEST=true` + Docker + `ironcurtain-base:latest` image | No |
+| **Auth** | `test/auth/oauth-flow.test.ts`, `test/auth/oauth-token-store.test.ts` | None | Yes |
+| **Docker subsystem** | `test/docker/registry-proxy.test.ts`, `test/docker/package-validator.test.ts` | None | Yes |
+| **Signal** | `test/signal/setup-signal.test.ts`, `test/signal/markdown-to-signal.test.ts` | None | Yes |
+| **PTY (platform-specific)** | `pty-session.test.ts` (some cases) | Linux + `socat` | Auto-skipped on non-Linux |
 
 ## Environment Flags
 
@@ -28,6 +33,7 @@ Gates tests that call a live LLM API. Requires a valid `ANTHROPIC_API_KEY` (set 
 ```bash
 LLM_INTEGRATION_TEST=true npm test -- test/auto-approver-integration.test.ts
 LLM_INTEGRATION_TEST=true npm test -- test/escalation-scenarios.test.ts
+LLM_INTEGRATION_TEST=true npm test -- test/help-llm-integration.test.ts
 ```
 
 ### `INTEGRATION_TEST`
@@ -65,12 +71,26 @@ npm test -- --watch test/policy-engine.test.ts
 - **Temp directories**: Integration tests that create temp directories should use `mkdtempSync` in `beforeAll`/`beforeEach` and `rmSync` in `afterAll`/`afterEach`. Use `/tmp/` as the base.
 - **Timeouts**: Tests spawning MCP server processes or calling live APIs should set a 30s timeout: `it('...', async () => { ... }, 30_000)`.
 - **Fixtures**: Shared test fixtures live in `test/fixtures/` (e.g., `test-policy.ts`, `escalation-scenarios.ts`).
+- **Helpers**: Shared test utilities live in `test/helpers/`:
+  - `isolated-vm-available.ts` — probes whether `isolated-vm` works on the current Node version (spawns a child process to avoid crashes).
+  - `config-test-setup.ts` — environment isolation for config-related tests (`setupConfigEnv`/`teardownConfigEnv`), plus `seedConfig`/`readConfig` helpers.
+  - `uds-client-transport.ts` — MCP client transport over Unix domain sockets, used by integration tests.
 - **ESM imports**: Use `.js` extensions in import paths (TypeScript convention for ESM).
+- **Conditional execution**: Use `describe.skipIf(condition)` or `it.skipIf(condition)` (vitest built-ins) to skip tests when prerequisites are missing. Common conditions: `!process.env.LLM_INTEGRATION_TEST`, `!process.env.INTEGRATION_TEST`, `!isIsolatedVmAvailable()`, `process.platform !== 'linux'`.
 
 ### Test file naming
 
 - `*.test.ts` — standard tests (unit, component, integration with mocked dependencies)
 - `*.integration.test.ts` — tests requiring external infrastructure (Docker, real network)
+- `*.spike.test.ts` — exploratory/spike tests (e.g., `docker-uds-mount.spike.test.ts`)
+
+### Test subdirectories
+
+Tests for self-contained subsystems live in subdirectories under `test/`:
+
+- `test/auth/` — OAuth flows, token storage, provider registry, Google scopes
+- `test/docker/` — Docker-specific utilities (registry proxy, package validator)
+- `test/signal/` — Signal messaging integration (formatting, setup, markdown conversion)
 
 ## Pre-commit Hook
 

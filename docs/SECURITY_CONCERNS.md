@@ -1,7 +1,6 @@
 # Security Concerns and Threat Landscape
 
 **Status:** Living Document
-**Last Updated:** 2026-02-26
 
 This document outlines the known security concerns, attack vectors, and residual risks for the IronCurtain runtime. It serves as a guide for security researchers, auditors, and developers to understand where the "dragons" live.
 
@@ -45,6 +44,29 @@ IronCurtain has two session modes with different containment models. Both rely o
 *   **Resource Limits:** Containers are created with memory (4 GB) and CPU (2 cores) limits.
 *   **Endpoint Filtering:** The MITM proxy only allows specific method+path combinations (e.g., `POST /v1/messages`), blocking arbitrary API usage.
 
+### 2b-i. Dynamic Domain Expansion (Docker Agent Mode)
+
+**Risk:** The agent can request new internet domains at runtime via the `add_proxy_domain` virtual MCP tool. Each approved domain expands the container's network reach beyond the initial static allowlist.
+**Vectors:**
+*   **Exfiltration via approved domain:** An agent tricks the user into approving a domain it controls, then exfiltrates data through it.
+*   **SSRF via domain:** An approved domain resolves to an internal IP or cloud metadata endpoint (169.254.169.254).
+**Mitigation:**
+*   **Human escalation required:** The `add_proxy_domain` tool is hardcoded to `escalate` — the user sees the domain and justification before approval. Domain removal is auto-allowed (reduces surface).
+*   **Input validation:** IP addresses, `localhost`, and `*.docker.internal` hosts are rejected at the validation layer before policy evaluation.
+*   **Passthrough only:** Dynamically added domains get no credential swap — the MITM proxy forwards traffic without injecting API keys, limiting what the agent can do on those hosts.
+
+### 2b-ii. Package Installation Proxy (Docker Agent Mode)
+
+**Risk:** Agents install packages (npm, PyPI, Debian APT) from public registries inside the container. A compromised or typosquatted package executes arbitrary code inside the container.
+**Vectors:**
+*   **Supply chain attack in-container:** A malicious package runs install scripts with the agent's container-level privileges.
+*   **Quarantine bypass:** If the age gate is set too low or the allowlist is too broad, recently-published malicious versions pass validation.
+**Mitigation:**
+*   **Quarantine age gate:** By default, package versions must be at least 2 days old before installation is allowed. This blocks zero-day supply chain attacks where a malicious version is published and immediately consumed.
+*   **Denylist takes precedence:** Explicitly denied packages are blocked regardless of age or allowlist status.
+*   **Fail-closed:** Packages with missing or unavailable metadata are denied (no silent pass-through).
+*   **Contained blast radius:** Even a compromised package runs inside the `--network=none` container and can only reach the outside world through the MCP and MITM proxies, which enforce policy.
+
 ### 2c. OS-Level MCP Server Sandboxing (Both Modes)
 
 **Risk:** MCP server child processes (filesystem, git, fetch) run on the host and could be exploited by a crafted tool call response or a compromised server binary.
@@ -59,6 +81,7 @@ IronCurtain has two session modes with different containment models. Both rely o
 **Impact:** If the parsing logic is buggy, a malicious agent could construct a malformed MCP request that exploits the parser, potentially leading to command injection or logic bypasses in the policy engine.
 **Mitigation:**
 *   **Protocol Validation:** The MCP SDK validates the protocol envelope (method, JSON-RPC structure) before requests reach the proxy. The proxy uses the low-level `Server` class to pass through raw JSON schemas without Zod conversion.
+*   **Tool Argument Validation:** Before policy evaluation, the proxy validates that all argument keys exist in the tool's `inputSchema`. Unknown argument keys are rejected for untrusted servers, preventing an agent from injecting unexpected parameters that bypass annotation-driven policy checks.
 *   **Minimal TCB:** The Trusted Process logic is kept as small and simple as possible—no complex business logic, just routing and policy checks.
 *   **Type Safety:** End-to-end TypeScript types ensure data structure integrity.
 
@@ -86,6 +109,7 @@ IronCurtain has two session modes with different containment models. Both rely o
 **Mitigation:**
 *   **High-Fidelity Policies:** Ensuring the compiler generates precise rules to minimize unnecessary prompts.
 *   **AutoApprover:** An optional LLM-based intent matcher (using a cheap model like Haiku) that auto-approves escalations when the user's most recent message clearly authorizes the action. Reduces fatigue but introduces its own risk: the auto-approver LLM could be tricked into approving an action the user didn't intend. Constrained to only return `approve` or `escalate` (never deny), so it can only reduce friction, not override policy. Off by default.
+*   **Approval Whitelisting:** When a user approves an escalation, the system extracts a generalized pattern (e.g., "allow writes within this directory") and auto-approves future matching calls for the remainder of the session. Patterns are session-scoped, in-memory only (never persisted), and can only convert `escalate` to `allow` (never override `deny`). Risk: an overly broad pattern (e.g., a tool with no annotated resource-identifier roles) whitelists all future calls to that tool — users are warned about zero-constraint patterns before approval.
 *   **Batching/Summarization:** Grouping related requests or providing clear, risk-highlighted summaries (not just raw JSON).
 *   **Policy Learning (Planned):** Evolving the constitution based on repeated approvals to reduce friction over time.
 
@@ -116,11 +140,28 @@ IronCurtain has two session modes with different containment models. Both rely o
 *   **No network access:** On Linux, containers run with `--network=none`. On macOS, containers run on an `--internal` network with only proxy ports forwarded via a sidecar. In both cases, the container has no direct internet access.
 **Residual risk:** A compromised agent can make excessive LLM API calls via the MITM proxy, incurring costs. Mitigated by the per-session ResourceBudgetTracker which enforces limits on estimated cost, tokens, steps, and wall-clock time — this applies in Docker Agent Mode as well as Code Mode.
 
-## 10. Supply Chain Attacks (Host Level)
+## 10. OAuth Token Handling (Docker Agent Mode)
 
-**Risk:** The IronCurtain runtime itself depends on npm packages (`@modelcontextprotocol/sdk`, `zod`, `uuid`, etc.).
-**Impact:** A compromised dependency in the host process runs with full user privileges and bypasses all sandbox protections.
+**Risk:** Docker sessions can use OAuth tokens instead of API keys. The `OAuthTokenManager` performs proactive and reactive token refreshes on the host, coordinating with the host Claude Code process that may also refresh concurrently.
+**Vectors:**
+*   **Refresh token race:** If both IronCurtain and the host Claude Code process refresh simultaneously, one refresh token is invalidated, potentially causing auth failures.
+*   **Token file as shared state:** The credentials file (`~/.claude/.credentials.json`) is read and written by multiple processes without locking.
 **Mitigation:**
-*   **Dependency Locking:** Strict use of lockfiles.
-*   **Minimal Dependencies:** Keeping the runtime dependency tree as lean as possible.
-*   **Auditing:** Regular auditing of critical dependencies.
+*   **Keychain read-only mode:** On macOS (where credentials come from the Keychain), the manager never performs its own refresh grant — it only re-reads from the file and Keychain, avoiding refresh token rotation races with the host process.
+*   **Deduplication:** A single in-flight refresh promise is shared across concurrent callers within the IronCurtain process.
+*   **Fallback re-read:** After a failed refresh, the manager re-reads the credentials file once more, handling the race where the host process refreshed concurrently.
+
+## 11. SSH Agent Forwarding (Code Mode)
+
+**Risk:** The host's `SSH_AUTH_SOCK` is forwarded into the MCP proxy process environment so that MCP servers (e.g., git) can authenticate to remote hosts. This gives MCP server processes access to the user's SSH keys via the agent socket.
+**Impact:** A compromised MCP server could use the forwarded SSH agent to authenticate as the user to any SSH host the user's keys are authorized for.
+**Context:** This is a deliberate trade-off — without SSH agent forwarding, git operations against private repositories would fail or require separate credential management. The blast radius is bounded by the OS-level MCP server sandboxing (Section 2c), which restricts what the server process can do even with SSH access. The SSH agent socket is only forwarded when `SSH_AUTH_SOCK` is set in the host environment.
+
+## 12. Supply Chain Attacks
+
+**Risk:** Supply chain attacks affect two layers: the IronCurtain host process (npm packages like `@modelcontextprotocol/sdk`, `zod`, etc.) and packages installed by the agent inside Docker containers.
+**Impact (host):** A compromised dependency in the host process runs with full user privileges and bypasses all sandbox protections.
+**Impact (container):** A compromised package installed by the agent runs with the agent's container-level privileges and could exfiltrate data through the MCP/MITM proxies.
+**Mitigation:**
+*   **Host-level:** Strict use of lockfiles, minimal dependency tree, and regular auditing of critical dependencies.
+*   **Container-level:** The package registry proxy validates installations against allowlist/denylist rules and enforces a quarantine age gate (see Section 2b-ii). Even a compromised in-container package is bounded by `--network=none` and can only reach external services through the policy-enforced proxies.
