@@ -4,6 +4,8 @@
 **Date:** 2026-03-04
 **Author:** IronCurtain Engineering
 
+> **Note (2026-03):** References to `memory.md` as a cross-run memory mechanism in this document are historical. Persistent agent memory is now handled by the memory MCP server (see `memory-mcp-server-v2.md`). The `last-run.md` workspace file is still used.
+
 ## 1. Problem Statement
 
 IronCurtain currently supports two interaction patterns: single-shot tasks (`ironcurtain start "task"`) and interactive sessions (CLI or Signal bot). Both require a human to initiate the work. Many valuable use cases -- GitHub issue triage, daily code health checks, scheduled backups, inbox summaries -- are inherently periodic and should run unattended on a schedule.

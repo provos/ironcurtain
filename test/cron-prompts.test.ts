@@ -29,9 +29,9 @@ describe('buildCronSystemPromptAugmentation', () => {
     expect(prompt).toContain('automated scheduled task');
   });
 
-  it('instructs the agent about memory.md and last-run.md', () => {
+  it('instructs the agent about last-run.md', () => {
     const prompt = buildCronSystemPromptAugmentation(baseContext);
-    expect(prompt).toContain('memory.md');
+    expect(prompt).not.toContain('memory.md');
     expect(prompt).toContain('last-run.md');
   });
 

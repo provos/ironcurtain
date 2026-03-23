@@ -1,6 +1,6 @@
 # Design: Memory MCP Server for IronCurtain
 
-**Status:** Proposed
+**Status:** Superseded by `memory-mcp-server-v2.md`
 **Date:** 2026-03-09
 
 ## 1. Problem Statement

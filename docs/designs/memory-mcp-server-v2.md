@@ -1,6 +1,6 @@
 # Design: General-Purpose Memory MCP Server
 
-**Status:** Proposed
+**Status:** Implemented (migration from `memory.md` complete; `memory.md` is fully deprecated and no longer created)
 **Date:** 2026-03-11
 **Supersedes:** `memory-mcp-server.md` (original design using `@modelcontextprotocol/server-memory`)
 

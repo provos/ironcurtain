@@ -1,5 +1,7 @@
 # Persona System
 
+> **Note (2026-03):** References to `memory.md` and `workspace/memory.md` in this document are historical. Persistent agent memory is now handled by the memory MCP server (see `memory-mcp-server-v2.md`). The persona workspace directory still exists but no longer contains a `memory.md` file.
+
 ## Overview
 
 A persona is a named profile that bundles a constitution and compiled policy under a stable directory inside `~/.ironcurtain/personas/<name>/`. When a session is created with a persona, its `policyDir` points to the persona's `generated/` subdirectory, reusing the existing per-session policy override mechanism. Personas also support optional MCP server filtering -- each persona can declare which servers from the global `mcp-servers.json` are enabled or disabled, so an "exec-assistant" persona can operate with gmail and calendar servers while a "coder" persona operates with filesystem and github.

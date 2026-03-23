@@ -135,15 +135,14 @@ Each job has a persistent workspace directory that survives across runs.
 **Git sync behavior:** When a job has a `gitRepo` configured:
 
 - **First run:** The repository is cloned into the workspace.
-- **Subsequent runs:** Tracked files are fetched and reset to the remote's default branch (auto-detected via `origin/HEAD`, fallback to `main`). Untracked files are preserved — this means cross-run state files like `memory.md` and `last-run.md` survive the sync.
+- **Subsequent runs:** Tracked files are fetched and reset to the remote's default branch (auto-detected via `origin/HEAD`, fallback to `main`). Untracked files are preserved — this means cross-run state files like `last-run.md` survive the sync.
 - **Discarded changes:** Any tracked-file modifications from a previous run are discarded. The `git diff --stat` of discarded changes is recorded in the run record.
 - **Supported protocols:** https, http, ssh, git, file, and SCP-style (`git@host:org/repo.git`). The `ext::` protocol is rejected for security.
 
 **Cross-run state files:**
 
-The agent is instructed to maintain two files in the workspace:
+Persistent memory across runs is handled by the memory MCP server (see `docs/designs/memory-mcp-server-v2.md`). The agent also maintains a file in the workspace:
 
-- **`memory.md`** — The agent's notes to itself. Read at the start of each run to recall context from previous runs (last processed item, patterns observed, recurring issues).
 - **`last-run.md`** — A structured summary of each run: date/time, actions taken with counts, issues encountered, recommendations for next run. The first 2000 characters are captured in the run record.
 
 ## Escalation Handling
@@ -202,7 +201,6 @@ When a budget is exhausted, the run ends with outcome `budget_exhausted` and the
 │       │   ├── tool-annotations.json (symlink or copy)
 │       │   └── ...
 │       ├── workspace/             # Persistent workspace (or custom path)
-│       │   ├── memory.md          # Agent's cross-run notes (created by agent)
 │       │   ├── last-run.md        # Agent's run summary (created by agent)
 │       │   └── ...                # Cloned repo or working files
 │       └── runs/
@@ -223,5 +221,5 @@ When a budget is exhausted, the run ends with outcome `budget_exhausted` and the
 | **Escalations always denied** | Without Signal, all escalations are auto-denied by design. Enable Signal (`ironcurtain setup-signal`) and set `notifyOnEscalation: true` on the job. |
 | **Daemon won't start ("already running")** | Check if another daemon is running. The control socket at `~/.ironcurtain/daemon.sock` is auto-cleaned if the previous process is dead. |
 | **Run record shows `budget_exhausted`** | The job hit a resource limit. Increase the relevant budget via `edit-job` or set the field to `null` to disable the limit. |
-| **`memory.md` / `last-run.md` missing** | These files are created by the agent, not the daemon. If the agent didn't write them, check the task description — the agent is prompted to use these files but may skip them if the task completes very quickly or errors out early. |
-| **Changes from previous run discarded** | This is expected behavior with `gitRepo` configured. Tracked files are reset to remote HEAD before each run. Untracked files (including `memory.md` and `last-run.md`) are preserved. |
+| **`last-run.md` missing** | This file is created by the agent, not the daemon. If the agent didn't write it, check the task description — the agent is prompted to use this file but may skip it if the task completes very quickly or errors out early. |
+| **Changes from previous run discarded** | This is expected behavior with `gitRepo` configured. Tracked files are reset to remote HEAD before each run. Untracked files (including `last-run.md`) are preserved. |

@@ -233,12 +233,6 @@ async function runCreate(nameStr: string, args: string[]): Promise<void> {
   const workspaceDir = getPersonaWorkspaceDir(name);
   mkdirSync(workspaceDir, { recursive: true });
 
-  // Create empty memory file in workspace
-  const memoryPath = join(workspaceDir, 'memory.md');
-  if (!existsSync(memoryPath)) {
-    writeFileSync(memoryPath, '', 'utf-8');
-  }
-
   // Save persona.json
   const personaDef: PersonaDefinition = {
     name,

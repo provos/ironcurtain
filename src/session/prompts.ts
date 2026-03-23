@@ -125,7 +125,6 @@ ${context.taskDescription}
 Your persistent workspace is: ${context.workspacePath}
 This directory persists across runs. Use it for cross-run state:
 
-- **workspace/memory.md** -- Your notes for yourself. Read this at the start of each run to recall context from previous runs. Update it with anything you want to remember for next time (last processed item, patterns observed, recurring issues, etc.).
 - **workspace/last-run.md** -- Write a structured summary here before finishing. Include:
   - Date and time of this run
   - Actions taken (with counts: "Labeled 12 issues, commented on 3, closed 1")
