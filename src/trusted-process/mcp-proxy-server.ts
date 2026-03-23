@@ -592,6 +592,31 @@ export function resolveServerSandboxConfigs(
   return { resolvedSandboxConfigs, settingsDir, serverCwdPaths };
 }
 
+/**
+ * Validates that all argument keys exist in the tool's inputSchema.
+ * Returns null if valid, or an error message listing unknown and valid keys.
+ * Skips validation when the schema has no properties or allows additional properties.
+ */
+export function validateToolArguments(
+  args: Record<string, unknown>,
+  inputSchema: Record<string, unknown>,
+): string | null {
+  const properties = inputSchema.properties;
+  if (!properties || typeof properties !== 'object') return null;
+  if (inputSchema.additionalProperties) return null;
+
+  const validKeys = new Set(Object.keys(properties as Record<string, unknown>));
+  const unknownKeys = Object.keys(args).filter((k) => !validKeys.has(k));
+  if (unknownKeys.length === 0) return null;
+
+  const unknownList = unknownKeys.map((k) => `"${k}"`).join(', ');
+  const validList = [...validKeys]
+    .sort()
+    .map((k) => `"${k}"`)
+    .join(', ');
+  return `Unknown argument(s): ${unknownList}. Valid parameters are: ${validList}`;
+}
+
 /** Builds a lookup map from tool name to ProxiedTool for routing. */
 export function buildToolMap(allTools: ProxiedTool[]): Map<string, ProxiedTool> {
   const toolMap = new Map<string, ProxiedTool>();
@@ -672,6 +697,17 @@ export async function handleCallTool(
       ],
       isError: true,
     };
+  }
+
+  // Validate argument names against the tool's schema (non-trusted servers only).
+  if (!isTrusted) {
+    const validationError = validateToolArguments(rawArgs, toolInfo.inputSchema);
+    if (validationError) {
+      return {
+        content: [{ type: 'text', text: validationError }],
+        isError: true,
+      };
+    }
   }
 
   let argsForTransport: Record<string, unknown>;

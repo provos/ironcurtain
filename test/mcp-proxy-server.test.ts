@@ -6,6 +6,7 @@ import {
   buildToolMap,
   buildAuditEntry,
   handleCallTool,
+  validateToolArguments,
   selectTransportConfig,
   isUserContextTrusted,
   type ProxiedTool,
@@ -492,6 +493,52 @@ describe('buildAuditEntry', () => {
   });
 });
 
+// ── validateToolArguments tests ──────────────────────────────────────────
+
+describe('validateToolArguments', () => {
+  it('returns null when all args match schema properties', () => {
+    const result = validateToolArguments(
+      { path: '/tmp/foo', encoding: 'utf-8' },
+      { type: 'object', properties: { path: { type: 'string' }, encoding: { type: 'string' } } },
+    );
+    expect(result).toBeNull();
+  });
+
+  it('returns error listing unknown keys and valid keys', () => {
+    const result = validateToolArguments(
+      { calendar_id: '123', summary: 'test' },
+      { type: 'object', properties: { calendarId: { type: 'string' }, summary: { type: 'string' } } },
+    );
+    expect(result).toContain('Unknown argument(s): "calendar_id"');
+    expect(result).toContain('"calendarId"');
+    expect(result).toContain('"summary"');
+  });
+
+  it('skips validation when schema has no properties', () => {
+    expect(validateToolArguments({ anything: 'goes' }, { type: 'object' })).toBeNull();
+  });
+
+  it('skips validation when additionalProperties is true', () => {
+    const result = validateToolArguments(
+      { unknown_key: 'value' },
+      { type: 'object', properties: { known: { type: 'string' } }, additionalProperties: true },
+    );
+    expect(result).toBeNull();
+  });
+
+  it('skips validation when additionalProperties is a schema object', () => {
+    const result = validateToolArguments(
+      { unknown_key: 'value' },
+      { type: 'object', properties: { known: { type: 'string' } }, additionalProperties: { type: 'string' } },
+    );
+    expect(result).toBeNull();
+  });
+
+  it('returns null for empty args', () => {
+    expect(validateToolArguments({}, { type: 'object', properties: { path: { type: 'string' } } })).toBeNull();
+  });
+});
+
 // ── handleCallTool tests ───────────────────────────────────────────────
 
 describe('handleCallTool', () => {
@@ -574,6 +621,43 @@ describe('handleCallTool', () => {
     const content = result.content as Array<{ type: string; text: string }>;
     expect(content[0].text).toContain('Missing annotation for tool');
     expect(content[0].text).toContain("Re-run 'ironcurtain annotate-tools'");
+  });
+
+  it('returns error for unknown argument keys', async () => {
+    const tool: ProxiedTool = {
+      serverName: 'fs',
+      name: 'read_file',
+      inputSchema: { type: 'object', properties: { path: { type: 'string' } } },
+    };
+    const toolMap = new Map<string, ProxiedTool>();
+    toolMap.set('read_file', tool);
+    const deps = createMockDeps({ toolMap });
+
+    const result = await handleCallTool('read_file', { file_path: '/tmp/foo' }, deps);
+
+    expect(result.isError).toBe(true);
+    const content = result.content as Array<{ type: string; text: string }>;
+    expect(content[0].text).toContain('Unknown argument(s): "file_path"');
+    expect(content[0].text).toContain('"path"');
+  });
+
+  it('skips argument validation for trusted servers', async () => {
+    const tool: ProxiedTool = {
+      serverName: 'memory',
+      name: 'store',
+      inputSchema: { type: 'object', properties: { key: { type: 'string' } } },
+    };
+    const toolMap = new Map<string, ProxiedTool>();
+    toolMap.set('store', tool);
+    const deps = createMockDeps({ toolMap });
+    vi.mocked(deps.policyEngine.getAnnotation).mockReturnValue(undefined);
+    vi.mocked(deps.policyEngine.isTrustedServer).mockReturnValue(true);
+
+    const result = await handleCallTool('store', { unknown_arg: 'value' }, deps);
+
+    // Should NOT be an argument validation error — trusted servers bypass validation
+    const content = result.content as Array<{ type: string; text: string }>;
+    expect(content[0]?.text ?? '').not.toContain('Unknown argument');
   });
 
   it('forwards allowed calls to the real MCP server', async () => {
