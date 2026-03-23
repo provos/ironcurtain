@@ -591,9 +591,9 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
         },
       });
 
-      term.on('key', (key: string) => {
+      term.on('key', (key: string, _matches: unknown, data: { code?: Buffer | number }) => {
         if (!running) return;
-        const action = inputHandler.handleKey(key);
+        const action = inputHandler.handleKey(key, data.code);
         void handleAction(action);
       });
 

@@ -255,9 +255,9 @@ describe('handleVirtualProxyTool', () => {
 
   it('rejects missing justification in add_proxy_domain', async () => {
     const client = createMockClient();
-    await expect(
-      handleVirtualProxyTool('add_proxy_domain', { domain: 'api.example.com' }, client),
-    ).rejects.toThrow('Missing or invalid required argument: justification');
+    await expect(handleVirtualProxyTool('add_proxy_domain', { domain: 'api.example.com' }, client)).rejects.toThrow(
+      'Missing or invalid required argument: justification',
+    );
   });
 });
 

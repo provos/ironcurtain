@@ -51,16 +51,30 @@ describe('MuxInputHandler', () => {
       expect(action).toEqual({ kind: 'write-pty', data: '\x1c' });
     });
 
-    it('translates terminal-kit key names to raw sequences for PTY', () => {
+    it('forwards raw bytes from terminal-kit data.code to PTY', () => {
       const handler = createMuxInputHandler();
-      expect(handler.handleKey('ENTER')).toEqual({ kind: 'write-pty', data: '\r' });
-      expect(handler.handleKey('BACKSPACE')).toEqual({ kind: 'write-pty', data: '\x7f' });
-      expect(handler.handleKey('ESCAPE')).toEqual({ kind: 'write-pty', data: '\x1b' });
-      expect(handler.handleKey('UP')).toEqual({ kind: 'write-pty', data: '\x1b[A' });
-      expect(handler.handleKey('DOWN')).toEqual({ kind: 'write-pty', data: '\x1b[B' });
-      expect(handler.handleKey('LEFT')).toEqual({ kind: 'write-pty', data: '\x1b[D' });
-      expect(handler.handleKey('RIGHT')).toEqual({ kind: 'write-pty', data: '\x1b[C' });
-      expect(handler.handleKey('CTRL_C')).toEqual({ kind: 'write-pty', data: '\x03' });
+      // Buffer rawCode (escape sequences)
+      expect(handler.handleKey('ENTER', 0x0d)).toEqual({ kind: 'write-pty', data: '\r' });
+      expect(handler.handleKey('BACKSPACE', 0x7f)).toEqual({ kind: 'write-pty', data: '\x7f' });
+      expect(handler.handleKey('ESCAPE', 0x1b)).toEqual({ kind: 'write-pty', data: '\x1b' });
+      expect(handler.handleKey('UP', Buffer.from('\x1b[A'))).toEqual({ kind: 'write-pty', data: '\x1b[A' });
+      expect(handler.handleKey('DOWN', Buffer.from('\x1b[B'))).toEqual({ kind: 'write-pty', data: '\x1b[B' });
+      expect(handler.handleKey('LEFT', Buffer.from('\x1b[D'))).toEqual({ kind: 'write-pty', data: '\x1b[D' });
+      expect(handler.handleKey('RIGHT', Buffer.from('\x1b[C'))).toEqual({ kind: 'write-pty', data: '\x1b[C' });
+      expect(handler.handleKey('CTRL_C', 0x03)).toEqual({ kind: 'write-pty', data: '\x03' });
+      // Keys not in any map are forwarded via rawCode
+      expect(handler.handleKey('SHIFT_TAB', Buffer.from('\x1b[Z'))).toEqual({
+        kind: 'write-pty',
+        data: '\x1b[Z',
+      });
+    });
+
+    it('falls back to key name string when rawCode is not provided', () => {
+      const handler = createMuxInputHandler();
+      // Without rawCode, the literal key name is forwarded (caller responsibility)
+      expect(handler.handleKey('ENTER')).toEqual({ kind: 'write-pty', data: 'ENTER' });
+      // Single printable chars pass through fine without rawCode
+      expect(handler.handleKey('a')).toEqual({ kind: 'write-pty', data: 'a' });
     });
   });
 
