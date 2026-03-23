@@ -128,8 +128,8 @@ export interface MuxInputHandler {
    *
    * @param rawCode - The raw bytes from terminal-kit's `data.code` field:
    *   Buffer for escape sequences, number for single ASCII chars. When
-   *   provided, PTY mode forwards these bytes directly instead of mapping
-   *   through KEY_TO_SEQUENCE.
+   *   provided, PTY mode forwards these bytes directly to the PTY. When
+   *   omitted, PTY mode falls back to writing the key name string.
    */
   handleKey(key: string, rawCode?: Buffer | number): MuxAction;
 
@@ -162,7 +162,7 @@ const SHIFT_TAB = 'SHIFT_TAB';
  * suitable for writing to a PTY.
  */
 function rawCodeToString(rawCode: Buffer | number): string {
-  return typeof rawCode === 'number' ? String.fromCharCode(rawCode) : rawCode.toString('binary');
+  return typeof rawCode === 'number' ? String.fromCharCode(rawCode) : rawCode.toString('utf8');
 }
 
 /**
