@@ -82,13 +82,13 @@ Engine uses concrete filesystem paths with `path.resolve()` and directory contai
 - `src/pipeline/generate-with-repair.ts` -- `generateObjectWithRepair()`, `parseJsonWithSchema()`, `extractJson()`, `schemaToPromptHint()` (all exported)
 - `src/pipeline/dynamic-list-types.ts` -- LIST_TYPE_REGISTRY, ListTypeDef, getListMatcher()
 - `src/pipeline/list-resolver.ts` -- resolveList(), resolveAllLists()
-- `src/pipeline/scenario-generator.ts` -- LLM test generation + `ScenarioGeneratorSession` (multi-turn) + `formatFeedbackMessage()`
+- `src/pipeline/scenario-generator.ts` -- LLM test generation with batching + `repairScenarios()` for structural conflict replacements
 - `src/pipeline/policy-verifier.ts` -- multi-round real engine + LLM judge (re-exports DiscardedScenario from types)
 - `src/pipeline/handwritten-scenarios.ts` -- 26 mandatory test scenarios (15 filesystem + 11 git)
-- `src/pipeline/compile.ts` -- CLI thin wrapper over PipelineRunner; re-exports `mergeReplacements`, `resolveRulePaths`, `connectMcpServersForLists`, `disconnectMcpServers`
-- `src/pipeline/pipeline-runner.ts` -- `PipelineRunner` class: full compile-verify-repair loop; `buildTaskCompilerSystemPrompt()` for task-policy
+- `src/pipeline/compile.ts` -- CLI thin wrapper over PipelineRunner; re-exports `resolveRulePaths`; CLI flags: `--constitution`, `--output-dir`, `--server`
+- `src/pipeline/pipeline-runner.ts` -- `PipelineRunner` class: per-server compilation for both 'constitution' and 'task-policy' modes; exports `mergeServerResults()`, `validateServerScoping()`, `deduplicateListDefinitions()`, `getHandwrittenScenariosForServer()`, `computeServerPolicyHash()`
 - `src/pipeline/mcp-connections.ts` -- `connectMcpServersForLists()`, `disconnectMcpServers()`
-- `src/pipeline/pipeline-shared.ts` -- shared utils: `resolveRulePaths()`, `mergeReplacements()`, `loadPipelineConfig()`, `createPipelineLlm()`, caching, spinners
+- `src/pipeline/pipeline-shared.ts` -- shared utils: `resolveRulePaths()`, `loadPipelineConfig()`, `createPipelineLlm()`, caching, spinners
 - `src/pipeline/constitution-customizer.ts` -- LLM-assisted conversational customizer CLI
 - `src/config/index.ts` -- `loadConfig()` and `loadGeneratedPolicy()` (returns dynamicLists)
 
@@ -134,15 +134,12 @@ Zod v4 (^4.3.6) strict by default. Mock response JSON must exactly match Zod sch
 - **Build**: `copy-assets.mjs` copies `constitution-readonly.md` + `generated-readonly/` to `dist/config/`
 - **Tests**: `test/constitution-generator.test.ts`, `test/job-customizer.test.ts`, `test/compile-policy-cli.test.ts`, `test/readonly-policy-paths.test.ts`
 
-## Multi-Turn Scenario Generator Session
-- **ScenarioGeneratorSession**: `src/pipeline/scenario-generator.ts` -- stateful multi-turn wrapper
-- **Pattern**: stable system prompt (cacheable) + growing message history; `generate()` for turn 1, `regenerate(feedback)` for turn 2+
-- **ScenarioFeedback**: `src/pipeline/types.ts` -- corrections + discardedScenarios + probeScenarios
-- **formatFeedbackMessage()**: exported from scenario-generator.ts; formats feedback as markdown sections
-- **mergeReplacements()**: canonical in pipeline-shared.ts (re-exported from compile.ts); removes corrected/discarded, adds unique replacements
-- **DiscardedScenario**: moved to `src/pipeline/types.ts` (was in policy-verifier.ts); re-exported from policy-verifier for backward compat
-- **parseJsonWithSchema()**: exported from generate-with-repair.ts; shared extraction+validation for session and generateObjectWithRepair
-- **Design**: `docs/designs/scenario-generator-multi-turn.md`
+## Scenario Generation & Repair
+- **Batched generation**: `generateScenarios()` in scenario-generator.ts; batches of SCENARIO_BATCH_SIZE=25; per-batch scoped schema
+- **repairScenarios()**: single-shot LLM call to replace structurally discarded scenarios; wired into `compileServer`
+- **DiscardedScenario**: in `src/pipeline/types.ts`; has `scenario`, `actual`, `rule` fields
+- **parseJsonWithSchema()**: exported from generate-with-repair.ts; shared extraction+validation
+- **Design**: `docs/designs/scenario-generation-batching.md`
 
 ## Persona System
 - **Design**: `docs/designs/persona-system.md`
@@ -155,6 +152,18 @@ Zod v4 (^4.3.6) strict by default. Mock response JSON must exactly match Zod sch
 - **Session integration**: `persona?: string` in `SessionOptions`; resolved in `buildSessionConfig()` via static import of resolve.ts
 - **Constitution generator**: `context?: 'cron' | 'persona'` added to `ConstitutionGeneratorOptions` in `src/cron/constitution-generator.ts`
 - **Layout**: `~/.ironcurtain/personas/{name}/{persona.json, constitution.md, generated/, workspace/memory.md}`
+
+## Per-Server Policy Compilation
+- **Design**: `docs/designs/per-server-policy-compilation.md`
+- **Dispatch**: `run()` routes all modes through `runPerServer()` (monolithic path removed)
+- **Per-server artifacts**: `generated/servers/{serverName}/compiled-policy.json` and `test-scenarios.json`
+- **Schema enforcement**: `buildCompilerResponseSchema(names, tools, { requireServer: true })` makes `server` field required
+- **Prompt scoping**: `buildCompilerSystemPrompt(..., { serverScope: serverName })` adds "Server Scope" section
+- **Merge**: `mergeServerResults()` concatenates rules sorted alphabetically by server; `deduplicateListDefinitions()` first-wins
+- **Cross-server verification**: deterministic `executeScenarios()` sanity check post-merge (no LLM calls)
+- **Types**: `ServerCompiledPolicyFile` in `types.ts`; `ServerCompilationUnit`/`ServerCompilationResult` internal to pipeline-runner
+- **CLI**: `--server <name>` flag for single-server debugging via `serverFilter` on `PipelineRunConfig`
+- **Cache key**: `computeServerPolicyHash(serverName, constitution, annotations, promptTemplate)`
 
 ## Design Documents
 - `docs/designs/policy-compilation-pipeline.md` -- pipeline design spec
