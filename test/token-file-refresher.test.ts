@@ -116,7 +116,7 @@ describe('TokenFileRefresher', () => {
       await refresher.refreshIfNeeded();
 
       expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining('Token endpoint unreachable'));
-      expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining('[token-refresher]'));
+      expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining('[token-refresher:'));
       expect(config.writeCredentialFile).not.toHaveBeenCalled();
 
       stderrSpy.mockRestore();

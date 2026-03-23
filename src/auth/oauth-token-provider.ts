@@ -165,6 +165,15 @@ export class OAuthTokenProvider {
     return this.doRefresh();
   }
 
+  /**
+   * Forces a token refresh regardless of current expiry.
+   * Used by the TokenFileRefresher which has a more aggressive threshold
+   * (10 min) than the normal getValidAccessToken (5 min).
+   */
+  async forceRefresh(): Promise<string> {
+    return this.doRefresh();
+  }
+
   /** Returns true if a token file exists for this provider. */
   isAuthorized(): boolean {
     return existsSync(getOAuthTokenPath(this.provider.id));
