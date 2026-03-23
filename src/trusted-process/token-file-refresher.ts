@@ -24,6 +24,8 @@ export interface TokenRefreshConfig {
   }>;
   /** Function to write the credential file in the format the MCP server expects. */
   readonly writeCredentialFile: (accessToken: string, expiresAt: number, scopes: readonly string[]) => void;
+  /** Optional callback to log to the session log (not just stderr). */
+  readonly logToSession?: (message: string) => void;
 }
 
 /**
@@ -60,9 +62,30 @@ export class TokenFileRefresher {
     this.currentExpiresAt = initialExpiresAt;
   }
 
-  /** Starts the periodic refresh check. */
+  /** Best-effort log to session log (if available) and stderr (errors only). */
+  private log(message: string, isError = false): void {
+    const prefix = `[token-refresher:${this.config.providerId}]`;
+    const full = `${prefix} ${message}`;
+    try {
+      this.config.logToSession?.(full);
+    } catch {
+      // Swallow — logging must never break the refresh loop.
+    }
+    if (isError) {
+      try {
+        process.stderr.write(`${full}\n`);
+      } catch {
+        // Swallow — logging must never break the refresh loop.
+      }
+    }
+  }
+
+  /** Starts the periodic refresh check. Performs an immediate check first. */
   start(intervalMs: number = DEFAULT_REFRESH_INTERVAL_MS): void {
     if (this.intervalHandle !== null) return;
+
+    // Immediate check — catches tokens already near expiry at session start
+    void this.refreshIfNeeded();
 
     this.intervalHandle = setInterval(() => {
       void this.refreshIfNeeded();
@@ -98,17 +121,22 @@ export class TokenFileRefresher {
         return; // Token still has plenty of time
       }
 
+      const minUntilExpiry = Math.round(timeUntilExpiry / 60_000);
+      this.log(`Refreshing token (${minUntilExpiry} min until expiry)`);
+
       const refresh = (async () => {
         const { accessToken, expiresAt, scopes } = await this.config.getAccessToken();
         this.config.writeCredentialFile(accessToken, expiresAt, scopes);
         this.currentExpiresAt = expiresAt;
+        const newMin = Math.round((expiresAt - Date.now()) / 60_000);
+        this.log(`Token refreshed successfully (new expiry in ${newMin} min)`);
       })();
       this.inflight = refresh;
       await refresh;
     } catch (err) {
       // Log but don't throw -- this runs on an interval
       const message = err instanceof Error ? err.message : String(err);
-      process.stderr.write(`[token-refresher] Failed to refresh token for "${this.config.providerId}": ${message}\n`);
+      this.log(`FAILED to refresh token: ${message}`, true);
     } finally {
       this.inflight = null;
     }

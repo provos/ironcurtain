@@ -165,6 +165,15 @@ export class OAuthTokenProvider {
     return this.doRefresh();
   }
 
+  /**
+   * Forces a token refresh regardless of current expiry.
+   * Used by the TokenFileRefresher which has a more aggressive threshold
+   * (10 min) than the normal getValidAccessToken (5 min).
+   */
+  async forceRefresh(): Promise<string> {
+    return this.doRefresh(true);
+  }
+
   /** Returns true if a token file exists for this provider. */
   isAuthorized(): boolean {
     return existsSync(getOAuthTokenPath(this.provider.id));
@@ -180,12 +189,12 @@ export class OAuthTokenProvider {
    * Core refresh with deduplication. Concurrent callers share a single
    * in-flight refresh promise.
    */
-  private doRefresh(): Promise<string> {
+  private doRefresh(force = false): Promise<string> {
     if (this.inflightRefresh) {
       return this.inflightRefresh;
     }
 
-    this.inflightRefresh = this.executeRefresh().finally(() => {
+    this.inflightRefresh = this.executeRefresh(force).finally(() => {
       this.inflightRefresh = null;
     });
 
@@ -195,11 +204,14 @@ export class OAuthTokenProvider {
   /**
    * Re-read-before-refresh pattern: another process may have already
    * refreshed the token since our initial check.
+   *
+   * When force=true, skips the early return so the token is always
+   * refreshed via the provider's token endpoint.
    */
-  private async executeRefresh(): Promise<string> {
+  private async executeRefresh(force = false): Promise<string> {
     // Re-read from disk -- another process may have refreshed already
     const reread = loadOAuthToken(this.provider.id);
-    if (reread && !isTokenExpired(reread)) {
+    if (!force && reread && !isTokenExpired(reread)) {
       return reread.accessToken;
     }
 

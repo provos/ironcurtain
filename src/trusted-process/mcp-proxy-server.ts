@@ -1122,7 +1122,9 @@ async function main(): Promise<void> {
           {
             providerId: oauthProvider.id,
             getAccessToken: async () => {
-              const token = await tokenProvider.getValidAccessToken();
+              // Force refresh: match the refresher's 10-min threshold
+              // (getValidAccessToken's 5-min threshold would skip near-expiry tokens)
+              const token = await tokenProvider.forceRefresh();
               const stored = loadOAuthToken(oauthProvider.id);
               if (!stored) {
                 throw new Error(`Token file missing for "${oauthProvider.id}"`);
@@ -1132,6 +1134,7 @@ async function main(): Promise<void> {
             writeCredentialFile: (token, expiry, scopes) => {
               writeGWorkspaceCredentialFile(credsDir, token, expiry, scopes);
             },
+            logToSession: sessionLogPath ? (msg) => logToSessionFile(sessionLogPath, msg) : undefined,
           },
           storedToken.expiresAt,
         );
