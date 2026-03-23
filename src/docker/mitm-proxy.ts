@@ -97,7 +97,6 @@ export interface MitmProxyOptions {
    */
   readonly providers: readonly ProviderKeyMapping[];
 
-
   /**
    * Package registry configurations.
    * When present, the proxy allows CONNECT to registry hosts and
