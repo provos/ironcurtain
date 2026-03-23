@@ -7,9 +7,12 @@ import { describe, it, expect } from 'vitest';
 import { parseCompilePolicyArgs } from '../src/pipeline/compile.js';
 
 describe('parseCompilePolicyArgs', () => {
-  it('returns empty object when no args provided', () => {
+  it('returns defaults when no args provided', () => {
     const result = parseCompilePolicyArgs([]);
-    expect(result).toEqual({});
+    expect(result.constitution).toBeUndefined();
+    expect(result.outputDir).toBeUndefined();
+    expect(result.server).toBeUndefined();
+    expect(result.noMcp).toBe(false);
   });
 
   it('parses --constitution flag', () => {
@@ -40,7 +43,10 @@ describe('parseCompilePolicyArgs', () => {
 
   it('ignores unknown flags', () => {
     const result = parseCompilePolicyArgs(['--unknown', 'value']);
-    expect(result).toEqual({});
+    expect(result.constitution).toBeUndefined();
+    expect(result.outputDir).toBeUndefined();
+    expect(result.server).toBeUndefined();
+    expect(result.noMcp).toBe(false);
   });
 
   it('resolves relative constitution paths to absolute', () => {
@@ -72,5 +78,15 @@ describe('parseCompilePolicyArgs', () => {
     expect(result.server).toBe('git');
     expect(result.constitution).toBe('/path/to/c.md');
     expect(result.outputDir).toBe('/tmp/out');
+  });
+
+  it('parses --no-mcp flag', () => {
+    const result = parseCompilePolicyArgs(['--no-mcp']);
+    expect(result.noMcp).toBe(true);
+  });
+
+  it('defaults noMcp to false when not specified', () => {
+    const result = parseCompilePolicyArgs(['--constitution', '/path/to/c.md']);
+    expect(result.noMcp).toBe(false);
   });
 });

@@ -145,6 +145,18 @@ export function loadToolAnnotationsFile(dir: string, fallbackDir?: string): Tool
   return resolveStoredAnnotationsFile(stored);
 }
 
+/**
+ * Loads tool-annotations.json WITHOUT resolving conditional role specs.
+ * Returns the raw on-disk format so callers can inspect conditional details
+ * (e.g., for scenario generator prompts that need discriminator arg info).
+ */
+export function loadStoredToolAnnotationsFile(
+  dir: string,
+  fallbackDir?: string,
+): StoredToolAnnotationsFile | undefined {
+  return loadExistingArtifact<StoredToolAnnotationsFile>(dir, 'tool-annotations.json', fallbackDir);
+}
+
 // ---------------------------------------------------------------------------
 // Spinner Helpers
 // ---------------------------------------------------------------------------

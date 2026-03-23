@@ -7,14 +7,15 @@
  * structured response.
  *
  * For data-backed lists (requiresMcp: true): gives the LLM access to
- * MCP tools (via tool-use) so it can query live data sources, then
- * parses the final text response for the structured list values.
+ * MCP tools exposed through a proxy connection, then parses the final
+ * text response for the structured list values.
  *
  * Applies type-specific validation to filter malformed values.
  * Preserves manual overrides from any existing resolution.
  */
 
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import type { LanguageModel, ToolSet } from 'ai';
 import { generateText, jsonSchema, stepCountIs, tool } from 'ai';
 import { z } from 'zod';
@@ -23,28 +24,18 @@ import { LIST_TYPE_REGISTRY } from './dynamic-list-types.js';
 import { computeHash } from './pipeline-shared.js';
 import type { ListDefinition, ResolvedList, DynamicListsFile } from './types.js';
 
-/**
- * Shape of a pre-connected MCP server with its discovered tools.
- * Matches the ServerConnection pattern from annotate.ts.
- */
-export interface McpServerConnection {
-  readonly client: Client;
-  readonly tools: ReadonlyArray<{
-    name: string;
-    description?: string;
-    inputSchema: Record<string, unknown>;
-  }>;
-}
-
 export interface ListResolverConfig {
   readonly model: LanguageModel;
 
   /**
-   * Optional pre-connected MCP clients for data-backed list resolution.
-   * Keyed by server name. When undefined, lists with requiresMcp: true
-   * fail with a descriptive error.
+   * Optional proxy connection for data-backed list resolution.
+   * The proxy handles policy mediation, OAuth, and sandbox containment
+   * internally -- tools are already filtered.
    */
-  readonly mcpConnections?: ReadonlyMap<string, McpServerConnection>;
+  readonly proxyConnection?: {
+    readonly client: Client;
+    readonly tools: ReadonlyArray<Tool>;
+  };
 }
 
 const listResponseSchema = z.object({
@@ -137,21 +128,21 @@ async function resolveViaLlm(
 const MAX_MCP_TOOL_STEPS = 5;
 
 /**
- * Bridges MCP server tools as AI SDK tools with execute functions
- * that forward calls to the MCP client.
+ * Bridges proxy-exposed MCP tools as AI SDK tools. The proxy handles
+ * policy evaluation internally, so these wrappers simply forward
+ * calls to the MCP client.
  */
-function bridgeMcpTools(serverName: string, connection: McpServerConnection): ToolSet {
-  const tools: ToolSet = {};
-  for (const mcpTool of connection.tools) {
-    const qualifiedName = `${serverName}__${mcpTool.name}`;
+export function bridgeProxyTools(client: Client, tools: ReadonlyArray<Tool>): ToolSet {
+  const bridged: ToolSet = {};
+  for (const mcpTool of tools) {
     // Ensure the input schema has "type": "object" (some MCP servers omit it)
-    const schema = { type: 'object' as const, ...mcpTool.inputSchema };
+    const schema = { type: 'object' as const, ...(mcpTool.inputSchema as Record<string, unknown>) };
 
-    tools[qualifiedName] = tool({
+    bridged[mcpTool.name] = tool({
       description: mcpTool.description ?? `Tool: ${mcpTool.name}`,
       inputSchema: jsonSchema(schema),
       execute: async (args: unknown) => {
-        const result = await connection.client.callTool({
+        const result = await client.callTool({
           name: mcpTool.name,
           arguments: args as Record<string, unknown>,
         });
@@ -166,28 +157,7 @@ function bridgeMcpTools(serverName: string, connection: McpServerConnection): To
       },
     });
   }
-  return tools;
-}
-
-/**
- * Selects which MCP connection to use for a definition.
- * Prefers mcpServerHint if it matches a connected server; otherwise
- * uses the first available connection.
- */
-function selectMcpConnection(
-  definition: ListDefinition,
-  connections: ReadonlyMap<string, McpServerConnection>,
-): { serverName: string; connection: McpServerConnection } | undefined {
-  if (definition.mcpServerHint) {
-    const connection = connections.get(definition.mcpServerHint);
-    if (connection) return { serverName: definition.mcpServerHint, connection };
-  }
-  // Fall back to first available connection
-  const first = connections.entries().next();
-  if (!first.done) {
-    return { serverName: first.value[0], connection: first.value[1] };
-  }
-  return undefined;
+  return bridged;
 }
 
 /**
@@ -214,7 +184,15 @@ async function resolveViaMcpTools(
   const parsed = parseValuesFromText(result.text);
   if (parsed.length > 0) return parsed;
 
-  // If parsing failed, return empty with a warning
+  // Check if the LLM's response indicates all tool calls failed (e.g., missing OAuth, auth errors)
+  const errorPatterns = /\b(Error|Login Required|No refresh token|authentication failed|unauthorized)\b/i;
+  if (errorPatterns.test(result.text)) {
+    // Extract a short excerpt for the error message
+    const excerpt = result.text.slice(0, 300).replace(/\n/g, ' ').trim();
+    throw new Error(`MCP-backed list resolution failed — LLM reported errors: ${excerpt}`);
+  }
+
+  // If parsing failed but no errors detected, warn and return empty
   console.error(`  Warning: Could not parse list values from MCP-backed resolution text`);
   return [];
 }
@@ -260,7 +238,7 @@ function parseValuesFromText(text: string): string[] {
  * Resolves a single list definition to concrete values.
  *
  * For knowledge-based lists: uses structured LLM output.
- * For data-backed lists: gives the LLM MCP tools, then parses the result.
+ * For data-backed lists: bridges proxy tools as AI SDK tools for LLM tool-use.
  *
  * Applies type-specific validation to filter malformed values.
  * Preserves manual overrides from any existing resolution.
@@ -277,17 +255,22 @@ export async function resolveList(
   let rawValues: string[];
 
   if (definition.requiresMcp) {
-    const selected = config.mcpConnections ? selectMcpConnection(definition, config.mcpConnections) : undefined;
-
-    if (!selected) {
+    if (!config.proxyConnection) {
       throw new Error(
-        `List "@${definition.name}" requires MCP server access (requiresMcp: true) ` +
-          `but no MCP clients are available. Run with --with-mcp or ensure the ` +
-          `"${definition.mcpServerHint ?? 'required'}" MCP server is configured and reachable.`,
+        `List "@${definition.name}" requires MCP access but no proxy connection ` +
+          `was provided. Ensure MCP servers are available (use --no-mcp to skip).`,
       );
     }
 
-    const mcpTools = bridgeMcpTools(selected.serverName, selected.connection);
+    if (config.proxyConnection.tools.length === 0) {
+      throw new Error(
+        `List "@${definition.name}" requires MCP server access (requiresMcp: true) ` +
+          `but no MCP tools are available through the proxy. ` +
+          `Ensure the "${definition.mcpServerHint ?? 'required'}" MCP server is configured and reachable.`,
+      );
+    }
+
+    const mcpTools = bridgeProxyTools(config.proxyConnection.client, config.proxyConnection.tools);
     rawValues = await resolveViaMcpTools(prompt, config.model, mcpTools, onProgress);
   } else {
     rawValues = await resolveViaLlm(prompt, config.model, onProgress);

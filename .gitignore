@@ -29,5 +29,8 @@ Thumbs.db
 # Out of repo references
 *-reference
 
+# Per-server intermediate artifacts from read-only policy compilation
+src/config/generated-readonly/servers/
+
 # Test Coverage
 coverage/

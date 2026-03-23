@@ -2324,8 +2324,18 @@ describe('PolicyEngine with conditional roles', () => {
 
             args: {
               path: {
-                default: ['read-path', 'write-history'],
-                when: [{ condition: { arg: 'mode', equals: 'list' }, roles: ['read-path'] }],
+                default: ['read-path', 'write-history', 'delete-history'],
+                when: [
+                  { condition: { arg: 'mode', equals: 'list' }, roles: ['read-path'] },
+                  {
+                    condition: { arg: 'mode', in: ['push', 'pop', 'apply'] },
+                    roles: ['read-path', 'write-history'],
+                  },
+                  {
+                    condition: { arg: 'mode', in: ['drop', 'clear'] },
+                    roles: ['read-path', 'delete-history'],
+                  },
+                ],
               },
               mode: ['none'],
             },
@@ -2543,7 +2553,7 @@ describe('PolicyEngine with conditional roles', () => {
         arguments: { path: `${SANDBOX_DIR}/repo`, mode: 'drop' },
       }),
     );
-    // write-history is sandbox-safe → structural-sandbox-allow
+    // delete-history is sandbox-safe → structural-sandbox-allow
     expect(result.decision).toBe('allow');
     expect(result.rule).toBe('structural-sandbox-allow');
   });

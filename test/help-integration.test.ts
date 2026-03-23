@@ -7,6 +7,7 @@ import { buildSystemPrompt, type ServerListing } from '../src/session/prompts.js
 import type { IronCurtainConfig } from '../src/config/types.js';
 import type { CompiledPolicyFile, ToolAnnotationsFile } from '../src/pipeline/types.js';
 import { testCompiledPolicy, testToolAnnotations, REAL_TMP } from './fixtures/test-policy.js';
+import { isIsolatedVmAvailable } from './helpers/isolated-vm-available.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(__dirname, '..');
@@ -25,7 +26,7 @@ function writeTestArtifacts(
   writeFileSync(resolve(dir, 'tool-annotations.json'), JSON.stringify(toolAnnotations));
 }
 
-describe('Help system integration', () => {
+describe.skipIf(!isIsolatedVmAvailable())('Help system integration', () => {
   let sandbox: Sandbox;
 
   const config: IronCurtainConfig = {

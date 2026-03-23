@@ -52,6 +52,7 @@
     "start": "tsx src/cli.ts start",
     "annotate-tools": "tsx src/cli.ts annotate-tools",
     "compile-policy": "tsx src/cli.ts compile-policy",
+    "compile-policy:readonly": "tsx src/cli.ts compile-policy --no-mcp --constitution src/config/constitution-readonly.md --output-dir src/config/generated-readonly",
     "customize-policy": "tsx src/cli.ts customize-policy",
     "bot": "tsx src/cli.ts bot",
     "config": "tsx src/cli.ts config",

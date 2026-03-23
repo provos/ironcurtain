@@ -261,21 +261,24 @@ describe('resolveList', () => {
   // MCP-required error cases
   // ---------------------------------------------------------------------------
 
-  describe('MCP-required list without connections', () => {
-    it('throws a descriptive error when requiresMcp is true and no connections provided', async () => {
+  describe('MCP-required list without proxy connection', () => {
+    it('throws when requiresMcp is true and no proxyConnection provided', async () => {
       const def = makeDefinition({ requiresMcp: true, name: 'github-repos' });
       const config: ListResolverConfig = { model: createMockModel([]) };
+      await expect(resolveList(def, config)).rejects.toThrow(/no proxy connection/);
       await expect(resolveList(def, config)).rejects.toThrow(/github-repos/);
-      await expect(resolveList(def, config)).rejects.toThrow(/requiresMcp/);
     });
 
-    it('throws when mcpConnections map is empty', async () => {
+    it('throws when proxyConnection has no tools', async () => {
       const def = makeDefinition({ requiresMcp: true });
       const config: ListResolverConfig = {
         model: createMockModel([]),
-        mcpConnections: new Map(),
+        proxyConnection: {
+          client: { callTool: vi.fn() } as never,
+          tools: [],
+        },
       };
-      await expect(resolveList(def, config)).rejects.toThrow();
+      await expect(resolveList(def, config)).rejects.toThrow(/no MCP tools are available/);
     });
   });
 

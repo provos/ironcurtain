@@ -2,16 +2,13 @@
  * PipelineRunner -- Encapsulates the full policy compilation pipeline.
  *
  * Provides a reusable abstraction over the compile-verify-repair loop.
- * Used by both:
+ * Used by:
  * - compile.ts CLI (constitutionKind: 'constitution') -- per-server compilation
- * - compileTaskPolicy() (constitutionKind: 'task-policy') -- monolithic compilation
+ * - compileTaskPolicy() (constitutionKind: 'task-policy') -- per-server whitelist
  *
- * For 'constitution' mode, each MCP server is compiled independently with its
- * own compile-verify-repair cycle, then results are merged. This enables
- * incremental recompilation and better per-server rule quality.
- *
- * For 'task-policy' mode, all servers are compiled in a single monolithic
- * pass since the LLM benefits from seeing all tools at once.
+ * Each MCP server is compiled independently with its own compile-verify-repair
+ * cycle, then results are merged. This enables incremental recompilation and
+ * better per-server rule quality.
  */
 
 import { resolve } from 'node:path';
@@ -27,29 +24,32 @@ import {
   validateCompiledRules,
 } from './constitution-compiler.js';
 import { getHandwrittenScenarios } from './handwritten-scenarios.js';
-import { resolveAllLists, type McpServerConnection } from './list-resolver.js';
+import { resolveAllLists } from './list-resolver.js';
 import {
   computeHash,
   loadExistingArtifact,
-  loadToolAnnotationsFile,
+  loadStoredToolAnnotationsFile,
   resolveRulePaths,
   writeArtifact,
   withSpinner,
   showCached,
   createPipelineLlm,
 } from './pipeline-shared.js';
+import { resolveStoredAnnotationsFile } from '../types/argument-roles.js';
 import {
   applyScenarioCorrections,
   buildJudgeSystemPrompt,
+  detectAllDefaultRoleFallbacks,
   extractScenarioCorrections,
   filterStructuralConflicts,
   PolicyVerifierSession,
   verifyPolicy,
 } from './policy-verifier.js';
+import { filterInvalidSchemaScenarios } from './scenario-schema-validator.js';
 import { buildGeneratorSystemPrompt, generateScenarios, repairScenarios } from './scenario-generator.js';
 import type { LlmLogContext } from './llm-logger.js';
 import type { PromptCacheStrategy } from '../session/prompt-cache.js';
-import { connectMcpServersForLists, disconnectMcpServers } from './mcp-connections.js';
+import { connectViaProxy, type ProxyConnection } from './proxy-mcp-connections.js';
 import type {
   CompiledPolicyFile,
   CompiledRule,
@@ -59,6 +59,8 @@ import type {
   RepairContext,
   ResolvedList,
   ServerCompiledPolicyFile,
+  StoredToolAnnotation,
+  StoredToolAnnotationsFile,
   TestScenario,
   TestScenariosFile,
   ToolAnnotation,
@@ -67,10 +69,12 @@ import type {
 } from './types.js';
 
 /**
- * Selects the LLM prompt variant for policy compilation.
+ * Selects the LLM prompt variant for per-server policy compilation.
  *
  * - 'constitution': broad-principle compilation from a constitution document.
- * - 'task-policy': whitelist-generation from an English task description.
+ * - 'task-policy': strict whitelist-generation from an English task description.
+ *
+ * Both modes compile each server independently via the per-server path.
  */
 export type ConstitutionKind = 'constitution' | 'task-policy';
 
@@ -107,15 +111,15 @@ export interface PipelineRunConfig {
 
   /**
    * Whether to include handwritten scenarios in verification.
-   * Default true for 'constitution', false for 'task-policy'.
+   * Defaults to true for 'constitution', false for 'task-policy'.
    */
   readonly includeHandwrittenScenarios?: boolean;
 
   /** Progress callback for CLI output. */
   readonly onProgress?: (message: string) => void;
 
-  /** Pre-loaded tool annotations (avoids re-reading from disk). */
-  readonly preloadedToolAnnotations?: ToolAnnotationsFile;
+  /** Pre-loaded stored tool annotations (avoids re-reading from disk). */
+  readonly preloadedStoredAnnotations?: StoredToolAnnotationsFile;
 
   /** Compile only these servers (default: all servers in annotations). */
   readonly serverFilter?: string[];
@@ -152,7 +156,9 @@ export async function createPipelineModels(logDir?: string): Promise<PipelineMod
 interface ServerCompilationUnit {
   readonly serverName: string;
   readonly annotations: ToolAnnotation[];
+  readonly storedAnnotations: StoredToolAnnotation[];
   readonly constitutionText: string;
+  readonly constitutionKind: ConstitutionKind;
   readonly allowedDirectory: string;
   readonly protectedPaths: string[];
   readonly mcpServerConfig?: MCPServerConfig;
@@ -173,10 +179,6 @@ interface ServerCompilationResult {
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
-
-function computePolicyHash(systemPrompt: string, annotations: ToolAnnotation[]): string {
-  return computeHash(systemPrompt, JSON.stringify(annotations));
-}
 
 function computeScenariosHash(systemPrompt: string, handwrittenScenarios: TestScenario[]): string {
   return computeHash(systemPrompt, JSON.stringify(handwrittenScenarios));
@@ -200,8 +202,11 @@ function filterAndLogStructuralConflicts(
   engine: PolicyEngine,
   scenarios: TestScenario[],
   label: string = 'Discarded scenario (structural conflict)',
+  storedAnnotations: StoredToolAnnotation[],
 ): { valid: TestScenario[]; discarded: DiscardedScenario[] } {
-  const { valid, discarded } = filterStructuralConflicts(engine, scenarios);
+  const filterResult = filterStructuralConflicts(engine, scenarios);
+  let valid = filterResult.valid;
+  const discarded = filterResult.discarded;
   for (const d of discarded) {
     const prefix =
       d.scenario.source === 'handwritten'
@@ -209,6 +214,40 @@ function filterAndLogStructuralConflicts(
         : chalk.dim(`${label}:`);
     console.error(`  ${prefix} "${d.scenario.description}" — ${d.rule} always returns ${d.actual}`);
   }
+
+  // Discard scenarios whose arguments don't match any conditional role spec —
+  // they fall back to all default roles and test the wrong thing.
+  if (storedAnnotations.length > 0) {
+    const fallbackWarnings = detectAllDefaultRoleFallbacks(valid, storedAnnotations);
+    const fallbackDescriptions = new Set(fallbackWarnings.map((w) => w.scenario.description));
+    if (fallbackDescriptions.size > 0) {
+      const kept: TestScenario[] = [];
+      for (const s of valid) {
+        if (fallbackDescriptions.has(s.description)) {
+          const w = fallbackWarnings.find((fw) => fw.scenario.description === s.description);
+          const details = w?.details.join('; ') ?? 'unknown conditional mismatch';
+          const discardLabel = 'Discarded (default role fallback)';
+          console.error(`  ${chalk.dim(`${discardLabel}:`)} "${s.description}" — ${details}`);
+          discarded.push({ scenario: s, rule: 'default-role-fallback', actual: 'deny' });
+        } else {
+          kept.push(s);
+        }
+      }
+      valid = kept;
+    }
+
+    // Discard scenarios whose arguments violate the tool's input schema
+    // (unknown arg names, missing required fields, invalid enum values).
+    const schemaResult = filterInvalidSchemaScenarios(valid, storedAnnotations);
+    if (schemaResult.discarded.length > 0) {
+      for (const d of schemaResult.discarded) {
+        console.error(`  ${chalk.dim('Discarded (schema mismatch):')} "${d.scenario.description}" — ${d.rule}`);
+      }
+      discarded.push(...schemaResult.discarded);
+      valid = schemaResult.valid;
+    }
+  }
+
   return { valid, discarded };
 }
 
@@ -258,10 +297,15 @@ function buildTaskCompilerSystemPrompt(
   annotations: ToolAnnotation[],
   protectedPaths: string[],
   allowedDirectory: string,
+  serverScope: string,
 ): string {
   const annotationsSummary = formatAnnotationsSummary(annotations);
 
   return `You are compiling a task-scoped security policy for an automated scheduled job. The job runs unattended on a schedule. Your goal is to generate the MINIMUM set of policy rules required for this specific task -- nothing more.
+
+## Server Scope
+
+You are generating rules ONLY for the "${serverScope}" server. Every rule you emit MUST include "server": ["${serverScope}"] in its "if" condition.
 
 ## Task Description
 
@@ -311,7 +355,7 @@ Produce an ORDERED list of policy rules (first match wins). Each rule has:
 - "principle": which task requirement this implements
 - "if": conditions that must ALL be true for the rule to fire:
   - "roles": array of argument roles to match. Omit = any tool.
-  - "server": array of server names (omit = any server)
+  - "server": MUST be ["${serverScope}"]
   - "tool": array of specific tool names (omit = any matching tool)
   - "paths": path condition with "roles" and "within" (concrete absolute directory)
   - "domains": domain condition with "roles" and "allowed" (list of allowed domain patterns). For git-remote-url roles, use hostname/owner/repo patterns for specific repos (e.g., "github.com/provos/ironcurtain") or hostname-only for any repo on that host (e.g., "github.com"). Git tools with both path and URL roles need "domains" conditions for git-remote-url (path roles get sandbox-resolved separately).
@@ -324,7 +368,8 @@ CRITICAL RULES:
 2. Use CONCRETE ABSOLUTE paths when needed.
 3. Order matters: more specific rules before more general ones.
 4. Only output "allow" and "escalate" rules.
-5. Be concise in descriptions and reasons -- one sentence each.`;
+5. Be concise in descriptions and reasons -- one sentence each.
+6. EVERY rule MUST have "server": ["${serverScope}"] in its condition.`;
 }
 
 // ---------------------------------------------------------------------------
@@ -430,9 +475,9 @@ export function mergeServerResults(results: ServerCompilationResult[], constitut
  * Encapsulates the full policy compilation pipeline:
  * compile rules -> generate scenarios -> verify -> repair loop.
  *
- * For 'constitution' mode, uses per-server compilation with independent
- * compile-verify-repair cycles per server, then merges results.
- * For 'task-policy' mode, uses monolithic compilation (all servers at once).
+ * Uses per-server compilation with independent compile-verify-repair
+ * cycles per server, then merges results. Works for both 'constitution'
+ * (broad principles) and 'task-policy' (strict whitelist) modes.
  */
 export class PipelineRunner {
   private readonly model: LanguageModel;
@@ -447,12 +492,10 @@ export class PipelineRunner {
 
   /**
    * Runs the full pipeline. Returns the compiled policy on success.
-   * Dispatches to per-server or monolithic path based on constitutionKind.
+   * All compilation modes use per-server compilation with independent
+   * compile-verify-repair cycles per server, then merge results.
    */
   async run(config: PipelineRunConfig): Promise<CompiledPolicyFile> {
-    if (config.constitutionKind === 'task-policy') {
-      return this.runMonolithic(config);
-    }
     return this.runPerServer(config);
   }
 
@@ -461,25 +504,37 @@ export class PipelineRunner {
   // -----------------------------------------------------------------------
 
   /**
-   * Orchestrates per-server compilation + merge for constitution mode.
+   * Orchestrates per-server compilation + merge.
    *
    * Phase 1: Compile each server independently (compile-verify-repair per server)
    * Phase 2: Merge all per-server results into final compiled-policy.json
    * Phase 3: Resolve dynamic lists (global, post-merge)
+   *
+   * Works for both 'constitution' and 'task-policy' modes -- the
+   * constitutionKind is forwarded to each server's compilation unit
+   * to select the appropriate compiler prompt.
    */
   private async runPerServer(config: PipelineRunConfig): Promise<CompiledPolicyFile> {
-    const toolAnnotationsFile =
-      config.preloadedToolAnnotations ??
-      loadToolAnnotationsFile(config.toolAnnotationsDir, config.toolAnnotationsFallbackDir);
+    const storedAnnotationsFile =
+      config.preloadedStoredAnnotations ??
+      loadStoredToolAnnotationsFile(config.toolAnnotationsDir, config.toolAnnotationsFallbackDir);
 
-    if (!toolAnnotationsFile) {
+    if (!storedAnnotationsFile) {
       throw new Error("tool-annotations.json not found. Run 'ironcurtain annotate-tools' first.");
     }
+
+    // Resolve conditional role specs to flat annotations for compiler prompts
+    const toolAnnotationsFile = resolveStoredAnnotationsFile(storedAnnotationsFile);
 
     const constitutionHash = computeHash(config.constitutionInput);
 
     // Phase 1: Per-server compilation
-    const serverResults = await this.compileAllServers(config, toolAnnotationsFile, constitutionHash);
+    const serverResults = await this.compileAllServers(
+      config,
+      toolAnnotationsFile,
+      constitutionHash,
+      storedAnnotationsFile,
+    );
 
     // Phase 2: Merge
     const mergedPolicy = mergeServerResults(serverResults, constitutionHash);
@@ -556,6 +611,7 @@ export class PipelineRunner {
     config: PipelineRunConfig,
     toolAnnotationsFile: ToolAnnotationsFile,
     constitutionHash: string,
+    storedAnnotationsFile: StoredToolAnnotationsFile,
   ): Promise<ServerCompilationResult[]> {
     const results: ServerCompilationResult[] = [];
     const serverEntries = Object.entries(toolAnnotationsFile.servers);
@@ -578,25 +634,48 @@ export class PipelineRunner {
     const allHandwrittenScenarios = includeHandwritten ? getHandwrittenScenarios(config.allowedDirectory) : [];
 
     const totalServers = filteredEntries.length;
+    const failedServers: string[] = [];
     for (let i = 0; i < filteredEntries.length; i++) {
       const [serverName, serverData] = filteredEntries[i];
       console.error('');
       console.error(chalk.bold(`[${i + 1}/${totalServers}] Compiling server: ${serverName}`));
 
-      const result = await this.compileServer(
-        {
-          serverName,
-          annotations: serverData.tools,
-          constitutionText: config.constitutionInput,
-          allowedDirectory: config.allowedDirectory,
-          protectedPaths: config.protectedPaths,
-          mcpServerConfig: config.mcpServers?.[serverName],
-          handwrittenScenarios: allHandwrittenScenarios.filter((s) => s.request.serverName === serverName),
-        },
-        config,
-        constitutionHash,
+      try {
+        const result = await this.compileServer(
+          {
+            serverName,
+            annotations: serverData.tools,
+            storedAnnotations: storedAnnotationsFile.servers[serverName].tools,
+            constitutionText: config.constitutionInput,
+            constitutionKind: config.constitutionKind,
+            allowedDirectory: config.allowedDirectory,
+            protectedPaths: config.protectedPaths,
+            mcpServerConfig: config.mcpServers?.[serverName],
+            handwrittenScenarios: allHandwrittenScenarios.filter((s) => s.request.serverName === serverName),
+          },
+          config,
+          constitutionHash,
+        );
+        results.push(result);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`  ${chalk.red(`Server "${serverName}" failed:`)} ${msg}`);
+        failedServers.push(serverName);
+      }
+    }
+
+    if (failedServers.length > 0) {
+      console.error(
+        `\n${chalk.yellow(`Warning: ${failedServers.length} server(s) failed verification: ${failedServers.join(', ')}`)}`,
       );
-      results.push(result);
+      console.error(chalk.yellow('Continuing with successfully compiled servers.'));
+    }
+
+    if (results.length === 0) {
+      throw new Error(
+        `All ${failedServers.length} server(s) failed compilation: ${failedServers.join(', ')}. ` +
+          'No policy rules were produced.',
+      );
     }
 
     return results;
@@ -614,13 +693,22 @@ export class PipelineRunner {
     const serverOutputDir = resolve(config.outputDir, 'servers', unit.serverName);
 
     // Build per-server system prompt (only this server's annotations)
-    const compilerPrompt = buildCompilerSystemPrompt(
-      unit.constitutionText,
-      unit.annotations,
-      { protectedPaths: unit.protectedPaths, allowedDirectory: unit.allowedDirectory },
-      unit.handwrittenScenarios.length > 0 ? unit.handwrittenScenarios : undefined,
-      { serverScope: unit.serverName },
-    );
+    const compilerPrompt =
+      unit.constitutionKind === 'task-policy'
+        ? buildTaskCompilerSystemPrompt(
+            unit.constitutionText,
+            unit.annotations,
+            unit.protectedPaths,
+            unit.allowedDirectory,
+            unit.serverName,
+          )
+        : buildCompilerSystemPrompt(
+            unit.constitutionText,
+            unit.annotations,
+            { protectedPaths: unit.protectedPaths, allowedDirectory: unit.allowedDirectory },
+            unit.handwrittenScenarios.length > 0 ? unit.handwrittenScenarios : undefined,
+            { serverScope: unit.serverName },
+          );
 
     // Check per-server cache
     const inputHash = computeServerPolicyHash(unit.serverName, unit.constitutionText, unit.annotations, compilerPrompt);
@@ -640,6 +728,7 @@ export class PipelineRunner {
         unit.allowedDirectory,
         cachedPermittedDirs,
         cachedDynamicLists,
+        unit.storedAnnotations,
       );
       const cachedScenarioHash = computeScenariosHash(cachedScenarioPrompt, unit.handwrittenScenarios);
 
@@ -691,10 +780,10 @@ export class PipelineRunner {
       } satisfies ServerCompiledPolicyFile);
     writeServerPolicy();
 
-    // Build per-server tool annotations file (wrap in servers record)
-    const serverAnnotationsFile: ToolAnnotationsFile = {
+    // Build per-server tool annotations file with conditional role specs preserved
+    const serverAnnotationsFile: StoredToolAnnotationsFile = {
       generatedAt: new Date().toISOString(),
-      servers: { [unit.serverName]: { inputHash, tools: unit.annotations } },
+      servers: { [unit.serverName]: { inputHash, tools: unit.storedAnnotations } },
     };
 
     // Extract domain allowlists for this server
@@ -712,6 +801,7 @@ export class PipelineRunner {
       unit.allowedDirectory,
       permittedDirectories,
       dynamicLists,
+      unit.storedAnnotations,
     );
     const scenarioHash = computeScenariosHash(scenarioPrompt, unit.handwrittenScenarios);
 
@@ -725,6 +815,7 @@ export class PipelineRunner {
       `  ${unit.serverName}`,
       permittedDirectories,
       dynamicLists,
+      unit.storedAnnotations,
     );
 
     // Step 3: Verify compiled rules against scenarios
@@ -741,6 +832,8 @@ export class PipelineRunner {
     const { valid: filteredScenarios, discarded: discardedScenarios } = filterAndLogStructuralConflicts(
       filterEngine,
       scenarioResult.scenarios,
+      undefined,
+      unit.storedAnnotations,
     );
 
     // Generate replacement scenarios for structurally discarded ones (pre-loop, one-time)
@@ -759,6 +852,7 @@ export class PipelineRunner {
         permittedDirectories,
         dynamicLists,
         (msg) => console.error(`  ${chalk.dim(msg)}`),
+        unit.storedAnnotations,
       );
       if (replacementScenarios.length > 0) {
         // Filter replacements through structural invariants too
@@ -766,6 +860,7 @@ export class PipelineRunner {
           filterEngine,
           replacementScenarios,
           'Discarded replacement (structural conflict)',
+          unit.storedAnnotations,
         );
         scenarioResult.scenarios.push(...validReplacements);
         filteredScenarios.push(...validReplacements);
@@ -787,6 +882,7 @@ export class PipelineRunner {
         serverTools,
         dynamicLists,
         unit.allowedDirectory,
+        unit.storedAnnotations,
       ),
     );
     let verifierSession = new PolicyVerifierSession({
@@ -794,6 +890,7 @@ export class PipelineRunner {
       model: this.model,
       serverNames,
       toolNames: serverToolNames,
+      storedAnnotations: unit.storedAnnotations,
     });
 
     const verifyLabel = `  ${unit.serverName}: Verifying`;
@@ -816,6 +913,7 @@ export class PipelineRunner {
           dynamicLists,
           verifierSystem,
           verifierSession,
+          unit.storedAnnotations,
         ),
       (r, elapsed) =>
         r.pass
@@ -833,6 +931,7 @@ export class PipelineRunner {
       filterEngine,
       collectProbeScenarios(verificationResult),
       'Discarded probe (structural conflict)',
+      unit.storedAnnotations,
     );
     const accumulatedProbes: TestScenario[] = filteredInitialProbes;
 
@@ -867,7 +966,12 @@ export class PipelineRunner {
           console.error(`  ${chalk.dim(`Corrected ${corrections.length} scenario expectation(s)`)}`);
         }
 
-        ({ valid: currentFilteredScenarios } = filterAndLogStructuralConflicts(filterEngine, scenarioResult.scenarios));
+        ({ valid: currentFilteredScenarios } = filterAndLogStructuralConflicts(
+          filterEngine,
+          scenarioResult.scenarios,
+          undefined,
+          unit.storedAnnotations,
+        ));
 
         const allRuleBlamedFailures = verificationResult.failedScenarios.filter((f) => {
           const attr = attributedFailures.find((a) => a.scenarioDescription === f.scenario.description);
@@ -934,6 +1038,7 @@ export class PipelineRunner {
               serverTools,
               dynamicLists,
               unit.allowedDirectory,
+              unit.storedAnnotations,
             ),
           );
           verifierSession = new PolicyVerifierSession({
@@ -941,6 +1046,7 @@ export class PipelineRunner {
             model: this.model,
             serverNames,
             toolNames: serverToolNames,
+            storedAnnotations: unit.storedAnnotations,
           });
         } else {
           console.error(`  ${chalk.dim('No rule-blamed failures — skipping recompilation')}`);
@@ -968,6 +1074,7 @@ export class PipelineRunner {
               dynamicLists,
               verifierSystem,
               verifierSession,
+              unit.storedAnnotations,
             ),
           (r, elapsed) =>
             r.pass
@@ -984,6 +1091,7 @@ export class PipelineRunner {
           filterEngine,
           collectProbeScenarios(verificationResult),
           'Discarded probe (structural conflict)',
+          unit.storedAnnotations,
         );
         accumulatedProbes.push(...validRepairProbes);
 
@@ -1072,561 +1180,8 @@ export class PipelineRunner {
   }
 
   // -----------------------------------------------------------------------
-  // Monolithic compilation path (task-policy mode)
+  // Private compilation methods
   // -----------------------------------------------------------------------
-
-  /**
-   * Original monolithic compilation path. Used by task-policy mode where
-   * all servers are compiled in a single LLM call.
-   */
-  private async runMonolithic(config: PipelineRunConfig): Promise<CompiledPolicyFile> {
-    const toolAnnotationsFile =
-      config.preloadedToolAnnotations ??
-      loadToolAnnotationsFile(config.toolAnnotationsDir, config.toolAnnotationsFallbackDir);
-
-    if (!toolAnnotationsFile) {
-      throw new Error("tool-annotations.json not found. Run 'ironcurtain annotate-tools' first.");
-    }
-
-    const allAnnotations = Object.values(toolAnnotationsFile.servers).flatMap((server) => server.tools);
-    const serverDomainAllowlists = config.mcpServers ? extractServerDomainAllowlists(config.mcpServers) : undefined;
-
-    const includeHandwritten = config.includeHandwrittenScenarios ?? config.constitutionKind === 'constitution';
-
-    const constitutionHash = computeHash(config.constitutionInput);
-
-    // Build the system prompt based on constitutionKind
-    const handwrittenScenarios = includeHandwritten ? getHandwrittenScenarios(config.allowedDirectory) : [];
-
-    const compilerPrompt =
-      config.constitutionKind === 'task-policy'
-        ? buildTaskCompilerSystemPrompt(
-            config.constitutionInput,
-            allAnnotations,
-            config.protectedPaths,
-            config.allowedDirectory,
-          )
-        : buildCompilerSystemPrompt(
-            config.constitutionInput,
-            allAnnotations,
-            { protectedPaths: config.protectedPaths, allowedDirectory: config.allowedDirectory },
-            handwrittenScenarios.length > 0 ? handwrittenScenarios : undefined,
-          );
-
-    const compilerHash = computePolicyHash(compilerPrompt, allAnnotations);
-    const compilerSystem = this.cacheStrategy.wrapSystemPrompt(compilerPrompt);
-
-    // Load existing artifacts for cache comparison
-    const existingPolicy = loadExistingArtifact<CompiledPolicyFile>(config.outputDir, 'compiled-policy.json');
-    const existingScenarios = loadExistingArtifact<TestScenariosFile>(config.outputDir, 'test-scenarios.json');
-
-    // Step 1: Compile constitution/task into policy rules
-    this.logContext.stepName = 'compile-constitution';
-    let {
-      rules,
-      listDefinitions,
-      inputHash,
-      session: compilerSession,
-    } = await this.compilePolicyRules(allAnnotations, compilerHash, existingPolicy, compilerSystem);
-
-    let compiledPolicyFile = buildPolicyArtifact(constitutionHash, rules, listDefinitions, inputHash);
-    writeArtifact(config.outputDir, 'compiled-policy.json', compiledPolicyFile);
-
-    // Resolve dynamic lists if the compiler emitted list definitions
-    const hasLists = listDefinitions.length > 0;
-    const totalSteps = hasLists ? 4 : 3;
-    let dynamicLists: DynamicListsFile | undefined;
-
-    if (hasLists) {
-      this.logContext.stepName = 'resolve-lists';
-      const existingLists = loadExistingArtifact<DynamicListsFile>(config.outputDir, 'dynamic-lists.json');
-
-      const needsMcp = listDefinitions.some((d) => d.requiresMcp);
-      let mcpConnections: Map<string, McpServerConnection> | undefined;
-      if (needsMcp && config.mcpServers) {
-        mcpConnections = await connectMcpServersForLists(listDefinitions, config.mcpServers);
-      }
-
-      const listStepText = `[2/${totalSteps}] Resolving dynamic lists`;
-      try {
-        const { result: resolvedLists } = await withSpinner(
-          listStepText,
-          async (spinner) =>
-            resolveAllLists(listDefinitions, { model: this.model, mcpConnections }, existingLists, (msg) => {
-              spinner.text = `${listStepText} — ${msg}`;
-            }),
-          (result, elapsed) => {
-            const count = Object.keys(result.lists).length;
-            return `${listStepText}: ${count} list(s) resolved (${elapsed.toFixed(1)}s)`;
-          },
-        );
-        dynamicLists = resolvedLists;
-        writeArtifact(config.outputDir, 'dynamic-lists.json', dynamicLists);
-      } finally {
-        if (mcpConnections) {
-          await disconnectMcpServers(mcpConnections);
-        }
-      }
-    }
-
-    // Extract permitted directories from compiled rules
-    const permittedDirectories = extractPermittedDirectories(rules);
-
-    // Step 2: Generate test scenarios
-    const scenarioStepLabel = `[${hasLists ? 3 : 2}/${totalSteps}]`;
-    this.logContext.stepName = 'generate-scenarios';
-
-    const scenarioPrompt = buildGeneratorSystemPrompt(
-      config.constitutionInput,
-      allAnnotations,
-      config.allowedDirectory,
-      permittedDirectories,
-      dynamicLists,
-    );
-    const scenarioHash = computeScenariosHash(scenarioPrompt, handwrittenScenarios);
-
-    const scenarioResult = await this.generateTestScenarios(
-      config.constitutionInput,
-      allAnnotations,
-      config.allowedDirectory,
-      handwrittenScenarios,
-      scenarioHash,
-      existingScenarios,
-      scenarioStepLabel,
-      permittedDirectories,
-      dynamicLists,
-    );
-
-    writeArtifact(config.outputDir, 'test-scenarios.json', {
-      generatedAt: new Date().toISOString(),
-      constitutionHash,
-      inputHash: scenarioResult.inputHash,
-      scenarios: scenarioResult.scenarios,
-    } satisfies TestScenariosFile);
-
-    // Filter scenarios against structural invariants
-    const filterEngine = new PolicyEngine(
-      compiledPolicyFile,
-      toolAnnotationsFile,
-      config.protectedPaths,
-      config.allowedDirectory,
-      undefined,
-      dynamicLists,
-    );
-    const { valid: initialValid, discarded: discardedScenarios } = filterAndLogStructuralConflicts(
-      filterEngine,
-      scenarioResult.scenarios,
-    );
-    let filteredScenarios = initialValid;
-
-    // Generate replacement scenarios for structurally discarded ones (pre-loop, one-time)
-    if (discardedScenarios.length > 0) {
-      const discardedForRepair = discardedScenarios.map((d) => ({
-        scenario: d.scenario,
-        feedback: `${d.rule} always returns ${d.actual}`,
-      }));
-      this.logContext.stepName = 'repair-scenarios';
-      const replacementScenarios = await repairScenarios(
-        discardedForRepair,
-        config.constitutionInput,
-        allAnnotations,
-        config.allowedDirectory,
-        this.model,
-        permittedDirectories,
-        dynamicLists,
-        (msg) => console.error(`  ${chalk.dim(msg)}`),
-      );
-      if (replacementScenarios.length > 0) {
-        const { valid: validReplacements } = filterAndLogStructuralConflicts(
-          filterEngine,
-          replacementScenarios,
-          'Discarded replacement (structural conflict)',
-        );
-        scenarioResult.scenarios.push(...validReplacements);
-        filteredScenarios = [...filteredScenarios, ...validReplacements];
-        console.error(
-          `  ${chalk.dim(`Repaired ${discardedScenarios.length} discarded scenario(s) → ${validReplacements.length} replacement(s)`)}`,
-        );
-      }
-    }
-
-    // Step 3: Verify compiled policy against scenarios
-    const verifyStepLabel = `[${totalSteps}/${totalSteps}]`;
-    this.logContext.stepName = 'verify-policy';
-
-    const allAvailableTools = allAnnotations.map((a) => ({ serverName: a.serverName, toolName: a.toolName }));
-    const serverNamesList = [...new Set(allAnnotations.map((a) => a.serverName))] as [string, ...string[]];
-    const toolNamesList = [...new Set(allAnnotations.map((a) => a.toolName))] as [string, ...string[]];
-
-    let verifierSystem = this.cacheStrategy.wrapSystemPrompt(
-      buildJudgeSystemPrompt(
-        config.constitutionInput,
-        compiledPolicyFile,
-        config.protectedPaths,
-        allAvailableTools,
-        dynamicLists,
-        config.allowedDirectory,
-      ),
-    );
-    let verifierSession = new PolicyVerifierSession({
-      system: verifierSystem,
-      model: this.model,
-      serverNames: serverNamesList,
-      toolNames: toolNamesList,
-    });
-
-    const { result: verificationResultInitial } = await withSpinner(
-      `${verifyStepLabel} Verifying policy`,
-      async (spinner) =>
-        verifyPolicy(
-          config.constitutionInput,
-          compiledPolicyFile,
-          toolAnnotationsFile,
-          config.protectedPaths,
-          filteredScenarios,
-          this.model,
-          3,
-          config.allowedDirectory,
-          (msg) => {
-            spinner.text = `${verifyStepLabel} Verifying policy — ${msg}`;
-          },
-          serverDomainAllowlists,
-          dynamicLists,
-          verifierSystem,
-          verifierSession,
-        ),
-      (r, elapsed) =>
-        r.pass
-          ? `${verifyStepLabel} Verified policy: ${r.rounds.length} round(s) (${elapsed.toFixed(1)}s)`
-          : `${verifyStepLabel} Verification completed with failures (${elapsed.toFixed(1)}s)`,
-    );
-    let verificationResult = verificationResultInitial;
-
-    if (!verificationResult.pass) {
-      this.logVerboseFailures(verificationResult);
-    }
-
-    // Collect probe scenarios from verifier
-    const { valid: filteredInitialProbes } = filterAndLogStructuralConflicts(
-      filterEngine,
-      collectProbeScenarios(verificationResult),
-      'Discarded probe (structural conflict)',
-    );
-    const accumulatedProbes: TestScenario[] = filteredInitialProbes;
-
-    // Compile-verify-repair loop (up to 2 repair attempts)
-    const MAX_REPAIRS = 2;
-    let repairAttempts = 0;
-    let scenarioCorrectionsApplied = 0;
-
-    if (!verificationResult.pass) {
-      const baseInputHash = inputHash;
-
-      for (let attempt = 1; attempt <= MAX_REPAIRS; attempt++) {
-        console.error('');
-
-        const lastRound = verificationResult.rounds[verificationResult.rounds.length - 1] as
-          | (typeof verificationResult.rounds)[number]
-          | undefined;
-        const judgeAnalysis = lastRound?.llmAnalysis ?? verificationResult.summary;
-        const attributedFailures = lastRound?.attributedFailures ?? [];
-
-        const allScenarios = [...scenarioResult.scenarios, ...accumulatedProbes];
-        const { corrections, handwrittenWarnings } = extractScenarioCorrections(attributedFailures, allScenarios);
-
-        for (const warning of handwrittenWarnings) {
-          console.error(`  ${chalk.yellow('Warning:')} ${warning}`);
-        }
-
-        if (corrections.length > 0) {
-          scenarioResult.scenarios = applyScenarioCorrections(scenarioResult.scenarios, corrections);
-          const correctedProbes = applyScenarioCorrections(accumulatedProbes, corrections);
-          accumulatedProbes.splice(0, accumulatedProbes.length, ...correctedProbes);
-          scenarioCorrectionsApplied += corrections.length;
-          console.error(`  ${chalk.dim(`Corrected ${corrections.length} scenario expectation(s)`)}`);
-        }
-
-        ({ valid: filteredScenarios } = filterAndLogStructuralConflicts(filterEngine, scenarioResult.scenarios));
-
-        const allRuleBlamedFailures = verificationResult.failedScenarios.filter((f) => {
-          const attr = attributedFailures.find((a) => a.scenarioDescription === f.scenario.description);
-          if (!attr || attr.blame.kind === 'rule' || attr.blame.kind === 'both') return true;
-          return handwrittenWarnings.some((w) => w.includes(f.scenario.description));
-        });
-
-        if (allRuleBlamedFailures.length > 0) {
-          const repairContext: RepairContext = {
-            failedScenarios: allRuleBlamedFailures,
-            judgeAnalysis,
-            attemptNumber: attempt,
-            existingListDefinitions: listDefinitions.length > 0 ? listDefinitions : undefined,
-            handwrittenScenarios: includeHandwritten ? handwrittenScenarios : undefined,
-          };
-
-          this.logContext.stepName = `repair-compile-${attempt}`;
-          const repairCompileText = `Repair ${attempt}/${MAX_REPAIRS}: Recompiling`;
-          const { result: repairResult } = await withSpinner(
-            repairCompileText,
-            async (spinner) =>
-              this.compilePolicyRulesWithRepair(
-                allAnnotations,
-                config.protectedPaths,
-                baseInputHash,
-                repairContext,
-                compilerSystem,
-                compilerSession,
-                (msg) => {
-                  spinner.text = `${repairCompileText} — ${msg}`;
-                },
-              ),
-            (r, elapsed) =>
-              `Repair ${attempt}/${MAX_REPAIRS}: Recompiled ${r.rules.length} rules (${elapsed.toFixed(1)}s)`,
-          );
-          rules = repairResult.rules;
-          listDefinitions = repairResult.listDefinitions;
-          inputHash = repairResult.inputHash;
-          compilerSession = repairResult.session;
-
-          // Re-resolve dynamic lists if repair introduced new ones
-          if (dynamicLists && listDefinitions.length > 0) {
-            const currentLists = dynamicLists;
-            const newListDefs = listDefinitions.filter((def) => !(def.name in currentLists.lists));
-            if (newListDefs.length > 0) {
-              const mcpRequired = newListDefs.filter((d) => d.requiresMcp);
-              if (mcpRequired.length > 0) {
-                console.error(
-                  `  ${chalk.yellow('Warning:')} Repair introduced ${mcpRequired.length} new MCP-requiring list(s) — skipping resolution`,
-                );
-              }
-              const knowledgeDefs = newListDefs.filter((d) => !d.requiresMcp);
-              if (knowledgeDefs.length > 0) {
-                console.error(`  ${chalk.dim(`Resolving ${knowledgeDefs.length} new list(s) from repair...`)}`);
-                const resolved = await resolveAllLists(knowledgeDefs, { model: this.model }, currentLists);
-                dynamicLists = {
-                  ...resolved,
-                  lists: { ...currentLists.lists, ...resolved.lists },
-                };
-                writeArtifact(config.outputDir, 'dynamic-lists.json', dynamicLists);
-              }
-            }
-          }
-
-          compiledPolicyFile = buildPolicyArtifact(constitutionHash, rules, listDefinitions, inputHash);
-          writeArtifact(config.outputDir, 'compiled-policy.json', compiledPolicyFile);
-
-          verifierSystem = this.cacheStrategy.wrapSystemPrompt(
-            buildJudgeSystemPrompt(
-              config.constitutionInput,
-              compiledPolicyFile,
-              config.protectedPaths,
-              allAvailableTools,
-              dynamicLists,
-              config.allowedDirectory,
-            ),
-          );
-          verifierSession = new PolicyVerifierSession({
-            system: verifierSystem,
-            model: this.model,
-            serverNames: serverNamesList,
-            toolNames: toolNamesList,
-          });
-        } else {
-          console.error(`  ${chalk.dim('No rule-blamed failures — skipping recompilation')}`);
-        }
-
-        this.logContext.stepName = `repair-verify-${attempt}`;
-        const scenariosForRepairVerify = [...filteredScenarios, ...accumulatedProbes];
-        const repairVerifyText = `Repair ${attempt}/${MAX_REPAIRS}: Verifying`;
-        const { result: repairVerifyResult } = await withSpinner(
-          repairVerifyText,
-          async (spinner) =>
-            verifyPolicy(
-              config.constitutionInput,
-              compiledPolicyFile,
-              toolAnnotationsFile,
-              config.protectedPaths,
-              scenariosForRepairVerify,
-              this.model,
-              1,
-              config.allowedDirectory,
-              (msg) => {
-                spinner.text = `${repairVerifyText} — ${msg}`;
-              },
-              serverDomainAllowlists,
-              dynamicLists,
-              verifierSystem,
-              verifierSession,
-            ),
-          (r, elapsed) =>
-            r.pass
-              ? `Repair ${attempt}/${MAX_REPAIRS}: Verified (${elapsed.toFixed(1)}s)`
-              : `Repair ${attempt}/${MAX_REPAIRS}: ${r.failedScenarios.length} failure(s) (${elapsed.toFixed(1)}s)`,
-        );
-        verificationResult = repairVerifyResult;
-
-        if (!verificationResult.pass) {
-          this.logVerboseFailures(verificationResult);
-        }
-
-        const { valid: validRepairProbes } = filterAndLogStructuralConflicts(
-          filterEngine,
-          collectProbeScenarios(verificationResult),
-          'Discarded probe (structural conflict)',
-        );
-        accumulatedProbes.push(...validRepairProbes);
-
-        repairAttempts = attempt;
-
-        if (verificationResult.pass) {
-          // Final full verification
-          this.logContext.stepName = 'final-verify';
-          const finalScenarios = [...filteredScenarios, ...accumulatedProbes];
-          const finalSession = new PolicyVerifierSession({
-            system: verifierSystem,
-            model: this.model,
-            serverNames: serverNamesList,
-            toolNames: toolNamesList,
-          });
-          const { result: finalVerifyResult } = await withSpinner(
-            'Final full verification',
-            async (spinner) =>
-              verifyPolicy(
-                config.constitutionInput,
-                compiledPolicyFile,
-                toolAnnotationsFile,
-                config.protectedPaths,
-                finalScenarios,
-                this.model,
-                3,
-                config.allowedDirectory,
-                (msg) => {
-                  spinner.text = `Final full verification — ${msg}`;
-                },
-                serverDomainAllowlists,
-                dynamicLists,
-                verifierSystem,
-                finalSession,
-              ),
-            (r, elapsed) =>
-              r.pass
-                ? `Final full verification: passed (${elapsed.toFixed(1)}s)`
-                : `Final full verification: ${r.failedScenarios.length} failure(s) (${elapsed.toFixed(1)}s)`,
-          );
-          verificationResult = finalVerifyResult;
-
-          const { valid: validFinalProbes } = filterAndLogStructuralConflicts(
-            filterEngine,
-            collectProbeScenarios(verificationResult),
-            'Discarded probe (structural conflict)',
-          );
-          accumulatedProbes.push(...validFinalProbes);
-          break;
-        }
-      }
-    }
-
-    // Re-write scenarios if the repair loop modified them
-    if (repairAttempts > 0) {
-      writeArtifact(config.outputDir, 'test-scenarios.json', {
-        generatedAt: new Date().toISOString(),
-        constitutionHash,
-        inputHash: scenarioResult.inputHash,
-        scenarios: scenarioResult.scenarios,
-      } satisfies TestScenariosFile);
-    }
-
-    // Summary
-    const seenDescriptions = new Set(scenarioResult.scenarios.map((s) => s.description));
-    const uniqueProbes = accumulatedProbes.filter((s) => {
-      if (seenDescriptions.has(s.description)) return false;
-      seenDescriptions.add(s.description);
-      return true;
-    });
-
-    const totalScenariosTested = filteredScenarios.length + uniqueProbes.length;
-
-    console.error('');
-    console.error(`  Rules: ${rules.length}`);
-    console.error(`  Scenarios tested: ${totalScenariosTested}`);
-    if (discardedScenarios.length > 0) {
-      console.error(`  Scenarios discarded (structural conflicts): ${discardedScenarios.length}`);
-    }
-    if (uniqueProbes.length > 0) {
-      console.error(`  Probe scenarios accumulated: ${uniqueProbes.length}`);
-    }
-    if (repairAttempts > 0) {
-      console.error(`  Repair attempts: ${repairAttempts}`);
-    }
-    if (scenarioCorrectionsApplied > 0) {
-      console.error(`  Scenario corrections: ${scenarioCorrectionsApplied}`);
-    }
-    console.error(`  Artifacts written to: ${chalk.dim(config.outputDir + '/')}`);
-    if (config.llmLogPath) {
-      console.error(`  LLM interaction log: ${chalk.dim(config.llmLogPath)}`);
-    }
-
-    if (!verificationResult.pass) {
-      throw new Error('Verification FAILED — artifacts written but policy may need review.');
-    }
-
-    console.error('');
-    console.error(chalk.green.bold('Policy compilation successful!'));
-
-    return compiledPolicyFile;
-  }
-
-  // -----------------------------------------------------------------------
-  // Shared private compilation methods (used by both paths)
-  // -----------------------------------------------------------------------
-
-  private async compilePolicyRules(
-    annotations: ToolAnnotation[],
-    inputHash: string,
-    existingPolicy: CompiledPolicyFile | undefined,
-    system: string | SystemModelMessage,
-  ): Promise<{
-    rules: CompiledRule[];
-    listDefinitions: ListDefinition[];
-    inputHash: string;
-    session?: ConstitutionCompilerSession;
-  }> {
-    const stepText = '[1/3] Compiling constitution';
-
-    if (existingPolicy && existingPolicy.inputHash === inputHash) {
-      showCached(stepText);
-      return {
-        rules: resolveRulePaths(existingPolicy.rules),
-        listDefinitions: existingPolicy.listDefinitions ?? [],
-        inputHash,
-      };
-    }
-
-    const session = new ConstitutionCompilerSession({
-      system,
-      model: this.model,
-      annotations,
-    });
-
-    const { result: compilationOutput } = await withSpinner(
-      stepText,
-      async (spinner) => {
-        const output = await session.compile((msg) => {
-          spinner.text = `${stepText} — ${msg}`;
-        });
-        const compiledRules = resolveRulePaths(output.rules);
-        validateRulesOrThrow(compiledRules, output.listDefinitions);
-        return { rules: compiledRules, listDefinitions: output.listDefinitions };
-      },
-      (output, elapsed) => `${stepText}: ${output.rules.length} rules compiled (${elapsed.toFixed(1)}s)`,
-    );
-
-    return {
-      rules: compilationOutput.rules,
-      listDefinitions: compilationOutput.listDefinitions,
-      inputHash,
-      session,
-    };
-  }
 
   private async compilePolicyRulesWithRepair(
     annotations: ToolAnnotation[],
@@ -1731,9 +1286,9 @@ export class PipelineRunner {
     const existingLists = loadExistingArtifact<DynamicListsFile>(serverOutputDir, 'dynamic-lists.json');
 
     const needsMcp = listDefinitions.some((d) => d.requiresMcp);
-    let mcpConnections: Map<string, McpServerConnection> | undefined;
+    let proxy: ProxyConnection | undefined;
     if (needsMcp && config.mcpServers) {
-      mcpConnections = await connectMcpServersForLists(listDefinitions, config.mcpServers);
+      proxy = await connectViaProxy(listDefinitions, config.mcpServers, config.toolAnnotationsDir);
     }
 
     const listStepText = `${labelPrefix}: Resolving dynamic lists`;
@@ -1741,9 +1296,17 @@ export class PipelineRunner {
       const { result: resolvedLists } = await withSpinner(
         listStepText,
         async (spinner) =>
-          resolveAllLists(listDefinitions, { model: this.model, mcpConnections }, existingLists, (msg) => {
-            spinner.text = `${listStepText} — ${msg}`;
-          }),
+          resolveAllLists(
+            listDefinitions,
+            {
+              model: this.model,
+              proxyConnection: proxy ? { client: proxy.client, tools: proxy.tools } : undefined,
+            },
+            existingLists,
+            (msg) => {
+              spinner.text = `${listStepText} — ${msg}`;
+            },
+          ),
         (result, elapsed) => {
           const count = Object.keys(result.lists).length;
           return `${listStepText}: ${count} list(s) resolved (${elapsed.toFixed(1)}s)`;
@@ -1752,8 +1315,8 @@ export class PipelineRunner {
       writeArtifact(serverOutputDir, 'dynamic-lists.json', resolvedLists);
       return resolvedLists;
     } finally {
-      if (mcpConnections) {
-        await disconnectMcpServers(mcpConnections);
+      if (proxy) {
+        await proxy.shutdown();
       }
     }
   }
@@ -1766,8 +1329,9 @@ export class PipelineRunner {
     inputHash: string,
     existingScenarios: TestScenariosFile | undefined,
     stepLabel: string,
-    permittedDirectories?: string[],
-    dynamicLists?: DynamicListsFile,
+    permittedDirectories: string[] | undefined,
+    dynamicLists: DynamicListsFile | undefined,
+    storedAnnotations: StoredToolAnnotation[],
   ): Promise<{
     scenarios: TestScenario[];
     inputHash: string;
@@ -1794,6 +1358,7 @@ export class PipelineRunner {
           },
           dynamicLists,
           (prompt: string) => this.cacheStrategy.wrapSystemPrompt(prompt),
+          storedAnnotations,
         ),
       (scenarios, elapsed) => {
         const generatedCount = scenarios.length - handwrittenScenarios.length;

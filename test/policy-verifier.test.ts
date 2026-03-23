@@ -103,6 +103,10 @@ describe('Policy Verifier', () => {
       SANDBOX_DIR,
       undefined,
       TEST_DOMAIN_ALLOWLISTS,
+      undefined,
+      undefined,
+      undefined,
+      [],
     );
 
     expect(result.pass).toBe(true);
@@ -124,6 +128,10 @@ describe('Policy Verifier', () => {
       SANDBOX_DIR,
       undefined,
       TEST_DOMAIN_ALLOWLISTS,
+      undefined,
+      undefined,
+      undefined,
+      [],
     );
 
     const executionResults = result.rounds[0].executionResults;
@@ -149,6 +157,10 @@ describe('Policy Verifier', () => {
       SANDBOX_DIR,
       undefined,
       TEST_DOMAIN_ALLOWLISTS,
+      undefined,
+      undefined,
+      undefined,
+      [],
     );
 
     expect(result.pass).toBe(true);
@@ -207,6 +219,10 @@ describe('Policy Verifier', () => {
       SANDBOX_DIR,
       undefined,
       TEST_DOMAIN_ALLOWLISTS,
+      undefined,
+      undefined,
+      undefined,
+      [],
     );
 
     expect(result.pass).toBe(false);
@@ -256,6 +272,10 @@ describe('Policy Verifier', () => {
       SANDBOX_DIR,
       undefined,
       TEST_DOMAIN_ALLOWLISTS,
+      undefined,
+      undefined,
+      undefined,
+      [],
     );
 
     expect(result.rounds).toHaveLength(2);

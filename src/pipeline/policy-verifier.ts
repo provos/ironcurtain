@@ -13,12 +13,21 @@ import { z } from 'zod';
 import { DEFAULT_MAX_TOKENS, parseJsonWithSchema, schemaToPromptHint } from './generate-with-repair.js';
 import { PolicyEngine } from '../trusted-process/policy-engine.js';
 import type { ToolCallRequest } from '../types/mcp.js';
+import { isConditionalRoles } from '../types/argument-roles.js';
 import { formatDynamicListsSection } from './scenario-generator.js';
+import {
+  filterInvalidSchemaScenarios,
+  buildScenarioArgsSuperRefine,
+  buildToolArgNamesMap,
+  formatToolArgNames,
+} from './scenario-schema-validator.js';
 import type {
   CompiledPolicyFile,
+  ConditionalRoles,
   DiscardedScenario,
   DynamicListsFile,
-  ToolAnnotationsFile,
+  StoredToolAnnotation,
+  StoredToolAnnotationsFile,
   TestScenario,
   ExecutionResult,
   VerifierRound,
@@ -109,9 +118,10 @@ export function buildJudgeSystemPrompt(
   constitutionText: string,
   compiledPolicy: CompiledPolicyFile,
   protectedPaths: string[],
-  availableTools?: { serverName: string; toolName: string }[],
-  dynamicLists?: DynamicListsFile,
-  sandboxDirectory?: string,
+  availableTools: { serverName: string; toolName: string }[] | undefined,
+  dynamicLists: DynamicListsFile | undefined,
+  sandboxDirectory: string | undefined,
+  storedAnnotations: StoredToolAnnotation[],
 ): string {
   const rulesText = compiledPolicy.rules
     .map((r, i) => `  ${i + 1}. [${r.name}] if: ${JSON.stringify(r.if)} then: ${r.then} -- ${r.reason}`)
@@ -160,6 +170,8 @@ When analyzing FAIL results:
   or explicitly prohibits it (should be "deny" via default-deny, meaning the escalate
   rule is too broad).
 
+CRITICAL: If a compiled escalate rule matches an operation (even outside the sandbox), the result is "escalate", NOT "deny". The "deny" outcome ONLY occurs when NO compiled rule matches at all (default-deny) or when a structural invariant denies the operation. When generating probe scenarios for operations that have explicit escalate rules (e.g., mutations on tools like git_tag, git_worktree), the expected outcome should be "escalate", not "deny", regardless of whether the path is inside or outside the sandbox.
+
 ## Instructions
 
 1. Analyze any FAIL results. For each failure, determine the blame:
@@ -183,6 +195,11 @@ ALL tools listed here are known/annotated — the "unknown tool → deny" struct
 
 ${(availableTools ?? []).map((t) => `- ${t.serverName}/${t.toolName}`).join('\n')}
 
+## Valid Tool Arguments
+
+CRITICAL: Only use these argument names in additional scenarios. Using unlisted arguments will cause validation failure.
+
+${formatToolArgNames(storedAnnotations)}
 ## Response Format
 
 Be concise. Keep the analysis to 2-3 sentences per issue found. Only generate additional scenarios that test genuinely untested gaps -- do not duplicate existing coverage. Limit additional scenarios to at most 5.`;
@@ -192,7 +209,11 @@ Be concise. Keep the analysis to 2-3 sentences per issue found. Only generate ad
 // Response Schema + Session
 // ---------------------------------------------------------------------------
 
-function buildJudgeResponseSchema(serverNames: [string, ...string[]], toolNames: [string, ...string[]]) {
+function buildJudgeResponseSchema(
+  serverNames: [string, ...string[]],
+  toolNames: [string, ...string[]],
+  argsSuperRefine?: ReturnType<typeof buildScenarioArgsSuperRefine>,
+) {
   const blameSchema = z.discriminatedUnion('kind', [
     z.object({
       kind: z.literal('rule'),
@@ -222,16 +243,18 @@ function buildJudgeResponseSchema(serverNames: [string, ...string[]], toolNames:
       }),
     ),
     additionalScenarios: z.array(
-      z.object({
-        description: z.string(),
-        request: z.object({
-          serverName: z.enum(serverNames),
-          toolName: z.enum(toolNames),
-          arguments: z.record(z.string(), z.unknown()),
-        }),
-        expectedDecision: z.enum(['allow', 'deny', 'escalate']),
-        reasoning: z.string(),
-      }),
+      z
+        .object({
+          description: z.string(),
+          request: z.object({
+            serverName: z.enum(serverNames),
+            toolName: z.enum(toolNames),
+            arguments: z.record(z.string(), z.unknown()),
+          }),
+          expectedDecision: z.enum(['allow', 'deny', 'escalate']),
+          reasoning: z.string(),
+        })
+        .superRefine(argsSuperRefine ?? (() => {})),
     ),
   });
 }
@@ -258,10 +281,14 @@ export class PolicyVerifierSession {
     model: LanguageModel;
     serverNames: [string, ...string[]];
     toolNames: [string, ...string[]];
+    storedAnnotations?: StoredToolAnnotation[];
   }) {
     this.systemPrompt = options.system;
     this.model = options.model;
-    this.schema = buildJudgeResponseSchema(options.serverNames, options.toolNames);
+    const argsSuperRefine = options.storedAnnotations
+      ? buildScenarioArgsSuperRefine(buildToolArgNamesMap(options.storedAnnotations))
+      : undefined;
+    this.schema = buildJudgeResponseSchema(options.serverNames, options.toolNames, argsSuperRefine);
     this.schemaHint = schemaToPromptHint(this.schema);
   }
 
@@ -345,17 +372,18 @@ export class PolicyVerifierSession {
 export async function verifyPolicy(
   constitutionText: string,
   compiledPolicy: CompiledPolicyFile,
-  toolAnnotations: ToolAnnotationsFile,
+  toolAnnotations: StoredToolAnnotationsFile,
   protectedPaths: string[],
   scenarios: TestScenario[],
   llm: LanguageModel,
-  maxRounds: number = DEFAULT_MAX_ROUNDS,
-  allowedDirectory?: string,
-  onProgress?: (message: string) => void,
-  serverDomainAllowlists?: ReadonlyMap<string, readonly string[]>,
-  dynamicLists?: DynamicListsFile,
-  system?: string | SystemModelMessage,
-  session?: PolicyVerifierSession,
+  maxRounds: number | undefined = DEFAULT_MAX_ROUNDS,
+  allowedDirectory: string | undefined,
+  onProgress: ((message: string) => void) | undefined,
+  serverDomainAllowlists: ReadonlyMap<string, readonly string[]> | undefined,
+  dynamicLists: DynamicListsFile | undefined,
+  system: string | SystemModelMessage | undefined,
+  session: PolicyVerifierSession | undefined,
+  storedAnnotations: StoredToolAnnotation[],
 ): Promise<VerificationResult> {
   const engine = new PolicyEngine(
     compiledPolicy,
@@ -384,10 +412,12 @@ export async function verifyPolicy(
           allAnnotations.map((a) => ({ serverName: a.serverName, toolName: a.toolName })),
           dynamicLists,
           allowedDirectory,
+          storedAnnotations,
         ),
       model: llm,
       serverNames: serverNamesList,
       toolNames: toolNamesList,
+      storedAnnotations,
     });
   }
 
@@ -403,10 +433,37 @@ export async function verifyPolicy(
 
     const judgment = await effectiveSession.judgeRound(executionResults, onProgress);
 
-    const newScenarios: TestScenario[] = judgment.additionalScenarios.map((s) => ({
+    let newScenarios: TestScenario[] = judgment.additionalScenarios.map((s) => ({
       ...s,
       source: 'generated' as const,
     }));
+
+    // Filter probe scenarios through schema validation and default-role-fallback
+    // detection — the same filtering applied to externally generated scenarios.
+    // Filter probe scenarios through schema validation and default-role-fallback
+    // detection — same filtering applied to externally generated scenarios.
+    const schemaResult = filterInvalidSchemaScenarios(newScenarios, storedAnnotations);
+    if (schemaResult.discarded.length > 0) {
+      for (const d of schemaResult.discarded) {
+        onProgress?.(`Discarded probe (schema mismatch): "${d.scenario.description}" — ${d.rule}`);
+      }
+      newScenarios = schemaResult.valid;
+    }
+
+    const fallbackWarnings = detectAllDefaultRoleFallbacks(newScenarios, storedAnnotations);
+    if (fallbackWarnings.length > 0) {
+      const fallbackDescriptions = new Set(fallbackWarnings.map((w) => w.scenario.description));
+      newScenarios = newScenarios.filter((s) => {
+        if (fallbackDescriptions.has(s.description)) {
+          const w = fallbackWarnings.find((fw) => fw.scenario.description === s.description);
+          onProgress?.(
+            `Discarded probe (default role fallback): "${s.description}" — ${w?.details.join('; ') ?? 'unknown'}`,
+          );
+          return false;
+        }
+        return true;
+      });
+    }
 
     rounds.push({
       round,
@@ -479,6 +536,124 @@ export function filterStructuralConflicts(
   }
 
   return { valid, discarded };
+}
+
+// ---------------------------------------------------------------------------
+// Default Role Fallback Detection
+// ---------------------------------------------------------------------------
+
+/**
+ * Warning info for a scenario where all conditional role specs fall to defaults.
+ */
+export interface DefaultRoleFallbackWarning {
+  readonly scenario: TestScenario;
+  readonly toolKey: string;
+  readonly details: string[];
+}
+
+/**
+ * Checks whether a scenario's arguments cause ALL conditional role specs
+ * to fall to their default (most-restrictive) roles. This happens when
+ * the discriminator argument is missing or has a value not matching any
+ * `when` clause. The scenario may still produce a valid policy decision,
+ * but it likely doesn't test the intended tool mode.
+ *
+ * @param scenario - The test scenario to check
+ * @param storedAnnotations - Raw annotations with conditional role specs
+ * @returns A warning if all conditionals fall to defaults, or undefined
+ */
+export function detectDefaultRoleFallback(
+  scenario: TestScenario,
+  storedAnnotations: StoredToolAnnotation[],
+): DefaultRoleFallbackWarning | undefined {
+  const toolKey = `${scenario.request.serverName}/${scenario.request.toolName}`;
+  const annotation = storedAnnotations.find(
+    (a) => a.serverName === scenario.request.serverName && a.toolName === scenario.request.toolName,
+  );
+  if (!annotation) return undefined;
+
+  // Find all args with conditional role specs
+  const conditionalArgs = Object.entries(annotation.args).filter((entry): entry is [string, ConditionalRoles] =>
+    isConditionalRoles(entry[1]),
+  );
+  if (conditionalArgs.length === 0) return undefined;
+
+  // Check each conditional arg: does ANY when clause match?
+  const details: string[] = [];
+  for (const [argName, spec] of conditionalArgs) {
+    const matchesAny = spec.when.some((entry) => {
+      const cond = entry.condition;
+      const value = scenario.request.arguments[cond.arg];
+
+      if (cond.equals !== undefined) return value === cond.equals;
+      if (cond.in !== undefined) return cond.in.includes(value as string | number | boolean);
+      if (cond.is !== undefined) {
+        switch (cond.is) {
+          case 'present':
+            return cond.arg in scenario.request.arguments && value !== null && value !== undefined;
+          case 'absent':
+            return !(cond.arg in scenario.request.arguments) || value === null || value === undefined;
+          case 'truthy':
+            return cond.arg in scenario.request.arguments && !!value;
+          case 'falsy':
+            return !(cond.arg in scenario.request.arguments) || !value;
+        }
+      }
+      return false;
+    });
+
+    if (!matchesAny) {
+      // Describe what went wrong
+      const discriminators = [...new Set(spec.when.map((w) => w.condition.arg))];
+      const validValues = spec.when.flatMap((w) => {
+        const c = w.condition;
+        if (c.equals !== undefined) return [JSON.stringify(c.equals)];
+        if (c.in !== undefined) return c.in.map((v) => JSON.stringify(v));
+        if (c.is !== undefined) return [`<${c.is}>`];
+        return [];
+      });
+      const discriminatorArg = discriminators[0] ?? argName;
+      const actualValue = scenario.request.arguments[discriminatorArg];
+      const actualDesc =
+        actualValue === undefined
+          ? `arg "${discriminatorArg}" is missing`
+          : `${discriminatorArg}=${JSON.stringify(actualValue)}`;
+      details.push(`${argName}: ${actualDesc}, valid values: [${validValues.join(', ')}]`);
+    }
+  }
+
+  if (details.length === conditionalArgs.length) {
+    return { scenario, toolKey, details };
+  }
+  return undefined;
+}
+
+/**
+ * Scans scenarios for default role fallback issues and returns warnings.
+ * Only checks scenarios for tools that have conditional role specs.
+ */
+export function detectAllDefaultRoleFallbacks(
+  scenarios: TestScenario[],
+  storedAnnotations: StoredToolAnnotation[],
+): DefaultRoleFallbackWarning[] {
+  // Pre-filter: only check tools that have conditional specs
+  const toolsWithConditionals = new Set(
+    storedAnnotations
+      .filter((a) => Object.values(a.args).some((spec) => isConditionalRoles(spec)))
+      .map((a) => `${a.serverName}/${a.toolName}`),
+  );
+
+  const warnings: DefaultRoleFallbackWarning[] = [];
+  for (const scenario of scenarios) {
+    const toolKey = `${scenario.request.serverName}/${scenario.request.toolName}`;
+    if (!toolsWithConditionals.has(toolKey)) continue;
+
+    const warning = detectDefaultRoleFallback(scenario, storedAnnotations);
+    if (warning) {
+      warnings.push(warning);
+    }
+  }
+  return warnings;
 }
 
 // ---------------------------------------------------------------------------

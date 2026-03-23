@@ -16,7 +16,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import chalk from 'chalk';
-import { loadPipelineConfig, loadToolAnnotationsFile } from './pipeline-shared.js';
+import { loadPipelineConfig, loadStoredToolAnnotationsFile } from './pipeline-shared.js';
 import { PipelineRunner, createPipelineModels } from './pipeline-runner.js';
 
 // Re-export utilities that test files import from this file.
@@ -30,6 +30,7 @@ export interface CompilePolicyCliArgs {
   constitution?: string;
   outputDir?: string;
   server?: string;
+  noMcp?: boolean;
 }
 
 /**
@@ -43,16 +44,19 @@ export function parseCompilePolicyArgs(argv: string[] = process.argv.slice(2)): 
       constitution: { type: 'string' },
       'output-dir': { type: 'string' },
       server: { type: 'string' },
+      'no-mcp': { type: 'boolean' },
     },
     strict: false,
   });
   const constitution = typeof values.constitution === 'string' ? values.constitution : undefined;
   const outputDir = typeof values['output-dir'] === 'string' ? values['output-dir'] : undefined;
   const server = typeof values.server === 'string' ? values.server : undefined;
+  const noMcp = (values['no-mcp'] as boolean | undefined) ?? false;
   return {
     constitution: constitution ? resolve(constitution) : undefined,
     outputDir: outputDir ? resolve(outputDir) : undefined,
     server,
+    noMcp,
   };
 }
 
@@ -65,8 +69,8 @@ export async function main(): Promise<void> {
   const config = loadPipelineConfig(cliArgs);
 
   // Load tool annotations early to validate they exist before printing the banner
-  const toolAnnotationsFile = loadToolAnnotationsFile(config.generatedDir, config.packageGeneratedDir);
-  if (!toolAnnotationsFile) {
+  const storedAnnotationsFile = loadStoredToolAnnotationsFile(config.generatedDir, config.packageGeneratedDir);
+  if (!storedAnnotationsFile) {
     console.error(
       chalk.red.bold(
         "Error: tool-annotations.json not found. Run 'npm run annotate-tools' first to generate tool annotations.",
@@ -75,8 +79,8 @@ export async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const allAnnotations = Object.values(toolAnnotationsFile.servers).flatMap((server) => server.tools);
-  const serverNames = Object.keys(toolAnnotationsFile.servers);
+  const allAnnotations = Object.values(storedAnnotationsFile.servers).flatMap((server) => server.tools);
+  const serverNames = Object.keys(storedAnnotationsFile.servers);
 
   console.error(chalk.bold('Policy Compilation Pipeline (per-server)'));
   console.error(chalk.bold('========================================='));
@@ -104,9 +108,9 @@ export async function main(): Promise<void> {
       toolAnnotationsFallbackDir: config.packageGeneratedDir,
       allowedDirectory: config.allowedDirectory,
       protectedPaths: config.protectedPaths,
-      mcpServers: config.mcpServers,
+      mcpServers: cliArgs.noMcp ? undefined : config.mcpServers,
       llmLogPath: models.logPath,
-      preloadedToolAnnotations: toolAnnotationsFile,
+      preloadedStoredAnnotations: storedAnnotationsFile,
       serverFilter: cliArgs.server ? [cliArgs.server] : undefined,
     });
   } catch (err) {
