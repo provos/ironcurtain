@@ -62,13 +62,21 @@ export class TokenFileRefresher {
     this.currentExpiresAt = initialExpiresAt;
   }
 
-  /** Logs to session log (if available) and stderr. */
+  /** Best-effort log to session log (if available) and stderr (errors only). */
   private log(message: string, isError = false): void {
     const prefix = `[token-refresher:${this.config.providerId}]`;
     const full = `${prefix} ${message}`;
-    this.config.logToSession?.(full);
+    try {
+      this.config.logToSession?.(full);
+    } catch {
+      // Swallow — logging must never break the refresh loop.
+    }
     if (isError) {
-      process.stderr.write(`${full}\n`);
+      try {
+        process.stderr.write(`${full}\n`);
+      } catch {
+        // Swallow — logging must never break the refresh loop.
+      }
     }
   }
 
