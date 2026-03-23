@@ -17,6 +17,10 @@ import * as logger from '../logger.js';
 export interface HeadlessTransportOptions {
   /** The initial task message to send. */
   readonly taskMessage: string;
+  /** When true, save session memory after the task completes. */
+  readonly autoSaveMemory?: boolean;
+  /** When true, session is running in Docker mode. */
+  readonly dockerMode?: boolean;
 }
 
 export class HeadlessTransport extends BaseTransport {
@@ -25,7 +29,7 @@ export class HeadlessTransport extends BaseTransport {
   private closed = false;
 
   constructor(options: HeadlessTransportOptions) {
-    super();
+    super({ autoSaveMemory: options.autoSaveMemory, dockerMode: options.dockerMode });
     this.taskMessage = options.taskMessage;
   }
 

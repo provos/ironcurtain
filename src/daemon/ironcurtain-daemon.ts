@@ -23,6 +23,7 @@ import type { IronCurtainConfig } from '../config/types.js';
 import type { SessionMode, EscalationRequest } from '../session/types.js';
 import { SessionManager, type SessionSource } from '../session/session-manager.js';
 import { HeadlessTransport } from '../cron/headless-transport.js';
+import { shouldAutoSaveMemory } from '../memory/auto-save.js';
 import { buildCronSystemPromptAugmentation } from '../session/prompts.js';
 import { createCronScheduler, type CronScheduler } from '../cron/cron-scheduler.js';
 import { loadAllJobs, loadJob, saveJob, deleteJob, saveRunRecord, loadRecentRuns } from '../cron/job-store.js';
@@ -430,7 +431,11 @@ export class IronCurtainDaemon {
     });
 
     // Create the headless transport
-    const transport = new HeadlessTransport({ taskMessage: job.taskDescription });
+    const transport = new HeadlessTransport({
+      taskMessage: job.taskDescription,
+      autoSaveMemory: shouldAutoSaveMemory(patchedConfig),
+      dockerMode: this.mode.kind === 'docker',
+    });
 
     // Track escalation counts for this run
     let escalationsEncountered = 0;

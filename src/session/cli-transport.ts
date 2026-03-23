@@ -36,6 +36,10 @@ export interface CliTransportOptions {
   initialMessage?: string;
   /** Override stdin for testing. Defaults to process.stdin. */
   input?: Readable;
+  /** When true, save session memory when the session ends. */
+  autoSaveMemory?: boolean;
+  /** When true, session is running in Docker mode. */
+  dockerMode?: boolean;
 }
 
 // Configure marked to render markdown for the terminal.
@@ -53,7 +57,7 @@ export class CliTransport extends BaseTransport {
   private rl: ReturnType<typeof createInterface> | null = null;
 
   constructor(options: CliTransportOptions = {}) {
-    super();
+    super({ autoSaveMemory: options.autoSaveMemory, dockerMode: options.dockerMode });
     this.initialMessage = options.initialMessage;
     this.input = options.input ?? process.stdin;
   }
@@ -150,6 +154,7 @@ export class CliTransport extends BaseTransport {
       this.spinner?.stop();
       process.stdout.write('\n');
       process.stdout.write(renderMarkdown(response));
+
       this.displaySessionSummary(session.getBudgetStatus());
     } catch (error) {
       this.stopSpinnerWithError(error);
