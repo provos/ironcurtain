@@ -29,13 +29,59 @@ import {
 import type { OAuthTokenManager } from './oauth-token-manager.js';
 import type { RegistryConfig, PackageValidator, AllowedVersionCache } from './package-types.js';
 import { DENY_ALL_VALIDATOR } from './package-validator.js';
+import { validateDomain, type DomainListing } from './proxy-tools.js';
 import * as logger from '../logger.js';
+
+/**
+ * Runtime control surface for the MITM proxy's host allowlist.
+ *
+ * Dynamically added hosts are passthrough-only: TLS is terminated
+ * for auditability, but no credential replacement or endpoint
+ * filtering is performed. The agent's own headers are forwarded
+ * as-is to the upstream server.
+ *
+ * Provider domains that are already statically configured
+ * cannot be added as passthrough. addHost() returns false for these
+ * domains, and the tool handler surfaces a clear message to the agent.
+ */
+export interface DynamicHostController {
+  /**
+   * Add a domain to the passthrough allowlist.
+   * Validates the domain format (no wildcards, no IP addresses,
+   * no *.docker.internal, max 253 chars).
+   *
+   * @throws Error if the domain fails validation.
+   * @returns true if the domain was newly added, false if already present
+   *          (either as a static provider or a previous dynamic addition).
+   */
+  addHost(domain: string): boolean;
+
+  /**
+   * Remove a domain from the passthrough allowlist.
+   * Cannot remove statically configured providers.
+   *
+   * @returns true if the domain was removed, false if not found or static.
+   */
+  removeHost(domain: string): boolean;
+
+  /**
+   * List all currently allowed hosts, grouped by type.
+   */
+  listHosts(): DomainListing;
+}
 
 export interface MitmProxy {
   /** Start listening on the UDS or TCP port. Pre-warms cert cache for all providers. */
-  start(): Promise<{ socketPath?: string; port?: number }>;
+  start(): Promise<{
+    socketPath?: string;
+    port?: number;
+    controlSocketPath?: string;
+    controlPort?: number;
+  }>;
   /** Stop the proxy and close all connections. */
   stop(): Promise<void>;
+  /** Runtime control for the dynamic host allowlist. */
+  readonly hosts: DynamicHostController;
 }
 
 export interface MitmProxyOptions {
@@ -50,6 +96,7 @@ export interface MitmProxyOptions {
    * The proxy uses these for host allowlisting, key swapping, and endpoint filtering.
    */
   readonly providers: readonly ProviderKeyMapping[];
+
 
   /**
    * Package registry configurations.
@@ -66,6 +113,16 @@ export interface MitmProxyOptions {
     readonly validator: PackageValidator;
     readonly auditLogPath?: string;
   };
+  /**
+   * Separate control socket path for domain management API.
+   * Must NOT be in a directory mounted into the container.
+   */
+  readonly controlSocketPath?: string;
+  /**
+   * Separate control TCP port. Used in TCP mode (macOS).
+   * 0 for OS-assigned.
+   */
+  readonly controlPort?: number;
 }
 
 export interface ProviderKeyMapping {
@@ -119,6 +176,9 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
   for (const mapping of options.providers) {
     providersByHost.set(mapping.config.host, mapping);
   }
+
+  // Dynamically added passthrough hosts (no key swap, no endpoint filtering)
+  const passthroughHosts = new Set<string>();
 
   // Certificate cache: hostname → { ctx, expiresAt }
   const certCache = new Map<string, { ctx: tls.SecureContext; expiresAt: number }>();
@@ -185,6 +245,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
   interface ConnectionMeta {
     readonly provider?: ProviderKeyMapping;
     readonly registry?: RegistryConfig;
+    readonly passthrough: boolean;
     readonly host: string;
     readonly port: number;
   }
@@ -263,9 +324,17 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
       return;
     }
 
+    const { host: targetHost, port: targetPort } = meta;
+
     // Dispatch: registry connections are handled separately from provider connections
     if (meta.registry) {
-      dispatchRegistryRequest(meta.registry, clientReq, clientRes, meta.host, meta.port);
+      dispatchRegistryRequest(meta.registry, clientReq, clientRes, targetHost, targetPort);
+      return;
+    }
+
+    // Passthrough connections: forward as-is, no key swap, no endpoint filtering
+    if (meta.passthrough) {
+      forwardPassthrough(clientReq, clientRes, targetHost, targetPort);
       return;
     }
 
@@ -275,8 +344,6 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
       return;
     }
     const provider = meta.provider;
-    const targetHost = meta.host;
-    const targetPort = meta.port;
     const { method, url: path, headers } = clientReq;
 
     // 1. Endpoint filtering
@@ -290,19 +357,14 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     // 2. Fake key validation + swap
     const modifiedHeaders = { ...headers };
     const keyResult = validateAndSwapApiKey(modifiedHeaders, provider);
-    if (!keyResult.valid) {
-      logger.info(`[mitm-proxy] REJECTED ${method} ${targetHost}${path} - invalid API key`);
-      clientRes.writeHead(403, { 'Content-Type': 'text/plain' });
-      clientRes.end('Rejected: API key does not match expected sentinel.');
-      return;
-    }
     modifiedHeaders.host = targetHost;
 
     // 3. Forward to real API - either direct pipe or buffer+rewrite.
     // Only enable 401 retry if the request actually carried the fake key —
     // unauthenticated requests should not have credentials injected on retry.
     const needsRewrite = shouldRewriteBody(provider.config, method, path);
-    const canRetryAuth = keyResult.hadKey && !!provider.tokenManager;
+    // 401 retry only makes sense when we swapped our own managed credential
+    const canRetryAuth = keyResult.swapped && !!provider.tokenManager;
     // Only buffer for retry when the body is small enough (known Content-Length
     // under 1MB). Large or chunked bodies stream through without retry support
     // to avoid memory overhead and 413 rejections on large payloads.
@@ -521,17 +583,18 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     activeClientSockets.add(clientSocket);
     clientSocket.on('close', () => activeClientSockets.delete(clientSocket));
 
-    // 1. Check allowlist (providers and registries)
+    // 1. Check allowlist (providers, registries, and dynamic passthrough)
     const provider = providersByHost.get(host);
     const registry = registriesByHost.get(host);
-    if (!provider && !registry) {
+    const isPassthrough = !provider && !registry && passthroughHosts.has(host);
+    if (!provider && !registry && !isPassthrough) {
       logger.info(`[mitm-proxy] #${connId} DENIED CONNECT ${host}:${port}`);
       clientSocket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
       clientSocket.destroy();
       return;
     }
 
-    const connType = provider ? 'provider' : 'registry';
+    const connType = provider ? 'provider' : registry ? 'registry' : 'passthrough';
     logger.info(`[mitm-proxy] #${connId} CONNECT ${host}:${port} → MITM (${connType})`);
 
     // 2. Acknowledge the CONNECT
@@ -561,7 +624,13 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
 
     // 6. Track the connection
     activeTlsSockets.add(tlsSocket);
-    socketMetadata.set(tlsSocket, { provider, registry, host, port });
+    socketMetadata.set(tlsSocket, {
+      provider: provider ?? undefined,
+      registry,
+      passthrough: isPassthrough,
+      host,
+      port,
+    });
 
     tlsSocket.on('error', (err) => {
       const log = isConnectionReset(err) ? logger.debug : logger.info;
@@ -577,12 +646,201 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     innerServer.emit('connection', tlsSocket);
   });
 
+  // ── Passthrough request forwarding ──────────────────────────────────
+  // For dynamically added domains: forward requests as-is with no
+  // credential replacement or endpoint filtering.
+
+  function forwardPassthrough(
+    clientReq: http.IncomingMessage,
+    clientRes: http.ServerResponse,
+    host: string,
+    port: number,
+  ): void {
+    const { method, url: path, headers } = clientReq;
+
+    logger.info(`[mitm-proxy] ${method} ${host}${path} -> PASSTHROUGH`);
+
+    const forwardHeaders = { ...headers, host };
+
+    const upstreamReq = https.request(
+      { hostname: host, port, method, path, headers: forwardHeaders },
+      (upstreamRes) => {
+        upstreamRes.on('error', (err) => {
+          const log = isConnectionReset(err) ? logger.debug : logger.info;
+          log(`[mitm-proxy] upstream response error (passthrough): ${err.message}`);
+          if (!clientRes.headersSent) {
+            clientRes.writeHead(502, { 'Content-Type': 'text/plain' });
+            clientRes.end(`Upstream response error: ${err.message}`);
+          } else {
+            clientRes.socket?.destroy();
+          }
+        });
+
+        clientRes.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers);
+        clientRes.flushHeaders();
+        clientRes.socket?.setNoDelay(true);
+        upstreamRes.pipe(clientRes);
+      },
+    );
+
+    activeUpstreamRequests.add(upstreamReq);
+    upstreamReq.on('close', () => activeUpstreamRequests.delete(upstreamReq));
+
+    upstreamReq.on('error', (err) => {
+      const log = isConnectionReset(err) ? logger.debug : logger.info;
+      log(`[mitm-proxy] upstream error (passthrough): ${err.message}`);
+      activeUpstreamRequests.delete(upstreamReq);
+      if (!clientRes.headersSent) {
+        clientRes.writeHead(502, { 'Content-Type': 'text/plain' });
+        clientRes.end(`Upstream error: ${err.message}`);
+      } else {
+        clientRes.socket?.destroy();
+      }
+    });
+
+    clientRes.on('close', () => {
+      if (!upstreamReq.destroyed) {
+        upstreamReq.destroy();
+      }
+    });
+
+    clientReq.on('error', (err) => {
+      const log = isConnectionReset(err) ? logger.debug : logger.info;
+      log(`[mitm-proxy] client request error (passthrough): ${err.message}`);
+      upstreamReq.destroy();
+    });
+
+    clientReq.pipe(upstreamReq);
+  }
+
+  // ── DynamicHostController ─────────────────────────────────────────
+
+  const hostController: DynamicHostController = {
+    addHost(domain: string): boolean {
+      validateDomain(domain);
+      if (providersByHost.has(domain)) return false;
+      if (passthroughHosts.has(domain)) return false;
+      passthroughHosts.add(domain);
+      // Pre-warm cert cache for the new domain
+      getOrCreateSecureContext(domain);
+      return true;
+    },
+
+    removeHost(domain: string): boolean {
+      return passthroughHosts.delete(domain);
+    },
+
+    listHosts(): DomainListing {
+      return {
+        providers: [...providersByHost.keys()],
+        dynamic: [...passthroughHosts],
+      };
+    },
+  };
+
+  // ── HTTP Control API server ───────────────────────────────────────
+  // Runs on a separate socket, NOT mounted into the container.
+
+  const controlServer = http.createServer((req, res) => {
+    const url = req.url ?? '';
+
+    if (url === '/__ironcurtain/domains' && req.method === 'GET') {
+      const listing = hostController.listHosts();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(listing));
+      return;
+    }
+
+    if (url === '/__ironcurtain/domains/add' && req.method === 'POST') {
+      bufferRequestBody(req, 4096)
+        .then((body) => {
+          const { domain } = JSON.parse(body.toString()) as { domain: string };
+          if (typeof domain !== 'string' || !domain) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Missing required field: domain' }));
+            return;
+          }
+          try {
+            const added = hostController.addHost(domain);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ added }));
+          } catch (err) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
+          }
+        })
+        .catch((err: unknown) => {
+          res.writeHead(400, { 'Content-Type': 'text/plain' });
+          res.end(err instanceof Error ? err.message : String(err));
+        });
+      return;
+    }
+
+    if (url === '/__ironcurtain/domains/remove' && req.method === 'POST') {
+      bufferRequestBody(req, 4096)
+        .then((body) => {
+          const { domain } = JSON.parse(body.toString()) as { domain: string };
+          if (typeof domain !== 'string' || !domain) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Missing required field: domain' }));
+            return;
+          }
+          const removed = hostController.removeHost(domain);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ removed }));
+        })
+        .catch((err: unknown) => {
+          res.writeHead(400, { 'Content-Type': 'text/plain' });
+          res.end(err instanceof Error ? err.message : String(err));
+        });
+      return;
+    }
+
+    res.writeHead(404, { 'Content-Type': 'text/plain' });
+    res.end('Not Found');
+  });
+
   const useTcp = options.listenPort !== undefined;
   if (!useTcp && !options.socketPath) {
     throw new Error('MitmProxyOptions: either socketPath or listenPort must be provided');
   }
 
+  /** Starts the control API server and returns its address info. */
+  async function startControlServer(): Promise<{ controlSocketPath?: string; controlPort?: number }> {
+    if (useTcp && options.controlPort !== undefined) {
+      return new Promise((resolve, reject) => {
+        const onError = reject;
+        controlServer.listen(options.controlPort, '127.0.0.1', () => {
+          controlServer.removeListener('error', onError);
+          const addr = controlServer.address();
+          const port = addr && typeof addr === 'object' ? addr.port : (options.controlPort ?? 0);
+          resolve({ controlPort: port });
+        });
+        controlServer.once('error', onError);
+      });
+    }
+
+    if (options.controlSocketPath) {
+      if (existsSync(options.controlSocketPath)) {
+        unlinkSync(options.controlSocketPath);
+      }
+      return new Promise((resolve, reject) => {
+        const onError = reject;
+        controlServer.listen(options.controlSocketPath, () => {
+          controlServer.removeListener('error', onError);
+          resolve({ controlSocketPath: options.controlSocketPath });
+        });
+        controlServer.once('error', onError);
+      });
+    }
+
+    // No control socket configured -- return empty
+    return {};
+  }
+
   return {
+    hosts: hostController,
+
     async start() {
       // Pre-warm cert cache for all configured providers and registries
       for (const mapping of options.providers) {
@@ -592,6 +850,8 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
         getOrCreateSecureContext(host);
       }
 
+      const controlResult = await startControlServer();
+
       if (useTcp) {
         // TCP mode: listen on host:port
         return new Promise((resolve, reject) => {
@@ -600,7 +860,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
             outerServer.removeListener('error', onError);
             const addr = outerServer.address();
             const port = addr && typeof addr === 'object' ? addr.port : (options.listenPort ?? 0);
-            resolve({ port });
+            resolve({ port, ...controlResult });
           });
           outerServer.once('error', onError);
         });
@@ -616,7 +876,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
         const onError = reject;
         outerServer.listen(socketPath, () => {
           outerServer.removeListener('error', onError);
-          resolve({ socketPath });
+          resolve({ socketPath, ...controlResult });
         });
         outerServer.once('error', onError);
       });
@@ -653,11 +913,26 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
       innerServer.closeAllConnections();
       innerServer.close();
 
-      // 5. Clean up socket file (UDS mode only)
+      // 5. Close the control API server.
+      controlServer.closeAllConnections();
+      await new Promise<void>((resolve) => {
+        controlServer.close(() => resolve());
+      });
+
+      // 6. Clean up socket files (UDS mode only)
       if (!useTcp && options.socketPath) {
         try {
           if (existsSync(options.socketPath)) {
             unlinkSync(options.socketPath);
+          }
+        } catch {
+          // Ignore cleanup errors
+        }
+      }
+      if (options.controlSocketPath) {
+        try {
+          if (existsSync(options.controlSocketPath)) {
+            unlinkSync(options.controlSocketPath);
           }
         } catch {
           // Ignore cleanup errors
@@ -718,15 +993,14 @@ function retryWithRefreshedToken(
 
 /** Result of fake key validation. */
 type KeyValidationResult =
-  | { valid: true; hadKey: true } // fake key matched and was swapped
-  | { valid: true; hadKey: false } // no key sent (unauthenticated endpoint)
-  | { valid: false; hadKey: false }; // wrong key — reject request
+  | { hadKey: true; swapped: true } // fake key matched -> swapped to real key
+  | { hadKey: true; swapped: false } // key present but not sentinel -> pass through
+  | { hadKey: false; swapped: false }; // no key sent (unauthenticated endpoint)
 
 /**
- * Validates that the request carries the expected fake key, then replaces
- * it with the real key. Returns validation result including whether the
- * request actually carried an API key (used to gate 401 retry — requests
- * without a key should not have credentials injected on retry).
+ * Validates the request's API key header. If the sentinel fake key is
+ * present, swaps it for the real key. Non-sentinel keys (the agent's
+ * own credentials) are passed through unchanged.
  */
 function validateAndSwapApiKey(
   headers: Record<string, string | string[] | undefined>,
@@ -738,17 +1012,23 @@ function validateAndSwapApiKey(
     case 'header': {
       const headerName = keyInjection.headerName.toLowerCase();
       const currentValue = headers[headerName];
-      if (currentValue === undefined) return { valid: true, hadKey: false };
-      if (currentValue !== provider.fakeKey) return { valid: false, hadKey: false };
-      headers[headerName] = provider.realKey;
-      return { valid: true, hadKey: true };
+      if (currentValue === undefined) return { hadKey: false, swapped: false };
+      if (currentValue === provider.fakeKey) {
+        headers[headerName] = provider.realKey;
+        return { hadKey: true, swapped: true };
+      }
+      // Non-sentinel key present -- agent's own credential, pass through
+      return { hadKey: true, swapped: false };
     }
     case 'bearer': {
       const authHeader = headers['authorization'];
-      if (authHeader === undefined) return { valid: true, hadKey: false };
-      if (authHeader !== `Bearer ${provider.fakeKey}`) return { valid: false, hadKey: false };
-      headers['authorization'] = `Bearer ${provider.realKey}`;
-      return { valid: true, hadKey: true };
+      if (authHeader === undefined) return { hadKey: false, swapped: false };
+      if (authHeader === `Bearer ${provider.fakeKey}`) {
+        headers['authorization'] = `Bearer ${provider.realKey}`;
+        return { hadKey: true, swapped: true };
+      }
+      // Non-sentinel bearer token -- agent's own credential, pass through
+      return { hadKey: true, swapped: false };
     }
   }
 }

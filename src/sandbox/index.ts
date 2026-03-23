@@ -387,6 +387,24 @@ export class Sandbox {
       };
     }
 
+    // Add a dedicated proxy instance for virtual proxy tools (domain management).
+    // This entry spawns mcp-proxy-server.ts with SERVER_FILTER=proxy and no
+    // matching backend server, so it enters virtual-only mode.
+    // MITM_CONTROL_ADDR is ONLY passed to this entry, not to other server instances.
+    if (config.mitmControlAddr) {
+      mcpServers['proxy'] = {
+        transport: 'stdio',
+        command: PROXY_COMMAND,
+        args: [...PROXY_ARGS],
+        env: {
+          ...proxyEnv,
+          SERVER_FILTER: 'proxy',
+          MITM_CONTROL_ADDR: config.mitmControlAddr,
+        },
+        timeout: timeoutSeconds,
+      };
+    }
+
     const registration = await this.client.registerManual({
       name: 'tools',
       call_template_type: 'mcp',

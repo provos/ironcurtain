@@ -94,6 +94,14 @@ import { OAuthTokenProvider } from '../auth/oauth-token-provider.js';
 import { loadOAuthToken } from '../auth/oauth-token-store.js';
 import { writeGWorkspaceCredentialFile } from './gworkspace-credentials.js';
 import { TokenFileRefresher } from './token-file-refresher.js';
+import {
+  proxyAnnotations,
+  proxyPolicyRules,
+  proxyToolDefinitions,
+  handleVirtualProxyTool,
+  createControlApiClient,
+  type ControlApiClient,
+} from '../docker/proxy-tools.js';
 
 export interface ProxiedTool {
   serverName: string;
@@ -446,6 +454,8 @@ export interface CallToolDeps {
   serverContextMap: ServerContextMap;
   /** Ephemeral approval whitelist for this session. */
   whitelist: ApprovalWhitelist;
+  /** Control API client for virtual proxy tools. Only set in virtual-only mode. */
+  controlApiClient?: ControlApiClient | null;
 }
 
 // ── Extracted functions ────────────────────────────────────────────────
@@ -487,13 +497,18 @@ export function parseProxyEnvConfig(): ProxyEnvConfig {
   const protectedPaths = JSON.parse(protectedPathsJson) as string[];
 
   // When SERVER_FILTER is set, only connect to that single backend server.
+  // Special case: SERVER_FILTER=proxy with no matching backend enters virtual-only mode.
   const serverFilter = process.env.SERVER_FILTER;
-  const serversConfig: Record<string, MCPServerConfig> = serverFilter
-    ? { [serverFilter]: allServersConfig[serverFilter] }
-    : allServersConfig;
+  const isVirtualOnly = serverFilter === 'proxy' && !allServersConfig[serverFilter];
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- isVirtualOnly is defensive; TS can't prove it's false at runtime
+  const serversConfig: Record<string, MCPServerConfig> = isVirtualOnly
+    ? {}
+    : serverFilter
+      ? { [serverFilter]: allServersConfig[serverFilter] }
+      : allServersConfig;
 
   // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- defensive: Record index may be undefined at runtime
-  if (serverFilter && !allServersConfig[serverFilter]) {
+  if (serverFilter && !allServersConfig[serverFilter] && !isVirtualOnly) {
     process.stderr.write(`SERVER_FILTER: unknown server "${serverFilter}"\n`);
     process.exit(1);
   }
@@ -962,6 +977,20 @@ export async function handleCallTool(
     };
   }
 
+  // Virtual proxy tools: handle locally, no backend forwarding
+  if (toolInfo.serverName === 'proxy' && deps.controlApiClient) {
+    const startTime = Date.now();
+    try {
+      const result = await handleVirtualProxyTool(toolInfo.name, argsForTransport, deps.controlApiClient);
+      logAudit({ status: 'success' }, Date.now() - startTime);
+      return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      logAudit({ status: 'error', error: errorMessage }, Date.now() - startTime);
+      return { content: [{ type: 'text', text: `Error: ${errorMessage}` }], isError: true };
+    }
+  }
+
   // Policy allows -- forward to the real MCP server with transport args
   const startTime = Date.now();
   try {
@@ -1077,6 +1106,14 @@ async function main(): Promise<void> {
     toolAnnotationsDir,
     fallbackDir: getPackageGeneratedDir(),
   });
+
+  // Merge proxy tool annotations and policy rules into the loaded artifacts
+  // so the PolicyEngine can evaluate proxy tool calls.
+  toolAnnotations.servers.proxy = {
+    inputHash: 'hardcoded',
+    tools: proxyAnnotations,
+  };
+  compiledPolicy.rules = [...proxyPolicyRules, ...compiledPolicy.rules];
 
   const serverDomainAllowlists = extractServerDomainAllowlists(serversConfig);
   const trustedServers = buildTrustedServerSet(serversConfig);
@@ -1305,6 +1342,27 @@ async function main(): Promise<void> {
     }
   }
 
+  // In virtual-only mode (SERVER_FILTER=proxy), register proxy tool definitions
+  // and create the control API client for communicating with the MITM proxy.
+  const isVirtualOnlyMode = process.env.SERVER_FILTER === 'proxy' && Object.keys(serversConfig).length === 0;
+  let controlApiClient: ControlApiClient | null = null;
+
+  if (isVirtualOnlyMode) {
+    for (const toolDef of proxyToolDefinitions) {
+      allTools.push({
+        serverName: 'proxy',
+        name: toolDef.name,
+        description: toolDef.description,
+        inputSchema: toolDef.inputSchema as Record<string, unknown>,
+      });
+    }
+
+    const mitmControlAddr = process.env.MITM_CONTROL_ADDR;
+    if (mitmControlAddr) {
+      controlApiClient = createControlApiClient(mitmControlAddr);
+    }
+  }
+
   const toolMap = buildToolMap(allTools);
   const toolDescriptionHints = loadToolDescriptionHints();
   const hintedTools = applyToolDescriptionHints(allTools, toolDescriptionHints);
@@ -1336,6 +1394,7 @@ async function main(): Promise<void> {
     autoApproveModel,
     serverContextMap,
     whitelist: createApprovalWhitelist(),
+    controlApiClient,
   };
 
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
