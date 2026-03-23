@@ -639,6 +639,11 @@ describe('handleCallTool', () => {
     const content = result.content as Array<{ type: string; text: string }>;
     expect(content[0].text).toContain('Unknown argument(s): "file_path"');
     expect(content[0].text).toContain('"path"');
+    // Validation failures must be audit-logged
+    expect(deps.auditLog.log).toHaveBeenCalledTimes(1);
+    const logged = vi.mocked(deps.auditLog.log).mock.calls[0][0];
+    expect(logged.result.status).toBe('denied');
+    expect(logged.result.error).toContain('file_path');
   });
 
   it('skips argument validation for trusted servers', async () => {
@@ -649,15 +654,31 @@ describe('handleCallTool', () => {
     };
     const toolMap = new Map<string, ProxiedTool>();
     toolMap.set('store', tool);
-    const deps = createMockDeps({ toolMap });
+
+    const mockClient = {
+      callTool: vi.fn().mockResolvedValue({
+        content: [{ type: 'text', text: 'stored' }],
+        isError: false,
+      }),
+    };
+    const clientStates = new Map<string, ClientState>();
+    clientStates.set('memory', {
+      client: mockClient as unknown as ClientState['client'],
+      roots: [],
+    });
+
+    const resolvedSandboxConfigs = new Map();
+    resolvedSandboxConfigs.set('memory', { sandboxed: false, reason: 'opt-out' });
+
+    const deps = createMockDeps({ toolMap, clientStates, resolvedSandboxConfigs });
     vi.mocked(deps.policyEngine.getAnnotation).mockReturnValue(undefined);
     vi.mocked(deps.policyEngine.isTrustedServer).mockReturnValue(true);
 
     const result = await handleCallTool('store', { unknown_arg: 'value' }, deps);
 
-    // Should NOT be an argument validation error — trusted servers bypass validation
-    const content = result.content as Array<{ type: string; text: string }>;
-    expect(content[0]?.text ?? '').not.toContain('Unknown argument');
+    // Trusted servers bypass validation — call should reach the MCP server
+    expect(result.isError).toBeFalsy();
+    expect(mockClient.callTool).toHaveBeenCalled();
   });
 
   it('forwards allowed calls to the real MCP server', async () => {

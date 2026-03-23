@@ -699,10 +699,21 @@ export async function handleCallTool(
     };
   }
 
-  // Validate argument names against the tool's schema (non-trusted servers only).
-  if (!isTrusted) {
+  // Validate argument names against the tool's schema.
+  // Skip for trusted servers (check directly, not via isTrusted which also requires missing annotation).
+  if (!deps.policyEngine.isTrustedServer(toolInfo.serverName)) {
     const validationError = validateToolArguments(rawArgs, toolInfo.inputSchema);
     if (validationError) {
+      deps.auditLog.log({
+        timestamp: new Date().toISOString(),
+        requestId: uuidv4(),
+        serverName: toolInfo.serverName,
+        toolName: toolInfo.name,
+        arguments: rawArgs,
+        policyDecision: { status: 'deny', rule: 'invalid-arguments', reason: validationError },
+        result: { status: 'denied', error: validationError },
+        durationMs: 0,
+      });
       return {
         content: [{ type: 'text', text: validationError }],
         isError: true,
