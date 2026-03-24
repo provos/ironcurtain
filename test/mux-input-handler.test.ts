@@ -263,11 +263,11 @@ describe('MuxInputHandler', () => {
       expect(handler.cursorPos).toBe(4);
     });
 
-    it('Up arrow on first line is a no-op', () => {
+    it('Up arrow on first line scrolls up', () => {
       const handler = createMuxInputHandler({ initialMode: 'command' });
       handler.handlePaste('abc');
       const action = handler.handleKey('UP');
-      expect(action).toEqual({ kind: 'none' });
+      expect(action).toEqual({ kind: 'scroll-up', amount: 3 });
       expect(handler.cursorPos).toBe(3);
     });
 
@@ -299,12 +299,12 @@ describe('MuxInputHandler', () => {
       expect(handler.cursorPos).toBe(5);
     });
 
-    it('Down arrow on last line is a no-op', () => {
+    it('Down arrow on last line scrolls down', () => {
       const handler = createMuxInputHandler({ initialMode: 'command' });
       handler.handlePaste('abc');
       handler.handleKey('HOME');
       const action = handler.handleKey('DOWN');
-      expect(action).toEqual({ kind: 'none' });
+      expect(action).toEqual({ kind: 'scroll-down', amount: 3 });
       expect(handler.cursorPos).toBe(0);
     });
 

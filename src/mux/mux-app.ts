@@ -8,7 +8,7 @@
 /* eslint-disable @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-assignment */
 
 import { createPtyBridge } from './pty-bridge.js';
-import { createMuxInputHandler, type MuxInputHandler } from './mux-input-handler.js';
+import { createMuxInputHandler, SCROLL_LINES, type MuxInputHandler } from './mux-input-handler.js';
 import { createMuxEscalationManager, type MuxEscalationManager } from './mux-escalation-manager.js';
 import { createMuxRenderer, type MuxRenderer } from './mux-renderer.js';
 import { writeTrustedUserContext } from './trusted-input.js';
@@ -57,7 +57,6 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
   // Mouse event constants
   const MOUSE_WHEEL_UP = 'MOUSE_WHEEL_UP';
   const MOUSE_WHEEL_DOWN = 'MOUSE_WHEEL_DOWN';
-  const SCROLL_LINES = 3;
 
   // Components (initialized in start())
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -532,6 +531,9 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
     // Exit fullscreen and destroy renderer before any async work
     // so the normal terminal is restored immediately.
     if (term) {
+      if (process.platform === 'darwin') {
+        process.stdout.write('\x1b[?1007l');
+      }
       term.grabInput(false);
       term.hideCursor(false);
       term.fullscreen(false);
@@ -596,7 +598,17 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
 
       term.fullscreen(true);
       term.hideCursor(true);
-      term.grabInput({ mouse: 'button' });
+
+      if (process.platform === 'darwin') {
+        // On macOS, avoid X11 mouse tracking -- it prevents native text selection
+        // (Shift+click drag) in Terminal.app. Instead, enable alternate scroll mode
+        // which translates scroll wheel into Up/Down arrow sequences while the
+        // alternate screen buffer is active (enabled by fullscreen(true) above).
+        term.grabInput({ mouse: false });
+        process.stdout.write('\x1b[?1007h');
+      } else {
+        term.grabInput({ mouse: 'button' });
+      }
 
       inputHandler = createMuxInputHandler({ initialMode: autoSpawn ? 'pty' : 'command' });
 
@@ -748,6 +760,9 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
       process.on('exit', () => {
         pasteInterceptor?.uninstall();
         if (term) {
+          if (process.platform === 'darwin') {
+            process.stdout.write('\x1b[?1007l');
+          }
           term.grabInput(false);
         }
       });
