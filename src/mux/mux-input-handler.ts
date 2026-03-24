@@ -157,6 +157,9 @@ const END = 'END';
 const CTRL_E = 'CTRL_E';
 const SHIFT_TAB = 'SHIFT_TAB';
 
+/** Scroll amount (in lines) for arrow-key and mouse-wheel scrolling. */
+export const SCROLL_LINES = 3;
+
 /**
  * Converts terminal-kit's raw code (from `data.code`) to a string
  * suitable for writing to a PTY.
@@ -804,10 +807,10 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
       return { kind: 'none' };
     }
 
-    // Up: move to same column on previous line
+    // Up: move to same column on previous line, or scroll if on first line
     if (key === UP) {
       const lastNl = _inputBuffer.lastIndexOf('\n', _cursorPos - 1);
-      if (lastNl === -1) return { kind: 'none' }; // already on first line
+      if (lastNl === -1) return { kind: 'scroll-up', amount: SCROLL_LINES };
       const col = _cursorPos - lastNl - 1;
       const prevNl = _inputBuffer.lastIndexOf('\n', lastNl - 1);
       const prevLineLen = lastNl - (prevNl + 1);
@@ -815,12 +818,12 @@ export function createMuxInputHandler(options?: MuxInputHandlerOptions): MuxInpu
       return { kind: 'redraw-input' };
     }
 
-    // Down: move to same column on next line
+    // Down: move to same column on next line, or scroll if on last line
     if (key === DOWN) {
       const lastNl = _inputBuffer.lastIndexOf('\n', _cursorPos - 1);
       const col = lastNl === -1 ? _cursorPos : _cursorPos - lastNl - 1;
       const nextNl = _inputBuffer.indexOf('\n', _cursorPos);
-      if (nextNl === -1) return { kind: 'none' }; // already on last line
+      if (nextNl === -1) return { kind: 'scroll-down', amount: SCROLL_LINES };
       const nextNextNl = _inputBuffer.indexOf('\n', nextNl + 1);
       const nextLineLen = nextNextNl === -1 ? _inputBuffer.length - nextNl - 1 : nextNextNl - nextNl - 1;
       _cursorPos = nextNl + 1 + Math.min(col, nextLineLen);
