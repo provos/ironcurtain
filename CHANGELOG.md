@@ -4,6 +4,41 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-03-24
+
+### Features
+
+- **Third-party OAuth onboarding** — full OAuth 2.0 flow for MCP servers with PKCE, callback server, token store with auto-refresh, interactive scope picker for Google services, `ironcurtain auth` CLI with setup guides, import, revocation, and incremental consent (#108)
+- **Google Workspace MCP server integration** — credential-file rendezvous pattern (access-token-only, no refresh token in MCP server), `TokenFileRefresher` with proactive refresh, strict filesystem sandbox with `denyRead: ["~"]`, dynamic Node path discovery for nvm/volta/fnm/asdf, and new `share-permission`, `email-address`, `email-body` argument roles (#113)
+- **Per-server policy compilation** — compile each MCP server independently with its own compile-verify-repair cycle, Zod-enforced server scoping to prevent cross-server rule leakage, per-server artifact caching for incremental recompilation, `--server` CLI flag for single-server debugging, annotation batching for 100+ tool servers, and point-fix repair mechanism that preserves passing rules (#118)
+- **Policy-mediated MCP access for dynamic lists** — all MCP tool calls during list resolution are gated through a read-only PolicyEngine via the MCP proxy server; includes `--no-mcp` flag, compiled read-only policy covering all servers, and error surfacing for failed MCP calls (#122)
+- **Escalation picker UI** — tab-per-escalation floating box overlay with single-key actions (a/d/w for approve/deny/whitelist), batch resolve-all via Shift+A/D, auto-open on new escalations with smart suppression, and narrow-terminal guards (#112, #116)
+- **Ephemeral approval whitelisting** — whitelist domains, directories, or identifiers during escalation approval for session-scoped auto-approve; role-driven pattern extraction, `/approve+` syntax across CLI/mux/listener, full audit trail (#109)
+- **Proxy MCP server for dynamic domains** — virtual tools (`add/remove/list_proxy_domain`) give Docker agents runtime control over MITM proxy domain allowlists via an HTTP control API on a host-only socket (#126)
+- **Multiple parallel mux sessions** — per-session ownership via `muxId` replaces the global escalation-listener lock; per-session Docker networks prevent cross-session teardown; orphan detection via PID liveness checks (#110)
+- **Auto-save session memory** — forced final turn after task completion prompts the agent to store session context via `memory.store`; works across all transports, configurable via `memory.autoSave` (#124)
+- **Tool argument validation against input schemas** — proxy validates argument names against MCP tool `inputSchema` before forwarding, returning actionable errors with valid parameter names so the agent can self-correct (#125)
+- **Scenario argument schema validation** — `inputSchema` stored on tool annotations and validated at the Zod level during scenario generation and verification, catching wrong argument names before they reach the LLM (#122)
+
+### Fixes
+
+- **Google Workspace token expiry** — immediate refresh check on `TokenFileRefresher.start()` and `forceRefresh()` that bypasses the 5-minute early-return threshold, preventing tokens from expiring mid-session (#123)
+- **Sandbox arg resolver mangling npm packages** — skip scoped (`@org/pkg`) and versioned (`pkg@1.2.3`) specifiers when resolving relative args to absolute paths (#119)
+- **Mux PTY key forwarding** — forward raw terminal-kit bytes instead of mapping key names, fixing broken Shift+Tab, F-keys, and Alt+arrow sequences (#127)
+- **Claude Code WebFetch in Docker** — add `skipWebFetchPreflight` and `HTTPS_PROXY` to Docker settings so WebFetch works through the MITM proxy (#129)
+- **Docker exec timeout logging** — detect and log timeout duration for docker exec calls; guard against empty Signal responses (#128)
+- **Fetch server JSON responses** — return structured `{ error, status, headers, body }` JSON from `http_fetch` instead of concatenated plain text (#114, #115)
+- **SSH agent forwarding** — forward `SSH_AUTH_SOCK` to the MCP server proxy process, fixing 60-second hangs on `git push`
+- **Mux shutdown spinner** — exit fullscreen before showing the shutdown spinner so it is always visible on `/quit`
+- **workspace:\* protocol** — replace pnpm-specific `workspace:*` with semver range for npm compatibility (#111)
+
+### Improvements
+
+- **Remove sideEffects from tool annotations** — the boolean was nearly useless (81/85 tools marked true); argument roles already capture security-relevant characteristics (#118)
+- **Remove monolithic compilation path** — all compilation routes through `runPerServer()`, deleting ~577 lines of dead code (#122)
+- **Increase Docker container resources** — bump defaults to 8 GB memory and 4 CPUs for resource-intensive workloads (#107)
+- **storedAnnotations mandatory throughout pipeline** — single required code path after monolithic removal, eliminating optional guards and fallbacks (#122)
+
 ## [0.8.0] - 2026-03-15
 
 ### Features
@@ -311,6 +346,7 @@ Initial public release.
 - CI pipeline with Node 22/24 matrix testing
 - Code of Conduct, Contributing guidelines, Security policy
 
+[0.9.0]: https://github.com/provos/ironcurtain/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/provos/ironcurtain/compare/v0.7.2...v0.8.0
 [0.7.2]: https://github.com/provos/ironcurtain/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/provos/ironcurtain/compare/v0.7.0...v0.7.1
