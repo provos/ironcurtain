@@ -9,6 +9,7 @@
 import { execFile as execFileCb } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { DockerContainerConfig, DockerExecResult, DockerManager } from './types.js';
+import * as logger from '../logger.js';
 
 /** Async exec function signature matching promisified execFile. */
 export type ExecFileFn = (
@@ -23,7 +24,7 @@ const defaultExecFile: ExecFileFn = async (cmd, args, opts) => {
 };
 
 /** Default timeout for docker exec commands (10 minutes). */
-const DEFAULT_EXEC_TIMEOUT_MS = 600_000;
+export const DEFAULT_EXEC_TIMEOUT_MS = 600_000;
 
 /** Grace period for docker stop before SIGKILL. */
 const STOP_TIMEOUT_SECONDS = 10;
@@ -136,6 +137,12 @@ export function createDockerManager(execFileFn?: ExecFileFn): DockerManager {
         return { exitCode: 0, stdout, stderr };
       } catch (err: unknown) {
         if (isExecError(err)) {
+          if (isTimeoutError(err)) {
+            logger.warn(
+              `[docker-manager] exec timed out after ${timeout}ms (killed=${String(err.killed)}, ` +
+                `signal=${err.signal ?? 'none'}): docker exec ${nameOrId} ${command[0] ?? ''}`,
+            );
+          }
           return {
             exitCode: err.code ?? 1,
             stdout: err.stdout,
@@ -312,8 +319,14 @@ interface ExecError {
   code: number | null;
   stdout: string;
   stderr: string;
+  killed?: boolean;
+  signal?: string;
 }
 
 function isExecError(err: unknown): err is ExecError {
   return typeof err === 'object' && err !== null && 'stdout' in err;
+}
+
+function isTimeoutError(err: ExecError): boolean {
+  return err.killed === true && err.signal === 'SIGTERM';
 }

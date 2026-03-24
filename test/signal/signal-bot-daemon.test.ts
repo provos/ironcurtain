@@ -515,6 +515,26 @@ describe('SignalBotDaemon', () => {
     });
   });
 
+  it('sends fallback message when agent returns empty response', async () => {
+    // Override createSession so sendMessage returns an empty string
+    const { createSession } = await import('../../src/session/index.js');
+    vi.mocked(createSession).mockImplementation((options?: { onEscalation?: MockSessionRecord['onEscalation'] }) => {
+      const session = createMockSession();
+      vi.mocked(session.sendMessage).mockResolvedValue('');
+      createdMockSessions.push({ session, onEscalation: options?.onEscalation });
+      return Promise.resolve(session);
+    });
+
+    await withDaemon(async () => {
+      mockApi.simulateIncomingMessage('+15559876543', 'Hello agent');
+      await waitForMessage(mockApi, (m) => m.includes('no text response'), 10_000);
+
+      expect(mockApi.messageTexts.some((m) => m.includes('no text response'))).toBe(true);
+      // Ensure no empty message was sent
+      expect(mockApi.sentMessages.every((m) => m.message.trim().length > 0)).toBe(true);
+    });
+  });
+
   it('ignores messages from unauthorized senders', async () => {
     await withDaemon(async () => {
       const countBefore = mockApi.sentMessages.length;

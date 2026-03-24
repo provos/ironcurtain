@@ -8,7 +8,7 @@
  */
 
 import * as http from 'node:http';
-import type { CompiledRule, ToolAnnotation } from '../pipeline/types.js';
+import type { CompiledRule, StoredToolAnnotation } from '../pipeline/types.js';
 
 // ---------------------------------------------------------------------------
 // Domain validation
@@ -103,32 +103,36 @@ export const proxyToolDefinitions = [
 // Tool annotations (hardcoded, not LLM-generated)
 // ---------------------------------------------------------------------------
 
-export const proxyAnnotations: ToolAnnotation[] = [
+const schemaByName = Object.fromEntries(
+  proxyToolDefinitions.map((t) => [t.name, t.inputSchema as Record<string, unknown>]),
+) as Record<(typeof proxyToolDefinitions)[number]['name'], Record<string, unknown>>;
+
+export const proxyAnnotations: StoredToolAnnotation[] = [
   {
     toolName: 'add_proxy_domain',
     serverName: 'proxy',
     comment: 'Add a domain to the MITM proxy allowlist',
-    sideEffects: true,
     args: {
       domain: ['none'],
       justification: ['none'],
     },
+    inputSchema: schemaByName.add_proxy_domain,
   },
   {
     toolName: 'remove_proxy_domain',
     serverName: 'proxy',
     comment: 'Remove a domain from the MITM proxy allowlist',
-    sideEffects: true,
     args: {
       domain: ['none'],
     },
+    inputSchema: schemaByName.remove_proxy_domain,
   },
   {
     toolName: 'list_proxy_domains',
     serverName: 'proxy',
     comment: 'List currently allowed proxy domains',
-    sideEffects: false,
     args: {},
+    inputSchema: schemaByName.list_proxy_domains,
   },
 ];
 
