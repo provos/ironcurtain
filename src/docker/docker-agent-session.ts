@@ -380,8 +380,9 @@ export class DockerAgentSession implements Session {
     const command = this.adapter.buildCommand(userMessage, this.systemPrompt);
     logger.info(`[docker-agent] exec: ${formatCommand(command)}`);
 
+    const execStartMs = Date.now();
     const { exitCode, stdout, stderr } = await this.docker.exec(this.containerId, command, execTimeout);
-    const execDurationMs = Date.now() - turnStartMs;
+    const execDurationMs = Date.now() - execStartMs;
     const timeoutLabel = execTimeout != null ? `${execTimeout}ms` : `${DEFAULT_EXEC_TIMEOUT_MS}ms (default)`;
     logger.info(
       `[docker-agent] exit=${exitCode} stdout=${stdout.length}B stderr=${stderr.length}B ` +

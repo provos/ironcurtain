@@ -249,6 +249,26 @@ describe('DockerManager', () => {
       await manager.exec('container-id', ['cmd'], 5000);
       expect(mock.calls[0].opts.timeout).toBe(5000);
     });
+
+    it('detects timeout errors and returns non-zero exit code', async () => {
+      // Simulate the error shape Node.js execFile produces on timeout
+      const mockExecTimeout: ExecFileFn = async (cmd, args, opts) => {
+        mock.calls.push({ cmd, args, opts });
+        throw Object.assign(new Error('Command timed out'), {
+          code: null,
+          killed: true,
+          signal: 'SIGTERM',
+          stdout: '',
+          stderr: '',
+        });
+      };
+      const manager = createDockerManager(mockExecTimeout);
+
+      const result = await manager.exec('container-id', ['claude', '--continue']);
+      expect(result.exitCode).toBe(1);
+      expect(result.stdout).toBe('');
+      expect(result.stderr).toBe('');
+    });
   });
 
   describe('stop', () => {

@@ -103,6 +103,10 @@ export const proxyToolDefinitions = [
 // Tool annotations (hardcoded, not LLM-generated)
 // ---------------------------------------------------------------------------
 
+const schemaByName = Object.fromEntries(
+  proxyToolDefinitions.map((t) => [t.name, t.inputSchema as Record<string, unknown>]),
+) as Record<(typeof proxyToolDefinitions)[number]['name'], Record<string, unknown>>;
+
 export const proxyAnnotations: StoredToolAnnotation[] = [
   {
     toolName: 'add_proxy_domain',
@@ -112,7 +116,7 @@ export const proxyAnnotations: StoredToolAnnotation[] = [
       domain: ['none'],
       justification: ['none'],
     },
-    inputSchema: proxyToolDefinitions[0].inputSchema as Record<string, unknown>,
+    inputSchema: schemaByName.add_proxy_domain,
   },
   {
     toolName: 'remove_proxy_domain',
@@ -121,14 +125,14 @@ export const proxyAnnotations: StoredToolAnnotation[] = [
     args: {
       domain: ['none'],
     },
-    inputSchema: proxyToolDefinitions[1].inputSchema as Record<string, unknown>,
+    inputSchema: schemaByName.remove_proxy_domain,
   },
   {
     toolName: 'list_proxy_domains',
     serverName: 'proxy',
     comment: 'List currently allowed proxy domains',
     args: {},
-    inputSchema: proxyToolDefinitions[2].inputSchema as Record<string, unknown>,
+    inputSchema: schemaByName.list_proxy_domains,
   },
 ];
 
