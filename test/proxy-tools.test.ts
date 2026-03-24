@@ -416,17 +416,17 @@ describe('proxyToolDefinitions', () => {
 // ---------------------------------------------------------------------------
 
 describe('proxyAnnotations', () => {
-  it('marks add_proxy_domain as having side effects', () => {
+  it('has correct metadata for add_proxy_domain', () => {
     const addAnnotation = proxyAnnotations.find((a) => a.toolName === 'add_proxy_domain');
     expect(addAnnotation).toBeDefined();
-    expect(addAnnotation!.sideEffects).toBe(true);
     expect(addAnnotation!.serverName).toBe('proxy');
+    expect(addAnnotation!.inputSchema).toBeDefined();
   });
 
-  it('marks list_proxy_domains as having no side effects', () => {
+  it('has correct metadata for list_proxy_domains', () => {
     const listAnnotation = proxyAnnotations.find((a) => a.toolName === 'list_proxy_domains');
     expect(listAnnotation).toBeDefined();
-    expect(listAnnotation!.sideEffects).toBe(false);
+    expect(listAnnotation!.inputSchema).toBeDefined();
   });
 });
 

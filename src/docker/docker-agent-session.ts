@@ -39,6 +39,7 @@ import { SessionNotReadyError, SessionClosedError } from '../session/errors.js';
 import { createEscalationWatcher, atomicWriteJsonSync } from '../escalation/escalation-watcher.js';
 import type { EscalationWatcher } from '../escalation/escalation-watcher.js';
 import * as logger from '../logger.js';
+import { DEFAULT_EXEC_TIMEOUT_MS } from './docker-manager.js';
 
 export interface DockerAgentSessionDeps {
   readonly config: IronCurtainConfig;
@@ -380,7 +381,15 @@ export class DockerAgentSession implements Session {
     logger.info(`[docker-agent] exec: ${formatCommand(command)}`);
 
     const { exitCode, stdout, stderr } = await this.docker.exec(this.containerId, command, execTimeout);
-    logger.info(`[docker-agent] exit=${exitCode} stdout=${stdout.length}B stderr=${stderr.length}B`);
+    const execDurationMs = Date.now() - turnStartMs;
+    const timeoutLabel = execTimeout != null ? `${execTimeout}ms` : `${DEFAULT_EXEC_TIMEOUT_MS}ms (default)`;
+    logger.info(
+      `[docker-agent] exit=${exitCode} stdout=${stdout.length}B stderr=${stderr.length}B ` +
+        `duration=${execDurationMs}ms timeout=${timeoutLabel}`,
+    );
+    if (exitCode !== 0) {
+      logger.warn(`[docker-agent] non-zero exit code ${exitCode} after ${execDurationMs}ms`);
+    }
 
     if (stderr) {
       logger.info(`[docker-agent] stderr: ${stderr.substring(0, 500)}`);
