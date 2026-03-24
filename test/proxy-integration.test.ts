@@ -29,7 +29,7 @@ import {
 } from '../src/docker/proxy-tools.js';
 import { PolicyEngine } from '../src/trusted-process/policy-engine.js';
 import type { ProviderConfig } from '../src/docker/provider-config.js';
-import type { CompiledPolicyFile, StoredToolAnnotationsFile, StoredToolAnnotation } from '../src/pipeline/types.js';
+import type { CompiledPolicyFile, StoredToolAnnotationsFile } from '../src/pipeline/types.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -84,13 +84,7 @@ function buildProxyPolicyEngine(): PolicyEngine {
     servers: {
       proxy: {
         inputHash: 'test-fixture',
-        tools: proxyAnnotations.map((a) => ({
-          toolName: a.toolName,
-          serverName: a.serverName,
-          comment: a.comment,
-          sideEffects: a.sideEffects,
-          args: a.args as StoredToolAnnotation['args'],
-        })),
+        tools: proxyAnnotations,
       },
     },
   };

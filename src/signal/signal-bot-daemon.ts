@@ -422,7 +422,12 @@ export class SignalBotDaemon {
     try {
       const response = await transport.forwardMessage(text);
       const styledText = markdownToSignal(response);
-      await this.sendSignalMessage(prefixWithLabel(styledText, managed.label, this.sessionManager.size));
+      const hasContent = styledText.trim().length > 0;
+      if (!hasContent) {
+        logger.warn(`[Signal Daemon] Session #${managed.label} returned empty response; sending fallback message`);
+      }
+      const messageToSend = hasContent ? styledText : 'The agent completed but produced no text response.';
+      await this.sendSignalMessage(prefixWithLabel(messageToSend, managed.label, this.sessionManager.size));
     } catch (error) {
       if (error instanceof BudgetExhaustedError) {
         const status = managed.session.getBudgetStatus();
