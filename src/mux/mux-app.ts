@@ -17,6 +17,8 @@ import type { MuxTab, MuxAction } from './types.js';
 import { validateWorkspacePath } from '../session/workspace-validation.js';
 import { scanResumableSessions } from './session-scanner.js';
 import { scanPersonas } from './persona-scanner.js';
+import ora from 'ora';
+import chalk from 'chalk';
 import * as logger from '../logger.js';
 
 export interface MuxApp {
@@ -525,24 +527,62 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
     running = false;
 
     pasteInterceptor?.uninstall();
-
-    for (const tab of tabs) {
-      if (tab.bridge.alive) {
-        tab.bridge.kill();
-      }
-    }
-
     escalationManager.stop();
 
+    // Exit fullscreen and destroy renderer before any async work
+    // so the normal terminal is restored immediately.
     if (term) {
       term.grabInput(false);
       term.hideCursor(false);
       term.fullscreen(false);
       term.styleReset();
     }
-
     renderer.destroy();
-    resolveShutdown?.();
+
+    // Collect alive tabs that need to be waited on
+    const aliveTabs = tabs.filter((t) => t.bridge.alive);
+
+    if (aliveTabs.length === 0) {
+      resolveShutdown?.();
+      return;
+    }
+
+    // Show a spinner on the real terminal while children shut down
+    const spinner = ora({
+      text: `Shutting down ${aliveTabs.length} PTY session${aliveTabs.length > 1 ? 's' : ''}...`,
+      stream: process.stderr,
+      discardStdin: false,
+    }).start();
+
+    // Kill all children
+    for (const tab of aliveTabs) {
+      tab.bridge.kill();
+    }
+
+    // Wait for all children to exit, with a safety timeout
+    let remaining = aliveTabs.length;
+    let settled = false;
+    const settle = (): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      spinner.succeed(chalk.dim('All sessions ended'));
+      resolveShutdown?.();
+    };
+
+    const deadline = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      spinner.warn(chalk.dim(`Timed out waiting for ${remaining} session(s)`));
+      resolveShutdown?.();
+    }, 10_000);
+
+    for (const tab of aliveTabs) {
+      tab.bridge.onExit(() => {
+        remaining--;
+        if (remaining === 0) settle();
+      });
+    }
   }
 
   return {

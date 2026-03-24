@@ -164,6 +164,7 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
   let renderScheduled = false;
   let lastRenderTime = 0;
   let renderTimeout: ReturnType<typeof setTimeout> | null = null;
+  let _destroyed = false;
 
   // Splash screen (shown when no tabs exist)
   let _splash: SplashScreen | null = null;
@@ -1193,6 +1194,7 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
     },
 
     destroy(): void {
+      _destroyed = true;
       tearDownSplash();
       if (renderTimeout) {
         clearTimeout(renderTimeout);
@@ -1216,7 +1218,7 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
     },
 
     scheduleRedraw(): void {
-      if (renderScheduled) return;
+      if (_destroyed || renderScheduled) return;
       renderScheduled = true;
 
       const elapsed = Date.now() - lastRenderTime;

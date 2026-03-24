@@ -220,6 +220,10 @@ export async function createPtyBridge(options: PtyBridgeOptions): Promise<PtyBri
     },
 
     onExit(callback: (exitCode: number) => void): void {
+      if (!_alive && _exitCode !== undefined) {
+        callback(_exitCode);
+        return;
+      }
       exitCallbacks.push(callback);
     },
 
