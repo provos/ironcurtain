@@ -13,11 +13,11 @@ USER codespace
 
 # Pre-seed Claude Code config so it skips interactive prompts:
 # - .claude.json: marks onboarding complete (skips login flow)
-# - .claude/settings.json: accepts bypass-permissions mode (skips confirmation dialog)
+# - .claude/settings.json: accepts bypass-permissions mode, skips web fetch preflight
 RUN mkdir -p /home/codespace/.claude && \
     echo '{"hasCompletedOnboarding":true,"numStartups":1,"projects":{"/workspace":{"allowedTools":[],"hasTrustDialogAccepted":true}}}' \
       > /home/codespace/.claude.json && \
-    echo '{"permissions":{"allow":[],"deny":[]},"skipDangerousModePermissionPrompt":true}' \
+    echo '{"permissions":{"allow":[],"deny":[]},"skipDangerousModePermissionPrompt":true,"skipWebFetchPreflight":true}' \
       > /home/codespace/.claude/settings.json
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

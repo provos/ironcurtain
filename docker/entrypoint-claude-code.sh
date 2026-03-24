@@ -35,6 +35,8 @@ fi
 
 # Configure settings.json:
 # - skipDangerousModePermissionPrompt: suppresses the bypass-permissions warning
+# - skipWebFetchPreflight: bypasses domain safety check that fails in proxied env
+# - env.HTTPS_PROXY: ensures Claude Code's WebFetch routes through the MITM proxy
 # Auth mode determines how Claude Code gets its API credentials:
 # - OAuth mode (CLAUDE_CODE_OAUTH_TOKEN set): Claude Code reads the token from
 #   this env var directly -- no apiKeyHelper needed.
@@ -45,7 +47,7 @@ mkdir -p "$HOME/.claude"
 
 if [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
   # OAuth mode: Claude Code reads the token from env var directly.
-  cat > "$HOME/.claude/settings.json" <<'EOSETTINGS'
+  cat > "$HOME/.claude/settings.json" <<EOSETTINGS
 {
   "permissions": {
     "allow": [],
@@ -53,12 +55,16 @@ if [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
     "additionalDirectories": [],
     "defaultMode": "bypassPermissions"
   },
-  "skipDangerousModePermissionPrompt": true
+  "skipDangerousModePermissionPrompt": true,
+  "skipWebFetchPreflight": true,
+  "env": {
+    "HTTPS_PROXY": "${HTTPS_PROXY}"
+  }
 }
 EOSETTINGS
 else
   # API key mode: apiKeyHelper echoes the fake key at runtime.
-  cat > "$HOME/.claude/settings.json" <<'EOSETTINGS'
+  cat > "$HOME/.claude/settings.json" <<EOSETTINGS
 {
   "permissions": {
     "allow": [],
@@ -66,8 +72,12 @@ else
     "additionalDirectories": [],
     "defaultMode": "bypassPermissions"
   },
-  "apiKeyHelper": "echo $IRONCURTAIN_API_KEY",
-  "skipDangerousModePermissionPrompt": true
+  "apiKeyHelper": "echo \$IRONCURTAIN_API_KEY",
+  "skipDangerousModePermissionPrompt": true,
+  "skipWebFetchPreflight": true,
+  "env": {
+    "HTTPS_PROXY": "${HTTPS_PROXY}"
+  }
 }
 EOSETTINGS
 fi
