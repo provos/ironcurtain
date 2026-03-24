@@ -108,9 +108,9 @@ ironcurtain mux
 **Key capabilities:**
 
 - **Full agent TUI** — The agent runs in a PTY inside a Docker container with no network access. You interact with it exactly as if it were running locally.
-- **Inline escalation handling** — When a tool call needs approval, an escalation panel overlays the viewport. Press Ctrl-A to enter command mode, `/approve N` or `/deny N`, and return.
+- **Inline escalation handling** — When a tool call needs approval, an escalation picker overlays the viewport with single-key actions (a/d/w for approve/deny/whitelist). Use `/approve+ N` to whitelist a domain or path for the rest of the session.
 - **Trusted user input** — Text typed in command mode (Ctrl-A) is captured on the host side before entering the container. This creates a verified intent signal that the auto-approver can use — e.g., typing "push my changes to origin" will auto-approve a subsequent `git_push` escalation.
-- **Tab management** — Spawn multiple concurrent sessions (`/new`), switch between them (`/tab N`, Alt-1..9), close them (`/close`).
+- **Tab management** — Spawn multiple concurrent sessions (`/new`), switch between them (`/tab N`, Alt-1..9), close them (`/close`). Multiple mux instances can run in parallel.
 
 See [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md) for the full walkthrough: input modes, trusted input security model, escalation workflow, and keyboard reference.
 
@@ -241,15 +241,16 @@ Key configuration areas: models and API keys, resource budgets (token/step/time/
 
 ## Built-in Capabilities
 
-IronCurtain ships with five pre-configured MCP servers. All tool calls (except memory) are governed by your compiled policy.
+IronCurtain ships with six pre-configured MCP servers. All tool calls (except memory) are governed by your compiled policy.
 
-| Server         | Tools | Key capabilities                                                                                                  |
-| -------------- | ----- | ----------------------------------------------------------------------------------------------------------------- |
-| **Filesystem** | 14    | Read, write, edit, search files; directory tree; move; diff calculation                                           |
-| **Git**        | 27    | Full git workflow: status, diff, log, commit, branch, push/pull/fetch, clone, stash, blame                        |
-| **Fetch**      | 2     | HTTP GET with HTML-to-markdown conversion; web search (Brave, Tavily, SerpAPI)                                    |
-| **GitHub**     | 41    | Issues, PRs, code search, reviews via `ghcr.io/github/github-mcp-server`; requires a GitHub personal access token |
-| **Memory**     | 5     | Persistent semantic memory with hybrid vector+keyword search, LLM summarization, and automatic compaction. Enabled for persona and cron sessions. |
+| Server               | Tools | Key capabilities                                                                                                  |
+| -------------------- | ----- | ----------------------------------------------------------------------------------------------------------------- |
+| **Filesystem**       | 14    | Read, write, edit, search files; directory tree; move; diff calculation                                           |
+| **Git**              | 28    | Full git workflow: status, diff, log, commit, branch, push/pull/fetch, clone, stash, blame                        |
+| **Fetch**            | 2     | HTTP GET with HTML-to-markdown conversion; web search (Brave, Tavily, SerpAPI)                                    |
+| **GitHub**           | 41    | Issues, PRs, code search, reviews via `ghcr.io/github/github-mcp-server`; requires a GitHub personal access token |
+| **Google Workspace** | 128   | Gmail, Calendar, Drive, Docs, Sheets — requires OAuth setup via `ironcurtain auth`                                |
+| **Memory**           | 5     | Persistent semantic memory with hybrid vector+keyword search, LLM summarization, and automatic compaction. Enabled for persona and cron sessions. |
 
 Read-only operations are allowed by default policy; mutations (writes, pushes, PR creation) escalate for human approval. Tools use `server.tool` naming (e.g., `filesystem.read_file`, `memory.recall`).
 
