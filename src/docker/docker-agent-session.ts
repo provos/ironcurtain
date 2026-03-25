@@ -212,6 +212,13 @@ export class DockerAgentSession implements Session {
     let mounts: { source: string; target: string; readonly: boolean }[];
 
     let extraHosts: string[] | undefined;
+    const mainContainerName = `ironcurtain-${shortId}`;
+
+    // Remove stale main container from a crashed previous session (same session
+    // ID means same deterministic name, which would conflict on docker create).
+    // Done before the TCP/UDS branch since the main container name is
+    // deterministic in both modes.
+    await this.docker.removeStaleContainer(mainContainerName);
 
     if (this.useTcp && mitmAddr.port !== undefined && this.proxy.port !== undefined) {
       // macOS TCP mode: internal bridge network blocks egress.
@@ -245,12 +252,9 @@ export class DockerAgentSession implements Session {
 
       // Create socat sidecar on the default bridge (can reach host.docker.internal)
       const sidecarName = `ironcurtain-sidecar-${shortId}`;
-      const mainContainerName = `ironcurtain-${shortId}`;
 
-      // Remove stale containers from a crashed previous session (same session ID
-      // means same deterministic container names, which would conflict on create).
+      // Remove stale sidecar from a crashed previous session (TCP mode only).
       await this.docker.removeStaleContainer(sidecarName);
-      await this.docker.removeStaleContainer(mainContainerName);
 
       this.sidecarContainerId = await this.docker.create({
         image: socatImage,
@@ -304,7 +308,7 @@ export class DockerAgentSession implements Session {
     try {
       this.containerId = await this.docker.create({
         image,
-        name: `ironcurtain-${shortId}`,
+        name: mainContainerName,
         network: network ?? 'none',
         mounts,
         env,

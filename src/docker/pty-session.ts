@@ -317,6 +317,12 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
     let hostPtyPort: number | undefined;
     const mainContainerName = `ironcurtain-pty-${shortId}`;
 
+    // Remove stale main container from a crashed previous session (same session
+    // ID means same deterministic name, which would conflict on docker create).
+    // Done before the TCP/UDS branch since the main container name is
+    // deterministic in both modes.
+    await docker.removeStaleContainer(mainContainerName);
+
     if (useTcp && proxy.port !== undefined && mitmAddr.port !== undefined) {
       // macOS TCP mode
       const mcpPort = proxy.port;
@@ -346,10 +352,8 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
       // with `fork` only resolves at connection time (so it's fine that main starts later).
       const sidecarName = `ironcurtain-sidecar-${shortId}`;
 
-      // Remove stale containers from a crashed previous session (same session ID
-      // means same deterministic container names, which would conflict on create).
+      // Remove stale sidecar from a crashed previous session (TCP mode only).
       await docker.removeStaleContainer(sidecarName);
-      await docker.removeStaleContainer(mainContainerName);
 
       // Container-internal PTY port is fixed; host-side port is dynamic to
       // avoid conflicts when multiple PTY sessions run concurrently.

@@ -471,4 +471,48 @@ describe('DockerManager', () => {
       await expect(manager.removeNetwork('ironcurtain-abc')).resolves.toBeUndefined();
     });
   });
+
+  describe('removeStaleContainer', () => {
+    it('no-ops when container does not exist', async () => {
+      // docker inspect fails → containerExists returns false
+      mock.setError(1, '', 'No such container');
+      const manager = createDockerManager(mock.mockExec);
+
+      const removed = await manager.removeStaleContainer('ironcurtain-sidecar-abc');
+      expect(removed).toBe(false);
+      // Only the inspect call, no stop/rm
+      expect(mock.calls).toHaveLength(1);
+      expect(mock.calls[0].args).toEqual(['inspect', 'ironcurtain-sidecar-abc']);
+    });
+
+    it('stops and removes when container exists', async () => {
+      // Sequence: inspect succeeds, stop succeeds, rm succeeds
+      mock.setSequence([
+        { stdout: '[{"Id":"abc"}]' }, // inspect → exists
+        { stdout: '' }, // stop
+        { stdout: '' }, // rm -f
+      ]);
+      const manager = createDockerManager(mock.mockExec);
+
+      const removed = await manager.removeStaleContainer('ironcurtain-pty-xyz');
+      expect(removed).toBe(true);
+      expect(mock.calls).toHaveLength(3);
+      expect(mock.calls[0].args).toEqual(['inspect', 'ironcurtain-pty-xyz']);
+      expect(mock.calls[1].args).toContain('stop');
+      expect(mock.calls[2].args).toEqual(['rm', '-f', 'ironcurtain-pty-xyz']);
+    });
+
+    it('still removes when stop fails (container already stopped)', async () => {
+      mock.setSequence([
+        { stdout: '[{"Id":"abc"}]' }, // inspect → exists
+        { error: true, code: 1, stderr: 'container already stopped' }, // stop fails
+        { stdout: '' }, // rm -f succeeds
+      ]);
+      const manager = createDockerManager(mock.mockExec);
+
+      const removed = await manager.removeStaleContainer('stale-container');
+      expect(removed).toBe(true);
+      expect(mock.calls).toHaveLength(3);
+    });
+  });
 });
