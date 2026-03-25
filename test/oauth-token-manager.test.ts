@@ -230,7 +230,7 @@ describe('OAuthTokenManager', () => {
     });
   });
 
-  describe('Keychain mode (canRefresh: false)', () => {
+  describe('canRefresh: false (refresh disabled)', () => {
     it('re-reads file and uses valid credentials without refresh', async () => {
       const creds = nearExpiryCreds();
       const fileCreds = validCreds({ accessToken: 'access-from-file' });
@@ -244,14 +244,29 @@ describe('OAuthTokenManager', () => {
       expect(deps.refreshToken).not.toHaveBeenCalled();
     });
 
-    it('falls back to Keychain when file has no valid creds', async () => {
+    it('returns null when file has no valid creds and refresh is disabled', async () => {
+      const creds = nearExpiryCreds();
+      const deps = makeDeps({
+        loadCredentials: vi.fn(() => null),
+      });
+      const manager = new OAuthTokenManager(creds, { canRefresh: false }, deps);
+
+      const token = await manager.handleAuthFailure();
+      expect(token).toBeNull();
+      expect(deps.refreshToken).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Keychain-sourced creds (canRefresh: true with keychainServiceName)', () => {
+    it('re-reads Keychain and uses valid credentials without refresh', async () => {
       const creds = nearExpiryCreds();
       const keychainCreds = validCreds({ accessToken: 'access-from-keychain' });
       const deps = makeDeps({
         loadCredentials: vi.fn(() => null),
         loadFromKeychain: vi.fn(() => keychainCreds),
+        keychainServiceName: 'Claude Code-credentials',
       });
-      const manager = new OAuthTokenManager(creds, { canRefresh: false }, deps);
+      const manager = new OAuthTokenManager(creds, { canRefresh: true }, deps);
 
       const token = await manager.getValidAccessToken();
       expect(token).toBe('access-from-keychain');
@@ -264,40 +279,31 @@ describe('OAuthTokenManager', () => {
       const keychainCreds = validCreds({ accessToken: 'access-from-keychain' });
       const deps = makeDeps({
         loadFromKeychain: vi.fn(() => keychainCreds),
+        keychainServiceName: 'Claude Code-credentials',
       });
-      const manager = new OAuthTokenManager(creds, { canRefresh: false }, deps);
+      const manager = new OAuthTokenManager(creds, { canRefresh: true }, deps);
 
       await manager.getValidAccessToken();
       expect(deps.saveCredentials).not.toHaveBeenCalled();
     });
 
-    it('self-refreshes as last resort when both file and Keychain are expired', async () => {
+    it('self-refreshes when both file and Keychain are expired', async () => {
       const creds = nearExpiryCreds();
       const newCreds = refreshedCreds();
+      const writeToKeychain = vi.fn();
       const deps = makeDeps({
         loadCredentials: vi.fn(() => nearExpiryCreds()),
         loadFromKeychain: vi.fn(() => nearExpiryCreds()),
         refreshToken: vi.fn(async () => newCreds),
+        keychainServiceName: 'Claude Code-credentials',
+        writeToKeychain,
       });
-      const manager = new OAuthTokenManager(creds, { canRefresh: false }, deps);
+      const manager = new OAuthTokenManager(creds, { canRefresh: true }, deps);
 
       const token = await manager.handleAuthFailure();
       expect(token).toBe('access-token-refreshed');
       expect(deps.refreshToken).toHaveBeenCalled();
-    });
-
-    it('saves refreshed credentials to file after self-refresh', async () => {
-      const creds = nearExpiryCreds();
-      const newCreds = refreshedCreds();
-      const deps = makeDeps({
-        loadCredentials: vi.fn(() => null),
-        loadFromKeychain: vi.fn(() => nearExpiryCreds()),
-        refreshToken: vi.fn(async () => newCreds),
-      });
-      const manager = new OAuthTokenManager(creds, { canRefresh: false }, deps);
-
-      await manager.handleAuthFailure();
-      expect(deps.saveCredentials).toHaveBeenCalledWith(newCreds, '/fake/.credentials.json');
+      expect(writeToKeychain).toHaveBeenCalledWith(newCreds, 'Claude Code-credentials');
     });
 
     it('returns null when self-refresh also fails', async () => {
@@ -306,15 +312,16 @@ describe('OAuthTokenManager', () => {
         loadCredentials: vi.fn(() => null),
         loadFromKeychain: vi.fn(() => null),
         refreshToken: vi.fn(async () => null),
+        keychainServiceName: 'Claude Code-credentials',
       });
-      const manager = new OAuthTokenManager(creds, { canRefresh: false }, deps);
+      const manager = new OAuthTokenManager(creds, { canRefresh: true }, deps);
 
       const token = await manager.handleAuthFailure();
       expect(token).toBeNull();
       expect(deps.refreshToken).toHaveBeenCalled();
     });
 
-    it('uses keychain refresh token when file has none', async () => {
+    it('uses Keychain refresh token when file has none', async () => {
       const creds = nearExpiryCreds();
       const keychainExpired = nearExpiryCreds({ refreshToken: 'refresh-from-keychain' });
       const newCreds = refreshedCreds();
@@ -322,14 +329,15 @@ describe('OAuthTokenManager', () => {
         loadCredentials: vi.fn(() => null),
         loadFromKeychain: vi.fn(() => keychainExpired),
         refreshToken: vi.fn(async () => newCreds),
+        keychainServiceName: 'Claude Code-credentials',
       });
-      const manager = new OAuthTokenManager(creds, { canRefresh: false }, deps);
+      const manager = new OAuthTokenManager(creds, { canRefresh: true }, deps);
 
       await manager.handleAuthFailure();
       expect(deps.refreshToken).toHaveBeenCalledWith('refresh-from-keychain');
     });
 
-    it('prefers file refresh token over keychain refresh token', async () => {
+    it('prefers file refresh token over Keychain refresh token', async () => {
       const creds = nearExpiryCreds();
       const fileExpired = nearExpiryCreds({ refreshToken: 'refresh-from-file' });
       const keychainExpired = nearExpiryCreds({ refreshToken: 'refresh-from-keychain' });
@@ -338,11 +346,24 @@ describe('OAuthTokenManager', () => {
         loadCredentials: vi.fn(() => fileExpired),
         loadFromKeychain: vi.fn(() => keychainExpired),
         refreshToken: vi.fn(async () => newCreds),
+        keychainServiceName: 'Claude Code-credentials',
       });
-      const manager = new OAuthTokenManager(creds, { canRefresh: false }, deps);
+      const manager = new OAuthTokenManager(creds, { canRefresh: true }, deps);
 
       await manager.handleAuthFailure();
       expect(deps.refreshToken).toHaveBeenCalledWith('refresh-from-file');
+    });
+
+    it('does not consult Keychain when keychainServiceName is not set', async () => {
+      const creds = nearExpiryCreds();
+      const deps = makeDeps({
+        loadCredentials: vi.fn(() => null),
+        loadFromKeychain: vi.fn(() => validCreds({ accessToken: 'should-not-use' })),
+      });
+      const manager = new OAuthTokenManager(creds, { canRefresh: true }, deps);
+
+      await manager.handleAuthFailure();
+      expect(deps.loadFromKeychain).not.toHaveBeenCalled();
     });
   });
 

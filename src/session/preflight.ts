@@ -99,7 +99,7 @@ async function detectCredentials(
   }
 
   // Default path: Anthropic OAuth + API key detection (Claude Code and others).
-  // No refresh functions in preflightSources -- preflight just detects, doesn't refresh.
+  // Uses preflightSources, which may refresh expired tokens and update credential storage.
   const auth = await detectAuthMethod(config, sources ?? preflightSources);
   if (auth.kind === 'none') return null;
   return auth.kind === 'oauth' ? 'oauth' : 'apikey';

@@ -320,8 +320,9 @@ export function saveOAuthCredentials(credentials: OAuthCredentials, filePath?: s
  * Injectable credential sources for testability.
  *
  * The optional refresh/save/keychain-write functions enable token refresh
- * in detectAuthMethod(). When omitted (e.g., in preflight checks), expired
- * tokens are not refreshed -- the caller just gets the detection result.
+ * and persistence in detectAuthMethod(). When these functions are omitted,
+ * expired tokens are not refreshed or written back; the caller only receives
+ * the detection result (and any existing, possibly stale, credentials).
  */
 export interface CredentialSources {
   loadFromFile: () => OAuthCredentials | null;

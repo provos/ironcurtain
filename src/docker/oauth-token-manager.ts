@@ -50,11 +50,10 @@ const defaultDeps: TokenManagerDeps = {
 
 export interface OAuthTokenManagerOptions {
   /**
-   * Controls the refresh strategy.
+   * Whether the manager may perform its own refresh_token grant.
    *
    * When false, the manager only re-reads credentials from the file and
-   * Keychain — it never POSTs to the token endpoint itself. This is a
-   * safety valve for cases where refresh should be completely disabled.
+   * Keychain — it never POSTs to the token endpoint itself.
    *
    * Defaults to true. For Keychain-sourced credentials, set writeToKeychain
    * and keychainServiceName in deps so refreshed tokens are persisted to
@@ -118,13 +117,9 @@ export class OAuthTokenManager {
    * Core refresh logic with deduplication. Concurrent callers share a single
    * in-flight refresh promise.
    *
-   * File-sourced credentials (canRefresh=true):
-   *   Re-read file -> if still expired, POST refresh grant -> on failure,
-   *   re-read file once more (host process may have won the race).
-   *
-   * Keychain-sourced credentials (canRefresh=false):
-   *   Re-read file -> re-read Keychain -> if both expired, fall back to
-   *   self-refresh as last resort -> save result to file.
+   * Re-read file -> for Keychain-sourced creds, also re-read Keychain ->
+   * if still expired and canRefresh is true, POST refresh grant ->
+   * on failure, re-read file once more (host process may have won the race).
    */
   private doRefresh(): Promise<string | null> {
     if (this.inflightRefresh) {
@@ -147,10 +142,10 @@ export class OAuthTokenManager {
       return this.credentials.accessToken;
     }
 
-    // In Keychain mode, check if the host process already refreshed before we attempt our own.
-    // Capture the keychain's refresh token in case it's newer than our startup copy.
+    // For Keychain-sourced creds, check if the host process already refreshed.
+    // Capture the Keychain's refresh token in case it's newer than our startup copy.
     let keychainRefreshToken: string | undefined;
-    if (!this.canRefresh) {
+    if (this.deps.keychainServiceName) {
       const keychainCreds = this.deps.loadFromKeychain();
       if (keychainCreds && !isTokenExpired(keychainCreds)) {
         logger.info('[oauth-token-manager] Found valid token in Keychain (refreshed by host process)');
@@ -158,9 +153,12 @@ export class OAuthTokenManager {
         return this.credentials.accessToken;
       }
       keychainRefreshToken = keychainCreds?.refreshToken;
-      logger.info(
-        '[oauth-token-manager] Keychain mode: no valid credentials available from file or Keychain, attempting self-refresh',
-      );
+    }
+
+    // Hard guard: when canRefresh is false, never POST a refresh grant
+    if (!this.canRefresh) {
+      logger.warn('[oauth-token-manager] Token expired and self-refresh is disabled');
+      return null;
     }
 
     // Pick the best available refresh token: file > keychain > initial credentials
