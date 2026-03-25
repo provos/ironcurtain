@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-03-25
+
+### Fixes
+
+- **macOS mux text selection** — replace X11 mouse tracking with alternate scroll mode on macOS so native text selection (Shift+drag) works in Terminal.app; scroll wheel works in command mode via arrow key mapping (#130)
+- **macOS OAuth Keychain refresh** — refresh expired OAuth tokens from the macOS Keychain instead of silently falling back to API key auth; write refreshed tokens back to the Keychain via `security add-generic-password -U`; enable `OAuthTokenManager` self-refresh for Keychain-sourced credentials during long sessions (#131)
+
 ## [0.9.0] - 2026-03-24
 
 ### Features
