@@ -35,6 +35,7 @@ import { AuditLogTailer } from './audit-log-tailer.js';
 import { ensureImage } from './docker-infrastructure.js';
 import { prepareSession } from './orientation.js';
 import { getInternalNetworkName } from './platform.js';
+import { cleanupContainers } from './container-lifecycle.js';
 import { SessionNotReadyError, SessionClosedError } from '../session/errors.js';
 import { createEscalationWatcher, atomicWriteJsonSync } from '../escalation/escalation-watcher.js';
 import type { EscalationWatcher } from '../escalation/escalation-watcher.js';
@@ -493,33 +494,11 @@ export class DockerAgentSession implements Session {
     this.escalationWatcher?.stop();
     this.auditTailer?.stop();
 
-    // Stop and remove containers in parallel (best-effort so one failure
-    // doesn't prevent cleanup of the other container or the network)
-    const cleanups: Promise<void>[] = [];
-    if (this.containerId) {
-      const cid = this.containerId;
-      cleanups.push(
-        this.docker
-          .stop(cid)
-          .then(() => this.docker.remove(cid))
-          .catch(() => {}),
-      );
-    }
-    if (this.sidecarContainerId) {
-      const sid = this.sidecarContainerId;
-      cleanups.push(
-        this.docker
-          .stop(sid)
-          .then(() => this.docker.remove(sid))
-          .catch(() => {}),
-      );
-    }
-    await Promise.all(cleanups);
-
-    // Remove per-session internal network after both containers are gone
-    if (this.networkName !== null) {
-      await this.docker.removeNetwork(this.networkName).catch(() => {});
-    }
+    await cleanupContainers(this.docker, {
+      containerId: this.containerId,
+      sidecarContainerId: this.sidecarContainerId,
+      networkName: this.networkName,
+    });
 
     // Stop proxies
     await this.mitmProxy.stop();

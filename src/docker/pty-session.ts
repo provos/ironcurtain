@@ -35,6 +35,7 @@ import { getSessionDir, getPtyRegistryDir } from '../config/paths.js';
 import * as logger from '../logger.js';
 import { buildDockerClaudeMd } from './claude-md-seed.js';
 import { getInternalNetworkName } from './platform.js';
+import { cleanupContainers } from './container-lifecycle.js';
 
 export interface PtySessionOptions {
   readonly config: IronCurtainConfig;
@@ -530,34 +531,12 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
       }
     }
 
-    // Stop and remove containers in parallel
     if (docker) {
-      const d = docker;
-      const cleanups: Promise<void>[] = [];
-      if (containerId) {
-        const cid = containerId;
-        cleanups.push(
-          d
-            .stop(cid)
-            .then(() => d.remove(cid))
-            .catch(() => {}),
-        );
-      }
-      if (sidecarContainerId) {
-        const sid = sidecarContainerId;
-        cleanups.push(
-          d
-            .stop(sid)
-            .then(() => d.remove(sid))
-            .catch(() => {}),
-        );
-      }
-      await Promise.all(cleanups);
-
-      // Remove per-session internal network after both containers are gone
-      if (networkName !== null) {
-        await d.removeNetwork(networkName).catch(() => {});
-      }
+      await cleanupContainers(docker, {
+        containerId,
+        sidecarContainerId,
+        networkName,
+      });
     }
 
     // Stop proxies
