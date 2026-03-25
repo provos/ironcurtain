@@ -302,14 +302,16 @@ describe('detectAuthMethod', () => {
     expect(result.kind).toBe('none');
   });
 
-  it('falls back to apikey when OAuth token is expired', () => {
-    const sources = makeSources({ loadFromFile: () => expiredCreds() });
+  it('returns oauth with expired file token so token manager can refresh', () => {
+    const expired = expiredCreds();
+    const sources = makeSources({ loadFromFile: () => expired });
     const config = makeConfig({ anthropicApiKey: 'sk-ant-api03-fallback' });
 
     const result = detectAuthMethod(config, sources);
-    expect(result.kind).toBe('apikey');
-    if (result.kind === 'apikey') {
-      expect(result.key).toBe('sk-ant-api03-fallback');
+    expect(result.kind).toBe('oauth');
+    if (result.kind === 'oauth') {
+      expect(result.credentials).toBe(expired);
+      expect(result.source).toBe('file');
     }
   });
 
@@ -342,7 +344,7 @@ describe('detectAuthMethod', () => {
     }
   });
 
-  it('does not try Keychain when credentials file exists but is expired', () => {
+  it('returns oauth from expired file without trying Keychain', () => {
     let keychainCalled = false;
     const sources: CredentialSources = {
       loadFromFile: () => expiredCreds(),
@@ -355,20 +357,25 @@ describe('detectAuthMethod', () => {
 
     const result = detectAuthMethod(config, sources);
     expect(keychainCalled).toBe(false);
-    expect(result.kind).toBe('apikey');
+    expect(result.kind).toBe('oauth');
+    if (result.kind === 'oauth') {
+      expect(result.source).toBe('file');
+    }
   });
 
-  it('falls back to apikey when Keychain credentials are expired', () => {
+  it('returns oauth with expired Keychain token so token manager can refresh', () => {
+    const expired = expiredCreds();
     const sources = makeSources({
       loadFromFile: () => null,
-      loadFromKeychain: () => expiredCreds(),
+      loadFromKeychain: () => expired,
     });
     const config = makeConfig({ anthropicApiKey: 'sk-ant-api03-keychain-fallback' });
 
     const result = detectAuthMethod(config, sources);
-    expect(result.kind).toBe('apikey');
-    if (result.kind === 'apikey') {
-      expect(result.key).toBe('sk-ant-api03-keychain-fallback');
+    expect(result.kind).toBe('oauth');
+    if (result.kind === 'oauth') {
+      expect(result.credentials).toBe(expired);
+      expect(result.source).toBe('keychain');
     }
   });
 
@@ -528,10 +535,13 @@ describe('refreshOAuthToken', () => {
 
     const fetchCall = vi.mocked(globalThis.fetch).mock.calls[0];
     expect(fetchCall[0]).toBe('https://platform.claude.com/v1/oauth/token');
-    const body = JSON.parse((fetchCall[1] as RequestInit).body as string);
-    expect(body.grant_type).toBe('refresh_token');
-    expect(body.refresh_token).toBe('old-refresh-token');
-    expect(body.client_id).toBe('9d1c250a-e61b-44d9-88ed-5944d1962f5e');
+    const opts = fetchCall[1] as RequestInit;
+    expect(opts.headers).toEqual({ 'Content-Type': 'application/x-www-form-urlencoded' });
+    const body = new URLSearchParams(opts.body as string);
+    expect(body.get('grant_type')).toBe('refresh_token');
+    expect(body.get('refresh_token')).toBe('old-refresh-token');
+    expect(body.get('client_id')).toBe('9d1c250a-e61b-44d9-88ed-5944d1962f5e');
+    expect(opts.signal).toBeDefined();
   });
 
   it('returns null on HTTP error', async () => {
@@ -551,14 +561,26 @@ describe('refreshOAuthToken', () => {
     expect(result).toBeNull();
   });
 
-  it('returns null when response lacks required fields', async () => {
+  it('returns null when response lacks access_token and expires_in', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue({
       ok: true,
-      json: async () => ({ access_token: 'token' }), // missing refresh_token and expires_in
+      json: async () => ({ access_token: 'token' }), // missing expires_in
     } as Response);
 
     const result = await refreshOAuthToken('any-token');
     expect(result).toBeNull();
+  });
+
+  it('preserves original refresh token when response omits refresh_token', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({ access_token: 'new-access', expires_in: 3600 }),
+    } as Response);
+
+    const result = await refreshOAuthToken('original-refresh-token');
+    expect(result).not.toBeNull();
+    expect(result!.accessToken).toBe('new-access');
+    expect(result!.refreshToken).toBe('original-refresh-token');
   });
 
   it('returns null when expires_in is invalid', async () => {

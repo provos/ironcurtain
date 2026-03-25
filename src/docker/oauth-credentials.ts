@@ -163,15 +163,19 @@ const OAUTH_TOKEN_URL = 'https://platform.claude.com/v1/oauth/token';
  * token, network error, etc.).
  */
 export async function refreshOAuthToken(refreshToken: string): Promise<OAuthCredentials | null> {
+  const REFRESH_TIMEOUT_MS = 30_000;
   try {
+    const body = new URLSearchParams({
+      grant_type: 'refresh_token',
+      refresh_token: refreshToken,
+      client_id: OAUTH_CLIENT_ID,
+    });
+
     const response = await fetch(OAUTH_TOKEN_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        grant_type: 'refresh_token',
-        refresh_token: refreshToken,
-        client_id: OAUTH_CLIENT_ID,
-      }),
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body.toString(),
+      signal: AbortSignal.timeout(REFRESH_TIMEOUT_MS),
     });
 
     if (!response.ok) {
@@ -180,7 +184,7 @@ export async function refreshOAuthToken(refreshToken: string): Promise<OAuthCred
     }
 
     const data = (await response.json()) as Record<string, unknown>;
-    return parseTokenResponse(data);
+    return parseTokenResponse(data, refreshToken);
   } catch (err) {
     logger.warn(`OAuth token refresh error: ${err instanceof Error ? err.message : String(err)}`);
     return null;
@@ -189,18 +193,19 @@ export async function refreshOAuthToken(refreshToken: string): Promise<OAuthCred
 
 /**
  * Validates and extracts credentials from an OAuth token endpoint response.
- * Returns null if any required field is missing or invalid.
+ * Returns null if access_token or expires_in are missing/invalid.
+ * Preserves the original refresh token when the response omits refresh_token
+ * (not all providers rotate refresh tokens on every grant).
  */
-function parseTokenResponse(data: Record<string, unknown>): OAuthCredentials | null {
+function parseTokenResponse(data: Record<string, unknown>, fallbackRefreshToken: string): OAuthCredentials | null {
   const { access_token: accessToken, refresh_token: refreshToken, expires_in: expiresIn } = data;
 
   if (!isNonEmptyString(accessToken)) return null;
-  if (!isNonEmptyString(refreshToken)) return null;
   if (!isPositiveFiniteNumber(expiresIn)) return null;
 
   return {
     accessToken,
-    refreshToken,
+    refreshToken: isNonEmptyString(refreshToken) ? refreshToken : fallbackRefreshToken,
     expiresAt: Date.now() + expiresIn * 1000,
   };
 }
@@ -274,20 +279,21 @@ export function detectAuthMethod(config: IronCurtainConfig, sources?: Credential
   if (fileCreds) {
     if (!isTokenExpired(fileCreds)) {
       logger.info('Detected OAuth credentials from ~/.claude/.credentials.json');
-      return { kind: 'oauth', credentials: fileCreds, source: 'file' };
+    } else {
+      logger.info('OAuth token from credentials file is expired, token manager will refresh');
     }
-    logger.warn('OAuth token from credentials file is expired');
+    return { kind: 'oauth', credentials: fileCreds, source: 'file' };
   }
 
   // Try macOS Keychain if credentials file was not found
-  if (!fileCreds) {
-    const keychainCreds = loadFromKeychain();
-    if (keychainCreds) {
-      if (!isTokenExpired(keychainCreds)) {
-        return { kind: 'oauth', credentials: keychainCreds, source: 'keychain' };
-      }
-      logger.warn('OAuth token from macOS Keychain is expired');
+  const keychainCreds = loadFromKeychain();
+  if (keychainCreds) {
+    if (!isTokenExpired(keychainCreds)) {
+      logger.info('Detected OAuth credentials from macOS Keychain');
+    } else {
+      logger.info('OAuth token from Keychain is expired, token manager will refresh');
     }
+    return { kind: 'oauth', credentials: keychainCreds, source: 'keychain' };
   }
 
   // Fall back to API key

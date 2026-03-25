@@ -231,16 +231,7 @@ describe('OAuthTokenManager', () => {
   });
 
   describe('Keychain mode (canRefresh: false)', () => {
-    it('never calls refreshToken', async () => {
-      const creds = nearExpiryCreds();
-      const deps = makeDeps();
-      const manager = new OAuthTokenManager(creds, { canRefresh: false }, deps);
-
-      await manager.getValidAccessToken();
-      expect(deps.refreshToken).not.toHaveBeenCalled();
-    });
-
-    it('re-reads file and uses valid credentials', async () => {
+    it('re-reads file and uses valid credentials without refresh', async () => {
       const creds = nearExpiryCreds();
       const fileCreds = validCreds({ accessToken: 'access-from-file' });
       const deps = makeDeps({
@@ -268,32 +259,7 @@ describe('OAuthTokenManager', () => {
       expect(deps.refreshToken).not.toHaveBeenCalled();
     });
 
-    it('returns null when both file and Keychain have expired creds', async () => {
-      const creds = nearExpiryCreds();
-      const deps = makeDeps({
-        loadCredentials: vi.fn(() => nearExpiryCreds()),
-        loadFromKeychain: vi.fn(() => nearExpiryCreds()),
-      });
-      const manager = new OAuthTokenManager(creds, { canRefresh: false }, deps);
-
-      const token = await manager.handleAuthFailure();
-      expect(token).toBeNull();
-      expect(deps.refreshToken).not.toHaveBeenCalled();
-    });
-
-    it('returns null on handleAuthFailure when no fresh creds available', async () => {
-      const creds = validCreds();
-      const deps = makeDeps({
-        loadCredentials: vi.fn(() => null),
-        loadFromKeychain: vi.fn(() => null),
-      });
-      const manager = new OAuthTokenManager(creds, { canRefresh: false }, deps);
-
-      const token = await manager.handleAuthFailure();
-      expect(token).toBeNull();
-    });
-
-    it('does not save credentials', async () => {
+    it('does not save credentials when Keychain fast path succeeds', async () => {
       const creds = nearExpiryCreds();
       const keychainCreds = validCreds({ accessToken: 'access-from-keychain' });
       const deps = makeDeps({
@@ -303,6 +269,80 @@ describe('OAuthTokenManager', () => {
 
       await manager.getValidAccessToken();
       expect(deps.saveCredentials).not.toHaveBeenCalled();
+    });
+
+    it('self-refreshes as last resort when both file and Keychain are expired', async () => {
+      const creds = nearExpiryCreds();
+      const newCreds = refreshedCreds();
+      const deps = makeDeps({
+        loadCredentials: vi.fn(() => nearExpiryCreds()),
+        loadFromKeychain: vi.fn(() => nearExpiryCreds()),
+        refreshToken: vi.fn(async () => newCreds),
+      });
+      const manager = new OAuthTokenManager(creds, { canRefresh: false }, deps);
+
+      const token = await manager.handleAuthFailure();
+      expect(token).toBe('access-token-refreshed');
+      expect(deps.refreshToken).toHaveBeenCalled();
+    });
+
+    it('saves refreshed credentials to file after self-refresh', async () => {
+      const creds = nearExpiryCreds();
+      const newCreds = refreshedCreds();
+      const deps = makeDeps({
+        loadCredentials: vi.fn(() => null),
+        loadFromKeychain: vi.fn(() => nearExpiryCreds()),
+        refreshToken: vi.fn(async () => newCreds),
+      });
+      const manager = new OAuthTokenManager(creds, { canRefresh: false }, deps);
+
+      await manager.handleAuthFailure();
+      expect(deps.saveCredentials).toHaveBeenCalledWith(newCreds, '/fake/.credentials.json');
+    });
+
+    it('returns null when self-refresh also fails', async () => {
+      const creds = validCreds();
+      const deps = makeDeps({
+        loadCredentials: vi.fn(() => null),
+        loadFromKeychain: vi.fn(() => null),
+        refreshToken: vi.fn(async () => null),
+      });
+      const manager = new OAuthTokenManager(creds, { canRefresh: false }, deps);
+
+      const token = await manager.handleAuthFailure();
+      expect(token).toBeNull();
+      expect(deps.refreshToken).toHaveBeenCalled();
+    });
+
+    it('uses keychain refresh token when file has none', async () => {
+      const creds = nearExpiryCreds();
+      const keychainExpired = nearExpiryCreds({ refreshToken: 'refresh-from-keychain' });
+      const newCreds = refreshedCreds();
+      const deps = makeDeps({
+        loadCredentials: vi.fn(() => null),
+        loadFromKeychain: vi.fn(() => keychainExpired),
+        refreshToken: vi.fn(async () => newCreds),
+      });
+      const manager = new OAuthTokenManager(creds, { canRefresh: false }, deps);
+
+      await manager.handleAuthFailure();
+      expect(deps.refreshToken).toHaveBeenCalledWith('refresh-from-keychain');
+    });
+
+    it('prefers file refresh token over keychain refresh token', async () => {
+      const creds = nearExpiryCreds();
+      const fileExpired = nearExpiryCreds({ refreshToken: 'refresh-from-file' });
+      const keychainExpired = nearExpiryCreds({ refreshToken: 'refresh-from-keychain' });
+      const newCreds = refreshedCreds();
+      const deps = makeDeps({
+        loadCredentials: vi.fn(() => fileExpired),
+        loadFromKeychain: vi.fn(() => keychainExpired),
+        refreshToken: vi.fn(async () => newCreds),
+      });
+      const manager = new OAuthTokenManager(creds, { canRefresh: false }, deps);
+
+      await manager.handleAuthFailure();
+      expect(deps.refreshToken).toHaveBeenCalledWith('refresh-from-file');
     });
   });
 });

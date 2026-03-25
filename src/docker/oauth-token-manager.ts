@@ -6,10 +6,11 @@
  * may also refresh tokens concurrently — re-reads the credentials file
  * before attempting a refresh to avoid using a stale refresh token.
  *
- * On macOS where credentials come from the Keychain, the manager operates
- * in read-only mode: it re-reads credentials from file and Keychain but
- * never performs its own refresh grant. This prevents invalidating the
- * host Claude Code's refresh token, which lives in the Keychain.
+ * On macOS where credentials come from the Keychain, the manager first
+ * re-reads credentials from file and Keychain (fast path — the host
+ * Claude Code process may have already refreshed). If both are expired,
+ * it falls back to self-refresh as a last resort and saves the result
+ * to ~/.claude/.credentials.json for future reads.
  *
  * A single in-flight refresh promise is shared across concurrent callers
  * to prevent duplicate refresh requests.
@@ -47,12 +48,13 @@ const defaultDeps: TokenManagerDeps = {
 
 export interface OAuthTokenManagerOptions {
   /**
-   * Whether the manager may perform its own refresh_token grant.
+   * Whether to attempt self-refresh immediately or prefer re-reading first.
    *
-   * When false (Keychain-sourced credentials on macOS), the manager only
-   * re-reads credentials from the file and Keychain — it never POSTs to
-   * the token endpoint itself, because doing so would rotate the refresh
-   * token and break host Claude Code's copy in the Keychain.
+   * When false (Keychain-sourced credentials on macOS), the manager first
+   * re-reads credentials from the file and Keychain (in case the host
+   * Claude Code process has already refreshed). If both sources are
+   * expired, it falls back to self-refresh as a last resort and saves
+   * the result to ~/.claude/.credentials.json.
    *
    * Defaults to true (file-sourced credentials on Linux/WSL).
    */
@@ -119,8 +121,8 @@ export class OAuthTokenManager {
    *   re-read file once more (host process may have won the race).
    *
    * Keychain-sourced credentials (canRefresh=false):
-   *   Re-read file and Keychain only -- never POST a refresh grant, because
-   *   doing so would rotate the refresh token and break host Claude Code.
+   *   Re-read file -> re-read Keychain -> if both expired, fall back to
+   *   self-refresh as last resort -> save result to file.
    */
   private doRefresh(): Promise<string | null> {
     if (this.inflightRefresh) {
@@ -143,7 +145,9 @@ export class OAuthTokenManager {
       return this.credentials.accessToken;
     }
 
-    // In read-only mode, also try the Keychain but never POST a refresh grant
+    // In Keychain mode, check if the host process already refreshed before we attempt our own.
+    // Capture the keychain's refresh token in case it's newer than our startup copy.
+    let keychainRefreshToken: string | undefined;
     if (!this.canRefresh) {
       const keychainCreds = this.deps.loadFromKeychain();
       if (keychainCreds && !isTokenExpired(keychainCreds)) {
@@ -151,14 +155,12 @@ export class OAuthTokenManager {
         this.credentials = keychainCreds;
         return this.credentials.accessToken;
       }
-      logger.warn(
-        '[oauth-token-manager] Token expired and cannot self-refresh (Keychain mode) — waiting for host Claude Code to refresh',
-      );
-      return null;
+      keychainRefreshToken = keychainCreds?.refreshToken;
+      logger.info('[oauth-token-manager] Keychain mode: file and Keychain expired, attempting self-refresh');
     }
 
-    // Attempt refresh ourselves, preferring the file's refresh token if available
-    const refreshToken = fileCreds?.refreshToken ?? this.credentials.refreshToken;
+    // Pick the best available refresh token: file > keychain > initial credentials
+    const refreshToken = fileCreds?.refreshToken ?? keychainRefreshToken ?? this.credentials.refreshToken;
     const newCreds = await this.deps.refreshToken(refreshToken);
 
     if (newCreds) {
