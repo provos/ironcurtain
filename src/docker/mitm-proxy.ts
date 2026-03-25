@@ -125,10 +125,8 @@ export interface MitmProxyOptions {
   /**
    * Custom DNS lookup function for outbound connections.
    * Used in tests to avoid real DNS resolution.
-   * Follows the same signature as `dns.lookup`.
    */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  readonly dnsLookup?: (...args: any[]) => void;
+  readonly dnsLookup?: http.RequestOptions['lookup'];
 }
 
 export interface ProviderKeyMapping {
@@ -594,7 +592,33 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
 
     logger.info(`[mitm-proxy] ${method} http://${host}:${port}${path} -> PASSTHROUGH (plain HTTP)`);
 
-    const forwardHeaders = { ...headers, host: port === 80 ? host : `${host}:${port}` };
+    // Strip proxy-only and hop-by-hop headers so they are not leaked upstream
+    const hopByHop = new Set([
+      'connection',
+      'proxy-authorization',
+      'proxy-connection',
+      'keep-alive',
+      'upgrade',
+      'transfer-encoding',
+      'te',
+      'trailer',
+    ]);
+    // Also strip any headers named in the Connection header
+    const connectionHeader = headers['connection'];
+    if (typeof connectionHeader === 'string') {
+      for (const token of connectionHeader.split(',')) {
+        const name = token.trim().toLowerCase();
+        if (name) hopByHop.add(name);
+      }
+    }
+    const forwardHeaders: Record<string, string | string[] | undefined> = {
+      host: port === 80 ? host : `${host}:${port}`,
+    };
+    for (const [key, value] of Object.entries(headers)) {
+      if (!hopByHop.has(key)) {
+        forwardHeaders[key] = value;
+      }
+    }
 
     const reqOpts: http.RequestOptions = {
       hostname: host,
@@ -604,7 +628,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
       headers: forwardHeaders,
     };
     if (options.dnsLookup) {
-      reqOpts.lookup = options.dnsLookup as http.RequestOptions['lookup'];
+      reqOpts.lookup = options.dnsLookup;
     }
 
     const upstreamReq = http.request(reqOpts, (upstreamRes) => {
@@ -768,8 +792,8 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
   ): void {
     const { method, url: path, headers } = clientReq;
 
-    // Use HTTP for non-443 ports (upstream likely plain HTTP), HTTPS for 443
-    const useHttps = port === 443;
+    // Default to HTTPS; use HTTP only for well-known cleartext ports
+    const useHttps = port !== 80 && port !== 8080;
     const proto = useHttps ? 'https' : 'http';
     logger.info(`[mitm-proxy] ${method} ${proto}://${host}:${port}${path} -> PASSTHROUGH`);
 
@@ -784,7 +808,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
       headers: forwardHeaders,
     };
     if (options.dnsLookup) {
-      reqOpts.lookup = options.dnsLookup as http.RequestOptions['lookup'];
+      reqOpts.lookup = options.dnsLookup;
     }
     const upstreamReq = requestFn(reqOpts, (upstreamRes) => {
       upstreamRes.on('error', (err) => {

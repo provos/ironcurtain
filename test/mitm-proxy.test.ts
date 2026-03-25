@@ -447,9 +447,9 @@ describe('MitmProxy', () => {
 
   it('forwards plain HTTP proxy requests to passthrough domains', async () => {
     // Start a local HTTP server as the upstream target on 127.0.0.1
-    const upstream = http.createServer((_req, res) => {
+    const upstream = http.createServer((req, res) => {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, path: _req.url, method: _req.method }));
+      res.end(JSON.stringify({ ok: true, path: req.url, method: req.method }));
     });
     const upstreamPort = await new Promise<number>((resolve) => {
       upstream.listen(0, '127.0.0.1', () => {
@@ -465,14 +465,9 @@ describe('MitmProxy', () => {
         providers: [],
         // Pass a custom lookup so the proxy resolves all hostnames to 127.0.0.1.
         // Must handle { all: true } (Node 24+) which expects an array result.
-        dnsLookup: (
-          _hostname: string,
-          options: unknown,
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          cb: (...args: any[]) => void,
-        ) => {
-          if (typeof options === 'object' && options !== null && (options as { all?: boolean }).all) {
-            cb(null, [{ address: '127.0.0.1', family: 4 }]);
+        dnsLookup: (_hostname, options, cb) => {
+          if ((options as { all?: boolean }).all) {
+            cb(null, [{ address: '127.0.0.1', family: 4 }] as never);
           } else {
             cb(null, '127.0.0.1', 4);
           }
