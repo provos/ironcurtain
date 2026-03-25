@@ -9,6 +9,8 @@ import {
   isTokenExpired,
   detectAuthMethod,
   extractFromKeychain,
+  extractFromKeychainWithService,
+  writeToKeychain,
   refreshOAuthToken,
   saveOAuthCredentials,
   type OAuthCredentials,
@@ -271,11 +273,11 @@ describe('detectAuthMethod', () => {
     }
   });
 
-  it('returns oauth when valid credentials are found from file', () => {
+  it('returns oauth when valid credentials are found from file', async () => {
     const creds = validCreds();
     const sources = makeSources({ loadFromFile: () => creds });
 
-    const result = detectAuthMethod(makeConfig(), sources);
+    const result = await detectAuthMethod(makeConfig(), sources);
     expect(result.kind).toBe('oauth');
     if (result.kind === 'oauth') {
       expect(result.credentials.accessToken).toBe('sk-ant-oat01-test-access-token');
@@ -283,60 +285,58 @@ describe('detectAuthMethod', () => {
     }
   });
 
-  it('falls back to apikey when no OAuth credentials', () => {
+  it('falls back to apikey when no OAuth credentials', async () => {
     const sources = makeSources({});
     const config = makeConfig({ anthropicApiKey: 'sk-ant-api03-test-key' });
 
-    const result = detectAuthMethod(config, sources);
+    const result = await detectAuthMethod(config, sources);
     expect(result.kind).toBe('apikey');
     if (result.kind === 'apikey') {
       expect(result.key).toBe('sk-ant-api03-test-key');
     }
   });
 
-  it('returns none when no OAuth and no API key', () => {
+  it('returns none when no OAuth and no API key', async () => {
     const sources = makeSources({});
     const config = makeConfig({ anthropicApiKey: '' });
 
-    const result = detectAuthMethod(config, sources);
+    const result = await detectAuthMethod(config, sources);
     expect(result.kind).toBe('none');
   });
 
-  it('returns oauth with expired file token so token manager can refresh', () => {
-    const expired = expiredCreds();
-    const sources = makeSources({ loadFromFile: () => expired });
+  it('falls back to apikey when OAuth token is expired and no refresh', async () => {
+    const sources = makeSources({ loadFromFile: () => expiredCreds() });
     const config = makeConfig({ anthropicApiKey: 'sk-ant-api03-fallback' });
 
-    const result = detectAuthMethod(config, sources);
-    expect(result.kind).toBe('oauth');
-    if (result.kind === 'oauth') {
-      expect(result.credentials).toBe(expired);
-      expect(result.source).toBe('file');
+    const result = await detectAuthMethod(config, sources);
+    expect(result.kind).toBe('apikey');
+    if (result.kind === 'apikey') {
+      expect(result.key).toBe('sk-ant-api03-fallback');
     }
   });
 
-  it('respects IRONCURTAIN_DOCKER_AUTH=apikey override', () => {
+  it('respects IRONCURTAIN_DOCKER_AUTH=apikey override', async () => {
     process.env.IRONCURTAIN_DOCKER_AUTH = 'apikey';
 
     const creds = validCreds();
     const sources = makeSources({ loadFromFile: () => creds });
     const config = makeConfig({ anthropicApiKey: 'sk-ant-api03-forced' });
 
-    const result = detectAuthMethod(config, sources);
+    const result = await detectAuthMethod(config, sources);
     expect(result.kind).toBe('apikey');
     if (result.kind === 'apikey') {
       expect(result.key).toBe('sk-ant-api03-forced');
     }
   });
 
-  it('tries Keychain when credentials file returns null', () => {
+  it('tries Keychain when credentials file returns null', async () => {
     const keychainCreds = validCreds({ accessToken: 'sk-ant-oat01-keychain-token' });
     const sources = makeSources({
       loadFromFile: () => null,
       loadFromKeychain: () => keychainCreds,
     });
 
-    const result = detectAuthMethod(makeConfig(), sources);
+    const result = await detectAuthMethod(makeConfig(), sources);
     expect(result.kind).toBe('oauth');
     if (result.kind === 'oauth') {
       expect(result.credentials.accessToken).toBe('sk-ant-oat01-keychain-token');
@@ -344,7 +344,7 @@ describe('detectAuthMethod', () => {
     }
   });
 
-  it('returns oauth from expired file without trying Keychain', () => {
+  it('does not try Keychain when credentials file exists but is expired', async () => {
     let keychainCalled = false;
     const sources: CredentialSources = {
       loadFromFile: () => expiredCreds(),
@@ -355,36 +355,123 @@ describe('detectAuthMethod', () => {
     };
     const config = makeConfig({ anthropicApiKey: 'sk-ant-api03-fallback' });
 
-    const result = detectAuthMethod(config, sources);
+    const result = await detectAuthMethod(config, sources);
     expect(keychainCalled).toBe(false);
-    expect(result.kind).toBe('oauth');
-    if (result.kind === 'oauth') {
-      expect(result.source).toBe('file');
+    expect(result.kind).toBe('apikey');
+    if (result.kind === 'apikey') {
+      expect(result.key).toBe('sk-ant-api03-fallback');
     }
   });
 
-  it('returns oauth with expired Keychain token so token manager can refresh', () => {
-    const expired = expiredCreds();
+  it('falls back to apikey when Keychain credentials are expired and no refresh', async () => {
     const sources = makeSources({
       loadFromFile: () => null,
-      loadFromKeychain: () => expired,
+      loadFromKeychain: () => expiredCreds(),
     });
     const config = makeConfig({ anthropicApiKey: 'sk-ant-api03-keychain-fallback' });
 
-    const result = detectAuthMethod(config, sources);
-    expect(result.kind).toBe('oauth');
-    if (result.kind === 'oauth') {
-      expect(result.credentials).toBe(expired);
-      expect(result.source).toBe('keychain');
+    const result = await detectAuthMethod(config, sources);
+    expect(result.kind).toBe('apikey');
+    if (result.kind === 'apikey') {
+      expect(result.key).toBe('sk-ant-api03-keychain-fallback');
     }
   });
 
-  it('returns none when all sources fail and no API key', () => {
+  it('returns none when all sources fail and no API key', async () => {
     const sources = makeSources({});
     const config = makeConfig({ anthropicApiKey: '' });
 
-    const result = detectAuthMethod(config, sources);
+    const result = await detectAuthMethod(config, sources);
     expect(result.kind).toBe('none');
+  });
+
+  it('refreshes expired file credentials when refresh function is provided', async () => {
+    const refreshed = validCreds({ accessToken: 'sk-ant-oat01-refreshed' });
+    const saveFn = vi.fn();
+    const sources = makeSources({
+      loadFromFile: () => expiredCreds(),
+      refreshToken: async () => refreshed,
+      saveToFile: saveFn,
+    });
+
+    const result = await detectAuthMethod(makeConfig(), sources);
+    expect(result.kind).toBe('oauth');
+    if (result.kind === 'oauth') {
+      expect(result.credentials.accessToken).toBe('sk-ant-oat01-refreshed');
+      expect(result.source).toBe('file');
+    }
+    expect(saveFn).toHaveBeenCalledWith(refreshed);
+  });
+
+  it('refreshes expired Keychain credentials and returns keychainServiceName', async () => {
+    const refreshed = validCreds({ accessToken: 'sk-ant-oat01-keychain-refreshed' });
+    const writeKcFn = vi.fn();
+    const sources = makeSources({
+      loadFromFile: () => null,
+      loadFromKeychainWithService: () => ({
+        credentials: expiredCreds(),
+        serviceName: 'Claude Code-credentials',
+      }),
+      refreshToken: async () => refreshed,
+      writeToKeychain: writeKcFn,
+    });
+
+    const result = await detectAuthMethod(makeConfig(), sources);
+    expect(result.kind).toBe('oauth');
+    if (result.kind === 'oauth') {
+      expect(result.credentials.accessToken).toBe('sk-ant-oat01-keychain-refreshed');
+      expect(result.source).toBe('keychain');
+      if (result.source === 'keychain') {
+        expect(result.keychainServiceName).toBe('Claude Code-credentials');
+      }
+    }
+    expect(writeKcFn).toHaveBeenCalledWith(refreshed, 'Claude Code-credentials');
+  });
+
+  it('falls back to apikey when expired credentials refresh fails', async () => {
+    const sources = makeSources({
+      loadFromFile: () => expiredCreds(),
+      refreshToken: async () => null,
+    });
+    const config = makeConfig({ anthropicApiKey: 'sk-ant-api03-fallback' });
+
+    const result = await detectAuthMethod(config, sources);
+    expect(result.kind).toBe('apikey');
+  });
+
+  it('falls back to apikey when expired Keychain credentials refresh fails', async () => {
+    const sources = makeSources({
+      loadFromFile: () => null,
+      loadFromKeychainWithService: () => ({
+        credentials: expiredCreds(),
+        serviceName: 'Claude Code',
+      }),
+      refreshToken: async () => null,
+    });
+    const config = makeConfig({ anthropicApiKey: 'sk-ant-api03-kc-fallback' });
+
+    const result = await detectAuthMethod(config, sources);
+    expect(result.kind).toBe('apikey');
+    if (result.kind === 'apikey') {
+      expect(result.key).toBe('sk-ant-api03-kc-fallback');
+    }
+  });
+
+  it('Keychain result includes serviceName from loadFromKeychainWithService', async () => {
+    const keychainCreds = validCreds({ accessToken: 'sk-ant-oat01-kc-with-service' });
+    const sources = makeSources({
+      loadFromFile: () => null,
+      loadFromKeychainWithService: () => ({
+        credentials: keychainCreds,
+        serviceName: 'Claude Code',
+      }),
+    });
+
+    const result = await detectAuthMethod(makeConfig(), sources);
+    expect(result.kind).toBe('oauth');
+    if (result.kind === 'oauth' && result.source === 'keychain') {
+      expect(result.keychainServiceName).toBe('Claude Code');
+    }
   });
 });
 
@@ -392,10 +479,29 @@ describe('detectAuthMethod', () => {
 
 describe('extractFromKeychain', () => {
   it('returns null on non-macOS platforms', () => {
-    // This test runs on Linux CI, so extractFromKeychain should return null
-    // because platform() !== 'darwin'.
     if (platform() !== 'darwin') {
       expect(extractFromKeychain()).toBeNull();
+    }
+  });
+});
+
+// --- extractFromKeychainWithService ---
+
+describe('extractFromKeychainWithService', () => {
+  it('returns null on non-macOS platforms', () => {
+    if (platform() !== 'darwin') {
+      expect(extractFromKeychainWithService()).toBeNull();
+    }
+  });
+});
+
+// --- writeToKeychain ---
+
+describe('writeToKeychain', () => {
+  it('is a no-op on non-macOS platforms', () => {
+    if (platform() !== 'darwin') {
+      // Should not throw
+      expect(() => writeToKeychain(validCreds(), 'Claude Code')).not.toThrow();
     }
   });
 });

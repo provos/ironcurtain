@@ -90,7 +90,7 @@ export async function prepareDockerInfrastructure(
   const { getIronCurtainHome } = await import('../config/paths.js');
   const { prepareSession } = await import('./orientation.js');
 
-  const { detectAuthMethod } = await import('./oauth-credentials.js');
+  const { detectAuthMethod, writeToKeychain } = await import('./oauth-credentials.js');
   const { OAuthTokenManager } = await import('./oauth-token-manager.js');
 
   await registerBuiltinAdapters(config.userConfig);
@@ -100,7 +100,7 @@ export async function prepareDockerInfrastructure(
   // Detect authentication method. Adapters with detectCredential() handle
   // their own credential detection (e.g., Goose checks provider-specific keys).
   // Adapters without it fall back to detectAuthMethod() (Anthropic OAuth + API key).
-  const authMethod = adapter.detectCredential ? adapter.detectCredential(config) : detectAuthMethod(config);
+  const authMethod = adapter.detectCredential ? adapter.detectCredential(config) : await detectAuthMethod(config);
   if (authMethod.kind === 'none') {
     throw new Error(
       adapter.credentialHelpText ??
@@ -137,9 +137,13 @@ export async function prepareDockerInfrastructure(
   // Providers sharing the same fakeKeyPrefix (and thus the same real credential)
   // reuse the same fake key so a single container token authenticates against all hosts.
   const oauthAccessToken = authMethod.kind === 'oauth' ? authMethod.credentials.accessToken : undefined;
+  const tokenManagerKeychainDeps =
+    authMethod.kind === 'oauth' && authMethod.source === 'keychain'
+      ? { writeToKeychain, keychainServiceName: authMethod.keychainServiceName }
+      : undefined;
   const tokenManager =
     authMethod.kind === 'oauth'
-      ? new OAuthTokenManager(authMethod.credentials, { canRefresh: authMethod.source === 'file' })
+      ? new OAuthTokenManager(authMethod.credentials, { canRefresh: true }, tokenManagerKeychainDeps)
       : undefined;
   const providers = adapter.getProviders(authKind);
   const fakeKeys = new Map<string, string>();

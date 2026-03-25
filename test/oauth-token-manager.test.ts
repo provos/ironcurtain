@@ -345,4 +345,53 @@ describe('OAuthTokenManager', () => {
       expect(deps.refreshToken).toHaveBeenCalledWith('refresh-from-file');
     });
   });
+
+  describe('Keychain write-back (canRefresh: true with keychainServiceName)', () => {
+    it('saves to Keychain instead of file on successful refresh', async () => {
+      const creds = nearExpiryCreds();
+      const newCreds = refreshedCreds();
+      const writeKcFn = vi.fn();
+      const deps = makeDeps({
+        refreshToken: vi.fn(async () => newCreds),
+        writeToKeychain: writeKcFn,
+        keychainServiceName: 'Claude Code-credentials',
+      });
+      const manager = new OAuthTokenManager(creds, { canRefresh: true }, deps);
+
+      const token = await manager.getValidAccessToken();
+      expect(token).toBe('access-token-refreshed');
+      expect(writeKcFn).toHaveBeenCalledWith(newCreds, 'Claude Code-credentials');
+      expect(deps.saveCredentials).not.toHaveBeenCalled();
+    });
+
+    it('saves to file when keychainServiceName is not set', async () => {
+      const creds = nearExpiryCreds();
+      const newCreds = refreshedCreds();
+      const deps = makeDeps({
+        refreshToken: vi.fn(async () => newCreds),
+      });
+      const manager = new OAuthTokenManager(creds, { canRefresh: true }, deps);
+
+      const token = await manager.getValidAccessToken();
+      expect(token).toBe('access-token-refreshed');
+      expect(deps.saveCredentials).toHaveBeenCalledWith(newCreds, '/fake/.credentials.json');
+    });
+
+    it('continues when Keychain write throws', async () => {
+      const creds = nearExpiryCreds();
+      const newCreds = refreshedCreds();
+      const deps = makeDeps({
+        refreshToken: vi.fn(async () => newCreds),
+        writeToKeychain: vi.fn(() => {
+          throw new Error('Keychain locked');
+        }),
+        keychainServiceName: 'Claude Code',
+      });
+      const manager = new OAuthTokenManager(creds, { canRefresh: true }, deps);
+
+      const token = await manager.getValidAccessToken();
+      expect(token).toBe('access-token-refreshed');
+      expect(manager.accessToken).toBe('access-token-refreshed');
+    });
+  });
 });

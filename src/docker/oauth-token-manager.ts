@@ -6,11 +6,9 @@
  * may also refresh tokens concurrently — re-reads the credentials file
  * before attempting a refresh to avoid using a stale refresh token.
  *
- * On macOS where credentials come from the Keychain, the manager first
- * re-reads credentials from file and Keychain (fast path — the host
- * Claude Code process may have already refreshed). If both are expired,
- * it falls back to self-refresh as a last resort and saves the result
- * to ~/.claude/.credentials.json for future reads.
+ * For file-sourced credentials, refreshed tokens are saved back to the
+ * credentials file. For Keychain-sourced credentials (macOS), refreshed
+ * tokens are written back to the Keychain via the writeToKeychain dep.
  *
  * A single in-flight refresh promise is shared across concurrent callers
  * to prevent duplicate refresh requests.
@@ -34,6 +32,10 @@ export interface TokenManagerDeps {
   refreshToken: (refreshToken: string) => Promise<OAuthCredentials | null>;
   saveCredentials: (credentials: OAuthCredentials, filePath?: string) => void;
   credentialsFilePath: string;
+  /** When set, refreshed credentials are written to the Keychain instead of the file. */
+  writeToKeychain?: (credentials: OAuthCredentials, serviceName: string) => void;
+  /** The Keychain service name to use with writeToKeychain. */
+  keychainServiceName?: string;
   /** @deprecated No longer used internally. Kept for backward compatibility with tests. */
   now?: () => number;
 }
@@ -50,15 +52,13 @@ export interface OAuthTokenManagerOptions {
   /**
    * Controls the refresh strategy.
    *
-   * When true (default, file-sourced credentials on Linux/WSL), the manager
-   * re-reads the credentials file and, if still expired, performs a refresh
-   * grant immediately.
+   * When false, the manager only re-reads credentials from the file and
+   * Keychain — it never POSTs to the token endpoint itself. This is a
+   * safety valve for cases where refresh should be completely disabled.
    *
-   * When false (Keychain-sourced credentials on macOS), the manager first
-   * re-reads both the credentials file and the Keychain — giving the host
-   * Claude Code process a chance to have already refreshed. If neither
-   * source has a valid token, it falls back to self-refresh as a last
-   * resort and saves the result to ~/.claude/.credentials.json.
+   * Defaults to true. For Keychain-sourced credentials, set writeToKeychain
+   * and keychainServiceName in deps so refreshed tokens are persisted to
+   * the Keychain rather than the credentials file.
    */
   canRefresh?: boolean;
 }
@@ -170,7 +170,11 @@ export class OAuthTokenManager {
     if (newCreds) {
       logger.info('[oauth-token-manager] Token refresh successful');
       try {
-        this.deps.saveCredentials(newCreds, this.deps.credentialsFilePath);
+        if (this.deps.keychainServiceName && this.deps.writeToKeychain) {
+          this.deps.writeToKeychain(newCreds, this.deps.keychainServiceName);
+        } else {
+          this.deps.saveCredentials(newCreds, this.deps.credentialsFilePath);
+        }
       } catch (err) {
         logger.warn(
           `[oauth-token-manager] Failed to save refreshed credentials: ${err instanceof Error ? err.message : String(err)}`,
