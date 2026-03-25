@@ -390,7 +390,7 @@ describe('MitmProxy', () => {
     socket?.destroy();
   });
 
-  it('returns 405 for non-CONNECT methods', async () => {
+  it('returns 405 for non-proxy, non-CONNECT methods', async () => {
     proxy = createMitmProxy({
       socketPath,
       ca,
@@ -398,6 +398,7 @@ describe('MitmProxy', () => {
     });
     await proxy.start();
 
+    // A relative URL (not an absolute proxy URL) should still get 405
     const statusCode = await new Promise<number>((resolve, reject) => {
       const req = http.request(
         {
@@ -415,6 +416,98 @@ describe('MitmProxy', () => {
     });
 
     expect(statusCode).toBe(405);
+  });
+
+  it('returns 403 for plain HTTP proxy requests to non-passthrough domains', async () => {
+    proxy = createMitmProxy({
+      socketPath,
+      ca,
+      providers: [{ config: testProvider, fakeKey, realKey }],
+    });
+    await proxy.start();
+
+    const statusCode = await new Promise<number>((resolve, reject) => {
+      const req = http.request(
+        {
+          socketPath,
+          method: 'GET',
+          path: 'http://unknown-domain.example.com/some/path',
+        },
+        (res) => {
+          resolve(res.statusCode ?? 0);
+          res.resume();
+        },
+      );
+      req.on('error', reject);
+      req.end();
+    });
+
+    expect(statusCode).toBe(403);
+  });
+
+  it('forwards plain HTTP proxy requests to passthrough domains', async () => {
+    // Start a local HTTP server as the upstream target on 127.0.0.1
+    const upstream = http.createServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, path: _req.url, method: _req.method }));
+    });
+    const upstreamPort = await new Promise<number>((resolve) => {
+      upstream.listen(0, '127.0.0.1', () => {
+        const addr = upstream.address() as import('node:net').AddressInfo;
+        resolve(addr.port);
+      });
+    });
+
+    try {
+      proxy = createMitmProxy({
+        socketPath,
+        ca,
+        providers: [],
+        // Pass a custom lookup so the proxy resolves all hostnames to 127.0.0.1.
+        // Must handle { all: true } (Node 24+) which expects an array result.
+        dnsLookup: (
+          _hostname: string,
+          options: unknown,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          cb: (...args: any[]) => void,
+        ) => {
+          if (typeof options === 'object' && options !== null && (options as { all?: boolean }).all) {
+            cb(null, [{ address: '127.0.0.1', family: 4 }]);
+          } else {
+            cb(null, '127.0.0.1', 4);
+          }
+        },
+      });
+      await proxy.start();
+
+      proxy.hosts.addHost('test-passthrough.example.com');
+
+      // Send a plain HTTP proxy request via the proxy UDS
+      const { statusCode, body } = await new Promise<{ statusCode: number; body: string }>((resolve, reject) => {
+        const req = http.request(
+          {
+            socketPath,
+            method: 'GET',
+            path: `http://test-passthrough.example.com:${upstreamPort}/test/path`,
+          },
+          (res) => {
+            let data = '';
+            res.on('data', (chunk: Buffer) => (data += chunk.toString()));
+            res.on('end', () => resolve({ statusCode: res.statusCode ?? 0, body: data }));
+          },
+        );
+        req.on('error', reject);
+        req.end();
+      });
+
+      expect(statusCode).toBe(200);
+      const parsed = JSON.parse(body);
+      expect(parsed.ok).toBe(true);
+      expect(parsed.path).toBe('/test/path');
+      expect(parsed.method).toBe('GET');
+    } finally {
+      upstream.close();
+    }
   });
 
   it('performs TLS handshake with CA-signed cert for allowed host', async () => {

@@ -122,6 +122,13 @@ export interface MitmProxyOptions {
    * 0 for OS-assigned.
    */
   readonly controlPort?: number;
+  /**
+   * Custom DNS lookup function for outbound connections.
+   * Used in tests to avoid real DNS resolution.
+   * Follows the same signature as `dns.lookup`.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  readonly dnsLookup?: (...args: any[]) => void;
 }
 
 export interface ProviderKeyMapping {
@@ -557,9 +564,113 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     });
   });
 
-  // Outer server - UDS listener, handles CONNECT
-  const outerServer = http.createServer((_req, res) => {
-    // Only CONNECT is supported; reject everything else
+  // ── Plain HTTP proxy forwarding ──────────────────────────────────
+  // When a client uses HTTP_PROXY for plain HTTP requests, it sends
+  // e.g. "GET http://host:port/path" — an absolute URL as the request target.
+  // Parse the absolute URL and return host/port/path, or null if not a proxy request.
+
+  function tryParseProxyUrl(url: string): { hostname: string; port: number; path: string } | null {
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol !== 'http:') return null;
+      return {
+        hostname: parsed.hostname,
+        port: parsed.port ? parseInt(parsed.port, 10) : 80,
+        path: parsed.pathname + parsed.search,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  function forwardPlainHttpPassthrough(
+    clientReq: http.IncomingMessage,
+    clientRes: http.ServerResponse,
+    host: string,
+    port: number,
+    path: string,
+  ): void {
+    const { method, headers } = clientReq;
+
+    logger.info(`[mitm-proxy] ${method} http://${host}:${port}${path} -> PASSTHROUGH (plain HTTP)`);
+
+    const forwardHeaders = { ...headers, host: port === 80 ? host : `${host}:${port}` };
+
+    const reqOpts: http.RequestOptions = {
+      hostname: host,
+      port,
+      method,
+      path,
+      headers: forwardHeaders,
+    };
+    if (options.dnsLookup) {
+      reqOpts.lookup = options.dnsLookup as http.RequestOptions['lookup'];
+    }
+
+    const upstreamReq = http.request(reqOpts, (upstreamRes) => {
+      upstreamRes.on('error', (err) => {
+        const log = isConnectionReset(err) ? logger.debug : logger.info;
+        log(`[mitm-proxy] upstream response error (plain HTTP passthrough): ${err.message}`);
+        if (!clientRes.headersSent) {
+          clientRes.writeHead(502, { 'Content-Type': 'text/plain' });
+          clientRes.end(`Upstream response error: ${err.message}`);
+        } else {
+          clientRes.socket?.destroy();
+        }
+      });
+
+      clientRes.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers);
+      clientRes.flushHeaders();
+      clientRes.socket?.setNoDelay(true);
+      upstreamRes.pipe(clientRes);
+    });
+
+    activeUpstreamRequests.add(upstreamReq);
+    upstreamReq.on('close', () => activeUpstreamRequests.delete(upstreamReq));
+
+    upstreamReq.on('error', (err) => {
+      const log = isConnectionReset(err) ? logger.debug : logger.info;
+      log(`[mitm-proxy] upstream error (plain HTTP passthrough): ${err.message}`);
+      activeUpstreamRequests.delete(upstreamReq);
+      if (!clientRes.headersSent) {
+        clientRes.writeHead(502, { 'Content-Type': 'text/plain' });
+        clientRes.end(`Upstream error: ${err.message}`);
+      } else {
+        clientRes.socket?.destroy();
+      }
+    });
+
+    clientRes.on('close', () => {
+      if (!upstreamReq.destroyed) {
+        upstreamReq.destroy();
+      }
+    });
+
+    clientReq.on('error', (err) => {
+      const log = isConnectionReset(err) ? logger.debug : logger.info;
+      log(`[mitm-proxy] client request error (plain HTTP passthrough): ${err.message}`);
+      upstreamReq.destroy();
+    });
+
+    clientReq.pipe(upstreamReq);
+  }
+
+  // Outer server - UDS listener, handles CONNECT and plain HTTP proxy requests
+  const outerServer = http.createServer((req, res) => {
+    // Handle plain HTTP proxy requests for passthrough domains.
+    // HTTP proxy clients send absolute URLs: "GET http://host:port/path".
+    const parsed = req.url ? tryParseProxyUrl(req.url) : null;
+    if (parsed && passthroughHosts.has(parsed.hostname)) {
+      forwardPlainHttpPassthrough(req, res, parsed.hostname, parsed.port, parsed.path);
+      return;
+    }
+    if (parsed) {
+      // Valid proxy request but domain not in allowlist
+      res.writeHead(403, { 'Content-Type': 'text/plain' });
+      res.end('Forbidden');
+      return;
+    }
+    // Not a proxy request (relative URL) — reject
     res.writeHead(405, { 'Content-Type': 'text/plain' });
     res.end('Method Not Allowed');
   });
@@ -657,30 +768,41 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
   ): void {
     const { method, url: path, headers } = clientReq;
 
-    logger.info(`[mitm-proxy] ${method} ${host}${path} -> PASSTHROUGH`);
+    // Use HTTP for non-443 ports (upstream likely plain HTTP), HTTPS for 443
+    const useHttps = port === 443;
+    const proto = useHttps ? 'https' : 'http';
+    logger.info(`[mitm-proxy] ${method} ${proto}://${host}:${port}${path} -> PASSTHROUGH`);
 
     const forwardHeaders = { ...headers, host };
 
-    const upstreamReq = https.request(
-      { hostname: host, port, method, path, headers: forwardHeaders },
-      (upstreamRes) => {
-        upstreamRes.on('error', (err) => {
-          const log = isConnectionReset(err) ? logger.debug : logger.info;
-          log(`[mitm-proxy] upstream response error (passthrough): ${err.message}`);
-          if (!clientRes.headersSent) {
-            clientRes.writeHead(502, { 'Content-Type': 'text/plain' });
-            clientRes.end(`Upstream response error: ${err.message}`);
-          } else {
-            clientRes.socket?.destroy();
-          }
-        });
+    const requestFn = useHttps ? https.request : http.request;
+    const reqOpts: http.RequestOptions = {
+      hostname: host,
+      port,
+      method,
+      path,
+      headers: forwardHeaders,
+    };
+    if (options.dnsLookup) {
+      reqOpts.lookup = options.dnsLookup as http.RequestOptions['lookup'];
+    }
+    const upstreamReq = requestFn(reqOpts, (upstreamRes) => {
+      upstreamRes.on('error', (err) => {
+        const log = isConnectionReset(err) ? logger.debug : logger.info;
+        log(`[mitm-proxy] upstream response error (passthrough): ${err.message}`);
+        if (!clientRes.headersSent) {
+          clientRes.writeHead(502, { 'Content-Type': 'text/plain' });
+          clientRes.end(`Upstream response error: ${err.message}`);
+        } else {
+          clientRes.socket?.destroy();
+        }
+      });
 
-        clientRes.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers);
-        clientRes.flushHeaders();
-        clientRes.socket?.setNoDelay(true);
-        upstreamRes.pipe(clientRes);
-      },
-    );
+      clientRes.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers);
+      clientRes.flushHeaders();
+      clientRes.socket?.setNoDelay(true);
+      upstreamRes.pipe(clientRes);
+    });
 
     activeUpstreamRequests.add(upstreamReq);
     upstreamReq.on('close', () => activeUpstreamRequests.delete(upstreamReq));
