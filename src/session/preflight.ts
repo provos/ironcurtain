@@ -11,7 +11,16 @@ import { promisify } from 'node:util';
 import type { IronCurtainConfig } from '../config/types.js';
 import type { AgentId } from '../docker/agent-adapter.js';
 import type { SessionMode } from './types.js';
-import { detectAuthMethod, loadOAuthCredentials, type CredentialSources } from '../docker/oauth-credentials.js';
+import {
+  detectAuthMethod,
+  loadOAuthCredentials,
+  extractFromKeychain,
+  refreshOAuthToken,
+  saveOAuthCredentials,
+  extractFromKeychainWithService,
+  writeToKeychain,
+  type CredentialSources,
+} from '../docker/oauth-credentials.js';
 import { resolveApiKeyForProvider } from '../config/model-provider.js';
 
 const execFile = promisify(execFileCb);
@@ -59,31 +68,29 @@ export async function checkDockerAvailable(): Promise<boolean> {
 }
 
 /**
- * Sources that skip macOS Keychain to keep preflight fast and non-interactive.
- * Full Keychain detection happens in prepareDockerInfrastructure().
- *
- * Limitation: macOS users whose OAuth credentials exist only in the Keychain
- * (no ~/.claude/.credentials.json and no API key) will fall back to builtin
- * in auto-detect mode, or get a PreflightError with explicit --agent.
- * In practice this is rare: Claude Code always writes the credentials file.
+ * Credential sources for preflight detection including Keychain lookup (~19ms)
+ * and token refresh so that expired credentials are refreshed at startup.
  */
 const preflightSources: CredentialSources = {
   loadFromFile: loadOAuthCredentials,
-  loadFromKeychain: () => null,
+  loadFromKeychain: extractFromKeychain,
+  refreshToken: refreshOAuthToken,
+  saveToFile: saveOAuthCredentials,
+  loadFromKeychainWithService: extractFromKeychainWithService,
+  writeToKeychain,
 };
 
 /**
  * Checks whether credentials (OAuth or API key) are available for the given agent.
  * Returns the auth kind if available, or null if no credentials found.
  *
- * Skips macOS Keychain to avoid interactive prompts during preflight.
- * Full detection including Keychain happens in prepareDockerInfrastructure().
+ * Includes macOS Keychain lookup and token refresh for expired credentials.
  */
-function detectCredentials(
+async function detectCredentials(
   agentId: AgentId,
   config: IronCurtainConfig,
   sources?: CredentialSources,
-): 'oauth' | 'apikey' | null {
+): Promise<'oauth' | 'apikey' | null> {
   // Goose uses provider-specific API keys, not Anthropic OAuth.
   if (agentId === 'goose') {
     const provider = config.userConfig.gooseProvider;
@@ -91,8 +98,9 @@ function detectCredentials(
     return key ? 'apikey' : null;
   }
 
-  // Default path: Anthropic OAuth + API key detection (Claude Code and others)
-  const auth = detectAuthMethod(config, sources ?? preflightSources);
+  // Default path: Anthropic OAuth + API key detection (Claude Code and others).
+  // Uses preflightSources, which may refresh expired tokens and update credential storage.
+  const auth = await detectAuthMethod(config, sources ?? preflightSources);
   if (auth.kind === 'none') return null;
   return auth.kind === 'oauth' ? 'oauth' : 'apikey';
 }
@@ -149,7 +157,7 @@ async function resolveExplicit(
     );
   }
 
-  const credKind = detectCredentials(agent, config, credentialSources);
+  const credKind = await detectCredentials(agent, config, credentialSources);
   if (credKind === null) {
     throw new PreflightError(credentialErrorMessage(agent, config));
   }
@@ -174,7 +182,7 @@ async function resolveAutoDetect(
   }
 
   const defaultAgent = config.userConfig.preferredDockerAgent as AgentId;
-  const credKind = detectCredentials(defaultAgent, config, credentialSources);
+  const credKind = await detectCredentials(defaultAgent, config, credentialSources);
   if (credKind === null) {
     return {
       mode: { kind: 'builtin' },

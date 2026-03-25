@@ -29,9 +29,21 @@ export interface OAuthCredentials {
 /** Where OAuth credentials were loaded from. */
 export type OAuthCredentialSource = 'file' | 'keychain';
 
+/** Keychain lookup result that preserves the service name for write-back. */
+export interface KeychainResult {
+  readonly credentials: OAuthCredentials;
+  readonly serviceName: string;
+}
+
 /** Authentication method detected on the host. */
 export type AuthMethod =
-  | { readonly kind: 'oauth'; readonly credentials: OAuthCredentials; readonly source: OAuthCredentialSource }
+  | { readonly kind: 'oauth'; readonly credentials: OAuthCredentials; readonly source: 'file' }
+  | {
+      readonly kind: 'oauth';
+      readonly credentials: OAuthCredentials;
+      readonly source: 'keychain';
+      readonly keychainServiceName: string;
+    }
   | { readonly kind: 'apikey'; readonly key: string }
   | { readonly kind: 'none' };
 
@@ -118,14 +130,15 @@ export function parseCredentialsJson(json: string): OAuthCredentials | null {
 }
 
 /**
- * Attempts to extract OAuth credentials from the macOS Keychain.
+ * Attempts to extract OAuth credentials from the macOS Keychain,
+ * also returning which service name succeeded (needed for write-back).
  * Returns null on non-macOS platforms, Keychain access failure, or
  * when no valid credentials are found.
  *
  * Tries both service names because Claude Code has a known bug where
  * the write and read service names differ.
  */
-export function extractFromKeychain(): OAuthCredentials | null {
+export function extractFromKeychainWithService(): KeychainResult | null {
   if (platform() !== 'darwin') return null;
 
   const account = userInfo().username;
@@ -139,7 +152,7 @@ export function extractFromKeychain(): OAuthCredentials | null {
       const credentials = parseCredentialsJson(result.trim());
       if (credentials) {
         logger.info(`Found OAuth credentials in macOS Keychain (service: "${service}")`);
-        return credentials;
+        return { credentials, serviceName: service };
       }
     } catch {
       // Not found or keychain locked -- try next service name
@@ -148,6 +161,65 @@ export function extractFromKeychain(): OAuthCredentials | null {
   }
 
   return null;
+}
+
+/**
+ * Attempts to extract OAuth credentials from the macOS Keychain.
+ * Returns null on non-macOS platforms, Keychain access failure, or
+ * when no valid credentials are found.
+ *
+ * Delegates to extractFromKeychainWithService() and strips the service name.
+ */
+export function extractFromKeychain(): OAuthCredentials | null {
+  return extractFromKeychainWithService()?.credentials ?? null;
+}
+
+/**
+ * Writes updated OAuth credentials back to the macOS Keychain.
+ * Preserves existing fields in the Keychain entry (e.g., scopes, subscriptionType).
+ *
+ * No-op on non-macOS platforms.
+ */
+export function writeToKeychain(credentials: OAuthCredentials, serviceName: string): void {
+  if (platform() !== 'darwin') return;
+
+  const account = userInfo().username;
+
+  // Read existing Keychain value to preserve extra fields
+  let existing: Record<string, unknown> = {};
+  try {
+    const raw = execFileSync('security', ['find-generic-password', '-s', serviceName, '-a', account, '-w'], {
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+      timeout: 10_000,
+    });
+    const parsed: unknown = JSON.parse(raw.trim());
+    if (typeof parsed === 'object' && parsed !== null) {
+      existing = parsed as Record<string, unknown>;
+    }
+  } catch {
+    // Entry doesn't exist or is unreadable -- start fresh
+  }
+
+  const existingOauth =
+    typeof existing.claudeAiOauth === 'object' && existing.claudeAiOauth !== null
+      ? (existing.claudeAiOauth as Record<string, unknown>)
+      : {};
+
+  existing.claudeAiOauth = {
+    ...existingOauth,
+    accessToken: credentials.accessToken,
+    refreshToken: credentials.refreshToken,
+    expiresAt: credentials.expiresAt,
+  };
+
+  const json = JSON.stringify(existing);
+
+  // -U flag updates an existing entry or creates a new one
+  execFileSync('security', ['add-generic-password', '-U', '-s', serviceName, '-a', account, '-w', json], {
+    timeout: 10_000,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
 }
 
 /** Claude Code's public OAuth client ID. */
@@ -163,15 +235,19 @@ const OAUTH_TOKEN_URL = 'https://platform.claude.com/v1/oauth/token';
  * token, network error, etc.).
  */
 export async function refreshOAuthToken(refreshToken: string): Promise<OAuthCredentials | null> {
+  const REFRESH_TIMEOUT_MS = 30_000;
   try {
+    const body = new URLSearchParams({
+      grant_type: 'refresh_token',
+      refresh_token: refreshToken,
+      client_id: OAUTH_CLIENT_ID,
+    });
+
     const response = await fetch(OAUTH_TOKEN_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        grant_type: 'refresh_token',
-        refresh_token: refreshToken,
-        client_id: OAUTH_CLIENT_ID,
-      }),
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body.toString(),
+      signal: AbortSignal.timeout(REFRESH_TIMEOUT_MS),
     });
 
     if (!response.ok) {
@@ -180,7 +256,7 @@ export async function refreshOAuthToken(refreshToken: string): Promise<OAuthCred
     }
 
     const data = (await response.json()) as Record<string, unknown>;
-    return parseTokenResponse(data);
+    return parseTokenResponse(data, refreshToken);
   } catch (err) {
     logger.warn(`OAuth token refresh error: ${err instanceof Error ? err.message : String(err)}`);
     return null;
@@ -189,18 +265,19 @@ export async function refreshOAuthToken(refreshToken: string): Promise<OAuthCred
 
 /**
  * Validates and extracts credentials from an OAuth token endpoint response.
- * Returns null if any required field is missing or invalid.
+ * Returns null if access_token or expires_in are missing/invalid.
+ * Preserves the original refresh token when the response omits refresh_token
+ * (not all providers rotate refresh tokens on every grant).
  */
-function parseTokenResponse(data: Record<string, unknown>): OAuthCredentials | null {
+function parseTokenResponse(data: Record<string, unknown>, fallbackRefreshToken: string): OAuthCredentials | null {
   const { access_token: accessToken, refresh_token: refreshToken, expires_in: expiresIn } = data;
 
   if (!isNonEmptyString(accessToken)) return null;
-  if (!isNonEmptyString(refreshToken)) return null;
   if (!isPositiveFiniteNumber(expiresIn)) return null;
 
   return {
     accessToken,
-    refreshToken,
+    refreshToken: isNonEmptyString(refreshToken) ? refreshToken : fallbackRefreshToken,
     expiresAt: Date.now() + expiresIn * 1000,
   };
 }
@@ -239,29 +316,46 @@ export function saveOAuthCredentials(credentials: OAuthCredentials, filePath?: s
   chmodSync(credPath, 0o600);
 }
 
-/** Injectable credential sources for testability. */
+/**
+ * Injectable credential sources for testability.
+ *
+ * The optional refresh/save/keychain-write functions enable token refresh
+ * and persistence in detectAuthMethod(). When these functions are omitted,
+ * expired tokens are not refreshed or written back; the caller only receives
+ * the detection result (and any existing, possibly stale, credentials).
+ */
 export interface CredentialSources {
   loadFromFile: () => OAuthCredentials | null;
   loadFromKeychain: () => OAuthCredentials | null;
+  refreshToken?: (refreshToken: string) => Promise<OAuthCredentials | null>;
+  saveToFile?: (credentials: OAuthCredentials) => void;
+  loadFromKeychainWithService?: () => KeychainResult | null;
+  writeToKeychain?: (credentials: OAuthCredentials, serviceName: string) => void;
 }
 
 const defaultSources: CredentialSources = {
   loadFromFile: loadOAuthCredentials,
   loadFromKeychain: extractFromKeychain,
+  refreshToken: refreshOAuthToken,
+  saveToFile: saveOAuthCredentials,
+  loadFromKeychainWithService: extractFromKeychainWithService,
+  writeToKeychain,
 };
 
 /**
  * Detects the best authentication method available on the host.
+ * When refresh functions are provided in sources, attempts to refresh
+ * expired OAuth tokens before falling back to API key auth.
  *
  * Priority:
  * 1. IRONCURTAIN_DOCKER_AUTH=apikey env var forces API key mode
- * 2. OAuth credentials from ~/.claude/.credentials.json (if not expired)
- * 3. OAuth credentials from macOS Keychain (if credentials file missing)
+ * 2. OAuth credentials from ~/.claude/.credentials.json (valid or refreshable)
+ * 3. OAuth credentials from macOS Keychain (valid or refreshable)
  * 4. API key from config
  * 5. None
  */
-export function detectAuthMethod(config: IronCurtainConfig, sources?: CredentialSources): AuthMethod {
-  const { loadFromFile, loadFromKeychain } = sources ?? defaultSources;
+export async function detectAuthMethod(config: IronCurtainConfig, sources?: CredentialSources): Promise<AuthMethod> {
+  const s = sources ?? defaultSources;
 
   // Allow explicit override to force API key mode
   if (process.env.IRONCURTAIN_DOCKER_AUTH === 'apikey') {
@@ -270,21 +364,38 @@ export function detectAuthMethod(config: IronCurtainConfig, sources?: Credential
   }
 
   // Try OAuth from credentials file
-  const fileCreds = loadFromFile();
+  const fileCreds = s.loadFromFile();
   if (fileCreds) {
     if (!isTokenExpired(fileCreds)) {
       logger.info('Detected OAuth credentials from ~/.claude/.credentials.json');
       return { kind: 'oauth', credentials: fileCreds, source: 'file' };
+    }
+
+    // Attempt refresh if refresh function is available
+    if (s.refreshToken) {
+      const refreshed = await tryRefreshFileCreds(fileCreds, s.refreshToken, s.saveToFile);
+      if (refreshed) return refreshed;
     }
     logger.warn('OAuth token from credentials file is expired');
   }
 
   // Try macOS Keychain if credentials file was not found
   if (!fileCreds) {
-    const keychainCreds = loadFromKeychain();
-    if (keychainCreds) {
-      if (!isTokenExpired(keychainCreds)) {
-        return { kind: 'oauth', credentials: keychainCreds, source: 'keychain' };
+    const keychainResult = s.loadFromKeychainWithService?.() ?? toKeychainResult(s.loadFromKeychain());
+    if (keychainResult) {
+      if (!isTokenExpired(keychainResult.credentials)) {
+        return {
+          kind: 'oauth',
+          credentials: keychainResult.credentials,
+          source: 'keychain',
+          keychainServiceName: keychainResult.serviceName,
+        };
+      }
+
+      // Attempt refresh if refresh function is available
+      if (s.refreshToken) {
+        const refreshed = await tryRefreshKeychainCreds(keychainResult, s.refreshToken, s.writeToKeychain);
+        if (refreshed) return refreshed;
       }
       logger.warn('OAuth token from macOS Keychain is expired');
     }
@@ -292,6 +403,64 @@ export function detectAuthMethod(config: IronCurtainConfig, sources?: Credential
 
   // Fall back to API key
   return resolveApiKeyAuth(config);
+}
+
+/**
+ * Wraps a plain OAuthCredentials from loadFromKeychain() into a KeychainResult.
+ * Uses the first service name as a fallback since we don't know which one matched.
+ */
+function toKeychainResult(creds: OAuthCredentials | null): KeychainResult | null {
+  if (!creds) return null;
+  return { credentials: creds, serviceName: KEYCHAIN_SERVICE_NAMES[0] };
+}
+
+/**
+ * Attempts to refresh expired file-sourced credentials.
+ * On success, saves to file and returns the oauth AuthMethod.
+ */
+async function tryRefreshFileCreds(
+  fileCreds: OAuthCredentials,
+  doRefresh: (refreshToken: string) => Promise<OAuthCredentials | null>,
+  saveToFile?: (credentials: OAuthCredentials) => void,
+): Promise<AuthMethod | null> {
+  const refreshed = await doRefresh(fileCreds.refreshToken);
+  if (!refreshed) return null;
+
+  try {
+    saveToFile?.(refreshed);
+  } catch (err) {
+    logger.warn(`Failed to save refreshed credentials to file: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  logger.info('Refreshed expired OAuth token from credentials file');
+  return { kind: 'oauth', credentials: refreshed, source: 'file' };
+}
+
+/**
+ * Attempts to refresh expired Keychain-sourced credentials.
+ * On success, writes back to Keychain and returns the oauth AuthMethod.
+ */
+async function tryRefreshKeychainCreds(
+  keychainResult: KeychainResult,
+  doRefresh: (refreshToken: string) => Promise<OAuthCredentials | null>,
+  doWriteToKeychain?: (credentials: OAuthCredentials, serviceName: string) => void,
+): Promise<AuthMethod | null> {
+  const refreshed = await doRefresh(keychainResult.credentials.refreshToken);
+  if (!refreshed) return null;
+
+  try {
+    doWriteToKeychain?.(refreshed, keychainResult.serviceName);
+  } catch (err) {
+    logger.warn(
+      `Failed to write refreshed credentials to Keychain: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  logger.info('Refreshed expired OAuth token from macOS Keychain');
+  return {
+    kind: 'oauth',
+    credentials: refreshed,
+    source: 'keychain',
+    keychainServiceName: keychainResult.serviceName,
+  };
 }
 
 /**
