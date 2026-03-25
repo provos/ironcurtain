@@ -48,15 +48,17 @@ const defaultDeps: TokenManagerDeps = {
 
 export interface OAuthTokenManagerOptions {
   /**
-   * Whether to attempt self-refresh immediately or prefer re-reading first.
+   * Controls the refresh strategy.
+   *
+   * When true (default, file-sourced credentials on Linux/WSL), the manager
+   * re-reads the credentials file and, if still expired, performs a refresh
+   * grant immediately.
    *
    * When false (Keychain-sourced credentials on macOS), the manager first
-   * re-reads credentials from the file and Keychain (in case the host
-   * Claude Code process has already refreshed). If both sources are
-   * expired, it falls back to self-refresh as a last resort and saves
-   * the result to ~/.claude/.credentials.json.
-   *
-   * Defaults to true (file-sourced credentials on Linux/WSL).
+   * re-reads both the credentials file and the Keychain — giving the host
+   * Claude Code process a chance to have already refreshed. If neither
+   * source has a valid token, it falls back to self-refresh as a last
+   * resort and saves the result to ~/.claude/.credentials.json.
    */
   canRefresh?: boolean;
 }
@@ -156,7 +158,9 @@ export class OAuthTokenManager {
         return this.credentials.accessToken;
       }
       keychainRefreshToken = keychainCreds?.refreshToken;
-      logger.info('[oauth-token-manager] Keychain mode: file and Keychain expired, attempting self-refresh');
+      logger.info(
+        '[oauth-token-manager] Keychain mode: no valid credentials available from file or Keychain, attempting self-refresh',
+      );
     }
 
     // Pick the best available refresh token: file > keychain > initial credentials

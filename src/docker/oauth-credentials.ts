@@ -260,8 +260,10 @@ const defaultSources: CredentialSources = {
  *
  * Priority:
  * 1. IRONCURTAIN_DOCKER_AUTH=apikey env var forces API key mode
- * 2. OAuth credentials from ~/.claude/.credentials.json (if not expired)
- * 3. OAuth credentials from macOS Keychain (if credentials file missing)
+ * 2. OAuth credentials from ~/.claude/.credentials.json (even if expired —
+ *    the token manager will handle refresh)
+ * 3. OAuth credentials from macOS Keychain (if credentials file missing;
+ *    returned even if expired so the token manager can refresh)
  * 4. API key from config
  * 5. None
  */
