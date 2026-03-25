@@ -345,6 +345,12 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
       // Docker DNS resolves the main container name on the internal network, and socat
       // with `fork` only resolves at connection time (so it's fine that main starts later).
       const sidecarName = `ironcurtain-sidecar-${shortId}`;
+
+      // Remove stale containers from a crashed previous session (same session ID
+      // means same deterministic container names, which would conflict on create).
+      await docker.removeStaleContainer(sidecarName);
+      await docker.removeStaleContainer(mainContainerName);
+
       // Container-internal PTY port is fixed; host-side port is dynamic to
       // avoid conflicts when multiple PTY sessions run concurrently.
       const containerPtyPort = ptyPort ?? DEFAULT_PTY_PORT;

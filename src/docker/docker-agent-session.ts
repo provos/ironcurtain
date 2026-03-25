@@ -245,6 +245,13 @@ export class DockerAgentSession implements Session {
 
       // Create socat sidecar on the default bridge (can reach host.docker.internal)
       const sidecarName = `ironcurtain-sidecar-${shortId}`;
+      const mainContainerName = `ironcurtain-${shortId}`;
+
+      // Remove stale containers from a crashed previous session (same session ID
+      // means same deterministic container names, which would conflict on create).
+      await this.docker.removeStaleContainer(sidecarName);
+      await this.docker.removeStaleContainer(mainContainerName);
+
       this.sidecarContainerId = await this.docker.create({
         image: socatImage,
         name: sidecarName,

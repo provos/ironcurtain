@@ -221,6 +221,12 @@ function createMockDocker(): DockerManager {
     async getContainerIp() {
       return '172.30.0.3';
     },
+    async containerExists() {
+      return false;
+    },
+    async removeStaleContainer() {
+      return false;
+    },
   };
 }
 

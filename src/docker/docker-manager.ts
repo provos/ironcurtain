@@ -312,6 +312,20 @@ export function createDockerManager(execFileFn?: ExecFileFn): DockerManager {
         return false;
       }
     },
+
+    /**
+     * Remove a stale container left behind by a crashed session.
+     * Stops and force-removes the container if it exists; no-ops otherwise.
+     * Returns true if a stale container was found and removed.
+     */
+    async removeStaleContainer(name: string): Promise<boolean> {
+      const exists = await this.containerExists(name);
+      if (!exists) return false;
+      logger.warn(`Removing stale container "${name}" from a previous session`);
+      await this.stop(name);
+      await this.remove(name);
+      return true;
+    },
   };
 }
 
