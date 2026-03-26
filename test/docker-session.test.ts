@@ -224,6 +224,9 @@ function createMockDocker(): DockerManager {
     async containerExists() {
       return false;
     },
+    async getContainerLabel() {
+      return undefined;
+    },
     async removeStaleContainer() {
       return false;
     },

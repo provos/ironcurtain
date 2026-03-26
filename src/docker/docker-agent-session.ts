@@ -264,6 +264,7 @@ export class DockerAgentSession implements Session {
         mounts: [],
         env: {},
         entrypoint: '/bin/sh',
+        sessionLabel: this.sessionId,
         command: [
           '-c',
           quote(['socat', `TCP-LISTEN:${mcpPort},fork,reuseaddr`, `TCP:host.docker.internal:${mcpPort}`]) +

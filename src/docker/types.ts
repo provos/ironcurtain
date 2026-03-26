@@ -161,6 +161,9 @@ export interface DockerManager {
    */
   removeStaleContainer(name: string): Promise<boolean>;
 
+  /** Returns a label value from a container, or undefined if not found. */
+  getContainerLabel(container: string, label: string): Promise<string | undefined>;
+
   /** Returns the image ID (sha256 digest) for a container or image. undefined if not found. */
   getImageId(nameOrId: string): Promise<string | undefined>;
 
