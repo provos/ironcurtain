@@ -471,4 +471,77 @@ describe('DockerManager', () => {
       await expect(manager.removeNetwork('ironcurtain-abc')).resolves.toBeUndefined();
     });
   });
+
+  describe('removeStaleContainer', () => {
+    it('no-ops when container does not exist', async () => {
+      // docker inspect fails → containerExists returns false
+      mock.setError(1, '', 'No such container');
+      const manager = createDockerManager(mock.mockExec);
+
+      const removed = await manager.removeStaleContainer('ironcurtain-sidecar-abc');
+      expect(removed).toBe(false);
+      // Only the inspect call, no label check or stop/rm
+      expect(mock.calls).toHaveLength(1);
+      expect(mock.calls[0].args).toEqual(['inspect', 'ironcurtain-sidecar-abc']);
+    });
+
+    it('skips removal when container lacks ironcurtain.session label', async () => {
+      mock.setSequence([
+        { stdout: '[{"Id":"abc"}]' }, // inspect → exists
+        { stdout: '<no value>\n' }, // label inspect → no label
+      ]);
+      const manager = createDockerManager(mock.mockExec);
+
+      const removed = await manager.removeStaleContainer('some-container');
+      expect(removed).toBe(false);
+      expect(mock.calls).toHaveLength(2);
+    });
+
+    it('stops and removes when container exists with session label', async () => {
+      mock.setSequence([
+        { stdout: '[{"Id":"abc"}]' }, // inspect → exists
+        { stdout: 'session-123\n' }, // label inspect → has label
+        { stdout: '' }, // stop
+        { stdout: '' }, // rm -f
+        { error: true, code: 1, stderr: 'No such container' }, // post-removal exists check → gone
+      ]);
+      const manager = createDockerManager(mock.mockExec);
+
+      const removed = await manager.removeStaleContainer('ironcurtain-pty-xyz');
+      expect(removed).toBe(true);
+      expect(mock.calls).toHaveLength(5);
+      expect(mock.calls[2].args).toContain('stop');
+      expect(mock.calls[3].args).toEqual(['rm', '-f', 'ironcurtain-pty-xyz']);
+    });
+
+    it('throws when container still exists after removal', async () => {
+      mock.setSequence([
+        { stdout: '[{"Id":"abc"}]' }, // inspect → exists
+        { stdout: 'session-123\n' }, // label inspect → has label
+        { stdout: '' }, // stop
+        { stdout: '' }, // rm -f
+        { stdout: '[{"Id":"abc"}]' }, // post-removal exists check → still there
+      ]);
+      const manager = createDockerManager(mock.mockExec);
+
+      await expect(manager.removeStaleContainer('stuck-container')).rejects.toThrow(
+        'Failed to remove stale container "stuck-container"',
+      );
+    });
+
+    it('still removes when stop fails (container already stopped)', async () => {
+      mock.setSequence([
+        { stdout: '[{"Id":"abc"}]' }, // inspect → exists
+        { stdout: 'session-456\n' }, // label inspect → has label
+        { error: true, code: 1, stderr: 'container already stopped' }, // stop fails
+        { stdout: '' }, // rm -f succeeds
+        { error: true, code: 1, stderr: 'No such container' }, // post-removal check → gone
+      ]);
+      const manager = createDockerManager(mock.mockExec);
+
+      const removed = await manager.removeStaleContainer('stale-container');
+      expect(removed).toBe(true);
+      expect(mock.calls).toHaveLength(5);
+    });
+  });
 });

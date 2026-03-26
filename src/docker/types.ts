@@ -154,6 +154,16 @@ export interface DockerManager {
    */
   containerExists(nameOrId: string): Promise<boolean>;
 
+  /**
+   * Remove a stale container left behind by a crashed session.
+   * Stops and force-removes if it exists; no-ops otherwise.
+   * Returns true if a stale container was found and removed.
+   */
+  removeStaleContainer(name: string): Promise<boolean>;
+
+  /** Returns a label value from a container, or undefined if not found. */
+  getContainerLabel(container: string, label: string): Promise<string | undefined>;
+
   /** Returns the image ID (sha256 digest) for a container or image. undefined if not found. */
   getImageId(nameOrId: string): Promise<string | undefined>;
 

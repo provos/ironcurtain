@@ -55,6 +55,8 @@ vi.mock('../../src/docker/docker-manager.js', () => ({
     removeNetwork: vi.fn().mockResolvedValue(undefined),
     pullImage: vi.fn().mockResolvedValue(undefined),
     containerExists: vi.fn().mockResolvedValue(true),
+    getContainerLabel: vi.fn().mockResolvedValue(undefined),
+    removeStaleContainer: vi.fn().mockResolvedValue(false),
     getImageId: vi.fn().mockResolvedValue('sha256:abc123'),
   })),
 }));

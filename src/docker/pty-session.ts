@@ -35,6 +35,7 @@ import { getSessionDir, getPtyRegistryDir } from '../config/paths.js';
 import * as logger from '../logger.js';
 import { buildDockerClaudeMd } from './claude-md-seed.js';
 import { getInternalNetworkName } from './platform.js';
+import { cleanupContainers } from './container-lifecycle.js';
 
 export interface PtySessionOptions {
   readonly config: IronCurtainConfig;
@@ -317,6 +318,12 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
     let hostPtyPort: number | undefined;
     const mainContainerName = `ironcurtain-pty-${shortId}`;
 
+    // Remove stale main container from a crashed previous session (same session
+    // ID means same deterministic name, which would conflict on docker create).
+    // Done before the TCP/UDS branch since the main container name is
+    // deterministic in both modes.
+    await docker.removeStaleContainer(mainContainerName);
+
     if (useTcp && proxy.port !== undefined && mitmAddr.port !== undefined) {
       // macOS TCP mode
       const mcpPort = proxy.port;
@@ -345,6 +352,10 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
       // Docker DNS resolves the main container name on the internal network, and socat
       // with `fork` only resolves at connection time (so it's fine that main starts later).
       const sidecarName = `ironcurtain-sidecar-${shortId}`;
+
+      // Remove stale sidecar from a crashed previous session (TCP mode only).
+      await docker.removeStaleContainer(sidecarName);
+
       // Container-internal PTY port is fixed; host-side port is dynamic to
       // avoid conflicts when multiple PTY sessions run concurrently.
       const containerPtyPort = ptyPort ?? DEFAULT_PTY_PORT;
@@ -356,6 +367,7 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
         mounts: [],
         env: {},
         entrypoint: '/bin/sh',
+        sessionLabel: effectiveSessionId,
         ports: [`127.0.0.1:${hostPtyPort}:${containerPtyPort}`],
         command: [
           '-c',
@@ -520,34 +532,12 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
       }
     }
 
-    // Stop and remove containers in parallel
     if (docker) {
-      const d = docker;
-      const cleanups: Promise<void>[] = [];
-      if (containerId) {
-        const cid = containerId;
-        cleanups.push(
-          d
-            .stop(cid)
-            .then(() => d.remove(cid))
-            .catch(() => {}),
-        );
-      }
-      if (sidecarContainerId) {
-        const sid = sidecarContainerId;
-        cleanups.push(
-          d
-            .stop(sid)
-            .then(() => d.remove(sid))
-            .catch(() => {}),
-        );
-      }
-      await Promise.all(cleanups);
-
-      // Remove per-session internal network after both containers are gone
-      if (networkName !== null) {
-        await d.removeNetwork(networkName).catch(() => {});
-      }
+      await cleanupContainers(docker, {
+        containerId,
+        sidecarContainerId,
+        networkName,
+      });
     }
 
     // Stop proxies

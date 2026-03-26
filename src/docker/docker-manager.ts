@@ -223,6 +223,18 @@ export function createDockerManager(execFileFn?: ExecFileFn): DockerManager {
       }
     },
 
+    async getContainerLabel(container: string, label: string): Promise<string | undefined> {
+      try {
+        const { stdout } = await exec('docker', ['inspect', '-f', `{{index .Config.Labels "${label}"}}`, container], {
+          timeout: 5_000,
+        });
+        const value = stdout.trim();
+        return value && value !== '<no value>' ? value : undefined;
+      } catch {
+        return undefined;
+      }
+    },
+
     async createNetwork(
       name: string,
       options?: { internal?: boolean; subnet?: string; gateway?: string },
@@ -311,6 +323,34 @@ export function createDockerManager(execFileFn?: ExecFileFn): DockerManager {
       } catch {
         return false;
       }
+    },
+
+    /**
+     * Remove a stale container left behind by a crashed session.
+     * Only removes containers labeled with `ironcurtain.session` to avoid
+     * accidentally removing unrelated containers that share the name.
+     * Returns true if a stale container was found and removed.
+     */
+    async removeStaleContainer(name: string): Promise<boolean> {
+      const exists = await this.containerExists(name);
+      if (!exists) return false;
+
+      // Verify the container belongs to IronCurtain before removing it
+      const label = await this.getContainerLabel(name, 'ironcurtain.session');
+      if (!label) {
+        logger.warn(`Container "${name}" exists but lacks ironcurtain.session label; skipping removal`);
+        return false;
+      }
+
+      logger.warn(`Removing stale container "${name}" from a previous session`);
+      await this.stop(name);
+      await this.remove(name);
+
+      // Verify removal succeeded (remove() swallows errors)
+      if (await this.containerExists(name)) {
+        throw new Error(`Failed to remove stale container "${name}"`);
+      }
+      return true;
     },
   };
 }

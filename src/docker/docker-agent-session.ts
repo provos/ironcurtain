@@ -35,6 +35,7 @@ import { AuditLogTailer } from './audit-log-tailer.js';
 import { ensureImage } from './docker-infrastructure.js';
 import { prepareSession } from './orientation.js';
 import { getInternalNetworkName } from './platform.js';
+import { cleanupContainers } from './container-lifecycle.js';
 import { SessionNotReadyError, SessionClosedError } from '../session/errors.js';
 import { createEscalationWatcher, atomicWriteJsonSync } from '../escalation/escalation-watcher.js';
 import type { EscalationWatcher } from '../escalation/escalation-watcher.js';
@@ -212,6 +213,13 @@ export class DockerAgentSession implements Session {
     let mounts: { source: string; target: string; readonly: boolean }[];
 
     let extraHosts: string[] | undefined;
+    const mainContainerName = `ironcurtain-${shortId}`;
+
+    // Remove stale main container from a crashed previous session (same session
+    // ID means same deterministic name, which would conflict on docker create).
+    // Done before the TCP/UDS branch since the main container name is
+    // deterministic in both modes.
+    await this.docker.removeStaleContainer(mainContainerName);
 
     if (this.useTcp && mitmAddr.port !== undefined && this.proxy.port !== undefined) {
       // macOS TCP mode: internal bridge network blocks egress.
@@ -245,6 +253,10 @@ export class DockerAgentSession implements Session {
 
       // Create socat sidecar on the default bridge (can reach host.docker.internal)
       const sidecarName = `ironcurtain-sidecar-${shortId}`;
+
+      // Remove stale sidecar from a crashed previous session (TCP mode only).
+      await this.docker.removeStaleContainer(sidecarName);
+
       this.sidecarContainerId = await this.docker.create({
         image: socatImage,
         name: sidecarName,
@@ -252,6 +264,7 @@ export class DockerAgentSession implements Session {
         mounts: [],
         env: {},
         entrypoint: '/bin/sh',
+        sessionLabel: this.sessionId,
         command: [
           '-c',
           quote(['socat', `TCP-LISTEN:${mcpPort},fork,reuseaddr`, `TCP:host.docker.internal:${mcpPort}`]) +
@@ -297,7 +310,7 @@ export class DockerAgentSession implements Session {
     try {
       this.containerId = await this.docker.create({
         image,
-        name: `ironcurtain-${shortId}`,
+        name: mainContainerName,
         network: network ?? 'none',
         mounts,
         env,
@@ -482,33 +495,11 @@ export class DockerAgentSession implements Session {
     this.escalationWatcher?.stop();
     this.auditTailer?.stop();
 
-    // Stop and remove containers in parallel (best-effort so one failure
-    // doesn't prevent cleanup of the other container or the network)
-    const cleanups: Promise<void>[] = [];
-    if (this.containerId) {
-      const cid = this.containerId;
-      cleanups.push(
-        this.docker
-          .stop(cid)
-          .then(() => this.docker.remove(cid))
-          .catch(() => {}),
-      );
-    }
-    if (this.sidecarContainerId) {
-      const sid = this.sidecarContainerId;
-      cleanups.push(
-        this.docker
-          .stop(sid)
-          .then(() => this.docker.remove(sid))
-          .catch(() => {}),
-      );
-    }
-    await Promise.all(cleanups);
-
-    // Remove per-session internal network after both containers are gone
-    if (this.networkName !== null) {
-      await this.docker.removeNetwork(this.networkName).catch(() => {});
-    }
+    await cleanupContainers(this.docker, {
+      containerId: this.containerId,
+      sidecarContainerId: this.sidecarContainerId,
+      networkName: this.networkName,
+    });
 
     // Stop proxies
     await this.mitmProxy.stop();
