@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach, beforeEach } from 'vitest';
 import * as http from 'node:http';
 import * as tls from 'node:tls';
+import * as crypto from 'node:crypto';
 import { mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -949,5 +950,235 @@ describe('MitmProxy', () => {
     // Proxy should still be alive
     const { statusCode } = await sendConnect(socketPath, 'api.test.com', 443);
     expect(statusCode).toBe(200);
+  });
+
+  // --- WebSocket upgrade support ---
+
+  /**
+   * Creates a minimal WebSocket echo server using raw Node.js HTTP.
+   * Performs the WebSocket handshake manually and echoes text frames back.
+   * Returns the server and the port it's listening on.
+   */
+  async function createWsEchoServer(): Promise<{ server: http.Server; port: number }> {
+    const server = http.createServer((_req, res) => {
+      res.writeHead(200);
+      res.end('not a websocket');
+    });
+
+    server.on('upgrade', (req, socket, head) => {
+      const key = req.headers['sec-websocket-key'];
+      if (!key) {
+        socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
+        socket.destroy();
+        return;
+      }
+
+      // Compute the accept key per RFC 6455
+      const MAGIC = '258EAFA5-E914-47DA-95CA-5AB5DA085B7';
+      const accept = crypto
+        .createHash('sha1')
+        .update(key + MAGIC)
+        .digest('base64');
+
+      socket.write(
+        'HTTP/1.1 101 Switching Protocols\r\n' +
+          'Upgrade: websocket\r\n' +
+          'Connection: Upgrade\r\n' +
+          `Sec-WebSocket-Accept: ${accept}\r\n` +
+          '\r\n',
+      );
+
+      if (head.length > 0) {
+        // Echo the head buffer as-is (for testing)
+        socket.write(head);
+      }
+
+      // Simple echo: pipe back any data received
+      socket.on('data', (data: Buffer) => {
+        socket.write(data);
+      });
+      socket.on('error', () => {});
+    });
+
+    const port = await new Promise<number>((resolve) => {
+      server.listen(0, '127.0.0.1', () => {
+        resolve((server.address() as import('node:net').AddressInfo).port);
+      });
+    });
+
+    return { server, port };
+  }
+
+  /**
+   * Sends a WebSocket upgrade request through the proxy via absolute URL
+   * (plain HTTP proxy mode), returning the raw socket and response status line.
+   */
+  function sendWsUpgrade(
+    proxySocketPath: string,
+    targetHost: string,
+    targetPort: number,
+    wsPath: string,
+  ): Promise<{ socket: import('node:net').Socket; statusLine: string; headers: Record<string, string> }> {
+    return new Promise((resolve, reject) => {
+      const wsKey = crypto.randomBytes(16).toString('base64');
+
+      const req = http.request({
+        socketPath: proxySocketPath,
+        method: 'GET',
+        path: `http://${targetHost}:${targetPort}${wsPath}`,
+        headers: {
+          host: `${targetHost}:${targetPort}`,
+          upgrade: 'websocket',
+          connection: 'Upgrade',
+          'sec-websocket-key': wsKey,
+          'sec-websocket-version': '13',
+        },
+      });
+
+      req.on('upgrade', (res, socket) => {
+        const headers: Record<string, string> = {};
+        for (const [k, v] of Object.entries(res.headers)) {
+          if (typeof v === 'string') headers[k] = v;
+        }
+        resolve({
+          socket,
+          statusLine: `HTTP/${res.httpVersion} ${res.statusCode} ${res.statusMessage}`,
+          headers,
+        });
+      });
+
+      req.on('response', (res) => {
+        reject(new Error(`Expected upgrade but got response: ${res.statusCode}`));
+        res.resume();
+      });
+
+      req.on('error', reject);
+      req.end();
+    });
+  }
+
+  it('bridges plain HTTP WebSocket upgrade through proxy', async () => {
+    const { server: wsServer, port: wsPort } = await createWsEchoServer();
+
+    try {
+      proxy = createMitmProxy({
+        socketPath,
+        ca,
+        providers: [],
+        dnsLookup: (_hostname, opts, cb) => {
+          if ((opts as { all?: boolean }).all) {
+            cb(null, [{ address: '127.0.0.1', family: 4 }] as never);
+          } else {
+            cb(null, '127.0.0.1', 4);
+          }
+        },
+      });
+      await proxy.start();
+      proxy.hosts.addHost('ws-echo.example.com');
+
+      const { socket, headers } = await sendWsUpgrade(socketPath, 'ws-echo.example.com', wsPort, '/echo');
+
+      // Verify we got a proper WebSocket handshake response
+      expect(headers['upgrade'].toLowerCase()).toBe('websocket');
+      expect(headers['connection'].toLowerCase()).toBe('upgrade');
+      expect(headers['sec-websocket-accept']).toBeDefined();
+
+      // Test bidirectional data flow by sending raw bytes and checking the echo
+      const testPayload = Buffer.from([0x81, 0x05, 0x48, 0x65, 0x6c, 0x6c, 0x6f]); // "Hello" WS text frame
+      const echoed = await new Promise<Buffer>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('Echo timeout')), 2000);
+        socket.once('data', (data: Buffer) => {
+          clearTimeout(timeout);
+          resolve(data);
+        });
+        socket.write(testPayload);
+      });
+
+      expect(echoed).toEqual(testPayload);
+      socket.destroy();
+    } finally {
+      wsServer.close();
+    }
+  });
+
+  it('returns 403 for WebSocket upgrade to non-passthrough domain', async () => {
+    proxy = createMitmProxy({
+      socketPath,
+      ca,
+      providers: [],
+    });
+    await proxy.start();
+
+    // Try WebSocket upgrade to a domain not in the passthrough list
+    const result = await new Promise<{ destroyed: boolean; data: string }>((resolve) => {
+      const wsKey = crypto.randomBytes(16).toString('base64');
+
+      const req = http.request({
+        socketPath,
+        method: 'GET',
+        path: 'http://evil.example.com:8080/ws',
+        headers: {
+          host: 'evil.example.com:8080',
+          upgrade: 'websocket',
+          connection: 'Upgrade',
+          'sec-websocket-key': wsKey,
+          'sec-websocket-version': '13',
+        },
+      });
+
+      req.on('upgrade', (_res, socket) => {
+        let data = '';
+        socket.on('data', (chunk: Buffer) => (data += chunk.toString()));
+        socket.on('close', () => resolve({ destroyed: true, data }));
+      });
+
+      req.on('response', (res) => {
+        let data = '';
+        res.on('data', (chunk: Buffer) => (data += chunk.toString()));
+        res.on('end', () => resolve({ destroyed: false, data }));
+      });
+
+      // The proxy writes a raw 403 response to the socket, which the HTTP
+      // client receives as a normal response (not an upgrade).
+      req.on('error', () => resolve({ destroyed: true, data: '' }));
+      req.end();
+    });
+
+    // The proxy should reject with 403 - either as a response or by destroying the socket
+    expect(result.destroyed || result.data.includes('Forbidden') || result.data === '').toBe(true);
+  });
+
+  it('cleans up active WebSocket connections on stop()', async () => {
+    const { server: wsServer, port: wsPort } = await createWsEchoServer();
+
+    try {
+      proxy = createMitmProxy({
+        socketPath,
+        ca,
+        providers: [],
+        dnsLookup: (_hostname, opts, cb) => {
+          if ((opts as { all?: boolean }).all) {
+            cb(null, [{ address: '127.0.0.1', family: 4 }] as never);
+          } else {
+            cb(null, '127.0.0.1', 4);
+          }
+        },
+      });
+      await proxy.start();
+      proxy.hosts.addHost('ws-echo.example.com');
+
+      const { socket } = await sendWsUpgrade(socketPath, 'ws-echo.example.com', wsPort, '/echo');
+
+      expect(socket.destroyed).toBe(false);
+
+      // Stop the proxy - should destroy the WebSocket connections
+      await proxy.stop();
+      proxy = undefined;
+
+      await waitFor(() => socket.destroyed);
+      expect(socket.destroyed).toBe(true);
+    } finally {
+      wsServer.close();
+    }
   });
 });

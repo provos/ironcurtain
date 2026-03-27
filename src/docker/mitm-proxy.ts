@@ -256,6 +256,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
   const activeClientSockets = new Set<Socket>();
   const activeTlsSockets = new Set<tls.TLSSocket>();
   const activeUpstreamRequests = new Set<http.ClientRequest>();
+  const activeWebSocketPairs = new Set<{ client: Socket; upstream: Socket }>();
   const socketMetadata = new WeakMap<tls.TLSSocket, ConnectionMeta>();
 
   let connectionId = 0;
@@ -780,6 +781,48 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     innerServer.emit('connection', tlsSocket);
   });
 
+  // ── Plain HTTP WebSocket upgrade ──────────────────────────────────
+  // When a client sends "GET http://host/path" with Upgrade: websocket
+  // through the proxy, the outer server emits an 'upgrade' event instead
+  // of routing through the normal 'request' handler.
+  outerServer.on('upgrade', (req: http.IncomingMessage, clientSocket: Socket, head: Buffer) => {
+    const parsed = req.url ? tryParseProxyUrl(req.url) : null;
+    if (!parsed || !passthroughHosts.has(parsed.hostname)) {
+      clientSocket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+      clientSocket.destroy();
+      return;
+    }
+
+    clientSocket.on('error', (err) => {
+      const log = isConnectionReset(err) ? logger.debug : logger.info;
+      log(`[mitm-proxy] WebSocket client socket error: ${err.message}`);
+    });
+
+    logger.info(`[mitm-proxy] WebSocket upgrade ws://${parsed.hostname}:${parsed.port}${parsed.path} → PASSTHROUGH`);
+    bridgeWebSocketUpgrade(clientSocket, head, parsed.hostname, parsed.port, parsed.path, req.headers, false);
+  });
+
+  // ── Inner server WebSocket upgrade (CONNECT tunnel) ───────────────
+  // After CONNECT + TLS, if the client sends an Upgrade: websocket
+  // request, the inner server emits 'upgrade'.
+  innerServer.on('upgrade', (req: http.IncomingMessage, clientSocket: Socket, head: Buffer) => {
+    const tlsSock = clientSocket as unknown as tls.TLSSocket;
+    const meta = socketMetadata.get(tlsSock);
+    if (!meta || !meta.passthrough) {
+      clientSocket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+      clientSocket.destroy();
+      return;
+    }
+
+    const { host: targetHost, port: targetPort } = meta;
+    const path = req.url ?? '/';
+
+    logger.info(
+      `[mitm-proxy] WebSocket upgrade wss://${targetHost}:${targetPort}${path} → PASSTHROUGH (CONNECT tunnel)`,
+    );
+    bridgeWebSocketUpgrade(clientSocket, head, targetHost, targetPort, path, req.headers, true);
+  });
+
   // ── Passthrough request forwarding ──────────────────────────────────
   // For dynamically added domains: forward requests as-is with no
   // credential replacement or endpoint filtering.
@@ -856,6 +899,115 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     });
 
     clientReq.pipe(upstreamReq);
+  }
+
+  // ── WebSocket upgrade bridging ───────────────────────────────────
+
+  /**
+   * Bridges a WebSocket upgrade from the client socket to an upstream server.
+   * Preserves WebSocket-specific headers and pipes both sockets bidirectionally.
+   */
+  function bridgeWebSocketUpgrade(
+    clientSocket: Socket,
+    head: Buffer,
+    targetHost: string,
+    targetPort: number,
+    path: string,
+    requestHeaders: http.IncomingHttpHeaders,
+    useHttps: boolean,
+  ): void {
+    // Build headers: preserve WebSocket headers, strip other hop-by-hop
+    const forwardHeaders: Record<string, string | string[] | undefined> = {
+      host: targetPort === (useHttps ? 443 : 80) ? targetHost : `${targetHost}:${targetPort}`,
+    };
+    for (const [key, value] of Object.entries(requestHeaders)) {
+      const lower = key.toLowerCase();
+      // Keep all headers except host (already set above)
+      if (lower !== 'host') {
+        forwardHeaders[key] = value;
+      }
+    }
+
+    const requestFn = useHttps ? https.request : http.request;
+    const reqOpts: http.RequestOptions = {
+      hostname: targetHost,
+      port: targetPort,
+      method: 'GET',
+      path,
+      headers: forwardHeaders,
+      timeout: 30_000,
+    };
+    if (options.dnsLookup) {
+      reqOpts.lookup = options.dnsLookup;
+    }
+
+    const upstreamReq = requestFn(reqOpts);
+
+    upstreamReq.on('upgrade', (upstreamRes, upstreamSocket, upstreamHead) => {
+      // Write the 101 response back to the client
+      const statusLine = `HTTP/${upstreamRes.httpVersion} ${upstreamRes.statusCode} ${upstreamRes.statusMessage}`;
+      const headerLines = Object.entries(upstreamRes.headers)
+        .filter(([, v]) => v !== undefined)
+        .map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(', ') : v}`)
+        .join('\r\n');
+      clientSocket.write(`${statusLine}\r\n${headerLines}\r\n\r\n`);
+
+      // Track the pair for cleanup
+      const pair = { client: clientSocket, upstream: upstreamSocket };
+      activeWebSocketPairs.add(pair);
+
+      const cleanup = (): void => {
+        activeWebSocketPairs.delete(pair);
+        if (!clientSocket.destroyed) clientSocket.destroy();
+        if (!upstreamSocket.destroyed) upstreamSocket.destroy();
+      };
+
+      clientSocket.on('error', cleanup);
+      clientSocket.on('close', cleanup);
+      upstreamSocket.on('error', cleanup);
+      upstreamSocket.on('close', cleanup);
+
+      // Write any buffered data from the upgrade
+      if (upstreamHead.length > 0) {
+        clientSocket.write(upstreamHead);
+      }
+      if (head.length > 0) {
+        upstreamSocket.write(head);
+      }
+
+      // Bidirectional pipe
+      clientSocket.pipe(upstreamSocket);
+      upstreamSocket.pipe(clientSocket);
+    });
+
+    upstreamReq.on('response', (res) => {
+      // Upstream rejected the upgrade (non-101 response)
+      const statusLine = `HTTP/${res.httpVersion} ${res.statusCode} ${res.statusMessage}`;
+      const headerLines = Object.entries(res.headers)
+        .filter(([, v]) => v !== undefined)
+        .map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(', ') : v}`)
+        .join('\r\n');
+      clientSocket.write(`${statusLine}\r\n${headerLines}\r\n\r\n`);
+      res.pipe(clientSocket);
+    });
+
+    upstreamReq.on('error', (err) => {
+      const log = isConnectionReset(err) ? logger.debug : logger.info;
+      log(`[mitm-proxy] WebSocket upgrade upstream error: ${err.message}`);
+      if (!clientSocket.destroyed) {
+        clientSocket.end('HTTP/1.1 502 Bad Gateway\r\n\r\n');
+      }
+    });
+
+    upstreamReq.on('timeout', () => {
+      logger.info(`[mitm-proxy] WebSocket upgrade timeout for ${targetHost}:${targetPort}${path}`);
+      upstreamReq.destroy();
+      if (!clientSocket.destroyed) {
+        clientSocket.end('HTTP/1.1 504 Gateway Timeout\r\n\r\n');
+      }
+    });
+
+    upstreamReq.end();
   }
 
   // ── DynamicHostController ─────────────────────────────────────────
@@ -1028,13 +1180,20 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     },
 
     async stop() {
-      // 1. Abort all in-flight upstream requests
+      // 1. Destroy active WebSocket pairs
+      for (const pair of activeWebSocketPairs) {
+        if (!pair.client.destroyed) pair.client.destroy();
+        if (!pair.upstream.destroyed) pair.upstream.destroy();
+      }
+      activeWebSocketPairs.clear();
+
+      // 2. Abort all in-flight upstream requests
       for (const req of activeUpstreamRequests) {
         req.destroy();
       }
       activeUpstreamRequests.clear();
 
-      // 2. Destroy all active TLS sockets and raw client sockets.
+      // 3. Destroy all active TLS sockets and raw client sockets.
       // Must happen before outerServer.close() because the raw sockets
       // are still tracked by the underlying net.Server, and close()
       // waits for all TCP connections to end.
@@ -1047,24 +1206,24 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
       }
       activeClientSockets.clear();
 
-      // 3. Close outer server - stop accepting new connections.
+      // 4. Close outer server - stop accepting new connections.
       // closeAllConnections() handles any non-upgraded HTTP connections.
       outerServer.closeAllConnections();
       await new Promise<void>((resolve) => {
         outerServer.close(() => resolve());
       });
 
-      // 4. Close the inner HTTP server.
+      // 5. Close the inner HTTP server.
       innerServer.closeAllConnections();
       innerServer.close();
 
-      // 5. Close the control API server.
+      // 6. Close the control API server.
       controlServer.closeAllConnections();
       await new Promise<void>((resolve) => {
         controlServer.close(() => resolve());
       });
 
-      // 6. Clean up socket files (UDS mode only)
+      // 7. Clean up socket files (UDS mode only)
       if (!useTcp && options.socketPath) {
         try {
           if (existsSync(options.socketPath)) {
