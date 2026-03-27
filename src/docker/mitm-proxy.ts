@@ -257,7 +257,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
   const activeClientSockets = new Set<Socket>();
   const activeTlsSockets = new Set<tls.TLSSocket>();
   const activeUpstreamRequests = new Set<http.ClientRequest>();
-  const activeWebSocketPairs = new Set<{ client: Socket; upstream: Socket }>();
+  const activeTunnelPairs = new Set<{ client: Socket; upstream: Socket }>();
   const socketMetadata = new WeakMap<tls.TLSSocket, ConnectionMeta>();
 
   let connectionId = 0;
@@ -760,14 +760,19 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
 
       // Track for cleanup
       const pair = { client: clientSocket, upstream: upstreamSocket };
-      activeWebSocketPairs.add(pair);
+      activeTunnelPairs.add(pair);
 
       const cleanup = (): void => {
-        activeWebSocketPairs.delete(pair);
+        activeTunnelPairs.delete(pair);
         if (!clientSocket.destroyed) clientSocket.destroy();
         if (!upstreamSocket.destroyed) upstreamSocket.destroy();
       };
 
+      clientSocket.on('error', (err) => {
+        const log = isConnectionReset(err) ? logger.debug : logger.info;
+        log(`[mitm-proxy] #${connId} CONNECT tunnel client error: ${err.message}`);
+        cleanup();
+      });
       clientSocket.on('close', cleanup);
       upstreamSocket.on('error', (err) => {
         const log = isConnectionReset(err) ? logger.debug : logger.info;
@@ -930,6 +935,16 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     clientReq.pipe(upstreamReq);
   }
 
+  /** Format an HTTP response line + headers for writing to a raw socket. */
+  function formatRawHttpResponse(res: http.IncomingMessage): string {
+    const statusLine = `HTTP/${res.httpVersion} ${res.statusCode} ${res.statusMessage}`;
+    const headerLines = Object.entries(res.headers)
+      .filter(([, v]) => v !== undefined)
+      .map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(', ') : v}`)
+      .join('\r\n');
+    return `${statusLine}\r\n${headerLines}\r\n\r\n`;
+  }
+
   // ── WebSocket upgrade bridging ───────────────────────────────────
 
   /**
@@ -972,20 +987,14 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     const upstreamReq = requestFn(reqOpts);
 
     upstreamReq.on('upgrade', (upstreamRes, upstreamSocket, upstreamHead) => {
-      // Write the 101 response back to the client
-      const statusLine = `HTTP/${upstreamRes.httpVersion} ${upstreamRes.statusCode} ${upstreamRes.statusMessage}`;
-      const headerLines = Object.entries(upstreamRes.headers)
-        .filter(([, v]) => v !== undefined)
-        .map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(', ') : v}`)
-        .join('\r\n');
-      clientSocket.write(`${statusLine}\r\n${headerLines}\r\n\r\n`);
+      clientSocket.write(formatRawHttpResponse(upstreamRes));
 
       // Track the pair for cleanup
       const pair = { client: clientSocket, upstream: upstreamSocket };
-      activeWebSocketPairs.add(pair);
+      activeTunnelPairs.add(pair);
 
       const cleanup = (): void => {
-        activeWebSocketPairs.delete(pair);
+        activeTunnelPairs.delete(pair);
         if (!clientSocket.destroyed) clientSocket.destroy();
         if (!upstreamSocket.destroyed) upstreamSocket.destroy();
       };
@@ -1009,14 +1018,9 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     });
 
     upstreamReq.on('response', (res) => {
-      // Upstream rejected the upgrade (non-101 response)
-      const statusLine = `HTTP/${res.httpVersion} ${res.statusCode} ${res.statusMessage}`;
-      const headerLines = Object.entries(res.headers)
-        .filter(([, v]) => v !== undefined)
-        .map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(', ') : v}`)
-        .join('\r\n');
-      clientSocket.write(`${statusLine}\r\n${headerLines}\r\n\r\n`);
+      clientSocket.write(formatRawHttpResponse(res));
       res.pipe(clientSocket);
+      clientSocket.on('close', () => upstreamReq.destroy());
     });
 
     upstreamReq.on('error', (err) => {
@@ -1209,11 +1213,11 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
 
     async stop() {
       // 1. Destroy active WebSocket pairs
-      for (const pair of activeWebSocketPairs) {
+      for (const pair of activeTunnelPairs) {
         if (!pair.client.destroyed) pair.client.destroy();
         if (!pair.upstream.destroyed) pair.upstream.destroy();
       }
-      activeWebSocketPairs.clear();
+      activeTunnelPairs.clear();
 
       // 2. Abort all in-flight upstream requests
       for (const req of activeUpstreamRequests) {

@@ -6,7 +6,7 @@ import { mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { loadOrCreateCA, type CertificateAuthority } from '../src/docker/ca.js';
-import { createMitmProxy, type MitmProxy } from '../src/docker/mitm-proxy.js';
+import { createMitmProxy, type MitmProxy, type MitmProxyOptions } from '../src/docker/mitm-proxy.js';
 import {
   isEndpointAllowed,
   stripServerSideTools,
@@ -43,6 +43,15 @@ function waitFor(
     setTimeout(check, intervalMs);
   });
 }
+
+/** DNS lookup that resolves all hostnames to 127.0.0.1 for testing. */
+const localhostDnsLookup: MitmProxyOptions['dnsLookup'] = (_hostname, opts, cb) => {
+  if ((opts as { all?: boolean }).all) {
+    cb(null, [{ address: '127.0.0.1', family: 4 }] as never);
+  } else {
+    cb(null, '127.0.0.1', 4);
+  }
+};
 
 /** Sends a CONNECT request to the proxy via UDS, returns client socket + status. */
 function sendConnect(
@@ -466,13 +475,7 @@ describe('MitmProxy', () => {
         providers: [],
         // Pass a custom lookup so the proxy resolves all hostnames to 127.0.0.1.
         // Must handle { all: true } (Node 24+) which expects an array result.
-        dnsLookup: (_hostname, options, cb) => {
-          if ((options as { all?: boolean }).all) {
-            cb(null, [{ address: '127.0.0.1', family: 4 }] as never);
-          } else {
-            cb(null, '127.0.0.1', 4);
-          }
-        },
+        dnsLookup: localhostDnsLookup,
       });
       await proxy.start();
 
@@ -974,7 +977,7 @@ describe('MitmProxy', () => {
       }
 
       // Compute the accept key per RFC 6455
-      const MAGIC = '258EAFA5-E914-47DA-95CA-5AB5DA085B7';
+      const MAGIC = '258EAFA5-E914-47DA-95CA-5AB5DA085CD6';
       const accept = crypto
         .createHash('sha1')
         .update(key + MAGIC)
@@ -1065,13 +1068,7 @@ describe('MitmProxy', () => {
         socketPath,
         ca,
         providers: [],
-        dnsLookup: (_hostname, opts, cb) => {
-          if ((opts as { all?: boolean }).all) {
-            cb(null, [{ address: '127.0.0.1', family: 4 }] as never);
-          } else {
-            cb(null, '127.0.0.1', 4);
-          }
-        },
+        dnsLookup: localhostDnsLookup,
       });
       await proxy.start();
       proxy.hosts.addHost('ws-echo.example.com');
@@ -1171,13 +1168,7 @@ describe('MitmProxy', () => {
         socketPath,
         ca,
         providers: [],
-        dnsLookup: (_hostname, opts, cb) => {
-          if ((opts as { all?: boolean }).all) {
-            cb(null, [{ address: '127.0.0.1', family: 4 }] as never);
-          } else {
-            cb(null, '127.0.0.1', 4);
-          }
-        },
+        dnsLookup: localhostDnsLookup,
       });
       await proxy.start();
       proxy.hosts.addHost('passthrough-http.example.com');
@@ -1222,13 +1213,7 @@ describe('MitmProxy', () => {
         socketPath,
         ca,
         providers: [],
-        dnsLookup: (_hostname, opts, cb) => {
-          if ((opts as { all?: boolean }).all) {
-            cb(null, [{ address: '127.0.0.1', family: 4 }] as never);
-          } else {
-            cb(null, '127.0.0.1', 4);
-          }
-        },
+        dnsLookup: localhostDnsLookup,
       });
       await proxy.start();
       proxy.hosts.addHost('ws-tunnel.example.com');
@@ -1286,13 +1271,7 @@ describe('MitmProxy', () => {
         socketPath,
         ca,
         providers: [],
-        dnsLookup: (_hostname, opts, cb) => {
-          if ((opts as { all?: boolean }).all) {
-            cb(null, [{ address: '127.0.0.1', family: 4 }] as never);
-          } else {
-            cb(null, '127.0.0.1', 4);
-          }
-        },
+        dnsLookup: localhostDnsLookup,
       });
       await proxy.start();
       proxy.hosts.addHost('ws-echo.example.com');
