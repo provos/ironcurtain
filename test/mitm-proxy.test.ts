@@ -1148,6 +1148,136 @@ describe('MitmProxy', () => {
     expect(result.destroyed || result.data.includes('Forbidden') || result.data === '').toBe(true);
   });
 
+  it('forwards plain HTTP through CONNECT tunnel to passthrough domain', async () => {
+    // Create a simple HTTP server that responds to /health
+    const httpServer = http.createServer((req, res) => {
+      if (req.url === '/health') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ok' }));
+      } else {
+        res.writeHead(404);
+        res.end();
+      }
+    });
+
+    const httpPort = await new Promise<number>((resolve) => {
+      httpServer.listen(0, '127.0.0.1', () => {
+        resolve((httpServer.address() as import('node:net').AddressInfo).port);
+      });
+    });
+
+    try {
+      proxy = createMitmProxy({
+        socketPath,
+        ca,
+        providers: [],
+        dnsLookup: (_hostname, opts, cb) => {
+          if ((opts as { all?: boolean }).all) {
+            cb(null, [{ address: '127.0.0.1', family: 4 }] as never);
+          } else {
+            cb(null, '127.0.0.1', 4);
+          }
+        },
+      });
+      await proxy.start();
+      proxy.hosts.addHost('passthrough-http.example.com');
+
+      // Establish CONNECT tunnel
+      const { socket, statusCode } = await sendConnect(socketPath, 'passthrough-http.example.com', httpPort);
+      expect(statusCode).toBe(200);
+      expect(socket).not.toBeNull();
+
+      // Send plain HTTP through the tunnel (no TLS)
+      const response = await new Promise<string>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('Tunnel timeout')), 3000);
+        let data = '';
+        socket!.on('data', (chunk: Buffer) => {
+          data += chunk.toString();
+          // Check if we've received the full response
+          if (data.includes('\r\n\r\n') && data.includes('}')) {
+            clearTimeout(timeout);
+            resolve(data);
+          }
+        });
+        socket!.on('error', (err) => {
+          clearTimeout(timeout);
+          reject(err);
+        });
+        socket!.write('GET /health HTTP/1.1\r\nHost: passthrough-http.example.com\r\nConnection: close\r\n\r\n');
+      });
+
+      expect(response).toContain('200 OK');
+      expect(response).toContain('"status":"ok"');
+      socket!.destroy();
+    } finally {
+      httpServer.close();
+    }
+  });
+
+  it('forwards WebSocket upgrade through CONNECT tunnel to passthrough domain', async () => {
+    const { server: wsServer, port: wsPort } = await createWsEchoServer();
+
+    try {
+      proxy = createMitmProxy({
+        socketPath,
+        ca,
+        providers: [],
+        dnsLookup: (_hostname, opts, cb) => {
+          if ((opts as { all?: boolean }).all) {
+            cb(null, [{ address: '127.0.0.1', family: 4 }] as never);
+          } else {
+            cb(null, '127.0.0.1', 4);
+          }
+        },
+      });
+      await proxy.start();
+      proxy.hosts.addHost('ws-tunnel.example.com');
+
+      // Establish CONNECT tunnel
+      const { socket, statusCode } = await sendConnect(socketPath, 'ws-tunnel.example.com', wsPort);
+      expect(statusCode).toBe(200);
+      expect(socket).not.toBeNull();
+
+      // Send WebSocket upgrade through the raw tunnel
+      const wsKey = crypto.randomBytes(16).toString('base64');
+      const upgradeResponse = await new Promise<string>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('Upgrade timeout')), 3000);
+        let data = '';
+        socket!.on('data', (chunk: Buffer) => {
+          data += chunk.toString();
+          if (data.includes('\r\n\r\n')) {
+            clearTimeout(timeout);
+            resolve(data);
+          }
+        });
+        socket!.write(
+          `GET /echo HTTP/1.1\r\nHost: ws-tunnel.example.com:${wsPort}\r\n` +
+            `Upgrade: websocket\r\nConnection: Upgrade\r\n` +
+            `Sec-WebSocket-Key: ${wsKey}\r\nSec-WebSocket-Version: 13\r\n\r\n`,
+        );
+      });
+
+      expect(upgradeResponse).toContain('101 Switching Protocols');
+      expect(upgradeResponse.toLowerCase()).toContain('upgrade: websocket');
+
+      // Test bidirectional data flow through the tunnel
+      const testPayload = Buffer.from([0x81, 0x05, 0x48, 0x65, 0x6c, 0x6c, 0x6f]); // "Hello" WS frame
+      const echoed = await new Promise<Buffer>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('Echo timeout')), 2000);
+        socket!.once('data', (chunk: Buffer) => {
+          clearTimeout(timeout);
+          resolve(chunk);
+        });
+        socket!.write(testPayload);
+      });
+
+      expect(echoed).toEqual(testPayload);
+      socket!.destroy();
+    } finally {
+      wsServer.close();
+    }
+  });
+
   it('cleans up active WebSocket connections on stop()', async () => {
     const { server: wsServer, port: wsPort } = await createWsEchoServer();
 

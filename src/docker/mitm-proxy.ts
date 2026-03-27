@@ -16,6 +16,7 @@
 import * as http from 'node:http';
 import * as https from 'node:https';
 import * as tls from 'node:tls';
+import * as net from 'node:net';
 import type { Socket } from 'node:net';
 import { existsSync, unlinkSync } from 'node:fs';
 import forge from 'node-forge';
@@ -730,17 +731,66 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     }
 
     const connType = provider ? 'provider' : registry ? 'registry' : 'passthrough';
+
+    // 2. For passthrough domains, create a raw TCP tunnel (no MITM).
+    //    The proxy just pipes bytes bidirectionally — this supports both
+    //    plain HTTP and WebSocket connections through CONNECT.
+    if (isPassthrough) {
+      logger.info(`[mitm-proxy] #${connId} CONNECT ${host}:${port} → TUNNEL (${connType})`);
+
+      // Acknowledge immediately per standard proxy behavior — the client
+      // will discover upstream failures itself once it tries to send data.
+      clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+
+      const connectOpts: net.NetConnectOpts = { host, port };
+      if (options.dnsLookup) {
+        connectOpts.lookup = options.dnsLookup;
+      }
+
+      const upstreamSocket = net.connect(connectOpts, () => {
+        // Write any buffered data from the CONNECT request
+        if (head.length > 0) {
+          upstreamSocket.write(head);
+        }
+
+        // Bidirectional pipe
+        clientSocket.pipe(upstreamSocket);
+        upstreamSocket.pipe(clientSocket);
+      });
+
+      // Track for cleanup
+      const pair = { client: clientSocket, upstream: upstreamSocket };
+      activeWebSocketPairs.add(pair);
+
+      const cleanup = (): void => {
+        activeWebSocketPairs.delete(pair);
+        if (!clientSocket.destroyed) clientSocket.destroy();
+        if (!upstreamSocket.destroyed) upstreamSocket.destroy();
+      };
+
+      clientSocket.on('close', cleanup);
+      upstreamSocket.on('error', (err) => {
+        const log = isConnectionReset(err) ? logger.debug : logger.info;
+        log(`[mitm-proxy] #${connId} CONNECT tunnel upstream error: ${err.message}`);
+        cleanup();
+      });
+      upstreamSocket.on('close', cleanup);
+
+      return;
+    }
+
+    // 3. For provider/registry connections, MITM with TLS termination.
     logger.info(`[mitm-proxy] #${connId} CONNECT ${host}:${port} → MITM (${connType})`);
 
-    // 2. Acknowledge the CONNECT
+    // Acknowledge the CONNECT
     clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
 
-    // 3. Push back any bytes that arrived after the CONNECT request line
+    // Push back any bytes that arrived after the CONNECT request line
     if (head.length > 0) {
       clientSocket.unshift(head);
     }
 
-    // 4. Upgrade to TLS (MITM)
+    // Upgrade to TLS (MITM)
     const tlsSocket = new tls.TLSSocket(clientSocket, {
       isServer: true,
       SNICallback: (servername, cb) => {
@@ -749,20 +799,20 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
       },
     });
 
-    // 5. TLS handshake timeout - if the handshake completes, the 'secure'
-    //    event clears this timer. If it fires, the handshake never completed.
+    // TLS handshake timeout - if the handshake completes, the 'secure'
+    // event clears this timer. If it fires, the handshake never completed.
     const handshakeTimeout = setTimeout(() => {
       logger.info(`[mitm-proxy] #${connId} TLS handshake timeout`);
       tlsSocket.destroy();
     }, 10_000);
     tlsSocket.once('secure', () => clearTimeout(handshakeTimeout));
 
-    // 6. Track the connection
+    // Track the connection
     activeTlsSockets.add(tlsSocket);
     socketMetadata.set(tlsSocket, {
       provider: provider ?? undefined,
       registry,
-      passthrough: isPassthrough,
+      passthrough: false,
       host,
       port,
     });
@@ -777,7 +827,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
       activeTlsSockets.delete(tlsSocket);
     });
 
-    // 7. Emit into shared inner HTTP server
+    // Emit into shared inner HTTP server
     innerServer.emit('connection', tlsSocket);
   });
 
@@ -799,28 +849,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     });
 
     logger.info(`[mitm-proxy] WebSocket upgrade ws://${parsed.hostname}:${parsed.port}${parsed.path} → PASSTHROUGH`);
-    bridgeWebSocketUpgrade(clientSocket, head, parsed.hostname, parsed.port, parsed.path, req.headers, false);
-  });
-
-  // ── Inner server WebSocket upgrade (CONNECT tunnel) ───────────────
-  // After CONNECT + TLS, if the client sends an Upgrade: websocket
-  // request, the inner server emits 'upgrade'.
-  innerServer.on('upgrade', (req: http.IncomingMessage, clientSocket: Socket, head: Buffer) => {
-    const tlsSock = clientSocket as unknown as tls.TLSSocket;
-    const meta = socketMetadata.get(tlsSock);
-    if (!meta || !meta.passthrough) {
-      clientSocket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
-      clientSocket.destroy();
-      return;
-    }
-
-    const { host: targetHost, port: targetPort } = meta;
-    const path = req.url ?? '/';
-
-    logger.info(
-      `[mitm-proxy] WebSocket upgrade wss://${targetHost}:${targetPort}${path} → PASSTHROUGH (CONNECT tunnel)`,
-    );
-    bridgeWebSocketUpgrade(clientSocket, head, targetHost, targetPort, path, req.headers, true);
+    bridgeWebSocketUpgrade(clientSocket, head, parsed.hostname, parsed.port, parsed.path, req.headers);
   });
 
   // ── Passthrough request forwarding ──────────────────────────────────
@@ -914,11 +943,10 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     targetPort: number,
     path: string,
     requestHeaders: http.IncomingHttpHeaders,
-    useHttps: boolean,
   ): void {
     // Build headers: preserve WebSocket headers, strip other hop-by-hop
     const forwardHeaders: Record<string, string | string[] | undefined> = {
-      host: targetPort === (useHttps ? 443 : 80) ? targetHost : `${targetHost}:${targetPort}`,
+      host: targetPort === 80 ? targetHost : `${targetHost}:${targetPort}`,
     };
     for (const [key, value] of Object.entries(requestHeaders)) {
       const lower = key.toLowerCase();
@@ -928,7 +956,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
       }
     }
 
-    const requestFn = useHttps ? https.request : http.request;
+    const requestFn = http.request;
     const reqOpts: http.RequestOptions = {
       hostname: targetHost,
       port: targetPort,
