@@ -16,6 +16,7 @@
 import * as http from 'node:http';
 import * as https from 'node:https';
 import * as tls from 'node:tls';
+import * as net from 'node:net';
 import type { Socket } from 'node:net';
 import { existsSync, unlinkSync } from 'node:fs';
 import forge from 'node-forge';
@@ -256,6 +257,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
   const activeClientSockets = new Set<Socket>();
   const activeTlsSockets = new Set<tls.TLSSocket>();
   const activeUpstreamRequests = new Set<http.ClientRequest>();
+  const activeTunnelPairs = new Set<{ client: Socket; upstream: Socket }>();
   const socketMetadata = new WeakMap<tls.TLSSocket, ConnectionMeta>();
 
   let connectionId = 0;
@@ -729,17 +731,71 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     }
 
     const connType = provider ? 'provider' : registry ? 'registry' : 'passthrough';
+
+    // 2. For passthrough domains, create a raw TCP tunnel (no MITM).
+    //    The proxy just pipes bytes bidirectionally — this supports both
+    //    plain HTTP and WebSocket connections through CONNECT.
+    if (isPassthrough) {
+      logger.info(`[mitm-proxy] #${connId} CONNECT ${host}:${port} → TUNNEL (${connType})`);
+
+      // Acknowledge immediately per standard proxy behavior — the client
+      // will discover upstream failures itself once it tries to send data.
+      clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+
+      const connectOpts: net.NetConnectOpts = { host, port };
+      if (options.dnsLookup) {
+        connectOpts.lookup = options.dnsLookup;
+      }
+
+      const upstreamSocket = net.connect(connectOpts, () => {
+        // Write any buffered data from the CONNECT request
+        if (head.length > 0) {
+          upstreamSocket.write(head);
+        }
+
+        // Bidirectional pipe
+        clientSocket.pipe(upstreamSocket);
+        upstreamSocket.pipe(clientSocket);
+      });
+
+      // Track for cleanup
+      const pair = { client: clientSocket, upstream: upstreamSocket };
+      activeTunnelPairs.add(pair);
+
+      const cleanup = (): void => {
+        activeTunnelPairs.delete(pair);
+        if (!clientSocket.destroyed) clientSocket.destroy();
+        if (!upstreamSocket.destroyed) upstreamSocket.destroy();
+      };
+
+      clientSocket.on('error', (err) => {
+        const log = isConnectionReset(err) ? logger.debug : logger.info;
+        log(`[mitm-proxy] #${connId} CONNECT tunnel client error: ${err.message}`);
+        cleanup();
+      });
+      clientSocket.on('close', cleanup);
+      upstreamSocket.on('error', (err) => {
+        const log = isConnectionReset(err) ? logger.debug : logger.info;
+        log(`[mitm-proxy] #${connId} CONNECT tunnel upstream error: ${err.message}`);
+        cleanup();
+      });
+      upstreamSocket.on('close', cleanup);
+
+      return;
+    }
+
+    // 3. For provider/registry connections, MITM with TLS termination.
     logger.info(`[mitm-proxy] #${connId} CONNECT ${host}:${port} → MITM (${connType})`);
 
-    // 2. Acknowledge the CONNECT
+    // Acknowledge the CONNECT
     clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
 
-    // 3. Push back any bytes that arrived after the CONNECT request line
+    // Push back any bytes that arrived after the CONNECT request line
     if (head.length > 0) {
       clientSocket.unshift(head);
     }
 
-    // 4. Upgrade to TLS (MITM)
+    // Upgrade to TLS (MITM)
     const tlsSocket = new tls.TLSSocket(clientSocket, {
       isServer: true,
       SNICallback: (servername, cb) => {
@@ -748,20 +804,20 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
       },
     });
 
-    // 5. TLS handshake timeout - if the handshake completes, the 'secure'
-    //    event clears this timer. If it fires, the handshake never completed.
+    // TLS handshake timeout - if the handshake completes, the 'secure'
+    // event clears this timer. If it fires, the handshake never completed.
     const handshakeTimeout = setTimeout(() => {
       logger.info(`[mitm-proxy] #${connId} TLS handshake timeout`);
       tlsSocket.destroy();
     }, 10_000);
     tlsSocket.once('secure', () => clearTimeout(handshakeTimeout));
 
-    // 6. Track the connection
+    // Track the connection
     activeTlsSockets.add(tlsSocket);
     socketMetadata.set(tlsSocket, {
       provider: provider ?? undefined,
       registry,
-      passthrough: isPassthrough,
+      passthrough: false,
       host,
       port,
     });
@@ -776,8 +832,28 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
       activeTlsSockets.delete(tlsSocket);
     });
 
-    // 7. Emit into shared inner HTTP server
+    // Emit into shared inner HTTP server
     innerServer.emit('connection', tlsSocket);
+  });
+
+  // ── Plain HTTP WebSocket upgrade ──────────────────────────────────
+  // When a client sends "GET http://host/path" with Upgrade: websocket
+  // through the proxy, the outer server emits an 'upgrade' event instead
+  // of routing through the normal 'request' handler.
+  outerServer.on('upgrade', (req: http.IncomingMessage, clientSocket: Socket, head: Buffer) => {
+    const parsed = req.url ? tryParseProxyUrl(req.url) : null;
+    if (!parsed || !passthroughHosts.has(parsed.hostname)) {
+      clientSocket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
+      return;
+    }
+
+    clientSocket.on('error', (err) => {
+      const log = isConnectionReset(err) ? logger.debug : logger.info;
+      log(`[mitm-proxy] WebSocket client socket error: ${err.message}`);
+    });
+
+    logger.info(`[mitm-proxy] WebSocket upgrade ws://${parsed.hostname}:${parsed.port}${parsed.path} → PASSTHROUGH`);
+    bridgeWebSocketUpgrade(clientSocket, head, parsed.hostname, parsed.port, parsed.path, req.headers);
   });
 
   // ── Passthrough request forwarding ──────────────────────────────────
@@ -856,6 +932,130 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     });
 
     clientReq.pipe(upstreamReq);
+  }
+
+  /** Format an HTTP response line + headers for writing to a raw socket. */
+  function formatRawHttpResponse(res: http.IncomingMessage): string {
+    const statusLine = `HTTP/${res.httpVersion} ${res.statusCode} ${res.statusMessage}`;
+    const headerLines = Object.entries(res.headers)
+      .filter(([, v]) => v !== undefined)
+      .map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(', ') : v}`)
+      .join('\r\n');
+    return `${statusLine}\r\n${headerLines}\r\n\r\n`;
+  }
+
+  // ── WebSocket upgrade bridging ───────────────────────────────────
+
+  /**
+   * Bridges a WebSocket upgrade from the client socket to an upstream server.
+   * Preserves WebSocket-specific headers and pipes both sockets bidirectionally.
+   */
+  function bridgeWebSocketUpgrade(
+    clientSocket: Socket,
+    head: Buffer,
+    targetHost: string,
+    targetPort: number,
+    path: string,
+    requestHeaders: http.IncomingHttpHeaders,
+  ): void {
+    // Build headers: preserve WebSocket headers, strip other hop-by-hop
+    const forwardHeaders: Record<string, string | string[] | undefined> = {
+      host: targetPort === 80 ? targetHost : `${targetHost}:${targetPort}`,
+    };
+    for (const [key, value] of Object.entries(requestHeaders)) {
+      const lower = key.toLowerCase();
+      if (lower === 'host') continue;
+
+      // Strip hop-by-hop and proxy-only headers (but preserve
+      // Connection/Upgrade and Sec-WebSocket-* for the handshake)
+      if (
+        lower === 'proxy-authorization' ||
+        lower === 'proxy-authenticate' ||
+        lower === 'proxy-connection' ||
+        lower === 'keep-alive' ||
+        lower === 'transfer-encoding' ||
+        lower === 'te' ||
+        lower === 'trailer'
+      ) {
+        continue;
+      }
+
+      forwardHeaders[key] = value;
+    }
+
+    const requestFn = http.request;
+    const reqOpts: http.RequestOptions = {
+      hostname: targetHost,
+      port: targetPort,
+      method: 'GET',
+      path,
+      headers: forwardHeaders,
+      timeout: 30_000,
+    };
+    if (options.dnsLookup) {
+      reqOpts.lookup = options.dnsLookup;
+    }
+
+    const upstreamReq = requestFn(reqOpts);
+    activeUpstreamRequests.add(upstreamReq);
+
+    upstreamReq.on('upgrade', (upstreamRes, upstreamSocket, upstreamHead) => {
+      activeUpstreamRequests.delete(upstreamReq);
+      clientSocket.write(formatRawHttpResponse(upstreamRes));
+
+      // Track the pair for cleanup
+      const pair = { client: clientSocket, upstream: upstreamSocket };
+      activeTunnelPairs.add(pair);
+
+      const cleanup = (): void => {
+        activeTunnelPairs.delete(pair);
+        if (!clientSocket.destroyed) clientSocket.destroy();
+        if (!upstreamSocket.destroyed) upstreamSocket.destroy();
+      };
+
+      clientSocket.on('error', cleanup);
+      clientSocket.on('close', cleanup);
+      upstreamSocket.on('error', cleanup);
+      upstreamSocket.on('close', cleanup);
+
+      // Write any buffered data from the upgrade
+      if (upstreamHead.length > 0) {
+        clientSocket.write(upstreamHead);
+      }
+      if (head.length > 0) {
+        upstreamSocket.write(head);
+      }
+
+      // Bidirectional pipe
+      clientSocket.pipe(upstreamSocket);
+      upstreamSocket.pipe(clientSocket);
+    });
+
+    upstreamReq.on('response', (res) => {
+      activeUpstreamRequests.delete(upstreamReq);
+      clientSocket.write(formatRawHttpResponse(res));
+      res.pipe(clientSocket);
+      clientSocket.on('close', () => upstreamReq.destroy());
+    });
+
+    upstreamReq.on('error', (err) => {
+      activeUpstreamRequests.delete(upstreamReq);
+      const log = isConnectionReset(err) ? logger.debug : logger.info;
+      log(`[mitm-proxy] WebSocket upgrade upstream error: ${err.message}`);
+      if (!clientSocket.destroyed) {
+        clientSocket.end('HTTP/1.1 502 Bad Gateway\r\n\r\n');
+      }
+    });
+
+    upstreamReq.on('timeout', () => {
+      logger.info(`[mitm-proxy] WebSocket upgrade timeout for ${targetHost}:${targetPort}${path}`);
+      upstreamReq.destroy();
+      if (!clientSocket.destroyed) {
+        clientSocket.end('HTTP/1.1 504 Gateway Timeout\r\n\r\n');
+      }
+    });
+
+    upstreamReq.end();
   }
 
   // ── DynamicHostController ─────────────────────────────────────────
@@ -1028,13 +1228,20 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     },
 
     async stop() {
-      // 1. Abort all in-flight upstream requests
+      // 1. Destroy active tunnel pairs (CONNECT passthrough + WebSocket bridges)
+      for (const pair of activeTunnelPairs) {
+        if (!pair.client.destroyed) pair.client.destroy();
+        if (!pair.upstream.destroyed) pair.upstream.destroy();
+      }
+      activeTunnelPairs.clear();
+
+      // 2. Abort all in-flight upstream requests
       for (const req of activeUpstreamRequests) {
         req.destroy();
       }
       activeUpstreamRequests.clear();
 
-      // 2. Destroy all active TLS sockets and raw client sockets.
+      // 3. Destroy all active TLS sockets and raw client sockets.
       // Must happen before outerServer.close() because the raw sockets
       // are still tracked by the underlying net.Server, and close()
       // waits for all TCP connections to end.
@@ -1047,24 +1254,24 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
       }
       activeClientSockets.clear();
 
-      // 3. Close outer server - stop accepting new connections.
+      // 4. Close outer server - stop accepting new connections.
       // closeAllConnections() handles any non-upgraded HTTP connections.
       outerServer.closeAllConnections();
       await new Promise<void>((resolve) => {
         outerServer.close(() => resolve());
       });
 
-      // 4. Close the inner HTTP server.
+      // 5. Close the inner HTTP server.
       innerServer.closeAllConnections();
       innerServer.close();
 
-      // 5. Close the control API server.
+      // 6. Close the control API server.
       controlServer.closeAllConnections();
       await new Promise<void>((resolve) => {
         controlServer.close(() => resolve());
       });
 
-      // 6. Clean up socket files (UDS mode only)
+      // 7. Clean up socket files (UDS mode only)
       if (!useTcp && options.socketPath) {
         try {
           if (existsSync(options.socketPath)) {
