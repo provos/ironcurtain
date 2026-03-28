@@ -843,8 +843,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
   outerServer.on('upgrade', (req: http.IncomingMessage, clientSocket: Socket, head: Buffer) => {
     const parsed = req.url ? tryParseProxyUrl(req.url) : null;
     if (!parsed || !passthroughHosts.has(parsed.hostname)) {
-      clientSocket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
-      clientSocket.destroy();
+      clientSocket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
       return;
     }
 
@@ -965,10 +964,23 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     };
     for (const [key, value] of Object.entries(requestHeaders)) {
       const lower = key.toLowerCase();
-      // Keep all headers except host (already set above)
-      if (lower !== 'host') {
-        forwardHeaders[key] = value;
+      if (lower === 'host') continue;
+
+      // Strip hop-by-hop and proxy-only headers (but preserve
+      // Connection/Upgrade and Sec-WebSocket-* for the handshake)
+      if (
+        lower === 'proxy-authorization' ||
+        lower === 'proxy-authenticate' ||
+        lower === 'proxy-connection' ||
+        lower === 'keep-alive' ||
+        lower === 'transfer-encoding' ||
+        lower === 'te' ||
+        lower === 'trailer'
+      ) {
+        continue;
       }
+
+      forwardHeaders[key] = value;
     }
 
     const requestFn = http.request;
@@ -985,8 +997,10 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     }
 
     const upstreamReq = requestFn(reqOpts);
+    activeUpstreamRequests.add(upstreamReq);
 
     upstreamReq.on('upgrade', (upstreamRes, upstreamSocket, upstreamHead) => {
+      activeUpstreamRequests.delete(upstreamReq);
       clientSocket.write(formatRawHttpResponse(upstreamRes));
 
       // Track the pair for cleanup
@@ -1018,12 +1032,14 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     });
 
     upstreamReq.on('response', (res) => {
+      activeUpstreamRequests.delete(upstreamReq);
       clientSocket.write(formatRawHttpResponse(res));
       res.pipe(clientSocket);
       clientSocket.on('close', () => upstreamReq.destroy());
     });
 
     upstreamReq.on('error', (err) => {
+      activeUpstreamRequests.delete(upstreamReq);
       const log = isConnectionReset(err) ? logger.debug : logger.info;
       log(`[mitm-proxy] WebSocket upgrade upstream error: ${err.message}`);
       if (!clientSocket.destroyed) {
@@ -1212,7 +1228,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     },
 
     async stop() {
-      // 1. Destroy active WebSocket pairs
+      // 1. Destroy active tunnel pairs (CONNECT passthrough + WebSocket bridges)
       for (const pair of activeTunnelPairs) {
         if (!pair.client.destroyed) pair.client.destroy();
         if (!pair.upstream.destroyed) pair.upstream.destroy();
