@@ -254,6 +254,12 @@ IronCurtain ships with six pre-configured MCP servers. All tool calls (except me
 
 Read-only operations are allowed by default policy; mutations (writes, pushes, PR creation) escalate for human approval. Tools use `server.tool` naming (e.g., `filesystem.read_file`, `memory.recall`).
 
+### Network Passthrough (Docker Agent Mode)
+
+In Docker Agent Mode, the container has no network access — all traffic goes through IronCurtain's MITM proxy. By default, only LLM provider domains are reachable. The agent can request access to additional domains at runtime via the `proxy` virtual MCP server (`add_proxy_domain`). Each request requires human approval via the escalation flow.
+
+Approved domains get a **raw passthrough tunnel** — HTTP, HTTPS, and WebSocket connections are forwarded without content inspection or credential injection. This gives the agent greater utility (calling third-party APIs, streaming data from external services) but means traffic to those domains is **unmediated**. See [SECURITY_CONCERNS.md](docs/SECURITY_CONCERNS.md) Section 2b-i for the threat model and [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md) for usage details.
+
 ## Security Model
 
 IronCurtain is designed around a specific threat model: **the LLM goes rogue.** This can happen through prompt injection (a malicious email or web page hijacks the agent) or through multi-turn drift (the agent gradually deviates from the user's intent over a long session).

@@ -252,10 +252,46 @@ Inside Docker Agent Mode, the agent has access to a virtual `proxy` MCP server t
 The proxy server exposes three tools:
 
 - **`add_proxy_domain`** — Request access to an additional domain (e.g., `api.example.com`). The agent must provide a justification, and the request is escalated for human approval before the domain is added.
-- **`remove_proxy_domain`** — Remove a previously approved dynamic domain from the allowlist.
-- **`list_proxy_domains`** — List all currently accessible domains (both built-in provider domains and dynamically added ones).
+- **`remove_proxy_domain`** — Remove a previously approved dynamic domain from the allowlist. Auto-allowed (reduces attack surface).
+- **`list_proxy_domains`** — List all currently accessible domains (both built-in provider domains and dynamically added ones). Auto-allowed (read-only).
 
 These tools go through normal policy evaluation and audit logging. Adding a domain always requires human approval via the escalation flow.
+
+### What "passthrough" means
+
+Dynamically added domains are fundamentally different from built-in LLM provider domains:
+
+| | Provider domains | Passthrough domains |
+|---|---|---|
+| **Credential handling** | Fake-to-real key swap (MITM) | No credential injection |
+| **Content inspection** | Endpoint filtering, request rewriting | None — raw TCP tunnel |
+| **Supported protocols** | HTTPS only (specific API paths) | HTTP, HTTPS, WebSocket |
+| **Persistence** | Permanent (configured at startup) | Session-scoped (cleared on exit) |
+
+When the agent connects to a passthrough domain, the proxy creates a direct TCP tunnel — bytes flow bidirectionally without inspection. This supports:
+
+- **Plain HTTP** — REST API calls via `HTTP_PROXY`
+- **WebSocket** — Both `ws://` (via HTTP upgrade) and `wss://` (via CONNECT tunnel)
+- **HTTPS** — Via standard CONNECT tunneling
+
+### Security considerations
+
+Approving a domain gives the agent **unmediated network access** to that host. Before approving:
+
+- **Check the domain** — Is it the domain the agent actually needs, or a look-alike?
+- **Consider the data** — What sandbox data could the agent exfiltrate to this domain?
+- **Scope narrowly** — Approve specific domains (`api.weather.com`), not wildcards or broad services
+
+Domains are session-scoped and never persisted. A new session starts with only the built-in provider domains. See [SECURITY_CONCERNS.md](docs/SECURITY_CONCERNS.md) Section 2b-i for the full threat analysis.
+
+### Input validation
+
+The proxy rejects domains before they reach the policy engine:
+
+- IP addresses (`192.168.1.1`, `10.0.0.1`)
+- `localhost` and `*.docker.internal`
+- Domains exceeding 253 characters
+- Invalid domain format (missing TLD, illegal characters)
 
 ## Package Installation Proxy
 

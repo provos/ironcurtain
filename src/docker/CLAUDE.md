@@ -29,6 +29,20 @@ An alternative session type that runs external coding agents (Claude Code, Goose
 - `package-types.ts` - Shared types for the package installation proxy (`RegistryConfig`, `PackageIdentity`, `PackageValidator`, etc.).
 - `package-validator.ts` - Package validation against allowlist/denylist/age-gate rules. First-match semantics: denylist > allowlist > age gate > default allow.
 
+## Proxy passthrough (domain management)
+
+The `proxy` virtual MCP server (`proxy-tools.ts`) exposes `add_proxy_domain`, `remove_proxy_domain`, and `list_proxy_domains`. These are hardcoded tool definitions (not LLM-generated) with hardcoded policy rules: `add` → escalate, `remove` → allow, `list` → allow. Injected into the PolicyEngine at startup alongside compiled rules.
+
+**Domain validation** (`validateDomain()` in `proxy-tools.ts`): Rejects IP addresses, `localhost`, `*.docker.internal`, names >253 chars, and invalid format. Runs before policy evaluation.
+
+**Two connection modes in `mitm-proxy.ts`:**
+- **Provider/registry CONNECT** → TLS-terminating MITM (credential swap, endpoint filtering, request rewriting). Used for LLM API providers and package registries.
+- **Passthrough CONNECT** → Raw TCP tunnel via `net.connect()`. No TLS termination, no content inspection. Supports HTTP, HTTPS, and WebSocket. Used for dynamically added domains.
+
+**Plain HTTP WebSocket upgrade** (`outerServer.on('upgrade')`) handles `ws://` connections via `HTTP_PROXY`. The `bridgeWebSocketUpgrade()` helper forwards the upgrade to the upstream and pipes both sockets bidirectionally.
+
+**Lifecycle:** Domains are session-scoped (in-memory `passthroughHosts` Set). Tunneled socket pairs are tracked in `activeTunnelPairs` and destroyed on `stop()`.
+
 ## Agent adapters
 
 - `agent-adapter.ts` - `AgentAdapter` interface. `getProviders(authKind?)` returns required LLM providers (OAuth or API key). `buildEnv(config, fakeKeys)` builds container env vars with fake keys instead of real ones.

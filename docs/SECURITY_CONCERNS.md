@@ -46,14 +46,19 @@ IronCurtain has two session modes with different containment models. Both rely o
 
 ### 2b-i. Dynamic Domain Expansion (Docker Agent Mode)
 
-**Risk:** The agent can request new internet domains at runtime via the `add_proxy_domain` virtual MCP tool. Each approved domain expands the container's network reach beyond the initial static allowlist.
+**Risk:** The agent can request new internet domains at runtime via the `add_proxy_domain` virtual MCP tool. Each approved domain expands the container's network reach beyond the initial static allowlist. Unlike provider domains (which get TLS-terminating MITM with credential swap and endpoint filtering), passthrough domains receive a **raw TCP tunnel** — all traffic (HTTP, HTTPS, WebSocket) flows without content inspection or credential injection.
 **Vectors:**
-*   **Exfiltration via approved domain:** An agent tricks the user into approving a domain it controls, then exfiltrates data through it.
+*   **Exfiltration via approved domain:** An agent tricks the user into approving a domain it controls, then exfiltrates sandbox data through it. Because passthrough connections are unmediated, the proxy cannot detect or block the exfiltration payload.
 *   **SSRF via domain:** An approved domain resolves to an internal IP or cloud metadata endpoint (169.254.169.254).
+*   **Long-lived exfiltration channel:** WebSocket connections to approved domains can persist for minutes (the proxy imposes no idle timeout on tunneled connections), providing a sustained channel for data exfiltration.
+*   **Domain confusion:** An agent requests a domain that looks legitimate but is attacker-controlled (e.g., `api-weather.com` vs `api.weather.com`).
 **Mitigation:**
-*   **Human escalation required:** The `add_proxy_domain` tool is hardcoded to `escalate` — the user sees the domain and justification before approval. Domain removal is auto-allowed (reduces surface).
-*   **Input validation:** IP addresses, `localhost`, and `*.docker.internal` hosts are rejected at the validation layer before policy evaluation.
+*   **Human escalation required:** The `add_proxy_domain` tool is hardcoded to `escalate` — the user sees the domain and justification before approval. This cannot be overridden by the constitution or auto-approver. Domain removal is auto-allowed (reduces surface).
+*   **Input validation:** IP addresses, `localhost`, and `*.docker.internal` hosts are rejected at the validation layer before policy evaluation. Invalid domain formats and overly long names are also rejected.
+*   **Session-scoped:** Approved domains exist only for the current session — they are never persisted to disk. A new session starts with only the built-in provider domains, preventing creeping over-permissioning across sessions.
 *   **Passthrough only:** Dynamically added domains get no credential swap — the MITM proxy forwards traffic without injecting API keys, limiting what the agent can do on those hosts.
+*   **Audit logged:** Every `add_proxy_domain` call (including the domain and justification) is recorded in the session audit log, providing forensic visibility.
+**Residual risk:** Once a domain is approved, all traffic to it is unmediated. The proxy cannot distinguish legitimate API calls from data exfiltration. This is an inherent trade-off: the passthrough tunnel exists to give agents access to services that IronCurtain doesn't have specialized support for. Mitigating this fully would require deep content inspection, which conflicts with the raw tunnel model. Users should treat domain approval as granting the agent internet access to that specific host.
 
 ### 2b-ii. Package Installation Proxy (Docker Agent Mode)
 
