@@ -12,8 +12,10 @@
  */
 
 import { resolve } from 'node:path';
+import type { LanguageModelV3 } from '@ai-sdk/provider';
 import type { LanguageModel, SystemModelMessage } from 'ai';
 import chalk from 'chalk';
+import pLimit from 'p-limit';
 import { extractServerDomainAllowlists } from '../config/index.js';
 import type { MCPServerConfig } from '../config/types.js';
 import { PolicyEngine } from '../trusted-process/policy-engine.js';
@@ -31,9 +33,11 @@ import {
   loadStoredToolAnnotationsFile,
   resolveRulePaths,
   writeArtifact,
-  withSpinner,
-  showCached,
   createPipelineLlm,
+  createPerServerModel,
+  createThrottledModel,
+  SpinnerProgressReporter,
+  type ServerProgressReporter,
 } from './pipeline-shared.js';
 import { resolveStoredAnnotationsFile } from '../types/argument-roles.js';
 import {
@@ -131,6 +135,8 @@ export interface PipelineRunConfig {
  */
 export interface PipelineModels {
   readonly compilationModel: LanguageModel;
+  /** The unwrapped base model for creating per-server wrapped models. */
+  readonly baseLlm: LanguageModelV3;
   readonly cacheStrategy: PromptCacheStrategy;
   readonly logContext: LlmLogContext;
   readonly logPath: string;
@@ -142,6 +148,7 @@ export async function createPipelineModels(logDir?: string): Promise<PipelineMod
   const llm = await createPipelineLlm(effectiveLogDir, 'unknown');
   return {
     compilationModel: llm.model,
+    baseLlm: llm.baseLlm,
     cacheStrategy: llm.cacheStrategy,
     logContext: llm.logContext,
     logPath: llm.logPath,
@@ -203,7 +210,10 @@ function filterAndLogStructuralConflicts(
   scenarios: TestScenario[],
   label: string = 'Discarded scenario (structural conflict)',
   storedAnnotations: StoredToolAnnotation[],
+  reporter?: ServerProgressReporter,
 ): { valid: TestScenario[]; discarded: DiscardedScenario[] } {
+  const warn = (msg: string) => (reporter ? reporter.warn(msg) : console.error(msg));
+
   const filterResult = filterStructuralConflicts(engine, scenarios);
   let valid = filterResult.valid;
   const discarded = filterResult.discarded;
@@ -212,7 +222,7 @@ function filterAndLogStructuralConflicts(
       d.scenario.source === 'handwritten'
         ? chalk.yellow('Warning: handwritten scenario conflicts with structural invariant:')
         : chalk.dim(`${label}:`);
-    console.error(`  ${prefix} "${d.scenario.description}" — ${d.rule} always returns ${d.actual}`);
+    warn(`  ${prefix} "${d.scenario.description}" — ${d.rule} always returns ${d.actual}`);
   }
 
   // Discard scenarios whose arguments don't match any conditional role spec —
@@ -227,7 +237,7 @@ function filterAndLogStructuralConflicts(
           const w = fallbackWarnings.find((fw) => fw.scenario.description === s.description);
           const details = w?.details.join('; ') ?? 'unknown conditional mismatch';
           const discardLabel = 'Discarded (default role fallback)';
-          console.error(`  ${chalk.dim(`${discardLabel}:`)} "${s.description}" — ${details}`);
+          warn(`  ${chalk.dim(`${discardLabel}:`)} "${s.description}" — ${details}`);
           discarded.push({ scenario: s, rule: 'default-role-fallback', actual: 'deny' });
         } else {
           kept.push(s);
@@ -241,7 +251,7 @@ function filterAndLogStructuralConflicts(
     const schemaResult = filterInvalidSchemaScenarios(valid, storedAnnotations);
     if (schemaResult.discarded.length > 0) {
       for (const d of schemaResult.discarded) {
-        console.error(`  ${chalk.dim('Discarded (schema mismatch):')} "${d.scenario.description}" — ${d.rule}`);
+        warn(`  ${chalk.dim('Discarded (schema mismatch):')} "${d.scenario.description}" — ${d.rule}`);
       }
       discarded.push(...schemaResult.discarded);
       valid = schemaResult.valid;
@@ -258,11 +268,16 @@ class RuleValidationError extends Error {
   }
 }
 
-function validateRulesOrThrow(rules: CompiledRule[], listDefinitions: ListDefinition[] = []): void {
+function validateRulesOrThrow(
+  rules: CompiledRule[],
+  listDefinitions: ListDefinition[] = [],
+  reporter?: ServerProgressReporter,
+): void {
+  const warn = (msg: string) => (reporter ? reporter.warn(msg) : console.error(msg));
   const ruleValidation = validateCompiledRules(rules, listDefinitions);
   if (ruleValidation.warnings.length > 0) {
     for (const w of ruleValidation.warnings) {
-      console.error(`  ${chalk.yellow('Warning:')} ${w}`);
+      warn(`  ${chalk.yellow('Warning:')} ${w}`);
     }
   }
   if (!ruleValidation.valid) {
@@ -481,13 +496,17 @@ export function mergeServerResults(results: ServerCompilationResult[], constitut
  */
 export class PipelineRunner {
   private readonly model: LanguageModel;
+  private readonly baseLlm: LanguageModelV3;
   private readonly cacheStrategy: PromptCacheStrategy;
   private readonly logContext: LlmLogContext;
+  private readonly logPath: string;
 
   constructor(models: PipelineModels) {
     this.model = models.compilationModel;
+    this.baseLlm = models.baseLlm;
     this.cacheStrategy = models.cacheStrategy;
     this.logContext = models.logContext;
+    this.logPath = models.logPath;
   }
 
   /**
@@ -604,8 +623,9 @@ export class PipelineRunner {
   }
 
   /**
-   * Compiles rules for all servers sequentially.
-   * Respects serverFilter if provided (for debugging single servers).
+   * Compiles rules for all servers, in parallel when multiple servers are present.
+   * Single-server compilation uses sequential spinner-based output.
+   * Multi-server compilation uses parallel execution with a multi-line progress display.
    */
   private async compileAllServers(
     config: PipelineRunConfig,
@@ -613,7 +633,6 @@ export class PipelineRunner {
     constitutionHash: string,
     storedAnnotationsFile: StoredToolAnnotationsFile,
   ): Promise<ServerCompilationResult[]> {
-    const results: ServerCompilationResult[] = [];
     const serverEntries = Object.entries(toolAnnotationsFile.servers);
 
     // Apply server filter if provided
@@ -633,28 +652,66 @@ export class PipelineRunner {
     const includeHandwritten = config.includeHandwrittenScenarios ?? config.constitutionKind === 'constitution';
     const allHandwrittenScenarios = includeHandwritten ? getHandwrittenScenarios(config.allowedDirectory) : [];
 
+    // Create concurrency controls
+    const llmSemaphore = pLimit(8);
+    const serverLimit = pLimit(10);
+
+    const buildUnit = (serverName: string): ServerCompilationUnit => ({
+      serverName,
+      annotations: toolAnnotationsFile.servers[serverName].tools,
+      storedAnnotations: storedAnnotationsFile.servers[serverName].tools,
+      constitutionText: config.constitutionInput,
+      constitutionKind: config.constitutionKind,
+      allowedDirectory: config.allowedDirectory,
+      protectedPaths: config.protectedPaths,
+      mcpServerConfig: config.mcpServers?.[serverName],
+      handwrittenScenarios: allHandwrittenScenarios.filter((s) => s.request.serverName === serverName),
+    });
+
+    const useParallel = filteredEntries.length > 1;
+
+    if (useParallel) {
+      return this.compileServersParallel(
+        filteredEntries,
+        config,
+        constitutionHash,
+        buildUnit,
+        llmSemaphore,
+        serverLimit,
+      );
+    }
+
+    return this.compileServersSequential(filteredEntries, config, constitutionHash, buildUnit, llmSemaphore);
+  }
+
+  private async compileServersSequential(
+    filteredEntries: [string, { tools: ToolAnnotation[] }][],
+    config: PipelineRunConfig,
+    constitutionHash: string,
+    buildUnit: (name: string) => ServerCompilationUnit,
+    llmSemaphore: ReturnType<typeof pLimit>,
+  ): Promise<ServerCompilationResult[]> {
+    const results: ServerCompilationResult[] = [];
     const totalServers = filteredEntries.length;
     const failedServers: string[] = [];
+
     for (let i = 0; i < filteredEntries.length; i++) {
-      const [serverName, serverData] = filteredEntries[i];
+      const [serverName] = filteredEntries[i];
       console.error('');
       console.error(chalk.bold(`[${i + 1}/${totalServers}] Compiling server: ${serverName}`));
 
+      const { model, logContext } = createPerServerModel(this.baseLlm, this.logPath, serverName);
+      const throttledModel = createThrottledModel(model, llmSemaphore);
+      const reporter = new SpinnerProgressReporter(serverName);
+
       try {
         const result = await this.compileServer(
-          {
-            serverName,
-            annotations: serverData.tools,
-            storedAnnotations: storedAnnotationsFile.servers[serverName].tools,
-            constitutionText: config.constitutionInput,
-            constitutionKind: config.constitutionKind,
-            allowedDirectory: config.allowedDirectory,
-            protectedPaths: config.protectedPaths,
-            mcpServerConfig: config.mcpServers?.[serverName],
-            handwrittenScenarios: allHandwrittenScenarios.filter((s) => s.request.serverName === serverName),
-          },
+          buildUnit(serverName),
           config,
           constitutionHash,
+          throttledModel,
+          logContext,
+          reporter,
         );
         results.push(result);
       } catch (err) {
@@ -664,6 +721,64 @@ export class PipelineRunner {
       }
     }
 
+    return this.handleCompilationResults(results, failedServers);
+  }
+
+  private async compileServersParallel(
+    filteredEntries: [string, { tools: ToolAnnotation[] }][],
+    config: PipelineRunConfig,
+    constitutionHash: string,
+    buildUnit: (name: string) => ServerCompilationUnit,
+    llmSemaphore: ReturnType<typeof pLimit>,
+    serverLimit: ReturnType<typeof pLimit>,
+  ): Promise<ServerCompilationResult[]> {
+    // Lazy import to avoid loading parallel-progress.ts when not needed
+    const { ParallelProgressDisplay, ParallelProgressReporter } = await import('./parallel-progress.js');
+
+    const serverNames = filteredEntries.map(([name]) => name);
+    const display = new ParallelProgressDisplay(serverNames);
+
+    const settled = await Promise.allSettled(
+      filteredEntries.map(([serverName]) =>
+        serverLimit(async () => {
+          const { model, logContext } = createPerServerModel(this.baseLlm, this.logPath, serverName);
+          const throttledModel = createThrottledModel(model, llmSemaphore);
+          const reporter = new ParallelProgressReporter(display, serverName);
+          return this.compileServer(
+            buildUnit(serverName),
+            config,
+            constitutionHash,
+            throttledModel,
+            logContext,
+            reporter,
+          );
+        }),
+      ),
+    );
+
+    display.finish();
+
+    const results: ServerCompilationResult[] = [];
+    const failedServers: string[] = [];
+
+    for (const [i, outcome] of settled.entries()) {
+      if (outcome.status === 'fulfilled') {
+        results.push(outcome.value);
+      } else {
+        const serverName = filteredEntries[i][0];
+        const msg = outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason);
+        console.error(`  ${chalk.red(`Server "${serverName}" failed:`)} ${msg}`);
+        failedServers.push(serverName);
+      }
+    }
+
+    return this.handleCompilationResults(results, failedServers);
+  }
+
+  private handleCompilationResults(
+    results: ServerCompilationResult[],
+    failedServers: string[],
+  ): ServerCompilationResult[] {
     if (failedServers.length > 0) {
       console.error(
         `\n${chalk.yellow(`Warning: ${failedServers.length} server(s) failed verification: ${failedServers.join(', ')}`)}`,
@@ -684,11 +799,18 @@ export class PipelineRunner {
   /**
    * Compiles a single server: compile -> generate scenarios -> verify -> repair.
    * Self-contained compile-verify-repair loop per server.
+   *
+   * Each server receives its own model (with per-server logging middleware),
+   * logContext (for step labeling), and reporter (for progress/warnings).
+   * This makes the method safe for concurrent execution.
    */
   private async compileServer(
     unit: ServerCompilationUnit,
     config: PipelineRunConfig,
     constitutionHash: string,
+    model: LanguageModel,
+    logContext: LlmLogContext,
+    reporter: ServerProgressReporter,
   ): Promise<ServerCompilationResult> {
     const serverOutputDir = resolve(config.outputDir, 'servers', unit.serverName);
 
@@ -719,7 +841,6 @@ export class PipelineRunner {
     const existingServerScenarios = loadExistingArtifact<TestScenariosFile>(serverOutputDir, 'test-scenarios.json');
 
     if (existingServerPolicy && existingServerPolicy.inputHash === inputHash && existingServerScenarios) {
-      // Verify scenario hash to detect stale scenarios (e.g., changed templates or handwritten scenarios)
       const cachedPermittedDirs = extractPermittedDirectories(resolveRulePaths(existingServerPolicy.rules));
       const cachedDynamicLists = loadExistingArtifact<DynamicListsFile>(serverOutputDir, 'dynamic-lists.json');
       const cachedScenarioPrompt = buildGeneratorSystemPrompt(
@@ -733,7 +854,7 @@ export class PipelineRunner {
       const cachedScenarioHash = computeScenariosHash(cachedScenarioPrompt, unit.handwrittenScenarios);
 
       if (existingServerScenarios.inputHash === cachedScenarioHash) {
-        showCached(`  ${unit.serverName}: compilation`);
+        reporter.complete('cached', `  ${unit.serverName}: compilation ${chalk.dim('(cached)')}`, 0);
         return {
           serverName: unit.serverName,
           rules: resolveRulePaths(existingServerPolicy.rules),
@@ -749,8 +870,8 @@ export class PipelineRunner {
     const compilerSystem = this.cacheStrategy.wrapSystemPrompt(compilerPrompt);
 
     // Step 1: Compile rules for this server
-    this.logContext.stepName = `compile-${unit.serverName}`;
-    const compileResult = await this.compileServerPolicyRules(unit, compilerSystem, inputHash);
+    logContext.stepName = `compile-${unit.serverName}`;
+    const compileResult = await this.compileServerPolicyRules(unit, compilerSystem, inputHash, model, reporter);
 
     let { rules } = compileResult;
     let { listDefinitions } = compileResult;
@@ -762,7 +883,15 @@ export class PipelineRunner {
     // Resolve dynamic lists for this server (before scenario generation so lists are available)
     let dynamicLists: DynamicListsFile | undefined;
     if (listDefinitions.length > 0) {
-      dynamicLists = await this.resolveServerLists(listDefinitions, serverOutputDir, config, `  ${unit.serverName}`);
+      dynamicLists = await this.resolveServerLists(
+        listDefinitions,
+        serverOutputDir,
+        config,
+        `  ${unit.serverName}`,
+        model,
+        logContext,
+        reporter,
+      );
     }
 
     // Build per-server policy artifact for engine construction
@@ -792,7 +921,7 @@ export class PipelineRunner {
       : undefined;
 
     // Step 2: Generate test scenarios for this server
-    this.logContext.stepName = `scenarios-${unit.serverName}`;
+    logContext.stepName = `scenarios-${unit.serverName}`;
     const permittedDirectories = extractPermittedDirectories(rules);
 
     const scenarioPrompt = buildGeneratorSystemPrompt(
@@ -816,10 +945,12 @@ export class PipelineRunner {
       permittedDirectories,
       dynamicLists,
       unit.storedAnnotations,
+      model,
+      reporter,
     );
 
     // Step 3: Verify compiled rules against scenarios
-    this.logContext.stepName = `verify-${unit.serverName}`;
+    logContext.stepName = `verify-${unit.serverName}`;
 
     const filterEngine = new PolicyEngine(
       serverPolicyFile,
@@ -834,6 +965,7 @@ export class PipelineRunner {
       scenarioResult.scenarios,
       undefined,
       unit.storedAnnotations,
+      reporter,
     );
 
     // Generate replacement scenarios for structurally discarded ones (pre-loop, one-time)
@@ -842,32 +974,40 @@ export class PipelineRunner {
         scenario: d.scenario,
         feedback: `${d.rule} always returns ${d.actual}`,
       }));
-      this.logContext.stepName = `repair-scenarios-${unit.serverName}`;
+      logContext.stepName = `repair-scenarios-${unit.serverName}`;
+      reporter.update('repair-scenarios');
+      const repairStart = Date.now();
       const replacementScenarios = await repairScenarios(
         discardedForRepair,
         unit.constitutionText,
         unit.annotations,
         unit.allowedDirectory,
-        this.model,
+        model,
         permittedDirectories,
         dynamicLists,
-        (msg) => console.error(`  ${chalk.dim(msg)}`),
+        (msg) => reporter.warn(`  ${chalk.dim(msg)}`),
         unit.storedAnnotations,
       );
       if (replacementScenarios.length > 0) {
-        // Filter replacements through structural invariants too
         const { valid: validReplacements } = filterAndLogStructuralConflicts(
           filterEngine,
           replacementScenarios,
           'Discarded replacement (structural conflict)',
           unit.storedAnnotations,
+          reporter,
         );
         scenarioResult.scenarios.push(...validReplacements);
         filteredScenarios.push(...validReplacements);
-        console.error(
+        reporter.warn(
           `  ${chalk.dim(`Repaired ${discardedScenarios.length} discarded scenario(s) → ${validReplacements.length} replacement(s)`)}`,
         );
       }
+      const repairElapsed = (Date.now() - repairStart) / 1000;
+      reporter.complete(
+        'repair-scenarios',
+        `  ${unit.serverName}: Repaired scenarios (${repairElapsed.toFixed(1)}s)`,
+        repairElapsed,
+      );
     }
 
     const serverToolNames = [...new Set(unit.annotations.map((a) => a.toolName))] as [string, ...string[]];
@@ -887,43 +1027,43 @@ export class PipelineRunner {
     );
     let verifierSession = new PolicyVerifierSession({
       system: verifierSystem,
-      model: this.model,
+      model,
       serverNames,
       toolNames: serverToolNames,
       storedAnnotations: unit.storedAnnotations,
     });
 
+    reporter.update('verifying');
+    const verifyStart = Date.now();
+    const verificationResultInitial = await verifyPolicy(
+      unit.constitutionText,
+      serverPolicyFile,
+      serverAnnotationsFile,
+      unit.protectedPaths,
+      filteredScenarios,
+      model,
+      3,
+      unit.allowedDirectory,
+      (msg) => reporter.update('verifying', msg),
+      serverDomainAllowlists,
+      dynamicLists,
+      verifierSystem,
+      verifierSession,
+      unit.storedAnnotations,
+    );
+    const verifyElapsed = (Date.now() - verifyStart) / 1000;
     const verifyLabel = `  ${unit.serverName}: Verifying`;
-    const { result: verificationResultInitial } = await withSpinner(
-      verifyLabel,
-      async (spinner) =>
-        verifyPolicy(
-          unit.constitutionText,
-          serverPolicyFile,
-          serverAnnotationsFile,
-          unit.protectedPaths,
-          filteredScenarios,
-          this.model,
-          3,
-          unit.allowedDirectory,
-          (msg) => {
-            spinner.text = `${verifyLabel} — ${msg}`;
-          },
-          serverDomainAllowlists,
-          dynamicLists,
-          verifierSystem,
-          verifierSession,
-          unit.storedAnnotations,
-        ),
-      (r, elapsed) =>
-        r.pass
-          ? `${verifyLabel}: ${r.rounds.length} round(s) (${elapsed.toFixed(1)}s)`
-          : `${verifyLabel}: completed with failures (${elapsed.toFixed(1)}s)`,
+    reporter.complete(
+      'verifying',
+      verificationResultInitial.pass
+        ? `${verifyLabel}: ${verificationResultInitial.rounds.length} round(s) (${verifyElapsed.toFixed(1)}s)`
+        : `${verifyLabel}: completed with failures (${verifyElapsed.toFixed(1)}s)`,
+      verifyElapsed,
     );
     let verificationResult = verificationResultInitial;
 
     if (!verificationResult.pass) {
-      this.logVerboseFailures(verificationResult);
+      this.logVerboseFailures(verificationResult, reporter);
     }
 
     // Collect probe scenarios
@@ -932,6 +1072,7 @@ export class PipelineRunner {
       collectProbeScenarios(verificationResult),
       'Discarded probe (structural conflict)',
       unit.storedAnnotations,
+      reporter,
     );
     const accumulatedProbes: TestScenario[] = filteredInitialProbes;
 
@@ -944,8 +1085,6 @@ export class PipelineRunner {
       const baseInputHash = inputHash;
 
       for (let attempt = 1; attempt <= MAX_REPAIRS; attempt++) {
-        console.error('');
-
         const lastRound = verificationResult.rounds[verificationResult.rounds.length - 1] as
           | (typeof verificationResult.rounds)[number]
           | undefined;
@@ -956,14 +1095,14 @@ export class PipelineRunner {
         const { corrections, handwrittenWarnings } = extractScenarioCorrections(attributedFailures, allScenarios);
 
         for (const warning of handwrittenWarnings) {
-          console.error(`  ${chalk.yellow('Warning:')} ${warning}`);
+          reporter.warn(`  ${chalk.yellow('Warning:')} ${warning}`);
         }
 
         if (corrections.length > 0) {
           scenarioResult.scenarios = applyScenarioCorrections(scenarioResult.scenarios, corrections);
           const correctedProbes = applyScenarioCorrections(accumulatedProbes, corrections);
           accumulatedProbes.splice(0, accumulatedProbes.length, ...correctedProbes);
-          console.error(`  ${chalk.dim(`Corrected ${corrections.length} scenario expectation(s)`)}`);
+          reporter.warn(`  ${chalk.dim(`Corrected ${corrections.length} scenario expectation(s)`)}`);
         }
 
         ({ valid: currentFilteredScenarios } = filterAndLogStructuralConflicts(
@@ -971,6 +1110,7 @@ export class PipelineRunner {
           scenarioResult.scenarios,
           undefined,
           unit.storedAnnotations,
+          reporter,
         ));
 
         const allRuleBlamedFailures = verificationResult.failedScenarios.filter((f) => {
@@ -988,25 +1128,26 @@ export class PipelineRunner {
             handwrittenScenarios: unit.handwrittenScenarios.length > 0 ? unit.handwrittenScenarios : undefined,
           };
 
-          this.logContext.stepName = `repair-compile-${unit.serverName}-${attempt}`;
-          const repairText = `  ${unit.serverName} repair ${attempt}/${MAX_REPAIRS}: Recompiling`;
-          const { result: repairResult } = await withSpinner(
-            repairText,
-            async (spinner) =>
-              this.compilePolicyRulesWithPointFix(
-                rules,
-                unit.annotations,
-                unit.protectedPaths,
-                baseInputHash,
-                repairContext,
-                compilerSystem,
-                compilerSession,
-                listDefinitions,
-                (msg) => {
-                  spinner.text = `${repairText} — ${msg}`;
-                },
-              ),
-            (r, elapsed) => `${repairText}: ${r.rules.length} rules (${elapsed.toFixed(1)}s)`,
+          logContext.stepName = `repair-compile-${unit.serverName}-${attempt}`;
+          reporter.update('repair-compile', `attempt ${attempt}/${MAX_REPAIRS}`);
+          const repairCompileStart = Date.now();
+          const repairResult = await this.compilePolicyRulesWithPointFix(
+            rules,
+            unit.annotations,
+            unit.protectedPaths,
+            baseInputHash,
+            repairContext,
+            compilerSystem,
+            compilerSession,
+            listDefinitions,
+            model,
+            (msg) => reporter.update('repair-compile', msg),
+          );
+          const repairCompileElapsed = (Date.now() - repairCompileStart) / 1000;
+          reporter.complete(
+            'repair-compile',
+            `  ${unit.serverName} repair ${attempt}/${MAX_REPAIRS}: ${repairResult.rules.length} rules (${repairCompileElapsed.toFixed(1)}s)`,
+            repairCompileElapsed,
           );
           rules = repairResult.rules;
           listDefinitions = repairResult.listDefinitions;
@@ -1022,6 +1163,9 @@ export class PipelineRunner {
               serverOutputDir,
               config,
               `  ${unit.serverName}`,
+              model,
+              logContext,
+              reporter,
             );
           }
 
@@ -1043,48 +1187,48 @@ export class PipelineRunner {
           );
           verifierSession = new PolicyVerifierSession({
             system: verifierSystem,
-            model: this.model,
+            model,
             serverNames,
             toolNames: serverToolNames,
             storedAnnotations: unit.storedAnnotations,
           });
         } else {
-          console.error(`  ${chalk.dim('No rule-blamed failures — skipping recompilation')}`);
+          reporter.warn(`  ${chalk.dim('No rule-blamed failures — skipping recompilation')}`);
         }
 
-        this.logContext.stepName = `repair-verify-${unit.serverName}-${attempt}`;
+        logContext.stepName = `repair-verify-${unit.serverName}-${attempt}`;
         const scenariosForRepairVerify = [...currentFilteredScenarios, ...accumulatedProbes];
+        reporter.update('repair-verify', `attempt ${attempt}/${MAX_REPAIRS}`);
+        const repairVerifyStart = Date.now();
+        const repairVerifyResult = await verifyPolicy(
+          unit.constitutionText,
+          serverPolicyFile,
+          serverAnnotationsFile,
+          unit.protectedPaths,
+          scenariosForRepairVerify,
+          model,
+          1,
+          unit.allowedDirectory,
+          (msg) => reporter.update('repair-verify', msg),
+          serverDomainAllowlists,
+          dynamicLists,
+          verifierSystem,
+          verifierSession,
+          unit.storedAnnotations,
+        );
+        const repairVerifyElapsed = (Date.now() - repairVerifyStart) / 1000;
         const repairVerifyText = `  ${unit.serverName} repair ${attempt}/${MAX_REPAIRS}: Verifying`;
-        const { result: repairVerifyResult } = await withSpinner(
-          repairVerifyText,
-          async (spinner) =>
-            verifyPolicy(
-              unit.constitutionText,
-              serverPolicyFile,
-              serverAnnotationsFile,
-              unit.protectedPaths,
-              scenariosForRepairVerify,
-              this.model,
-              1,
-              unit.allowedDirectory,
-              (msg) => {
-                spinner.text = `${repairVerifyText} — ${msg}`;
-              },
-              serverDomainAllowlists,
-              dynamicLists,
-              verifierSystem,
-              verifierSession,
-              unit.storedAnnotations,
-            ),
-          (r, elapsed) =>
-            r.pass
-              ? `${repairVerifyText}: passed (${elapsed.toFixed(1)}s)`
-              : `${repairVerifyText}: ${r.failedScenarios.length} failure(s) (${elapsed.toFixed(1)}s)`,
+        reporter.complete(
+          'repair-verify',
+          repairVerifyResult.pass
+            ? `${repairVerifyText}: passed (${repairVerifyElapsed.toFixed(1)}s)`
+            : `${repairVerifyText}: ${repairVerifyResult.failedScenarios.length} failure(s) (${repairVerifyElapsed.toFixed(1)}s)`,
+          repairVerifyElapsed,
         );
         verificationResult = repairVerifyResult;
 
         if (!verificationResult.pass) {
-          this.logVerboseFailures(verificationResult);
+          this.logVerboseFailures(verificationResult, reporter);
         }
 
         const { valid: validRepairProbes } = filterAndLogStructuralConflicts(
@@ -1092,6 +1236,7 @@ export class PipelineRunner {
           collectProbeScenarios(verificationResult),
           'Discarded probe (structural conflict)',
           unit.storedAnnotations,
+          reporter,
         );
         accumulatedProbes.push(...validRepairProbes);
 
@@ -1114,15 +1259,21 @@ export class PipelineRunner {
     } satisfies TestScenariosFile);
 
     if (!verificationResult.pass) {
+      reporter.fail(
+        'verifying',
+        new Error(
+          `Verification FAILED for server "${unit.serverName}" — artifacts written for inspection but policy may need review.`,
+        ),
+      );
       throw new Error(
         `Verification FAILED for server "${unit.serverName}" — artifacts written for inspection but policy may need review.`,
       );
     }
 
-    console.error(
+    const summary =
       `  ${chalk.green(unit.serverName)}: ${rules.length} rules, ${finalScenarios.length} scenarios` +
-        (repairAttempts > 0 ? `, ${repairAttempts} repair(s)` : ''),
-    );
+      (repairAttempts > 0 ? `, ${repairAttempts} repair(s)` : '');
+    reporter.done(summary);
 
     return {
       serverName: unit.serverName,
@@ -1143,37 +1294,38 @@ export class PipelineRunner {
     unit: ServerCompilationUnit,
     system: string | SystemModelMessage,
     inputHash: string,
+    model: LanguageModel,
+    reporter: ServerProgressReporter,
   ): Promise<{
     rules: CompiledRule[];
     listDefinitions: ListDefinition[];
     inputHash: string;
     session: ConstitutionCompilerSession;
   }> {
-    const stepText = `  ${unit.serverName}: Compiling rules`;
+    reporter.update('compiling');
+    const start = Date.now();
 
     const session = new ConstitutionCompilerSession({
       system,
-      model: this.model,
+      model,
       annotations: unit.annotations,
       schemaOptions: { requireServer: true },
     });
 
-    const { result: compilationOutput } = await withSpinner(
-      stepText,
-      async (spinner) => {
-        const output = await session.compile((msg) => {
-          spinner.text = `${stepText} — ${msg}`;
-        });
-        const compiledRules = resolveRulePaths(output.rules);
-        validateRulesOrThrow(compiledRules, output.listDefinitions);
-        return { rules: compiledRules, listDefinitions: output.listDefinitions };
-      },
-      (output, elapsed) => `${stepText}: ${output.rules.length} rules (${elapsed.toFixed(1)}s)`,
+    const output = await session.compile((msg) => reporter.update('compiling', msg));
+    const compiledRules = resolveRulePaths(output.rules);
+    validateRulesOrThrow(compiledRules, output.listDefinitions, reporter);
+
+    const elapsed = (Date.now() - start) / 1000;
+    reporter.complete(
+      'compiling',
+      `  ${unit.serverName}: Compiling rules: ${compiledRules.length} rules (${elapsed.toFixed(1)}s)`,
+      elapsed,
     );
 
     return {
-      rules: compilationOutput.rules,
-      listDefinitions: compilationOutput.listDefinitions,
+      rules: compiledRules,
+      listDefinitions: output.listDefinitions,
       inputHash,
       session,
     };
@@ -1190,6 +1342,7 @@ export class PipelineRunner {
     repairContext: RepairContext,
     system: string | SystemModelMessage,
     session: ConstitutionCompilerSession | undefined,
+    model: LanguageModel,
     onProgress?: (message: string) => void,
   ): Promise<{
     rules: CompiledRule[];
@@ -1206,7 +1359,7 @@ export class PipelineRunner {
         '', // Not needed when system prompt is provided
         annotations,
         { protectedPaths },
-        this.model,
+        model,
         repairContext,
         onProgress,
         system,
@@ -1238,6 +1391,7 @@ export class PipelineRunner {
     system: string | SystemModelMessage,
     session: ConstitutionCompilerSession | undefined,
     existingListDefinitions: ListDefinition[],
+    model: LanguageModel,
     onProgress?: (message: string) => void,
   ): Promise<{
     rules: CompiledRule[];
@@ -1257,6 +1411,7 @@ export class PipelineRunner {
         repairContext,
         system,
         session,
+        model,
         onProgress,
       );
     }
@@ -1281,8 +1436,11 @@ export class PipelineRunner {
     serverOutputDir: string,
     config: PipelineRunConfig,
     labelPrefix: string,
+    model: LanguageModel,
+    logContext: LlmLogContext,
+    reporter: ServerProgressReporter,
   ): Promise<DynamicListsFile> {
-    this.logContext.stepName = `resolve-lists-${labelPrefix.trim()}`;
+    logContext.stepName = `resolve-lists-${labelPrefix.trim()}`;
     const existingLists = loadExistingArtifact<DynamicListsFile>(serverOutputDir, 'dynamic-lists.json');
 
     const needsMcp = listDefinitions.some((d) => d.requiresMcp);
@@ -1291,26 +1449,24 @@ export class PipelineRunner {
       proxy = await connectViaProxy(listDefinitions, config.mcpServers, config.toolAnnotationsDir);
     }
 
-    const listStepText = `${labelPrefix}: Resolving dynamic lists`;
+    reporter.update('lists');
+    const start = Date.now();
     try {
-      const { result: resolvedLists } = await withSpinner(
-        listStepText,
-        async (spinner) =>
-          resolveAllLists(
-            listDefinitions,
-            {
-              model: this.model,
-              proxyConnection: proxy ? { client: proxy.client, tools: proxy.tools } : undefined,
-            },
-            existingLists,
-            (msg) => {
-              spinner.text = `${listStepText} — ${msg}`;
-            },
-          ),
-        (result, elapsed) => {
-          const count = Object.keys(result.lists).length;
-          return `${listStepText}: ${count} list(s) resolved (${elapsed.toFixed(1)}s)`;
+      const resolvedLists = await resolveAllLists(
+        listDefinitions,
+        {
+          model,
+          proxyConnection: proxy ? { client: proxy.client, tools: proxy.tools } : undefined,
         },
+        existingLists,
+        (msg) => reporter.update('lists', msg),
+      );
+      const elapsed = (Date.now() - start) / 1000;
+      const count = Object.keys(resolvedLists.lists).length;
+      reporter.complete(
+        'lists',
+        `${labelPrefix}: Resolving dynamic lists: ${count} list(s) resolved (${elapsed.toFixed(1)}s)`,
+        elapsed,
       );
       writeArtifact(serverOutputDir, 'dynamic-lists.json', resolvedLists);
       return resolvedLists;
@@ -1332,6 +1488,8 @@ export class PipelineRunner {
     permittedDirectories: string[] | undefined,
     dynamicLists: DynamicListsFile | undefined,
     storedAnnotations: StoredToolAnnotation[],
+    model: LanguageModel,
+    reporter: ServerProgressReporter,
   ): Promise<{
     scenarios: TestScenario[];
     inputHash: string;
@@ -1339,44 +1497,43 @@ export class PipelineRunner {
     const stepText = `${stepLabel} Generating test scenarios`;
 
     if (existingScenarios && existingScenarios.inputHash === inputHash) {
-      showCached(stepText);
+      reporter.complete('scenarios', `${stepText} ${chalk.dim('(cached)')}`, 0);
       return { scenarios: existingScenarios.scenarios, inputHash };
     }
 
-    const { result: scenarios } = await withSpinner(
-      stepText,
-      async (spinner) =>
-        generateScenarios(
-          constitutionText,
-          annotations,
-          handwrittenScenarios,
-          allowedDirectory,
-          this.model,
-          permittedDirectories,
-          (msg: string) => {
-            spinner.text = `${stepText} — ${msg}`;
-          },
-          dynamicLists,
-          (prompt: string) => this.cacheStrategy.wrapSystemPrompt(prompt),
-          storedAnnotations,
-        ),
-      (scenarios, elapsed) => {
-        const generatedCount = scenarios.length - handwrittenScenarios.length;
-        return `${stepText}: ${scenarios.length} scenarios (${handwrittenScenarios.length} handwritten + ${generatedCount} generated) (${elapsed.toFixed(1)}s)`;
-      },
+    reporter.update('scenarios');
+    const start = Date.now();
+    const scenarios = await generateScenarios(
+      constitutionText,
+      annotations,
+      handwrittenScenarios,
+      allowedDirectory,
+      model,
+      permittedDirectories,
+      (msg: string) => reporter.update('scenarios', msg),
+      dynamicLists,
+      (prompt: string) => this.cacheStrategy.wrapSystemPrompt(prompt),
+      storedAnnotations,
+    );
+    const elapsed = (Date.now() - start) / 1000;
+    const generatedCount = scenarios.length - handwrittenScenarios.length;
+    reporter.complete(
+      'scenarios',
+      `${stepText}: ${scenarios.length} scenarios (${handwrittenScenarios.length} handwritten + ${generatedCount} generated) (${elapsed.toFixed(1)}s)`,
+      elapsed,
     );
 
     return { scenarios, inputHash };
   }
 
-  private logVerboseFailures(result: VerificationResult): void {
-    console.error('');
-    console.error(chalk.red('Verification FAILED:'));
-    console.error(result.summary);
-    console.error('');
+  private logVerboseFailures(result: VerificationResult, reporter: ServerProgressReporter): void {
+    reporter.warn('');
+    reporter.warn(chalk.red('Verification FAILED:'));
+    reporter.warn(result.summary);
+    reporter.warn('');
     for (const f of result.failedScenarios) {
-      console.error(`  ${chalk.red('FAIL:')} ${f.scenario.description}`);
-      console.error(`    Expected: ${f.scenario.expectedDecision}, Got: ${f.actualDecision} (rule: ${f.matchingRule})`);
+      reporter.warn(`  ${chalk.red('FAIL:')} ${f.scenario.description}`);
+      reporter.warn(`    Expected: ${f.scenario.expectedDecision}, Got: ${f.actualDecision} (rule: ${f.matchingRule})`);
     }
   }
 }
