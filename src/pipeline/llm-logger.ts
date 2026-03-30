@@ -62,9 +62,13 @@ export interface LlmLogContext {
 export function createLlmLoggingMiddleware(
   logPath: string,
   context: LlmLogContext,
-  options?: { deltaLogging?: boolean; skipInit?: boolean },
+  options?: { deltaLogging?: boolean; appendOnly?: boolean },
 ): LanguageModelMiddleware {
-  if (!options?.skipInit) {
+  if (options?.appendOnly) {
+    // Ensure the directory exists without truncating the file.
+    // Used by per-server models whose log file is already initialized.
+    mkdirSync(dirname(logPath), { recursive: true });
+  } else {
     initLogFile(logPath);
   }
 

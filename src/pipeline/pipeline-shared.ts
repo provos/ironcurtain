@@ -272,11 +272,11 @@ export function createPerServerModel(
   baseLlm: LanguageModelV3,
   logPath: string,
   serverName: string,
-): { model: LanguageModel; logContext: LlmLogContext } {
+): { model: LanguageModelV3; logContext: LlmLogContext } {
   const logContext: LlmLogContext = { stepName: `init-${serverName}` };
   const model = wrapLanguageModel({
     model: baseLlm,
-    middleware: createLlmLoggingMiddleware(logPath, logContext, { deltaLogging: false, skipInit: true }),
+    middleware: createLlmLoggingMiddleware(logPath, logContext, { deltaLogging: false, appendOnly: true }),
   });
   return { model, logContext };
 }
@@ -286,14 +286,11 @@ export function createPerServerModel(
  * the semaphore before delegating. This caps total concurrent LLM API
  * calls across all servers.
  */
-export function createThrottledModel(model: LanguageModel, semaphore: LimitFunction): LanguageModel {
-  // LanguageModel is a union: string | LanguageModelV3 | LanguageModelV2.
-  // After wrapLanguageModel() it is always LanguageModelV3.
-  const m = model as LanguageModelV3;
+export function createThrottledModel(model: LanguageModelV3, semaphore: LimitFunction): LanguageModelV3 {
   return {
-    ...m,
-    doGenerate: (options: LanguageModelV3CallOptions) => semaphore(() => m.doGenerate(options)),
-    doStream: (options: LanguageModelV3CallOptions) => semaphore(() => m.doStream(options)),
+    ...model,
+    doGenerate: (options: LanguageModelV3CallOptions) => semaphore(() => model.doGenerate(options)),
+    doStream: (options: LanguageModelV3CallOptions) => semaphore(() => model.doStream(options)),
   };
 }
 
