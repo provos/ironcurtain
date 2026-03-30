@@ -31,10 +31,6 @@ export interface MuxTab {
   label: string;
   /** Persona name if this tab was spawned with a persona. */
   persona?: string;
-  /** Whether the child process has exited. */
-  status: 'running' | 'exited';
-  /** Exit code if exited. */
-  exitCode?: number;
   /** Whether escalation watching is available for this session. */
   escalationAvailable: boolean;
   /** Scroll offset into xterm buffer (null = live/bottom). */

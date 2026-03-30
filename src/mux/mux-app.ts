@@ -54,10 +54,6 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
   let nextTabNumber = 1;
   let running = false;
 
-  // Mouse event constants
-  const MOUSE_WHEEL_UP = 'MOUSE_WHEEL_UP';
-  const MOUSE_WHEEL_DOWN = 'MOUSE_WHEEL_DOWN';
-
   // Components (initialized in start())
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let term: any;
@@ -68,6 +64,22 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
 
   function getActiveTab(): MuxTab | undefined {
     return tabs[activeTabIndex];
+  }
+
+  function removeTab(tab: MuxTab): void {
+    if (tab.bridge.sessionId) {
+      escalationManager.removeSession(tab.bridge.sessionId);
+    }
+
+    const index = tabs.indexOf(tab);
+    if (index === -1) return;
+    tabs.splice(index, 1);
+
+    if (tabs.length === 0) {
+      activeTabIndex = 0;
+    } else if (activeTabIndex >= tabs.length) {
+      activeTabIndex = tabs.length - 1;
+    }
   }
 
   function resolveIroncurtainBin(): { bin: string; prefixArgs: string[] } {
@@ -112,7 +124,6 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
       bridge,
       label: opts?.persona ? `${sessionAgent} (${opts.persona})` : sessionAgent,
       persona: opts?.persona,
-      status: 'running',
       escalationAvailable: false,
       scrollOffset: null,
     };
@@ -127,27 +138,17 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
     });
 
     bridge.onExit((exitCode: number) => {
-      tab.status = 'exited';
-      tab.exitCode = exitCode;
-
       // Skip UI effects if the mux is shutting down or the tab was already removed
       if (!running || !tabs.includes(tab)) return;
 
-      if (bridge.sessionId) {
-        escalationManager.removeSession(bridge.sessionId);
-      }
-
-      renderer.redrawTabBar();
-
-      if (getActiveTab() === tab) {
-        showMessage(`Session #${tab.number} exited with code ${exitCode}`);
-      }
-
+      removeTab(tab);
+      renderer.fullRedraw();
+      showMessage(`Session #${tab.number} exited with code ${exitCode}`);
       process.stderr.write('\x07');
     });
 
     bridge.onSessionDiscovered((registration) => {
-      if (registration && tab.status === 'running') {
+      if (registration && tabs.includes(tab)) {
         tab.escalationAvailable = true;
         escalationManager.addSession(registration);
         tab.label = tab.persona ? `${registration.label} [${tab.persona}]` : registration.label;
@@ -168,30 +169,14 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
   }
 
   function closeTab(tabNumber: number): void {
-    const index = tabs.findIndex((t) => t.number === tabNumber);
-    if (index === -1) {
+    const tab = tabs.find((t) => t.number === tabNumber);
+    if (!tab) {
       showMessage(`No tab #${tabNumber}`);
       return;
     }
 
-    const tab = tabs[index];
     tab.bridge.kill();
-
-    if (tab.bridge.sessionId) {
-      escalationManager.removeSession(tab.bridge.sessionId);
-    }
-
-    tabs.splice(index, 1);
-
-    if (tabs.length === 0) {
-      activeTabIndex = 0;
-      renderer.fullRedraw();
-      return;
-    }
-
-    if (activeTabIndex >= tabs.length) {
-      activeTabIndex = tabs.length - 1;
-    }
+    removeTab(tab);
     renderer.fullRedraw();
   }
 
@@ -211,6 +196,10 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
   function showMessage(message: string): void {
     logger.info(message);
     renderer.showMessage(message);
+  }
+
+  function baseMode(): 'pty' | 'command' {
+    return inputHandler.mode === 'command' ? 'command' : 'pty';
   }
 
   function navigateEscalationTab(direction: 'next' | 'prev'): void {
@@ -346,8 +335,7 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
           break;
         }
         const sortedNums = escalationManager.sortedDisplayNumbers();
-        const previousMode: 'pty' | 'command' = inputHandler.mode === 'command' ? 'command' : 'pty';
-        inputHandler.enterEscalationPickerMode(sortedNums[0], previousMode);
+        inputHandler.enterEscalationPickerMode(sortedNums[0], baseMode());
         renderer.fullRedraw();
         break;
       }
@@ -652,9 +640,9 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
       // Mouse events come through a separate 'mouse' emitter, not 'key'
       term.on('mouse', (name: string) => {
         if (!running) return;
-        if (name === MOUSE_WHEEL_UP) {
+        if (name === 'MOUSE_WHEEL_UP') {
           void handleAction({ kind: 'scroll-up', amount: SCROLL_LINES });
-        } else if (name === MOUSE_WHEEL_DOWN) {
+        } else if (name === 'MOUSE_WHEEL_DOWN') {
           void handleAction({ kind: 'scroll-down', amount: SCROLL_LINES });
         }
       });
@@ -697,7 +685,7 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
             !inputHandler.escalationDismissed || highestPending > inputHandler.escalationDismissedAtNumber;
 
           if (shouldAutoOpen) {
-            const previousMode: 'pty' | 'command' = mode === 'pty' ? 'pty' : mode === 'command' ? 'command' : 'pty'; // if in another picker, treat as pty
+            const previousMode = baseMode();
 
             // If user is in another picker, cancel it first
             if (mode === 'picker') {

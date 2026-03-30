@@ -214,8 +214,7 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
     for (let i = 0; i < tabs.length; i++) {
       const tab = tabs[i];
       const isActive = i === activeIdx;
-      const statusSuffix = tab.status === 'exited' ? ' exited' : '';
-      const label = ` #${tab.number} ${tab.label}${statusSuffix} `;
+      const label = ` #${tab.number} ${tab.label} `;
 
       if (isActive) {
         term.bgWhite.black(label);
