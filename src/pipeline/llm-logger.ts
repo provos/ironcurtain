@@ -62,9 +62,11 @@ export interface LlmLogContext {
 export function createLlmLoggingMiddleware(
   logPath: string,
   context: LlmLogContext,
-  options?: { deltaLogging?: boolean },
+  options?: { deltaLogging?: boolean; skipInit?: boolean },
 ): LanguageModelMiddleware {
-  initLogFile(logPath);
+  if (!options?.skipInit) {
+    initLogFile(logPath);
+  }
 
   const deltaLogging = options?.deltaLogging ?? false;
 

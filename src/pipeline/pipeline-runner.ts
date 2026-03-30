@@ -716,6 +716,7 @@ export class PipelineRunner {
         results.push(result);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
+        reporter.fail('compiling', err instanceof Error ? err : new Error(msg));
         console.error(`  ${chalk.red(`Server "${serverName}" failed:`)} ${msg}`);
         failedServers.push(serverName);
       }
@@ -744,14 +745,19 @@ export class PipelineRunner {
           const { model, logContext } = createPerServerModel(this.baseLlm, this.logPath, serverName);
           const throttledModel = createThrottledModel(model, llmSemaphore);
           const reporter = new ParallelProgressReporter(display, serverName);
-          return this.compileServer(
-            buildUnit(serverName),
-            config,
-            constitutionHash,
-            throttledModel,
-            logContext,
-            reporter,
-          );
+          try {
+            return await this.compileServer(
+              buildUnit(serverName),
+              config,
+              constitutionHash,
+              throttledModel,
+              logContext,
+              reporter,
+            );
+          } catch (err) {
+            reporter.fail('compiling', err instanceof Error ? err : new Error(String(err)));
+            throw err;
+          }
         }),
       ),
     );
@@ -1142,6 +1148,7 @@ export class PipelineRunner {
             listDefinitions,
             model,
             (msg) => reporter.update('repair-compile', msg),
+            reporter,
           );
           const repairCompileElapsed = (Date.now() - repairCompileStart) / 1000;
           reporter.complete(
@@ -1271,7 +1278,7 @@ export class PipelineRunner {
     }
 
     const summary =
-      `  ${chalk.green(unit.serverName)}: ${rules.length} rules, ${finalScenarios.length} scenarios` +
+      `${rules.length} rules, ${finalScenarios.length} scenarios` +
       (repairAttempts > 0 ? `, ${repairAttempts} repair(s)` : '');
     reporter.done(summary);
 
@@ -1344,6 +1351,7 @@ export class PipelineRunner {
     session: ConstitutionCompilerSession | undefined,
     model: LanguageModel,
     onProgress?: (message: string) => void,
+    reporter?: ServerProgressReporter,
   ): Promise<{
     rules: CompiledRule[];
     listDefinitions: ListDefinition[];
@@ -1366,7 +1374,7 @@ export class PipelineRunner {
       );
     }
     const compiledRules = resolveRulePaths(output.rules);
-    validateRulesOrThrow(compiledRules, output.listDefinitions);
+    validateRulesOrThrow(compiledRules, output.listDefinitions, reporter);
 
     return {
       rules: compiledRules,
@@ -1393,6 +1401,7 @@ export class PipelineRunner {
     existingListDefinitions: ListDefinition[],
     model: LanguageModel,
     onProgress?: (message: string) => void,
+    reporter?: ServerProgressReporter,
   ): Promise<{
     rules: CompiledRule[];
     listDefinitions: ListDefinition[];
@@ -1413,10 +1422,11 @@ export class PipelineRunner {
         session,
         model,
         onProgress,
+        reporter,
       );
     }
     const compiledRules = resolveRulePaths(output.rules);
-    validateRulesOrThrow(compiledRules, output.listDefinitions);
+    validateRulesOrThrow(compiledRules, output.listDefinitions, reporter);
 
     return {
       rules: compiledRules,

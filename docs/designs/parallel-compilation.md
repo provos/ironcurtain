@@ -2,7 +2,7 @@
 
 ## Overview
 
-`compileAllServers()` in `pipeline-runner.ts:610-682` processes servers sequentially in a `for` loop. Per the performance investigation (`compile-policy-performance.md`), all 5 exec-assistant servers are independent -- their compilation, scenario generation, and verification have no cross-server dependencies. Sequential execution means total time = sum of all servers (~16.4 min). Parallel execution would reduce this to time of slowest server (~7 min for git).
+`compileAllServers()` in `pipeline-runner.ts` processes servers sequentially in a `for` loop. Per the performance investigation (`compile-policy-performance.md`), all 5 exec-assistant servers are independent -- their compilation, scenario generation, and verification have no cross-server dependencies. Sequential execution means total time = sum of all servers (~16.4 min). Parallel execution would reduce this to time of slowest server (~7 min for git).
 
 This document designs the parallelization of `compileAllServers()` with options for each design choice.
 

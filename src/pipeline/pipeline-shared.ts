@@ -276,7 +276,7 @@ export function createPerServerModel(
   const logContext: LlmLogContext = { stepName: `init-${serverName}` };
   const model = wrapLanguageModel({
     model: baseLlm,
-    middleware: createLlmLoggingMiddleware(logPath, logContext, { deltaLogging: false }),
+    middleware: createLlmLoggingMiddleware(logPath, logContext, { deltaLogging: false, skipInit: true }),
   });
   return { model, logContext };
 }
@@ -362,6 +362,8 @@ export class SpinnerProgressReporter implements ServerProgressReporter {
     if (this.spinner) {
       this.spinner.succeed(summary);
       this.spinner = undefined;
+    } else {
+      console.error(summary);
     }
   }
 
@@ -387,7 +389,7 @@ export class SpinnerProgressReporter implements ServerProgressReporter {
 
   done(summary: string): void {
     this.stopSpinner();
-    console.error(summary);
+    console.error(`  ${chalk.green(this.serverName)}: ${summary}`);
   }
 
   private formatText(phase: CompilationPhase, detail?: string): string {

@@ -141,6 +141,8 @@ export class ParallelProgressDisplay {
         process.stderr.write(
           `  ${chalk.green(name.padEnd(this.maxNameLength))}  ${state.summary ?? 'done'}  (${totalElapsed}s)\n`,
         );
+      } else if (state.phase === 'cached') {
+        process.stderr.write(`  ${chalk.green(name.padEnd(this.maxNameLength))}  cached  (${totalElapsed}s)\n`);
       } else {
         process.stderr.write(
           `  ${chalk.yellow(name.padEnd(this.maxNameLength))}  ${state.phase}  (${totalElapsed}s)\n`,

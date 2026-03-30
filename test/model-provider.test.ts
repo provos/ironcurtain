@@ -150,4 +150,37 @@ describe('createLanguageModel', () => {
     const config = createTestUserConfig();
     await expect(createLanguageModel('mistral:model', config)).rejects.toThrow(/Unknown model provider "mistral"/);
   });
+
+  it('passes proxy fetch when HTTPS_PROXY is set', async () => {
+    const original = process.env.HTTPS_PROXY;
+    process.env.HTTPS_PROXY = 'http://test-proxy:8080';
+    try {
+      const config = createTestUserConfig();
+      await createLanguageModel('anthropic:claude-sonnet-4-6', config);
+      const { createAnthropic } = await import('@ai-sdk/anthropic');
+      expect(createAnthropic).toHaveBeenCalledWith(expect.objectContaining({ fetch: expect.any(Function) }));
+    } finally {
+      if (original) process.env.HTTPS_PROXY = original;
+      else delete process.env.HTTPS_PROXY;
+    }
+  });
+
+  it('omits proxy fetch when no proxy env vars are set', async () => {
+    const origHttps = process.env.HTTPS_PROXY;
+    const origHttp = process.env.HTTP_PROXY;
+    delete process.env.HTTPS_PROXY;
+    delete process.env.HTTP_PROXY;
+    try {
+      // Use vi.resetModules + dynamic import to get a fresh module without cached proxy
+      vi.resetModules();
+      const { createLanguageModel: freshCreateLanguageModel } = await import('../src/config/model-provider.js');
+      const config = createTestUserConfig();
+      await freshCreateLanguageModel('anthropic:claude-sonnet-4-6', config);
+      const { createAnthropic } = await import('@ai-sdk/anthropic');
+      expect(createAnthropic).toHaveBeenCalledWith(expect.objectContaining({ fetch: undefined }));
+    } finally {
+      if (origHttps) process.env.HTTPS_PROXY = origHttps;
+      if (origHttp) process.env.HTTP_PROXY = origHttp;
+    }
+  });
 });
