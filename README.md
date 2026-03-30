@@ -203,7 +203,8 @@ compiles to:
 Any call that doesn't match an explicit `allow` or `escalate` rule is **denied by default**.
 
 ```bash
-ironcurtain annotate-tools                      # Classify MCP tool arguments (re-run when servers change)
+ironcurtain annotate-tools --server filesystem   # Annotate one server (merge with existing)
+ironcurtain annotate-tools --all                 # Re-annotate all servers
 ironcurtain compile-policy                      # Compile constitution into rules and verify
 ironcurtain refresh-lists                       # Re-resolve dynamic lists without full recompilation
 ironcurtain refresh-lists --list major-news     # Refresh a single list
@@ -252,7 +253,7 @@ IronCurtain ships with six pre-configured MCP servers. All tool calls (except me
 | **Google Workspace** | 128   | Gmail, Calendar, Drive, Docs, Sheets — requires OAuth setup via `ironcurtain auth`                                |
 | **Memory**           | 5     | Persistent semantic memory with hybrid vector+keyword search, LLM summarization, and automatic compaction. Enabled for persona and cron sessions. |
 
-Read-only operations are allowed by default policy; mutations (writes, pushes, PR creation) escalate for human approval. Tools use `server.tool` naming (e.g., `filesystem.read_file`, `memory.recall`).
+Read-only operations are allowed by default policy; mutations (writes, pushes, PR creation) escalate for human approval. Tools use `server.tool` naming (e.g., `filesystem.read_file`, `memory.recall`). See [ADDING_MCP_SERVERS.md](ADDING_MCP_SERVERS.md) to add your own.
 
 ### Network Passthrough (Docker Agent Mode)
 

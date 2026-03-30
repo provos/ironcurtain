@@ -29,7 +29,7 @@ const topLevelSpec: CommandSpec = {
     { name: 'auth', description: 'Manage OAuth providers (import credentials, authorize, revoke)' },
     { name: 'setup', description: 'Run the first-start wizard (always runs)' },
     { name: 'setup-signal', description: 'Interactive Signal transport onboarding' },
-    { name: 'annotate-tools', description: 'Classify MCP tool arguments via LLM' },
+    { name: 'annotate-tools', description: 'Classify MCP tool arguments via LLM (--server <name> or --all)' },
     { name: 'compile-policy', description: 'Compile constitution into enforceable policy rules' },
     { name: 'refresh-lists', description: 'Re-resolve dynamic lists without full recompilation' },
     { name: 'customize-policy', description: 'Customize your policy via LLM-assisted conversation' },
@@ -94,7 +94,7 @@ switch (subcommand) {
   }
   case 'annotate-tools': {
     const { main } = await import('./pipeline/annotate.js');
-    await main();
+    await main(process.argv.slice(3));
     break;
   }
   case 'compile-policy': {

@@ -27,7 +27,7 @@ IronCurtain is a secure agent runtime that mediates between an AI agent and MCP 
 - `ironcurtain start "your task"` - run the agent with a task (or `npm start "your task"` during development)
 - `ironcurtain start -w ./path "task"` - run the agent in an existing directory instead of a fresh sandbox
 - `ironcurtain config` - interactively edit `~/.ironcurtain/config.json` (or `npm run config`)
-- `ironcurtain annotate-tools` - classify MCP tool arguments via LLM (or `npm run annotate-tools`)
+- `ironcurtain annotate-tools --server <name>` - classify MCP tool arguments via LLM for a single server (or `npm run annotate-tools -- --server <name>`). Use `--all` to annotate all servers.
 - `ironcurtain compile-policy` - compile constitution into policy rules (or `npm run compile-policy`). Supports `--constitution <path>`, `--output-dir <path>`, and `--server <name>` flags for alternative constitutions, output directories, and single-server debugging. The read-only policy is compiled via `npm run compile-policy -- --no-mcp --constitution src/config/constitution-readonly.md --output-dir src/config/generated-readonly`.
 - `ironcurtain refresh-lists [--list <name>] [--with-mcp]` - re-resolve dynamic lists without full recompilation
 - `npm run build` - TypeScript compilation + copy config assets to `dist/`
@@ -83,7 +83,7 @@ Adding a new MCP server requires changes across configuration, policy, and tests
 5. **`src/pipeline/handwritten-scenarios.ts`** — Add ground-truth scenarios for critical policy decisions involving the new server.
 6. **`test/fixtures/test-policy.ts`** — Add representative tools to `testToolAnnotations.servers` and corresponding rules to `testCompiledPolicy.rules`.
 7. **`test/policy-engine.test.ts`** — Add unit tests verifying the new server's tools are correctly allowed/escalated/denied.
-8. **Run the pipeline** — `npm run annotate-tools` (generates annotations), then `npm run compile-policy` (compiles policy rules). Both commands gracefully skip servers that fail to connect (e.g., Docker not available).
+8. **Run the pipeline** — `npm run annotate-tools -- --server <name>` (generates annotations for the new server, merging with existing), then `npm run compile-policy` (compiles policy rules). Use `--all` instead of `--server` to re-annotate all servers. Both commands gracefully skip servers that fail to connect (e.g., Docker not available).
 
 ## Publishing / Workspace Dependencies
 
