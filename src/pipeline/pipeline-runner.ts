@@ -901,8 +901,6 @@ export class PipelineRunner {
 
     let { rules } = compileResult;
     let { listDefinitions } = compileResult;
-    let compilerSession: ConstitutionCompilerSession | undefined = compileResult.session;
-
     // Validate server scoping (debug assertion)
     validateServerScoping(unit.serverName, rules);
 
@@ -921,7 +919,7 @@ export class PipelineRunner {
     }
 
     // Build per-server policy artifact for engine construction
-    let serverPolicyFile = buildPolicyArtifact(constitutionHash, rules, listDefinitions, inputHash);
+    const serverPolicyFile = buildPolicyArtifact(constitutionHash, rules, listDefinitions, inputHash);
 
     // Persist early so intermediate results survive scenario/verification failures
     const writeServerPolicy = () =>
@@ -1091,7 +1089,7 @@ export class PipelineRunner {
     const serverNames = [unit.serverName] as [string, ...string[]];
     const serverTools = unit.annotations.map((a) => ({ serverName: a.serverName, toolName: a.toolName }));
 
-    let verifierSystem = this.cacheStrategy.wrapSystemPrompt(
+    const verifierSystem = this.cacheStrategy.wrapSystemPrompt(
       buildJudgeSystemPrompt(
         unit.constitutionText,
         serverPolicyFile,
@@ -1102,7 +1100,7 @@ export class PipelineRunner {
         unit.storedAnnotations,
       ),
     );
-    let verifierSession = new PolicyVerifierSession({
+    const verifierSession = new PolicyVerifierSession({
       system: verifierSystem,
       model,
       serverNames,
