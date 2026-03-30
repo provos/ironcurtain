@@ -57,15 +57,23 @@ export interface AnnotateToolsCliArgs {
 }
 
 export function parseAnnotateArgs(argv: string[] = process.argv.slice(2)): AnnotateToolsCliArgs {
-  const { values } = parseArgs({
-    args: argv,
-    options: {
-      server: { type: 'string' },
-      all: { type: 'boolean' },
-      help: { type: 'boolean' },
-    },
-    strict: true,
-  });
+  let values: ReturnType<typeof parseArgs>['values'];
+  try {
+    ({ values } = parseArgs({
+      args: argv,
+      options: {
+        server: { type: 'string' },
+        all: { type: 'boolean' },
+        help: { type: 'boolean', short: 'h' },
+      },
+      strict: true,
+    }));
+  } catch (err) {
+    console.error(chalk.red(err instanceof Error ? err.message : String(err)));
+    console.error('');
+    printHelp(ANNOTATE_HELP);
+    process.exit(1);
+  }
   return {
     server: typeof values.server === 'string' ? values.server : undefined,
     all: values.all === true,
@@ -241,7 +249,7 @@ export async function main(argv?: string[]): Promise<void> {
   }
   const config = loadPipelineConfig();
 
-  if (cliArgs.server && !(cliArgs.server in config.mcpServers)) {
+  if (cliArgs.server && !Object.hasOwn(config.mcpServers, cliArgs.server)) {
     const available = Object.keys(config.mcpServers).join(', ');
     console.error(chalk.red(`Error: unknown server '${cliArgs.server}'.`));
     console.error(`Available servers: ${available}`);
@@ -270,6 +278,11 @@ export async function main(argv?: string[]): Promise<void> {
     : config.mcpServers;
   const connections = await connectAndDiscoverTools(serversToAnnotate);
 
+  if (cliArgs.server && !connections.has(cliArgs.server)) {
+    console.error(chalk.red(`Error: failed to connect to server '${cliArgs.server}'.`));
+    process.exit(1);
+  }
+
   try {
     const existingAnnotations = loadExistingArtifact<StoredToolAnnotationsFile>(
       config.generatedDir,
@@ -288,7 +301,7 @@ export async function main(argv?: string[]): Promise<void> {
 
     if (cliArgs.server && existingAnnotations) {
       for (const [name, data] of Object.entries(existingAnnotations.servers)) {
-        if (!(name in toolAnnotationsFile.servers)) {
+        if (!Object.hasOwn(toolAnnotationsFile.servers, name)) {
           toolAnnotationsFile.servers[name] = data;
         }
       }
