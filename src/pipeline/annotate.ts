@@ -41,7 +41,7 @@ const ANNOTATE_HELP: CommandSpec = {
   options: [
     { flag: 'server', description: 'Annotate only this MCP server (required unless --all)', placeholder: '<name>' },
     { flag: 'all', description: 'Annotate all MCP servers' },
-    { flag: 'help', description: 'Show this help message' },
+    { flag: 'help', short: 'h', description: 'Show this help message' },
   ],
   examples: [
     'ironcurtain annotate-tools --server filesystem',
@@ -57,23 +57,15 @@ export interface AnnotateToolsCliArgs {
 }
 
 export function parseAnnotateArgs(argv: string[] = process.argv.slice(2)): AnnotateToolsCliArgs {
-  let values: ReturnType<typeof parseArgs>['values'];
-  try {
-    ({ values } = parseArgs({
-      args: argv,
-      options: {
-        server: { type: 'string' },
-        all: { type: 'boolean' },
-        help: { type: 'boolean', short: 'h' },
-      },
-      strict: true,
-    }));
-  } catch (err) {
-    console.error(chalk.red(err instanceof Error ? err.message : String(err)));
-    console.error('');
-    printHelp(ANNOTATE_HELP);
-    process.exit(1);
-  }
+  const { values } = parseArgs({
+    args: argv,
+    options: {
+      server: { type: 'string' },
+      all: { type: 'boolean' },
+      help: { type: 'boolean', short: 'h' },
+    },
+    strict: true,
+  });
   return {
     server: typeof values.server === 'string' ? values.server : undefined,
     all: values.all === true,
@@ -227,7 +219,15 @@ async function disconnectAll(connections: Map<string, ServerConnection>): Promis
 // ---------------------------------------------------------------------------
 
 export async function main(argv?: string[]): Promise<void> {
-  const cliArgs = parseAnnotateArgs(argv);
+  let cliArgs: AnnotateToolsCliArgs;
+  try {
+    cliArgs = parseAnnotateArgs(argv);
+  } catch (err) {
+    console.error(chalk.red(err instanceof Error ? err.message : String(err)));
+    console.error('');
+    printHelp(ANNOTATE_HELP);
+    process.exit(1);
+  }
 
   if (checkHelp(cliArgs, ANNOTATE_HELP)) return;
 
@@ -299,11 +299,18 @@ export async function main(argv?: string[]): Promise<void> {
 
     const toolAnnotationsFile = buildAnnotationsArtifact(annotationResults);
 
-    if (cliArgs.server && existingAnnotations) {
+    if (existingAnnotations) {
       for (const [name, data] of Object.entries(existingAnnotations.servers)) {
-        if (!Object.hasOwn(toolAnnotationsFile.servers, name)) {
+        if (Object.hasOwn(toolAnnotationsFile.servers, name)) continue;
+        if (cliArgs.server) {
+          // Single-server mode: preserve all other servers
+          toolAnnotationsFile.servers[name] = data;
+        } else if (Object.hasOwn(serversToAnnotate, name)) {
+          // --all mode: preserve annotations for servers that were requested
+          // but failed to connect (don't drop them silently)
           toolAnnotationsFile.servers[name] = data;
         }
+        // --all mode: servers not in config are intentionally dropped
       }
     }
 
