@@ -792,8 +792,6 @@ export class PipelineRunner {
         results.push(outcome.value);
       } else {
         const serverName = filteredEntries[i][0];
-        const msg = outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason);
-        console.error(`  ${chalk.red(`Server "${serverName}" failed:`)} ${msg}`);
         failedServers.push(serverName);
       }
     }
@@ -1011,12 +1009,6 @@ export class PipelineRunner {
     } satisfies TestScenariosFile);
 
     if (!state.verificationResult.pass) {
-      reporter.fail(
-        'verifying',
-        new Error(
-          `Verification FAILED for server "${unit.serverName}" — artifacts written for inspection but policy may need review.`,
-        ),
-      );
       throw new Error(
         `Verification FAILED for server "${unit.serverName}" — artifacts written for inspection but policy may need review.`,
       );
