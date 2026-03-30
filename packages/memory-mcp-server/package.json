@@ -18,7 +18,9 @@
     ".": "./dist/index.js",
     "./prompts": "./dist/prompts.js"
   },
-  "files": ["dist/"],
+  "files": [
+    "dist/"
+  ],
   "publishConfig": {
     "access": "public"
   },
@@ -36,16 +38,16 @@
     "format:check": "prettier --check \"src/**/*.ts\" \"test/**/*.ts\""
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.27.1",
-    "better-sqlite3": "^12.6.2",
-    "sqlite-vec": "^0.1.7-alpha.2",
     "@huggingface/transformers": "^3.8.1",
-    "openai": "^6.27.0"
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "better-sqlite3": "^12.8.0",
+    "openai": "^6.33.0",
+    "sqlite-vec": "^0.1.7"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
-    "vitest": "^4.0.18",
-    "@types/better-sqlite3": "^7.6.13"
+    "vitest": "^4.0.18"
   }
 }
