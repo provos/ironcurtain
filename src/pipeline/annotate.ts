@@ -9,12 +9,14 @@
 
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseArgs } from 'node:util';
 import type { LanguageModel } from 'ai';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { permissiveJsonSchemaValidator } from '../trusted-process/permissive-output-validator.js';
 import chalk from 'chalk';
 import type { MCPServerConfig } from '../config/types.js';
+import { checkHelp, printHelp, type CommandSpec } from '../cli-help.js';
 import {
   computeHash,
   createPipelineLlm,
@@ -27,6 +29,49 @@ import {
 import { annotateTools, buildAnnotationPrompt } from './tool-annotator.js';
 import type { StoredToolAnnotation, StoredToolAnnotationsFile } from './types.js';
 import { VERSION } from '../version.js';
+
+// ---------------------------------------------------------------------------
+// CLI Argument Parsing
+// ---------------------------------------------------------------------------
+
+const ANNOTATE_HELP: CommandSpec = {
+  name: 'ironcurtain annotate-tools',
+  description: 'Classify MCP tool arguments via LLM',
+  usage: ['ironcurtain annotate-tools --server <name>', 'ironcurtain annotate-tools --all'],
+  options: [
+    { flag: 'server', description: 'Annotate only this MCP server (required unless --all)', placeholder: '<name>' },
+    { flag: 'all', description: 'Annotate all MCP servers' },
+    { flag: 'help', description: 'Show this help message' },
+  ],
+  examples: [
+    'ironcurtain annotate-tools --server filesystem',
+    'ironcurtain annotate-tools --server github',
+    'ironcurtain annotate-tools --all',
+  ],
+};
+
+export interface AnnotateToolsCliArgs {
+  server?: string;
+  all: boolean;
+  help: boolean;
+}
+
+export function parseAnnotateArgs(argv: string[] = process.argv.slice(2)): AnnotateToolsCliArgs {
+  const { values } = parseArgs({
+    args: argv,
+    options: {
+      server: { type: 'string' },
+      all: { type: 'boolean' },
+      help: { type: 'boolean' },
+    },
+    strict: true,
+  });
+  return {
+    server: typeof values.server === 'string' ? values.server : undefined,
+    all: values.all === true,
+    help: values.help === true,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // MCP Server Connection & Tool Discovery
@@ -173,13 +218,35 @@ async function disconnectAll(connections: Map<string, ServerConnection>): Promis
 // Main
 // ---------------------------------------------------------------------------
 
-export async function main(): Promise<void> {
+export async function main(argv?: string[]): Promise<void> {
+  const cliArgs = parseAnnotateArgs(argv);
+
+  if (checkHelp(cliArgs, ANNOTATE_HELP)) return;
+
+  if (cliArgs.server && cliArgs.all) {
+    console.error(chalk.red('Error: --server and --all cannot be used together.'));
+    process.exit(1);
+  }
+  if (!cliArgs.server && !cliArgs.all) {
+    console.error(chalk.red('Error: specify --server <name> or --all.'));
+    console.error('');
+    printHelp(ANNOTATE_HELP);
+    process.exit(1);
+  }
+
   // The pipeline only lists tools — it never reads/writes through MCP servers.
   // Set a valid ALLOWED_DIRECTORY so the filesystem server can start.
   if (!process.env.ALLOWED_DIRECTORY) {
     process.env.ALLOWED_DIRECTORY = process.cwd();
   }
   const config = loadPipelineConfig();
+
+  if (cliArgs.server && !(cliArgs.server in config.mcpServers)) {
+    const available = Object.keys(config.mcpServers).join(', ');
+    console.error(chalk.red(`Error: unknown server '${cliArgs.server}'.`));
+    console.error(`Available servers: ${available}`);
+    process.exit(1);
+  }
 
   console.error(chalk.bold('Tool Annotation Pipeline'));
   console.error(chalk.bold('========================'));
@@ -190,12 +257,18 @@ export async function main(): Promise<void> {
   console.error(chalk.yellow('   This is a developer tool and should not be run lightly. All annotation'));
   console.error(chalk.yellow('   output must be manually reviewed for correctness before use in production.'));
   console.error('');
+  if (cliArgs.server) {
+    console.error(`Server: ${chalk.bold(cliArgs.server)}`);
+  }
   console.error(`Output: ${chalk.dim(config.generatedDir + '/')}`);
   console.error('');
 
   const { model: llm, logContext, logPath } = await createPipelineLlm(config.generatedDir, 'annotate');
 
-  const connections = await connectAndDiscoverTools(config.mcpServers);
+  const serversToAnnotate = cliArgs.server
+    ? { [cliArgs.server]: config.mcpServers[cliArgs.server] }
+    : config.mcpServers;
+  const connections = await connectAndDiscoverTools(serversToAnnotate);
 
   try {
     const existingAnnotations = loadExistingArtifact<StoredToolAnnotationsFile>(
@@ -212,6 +285,15 @@ export async function main(): Promise<void> {
     }
 
     const toolAnnotationsFile = buildAnnotationsArtifact(annotationResults);
+
+    if (cliArgs.server && existingAnnotations) {
+      for (const [name, data] of Object.entries(existingAnnotations.servers)) {
+        if (!(name in toolAnnotationsFile.servers)) {
+          toolAnnotationsFile.servers[name] = data;
+        }
+      }
+    }
+
     writeArtifact(config.generatedDir, 'tool-annotations.json', toolAnnotationsFile);
 
     const totalTools = [...annotationResults.values()].reduce((sum, r) => sum + r.annotations.length, 0);
