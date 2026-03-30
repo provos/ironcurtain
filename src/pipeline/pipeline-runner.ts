@@ -1366,16 +1366,10 @@ export class PipelineRunner {
           );
         }
 
-        state.serverPolicyFile = buildPolicyArtifact(
-          constitutionHash,
-          state.rules,
-          state.listDefinitions,
-          inputHash,
-        );
+        state.serverPolicyFile = buildPolicyArtifact(constitutionHash, state.rules, state.listDefinitions, inputHash);
 
         // Persist repaired rules immediately
         writeServerPolicy();
-
       } else {
         reporter.warn(`  ${chalk.dim('No rule-blamed failures — skipping recompilation')}`);
       }
