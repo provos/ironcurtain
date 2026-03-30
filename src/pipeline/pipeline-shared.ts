@@ -11,8 +11,10 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { LanguageModel } from 'ai';
+import type { LanguageModelV3, LanguageModelV3CallOptions } from '@ai-sdk/provider';
 import { wrapLanguageModel } from 'ai';
 import chalk from 'chalk';
+import type { LimitFunction } from 'p-limit';
 import ora, { type Ora } from 'ora';
 import { computeProtectedPaths, resolveMcpServerPaths } from '../config/index.js';
 import { createLanguageModel } from '../config/model-provider.js';
@@ -237,6 +239,8 @@ export function resolveRulePaths(rules: CompiledRule[]): CompiledRule[] {
 
 export interface PipelineLlm {
   model: LanguageModel;
+  /** The unwrapped base model (no middleware). Used to create per-server models. */
+  baseLlm: LanguageModelV3;
   logContext: LlmLogContext;
   logPath: string;
   cacheStrategy: PromptCacheStrategy;
@@ -256,5 +260,176 @@ export async function createPipelineLlm(generatedDir: string, initialStepName: s
     middleware: createLlmLoggingMiddleware(logPath, logContext),
   });
   const cacheStrategy = createCacheStrategy(userConfig.policyModelId);
-  return { model, logContext, logPath, cacheStrategy };
+  return { model, baseLlm, logContext, logPath, cacheStrategy };
+}
+
+/**
+ * Creates a per-server wrapped LanguageModel with its own log context.
+ * The base LLM (expensive: API key, provider) is shared; only the
+ * lightweight logging middleware is per-server.
+ */
+export function createPerServerModel(
+  baseLlm: LanguageModelV3,
+  logPath: string,
+  serverName: string,
+): { model: LanguageModelV3; logContext: LlmLogContext } {
+  const logContext: LlmLogContext = { stepName: `init-${serverName}` };
+  const model = wrapLanguageModel({
+    model: baseLlm,
+    middleware: createLlmLoggingMiddleware(logPath, logContext, { deltaLogging: false, appendOnly: true }),
+  });
+  return { model, logContext };
+}
+
+/**
+ * Wraps a LanguageModel so that `doGenerate` and `doStream` acquire
+ * the semaphore before delegating. This caps total concurrent LLM API
+ * calls across all servers.
+ */
+export function createThrottledModel(model: LanguageModelV3, semaphore: LimitFunction): LanguageModelV3 {
+  return {
+    ...model,
+    doGenerate: (options: LanguageModelV3CallOptions) => semaphore(() => model.doGenerate(options)),
+    doStream: (options: LanguageModelV3CallOptions) => semaphore(() => model.doStream(options)),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Progress Reporting
+// ---------------------------------------------------------------------------
+
+export type CompilationPhase =
+  | 'cached'
+  | 'compiling'
+  | 'lists'
+  | 'scenarios'
+  | 'repair-scenarios'
+  | 'verifying'
+  | 'repair-compile'
+  | 'repair-verify'
+  | 'done';
+
+/**
+ * Abstracts progress reporting for a single server's compilation.
+ * Implementations differ between sequential (ora spinner) and parallel
+ * (multi-line status table) modes.
+ */
+export interface ServerProgressReporter {
+  /** Report a phase change for this server. */
+  update(phase: CompilationPhase, detail?: string): void;
+  /** Mark a phase as complete with timing information. */
+  complete(phase: CompilationPhase, summary: string, elapsed: number): void;
+  /** Report a warning or diagnostic message. */
+  warn(message: string): void;
+  /** Mark this server as failed. */
+  fail(phase: CompilationPhase, error: Error): void;
+  /** Mark this server as fully complete. */
+  done(summary: string): void;
+}
+
+/**
+ * Sequential-mode progress reporter backed by ora spinners.
+ * Preserves the exact behavior of the pre-parallel pipeline.
+ */
+export class SpinnerProgressReporter implements ServerProgressReporter {
+  private spinner: Ora | undefined;
+  private timer: ReturnType<typeof setInterval> | undefined;
+  private phaseStart = 0;
+  private readonly serverName: string;
+
+  constructor(serverName: string) {
+    this.serverName = serverName;
+  }
+
+  update(phase: CompilationPhase, detail?: string): void {
+    this.stopSpinner();
+    const text = this.formatText(phase, detail);
+    this.spinner = ora({ text, stream: process.stderr, discardStdin: false }).start();
+    this.phaseStart = Date.now();
+    const spinner = this.spinner;
+    this.timer = setInterval(() => {
+      const secs = ((Date.now() - this.phaseStart) / 1000).toFixed(0);
+      spinner.text = `${this.formatText(phase, detail)} (${secs}s)`;
+    }, 1000);
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars -- interface conformance
+  complete(phase: CompilationPhase, summary: string, elapsed: number): void {
+    this.stopTimer();
+    if (this.spinner) {
+      this.spinner.succeed(summary);
+      this.spinner = undefined;
+    } else {
+      console.error(summary);
+    }
+  }
+
+  warn(message: string): void {
+    // Pause spinner to avoid interleaving, then resume
+    if (this.spinner) {
+      this.spinner.stop();
+      console.error(message);
+      this.spinner.start();
+    } else {
+      console.error(message);
+    }
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars -- interface conformance
+  fail(phase: CompilationPhase, error: Error): void {
+    this.stopTimer();
+    if (this.spinner) {
+      this.spinner.fail();
+      this.spinner = undefined;
+    }
+  }
+
+  done(summary: string): void {
+    this.stopSpinner();
+    console.error(`  ${chalk.green(this.serverName)}: ${summary}`);
+  }
+
+  private formatText(phase: CompilationPhase, detail?: string): string {
+    const base = `  ${this.serverName}: ${phaseLabel(phase)}`;
+    return detail ? `${base} — ${detail}` : base;
+  }
+
+  private stopTimer(): void {
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = undefined;
+    }
+  }
+
+  private stopSpinner(): void {
+    this.stopTimer();
+    if (this.spinner) {
+      this.spinner.stop();
+      this.spinner = undefined;
+    }
+  }
+}
+
+/** Human-readable label for each compilation phase. */
+function phaseLabel(phase: CompilationPhase): string {
+  switch (phase) {
+    case 'cached':
+      return 'Compilation';
+    case 'compiling':
+      return 'Compiling rules';
+    case 'lists':
+      return 'Resolving dynamic lists';
+    case 'scenarios':
+      return 'Generating test scenarios';
+    case 'repair-scenarios':
+      return 'Repairing discarded scenarios';
+    case 'verifying':
+      return 'Verifying';
+    case 'repair-compile':
+      return 'Recompiling (repair)';
+    case 'repair-verify':
+      return 'Verifying (repair)';
+    case 'done':
+      return 'Done';
+  }
 }
