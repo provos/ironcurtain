@@ -160,6 +160,15 @@ export function writeServerSettings(
       ? { allowedDomains: [], deniedDomains: [] }
       : { allowedDomains: config.network.allowedDomains, deniedDomains: config.network.deniedDomains };
 
+  // Allow the SSH agent Unix socket so sandboxed servers (e.g., git) can
+  // authenticate via ssh-agent without falling back to passphrase prompts.
+  // SSH_AUTH_SOCK points to a Unix domain socket that the macOS Seatbelt
+  // sandbox blocks by default when network restrictions are active.
+  const sshAuthSock = process.env.SSH_AUTH_SOCK;
+  if (sshAuthSock && config.network !== false) {
+    (network as Record<string, unknown>).allowUnixSockets = [dirname(sshAuthSock)];
+  }
+
   const settings = {
     network,
     filesystem: {

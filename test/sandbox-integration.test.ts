@@ -1,7 +1,16 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, readFileSync, readdirSync, existsSync, rmSync, realpathSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import {
+  mkdtempSync,
+  readFileSync,
+  writeFileSync as fsWriteFileSync,
+  readdirSync,
+  existsSync,
+  rmSync,
+  realpathSync,
+} from 'node:fs';
+import { join, resolve, dirname } from 'node:path';
 import { tmpdir, homedir } from 'node:os';
+import { execFileSync } from 'node:child_process';
 import {
   checkSandboxAvailability,
   resolveSandboxConfig,
@@ -304,6 +313,93 @@ describe('writeServerSettings', () => {
     const content = JSON.parse(readFileSync(settingsPath, 'utf-8'));
     expect(content.filesystem.allowRead).toEqual(['/usr', '/etc', '/home/user/.nvm']);
     expect(content.filesystem.denyRead).toEqual(['~']);
+  });
+
+  it('includes SSH_AUTH_SOCK directory in allowUnixSockets when set', () => {
+    const originalSock = process.env.SSH_AUTH_SOCK;
+    try {
+      process.env.SSH_AUTH_SOCK = '/private/tmp/com.apple.launchd.abc123/Listeners';
+      const { settingsPath } = writeServerSettings(
+        'git',
+        {
+          allowWrite: ['/sandbox'],
+          allowRead: [],
+          denyRead: [],
+          denyWrite: [],
+          network: {
+            allowedDomains: ['github.com'],
+            deniedDomains: [],
+          },
+        },
+        settingsDir,
+      );
+
+      const content = JSON.parse(readFileSync(settingsPath, 'utf-8'));
+      expect(content.network.allowUnixSockets).toEqual(['/private/tmp/com.apple.launchd.abc123']);
+    } finally {
+      if (originalSock !== undefined) {
+        process.env.SSH_AUTH_SOCK = originalSock;
+      } else {
+        delete process.env.SSH_AUTH_SOCK;
+      }
+    }
+  });
+
+  it('does not include allowUnixSockets when SSH_AUTH_SOCK is unset', () => {
+    const originalSock = process.env.SSH_AUTH_SOCK;
+    try {
+      delete process.env.SSH_AUTH_SOCK;
+      const { settingsPath } = writeServerSettings(
+        'git',
+        {
+          allowWrite: ['/sandbox'],
+          allowRead: [],
+          denyRead: [],
+          denyWrite: [],
+          network: {
+            allowedDomains: ['github.com'],
+            deniedDomains: [],
+          },
+        },
+        settingsDir,
+      );
+
+      const content = JSON.parse(readFileSync(settingsPath, 'utf-8'));
+      expect(content.network.allowUnixSockets).toBeUndefined();
+    } finally {
+      if (originalSock !== undefined) {
+        process.env.SSH_AUTH_SOCK = originalSock;
+      } else {
+        delete process.env.SSH_AUTH_SOCK;
+      }
+    }
+  });
+
+  it('does not include allowUnixSockets when network is disabled', () => {
+    const originalSock = process.env.SSH_AUTH_SOCK;
+    try {
+      process.env.SSH_AUTH_SOCK = '/private/tmp/com.apple.launchd.abc123/Listeners';
+      const { settingsPath } = writeServerSettings(
+        'exec',
+        {
+          allowWrite: ['/sandbox'],
+          allowRead: [],
+          denyRead: [],
+          denyWrite: [],
+          network: false,
+        },
+        settingsDir,
+      );
+
+      const content = JSON.parse(readFileSync(settingsPath, 'utf-8'));
+      expect(content.network.allowUnixSockets).toBeUndefined();
+    } finally {
+      if (originalSock !== undefined) {
+        process.env.SSH_AUTH_SOCK = originalSock;
+      } else {
+        delete process.env.SSH_AUTH_SOCK;
+      }
+    }
   });
 });
 
@@ -858,4 +954,94 @@ describe.skipIf(!sandboxAvailable)('sandbox integration (requires bubblewrap+soc
       }
     }
   }, 30000);
+
+  // Verify that SSH agent socket is accessible from within the sandbox
+  // when allowUnixSockets includes the socket's parent directory.
+  it.skipIf(process.platform !== 'darwin' || !process.env.SSH_AUTH_SOCK)(
+    'sandboxed process can reach SSH agent socket via allowUnixSockets',
+    () => {
+      const sshAuthSock = process.env.SSH_AUTH_SOCK!;
+
+      // Write settings WITH allowUnixSockets (our fix)
+      const config: ResolvedSandboxParams = {
+        allowWrite: [sandboxDir],
+        allowRead: [],
+        denyRead: [],
+        denyWrite: [],
+        network: {
+          allowedDomains: ['github.com', '*.github.com'],
+          deniedDomains: [],
+        },
+      };
+      writeServerSettings('git-ssh-test', config, settingsDir);
+
+      // The settings file should have allowUnixSockets from our fix
+      const settingsPath = join(settingsDir, 'git-ssh-test.srt-settings.json');
+      const settings = JSON.parse(readFileSync(settingsPath, 'utf-8'));
+      expect(settings.network.allowUnixSockets).toEqual([dirname(sshAuthSock)]);
+
+      const wrapped = wrapServerCommand('git-ssh-test', 'node', [], { sandboxed: true, config }, settingsDir);
+
+      // Run ssh-add -l inside the sandbox — if the socket is reachable this exits 0
+      // and prints the key fingerprint. If blocked, ssh-add fails with exit code 2.
+      const result = execFileSync(
+        wrapped.command,
+        [
+          ...wrapped.args.slice(0, -1), // drop the original "-c node" command
+          'ssh-add -l',
+        ],
+        {
+          env: { ...process.env },
+          timeout: 10000,
+          encoding: 'utf-8',
+        },
+      );
+
+      // ssh-add -l should list at least one key (the user has keys loaded)
+      expect(result).toContain('SHA256:');
+    },
+    15000,
+  );
+
+  // Verify that WITHOUT allowUnixSockets, the SSH agent socket is NOT accessible.
+  it.skipIf(process.platform !== 'darwin' || !process.env.SSH_AUTH_SOCK)(
+    'sandboxed process cannot reach SSH agent socket without allowUnixSockets',
+    () => {
+      // Write settings WITHOUT allowUnixSockets by writing the file manually
+      const config: ResolvedSandboxParams = {
+        allowWrite: [sandboxDir],
+        allowRead: [],
+        denyRead: [],
+        denyWrite: [],
+        network: {
+          allowedDomains: ['github.com', '*.github.com'],
+          deniedDomains: [],
+        },
+      };
+      // writeServerSettings will add allowUnixSockets, so we overwrite the file
+      writeServerSettings('git-no-ssh', config, settingsDir);
+      const settingsPath = join(settingsDir, 'git-no-ssh.srt-settings.json');
+      const settings = JSON.parse(readFileSync(settingsPath, 'utf-8'));
+      delete settings.network.allowUnixSockets;
+      fsWriteFileSync(settingsPath, JSON.stringify(settings, null, 2));
+
+      const wrapped = wrapServerCommand('git-no-ssh', 'node', [], { sandboxed: true, config }, settingsDir);
+
+      // ssh-add -l should fail because the Unix socket is blocked
+      try {
+        execFileSync(wrapped.command, [...wrapped.args.slice(0, -1), 'ssh-add -l'], {
+          env: { ...process.env },
+          timeout: 10000,
+          encoding: 'utf-8',
+        });
+        // If we get here, the socket was unexpectedly reachable
+        expect.unreachable('ssh-add should have failed without allowUnixSockets');
+      } catch (err: unknown) {
+        // ssh-add exits with code 2 when it can't contact the agent
+        const error = err as { status: number; stderr: string; stdout: string };
+        expect(error.status).not.toBe(0);
+      }
+    },
+    15000,
+  );
 });
