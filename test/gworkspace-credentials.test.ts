@@ -65,7 +65,6 @@ describe('writeGWorkspaceCredentialFile', () => {
 
     const filePath = join(testDir, GWORKSPACE_CREDENTIAL_FILENAME);
     const stats = statSync(filePath);
-    // eslint-disable-next-line no-bitwise
     const mode = stats.mode & 0o777;
     expect(mode).toBe(0o600);
   });
