@@ -55,6 +55,12 @@ ironcurtain annotate-tools --server my-server
 
 This connects to the server, discovers its tools, and uses an LLM to classify each argument. The result is merged with existing annotations for other servers and written to `~/.ironcurtain/generated/tool-annotations.json`.
 
+**For IronCurtain developers:** The repository ships pre-generated annotations in `src/config/generated/`. After annotating, copy the updated file back so it ships with the package:
+
+```bash
+cp ~/.ironcurtain/generated/tool-annotations.json src/config/generated/tool-annotations.json
+```
+
 **Flags:**
 - `--server <name>` — Annotate only this server (default workflow)
 - `--all` — Re-annotate all servers
@@ -96,9 +102,11 @@ ironcurtain compile-policy
 
 This generates `compiled-policy.json` with enforceable rules, test scenarios, and verification. Review the compiled output to confirm the rules match your intent.
 
-### Adding Test Scenarios
+### Adding Tests
 
-For critical policy decisions, add ground-truth scenarios to `src/pipeline/handwritten-scenarios.ts`. These are checked during compilation to catch regressions. Also add test fixtures in `test/fixtures/test-policy.ts` and unit tests in `test/policy-engine.test.ts`.
+**Handwritten scenarios** (`src/pipeline/handwritten-scenarios.ts`) are reserved for universal safety invariants that must hold regardless of the user's constitution — currently filesystem sandbox containment rules. Only add scenarios here if your server introduces a new universal invariant (e.g., a hard safety boundary that no constitution should be able to override).
+
+**Policy unit tests** (`test/policy-engine.test.ts`) are where server-specific policy tests belong. Add test fixtures in `test/fixtures/test-policy.ts` with representative tools and rules, then write tests verifying your server's tools are correctly allowed/escalated/denied under the current compiled policy.
 
 ## Verification
 
