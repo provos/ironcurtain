@@ -18,6 +18,11 @@ Always stage and verify all relevant files before committing. Run `git status` b
 
 When fixing bugs or implementing features for cross-platform code (macOS/Linux/Docker), ensure changes are scoped to the correct platform and do not break other platforms. Always ask if unsure.
 
+## Safe Coding
+
+- **No shell string concatenation.** Never use `child_process.exec()` or build command strings by concatenating/interpolating untrusted values. Always use `spawn()`/`execFile()` with argument arrays so the OS handles escaping. Untrusted values must only appear in the args array, never in the command string itself.
+- **Encapsulate risky operations.** Security-critical operations (path resolution, credential handling, Docker command construction) must live in dedicated modules with safe public APIs. Application code should call the safe abstraction, not reimplement the logic inline.
+
 ## Project Overview
 
 IronCurtain is a secure agent runtime that mediates between an AI agent and MCP (Model Context Protocol) servers. Every tool call from the agent passes through a trusted process that evaluates it against policy rules (allow/deny/escalate) before routing to the real MCP server. This is a proof-of-concept implementation.
