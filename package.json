@@ -89,6 +89,7 @@
     "minimatch": "^10.2.1",
     "node-forge": "^1.3.3",
     "ora": "^9.3.0",
+    "p-limit": "^7.3.0",
     "shell-quote": "^1.8.3",
     "turndown": "^7.2.2",
     "uuid": "^13.0.0",

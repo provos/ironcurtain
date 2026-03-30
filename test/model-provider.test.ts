@@ -107,7 +107,7 @@ describe('createLanguageModel', () => {
     const model = await createLanguageModel('anthropic:claude-sonnet-4-6', config);
 
     const { createAnthropic } = await import('@ai-sdk/anthropic');
-    expect(createAnthropic).toHaveBeenCalledWith({ apiKey: 'test-anthropic-key' });
+    expect(createAnthropic).toHaveBeenCalledWith(expect.objectContaining({ apiKey: 'test-anthropic-key' }));
     expect(model).toHaveProperty('modelId', 'claude-sonnet-4-6');
   });
 
@@ -116,7 +116,7 @@ describe('createLanguageModel', () => {
     const model = await createLanguageModel('google:gemini-2.0-flash', config);
 
     const { createGoogleGenerativeAI } = await import('@ai-sdk/google');
-    expect(createGoogleGenerativeAI).toHaveBeenCalledWith({ apiKey: 'test-google-key' });
+    expect(createGoogleGenerativeAI).toHaveBeenCalledWith(expect.objectContaining({ apiKey: 'test-google-key' }));
     expect(model).toHaveProperty('modelId', 'gemini-2.0-flash');
   });
 
@@ -125,7 +125,7 @@ describe('createLanguageModel', () => {
     const model = await createLanguageModel('openai:gpt-4o', config);
 
     const { createOpenAI } = await import('@ai-sdk/openai');
-    expect(createOpenAI).toHaveBeenCalledWith({ apiKey: 'test-openai-key' });
+    expect(createOpenAI).toHaveBeenCalledWith(expect.objectContaining({ apiKey: 'test-openai-key' }));
     expect(model).toHaveProperty('modelId', 'gpt-4o');
   });
 
@@ -134,7 +134,7 @@ describe('createLanguageModel', () => {
     await createLanguageModel('anthropic:claude-sonnet-4-6', config);
 
     const { createAnthropic } = await import('@ai-sdk/anthropic');
-    expect(createAnthropic).toHaveBeenCalledWith({ apiKey: undefined });
+    expect(createAnthropic).toHaveBeenCalledWith(expect.objectContaining({ apiKey: undefined }));
   });
 
   it('defaults bare model IDs to anthropic', async () => {

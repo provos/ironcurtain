@@ -17,6 +17,32 @@
 import type { LanguageModelV3 } from '@ai-sdk/provider';
 import type { ResolvedUserConfig } from './user-config.js';
 
+/**
+ * Returns a proxy-aware fetch function if HTTPS_PROXY or HTTP_PROXY is set.
+ * Memoized: the ProxyAgent and fetch wrapper are created once and reused.
+ */
+let cachedProxyFetch: typeof globalThis.fetch | undefined;
+let cachedProxyUrl: string | undefined;
+
+async function getProxyFetch(): Promise<typeof globalThis.fetch | undefined> {
+  const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
+  if (!proxyUrl) return undefined;
+  if (cachedProxyFetch && cachedProxyUrl === proxyUrl) return cachedProxyFetch;
+
+  const { ProxyAgent, fetch: undiciFetch } = await import('undici');
+  const dispatcher = new ProxyAgent(proxyUrl);
+  // undici's fetch types are structurally incompatible with globalThis.fetch
+  // but fully compatible at runtime. The AI SDK only uses standard fetch semantics.
+  const proxyFetch = (input: unknown, init?: unknown) =>
+    undiciFetch(input as Parameters<typeof undiciFetch>[0], {
+      ...(init as Record<string, unknown>),
+      dispatcher,
+    });
+  cachedProxyUrl = proxyUrl;
+  cachedProxyFetch = proxyFetch as unknown as typeof globalThis.fetch;
+  return cachedProxyFetch;
+}
+
 /** Supported LLM provider identifiers. */
 export type ProviderId = 'anthropic' | 'google' | 'openai';
 
@@ -93,19 +119,20 @@ export async function createLanguageModel(qualifiedId: string, config: ResolvedU
 export async function createLanguageModelFromEnv(qualifiedId: string, apiKey: string): Promise<LanguageModelV3> {
   const { provider, modelId } = parseModelId(qualifiedId);
   const key = apiKey || undefined;
+  const fetch = await getProxyFetch();
 
   switch (provider) {
     case 'anthropic': {
       const { createAnthropic } = await import('@ai-sdk/anthropic');
-      return createAnthropic({ apiKey: key })(modelId);
+      return createAnthropic({ apiKey: key, fetch })(modelId);
     }
     case 'google': {
       const { createGoogleGenerativeAI } = await import('@ai-sdk/google');
-      return createGoogleGenerativeAI({ apiKey: key })(modelId);
+      return createGoogleGenerativeAI({ apiKey: key, fetch })(modelId);
     }
     case 'openai': {
       const { createOpenAI } = await import('@ai-sdk/openai');
-      return createOpenAI({ apiKey: key })(modelId);
+      return createOpenAI({ apiKey: key, fetch })(modelId);
     }
   }
 }
