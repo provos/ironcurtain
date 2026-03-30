@@ -47,8 +47,8 @@ describe('argument name validation -- real filesystem server', () => {
     const initialRoots: McpRoot[] = toMcpRoots([{ path: DIR, name: 'sandbox' }]);
 
     const transport = new StdioClientTransport({
-      command: 'npx',
-      args: ['-y', '@modelcontextprotocol/server-filesystem', DIR],
+      command: 'mcp-server-filesystem',
+      args: [DIR],
     });
 
     client = new Client(

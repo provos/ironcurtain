@@ -90,8 +90,8 @@ describe('MCP roots-expansion race -- handleCallTool retry', () => {
     const initialRoots: McpRoot[] = toMcpRoots([{ path: DIR_A, name: 'dir-a' }]);
 
     const transport = new StdioClientTransport({
-      command: 'npx',
-      args: ['-y', '@modelcontextprotocol/server-filesystem', DIR_A],
+      command: 'mcp-server-filesystem',
+      args: [DIR_A],
     });
 
     client = new Client(
