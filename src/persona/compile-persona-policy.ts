@@ -51,5 +51,6 @@ export async function compilePersonaPolicy(name: PersonaName): Promise<CompiledP
     protectedPaths: config.protectedPaths,
     mcpServers,
     includeHandwrittenScenarios: false,
+    prefilterText: constitutionText,
   });
 }

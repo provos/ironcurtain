@@ -17,7 +17,9 @@ import type { LanguageModel, SystemModelMessage } from 'ai';
 import chalk from 'chalk';
 import pLimit from 'p-limit';
 import { extractServerDomainAllowlists } from '../config/index.js';
+import { createLanguageModel } from '../config/model-provider.js';
 import type { MCPServerConfig } from '../config/types.js';
+import { loadUserConfig } from '../config/user-config.js';
 import { PolicyEngine } from '../trusted-process/policy-engine.js';
 import {
   buildCompilerSystemPrompt,
@@ -51,6 +53,7 @@ import {
 } from './policy-verifier.js';
 import { filterInvalidSchemaScenarios } from './scenario-schema-validator.js';
 import { buildGeneratorSystemPrompt, generateScenarios, repairScenarios } from './scenario-generator.js';
+import { prefilterServers } from './server-prefilter.js';
 import type { LlmLogContext } from './llm-logger.js';
 import type { PromptCacheStrategy } from '../session/prompt-cache.js';
 import { connectViaProxy, type ProxyConnection } from './proxy-mcp-connections.js';
@@ -127,6 +130,17 @@ export interface PipelineRunConfig {
 
   /** Compile only these servers (default: all servers in annotations). */
   readonly serverFilter?: string[];
+
+  /**
+   * Text for the pre-filter to evaluate server relevance against.
+   * Caller provides the appropriate text for the compilation mode:
+   * - Constitution mode: user constitution only (without base principles)
+   * - Task-policy mode: task description
+   * - Persona mode: persona constitution
+   *
+   * When undefined, the pre-filter is skipped.
+   */
+  readonly prefilterText?: string;
 }
 
 /**
@@ -138,16 +152,22 @@ export interface PipelineModels {
   readonly baseLlm: LanguageModelV3;
   readonly cacheStrategy: PromptCacheStrategy;
   readonly logPath: string;
+  /** Cheap model for pre-filter classification (Haiku). */
+  readonly prefilterModel: LanguageModel;
 }
 
 /** Creates PipelineModels from user config. Delegates to shared createPipelineLlm. */
 export async function createPipelineModels(logDir?: string): Promise<PipelineModels> {
   const effectiveLogDir = logDir ?? resolve(process.cwd(), 'generated');
   const llm = await createPipelineLlm(effectiveLogDir, 'unknown');
+  const userConfig = loadUserConfig();
+  const haikuBaseLlm = await createLanguageModel(userConfig.prefilterModelId, userConfig);
+  const { model: prefilterModel } = createPerServerModel(haikuBaseLlm, llm.logPath, 'prefilter');
   return {
     baseLlm: llm.baseLlm,
     cacheStrategy: llm.cacheStrategy,
     logPath: llm.logPath,
+    prefilterModel,
   };
 }
 
@@ -478,7 +498,11 @@ export function deduplicateListDefinitions(defs: ListDefinition[]): ListDefiniti
  * Rules are concatenated in alphabetical server order for determinism.
  * List definitions are deduplicated by name.
  */
-export function mergeServerResults(results: ServerCompilationResult[], constitutionHash: string): CompiledPolicyFile {
+export function mergeServerResults(
+  results: ServerCompilationResult[],
+  constitutionHash: string,
+  skippedServers?: Array<{ serverName: string; reason: string }>,
+): CompiledPolicyFile {
   const sortedResults = [...results].sort((a, b) => a.serverName.localeCompare(b.serverName));
 
   const allRules: CompiledRule[] = sortedResults.flatMap((r) => r.rules);
@@ -495,6 +519,12 @@ export function mergeServerResults(results: ServerCompilationResult[], constitut
   };
   if (uniqueListDefs.length > 0) {
     artifact.listDefinitions = uniqueListDefs;
+  }
+  // skippedServers is informational metadata — not read by PolicyEngine.
+  // It's intentionally excluded from inputHash; the constitutionHash already
+  // changes when the constitution changes, which drives different skip decisions.
+  if (skippedServers && skippedServers.length > 0) {
+    artifact.skippedServers = skippedServers;
   }
   return artifact;
 }
@@ -515,10 +545,12 @@ export class PipelineRunner {
   private readonly baseLlm: LanguageModelV3;
   private readonly cacheStrategy: PromptCacheStrategy;
   private readonly logPath: string;
+  private readonly prefilterModel: LanguageModel;
 
   constructor(models: PipelineModels) {
     this.baseLlm = models.baseLlm;
     this.cacheStrategy = models.cacheStrategy;
+    this.prefilterModel = models.prefilterModel;
     this.logPath = models.logPath;
   }
 
@@ -560,8 +592,8 @@ export class PipelineRunner {
 
     const constitutionHash = computeHash(config.constitutionInput);
 
-    // Phase 1: Per-server compilation
-    const serverResults = await this.compileAllServers(
+    // Phase 1: Per-server compilation (with optional Haiku pre-filter)
+    const { results: serverResults, skippedServers } = await this.compileAllServers(
       config,
       toolAnnotationsFile,
       constitutionHash,
@@ -569,7 +601,7 @@ export class PipelineRunner {
     );
 
     // Phase 2: Merge
-    const mergedPolicy = mergeServerResults(serverResults, constitutionHash);
+    const mergedPolicy = mergeServerResults(serverResults, constitutionHash, skippedServers);
     writeArtifact(config.outputDir, 'compiled-policy.json', mergedPolicy);
 
     // Merge scenarios for the global artifact
@@ -645,7 +677,10 @@ export class PipelineRunner {
     toolAnnotationsFile: ToolAnnotationsFile,
     constitutionHash: string,
     storedAnnotationsFile: StoredToolAnnotationsFile,
-  ): Promise<ServerCompilationResult[]> {
+  ): Promise<{
+    results: ServerCompilationResult[];
+    skippedServers: Array<{ serverName: string; reason: string }>;
+  }> {
     const serverEntries = Object.entries(toolAnnotationsFile.servers);
 
     // Apply server filter if provided
@@ -659,6 +694,54 @@ export class PipelineRunner {
         `No matching servers found for filter: ${config.serverFilter.join(', ')}. ` +
           `Available: ${serverEntries.map(([n]) => n).join(', ')}`,
       );
+    }
+
+    // Pre-filter with Haiku: skip servers irrelevant to the input text
+    let entriesToCompile = filteredEntries;
+    const skippedServers: Array<{ serverName: string; reason: string }> = [];
+
+    if (config.prefilterText !== undefined && !config.serverFilter) {
+      const prefilterText = config.prefilterText;
+
+      if (prefilterText.trim() === '') {
+        console.error(chalk.yellow('Pre-filter input is empty. All servers skipped (default-deny applies).'));
+        const allSkipped = filteredEntries.map(([name]) => ({
+          serverName: name,
+          reason: 'No input text provided — all servers skipped by default',
+        }));
+        return { results: [], skippedServers: allSkipped };
+      }
+
+      const serverToolPairs = filteredEntries.map(
+        ([name]) => [name, toolAnnotationsFile.servers[name].tools] as [string, ReadonlyArray<ToolAnnotation>],
+      );
+      const decisions = await prefilterServers(
+        prefilterText,
+        serverToolPairs,
+        this.prefilterModel,
+        config.constitutionKind,
+      );
+
+      const decisionMap = new Map(decisions.map((d) => [d.serverName, d]));
+      entriesToCompile = filteredEntries.filter(([name]) => {
+        const decision = decisionMap.get(name);
+        if (decision?.skip) {
+          console.error(`  ${chalk.dim(name)}: ${chalk.yellow('skipped')} — ${decision.reason}`);
+          skippedServers.push({ serverName: name, reason: decision.reason });
+          return false;
+        }
+        return true;
+      });
+
+      const skippedCount = filteredEntries.length - entriesToCompile.length;
+      if (skippedCount > 0) {
+        console.error(`  Pre-filter: ${skippedCount} server(s) skipped, ${entriesToCompile.length} proceeding`);
+      }
+    }
+
+    if (entriesToCompile.length === 0) {
+      console.error(chalk.yellow('All servers skipped by pre-filter. Policy will use default-deny only.'));
+      return { results: [], skippedServers };
     }
 
     // Load handwritten scenarios once, then filter per server (avoids N redundant loads)
@@ -681,20 +764,29 @@ export class PipelineRunner {
       handwrittenScenarios: allHandwrittenScenarios.filter((s) => s.request.serverName === serverName),
     });
 
-    const useParallel = filteredEntries.length > 1;
+    const useParallel = entriesToCompile.length > 1;
 
+    let results: ServerCompilationResult[];
     if (useParallel) {
-      return this.compileServersParallel(
-        filteredEntries,
+      results = await this.compileServersParallel(
+        entriesToCompile,
         config,
         constitutionHash,
         buildUnit,
         llmSemaphore,
         serverLimit,
       );
+    } else {
+      results = await this.compileServersSequential(
+        entriesToCompile,
+        config,
+        constitutionHash,
+        buildUnit,
+        llmSemaphore,
+      );
     }
 
-    return this.compileServersSequential(filteredEntries, config, constitutionHash, buildUnit, llmSemaphore);
+    return { results, skippedServers };
   }
 
   /** Creates a per-server model wrapped with LLM call throttling. */

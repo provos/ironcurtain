@@ -229,6 +229,12 @@ export interface CompiledPolicyFile {
 
   /** List definitions emitted by the compiler. Empty if no dynamic lists needed. */
   listDefinitions?: ListDefinition[];
+
+  /** Servers skipped by the pre-filter (all calls denied by default). */
+  skippedServers?: Array<{
+    readonly serverName: string;
+    readonly reason: string;
+  }>;
 }
 
 /**

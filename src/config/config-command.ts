@@ -103,6 +103,7 @@ export function computeDiff(resolved: ResolvedUserConfig, pending: UserConfig): 
   const topLevelKeys = [
     'agentModelId',
     'policyModelId',
+    'prefilterModelId',
     'escalationTimeoutSeconds',
     'gooseProvider',
     'gooseModel',
@@ -252,22 +253,28 @@ async function handleModels(resolved: ResolvedUserConfig, pending: UserConfig): 
   while (true) {
     const currentAgent = pending.agentModelId ?? resolved.agentModelId;
     const currentPolicy = pending.policyModelId ?? resolved.policyModelId;
+    const currentPrefilter = pending.prefilterModelId ?? resolved.prefilterModelId;
 
     const field = await p.select({
       message: 'Models',
       options: [
         { value: 'agentModelId', label: 'Agent model', hint: formatModelShort(currentAgent) },
         { value: 'policyModelId', label: 'Policy model', hint: formatModelShort(currentPolicy) },
+        { value: 'prefilterModelId', label: 'Pre-filter model', hint: formatModelShort(currentPrefilter) },
         { value: 'back', label: 'Back' },
       ],
     });
     if (isCancelled(field) || field === 'back') return;
 
-    const current = field === 'agentModelId' ? currentAgent : currentPolicy;
-    const newValue = await promptModelId(
-      field === 'agentModelId' ? 'Select agent model:' : 'Select policy model:',
-      current,
-    );
+    const current =
+      field === 'agentModelId' ? currentAgent : field === 'policyModelId' ? currentPolicy : currentPrefilter;
+    const promptLabel =
+      field === 'agentModelId'
+        ? 'Select agent model:'
+        : field === 'policyModelId'
+          ? 'Select policy model:'
+          : 'Select pre-filter model:';
+    const newValue = await promptModelId(promptLabel, current);
     if (newValue !== undefined && newValue !== current) {
       (pending as Record<string, unknown>)[field as string] = newValue;
     }
@@ -823,7 +830,8 @@ function gooseConfigHint(resolved: ResolvedUserConfig, pending: UserConfig): str
 function modelsHint(resolved: ResolvedUserConfig, pending: UserConfig): string {
   const agent = formatModelShort(pending.agentModelId ?? resolved.agentModelId);
   const policy = formatModelShort(pending.policyModelId ?? resolved.policyModelId);
-  return `${agent}, ${policy}`;
+  const prefilter = formatModelShort(pending.prefilterModelId ?? resolved.prefilterModelId);
+  return `${agent}, ${policy}, pre-filter: ${prefilter}`;
 }
 
 function securityHint(resolved: ResolvedUserConfig, pending: UserConfig): string {

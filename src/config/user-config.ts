@@ -16,6 +16,7 @@ import { parseModelId } from './model-provider.js';
 export const USER_CONFIG_DEFAULTS = {
   agentModelId: 'anthropic:claude-sonnet-4-6',
   policyModelId: 'anthropic:claude-sonnet-4-6',
+  prefilterModelId: 'anthropic:claude-haiku-4-5',
   escalationTimeoutSeconds: 300,
   resourceBudget: {
     maxTotalTokens: 1_000_000,
@@ -180,6 +181,7 @@ export type DockerAgent = (typeof DOCKER_AGENTS)[number];
 export const userConfigSchema = z.object({
   agentModelId: qualifiedModelId.optional(),
   policyModelId: qualifiedModelId.optional(),
+  prefilterModelId: qualifiedModelId.optional(),
   anthropicApiKey: z.string().min(1, 'anthropicApiKey must be non-empty').optional(),
   googleApiKey: z.string().min(1, 'googleApiKey must be non-empty').optional(),
   openaiApiKey: z.string().min(1, 'openaiApiKey must be non-empty').optional(),
@@ -262,6 +264,7 @@ export interface ResolvedWebSearchConfig {
 export interface ResolvedUserConfig {
   readonly agentModelId: string;
   readonly policyModelId: string;
+  readonly prefilterModelId: string;
   readonly anthropicApiKey: string;
   readonly googleApiKey: string;
   readonly openaiApiKey: string;
@@ -322,6 +325,7 @@ const DEFAULT_CONFIG_CONTENT =
     {
       agentModelId: USER_CONFIG_DEFAULTS.agentModelId,
       policyModelId: USER_CONFIG_DEFAULTS.policyModelId,
+      prefilterModelId: USER_CONFIG_DEFAULTS.prefilterModelId,
       escalationTimeoutSeconds: USER_CONFIG_DEFAULTS.escalationTimeoutSeconds,
       resourceBudget: USER_CONFIG_DEFAULTS.resourceBudget,
       autoCompact: USER_CONFIG_DEFAULTS.autoCompact,
@@ -558,6 +562,7 @@ function mergeWithDefaults(config: UserConfig): ResolvedUserConfig {
   return {
     agentModelId: config.agentModelId ?? USER_CONFIG_DEFAULTS.agentModelId,
     policyModelId: config.policyModelId ?? USER_CONFIG_DEFAULTS.policyModelId,
+    prefilterModelId: config.prefilterModelId ?? USER_CONFIG_DEFAULTS.prefilterModelId,
     anthropicApiKey: config.anthropicApiKey ?? '',
     googleApiKey: config.googleApiKey ?? '',
     openaiApiKey: config.openaiApiKey ?? '',

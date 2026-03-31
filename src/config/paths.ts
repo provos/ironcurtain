@@ -222,6 +222,23 @@ export function getPackageConfigDir(): string {
 }
 
 /**
+ * Reads just the user constitution text (without base principles).
+ * Returns empty string if no user constitution file exists, because
+ * an absent user constitution is a valid state (means "no server-specific guidance").
+ */
+export function loadUserConstitutionText(): string {
+  const userPath = getUserConstitutionPath();
+  const fallbackPath = getBaseUserConstitutionPath();
+  if (existsSync(userPath)) {
+    return readFileSync(userPath, 'utf-8');
+  }
+  if (existsSync(fallbackPath)) {
+    return readFileSync(fallbackPath, 'utf-8');
+  }
+  return '';
+}
+
+/**
  * Loads the combined constitution text (base + optional user constitution).
  * If ~/.ironcurtain/constitution.md exists, it replaces the package-bundled base.
  * The user extension file (~/.ironcurtain/constitution-user.md), when present,
@@ -237,15 +254,10 @@ export function loadConstitutionText(packageBasePath: string): string {
 
   const userPath = getUserConstitutionPath();
   const userFallbackPath = getBaseUserConstitutionPath();
-  let effectiveUserPath: string;
-  if (existsSync(userPath)) {
-    effectiveUserPath = userPath;
-  } else if (existsSync(userFallbackPath)) {
-    effectiveUserPath = userFallbackPath;
-  } else {
+  if (!existsSync(userPath) && !existsSync(userFallbackPath)) {
     throw new Error(`User constitution not found: tried ${userPath} and ${userFallbackPath}`);
   }
-  const user = readFileSync(effectiveUserPath, 'utf-8');
+  const user = loadUserConstitutionText();
   return `${base}\n\n${user}`;
 }
 

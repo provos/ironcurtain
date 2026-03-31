@@ -42,5 +42,6 @@ export async function compileTaskPolicy(
     protectedPaths: config.protectedPaths,
     mcpServers: config.mcpServers,
     includeHandwrittenScenarios: false,
+    prefilterText: taskDescription,
   });
 }
