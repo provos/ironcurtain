@@ -520,6 +520,9 @@ export function mergeServerResults(
   if (uniqueListDefs.length > 0) {
     artifact.listDefinitions = uniqueListDefs;
   }
+  // skippedServers is informational metadata — not read by PolicyEngine.
+  // It's intentionally excluded from inputHash; the constitutionHash already
+  // changes when the constitution changes, which drives different skip decisions.
   if (skippedServers && skippedServers.length > 0) {
     artifact.skippedServers = skippedServers;
   }

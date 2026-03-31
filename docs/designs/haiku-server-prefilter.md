@@ -614,7 +614,7 @@ No concurrency cap is needed. If server count grows significantly in the future,
 
 ### Caller-level tests
 
-1. **`compile.ts`**: When `--constitution` is not specified, `prefilterText` is set to the user constitution text. When `--constitution` is specified, `prefilterText` is `undefined`.
+1. **`compile.ts`**: `prefilterText` is always set — to the user constitution text in normal mode, or to the full override text when `--constitution` is specified.
 2. **`compileTaskPolicy()`**: `prefilterText` is set to the task description.
 3. **Persona compilation**: `prefilterText` is set to the persona constitution.
 
@@ -628,7 +628,7 @@ This is a purely additive change:
 
 1. **New file**: `src/pipeline/server-prefilter.ts`
 2. **New export**: `loadUserConstitutionText()` in `src/config/paths.ts`
-3. **Modified**: `createPipelineModels()` in `pipeline-shared.ts` -- adds `prefilterModel` to return value
+3. **Modified**: `createPipelineModels()` in `pipeline-runner.ts` -- adds `prefilterModel` to return value
 4. **Modified**: `PipelineModels` interface -- adds `prefilterModel` field
 5. **Modified**: `PipelineRunConfig` -- new optional `prefilterText` field
 6. **Modified**: `CompiledPolicyFile` -- new optional `skippedServers` field
