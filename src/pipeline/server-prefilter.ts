@@ -9,10 +9,14 @@
  */
 
 import type { LanguageModel } from 'ai';
+import pLimit from 'p-limit';
 import { z } from 'zod';
 import { generateObjectWithRepair } from './generate-with-repair.js';
 import type { ConstitutionKind } from './pipeline-runner.js';
 import type { ToolAnnotation } from './types.js';
+
+/** Cap concurrent pre-filter LLM calls to avoid rate-limit bursts. */
+const PREFILTER_CONCURRENCY = 5;
 
 // ---------------------------------------------------------------------------
 // Schema
@@ -147,7 +151,8 @@ export async function prefilterServers(
       reason: 'No input text provided — all servers skipped by default',
     }));
   }
+  const limit = pLimit(PREFILTER_CONCURRENCY);
   return Promise.all(
-    servers.map(([serverName, tools]) => checkServerRelevance(trimmed, serverName, tools, model, kind)),
+    servers.map(([serverName, tools]) => limit(() => checkServerRelevance(trimmed, serverName, tools, model, kind))),
   );
 }
