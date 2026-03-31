@@ -30,6 +30,8 @@ RUN uv python install 3.12
 RUN mkdir -p /workspace /etc/ironcurtain /run/ironcurtain && \
     chown codespace:codespace /workspace /etc/ironcurtain /run/ironcurtain
 
+RUN npm install -g node-gyp
+
 WORKDIR /workspace
 USER codespace
 
