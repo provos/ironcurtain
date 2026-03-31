@@ -16,6 +16,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import chalk from 'chalk';
+import { loadUserConstitutionText } from '../config/paths.js';
 import { loadPipelineConfig, loadStoredToolAnnotationsFile } from './pipeline-shared.js';
 import { PipelineRunner, createPipelineModels } from './pipeline-runner.js';
 
@@ -112,6 +113,7 @@ export async function main(): Promise<void> {
       llmLogPath: models.logPath,
       preloadedStoredAnnotations: storedAnnotationsFile,
       serverFilter: cliArgs.server ? [cliArgs.server] : undefined,
+      prefilterText: cliArgs.constitution ? config.constitutionText : loadUserConstitutionText(),
     });
   } catch (err) {
     if (err instanceof Error && err.message.includes('Verification FAILED')) {
