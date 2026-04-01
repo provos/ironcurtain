@@ -94,6 +94,8 @@ export interface PtyBridgeOptions {
   readonly resumeSessionId?: string;
   /** Optional persona name (passed as --persona to the child). */
   readonly persona?: string;
+  /** Optional model ID override (passed as --model to the child). */
+  readonly model?: string;
   /** Mux instance ID to propagate to child sessions via env var. */
   readonly muxId?: string;
   /** Mux process PID to propagate to child sessions via env var. */
@@ -127,6 +129,9 @@ export async function createPtyBridge(options: PtyBridgeOptions): Promise<PtyBri
   }
   if (options.persona) {
     spawnArgs.push('--persona', options.persona);
+  }
+  if (options.model) {
+    spawnArgs.push('--model', options.model);
   }
   // Create a copy of process.env so we don't mutate the shared object
   const childEnv: Record<string, string> = { ...(process.env as Record<string, string>) };

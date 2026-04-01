@@ -2,7 +2,9 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { claudeCodeAdapter } from '../src/docker/adapters/claude-code.js';
+import { createClaudeCodeAdapter } from '../src/docker/adapters/claude-code.js';
+
+const claudeCodeAdapter = createClaudeCodeAdapter();
 import { registerAgent, getAgent, listAgents } from '../src/docker/agent-registry.js';
 import { prepareSession, extractAllowedDomains } from '../src/docker/orientation.js';
 import { CONTAINER_WORKSPACE_DIR, type AgentId, type OrientationContext } from '../src/docker/agent-adapter.js';

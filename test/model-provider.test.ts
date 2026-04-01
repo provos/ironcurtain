@@ -40,6 +40,9 @@ function createTestUserConfig(overrides: Partial<ResolvedUserConfig> = {}): Reso
     anthropicApiKey: 'test-anthropic-key',
     googleApiKey: 'test-google-key',
     openaiApiKey: 'test-openai-key',
+    anthropicBaseUrl: '',
+    openaiBaseUrl: '',
+    googleBaseUrl: '',
     escalationTimeoutSeconds: 300,
     resourceBudget: {
       maxTotalTokens: 1_000_000,
@@ -80,18 +83,24 @@ describe('parseModelId', () => {
     expect(result).toEqual({ provider: 'anthropic', modelId: 'claude-sonnet-4-6' });
   });
 
-  it('throws on unknown provider prefix', () => {
-    expect(() => parseModelId('unknown:model-id')).toThrow(
-      /Unknown model provider "unknown".*Supported providers: anthropic, google, openai/,
-    );
+  it('treats unknown prefix as part of model ID with default provider', () => {
+    // "unknown:model-id" is not a known provider, so the whole string is the model ID
+    const result = parseModelId('unknown:model-id');
+    expect(result).toEqual({ provider: 'anthropic', modelId: 'unknown:model-id' });
   });
 
-  it('throws on empty model ID after colon', () => {
+  it('handles Ollama-style model tags with colons', () => {
+    // Ollama tags like "qwen3.5-uncensored:35b" use colon for name:tag
+    const result = parseModelId('jaahas/qwen3.5-uncensored:35b');
+    expect(result).toEqual({ provider: 'anthropic', modelId: 'jaahas/qwen3.5-uncensored:35b' });
+  });
+
+  it('throws on empty model ID after known provider colon', () => {
     expect(() => parseModelId('anthropic:')).toThrow(/Empty model ID.*Expected format/);
   });
 
   it('handles model IDs with colons in the model name', () => {
-    // Only the first colon separates provider from model
+    // Only the first colon separates provider from model when prefix is a known provider
     const result = parseModelId('openai:ft:gpt-4o:custom');
     expect(result).toEqual({ provider: 'openai', modelId: 'ft:gpt-4o:custom' });
   });
@@ -146,9 +155,14 @@ describe('createLanguageModel', () => {
     expect(model).toHaveProperty('modelId', 'claude-sonnet-4-6');
   });
 
-  it('throws on unknown provider', async () => {
+  it('treats unknown prefix as model ID on default provider', async () => {
     const config = createTestUserConfig();
-    await expect(createLanguageModel('mistral:model', config)).rejects.toThrow(/Unknown model provider "mistral"/);
+    const model = await createLanguageModel('mistral:model', config);
+
+    // "mistral" is not a known provider, so the full string becomes the model ID
+    const { createAnthropic } = await import('@ai-sdk/anthropic');
+    expect(createAnthropic).toHaveBeenCalledWith(expect.objectContaining({ apiKey: 'test-anthropic-key' }));
+    expect(model).toHaveProperty('modelId', 'mistral:model');
   });
 
   it('passes proxy fetch when HTTPS_PROXY is set', async () => {

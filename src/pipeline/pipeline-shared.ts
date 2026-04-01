@@ -14,9 +14,11 @@ import type { LanguageModel } from 'ai';
 import type { LanguageModelV3, LanguageModelV3CallOptions } from '@ai-sdk/provider';
 import { wrapLanguageModel } from 'ai';
 import chalk from 'chalk';
-import type { LimitFunction } from 'p-limit';
+import type pLimit from 'p-limit';
 import ora, { type Ora } from 'ora';
 import { computeProtectedPaths, resolveMcpServerPaths } from '../config/index.js';
+
+type LimitFunction = ReturnType<typeof pLimit>;
 import { createLanguageModel } from '../config/model-provider.js';
 import { getIronCurtainHome, getUserGeneratedDir, loadConstitutionText } from '../config/paths.js';
 

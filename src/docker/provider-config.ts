@@ -25,6 +25,45 @@ export type RequestBodyRewriter = (
   context: { method: string; path: string },
 ) => RewriteResult | null;
 
+/**
+ * Upstream target for provider requests when the default API host
+ * is overridden via environment variables (e.g., ANTHROPIC_BASE_URL).
+ * The MITM proxy uses this to route upstream connections to a custom
+ * API gateway (e.g., LiteLLM) instead of the provider's canonical host.
+ */
+export interface UpstreamTarget {
+  /** Hostname of the upstream server. */
+  readonly hostname: string;
+  /** Port number of the upstream server. */
+  readonly port: number;
+  /** Path prefix to prepend to all request paths ('' for none). */
+  readonly pathPrefix: string;
+  /** Whether to use TLS for the upstream connection. */
+  readonly useTls: boolean;
+}
+
+/**
+ * Parses a base URL string into an UpstreamTarget.
+ *
+ * Supports http:// and https:// URLs. The path component becomes the
+ * pathPrefix (trailing slashes stripped). Defaults to port 443 for
+ * https and port 80 for http when no port is specified.
+ *
+ * @throws {Error} If the URL uses an unsupported protocol.
+ */
+export function parseUpstreamBaseUrl(baseUrl: string): UpstreamTarget {
+  const parsed = new URL(baseUrl);
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    throw new Error(`Unsupported protocol in upstream base URL: ${parsed.protocol}`);
+  }
+  const useTls = parsed.protocol === 'https:';
+  const defaultPort = useTls ? 443 : 80;
+  const port = parsed.port ? parseInt(parsed.port, 10) : defaultPort;
+  const pathPrefix = parsed.pathname.replace(/\/+$/, '');
+
+  return { hostname: parsed.hostname, port, pathPrefix, useTls };
+}
+
 export interface ProviderConfig {
   /** Hostname of the API endpoint (e.g., 'api.anthropic.com'). */
   readonly host: string;
@@ -61,6 +100,13 @@ export interface ProviderConfig {
    * Only applies to POST requests. Requires requestRewriter to be set.
    */
   readonly rewriteEndpoints?: readonly string[];
+
+  /**
+   * Optional upstream target override. When set, the MITM proxy routes
+   * requests to this target instead of the provider's canonical host.
+   * Populated from environment variables (e.g., ANTHROPIC_BASE_URL).
+   */
+  readonly upstreamTarget?: UpstreamTarget;
 }
 
 export interface EndpointPattern {

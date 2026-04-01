@@ -363,7 +363,18 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
     // 2. Fake key validation + swap
     const modifiedHeaders = { ...headers };
     const keyResult = validateAndSwapApiKey(modifiedHeaders, provider);
-    modifiedHeaders.host = targetHost;
+
+    // Resolve upstream target: use custom gateway if configured, otherwise the original host.
+    const upstream = provider.config.upstreamTarget;
+    const upstreamHost = upstream?.hostname ?? targetHost;
+    const upstreamPort = upstream?.port ?? targetPort;
+    const upstreamPathPrefix = upstream?.pathPrefix ?? '';
+    const upstreamUseTls = upstream?.useTls ?? true;
+
+    // Set Host header to match the upstream target so the gateway receives
+    // the correct virtual-host. Include port only when non-standard.
+    const isStandardPort = (upstreamUseTls && upstreamPort === 443) || (!upstreamUseTls && upstreamPort === 80);
+    modifiedHeaders.host = isStandardPort ? upstreamHost : `${upstreamHost}:${upstreamPort}`;
 
     // 3. Forward to real API - either direct pipe or buffer+rewrite.
     // Only enable 401 retry if the request actually carried the fake key —
@@ -384,7 +395,8 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
      * the error response, refreshes the token, and retries once.
      */
     function forwardRequest(bodyOverride?: Buffer, isRetry?: boolean): void {
-      logger.info(`[mitm-proxy] ${method} ${targetHost}${path} → FORWARDED${isRetry ? ' (retry)' : ''}`);
+      const routeInfo = upstream ? ` (via ${upstreamHost}:${upstreamPort})` : '';
+      logger.info(`[mitm-proxy] ${method} ${targetHost}${path} → FORWARDED${routeInfo}${isRetry ? ' (retry)' : ''}`);
 
       const finalHeaders = { ...modifiedHeaders };
       if (bodyOverride) {
@@ -395,12 +407,16 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
         delete finalHeaders['transfer-encoding'];
       }
 
-      const upstreamReq = https.request(
+      // Route to custom upstream gateway when configured; path prefix is
+      // prepended AFTER endpoint filtering (which runs on the original path).
+      const upstreamPath = upstreamPathPrefix ? `${upstreamPathPrefix}${path}` : path;
+      const requestFn = upstreamUseTls ? https.request : http.request;
+      const upstreamReq = requestFn(
         {
-          hostname: targetHost,
-          port: targetPort,
+          hostname: upstreamHost,
+          port: upstreamPort,
           method,
-          path,
+          path: upstreamPath,
           headers: finalHeaders,
         },
         (upstreamRes) => {

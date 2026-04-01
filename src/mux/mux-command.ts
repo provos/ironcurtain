@@ -22,7 +22,10 @@ const muxSpec: CommandSpec = {
   name: 'ironcurtain mux',
   description: 'Terminal multiplexer for PTY sessions (requires node-pty)',
   usage: ['ironcurtain mux [options]'],
-  options: [{ flag: 'agent', short: 'a', description: 'Agent mode (default: claude-code)', placeholder: '<name>' }],
+  options: [
+    { flag: 'agent', short: 'a', description: 'Agent mode (default: claude-code)', placeholder: '<name>' },
+    { flag: 'model', short: 'm', description: 'Override the agent model ID', placeholder: '<model>' },
+  ],
 };
 
 export async function main(args?: string[]): Promise<void> {
@@ -78,6 +81,7 @@ export async function main(args?: string[]): Promise<void> {
     options: {
       help: { type: 'boolean', short: 'h' },
       agent: { type: 'string', short: 'a' },
+      model: { type: 'string', short: 'm' },
     },
     allowPositionals: true,
     strict: false,
@@ -86,6 +90,7 @@ export async function main(args?: string[]): Promise<void> {
   if (checkHelp(values as { help?: boolean }, muxSpec)) return;
 
   const agent = (values.agent as string | undefined) ?? 'claude-code';
+  const model = values.model as string | undefined;
 
   // Generate a unique mux instance ID for session ownership
   const muxId = `mux-${randomBytes(4).toString('hex')}`;
@@ -130,6 +135,7 @@ export async function main(args?: string[]): Promise<void> {
 
   const app = createMuxApp({
     agent,
+    model,
     autoSpawn: false,
     protectedPaths,
     muxId,

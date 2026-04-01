@@ -550,7 +550,8 @@ describe('OAuth provider configs', () => {
 
 describe('Claude Code adapter OAuth support', () => {
   it('returns OAuth providers when authKind is oauth', async () => {
-    const { claudeCodeAdapter } = await import('../src/docker/adapters/claude-code.js');
+    const { createClaudeCodeAdapter: createAdapter } = await import('../src/docker/adapters/claude-code.js');
+    const claudeCodeAdapter = createAdapter();
     const providers = claudeCodeAdapter.getProviders('oauth');
     expect(providers).toHaveLength(2);
     expect(providers[0].displayName).toBe('Anthropic (OAuth)');
@@ -560,7 +561,8 @@ describe('Claude Code adapter OAuth support', () => {
   });
 
   it('returns API key providers when authKind is apikey', async () => {
-    const { claudeCodeAdapter } = await import('../src/docker/adapters/claude-code.js');
+    const { createClaudeCodeAdapter: createAdapter } = await import('../src/docker/adapters/claude-code.js');
+    const claudeCodeAdapter = createAdapter();
     const providers = claudeCodeAdapter.getProviders('apikey');
     expect(providers).toHaveLength(2);
     expect(providers[0].displayName).toBe('Anthropic');
@@ -568,14 +570,16 @@ describe('Claude Code adapter OAuth support', () => {
   });
 
   it('returns API key providers when authKind is undefined', async () => {
-    const { claudeCodeAdapter } = await import('../src/docker/adapters/claude-code.js');
+    const { createClaudeCodeAdapter: createAdapter } = await import('../src/docker/adapters/claude-code.js');
+    const claudeCodeAdapter = createAdapter();
     const providers = claudeCodeAdapter.getProviders();
     expect(providers).toHaveLength(2);
     expect(providers[0].displayName).toBe('Anthropic');
   });
 
   it('sets CLAUDE_CODE_OAUTH_TOKEN in OAuth mode', async () => {
-    const { claudeCodeAdapter } = await import('../src/docker/adapters/claude-code.js');
+    const { createClaudeCodeAdapter: createAdapter } = await import('../src/docker/adapters/claude-code.js');
+    const claudeCodeAdapter = createAdapter();
     const config = {
       dockerAuth: { kind: 'oauth' as const },
       userConfig: { anthropicApiKey: 'sk-test' },
@@ -590,7 +594,8 @@ describe('Claude Code adapter OAuth support', () => {
   });
 
   it('sets IRONCURTAIN_API_KEY in API key mode', async () => {
-    const { claudeCodeAdapter } = await import('../src/docker/adapters/claude-code.js');
+    const { createClaudeCodeAdapter: createAdapter } = await import('../src/docker/adapters/claude-code.js');
+    const claudeCodeAdapter = createAdapter();
     const config = {
       dockerAuth: { kind: 'apikey' as const },
       userConfig: { anthropicApiKey: 'sk-test' },
@@ -603,7 +608,8 @@ describe('Claude Code adapter OAuth support', () => {
   });
 
   it('defaults to API key mode when dockerAuth is undefined', async () => {
-    const { claudeCodeAdapter } = await import('../src/docker/adapters/claude-code.js');
+    const { createClaudeCodeAdapter: createAdapter } = await import('../src/docker/adapters/claude-code.js');
+    const claudeCodeAdapter = createAdapter();
     const config = {
       userConfig: { anthropicApiKey: 'sk-test' },
     } as IronCurtainConfig;
