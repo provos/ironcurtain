@@ -17,9 +17,9 @@ import chalk from 'chalk';
 import type pLimit from 'p-limit';
 import ora, { type Ora } from 'ora';
 import { computeProtectedPaths, resolveMcpServerPaths } from '../config/index.js';
+import { createLanguageModel } from '../config/model-provider.js';
 
 type LimitFunction = ReturnType<typeof pLimit>;
-import { createLanguageModel } from '../config/model-provider.js';
 import { getIronCurtainHome, getUserGeneratedDir, loadConstitutionText } from '../config/paths.js';
 
 // Re-export so existing pipeline callers (loadPipelineConfig) don't need updating.

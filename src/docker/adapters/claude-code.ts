@@ -127,7 +127,6 @@ if [ -n "$IRONCURTAIN_INITIAL_COLS" ] && [ -n "$IRONCURTAIN_INITIAL_ROWS" ]; the
 fi
 cd /workspace
 
-# Build optional model args array
 MODEL_ARGS=()
 if [ -n "$IRONCURTAIN_MODEL" ]; then
   MODEL_ARGS=(--model "$IRONCURTAIN_MODEL")
