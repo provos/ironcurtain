@@ -495,11 +495,26 @@ const UPSTREAM_ENV_VARS: ReadonlyMap<string, string> = new Map([
 ]);
 
 /**
+ * Strips credentials and query parameters from a URL string for safe logging.
+ * Returns only scheme + hostname + port + pathname.
+ */
+function sanitizeUrlForLog(raw: string): string {
+  try {
+    const u = new URL(raw);
+    // Reconstruct with only safe components
+    return `${u.protocol}//${u.hostname}${u.port ? ':' + u.port : ''}${u.pathname}`;
+  } catch {
+    return '<invalid URL>';
+  }
+}
+
+/**
  * Applies upstream target overrides from environment variables to provider configs.
  *
  * For each provider whose host has a corresponding env var set, parses the URL
  * and returns a new ProviderConfig with the upstreamTarget field populated.
- * Providers without an override (or with an invalid URL) are returned unchanged.
+ * If the env var is set but invalid, falls back to configBaseUrls before
+ * giving up. Providers without any valid override are returned unchanged.
  */
 export function applyUpstreamOverrides(
   providers: readonly ProviderConfig[],
@@ -510,20 +525,24 @@ export function applyUpstreamOverrides(
     const envVar = UPSTREAM_ENV_VARS.get(config.host);
     if (!envVar) return config;
 
+    // Try env var first, then configBaseUrls fallback
+    const sources: Array<{ label: string; url: string }> = [];
     const envValue = process.env[envVar];
-    const baseUrl = envValue || configBaseUrls?.[config.host];
-    if (!baseUrl) return config;
+    if (envValue) sources.push({ label: envVar, url: envValue });
+    const configUrl = configBaseUrls?.[config.host];
+    if (configUrl) sources.push({ label: 'config', url: configUrl });
 
-    const source = envValue ? envVar : 'config';
-    try {
-      const upstreamTarget = parser(baseUrl);
-      logger.info(`[docker] ${config.displayName}: upstream override via ${source} → ${baseUrl}`);
-      return { ...config, upstreamTarget };
-    } catch (err) {
-      logger.warn(
-        `[docker] ${config.displayName}: ignoring invalid ${source}="${baseUrl}": ${err instanceof Error ? err.message : String(err)}`,
-      );
-      return config;
+    for (const { label, url } of sources) {
+      try {
+        const upstreamTarget = parser(url);
+        logger.info(`[docker] ${config.displayName}: upstream override via ${label} → ${sanitizeUrlForLog(url)}`);
+        return { ...config, upstreamTarget };
+      } catch (err) {
+        logger.warn(
+          `[docker] ${config.displayName}: ignoring invalid ${label}="${sanitizeUrlForLog(url)}": ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
     }
+    return config;
   });
 }

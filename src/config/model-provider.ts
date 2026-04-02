@@ -66,7 +66,8 @@ export interface ParsedModelId {
  *
  * Format: "provider:model-id" or just "model-id" (defaults to anthropic).
  *
- * @throws Error if the provider prefix is not recognized or model ID is empty
+ * @throws Error if the model ID is empty after a recognized provider prefix (e.g. "anthropic:").
+ * Unknown prefixes are treated as part of the model ID and default to the anthropic provider.
  */
 export function parseModelId(qualifiedId: string): ParsedModelId {
   const colonIndex = qualifiedId.indexOf(':');

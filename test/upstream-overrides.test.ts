@@ -173,6 +173,22 @@ describe('applyUpstreamOverrides', () => {
     expect(result[0].upstreamTarget!.hostname).toBe('gateway.corp.com');
   });
 
+  it('falls back to configBaseUrls when env var is invalid', () => {
+    process.env.ANTHROPIC_BASE_URL = 'ftp://not-supported.com';
+    const providers = [makeProvider('api.anthropic.com', 'Anthropic')];
+
+    const result = applyUpstreamOverrides(providers, mockParser, {
+      'api.anthropic.com': 'http://localhost:11434',
+    });
+
+    expect(result[0].upstreamTarget).toEqual({
+      hostname: 'localhost',
+      port: 11434,
+      pathPrefix: '',
+      useTls: false,
+    });
+  });
+
   it('applies multiple env var overrides simultaneously', () => {
     process.env.ANTHROPIC_BASE_URL = 'https://gateway.corp.com/anthropic';
     process.env.OPENAI_BASE_URL = 'http://localhost:4000';

@@ -165,6 +165,42 @@ describe('createLanguageModel', () => {
     expect(model).toHaveProperty('modelId', 'mistral:model');
   });
 
+  it('passes baseURL to Anthropic provider when configured', async () => {
+    const config = createTestUserConfig({ anthropicBaseUrl: 'https://gateway.example.com' });
+    await createLanguageModel('anthropic:claude-sonnet-4-6', config);
+
+    const { createAnthropic } = await import('@ai-sdk/anthropic');
+    expect(createAnthropic).toHaveBeenCalledWith(expect.objectContaining({ baseURL: 'https://gateway.example.com' }));
+  });
+
+  it('passes baseURL to Google provider when configured', async () => {
+    const config = createTestUserConfig({ googleBaseUrl: 'https://google-gateway.example.com' });
+    await createLanguageModel('google:gemini-2.0-flash', config);
+
+    const { createGoogleGenerativeAI } = await import('@ai-sdk/google');
+    expect(createGoogleGenerativeAI).toHaveBeenCalledWith(
+      expect.objectContaining({ baseURL: 'https://google-gateway.example.com' }),
+    );
+  });
+
+  it('passes baseURL to OpenAI provider when configured', async () => {
+    const config = createTestUserConfig({ openaiBaseUrl: 'https://openai-gateway.example.com' });
+    await createLanguageModel('openai:gpt-4o', config);
+
+    const { createOpenAI } = await import('@ai-sdk/openai');
+    expect(createOpenAI).toHaveBeenCalledWith(
+      expect.objectContaining({ baseURL: 'https://openai-gateway.example.com' }),
+    );
+  });
+
+  it('passes undefined baseURL when not configured', async () => {
+    const config = createTestUserConfig();
+    await createLanguageModel('anthropic:claude-sonnet-4-6', config);
+
+    const { createAnthropic } = await import('@ai-sdk/anthropic');
+    expect(createAnthropic).toHaveBeenCalledWith(expect.objectContaining({ baseURL: undefined }));
+  });
+
   it('passes proxy fetch when HTTPS_PROXY is set', async () => {
     const original = process.env.HTTPS_PROXY;
     process.env.HTTPS_PROXY = 'http://test-proxy:8080';
