@@ -27,7 +27,7 @@ import {
 import type { ListenerState } from '../escalation/listener-state.js';
 import type { PickerState, ResumePickerState, PersonaPickerState, EscalationPickerState } from './mux-input-handler.js';
 import { createSplashScreen, type SplashScreen } from './mux-splash.js';
-import { formatRelativeTime } from './session-scanner.js';
+import { formatRelativeTime, getWorkspaceLabel } from './session-scanner.js';
 
 // -- xterm.js color mode constants (from IBufferCell.getFgColorMode/getBgColorMode) --
 const CM_DEFAULT = 0;
@@ -1025,7 +1025,9 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
         const isSelected = idx === rps.selectedIndex;
         const shortId = s.sessionId.substring(0, 8);
         const timeAgo = formatRelativeTime(s.lastActivity);
-        const line = `${shortId}  ${s.agent}  ${s.label}  ${timeAgo}  [${s.status}]`;
+        const workspace = getWorkspaceLabel(s);
+        const workspaceSuffix = workspace ? `  ${workspace}` : '';
+        const line = `${shortId}  ${s.agent}  ${s.label}${workspaceSuffix}  ${timeAgo}  [${s.status}]`;
 
         moveTo(2, currentY);
         if (isSelected) {
@@ -1037,7 +1039,20 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
           term('  ');
           term(s.agent);
           term('  ');
-          term.cyan(truncate(s.label, Math.max(10, _cols - 50)));
+          // Fixed columns: "  " prefix (2) + shortId (8) + "  " (2) + agent + "  " (2) +
+          // label + "  " (2) + timeAgo + "  " (2) + [status]
+          const fixedWidth = 2 + 8 + 2 + s.agent.length + 2 + 2 + timeAgo.length + 2 + s.status.length + 2;
+          const availForLabelAndWs = Math.max(10, _cols - fixedWidth);
+          if (workspace) {
+            // Split available space: label gets half, workspace gets the rest
+            const labelWidth = Math.max(5, Math.floor(availForLabelAndWs * 0.4));
+            const wsWidth = Math.max(5, availForLabelAndWs - labelWidth - 2);
+            term.cyan(truncate(s.label, labelWidth));
+            term('  ');
+            term.yellow(truncate(workspace, wsWidth));
+          } else {
+            term.cyan(truncate(s.label, availForLabelAndWs));
+          }
           term('  ');
           term.dim(timeAgo);
           term('  ');

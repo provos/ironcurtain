@@ -7,8 +7,9 @@
  */
 
 import { readdirSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { resolve } from 'node:path';
-import { getSessionsDir } from '../config/paths.js';
+import { getSessionsDir, getSessionSandboxDir } from '../config/paths.js';
 import { SESSION_STATE_FILENAME } from '../docker/pty-types.js';
 import type { SessionSnapshot } from '../docker/pty-types.js';
 
@@ -50,6 +51,25 @@ export function scanResumableSessions(): SessionSnapshot[] {
   });
 
   return snapshots;
+}
+
+/** Shortens an absolute path by replacing $HOME with ~. */
+export function shortenHomePath(p: string): string {
+  const home = homedir();
+  if (p === home) return '~';
+  if (p.startsWith(home + '/')) return '~' + p.slice(home.length);
+  return p;
+}
+
+/**
+ * Returns a display-friendly workspace label for a session, or undefined
+ * if the session uses the default sandbox (not an explicit --workspace).
+ */
+export function getWorkspaceLabel(s: SessionSnapshot): string | undefined {
+  if (s.workspacePath === getSessionSandboxDir(s.sessionId)) {
+    return undefined;
+  }
+  return shortenHomePath(s.workspacePath);
 }
 
 /**
