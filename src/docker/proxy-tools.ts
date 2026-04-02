@@ -113,7 +113,7 @@ export const proxyAnnotations: StoredToolAnnotation[] = [
     serverName: 'proxy',
     comment: 'Add a domain to the MITM proxy allowlist',
     args: {
-      domain: ['none'],
+      domain: ['proxy-domain'],
       justification: ['none'],
     },
     inputSchema: schemaByName.add_proxy_domain,
@@ -123,7 +123,7 @@ export const proxyAnnotations: StoredToolAnnotation[] = [
     serverName: 'proxy',
     comment: 'Remove a domain from the MITM proxy allowlist',
     args: {
-      domain: ['none'],
+      domain: ['proxy-domain'],
     },
     inputSchema: schemaByName.remove_proxy_domain,
   },

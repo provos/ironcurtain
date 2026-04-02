@@ -453,9 +453,6 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
           moveTo(6, currentY);
           term.dim('/approve+ ');
           term.cyan(candidate.description);
-          if (candidate.warning) {
-            term.yellow(` (${candidate.warning})`);
-          }
           currentY++;
           rowsUsed++;
         }
@@ -620,7 +617,7 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
     detailLines.push({ kind: 'reason', text: `Reason: ${focused.request.reason}` });
     if (focused.request.whitelistCandidates && focused.request.whitelistCandidates.length > 0) {
       const candidate = focused.request.whitelistCandidates[0];
-      const wlText = candidate.warning ? `${candidate.description} (${candidate.warning})` : candidate.description;
+      const wlText = candidate.description;
       detailLines.push({ kind: 'whitelist', text: `/approve+ ${wlText}` });
     }
 
@@ -736,13 +733,7 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
           const candidate = focused.request.whitelistCandidates?.[0];
           if (candidate) {
             const descBudget = maxTextWidth - 10;
-            if (candidate.warning) {
-              const warnText = ` (${candidate.warning})`;
-              term.cyan(truncate(candidate.description, Math.max(1, descBudget - warnText.length)));
-              term.yellow(truncate(warnText, descBudget));
-            } else {
-              term.cyan(truncate(candidate.description, descBudget));
-            }
+            term.cyan(truncate(candidate.description, descBudget));
           }
         } else {
           term(truncate(detail.text, maxTextWidth));

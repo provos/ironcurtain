@@ -46,6 +46,8 @@ export type ArgumentRole =
   | 'email-address'
   | 'email-body'
   | 'share-permission'
+  // Proxy roles
+  | 'proxy-domain'
   // Catch-all
   | 'none';
 
@@ -332,6 +334,19 @@ const registryEntries: [ArgumentRole, RoleDefinition][] = [
     },
   ],
   [
+    'proxy-domain',
+    {
+      description: 'Domain name for proxy allowlist management',
+      isResourceIdentifier: true,
+      category: 'identifier',
+      canonicalize: lowercase,
+      annotationGuidance:
+        'Assign to arguments that are domain names used for proxy allowlist management. ' +
+        'Typically the "domain" parameter on proxy domain management tools.',
+      serverNames: ['proxy'],
+    },
+  ],
+  [
     'none',
     {
       description: 'Argument carries no resource-identifier semantics',
@@ -367,6 +382,7 @@ const _ROLE_COMPLETENESS_CHECK: Record<ArgumentRole, true> = {
   'email-address': true,
   'email-body': true,
   'share-permission': true,
+  'proxy-domain': true,
   none: true,
 };
 

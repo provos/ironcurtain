@@ -379,8 +379,8 @@ describe('extractWhitelistCandidates', () => {
       'test reason',
     );
 
-    // write-history is excluded, so no constraints
-    expect(patterns[0].constraints).toHaveLength(0);
+    // write-history is excluded, so no constraints → no patterns offered
+    expect(patterns).toHaveLength(0);
   });
 
   it('excludes delete-history roles from directory generalization', () => {
@@ -400,7 +400,8 @@ describe('extractWhitelistCandidates', () => {
       'test reason',
     );
 
-    expect(patterns[0].constraints).toHaveLength(0);
+    // delete-history is excluded, so no constraints → no patterns offered
+    expect(patterns).toHaveLength(0);
   });
 
   it('falls back to all resource roles when escalatedRoles is undefined', () => {
@@ -420,9 +421,9 @@ describe('extractWhitelistCandidates', () => {
     expect(patterns[0].constraints[0].kind).toBe('directory');
   });
 
-  it('returns empty constraints when no values are extractable', () => {
+  it('returns no patterns when no values are extractable', () => {
     const annotation = makeAnnotation({ args: {} });
-    const { patterns } = extractWhitelistCandidates(
+    const { patterns, ipcs } = extractWhitelistCandidates(
       'filesystem',
       'write_file',
       {},
@@ -432,12 +433,14 @@ describe('extractWhitelistCandidates', () => {
       'test reason',
     );
 
-    expect(patterns[0].constraints).toHaveLength(0);
+    // Zero constraints → no whitelist candidate offered
+    expect(patterns).toHaveLength(0);
+    expect(ipcs).toHaveLength(0);
   });
 
-  it('returns empty constraints when args are missing', () => {
+  it('returns no patterns when args are missing', () => {
     const annotation = makeAnnotation();
-    const { patterns } = extractWhitelistCandidates(
+    const { patterns, ipcs } = extractWhitelistCandidates(
       'filesystem',
       'write_file',
       { content: 'x' }, // path is missing
@@ -447,23 +450,9 @@ describe('extractWhitelistCandidates', () => {
       'test reason',
     );
 
-    expect(patterns[0].constraints).toHaveLength(0);
-  });
-
-  it('generates warning for zero-constraint patterns', () => {
-    const annotation = makeAnnotation({ args: {} });
-    const { ipcs } = extractWhitelistCandidates(
-      'filesystem',
-      'write_file',
-      {},
-      annotation,
-      ['write-path'],
-      'esc-9',
-      'test reason',
-    );
-
-    expect(ipcs[0].warning).toBeDefined();
-    expect(ipcs[0].warning).toContain('auto-approve ALL');
+    // Zero constraints → no whitelist candidate offered
+    expect(patterns).toHaveLength(0);
+    expect(ipcs).toHaveLength(0);
   });
 });
 

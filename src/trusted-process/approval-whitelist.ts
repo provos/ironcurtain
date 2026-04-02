@@ -73,8 +73,6 @@ export interface WhitelistPattern {
 export interface WhitelistCandidateIpc {
   /** Human-readable summary, e.g. "Allow write_file within /home/user/Documents" */
   readonly description: string;
-  /** Warning for zero-constraint side-effectful patterns. */
-  readonly warning?: string;
 }
 
 /**
@@ -193,8 +191,16 @@ export function extractWhitelistCandidates(
   const rolesToExtract = escalatedRoles ?? collectDistinctRoles(annotation);
 
   const constraints = buildConstraints(rolesToExtract, args, annotation);
+
+  // Zero-constraint patterns would blanket-approve ALL future calls to the tool.
+  // This happens when a tool's arguments only have 'none' roles (no resource
+  // identifiers). Refuse to offer whitelisting in this case — each invocation
+  // must be individually approved.
+  if (constraints.length === 0) {
+    return { patterns: [], ipcs: [] };
+  }
+
   const description = buildDescription(serverName, toolName, constraints);
-  const warning = buildWarning(constraints);
 
   const pattern: Omit<WhitelistPattern, 'id'> = {
     serverName,
@@ -208,7 +214,6 @@ export function extractWhitelistCandidates(
 
   const ipc: WhitelistCandidateIpc = {
     description,
-    ...(warning ? { warning } : {}),
   };
 
   // Phase 1: returns a single candidate pattern. The array-based return type and
@@ -301,10 +306,6 @@ function buildConstraintForRole(role: ArgumentRole, category: string, value: str
  * Builds a human-readable description from constraints.
  */
 function buildDescription(serverName: string, toolName: string, constraints: readonly WhitelistConstraint[]): string {
-  if (constraints.length === 0) {
-    return `Allow ${serverName}/${toolName} (exact tool match only)`;
-  }
-
   const parts = constraints.map((c) => {
     switch (c.kind) {
       case 'directory':
@@ -317,16 +318,6 @@ function buildDescription(serverName: string, toolName: string, constraints: rea
   });
 
   return `Allow ${serverName}/${toolName} ${parts.join(', ')}`;
-}
-
-/**
- * Generates a warning for zero-constraint tools.
- */
-function buildWarning(constraints: readonly WhitelistConstraint[]): string | undefined {
-  if (constraints.length === 0) {
-    return 'Whitelisting will auto-approve ALL future calls to this tool for this session.';
-  }
-  return undefined;
 }
 
 // ---------------------------------------------------------------------------

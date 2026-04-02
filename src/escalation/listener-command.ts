@@ -403,9 +403,6 @@ function buildDashboard(state: ListenerState): string {
       if (esc.request.whitelistCandidates && esc.request.whitelistCandidates.length > 0) {
         const candidate = esc.request.whitelistCandidates[0];
         lines.push(`        ${chalk.cyan('Whitelist: ' + candidate.description)}`);
-        if (candidate.warning) {
-          lines.push(`        ${chalk.yellow('Warning:   ' + candidate.warning)}`);
-        }
       }
     }
   }
