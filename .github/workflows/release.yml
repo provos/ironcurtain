@@ -21,6 +21,9 @@ jobs:
           cache: npm
           registry-url: https://registry.npmjs.org
 
+      - name: Upgrade npm for OIDC trusted publishing support
+        run: npx npm@latest install -g npm@latest
+
       - run: npm ci
       - run: npm run build --workspace=packages/memory-mcp-server
       - run: npm run format:check
