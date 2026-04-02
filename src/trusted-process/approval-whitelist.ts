@@ -332,6 +332,14 @@ export function createApprovalWhitelist(): ApprovalWhitelist {
 
   return {
     add(patternData: Omit<WhitelistPattern, 'id'>): WhitelistEntryId {
+      // Defense-in-depth: reject zero-constraint patterns that would blanket-approve
+      // all calls to a tool. extractWhitelistCandidates() already prevents this, but
+      // guard here too so a future caller can't reintroduce the vulnerability.
+      if (patternData.constraints.length === 0) {
+        throw new Error(
+          `Refusing to add zero-constraint whitelist pattern for ${patternData.serverName}/${patternData.toolName}`,
+        );
+      }
       const id = uuidv4() as WhitelistEntryId;
       const pattern: WhitelistPattern = { ...patternData, id };
       patterns.push(pattern);
@@ -348,10 +356,10 @@ export function createApprovalWhitelist(): ApprovalWhitelist {
         if (pattern.serverName !== serverName) continue;
         if (pattern.toolName !== toolName) continue;
 
-        // All constraints must match (AND semantics)
-        const allMatch =
-          pattern.constraints.length === 0 ||
-          pattern.constraints.every((c) => constraintMatches(c, resolvedArgs, annotation));
+        // All constraints must match (AND semantics).
+        // Zero-constraint patterns are rejected by add(), so every pattern
+        // here has at least one constraint to evaluate.
+        const allMatch = pattern.constraints.every((c) => constraintMatches(c, resolvedArgs, annotation));
 
         if (allMatch) {
           return { matched: true, patternId: pattern.id, pattern };

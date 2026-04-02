@@ -35,7 +35,7 @@ function makePattern(overrides: Partial<Omit<WhitelistPattern, 'id'>> = {}): Omi
   return {
     serverName: 'filesystem',
     toolName: 'write_file',
-    constraints: [],
+    constraints: [{ kind: 'directory', role: 'write-path', directory: '/tmp' }],
     createdAt: new Date().toISOString(),
     sourceEscalationId: 'test-esc-1',
     originalReason: 'test reason',
@@ -69,11 +69,11 @@ describe('createApprovalWhitelist', () => {
     expect(whitelist.entries()[0].id).toBe(id);
   });
 
-  it('matches a zero-constraint pattern for the same server/tool', () => {
+  it('matches a pattern for the same server/tool with matching args', () => {
     const annotation = makeAnnotation();
     whitelist.add(makePattern());
 
-    const result = whitelist.match('filesystem', 'write_file', { path: '/any/path', content: 'x' }, annotation);
+    const result = whitelist.match('filesystem', 'write_file', { path: '/tmp/file.txt', content: 'x' }, annotation);
     expect(result.matched).toBe(true);
   });
 
@@ -268,13 +268,12 @@ describe('exact constraint matching', () => {
 // ---------------------------------------------------------------------------
 
 describe('zero-constraint patterns', () => {
-  it('matches any call to the same server/tool', () => {
+  it('rejects zero-constraint patterns in add()', () => {
     const whitelist = createApprovalWhitelist();
-    const annotation = makeAnnotation();
-    whitelist.add(makePattern({ constraints: [] }));
-
-    const result = whitelist.match('filesystem', 'write_file', { path: '/anything', content: 'y' }, annotation);
-    expect(result.matched).toBe(true);
+    expect(() => whitelist.add(makePattern({ constraints: [] }))).toThrow(
+      /Refusing to add zero-constraint whitelist pattern/,
+    );
+    expect(whitelist.size).toBe(0);
   });
 });
 

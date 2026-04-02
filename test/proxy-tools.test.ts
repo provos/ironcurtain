@@ -423,6 +423,14 @@ describe('proxyAnnotations', () => {
     expect(addAnnotation!.inputSchema).toBeDefined();
   });
 
+  it('annotates domain arguments as proxy-domain for whitelist scoping', () => {
+    const addAnnotation = proxyAnnotations.find((a) => a.toolName === 'add_proxy_domain');
+    expect(addAnnotation!.args.domain).toEqual(['proxy-domain']);
+
+    const removeAnnotation = proxyAnnotations.find((a) => a.toolName === 'remove_proxy_domain');
+    expect(removeAnnotation!.args.domain).toEqual(['proxy-domain']);
+  });
+
   it('has correct metadata for list_proxy_domains', () => {
     const listAnnotation = proxyAnnotations.find((a) => a.toolName === 'list_proxy_domains');
     expect(listAnnotation).toBeDefined();
