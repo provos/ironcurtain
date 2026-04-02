@@ -1,7 +1,13 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { scanResumableSessions, formatRelativeTime } from '../src/mux/session-scanner.js';
+import { homedir } from 'node:os';
+import {
+  scanResumableSessions,
+  formatRelativeTime,
+  shortenHomePath,
+  getWorkspaceLabel,
+} from '../src/mux/session-scanner.js';
 import type { SessionSnapshot } from '../src/mux/session-scanner.js';
 import { SESSION_STATE_FILENAME } from '../src/docker/pty-types.js';
 
@@ -161,5 +167,53 @@ describe('formatRelativeTime', () => {
   it('formats days ago', () => {
     const threeDaysAgo = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString();
     expect(formatRelativeTime(threeDaysAgo)).toBe('3d ago');
+  });
+});
+
+describe('shortenHomePath', () => {
+  const home = homedir();
+
+  it('replaces home directory with ~', () => {
+    expect(shortenHomePath(`${home}/src/project`)).toBe('~/src/project');
+  });
+
+  it('replaces exact home directory with ~', () => {
+    expect(shortenHomePath(home)).toBe('~');
+  });
+
+  it('leaves non-home paths unchanged', () => {
+    expect(shortenHomePath('/tmp/workspace')).toBe('/tmp/workspace');
+  });
+
+  it('does not shorten partial home prefix matches', () => {
+    expect(shortenHomePath(`${home}-extra/src`)).toBe(`${home}-extra/src`);
+  });
+});
+
+describe('getWorkspaceLabel', () => {
+  const baseSnapshot: SessionSnapshot = {
+    sessionId: 'test-id',
+    status: 'user-exit',
+    exitCode: 0,
+    lastActivity: '2026-03-10T12:00:00Z',
+    workspacePath: '/workspace',
+    agent: 'claude-code',
+    label: 'test',
+    resumable: true,
+  };
+
+  it('returns undefined for default session sandbox', () => {
+    const s = { ...baseSnapshot, workspacePath: `${homedir()}/.ironcurtain/sessions/abc123/sandbox` };
+    expect(getWorkspaceLabel(s)).toBeUndefined();
+  });
+
+  it('returns shortened path for explicit workspace', () => {
+    const s = { ...baseSnapshot, workspacePath: `${homedir()}/src/myproject` };
+    expect(getWorkspaceLabel(s)).toBe('~/src/myproject');
+  });
+
+  it('returns full path for non-home workspace', () => {
+    const s = { ...baseSnapshot, workspacePath: '/tmp/workspace' };
+    expect(getWorkspaceLabel(s)).toBe('/tmp/workspace');
   });
 });

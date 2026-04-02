@@ -27,7 +27,7 @@ import {
 import type { ListenerState } from '../escalation/listener-state.js';
 import type { PickerState, ResumePickerState, PersonaPickerState, EscalationPickerState } from './mux-input-handler.js';
 import { createSplashScreen, type SplashScreen } from './mux-splash.js';
-import { formatRelativeTime } from './session-scanner.js';
+import { formatRelativeTime, getWorkspaceLabel } from './session-scanner.js';
 
 // -- xterm.js color mode constants (from IBufferCell.getFgColorMode/getBgColorMode) --
 const CM_DEFAULT = 0;
@@ -1025,7 +1025,9 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
         const isSelected = idx === rps.selectedIndex;
         const shortId = s.sessionId.substring(0, 8);
         const timeAgo = formatRelativeTime(s.lastActivity);
-        const line = `${shortId}  ${s.agent}  ${s.label}  ${timeAgo}  [${s.status}]`;
+        const workspace = getWorkspaceLabel(s);
+        const workspaceSuffix = workspace ? `  ${workspace}` : '';
+        const line = `${shortId}  ${s.agent}  ${s.label}${workspaceSuffix}  ${timeAgo}  [${s.status}]`;
 
         moveTo(2, currentY);
         if (isSelected) {
@@ -1038,6 +1040,10 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
           term(s.agent);
           term('  ');
           term.cyan(truncate(s.label, Math.max(10, _cols - 50)));
+          if (workspace) {
+            term('  ');
+            term.yellow(workspace);
+          }
           term('  ');
           term.dim(timeAgo);
           term('  ');
