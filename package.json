@@ -1,6 +1,6 @@
 {
   "name": "@provos/ironcurtain",
-  "version": "0.9.1",
+  "version": "0.10.0",
   "type": "module",
   "description": "Secure agent runtime with trusted process mediation",
   "license": "Apache-2.0",

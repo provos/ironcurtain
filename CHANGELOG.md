@@ -4,6 +4,34 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-04-01
+
+### Features
+
+- **Custom API gateway support** — route LLM traffic through API gateways (LiteLLM, Ollama, etc.) via `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, and `GOOGLE_API_BASE_URL` environment variables or config file fields; the MITM proxy intercepts container traffic as usual but forwards upstream to the custom gateway; Code Mode passes `baseURL` directly to AI SDK providers (#148)
+- **`--model` CLI flag** — override the agent model on `start` and `mux` commands (e.g., `--model jaahas/qwen3.5-uncensored:35b` for Ollama); `parseModelId()` now handles non-provider colon-separated tags; Claude Code adapter passes the model to the container via `--model` and `IRONCURTAIN_MODEL` (#148)
+- **Haiku-based server pre-filter** — cheap Haiku pre-filter step during policy compilation skips servers irrelevant to the constitution, saving expensive Opus/Sonnet LLM calls; configurable via `prefilterModelId` in user config (#146)
+- **Parallel server compilation** — compile all servers concurrently via `Promise.allSettled` with `p-limit` throttling (10 servers, 8 LLM calls); multi-line TTY progress display shows all servers simultaneously; adds `HTTPS_PROXY`/`HTTP_PROXY` support for AI SDK providers (#144)
+- **`annotate-tools` requires explicit target** — `--server <name>` or `--all` flag required instead of always annotating everything; single-server mode merges with existing annotations; includes `--help` and server name validation (#142)
+- **WebSocket and plain HTTP CONNECT tunnels** — WebSocket upgrade handling for `ws://` via `HTTP_PROXY`; passthrough CONNECT tunnels use raw TCP tunneling instead of TLS MITM, fixing plain HTTP and WebSocket connections (#139)
+- **SSH agent socket in sandbox** — forward `SSH_AUTH_SOCK` into Docker containers for git operations requiring SSH keys
+- **Workspace display in resume picker** — mux `/resume` picker shows the workspace directory (with `~/` shortening) when a session was started with `--workspace` (#149)
+- **Enhanced Docker base images** — additional packages (`build-essential`, `cmake`, graphics/Qt libraries, common Python native deps) and passwordless sudo in arm64 image
+
+### Fixes
+
+- **x86_64 Dockerfile missing node-gyp** — install `node-gyp` globally in `Dockerfile.base` to match the arm64 variant; fixes Docker build failures on Windows/WSL2 (#147)
+- **Stale Docker containers on resume** — clean up containers from previous sessions before starting a new one (#134)
+- **Mux exited tab cleanup** — auto-remove exited tabs to restore the splash screen when all sessions end
+- **Plain HTTP passthrough in MITM proxy** — fix plain HTTP connections through CONNECT tunnels for passthrough domains (#133)
+- **Integration test reliability** — use local `mcp-server-filesystem` binary instead of global install
+
+### Dependencies
+
+- Bump `node-forge` from 1.3.3 to 1.4.0
+- Bump `path-to-regexp` from 8.3.0 to 8.4.0
+- Bump `picomatch` (security fix)
+
 ## [0.9.1] - 2026-03-25
 
 ### Fixes
