@@ -86,6 +86,7 @@ export async function main(args?: string[]): Promise<void> {
 
   // Apply --model override to both Code Mode and Docker agent model IDs
   if (modelOverride) {
+    config.agentModelId = modelOverride;
     config.userConfig = { ...config.userConfig, agentModelId: modelOverride };
   }
 
