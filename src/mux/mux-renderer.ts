@@ -1039,10 +1039,19 @@ export function createMuxRenderer(term: TerminalKit, cols: number, rows: number,
           term('  ');
           term(s.agent);
           term('  ');
-          term.cyan(truncate(s.label, Math.max(10, _cols - 50)));
+          // Fixed columns: "  " prefix (2) + shortId (8) + "  " (2) + agent + "  " (2) +
+          // label + "  " (2) + timeAgo + "  " (2) + [status]
+          const fixedWidth = 2 + 8 + 2 + s.agent.length + 2 + 2 + timeAgo.length + 2 + s.status.length + 2;
+          const availForLabelAndWs = Math.max(10, _cols - fixedWidth);
           if (workspace) {
+            // Split available space: label gets half, workspace gets the rest
+            const labelWidth = Math.max(5, Math.floor(availForLabelAndWs * 0.4));
+            const wsWidth = Math.max(5, availForLabelAndWs - labelWidth - 2);
+            term.cyan(truncate(s.label, labelWidth));
             term('  ');
-            term.yellow(workspace);
+            term.yellow(truncate(workspace, wsWidth));
+          } else {
+            term.cyan(truncate(s.label, availForLabelAndWs));
           }
           term('  ');
           term.dim(timeAgo);

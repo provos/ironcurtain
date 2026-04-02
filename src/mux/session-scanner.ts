@@ -9,7 +9,7 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
-import { getSessionsDir } from '../config/paths.js';
+import { getSessionsDir, getSessionSandboxDir } from '../config/paths.js';
 import { SESSION_STATE_FILENAME } from '../docker/pty-types.js';
 import type { SessionSnapshot } from '../docker/pty-types.js';
 
@@ -66,7 +66,7 @@ export function shortenHomePath(p: string): string {
  * if the session uses the default sandbox (not an explicit --workspace).
  */
 export function getWorkspaceLabel(s: SessionSnapshot): string | undefined {
-  if (s.workspacePath.includes('/sessions/') && s.workspacePath.endsWith('/sandbox')) {
+  if (s.workspacePath === getSessionSandboxDir(s.sessionId)) {
     return undefined;
   }
   return shortenHomePath(s.workspacePath);

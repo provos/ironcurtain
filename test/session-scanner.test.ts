@@ -8,6 +8,7 @@ import {
   shortenHomePath,
   getWorkspaceLabel,
 } from '../src/mux/session-scanner.js';
+import { getSessionSandboxDir } from '../src/config/paths.js';
 import type { SessionSnapshot } from '../src/mux/session-scanner.js';
 import { SESSION_STATE_FILENAME } from '../src/docker/pty-types.js';
 
@@ -203,7 +204,7 @@ describe('getWorkspaceLabel', () => {
   };
 
   it('returns undefined for default session sandbox', () => {
-    const s = { ...baseSnapshot, workspacePath: `${homedir()}/.ironcurtain/sessions/abc123/sandbox` };
+    const s = { ...baseSnapshot, workspacePath: getSessionSandboxDir(baseSnapshot.sessionId) };
     expect(getWorkspaceLabel(s)).toBeUndefined();
   });
 
