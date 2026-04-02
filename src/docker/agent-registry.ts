@@ -39,8 +39,9 @@ export function listAgents(): readonly AgentAdapter[] {
  *   provider, default model). This allows --list-agents to work without config.
  */
 export async function registerBuiltinAdapters(userConfig?: ResolvedUserConfig): Promise<void> {
-  const { claudeCodeAdapter } = await import('./adapters/claude-code.js');
-  if (!registry.has(claudeCodeAdapter.id)) {
+  if (!registry.has('claude-code' as AgentId)) {
+    const { createClaudeCodeAdapter } = await import('./adapters/claude-code.js');
+    const claudeCodeAdapter = createClaudeCodeAdapter(userConfig);
     registry.set(claudeCodeAdapter.id, claudeCodeAdapter);
   }
 

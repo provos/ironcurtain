@@ -31,6 +31,8 @@ export interface MuxApp {
 export interface MuxAppOptions {
   /** Agent to use for PTY sessions. Defaults to 'claude-code'. */
   readonly agent?: string;
+  /** Optional model ID override (passed as --model to child sessions). */
+  readonly model?: string;
   /** Whether to auto-spawn an initial session. Default: true. */
   readonly autoSpawn?: boolean;
   /** Protected paths for workspace validation. */
@@ -115,6 +117,7 @@ export function createMuxApp(options: MuxAppOptions): MuxApp {
       workspacePath: opts?.workspacePath,
       resumeSessionId: opts?.resumeSessionId,
       persona: opts?.persona,
+      model: options.model,
       muxId: options.muxId,
       muxPid: options.muxPid,
     });

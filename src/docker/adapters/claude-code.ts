@@ -22,6 +22,8 @@ import type {
 } from '../agent-adapter.js';
 import type { IronCurtainConfig } from '../../config/types.js';
 import type { ProviderConfig } from '../provider-config.js';
+import type { ResolvedUserConfig } from '../../config/user-config.js';
+import { parseModelId } from '../../config/model-provider.js';
 import {
   anthropicProvider,
   claudePlatformProvider,
@@ -80,59 +82,67 @@ ${buildAttributionSection()}
 `;
 }
 
-export const claudeCodeAdapter: AgentAdapter = {
-  id: 'claude-code' as AgentId,
-  displayName: 'Claude Code',
+export function createClaudeCodeAdapter(userConfig?: ResolvedUserConfig): AgentAdapter {
+  const modelId = userConfig?.agentModelId ? parseModelId(userConfig.agentModelId).modelId : undefined;
 
-  // eslint-disable-next-line @typescript-eslint/require-await -- interface requires Promise return
-  async getImage(): Promise<string> {
-    return CLAUDE_CODE_IMAGE;
-  },
+  return {
+    id: 'claude-code' as AgentId,
+    displayName: 'Claude Code',
 
-  // Generates MCP config file passed via --mcp-config on the command line.
-  // socketPath is either a UDS path or a TCP host:port address.
-  generateMcpConfig(socketPath: string): AgentConfigFile[] {
-    const isTcp = socketPath.includes(':');
-    const mcpConfig = {
-      mcpServers: {
-        ironcurtain: {
-          command: 'socat',
-          args: isTcp ? ['STDIO', `TCP:${socketPath}`] : ['STDIO', `UNIX-CONNECT:${socketPath}`],
+    // eslint-disable-next-line @typescript-eslint/require-await -- interface requires Promise return
+    async getImage(): Promise<string> {
+      return CLAUDE_CODE_IMAGE;
+    },
+
+    // Generates MCP config file passed via --mcp-config on the command line.
+    // socketPath is either a UDS path or a TCP host:port address.
+    generateMcpConfig(socketPath: string): AgentConfigFile[] {
+      const isTcp = socketPath.includes(':');
+      const mcpConfig = {
+        mcpServers: {
+          ironcurtain: {
+            command: 'socat',
+            args: isTcp ? ['STDIO', `TCP:${socketPath}`] : ['STDIO', `UNIX-CONNECT:${socketPath}`],
+          },
         },
-      },
-    };
+      };
 
-    return [
-      {
-        path: 'claude-mcp-config.json',
-        content: JSON.stringify(mcpConfig, null, 2),
-      },
-    ];
-  },
+      return [
+        {
+          path: 'claude-mcp-config.json',
+          content: JSON.stringify(mcpConfig, null, 2),
+        },
+      ];
+    },
 
-  generateOrientationFiles(): AgentConfigFile[] {
-    // Wrapper script for PTY mode -- avoids shell quoting issues by reading
-    // the system prompt from $IRONCURTAIN_SYSTEM_PROMPT (set by entrypoint).
-    // Sets initial PTY size from host-provided env vars before exec, so the
-    // PTY has the correct dimensions before Claude even starts.
-    const startScript = `#!/bin/bash
+    generateOrientationFiles(): AgentConfigFile[] {
+      // Wrapper script for PTY mode -- avoids shell quoting issues by reading
+      // the system prompt from $IRONCURTAIN_SYSTEM_PROMPT (set by entrypoint).
+      // Sets initial PTY size from host-provided env vars before exec, so the
+      // PTY has the correct dimensions before Claude even starts.
+      const startScript = `#!/bin/bash
 # Set initial terminal size from host env vars
 if [ -n "$IRONCURTAIN_INITIAL_COLS" ] && [ -n "$IRONCURTAIN_INITIAL_ROWS" ]; then
   stty cols "$IRONCURTAIN_INITIAL_COLS" rows "$IRONCURTAIN_INITIAL_ROWS" 2>/dev/null
 fi
 cd /workspace
 
+MODEL_ARGS=()
+if [ -n "$IRONCURTAIN_MODEL" ]; then
+  MODEL_ARGS=(--model "$IRONCURTAIN_MODEL")
+fi
+
 # shellcheck disable=SC2086
 if [ -n "$IRONCURTAIN_RESUME_FLAGS" ]; then
   # Try resume; if --continue fails (no conversation), fall back to fresh start
-  claude --dangerously-skip-permissions --mcp-config /etc/ironcurtain/claude-mcp-config.json --append-system-prompt "$IRONCURTAIN_SYSTEM_PROMPT" $IRONCURTAIN_RESUME_FLAGS
+  claude --dangerously-skip-permissions --mcp-config /etc/ironcurtain/claude-mcp-config.json --append-system-prompt "$IRONCURTAIN_SYSTEM_PROMPT" "\${MODEL_ARGS[@]}" $IRONCURTAIN_RESUME_FLAGS
   STATUS=$?
   if [ $STATUS -ne 0 ]; then
-    claude --dangerously-skip-permissions --mcp-config /etc/ironcurtain/claude-mcp-config.json --append-system-prompt "$IRONCURTAIN_SYSTEM_PROMPT"
+    claude --dangerously-skip-permissions --mcp-config /etc/ironcurtain/claude-mcp-config.json --append-system-prompt "$IRONCURTAIN_SYSTEM_PROMPT" "\${MODEL_ARGS[@]}"
     STATUS=$?
   fi
 else
-  claude --dangerously-skip-permissions --mcp-config /etc/ironcurtain/claude-mcp-config.json --append-system-prompt "$IRONCURTAIN_SYSTEM_PROMPT"
+  claude --dangerously-skip-permissions --mcp-config /etc/ironcurtain/claude-mcp-config.json --append-system-prompt "$IRONCURTAIN_SYSTEM_PROMPT" "\${MODEL_ARGS[@]}"
   STATUS=$?
 fi
 
@@ -142,109 +152,117 @@ cp "$HOME/.claude.json" "$HOME/.claude/.claude.json.saved" 2>/dev/null
 exit $STATUS
 `;
 
-    // Helper scripts for PTY resize — use shared generators parameterized by process name.
-    const resizeScript = buildResizePtyScript('claude');
-    const checkSizeScript = buildCheckPtySizeScript('claude');
+      // Helper scripts for PTY resize — use shared generators parameterized by process name.
+      const resizeScript = buildResizePtyScript('claude');
+      const checkSizeScript = buildCheckPtySizeScript('claude');
 
-    return [
-      { path: 'start-claude.sh', content: startScript, mode: 0o755 },
-      { path: 'resize-pty.sh', content: resizeScript, mode: 0o755 },
-      { path: 'check-pty-size.sh', content: checkSizeScript, mode: 0o755 },
-    ];
-  },
+      return [
+        { path: 'start-claude.sh', content: startScript, mode: 0o755 },
+        { path: 'resize-pty.sh', content: resizeScript, mode: 0o755 },
+        { path: 'check-pty-size.sh', content: checkSizeScript, mode: 0o755 },
+      ];
+    },
 
-  buildCommand(message: string, systemPrompt: string): readonly string[] {
-    return [
-      'claude',
-      '--continue',
-      '--dangerously-skip-permissions',
-      '--output-format',
-      'json',
-      '--mcp-config',
-      '/etc/ironcurtain/claude-mcp-config.json',
-      '--append-system-prompt',
-      systemPrompt,
-      '-p',
-      message,
-    ];
-  },
+    buildCommand(message: string, systemPrompt: string): readonly string[] {
+      const cmd = [
+        'claude',
+        '--continue',
+        '--dangerously-skip-permissions',
+        '--output-format',
+        'json',
+        '--mcp-config',
+        '/etc/ironcurtain/claude-mcp-config.json',
+        '--append-system-prompt',
+        systemPrompt,
+      ];
+      if (modelId) {
+        cmd.push('--model', modelId);
+      }
+      cmd.push('-p', message);
+      return cmd;
+    },
 
-  buildSystemPrompt(context: OrientationContext): string {
-    // Layer 1: Code Mode instructions (tool discovery, sync calls, return semantics)
-    const codeModePrompt = buildSystemPrompt(context.serverListings, context.hostSandboxDir);
+    buildSystemPrompt(context: OrientationContext): string {
+      // Layer 1: Code Mode instructions (tool discovery, sync calls, return semantics)
+      const codeModePrompt = buildSystemPrompt(context.serverListings, context.hostSandboxDir);
 
-    // Layer 2: Docker environment specifics (workspace, host access, policy)
-    const dockerPrompt = buildDockerEnvironmentPrompt(context);
+      // Layer 2: Docker environment specifics (workspace, host access, policy)
+      const dockerPrompt = buildDockerEnvironmentPrompt(context);
 
-    return `${codeModePrompt}\n${dockerPrompt}`;
-  },
+      return `${codeModePrompt}\n${dockerPrompt}`;
+    },
 
-  getProviders(authKind?: 'oauth' | 'apikey'): readonly ProviderConfig[] {
-    if (authKind === 'oauth') {
-      return [anthropicOAuthProvider, claudePlatformOAuthProvider];
-    }
-    return [anthropicProvider, claudePlatformProvider];
-  },
+    getProviders(authKind?: 'oauth' | 'apikey'): readonly ProviderConfig[] {
+      if (authKind === 'oauth') {
+        return [anthropicOAuthProvider, claudePlatformOAuthProvider];
+      }
+      return [anthropicProvider, claudePlatformProvider];
+    },
 
-  buildEnv(config: IronCurtainConfig, fakeKeys: ReadonlyMap<string, string>): Record<string, string> {
-    const env: Record<string, string> = {
-      CLAUDE_CODE_DISABLE_UPDATE_CHECK: '1',
-      // Node.js does not use the system CA store -- must set this explicitly
-      NODE_EXTRA_CA_CERTS: '/usr/local/share/ca-certificates/ironcurtain-ca.crt',
-    };
+    buildEnv(config: IronCurtainConfig, fakeKeys: ReadonlyMap<string, string>): Record<string, string> {
+      const env: Record<string, string> = {
+        CLAUDE_CODE_DISABLE_UPDATE_CHECK: '1',
+        // Node.js does not use the system CA store -- must set this explicitly
+        NODE_EXTRA_CA_CERTS: '/usr/local/share/ca-certificates/ironcurtain-ca.crt',
+      };
 
-    const fakeKey = fakeKeys.get('api.anthropic.com');
-    if (!fakeKey) {
-      throw new Error('No fake key generated for api.anthropic.com — cannot configure Claude Code authentication');
-    }
+      if (modelId) {
+        env.IRONCURTAIN_MODEL = modelId;
+      }
 
-    if (config.dockerAuth?.kind === 'oauth') {
-      // OAuth mode: pass fake token via Claude Code's native env var.
-      // Claude Code reads CLAUDE_CODE_OAUTH_TOKEN as its highest-priority auth.
-      env.CLAUDE_CODE_OAUTH_TOKEN = fakeKey;
-    } else {
-      // API key mode: pass the fake key via a non-Claude env var; apiKeyHelper
-      // in settings.json echoes it so Claude Code never prompts for approval.
-      env.IRONCURTAIN_API_KEY = fakeKey;
-    }
+      const fakeKey = fakeKeys.get('api.anthropic.com');
+      if (!fakeKey) {
+        throw new Error('No fake key generated for api.anthropic.com — cannot configure Claude Code authentication');
+      }
 
-    return env;
-  },
+      if (config.dockerAuth?.kind === 'oauth') {
+        // OAuth mode: pass fake token via Claude Code's native env var.
+        // Claude Code reads CLAUDE_CODE_OAUTH_TOKEN as its highest-priority auth.
+        env.CLAUDE_CODE_OAUTH_TOKEN = fakeKey;
+      } else {
+        // API key mode: pass the fake key via a non-Claude env var; apiKeyHelper
+        // in settings.json echoes it so Claude Code never prompts for approval.
+        env.IRONCURTAIN_API_KEY = fakeKey;
+      }
 
-  extractResponse(exitCode: number, stdout: string): AgentResponse {
-    if (exitCode !== 0) {
-      return { text: `Agent exited with code ${exitCode}.\n\nOutput:\n${stdout}` };
-    }
-    return parseClaudeCodeJson(stdout);
-  },
+      return env;
+    },
 
-  buildPtyCommand(
-    _systemPrompt: string,
-    ptySockPath: string | undefined,
-    ptyPort: number | undefined,
-  ): readonly string[] {
-    // The socat listener target depends on platform
-    const listenArg = ptySockPath
-      ? `UNIX-LISTEN:${ptySockPath},fork` // Linux UDS
-      : `TCP-LISTEN:${ptyPort},reuseaddr`; // macOS TCP
+    extractResponse(exitCode: number, stdout: string): AgentResponse {
+      if (exitCode !== 0) {
+        return { text: `Agent exited with code ${exitCode}.\n\nOutput:\n${stdout}` };
+      }
+      return parseClaudeCodeJson(stdout);
+    },
 
-    // Interactive mode: claude runs via a wrapper script that reads the system
-    // prompt from an env var set by the entrypoint. This avoids shell quoting
-    // issues that occur when embedding large prompts in socat EXEC: strings.
-    return ['socat', listenArg, 'EXEC:/etc/ironcurtain/start-claude.sh,pty,setsid,ctty,stderr,rawer'];
-  },
+    buildPtyCommand(
+      _systemPrompt: string,
+      ptySockPath: string | undefined,
+      ptyPort: number | undefined,
+    ): readonly string[] {
+      // The socat listener target depends on platform
+      const listenArg = ptySockPath
+        ? `UNIX-LISTEN:${ptySockPath},fork` // Linux UDS
+        : `TCP-LISTEN:${ptyPort},reuseaddr`; // macOS TCP
 
-  getConversationStateConfig(): ConversationStateConfig {
-    return {
-      hostDirName: 'claude-state',
-      containerMountPath: '/home/codespace/.claude/',
-      seed: [
-        { path: 'projects/', content: '' }, // directory, populated by Claude Code
-      ],
-      resumeFlags: ['--continue'],
-    };
-  },
-};
+      // Interactive mode: claude runs via a wrapper script that reads the system
+      // prompt from an env var set by the entrypoint. This avoids shell quoting
+      // issues that occur when embedding large prompts in socat EXEC: strings.
+      return ['socat', listenArg, 'EXEC:/etc/ironcurtain/start-claude.sh,pty,setsid,ctty,stderr,rawer'];
+    },
+
+    getConversationStateConfig(): ConversationStateConfig {
+      return {
+        hostDirName: 'claude-state',
+        containerMountPath: '/home/codespace/.claude/',
+        seed: [
+          { path: 'projects/', content: '' }, // directory, populated by Claude Code
+        ],
+        resumeFlags: ['--continue'],
+      };
+    },
+  };
+}
 
 /**
  * Parses Claude Code's `--output-format json` response.

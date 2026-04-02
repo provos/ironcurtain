@@ -133,10 +133,13 @@ describe('SIGWINCH forwarding', () => {
 
 describe('Claude Code adapter PTY orientation files', () => {
   // Lazy import to avoid pulling in the full adapter at module level
-  let claudeCodeAdapter: (typeof import('../src/docker/adapters/claude-code.js'))['claudeCodeAdapter'];
+  let claudeCodeAdapter: ReturnType<
+    (typeof import('../src/docker/adapters/claude-code.js'))['createClaudeCodeAdapter']
+  >;
 
   beforeEach(async () => {
-    ({ claudeCodeAdapter } = await import('../src/docker/adapters/claude-code.js'));
+    const { createClaudeCodeAdapter } = await import('../src/docker/adapters/claude-code.js');
+    claudeCodeAdapter = createClaudeCodeAdapter();
   });
 
   it('start-claude.sh includes stty initialization from env vars', () => {

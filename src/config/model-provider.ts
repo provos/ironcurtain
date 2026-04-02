@@ -66,7 +66,8 @@ export interface ParsedModelId {
  *
  * Format: "provider:model-id" or just "model-id" (defaults to anthropic).
  *
- * @throws Error if the provider prefix is not recognized or model ID is empty
+ * @throws Error if the model ID is empty after a recognized provider prefix (e.g. "anthropic:").
+ * Unknown prefixes are treated as part of the model ID and default to the anthropic provider.
  */
 export function parseModelId(qualifiedId: string): ParsedModelId {
   const colonIndex = qualifiedId.indexOf(':');
@@ -76,13 +77,15 @@ export function parseModelId(qualifiedId: string): ParsedModelId {
   }
 
   const prefix = qualifiedId.substring(0, colonIndex);
-  const modelId = qualifiedId.substring(colonIndex + 1);
 
+  // Only treat the prefix as a provider if it's a known provider name.
+  // Otherwise the entire string is a model ID (e.g. Ollama tags like
+  // "qwen3.5-uncensored:35b" where the colon separates name from tag).
   if (!KNOWN_PROVIDERS.has(prefix)) {
-    const known = [...KNOWN_PROVIDERS].sort().join(', ');
-    throw new Error(`Unknown model provider "${prefix}" in "${qualifiedId}". ` + `Supported providers: ${known}`);
+    return { provider: DEFAULT_PROVIDER, modelId: qualifiedId };
   }
 
+  const modelId = qualifiedId.substring(colonIndex + 1);
   if (!modelId) {
     throw new Error(`Empty model ID in "${qualifiedId}". ` + `Expected format: "provider:model-id"`);
   }
@@ -102,7 +105,11 @@ export function parseModelId(qualifiedId: string): ParsedModelId {
  */
 export async function createLanguageModel(qualifiedId: string, config: ResolvedUserConfig): Promise<LanguageModelV3> {
   const { provider } = parseModelId(qualifiedId);
-  return createLanguageModelFromEnv(qualifiedId, resolveApiKeyForProvider(provider, config));
+  return createLanguageModelFromEnv(
+    qualifiedId,
+    resolveApiKeyForProvider(provider, config),
+    resolveBaseUrlForProvider(provider, config),
+  );
 }
 
 /**
@@ -116,23 +123,28 @@ export async function createLanguageModel(qualifiedId: string, config: ResolvedU
  * @param apiKey - Explicit API key for the model's provider (empty string uses env/default)
  * @returns A LanguageModelV3 instance ready for use with generateText()
  */
-export async function createLanguageModelFromEnv(qualifiedId: string, apiKey: string): Promise<LanguageModelV3> {
+export async function createLanguageModelFromEnv(
+  qualifiedId: string,
+  apiKey: string,
+  baseURL?: string,
+): Promise<LanguageModelV3> {
   const { provider, modelId } = parseModelId(qualifiedId);
   const key = apiKey || undefined;
+  const url = baseURL || undefined;
   const fetch = await getProxyFetch();
 
   switch (provider) {
     case 'anthropic': {
       const { createAnthropic } = await import('@ai-sdk/anthropic');
-      return createAnthropic({ apiKey: key, fetch })(modelId);
+      return createAnthropic({ apiKey: key, baseURL: url, fetch })(modelId);
     }
     case 'google': {
       const { createGoogleGenerativeAI } = await import('@ai-sdk/google');
-      return createGoogleGenerativeAI({ apiKey: key, fetch })(modelId);
+      return createGoogleGenerativeAI({ apiKey: key, baseURL: url, fetch })(modelId);
     }
     case 'openai': {
       const { createOpenAI } = await import('@ai-sdk/openai');
-      return createOpenAI({ apiKey: key, fetch })(modelId);
+      return createOpenAI({ apiKey: key, baseURL: url, fetch })(modelId);
     }
   }
 }
@@ -149,5 +161,20 @@ export function resolveApiKeyForProvider(provider: ProviderId, config: ResolvedU
       return config.googleApiKey;
     case 'openai':
       return config.openaiApiKey;
+  }
+}
+
+/**
+ * Resolves the base URL override for a given provider from user config.
+ * Returns empty string when no override is configured.
+ */
+export function resolveBaseUrlForProvider(provider: ProviderId, config: ResolvedUserConfig): string {
+  switch (provider) {
+    case 'anthropic':
+      return config.anthropicBaseUrl;
+    case 'google':
+      return config.googleBaseUrl;
+    case 'openai':
+      return config.openaiBaseUrl;
   }
 }

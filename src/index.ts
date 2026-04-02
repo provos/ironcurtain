@@ -25,6 +25,7 @@ const startSpec: CommandSpec = {
     { flag: 'workspace', short: 'w', description: 'Use an existing directory as the workspace', placeholder: '<path>' },
     { flag: 'persona', short: 'p', description: 'Use a named persona profile', placeholder: '<name>' },
     { flag: 'pty', description: 'Attach terminal directly to agent PTY (Docker mode only)' },
+    { flag: 'model', short: 'm', description: 'Override the agent model ID', placeholder: '<model>' },
     { flag: 'list-agents', description: 'List registered agent adapters' },
   ],
   examples: [
@@ -49,6 +50,7 @@ export async function main(args?: string[]): Promise<void> {
       workspace: { type: 'string', short: 'w' },
       persona: { type: 'string', short: 'p' },
       pty: { type: 'boolean' },
+      model: { type: 'string', short: 'm' },
       'list-agents': { type: 'boolean' },
     },
     allowPositionals: true,
@@ -79,7 +81,14 @@ export async function main(args?: string[]): Promise<void> {
   const agentName = values.agent as string | undefined;
   const rawWorkspace = values.workspace as string | undefined;
   const personaName = values.persona as string | undefined;
+  const modelOverride = values.model as string | undefined;
   const config = loadConfig();
+
+  // Apply --model override to both Code Mode and Docker agent model IDs
+  if (modelOverride) {
+    config.agentModelId = modelOverride;
+    config.userConfig = { ...config.userConfig, agentModelId: modelOverride };
+  }
 
   // When resuming, CLI --workspace and --persona are ignored -- the original
   // values are restored from persisted session metadata.

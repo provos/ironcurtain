@@ -29,6 +29,7 @@ import type { MitmProxy } from './mitm-proxy.js';
 import type { CertificateAuthority } from './ca.js';
 import type { DockerManager } from './types.js';
 import type { ProviderKeyMapping } from './mitm-proxy.js';
+import { parseUpstreamBaseUrl, type ProviderConfig, type UpstreamTarget } from './provider-config.js';
 import * as logger from '../logger.js';
 
 /** All the infrastructure created during Docker session setup. */
@@ -146,10 +147,17 @@ export async function prepareDockerInfrastructure(
       ? new OAuthTokenManager(authMethod.credentials, { canRefresh: true }, tokenManagerKeychainDeps)
       : undefined;
   const providers = adapter.getProviders(authKind);
+
+  const resolvedProviders = applyUpstreamOverrides(providers, parseUpstreamBaseUrl, {
+    'api.anthropic.com': config.userConfig.anthropicBaseUrl,
+    'api.openai.com': config.userConfig.openaiBaseUrl,
+    'generativelanguage.googleapis.com': config.userConfig.googleBaseUrl,
+  });
+
   const fakeKeys = new Map<string, string>();
   const providerMappings: ProviderKeyMapping[] = [];
   const fakeKeysByPrefix = new Map<string, string>();
-  for (const providerConfig of providers) {
+  for (const providerConfig of resolvedProviders) {
     let fakeKey = fakeKeysByPrefix.get(providerConfig.fakeKeyPrefix);
     if (!fakeKey) {
       fakeKey = generateFakeKey(providerConfig.fakeKeyPrefix);
@@ -473,4 +481,68 @@ function computeBuildHash(dockerDir: string, dockerfiles: string[], caCertPem: s
   }
 
   return hash.digest('hex');
+}
+
+/**
+ * Map of provider canonical hostnames to environment variable names
+ * that can override the upstream target URL. platform.claude.com is
+ * intentionally excluded — platform endpoints should not be redirected.
+ */
+const UPSTREAM_ENV_VARS: ReadonlyMap<string, string> = new Map([
+  ['api.anthropic.com', 'ANTHROPIC_BASE_URL'],
+  ['api.openai.com', 'OPENAI_BASE_URL'],
+  ['generativelanguage.googleapis.com', 'GOOGLE_API_BASE_URL'],
+]);
+
+/**
+ * Strips credentials and query parameters from a URL string for safe logging.
+ * Returns only scheme + hostname + port + pathname.
+ */
+function sanitizeUrlForLog(raw: string): string {
+  try {
+    const u = new URL(raw);
+    // Reconstruct with only safe components
+    return `${u.protocol}//${u.hostname}${u.port ? ':' + u.port : ''}${u.pathname}`;
+  } catch {
+    return '<invalid URL>';
+  }
+}
+
+/**
+ * Applies upstream target overrides from environment variables to provider configs.
+ *
+ * For each provider whose host has a corresponding env var set, parses the URL
+ * and returns a new ProviderConfig with the upstreamTarget field populated.
+ * If the env var is set but invalid, falls back to configBaseUrls before
+ * giving up. Providers without any valid override are returned unchanged.
+ */
+export function applyUpstreamOverrides(
+  providers: readonly ProviderConfig[],
+  parser: (baseUrl: string) => UpstreamTarget,
+  configBaseUrls?: Readonly<Record<string, string>>,
+): ProviderConfig[] {
+  return providers.map((config) => {
+    const envVar = UPSTREAM_ENV_VARS.get(config.host);
+    if (!envVar) return config;
+
+    // Try env var first, then configBaseUrls fallback
+    const sources: Array<{ label: string; url: string }> = [];
+    const envValue = process.env[envVar];
+    if (envValue) sources.push({ label: envVar, url: envValue });
+    const configUrl = configBaseUrls?.[config.host];
+    if (configUrl) sources.push({ label: 'config', url: configUrl });
+
+    for (const { label, url } of sources) {
+      try {
+        const upstreamTarget = parser(url);
+        logger.info(`[docker] ${config.displayName}: upstream override via ${label} → ${sanitizeUrlForLog(url)}`);
+        return { ...config, upstreamTarget };
+      } catch (err) {
+        logger.warn(
+          `[docker] ${config.displayName}: ignoring invalid ${label}="${sanitizeUrlForLog(url)}": ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+    return config;
+  });
 }

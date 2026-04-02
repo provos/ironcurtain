@@ -54,9 +54,12 @@ const resourceBudgetSchema = z
   .optional();
 
 /**
- * Validates a qualified model ID string: either a bare model name
- * or "provider:model-name" where provider is a known provider.
- * Delegates to parseModelId() so validation logic is not duplicated.
+ * Validates a qualified model ID string for config files: either a bare model
+ * name (no colons) or "provider:model-name" where provider is a known provider.
+ *
+ * Stricter than parseModelId() which also accepts Ollama-style "name:tag" via
+ * the --model CLI flag. Config values should use explicit provider prefixes
+ * when colons are present to avoid ambiguity.
  */
 const qualifiedModelId = z
   .string()
@@ -64,8 +67,12 @@ const qualifiedModelId = z
   .refine(
     (val) => {
       try {
-        parseModelId(val);
-        return true;
+        const { provider, modelId } = parseModelId(val);
+        // If the original value contains a colon, it must have resolved to
+        // a known provider prefix (not fallen through to the default).
+        // This catches ambiguous strings like "unknown:model" in config files.
+        if (val.includes(':') && val === modelId) return false;
+        return !!provider;
       } catch {
         return false;
       }
@@ -185,6 +192,9 @@ export const userConfigSchema = z.object({
   anthropicApiKey: z.string().min(1, 'anthropicApiKey must be non-empty').optional(),
   googleApiKey: z.string().min(1, 'googleApiKey must be non-empty').optional(),
   openaiApiKey: z.string().min(1, 'openaiApiKey must be non-empty').optional(),
+  anthropicBaseUrl: z.url().optional(),
+  openaiBaseUrl: z.url().optional(),
+  googleBaseUrl: z.url().optional(),
   escalationTimeoutSeconds: z
     .number()
     .int('escalationTimeoutSeconds must be an integer')
@@ -268,6 +278,9 @@ export interface ResolvedUserConfig {
   readonly anthropicApiKey: string;
   readonly googleApiKey: string;
   readonly openaiApiKey: string;
+  readonly anthropicBaseUrl: string;
+  readonly openaiBaseUrl: string;
+  readonly googleBaseUrl: string;
   readonly escalationTimeoutSeconds: number;
   readonly resourceBudget: ResolvedResourceBudgetConfig;
   readonly autoCompact: ResolvedAutoCompactConfig;
@@ -566,6 +579,9 @@ function mergeWithDefaults(config: UserConfig): ResolvedUserConfig {
     anthropicApiKey: config.anthropicApiKey ?? '',
     googleApiKey: config.googleApiKey ?? '',
     openaiApiKey: config.openaiApiKey ?? '',
+    anthropicBaseUrl: config.anthropicBaseUrl ?? '',
+    openaiBaseUrl: config.openaiBaseUrl ?? '',
+    googleBaseUrl: config.googleBaseUrl ?? '',
     escalationTimeoutSeconds: config.escalationTimeoutSeconds ?? USER_CONFIG_DEFAULTS.escalationTimeoutSeconds,
     resourceBudget: {
       // Nullable fields: null means "disabled", undefined means "use default".
@@ -654,6 +670,9 @@ function applyEnvOverrides(config: ResolvedUserConfig): ResolvedUserConfig {
     anthropicApiKey: process.env.ANTHROPIC_API_KEY || config.anthropicApiKey,
     googleApiKey: process.env.GOOGLE_GENERATIVE_AI_API_KEY || config.googleApiKey,
     openaiApiKey: process.env.OPENAI_API_KEY || config.openaiApiKey,
+    anthropicBaseUrl: process.env.ANTHROPIC_BASE_URL || config.anthropicBaseUrl,
+    openaiBaseUrl: process.env.OPENAI_BASE_URL || config.openaiBaseUrl,
+    googleBaseUrl: process.env.GOOGLE_API_BASE_URL || config.googleBaseUrl,
   };
 }
 
