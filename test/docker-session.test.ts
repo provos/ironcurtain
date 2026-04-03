@@ -650,6 +650,43 @@ describe('DockerAgentSession', () => {
     expect(stateMount!.readonly).toBe(false);
   });
 
+  it('mounts conversation state directory when configured (TCP mode)', async () => {
+    const createCalls: DockerContainerConfig[] = [];
+    const docker: DockerManager = {
+      ...createMockDocker(),
+      async create(config: DockerContainerConfig) {
+        createCalls.push(config);
+        return 'container-state-tcp-123';
+      },
+    };
+
+    const stateConfig: ConversationStateConfig = {
+      hostDirName: 'claude-state',
+      containerMountPath: '/home/codespace/.claude/',
+      seed: [],
+      resumeFlags: ['--continue'],
+    };
+    const conversationStateDir = join(deps.sessionDir, 'claude-state');
+    mkdirSync(conversationStateDir, { recursive: true });
+
+    session = new DockerAgentSession({
+      ...deps,
+      docker,
+      useTcp: true,
+      conversationStateDir,
+      conversationStateConfig: stateConfig,
+    });
+    await session.initialize();
+
+    expect(createCalls).toHaveLength(1);
+    const mounts = createCalls[0].mounts;
+
+    const stateMount = mounts.find((m) => m.target === '/home/codespace/.claude/');
+    expect(stateMount).toBeDefined();
+    expect(stateMount!.source).toBe(conversationStateDir);
+    expect(stateMount!.readonly).toBe(false);
+  });
+
   it('does not mount conversation state directory when not configured', async () => {
     const createCalls: DockerContainerConfig[] = [];
     const docker: DockerManager = {
@@ -666,8 +703,7 @@ describe('DockerAgentSession', () => {
     expect(createCalls).toHaveLength(1);
     const mounts = createCalls[0].mounts;
 
-    // Should only have workspace, sockets, and orientation mounts
-    expect(mounts).toHaveLength(3);
+    expect(mounts.some((m) => m.target === '/home/codespace/.claude/')).toBe(false);
   });
 
   it('getDiagnosticLog returns accumulated events', async () => {
