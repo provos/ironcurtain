@@ -94,6 +94,7 @@
     "turndown": "^7.2.2",
     "undici": "^7.24.0",
     "uuid": "^13.0.0",
+    "xstate": "^5.30.0",
     "zod": "^4.3.6"
   },
   "optionalDependencies": {
