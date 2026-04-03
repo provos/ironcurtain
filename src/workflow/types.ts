@@ -1,0 +1,248 @@
+import { randomUUID } from 'node:crypto';
+
+// ---------------------------------------------------------------------------
+// Branded identifiers
+// ---------------------------------------------------------------------------
+
+/**
+ * Unique identifier for a workflow instance. Branded to prevent accidental
+ * mixing with other string identifiers.
+ */
+export type WorkflowId = string & { readonly __brand: 'WorkflowId' };
+
+/** Creates a new unique WorkflowId. */
+export function createWorkflowId(): WorkflowId {
+  return randomUUID() as WorkflowId;
+}
+
+// ---------------------------------------------------------------------------
+// Workflow definition types
+// ---------------------------------------------------------------------------
+
+export interface WorkflowDefinition {
+  readonly name: string;
+  readonly description: string;
+  readonly initial: string;
+  readonly states: Record<string, WorkflowStateDefinition>;
+  readonly settings?: WorkflowSettings;
+}
+
+export interface WorkflowSettings {
+  /** Session mode. Default: 'docker'. */
+  readonly mode?: 'docker' | 'builtin';
+  /** Agent ID for Docker mode. Default: 'claude-code'. */
+  readonly dockerAgent?: string;
+  /** Default max rounds for iterative loops. Default: 4. */
+  readonly maxRounds?: number;
+  /** Git repository path for worktree management. */
+  readonly gitRepoPath?: string;
+  /** Max parallel agent sessions. Default: 3. */
+  readonly maxParallelism?: number;
+}
+
+/**
+ * State definition. Discriminated on `type`.
+ */
+export type WorkflowStateDefinition =
+  | AgentStateDefinition
+  | HumanGateStateDefinition
+  | DeterministicStateDefinition
+  | TerminalStateDefinition;
+
+export interface AgentStateDefinition {
+  readonly type: 'agent';
+  readonly persona: string;
+  /**
+   * Input artifact names assembled into the agent's command.
+   * Trailing `?` marks optional inputs (no error if absent).
+   */
+  readonly inputs: readonly string[];
+  /** Output artifact names the agent is expected to produce. */
+  readonly outputs: readonly string[];
+  /** Transitions evaluated in order; first match wins. */
+  readonly transitions: readonly AgentTransitionDefinition[];
+  /**
+   * Key path into an artifact for parallel instantiation.
+   * E.g., "spec.modules" reads the modules array from the spec artifact.
+   */
+  readonly parallelKey?: string;
+  /** When true, each parallel instance gets a dedicated git worktree. */
+  readonly worktree?: boolean;
+}
+
+export interface HumanGateStateDefinition {
+  readonly type: 'human_gate';
+  /** Event types this gate accepts. Each maps to a HUMAN_* WorkflowEvent. */
+  readonly acceptedEvents: readonly HumanGateEventType[];
+  /** Artifact names to present to the human for review. */
+  readonly present?: readonly string[];
+  /**
+   * Transitions keyed by accepted event type.
+   * Each transition specifies which event triggers it and where to go.
+   */
+  readonly transitions: readonly HumanGateTransitionDefinition[];
+}
+
+export interface DeterministicStateDefinition {
+  readonly type: 'deterministic';
+  /**
+   * Commands to execute. Each command is an array of [binary, ...args].
+   * Never a shell string -- per CLAUDE.md safe coding rules.
+   */
+  readonly run: readonly (readonly string[])[];
+  readonly transitions: readonly AgentTransitionDefinition[];
+}
+
+export interface TerminalStateDefinition {
+  readonly type: 'terminal';
+  readonly outputs?: readonly string[];
+  readonly cleanup?: readonly (readonly string[])[];
+}
+
+// ---------------------------------------------------------------------------
+// Transition definitions
+// ---------------------------------------------------------------------------
+
+export interface AgentTransitionDefinition {
+  readonly to: string;
+  /**
+   * Guard name matching a registered XState guard. No translation
+   * layer -- use names directly: isApproved, isRejected,
+   * isRoundLimitReached, isStalled, hasTestCountRegression,
+   * isLowConfidence, isPassed.
+   */
+  readonly guard?: string;
+  /** If truthy, sets flaggedForReview in context. */
+  readonly flag?: string;
+}
+
+export interface HumanGateTransitionDefinition {
+  readonly to: string;
+  /** The accepted event type that triggers this transition. */
+  readonly event: HumanGateEventType;
+}
+
+export type HumanGateEventType = 'APPROVE' | 'FORCE_REVISION' | 'REPLAN' | 'ABORT';
+
+// ---------------------------------------------------------------------------
+// Agent output
+// ---------------------------------------------------------------------------
+
+/** Structured output parsed from the agent's response text. */
+export interface AgentOutput {
+  readonly completed: boolean;
+  readonly verdict: 'approved' | 'rejected' | 'blocked' | 'spec_flaw';
+  readonly confidence: 'high' | 'medium' | 'low';
+  readonly escalation: string | null;
+  readonly testCount: number | null;
+  readonly notes: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Workflow events (XState event discriminated union)
+// ---------------------------------------------------------------------------
+
+export type WorkflowEvent =
+  | { readonly type: 'AGENT_COMPLETED'; readonly output: AgentOutput }
+  | { readonly type: 'AGENT_FAILED'; readonly error: string }
+  | { readonly type: 'VALIDATION_PASSED'; readonly testCount: number }
+  | { readonly type: 'VALIDATION_FAILED'; readonly errors: string }
+  | { readonly type: 'STALL_DETECTED' }
+  | { readonly type: 'SPEC_FLAW_DETECTED' }
+  | { readonly type: 'HUMAN_APPROVE'; readonly prompt?: string }
+  | { readonly type: 'HUMAN_FORCE_REVISION'; readonly prompt?: string }
+  | { readonly type: 'HUMAN_REPLAN'; readonly prompt?: string }
+  | { readonly type: 'HUMAN_ABORT' }
+  | { readonly type: 'PARALLEL_ALL_COMPLETED'; readonly results: readonly ParallelSlotResult[] }
+  | { readonly type: 'PARALLEL_SLOT_FAILED'; readonly key: string; readonly error: string }
+  | { readonly type: 'MERGE_SUCCEEDED' }
+  | { readonly type: 'MERGE_CONFLICT'; readonly conflictDetails: string };
+
+// ---------------------------------------------------------------------------
+// Workflow context (XState context)
+// ---------------------------------------------------------------------------
+
+export interface WorkflowContext {
+  readonly taskDescription: string;
+  readonly artifacts: Record<string, string>;
+  readonly round: number;
+  readonly maxRounds: number;
+  /** Per-role output hash for stall detection. */
+  readonly previousOutputHashes: Record<string, string>;
+  readonly previousTestCount: number | null;
+  readonly humanPrompt: string | null;
+  readonly reviewHistory: readonly string[];
+  readonly parallelResults: Record<string, ParallelSlotResult>;
+  readonly worktreeBranches: readonly string[];
+  readonly totalTokens: number;
+  readonly flaggedForReview: boolean;
+  readonly lastError: string | null;
+  readonly sessionsByRole: Record<string, string>;
+}
+
+// ---------------------------------------------------------------------------
+// Workflow status (exposed to TUI and tests)
+// ---------------------------------------------------------------------------
+
+export type WorkflowStatus =
+  | { readonly phase: 'running'; readonly currentState: string; readonly activeAgents: readonly AgentSlot[] }
+  | { readonly phase: 'waiting_human'; readonly gate: HumanGateRequest }
+  | { readonly phase: 'completed'; readonly result: WorkflowResult }
+  | { readonly phase: 'failed'; readonly error: string; readonly lastState: string }
+  | { readonly phase: 'aborted'; readonly reason: string };
+
+// ---------------------------------------------------------------------------
+// Supporting types
+// ---------------------------------------------------------------------------
+
+export interface AgentSlot {
+  readonly stateId: string;
+  readonly persona: string;
+  readonly parallelKey?: string;
+}
+
+export interface WorkflowResult {
+  readonly finalArtifacts: Record<string, string>;
+}
+
+export interface ParallelSlotResult {
+  readonly key: string;
+  readonly status: 'success' | 'failed';
+  readonly error?: string;
+  readonly worktreeBranch?: string;
+}
+
+export interface HumanGateRequest {
+  readonly gateId: string;
+  readonly workflowId: string;
+  readonly stateName: string;
+  readonly acceptedEvents: readonly HumanGateEventType[];
+  readonly presentedArtifacts: ReadonlyMap<string, string>;
+  readonly summary: string;
+}
+
+export interface HumanGateEvent {
+  readonly type: HumanGateEventType;
+  readonly prompt?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Checkpoint and history
+// ---------------------------------------------------------------------------
+
+export interface WorkflowCheckpoint {
+  /** Serialized XState snapshot.value (string or nested object). */
+  readonly machineState: unknown;
+  readonly context: WorkflowContext;
+  readonly timestamp: string;
+  readonly transitionHistory: readonly TransitionRecord[];
+  readonly definitionPath: string;
+}
+
+export interface TransitionRecord {
+  readonly from: string;
+  readonly to: string;
+  readonly event: string;
+  readonly timestamp: string;
+  readonly duration_ms: number;
+}
