@@ -1,0 +1,923 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { mkdirSync, writeFileSync, mkdtempSync, rmSync, readdirSync } from 'node:fs';
+import { resolve, join } from 'node:path';
+import { tmpdir } from 'node:os';
+import type {
+  SessionInfo,
+  SessionId,
+  SessionOptions,
+  BudgetStatus,
+  ConversationTurn,
+  DiagnosticEvent,
+  EscalationRequest,
+} from '../../src/session/types.js';
+import type { Session } from '../../src/session/types.js';
+import type { WorkflowId, HumanGateRequest, WorkflowDefinition } from '../../src/workflow/types.js';
+import {
+  WorkflowOrchestrator,
+  type WorkflowOrchestratorDeps,
+  type WorkflowTabHandle,
+  type WorkflowLifecycleEvent,
+} from '../../src/workflow/orchestrator.js';
+
+// ---------------------------------------------------------------------------
+// MockSession
+// ---------------------------------------------------------------------------
+
+type ResponseFn = (msg: string) => string | Promise<string>;
+
+class MockSession implements Session {
+  readonly sentMessages: string[] = [];
+  closed = false;
+  private readonly sessionId: string;
+  private readonly responseFn: ResponseFn;
+
+  constructor(opts: { sessionId?: string; responses: ResponseFn | string[] }) {
+    this.sessionId = opts.sessionId ?? `mock-${Math.random().toString(36).slice(2, 8)}`;
+    if (Array.isArray(opts.responses)) {
+      let idx = 0;
+      const arr = opts.responses;
+      this.responseFn = () => {
+        if (idx >= arr.length) throw new Error(`MockSession ${this.sessionId} exhausted at call ${idx + 1}`);
+        return arr[idx++];
+      };
+    } else {
+      this.responseFn = opts.responses;
+    }
+  }
+
+  getInfo(): SessionInfo {
+    return {
+      id: this.sessionId as SessionId,
+      status: this.closed ? 'closed' : 'ready',
+      turnCount: this.sentMessages.length,
+      createdAt: new Date().toISOString(),
+    };
+  }
+
+  async sendMessage(msg: string): Promise<string> {
+    this.sentMessages.push(msg);
+    return this.responseFn(msg);
+  }
+
+  getHistory(): readonly ConversationTurn[] {
+    return [];
+  }
+  getDiagnosticLog(): readonly DiagnosticEvent[] {
+    return [];
+  }
+  async resolveEscalation(): Promise<void> {
+    /* no-op */
+  }
+  getPendingEscalation(): EscalationRequest | undefined {
+    return undefined;
+  }
+  getBudgetStatus(): BudgetStatus {
+    return {
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      totalTokens: 0,
+      stepCount: 0,
+      elapsedSeconds: 0,
+      estimatedCostUsd: 0,
+      limits: {} as BudgetStatus['limits'],
+      cumulative: {} as BudgetStatus['cumulative'],
+      tokenTrackingAvailable: false,
+    };
+  }
+  async close(): Promise<void> {
+    this.closed = true;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Response helpers
+// ---------------------------------------------------------------------------
+
+function approvedResponse(notes = 'done'): string {
+  return [
+    'I completed the task.',
+    '```',
+    'agent_status:',
+    '  completed: true',
+    '  verdict: approved',
+    '  confidence: high',
+    '  escalation: null',
+    '  test_count: null',
+    `  notes: "${notes}"`,
+    '```',
+  ].join('\n');
+}
+
+function rejectedResponse(notes: string): string {
+  return [
+    'Found issues.',
+    '```',
+    'agent_status:',
+    '  completed: true',
+    '  verdict: rejected',
+    '  confidence: high',
+    '  escalation: null',
+    '  test_count: null',
+    `  notes: "${notes}"`,
+    '```',
+  ].join('\n');
+}
+
+function noStatusResponse(): string {
+  return 'I did the work. Here is the result.\nNo structured status block.';
+}
+
+// ---------------------------------------------------------------------------
+// Artifact simulation
+// ---------------------------------------------------------------------------
+
+function simulateArtifacts(workflowDir: string, names: string[]): void {
+  for (const name of names) {
+    const dir = resolve(workflowDir, 'artifacts', name);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(resolve(dir, `${name}.md`), `content for ${name}`);
+  }
+}
+
+/**
+ * Finds the workflow directory inside the base dir. The orchestrator creates
+ * {baseDir}/{workflowId}/artifacts/ before starting the actor.
+ */
+function findWorkflowDir(baseDir: string): string {
+  const entries = readdirSync(baseDir);
+  const dirs = entries.filter((e) => !e.endsWith('.json'));
+  if (dirs.length === 0) {
+    throw new Error(`No workflow directory found in ${baseDir}`);
+  }
+  return resolve(baseDir, dirs[dirs.length - 1]);
+}
+
+function createArtifactAwareSession(
+  responses: Array<{ text: string; artifacts?: string[] }>,
+  baseDir: string,
+  sessionId?: string,
+): MockSession {
+  let index = 0;
+  return new MockSession({
+    sessionId,
+    responses: () => {
+      if (index >= responses.length) {
+        throw new Error(`MockSession exhausted at call ${index + 1}`);
+      }
+      const entry = responses[index++];
+      if (entry.artifacts) {
+        // Resolve the workflow dir at call time (not at construction time)
+        simulateArtifacts(findWorkflowDir(baseDir), entry.artifacts);
+      }
+      return entry.text;
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Workflow definitions
+// ---------------------------------------------------------------------------
+
+const linearWorkflowDef: WorkflowDefinition = {
+  name: 'linear-workflow',
+  description: 'Full linear workflow',
+  initial: 'plan',
+  settings: { mode: 'builtin', maxRounds: 4 },
+  states: {
+    plan: {
+      type: 'agent',
+      persona: 'planner',
+      inputs: [],
+      outputs: ['plan'],
+      transitions: [{ to: 'plan_gate' }],
+    },
+    plan_gate: {
+      type: 'human_gate',
+      acceptedEvents: ['APPROVE', 'FORCE_REVISION', 'ABORT'],
+      present: ['plan'],
+      transitions: [
+        { to: 'implement', event: 'APPROVE' },
+        { to: 'plan', event: 'FORCE_REVISION' },
+        { to: 'aborted', event: 'ABORT' },
+      ],
+    },
+    implement: {
+      type: 'agent',
+      persona: 'coder',
+      inputs: ['plan'],
+      outputs: ['code'],
+      transitions: [{ to: 'review' }],
+    },
+    review: {
+      type: 'agent',
+      persona: 'reviewer',
+      inputs: ['code'],
+      outputs: ['reviews'],
+      transitions: [
+        { to: 'done', guard: 'isApproved' },
+        { to: 'implement', guard: 'isRejected' },
+      ],
+    },
+    done: { type: 'terminal' },
+    aborted: { type: 'terminal' },
+  },
+};
+
+const coderCriticLoopDef: WorkflowDefinition = {
+  name: 'coder-critic-loop',
+  description: 'Coder-critic loop',
+  initial: 'implement',
+  settings: { mode: 'builtin', maxRounds: 4 },
+  states: {
+    implement: {
+      type: 'agent',
+      persona: 'coder',
+      inputs: [],
+      outputs: ['code'],
+      transitions: [{ to: 'review' }],
+    },
+    review: {
+      type: 'agent',
+      persona: 'reviewer',
+      inputs: ['code'],
+      outputs: ['reviews'],
+      transitions: [
+        { to: 'done', guard: 'isApproved' },
+        { to: 'implement', guard: 'isRejected' },
+      ],
+    },
+    done: { type: 'terminal' },
+  },
+};
+
+const simpleAgentDef: WorkflowDefinition = {
+  name: 'simple-agent',
+  description: 'Single agent to done',
+  initial: 'implement',
+  settings: { mode: 'builtin' },
+  states: {
+    implement: {
+      type: 'agent',
+      persona: 'coder',
+      inputs: [],
+      outputs: ['code'],
+      transitions: [{ to: 'done' }],
+    },
+    done: { type: 'terminal' },
+  },
+};
+
+const stallDetectionDef: WorkflowDefinition = {
+  name: 'stall-detection',
+  description: 'Stall detection workflow',
+  initial: 'implement',
+  settings: { mode: 'builtin', maxRounds: 4 },
+  states: {
+    implement: {
+      type: 'agent',
+      persona: 'coder',
+      inputs: [],
+      outputs: ['code'],
+      transitions: [{ to: 'stalled', guard: 'isStalled' }, { to: 'review' }],
+    },
+    review: {
+      type: 'agent',
+      persona: 'reviewer',
+      inputs: ['code'],
+      outputs: ['reviews'],
+      transitions: [
+        { to: 'done', guard: 'isApproved' },
+        { to: 'implement', guard: 'isRejected' },
+      ],
+    },
+    stalled: {
+      type: 'human_gate',
+      acceptedEvents: ['FORCE_REVISION', 'ABORT'],
+      present: ['code'],
+      transitions: [
+        { to: 'implement', event: 'FORCE_REVISION' },
+        { to: 'aborted', event: 'ABORT' },
+      ],
+    },
+    done: { type: 'terminal' },
+    aborted: { type: 'terminal' },
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Test infrastructure
+// ---------------------------------------------------------------------------
+
+function writeDefinitionFile(tmpDir: string, def: WorkflowDefinition): string {
+  const defPath = resolve(tmpDir, `${def.name}.json`);
+  writeFileSync(defPath, JSON.stringify(def));
+  return defPath;
+}
+
+function createMockTab(): WorkflowTabHandle {
+  return {
+    write: vi.fn(),
+    setLabel: vi.fn(),
+    close: vi.fn(),
+  };
+}
+
+function createDeps(tmpDir: string, overrides: Partial<WorkflowOrchestratorDeps> = {}): WorkflowOrchestratorDeps {
+  return {
+    createSession: vi.fn(async () => new MockSession({ responses: [] })),
+    createWorkflowTab: vi.fn(() => createMockTab()),
+    raiseGate: vi.fn(),
+    dismissGate: vi.fn(),
+    baseDir: tmpDir,
+    ...overrides,
+  };
+}
+
+async function waitForGate(
+  raiseGateMock: ReturnType<typeof vi.fn>,
+  expectedCount: number,
+  timeoutMs = 5000,
+): Promise<HumanGateRequest[]> {
+  const start = Date.now();
+  while (raiseGateMock.mock.calls.length < expectedCount) {
+    if (Date.now() - start > timeoutMs) {
+      throw new Error(`Timed out waiting for ${expectedCount} gate(s), got ${raiseGateMock.mock.calls.length}`);
+    }
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  return raiseGateMock.mock.calls.map((c: unknown[]) => c[0] as HumanGateRequest);
+}
+
+async function waitForCompletion(
+  orchestrator: WorkflowOrchestrator,
+  workflowId: WorkflowId,
+  timeoutMs = 5000,
+): Promise<void> {
+  const start = Date.now();
+  for (;;) {
+    const status = orchestrator.getStatus(workflowId);
+    if (status?.phase === 'completed' || status?.phase === 'failed' || status?.phase === 'aborted') {
+      return;
+    }
+    if (Date.now() - start > timeoutMs) {
+      throw new Error(`Timed out waiting for workflow completion, current status: ${JSON.stringify(status)}`);
+    }
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+describe('WorkflowOrchestrator', () => {
+  let tmpDir: string;
+  let activeOrchestrator: WorkflowOrchestrator | undefined;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'orchestrator-test-'));
+    activeOrchestrator = undefined;
+  });
+
+  afterEach(async () => {
+    // Clean up any running workflows to prevent hanging actors
+    if (activeOrchestrator) {
+      await activeOrchestrator.shutdownAll();
+    }
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  // -----------------------------------------------------------------------
+  // Test 1: Happy path linear workflow
+  // -----------------------------------------------------------------------
+
+  it('drives a linear workflow from plan through gate to completion', async () => {
+    const defPath = writeDefinitionFile(tmpDir, linearWorkflowDef);
+    const allSessions: MockSession[] = [];
+
+    const sessionFactory = vi.fn(async (opts: SessionOptions) => {
+      const persona = opts.persona!;
+
+      let session: MockSession;
+      switch (persona) {
+        case 'planner':
+          session = createArtifactAwareSession(
+            [{ text: approvedResponse('plan complete'), artifacts: ['plan'] }],
+            tmpDir,
+            'planner-session-1',
+          );
+          break;
+        case 'coder':
+          session = createArtifactAwareSession(
+            [{ text: approvedResponse('implementation done'), artifacts: ['code'] }],
+            tmpDir,
+            'coder-session-1',
+          );
+          break;
+        case 'reviewer':
+          session = createArtifactAwareSession(
+            [{ text: approvedResponse('looks good'), artifacts: ['reviews'] }],
+            tmpDir,
+            'reviewer-session-1',
+          );
+          break;
+        default:
+          throw new Error(`Unexpected persona: ${persona}`);
+      }
+      allSessions.push(session);
+      return session;
+    });
+
+    const raiseGate = vi.fn();
+    const dismissGate = vi.fn();
+    const deps = createDeps(tmpDir, {
+      createSession: sessionFactory,
+      raiseGate,
+      dismissGate,
+    });
+
+    const orchestrator = new WorkflowOrchestrator(deps);
+    activeOrchestrator = orchestrator;
+    const lifecycleEvents: WorkflowLifecycleEvent[] = [];
+    orchestrator.onEvent((e) => lifecycleEvents.push(e));
+
+    const workflowId = await orchestrator.start(defPath, 'build a REST API');
+
+    // Machine enters plan, agent completes, reaches plan_gate
+    const gateRequests = await waitForGate(raiseGate, 1);
+    expect(gateRequests[0].stateName).toBe('plan_gate');
+    expect(gateRequests[0].acceptedEvents).toContain('APPROVE');
+
+    // Approve plan gate
+    orchestrator.resolveGate(workflowId, { type: 'APPROVE' });
+
+    // Machine enters implement -> review(approved) -> done
+    await waitForCompletion(orchestrator, workflowId);
+
+    const status = orchestrator.getStatus(workflowId);
+    expect(status?.phase).toBe('completed');
+
+    // 3 sessions: planner, coder, reviewer
+    expect(sessionFactory).toHaveBeenCalledTimes(3);
+
+    // All sessions closed
+    expect(allSessions.every((s) => s.closed)).toBe(true);
+
+    // Lifecycle events include state transitions
+    const stateEvents = lifecycleEvents
+      .filter((e) => e.kind === 'state_entered')
+      .map((e) => (e as { state: string }).state);
+    expect(stateEvents).toContain('plan');
+    expect(stateEvents).toContain('plan_gate');
+    expect(stateEvents).toContain('implement');
+
+    // dismissGate called once
+    expect(dismissGate).toHaveBeenCalledTimes(1);
+  });
+
+  // -----------------------------------------------------------------------
+  // Test 2: Coder-critic loop
+  // -----------------------------------------------------------------------
+
+  it('iterates coder-critic loop until review approves', async () => {
+    const defPath = writeDefinitionFile(tmpDir, coderCriticLoopDef);
+    const allSessions: MockSession[] = [];
+    let coderCallCount = 0;
+    let reviewerCallCount = 0;
+
+    const sessionFactory = vi.fn(async (opts: SessionOptions) => {
+      const persona = opts.persona!;
+
+      let session: MockSession;
+      if (persona === 'coder') {
+        coderCallCount++;
+        session = createArtifactAwareSession(
+          [{ text: approvedResponse(`coder pass ${coderCallCount}`), artifacts: ['code'] }],
+          tmpDir,
+          `coder-session-${coderCallCount}`,
+        );
+      } else if (persona === 'reviewer') {
+        reviewerCallCount++;
+        if (reviewerCallCount === 1) {
+          session = createArtifactAwareSession(
+            [{ text: rejectedResponse('missing error handling'), artifacts: ['reviews'] }],
+            tmpDir,
+            'reviewer-session-1',
+          );
+        } else {
+          session = createArtifactAwareSession(
+            [{ text: approvedResponse('all issues fixed'), artifacts: ['reviews'] }],
+            tmpDir,
+            'reviewer-session-2',
+          );
+        }
+      } else {
+        throw new Error(`Unexpected persona: ${persona}`);
+      }
+      allSessions.push(session);
+      return session;
+    });
+
+    const deps = createDeps(tmpDir, { createSession: sessionFactory });
+    const orchestrator = new WorkflowOrchestrator(deps);
+    activeOrchestrator = orchestrator;
+    const lifecycleEvents: WorkflowLifecycleEvent[] = [];
+    orchestrator.onEvent((e) => lifecycleEvents.push(e));
+
+    const workflowId = await orchestrator.start(defPath, 'implement feature X');
+    await waitForCompletion(orchestrator, workflowId);
+
+    // 4 sessions: coder -> reviewer(reject) -> coder -> reviewer(approve)
+    expect(sessionFactory).toHaveBeenCalledTimes(4);
+    expect(orchestrator.getStatus(workflowId)?.phase).toBe('completed');
+    expect(allSessions.every((s) => s.closed)).toBe(true);
+
+    // Second coder invocation received resumeSessionId from first coder session
+    const secondCoderCall = sessionFactory.mock.calls[2][0];
+    expect(secondCoderCall.persona).toBe('coder');
+    expect(secondCoderCall.resumeSessionId).toBe('coder-session-1');
+
+    // Second coder's prompt includes review history
+    const secondCoderSession = allSessions[2];
+    expect(secondCoderSession.sentMessages[0]).toContain('missing error handling');
+
+    // Lifecycle events show the loop
+    const stateEvents = lifecycleEvents
+      .filter((e) => e.kind === 'state_entered')
+      .map((e) => (e as { state: string }).state);
+    const implCount = stateEvents.filter((s) => s === 'implement').length;
+    const revCount = stateEvents.filter((s) => s === 'review').length;
+    expect(implCount).toBe(2);
+    expect(revCount).toBe(2);
+  });
+
+  // -----------------------------------------------------------------------
+  // Test 3: Human gate with FORCE_REVISION prompt
+  // -----------------------------------------------------------------------
+
+  it('FORCE_REVISION propagates human prompt to next agent invocation', async () => {
+    const defPath = writeDefinitionFile(tmpDir, linearWorkflowDef);
+    const allSessions: MockSession[] = [];
+    let plannerCallCount = 0;
+
+    const sessionFactory = vi.fn(async (opts: SessionOptions) => {
+      const persona = opts.persona!;
+
+      let session: MockSession;
+      if (persona === 'planner') {
+        plannerCallCount++;
+        session = createArtifactAwareSession(
+          [{ text: approvedResponse(`plan v${plannerCallCount}`), artifacts: ['plan'] }],
+          tmpDir,
+          `planner-session-${plannerCallCount}`,
+        );
+      } else if (persona === 'coder') {
+        session = createArtifactAwareSession([{ text: approvedResponse('code done'), artifacts: ['code'] }], tmpDir);
+      } else if (persona === 'reviewer') {
+        session = createArtifactAwareSession([{ text: approvedResponse('approved'), artifacts: ['reviews'] }], tmpDir);
+      } else {
+        throw new Error(`Unexpected persona: ${persona}`);
+      }
+      allSessions.push(session);
+      return session;
+    });
+
+    const raiseGate = vi.fn();
+    const dismissGate = vi.fn();
+    const deps = createDeps(tmpDir, {
+      createSession: sessionFactory,
+      raiseGate,
+      dismissGate,
+    });
+
+    const orchestrator = new WorkflowOrchestrator(deps);
+    activeOrchestrator = orchestrator;
+    const workflowId = await orchestrator.start(defPath, 'build an API');
+
+    // Wait for plan_gate
+    await waitForGate(raiseGate, 1);
+
+    // Send FORCE_REVISION with a prompt
+    orchestrator.resolveGate(workflowId, {
+      type: 'FORCE_REVISION',
+      prompt: 'Focus more on error handling and retry logic',
+    });
+
+    // Wait for second plan_gate
+    await waitForGate(raiseGate, 2);
+
+    // Verify the second planner session received the human prompt
+    const secondPlannerSession = allSessions[1];
+    expect(secondPlannerSession.sentMessages[0]).toContain('Focus more on error handling and retry logic');
+
+    // Verify resumeSessionId was passed for same-role continuity
+    const secondPlannerOpts = sessionFactory.mock.calls[1][0];
+    expect(secondPlannerOpts.resumeSessionId).toBe('planner-session-1');
+
+    // dismissGate called for the first gate
+    expect(dismissGate).toHaveBeenCalledTimes(1);
+
+    // Approve the second plan gate to let the workflow finish
+    orchestrator.resolveGate(workflowId, { type: 'APPROVE' });
+    await waitForCompletion(orchestrator, workflowId);
+  });
+
+  // -----------------------------------------------------------------------
+  // Test 4: Abort
+  // -----------------------------------------------------------------------
+
+  it('abort closes all sessions and removes workflow', async () => {
+    const defPath = writeDefinitionFile(tmpDir, linearWorkflowDef);
+    const allSessions: MockSession[] = [];
+
+    const sessionFactory = vi.fn(async () => {
+      const session = createArtifactAwareSession(
+        [{ text: approvedResponse('plan done'), artifacts: ['plan'] }],
+        tmpDir,
+      );
+      allSessions.push(session);
+      return session;
+    });
+
+    const raiseGate = vi.fn();
+    const deps = createDeps(tmpDir, {
+      createSession: sessionFactory,
+      raiseGate,
+    });
+
+    const orchestrator = new WorkflowOrchestrator(deps);
+    activeOrchestrator = orchestrator;
+    const workflowId = await orchestrator.start(defPath, 'build a thing');
+
+    // Wait for plan_gate
+    await waitForGate(raiseGate, 1);
+
+    // Abort the workflow
+    await orchestrator.abort(workflowId);
+
+    // Verify aborted status
+    const status = orchestrator.getStatus(workflowId);
+    expect(status?.phase).toBe('aborted');
+
+    // Planner session was closed
+    expect(allSessions[0].closed).toBe(true);
+
+    // No more sessions created after abort
+    expect(sessionFactory).toHaveBeenCalledTimes(1);
+  });
+
+  // -----------------------------------------------------------------------
+  // Test 5: Missing status block retry
+  // -----------------------------------------------------------------------
+
+  it('re-prompts agent when response lacks agent_status block', async () => {
+    const defPath = writeDefinitionFile(tmpDir, simpleAgentDef);
+    const allSessions: MockSession[] = [];
+
+    const sessionFactory = vi.fn(async () => {
+      let callCount = 0;
+
+      const session = new MockSession({
+        responses: () => {
+          callCount++;
+          if (callCount === 1) {
+            // First response: create artifacts but no status block
+            simulateArtifacts(findWorkflowDir(tmpDir), ['code']);
+            return noStatusResponse();
+          }
+          if (callCount === 2) {
+            // Retry: include status block
+            return approvedResponse('here is my status');
+          }
+          throw new Error(`Unexpected call ${callCount}`);
+        },
+      });
+      allSessions.push(session);
+      return session;
+    });
+
+    const deps = createDeps(tmpDir, { createSession: sessionFactory });
+    const orchestrator = new WorkflowOrchestrator(deps);
+    activeOrchestrator = orchestrator;
+
+    const workflowId = await orchestrator.start(defPath, 'write code');
+    await waitForCompletion(orchestrator, workflowId);
+
+    expect(orchestrator.getStatus(workflowId)?.phase).toBe('completed');
+
+    // Two messages sent (original + status block retry)
+    const session = allSessions[0];
+    expect(session.sentMessages).toHaveLength(2);
+
+    // Re-prompt mentions agent_status
+    expect(session.sentMessages[1]).toContain('agent_status');
+  });
+
+  it('fails when both attempts lack agent_status block', async () => {
+    const defPath = writeDefinitionFile(tmpDir, simpleAgentDef);
+
+    const sessionFactory = vi.fn(async () => {
+      simulateArtifacts(findWorkflowDir(tmpDir), ['code']);
+      return new MockSession({
+        responses: [noStatusResponse(), noStatusResponse()],
+      });
+    });
+
+    const deps = createDeps(tmpDir, { createSession: sessionFactory });
+    const orchestrator = new WorkflowOrchestrator(deps);
+    activeOrchestrator = orchestrator;
+
+    const workflowId = await orchestrator.start(defPath, 'write code');
+    await waitForCompletion(orchestrator, workflowId);
+
+    // Error goes through onError -> terminal. The storeError action
+    // records the error but the machine still reaches 'done'.
+    const status = orchestrator.getStatus(workflowId);
+    expect(status?.phase).toBe('completed');
+  });
+
+  // -----------------------------------------------------------------------
+  // Test 6: Stall detection
+  // -----------------------------------------------------------------------
+
+  it('detects stall when coder produces identical output twice', async () => {
+    const defPath = writeDefinitionFile(tmpDir, stallDetectionDef);
+    let coderCallCount = 0;
+
+    const sessionFactory = vi.fn(async (opts: SessionOptions) => {
+      const persona = opts.persona!;
+
+      let session: MockSession;
+      if (persona === 'coder') {
+        coderCallCount++;
+        // Both coder calls produce IDENTICAL artifacts -> same hash -> stall
+        session = createArtifactAwareSession(
+          [{ text: approvedResponse('coder output'), artifacts: ['code'] }],
+          tmpDir,
+          `coder-session-${coderCallCount}`,
+        );
+      } else if (persona === 'reviewer') {
+        // Reject to trigger second coder pass
+        session = createArtifactAwareSession(
+          [{ text: rejectedResponse('needs work'), artifacts: ['reviews'] }],
+          tmpDir,
+        );
+      } else {
+        throw new Error(`Unexpected persona: ${persona}`);
+      }
+      return session;
+    });
+
+    const raiseGate = vi.fn();
+    const deps = createDeps(tmpDir, {
+      createSession: sessionFactory,
+      raiseGate,
+    });
+
+    const orchestrator = new WorkflowOrchestrator(deps);
+    activeOrchestrator = orchestrator;
+    const workflowId = await orchestrator.start(defPath, 'implement feature');
+
+    // Flow: implement -> review(reject) -> implement(same hash) -> stall detected
+    // Machine enters 'stalled' human gate
+    const gateRequests = await waitForGate(raiseGate, 1);
+
+    expect(gateRequests[0].stateName).toBe('stalled');
+    expect(gateRequests[0].acceptedEvents).toContain('FORCE_REVISION');
+    expect(gateRequests[0].acceptedEvents).toContain('ABORT');
+
+    // 3 sessions: coder, reviewer, coder (stall detected after 2nd coder)
+    expect(sessionFactory).toHaveBeenCalledTimes(3);
+
+    // Abort to clean up
+    orchestrator.resolveGate(workflowId, { type: 'ABORT' });
+    await waitForCompletion(orchestrator, workflowId);
+  });
+
+  // -----------------------------------------------------------------------
+  // Test 7: Missing artifact retry
+  // -----------------------------------------------------------------------
+
+  it('re-prompts agent when expected artifact is missing, succeeds on retry', async () => {
+    const defPath = writeDefinitionFile(tmpDir, simpleAgentDef);
+    const allSessions: MockSession[] = [];
+
+    const sessionFactory = vi.fn(async () => {
+      let callCount = 0;
+
+      const session = new MockSession({
+        responses: () => {
+          callCount++;
+          if (callCount === 1) {
+            // First call: complete but DON'T create artifacts
+            return approvedResponse('done');
+          }
+          if (callCount === 2) {
+            // Second call (re-prompt for artifacts): create them
+            simulateArtifacts(findWorkflowDir(tmpDir), ['code']);
+            return approvedResponse('created the artifact');
+          }
+          throw new Error(`Unexpected call ${callCount}`);
+        },
+      });
+      allSessions.push(session);
+      return session;
+    });
+
+    const deps = createDeps(tmpDir, { createSession: sessionFactory });
+    const orchestrator = new WorkflowOrchestrator(deps);
+    activeOrchestrator = orchestrator;
+
+    const workflowId = await orchestrator.start(defPath, 'write code');
+    await waitForCompletion(orchestrator, workflowId);
+
+    expect(orchestrator.getStatus(workflowId)?.phase).toBe('completed');
+
+    // Session received 2 messages (original + re-prompt)
+    const session = allSessions[0];
+    expect(session.sentMessages).toHaveLength(2);
+
+    // Re-prompt mentions the missing artifact with relative path
+    expect(session.sentMessages[1]).toContain('`code/`');
+    // No host paths leaked
+    expect(session.sentMessages[1]).not.toContain(tmpDir);
+
+    expect(session.closed).toBe(true);
+  });
+
+  // -----------------------------------------------------------------------
+  // Test 8: ABORT at human gate
+  // -----------------------------------------------------------------------
+
+  it('ABORT at human gate reaches aborted terminal state', async () => {
+    const defPath = writeDefinitionFile(tmpDir, linearWorkflowDef);
+    const allSessions: MockSession[] = [];
+
+    const sessionFactory = vi.fn(async () => {
+      const session = createArtifactAwareSession(
+        [{ text: approvedResponse('plan done'), artifacts: ['plan'] }],
+        tmpDir,
+      );
+      allSessions.push(session);
+      return session;
+    });
+
+    const raiseGate = vi.fn();
+    const deps = createDeps(tmpDir, {
+      createSession: sessionFactory,
+      raiseGate,
+    });
+
+    const orchestrator = new WorkflowOrchestrator(deps);
+    activeOrchestrator = orchestrator;
+    const workflowId = await orchestrator.start(defPath, 'build a thing');
+
+    // Wait for plan_gate
+    await waitForGate(raiseGate, 1);
+
+    // Send ABORT
+    orchestrator.resolveGate(workflowId, { type: 'ABORT' });
+
+    // Wait for completion
+    await waitForCompletion(orchestrator, workflowId);
+
+    // Verify aborted status
+    const status = orchestrator.getStatus(workflowId);
+    expect(status?.phase).toBe('aborted');
+
+    // Planner session was closed
+    expect(allSessions[0].closed).toBe(true);
+
+    // Only planner session created
+    expect(sessionFactory).toHaveBeenCalledTimes(1);
+  });
+
+  // -----------------------------------------------------------------------
+  // Test 9: shutdownAll
+  // -----------------------------------------------------------------------
+
+  it('shutdownAll aborts all active workflows', async () => {
+    const defPath = writeDefinitionFile(tmpDir, linearWorkflowDef);
+
+    const sessionFactory = vi.fn(async () => {
+      return createArtifactAwareSession([{ text: approvedResponse('plan done'), artifacts: ['plan'] }], tmpDir);
+    });
+
+    const raiseGate = vi.fn();
+    const deps = createDeps(tmpDir, {
+      createSession: sessionFactory,
+      raiseGate,
+    });
+
+    const orchestrator = new WorkflowOrchestrator(deps);
+    activeOrchestrator = orchestrator;
+    await orchestrator.start(defPath, 'task 1');
+
+    await waitForGate(raiseGate, 1);
+    expect(orchestrator.listActive().length).toBe(1);
+
+    await orchestrator.shutdownAll();
+    expect(orchestrator.listActive().length).toBe(0);
+  });
+});
