@@ -248,6 +248,15 @@ export class WorkflowOrchestrator implements WorkflowController {
     const instance = this.workflows.get(id);
     if (!instance) return;
 
+    // No-op if workflow already reached a terminal state
+    if (
+      instance.finalStatus?.phase === 'completed' ||
+      instance.finalStatus?.phase === 'aborted' ||
+      instance.finalStatus?.phase === 'failed'
+    ) {
+      return;
+    }
+
     // Close all active sessions
     const closePromises: Promise<void>[] = [];
     for (const session of instance.activeSessions) {
