@@ -120,6 +120,15 @@ console.log(r.decision, r.rule);
 - Scenario uses wrong argument name (e.g., `mode` vs `operation`) → conditional roles fall to default (most restrictive). The `filterInvalidSchemaScenarios` validator catches this using `inputSchema`
 - Unconditional allow rule on multi-mode tool → allows mutations too. Compiler prompt forbids this; allow rules must include `roles: ["read-path"]`
 
+## Code Quality
+
+Before committing, always run `npm run format` and `npm run lint` on new/modified files and fix any issues. The pre-commit hook runs `lint-staged` (Prettier + ESLint) and will reject the commit if there are violations. Common ESLint rules to watch for:
+- No `require()` in ESM — use `import` or `readFileSync` + `JSON.parse`
+- No unused variables or imports (`@typescript-eslint/no-unused-vars`)
+- No non-null assertions (`!`) — use type guards or `as Type | undefined` instead
+- No unnecessary optional chaining on non-nullish values
+- No unnecessary type assertions (`as`) when the type is already correct
+
 ## Key Conventions
 
 - ESM modules throughout (`.js` extensions in imports, `"type": "module"` in package.json)
