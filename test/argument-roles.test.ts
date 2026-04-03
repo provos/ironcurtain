@@ -31,8 +31,8 @@ import {
 } from '../src/trusted-process/domain-utils.js';
 
 describe('ARGUMENT_ROLE_REGISTRY', () => {
-  it('contains all fifteen roles', () => {
-    expect(ARGUMENT_ROLE_REGISTRY.size).toBe(15);
+  it('contains all sixteen roles', () => {
+    expect(ARGUMENT_ROLE_REGISTRY.size).toBe(16);
   });
 
   it('has entries for all known roles', () => {
@@ -51,6 +51,7 @@ describe('ARGUMENT_ROLE_REGISTRY', () => {
       'email-address',
       'email-body',
       'share-permission',
+      'proxy-domain',
       'none',
     ];
     for (const role of expectedRoles) {
@@ -110,8 +111,8 @@ describe('getResourceRoles', () => {
     expect(roles).not.toContain('commit-message');
   });
 
-  it('returns exactly nine roles', () => {
-    expect(getResourceRoles()).toHaveLength(9);
+  it('returns exactly ten roles', () => {
+    expect(getResourceRoles()).toHaveLength(10);
   });
 });
 
@@ -146,7 +147,7 @@ describe('getArgumentRoleValues', () => {
     expect(values.length).toBeGreaterThanOrEqual(1);
   });
 
-  it('contains all fifteen roles', () => {
+  it('contains all sixteen roles', () => {
     const values = getArgumentRoleValues();
     expect(values).toContain('read-path');
     expect(values).toContain('write-path');
@@ -162,6 +163,7 @@ describe('getArgumentRoleValues', () => {
     expect(values).toContain('email-address');
     expect(values).toContain('email-body');
     expect(values).toContain('share-permission');
+    expect(values).toContain('proxy-domain');
     expect(values).toContain('none');
   });
 });

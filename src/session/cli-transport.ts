@@ -324,9 +324,6 @@ export class CliTransport extends BaseTransport {
         if (withWhitelist && pending.whitelistCandidates && pending.whitelistCandidates.length > 0) {
           const candidate = pending.whitelistCandidates[0];
           process.stderr.write(chalk.green(`  Whitelisted: ${candidate.description}\n`));
-          if (candidate.warning) {
-            process.stderr.write(chalk.yellow(`  Warning: ${candidate.warning}\n`));
-          }
         }
         // Restart the spinner — sendMessage() is still in-flight, waiting
         // for the proxy to process the escalation result and continue.
@@ -420,9 +417,6 @@ export class CliTransport extends BaseTransport {
       lines.push(chalk.cyan('  Whitelist pattern:'));
       for (const candidate of request.whitelistCandidates) {
         lines.push(chalk.cyan(`    ${candidate.description}`));
-        if (candidate.warning) {
-          lines.push(chalk.yellow(`    Warning: ${candidate.warning}`));
-        }
       }
     }
 

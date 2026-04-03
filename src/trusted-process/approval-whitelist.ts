@@ -73,8 +73,6 @@ export interface WhitelistPattern {
 export interface WhitelistCandidateIpc {
   /** Human-readable summary, e.g. "Allow write_file within /home/user/Documents" */
   readonly description: string;
-  /** Warning for zero-constraint side-effectful patterns. */
-  readonly warning?: string;
 }
 
 /**
@@ -193,8 +191,16 @@ export function extractWhitelistCandidates(
   const rolesToExtract = escalatedRoles ?? collectDistinctRoles(annotation);
 
   const constraints = buildConstraints(rolesToExtract, args, annotation);
+
+  // Zero-constraint patterns would blanket-approve ALL future calls to the tool.
+  // This happens when a tool's arguments only have 'none' roles (no resource
+  // identifiers). Refuse to offer whitelisting in this case — each invocation
+  // must be individually approved.
+  if (constraints.length === 0) {
+    return { patterns: [], ipcs: [] };
+  }
+
   const description = buildDescription(serverName, toolName, constraints);
-  const warning = buildWarning(constraints);
 
   const pattern: Omit<WhitelistPattern, 'id'> = {
     serverName,
@@ -208,7 +214,6 @@ export function extractWhitelistCandidates(
 
   const ipc: WhitelistCandidateIpc = {
     description,
-    ...(warning ? { warning } : {}),
   };
 
   // Phase 1: returns a single candidate pattern. The array-based return type and
@@ -301,10 +306,6 @@ function buildConstraintForRole(role: ArgumentRole, category: string, value: str
  * Builds a human-readable description from constraints.
  */
 function buildDescription(serverName: string, toolName: string, constraints: readonly WhitelistConstraint[]): string {
-  if (constraints.length === 0) {
-    return `Allow ${serverName}/${toolName} (exact tool match only)`;
-  }
-
   const parts = constraints.map((c) => {
     switch (c.kind) {
       case 'directory':
@@ -319,16 +320,6 @@ function buildDescription(serverName: string, toolName: string, constraints: rea
   return `Allow ${serverName}/${toolName} ${parts.join(', ')}`;
 }
 
-/**
- * Generates a warning for zero-constraint tools.
- */
-function buildWarning(constraints: readonly WhitelistConstraint[]): string | undefined {
-  if (constraints.length === 0) {
-    return 'Whitelisting will auto-approve ALL future calls to this tool for this session.';
-  }
-  return undefined;
-}
-
 // ---------------------------------------------------------------------------
 // Factory
 // ---------------------------------------------------------------------------
@@ -341,6 +332,14 @@ export function createApprovalWhitelist(): ApprovalWhitelist {
 
   return {
     add(patternData: Omit<WhitelistPattern, 'id'>): WhitelistEntryId {
+      // Defense-in-depth: reject zero-constraint patterns that would blanket-approve
+      // all calls to a tool. extractWhitelistCandidates() already prevents this, but
+      // guard here too so a future caller can't reintroduce the vulnerability.
+      if (patternData.constraints.length === 0) {
+        throw new Error(
+          `Refusing to add zero-constraint whitelist pattern for ${patternData.serverName}/${patternData.toolName}`,
+        );
+      }
       const id = uuidv4() as WhitelistEntryId;
       const pattern: WhitelistPattern = { ...patternData, id };
       patterns.push(pattern);
@@ -357,10 +356,10 @@ export function createApprovalWhitelist(): ApprovalWhitelist {
         if (pattern.serverName !== serverName) continue;
         if (pattern.toolName !== toolName) continue;
 
-        // All constraints must match (AND semantics)
-        const allMatch =
-          pattern.constraints.length === 0 ||
-          pattern.constraints.every((c) => constraintMatches(c, resolvedArgs, annotation));
+        // All constraints must match (AND semantics).
+        // Zero-constraint patterns are rejected by add(), so every pattern
+        // here has at least one constraint to evaluate.
+        const allMatch = pattern.constraints.every((c) => constraintMatches(c, resolvedArgs, annotation));
 
         if (allMatch) {
           return { matched: true, patternId: pattern.id, pattern };
