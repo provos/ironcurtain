@@ -7,7 +7,7 @@ import { DockerAgentSession, type DockerAgentSessionDeps } from '../src/docker/d
 import type { DockerProxy } from '../src/docker/code-mode-proxy.js';
 import type { MitmProxy } from '../src/docker/mitm-proxy.js';
 import type { CertificateAuthority } from '../src/docker/ca.js';
-import type { AgentAdapter, AgentId, AgentResponse } from '../src/docker/agent-adapter.js';
+import type { AgentAdapter, AgentId, AgentResponse, ConversationStateConfig } from '../src/docker/agent-adapter.js';
 import type { ProviderConfig } from '../src/docker/provider-config.js';
 import type { DockerManager, DockerContainerConfig } from '../src/docker/types.js';
 import type { IronCurtainConfig } from '../src/config/types.js';
@@ -611,6 +611,99 @@ describe('DockerAgentSession', () => {
 
     // The sockets directory should have been created on disk
     expect(existsSync(join(deps.sessionDir, 'sockets'))).toBe(true);
+  });
+
+  it('mounts conversation state directory when configured (UDS mode)', async () => {
+    const createCalls: DockerContainerConfig[] = [];
+    const docker: DockerManager = {
+      ...createMockDocker(),
+      async create(config: DockerContainerConfig) {
+        createCalls.push(config);
+        return 'container-state-123';
+      },
+    };
+
+    const stateConfig: ConversationStateConfig = {
+      hostDirName: 'claude-state',
+      containerMountPath: '/home/codespace/.claude/',
+      seed: [],
+      resumeFlags: ['--continue'],
+    };
+    const conversationStateDir = join(deps.sessionDir, 'claude-state');
+    mkdirSync(conversationStateDir, { recursive: true });
+
+    session = new DockerAgentSession({
+      ...deps,
+      docker,
+      useTcp: false,
+      conversationStateDir,
+      conversationStateConfig: stateConfig,
+    });
+    await session.initialize();
+
+    expect(createCalls).toHaveLength(1);
+    const mounts = createCalls[0].mounts;
+
+    const stateMount = mounts.find((m) => m.target === '/home/codespace/.claude/');
+    expect(stateMount).toBeDefined();
+    expect(stateMount!.source).toBe(conversationStateDir);
+    expect(stateMount!.readonly).toBe(false);
+  });
+
+  it('mounts conversation state directory when configured (TCP mode)', async () => {
+    const createCalls: DockerContainerConfig[] = [];
+    const docker: DockerManager = {
+      ...createMockDocker(),
+      async create(config: DockerContainerConfig) {
+        createCalls.push(config);
+        return 'container-state-tcp-123';
+      },
+    };
+
+    const stateConfig: ConversationStateConfig = {
+      hostDirName: 'claude-state',
+      containerMountPath: '/home/codespace/.claude/',
+      seed: [],
+      resumeFlags: ['--continue'],
+    };
+    const conversationStateDir = join(deps.sessionDir, 'claude-state');
+    mkdirSync(conversationStateDir, { recursive: true });
+
+    session = new DockerAgentSession({
+      ...deps,
+      docker,
+      useTcp: true,
+      conversationStateDir,
+      conversationStateConfig: stateConfig,
+    });
+    await session.initialize();
+
+    expect(createCalls).toHaveLength(1);
+    const mounts = createCalls[0].mounts;
+
+    const stateMount = mounts.find((m) => m.target === '/home/codespace/.claude/');
+    expect(stateMount).toBeDefined();
+    expect(stateMount!.source).toBe(conversationStateDir);
+    expect(stateMount!.readonly).toBe(false);
+  });
+
+  it('does not mount conversation state directory when not configured', async () => {
+    const createCalls: DockerContainerConfig[] = [];
+    const docker: DockerManager = {
+      ...createMockDocker(),
+      async create(config: DockerContainerConfig) {
+        createCalls.push(config);
+        return 'container-nostate-123';
+      },
+    };
+
+    session = new DockerAgentSession({ ...deps, docker, useTcp: false });
+    await session.initialize();
+
+    expect(createCalls).toHaveLength(1);
+    const mounts = createCalls[0].mounts;
+
+    expect(mounts.some((m) => m.target === '/home/codespace/.claude/')).toBe(false);
   });
 
   it('getDiagnosticLog returns accumulated events', async () => {
