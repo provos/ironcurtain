@@ -201,6 +201,8 @@ async function createDockerSession(
     escalationDir: sessionConfig.escalationDir,
     auditLogPath: sessionConfig.auditLogPath,
     useTcp: infra.useTcp,
+    conversationStateDir: infra.conversationStateDir,
+    conversationStateConfig: infra.conversationStateConfig,
     onEscalation: options.onEscalation,
     onEscalationExpired: options.onEscalationExpired,
     onEscalationResolved: options.onEscalationResolved,

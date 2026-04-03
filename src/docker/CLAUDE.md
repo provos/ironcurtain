@@ -52,6 +52,10 @@ The `proxy` virtual MCP server (`proxy-tools.ts`) exposes `add_proxy_domain`, `r
 - `adapters/shared-scripts.ts` - Shared shell script generators (e.g., `resize-pty.sh`) and prompt sections used by both adapters.
 - `claude-md-seed.ts` - Builds `CLAUDE.md` content seeded into the container's `~/.claude/` for Claude Code sessions. Contains memory behavioral rules (pre-response MCP tool call protocol).
 
+## Dual session modes: keep in sync
+
+`docker-agent-session.ts` (batch mode) and `pty-session.ts` (PTY mode) have parallel initialization paths that share adapter infrastructure but assemble container configs independently. When adding a mount, env var, or container lifecycle feature to one mode, always check the other mode and apply the same change if applicable. Past bug: conversation state mount was added to PTY mode but missed in batch mode, breaking `claude --continue` across container recreations.
+
 ## PTY mode
 
 - `pty-session.ts` - PTY session orchestration. Node.js PTY proxy bridges the user's terminal to Claude Code inside the container via a socket (UDS on Linux, TCP on macOS). Handles terminal raw mode enter/exit, SIGWINCH forwarding for resize, BEL on escalation, and registration file lifecycle.

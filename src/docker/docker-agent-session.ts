@@ -26,7 +26,7 @@ import type {
   BudgetStatus,
 } from '../session/types.js';
 import type { IronCurtainConfig } from '../config/types.js';
-import { CONTAINER_WORKSPACE_DIR, type AgentAdapter } from './agent-adapter.js';
+import { CONTAINER_WORKSPACE_DIR, type AgentAdapter, type ConversationStateConfig } from './agent-adapter.js';
 import type { DockerManager } from './types.js';
 import type { DockerProxy } from './code-mode-proxy.js';
 import type { MitmProxy } from './mitm-proxy.js';
@@ -57,6 +57,10 @@ export interface DockerAgentSessionDeps {
   readonly auditLogPath: string;
   /** Use TCP transport instead of UDS (macOS Docker Desktop). */
   readonly useTcp?: boolean;
+  /** Host-side conversation state directory for session resume. */
+  readonly conversationStateDir?: string;
+  /** Conversation state config from the adapter (mount path, resume flags). */
+  readonly conversationStateConfig?: ConversationStateConfig;
   readonly onEscalation?: (request: EscalationRequest) => void;
   readonly onEscalationExpired?: () => void;
   readonly onEscalationResolved?: (escalationId: string, decision: 'approved' | 'denied') => void;
@@ -87,6 +91,8 @@ export class DockerAgentSession implements Session {
   private readonly escalationDir: string;
   private readonly auditLogPath: string;
   private readonly useTcp: boolean;
+  private readonly conversationStateDir?: string;
+  private readonly conversationStateConfig?: ConversationStateConfig;
 
   private status: SessionStatus = 'initializing';
   private readonly createdAt: string;
@@ -124,6 +130,8 @@ export class DockerAgentSession implements Session {
     this.escalationDir = deps.escalationDir;
     this.auditLogPath = deps.auditLogPath;
     this.useTcp = deps.useTcp ?? false;
+    this.conversationStateDir = deps.conversationStateDir;
+    this.conversationStateConfig = deps.conversationStateConfig;
     this.onEscalation = deps.onEscalation;
     this.onEscalationExpired = deps.onEscalationExpired;
     this.onEscalationResolved = deps.onEscalationResolved;
@@ -286,6 +294,15 @@ export class DockerAgentSession implements Session {
         // No session dir mount needed for sockets (TCP mode) -- only orientation subdir is mounted
         { source: orientationDir, target: '/etc/ironcurtain', readonly: true },
       ];
+
+      // Mount conversation state directory for session resume (e.g., claude --continue)
+      if (this.conversationStateDir && this.conversationStateConfig) {
+        mounts.push({
+          source: this.conversationStateDir,
+          target: this.conversationStateConfig.containerMountPath,
+          readonly: false,
+        });
+      }
     } else {
       // Linux UDS mode: --network=none, session dir with sockets mounted
       env = {
@@ -305,6 +322,15 @@ export class DockerAgentSession implements Session {
         { source: socketsDir, target: '/run/ironcurtain', readonly: false },
         { source: orientationDir, target: '/etc/ironcurtain', readonly: true },
       ];
+
+      // Mount conversation state directory for session resume (e.g., claude --continue)
+      if (this.conversationStateDir && this.conversationStateConfig) {
+        mounts.push({
+          source: this.conversationStateDir,
+          target: this.conversationStateConfig.containerMountPath,
+          readonly: false,
+        });
+      }
     }
 
     try {
