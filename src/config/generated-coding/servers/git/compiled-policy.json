@@ -1,0 +1,447 @@
+{
+  "generatedAt": "2026-03-31T19:57:38.877Z",
+  "serverName": "git",
+  "constitutionHash": "77e1a4a7b304748032418f82bf22f38a4a478f2582faacab227cf2c45d474996",
+  "inputHash": "f448febee6cb96a40fae151a6778c39396bef1776433bac83807cdbf99f982c3",
+  "rules": [
+    {
+      "name": "allow-local-read-only-git-ops",
+      "description": "Allow read-only local git operations only when paths are within the sandbox.",
+      "principle": "The agent is allowed to perform all local read and write git operations within the sandbox.",
+      "if": {
+        "server": [
+          "git"
+        ],
+        "tool": [
+          "git_status",
+          "git_log",
+          "git_diff",
+          "git_show",
+          "git_blame",
+          "git_reflog",
+          "git_changelog_analyze",
+          "git_set_working_dir"
+        ],
+        "paths": {
+          "roles": [
+            "read-path"
+          ],
+          "within": "/home/codespace/.ironcurtain/sandbox"
+        }
+      },
+      "then": "allow",
+      "reason": "Read-only local git operations are permitted within the sandbox."
+    },
+    {
+      "name": "allow-git-none-role-tools",
+      "description": "Allow git tools that have only none-role arguments (no path arguments), like git_wrapup_instructions and git_clear_working_dir.",
+      "principle": "The agent is allowed to perform all local read and write git operations within the sandbox.",
+      "if": {
+        "roles": [
+          "none"
+        ],
+        "server": [
+          "git"
+        ],
+        "tool": [
+          "git_wrapup_instructions",
+          "git_clear_working_dir"
+        ]
+      },
+      "then": "allow",
+      "reason": "These tools have no path arguments and are safe local operations."
+    },
+    {
+      "name": "allow-local-git-add",
+      "description": "Allow git_add (staging files) as a local write operation.",
+      "principle": "The agent is allowed to perform all local read and write git operations within the sandbox.",
+      "if": {
+        "roles": [
+          "read-path"
+        ],
+        "server": [
+          "git"
+        ],
+        "tool": [
+          "git_add"
+        ]
+      },
+      "then": "allow",
+      "reason": "git_add only stages files locally and is a permitted local operation."
+    },
+    {
+      "name": "allow-local-git-commit",
+      "description": "Allow git_commit as a local write-history operation.",
+      "principle": "The agent is allowed to perform all local read and write git operations within the sandbox.",
+      "if": {
+        "roles": [
+          "write-history"
+        ],
+        "server": [
+          "git"
+        ],
+        "tool": [
+          "git_commit"
+        ]
+      },
+      "then": "allow",
+      "reason": "git_commit creates local commits which are permitted local write operations."
+    },
+    {
+      "name": "allow-local-git-branch-read",
+      "description": "Allow reading branch information only when the path is within the sandbox.",
+      "principle": "The agent is allowed to perform all local read and write git operations within the sandbox.",
+      "if": {
+        "server": [
+          "git"
+        ],
+        "tool": [
+          "git_branch"
+        ],
+        "paths": {
+          "roles": [
+            "read-path"
+          ],
+          "within": "/home/codespace/.ironcurtain/sandbox"
+        }
+      },
+      "then": "allow",
+      "reason": "Reading branch info is permitted for local repos within the sandbox."
+    },
+    {
+      "name": "allow-local-git-branch-write",
+      "description": "Allow creating, renaming, and deleting local branches.",
+      "principle": "The agent is allowed to perform all local read and write git operations within the sandbox.",
+      "if": {
+        "roles": [
+          "write-history",
+          "delete-history"
+        ],
+        "server": [
+          "git"
+        ],
+        "tool": [
+          "git_branch"
+        ]
+      },
+      "then": "allow",
+      "reason": "Local branch management is a permitted local write operation."
+    },
+    {
+      "name": "allow-local-git-checkout",
+      "description": "Allow git_checkout for switching/creating branches or restoring files locally.",
+      "principle": "The agent is allowed to perform all local read and write git operations within the sandbox.",
+      "if": {
+        "roles": [
+          "write-history"
+        ],
+        "server": [
+          "git"
+        ],
+        "tool": [
+          "git_checkout"
+        ]
+      },
+      "then": "allow",
+      "reason": "git_checkout is a local operation permitted by the constitution."
+    },
+    {
+      "name": "allow-local-git-merge",
+      "description": "Allow git_merge for merging branches locally.",
+      "principle": "The agent is allowed to perform all local read and write git operations within the sandbox.",
+      "if": {
+        "roles": [
+          "write-history"
+        ],
+        "server": [
+          "git"
+        ],
+        "tool": [
+          "git_merge"
+        ]
+      },
+      "then": "allow",
+      "reason": "Local merges are permitted local write operations."
+    },
+    {
+      "name": "allow-local-git-rebase",
+      "description": "Allow git_rebase for rebasing locally.",
+      "principle": "The agent is allowed to perform all local read and write git operations within the sandbox.",
+      "if": {
+        "roles": [
+          "write-history"
+        ],
+        "server": [
+          "git"
+        ],
+        "tool": [
+          "git_rebase"
+        ]
+      },
+      "then": "allow",
+      "reason": "Local rebase is a permitted local write operation."
+    },
+    {
+      "name": "allow-local-git-reset",
+      "description": "Allow git_reset for local HEAD/index resets.",
+      "principle": "The agent is allowed to perform all local read and write git operations within the sandbox.",
+      "if": {
+        "roles": [
+          "write-history"
+        ],
+        "server": [
+          "git"
+        ],
+        "tool": [
+          "git_reset"
+        ]
+      },
+      "then": "allow",
+      "reason": "Local reset operations are permitted local write operations."
+    },
+    {
+      "name": "allow-local-git-cherry-pick",
+      "description": "Allow git_cherry_pick for applying commits locally.",
+      "principle": "The agent is allowed to perform all local read and write git operations within the sandbox.",
+      "if": {
+        "roles": [
+          "write-history"
+        ],
+        "server": [
+          "git"
+        ],
+        "tool": [
+          "git_cherry_pick"
+        ]
+      },
+      "then": "allow",
+      "reason": "Cherry-pick is a local write operation permitted by the constitution."
+    },
+    {
+      "name": "allow-local-git-stash",
+      "description": "Allow git_stash for stashing/restoring local changes.",
+      "principle": "The agent is allowed to perform all local read and write git operations within the sandbox.",
+      "if": {
+        "roles": [
+          "write-history",
+          "delete-history"
+        ],
+        "server": [
+          "git"
+        ],
+        "tool": [
+          "git_stash"
+        ]
+      },
+      "then": "allow",
+      "reason": "Stash operations are local and permitted by the constitution."
+    },
+    {
+      "name": "allow-local-git-tag",
+      "description": "Allow git_tag for creating/deleting local tags.",
+      "principle": "The agent is allowed to perform all local read and write git operations within the sandbox.",
+      "if": {
+        "roles": [
+          "write-history",
+          "delete-history"
+        ],
+        "server": [
+          "git"
+        ],
+        "tool": [
+          "git_tag"
+        ]
+      },
+      "then": "allow",
+      "reason": "Local tag management is a permitted local write operation."
+    },
+    {
+      "name": "allow-local-git-remote-read",
+      "description": "Allow reading remote configuration locally.",
+      "principle": "The agent is allowed to perform all local read and write git operations within the sandbox.",
+      "if": {
+        "roles": [
+          "read-path"
+        ],
+        "server": [
+          "git"
+        ],
+        "tool": [
+          "git_remote"
+        ]
+      },
+      "then": "allow",
+      "reason": "Listing/reading remotes is a local read operation."
+    },
+    {
+      "name": "allow-local-git-remote-write",
+      "description": "Allow local modifications to remote configuration (add, remove, rename, set-url).",
+      "principle": "The agent is allowed to perform all local read and write git operations within the sandbox.",
+      "if": {
+        "roles": [
+          "write-history",
+          "delete-history"
+        ],
+        "server": [
+          "git"
+        ],
+        "tool": [
+          "git_remote"
+        ]
+      },
+      "then": "allow",
+      "reason": "Modifying local remote config entries is a local write operation."
+    },
+    {
+      "name": "escalate-git-remote-url",
+      "description": "Require human approval when git_remote is called with a remote URL (add, set-url operations).",
+      "principle": "The agent must ask for human approval for all other git operations.",
+      "if": {
+        "roles": [
+          "git-remote-url"
+        ],
+        "server": [
+          "git"
+        ],
+        "tool": [
+          "git_remote"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Modifying remote URLs involves network-reachable endpoints and requires human approval."
+    },
+    {
+      "name": "allow-local-git-init",
+      "description": "Allow git_init only when the target path is within the sandbox.",
+      "principle": "The agent is allowed to perform all local read and write git operations within the sandbox.",
+      "if": {
+        "server": [
+          "git"
+        ],
+        "tool": [
+          "git_init"
+        ],
+        "paths": {
+          "roles": [
+            "write-path"
+          ],
+          "within": "/home/codespace/.ironcurtain/sandbox"
+        }
+      },
+      "then": "allow",
+      "reason": "Initializing a local repo is permitted only within the sandbox."
+    },
+    {
+      "name": "allow-local-git-worktree",
+      "description": "Allow git_worktree write/delete operations only when ALL paths are within the sandbox.",
+      "principle": "The agent is allowed to perform all local read and write git operations within the sandbox.",
+      "if": {
+        "server": [
+          "git"
+        ],
+        "tool": [
+          "git_worktree"
+        ],
+        "paths": {
+          "roles": [
+            "write-path",
+            "delete-path"
+          ],
+          "within": "/home/codespace/.ironcurtain/sandbox"
+        }
+      },
+      "then": "allow",
+      "reason": "Worktree management is permitted only when all paths are within the sandbox."
+    },
+    {
+      "name": "allow-local-git-clean",
+      "description": "Allow git_clean to remove untracked files locally.",
+      "principle": "The agent is allowed to perform all local read and write git operations within the sandbox.",
+      "if": {
+        "roles": [
+          "delete-path"
+        ],
+        "server": [
+          "git"
+        ],
+        "tool": [
+          "git_clean"
+        ]
+      },
+      "then": "allow",
+      "reason": "Cleaning untracked files is a permitted local write operation."
+    },
+    {
+      "name": "escalate-git-fetch",
+      "description": "Require human approval for git_fetch (fetches from remote).",
+      "principle": "The agent must ask for human approval for all other git operations.",
+      "if": {
+        "roles": [
+          "git-remote-url"
+        ],
+        "server": [
+          "git"
+        ],
+        "tool": [
+          "git_fetch"
+        ]
+      },
+      "then": "escalate",
+      "reason": "git_fetch communicates with a remote repository and requires human approval per the constitution."
+    },
+    {
+      "name": "escalate-git-pull",
+      "description": "Require human approval for git_pull (fetches and merges from remote).",
+      "principle": "The agent must ask for human approval for all other git operations.",
+      "if": {
+        "roles": [
+          "git-remote-url"
+        ],
+        "server": [
+          "git"
+        ],
+        "tool": [
+          "git_pull"
+        ]
+      },
+      "then": "escalate",
+      "reason": "git_pull communicates with a remote repository and requires human approval per the constitution."
+    },
+    {
+      "name": "escalate-git-push",
+      "description": "Require human approval for git_push (pushes to remote).",
+      "principle": "The agent must ask for human approval for all other git operations.",
+      "if": {
+        "roles": [
+          "git-remote-url"
+        ],
+        "server": [
+          "git"
+        ],
+        "tool": [
+          "git_push"
+        ]
+      },
+      "then": "escalate",
+      "reason": "git_push communicates with a remote repository and requires human approval per the constitution."
+    },
+    {
+      "name": "escalate-git-clone",
+      "description": "Require human approval for git_clone (clones from remote).",
+      "principle": "The agent must ask for human approval for all other git operations.",
+      "if": {
+        "roles": [
+          "git-remote-url"
+        ],
+        "server": [
+          "git"
+        ],
+        "tool": [
+          "git_clone"
+        ]
+      },
+      "then": "escalate",
+      "reason": "git_clone communicates with a remote repository and requires human approval per the constitution."
+    }
+  ]
+}

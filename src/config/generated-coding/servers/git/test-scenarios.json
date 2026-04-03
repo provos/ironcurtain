@@ -1,0 +1,1107 @@
+{
+  "generatedAt": "2026-03-31T19:57:38.877Z",
+  "constitutionHash": "77e1a4a7b304748032418f82bf22f38a4a478f2582faacab227cf2c45d474996",
+  "inputHash": "6d433d1adc067853191d056706330d7227a74aea031d90d0b47f4de59ea940d9",
+  "scenarios": [
+    {
+      "description": "Read git status inside sandbox — allowed local read operation",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_status",
+        "arguments": {
+          "path": "/home/codespace/.ironcurtain/sandbox",
+          "includeUntracked": true
+        }
+      },
+      "expectedDecision": "allow",
+      "reasoning": "git_status is a local read operation within the sandbox, which is fully permitted by the constitution.",
+      "source": "generated"
+    },
+    {
+      "description": "Stage files for commit inside sandbox — allowed local write operation",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_add",
+        "arguments": {
+          "path": "/home/codespace/.ironcurtain/sandbox",
+          "all": true
+        }
+      },
+      "expectedDecision": "allow",
+      "reasoning": "git_add is a local write (staging) operation inside the sandbox, which the constitution permits.",
+      "source": "generated"
+    },
+    {
+      "description": "Commit staged changes inside sandbox — allowed local write operation",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_commit",
+        "arguments": {
+          "path": "/home/codespace/.ironcurtain/sandbox",
+          "message": "feat: add new feature"
+        }
+      },
+      "expectedDecision": "allow",
+      "reasoning": "git_commit is a local write operation inside the sandbox, explicitly allowed by the constitution.",
+      "source": "generated"
+    },
+    {
+      "description": "View git log inside sandbox — allowed local read operation",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_log",
+        "arguments": {
+          "path": "/home/codespace/.ironcurtain/sandbox",
+          "maxCount": 20,
+          "oneline": true
+        }
+      },
+      "expectedDecision": "allow",
+      "reasoning": "git_log is a local read operation inside the sandbox, which the constitution permits.",
+      "source": "generated"
+    },
+    {
+      "description": "Create a new branch inside sandbox — allowed local write operation",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_branch",
+        "arguments": {
+          "path": "/home/codespace/.ironcurtain/sandbox",
+          "operation": "create",
+          "name": "feature/new-branch"
+        }
+      },
+      "expectedDecision": "allow",
+      "reasoning": "Creating a local branch inside the sandbox is a permitted local write/history operation.",
+      "source": "generated"
+    },
+    {
+      "description": "Delete a local branch inside sandbox — allowed local delete-history operation",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_branch",
+        "arguments": {
+          "path": "/home/codespace/.ironcurtain/sandbox",
+          "operation": "delete",
+          "name": "feature/old-branch"
+        }
+      },
+      "expectedDecision": "allow",
+      "reasoning": "Deleting a local branch inside the sandbox is a permitted local git operation.",
+      "source": "generated"
+    },
+    {
+      "description": "Checkout a branch inside sandbox — allowed local read/write-history operation",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_checkout",
+        "arguments": {
+          "path": "/home/codespace/.ironcurtain/sandbox",
+          "target": "main"
+        }
+      },
+      "expectedDecision": "allow",
+      "reasoning": "git_checkout switching branches is a local read/write-history operation inside the sandbox, which is permitted.",
+      "source": "generated"
+    },
+    {
+      "description": "Show diff of staged changes inside sandbox — allowed local read operation",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_diff",
+        "arguments": {
+          "path": "/home/codespace/.ironcurtain/sandbox",
+          "staged": true
+        }
+      },
+      "expectedDecision": "allow",
+      "reasoning": "git_diff is a read-only operation inside the sandbox, which the constitution permits.",
+      "source": "generated"
+    },
+    {
+      "description": "Merge a branch inside sandbox — allowed local write-history operation",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_merge",
+        "arguments": {
+          "path": "/home/codespace/.ironcurtain/sandbox",
+          "branch": "feature/my-feature"
+        }
+      },
+      "expectedDecision": "allow",
+      "reasoning": "Local git merge inside the sandbox is a permitted local write operation.",
+      "source": "generated"
+    },
+    {
+      "description": "Rebase inside sandbox — allowed local write-history operation",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_rebase",
+        "arguments": {
+          "path": "/home/codespace/.ironcurtain/sandbox",
+          "upstream": "main"
+        }
+      },
+      "expectedDecision": "allow",
+      "reasoning": "Local rebase inside the sandbox is a permitted local write-history operation.",
+      "source": "generated"
+    },
+    {
+      "description": "Stash changes inside sandbox — allowed local write-history operation",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_stash",
+        "arguments": {
+          "path": "/home/codespace/.ironcurtain/sandbox",
+          "mode": "push",
+          "message": "WIP: stashing work"
+        }
+      },
+      "expectedDecision": "allow",
+      "reasoning": "git_stash push is a local write-history operation inside the sandbox, which is permitted.",
+      "source": "generated"
+    },
+    {
+      "description": "Initialize a new git repo inside sandbox — allowed local write operation",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_init",
+        "arguments": {
+          "path": "/home/codespace/.ironcurtain/sandbox/new-project",
+          "initialBranch": "main"
+        }
+      },
+      "expectedDecision": "allow",
+      "reasoning": "Initializing a git repo inside the sandbox is a permitted local write operation.",
+      "source": "generated"
+    },
+    {
+      "description": "Push to GitHub remote — requires human approval as it's an external git operation",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_push",
+        "arguments": {
+          "path": "/home/codespace/.ironcurtain/sandbox",
+          "remote": "https://github.com/myorg/myrepo.git",
+          "branch": "main"
+        }
+      },
+      "expectedDecision": "escalate",
+      "reasoning": "The constitution requires human approval for all git operations that are not purely local (push is a remote operation).",
+      "source": "generated"
+    },
+    {
+      "description": "Pull from GitHub remote — requires human approval as it's an external git operation",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_pull",
+        "arguments": {
+          "path": "/home/codespace/.ironcurtain/sandbox",
+          "remote": "https://github.com/myorg/myrepo.git",
+          "branch": "feature-branch"
+        }
+      },
+      "expectedDecision": "escalate",
+      "reasoning": "The constitution requires human approval for all non-local git operations; git pull involves fetching from a remote.",
+      "source": "generated"
+    },
+    {
+      "description": "Fetch from a remote GitHub repository — requires human approval",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_fetch",
+        "arguments": {
+          "path": "/home/codespace/.ironcurtain/sandbox",
+          "remote": "https://github.com/myorg/myrepo.git"
+        }
+      },
+      "expectedDecision": "escalate",
+      "reasoning": "git_fetch communicates with an external remote, which the constitution requires human approval for.",
+      "source": "generated"
+    },
+    {
+      "description": "Clone a GitHub repository into sandbox — requires human approval as a remote operation",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_clone",
+        "arguments": {
+          "url": "https://github.com/myorg/myrepo.git",
+          "localPath": "/home/codespace/.ironcurtain/sandbox/myrepo"
+        }
+      },
+      "expectedDecision": "escalate",
+      "reasoning": "git_clone is a remote git operation that the constitution requires human approval for.",
+      "source": "generated"
+    },
+    {
+      "description": "Force-push to a remote — requires human approval as an external git operation",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_push",
+        "arguments": {
+          "path": "/home/codespace/.ironcurtain/sandbox",
+          "remote": "git@github.com:myorg/myrepo.git",
+          "branch": "main",
+          "force": true
+        }
+      },
+      "expectedDecision": "escalate",
+      "reasoning": "Force-pushing to a remote requires human approval per the constitution's rule on non-local git operations.",
+      "source": "generated"
+    },
+    {
+      "description": "Add a remote URL — requires human approval as it modifies remote config",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_remote",
+        "arguments": {
+          "path": "/home/codespace/.ironcurtain/sandbox",
+          "mode": "add",
+          "name": "upstream",
+          "url": "https://github.com/upstream/repo.git"
+        }
+      },
+      "expectedDecision": "escalate",
+      "reasoning": "Adding a remote writes a git-remote-url into the config and constitutes a non-local git operation requiring human approval.",
+      "source": "generated"
+    },
+    {
+      "description": "git_status on /etc — denied because it is outside sandbox and no permission granted",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_status",
+        "arguments": {
+          "path": "/etc"
+        }
+      },
+      "expectedDecision": "deny",
+      "reasoning": "The path /etc is outside the sandbox and no permitted directory, and the constitution does not grant any access there.",
+      "source": "generated"
+    },
+    {
+      "description": "git_log on /var/log — denied because it is outside all permitted directories",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_log",
+        "arguments": {
+          "path": "/var/log"
+        }
+      },
+      "expectedDecision": "deny",
+      "reasoning": "/var/log is outside the sandbox and not a permitted directory, so default-deny applies.",
+      "source": "generated"
+    },
+    {
+      "description": "git_commit outside sandbox in /tmp — denied because /tmp is not a permitted path",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_commit",
+        "arguments": {
+          "path": "/tmp/myrepo",
+          "message": "sneaky commit"
+        }
+      },
+      "expectedDecision": "deny",
+      "reasoning": "/tmp is not the sandbox or any permitted directory, so the write operation is denied by default-deny.",
+      "source": "generated"
+    },
+    {
+      "description": "git_clean with force outside sandbox — denied as destructive operation in unpermitted path",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_clean",
+        "arguments": {
+          "path": "/home/codespace/projects/external",
+          "force": true,
+          "directories": true
+        }
+      },
+      "expectedDecision": "deny",
+      "reasoning": "This delete-path operation is outside the sandbox and no permission exists for that path, so it is denied.",
+      "source": "generated"
+    },
+    {
+      "description": "Path traversal attempt via sandbox path going outside — denied",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_status",
+        "arguments": {
+          "path": "/home/codespace/.ironcurtain/sandbox/../../.ssh"
+        }
+      },
+      "expectedDecision": "deny",
+      "reasoning": "The traversal resolves to /home/codespace/.ssh which is outside the sandbox, so the operation is denied.",
+      "source": "generated"
+    },
+    {
+      "description": "git_blame on a file inside sandbox — allowed local read operation",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_blame",
+        "arguments": {
+          "path": "/home/codespace/.ironcurtain/sandbox",
+          "file": "/home/codespace/.ironcurtain/sandbox/src/main.py"
+        }
+      },
+      "expectedDecision": "allow",
+      "reasoning": "git_blame is a local read operation on a file within the sandbox, which is permitted.",
+      "source": "generated"
+    },
+    {
+      "description": "git_show on a commit inside sandbox — allowed local read operation",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_show",
+        "arguments": {
+          "path": "/home/codespace/.ironcurtain/sandbox",
+          "object": "HEAD"
+        }
+      },
+      "expectedDecision": "allow",
+      "reasoning": "git_show is a read-only local operation inside the sandbox, which the constitution permits.",
+      "source": "generated"
+    },
+    {
+      "description": "git_reflog inside sandbox — allowed local read operation",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_reflog",
+        "arguments": {
+          "path": "/home/codespace/.ironcurtain/sandbox",
+          "maxCount": 50
+        }
+      },
+      "expectedDecision": "allow",
+      "reasoning": "git_reflog is a local read operation inside the sandbox, fully permitted by the constitution.",
+      "source": "generated"
+    },
+    {
+      "description": "git_changelog_analyze inside sandbox — allowed local read operation",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_changelog_analyze",
+        "arguments": {
+          "path": "/home/codespace/.ironcurtain/sandbox",
+          "maxCommits": 100,
+          "branch": "main"
+        }
+      },
+      "expectedDecision": "allow",
+      "reasoning": "git_changelog_analyze is a local read/analysis operation inside the sandbox, which is permitted.",
+      "source": "generated"
+    },
+    {
+      "description": "git_cherry_pick inside sandbox — allowed local write-history operation",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_cherry_pick",
+        "arguments": {
+          "path": "/home/codespace/.ironcurtain/sandbox",
+          "commits": [
+            "abc1234",
+            "def5678"
+          ]
+        }
+      },
+      "expectedDecision": "allow",
+      "reasoning": "git_cherry_pick is a local write-history operation inside the sandbox, which the constitution permits.",
+      "source": "generated"
+    },
+    {
+      "description": "git_reset hard inside sandbox — allowed local write-history operation",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_reset",
+        "arguments": {
+          "path": "/home/codespace/.ironcurtain/sandbox",
+          "mode": "hard",
+          "target": "HEAD~1"
+        }
+      },
+      "expectedDecision": "allow",
+      "reasoning": "git_reset is a local write-history operation inside the sandbox, which the constitution permits.",
+      "source": "generated"
+    },
+    {
+      "description": "List git remotes inside sandbox — allowed as read-only remote listing",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_remote",
+        "arguments": {
+          "path": "/home/codespace/.ironcurtain/sandbox",
+          "mode": "list"
+        }
+      },
+      "expectedDecision": "allow",
+      "reasoning": "Listing remotes is a read-only operation inside the sandbox, which the constitution permits.",
+      "source": "generated"
+    },
+    {
+      "description": "git_clean dry-run inside sandbox — allowed as read-only preview",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_clean",
+        "arguments": {
+          "path": "/home/codespace/.ironcurtain/sandbox",
+          "dryRun": true,
+          "directories": true
+        }
+      },
+      "expectedDecision": "allow",
+      "reasoning": "git_clean with dryRun=true is a read-only operation inside the sandbox, which is permitted.",
+      "source": "generated"
+    },
+    {
+      "description": "git_init outside sandbox at /opt/myproject — denied as write outside permitted paths",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_init",
+        "arguments": {
+          "path": "/opt/myproject"
+        }
+      },
+      "expectedDecision": "deny",
+      "reasoning": "/opt is outside the sandbox and no permission exists for that path, so the write is denied.",
+      "source": "generated"
+    },
+    {
+      "description": "git_set_working_dir to sandbox path — allowed as a read operation on permitted path",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_set_working_dir",
+        "arguments": {
+          "path": "/home/codespace/.ironcurtain/sandbox",
+          "validateGitRepo": true
+        }
+      },
+      "expectedDecision": "allow",
+      "reasoning": "Setting the working directory to the sandbox path is a read operation on a permitted path.",
+      "source": "generated"
+    },
+    {
+      "description": "Push tags to remote — requires human approval as external git operation",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_push",
+        "arguments": {
+          "path": "/home/codespace/.ironcurtain/sandbox",
+          "remote": "https://github.com/myorg/myrepo.git",
+          "tags": true
+        }
+      },
+      "expectedDecision": "escalate",
+      "reasoning": "Pushing tags to a remote is a non-local git operation that requires human approval per the constitution.",
+      "source": "generated"
+    },
+    {
+      "description": "git_stash drop inside sandbox — allowed local delete-history operation",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_stash",
+        "arguments": {
+          "path": "/home/codespace/.ironcurtain/sandbox",
+          "mode": "drop",
+          "stashRef": "stash@{0}"
+        }
+      },
+      "expectedDecision": "allow",
+      "reasoning": "Dropping a stash is a local delete-history operation inside the sandbox, which is permitted.",
+      "source": "generated"
+    },
+    {
+      "description": "List git tags within the sandbox — read-only local git operation",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_tag",
+        "arguments": {
+          "path": "/home/codespace/.ironcurtain/sandbox",
+          "mode": "list"
+        }
+      },
+      "expectedDecision": "allow",
+      "reasoning": "Listing tags only requires read-path on the sandbox directory, which is a permitted local read git operation.",
+      "source": "generated"
+    },
+    {
+      "description": "Create a git tag within the sandbox — local write git operation",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_tag",
+        "arguments": {
+          "path": "/home/codespace/.ironcurtain/sandbox",
+          "mode": "create",
+          "tagName": "v1.0.0",
+          "commit": "HEAD",
+          "message": "Release 1.0.0",
+          "annotated": true
+        }
+      },
+      "expectedDecision": "allow",
+      "reasoning": "Creating a tag writes history within the sandbox, which is a permitted local write git operation.",
+      "source": "generated"
+    },
+    {
+      "description": "Delete a git tag within the sandbox — local delete git operation",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_tag",
+        "arguments": {
+          "path": "/home/codespace/.ironcurtain/sandbox",
+          "mode": "delete",
+          "tagName": "v0.9.0"
+        }
+      },
+      "expectedDecision": "allow",
+      "reasoning": "Deleting a local tag within the sandbox is a permitted local git operation (delete-history on sandbox path).",
+      "source": "generated"
+    },
+    {
+      "description": "List git tags outside sandbox in /etc — read on forbidden path",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_tag",
+        "arguments": {
+          "path": "/etc",
+          "mode": "list"
+        }
+      },
+      "expectedDecision": "deny",
+      "reasoning": "Reading git history outside the sandbox is not permitted by the constitution and no explicit rule allows it.",
+      "source": "generated"
+    },
+    {
+      "description": "Create a git tag outside the sandbox in /var/log — write-history on forbidden path",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_tag",
+        "arguments": {
+          "path": "/var/log",
+          "mode": "create",
+          "tagName": "v2.0.0",
+          "commit": "HEAD"
+        }
+      },
+      "expectedDecision": "deny",
+      "reasoning": "Writing git history outside the sandbox is not permitted; the constitution only allows local git operations within the sandbox.",
+      "source": "generated"
+    },
+    {
+      "description": "Delete a git tag outside the sandbox — delete-history on forbidden path",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_tag",
+        "arguments": {
+          "path": "/home/user/project",
+          "mode": "delete",
+          "tagName": "v1.2.3"
+        }
+      },
+      "expectedDecision": "deny",
+      "reasoning": "Deleting git history outside the sandbox is categorically not permitted by the constitution.",
+      "source": "generated"
+    },
+    {
+      "description": "Add a git worktree inside the sandbox — local write path operation",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_worktree",
+        "arguments": {
+          "path": "/home/codespace/.ironcurtain/sandbox",
+          "mode": "add",
+          "worktreePath": "/home/codespace/.ironcurtain/sandbox/worktrees/feature-branch",
+          "branch": "feature-branch"
+        }
+      },
+      "expectedDecision": "allow",
+      "reasoning": "Adding a worktree within the sandbox involves write-path on sandbox paths, which is permitted as a local git operation.",
+      "source": "generated"
+    },
+    {
+      "description": "List git worktrees inside the sandbox — read-only operation",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_worktree",
+        "arguments": {
+          "path": "/home/codespace/.ironcurtain/sandbox",
+          "mode": "list"
+        }
+      },
+      "expectedDecision": "allow",
+      "reasoning": "Listing worktrees only reads the sandbox path, which is a permitted local read git operation.",
+      "source": "generated"
+    },
+    {
+      "description": "Remove a git worktree inside the sandbox — local delete path operation",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_worktree",
+        "arguments": {
+          "path": "/home/codespace/.ironcurtain/sandbox",
+          "mode": "remove",
+          "worktreePath": "/home/codespace/.ironcurtain/sandbox/worktrees/old-branch"
+        }
+      },
+      "expectedDecision": "allow",
+      "reasoning": "Removing a worktree within the sandbox involves delete-path on a sandbox path, permitted as a local git operation.",
+      "source": "generated"
+    },
+    {
+      "description": "Move a git worktree from inside sandbox to outside — delete-path on sandbox, write-path outside",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_worktree",
+        "arguments": {
+          "path": "/home/codespace/.ironcurtain/sandbox",
+          "mode": "move",
+          "worktreePath": "/home/codespace/.ironcurtain/sandbox/worktrees/my-branch",
+          "newPath": "/tmp/my-branch"
+        }
+      },
+      "expectedDecision": "deny",
+      "reasoning": "Moving a worktree writes to /tmp which is outside the sandbox and not a permitted directory; the constitution does not allow this.",
+      "source": "generated"
+    },
+    {
+      "description": "Prune worktrees inside the sandbox with dry run — read-only check",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_worktree",
+        "arguments": {
+          "path": "/home/codespace/.ironcurtain/sandbox",
+          "mode": "prune",
+          "dryRun": true
+        }
+      },
+      "expectedDecision": "allow",
+      "reasoning": "A dry-run prune only reads the sandbox path and is a permitted local read git operation.",
+      "source": "generated"
+    },
+    {
+      "description": "Add a git worktree outside the sandbox — write-path on forbidden path",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_worktree",
+        "arguments": {
+          "path": "/home/codespace/.ironcurtain/sandbox",
+          "mode": "add",
+          "worktreePath": "/tmp/external-worktree",
+          "branch": "hotfix"
+        }
+      },
+      "expectedDecision": "deny",
+      "reasoning": "The worktreePath write target is outside the sandbox; the constitution does not permit writing to /tmp.",
+      "source": "generated"
+    },
+    {
+      "description": "Retrieve git wrap-up instructions — no-resource read-only tool",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_wrapup_instructions",
+        "arguments": {
+          "acknowledgement": true,
+          "updateAgentMetaFiles": false,
+          "createTag": false
+        }
+      },
+      "expectedDecision": "allow",
+      "reasoning": "git_wrapup_instructions has only none-role arguments, making it a read-only informational tool that should always be allowed.",
+      "source": "generated"
+    },
+    {
+      "description": "Path traversal attack: list tags using traversal path targeting /etc",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_tag",
+        "arguments": {
+          "path": "/home/codespace/.ironcurtain/sandbox/../../../../../../etc",
+          "mode": "list"
+        }
+      },
+      "expectedDecision": "deny",
+      "reasoning": "The traversal path resolves outside the sandbox to /etc; the policy engine should deny this as it is not a permitted path.",
+      "source": "generated"
+    },
+    {
+      "description": "Move worktree within the sandbox only — both source and destination inside sandbox",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_worktree",
+        "arguments": {
+          "path": "/home/codespace/.ironcurtain/sandbox",
+          "mode": "move",
+          "worktreePath": "/home/codespace/.ironcurtain/sandbox/worktrees/branch-a",
+          "newPath": "/home/codespace/.ironcurtain/sandbox/worktrees/branch-b"
+        }
+      },
+      "expectedDecision": "allow",
+      "reasoning": "Both source (delete-path) and destination (write-path) are within the sandbox, satisfying all local git operation requirements.",
+      "source": "generated"
+    },
+    {
+      "description": "Create annotated signed tag inside sandbox — local write git operation",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_tag",
+        "arguments": {
+          "path": "/home/codespace/.ironcurtain/sandbox",
+          "mode": "create",
+          "tagName": "v1.1.0",
+          "commit": "abc1234",
+          "annotated": true,
+          "sign": true,
+          "forceUnsignedOnFailure": true
+        }
+      },
+      "expectedDecision": "allow",
+      "reasoning": "Creating a signed annotated tag within the sandbox is still a permitted local write git operation.",
+      "source": "generated"
+    },
+    {
+      "description": "Prune worktrees outside the sandbox — delete-path on forbidden path",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_worktree",
+        "arguments": {
+          "path": "/var/log/myrepo",
+          "mode": "prune"
+        }
+      },
+      "expectedDecision": "deny",
+      "reasoning": "Pruning worktrees at /var/log/myrepo involves delete-path outside the sandbox, which the constitution does not permit.",
+      "source": "generated"
+    },
+    {
+      "description": "Wrap-up instructions with createTag true — still a none-role-only tool call",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_wrapup_instructions",
+        "arguments": {
+          "acknowledgement": true,
+          "updateAgentMetaFiles": true,
+          "createTag": true
+        }
+      },
+      "expectedDecision": "allow",
+      "reasoning": "All arguments to git_wrapup_instructions carry none roles, so this is a read-only informational call always allowed.",
+      "source": "generated"
+    },
+    {
+      "description": "git_clean dry-run outside sandbox — read-only preview allowed even outside sandbox",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_clean",
+        "arguments": {
+          "path": "/home/codespace/.ironcurtain/sandbox",
+          "dryRun": true,
+          "directories": true
+        }
+      },
+      "expectedDecision": "allow",
+      "reasoning": "When dryRun=true, git_clean only has read-path role which is permitted inside the sandbox.",
+      "source": "generated"
+    },
+    {
+      "description": "Stage all files for commit inside sandbox using all flag — allowed local write operation",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_add",
+        "arguments": {
+          "path": "/home/codespace/.ironcurtain/sandbox",
+          "files": [
+            "src/main.py",
+            "README.md"
+          ]
+        }
+      },
+      "expectedDecision": "allow",
+      "reasoning": "Staging files with explicit files list inside the sandbox is a permitted local git write operation.",
+      "source": "generated"
+    },
+    {
+      "description": "Analyze changelog inside sandbox with required reviewTypes — allowed local read operation",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_changelog_analyze",
+        "arguments": {
+          "path": "/home/codespace/.ironcurtain/sandbox",
+          "reviewTypes": [
+            "features",
+            "bugfixes"
+          ],
+          "maxCommits": 50
+        }
+      },
+      "expectedDecision": "allow",
+      "reasoning": "git_changelog_analyze is a read operation inside the sandbox with required reviewTypes provided, so it is permitted.",
+      "source": "generated"
+    },
+    {
+      "description": "Retrieve git wrap-up instructions with valid acknowledgement string — no-resource read-only tool",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_wrapup_instructions",
+        "arguments": {
+          "acknowledgement": "yes"
+        }
+      },
+      "expectedDecision": "allow",
+      "reasoning": "git_wrapup_instructions has only none-role arguments and is a read-only informational tool that should always be allowed.",
+      "source": "generated"
+    },
+    {
+      "description": "Wrap-up instructions with updateAgentMetaFiles acknowledged — none-role-only tool call is allowed",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_wrapup_instructions",
+        "arguments": {
+          "acknowledgement": "yes",
+          "updateAgentMetaFiles": "yes"
+        }
+      },
+      "expectedDecision": "allow",
+      "reasoning": "All arguments on git_wrapup_instructions have none roles with valid string values, so the call is always allowed regardless of argument values.",
+      "source": "generated"
+    },
+    {
+      "description": "git_status on /home/codespace (outside sandbox) — should be denied as it's outside permitted paths",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_status",
+        "arguments": {
+          "path": "/home/codespace"
+        }
+      },
+      "expectedDecision": "deny",
+      "reasoning": "The path is outside the sandbox; the constitution only permits local git operations within the sandbox, so this should be denied.",
+      "source": "generated"
+    },
+    {
+      "description": "git_remote add outside sandbox — should escalate as it involves a remote URL on an external path",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_remote",
+        "arguments": {
+          "path": "/tmp/myrepo",
+          "mode": "add",
+          "name": "origin",
+          "url": "https://github.com/example/repo.git"
+        }
+      },
+      "expectedDecision": "escalate",
+      "reasoning": "Adding a remote URL via git_remote uses the git-remote-url role and triggers rule 'escalate-git-remote-url', which correctly routes it for human approval as it involves a network-reachable endpoint.",
+      "source": "generated"
+    },
+    {
+      "description": "git_fetch from remote on a path outside sandbox — should escalate for human approval",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_fetch",
+        "arguments": {
+          "path": "/tmp/externalrepo",
+          "remote": "origin"
+        }
+      },
+      "expectedDecision": "escalate",
+      "reasoning": "git_fetch always requires human approval per the constitution as it communicates with a remote. The escalate-git-fetch rule should fire regardless of path location.",
+      "source": "generated"
+    },
+    {
+      "description": "git_branch list outside sandbox — should be denied as it's a local op on a non-permitted path",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_branch",
+        "arguments": {
+          "path": "/opt/project",
+          "operation": "list"
+        }
+      },
+      "expectedDecision": "deny",
+      "reasoning": "The path is outside the sandbox. The allow-local-git-branch-read rule is too broad if it matches external paths; the operation should be denied.",
+      "source": "generated"
+    },
+    {
+      "description": "git_commit outside sandbox at /tmp/repo — should be denied as write outside permitted paths",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_commit",
+        "arguments": {
+          "path": "/tmp/repo",
+          "message": "test commit"
+        }
+      },
+      "expectedDecision": "deny",
+      "reasoning": "Rule allow-local-git-commit likely also lacks path scoping; a commit on a path outside the sandbox should be denied per the constitution.",
+      "source": "generated"
+    },
+    {
+      "description": "git_merge outside sandbox at /home/codespace/project — should be denied",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_merge",
+        "arguments": {
+          "path": "/home/codespace/project",
+          "branch": "feature"
+        }
+      },
+      "expectedDecision": "deny",
+      "reasoning": "Rule allow-local-git-merge likely lacks path scoping; local merge on a path outside the sandbox should be denied.",
+      "source": "generated"
+    },
+    {
+      "description": "git_stash outside sandbox at /opt/myrepo — should be denied",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_stash",
+        "arguments": {
+          "path": "/opt/myrepo",
+          "mode": "push"
+        }
+      },
+      "expectedDecision": "deny",
+      "reasoning": "Rule allow-local-git-stash likely lacks path scoping; stash on a path outside the sandbox should be denied per the constitution.",
+      "source": "generated"
+    },
+    {
+      "description": "git_checkout outside sandbox at /var/repos/project — should be denied",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_checkout",
+        "arguments": {
+          "path": "/var/repos/project",
+          "target": "main"
+        }
+      },
+      "expectedDecision": "deny",
+      "reasoning": "Rule allow-local-git-checkout likely lacks path scoping; checkout on a path outside the sandbox should be denied per the constitution.",
+      "source": "generated"
+    },
+    {
+      "description": "git_diff outside sandbox at /home/codespace/project — should be denied as read op outside sandbox",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_diff",
+        "arguments": {
+          "path": "/home/codespace/project"
+        }
+      },
+      "expectedDecision": "deny",
+      "reasoning": "git_diff is covered by allow-local-read-only-git-ops which was shown to lack path scoping; this confirms the issue extends to diff operations outside the sandbox.",
+      "source": "generated"
+    },
+    {
+      "description": "git_show outside sandbox at /opt/repo — should be denied as read op outside sandbox",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_show",
+        "arguments": {
+          "path": "/opt/repo",
+          "object": "HEAD"
+        }
+      },
+      "expectedDecision": "deny",
+      "reasoning": "git_show is in allow-local-read-only-git-ops which lacks path scoping; operations outside the sandbox should be denied.",
+      "source": "generated"
+    },
+    {
+      "description": "git_wrapup_instructions with acknowledgement — path-less tool should be allowed",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_wrapup_instructions",
+        "arguments": {
+          "acknowledgement": "yes"
+        }
+      },
+      "expectedDecision": "allow",
+      "reasoning": "Previously identified as failing (Round 1 [52]): git_wrapup_instructions is a path-less read-only tool listed in rule 1 but cannot match roles=[read-path] without a path, causing default-deny. A dedicated rule is needed.",
+      "source": "generated"
+    },
+    {
+      "description": "git_remote set-url outside sandbox — should escalate for human approval as it changes a remote URL",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_remote",
+        "arguments": {
+          "path": "/tmp/myrepo",
+          "mode": "set-url",
+          "name": "origin",
+          "url": "https://github.com/example/repo.git"
+        }
+      },
+      "expectedDecision": "escalate",
+      "reasoning": "Changing a remote URL triggers the git-remote-url role and matches rule 'escalate-git-remote-url', requiring human approval regardless of path.",
+      "source": "generated"
+    },
+    {
+      "description": "git_remote list (read) outside sandbox — should be denied as it is a local read op on a non-permitted external path",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_remote",
+        "arguments": {
+          "path": "/opt/myrepo",
+          "mode": "list"
+        }
+      },
+      "expectedDecision": "deny",
+      "reasoning": "Listing remotes uses the read-path role, which rule 'allow-local-git-remote-read' permits, but only implicitly via path roles. Since there is no sandbox structural allow and /opt/myrepo is outside the sandbox, the path-based allow rule requires the path to match a permitted directory — there is no such permission for /opt, so this should default-deny.",
+      "source": "generated"
+    },
+    {
+      "description": "git_commit outside sandbox at /opt/myrepo — should be denied as commits are only permitted within sandbox",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_commit",
+        "arguments": {
+          "path": "/opt/myrepo",
+          "message": "test commit"
+        }
+      },
+      "expectedDecision": "deny",
+      "reasoning": "Rule allow-local-git-commit matches any git_commit with write-history role regardless of path. The constitution only permits local git write operations within the sandbox.",
+      "source": "generated"
+    },
+    {
+      "description": "git_merge outside sandbox at /opt/myrepo — should be denied as merges are only permitted within sandbox",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_merge",
+        "arguments": {
+          "path": "/opt/myrepo",
+          "branch": "feature-branch"
+        }
+      },
+      "expectedDecision": "deny",
+      "reasoning": "Rule allow-local-git-merge matches any git_merge with write-history role regardless of path. Operations on external paths should be denied per constitution.",
+      "source": "generated"
+    },
+    {
+      "description": "git_remote remove (delete) outside sandbox at /opt/myrepo — should be denied as local remote config write is only permitted within sandbox",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_remote",
+        "arguments": {
+          "path": "/opt/myrepo",
+          "mode": "remove",
+          "name": "origin"
+        }
+      },
+      "expectedDecision": "deny",
+      "reasoning": "Rule allow-local-git-remote-write matches any git_remote with write-history/delete-history role without a sandbox path constraint. Modifying local remote config on external paths should be denied per constitution.",
+      "source": "generated"
+    },
+    {
+      "description": "git_tag create outside sandbox at /opt/myrepo — should be denied as tag operations are only permitted within sandbox",
+      "request": {
+        "serverName": "git",
+        "toolName": "git_tag",
+        "arguments": {
+          "path": "/opt/myrepo",
+          "mode": "create",
+          "tagName": "v1.0"
+        }
+      },
+      "expectedDecision": "deny",
+      "reasoning": "Rule allow-local-git-tag matches any git_tag with write-history/delete-history role regardless of path. Local tag operations on external paths should be denied per constitution.",
+      "source": "generated"
+    }
+  ]
+}

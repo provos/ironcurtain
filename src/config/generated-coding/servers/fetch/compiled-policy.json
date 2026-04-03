@@ -1,0 +1,108 @@
+{
+  "generatedAt": "2026-03-31T19:55:00.016Z",
+  "serverName": "fetch",
+  "constitutionHash": "77e1a4a7b304748032418f82bf22f38a4a478f2582faacab227cf2c45d474996",
+  "inputHash": "e9b8df3b1ca3eef18222e66a23a1b213001c1eb9a5b9e0bf65b0ee316c9b9b40",
+  "rules": [
+    {
+      "name": "allow-web-search",
+      "description": "Allow web searches using the web_search tool.",
+      "principle": "The agent may perform web searches to find information.",
+      "if": {
+        "server": [
+          "fetch"
+        ],
+        "tool": [
+          "web_search"
+        ]
+      },
+      "then": "allow",
+      "reason": "Constitution explicitly permits web searches."
+    },
+    {
+      "name": "allow-fetch-news-sites",
+      "description": "Allow fetching web content from popular news sites.",
+      "principle": "The agent may fetch web content from popular news sites.",
+      "if": {
+        "server": [
+          "fetch"
+        ],
+        "tool": [
+          "http_fetch"
+        ],
+        "domains": {
+          "roles": [
+            "fetch-url"
+          ],
+          "allowed": [
+            "@popular-news-sites"
+          ]
+        }
+      },
+      "then": "allow",
+      "reason": "Constitution explicitly permits fetching content from popular news sites."
+    },
+    {
+      "name": "allow-fetch-development-sites",
+      "description": "Allow fetching web content from popular development sites.",
+      "principle": "The agent may fetch web content from popular development sites.",
+      "if": {
+        "server": [
+          "fetch"
+        ],
+        "tool": [
+          "http_fetch"
+        ],
+        "domains": {
+          "roles": [
+            "fetch-url"
+          ],
+          "allowed": [
+            "@popular-development-sites"
+          ]
+        }
+      },
+      "then": "allow",
+      "reason": "Constitution explicitly permits fetching content from popular development sites."
+    },
+    {
+      "name": "escalate-fetch-other-urls",
+      "description": "Escalate fetching content from any other URL not explicitly permitted.",
+      "principle": "The agent may fetch web content from popular news sites and popular development sites; all other URLs require human judgment.",
+      "if": {
+        "server": [
+          "fetch"
+        ],
+        "tool": [
+          "http_fetch"
+        ],
+        "domains": {
+          "roles": [
+            "fetch-url"
+          ],
+          "allowed": [
+            "*"
+          ]
+        }
+      },
+      "then": "escalate",
+      "reason": "URL is not in an explicitly permitted category; requires human approval."
+    }
+  ],
+  "listDefinitions": [
+    {
+      "name": "popular-news-sites",
+      "type": "domains",
+      "principle": "The agent may fetch web content from popular news sites.",
+      "generationPrompt": "List the domains of approximately 30–50 widely recognized, popular news and media outlets (e.g., major national newspapers, broadcasters, and online news publications) from around the world.",
+      "requiresMcp": false
+    },
+    {
+      "name": "popular-development-sites",
+      "type": "domains",
+      "principle": "The agent may fetch web content from popular development sites.",
+      "generationPrompt": "List the domains of approximately 30–50 widely used software development and technical reference sites, including code hosting, documentation, package registries, developer forums, and technical blogs (e.g., github.com, stackoverflow.com, docs.python.org, npmjs.com, developer.mozilla.org).",
+      "requiresMcp": false
+    }
+  ]
+}

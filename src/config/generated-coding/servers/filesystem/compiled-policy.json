@@ -1,0 +1,160 @@
+{
+  "generatedAt": "2026-03-31T19:55:25.529Z",
+  "serverName": "filesystem",
+  "constitutionHash": "77e1a4a7b304748032418f82bf22f38a4a478f2582faacab227cf2c45d474996",
+  "inputHash": "e0589b155fd0dc9368a58276864a9c032b1a85a6c89bf29b994c545678886f31",
+  "rules": [
+    {
+      "name": "allow-downloads-read",
+      "description": "Allow reading files in the Downloads folder.",
+      "principle": "The agent is allowed to read, write and delete content in the Downloads folder.",
+      "if": {
+        "roles": [
+          "read-path"
+        ],
+        "server": [
+          "filesystem"
+        ],
+        "paths": {
+          "roles": [
+            "read-path"
+          ],
+          "within": "/home/codespace/Downloads"
+        }
+      },
+      "then": "allow",
+      "reason": "Constitution explicitly permits reading in the Downloads folder."
+    },
+    {
+      "name": "allow-downloads-write",
+      "description": "Allow writing files in the Downloads folder.",
+      "principle": "The agent is allowed to read, write and delete content in the Downloads folder.",
+      "if": {
+        "roles": [
+          "write-path"
+        ],
+        "server": [
+          "filesystem"
+        ],
+        "paths": {
+          "roles": [
+            "write-path"
+          ],
+          "within": "/home/codespace/Downloads"
+        }
+      },
+      "then": "allow",
+      "reason": "Constitution explicitly permits writing in the Downloads folder."
+    },
+    {
+      "name": "allow-downloads-move-source",
+      "description": "Allow move operations where the source (delete-path) is within Downloads.",
+      "principle": "The agent is allowed to read, write and delete content in the Downloads folder.",
+      "if": {
+        "roles": [
+          "delete-path"
+        ],
+        "server": [
+          "filesystem"
+        ],
+        "paths": {
+          "roles": [
+            "delete-path"
+          ],
+          "within": "/home/codespace/Downloads"
+        }
+      },
+      "then": "allow",
+      "reason": "Constitution permits delete/move operations within the Downloads folder."
+    },
+    {
+      "name": "allow-documents-read",
+      "description": "Allow reading documents in the Users document folder.",
+      "principle": "The agent is allowed to read documents in the Users document folder.",
+      "if": {
+        "roles": [
+          "read-path"
+        ],
+        "server": [
+          "filesystem"
+        ],
+        "paths": {
+          "roles": [
+            "read-path"
+          ],
+          "within": "/home/codespace/Documents"
+        }
+      },
+      "then": "allow",
+      "reason": "Constitution explicitly permits reading in the Documents folder."
+    },
+    {
+      "name": "allow-read-file-info-anywhere",
+      "description": "Allow listing directories and getting file metadata for any readable path.",
+      "principle": "The agent is allowed to read documents in the Users document folder and perform git operations within the sandbox.",
+      "if": {
+        "roles": [
+          "read-path"
+        ],
+        "server": [
+          "filesystem"
+        ],
+        "tool": [
+          "list_directory",
+          "list_directory_with_sizes",
+          "directory_tree",
+          "search_files",
+          "get_file_info",
+          "list_allowed_directories"
+        ]
+      },
+      "then": "allow",
+      "reason": "Read-only metadata and directory listing tools are safe to allow broadly to support agent navigation."
+    },
+    {
+      "name": "allow-list-allowed-directories",
+      "description": "Allow calling list_allowed_directories which has no path arguments.",
+      "principle": "The agent is allowed to read documents in the Users document folder.",
+      "if": {
+        "server": [
+          "filesystem"
+        ],
+        "tool": [
+          "list_allowed_directories"
+        ]
+      },
+      "then": "allow",
+      "reason": "list_allowed_directories has no path arguments and is a safe informational call."
+    },
+    {
+      "name": "escalate-write-outside-permitted",
+      "description": "Escalate write operations outside permitted directories (Downloads, sandbox).",
+      "principle": "The agent is allowed to read, write and delete content in the Downloads folder.",
+      "if": {
+        "roles": [
+          "write-path"
+        ],
+        "server": [
+          "filesystem"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Writes outside the Downloads folder or sandbox require human approval."
+    },
+    {
+      "name": "escalate-delete-outside-permitted",
+      "description": "Escalate delete/move-source operations outside permitted directories.",
+      "principle": "The agent is allowed to read, write and delete content in the Downloads folder.",
+      "if": {
+        "roles": [
+          "delete-path"
+        ],
+        "server": [
+          "filesystem"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Delete operations outside the Downloads folder or sandbox require human approval."
+    }
+  ]
+}

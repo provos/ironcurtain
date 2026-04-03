@@ -1,0 +1,315 @@
+{
+  "generatedAt": "2026-03-31T19:55:43.288Z",
+  "serverName": "github",
+  "constitutionHash": "77e1a4a7b304748032418f82bf22f38a4a478f2582faacab227cf2c45d474996",
+  "inputHash": "9676d7904d2f04c75dc5f6b9c7b8b49b06f0b06c5edb5b5ae5688557a6840243",
+  "rules": [
+    {
+      "name": "github-read-operations-allow",
+      "description": "Allow all read-only GitHub operations (listing, searching, reading issues, PRs, repos, code, comments, reviews).",
+      "principle": "The agent may freely list, search, and read GitHub resources (issues, pull requests, repositories, code, comments, reviews) without human approval.",
+      "if": {
+        "server": [
+          "github"
+        ],
+        "tool": [
+          "get_commit",
+          "get_file_contents",
+          "get_label",
+          "get_latest_release",
+          "get_me",
+          "get_release_by_tag",
+          "get_tag",
+          "get_team_members",
+          "get_teams",
+          "issue_read",
+          "list_branches",
+          "list_commits",
+          "list_issue_types",
+          "list_issues",
+          "list_pull_requests",
+          "list_releases",
+          "list_tags",
+          "pull_request_read",
+          "search_code",
+          "search_issues",
+          "search_pull_requests",
+          "search_repositories",
+          "search_users"
+        ]
+      },
+      "then": "allow",
+      "reason": "These tools are purely read-only and the constitution explicitly permits free access to GitHub read operations."
+    },
+    {
+      "name": "github-issue-write-escalate",
+      "description": "Require human approval for creating or updating GitHub issues.",
+      "principle": "Creating, updating, closing, or deleting GitHub resources (issues, PRs, comments, reviews, branches, files, repositories) requires human approval.",
+      "if": {
+        "server": [
+          "github"
+        ],
+        "tool": [
+          "issue_write"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Writing or modifying issues is a mutating GitHub operation that requires human approval per the constitution."
+    },
+    {
+      "name": "github-add-issue-comment-escalate",
+      "description": "Require human approval for adding comments to issues or pull requests.",
+      "principle": "Creating, updating, closing, or deleting GitHub resources (issues, PRs, comments, reviews, branches, files, repositories) requires human approval.",
+      "if": {
+        "server": [
+          "github"
+        ],
+        "tool": [
+          "add_issue_comment"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Adding a comment is a mutating GitHub operation that requires human approval per the constitution."
+    },
+    {
+      "name": "github-add-comment-to-pending-review-escalate",
+      "description": "Require human approval for adding review comments to a pending pull request review.",
+      "principle": "Creating, updating, closing, or deleting GitHub resources (issues, PRs, comments, reviews, branches, files, repositories) requires human approval.",
+      "if": {
+        "server": [
+          "github"
+        ],
+        "tool": [
+          "add_comment_to_pending_review"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Adding a review comment is a mutating GitHub operation that requires human approval per the constitution."
+    },
+    {
+      "name": "github-add-reply-to-pr-comment-escalate",
+      "description": "Require human approval for replying to pull request comments.",
+      "principle": "Creating, updating, closing, or deleting GitHub resources (issues, PRs, comments, reviews, branches, files, repositories) requires human approval.",
+      "if": {
+        "server": [
+          "github"
+        ],
+        "tool": [
+          "add_reply_to_pull_request_comment"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Replying to a PR comment is a mutating GitHub operation that requires human approval per the constitution."
+    },
+    {
+      "name": "github-assign-copilot-to-issue-escalate",
+      "description": "Require human approval for assigning Copilot to an issue.",
+      "principle": "Creating, updating, closing, or deleting GitHub resources (issues, PRs, comments, reviews, branches, files, repositories) requires human approval.",
+      "if": {
+        "server": [
+          "github"
+        ],
+        "tool": [
+          "assign_copilot_to_issue"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Assigning Copilot to an issue may create a PR and is a mutating operation requiring human approval."
+    },
+    {
+      "name": "github-create-branch-escalate",
+      "description": "Require human approval for creating new branches in GitHub repositories.",
+      "principle": "Creating, updating, closing, or deleting GitHub resources (issues, PRs, comments, reviews, branches, files, repositories) requires human approval.",
+      "if": {
+        "server": [
+          "github"
+        ],
+        "tool": [
+          "create_branch"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Creating a branch is a mutating GitHub operation that requires human approval per the constitution."
+    },
+    {
+      "name": "github-create-or-update-file-escalate",
+      "description": "Require human approval for creating or updating files in GitHub repositories.",
+      "principle": "Creating, updating, closing, or deleting GitHub resources (issues, PRs, comments, reviews, branches, files, repositories) requires human approval.",
+      "if": {
+        "server": [
+          "github"
+        ],
+        "tool": [
+          "create_or_update_file"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Creating or updating a file is a mutating GitHub operation that requires human approval per the constitution."
+    },
+    {
+      "name": "github-create-pull-request-escalate",
+      "description": "Require human approval for creating pull requests.",
+      "principle": "Creating, updating, closing, or deleting GitHub resources (issues, PRs, comments, reviews, branches, files, repositories) requires human approval.",
+      "if": {
+        "server": [
+          "github"
+        ],
+        "tool": [
+          "create_pull_request"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Creating a pull request is a mutating GitHub operation that requires human approval per the constitution."
+    },
+    {
+      "name": "github-create-repository-escalate",
+      "description": "Require human approval for creating new GitHub repositories.",
+      "principle": "Creating, updating, closing, or deleting GitHub resources (issues, PRs, comments, reviews, branches, files, repositories) requires human approval.",
+      "if": {
+        "server": [
+          "github"
+        ],
+        "tool": [
+          "create_repository"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Creating a repository is a mutating GitHub operation that requires human approval per the constitution."
+    },
+    {
+      "name": "github-delete-file-escalate",
+      "description": "Require human approval for deleting files from GitHub repositories.",
+      "principle": "Creating, updating, closing, or deleting GitHub resources (issues, PRs, comments, reviews, branches, files, repositories) requires human approval.",
+      "if": {
+        "server": [
+          "github"
+        ],
+        "tool": [
+          "delete_file"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Deleting a file is a mutating GitHub operation that requires human approval per the constitution."
+    },
+    {
+      "name": "github-fork-repository-escalate",
+      "description": "Require human approval for forking GitHub repositories.",
+      "principle": "Creating, updating, closing, or deleting GitHub resources (issues, PRs, comments, reviews, branches, files, repositories) requires human approval.",
+      "if": {
+        "server": [
+          "github"
+        ],
+        "tool": [
+          "fork_repository"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Forking a repository is a mutating GitHub operation that requires human approval per the constitution."
+    },
+    {
+      "name": "github-merge-pull-request-escalate",
+      "description": "Require human approval for merging pull requests.",
+      "principle": "Creating, updating, closing, or deleting GitHub resources (issues, PRs, comments, reviews, branches, files, repositories) requires human approval.",
+      "if": {
+        "server": [
+          "github"
+        ],
+        "tool": [
+          "merge_pull_request"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Merging a pull request is a mutating GitHub operation that requires human approval per the constitution."
+    },
+    {
+      "name": "github-pull-request-review-write-escalate",
+      "description": "Require human approval for creating, submitting, or deleting pull request reviews.",
+      "principle": "Creating, updating, closing, or deleting GitHub resources (issues, PRs, comments, reviews, branches, files, repositories) requires human approval.",
+      "if": {
+        "server": [
+          "github"
+        ],
+        "tool": [
+          "pull_request_review_write"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Writing a PR review is a mutating GitHub operation that requires human approval per the constitution."
+    },
+    {
+      "name": "github-push-files-escalate",
+      "description": "Require human approval for pushing files to GitHub repositories.",
+      "principle": "Creating, updating, closing, or deleting GitHub resources (issues, PRs, comments, reviews, branches, files, repositories) requires human approval.",
+      "if": {
+        "server": [
+          "github"
+        ],
+        "tool": [
+          "push_files"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Pushing files is a mutating GitHub operation that requires human approval per the constitution."
+    },
+    {
+      "name": "github-request-copilot-review-escalate",
+      "description": "Require human approval for requesting Copilot code reviews on pull requests.",
+      "principle": "Creating, updating, closing, or deleting GitHub resources (issues, PRs, comments, reviews, branches, files, repositories) requires human approval.",
+      "if": {
+        "server": [
+          "github"
+        ],
+        "tool": [
+          "request_copilot_review"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Requesting a Copilot review modifies the PR and requires human approval per the constitution."
+    },
+    {
+      "name": "github-sub-issue-write-escalate",
+      "description": "Require human approval for adding, removing, or reprioritizing sub-issues.",
+      "principle": "Creating, updating, closing, or deleting GitHub resources (issues, PRs, comments, reviews, branches, files, repositories) requires human approval.",
+      "if": {
+        "server": [
+          "github"
+        ],
+        "tool": [
+          "sub_issue_write"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Modifying sub-issue relationships is a mutating GitHub operation that requires human approval per the constitution."
+    },
+    {
+      "name": "github-update-pull-request-escalate",
+      "description": "Require human approval for updating pull request metadata.",
+      "principle": "Creating, updating, closing, or deleting GitHub resources (issues, PRs, comments, reviews, branches, files, repositories) requires human approval.",
+      "if": {
+        "server": [
+          "github"
+        ],
+        "tool": [
+          "update_pull_request"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Updating a pull request is a mutating GitHub operation that requires human approval per the constitution."
+    },
+    {
+      "name": "github-update-pull-request-branch-escalate",
+      "description": "Require human approval for updating a pull request's head branch.",
+      "principle": "Creating, updating, closing, or deleting GitHub resources (issues, PRs, comments, reviews, branches, files, repositories) requires human approval.",
+      "if": {
+        "server": [
+          "github"
+        ],
+        "tool": [
+          "update_pull_request_branch"
+        ]
+      },
+      "then": "escalate",
+      "reason": "Updating a PR branch is a mutating GitHub operation that requires human approval per the constitution."
+    }
+  ]
+}
