@@ -613,7 +613,7 @@ export class WorkflowOrchestrator implements WorkflowController {
 
       return {
         output: agentOutput,
-        sessionId: session.getInfo().id,
+        sessionId: previousSessionId || session.getInfo().id,
         artifacts,
         outputHash,
       };

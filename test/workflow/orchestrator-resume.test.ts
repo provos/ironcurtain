@@ -1000,4 +1000,102 @@ describe('WorkflowOrchestrator checkpoint + resume', () => {
     const gateRequest = raiseGate.mock.calls[0][0] as HumanGateRequest;
     expect(gateRequest.stateName).toBe('error_gate');
   });
+
+  // -----------------------------------------------------------------------
+  // Test 10: Session IDs survive checkpoint and resume
+  // -----------------------------------------------------------------------
+
+  it('session IDs survive checkpoint and resume', async () => {
+    // loopWithErrorGateDef: implement -> review(reject -> error_gate) -> ...
+    // Run coder round 1 -> reviewer rejects -> error_gate (checkpoint).
+    // Resume from checkpoint. Approve gate -> coder round 2 should get
+    // the original coder session ID via resumeSessionId.
+    const defPath = writeDefinitionFile(tmpDir, loopWithErrorGateDef);
+    const checkpointStore = createCheckpointStore(tmpDir);
+
+    let coderCallCount = 0;
+
+    const sessionFactory1 = vi.fn(async (opts: SessionOptions) => {
+      const persona = opts.persona!;
+
+      if (persona === 'coder') {
+        coderCallCount++;
+        return createArtifactAwareSession(
+          [{ text: approvedResponse(`coder pass ${coderCallCount}`), artifacts: ['code'] }],
+          tmpDir,
+          `coder-session-${coderCallCount}`,
+        );
+      }
+      if (persona === 'reviewer') {
+        return createArtifactAwareSession([{ text: rejectedResponse('needs fixing'), artifacts: ['reviews'] }], tmpDir);
+      }
+      throw new Error(`Unexpected persona: ${persona}`);
+    });
+
+    const raiseGate1 = vi.fn();
+    const deps1 = createDeps(tmpDir, {
+      createSession: sessionFactory1,
+      raiseGate: raiseGate1,
+      checkpointStore,
+    });
+
+    const orchestrator1 = trackOrchestrator(new WorkflowOrchestrator(deps1));
+    const workflowId = await orchestrator1.start(defPath, 'implement feature');
+
+    // Flow: implement(coder) -> review(reject) -> error_gate
+    await waitForGate(raiseGate1, 1);
+
+    // Verify checkpoint has the coder's session ID stored
+    const checkpoint = checkpointStore.load(workflowId);
+    expect(checkpoint).toBeDefined();
+    expect(checkpoint!.machineState).toBe('error_gate');
+    expect(checkpoint!.context.sessionsByRole['implement']).toBe('coder-session-1');
+
+    // Simulate crash: save checkpoint, shutdown (which removes it), re-save
+    const savedCheckpoint = { ...checkpoint! };
+    await orchestrator1.shutdownAll();
+    checkpointStore.save(workflowId, savedCheckpoint);
+
+    // Resume with a new orchestrator
+    const sessionFactory2 = vi.fn(async (opts: SessionOptions) => {
+      const persona = opts.persona!;
+
+      if (persona === 'coder') {
+        return createArtifactAwareSession(
+          [{ text: approvedResponse('fixed code'), artifacts: ['code'] }],
+          tmpDir,
+          'coder-session-resumed',
+        );
+      }
+      if (persona === 'reviewer') {
+        return createArtifactAwareSession([{ text: approvedResponse('approved'), artifacts: ['reviews'] }], tmpDir);
+      }
+      throw new Error(`Unexpected persona: ${persona}`);
+    });
+
+    const raiseGate2 = vi.fn();
+    const deps2 = createDeps(tmpDir, {
+      createSession: sessionFactory2,
+      raiseGate: raiseGate2,
+      checkpointStore,
+    });
+
+    const orchestrator2 = trackOrchestrator(new WorkflowOrchestrator(deps2));
+    await orchestrator2.resume(workflowId);
+
+    // Gate is re-raised at error_gate
+    await waitForGate(raiseGate2, 1);
+
+    // Approve gate -> implement(coder round 2) -> review(approve) -> done
+    orchestrator2.resolveGate(workflowId, { type: 'APPROVE' });
+    await waitForCompletion(orchestrator2, workflowId);
+
+    expect(orchestrator2.getStatus(workflowId)?.phase).toBe('completed');
+
+    // The resumed coder session should have received the original coder session ID
+    expect(sessionFactory2).toHaveBeenCalled();
+    const coderCall = sessionFactory2.mock.calls.find((c) => c[0].persona === 'coder');
+    expect(coderCall).toBeDefined();
+    expect(coderCall![0].resumeSessionId).toBe('coder-session-1');
+  });
 });

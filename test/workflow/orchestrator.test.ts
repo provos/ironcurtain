@@ -932,4 +932,167 @@ describe('WorkflowOrchestrator', () => {
     await orchestrator.shutdownAll();
     expect(orchestrator.listActive().length).toBe(0);
   });
+
+  // -----------------------------------------------------------------------
+  // Test 10: Session ID preserved across 3+ rounds of the same role
+  // -----------------------------------------------------------------------
+
+  it('preserves original session ID across 3+ rounds of the same role', async () => {
+    // Need maxRounds high enough for 3 coder + 3 reviewer = 6 agent invocations
+    const threeRoundLoopDef: WorkflowDefinition = {
+      name: 'three-round-loop',
+      description: 'Coder-critic loop with enough rounds for 3 iterations',
+      initial: 'implement',
+      settings: { mode: 'builtin', maxRounds: 8 },
+      states: {
+        implement: {
+          type: 'agent',
+          persona: 'coder',
+          inputs: [],
+          outputs: ['code'],
+          transitions: [{ to: 'review' }],
+        },
+        review: {
+          type: 'agent',
+          persona: 'reviewer',
+          inputs: ['code'],
+          outputs: ['reviews'],
+          transitions: [
+            { to: 'done', guard: 'isApproved' },
+            { to: 'implement', guard: 'isRejected' },
+          ],
+        },
+        done: { type: 'terminal' },
+      },
+    };
+
+    const defPath = writeDefinitionFile(tmpDir, threeRoundLoopDef);
+    let coderCallCount = 0;
+    let reviewerCallCount = 0;
+
+    const sessionFactory = vi.fn(async (opts: SessionOptions) => {
+      const persona = opts.persona!;
+
+      if (persona === 'coder') {
+        coderCallCount++;
+        return createArtifactAwareSession(
+          [{ text: approvedResponse(`coder pass ${coderCallCount}`), artifacts: ['code'] }],
+          tmpDir,
+          `coder-session-${coderCallCount}`,
+        );
+      }
+      if (persona === 'reviewer') {
+        reviewerCallCount++;
+        // Reject on rounds 1 and 2, approve on round 3
+        if (reviewerCallCount < 3) {
+          return createArtifactAwareSession(
+            [{ text: rejectedResponse(`issue ${reviewerCallCount}`), artifacts: ['reviews'] }],
+            tmpDir,
+            `reviewer-session-${reviewerCallCount}`,
+          );
+        }
+        return createArtifactAwareSession(
+          [{ text: approvedResponse('all fixed'), artifacts: ['reviews'] }],
+          tmpDir,
+          `reviewer-session-${reviewerCallCount}`,
+        );
+      }
+      throw new Error(`Unexpected persona: ${persona}`);
+    });
+
+    const deps = createDeps(tmpDir, { createSession: sessionFactory });
+    const orchestrator = new WorkflowOrchestrator(deps);
+    activeOrchestrator = orchestrator;
+
+    const workflowId = await orchestrator.start(defPath, 'implement feature');
+    await waitForCompletion(orchestrator, workflowId);
+
+    // 6 sessions: coder1, reviewer1(reject), coder2, reviewer2(reject), coder3, reviewer3(approve)
+    expect(sessionFactory).toHaveBeenCalledTimes(6);
+    expect(orchestrator.getStatus(workflowId)?.phase).toBe('completed');
+
+    // Round 1 coder: no resumeSessionId (first invocation)
+    const call1 = sessionFactory.mock.calls[0][0];
+    expect(call1.persona).toBe('coder');
+    expect(call1.resumeSessionId).toBeUndefined();
+
+    // Round 2 coder: resumeSessionId is the original coder session
+    const call3 = sessionFactory.mock.calls[2][0];
+    expect(call3.persona).toBe('coder');
+    expect(call3.resumeSessionId).toBe('coder-session-1');
+
+    // Round 3 coder: resumeSessionId is STILL the original coder session (not coder-session-2)
+    const call5 = sessionFactory.mock.calls[4][0];
+    expect(call5.persona).toBe('coder');
+    expect(call5.resumeSessionId).toBe('coder-session-1');
+  });
+
+  // -----------------------------------------------------------------------
+  // Test 11: Different roles get independent session IDs
+  // -----------------------------------------------------------------------
+
+  it('different roles get independent session IDs', async () => {
+    const defPath = writeDefinitionFile(tmpDir, coderCriticLoopDef);
+    let coderCallCount = 0;
+    let reviewerCallCount = 0;
+
+    const sessionFactory = vi.fn(async (opts: SessionOptions) => {
+      const persona = opts.persona!;
+
+      if (persona === 'coder') {
+        coderCallCount++;
+        return createArtifactAwareSession(
+          [{ text: approvedResponse(`coder pass ${coderCallCount}`), artifacts: ['code'] }],
+          tmpDir,
+          `coder-session-${coderCallCount}`,
+        );
+      }
+      if (persona === 'reviewer') {
+        reviewerCallCount++;
+        if (reviewerCallCount === 1) {
+          return createArtifactAwareSession(
+            [{ text: rejectedResponse('needs work'), artifacts: ['reviews'] }],
+            tmpDir,
+            `reviewer-session-${reviewerCallCount}`,
+          );
+        }
+        return createArtifactAwareSession(
+          [{ text: approvedResponse('approved'), artifacts: ['reviews'] }],
+          tmpDir,
+          `reviewer-session-${reviewerCallCount}`,
+        );
+      }
+      throw new Error(`Unexpected persona: ${persona}`);
+    });
+
+    const deps = createDeps(tmpDir, { createSession: sessionFactory });
+    const orchestrator = new WorkflowOrchestrator(deps);
+    activeOrchestrator = orchestrator;
+
+    const workflowId = await orchestrator.start(defPath, 'implement feature');
+    await waitForCompletion(orchestrator, workflowId);
+
+    // 4 sessions: coder1, reviewer1(reject), coder2, reviewer2(approve)
+    expect(sessionFactory).toHaveBeenCalledTimes(4);
+
+    // Coder round 1: no resumeSessionId
+    const coderCall1 = sessionFactory.mock.calls[0][0];
+    expect(coderCall1.persona).toBe('coder');
+    expect(coderCall1.resumeSessionId).toBeUndefined();
+
+    // Reviewer round 1: no resumeSessionId (different role, first invocation)
+    const reviewerCall1 = sessionFactory.mock.calls[1][0];
+    expect(reviewerCall1.persona).toBe('reviewer');
+    expect(reviewerCall1.resumeSessionId).toBeUndefined();
+
+    // Coder round 2: gets coder's original session ID (not reviewer's)
+    const coderCall2 = sessionFactory.mock.calls[2][0];
+    expect(coderCall2.persona).toBe('coder');
+    expect(coderCall2.resumeSessionId).toBe('coder-session-1');
+
+    // Reviewer round 2: gets reviewer's original session ID (not coder's)
+    const reviewerCall2 = sessionFactory.mock.calls[3][0];
+    expect(reviewerCall2.persona).toBe('reviewer');
+    expect(reviewerCall2.resumeSessionId).toBe('reviewer-session-1');
+  });
 });
