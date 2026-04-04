@@ -1,5 +1,6 @@
 import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { MessageLog } from './message-log.js';
 import { createHash } from 'node:crypto';
 import { execFile as execFileCb } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -18,6 +19,7 @@ import type {
   HumanGateStateDefinition,
   AgentStateDefinition,
   DeterministicStateDefinition,
+  AgentOutput,
 } from './types.js';
 import { createWorkflowId } from './types.js';
 import type { Session, SessionOptions, SessionMode } from '../session/types.js';
@@ -129,6 +131,8 @@ interface WorkflowInstance {
   lastSurfacedError?: string;
   /** Timestamp when the current state was entered, for transition duration tracking. */
   stateEnteredAt?: number;
+  /** Append-only JSONL message log for debugging. */
+  readonly messageLog: MessageLog;
 }
 
 // ---------------------------------------------------------------------------
@@ -140,6 +144,15 @@ export class WorkflowOrchestrator implements WorkflowController {
   private readonly lifecycleCallbacks: Array<(e: WorkflowLifecycleEvent) => void> = [];
 
   constructor(private readonly deps: WorkflowOrchestratorDeps) {}
+
+  /** Build a partial log entry with shared fields for the given workflow instance. */
+  private logBase(instance: WorkflowInstance): { ts: string; workflowId: string; state: string } {
+    return {
+      ts: new Date().toISOString(),
+      workflowId: instance.id,
+      state: instance.currentState,
+    };
+  }
 
   // -----------------------------------------------------------------------
   // WorkflowController implementation
@@ -161,6 +174,7 @@ export class WorkflowOrchestrator implements WorkflowController {
     const providedMachine = this.provideActors(machine, workflowId, definition);
     const actor = createActor(providedMachine);
     const tab = this.deps.createWorkflowTab(definition.name, workflowId);
+    const messageLog = new MessageLog(resolve(this.deps.baseDir, workflowId, 'messages.jsonl'));
 
     const instance: WorkflowInstance = {
       id: workflowId,
@@ -175,6 +189,7 @@ export class WorkflowOrchestrator implements WorkflowController {
       transitionHistory: [],
       currentState: definition.initial,
       stateEnteredAt: Date.now(),
+      messageLog,
     };
 
     this.workflows.set(workflowId, instance);
@@ -211,6 +226,8 @@ export class WorkflowOrchestrator implements WorkflowController {
     // Reuse the existing artifact directory
     const artifactDir = resolve(this.deps.baseDir, workflowId, 'artifacts');
     const tab = this.deps.createWorkflowTab(definition.name, workflowId);
+    // Append to existing log file (resume must not overwrite)
+    const messageLog = new MessageLog(resolve(this.deps.baseDir, workflowId, 'messages.jsonl'));
 
     const instance: WorkflowInstance = {
       id: workflowId,
@@ -225,6 +242,7 @@ export class WorkflowOrchestrator implements WorkflowController {
       transitionHistory: [...checkpoint.transitionHistory],
       currentState: String(checkpoint.machineState),
       stateEnteredAt: Date.now(),
+      messageLog,
     };
 
     this.workflows.set(workflowId, instance);
@@ -326,6 +344,13 @@ export class WorkflowOrchestrator implements WorkflowController {
       this.deps.dismissGate(gateId);
       instance.activeGateId = undefined;
     }
+
+    instance.messageLog.append({
+      ...this.logBase(instance),
+      type: 'gate_resolved',
+      event: event.type,
+      prompt: event.prompt ?? null,
+    });
 
     // Map human gate event to XState event name
     const xstateEventName = `HUMAN_${event.type}` as const;
@@ -453,6 +478,13 @@ export class WorkflowOrchestrator implements WorkflowController {
         });
         instance.stateEnteredAt = now;
         this.saveCheckpoint(instance, snapshot);
+
+        instance.messageLog.append({
+          ...this.logBase(instance),
+          type: 'state_transition',
+          from: previousState,
+          event: stateValue,
+        });
       }
 
       instance.currentState = stateValue;
@@ -559,6 +591,12 @@ export class WorkflowOrchestrator implements WorkflowController {
       const errMsg = toErrorMessage(err);
       writeStderr(`[workflow] Session creation failed for "${stateId}": ${errMsg}`);
       instance.tab.write(`[error] Session creation failed for "${stateId}": ${errMsg}`);
+      instance.messageLog.append({
+        ...this.logBase(instance),
+        type: 'error',
+        error: errMsg,
+        context: `session creation for "${stateId}"`,
+      });
       throw err;
     }
 
@@ -567,24 +605,64 @@ export class WorkflowOrchestrator implements WorkflowController {
     try {
       instance.tab.write(`[agent] Sending command to "${stateId}"...`);
 
-      // Send command and get response
-      let responseText = await session.sendMessage(command);
+      const { messageLog } = instance;
 
-      // Parse agent_status with retry
+      const logReceived = (text: string, output: AgentOutput | undefined) => {
+        messageLog.append({
+          ...this.logBase(instance),
+          type: 'agent_received',
+          role: stateConfig.persona,
+          message: text,
+          verdict: output?.verdict ?? null,
+          confidence: output?.confidence ?? null,
+        });
+      };
+
+      messageLog.append({
+        ...this.logBase(instance),
+        type: 'agent_sent',
+        role: stateConfig.persona,
+        message: command,
+      });
+
+      let responseText = await session.sendMessage(command);
       let agentOutput = parseAgentStatus(responseText);
+      logReceived(responseText, agentOutput);
+
       if (!agentOutput) {
-        responseText = await session.sendMessage(buildStatusBlockReprompt());
+        const retryMsg = buildStatusBlockReprompt();
+        messageLog.append({
+          ...this.logBase(instance),
+          type: 'agent_retry',
+          role: stateConfig.persona,
+          reason: 'missing_status_block',
+          details: 'Response did not contain an agent_status block',
+          retryMessage: retryMsg,
+        });
+
+        responseText = await session.sendMessage(retryMsg);
         agentOutput = parseAgentStatus(responseText);
+        logReceived(responseText, agentOutput);
+
         if (!agentOutput) {
           throw new Error('Agent failed to provide agent_status block after retry');
         }
       }
 
-      // Verify expected artifacts with retry
       const missingArtifacts = this.findMissingArtifacts(stateConfig, instance.artifactDir);
       if (missingArtifacts.length > 0) {
-        const retryResponse = await session.sendMessage(buildArtifactReprompt(missingArtifacts));
-        // Re-parse status from retry response
+        const artifactRetryMsg = buildArtifactReprompt(missingArtifacts);
+        messageLog.append({
+          ...this.logBase(instance),
+          type: 'agent_retry',
+          role: stateConfig.persona,
+          reason: 'missing_artifacts',
+          details: `Missing: ${missingArtifacts.join(', ')}`,
+          retryMessage: artifactRetryMsg,
+        });
+
+        const retryResponse = await session.sendMessage(artifactRetryMsg);
+        logReceived(retryResponse, parseAgentStatus(retryResponse));
         const retryOutput = parseAgentStatus(retryResponse);
         if (retryOutput) {
           agentOutput = retryOutput;
@@ -595,10 +673,7 @@ export class WorkflowOrchestrator implements WorkflowController {
         }
       }
 
-      // Compute output hash for stall detection
       const outputHash = computeOutputHash(stateConfig.outputs, instance.artifactDir);
-
-      // Collect artifact paths
       const artifacts = collectArtifactPaths(stateConfig.outputs, instance.artifactDir);
 
       instance.tab.write(
@@ -612,6 +687,14 @@ export class WorkflowOrchestrator implements WorkflowController {
         outputHash,
         responseText,
       };
+    } catch (err) {
+      instance.messageLog.append({
+        ...this.logBase(instance),
+        type: 'error',
+        error: toErrorMessage(err),
+        context: `agent "${stateId}" (persona: ${stateConfig.persona})`,
+      });
+      throw err;
     } finally {
       instance.activeSessions.delete(session);
       await session.close().catch((closeErr: unknown) => {
@@ -662,6 +745,12 @@ export class WorkflowOrchestrator implements WorkflowController {
 
     const gateRequest = this.buildGateRequest(workflowId, gateName, stateDef);
     instance.activeGateId = gateRequest.gateId;
+
+    instance.messageLog.append({
+      ...this.logBase(instance),
+      type: 'gate_raised',
+      acceptedEvents: stateDef.acceptedEvents,
+    });
 
     this.deps.raiseGate(gateRequest);
     this.emitLifecycleEvent({
