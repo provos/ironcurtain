@@ -25,19 +25,16 @@ function extractAgentOutput(event: WorkflowEvent): AgentOutput | undefined {
 // Guard implementations
 // ---------------------------------------------------------------------------
 
-/** Agent verdict is 'approved' (any confidence). */
 const isApproved: GuardFunction = ({ event }) => {
   const output = extractAgentOutput(event);
   return output?.verdict === 'approved';
 };
 
-/** Agent verdict is 'rejected'. */
 const isRejected: GuardFunction = ({ event }) => {
   const output = extractAgentOutput(event);
   return output?.verdict === 'rejected';
 };
 
-/** Agent verdict is 'approved' but confidence is 'low'. */
 const isLowConfidence: GuardFunction = ({ event }) => {
   const output = extractAgentOutput(event);
   return output?.verdict === 'approved' && output.confidence === 'low';
@@ -58,31 +55,12 @@ const isRoundLimitReached: GuardFunction = ({ context }) => {
   return maxVisits >= context.maxRounds;
 };
 
-/**
- * Per-role stall detection. Compares the current output hash against
- * the hash stored for the same role from the previous invocation.
- *
- * The event must carry stateId and outputHash for this guard to fire.
- * In Phase 1 we work with WorkflowEvent directly; the orchestrator
- * will attach these via context updates. For now, we check the context's
- * previousOutputHashes against the current state's stored hash.
- *
- * NOTE: This guard operates on context state that the orchestrator
- * updates between rounds. It checks whether the last recorded hash
- * for a given role matches the current hash (carried on the event
- * via a convention TBD in the machine builder phase).
- */
-const isStalled: GuardFunction = ({ event }) => {
-  if (event.type !== 'AGENT_COMPLETED') return false;
-  // The orchestrator sets context.previousOutputHashes[stateId] after
-  // each agent invocation. The stall check compares the hash from the
-  // current invocation (not yet in context) against the stored one.
-  // In the guards-only phase, we expose this as a context-driven check.
-  // The machine builder will wire stateId + outputHash through the event.
-  return false; // Requires machine builder integration; stubbed for Phase 1
-};
+// Stall detection is handled by the machine builder's guard adapter
+// (machine-builder.ts), which has access to outputHash and stateId from
+// the invoke result. This stub exists so 'isStalled' passes definition
+// validation via REGISTERED_GUARDS.
+const isStalled: GuardFunction = () => false;
 
-/** Test count has decreased compared to the previous round. */
 const hasTestCountRegression: GuardFunction = ({ context, event }) => {
   const output = extractAgentOutput(event);
   if (context.previousTestCount == null || output?.testCount == null) {
@@ -91,10 +69,6 @@ const hasTestCountRegression: GuardFunction = ({ context, event }) => {
   return output.testCount < context.previousTestCount;
 };
 
-/**
- * For deterministic states. Checks whether the validation passed.
- * The event type is VALIDATION_PASSED for passing results.
- */
 const isPassed: GuardFunction = ({ event }) => {
   return event.type === 'VALIDATION_PASSED';
 };

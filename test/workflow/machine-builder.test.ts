@@ -967,20 +967,4 @@ describe('buildWorkflowMachine', () => {
       expect(ctx.lastError).toBe('Command failed');
     });
   });
-
-  describe('validation', () => {
-    it('throws on invalid definition', () => {
-      expect(() =>
-        buildWorkflowMachine(
-          {
-            name: 'bad',
-            description: 'bad workflow',
-            initial: 'nonexistent',
-            states: {},
-          },
-          'task',
-        ),
-      ).toThrow();
-    });
-  });
 });

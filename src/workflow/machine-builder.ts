@@ -10,7 +10,6 @@ import type {
   AgentTransitionDefinition,
 } from './types.js';
 import { guardImplementations } from './guards.js';
-import { validateDefinition } from './validate.js';
 
 // ---------------------------------------------------------------------------
 // Invoke input/result types
@@ -250,9 +249,6 @@ function buildHumanGateState(_stateId: string, config: HumanGateStateDefinition)
  * module. Actions for context updates are defined inline via `assign`.
  */
 export function buildWorkflowMachine(definition: WorkflowDefinition, taskDescription: string): BuildMachineResult {
-  // Validate before building
-  validateDefinition(definition);
-
   const states: Record<string, object> = {};
   const gateStateNames = new Set<string>();
   const terminalStateNames = new Set<string>();

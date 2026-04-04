@@ -48,10 +48,15 @@ export class FileCheckpointStore implements CheckpointStore {
 
   load(workflowId: WorkflowId): WorkflowCheckpoint | undefined {
     const filePath = this.checkpointPath(workflowId);
-    if (!existsSync(filePath)) return undefined;
-
-    const content = readFileSync(filePath, 'utf-8');
-    return JSON.parse(content) as WorkflowCheckpoint;
+    try {
+      const content = readFileSync(filePath, 'utf-8');
+      return JSON.parse(content) as WorkflowCheckpoint;
+    } catch (err: unknown) {
+      if (err instanceof Error && 'code' in err && (err as NodeJS.ErrnoException).code === 'ENOENT') {
+        return undefined;
+      }
+      throw err;
+    }
   }
 
   listAll(): WorkflowId[] {
@@ -71,8 +76,13 @@ export class FileCheckpointStore implements CheckpointStore {
 
   remove(workflowId: WorkflowId): void {
     const filePath = this.checkpointPath(workflowId);
-    if (existsSync(filePath)) {
+    try {
       rmSync(filePath);
+    } catch (err: unknown) {
+      if (err instanceof Error && 'code' in err && (err as NodeJS.ErrnoException).code === 'ENOENT') {
+        return;
+      }
+      throw err;
     }
   }
 

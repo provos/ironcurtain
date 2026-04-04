@@ -1,3 +1,7 @@
+// Public API for external consumers (e.g., custom orchestrator implementations).
+// Not currently used internally -- the machine builder handles agent output
+// routing via XState invoke events and guard adapters.
+
 import type { AgentOutput, WorkflowEvent } from './types.js';
 
 /**

@@ -37,6 +37,10 @@ import { validateDefinition } from './validate.js';
 
 const execFileAsync = promisify(execFileCb);
 
+function toErrorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 /**
  * Writes directly to process.stderr, bypassing any console hijacking
  * (e.g., logger.setup() redirecting console.error to a file).
@@ -146,21 +150,16 @@ export class WorkflowOrchestrator implements WorkflowController {
     const definition = validateDefinition(raw);
     const workflowId = createWorkflowId();
 
-    // Create artifact directory and write task description
     const artifactDir = resolve(this.deps.baseDir, workflowId, 'artifacts');
     mkdirSync(artifactDir, { recursive: true });
     const taskDir = resolve(artifactDir, 'task');
     mkdirSync(taskDir, { recursive: true });
     writeFileSync(resolve(taskDir, 'description.md'), taskDescription);
 
-    // Build XState machine
     const { machine, gateStateNames, terminalStateNames } = buildWorkflowMachine(definition, taskDescription);
 
-    // Provide concrete service implementations
     const providedMachine = this.provideActors(machine, workflowId, definition);
     const actor = createActor(providedMachine);
-
-    // Create the workflow tab
     const tab = this.deps.createWorkflowTab(definition.name, workflowId);
 
     const instance: WorkflowInstance = {
@@ -370,8 +369,7 @@ export class WorkflowOrchestrator implements WorkflowController {
     try {
       this.deps.checkpointStore.remove(id);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      writeStderr(`[workflow] Failed to remove checkpoint on abort for ${id}: ${msg}`);
+      writeStderr(`[workflow] Failed to remove checkpoint on abort for ${id}: ${toErrorMessage(err)}`);
     }
 
     // Clean up tab
@@ -410,8 +408,7 @@ export class WorkflowOrchestrator implements WorkflowController {
           try {
             return await this.executeAgentState(workflowId, input, definition);
           } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            writeStderr(`[workflow] agentService invoke rejected for "${input.stateId}": ${msg}`);
+            writeStderr(`[workflow] agentService invoke rejected for "${input.stateId}": ${toErrorMessage(err)}`);
             throw err;
           }
         }),
@@ -419,8 +416,9 @@ export class WorkflowOrchestrator implements WorkflowController {
           try {
             return await this.executeDeterministicState(input);
           } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            writeStderr(`[workflow] deterministicService invoke rejected for "${input.stateId}": ${msg}`);
+            writeStderr(
+              `[workflow] deterministicService invoke rejected for "${input.stateId}": ${toErrorMessage(err)}`,
+            );
             throw err;
           }
         }),
@@ -443,7 +441,7 @@ export class WorkflowOrchestrator implements WorkflowController {
       const previousState = instance.currentState;
       const now = Date.now();
 
-      // Record transition if state actually changed
+      // Record transition and checkpoint only on actual state changes
       if (stateValue !== previousState) {
         const duration = instance.stateEnteredAt ? now - instance.stateEnteredAt : 0;
         instance.transitionHistory.push({
@@ -454,6 +452,7 @@ export class WorkflowOrchestrator implements WorkflowController {
           duration_ms: duration,
         });
         instance.stateEnteredAt = now;
+        this.saveCheckpoint(instance, snapshot);
       }
 
       instance.currentState = stateValue;
@@ -474,7 +473,6 @@ export class WorkflowOrchestrator implements WorkflowController {
         instance.lastSurfacedError = undefined;
       }
 
-      // Check if we entered a gate state
       for (const gateName of gateStateNames) {
         if (snapshot.matches(gateName)) {
           const stateDef = definition.states[gateName];
@@ -485,15 +483,11 @@ export class WorkflowOrchestrator implements WorkflowController {
         }
       }
 
-      // Emit lifecycle event
       this.emitLifecycleEvent({
         kind: 'state_entered',
         workflowId,
         state: stateValue,
       });
-
-      // Save checkpoint on every state change
-      this.saveCheckpoint(instance, snapshot);
 
       // Check for terminal states
       if (snapshot.status === 'done') {
@@ -517,8 +511,7 @@ export class WorkflowOrchestrator implements WorkflowController {
     try {
       this.deps.checkpointStore.save(instance.id, checkpoint);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      writeStderr(`[workflow] Failed to save checkpoint for ${instance.id}: ${msg}`);
+      writeStderr(`[workflow] Failed to save checkpoint for ${instance.id}: ${toErrorMessage(err)}`);
     }
   }
 
@@ -563,9 +556,9 @@ export class WorkflowOrchestrator implements WorkflowController {
         systemPromptAugmentation: definition.settings?.systemPrompt,
       });
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      writeStderr(`[workflow] Session creation failed for "${stateId}": ${msg}`);
-      instance.tab.write(`[error] Session creation failed for "${stateId}": ${msg}`);
+      const errMsg = toErrorMessage(err);
+      writeStderr(`[workflow] Session creation failed for "${stateId}": ${errMsg}`);
+      instance.tab.write(`[error] Session creation failed for "${stateId}": ${errMsg}`);
       throw err;
     }
 
@@ -622,8 +615,7 @@ export class WorkflowOrchestrator implements WorkflowController {
     } finally {
       instance.activeSessions.delete(session);
       await session.close().catch((closeErr: unknown) => {
-        const closeMsg = closeErr instanceof Error ? closeErr.message : String(closeErr);
-        console.error(`[workflow] session.close() failed for "${stateId}": ${closeMsg}`);
+        console.error(`[workflow] session.close() failed for "${stateId}": ${toErrorMessage(closeErr)}`);
       });
     }
   }
@@ -737,8 +729,7 @@ export class WorkflowOrchestrator implements WorkflowController {
     try {
       this.deps.checkpointStore.remove(workflowId);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      writeStderr(`[workflow] Failed to remove checkpoint for ${workflowId}: ${msg}`);
+      writeStderr(`[workflow] Failed to remove checkpoint for ${workflowId}: ${toErrorMessage(err)}`);
     }
 
     instance.tab.write(`[done] ${instance.finalStatus.phase}`);
