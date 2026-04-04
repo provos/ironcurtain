@@ -1,7 +1,7 @@
-import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { readFileSync, existsSync, mkdirSync, writeFileSync, appendFileSync, readdirSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { MessageLog } from './message-log.js';
-import { createHash } from 'node:crypto';
+import { createHash, type Hash } from 'node:crypto';
 import { execFile as execFileCb } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createActor, fromPromise, type AnyActorRef, type Snapshot } from 'xstate';
@@ -21,7 +21,7 @@ import type {
   DeterministicStateDefinition,
   AgentOutput,
 } from './types.js';
-import { createWorkflowId } from './types.js';
+import { createWorkflowId, WORKFLOW_ARTIFACT_DIR } from './types.js';
 import type { Session, SessionOptions, SessionMode } from '../session/types.js';
 import type { AgentId } from '../docker/agent-adapter.js';
 import {
@@ -94,7 +94,7 @@ export type WorkflowLifecycleEvent =
 
 /** The narrow controller interface exposed to the mux. */
 export interface WorkflowController {
-  start(definitionPath: string, taskDescription: string): Promise<WorkflowId>;
+  start(definitionPath: string, taskDescription: string, workspacePath?: string): Promise<WorkflowId>;
   resume(workflowId: WorkflowId): Promise<void>;
   listResumable(): WorkflowId[];
   getStatus(id: WorkflowId): WorkflowStatus | undefined;
@@ -118,6 +118,12 @@ interface WorkflowInstance {
   readonly terminalStateNames: ReadonlySet<string>;
   readonly activeSessions: Set<Session>;
   readonly artifactDir: string;
+  /**
+   * Root directory where the agent session operates.
+   * Either a fresh directory created by the orchestrator
+   * or a user-provided path via --workspace.
+   */
+  readonly workspacePath: string;
   readonly tab: WorkflowTabHandle;
   /** Accumulated transition records for checkpointing. */
   readonly transitionHistory: TransitionRecord[];
@@ -158,23 +164,37 @@ export class WorkflowOrchestrator implements WorkflowController {
   // WorkflowController implementation
   // -----------------------------------------------------------------------
 
-  start(definitionPath: string, taskDescription: string): Promise<WorkflowId> {
-    const raw = JSON.parse(readFileSync(definitionPath, 'utf-8')) as unknown;
+  start(definitionPath: string, taskDescription: string, workspacePath?: string): Promise<WorkflowId> {
+    const definitionContent = readFileSync(definitionPath, 'utf-8');
+    const raw = JSON.parse(definitionContent) as unknown;
     const definition = validateDefinition(raw);
     const workflowId = createWorkflowId();
 
-    const artifactDir = resolve(this.deps.baseDir, workflowId, 'artifacts');
+    const resolvedWorkspace = workspacePath ?? resolve(this.deps.baseDir, workflowId, 'workspace');
+    mkdirSync(resolvedWorkspace, { recursive: true });
+
+    const artifactDir = resolve(resolvedWorkspace, WORKFLOW_ARTIFACT_DIR);
     mkdirSync(artifactDir, { recursive: true });
     const taskDir = resolve(artifactDir, 'task');
     mkdirSync(taskDir, { recursive: true });
     writeFileSync(resolve(taskDir, 'description.md'), taskDescription);
+
+    ensureWorkflowGitignored(resolvedWorkspace);
+
+    // Copy definition to baseDir for resume portability
+    const metaDir = resolve(this.deps.baseDir, workflowId);
+    mkdirSync(metaDir, { recursive: true });
+    writeFileSync(resolve(metaDir, 'definition.json'), JSON.stringify(definition, null, 2));
 
     const { machine, gateStateNames, terminalStateNames } = buildWorkflowMachine(definition, taskDescription);
 
     const providedMachine = this.provideActors(machine, workflowId, definition);
     const actor = createActor(providedMachine);
     const tab = this.deps.createWorkflowTab(definition.name, workflowId);
-    const messageLog = new MessageLog(resolve(this.deps.baseDir, workflowId, 'messages.jsonl'));
+    // WARNING: messages.jsonl is inside the agent's workspace mount and is writable
+    // by the agent. This is acceptable for diagnostic purposes but the log should
+    // not be used for security-critical decisions.
+    const messageLog = new MessageLog(resolve(artifactDir, 'messages.jsonl'));
 
     const instance: WorkflowInstance = {
       id: workflowId,
@@ -185,6 +205,7 @@ export class WorkflowOrchestrator implements WorkflowController {
       terminalStateNames,
       activeSessions: new Set(),
       artifactDir,
+      workspacePath: resolvedWorkspace,
       tab,
       transitionHistory: [],
       currentState: definition.initial,
@@ -204,11 +225,11 @@ export class WorkflowOrchestrator implements WorkflowController {
       throw new Error(`No checkpoint found for workflow ${workflowId}`);
     }
 
-    // Read the definition from the checkpointed path
-    const raw = JSON.parse(readFileSync(checkpoint.definitionPath, 'utf-8')) as unknown;
+    const definitionCopyPath = resolve(this.deps.baseDir, workflowId, 'definition.json');
+    const definitionPath = existsSync(definitionCopyPath) ? definitionCopyPath : checkpoint.definitionPath;
+    const raw = JSON.parse(readFileSync(definitionPath, 'utf-8')) as unknown;
     const definition = validateDefinition(raw);
 
-    // Rebuild the machine with the original task description from context
     const { machine, gateStateNames, terminalStateNames } = buildWorkflowMachine(
       definition,
       checkpoint.context.taskDescription,
@@ -216,18 +237,20 @@ export class WorkflowOrchestrator implements WorkflowController {
 
     const providedMachine = this.provideActors(machine, workflowId, definition);
 
-    // Restore actor from checkpoint snapshot
     const restoredSnapshot = providedMachine.resolveState({
       value: checkpoint.machineState as string,
       context: checkpoint.context,
     });
     const actor = createActor(providedMachine, { snapshot: restoredSnapshot as Snapshot<unknown> });
 
-    // Reuse the existing artifact directory
-    const artifactDir = resolve(this.deps.baseDir, workflowId, 'artifacts');
+    const workspacePath = checkpoint.workspacePath ?? resolve(this.deps.baseDir, workflowId, 'workspace');
+    const artifactDir = resolve(workspacePath, WORKFLOW_ARTIFACT_DIR);
+    // Ensure artifact dir exists (backward compat with pre-workspace checkpoints)
+    mkdirSync(artifactDir, { recursive: true });
+
     const tab = this.deps.createWorkflowTab(definition.name, workflowId);
     // Append to existing log file (resume must not overwrite)
-    const messageLog = new MessageLog(resolve(this.deps.baseDir, workflowId, 'messages.jsonl'));
+    const messageLog = new MessageLog(resolve(artifactDir, 'messages.jsonl'));
 
     const instance: WorkflowInstance = {
       id: workflowId,
@@ -238,6 +261,7 @@ export class WorkflowOrchestrator implements WorkflowController {
       terminalStateNames,
       activeSessions: new Set(),
       artifactDir,
+      workspacePath,
       tab,
       transitionHistory: [...checkpoint.transitionHistory],
       currentState: String(checkpoint.machineState),
@@ -309,7 +333,6 @@ export class WorkflowOrchestrator implements WorkflowController {
 
     if (instance.finalStatus) return instance.finalStatus;
 
-    // Check if waiting at a gate
     if (instance.activeGateId) {
       const gateName = instance.currentState;
       const stateDef = instance.definition.states[gateName];
@@ -352,7 +375,6 @@ export class WorkflowOrchestrator implements WorkflowController {
       prompt: event.prompt ?? null,
     });
 
-    // Map human gate event to XState event name
     const xstateEventName = `HUMAN_${event.type}` as const;
     instance.actor.send({
       type: xstateEventName,
@@ -364,7 +386,6 @@ export class WorkflowOrchestrator implements WorkflowController {
     const instance = this.workflows.get(id);
     if (!instance) return;
 
-    // No-op if workflow already reached a terminal state
     if (
       instance.finalStatus?.phase === 'completed' ||
       instance.finalStatus?.phase === 'aborted' ||
@@ -373,7 +394,6 @@ export class WorkflowOrchestrator implements WorkflowController {
       return;
     }
 
-    // Close all active sessions
     const closePromises: Promise<void>[] = [];
     for (const session of instance.activeSessions) {
       closePromises.push(session.close().catch(() => {}));
@@ -381,23 +401,18 @@ export class WorkflowOrchestrator implements WorkflowController {
     await Promise.allSettled(closePromises);
     instance.activeSessions.clear();
 
-    // Stop XState actor
     instance.actor.stop();
-
-    // Set final status
     instance.finalStatus = {
       phase: 'aborted',
       reason: 'Workflow aborted by user',
     };
 
-    // Remove checkpoint on abort
     try {
       this.deps.checkpointStore.remove(id);
     } catch (err) {
       writeStderr(`[workflow] Failed to remove checkpoint on abort for ${id}: ${toErrorMessage(err)}`);
     }
 
-    // Clean up tab
     instance.tab.write('[aborted]');
     instance.tab.close();
 
@@ -539,6 +554,7 @@ export class WorkflowOrchestrator implements WorkflowController {
       timestamp: new Date().toISOString(),
       transitionHistory: [...instance.transitionHistory],
       definitionPath: instance.definitionPath,
+      workspacePath: instance.workspacePath,
     };
     try {
       this.deps.checkpointStore.save(instance.id, checkpoint);
@@ -564,10 +580,8 @@ export class WorkflowOrchestrator implements WorkflowController {
 
     instance.tab.write(`[agent] Starting "${stateId}" (persona: ${stateConfig.persona})`);
 
-    // Build command from context (no file I/O)
     const command = buildAgentCommand(stateId, stateConfig, context);
 
-    // Construct SessionMode from definition settings
     const mode: SessionMode =
       settings.mode === 'builtin'
         ? { kind: 'builtin' }
@@ -584,7 +598,7 @@ export class WorkflowOrchestrator implements WorkflowController {
         persona: stateConfig.persona,
         mode,
         resumeSessionId: previousSessionId,
-        workspacePath: instance.artifactDir,
+        workspacePath: instance.workspacePath,
         systemPromptAugmentation: definition.settings?.systemPrompt,
       });
     } catch (err) {
@@ -673,7 +687,7 @@ export class WorkflowOrchestrator implements WorkflowController {
         }
       }
 
-      const outputHash = computeOutputHash(stateConfig.outputs, instance.artifactDir);
+      const outputHash = computeOutputHash(stateConfig.outputs, instance.artifactDir, instance.workspacePath);
       const artifacts = collectArtifactPaths(stateConfig.outputs, instance.artifactDir);
 
       instance.tab.write(
@@ -814,7 +828,6 @@ export class WorkflowOrchestrator implements WorkflowController {
       };
     }
 
-    // Remove checkpoint on terminal completion
     try {
       this.deps.checkpointStore.remove(workflowId);
     } catch (err) {
@@ -865,21 +878,98 @@ export class WorkflowOrchestrator implements WorkflowController {
 // Standalone helpers (exported for testing)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Workspace root hashing (file listing + mtime, no content reads)
+// ---------------------------------------------------------------------------
+
+const WORKSPACE_HASH_EXCLUDED_DIRS: ReadonlySet<string> = new Set([
+  '.git',
+  WORKFLOW_ARTIFACT_DIR,
+  'node_modules',
+  '__pycache__',
+  '.next',
+  'dist',
+  'build',
+  '.cache',
+  '.venv',
+  'venv',
+]);
+
 /**
- * Computes a SHA-256 hash of all files in the output artifact directories.
- * Recursively walks subdirectories. Deterministic: files are sorted by relative path.
+ * Recursively collects `relativePath:mtime` entries for all files
+ * under `basePath`, excluding directories in WORKSPACE_HASH_EXCLUDED_DIRS.
  */
-export function computeOutputHash(outputNames: readonly string[], artifactDir: string): string {
-  const hash = createHash('sha256');
-  for (const output of outputNames) {
-    const dir = resolve(artifactDir, output);
-    const files = collectFilesRecursive(dir);
-    for (const file of files) {
-      hash.update(file.relativePath);
-      hash.update(readFileSync(file.fullPath));
+function collectFileEntries(basePath: string, relativeTo: string, out: string[]): void {
+  const dirents = readdirSync(resolve(basePath, relativeTo), { withFileTypes: true });
+  for (const dirent of dirents) {
+    const relPath = relativeTo ? `${relativeTo}/${dirent.name}` : dirent.name;
+    if (dirent.isDirectory()) {
+      if (WORKSPACE_HASH_EXCLUDED_DIRS.has(dirent.name)) continue;
+      collectFileEntries(basePath, relPath, out);
+    } else if (dirent.isFile()) {
+      const fullPath = resolve(basePath, relPath);
+      const mtime = statSync(fullPath).mtimeMs;
+      out.push(`${relPath}:${mtime}`);
     }
   }
+}
+
+/** Hashes the workspace root file listing (paths + mtimes) into the given hash. */
+function hashWorkspaceRoot(hash: Hash, workspacePath: string): void {
+  const entries: string[] = [];
+  collectFileEntries(workspacePath, '', entries);
+  entries.sort();
+  for (const entry of entries) {
+    hash.update(entry);
+  }
+}
+
+/**
+ * Computes a SHA-256 hash of output artifacts or workspace root file metadata.
+ *
+ * When `outputNames` is non-empty, hashes declared artifact file contents.
+ * When `outputNames` is empty, hashes workspace root file listing (paths + mtimes)
+ * to detect code-only changes without reading file contents.
+ */
+export function computeOutputHash(outputNames: readonly string[], artifactDir: string, workspacePath: string): string {
+  const hash = createHash('sha256');
+
+  if (outputNames.length > 0) {
+    for (const output of outputNames) {
+      const dir = resolve(artifactDir, output);
+      const files = collectFilesRecursive(dir);
+      for (const file of files) {
+        hash.update(file.relativePath);
+        hash.update(readFileSync(file.fullPath));
+      }
+    }
+  } else {
+    hashWorkspaceRoot(hash, workspacePath);
+  }
+
   return hash.digest('hex');
+}
+
+// ---------------------------------------------------------------------------
+// .gitignore management
+// ---------------------------------------------------------------------------
+
+/** Ensures the workflow artifact directory is listed in the workspace root's .gitignore. */
+function ensureWorkflowGitignored(workspacePath: string): void {
+  const gitignorePath = resolve(workspacePath, '.gitignore');
+  const dirEntry = `${WORKFLOW_ARTIFACT_DIR}/`;
+
+  if (existsSync(gitignorePath)) {
+    const content = readFileSync(gitignorePath, 'utf-8');
+    const lines = content.split('\n');
+    const alreadyListed = lines.some((line) => line.trim() === dirEntry || line.trim() === WORKFLOW_ARTIFACT_DIR);
+    if (!alreadyListed) {
+      const suffix = content.endsWith('\n') ? '' : '\n';
+      appendFileSync(gitignorePath, `${suffix}${dirEntry}\n`);
+    }
+  } else {
+    writeFileSync(gitignorePath, `${dirEntry}\n`);
+  }
 }
 
 /**

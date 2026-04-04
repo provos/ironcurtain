@@ -1,18 +1,18 @@
 {
   "name": "real-agent-workflow",
-  "description": "Plan -> Design -> Implement -> Validate -> Review workflow using Docker agent sessions",
+  "description": "Plan -> Design -> Implement -> Review workflow",
   "initial": "plan",
   "settings": {
     "mode": "docker",
     "dockerAgent": "claude-code",
     "maxRounds": 3,
-    "systemPrompt": "When creating artifact directories, place them directly in your workspace root (e.g., `plan/`, `spec/`, `code/`). Do not nest them inside subdirectories."
+    "systemPrompt": "Workflow artifacts (plan, spec, reviews) go in `.workflow/`. Code goes directly at the workspace root."
   },
   "states": {
     "plan": {
       "type": "agent",
       "persona": "planner",
-      "prompt": "You are a project planner. Break down the task into a clear, actionable plan.\n\nYour responsibilities:\n- Analyze the task requirements\n- Identify components, dependencies, and implementation order\n- Note key design decisions and trade-offs\n\nOutput: Create a `plan/` directory in your workspace with a `plan.md` file.\nWrite a structured markdown document with numbered steps.\nDo NOT write any code -- only the plan.",
+      "prompt": "You are a project planner.\n\nYour responsibilities:\n- Analyze the task requirements\n- If there is existing code in the workspace, read it to understand the current architecture\n- Identify components, dependencies, and implementation order\n- Note key design decisions and trade-offs\n\nOutput: Create a `.workflow/plan/` directory with a `plan.md` file.\nWrite a structured markdown document with numbered steps.\nDo NOT write any code -- only the plan.",
       "inputs": [],
       "outputs": ["plan"],
       "transitions": [{ "to": "plan_review" }]
@@ -30,7 +30,7 @@
     "design": {
       "type": "agent",
       "persona": "architect",
-      "prompt": "You are a software architect. Produce a technical design specification.\n\nYour responsibilities:\n- Define module structure, interfaces, and data flow\n- Specify function signatures with TypeScript types\n- Document key design decisions and rationale\n\nOutput: Create a `spec/` directory in your workspace with a `spec.md` file.\nWrite a structured markdown document with interface definitions and architecture notes.\nDo NOT write implementation code.\n\nYou have access to the plan created by the planner. Read the `plan/` directory for context.",
+      "prompt": "You are a software architect. Produce a technical design specification.\n\nYour responsibilities:\n- Define module structure, interfaces, and data flow\n- Specify function signatures with TypeScript types\n- Document key design decisions and rationale\n- If there is existing code, design around it\n\nOutput: Create a `.workflow/spec/` directory with a `spec.md` file.\nDo NOT write implementation code.",
       "inputs": ["plan"],
       "outputs": ["spec"],
       "transitions": [{ "to": "design_review" }]
@@ -48,16 +48,16 @@
     "implement": {
       "type": "agent",
       "persona": "coder",
-      "prompt": "You are an implementation engineer. Write working code based on the plan and spec.\n\nYour responsibilities:\n- Implement all modules described in the spec\n- Write clean, well-typed TypeScript\n- Create unit tests using Node.js built-in assert module\n- Ensure all tests pass by running them\n\nOutput: Create a `code/` directory in your workspace containing all source files and tests.\nRun the tests to verify they pass before finishing.\n\nRead the `plan/` and `spec/` directories for context on what to build.",
+      "prompt": "You are an implementation engineer.\n\nYour responsibilities:\n- Implement all modules described in the spec\n- Write clean, well-typed TypeScript\n- Create unit tests\n- Run the tests to verify they pass\n\nWrite code directly at the workspace root (e.g., `src/`, `package.json`, `tests/`).\nDo NOT create a separate output directory for code.\nRun all tests to verify everything works.",
       "inputs": ["plan", "spec"],
-      "outputs": ["code"],
+      "outputs": [],
       "transitions": [{ "to": "review" }]
     },
     "review": {
       "type": "agent",
       "persona": "critic",
-      "prompt": "You are a code reviewer. Review the implementation against the specification.\n\nYour responsibilities:\n- Verify correctness: does the code match the spec?\n- Check edge cases and error handling\n- Evaluate code quality, naming, and structure\n- Assess test coverage and test quality\n\nOutput: Create a `reviews/` directory with a `review.md` file.\nIf issues are found, set verdict to \"rejected\" with specific, actionable feedback.\nIf the code is solid, set verdict to \"approved\".\n\nRead the `code/` and `spec/` directories to perform your review.",
-      "inputs": ["code", "spec"],
+      "prompt": "You are a code reviewer.\n\nYour responsibilities:\n- Verify correctness: does the code at the workspace root match the spec?\n- Check edge cases and error handling\n- Evaluate code quality, naming, and structure\n- Assess test coverage and test quality\n\nOutput: Create a `.workflow/reviews/` directory with a `review.md` file.\nIf issues are found, set verdict to \"rejected\" with specific, actionable feedback.\nIf the code is solid, set verdict to \"approved\".",
+      "inputs": ["spec"],
       "outputs": ["reviews"],
       "transitions": [
         { "to": "done", "guard": "isApproved" },
@@ -68,7 +68,7 @@
     "escalate_gate": {
       "type": "human_gate",
       "acceptedEvents": ["APPROVE", "FORCE_REVISION", "ABORT"],
-      "present": ["code", "reviews"],
+      "present": ["reviews"],
       "transitions": [
         { "to": "done", "event": "APPROVE" },
         { "to": "implement", "event": "FORCE_REVISION" },
@@ -77,7 +77,7 @@
     },
     "done": {
       "type": "terminal",
-      "outputs": ["code", "reviews"]
+      "outputs": ["reviews"]
     },
     "aborted": {
       "type": "terminal"

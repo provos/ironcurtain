@@ -12,7 +12,16 @@
  *   - Docker running with ironcurtain-claude-code:latest image built
  *   - Global compiled policy in src/config/generated/
  */
-import { mkdirSync, mkdtempSync, rmSync, existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  existsSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+  statSync,
+} from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -293,6 +302,7 @@ function printSummary(orchestrator: WorkflowOrchestrator, workflowId: WorkflowId
 interface StartArgs {
   readonly mode: 'start';
   readonly taskDescription: string;
+  readonly workspacePath?: string;
 }
 
 interface ResumeArgs {
@@ -326,15 +336,35 @@ function parseCliArgs(): CliArgs {
     return { mode: 'resume', baseDir: resolved, overrideState };
   }
 
+  // Parse --workspace flag (before positional args)
+  const workspaceIndex = args.indexOf('--workspace');
+  let workspacePath: string | undefined;
+  if (workspaceIndex !== -1) {
+    const workspaceArg = args[workspaceIndex + 1];
+    if (!workspaceArg) {
+      stderrWrite(`${RED}--workspace requires a path argument${RESET}`);
+      process.exit(1);
+    }
+    const resolvedWs = resolve(workspaceArg);
+    if (!existsSync(resolvedWs) || !statSync(resolvedWs).isDirectory()) {
+      stderrWrite(`${RED}Workspace path is not a directory: ${resolvedWs}${RESET}`);
+      process.exit(1);
+    }
+    workspacePath = resolvedWs;
+    // Remove --workspace and its value from args for positional parsing
+    args.splice(workspaceIndex, 2);
+  }
+
   const taskDescription = args[0];
   if (!taskDescription) {
     stderrWrite(`${RED}Usage:${RESET}`);
     stderrWrite(`${RED}  npx tsx examples/workflow-real-spike.ts "Your task description"${RESET}`);
+    stderrWrite(`${RED}  npx tsx examples/workflow-real-spike.ts "Your task" --workspace ~/src/myproject${RESET}`);
     stderrWrite(`${RED}  npx tsx examples/workflow-real-spike.ts --resume /path/to/dir [--state stateName]${RESET}`);
     process.exit(1);
   }
 
-  return { mode: 'start', taskDescription };
+  return { mode: 'start', taskDescription, workspacePath };
 }
 
 // ---------------------------------------------------------------------------
@@ -342,7 +372,8 @@ function parseCliArgs(): CliArgs {
 // ---------------------------------------------------------------------------
 
 function printResumeInfo(baseDir: string, workflowId: WorkflowId, checkpoint: WorkflowCheckpoint): void {
-  const artifactDir = resolve(baseDir, workflowId, 'artifacts');
+  const workspacePath = checkpoint.workspacePath ?? resolve(baseDir, workflowId, 'workspace');
+  const artifactDir = resolve(workspacePath, '.workflow');
   const artifacts = existsSync(artifactDir) ? readdirSync(artifactDir).join(', ') : 'none';
   const errorInfo = checkpoint.context.lastError ?? 'none';
 
@@ -402,16 +433,22 @@ function synthesizeCheckpoint(
   checkpointStore: FileCheckpointStore,
 ): { workflowId: WorkflowId; checkpoint: WorkflowCheckpoint } {
   // Discover workflow ID — the single UUID subdirectory of baseDir
+  // Support both new layout (workspace/.workflow/) and legacy (artifacts/)
   const entries = readdirSync(baseDir).filter((e) => {
     const full = resolve(baseDir, e);
-    return existsSync(resolve(full, 'artifacts'));
+    return existsSync(resolve(full, 'workspace', '.workflow')) || existsSync(resolve(full, 'artifacts'));
   });
   if (entries.length === 0) {
     stderrWrite(`${RED}No workflow directory found in ${baseDir}${RESET}`);
     process.exit(1);
   }
   const workflowId = entries[0] as WorkflowId;
-  const artifactDir = resolve(baseDir, workflowId, 'artifacts');
+
+  // Determine artifact dir: new layout first, then legacy
+  const workspacePath = resolve(baseDir, workflowId, 'workspace');
+  const artifactDir = existsSync(resolve(workspacePath, '.workflow'))
+    ? resolve(workspacePath, '.workflow')
+    : resolve(baseDir, workflowId, 'artifacts');
 
   // Read task description from task artifact if it exists
   let taskDescription = 'Unknown task (synthesized checkpoint)';
@@ -458,6 +495,7 @@ function synthesizeCheckpoint(
     timestamp: new Date().toISOString(),
     transitionHistory: [],
     definitionPath,
+    workspacePath,
   };
 
   // Write it so the orchestrator's resume() can find it
@@ -577,10 +615,15 @@ async function main(): Promise<void> {
       stdoutWrite(`${DIM}Base dir: ${baseDir}${RESET}`);
       stdoutWrite('');
 
-      workflowId = await orchestrator.start(definitionPath, cliArgs.taskDescription);
+      workflowId = await orchestrator.start(definitionPath, cliArgs.taskDescription, cliArgs.workspacePath);
     }
 
-    const artifactDir = resolve(baseDir, workflowId, 'artifacts');
+    // Determine artifact dir based on mode: workspace/.workflow/ for start, base/id/workspace/.workflow for resume
+    const wsPath =
+      cliArgs.mode === 'start'
+        ? (cliArgs.workspacePath ?? resolve(baseDir, workflowId, 'workspace'))
+        : resolve(baseDir, workflowId, 'workspace');
+    const artifactDir = resolve(wsPath, '.workflow');
 
     await runEventLoop(orchestrator, workflowId, rl);
 

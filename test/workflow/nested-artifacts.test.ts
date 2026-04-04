@@ -30,7 +30,7 @@ describe('computeOutputHash with nested directories', () => {
     writeFileSync(resolve(codeDir, 'tests', 'main.test.ts'), 'test("works", () => {})');
 
     // Should not throw EISDIR
-    const hash = computeOutputHash(['code'], artifactDir);
+    const hash = computeOutputHash(['code'], artifactDir, artifactDir);
     expect(hash).toMatch(/^[0-9a-f]{64}$/);
   });
 
@@ -39,8 +39,8 @@ describe('computeOutputHash with nested directories', () => {
     mkdirSync(resolve(codeDir, 'src'), { recursive: true });
     writeFileSync(resolve(codeDir, 'src', 'main.ts'), 'content');
 
-    const hash1 = computeOutputHash(['code'], artifactDir);
-    const hash2 = computeOutputHash(['code'], artifactDir);
+    const hash1 = computeOutputHash(['code'], artifactDir, artifactDir);
+    const hash2 = computeOutputHash(['code'], artifactDir, artifactDir);
     expect(hash1).toBe(hash2);
   });
 
@@ -49,10 +49,10 @@ describe('computeOutputHash with nested directories', () => {
     mkdirSync(resolve(codeDir, 'src', 'utils'), { recursive: true });
     writeFileSync(resolve(codeDir, 'src', 'utils', 'helper.ts'), 'version 1');
 
-    const hash1 = computeOutputHash(['code'], artifactDir);
+    const hash1 = computeOutputHash(['code'], artifactDir, artifactDir);
 
     writeFileSync(resolve(codeDir, 'src', 'utils', 'helper.ts'), 'version 2');
-    const hash2 = computeOutputHash(['code'], artifactDir);
+    const hash2 = computeOutputHash(['code'], artifactDir, artifactDir);
 
     expect(hash1).not.toBe(hash2);
   });
@@ -63,7 +63,7 @@ describe('computeOutputHash with nested directories', () => {
     writeFileSync(resolve(codeDir, 'README.md'), 'readme');
     writeFileSync(resolve(codeDir, 'src', 'app.ts'), 'app');
 
-    const hash = computeOutputHash(['code'], artifactDir);
+    const hash = computeOutputHash(['code'], artifactDir, artifactDir);
     expect(hash).toMatch(/^[0-9a-f]{64}$/);
   });
 
@@ -72,7 +72,7 @@ describe('computeOutputHash with nested directories', () => {
     mkdirSync(resolve(codeDir, 'empty-subdir'), { recursive: true });
     writeFileSync(resolve(codeDir, 'file.ts'), 'content');
 
-    const hash = computeOutputHash(['code'], artifactDir);
+    const hash = computeOutputHash(['code'], artifactDir, artifactDir);
     expect(hash).toMatch(/^[0-9a-f]{64}$/);
   });
 });
@@ -121,7 +121,7 @@ describe('buildAgentCommand first-visit mode', () => {
     expect(command).toContain('## Task');
     expect(command).toContain('Build a CLI tool');
     expect(command).toContain('## Expected Outputs');
-    expect(command).toContain('`plan/`');
+    expect(command).toContain('`.workflow/plan/`');
     expect(command).toContain('agent_status');
   });
 
@@ -273,8 +273,8 @@ describe('buildAgentCommand with artifact inputs', () => {
 
     const command = buildAgentCommand('test', stateConfig, makeContext());
 
-    // Should reference the directory path, not inline content
-    expect(command).toContain('`spec/`');
+    // Should reference the directory path with .workflow/ prefix, not inline content
+    expect(command).toContain('`.workflow/spec/`');
     expect(command).toContain('Read the contents');
     expect(command).toContain('file reading tools');
   });
@@ -292,9 +292,9 @@ describe('buildAgentCommand with artifact inputs', () => {
     const command = buildAgentCommand('test', stateConfig, makeContext());
 
     expect(command).toContain('## Input: plan');
-    expect(command).toContain('`plan/`');
+    expect(command).toContain('`.workflow/plan/`');
     expect(command).toContain('## Input: spec');
-    expect(command).toContain('`spec/`');
+    expect(command).toContain('`.workflow/spec/`');
   });
 
   it('handles optional inputs by stripping the ? suffix', () => {
@@ -310,7 +310,7 @@ describe('buildAgentCommand with artifact inputs', () => {
     const command = buildAgentCommand('test', stateConfig, makeContext());
 
     expect(command).toContain('## Input: feedback');
-    expect(command).toContain('`feedback/`');
+    expect(command).toContain('`.workflow/feedback/`');
     expect(command).not.toContain('feedback?');
   });
 });

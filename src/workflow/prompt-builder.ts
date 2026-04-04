@@ -1,4 +1,5 @@
 import type { AgentStateDefinition, WorkflowContext } from './types.js';
+import { WORKFLOW_ARTIFACT_DIR } from './types.js';
 import { STATUS_BLOCK_INSTRUCTIONS } from './status-parser.js';
 
 // ---------------------------------------------------------------------------
@@ -64,14 +65,14 @@ function buildFirstVisitPrompt(stateConfig: AgentStateDefinition, context: Workf
     const name = isOptional ? inputRef.slice(0, -1) : inputRef;
     sections.push(
       `## Input: ${name}\n\n` +
-        `Read the contents of the \`${name}/\` directory ` +
+        `Read the contents of the \`${WORKFLOW_ARTIFACT_DIR}/${name}/\` directory ` +
         `in your workspace using your file reading tools.`,
     );
   }
 
   // 5. Expected outputs
   if (stateConfig.outputs.length > 0) {
-    const outputList = stateConfig.outputs.map((o) => `- \`${o}/\``).join('\n');
+    const outputList = stateConfig.outputs.map((o) => `- \`${WORKFLOW_ARTIFACT_DIR}/${o}/\``).join('\n');
     sections.push(`## Expected Outputs\n\nCreate the following artifact directories in your workspace:\n${outputList}`);
   }
 
@@ -136,7 +137,7 @@ function buildReVisitPrompt(stateId: string, context: WorkflowContext): string {
  * (no host-absolute paths, since Docker agents see /workspace).
  */
 export function buildArtifactReprompt(missing: readonly string[]): string {
-  const paths = missing.map((name) => `  - \`${name}/\``);
+  const paths = missing.map((name) => `  - \`${WORKFLOW_ARTIFACT_DIR}/${name}/\``);
   return (
     'The following required output artifacts were not created in your workspace:\n' +
     paths.join('\n') +

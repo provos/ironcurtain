@@ -1,6 +1,16 @@
 import { randomUUID } from 'node:crypto';
 
 // ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/**
+ * Directory name for workflow artifacts inside the agent workspace.
+ * All artifact subdirectories (plan/, code/, reviews/, etc.) live under this.
+ */
+export const WORKFLOW_ARTIFACT_DIR = '.workflow';
+
+// ---------------------------------------------------------------------------
 // Branded identifiers
 // ---------------------------------------------------------------------------
 
@@ -275,6 +285,8 @@ export interface WorkflowCheckpoint {
   readonly timestamp: string;
   readonly transitionHistory: readonly TransitionRecord[];
   readonly definitionPath: string;
+  /** Workspace root directory. Used on resume to reconstruct artifactDir. */
+  readonly workspacePath?: string;
 }
 
 export interface TransitionRecord {

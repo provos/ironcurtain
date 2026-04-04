@@ -1,153 +1,25 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdirSync, writeFileSync, mkdtempSync, rmSync, readdirSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { resolve, join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import type {
-  SessionOptions,
-  SessionInfo,
-  SessionId,
-  BudgetStatus,
-  ConversationTurn,
-  DiagnosticEvent,
-  EscalationRequest,
-} from '../../src/session/types.js';
+import type { SessionOptions } from '../../src/session/types.js';
 import type { Session } from '../../src/session/types.js';
-import type { WorkflowId, HumanGateRequest } from '../../src/workflow/types.js';
+import type { HumanGateRequest } from '../../src/workflow/types.js';
 import { FileCheckpointStore } from '../../src/workflow/checkpoint.js';
 import {
   WorkflowOrchestrator,
   type WorkflowOrchestratorDeps,
   type WorkflowLifecycleEvent,
 } from '../../src/workflow/orchestrator.js';
-
-// ---------------------------------------------------------------------------
-// MockSession (same pattern as orchestrator.test.ts)
-// ---------------------------------------------------------------------------
-
-type ResponseFn = (msg: string) => string | Promise<string>;
-
-class MockSession implements Session {
-  readonly sentMessages: string[] = [];
-  closed = false;
-  private readonly sessionId: string;
-  private readonly responseFn: ResponseFn;
-
-  constructor(opts: { sessionId?: string; responses: ResponseFn }) {
-    this.sessionId = opts.sessionId ?? `mock-${Math.random().toString(36).slice(2, 8)}`;
-    this.responseFn = opts.responses;
-  }
-
-  getInfo(): SessionInfo {
-    return {
-      id: this.sessionId as SessionId,
-      status: this.closed ? 'closed' : 'ready',
-      turnCount: this.sentMessages.length,
-      createdAt: new Date().toISOString(),
-    };
-  }
-
-  async sendMessage(msg: string): Promise<string> {
-    this.sentMessages.push(msg);
-    return this.responseFn(msg);
-  }
-
-  getHistory(): readonly ConversationTurn[] {
-    return [];
-  }
-  getDiagnosticLog(): readonly DiagnosticEvent[] {
-    return [];
-  }
-  async resolveEscalation(): Promise<void> {}
-  getPendingEscalation(): EscalationRequest | undefined {
-    return undefined;
-  }
-  getBudgetStatus(): BudgetStatus {
-    return {
-      totalInputTokens: 0,
-      totalOutputTokens: 0,
-      totalTokens: 0,
-      stepCount: 0,
-      elapsedSeconds: 0,
-      estimatedCostUsd: 0,
-      limits: {} as BudgetStatus['limits'],
-      cumulative: {} as BudgetStatus['cumulative'],
-      tokenTrackingAvailable: false,
-    };
-  }
-  async close(): Promise<void> {
-    this.closed = true;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Response helpers
-// ---------------------------------------------------------------------------
-
-function statusBlock(verdict: string, notes: string): string {
-  return [
-    '```',
-    'agent_status:',
-    '  completed: true',
-    `  verdict: ${verdict}`,
-    '  confidence: high',
-    '  escalation: null',
-    '  test_count: null',
-    `  notes: "${notes}"`,
-    '```',
-  ].join('\n');
-}
-
-function simulateArtifacts(baseDir: string, names: string[]): void {
-  const entries = readdirSync(baseDir);
-  const dirs = entries.filter((e) => !e.endsWith('.json'));
-  if (dirs.length === 0) throw new Error(`No workflow dir in ${baseDir}`);
-  const artifactDir = resolve(baseDir, dirs[dirs.length - 1], 'artifacts');
-  for (const name of names) {
-    const dir = resolve(artifactDir, name);
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(resolve(dir, `${name}.md`), `content for ${name}`);
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Polling helpers
-// ---------------------------------------------------------------------------
-
-async function waitForGateOrCompletion(
-  orchestrator: WorkflowOrchestrator,
-  workflowId: WorkflowId,
-  timeoutMs = 5000,
-): Promise<'gate' | 'done'> {
-  const start = Date.now();
-  for (;;) {
-    const status = orchestrator.getStatus(workflowId);
-    if (!status) return 'done';
-    if (status.phase === 'completed' || status.phase === 'failed' || status.phase === 'aborted') return 'done';
-    if (status.phase === 'waiting_human') return 'gate';
-    if (Date.now() - start > timeoutMs) {
-      throw new Error(`Timed out waiting for gate or completion, status: ${JSON.stringify(status)}`);
-    }
-    await new Promise((r) => setTimeout(r, 10));
-  }
-}
-
-async function waitForCompletion(
-  orchestrator: WorkflowOrchestrator,
-  workflowId: WorkflowId,
-  timeoutMs = 5000,
-): Promise<void> {
-  const start = Date.now();
-  for (;;) {
-    const status = orchestrator.getStatus(workflowId);
-    if (!status) return;
-    if (status.phase === 'completed' || status.phase === 'failed' || status.phase === 'aborted') return;
-    if (Date.now() - start > timeoutMs) {
-      throw new Error(`Timed out waiting for completion, status: ${JSON.stringify(status)}`);
-    }
-    await new Promise((r) => setTimeout(r, 10));
-  }
-}
+import {
+  MockSession,
+  statusBlock,
+  simulateArtifacts,
+  findWorkflowDir,
+  waitForGateOrCompletion,
+  waitForCompletion,
+} from './test-helpers.js';
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -183,20 +55,20 @@ describe('workflow-spike demo definition', () => {
         responses: () => {
           switch (persona) {
             case 'planner':
-              simulateArtifacts(tmpDir, ['plan']);
+              simulateArtifacts(findWorkflowDir(tmpDir), ['plan']);
               return `Plan created.\n\n${statusBlock('approved', 'Plan complete')}`;
 
             case 'architect':
-              simulateArtifacts(tmpDir, ['spec']);
+              simulateArtifacts(findWorkflowDir(tmpDir), ['spec']);
               return `Design spec created.\n\n${statusBlock('approved', 'Design complete')}`;
 
             case 'coder':
-              simulateArtifacts(tmpDir, ['code']);
+              simulateArtifacts(findWorkflowDir(tmpDir), ['code']);
               return `Code implemented.\n\n${statusBlock('approved', 'Code complete')}`;
 
             case 'critic': {
               criticCallCount++;
-              simulateArtifacts(tmpDir, ['reviews']);
+              simulateArtifacts(findWorkflowDir(tmpDir), ['reviews']);
               if (criticCallCount === 1) {
                 return `Issues found.\n\n${statusBlock('rejected', 'Missing validation')}`;
               }
@@ -299,19 +171,19 @@ describe('workflow-spike demo definition', () => {
           switch (persona) {
             case 'planner':
               plannerCallCount++;
-              simulateArtifacts(tmpDir, ['plan']);
+              simulateArtifacts(findWorkflowDir(tmpDir), ['plan']);
               return `Plan v${plannerCallCount}.\n\n${statusBlock('approved', `Plan v${plannerCallCount}`)}`;
 
             case 'architect':
-              simulateArtifacts(tmpDir, ['spec']);
+              simulateArtifacts(findWorkflowDir(tmpDir), ['spec']);
               return `Spec.\n\n${statusBlock('approved', 'Design done')}`;
 
             case 'coder':
-              simulateArtifacts(tmpDir, ['code']);
+              simulateArtifacts(findWorkflowDir(tmpDir), ['code']);
               return `Code.\n\n${statusBlock('approved', 'Code done')}`;
 
             case 'critic':
-              simulateArtifacts(tmpDir, ['reviews']);
+              simulateArtifacts(findWorkflowDir(tmpDir), ['reviews']);
               return `LGTM.\n\n${statusBlock('approved', 'Approved')}`;
 
             default:
@@ -370,7 +242,7 @@ describe('workflow-spike demo definition', () => {
     const sessionFactory = async (opts: SessionOptions): Promise<Session> => {
       return new MockSession({
         responses: () => {
-          simulateArtifacts(tmpDir, ['plan']);
+          simulateArtifacts(findWorkflowDir(tmpDir), ['plan']);
           return `Plan.\n\n${statusBlock('approved', 'Plan done')}`;
         },
       });
