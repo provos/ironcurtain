@@ -31,6 +31,15 @@ import { validateDefinition } from './validate.js';
 
 const execFileAsync = promisify(execFileCb);
 
+/**
+ * Writes directly to process.stderr, bypassing any console hijacking
+ * (e.g., logger.setup() redirecting console.error to a file).
+ * Used for critical error messages that MUST reach the terminal.
+ */
+function writeStderr(message: string): void {
+  process.stderr.write(`${message}\n`);
+}
+
 // ---------------------------------------------------------------------------
 // Public interfaces
 // ---------------------------------------------------------------------------
@@ -98,6 +107,8 @@ interface WorkflowInstance {
   finalStatus?: WorkflowStatus;
   /** Active gate ID, if the machine is waiting at a human gate. */
   activeGateId?: string;
+  /** Tracks the last error surfaced to avoid emitting duplicate lifecycle events. */
+  lastSurfacedError?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -132,12 +143,26 @@ export class WorkflowOrchestrator implements WorkflowController {
     // Provide concrete service implementations
     const providedMachine = machine.provide({
       actors: {
-        agentService: fromPromise<AgentInvokeResult, AgentInvokeInput>(async ({ input }) =>
-          this.executeAgentState(workflowId, input, definition),
-        ),
-        deterministicService: fromPromise<DeterministicInvokeResult, DeterministicInvokeInput>(async ({ input }) =>
-          this.executeDeterministicState(input),
-        ),
+        agentService: fromPromise<AgentInvokeResult, AgentInvokeInput>(async ({ input }) => {
+          try {
+            return await this.executeAgentState(workflowId, input, definition);
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            // Use writeStderr because console.error may be hijacked by
+            // logger.setup() inside createSession, redirecting to a log file.
+            writeStderr(`[workflow] agentService invoke rejected for "${input.stateId}": ${msg}`);
+            throw err;
+          }
+        }),
+        deterministicService: fromPromise<DeterministicInvokeResult, DeterministicInvokeInput>(async ({ input }) => {
+          try {
+            return await this.executeDeterministicState(input);
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            writeStderr(`[workflow] deterministicService invoke rejected for "${input.stateId}": ${msg}`);
+            throw err;
+          }
+        }),
       },
     });
 
@@ -163,8 +188,26 @@ export class WorkflowOrchestrator implements WorkflowController {
     // Subscribe to snapshot changes for gate detection and lifecycle events
     actor.subscribe((snapshot) => {
       const stateValue = String(snapshot.value);
+      const previousState = instance.currentState;
       instance.currentState = stateValue;
       tab.write(`[state] ${stateValue}`);
+
+      // Surface errors from invoke failures (storeError action sets lastError)
+      const ctx = snapshot.context as WorkflowContext;
+      if (ctx.lastError && ctx.lastError !== instance.lastSurfacedError) {
+        instance.lastSurfacedError = ctx.lastError;
+        writeStderr(`[workflow] Error in context after state "${stateValue}": ${ctx.lastError}`);
+        tab.write(`[error] Agent invoke failed: ${ctx.lastError}`);
+        this.emitLifecycleEvent({
+          kind: 'failed',
+          workflowId,
+          error: `Agent "${previousState}" failed: ${ctx.lastError}`,
+        });
+      } else if (!ctx.lastError && instance.lastSurfacedError) {
+        // Error was cleared (e.g., human gate resolved). Reset tracking
+        // so the same error message can be surfaced again on retry.
+        instance.lastSurfacedError = undefined;
+      }
 
       // Check if we entered a gate state
       for (const gateName of gateStateNames) {
@@ -309,6 +352,8 @@ export class WorkflowOrchestrator implements WorkflowController {
 
     const settings = definition.settings ?? {};
 
+    instance.tab.write(`[agent] Starting "${stateId}" (persona: ${stateConfig.persona})`);
+
     // Build command from artifacts + context
     const command = buildAgentCommand(stateConfig, context, instance.artifactDir);
 
@@ -320,16 +365,29 @@ export class WorkflowOrchestrator implements WorkflowController {
 
     // Create session with resumeSessionId for same-role continuity.
     // sessionsByRole is keyed by stateId (set by updateContextFromAgentResult).
+    // workspacePath ensures the agent writes to the artifact directory,
+    // so files created by the agent are visible to the orchestrator.
     const previousSessionId = context.sessionsByRole[stateId];
-    const session = await this.deps.createSession({
-      persona: stateConfig.persona,
-      mode,
-      resumeSessionId: previousSessionId,
-    });
+    let session: Session;
+    try {
+      session = await this.deps.createSession({
+        persona: stateConfig.persona,
+        mode,
+        resumeSessionId: previousSessionId,
+        workspacePath: instance.artifactDir,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      writeStderr(`[workflow] Session creation failed for "${stateId}": ${msg}`);
+      instance.tab.write(`[error] Session creation failed for "${stateId}": ${msg}`);
+      throw err;
+    }
 
     instance.activeSessions.add(session);
 
     try {
+      instance.tab.write(`[agent] Sending command to "${stateId}"...`);
+
       // Send command and get response
       let responseText = await session.sendMessage(command);
 
@@ -364,6 +422,10 @@ export class WorkflowOrchestrator implements WorkflowController {
       // Collect artifact paths
       const artifacts = collectArtifactPaths(stateConfig.outputs, instance.artifactDir);
 
+      instance.tab.write(
+        `[agent] "${stateId}" completed: verdict=${agentOutput.verdict}, artifacts=${Object.keys(artifacts).join(',') || 'none'}`,
+      );
+
       return {
         output: agentOutput,
         sessionId: session.getInfo().id,
@@ -372,7 +434,10 @@ export class WorkflowOrchestrator implements WorkflowController {
       };
     } finally {
       instance.activeSessions.delete(session);
-      await session.close();
+      await session.close().catch((closeErr: unknown) => {
+        const closeMsg = closeErr instanceof Error ? closeErr.message : String(closeErr);
+        console.error(`[workflow] session.close() failed for "${stateId}": ${closeMsg}`);
+      });
     }
   }
 
@@ -432,9 +497,9 @@ export class WorkflowOrchestrator implements WorkflowController {
     gateName: string,
     stateDef: HumanGateStateDefinition,
   ): HumanGateRequest {
+    const instance = this.workflows.get(workflowId);
     const presentedArtifacts = new Map<string, string>();
     for (const artifactName of stateDef.present ?? []) {
-      const instance = this.workflows.get(workflowId);
       if (instance) {
         const dir = resolve(instance.artifactDir, artifactName);
         if (existsSync(dir)) {
@@ -443,13 +508,18 @@ export class WorkflowOrchestrator implements WorkflowController {
       }
     }
 
+    // Surface context.lastError in the gate summary so callers know
+    // whether this gate was reached normally or via an invoke error.
+    const snapshot = instance?.actor.getSnapshot() as { context?: WorkflowContext } | undefined;
+    const errorContext = snapshot?.context?.lastError ? ` (error: ${snapshot.context.lastError})` : '';
+
     return {
       gateId: `${workflowId}-${gateName}`,
       workflowId,
       stateName: gateName,
       acceptedEvents: stateDef.acceptedEvents,
       presentedArtifacts,
-      summary: `Waiting for human review at ${gateName}`,
+      summary: `Waiting for human review at ${gateName}${errorContext}`,
     };
   }
 
@@ -508,8 +578,9 @@ export class WorkflowOrchestrator implements WorkflowController {
     for (const cb of this.lifecycleCallbacks) {
       try {
         cb(event);
-      } catch {
-        // Lifecycle callbacks should not crash the orchestrator
+      } catch (cbErr) {
+        // Lifecycle callbacks should not crash the orchestrator, but log the failure
+        console.error(`[workflow] Lifecycle callback threw for "${event.kind}":`, cbErr);
       }
     }
   }

@@ -199,7 +199,7 @@ function buildHumanGateState(_stateId: string, config: HumanGateStateDefinition)
     const eventName = `HUMAN_${t.event}`;
     on[eventName] = {
       target: t.to,
-      actions: ['storeHumanPrompt'],
+      actions: ['storeHumanPrompt', 'clearError'],
     };
   }
 
@@ -345,9 +345,28 @@ export function buildWorkflowMachine(definition: WorkflowDefinition, taskDescrip
       storeHumanPrompt: assign(({ event }) => ({
         humanPrompt: (event as { prompt?: string }).prompt ?? null,
       })),
-      storeError: assign(({ event }) => ({
-        lastError: (event as { error?: { message?: string } }).error?.message ?? 'Unknown error',
+      clearError: assign(() => ({
+        lastError: null,
       })),
+      storeError: assign(({ event }) => {
+        const errorEvent = event as { error?: unknown };
+        const err = errorEvent.error;
+        let message: string;
+        if (err instanceof Error) {
+          message = err.message;
+        } else if (typeof err === 'object' && err !== null && 'message' in err) {
+          message = String((err as { message: unknown }).message);
+        } else if (typeof err === 'string') {
+          message = err;
+        } else {
+          // eslint-disable-next-line @typescript-eslint/no-base-to-string
+          message = err != null ? String(err) : 'Unknown error';
+        }
+        // Write directly to stderr to bypass any console hijacking
+        // (logger.setup() redirects console.error to a log file).
+        process.stderr.write(`[workflow] storeError action: ${message}\n`);
+        return { lastError: message };
+      }),
       setFlag: assign(() => ({
         flaggedForReview: true,
       })),

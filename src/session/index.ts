@@ -122,7 +122,8 @@ async function createBuiltinSession(options: SessionOptions): Promise<Session> {
   try {
     await session.initialize();
   } catch (error) {
-    // Clean up on init failure
+    // Clean up on init failure. Teardown logger so error messages from
+    // callers (orchestrator, XState) go to the terminal, not the log file.
     await session.close().catch(() => {});
     if (!loggerWasActive) logger.teardown();
     throw new SessionError(
@@ -152,82 +153,88 @@ async function createDockerSession(
   const loggerWasActive = logger.isActive();
   const sessionConfig = buildSessionConfig(config, effectiveSessionId, sessionId, options);
 
-  const { prepareDockerInfrastructure } = await import('../docker/docker-infrastructure.js');
-  const { DockerAgentSession } = await import('../docker/docker-agent-session.js');
-  const { buildDockerClaudeMd } = await import('../docker/claude-md-seed.js');
+  // Wrap the entire infrastructure + init sequence so that logger.teardown()
+  // runs on ANY failure, not just session.initialize() failures.
+  // buildSessionConfig() calls logger.setup() which hijacks console globally;
+  // if we don't teardown on error, all subsequent console output (including
+  // error messages from the orchestrator and XState) silently goes to a log
+  // file instead of the terminal.
+  try {
+    const { prepareDockerInfrastructure } = await import('../docker/docker-infrastructure.js');
+    const { DockerAgentSession } = await import('../docker/docker-agent-session.js');
+    const { buildDockerClaudeMd } = await import('../docker/claude-md-seed.js');
 
-  const claudeMdContent = buildDockerClaudeMd({
-    personaName: options.persona,
-    memoryEnabled: config.userConfig.memory.enabled,
-  });
+    const claudeMdContent = buildDockerClaudeMd({
+      personaName: options.persona,
+      memoryEnabled: config.userConfig.memory.enabled,
+    });
 
-  const infra = await prepareDockerInfrastructure(
-    sessionConfig.config,
-    { kind: 'docker', agent: agentId },
-    sessionConfig.sessionDir,
-    sessionConfig.sandboxDir,
-    sessionConfig.escalationDir,
-    sessionConfig.auditLogPath,
-    sessionId,
-  );
+    const infra = await prepareDockerInfrastructure(
+      sessionConfig.config,
+      { kind: 'docker', agent: agentId },
+      sessionConfig.sessionDir,
+      sessionConfig.sandboxDir,
+      sessionConfig.escalationDir,
+      sessionConfig.auditLogPath,
+      sessionId,
+    );
 
-  // Write CLAUDE.md into conversation state dir (unconditionally, even on
-  // resume, since persona/memory config may change between sessions).
-  // Clean up stale CLAUDE.md when memory is disabled to avoid leftover rules.
-  if (infra.conversationStateDir) {
-    const claudeMdPath = resolve(infra.conversationStateDir, 'CLAUDE.md');
-    if (claudeMdContent) {
-      writeFileSync(claudeMdPath, claudeMdContent);
-    } else {
-      try {
-        unlinkSync(claudeMdPath);
-      } catch {
-        /* not present */
+    // Write CLAUDE.md into conversation state dir (unconditionally, even on
+    // resume, since persona/memory config may change between sessions).
+    // Clean up stale CLAUDE.md when memory is disabled to avoid leftover rules.
+    if (infra.conversationStateDir) {
+      const claudeMdPath = resolve(infra.conversationStateDir, 'CLAUDE.md');
+      if (claudeMdContent) {
+        writeFileSync(claudeMdPath, claudeMdContent);
+      } else {
+        try {
+          unlinkSync(claudeMdPath);
+        } catch {
+          /* not present */
+        }
       }
     }
-  }
 
-  const session = new DockerAgentSession({
-    config: sessionConfig.config,
-    sessionId,
-    adapter: infra.adapter,
-    docker: infra.docker,
-    proxy: infra.proxy,
-    mitmProxy: infra.mitmProxy,
-    ca: infra.ca,
-    fakeKeys: infra.fakeKeys,
-    sessionDir: sessionConfig.sessionDir,
-    sandboxDir: sessionConfig.sandboxDir,
-    escalationDir: sessionConfig.escalationDir,
-    auditLogPath: sessionConfig.auditLogPath,
-    useTcp: infra.useTcp,
-    conversationStateDir: infra.conversationStateDir,
-    conversationStateConfig: infra.conversationStateConfig,
-    onEscalation: options.onEscalation,
-    onEscalationExpired: options.onEscalationExpired,
-    onEscalationResolved: options.onEscalationResolved,
-    onDiagnostic: options.onDiagnostic,
-    preBuiltInfrastructure: {
-      systemPrompt: sessionConfig.systemPromptAugmentation
-        ? `${infra.systemPrompt}\n\n${sessionConfig.systemPromptAugmentation}`
-        : infra.systemPrompt,
-      image: infra.image,
-      mitmAddr: infra.mitmAddr,
-    },
-  });
+    const session = new DockerAgentSession({
+      config: sessionConfig.config,
+      sessionId,
+      adapter: infra.adapter,
+      docker: infra.docker,
+      proxy: infra.proxy,
+      mitmProxy: infra.mitmProxy,
+      ca: infra.ca,
+      fakeKeys: infra.fakeKeys,
+      sessionDir: sessionConfig.sessionDir,
+      sandboxDir: sessionConfig.sandboxDir,
+      escalationDir: sessionConfig.escalationDir,
+      auditLogPath: sessionConfig.auditLogPath,
+      useTcp: infra.useTcp,
+      conversationStateDir: infra.conversationStateDir,
+      conversationStateConfig: infra.conversationStateConfig,
+      onEscalation: options.onEscalation,
+      onEscalationExpired: options.onEscalationExpired,
+      onEscalationResolved: options.onEscalationResolved,
+      onDiagnostic: options.onDiagnostic,
+      preBuiltInfrastructure: {
+        systemPrompt: sessionConfig.systemPromptAugmentation
+          ? `${infra.systemPrompt}\n\n${sessionConfig.systemPromptAugmentation}`
+          : infra.systemPrompt,
+        image: infra.image,
+        mitmAddr: infra.mitmAddr,
+      },
+    });
 
-  try {
     await session.initialize();
+    return session;
   } catch (error) {
-    await session.close().catch(() => {});
     if (!loggerWasActive) logger.teardown();
-    throw new SessionError(
-      `Docker session initialization failed: ${error instanceof Error ? error.message : String(error)}`,
-      'SESSION_INIT_FAILED',
-    );
+    throw error instanceof SessionError
+      ? error
+      : new SessionError(
+          `Docker session failed: ${error instanceof Error ? error.message : String(error)}`,
+          'SESSION_INIT_FAILED',
+        );
   }
-
-  return session;
 }
 
 /** Paths and patched config produced by buildSessionConfig. */

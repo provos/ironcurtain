@@ -1,9 +1,10 @@
 {
-  "name": "demo-workflow",
-  "description": "Plan -> Design -> Implement -> Validate -> Review workflow with human gates and coder-critic loop",
+  "name": "real-agent-workflow",
+  "description": "Plan -> Design -> Implement -> Validate -> Review workflow using Docker agent sessions",
   "initial": "plan",
   "settings": {
-    "mode": "builtin",
+    "mode": "docker",
+    "dockerAgent": "claude-code",
     "maxRounds": 3
   },
   "states": {
@@ -46,12 +47,7 @@
       "persona": "coder",
       "inputs": ["plan", "spec"],
       "outputs": ["code"],
-      "transitions": [{ "to": "validate" }]
-    },
-    "validate": {
-      "type": "deterministic",
-      "run": [["echo", "3 tests passed"]],
-      "transitions": [{ "to": "review", "guard": "isPassed" }, { "to": "implement" }]
+      "transitions": [{ "to": "review" }]
     },
     "review": {
       "type": "agent",
