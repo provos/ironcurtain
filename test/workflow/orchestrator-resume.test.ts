@@ -847,4 +847,157 @@ describe('WorkflowOrchestrator checkpoint + resume', () => {
       'No checkpoint found for workflow nonexistent',
     );
   });
+
+  // -----------------------------------------------------------------------
+  // Test 8: Resume from an agent invoke state re-triggers the service
+  // -----------------------------------------------------------------------
+
+  it('resume from agent invoke state re-triggers the service instead of hanging', async () => {
+    // Use linearWorkflowDef: plan -> plan_gate -> implement -> review -> done
+    // Simulate a checkpoint at the "review" state (an agent invoke state).
+    // Before the fix, XState would restore to "review" but never start the
+    // agentService invoke, causing the workflow to hang indefinitely.
+    const defPath = writeDefinitionFile(tmpDir, linearWorkflowDef);
+    const checkpointStore = createCheckpointStore(tmpDir);
+
+    // Create artifact directory structure that would exist at this point
+    const fakeWorkflowId = 'resume-invoke-test' as WorkflowId;
+    const artifactDir = resolve(tmpDir, fakeWorkflowId, 'artifacts');
+    mkdirSync(artifactDir, { recursive: true });
+    simulateArtifacts(resolve(tmpDir, fakeWorkflowId), ['plan', 'code']);
+
+    // Save a checkpoint at the "review" agent state
+    checkpointStore.save(fakeWorkflowId, {
+      machineState: 'review',
+      context: {
+        taskDescription: 'build an API',
+        artifacts: {
+          plan: resolve(artifactDir, 'plan'),
+          code: resolve(artifactDir, 'code'),
+        },
+        round: 2,
+        maxRounds: 4,
+        previousOutputHashes: {},
+        previousTestCount: null,
+        humanPrompt: null,
+        reviewHistory: [],
+        parallelResults: {},
+        worktreeBranches: [],
+        totalTokens: 0,
+        flaggedForReview: false,
+        lastError: null,
+        sessionsByRole: {},
+      },
+      timestamp: new Date().toISOString(),
+      transitionHistory: [
+        { from: 'plan', to: 'plan_gate', event: 'transition', timestamp: new Date().toISOString(), duration_ms: 100 },
+        {
+          from: 'plan_gate',
+          to: 'implement',
+          event: 'transition',
+          timestamp: new Date().toISOString(),
+          duration_ms: 50,
+        },
+        {
+          from: 'implement',
+          to: 'review',
+          event: 'transition',
+          timestamp: new Date().toISOString(),
+          duration_ms: 200,
+        },
+      ],
+      definitionPath: defPath,
+    });
+
+    // The reviewer approves, so the workflow should proceed to "done"
+    const sessionFactory = vi.fn(async (opts: SessionOptions) => {
+      expect(opts.persona).toBe('reviewer');
+      return createArtifactAwareSession(
+        [{ text: approvedResponse('code looks great'), artifacts: ['reviews'] }],
+        tmpDir,
+        'reviewer-session-resumed',
+      );
+    });
+
+    const deps = createDeps(tmpDir, {
+      createSession: sessionFactory,
+      checkpointStore,
+    });
+
+    const orchestrator = trackOrchestrator(new WorkflowOrchestrator(deps));
+    const events: WorkflowLifecycleEvent[] = [];
+    orchestrator.onEvent((e) => events.push(e));
+
+    await orchestrator.resume(fakeWorkflowId);
+
+    // The workflow should complete (not hang)
+    await waitForCompletion(orchestrator, fakeWorkflowId, 5000);
+
+    expect(orchestrator.getStatus(fakeWorkflowId)?.phase).toBe('completed');
+    expect(sessionFactory).toHaveBeenCalledTimes(1);
+    expect(sessionFactory.mock.calls[0][0].persona).toBe('reviewer');
+  });
+
+  // -----------------------------------------------------------------------
+  // Test 9: Resume from agent invoke state handles service failure
+  // -----------------------------------------------------------------------
+
+  it('resume from agent invoke state handles service failure gracefully', async () => {
+    // Use agentWithErrorGateDef: implement -> (error) -> error_gate
+    // Checkpoint at "implement" (invoke state), service fails on resume.
+    const defPath = writeDefinitionFile(tmpDir, agentWithErrorGateDef);
+    const checkpointStore = createCheckpointStore(tmpDir);
+
+    const fakeWorkflowId = 'resume-invoke-error-test' as WorkflowId;
+    const artifactDir = resolve(tmpDir, fakeWorkflowId, 'artifacts');
+    mkdirSync(artifactDir, { recursive: true });
+
+    checkpointStore.save(fakeWorkflowId, {
+      machineState: 'implement',
+      context: {
+        taskDescription: 'write code',
+        artifacts: {},
+        round: 0,
+        maxRounds: 4,
+        previousOutputHashes: {},
+        previousTestCount: null,
+        humanPrompt: null,
+        reviewHistory: [],
+        parallelResults: {},
+        worktreeBranches: [],
+        totalTokens: 0,
+        flaggedForReview: false,
+        lastError: null,
+        sessionsByRole: {},
+      },
+      timestamp: new Date().toISOString(),
+      transitionHistory: [],
+      definitionPath: defPath,
+    });
+
+    // Session factory that fails
+    const sessionFactory = vi.fn(async () => {
+      return new MockSession({
+        responses: () => {
+          throw new Error('Network timeout on resume');
+        },
+      });
+    });
+
+    const raiseGate = vi.fn();
+    const deps = createDeps(tmpDir, {
+      createSession: sessionFactory,
+      raiseGate,
+      checkpointStore,
+    });
+
+    const orchestrator = trackOrchestrator(new WorkflowOrchestrator(deps));
+    await orchestrator.resume(fakeWorkflowId);
+
+    // The error should transition the machine to error_gate (human gate)
+    await waitForGate(raiseGate, 1);
+
+    const gateRequest = raiseGate.mock.calls[0][0] as HumanGateRequest;
+    expect(gateRequest.stateName).toBe('error_gate');
+  });
 });

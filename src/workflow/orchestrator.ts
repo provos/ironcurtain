@@ -11,11 +11,13 @@ import type {
   WorkflowStatus,
   WorkflowResult,
   WorkflowCheckpoint,
+  WorkflowEvent,
   TransitionRecord,
   HumanGateRequest,
   HumanGateEvent,
   HumanGateStateDefinition,
   AgentStateDefinition,
+  DeterministicStateDefinition,
 } from './types.js';
 import { createWorkflowId } from './types.js';
 import type { Session, SessionOptions, SessionMode } from '../session/types.js';
@@ -182,10 +184,10 @@ export class WorkflowOrchestrator implements WorkflowController {
     return Promise.resolve(workflowId);
   }
 
-  resume(workflowId: WorkflowId): Promise<void> {
-    const checkpoint = this.deps.checkpointStore.load(workflowId);
+  async resume(workflowId: WorkflowId): Promise<void> {
+    const checkpoint = await Promise.resolve(this.deps.checkpointStore.load(workflowId));
     if (!checkpoint) {
-      return Promise.reject(new Error(`No checkpoint found for workflow ${workflowId}`));
+      throw new Error(`No checkpoint found for workflow ${workflowId}`);
     }
 
     // Read the definition from the checkpointed path
@@ -229,7 +231,53 @@ export class WorkflowOrchestrator implements WorkflowController {
     this.workflows.set(workflowId, instance);
     this.subscribeToActor(instance);
     actor.start();
-    return Promise.resolve();
+
+    // XState v5's resolveState() restores *to* a state but does not *enter* it.
+    // Invoke services (agent/deterministic) only start on state entry via transition.
+    // For invoke states, we must manually execute the service and feed the result
+    // back to the actor as an xstate.done.actor / xstate.error.actor event.
+    const restoredState = String(checkpoint.machineState);
+    const stateDef = definition.states[restoredState];
+    if (stateDef.type === 'agent' || stateDef.type === 'deterministic') {
+      this.replayInvokeForRestoredState(workflowId, restoredState, stateDef, definition);
+    }
+  }
+
+  /**
+   * Manually executes the invoke service for a state that was restored from
+   * a checkpoint. XState does not re-trigger invocations when an actor is
+   * started from a persisted snapshot, so we run the service ourselves and
+   * send the result event to the actor.
+   */
+  private replayInvokeForRestoredState(
+    workflowId: WorkflowId,
+    stateId: string,
+    stateDef: AgentStateDefinition | DeterministicStateDefinition,
+    definition: WorkflowDefinition,
+  ): void {
+    const instance = this.workflows.get(workflowId);
+    if (!instance) return;
+
+    const snapshot = instance.actor.getSnapshot() as { context: WorkflowContext };
+    const context = snapshot.context;
+
+    // Build the service promise based on state type
+    const servicePromise: Promise<unknown> =
+      stateDef.type === 'agent'
+        ? this.executeAgentState(workflowId, { stateId, stateConfig: stateDef, context }, definition)
+        : this.executeDeterministicState({ stateId, commands: stateDef.run, context });
+
+    // Feed the result back to the actor as an XState internal invoke event.
+    // These event types don't exist in our WorkflowEvent union, so we cast
+    // through unknown to satisfy TypeScript while matching XState's internal
+    // event format that onDone/onError handlers expect.
+    servicePromise
+      .then((output) => {
+        instance.actor.send({ type: `xstate.done.actor.${stateId}`, output } as unknown as WorkflowEvent);
+      })
+      .catch((err: unknown) => {
+        instance.actor.send({ type: `xstate.error.actor.${stateId}`, error: err } as unknown as WorkflowEvent);
+      });
   }
 
   listResumable(): WorkflowId[] {
