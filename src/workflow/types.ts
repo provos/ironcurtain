@@ -38,6 +38,13 @@ export interface WorkflowSettings {
   readonly gitRepoPath?: string;
   /** Max parallel agent sessions. Default: 3. */
   readonly maxParallelism?: number;
+  /**
+   * Optional system prompt text appended to the base system prompt
+   * for ALL agent states in this workflow. Use for workspace
+   * conventions, project-level context, or shared instructions.
+   * Sent via --append-system-prompt.
+   */
+  readonly systemPrompt?: string;
 }
 
 /**
@@ -52,6 +59,20 @@ export type WorkflowStateDefinition =
 export interface AgentStateDefinition {
   readonly type: 'agent';
   readonly persona: string;
+  /**
+   * Prompt template sent to the agent on FIRST invocation of this state.
+   *
+   * Contains the role's instructions, responsibilities, and output
+   * expectations. The orchestrator appends standard context sections
+   * (task, previous agent output, artifacts, status format) AFTER
+   * this template.
+   *
+   * On re-invocation of the same state (round 2+ via --continue),
+   * only the new information is sent (previous agent output, round
+   * number, human feedback, status format). The role instructions
+   * are already in the conversation history.
+   */
+  readonly prompt: string;
   /**
    * Input artifact names assembled into the agent's command.
    * Trailing `?` marks optional inputs (no error if absent).
@@ -178,6 +199,23 @@ export interface WorkflowContext {
   readonly flaggedForReview: boolean;
   readonly lastError: string | null;
   readonly sessionsByRole: Record<string, string>;
+  /**
+   * Response text from the last completed agent state. Truncated
+   * at 32KB. Used to give the next agent visibility into what
+   * the previous agent said.
+   */
+  readonly previousAgentOutput: string | null;
+  /**
+   * The state name that produced `previousAgentOutput`. Used to
+   * label the output in the next agent's prompt.
+   */
+  readonly previousStateName: string | null;
+  /**
+   * Per-state visit counter. Maps state ID to the number of times
+   * that state has been entered. Used for first-visit vs re-visit
+   * prompt selection and per-state round limit checking.
+   */
+  readonly visitCounts: Readonly<Record<string, number>>;
 }
 
 // ---------------------------------------------------------------------------

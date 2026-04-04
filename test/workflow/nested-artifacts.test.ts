@@ -78,67 +78,239 @@ describe('computeOutputHash with nested directories', () => {
 });
 
 // ---------------------------------------------------------------------------
-// readArtifactContent via buildAgentCommand with nested directories
+// buildAgentCommand with artifact inputs (path references, no file I/O)
 // ---------------------------------------------------------------------------
 
-describe('buildAgentCommand with nested artifact directories', () => {
-  let artifactDir: string;
+function makeContext(overrides: Partial<WorkflowContext> = {}): WorkflowContext {
+  return {
+    taskDescription: 'Build something',
+    artifacts: {},
+    round: 0,
+    maxRounds: 4,
+    previousOutputHashes: {},
+    previousTestCount: null,
+    humanPrompt: null,
+    reviewHistory: [],
+    parallelResults: {},
+    worktreeBranches: [],
+    totalTokens: 0,
+    flaggedForReview: false,
+    lastError: null,
+    sessionsByRole: {},
+    previousAgentOutput: null,
+    previousStateName: null,
+    visitCounts: {},
+    ...overrides,
+  };
+}
 
-  beforeEach(() => {
-    artifactDir = resolve('/tmp', `ironcurtain-prompt-test-${process.pid}-${Date.now()}`);
-    mkdirSync(artifactDir, { recursive: true });
-  });
-
-  afterEach(() => {
-    rmSync(artifactDir, { recursive: true, force: true });
-  });
-
-  it('reads files from nested directories without EISDIR', () => {
-    const specDir = resolve(artifactDir, 'spec');
-    mkdirSync(resolve(specDir, 'sections'), { recursive: true });
-    writeFileSync(resolve(specDir, 'overview.md'), '# Overview');
-    writeFileSync(resolve(specDir, 'sections', 'details.md'), '# Details');
-
+describe('buildAgentCommand first-visit mode', () => {
+  it('includes role prompt, task, expected outputs, and status block on first visit', () => {
     const stateConfig: AgentStateDefinition = {
       type: 'agent',
-      persona: 'test',
+      persona: 'planner',
+      prompt: 'You are a project planner.',
+      inputs: [],
+      outputs: ['plan'],
+      transitions: [],
+    };
+
+    const command = buildAgentCommand('plan', stateConfig, makeContext({ taskDescription: 'Build a CLI tool' }));
+
+    expect(command).toContain('You are a project planner.');
+    expect(command).toContain('## Task');
+    expect(command).toContain('Build a CLI tool');
+    expect(command).toContain('## Expected Outputs');
+    expect(command).toContain('`plan/`');
+    expect(command).toContain('agent_status');
+  });
+
+  it('includes previous agent output when available', () => {
+    const stateConfig: AgentStateDefinition = {
+      type: 'agent',
+      persona: 'architect',
+      prompt: 'You are an architect.',
+      inputs: ['plan'],
+      outputs: ['spec'],
+      transitions: [],
+    };
+
+    const command = buildAgentCommand(
+      'design',
+      stateConfig,
+      makeContext({
+        previousAgentOutput: 'The planner created a 3-step plan.',
+        previousStateName: 'plan',
+      }),
+    );
+
+    expect(command).toContain('## Output from plan');
+    expect(command).toContain('The planner created a 3-step plan.');
+  });
+
+  it('includes human feedback when present', () => {
+    const stateConfig: AgentStateDefinition = {
+      type: 'agent',
+      persona: 'planner',
+      prompt: 'You are a planner.',
+      inputs: [],
+      outputs: ['plan'],
+      transitions: [],
+    };
+
+    const command = buildAgentCommand('plan', stateConfig, makeContext({ humanPrompt: 'Focus on testing' }));
+
+    expect(command).toContain('## Human Feedback');
+    expect(command).toContain('Focus on testing');
+  });
+
+  it('omits previous output section when no previous agent output', () => {
+    const stateConfig: AgentStateDefinition = {
+      type: 'agent',
+      persona: 'planner',
+      prompt: 'You are a planner.',
+      inputs: [],
+      outputs: [],
+      transitions: [],
+    };
+
+    const command = buildAgentCommand('plan', stateConfig, makeContext());
+
+    expect(command).not.toContain('## Output from');
+    expect(command).not.toContain('## New Input from');
+  });
+});
+
+describe('buildAgentCommand re-visit mode', () => {
+  it('omits role prompt and task on re-visit', () => {
+    const stateConfig: AgentStateDefinition = {
+      type: 'agent',
+      persona: 'coder',
+      prompt: 'You are an implementation engineer.',
       inputs: ['spec'],
       outputs: ['code'],
-    };
-    const context: WorkflowContext = {
-      taskDescription: 'Build something',
-      artifacts: {},
-      reviewHistory: [],
-      sessionsByRole: {},
-      stallCount: 0,
+      transitions: [],
     };
 
-    // Should not throw EISDIR
-    const command = buildAgentCommand(stateConfig, context, artifactDir);
-    expect(command).toContain('# Overview');
-    expect(command).toContain('# Details');
+    const command = buildAgentCommand(
+      'implement',
+      stateConfig,
+      makeContext({
+        visitCounts: { implement: 2 },
+        previousAgentOutput: 'Rejected: missing tests',
+        previousStateName: 'review',
+      }),
+    );
+
+    // Re-visit should NOT include role prompt or task
+    expect(command).not.toContain('You are an implementation engineer.');
+    expect(command).not.toContain('## Task');
+    // Should include new input and round info
+    expect(command).toContain('## New Input from review');
+    expect(command).toContain('Rejected: missing tests');
+    expect(command).toContain('## Round');
+    expect(command).toContain('round 2');
+    expect(command).toContain('agent_status');
   });
 
-  it('labels nested files with relative paths', () => {
-    const specDir = resolve(artifactDir, 'spec');
-    mkdirSync(resolve(specDir, 'sub'), { recursive: true });
-    writeFileSync(resolve(specDir, 'sub', 'file.md'), 'nested content');
+  it('includes human feedback on re-visit', () => {
+    const stateConfig: AgentStateDefinition = {
+      type: 'agent',
+      persona: 'coder',
+      prompt: 'You are a coder.',
+      inputs: [],
+      outputs: ['code'],
+      transitions: [],
+    };
 
+    const command = buildAgentCommand(
+      'implement',
+      stateConfig,
+      makeContext({
+        visitCounts: { implement: 3 },
+        humanPrompt: 'Add error handling',
+      }),
+    );
+
+    expect(command).toContain('## Human Feedback');
+    expect(command).toContain('Add error handling');
+  });
+
+  it('dispatches based on visitCounts, not global round', () => {
+    const stateConfig: AgentStateDefinition = {
+      type: 'agent',
+      persona: 'coder',
+      prompt: 'You are a coder.',
+      inputs: [],
+      outputs: [],
+      transitions: [],
+    };
+
+    // First visit (visitCounts[implement] = 0 or missing) -> includes prompt
+    const firstVisit = buildAgentCommand('implement', stateConfig, makeContext({ visitCounts: {} }));
+    expect(firstVisit).toContain('You are a coder.');
+
+    // visitCounts[implement] = 1 means visited once, so still first visit semantics
+    const afterFirstVisit = buildAgentCommand('implement', stateConfig, makeContext({ visitCounts: { implement: 1 } }));
+    expect(afterFirstVisit).toContain('You are a coder.');
+
+    // visitCounts[implement] = 2 means re-visit
+    const reVisit = buildAgentCommand('implement', stateConfig, makeContext({ visitCounts: { implement: 2 } }));
+    expect(reVisit).not.toContain('You are a coder.');
+  });
+});
+
+describe('buildAgentCommand with artifact inputs', () => {
+  it('includes path references for input artifacts instead of file content', () => {
     const stateConfig: AgentStateDefinition = {
       type: 'agent',
       persona: 'test',
+      prompt: 'You are a test agent.',
       inputs: ['spec'],
-      outputs: [],
-    };
-    const context: WorkflowContext = {
-      taskDescription: 'Task',
-      artifacts: {},
-      reviewHistory: [],
-      sessionsByRole: {},
-      stallCount: 0,
+      outputs: ['code'],
+      transitions: [],
     };
 
-    const command = buildAgentCommand(stateConfig, context, artifactDir);
-    expect(command).toContain('### spec/sub/file.md');
+    const command = buildAgentCommand('test', stateConfig, makeContext());
+
+    // Should reference the directory path, not inline content
+    expect(command).toContain('`spec/`');
+    expect(command).toContain('Read the contents');
+    expect(command).toContain('file reading tools');
+  });
+
+  it('includes path references for multiple input artifacts', () => {
+    const stateConfig: AgentStateDefinition = {
+      type: 'agent',
+      persona: 'test',
+      prompt: 'You are a test agent.',
+      inputs: ['plan', 'spec'],
+      outputs: [],
+      transitions: [],
+    };
+
+    const command = buildAgentCommand('test', stateConfig, makeContext());
+
+    expect(command).toContain('## Input: plan');
+    expect(command).toContain('`plan/`');
+    expect(command).toContain('## Input: spec');
+    expect(command).toContain('`spec/`');
+  });
+
+  it('handles optional inputs by stripping the ? suffix', () => {
+    const stateConfig: AgentStateDefinition = {
+      type: 'agent',
+      persona: 'test',
+      prompt: 'You are a test agent.',
+      inputs: ['feedback?'],
+      outputs: [],
+      transitions: [],
+    };
+
+    const command = buildAgentCommand('test', stateConfig, makeContext());
+
+    expect(command).toContain('## Input: feedback');
+    expect(command).toContain('`feedback/`');
+    expect(command).not.toContain('feedback?');
   });
 });

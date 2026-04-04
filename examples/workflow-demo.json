@@ -10,6 +10,7 @@
     "plan": {
       "type": "agent",
       "persona": "planner",
+      "prompt": "You are a project planner. Break down the task into a clear plan with numbered steps.",
       "inputs": [],
       "outputs": ["plan"],
       "transitions": [{ "to": "plan_review" }]
@@ -27,6 +28,7 @@
     "design": {
       "type": "agent",
       "persona": "architect",
+      "prompt": "You are a software architect. Produce a technical design spec with interfaces and data flow.",
       "inputs": ["plan"],
       "outputs": ["spec"],
       "transitions": [{ "to": "design_review" }]
@@ -44,6 +46,7 @@
     "implement": {
       "type": "agent",
       "persona": "coder",
+      "prompt": "You are an implementation engineer. Write working code with tests based on the plan and spec.",
       "inputs": ["plan", "spec"],
       "outputs": ["code"],
       "transitions": [{ "to": "validate" }]
@@ -56,6 +59,7 @@
     "review": {
       "type": "agent",
       "persona": "critic",
+      "prompt": "You are a code reviewer. Review the implementation against the spec and provide a verdict.",
       "inputs": ["code", "spec"],
       "outputs": ["reviews"],
       "transitions": [

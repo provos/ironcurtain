@@ -22,6 +22,9 @@ function baseContext(overrides: Partial<WorkflowContext> = {}): WorkflowContext 
     flaggedForReview: false,
     lastError: null,
     sessionsByRole: {},
+    previousAgentOutput: null,
+    previousStateName: null,
+    visitCounts: {},
     ...overrides,
   };
 }
@@ -131,28 +134,37 @@ describe('isLowConfidence', () => {
 });
 
 describe('isRoundLimitReached', () => {
-  it('returns true when round >= maxRounds', () => {
+  it('returns true when any state visit count >= maxRounds', () => {
     expect(
       isRoundLimitReached({
-        context: baseContext({ round: 4, maxRounds: 4 }),
+        context: baseContext({ visitCounts: { implement: 4 }, maxRounds: 4 }),
         event: completedEvent(),
       }),
     ).toBe(true);
   });
 
-  it('returns true when round exceeds maxRounds', () => {
+  it('returns true when visit count exceeds maxRounds', () => {
     expect(
       isRoundLimitReached({
-        context: baseContext({ round: 5, maxRounds: 4 }),
+        context: baseContext({ visitCounts: { implement: 5, review: 4 }, maxRounds: 4 }),
         event: completedEvent(),
       }),
     ).toBe(true);
   });
 
-  it('returns false when round < maxRounds', () => {
+  it('returns false when all visit counts < maxRounds', () => {
     expect(
       isRoundLimitReached({
-        context: baseContext({ round: 2, maxRounds: 4 }),
+        context: baseContext({ visitCounts: { implement: 2, review: 1 }, maxRounds: 4 }),
+        event: completedEvent(),
+      }),
+    ).toBe(false);
+  });
+
+  it('returns false when visitCounts is empty', () => {
+    expect(
+      isRoundLimitReached({
+        context: baseContext({ visitCounts: {}, maxRounds: 4 }),
         event: completedEvent(),
       }),
     ).toBe(false);

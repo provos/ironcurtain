@@ -65,57 +65,6 @@ const BG_YELLOW = '\x1b[43m';
 const BLACK = '\x1b[30m';
 
 // ---------------------------------------------------------------------------
-// Role prompts
-// ---------------------------------------------------------------------------
-
-const ROLE_PROMPTS: Record<string, string> = {
-  planner: `You are a project planner. Break down the task into a clear, actionable plan.
-
-Your responsibilities:
-- Analyze the task requirements
-- Identify components, dependencies, and implementation order
-- Note key design decisions and trade-offs
-
-Output: Create a \`plan/\` directory in your workspace with a \`plan.md\` file.
-Write a structured markdown document with numbered steps.
-Do NOT write any code -- only the plan.`,
-
-  architect: `You are a software architect. Produce a technical design specification.
-
-Your responsibilities:
-- Define module structure, interfaces, and data flow
-- Specify function signatures with TypeScript types
-- Document key design decisions and rationale
-
-Output: Create a \`spec/\` directory in your workspace with a \`spec.md\` file.
-Write a structured markdown document with interface definitions and architecture notes.
-Do NOT write implementation code.`,
-
-  coder: `You are an implementation engineer. Write working code based on the plan and spec.
-
-Your responsibilities:
-- Implement all modules described in the spec
-- Write clean, well-typed TypeScript
-- Create unit tests using Node.js built-in assert module
-- Ensure all tests pass by running them
-
-Output: Create a \`code/\` directory in your workspace containing all source files and tests.
-Run the tests to verify they pass before finishing.`,
-
-  critic: `You are a code reviewer. Review the implementation against the specification.
-
-Your responsibilities:
-- Verify correctness: does the code match the spec?
-- Check edge cases and error handling
-- Evaluate code quality, naming, and structure
-- Assess test coverage and test quality
-
-Output: Create a \`reviews/\` directory with a \`review.md\` file.
-If issues are found, set verdict to "rejected" with specific feedback.
-If the code is solid, set verdict to "approved".`,
-};
-
-// ---------------------------------------------------------------------------
 // Session factory for Docker mode with Haiku model
 // ---------------------------------------------------------------------------
 
@@ -135,20 +84,14 @@ function createRealSessionFactory(): (opts: SessionOptions) => Promise<Session> 
   return async (opts: SessionOptions): Promise<Session> => {
     const persona = opts.persona;
 
-    // Convert persona to systemPromptAugmentation instead of forwarding
-    // persona field (which would trigger persona directory resolution).
-    // Workflow role names (planner, architect, etc.) are NOT IronCurtain
-    // personas -- they don't have persona directories or compiled policies.
-    // The global compiled policy applies to all roles.
-    const rolePrompt = persona ? ROLE_PROMPTS[persona] : undefined;
-    const systemPromptAugmentation = [rolePrompt, opts.systemPromptAugmentation].filter(Boolean).join('\n\n');
-
-    // Build effective options: inject config + role prompt, strip persona
+    // Strip persona (workflow role names are NOT IronCurtain personas --
+    // they don't have persona directories or compiled policies).
+    // systemPromptAugmentation is passed through from the orchestrator,
+    // which reads it from the workflow definition's settings.systemPrompt.
     const effectiveOpts: SessionOptions = {
       ...opts,
       config: haiku,
       persona: undefined,
-      systemPromptAugmentation: systemPromptAugmentation || undefined,
     };
 
     try {
@@ -504,6 +447,9 @@ function synthesizeCheckpoint(
     flaggedForReview: false,
     lastError: null,
     sessionsByRole: {},
+    previousAgentOutput: null,
+    previousStateName: null,
+    visitCounts: {},
   };
 
   const checkpoint: WorkflowCheckpoint = {

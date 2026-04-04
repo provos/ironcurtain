@@ -189,6 +189,7 @@ const linearWorkflowDef: WorkflowDefinition = {
     plan: {
       type: 'agent',
       persona: 'planner',
+      prompt: 'You are a planner.',
       inputs: [],
       outputs: ['plan'],
       transitions: [{ to: 'plan_gate' }],
@@ -206,6 +207,7 @@ const linearWorkflowDef: WorkflowDefinition = {
     implement: {
       type: 'agent',
       persona: 'coder',
+      prompt: 'You are a coder.',
       inputs: ['plan'],
       outputs: ['code'],
       transitions: [{ to: 'review' }],
@@ -213,6 +215,7 @@ const linearWorkflowDef: WorkflowDefinition = {
     review: {
       type: 'agent',
       persona: 'reviewer',
+      prompt: 'You are a reviewer.',
       inputs: ['code'],
       outputs: ['reviews'],
       transitions: [
@@ -234,6 +237,7 @@ const coderCriticLoopDef: WorkflowDefinition = {
     implement: {
       type: 'agent',
       persona: 'coder',
+      prompt: 'You are a coder.',
       inputs: [],
       outputs: ['code'],
       transitions: [{ to: 'review' }],
@@ -241,6 +245,7 @@ const coderCriticLoopDef: WorkflowDefinition = {
     review: {
       type: 'agent',
       persona: 'reviewer',
+      prompt: 'You are a reviewer.',
       inputs: ['code'],
       outputs: ['reviews'],
       transitions: [
@@ -261,6 +266,7 @@ const simpleAgentDef: WorkflowDefinition = {
     implement: {
       type: 'agent',
       persona: 'coder',
+      prompt: 'You are a coder.',
       inputs: [],
       outputs: ['code'],
       transitions: [{ to: 'done' }],
@@ -278,6 +284,7 @@ const stallDetectionDef: WorkflowDefinition = {
     implement: {
       type: 'agent',
       persona: 'coder',
+      prompt: 'You are a coder.',
       inputs: [],
       outputs: ['code'],
       transitions: [{ to: 'stalled', guard: 'isStalled' }, { to: 'review' }],
@@ -285,6 +292,7 @@ const stallDetectionDef: WorkflowDefinition = {
     review: {
       type: 'agent',
       persona: 'reviewer',
+      prompt: 'You are a reviewer.',
       inputs: ['code'],
       outputs: ['reviews'],
       transitions: [
@@ -948,6 +956,7 @@ describe('WorkflowOrchestrator', () => {
         implement: {
           type: 'agent',
           persona: 'coder',
+          prompt: 'You are a coder.',
           inputs: [],
           outputs: ['code'],
           transitions: [{ to: 'review' }],
@@ -955,6 +964,7 @@ describe('WorkflowOrchestrator', () => {
         review: {
           type: 'agent',
           persona: 'reviewer',
+          prompt: 'You are a reviewer.',
           inputs: ['code'],
           outputs: ['reviews'],
           transitions: [

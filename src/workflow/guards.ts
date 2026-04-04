@@ -43,9 +43,19 @@ const isLowConfidence: GuardFunction = ({ event }) => {
   return output?.verdict === 'approved' && output.confidence === 'low';
 };
 
-/** Current round has reached or exceeded maxRounds. */
+/**
+ * Per-state round limit check. Compares the maximum visit count
+ * across all states against maxRounds. This fires when any state
+ * has been visited enough times to hit the limit.
+ *
+ * In the typical coder-critic loop, this checks whether the loop
+ * has iterated enough times to warrant escalation.
+ */
 const isRoundLimitReached: GuardFunction = ({ context }) => {
-  return context.round >= context.maxRounds;
+  const counts = Object.values(context.visitCounts);
+  if (counts.length === 0) return false;
+  const maxVisits = Math.max(...counts);
+  return maxVisits >= context.maxRounds;
 };
 
 /**

@@ -3,6 +3,7 @@ import { createActor, fromPromise, type AnyActor } from 'xstate';
 import {
   buildWorkflowMachine,
   createInitialContext,
+  truncateAgentOutput,
   type AgentInvokeInput,
   type AgentInvokeResult,
   type DeterministicInvokeInput,
@@ -27,6 +28,7 @@ function makeAgentResult(overrides: Partial<AgentInvokeResult> = {}): AgentInvok
     sessionId: 'test-session',
     artifacts: {},
     outputHash: 'hash-1',
+    responseText: 'Agent response text',
     ...overrides,
   };
 }
@@ -80,6 +82,7 @@ const linearDefinition: WorkflowDefinition = {
     plan: {
       type: 'agent',
       persona: 'planner',
+      prompt: 'You are a planner.',
       inputs: [],
       outputs: ['plan'],
       transitions: [{ to: 'design' }],
@@ -87,6 +90,7 @@ const linearDefinition: WorkflowDefinition = {
     design: {
       type: 'agent',
       persona: 'architect',
+      prompt: 'You are an architect.',
       inputs: ['plan'],
       outputs: ['design'],
       transitions: [{ to: 'done' }],
@@ -107,6 +111,7 @@ const gatedDefinition: WorkflowDefinition = {
     plan: {
       type: 'agent',
       persona: 'planner',
+      prompt: 'You are a planner.',
       inputs: [],
       outputs: ['plan'],
       transitions: [{ to: 'review_gate' }],
@@ -124,6 +129,7 @@ const gatedDefinition: WorkflowDefinition = {
     design: {
       type: 'agent',
       persona: 'architect',
+      prompt: 'You are an architect.',
       inputs: ['plan'],
       outputs: ['design'],
       transitions: [{ to: 'done' }],
@@ -147,6 +153,7 @@ const deterministicLoopDefinition: WorkflowDefinition = {
     plan: {
       type: 'agent',
       persona: 'planner',
+      prompt: 'You are a planner.',
       inputs: [],
       outputs: ['plan'],
       transitions: [{ to: 'implement' }],
@@ -154,6 +161,7 @@ const deterministicLoopDefinition: WorkflowDefinition = {
     implement: {
       type: 'agent',
       persona: 'coder',
+      prompt: 'You are a coder.',
       inputs: ['plan'],
       outputs: ['code'],
       transitions: [{ to: 'test' }],
@@ -180,6 +188,7 @@ const coderCriticDefinition: WorkflowDefinition = {
     implement: {
       type: 'agent',
       persona: 'coder',
+      prompt: 'You are a coder.',
       inputs: [],
       outputs: ['code'],
       transitions: [{ to: 'review' }],
@@ -187,6 +196,7 @@ const coderCriticDefinition: WorkflowDefinition = {
     review: {
       type: 'agent',
       persona: 'critic',
+      prompt: 'You are a critic.',
       inputs: ['code'],
       outputs: ['review'],
       transitions: [
@@ -225,6 +235,7 @@ const parallelDefinition: WorkflowDefinition = {
     plan: {
       type: 'agent',
       persona: 'planner',
+      prompt: 'You are a planner.',
       inputs: [],
       outputs: ['spec'],
       transitions: [{ to: 'implement' }],
@@ -232,6 +243,7 @@ const parallelDefinition: WorkflowDefinition = {
     implement: {
       type: 'agent',
       persona: 'coder',
+      prompt: 'You are a coder.',
       inputs: ['spec'],
       outputs: ['code'],
       transitions: [{ to: 'done' }],
@@ -291,6 +303,9 @@ describe('buildWorkflowMachine', () => {
       expect(ctx.flaggedForReview).toBe(false);
       expect(ctx.lastError).toBeNull();
       expect(ctx.sessionsByRole).toEqual({});
+      expect(ctx.previousAgentOutput).toBeNull();
+      expect(ctx.previousStateName).toBeNull();
+      expect(ctx.visitCounts).toEqual({});
     });
 
     it('uses settings maxRounds when provided', () => {
@@ -422,12 +437,19 @@ describe('buildWorkflowMachine', () => {
       expect(actor.getSnapshot().status).toBe('done');
     });
 
-    it('stores humanPrompt from gate events', async () => {
+    it('stores humanPrompt from gate events and clears it after agent runs', async () => {
       const result = buildWorkflowMachine(gatedDefinition, 'task');
+      let capturedHumanPrompt: string | null = null;
 
       const testMachine = result.machine.provide({
         actors: {
-          agentService: fromPromise(async () => makeAgentResult()),
+          agentService: fromPromise(async ({ input }: { input: AgentInvokeInput }) => {
+            // Capture the humanPrompt that the agent receives
+            if (input.stateId === 'design') {
+              capturedHumanPrompt = input.context.humanPrompt;
+            }
+            return makeAgentResult();
+          }),
         },
       });
 
@@ -438,7 +460,10 @@ describe('buildWorkflowMachine', () => {
       actor.send({ type: 'HUMAN_APPROVE', prompt: 'Looks good, proceed' });
       await settle();
 
-      expect(actor.getSnapshot().context.humanPrompt).toBe('Looks good, proceed');
+      // The design agent should have received the human prompt
+      expect(capturedHumanPrompt).toBe('Looks good, proceed');
+      // After the agent runs, humanPrompt is cleared
+      expect(actor.getSnapshot().context.humanPrompt).toBeNull();
     });
   });
 
@@ -733,6 +758,112 @@ describe('buildWorkflowMachine', () => {
       await settle();
 
       expect(actor.getSnapshot().context.previousTestCount).toBe(42);
+    });
+
+    it('stores previousAgentOutput (truncated) and previousStateName from agent results', async () => {
+      const result = buildWorkflowMachine(linearDefinition, 'task');
+
+      const testMachine = result.machine.provide({
+        actors: {
+          agentService: fromPromise(async ({ input }: { input: AgentInvokeInput }) => {
+            return makeAgentResult({
+              responseText: `Response from ${input.stateId}`,
+            });
+          }),
+        },
+      });
+
+      const actor = createActor(testMachine);
+      actor.start();
+
+      await settle();
+
+      const ctx = actor.getSnapshot().context;
+      // After plan -> design -> done, the last agent was "design"
+      expect(ctx.previousAgentOutput).toBe('Response from design');
+      expect(ctx.previousStateName).toBe('design');
+    });
+
+    it('increments visitCounts per state on each agent completion', async () => {
+      const result = buildWorkflowMachine(coderCriticDefinition, 'task');
+      let reviewCount = 0;
+
+      const testMachine = result.machine.provide({
+        actors: {
+          agentService: fromPromise(async ({ input }: { input: AgentInvokeInput }) => {
+            if (input.stateId === 'review') {
+              reviewCount++;
+              if (reviewCount === 1) return makeRejectedResult('needs work');
+              return makeAgentResult(); // approve second time
+            }
+            return makeAgentResult();
+          }),
+        },
+      });
+
+      const actor = createActor(testMachine);
+      actor.start();
+
+      await settle();
+
+      const ctx = actor.getSnapshot().context;
+      // implement ran twice (initial + after rejection), review ran twice
+      expect(ctx.visitCounts['implement']).toBe(2);
+      expect(ctx.visitCounts['review']).toBe(2);
+    });
+
+    it('clears humanPrompt after agent completion', async () => {
+      const result = buildWorkflowMachine(gatedDefinition, 'task');
+
+      const testMachine = result.machine.provide({
+        actors: {
+          agentService: fromPromise(async () => makeAgentResult()),
+        },
+      });
+
+      const actor = createActor(testMachine);
+      actor.start();
+
+      await settle();
+      // At gate, send FORCE_REVISION with feedback
+      actor.send({ type: 'HUMAN_FORCE_REVISION', prompt: 'Fix the plan' });
+      await settle();
+
+      // After the agent runs again, humanPrompt should be cleared
+      expect(actor.getSnapshot().context.humanPrompt).toBeNull();
+    });
+  });
+
+  describe('truncateAgentOutput', () => {
+    it('returns short text unchanged', () => {
+      expect(truncateAgentOutput('hello')).toBe('hello');
+    });
+
+    it('returns empty string unchanged', () => {
+      expect(truncateAgentOutput('')).toBe('');
+    });
+
+    it('returns text exactly at 32KB limit unchanged', () => {
+      const text = 'a'.repeat(32_768);
+      expect(truncateAgentOutput(text)).toBe(text);
+    });
+
+    it('truncates text exceeding 32KB and appends notice', () => {
+      const text = 'a'.repeat(40_000);
+      const result = truncateAgentOutput(text);
+
+      expect(Buffer.byteLength(result, 'utf-8')).toBeLessThanOrEqual(32_768);
+      expect(result).toContain('[Output truncated. Read the artifact directories for full details.]');
+      expect(result.length).toBeLessThan(text.length);
+    });
+
+    it('handles multi-byte characters gracefully', () => {
+      // Each emoji is 4 bytes in UTF-8
+      const text = '\u{1F600}'.repeat(10_000); // 40,000 bytes
+      const result = truncateAgentOutput(text);
+
+      expect(Buffer.byteLength(result, 'utf-8')).toBeLessThanOrEqual(32_768);
+      expect(result).toContain('[Output truncated');
     });
   });
 

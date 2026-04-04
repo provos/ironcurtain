@@ -20,6 +20,7 @@ const humanGateTransitionSchema = z.object({
 const agentStateSchema = z.object({
   type: z.literal('agent'),
   persona: z.string(),
+  prompt: z.string().min(1),
   inputs: z.array(z.string()),
   outputs: z.array(z.string()),
   transitions: z.array(agentTransitionSchema),
@@ -60,6 +61,7 @@ const workflowSettingsSchema = z
     maxRounds: z.number().int().positive().optional(),
     gitRepoPath: z.string().optional(),
     maxParallelism: z.number().int().positive().optional(),
+    systemPrompt: z.string().optional(),
   })
   .optional();
 

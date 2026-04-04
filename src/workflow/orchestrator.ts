@@ -539,8 +539,8 @@ export class WorkflowOrchestrator implements WorkflowController {
 
     instance.tab.write(`[agent] Starting "${stateId}" (persona: ${stateConfig.persona})`);
 
-    // Build command from artifacts + context
-    const command = buildAgentCommand(stateConfig, context, instance.artifactDir);
+    // Build command from context (no file I/O)
+    const command = buildAgentCommand(stateId, stateConfig, context);
 
     // Construct SessionMode from definition settings
     const mode: SessionMode =
@@ -560,6 +560,7 @@ export class WorkflowOrchestrator implements WorkflowController {
         mode,
         resumeSessionId: previousSessionId,
         workspacePath: instance.artifactDir,
+        systemPromptAugmentation: definition.settings?.systemPrompt,
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -616,6 +617,7 @@ export class WorkflowOrchestrator implements WorkflowController {
         sessionId: previousSessionId || session.getInfo().id,
         artifacts,
         outputHash,
+        responseText,
       };
     } finally {
       instance.activeSessions.delete(session);

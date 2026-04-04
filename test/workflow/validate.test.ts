@@ -15,6 +15,7 @@ function validDefinition(): Record<string, unknown> {
       plan: {
         type: 'agent',
         persona: 'planner',
+        prompt: 'You are a planner. Create a plan.',
         inputs: [],
         outputs: ['plan'],
         transitions: [{ to: 'review' }],
@@ -22,6 +23,7 @@ function validDefinition(): Record<string, unknown> {
       review: {
         type: 'agent',
         persona: 'reviewer',
+        prompt: 'You are a reviewer. Review the plan.',
         inputs: ['plan'],
         outputs: ['review'],
         transitions: [
@@ -74,6 +76,7 @@ describe('validateDefinition', () => {
           start: {
             type: 'agent',
             persona: 'worker',
+            prompt: 'You are a worker.',
             inputs: [],
             outputs: ['result'],
             transitions: [{ to: 'done' }],
@@ -158,6 +161,7 @@ describe('validateDefinition', () => {
           start: {
             type: 'agent',
             persona: 'worker',
+            prompt: 'You are a worker.',
             inputs: [],
             outputs: [],
             transitions: [{ to: 'start' }],

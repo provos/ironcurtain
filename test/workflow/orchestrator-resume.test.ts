@@ -180,6 +180,7 @@ const linearWorkflowDef: WorkflowDefinition = {
     plan: {
       type: 'agent',
       persona: 'planner',
+      prompt: 'You are a planner.',
       inputs: [],
       outputs: ['plan'],
       transitions: [{ to: 'plan_gate' }],
@@ -197,6 +198,7 @@ const linearWorkflowDef: WorkflowDefinition = {
     implement: {
       type: 'agent',
       persona: 'coder',
+      prompt: 'You are a coder.',
       inputs: ['plan'],
       outputs: ['code'],
       transitions: [{ to: 'review' }],
@@ -204,6 +206,7 @@ const linearWorkflowDef: WorkflowDefinition = {
     review: {
       type: 'agent',
       persona: 'reviewer',
+      prompt: 'You are a reviewer.',
       inputs: ['code'],
       outputs: ['reviews'],
       transitions: [
@@ -225,6 +228,7 @@ const simpleAgentDef: WorkflowDefinition = {
     implement: {
       type: 'agent',
       persona: 'coder',
+      prompt: 'You are a coder.',
       inputs: [],
       outputs: ['code'],
       transitions: [{ to: 'done' }],
@@ -246,6 +250,7 @@ const agentWithErrorGateDef: WorkflowDefinition = {
     implement: {
       type: 'agent',
       persona: 'coder',
+      prompt: 'You are a coder.',
       inputs: [],
       outputs: ['code'],
       transitions: [{ to: 'error_gate' }],
@@ -275,6 +280,7 @@ const loopWithErrorGateDef: WorkflowDefinition = {
     implement: {
       type: 'agent',
       persona: 'coder',
+      prompt: 'You are a coder.',
       inputs: [],
       outputs: ['code'],
       transitions: [{ to: 'review' }],
@@ -282,6 +288,7 @@ const loopWithErrorGateDef: WorkflowDefinition = {
     review: {
       type: 'agent',
       persona: 'reviewer',
+      prompt: 'You are a reviewer.',
       inputs: ['code'],
       outputs: ['reviews'],
       transitions: [
@@ -714,6 +721,9 @@ describe('WorkflowOrchestrator checkpoint + resume', () => {
           flaggedForReview: false,
           lastError: null,
           sessionsByRole: {},
+          previousAgentOutput: null,
+          previousStateName: null,
+          visitCounts: {},
         },
         timestamp: new Date().toISOString(),
         transitionHistory: [],
@@ -822,6 +832,9 @@ describe('WorkflowOrchestrator checkpoint + resume', () => {
         flaggedForReview: false,
         lastError: 'crash',
         sessionsByRole: {},
+        previousAgentOutput: null,
+        previousStateName: null,
+        visitCounts: {},
       },
       timestamp: new Date().toISOString(),
       transitionHistory: [],
@@ -887,6 +900,9 @@ describe('WorkflowOrchestrator checkpoint + resume', () => {
         flaggedForReview: false,
         lastError: null,
         sessionsByRole: {},
+        previousAgentOutput: null,
+        previousStateName: null,
+        visitCounts: {},
       },
       timestamp: new Date().toISOString(),
       transitionHistory: [
@@ -969,6 +985,9 @@ describe('WorkflowOrchestrator checkpoint + resume', () => {
         flaggedForReview: false,
         lastError: null,
         sessionsByRole: {},
+        previousAgentOutput: null,
+        previousStateName: null,
+        visitCounts: {},
       },
       timestamp: new Date().toISOString(),
       transitionHistory: [],

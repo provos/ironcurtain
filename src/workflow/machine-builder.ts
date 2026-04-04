@@ -30,6 +30,8 @@ export interface AgentInvokeResult {
   readonly artifacts: Record<string, string>;
   /** SHA-256 of output artifacts, computed by the orchestrator. */
   readonly outputHash: string;
+  /** Raw response text from session.sendMessage(). */
+  readonly responseText: string;
 }
 
 /** Input provided to each invoked deterministic service. */
@@ -76,6 +78,29 @@ function extractInvokeResult(event: { output?: unknown }): AgentInvokeResult | u
 }
 
 // ---------------------------------------------------------------------------
+// Agent output truncation
+// ---------------------------------------------------------------------------
+
+const MAX_AGENT_OUTPUT_BYTES = 32_768;
+const TRUNCATION_NOTICE = '\n\n[Output truncated. Read the artifact directories for full details.]';
+
+/**
+ * Truncates agent response text to stay within the 32KB limit.
+ * Exported for testing.
+ */
+export function truncateAgentOutput(text: string): string {
+  if (Buffer.byteLength(text, 'utf-8') <= MAX_AGENT_OUTPUT_BYTES) {
+    return text;
+  }
+  const budget = MAX_AGENT_OUTPUT_BYTES - Buffer.byteLength(TRUNCATION_NOTICE, 'utf-8');
+  let truncated = text;
+  while (Buffer.byteLength(truncated, 'utf-8') > budget) {
+    truncated = truncated.slice(0, Math.floor(truncated.length * 0.9));
+  }
+  return truncated + TRUNCATION_NOTICE;
+}
+
+// ---------------------------------------------------------------------------
 // Initial context factory
 // ---------------------------------------------------------------------------
 
@@ -98,6 +123,9 @@ export function createInitialContext(definition: WorkflowDefinition): Omit<Workf
     flaggedForReview: false,
     lastError: null,
     sessionsByRole: {},
+    previousAgentOutput: null,
+    previousStateName: null,
+    visitCounts: {},
   };
 }
 
@@ -331,6 +359,13 @@ export function buildWorkflowMachine(definition: WorkflowDefinition, taskDescrip
             [stateId]: result.sessionId,
           },
           totalTokens: context.totalTokens,
+          previousAgentOutput: truncateAgentOutput(result.responseText),
+          previousStateName: stateId,
+          visitCounts: {
+            ...context.visitCounts,
+            [stateId]: (context.visitCounts[stateId] ?? 0) + 1,
+          },
+          humanPrompt: null,
         };
       }),
       updateContextFromDeterministicResult: assign(({ context, event }) => {
