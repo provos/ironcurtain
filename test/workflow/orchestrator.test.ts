@@ -19,6 +19,7 @@ import {
   type WorkflowTabHandle,
   type WorkflowLifecycleEvent,
 } from '../../src/workflow/orchestrator.js';
+import { FileCheckpointStore } from '../../src/workflow/checkpoint.js';
 
 // ---------------------------------------------------------------------------
 // MockSession
@@ -323,6 +324,12 @@ function createMockTab(): WorkflowTabHandle {
   };
 }
 
+function createCheckpointStore(tmpDir: string): FileCheckpointStore {
+  // Use a sibling directory to avoid interfering with findWorkflowDir()
+  const baseName = resolve(tmpDir).split('/').pop()!;
+  return new FileCheckpointStore(resolve(tmpDir, '..', `${baseName}-ckpt`));
+}
+
 function createDeps(tmpDir: string, overrides: Partial<WorkflowOrchestratorDeps> = {}): WorkflowOrchestratorDeps {
   return {
     createSession: vi.fn(async () => new MockSession({ responses: [] })),
@@ -330,6 +337,7 @@ function createDeps(tmpDir: string, overrides: Partial<WorkflowOrchestratorDeps>
     raiseGate: vi.fn(),
     dismissGate: vi.fn(),
     baseDir: tmpDir,
+    checkpointStore: createCheckpointStore(tmpDir),
     ...overrides,
   };
 }
@@ -386,6 +394,10 @@ describe('WorkflowOrchestrator', () => {
       await activeOrchestrator.shutdownAll();
     }
     rmSync(tmpDir, { recursive: true, force: true });
+    // Clean up sibling checkpoint directory
+    const baseName = resolve(tmpDir).split('/').pop()!;
+    const ckptDir = resolve(tmpDir, '..', `${baseName}-ckpt`);
+    rmSync(ckptDir, { recursive: true, force: true });
   });
 
   // -----------------------------------------------------------------------

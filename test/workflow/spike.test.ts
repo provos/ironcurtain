@@ -14,6 +14,7 @@ import type {
 } from '../../src/session/types.js';
 import type { Session } from '../../src/session/types.js';
 import type { WorkflowId, HumanGateRequest } from '../../src/workflow/types.js';
+import { FileCheckpointStore } from '../../src/workflow/checkpoint.js';
 import {
   WorkflowOrchestrator,
   type WorkflowOrchestratorDeps,
@@ -218,6 +219,7 @@ describe('workflow-spike demo definition', () => {
       raiseGate: (gate) => raisedGates.push(gate),
       dismissGate: () => {},
       baseDir: tmpDir,
+      checkpointStore: new FileCheckpointStore(resolve(tmpDir, '..', `${resolve(tmpDir).split('/').pop()!}-ckpt`)),
     };
 
     orchestrator = new WorkflowOrchestrator(deps);
@@ -328,6 +330,7 @@ describe('workflow-spike demo definition', () => {
       raiseGate: (gate) => raisedGates.push(gate),
       dismissGate: () => {},
       baseDir: tmpDir,
+      checkpointStore: new FileCheckpointStore(resolve(tmpDir, '..', `${resolve(tmpDir).split('/').pop()!}-ckpt`)),
     };
 
     orchestrator = new WorkflowOrchestrator(deps);
@@ -380,6 +383,7 @@ describe('workflow-spike demo definition', () => {
       raiseGate: (gate) => raisedGates.push(gate),
       dismissGate: () => {},
       baseDir: tmpDir,
+      checkpointStore: new FileCheckpointStore(resolve(tmpDir, '..', `${resolve(tmpDir).split('/').pop()!}-ckpt`)),
     };
 
     orchestrator = new WorkflowOrchestrator(deps);

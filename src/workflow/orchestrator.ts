@@ -3,13 +3,15 @@ import { resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { execFile as execFileCb } from 'node:child_process';
 import { promisify } from 'node:util';
-import { createActor, fromPromise, type AnyActorRef } from 'xstate';
+import { createActor, fromPromise, type AnyActorRef, type Snapshot } from 'xstate';
 import type {
   WorkflowId,
   WorkflowDefinition,
   WorkflowContext,
   WorkflowStatus,
   WorkflowResult,
+  WorkflowCheckpoint,
+  TransitionRecord,
   HumanGateRequest,
   HumanGateEvent,
   HumanGateStateDefinition,
@@ -25,6 +27,7 @@ import {
   type DeterministicInvokeInput,
   type DeterministicInvokeResult,
 } from './machine-builder.js';
+import type { CheckpointStore } from './checkpoint.js';
 import { parseAgentStatus, buildStatusBlockReprompt } from './status-parser.js';
 import { buildAgentCommand, buildArtifactReprompt } from './prompt-builder.js';
 import { collectFilesRecursive, hasAnyFiles } from './artifacts.js';
@@ -68,6 +71,9 @@ export interface WorkflowOrchestratorDeps {
 
   /** Base directory for workflow artifacts and checkpoints. */
   readonly baseDir: string;
+
+  /** Persistent checkpoint store for workflow resume. */
+  readonly checkpointStore: CheckpointStore;
 }
 
 /** Lifecycle events emitted by the orchestrator. */
@@ -81,6 +87,8 @@ export type WorkflowLifecycleEvent =
 /** The narrow controller interface exposed to the mux. */
 export interface WorkflowController {
   start(definitionPath: string, taskDescription: string): Promise<WorkflowId>;
+  resume(workflowId: WorkflowId): Promise<void>;
+  listResumable(): WorkflowId[];
   getStatus(id: WorkflowId): WorkflowStatus | undefined;
   listActive(): readonly WorkflowId[];
   resolveGate(id: WorkflowId, event: HumanGateEvent): void;
@@ -96,12 +104,15 @@ export interface WorkflowController {
 interface WorkflowInstance {
   readonly id: WorkflowId;
   readonly definition: WorkflowDefinition;
+  readonly definitionPath: string;
   readonly actor: AnyActorRef;
   readonly gateStateNames: ReadonlySet<string>;
   readonly terminalStateNames: ReadonlySet<string>;
   readonly activeSessions: Set<Session>;
   readonly artifactDir: string;
   readonly tab: WorkflowTabHandle;
+  /** Accumulated transition records for checkpointing. */
+  readonly transitionHistory: TransitionRecord[];
   /** Tracks the most recently detected state for status queries. */
   currentState: string;
   /** Set when the workflow reaches a terminal state. */
@@ -110,6 +121,8 @@ interface WorkflowInstance {
   activeGateId?: string;
   /** Tracks the last error surfaced to avoid emitting duplicate lifecycle events. */
   lastSurfacedError?: string;
+  /** Timestamp when the current state was entered, for transition duration tracking. */
+  stateEnteredAt?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -142,31 +155,7 @@ export class WorkflowOrchestrator implements WorkflowController {
     const { machine, gateStateNames, terminalStateNames } = buildWorkflowMachine(definition, taskDescription);
 
     // Provide concrete service implementations
-    const providedMachine = machine.provide({
-      actors: {
-        agentService: fromPromise<AgentInvokeResult, AgentInvokeInput>(async ({ input }) => {
-          try {
-            return await this.executeAgentState(workflowId, input, definition);
-          } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            // Use writeStderr because console.error may be hijacked by
-            // logger.setup() inside createSession, redirecting to a log file.
-            writeStderr(`[workflow] agentService invoke rejected for "${input.stateId}": ${msg}`);
-            throw err;
-          }
-        }),
-        deterministicService: fromPromise<DeterministicInvokeResult, DeterministicInvokeInput>(async ({ input }) => {
-          try {
-            return await this.executeDeterministicState(input);
-          } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            writeStderr(`[workflow] deterministicService invoke rejected for "${input.stateId}": ${msg}`);
-            throw err;
-          }
-        }),
-      },
-    });
-
+    const providedMachine = this.provideActors(machine, workflowId, definition);
     const actor = createActor(providedMachine);
 
     // Create the workflow tab
@@ -175,67 +164,78 @@ export class WorkflowOrchestrator implements WorkflowController {
     const instance: WorkflowInstance = {
       id: workflowId,
       definition,
+      definitionPath,
       actor,
       gateStateNames,
       terminalStateNames,
       activeSessions: new Set(),
       artifactDir,
       tab,
+      transitionHistory: [],
       currentState: definition.initial,
+      stateEnteredAt: Date.now(),
     };
 
     this.workflows.set(workflowId, instance);
-
-    // Subscribe to snapshot changes for gate detection and lifecycle events
-    actor.subscribe((snapshot) => {
-      const stateValue = String(snapshot.value);
-      const previousState = instance.currentState;
-      instance.currentState = stateValue;
-      tab.write(`[state] ${stateValue}`);
-
-      // Surface errors from invoke failures (storeError action sets lastError)
-      const ctx = snapshot.context as WorkflowContext;
-      if (ctx.lastError && ctx.lastError !== instance.lastSurfacedError) {
-        instance.lastSurfacedError = ctx.lastError;
-        writeStderr(`[workflow] Error in context after state "${stateValue}": ${ctx.lastError}`);
-        tab.write(`[error] Agent invoke failed: ${ctx.lastError}`);
-        this.emitLifecycleEvent({
-          kind: 'failed',
-          workflowId,
-          error: `Agent "${previousState}" failed: ${ctx.lastError}`,
-        });
-      } else if (!ctx.lastError && instance.lastSurfacedError) {
-        // Error was cleared (e.g., human gate resolved). Reset tracking
-        // so the same error message can be surfaced again on retry.
-        instance.lastSurfacedError = undefined;
-      }
-
-      // Check if we entered a gate state
-      for (const gateName of gateStateNames) {
-        if (snapshot.matches(gateName)) {
-          const stateDef = definition.states[gateName];
-          if (stateDef.type === 'human_gate') {
-            this.handleGateEntry(workflowId, gateName, stateDef);
-          }
-          break;
-        }
-      }
-
-      // Emit lifecycle event
-      this.emitLifecycleEvent({
-        kind: 'state_entered',
-        workflowId,
-        state: stateValue,
-      });
-
-      // Check for terminal states
-      if (snapshot.status === 'done') {
-        this.handleWorkflowComplete(workflowId, snapshot.context as WorkflowContext);
-      }
-    });
-
+    this.subscribeToActor(instance);
     actor.start();
     return Promise.resolve(workflowId);
+  }
+
+  resume(workflowId: WorkflowId): Promise<void> {
+    const checkpoint = this.deps.checkpointStore.load(workflowId);
+    if (!checkpoint) {
+      return Promise.reject(new Error(`No checkpoint found for workflow ${workflowId}`));
+    }
+
+    // Read the definition from the checkpointed path
+    const raw = JSON.parse(readFileSync(checkpoint.definitionPath, 'utf-8')) as unknown;
+    const definition = validateDefinition(raw);
+
+    // Rebuild the machine with the original task description from context
+    const { machine, gateStateNames, terminalStateNames } = buildWorkflowMachine(
+      definition,
+      checkpoint.context.taskDescription,
+    );
+
+    const providedMachine = this.provideActors(machine, workflowId, definition);
+
+    // Restore actor from checkpoint snapshot
+    const restoredSnapshot = providedMachine.resolveState({
+      value: checkpoint.machineState as string,
+      context: checkpoint.context,
+    });
+    const actor = createActor(providedMachine, { snapshot: restoredSnapshot as Snapshot<unknown> });
+
+    // Reuse the existing artifact directory
+    const artifactDir = resolve(this.deps.baseDir, workflowId, 'artifacts');
+    const tab = this.deps.createWorkflowTab(definition.name, workflowId);
+
+    const instance: WorkflowInstance = {
+      id: workflowId,
+      definition,
+      definitionPath: checkpoint.definitionPath,
+      actor,
+      gateStateNames,
+      terminalStateNames,
+      activeSessions: new Set(),
+      artifactDir,
+      tab,
+      transitionHistory: [...checkpoint.transitionHistory],
+      currentState: String(checkpoint.machineState),
+      stateEnteredAt: Date.now(),
+    };
+
+    this.workflows.set(workflowId, instance);
+    this.subscribeToActor(instance);
+    actor.start();
+    return Promise.resolve();
+  }
+
+  listResumable(): WorkflowId[] {
+    const allCheckpointed = this.deps.checkpointStore.listAll();
+    const activeIds = new Set(this.listActive());
+    return allCheckpointed.filter((id) => !activeIds.has(id));
   }
 
   getStatus(id: WorkflowId): WorkflowStatus | undefined {
@@ -318,6 +318,14 @@ export class WorkflowOrchestrator implements WorkflowController {
       reason: 'Workflow aborted by user',
     };
 
+    // Remove checkpoint on abort
+    try {
+      this.deps.checkpointStore.remove(id);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      writeStderr(`[workflow] Failed to remove checkpoint on abort for ${id}: ${msg}`);
+    }
+
     // Clean up tab
     instance.tab.write('[aborted]');
     instance.tab.close();
@@ -336,6 +344,134 @@ export class WorkflowOrchestrator implements WorkflowController {
   async shutdownAll(): Promise<void> {
     const ids = [...this.workflows.keys()];
     await Promise.allSettled(ids.map((id) => this.abort(id)));
+  }
+
+  // -----------------------------------------------------------------------
+  // Actor setup helpers
+  // -----------------------------------------------------------------------
+
+  /** Injects concrete agent/deterministic service implementations into the machine. */
+  private provideActors(
+    machine: ReturnType<typeof buildWorkflowMachine>['machine'],
+    workflowId: WorkflowId,
+    definition: WorkflowDefinition,
+  ): ReturnType<typeof buildWorkflowMachine>['machine'] {
+    return machine.provide({
+      actors: {
+        agentService: fromPromise<AgentInvokeResult, AgentInvokeInput>(async ({ input }) => {
+          try {
+            return await this.executeAgentState(workflowId, input, definition);
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            writeStderr(`[workflow] agentService invoke rejected for "${input.stateId}": ${msg}`);
+            throw err;
+          }
+        }),
+        deterministicService: fromPromise<DeterministicInvokeResult, DeterministicInvokeInput>(async ({ input }) => {
+          try {
+            return await this.executeDeterministicState(input);
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            writeStderr(`[workflow] deterministicService invoke rejected for "${input.stateId}": ${msg}`);
+            throw err;
+          }
+        }),
+      },
+    }) as ReturnType<typeof buildWorkflowMachine>['machine'];
+  }
+
+  /** Subscribes to actor snapshot changes for lifecycle events, gates, and checkpointing. */
+  private subscribeToActor(instance: WorkflowInstance): void {
+    const { actor, gateStateNames, definition, id: workflowId } = instance;
+
+    actor.subscribe((rawSnapshot: unknown) => {
+      const snapshot = rawSnapshot as {
+        value: unknown;
+        context: WorkflowContext;
+        status: string;
+        matches: (state: string) => boolean;
+      };
+      const stateValue = String(snapshot.value);
+      const previousState = instance.currentState;
+      const now = Date.now();
+
+      // Record transition if state actually changed
+      if (stateValue !== previousState) {
+        const duration = instance.stateEnteredAt ? now - instance.stateEnteredAt : 0;
+        instance.transitionHistory.push({
+          from: previousState,
+          to: stateValue,
+          event: 'transition',
+          timestamp: new Date(now).toISOString(),
+          duration_ms: duration,
+        });
+        instance.stateEnteredAt = now;
+      }
+
+      instance.currentState = stateValue;
+      instance.tab.write(`[state] ${stateValue}`);
+
+      // Surface errors from invoke failures (storeError action sets lastError)
+      const ctx = snapshot.context;
+      if (ctx.lastError && ctx.lastError !== instance.lastSurfacedError) {
+        instance.lastSurfacedError = ctx.lastError;
+        writeStderr(`[workflow] Error in context after state "${stateValue}": ${ctx.lastError}`);
+        instance.tab.write(`[error] Agent invoke failed: ${ctx.lastError}`);
+        this.emitLifecycleEvent({
+          kind: 'failed',
+          workflowId,
+          error: `Agent "${previousState}" failed: ${ctx.lastError}`,
+        });
+      } else if (!ctx.lastError && instance.lastSurfacedError) {
+        instance.lastSurfacedError = undefined;
+      }
+
+      // Check if we entered a gate state
+      for (const gateName of gateStateNames) {
+        if (snapshot.matches(gateName)) {
+          const stateDef = definition.states[gateName];
+          if (stateDef.type === 'human_gate') {
+            this.handleGateEntry(workflowId, gateName, stateDef);
+          }
+          break;
+        }
+      }
+
+      // Emit lifecycle event
+      this.emitLifecycleEvent({
+        kind: 'state_entered',
+        workflowId,
+        state: stateValue,
+      });
+
+      // Save checkpoint on every state change
+      this.saveCheckpoint(instance, snapshot);
+
+      // Check for terminal states
+      if (snapshot.status === 'done') {
+        this.handleWorkflowComplete(workflowId, snapshot.context);
+      }
+    });
+  }
+
+  // -----------------------------------------------------------------------
+  // Checkpointing
+  // -----------------------------------------------------------------------
+
+  private saveCheckpoint(instance: WorkflowInstance, snapshot: { value: unknown; context: unknown }): void {
+    const checkpoint: WorkflowCheckpoint = {
+      machineState: snapshot.value,
+      context: snapshot.context as WorkflowContext,
+      timestamp: new Date().toISOString(),
+      transitionHistory: [...instance.transitionHistory],
+      definitionPath: instance.definitionPath,
+    };
+    try {
+      this.deps.checkpointStore.save(instance.id, checkpoint);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      writeStderr(`[workflow] Failed to save checkpoint for ${instance.id}: ${msg}`);
+    }
   }
 
   // -----------------------------------------------------------------------
@@ -545,6 +681,14 @@ export class WorkflowOrchestrator implements WorkflowController {
         phase: 'completed',
         result,
       };
+    }
+
+    // Remove checkpoint on terminal completion
+    try {
+      this.deps.checkpointStore.remove(workflowId);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      writeStderr(`[workflow] Failed to remove checkpoint for ${workflowId}: ${msg}`);
     }
 
     instance.tab.write(`[done] ${instance.finalStatus.phase}`);
