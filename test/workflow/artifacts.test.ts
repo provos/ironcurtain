@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync, symlinkSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { FileArtifactManager } from '../../src/workflow/artifacts.js';
+import { FileArtifactManager, collectFilesRecursive, hasAnyFiles } from '../../src/workflow/artifacts.js';
 import type { WorkflowId } from '../../src/workflow/types.js';
 import { createWorkflowId } from '../../src/workflow/types.js';
 
@@ -214,5 +214,180 @@ describe('FileArtifactManager', () => {
       const hash2 = manager.computeHash(workflowId, ['beta', 'alpha']);
       expect(hash1).toBe(hash2);
     });
+
+    it('includes nested files in hash computation', () => {
+      const artifactDir = manager.initialize(workflowId);
+      const codeDir = resolve(artifactDir, 'code');
+      mkdirSync(resolve(codeDir, 'src'), { recursive: true });
+      writeFileSync(resolve(codeDir, 'index.ts'), 'root file');
+      writeFileSync(resolve(codeDir, 'src', 'main.ts'), 'nested file');
+
+      const hash1 = manager.computeHash(workflowId, ['code']);
+
+      // Changing a nested file should change the hash
+      writeFileSync(resolve(codeDir, 'src', 'main.ts'), 'modified nested file');
+      const hash2 = manager.computeHash(workflowId, ['code']);
+
+      expect(hash1).not.toBe(hash2);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Nested directory support
+  // -------------------------------------------------------------------------
+
+  describe('nested directory support', () => {
+    it('findMissing detects files in subdirectories', () => {
+      const artifactDir = manager.initialize(workflowId);
+      const codeDir = resolve(artifactDir, 'code');
+      mkdirSync(resolve(codeDir, 'src'), { recursive: true });
+      writeFileSync(resolve(codeDir, 'src', 'main.ts'), 'code');
+
+      expect(manager.findMissing(workflowId, ['code'])).toEqual([]);
+    });
+
+    it('findMissing treats directories with only empty subdirs as missing', () => {
+      const artifactDir = manager.initialize(workflowId);
+      const codeDir = resolve(artifactDir, 'code');
+      mkdirSync(resolve(codeDir, 'src', 'empty'), { recursive: true });
+
+      expect(manager.findMissing(workflowId, ['code'])).toEqual(['code']);
+    });
+
+    it('listArtifactFiles returns relative paths for nested files', () => {
+      const artifactDir = manager.initialize(workflowId);
+      const codeDir = resolve(artifactDir, 'code');
+      mkdirSync(resolve(codeDir, 'src'), { recursive: true });
+      mkdirSync(resolve(codeDir, 'tests'), { recursive: true });
+      writeFileSync(resolve(codeDir, 'index.ts'), 'root');
+      writeFileSync(resolve(codeDir, 'src', 'main.ts'), 'src');
+      writeFileSync(resolve(codeDir, 'tests', 'main.test.ts'), 'test');
+
+      const files = manager.listArtifactFiles(workflowId, 'code');
+      expect(files).toEqual(['index.ts', 'src/main.ts', 'tests/main.test.ts']);
+    });
+
+    it('read falls back to first file by sorted relative path in nested dirs', () => {
+      const artifactDir = manager.initialize(workflowId);
+      const codeDir = resolve(artifactDir, 'code');
+      mkdirSync(resolve(codeDir, 'src'), { recursive: true });
+      writeFileSync(resolve(codeDir, 'src', 'alpha.ts'), 'alpha content');
+
+      const content = manager.read(workflowId, 'code');
+      expect(content).toBe('alpha content');
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Shared filesystem helpers
+// ---------------------------------------------------------------------------
+
+describe('collectFilesRecursive', () => {
+  let testDir: string;
+
+  beforeEach(() => {
+    testDir = resolve('/tmp', `ironcurtain-collect-test-${process.pid}-${Date.now()}`);
+    mkdirSync(testDir, { recursive: true });
+  });
+
+  afterEach(() => {
+    rmSync(testDir, { recursive: true, force: true });
+  });
+
+  it('returns empty array for nonexistent directory', () => {
+    expect(collectFilesRecursive(resolve(testDir, 'nope'))).toEqual([]);
+  });
+
+  it('returns empty array for empty directory', () => {
+    expect(collectFilesRecursive(testDir)).toEqual([]);
+  });
+
+  it('collects flat files', () => {
+    writeFileSync(resolve(testDir, 'a.txt'), 'a');
+    writeFileSync(resolve(testDir, 'b.txt'), 'b');
+
+    const files = collectFilesRecursive(testDir);
+    expect(files.map((f) => f.relativePath)).toEqual(['a.txt', 'b.txt']);
+  });
+
+  it('collects files from nested directories', () => {
+    mkdirSync(resolve(testDir, 'src', 'utils'), { recursive: true });
+    writeFileSync(resolve(testDir, 'index.ts'), 'root');
+    writeFileSync(resolve(testDir, 'src', 'main.ts'), 'main');
+    writeFileSync(resolve(testDir, 'src', 'utils', 'helper.ts'), 'helper');
+
+    const files = collectFilesRecursive(testDir);
+    expect(files.map((f) => f.relativePath)).toEqual(['index.ts', 'src/main.ts', 'src/utils/helper.ts']);
+  });
+
+  it('sorts results deterministically by relative path', () => {
+    mkdirSync(resolve(testDir, 'z'), { recursive: true });
+    mkdirSync(resolve(testDir, 'a'), { recursive: true });
+    writeFileSync(resolve(testDir, 'z', 'file.ts'), 'z');
+    writeFileSync(resolve(testDir, 'a', 'file.ts'), 'a');
+    writeFileSync(resolve(testDir, 'middle.ts'), 'm');
+
+    const paths = collectFilesRecursive(testDir).map((f) => f.relativePath);
+    expect(paths).toEqual(['a/file.ts', 'middle.ts', 'z/file.ts']);
+  });
+
+  it('skips symlinks', () => {
+    writeFileSync(resolve(testDir, 'real.txt'), 'real');
+    symlinkSync(resolve(testDir, 'real.txt'), resolve(testDir, 'link.txt'));
+
+    const files = collectFilesRecursive(testDir);
+    expect(files.map((f) => f.relativePath)).toEqual(['real.txt']);
+  });
+
+  it('skips directories containing only empty subdirs', () => {
+    mkdirSync(resolve(testDir, 'empty', 'nested'), { recursive: true });
+
+    expect(collectFilesRecursive(testDir)).toEqual([]);
+  });
+
+  it('provides correct fullPath for each file', () => {
+    mkdirSync(resolve(testDir, 'sub'), { recursive: true });
+    writeFileSync(resolve(testDir, 'sub', 'file.txt'), 'content');
+
+    const files = collectFilesRecursive(testDir);
+    expect(files[0].fullPath).toBe(resolve(testDir, 'sub', 'file.txt'));
+  });
+});
+
+describe('hasAnyFiles', () => {
+  let testDir: string;
+
+  beforeEach(() => {
+    testDir = resolve('/tmp', `ironcurtain-hasfiles-test-${process.pid}-${Date.now()}`);
+    mkdirSync(testDir, { recursive: true });
+  });
+
+  afterEach(() => {
+    rmSync(testDir, { recursive: true, force: true });
+  });
+
+  it('returns false for nonexistent directory', () => {
+    expect(hasAnyFiles(resolve(testDir, 'nope'))).toBe(false);
+  });
+
+  it('returns false for empty directory', () => {
+    expect(hasAnyFiles(testDir)).toBe(false);
+  });
+
+  it('returns false for directory with only empty subdirs', () => {
+    mkdirSync(resolve(testDir, 'a', 'b', 'c'), { recursive: true });
+    expect(hasAnyFiles(testDir)).toBe(false);
+  });
+
+  it('returns true for directory with a flat file', () => {
+    writeFileSync(resolve(testDir, 'file.txt'), 'content');
+    expect(hasAnyFiles(testDir)).toBe(true);
+  });
+
+  it('returns true for deeply nested file', () => {
+    mkdirSync(resolve(testDir, 'a', 'b', 'c'), { recursive: true });
+    writeFileSync(resolve(testDir, 'a', 'b', 'c', 'deep.txt'), 'deep');
+    expect(hasAnyFiles(testDir)).toBe(true);
   });
 });

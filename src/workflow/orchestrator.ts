@@ -1,4 +1,4 @@
-import { readFileSync, existsSync, readdirSync, mkdirSync, writeFileSync } from 'node:fs';
+import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { execFile as execFileCb } from 'node:child_process';
@@ -27,6 +27,7 @@ import {
 } from './machine-builder.js';
 import { parseAgentStatus, buildStatusBlockReprompt } from './status-parser.js';
 import { buildAgentCommand, buildArtifactReprompt } from './prompt-builder.js';
+import { collectFilesRecursive, hasAnyFiles } from './artifacts.js';
 import { validateDefinition } from './validate.js';
 
 const execFileAsync = promisify(execFileCb);
@@ -563,7 +564,7 @@ export class WorkflowOrchestrator implements WorkflowController {
     const missing: string[] = [];
     for (const output of stateConfig.outputs) {
       const dir = resolve(artifactDir, output);
-      if (!existsSync(dir) || readdirSync(dir).length === 0) {
+      if (!hasAnyFiles(dir)) {
         missing.push(output);
       }
     }
@@ -592,18 +593,16 @@ export class WorkflowOrchestrator implements WorkflowController {
 
 /**
  * Computes a SHA-256 hash of all files in the output artifact directories.
- * Deterministic: files are sorted alphabetically within each directory.
+ * Recursively walks subdirectories. Deterministic: files are sorted by relative path.
  */
 export function computeOutputHash(outputNames: readonly string[], artifactDir: string): string {
   const hash = createHash('sha256');
   for (const output of outputNames) {
     const dir = resolve(artifactDir, output);
-    if (!existsSync(dir)) continue;
-    const files = readdirSync(dir).sort();
+    const files = collectFilesRecursive(dir);
     for (const file of files) {
-      const content = readFileSync(resolve(dir, file));
-      hash.update(file);
-      hash.update(content);
+      hash.update(file.relativePath);
+      hash.update(readFileSync(file.fullPath));
     }
   }
   return hash.digest('hex');

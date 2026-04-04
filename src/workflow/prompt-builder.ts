@@ -1,26 +1,27 @@
-import { readFileSync, existsSync, readdirSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { AgentStateDefinition, WorkflowContext } from './types.js';
 import { STATUS_BLOCK_INSTRUCTIONS } from './status-parser.js';
+import { collectFilesRecursive } from './artifacts.js';
 
 // ---------------------------------------------------------------------------
 // Artifact reading helpers
 // ---------------------------------------------------------------------------
 
 /**
- * Reads all files from an artifact directory and returns their concatenated
- * content with headers. Returns empty string if the directory does not exist.
+ * Reads all files from an artifact directory (recursively) and returns their
+ * concatenated content with headers. Returns empty string if the directory
+ * does not exist or contains no files.
  */
 function readArtifactContent(artifactDir: string, artifactName: string): string {
   const dir = resolve(artifactDir, artifactName);
-  if (!existsSync(dir)) return '';
+  const files = collectFilesRecursive(dir);
+  if (files.length === 0) return '';
 
-  const files = readdirSync(dir).sort();
   const parts: string[] = [];
   for (const file of files) {
-    const filePath = resolve(dir, file);
-    const content = readFileSync(filePath, 'utf-8');
-    parts.push(`### ${artifactName}/${file}\n\n${content}`);
+    const content = readFileSync(file.fullPath, 'utf-8');
+    parts.push(`### ${artifactName}/${file.relativePath}\n\n${content}`);
   }
   return parts.join('\n\n');
 }

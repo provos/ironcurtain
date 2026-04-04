@@ -1,7 +1,70 @@
-import { readFileSync, mkdirSync, readdirSync, existsSync, statSync } from 'node:fs';
-import { resolve, join } from 'node:path';
+import { readFileSync, mkdirSync, readdirSync, existsSync, lstatSync } from 'node:fs';
+import { resolve, relative } from 'node:path';
 import { createHash } from 'node:crypto';
 import type { WorkflowId } from './types.js';
+
+// ---------------------------------------------------------------------------
+// Shared filesystem helpers (used by orchestrator, prompt-builder, and manager)
+// ---------------------------------------------------------------------------
+
+export interface CollectedFile {
+  /** Path relative to the root directory, using forward slashes. */
+  readonly relativePath: string;
+  /** Absolute path on disk. */
+  readonly fullPath: string;
+}
+
+/**
+ * Recursively walks a directory and returns all regular files (not directories
+ * or symlinks). Results are sorted by relative path for deterministic ordering.
+ */
+export function collectFilesRecursive(dir: string): CollectedFile[] {
+  if (!existsSync(dir)) return [];
+
+  const results: CollectedFile[] = [];
+  walkDir(dir, dir, results);
+  results.sort((a, b) => a.relativePath.localeCompare(b.relativePath));
+  return results;
+}
+
+function walkDir(rootDir: string, currentDir: string, results: CollectedFile[]): void {
+  const entries = readdirSync(currentDir);
+  for (const entry of entries) {
+    const fullPath = resolve(currentDir, entry);
+    // Skip symlinks for safety
+    const lstats = lstatSync(fullPath);
+    if (lstats.isSymbolicLink()) continue;
+    if (lstats.isDirectory()) {
+      walkDir(rootDir, fullPath, results);
+    } else if (lstats.isFile()) {
+      results.push({
+        relativePath: relative(rootDir, fullPath),
+        fullPath,
+      });
+    }
+  }
+}
+
+/**
+ * Recursively checks whether a directory contains any regular files.
+ * More efficient than collectFilesRecursive when you only need a boolean.
+ */
+export function hasAnyFiles(dir: string): boolean {
+  if (!existsSync(dir)) return false;
+  return hasAnyFilesInDir(dir);
+}
+
+function hasAnyFilesInDir(currentDir: string): boolean {
+  const entries = readdirSync(currentDir);
+  for (const entry of entries) {
+    const fullPath = resolve(currentDir, entry);
+    const lstats = lstatSync(fullPath);
+    if (lstats.isSymbolicLink()) continue;
+    if (lstats.isFile()) return true;
+    if (lstats.isDirectory() && hasAnyFilesInDir(fullPath)) return true;
+  }
+  return false;
+}
 
 // ---------------------------------------------------------------------------
 // Public interface
@@ -53,22 +116,15 @@ export class FileArtifactManager implements ArtifactManager {
       return readFileSync(conventionPath, 'utf-8');
     }
 
-    const files = readdirSync(dir).filter((f) => {
-      const stat = statSync(resolve(dir, f));
-      return stat.isFile();
-    });
+    const files = collectFilesRecursive(dir);
     if (files.length === 0) return undefined;
 
-    return readFileSync(resolve(dir, files.sort()[0]), 'utf-8');
+    return readFileSync(files[0].fullPath, 'utf-8');
   }
 
   listArtifactFiles(workflowId: WorkflowId, artifactName: string): string[] {
     const dir = resolve(this.artifactDir(workflowId), artifactName);
-    if (!existsSync(dir)) return [];
-
-    return readdirSync(dir)
-      .filter((f) => statSync(resolve(dir, f)).isFile())
-      .sort();
+    return collectFilesRecursive(dir).map((f) => f.relativePath);
   }
 
   findMissing(workflowId: WorkflowId, expectedOutputs: readonly string[]): string[] {
@@ -77,12 +133,7 @@ export class FileArtifactManager implements ArtifactManager {
 
     for (const name of expectedOutputs) {
       const dir = resolve(artifactDir, name);
-      if (!existsSync(dir)) {
-        missing.push(name);
-        continue;
-      }
-      const files = readdirSync(dir).filter((f) => statSync(resolve(dir, f)).isFile());
-      if (files.length === 0) {
+      if (!hasAnyFiles(dir)) {
         missing.push(name);
       }
     }
@@ -96,16 +147,10 @@ export class FileArtifactManager implements ArtifactManager {
 
     for (const name of [...artifactNames].sort()) {
       const dir = resolve(artifactDir, name);
-      if (!existsSync(dir)) continue;
-
-      const files = readdirSync(dir)
-        .filter((f) => statSync(join(dir, f)).isFile())
-        .sort();
-
+      const files = collectFilesRecursive(dir);
       for (const file of files) {
-        const content = readFileSync(resolve(dir, file));
-        hash.update(file);
-        hash.update(content);
+        hash.update(file.relativePath);
+        hash.update(readFileSync(file.fullPath));
       }
     }
 
