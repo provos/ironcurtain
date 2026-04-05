@@ -63,6 +63,10 @@ export class WebUiServer {
   private readonly dispatchCtx: DispatchContext;
   private eventSeq = 0;
   private statusInterval: ReturnType<typeof setInterval> | null = null;
+  private pingInterval: ReturnType<typeof setInterval> | null = null;
+  private orphanTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly aliveClients = new Set<WsWebSocket>();
+  private readonly missedPings = new Map<WsWebSocket, number>();
   private readonly staticRoot: string;
   private readonly staticCache = new Map<string, { content: Buffer; mime: string }>();
 
@@ -113,6 +117,10 @@ export class WebUiServer {
       }
     }, 10_000);
 
+    this.pingInterval = setInterval(() => {
+      this.pingClients();
+    }, 30_000);
+
     const addr = httpServer.address();
     const actualPort = typeof addr === 'object' && addr ? addr.port : this.options.port;
     return `http://${this.options.host}:${actualPort}?token=${this.authToken}`;
@@ -123,6 +131,13 @@ export class WebUiServer {
       clearInterval(this.statusInterval);
       this.statusInterval = null;
     }
+
+    if (this.pingInterval) {
+      clearInterval(this.pingInterval);
+      this.pingInterval = null;
+    }
+
+    this.cancelOrphanTimer();
 
     for (const client of this.clients) {
       client.close(1001, 'Server shutting down');
@@ -157,6 +172,71 @@ export class WebUiServer {
       if (client.readyState === WsWebSocket.OPEN) {
         client.send(data);
       }
+    }
+  }
+
+  // --- Ping/pong heartbeat ---
+
+  private pingClients(): void {
+    for (const client of this.clients) {
+      if (!this.aliveClients.has(client)) {
+        const missed = (this.missedPings.get(client) ?? 0) + 1;
+        if (missed >= 2) {
+          logger.info('[WebUI] Terminating stale client (missed 2 pings)');
+          this.removeClient(client);
+          client.terminate();
+          continue;
+        }
+        this.missedPings.set(client, missed);
+      }
+      this.aliveClients.delete(client);
+      client.ping();
+    }
+    this.startOrphanTimerIfNeeded();
+  }
+
+  private removeClient(ws: WsWebSocket): void {
+    this.clients.delete(ws);
+    this.aliveClients.delete(ws);
+    this.missedPings.delete(ws);
+  }
+
+  // --- Orphan session cleanup ---
+
+  private static readonly ORPHAN_GRACE_MS = 60_000;
+
+  private startOrphanTimerIfNeeded(): void {
+    if (this.orphanTimer) return;
+    if (this.clients.size > 0) return;
+
+    const webSessions = this.options.sessionManager.byKind('web');
+    if (webSessions.length === 0) return;
+
+    logger.info(`[WebUI] No connected clients with ${webSessions.length} web session(s). Starting 60s orphan timer.`);
+    this.orphanTimer = setTimeout(() => {
+      this.orphanTimer = null;
+      this.cleanupOrphanedWebSessions();
+    }, WebUiServer.ORPHAN_GRACE_MS);
+  }
+
+  private cancelOrphanTimer(): void {
+    if (this.orphanTimer) {
+      clearTimeout(this.orphanTimer);
+      this.orphanTimer = null;
+    }
+  }
+
+  private cleanupOrphanedWebSessions(): void {
+    if (this.clients.size > 0) return;
+
+    const webSessions = this.options.sessionManager.byKind('web');
+    if (webSessions.length === 0) return;
+
+    logger.info(`[WebUI] Ending ${webSessions.length} orphaned web session(s).`);
+    for (const managed of webSessions) {
+      this.options.sessionManager.end(managed.label).catch((err: unknown) => {
+        logger.warn(`[WebUI] Error ending orphaned web session #${managed.label}: ${String(err)}`);
+      });
     }
   }
 
@@ -259,7 +339,15 @@ export class WebUiServer {
 
     wss.handleUpgrade(req, socket, head, (ws) => {
       this.clients.add(ws);
+      this.aliveClients.add(ws);
+      this.missedPings.delete(ws);
+      this.cancelOrphanTimer();
       logger.info(`[WebUI] Client connected (${this.clients.size} active)`);
+
+      ws.on('pong', () => {
+        this.aliveClients.add(ws);
+        this.missedPings.delete(ws);
+      });
 
       ws.on('message', (data: Buffer | ArrayBuffer | Buffer[]) => {
         const text = Buffer.isBuffer(data)
@@ -273,13 +361,15 @@ export class WebUiServer {
       });
 
       ws.on('close', () => {
-        this.clients.delete(ws);
+        this.removeClient(ws);
         logger.info(`[WebUI] Client disconnected (${this.clients.size} active)`);
+        this.startOrphanTimerIfNeeded();
       });
 
       ws.on('error', (err) => {
         logger.warn(`[WebUI] WebSocket error: ${err.message}`);
-        this.clients.delete(ws);
+        this.removeClient(ws);
+        this.startOrphanTimerIfNeeded();
       });
     });
   }

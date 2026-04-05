@@ -560,36 +560,28 @@ export class SignalBotDaemon {
       return true;
     }
 
-    if (target.escalationResolving) {
-      this.sendSignalMessage(
-        prefixWithLabel('Escalation is being resolved, please wait...', target.label, this.sessionManager.size),
-      ).catch(() => {});
-      return true;
-    }
-
     const decision = isApprove ? ('approved' as const) : ('denied' as const);
     const escalationId = target.pendingEscalation?.escalationId ?? '';
-    const managed = target;
-    managed.escalationResolving = true;
 
-    managed.session
-      .resolveEscalation(escalationId, decision)
-      .then(() => {
+    this.sessionManager
+      .resolveSessionEscalation(escalationId, decision)
+      .then((result) => {
+        if (!result.resolved) {
+          const reason =
+            result.reason === 'already_resolving'
+              ? 'Escalation is being resolved, please wait...'
+              : `Escalation not found (${result.reason}).`;
+          return this.sendSignalMessage(prefixWithLabel(reason, target.label, this.sessionManager.size));
+        }
         return this.sendSignalMessage(
-          prefixWithLabel(`Escalation ${decision}.`, managed.label, this.sessionManager.size),
+          prefixWithLabel(`Escalation ${decision}.`, target.label, this.sessionManager.size),
         );
       })
       .catch((err: unknown) => {
         const msg = err instanceof Error ? err.message : String(err);
         this.sendSignalMessage(
-          prefixWithLabel(`Escalation error: ${msg}`, managed.label, this.sessionManager.size),
+          prefixWithLabel(`Escalation error: ${msg}`, target.label, this.sessionManager.size),
         ).catch(() => {});
-      })
-      .finally(() => {
-        managed.escalationResolving = false;
-        if (managed.pendingEscalation?.escalationId === escalationId) {
-          managed.pendingEscalation = null;
-        }
       });
 
     return true;
