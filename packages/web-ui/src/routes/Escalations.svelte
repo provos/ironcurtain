@@ -9,18 +9,37 @@
 
   let resolvingIds = $state<Set<string>>(new Set());
   let resolveError = $state('');
+  let whitelistSelections = $state<Map<string, number>>(new Map());
+
+  function selectWhitelistCandidate(escalationId: string, index: number): void {
+    const next = new Map(whitelistSelections);
+    if (next.get(escalationId) === index) {
+      next.delete(escalationId);
+    } else {
+      next.set(escalationId, index);
+    }
+    whitelistSelections = next;
+  }
 
   async function resolveEscalation(escalationId: string, decision: 'approved' | 'denied'): Promise<void> {
     resolvingIds = new Set([...resolvingIds, escalationId]);
     resolveError = '';
     try {
-      await getWsClient().request('escalations.resolve', { escalationId, decision });
+      const params: Record<string, unknown> = { escalationId, decision };
+      const selectedIndex = whitelistSelections.get(escalationId);
+      if (decision === 'approved' && selectedIndex != null) {
+        params.whitelistSelection = selectedIndex;
+      }
+      await getWsClient().request('escalations.resolve', params);
     } catch (err) {
       resolveError = `Failed to ${decision === 'approved' ? 'approve' : 'deny'}: ${err instanceof Error ? err.message : String(err)}`;
     } finally {
       const next = new Set(resolvingIds);
       next.delete(escalationId);
       resolvingIds = next;
+      const nextSelections = new Map(whitelistSelections);
+      nextSelections.delete(escalationId);
+      whitelistSelections = nextSelections;
     }
   }
 </script>
@@ -100,6 +119,35 @@
               <div>
                 <div class="text-[11px] font-medium text-muted-foreground uppercase tracking-wider mb-1.5">Context</div>
                 <pre class="text-xs font-mono bg-muted/40 rounded-lg px-3 py-2.5 overflow-auto max-h-32 text-foreground/80">{JSON.stringify(esc.context, null, 2)}</pre>
+              </div>
+            {/if}
+
+            {#if esc.whitelistCandidates && esc.whitelistCandidates.length > 0}
+              <div>
+                <div class="text-[11px] font-medium text-muted-foreground uppercase tracking-wider mb-1.5">Whitelist (optional)</div>
+                <div class="space-y-1.5">
+                  {#each esc.whitelistCandidates as candidate, idx}
+                    {@const isSelected = whitelistSelections.get(esc.escalationId) === idx}
+                    <button
+                      onclick={() => selectWhitelistCandidate(esc.escalationId, idx)}
+                      disabled={isResolving}
+                      class="w-full text-left flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors
+                        {isSelected
+                          ? 'bg-primary/15 border border-primary/40 text-foreground'
+                          : 'bg-muted/40 border border-transparent hover:bg-muted/60 text-foreground/80'}
+                        disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      <span class="shrink-0 w-4 h-4 rounded-full border-2 flex items-center justify-center
+                        {isSelected ? 'border-primary' : 'border-muted-foreground/40'}">
+                        {#if isSelected}
+                          <span class="w-2 h-2 rounded-full bg-primary"></span>
+                        {/if}
+                      </span>
+                      <span class="text-xs">{candidate.description}</span>
+                    </button>
+                  {/each}
+                </div>
+                <p class="text-[10px] text-muted-foreground/60 mt-1.5">Select a rule to auto-approve similar future requests.</p>
               </div>
             {/if}
           </div>

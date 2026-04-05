@@ -313,7 +313,9 @@ function sendToSession(ctx: DispatchContext, label: number, text: string): { acc
   });
   ctx.sessionQueues.set(
     label,
-    current.catch(() => {}),
+    current.catch((err: unknown) => {
+      logger.error(`[WebUI] Session #${label} queue error: ${err instanceof Error ? err.message : String(err)}`);
+    }),
   );
 
   return { accepted: true };

@@ -23,27 +23,95 @@ export interface EventSideEffects {
   refreshJobs(): void;
 }
 
+// ---------------------------------------------------------------------------
+// Discriminated union for server-push events
+// ---------------------------------------------------------------------------
+
+/** All recognized event types with their typed payloads. */
+export type WebEvent =
+  | { event: 'daemon.status'; payload: DaemonStatusDto }
+  | { event: 'session.created'; payload: SessionDto }
+  | { event: 'session.updated'; payload: SessionDto }
+  | { event: 'session.ended'; payload: { label: number; reason?: string } }
+  | { event: 'session.thinking'; payload: { label: number; turnNumber: number } }
+  | { event: 'session.tool_call'; payload: { label: number; toolName: string; preview: string } }
+  | { event: 'session.output'; payload: { label: number; text: string; turnNumber: number } }
+  | { event: 'session.budget_update'; payload: { label: number; budget: BudgetSummaryDto } }
+  | { event: 'escalation.created'; payload: EscalationDto }
+  | { event: 'escalation.resolved'; payload: { escalationId: string; decision: string } }
+  | { event: 'escalation.expired'; payload: { escalationId: string; sessionLabel: number } }
+  | { event: 'job.list_changed'; payload: Record<string, unknown> }
+  | { event: 'job.completed'; payload: Record<string, unknown> }
+  | { event: 'job.failed'; payload: Record<string, unknown> }
+  | { event: 'job.started'; payload: Record<string, unknown> };
+
+/**
+ * Parse a raw event name + payload into a typed WebEvent.
+ * Returns undefined for unrecognized events.
+ */
+export function parseEvent(event: string, payload: unknown): WebEvent | undefined {
+  const data = payload as Record<string, unknown>;
+  switch (event) {
+    case 'daemon.status':
+      return { event, payload: data as unknown as DaemonStatusDto };
+    case 'session.created':
+    case 'session.updated':
+      return { event, payload: data as unknown as SessionDto };
+    case 'session.ended':
+      return { event, payload: data as { label: number; reason?: string } };
+    case 'session.thinking':
+      return { event, payload: data as { label: number; turnNumber: number } };
+    case 'session.tool_call':
+      return { event, payload: data as { label: number; toolName: string; preview: string } };
+    case 'session.output':
+      return { event, payload: data as { label: number; text: string; turnNumber: number } };
+    case 'session.budget_update':
+      return { event, payload: data as { label: number; budget: BudgetSummaryDto } };
+    case 'escalation.created':
+      return { event, payload: data as unknown as EscalationDto };
+    case 'escalation.resolved':
+      return { event, payload: data as { escalationId: string; decision: string } };
+    case 'escalation.expired':
+      return { event, payload: data as { escalationId: string; sessionLabel: number } };
+    case 'job.list_changed':
+    case 'job.completed':
+    case 'job.failed':
+    case 'job.started':
+      return { event, payload: data };
+    default:
+      return undefined;
+  }
+}
+
 /**
  * Pure event handler: applies a server-push event to the state object.
  * Returns true if the event was recognized, false otherwise.
  */
 export function handleEvent(state: AppStateLike, effects: EventSideEffects, event: string, payload: unknown): boolean {
-  const data = payload as Record<string, unknown>;
+  const parsed = parseEvent(event, payload);
+  if (!parsed) return false;
+  return applyEvent(state, effects, parsed);
+}
 
-  switch (event) {
+/**
+ * Apply a typed WebEvent to the state. The switch on `parsed.event`
+ * narrows `parsed.payload` automatically.
+ */
+function applyEvent(state: AppStateLike, effects: EventSideEffects, parsed: WebEvent): boolean {
+  switch (parsed.event) {
     case 'daemon.status':
-      state.daemonStatus = data as unknown as DaemonStatusDto;
+      state.daemonStatus = parsed.payload;
       return true;
 
     case 'session.created':
     case 'session.updated': {
-      const session = data as unknown as SessionDto;
+      const session = parsed.payload;
       state.sessions = new Map(state.sessions).set(session.label, session);
       return true;
     }
 
     case 'session.ended': {
-      const label = data.label as number;
+      const { label } = parsed.payload;
       const next = new Map(state.sessions);
       next.delete(label);
       state.sessions = next;
@@ -55,7 +123,7 @@ export function handleEvent(state: AppStateLike, effects: EventSideEffects, even
     }
 
     case 'session.thinking': {
-      const label = data.label as number;
+      const { label } = parsed.payload;
       const existing = state.sessions.get(label);
       if (existing) {
         state.sessions = new Map(state.sessions).set(label, { ...existing, status: 'processing' });
@@ -69,28 +137,27 @@ export function handleEvent(state: AppStateLike, effects: EventSideEffects, even
     }
 
     case 'session.tool_call': {
-      const label = data.label as number;
+      const { label, toolName, preview } = parsed.payload;
       state.addOutput(label, {
         kind: 'tool_call',
-        text: `${data.toolName as string}: ${data.preview as string}`,
+        text: `${toolName}: ${preview}`,
         timestamp: new Date().toISOString(),
       });
       return true;
     }
 
     case 'session.output': {
-      const label = data.label as number;
+      const { label, text } = parsed.payload;
       state.addOutput(label, {
         kind: 'assistant',
-        text: data.text as string,
+        text,
         timestamp: new Date().toISOString(),
       });
       return true;
     }
 
     case 'session.budget_update': {
-      const label = data.label as number;
-      const budget = data.budget as BudgetSummaryDto;
+      const { label, budget } = parsed.payload;
       const session = state.sessions.get(label);
       if (session) {
         state.sessions = new Map(state.sessions).set(label, { ...session, budget });
@@ -99,16 +166,16 @@ export function handleEvent(state: AppStateLike, effects: EventSideEffects, even
     }
 
     case 'escalation.created': {
-      const esc = data as unknown as EscalationDto;
+      const esc = parsed.payload;
       state.pendingEscalations = new Map(state.pendingEscalations).set(esc.escalationId, esc);
       return true;
     }
 
     case 'escalation.resolved':
     case 'escalation.expired': {
-      const id = data.escalationId as string;
+      const { escalationId } = parsed.payload;
       const next = new Map(state.pendingEscalations);
-      next.delete(id);
+      next.delete(escalationId);
       state.pendingEscalations = next;
       return true;
     }

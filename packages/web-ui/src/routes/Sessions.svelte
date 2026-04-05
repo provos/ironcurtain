@@ -140,11 +140,20 @@
     }
   }
 
+  // Guard against stale history responses when the user switches sessions quickly
+  let historyVersion = 0;
+
   // Load history when session is selected; reset expanded groups
   $effect(() => {
-    if (appState.selectedSessionLabel !== null) {
-      loadHistory(appState.selectedSessionLabel);
+    const label = appState.selectedSessionLabel;
+    if (label !== null) {
+      const version = ++historyVersion;
       expandedGroups = new Set();
+      loadHistory(label).then(() => {
+        if (version !== historyVersion) {
+          sessionHistory = [];
+        }
+      });
     }
   });
 

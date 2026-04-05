@@ -1,5 +1,6 @@
 <script lang="ts">
   import { cn } from '$lib/utils.js';
+  import { tick } from 'svelte';
   import type { Snippet } from 'svelte';
 
   type MenuAlign = 'bottom-left' | 'bottom-right' | 'top-left' | 'top-right';
@@ -14,6 +15,7 @@
   let {
     open = $bindable(false),
     align = 'bottom-left',
+    'aria-label': ariaLabel = 'Menu',
     class: className,
     contentClass,
     trigger,
@@ -21,25 +23,46 @@
   }: {
     open?: boolean;
     align?: MenuAlign;
+    'aria-label'?: string;
     class?: string;
     contentClass?: string;
     trigger: Snippet;
     children?: Snippet;
   } = $props();
 
+  let triggerEl: HTMLDivElement | undefined = $state(undefined);
+  let menuEl: HTMLDivElement | undefined = $state(undefined);
+
   function handleBackdropClick(): void {
     open = false;
+    triggerEl?.querySelector('button')?.focus();
   }
 
   function handleKeydown(e: KeyboardEvent): void {
     if (e.key === 'Escape') {
       open = false;
+      triggerEl?.querySelector('button')?.focus();
     }
   }
+
+  function focusFirstItem(): void {
+    tick().then(() => {
+      const firstItem = menuEl?.querySelector('[role="menuitem"]') as HTMLElement | null;
+      firstItem?.focus();
+    });
+  }
+
+  $effect(() => {
+    if (open) {
+      focusFirstItem();
+    }
+  });
 </script>
 
 <div class={cn('relative', className)}>
-  {@render trigger()}
+  <div bind:this={triggerEl} aria-expanded={open} aria-haspopup="menu">
+    {@render trigger()}
+  </div>
 
   {#if open}
     <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -49,12 +72,14 @@
       onkeydown={handleKeydown}
     ></div>
     <div
+      bind:this={menuEl}
       class={cn(
         'absolute z-20 min-w-[12rem] bg-card border border-border rounded-lg shadow-xl overflow-hidden animate-fade-in',
         alignStyles[align],
         contentClass,
       )}
       role="menu"
+      aria-label={ariaLabel}
     >
       {#if children}
         {@render children()}

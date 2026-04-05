@@ -46,6 +46,10 @@ interface MockSession {
   estimatedCostUsd: number;
 }
 
+interface MockWhitelistCandidate {
+  description: string;
+}
+
 interface MockEscalation {
   escalationId: string;
   sessionLabel: number;
@@ -53,6 +57,7 @@ interface MockEscalation {
   serverName: string;
   arguments: Record<string, unknown>;
   reason: string;
+  whitelistCandidates?: MockWhitelistCandidate[];
   receivedAt: string;
 }
 
@@ -363,6 +368,10 @@ async function simulateTurn(ws: WebSocket, label: number, text: string): Promise
       serverName: 'filesystem',
       arguments: { path: '/etc/hosts', content: 'malicious content' },
       reason: 'Write to protected system path',
+      whitelistCandidates: [
+        { description: 'Allow filesystem.write_file within /etc/' },
+        { description: 'Allow filesystem.write_file for this exact path: /etc/hosts' },
+      ],
       receivedAt: new Date().toISOString(),
     };
     escalations.set(escalationId, esc);

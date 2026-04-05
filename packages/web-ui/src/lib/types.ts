@@ -54,6 +54,11 @@ export interface SessionDetailDto extends SessionDto {
   readonly diagnosticLog: readonly DiagnosticEvent[];
 }
 
+/** Whitelist candidate for display in the escalation UI. */
+export interface WhitelistCandidate {
+  readonly description: string;
+}
+
 export interface EscalationDto {
   readonly escalationId: string;
   readonly sessionLabel: number;
@@ -63,6 +68,7 @@ export interface EscalationDto {
   readonly arguments: Record<string, unknown>;
   readonly reason: string;
   readonly context?: Record<string, string>;
+  readonly whitelistCandidates?: readonly WhitelistCandidate[];
   readonly receivedAt: string;
 }
 
