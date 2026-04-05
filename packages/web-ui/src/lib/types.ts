@@ -127,6 +127,13 @@ export interface EventFrame {
   readonly seq: number;
 }
 
+/** Available persona for session creation. */
+export interface PersonaListItem {
+  readonly name: string;
+  readonly description: string;
+  readonly compiled: boolean;
+}
+
 /** Output line for the session console. */
 export interface OutputLine {
   readonly kind: 'user' | 'assistant' | 'tool_call' | 'thinking' | 'error' | 'system';

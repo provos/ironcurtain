@@ -1,25 +1,62 @@
 <script lang="ts">
   import { appState, getWsClient } from '../lib/stores.svelte.js';
-  import type { ConversationTurn } from '../lib/types.js';
+  import type { ConversationTurn, PersonaListItem } from '../lib/types.js';
 
   let messageInput = $state('');
   let sending = $state(false);
   let sessionHistory = $state<ConversationTurn[]>([]);
 
-  async function createSession(): Promise<void> {
+  // Session creation state
+  let creatingSession = $state(false);
+  let showPersonaPicker = $state(false);
+  let personas = $state<PersonaListItem[]>([]);
+  let loadingPersonas = $state(false);
+  let createError = $state('');
+
+  // Session end state
+  let endingSession = $state<number | null>(null);
+
+  async function loadPersonas(): Promise<void> {
+    loadingPersonas = true;
     try {
-      const result = await getWsClient().request<{ label: number }>('sessions.create');
+      personas = await getWsClient().request<PersonaListItem[]>('personas.list');
+    } catch {
+      personas = [];
+    } finally {
+      loadingPersonas = false;
+    }
+  }
+
+  function openPersonaPicker(): void {
+    createError = '';
+    showPersonaPicker = true;
+    loadPersonas();
+  }
+
+  async function createSession(persona?: string): Promise<void> {
+    showPersonaPicker = false;
+    creatingSession = true;
+    createError = '';
+    try {
+      const params: Record<string, unknown> = {};
+      if (persona) params.persona = persona;
+      const result = await getWsClient().request<{ label: number }>('sessions.create', params);
       appState.selectedSessionLabel = result.label;
     } catch (err) {
-      console.error('Failed to create session:', err);
+      createError = err instanceof Error ? err.message : String(err);
+    } finally {
+      creatingSession = false;
     }
   }
 
   async function endSession(label: number): Promise<void> {
+    endingSession = label;
     try {
       await getWsClient().request('sessions.end', { label });
     } catch (err) {
       console.error('Failed to end session:', err);
+    } finally {
+      endingSession = null;
     }
   }
 
@@ -75,14 +112,85 @@
   <div class="w-64 border-r border-border bg-card/50 flex flex-col">
     <div class="p-4 border-b border-border flex items-center justify-between">
       <h3 class="font-medium">Sessions</h3>
-      <button
-        onclick={createSession}
-        class="px-3 py-1 text-xs bg-primary text-primary-foreground rounded-md hover:opacity-90 transition-opacity"
-      >
-        New
-      </button>
+      <div class="relative">
+        <button
+          onclick={openPersonaPicker}
+          disabled={creatingSession}
+          class="px-3 py-1 text-xs bg-primary text-primary-foreground rounded-md hover:opacity-90
+                 transition-opacity disabled:opacity-50"
+        >
+          {#if creatingSession}
+            <span class="inline-flex items-center gap-1">
+              <span class="w-3 h-3 border-2 border-primary-foreground/30 border-t-primary-foreground rounded-full animate-spin"></span>
+              Starting...
+            </span>
+          {:else}
+            New
+          {/if}
+        </button>
+
+        <!-- Persona picker dropdown -->
+        {#if showPersonaPicker}
+          <!-- Backdrop -->
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div class="fixed inset-0 z-10" onclick={() => showPersonaPicker = false} onkeydown={() => {}}></div>
+          <div class="absolute right-0 top-full mt-1 z-20 w-56 bg-card border border-border rounded-lg shadow-lg overflow-hidden">
+            <button
+              onclick={() => createSession()}
+              class="w-full text-left px-3 py-2 text-sm hover:bg-accent transition-colors border-b border-border"
+            >
+              <div class="font-medium">Default</div>
+              <div class="text-xs text-muted-foreground">No persona</div>
+            </button>
+            {#if loadingPersonas}
+              <div class="px-3 py-3 text-xs text-muted-foreground text-center">
+                Loading personas...
+              </div>
+            {:else if personas.length === 0}
+              <div class="px-3 py-3 text-xs text-muted-foreground text-center">
+                No personas available
+              </div>
+            {:else}
+              {#each personas as persona (persona.name)}
+                <button
+                  onclick={() => createSession(persona.name)}
+                  disabled={!persona.compiled}
+                  class="w-full text-left px-3 py-2 text-sm hover:bg-accent transition-colors
+                         disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  <div class="font-medium flex items-center gap-1.5">
+                    {persona.name}
+                    {#if !persona.compiled}
+                      <span class="text-xs text-yellow-400">(not compiled)</span>
+                    {/if}
+                  </div>
+                  {#if persona.description}
+                    <div class="text-xs text-muted-foreground truncate">{persona.description}</div>
+                  {/if}
+                </button>
+              {/each}
+            {/if}
+          </div>
+        {/if}
+      </div>
     </div>
+
+    {#if createError}
+      <div class="px-4 py-2 text-xs text-destructive bg-destructive/10 border-b border-border">
+        {createError}
+      </div>
+    {/if}
+
     <div class="flex-1 overflow-auto">
+      {#if creatingSession}
+        <div class="w-full text-left px-4 py-3 border-b border-border text-sm bg-accent/20 animate-pulse">
+          <div class="flex items-center justify-between">
+            <span class="font-mono font-medium text-muted-foreground">Starting...</span>
+            <span class="w-3 h-3 border-2 border-muted-foreground/30 border-t-muted-foreground rounded-full animate-spin"></span>
+          </div>
+          <div class="text-xs text-muted-foreground mt-1">New session</div>
+        </div>
+      {/if}
       {#each [...appState.sessions.values()] as session (session.label)}
         <button
           onclick={() => appState.selectedSessionLabel = session.label}
@@ -105,7 +213,7 @@
           {/if}
         </button>
       {/each}
-      {#if appState.sessions.size === 0}
+      {#if appState.sessions.size === 0 && !creatingSession}
         <div class="p-4 text-sm text-muted-foreground text-center">
           No active sessions
         </div>
@@ -135,9 +243,18 @@
           </span>
           <button
             onclick={() => endSession(appState.selectedSessionLabel!)}
-            class="px-3 py-1 text-xs bg-destructive text-destructive-foreground rounded-md hover:opacity-90"
+            disabled={endingSession === appState.selectedSessionLabel}
+            class="px-3 py-1 text-xs bg-destructive text-destructive-foreground rounded-md
+                   hover:opacity-90 disabled:opacity-50"
           >
-            End
+            {#if endingSession === appState.selectedSessionLabel}
+              <span class="inline-flex items-center gap-1">
+                <span class="w-3 h-3 border-2 border-destructive-foreground/30 border-t-destructive-foreground rounded-full animate-spin"></span>
+                Ending
+              </span>
+            {:else}
+              End
+            {/if}
           </button>
         </div>
       </div>
@@ -188,7 +305,14 @@
           class="px-4 py-2 bg-primary text-primary-foreground rounded-md text-sm font-medium
                  hover:opacity-90 transition-opacity disabled:opacity-50"
         >
-          {sending ? 'Sending...' : 'Send'}
+          {#if sending}
+            <span class="inline-flex items-center gap-1">
+              <span class="w-3 h-3 border-2 border-primary-foreground/30 border-t-primary-foreground rounded-full animate-spin"></span>
+              Sending
+            </span>
+          {:else}
+            Send
+          {/if}
         </button>
       </form>
     {:else}

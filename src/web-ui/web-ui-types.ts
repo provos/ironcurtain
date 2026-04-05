@@ -31,7 +31,8 @@ export type MethodName =
   | 'sessions.history'
   | 'sessions.diagnostics'
   | 'escalations.list'
-  | 'escalations.resolve';
+  | 'escalations.resolve'
+  | 'personas.list';
 
 /** Browser -> Daemon request frame. */
 export interface RequestFrame {

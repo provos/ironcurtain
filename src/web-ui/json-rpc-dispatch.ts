@@ -32,6 +32,7 @@ import { shouldAutoSaveMemory } from '../memory/auto-save.js';
 import { BudgetExhaustedError } from '../session/errors.js';
 import { loadRecentRuns } from '../cron/job-store.js';
 import type { JobId } from '../cron/types.js';
+import { scanPersonas } from '../mux/persona-scanner.js';
 import * as logger from '../logger.js';
 
 // ---------------------------------------------------------------------------
@@ -186,6 +187,13 @@ export async function dispatch(
       }
       return;
     }
+
+    case 'personas.list':
+      return scanPersonas().map((p) => ({
+        name: p.name,
+        description: p.description,
+        compiled: p.compiled,
+      }));
 
     default:
       throw new MethodNotFoundError(method);
