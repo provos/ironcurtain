@@ -14,8 +14,11 @@ export type ThemeId = 'iron' | 'daylight' | 'midnight';
 const MAX_OUTPUT_LINES = 2000;
 const THEME_KEY = 'ic-theme';
 
+const VALID_THEMES: ReadonlySet<string> = new Set<ThemeId>(['iron', 'daylight', 'midnight']);
+
 export function getTheme(): ThemeId {
-  return (localStorage.getItem(THEME_KEY) as ThemeId) || 'iron';
+  const stored = localStorage.getItem(THEME_KEY);
+  return stored && VALID_THEMES.has(stored) ? (stored as ThemeId) : 'iron';
 }
 
 export function setTheme(theme: ThemeId): void {
@@ -211,17 +214,16 @@ async function refreshAll(client: WsClient): Promise<void> {
 
 let refreshJobsTimer: ReturnType<typeof setTimeout> | null = null;
 
-async function refreshJobs(client: WsClient): Promise<void> {
-  // Debounce rapid job events
-  if (refreshJobsTimer) return;
-  refreshJobsTimer = setTimeout(() => {
+function refreshJobs(client: WsClient): void {
+  if (refreshJobsTimer) clearTimeout(refreshJobsTimer);
+  refreshJobsTimer = setTimeout(async () => {
     refreshJobsTimer = null;
-  }, 500);
-  try {
-    appState.jobs = await client.request<JobListDto[]>('jobs.list');
-  } catch {
-    // Best-effort
-  }
+    try {
+      appState.jobs = await client.request<JobListDto[]>('jobs.list');
+    } catch {
+      // Best-effort
+    }
+  }, 300);
 }
 
 function buildWsUrl(): string {

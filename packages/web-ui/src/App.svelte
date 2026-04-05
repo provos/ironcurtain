@@ -115,14 +115,7 @@
           <div>
             <span class="text-sm font-semibold tracking-tight">IronCurtain</span>
             <div class="flex items-center gap-1.5 mt-0.5">
-              <span class="relative flex h-2 w-2">
-                {#if appState.connected}
-                  <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-success opacity-75"></span>
-                  <span class="relative inline-flex rounded-full h-2 w-2 bg-success"></span>
-                {:else}
-                  <span class="relative inline-flex rounded-full h-2 w-2 bg-destructive"></span>
-                {/if}
-              </span>
+              <span class="inline-flex rounded-full h-2 w-2 {appState.connected ? 'bg-success' : 'bg-destructive'}"></span>
               <span class="text-[10px] text-muted-foreground uppercase tracking-wider">
                 {appState.connected ? 'Live' : 'Offline'}
               </span>
@@ -135,12 +128,13 @@
         {#each navItems as item}
           <button
             onclick={() => appState.currentView = item.id}
+            aria-current={appState.currentView === item.id ? 'page' : undefined}
             class="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-all
               {appState.currentView === item.id
                 ? 'bg-accent text-accent-foreground font-medium shadow-sm'
                 : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground'}"
           >
-            <svg viewBox="0 0 24 24" class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <svg viewBox="0 0 24 24" class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d={item.icon} />
             </svg>
             {item.label}

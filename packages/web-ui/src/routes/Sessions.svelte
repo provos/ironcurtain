@@ -226,10 +226,15 @@
       <div class="px-6 py-3 border-b border-border flex items-center justify-between bg-card/50">
         <div>
           <span class="font-mono font-semibold">#{appState.selectedSession.label}</span>
-          <span class="ml-2 px-2 py-0.5 text-xs rounded-full
-            {appState.selectedSession.status === 'processing' ? 'bg-yellow-500/20 text-yellow-400' :
-             appState.selectedSession.status === 'ready' ? 'bg-green-500/20 text-green-400' :
+          <span class="inline-flex items-center gap-1.5 ml-2 px-2 py-0.5 text-[11px] font-medium rounded-full
+            {appState.selectedSession.status === 'processing' ? 'bg-warning/15 text-warning' :
+             appState.selectedSession.status === 'ready' ? 'bg-success/15 text-success' :
              'bg-muted text-muted-foreground'}">
+            {#if appState.selectedSession.status === 'processing'}
+              <span class="w-1.5 h-1.5 rounded-full bg-warning animate-pulse"></span>
+            {:else if appState.selectedSession.status === 'ready'}
+              <span class="w-1.5 h-1.5 rounded-full bg-success"></span>
+            {/if}
             {appState.selectedSession.status}
           </span>
         </div>

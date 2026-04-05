@@ -10,7 +10,14 @@
  */
 
 @layer base {
-  /* ── Iron (dark default) ─────────────────────────────── */
+  /* Shared across all themes */
+  :root {
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 98%;
+    --success-foreground: 0 0% 98%;
+    --radius: 0.5rem;
+  }
+
   [data-theme="iron"] {
     --background: 220 14% 8%;
     --foreground: 210 20% 92%;
@@ -24,21 +31,15 @@
     --muted-foreground: 215 12% 52%;
     --accent: 220 12% 14%;
     --accent-foreground: 210 20% 92%;
-    --destructive: 0 72% 51%;
-    --destructive-foreground: 0 0% 98%;
     --success: 142 72% 42%;
-    --success-foreground: 0 0% 98%;
     --warning: 38 92% 55%;
     --warning-foreground: 220 14% 8%;
     --border: 220 12% 18%;
     --ring: 38 92% 55%;
-    --radius: 0.5rem;
     --sidebar: 220 14% 6%;
-    --glow: 38 92% 55%;
     color-scheme: dark;
   }
 
-  /* ── Daylight (light) ────────────────────────────────── */
   [data-theme="daylight"] {
     --background: 40 20% 97%;
     --foreground: 220 20% 12%;
@@ -52,21 +53,15 @@
     --muted-foreground: 220 10% 46%;
     --accent: 220 10% 92%;
     --accent-foreground: 220 20% 12%;
-    --destructive: 0 72% 51%;
-    --destructive-foreground: 0 0% 98%;
     --success: 142 72% 36%;
-    --success-foreground: 0 0% 98%;
     --warning: 38 92% 50%;
     --warning-foreground: 220 14% 8%;
     --border: 220 12% 88%;
     --ring: 172 66% 36%;
-    --radius: 0.5rem;
     --sidebar: 0 0% 100%;
-    --glow: 172 66% 36%;
     color-scheme: light;
   }
 
-  /* ── Midnight (dark blue) ────────────────────────────── */
   [data-theme="midnight"] {
     --background: 228 24% 8%;
     --foreground: 215 20% 90%;
@@ -80,17 +75,12 @@
     --muted-foreground: 220 14% 50%;
     --accent: 228 18% 14%;
     --accent-foreground: 215 20% 90%;
-    --destructive: 0 72% 51%;
-    --destructive-foreground: 0 0% 98%;
     --success: 142 72% 42%;
-    --success-foreground: 0 0% 98%;
     --warning: 45 93% 58%;
     --warning-foreground: 228 24% 8%;
     --border: 228 16% 18%;
     --ring: 213 94% 58%;
-    --radius: 0.5rem;
     --sidebar: 228 24% 6%;
-    --glow: 213 94% 58%;
     color-scheme: dark;
   }
 }
@@ -138,23 +128,9 @@
   from { opacity: 0; transform: translateY(4px); }
   to { opacity: 1; transform: translateY(0); }
 }
-@keyframes slideIn {
-  from { opacity: 0; transform: translateX(-8px); }
-  to { opacity: 1; transform: translateX(0); }
-}
-@keyframes glow-pulse {
-  0%, 100% { box-shadow: 0 0 4px hsl(var(--glow) / 0.3); }
-  50% { box-shadow: 0 0 12px hsl(var(--glow) / 0.5); }
-}
 
 @layer utilities {
   .animate-fade-in {
     animation: fadeIn 0.3s ease-out;
-  }
-  .animate-slide-in {
-    animation: slideIn 0.25s ease-out;
-  }
-  .animate-glow {
-    animation: glow-pulse 2s ease-in-out infinite;
   }
 }
