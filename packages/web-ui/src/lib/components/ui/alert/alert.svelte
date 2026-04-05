@@ -41,7 +41,9 @@
       onclick={ondismiss}
       class={cn(
         'ml-4 text-xs font-medium shrink-0',
-        variant === 'destructive' ? 'text-destructive/60 hover:text-destructive' : 'text-muted-foreground hover:text-foreground',
+        variant === 'destructive'
+          ? 'text-destructive/60 hover:text-destructive'
+          : 'text-muted-foreground hover:text-foreground',
       )}
     >
       Dismiss

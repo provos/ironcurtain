@@ -39,12 +39,19 @@
       <div class="text-[11px] text-muted-foreground mt-1">active</div>
     </Card>
 
-    <Card data-testid="stat-escalations" class="group p-4 hover:border-destructive/30 transition-colors {appState.escalationCount > 0 ? 'border-destructive/20' : ''}">
+    <Card
+      data-testid="stat-escalations"
+      class="group p-4 hover:border-destructive/30 transition-colors {appState.escalationCount > 0
+        ? 'border-destructive/20'
+        : ''}"
+    >
       <div class="flex items-center justify-between mb-3">
         <span class="text-xs font-medium text-muted-foreground uppercase tracking-wider">Escalations</span>
         <Warning size={16} class={appState.escalationCount > 0 ? 'text-destructive' : 'text-muted-foreground/50'} />
       </div>
-      <div class="text-3xl font-bold font-mono tracking-tight {appState.escalationCount > 0 ? 'text-destructive' : ''}">{appState.escalationCount}</div>
+      <div class="text-3xl font-bold font-mono tracking-tight {appState.escalationCount > 0 ? 'text-destructive' : ''}">
+        {appState.escalationCount}
+      </div>
       <div class="text-[11px] text-muted-foreground mt-1">pending</div>
     </Card>
 
@@ -87,14 +94,23 @@
           {#each [...appState.sessions.values()] as session (session.label)}
             <TableRow
               clickable
-              onclick={() => { appState.selectedSessionLabel = session.label; appState.currentView = 'sessions'; }}
+              onclick={() => {
+                appState.selectedSessionLabel = session.label;
+                appState.currentView = 'sessions';
+              }}
             >
               <TableCell class="font-mono font-medium text-primary">#{session.label}</TableCell>
               <TableCell>
                 <Badge variant="secondary" class="font-mono">{session.source.kind}</Badge>
               </TableCell>
               <TableCell>
-                <Badge variant={session.status === 'processing' ? 'warning' : session.status === 'ready' ? 'success' : 'secondary'}>
+                <Badge
+                  variant={session.status === 'processing'
+                    ? 'warning'
+                    : session.status === 'ready'
+                      ? 'success'
+                      : 'secondary'}
+                >
                   {#if session.status === 'processing'}
                     <span class="w-1.5 h-1.5 rounded-full bg-warning animate-pulse"></span>
                   {:else if session.status === 'ready'}
@@ -124,7 +140,7 @@
           <TableHead>Status</TableHead>
         </TableHeader>
         <TableBody>
-          {#each appState.jobs.filter(j => j.job.enabled).slice(0, 5) as entry (entry.job.id)}
+          {#each appState.jobs.filter((j) => j.job.enabled).slice(0, 5) as entry (entry.job.id)}
             <TableRow>
               <TableCell class="font-medium">{entry.job.name}</TableCell>
               <TableCell class="font-mono text-xs text-muted-foreground">{entry.job.schedule}</TableCell>

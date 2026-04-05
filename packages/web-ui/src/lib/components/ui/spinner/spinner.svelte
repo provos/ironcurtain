@@ -17,10 +17,6 @@
 </script>
 
 <span
-  class={cn(
-    'inline-block rounded-full border-current/30 border-t-current animate-spin',
-    sizeStyles[size],
-    className,
-  )}
+  class={cn('inline-block rounded-full border-current/30 border-t-current animate-spin', sizeStyles[size], className)}
   aria-label="Loading"
 ></span>

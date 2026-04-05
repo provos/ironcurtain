@@ -63,13 +63,13 @@
     <h2 class="text-xl font-semibold tracking-tight">Jobs</h2>
     {#if appState.jobs.length > 0}
       <span class="text-xs font-mono text-muted-foreground">
-        {appState.jobs.filter(j => j.job.enabled).length}/{appState.jobs.length} enabled
+        {appState.jobs.filter((j) => j.job.enabled).length}/{appState.jobs.length} enabled
       </span>
     {/if}
   </div>
 
   {#if actionError}
-    <Alert variant="destructive" dismissible ondismiss={() => actionError = ''}>
+    <Alert variant="destructive" dismissible ondismiss={() => (actionError = '')}>
       {actionError}
     </Alert>
   {/if}
@@ -101,7 +101,9 @@
               <div class="text-[11px] text-muted-foreground font-mono mt-0.5">{entry.job.id}</div>
             </TableCell>
             <TableCell>
-              <code class="text-xs font-mono text-muted-foreground bg-muted/50 px-1.5 py-0.5 rounded">{entry.job.schedule}</code>
+              <code class="text-xs font-mono text-muted-foreground bg-muted/50 px-1.5 py-0.5 rounded"
+                >{entry.job.schedule}</code
+              >
             </TableCell>
             <TableCell class="text-xs text-muted-foreground">
               {entry.nextRun ? new Date(entry.nextRun).toLocaleString() : '--'}
@@ -109,9 +111,13 @@
             <TableCell>
               {#if entry.lastRun}
                 <div class="flex items-center gap-1.5">
-                  <Badge variant={entry.lastRun.outcome.kind === 'success' ? 'success'
-                    : entry.lastRun.outcome.kind === 'error' ? 'destructive'
-                    : 'warning'}>
+                  <Badge
+                    variant={entry.lastRun.outcome.kind === 'success'
+                      ? 'success'
+                      : entry.lastRun.outcome.kind === 'error'
+                        ? 'destructive'
+                        : 'warning'}
+                  >
                     {entry.lastRun.outcome.kind}
                   </Badge>
                   <span class="text-[11px] font-mono text-muted-foreground">
@@ -141,40 +147,30 @@
             </TableCell>
             <TableCell>
               <div class="flex gap-1.5 justify-end">
-                <Button
-                  size="sm"
-                  onclick={() => runJob(entry.job.id)}
-                  disabled={entry.isRunning || !!busy}
-                >Run</Button>
+                <Button size="sm" onclick={() => runJob(entry.job.id)} disabled={entry.isRunning || !!busy}>Run</Button>
                 {#if entry.job.enabled}
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    onclick={() => disableJob(entry.job.id)}
-                    disabled={!!busy}
-                  >Disable</Button>
+                  <Button variant="secondary" size="sm" onclick={() => disableJob(entry.job.id)} disabled={!!busy}
+                    >Disable</Button
+                  >
                 {:else}
-                  <Button
-                    variant="success"
-                    size="sm"
-                    onclick={() => enableJob(entry.job.id)}
-                    disabled={!!busy}
-                  >Enable</Button>
+                  <Button variant="success" size="sm" onclick={() => enableJob(entry.job.id)} disabled={!!busy}
+                    >Enable</Button
+                  >
                 {/if}
                 <Button
                   variant="secondary"
                   size="sm"
                   onclick={() => recompileJob(entry.job.id)}
                   disabled={!!busy}
-                  title="Recompile policy"
-                >Recompile</Button>
+                  title="Recompile policy">Recompile</Button
+                >
                 <Button
                   variant="ghost"
                   size="sm"
                   class="text-destructive hover:bg-destructive hover:text-destructive-foreground"
                   onclick={() => removeJob(entry.job.id)}
-                  disabled={!!busy}
-                >Remove</Button>
+                  disabled={!!busy}>Remove</Button
+                >
               </div>
             </TableCell>
           </TableRow>

@@ -179,12 +179,7 @@
       <h3 class="text-sm font-semibold uppercase tracking-wider text-muted-foreground">Sessions</h3>
       <DropdownMenu bind:open={showPersonaPicker} align="bottom-right" contentClass="w-56">
         {#snippet trigger()}
-          <Button
-            variant="default"
-            size="sm"
-            loading={creatingSession}
-            onclick={openPersonaPicker}
-          >
+          <Button variant="default" size="sm" loading={creatingSession} onclick={openPersonaPicker}>
             {#if !creatingSession}
               <Plus size={14} weight="bold" />
             {/if}
@@ -196,19 +191,12 @@
           <div class="text-xs text-muted-foreground">No persona</div>
         </DropdownMenuItem>
         {#if loadingPersonas}
-          <div class="px-3 py-3 text-xs text-muted-foreground text-center">
-            Loading personas...
-          </div>
+          <div class="px-3 py-3 text-xs text-muted-foreground text-center">Loading personas...</div>
         {:else if personas.length === 0}
-          <div class="px-3 py-3 text-xs text-muted-foreground text-center">
-            No personas available
-          </div>
+          <div class="px-3 py-3 text-xs text-muted-foreground text-center">No personas available</div>
         {:else}
           {#each personas as persona (persona.name)}
-            <DropdownMenuItem
-              onclick={() => createSession(persona.name)}
-              disabled={!persona.compiled}
-            >
+            <DropdownMenuItem onclick={() => createSession(persona.name)} disabled={!persona.compiled}>
               <div class="font-medium flex items-center gap-1.5">
                 {persona.name}
                 {#if !persona.compiled}
@@ -235,7 +223,9 @@
         <div class="w-full text-left px-4 py-3 border-b border-border text-sm bg-accent/20 animate-pulse">
           <div class="flex items-center justify-between">
             <span class="font-mono font-medium text-muted-foreground">Starting...</span>
-            <span class="w-3 h-3 border-2 border-muted-foreground/30 border-t-muted-foreground rounded-full animate-spin"></span>
+            <span
+              class="w-3 h-3 border-2 border-muted-foreground/30 border-t-muted-foreground rounded-full animate-spin"
+            ></span>
           </div>
           <div class="text-xs text-muted-foreground mt-1">New session</div>
         </div>
@@ -243,11 +233,9 @@
       {#each [...appState.sessions.values()] as session (session.label)}
         <button
           data-testid="session-item-{session.label}"
-          onclick={() => appState.selectedSessionLabel = session.label}
+          onclick={() => (appState.selectedSessionLabel = session.label)}
           class="w-full text-left px-4 py-3 border-b border-border text-sm transition-colors
-            {appState.selectedSessionLabel === session.label
-              ? 'bg-accent'
-              : 'hover:bg-accent/30'}"
+            {appState.selectedSessionLabel === session.label ? 'bg-accent' : 'hover:bg-accent/30'}"
         >
           <div class="flex items-center justify-between">
             <span class="font-mono font-medium">#{session.label}</span>
@@ -259,16 +247,12 @@
             {session.turnCount} turns &middot; {session.budget.estimatedCostUsd.toFixed(2)}
           </div>
           {#if session.hasPendingEscalation}
-            <Badge variant="destructive" class="mt-1">
-              escalation
-            </Badge>
+            <Badge variant="destructive" class="mt-1">escalation</Badge>
           {/if}
         </button>
       {/each}
       {#if appState.sessions.size === 0 && !creatingSession}
-        <div class="p-4 text-sm text-muted-foreground text-center">
-          No active sessions
-        </div>
+        <div class="p-4 text-sm text-muted-foreground text-center">No active sessions</div>
       {/if}
     </div>
   </div>
@@ -285,9 +269,11 @@
             </Badge>
           {/if}
           <Badge
-            variant={appState.selectedSession.status === 'processing' ? 'warning'
-                   : appState.selectedSession.status === 'ready' ? 'success'
-                   : 'secondary'}
+            variant={appState.selectedSession.status === 'processing'
+              ? 'warning'
+              : appState.selectedSession.status === 'ready'
+                ? 'success'
+                : 'secondary'}
             class="ml-2"
           >
             {#if appState.selectedSession.status === 'processing'}
@@ -315,14 +301,23 @@
         </div>
       </div>
 
-      <div bind:this={outputContainer} data-testid="session-output" class="flex-1 overflow-auto p-5 space-y-2 font-mono text-sm">
+      <div
+        bind:this={outputContainer}
+        data-testid="session-output"
+        class="flex-1 overflow-auto p-5 space-y-2 font-mono text-sm"
+      >
         {#each groupOutputLines(appState.getOutput(appState.selectedSessionLabel!)) as entry, groupIdx}
           {#if entry.kind === 'single'}
             {@const line = entry.line}
-            <div class="{line.kind === 'user' ? 'text-blue-400' :
-                         line.kind === 'assistant' ? 'text-foreground' :
-                         line.kind === 'error' ? 'text-destructive' :
-                         'text-muted-foreground'}">
+            <div
+              class={line.kind === 'user'
+                ? 'text-blue-400'
+                : line.kind === 'assistant'
+                  ? 'text-foreground'
+                  : line.kind === 'error'
+                    ? 'text-destructive'
+                    : 'text-muted-foreground'}
+            >
               {#if line.kind === 'user'}
                 <span class="text-muted-foreground select-none">&gt; </span>{line.text}
               {:else}
@@ -337,18 +332,19 @@
                 class="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-muted-foreground
                        hover:bg-accent/30 transition-colors select-none"
               >
-                <CaretRight
-                  size={12}
-                  class="transition-transform {expandedGroups.has(groupIdx) ? 'rotate-90' : ''}"
-                />
+                <CaretRight size={12} class="transition-transform {expandedGroups.has(groupIdx) ? 'rotate-90' : ''}" />
                 <span class="italic">{entry.summary}</span>
               </button>
               {#if expandedGroups.has(groupIdx)}
                 <div class="px-3 pb-2 space-y-1">
                   {#each entry.lines as line}
-                    <div class="{line.kind === 'tool_call' ? 'text-muted-foreground italic' :
-                                 line.kind === 'thinking' ? 'text-yellow-400 animate-pulse' :
-                                 'text-muted-foreground'} text-xs">
+                    <div
+                      class="{line.kind === 'tool_call'
+                        ? 'text-muted-foreground italic'
+                        : line.kind === 'thinking'
+                          ? 'text-yellow-400 animate-pulse'
+                          : 'text-muted-foreground'} text-xs"
+                    >
                       {#if line.kind === 'tool_call'}
                         <span class="select-none">[tool] </span>{line.text}
                       {:else}

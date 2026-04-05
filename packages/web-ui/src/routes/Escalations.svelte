@@ -55,7 +55,7 @@
   </div>
 
   {#if resolveError}
-    <Alert variant="destructive" dismissible ondismiss={() => resolveError = ''}>
+    <Alert variant="destructive" dismissible ondismiss={() => (resolveError = '')}>
       {resolveError}
     </Alert>
   {/if}
@@ -70,12 +70,16 @@
     <div class="space-y-3">
       {#each [...appState.pendingEscalations.values()] as esc (esc.escalationId)}
         {@const isResolving = resolvingIds.has(esc.escalationId)}
-        <Card class="overflow-hidden transition-all animate-fade-in
-          {isResolving ? 'opacity-50 border-border' : 'border-destructive/20 shadow-sm shadow-destructive/5'}">
+        <Card
+          class="overflow-hidden transition-all animate-fade-in
+          {isResolving ? 'opacity-50 border-border' : 'border-destructive/20 shadow-sm shadow-destructive/5'}"
+        >
           <div class="px-5 py-4 flex items-start justify-between gap-4">
             <div class="min-w-0">
               <div class="flex items-center gap-2">
-                <span class="font-mono font-semibold text-sm">{esc.serverName}<span class="text-muted-foreground">/</span>{esc.toolName}</span>
+                <span class="font-mono font-semibold text-sm"
+                  >{esc.serverName}<span class="text-muted-foreground">/</span>{esc.toolName}</span
+                >
               </div>
               <div class="flex items-center gap-2 mt-1 text-xs text-muted-foreground">
                 <Badge variant="secondary" class="font-mono">#{esc.sessionLabel}</Badge>
@@ -112,19 +116,31 @@
 
             <div>
               <div class="text-[11px] font-medium text-muted-foreground uppercase tracking-wider mb-1.5">Arguments</div>
-              <pre class="text-xs font-mono bg-muted/40 rounded-lg px-3 py-2.5 overflow-auto max-h-48 text-foreground/80">{JSON.stringify(esc.arguments, null, 2)}</pre>
+              <pre
+                class="text-xs font-mono bg-muted/40 rounded-lg px-3 py-2.5 overflow-auto max-h-48 text-foreground/80">{JSON.stringify(
+                  esc.arguments,
+                  null,
+                  2,
+                )}</pre>
             </div>
 
             {#if esc.context && Object.keys(esc.context).length > 0}
               <div>
                 <div class="text-[11px] font-medium text-muted-foreground uppercase tracking-wider mb-1.5">Context</div>
-                <pre class="text-xs font-mono bg-muted/40 rounded-lg px-3 py-2.5 overflow-auto max-h-32 text-foreground/80">{JSON.stringify(esc.context, null, 2)}</pre>
+                <pre
+                  class="text-xs font-mono bg-muted/40 rounded-lg px-3 py-2.5 overflow-auto max-h-32 text-foreground/80">{JSON.stringify(
+                    esc.context,
+                    null,
+                    2,
+                  )}</pre>
               </div>
             {/if}
 
             {#if esc.whitelistCandidates && esc.whitelistCandidates.length > 0}
               <div>
-                <div class="text-[11px] font-medium text-muted-foreground uppercase tracking-wider mb-1.5">Whitelist (optional)</div>
+                <div class="text-[11px] font-medium text-muted-foreground uppercase tracking-wider mb-1.5">
+                  Whitelist (optional)
+                </div>
                 <div class="space-y-1.5">
                   {#each esc.whitelistCandidates as candidate, idx}
                     {@const isSelected = whitelistSelections.get(esc.escalationId) === idx}
@@ -133,12 +149,14 @@
                       disabled={isResolving}
                       class="w-full text-left flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors
                         {isSelected
-                          ? 'bg-primary/15 border border-primary/40 text-foreground'
-                          : 'bg-muted/40 border border-transparent hover:bg-muted/60 text-foreground/80'}
+                        ? 'bg-primary/15 border border-primary/40 text-foreground'
+                        : 'bg-muted/40 border border-transparent hover:bg-muted/60 text-foreground/80'}
                         disabled:opacity-50 disabled:cursor-not-allowed"
                     >
-                      <span class="shrink-0 w-4 h-4 rounded-full border-2 flex items-center justify-center
-                        {isSelected ? 'border-primary' : 'border-muted-foreground/40'}">
+                      <span
+                        class="shrink-0 w-4 h-4 rounded-full border-2 flex items-center justify-center
+                        {isSelected ? 'border-primary' : 'border-muted-foreground/40'}"
+                      >
                         {#if isSelected}
                           <span class="w-2 h-2 rounded-full bg-primary"></span>
                         {/if}
@@ -147,7 +165,9 @@
                     </button>
                   {/each}
                 </div>
-                <p class="text-[10px] text-muted-foreground/60 mt-1.5">Select a rule to auto-approve similar future requests.</p>
+                <p class="text-[10px] text-muted-foreground/60 mt-1.5">
+                  Select a rule to auto-approve similar future requests.
+                </p>
               </div>
             {/if}
           </div>

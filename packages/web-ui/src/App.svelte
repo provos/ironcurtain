@@ -1,13 +1,15 @@
+<script lang="ts" module>
+  function formatUptime(seconds: number): string {
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    if (h > 0) return `${h}h ${m}m`;
+    return `${m}m`;
+  }
+</script>
+
 <script lang="ts">
   import { onMount } from 'svelte';
-  import {
-    appState,
-    initConnection,
-    connectWithToken,
-    getTheme,
-    setTheme,
-    type ThemeId,
-  } from './lib/stores.svelte.js';
+  import { appState, initConnection, connectWithToken, getTheme, setTheme, type ThemeId } from './lib/stores.svelte.js';
   import Dashboard from './routes/Dashboard.svelte';
   import Sessions from './routes/Sessions.svelte';
   import Escalations from './routes/Escalations.svelte';
@@ -68,7 +70,9 @@
     <div class="absolute inset-0 bg-gradient-to-br from-background via-background to-primary/5"></div>
     <div class="relative z-10 w-full max-w-sm mx-4 animate-fade-in">
       <div class="text-center mb-8">
-        <div class="inline-flex items-center justify-center w-14 h-14 rounded-xl bg-primary/10 border border-primary/20 mb-4">
+        <div
+          class="inline-flex items-center justify-center w-14 h-14 rounded-xl bg-primary/10 border border-primary/20 mb-4"
+        >
           <ShieldCheck size={28} class="text-primary" weight="duotone" />
         </div>
         <h1 class="text-2xl font-semibold tracking-tight">IronCurtain</h1>
@@ -76,19 +80,10 @@
       </div>
 
       <div class="bg-card border border-border rounded-xl p-6 shadow-lg shadow-black/5">
-        <p class="text-sm text-muted-foreground mb-5">
-          Paste the auth token from the daemon output to connect.
-        </p>
+        <p class="text-sm text-muted-foreground mb-5">Paste the auth token from the daemon output to connect.</p>
         <form onsubmit={handleTokenSubmit}>
-          <Input
-            type="text"
-            bind:value={tokenInput}
-            placeholder="Auth token..."
-            class="font-mono"
-          />
-          <Button type="submit" class="w-full mt-3">
-            Connect
-          </Button>
+          <Input type="text" bind:value={tokenInput} placeholder="Auth token..." class="font-mono" />
+          <Button type="submit" class="w-full mt-3">Connect</Button>
         </form>
       </div>
 
@@ -98,9 +93,7 @@
             variant="ghost"
             size="sm"
             onclick={() => switchTheme(t.id)}
-            class={currentTheme === t.id
-              ? 'bg-primary/15 text-primary font-medium'
-              : 'text-muted-foreground'}
+            class={currentTheme === t.id ? 'bg-primary/15 text-primary font-medium' : 'text-muted-foreground'}
           >
             {t.label}
           </Button>
@@ -119,7 +112,8 @@
           <div>
             <span class="text-sm font-semibold tracking-tight">IronCurtain</span>
             <div data-testid="connection-status" class="flex items-center gap-1.5 mt-0.5">
-              <span class="inline-flex rounded-full h-2 w-2 {appState.connected ? 'bg-success' : 'bg-destructive'}"></span>
+              <span class="inline-flex rounded-full h-2 w-2 {appState.connected ? 'bg-success' : 'bg-destructive'}"
+              ></span>
               <span class="text-[10px] text-muted-foreground uppercase tracking-wider">
                 {appState.connected ? 'Live' : 'Offline'}
               </span>
@@ -131,17 +125,20 @@
       <div class="flex-1 py-2 px-2 space-y-0.5">
         {#each navItems as item}
           <button
-            onclick={() => appState.currentView = item.id}
+            onclick={() => (appState.currentView = item.id)}
             aria-current={appState.currentView === item.id ? 'page' : undefined}
             class="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-all
               {appState.currentView === item.id
-                ? 'bg-accent text-accent-foreground font-medium shadow-sm'
-                : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground'}"
+              ? 'bg-accent text-accent-foreground font-medium shadow-sm'
+              : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground'}"
           >
             <item.icon size={16} class="shrink-0" />
             {item.label}
             {#if item.id === 'escalations' && appState.escalationCount > 0}
-              <Badge variant="destructive" class="ml-auto px-1.5 font-mono font-semibold min-w-[18px] text-center text-[10px] leading-none">
+              <Badge
+                variant="destructive"
+                class="ml-auto px-1.5 font-mono font-semibold min-w-[18px] text-center text-[10px] leading-none"
+              >
                 {appState.escalationCount}
               </Badge>
             {/if}
@@ -162,7 +159,9 @@
           </div>
           <div class="flex justify-between">
             <span>Jobs</span>
-            <span class="text-foreground/70">{appState.daemonStatus.jobs.enabled}/{appState.daemonStatus.jobs.total}</span>
+            <span class="text-foreground/70"
+              >{appState.daemonStatus.jobs.enabled}/{appState.daemonStatus.jobs.total}</span
+            >
           </div>
           {#if appState.daemonStatus.signalConnected}
             <div class="flex justify-between">
@@ -177,19 +176,15 @@
         <DropdownMenu bind:open={showThemePicker} align="top-left" contentClass="w-48" class="w-full">
           {#snippet trigger()}
             <button
-              onclick={() => showThemePicker = !showThemePicker}
+              onclick={() => (showThemePicker = !showThemePicker)}
               class="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm text-muted-foreground hover:bg-accent/50 hover:text-foreground transition-all"
             >
               <Palette size={16} class="shrink-0" />
-              Theme: {themes.find(t => t.id === currentTheme)?.label}
+              Theme: {themes.find((t) => t.id === currentTheme)?.label}
             </button>
           {/snippet}
           {#each themes as t (t.id)}
-            <DropdownMenuItem
-              active={currentTheme === t.id}
-              onclick={() => switchTheme(t.id)}
-              class="py-2.5"
-            >
+            <DropdownMenuItem active={currentTheme === t.id} onclick={() => switchTheme(t.id)} class="py-2.5">
               <div class="flex items-center justify-between w-full">
                 <div>
                   <div class="font-medium">{t.label}</div>
@@ -218,12 +213,3 @@
     </main>
   </div>
 {/if}
-
-<script lang="ts" module>
-  function formatUptime(seconds: number): string {
-    const h = Math.floor(seconds / 3600);
-    const m = Math.floor((seconds % 3600) / 60);
-    if (h > 0) return `${h}h ${m}m`;
-    return `${m}m`;
-  }
-</script>
