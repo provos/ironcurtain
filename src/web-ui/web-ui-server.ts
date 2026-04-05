@@ -10,7 +10,7 @@ import { createServer, type Server, type IncomingMessage, type ServerResponse } 
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { resolve, dirname, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import type { Socket } from 'node:net';
 import { WebSocketServer, WebSocket as WsWebSocket } from 'ws';
 
@@ -73,7 +73,13 @@ export class WebUiServer {
   constructor(options: WebUiServerOptions) {
     this.options = options;
     this.authToken = randomBytes(32).toString('base64url');
-    this.staticRoot = resolveStaticAssetPath();
+    const rawStaticRoot = resolveStaticAssetPath();
+    try {
+      this.staticRoot = realpathSync(rawStaticRoot);
+    } catch {
+      // Static root may not exist yet (web UI not built); keep the raw path
+      this.staticRoot = rawStaticRoot;
+    }
 
     this.dispatchCtx = {
       handler: options.handler,
@@ -97,7 +103,7 @@ export class WebUiServer {
 
   async start(): Promise<string> {
     const httpServer = createServer((req, res) => this.handleHttpRequest(req, res));
-    const wss = new WebSocketServer({ noServer: true });
+    const wss = new WebSocketServer({ noServer: true, maxPayload: 1_048_576 });
 
     httpServer.on('upgrade', (req: IncomingMessage, socket: Socket, head: Buffer) => {
       this.handleUpgrade(req, socket, head, wss);
@@ -259,10 +265,19 @@ export class WebUiServer {
       return;
     }
 
-    const filePath =
+    const rawFilePath =
       pathname === '/' ? resolve(this.staticRoot, 'index.html') : resolve(this.staticRoot, pathname.slice(1));
 
-    // Path containment check
+    // Resolve symlinks before containment check to prevent symlink escape
+    let filePath: string;
+    try {
+      filePath = realpathSync(rawFilePath);
+    } catch {
+      // File doesn't exist — fall through to SPA fallback below
+      filePath = rawFilePath;
+    }
+
+    // Path containment check (both sides are canonical real paths)
     if (!filePath.startsWith(this.staticRoot)) {
       res.writeHead(403);
       res.end('Forbidden');
