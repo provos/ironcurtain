@@ -5,8 +5,9 @@
  * The WebSocket client feeds events into the store via handleEvent().
  */
 
-import type { SessionDto, EscalationDto, DaemonStatusDto, JobListDto, OutputLine, BudgetSummaryDto } from './types.js';
+import type { SessionDto, EscalationDto, DaemonStatusDto, JobListDto, OutputLine } from './types.js';
 import { createWsClient, type WsClient } from './ws-client.js';
+import { handleEvent as handleEventPure } from './event-handler.js';
 
 export type ViewId = 'dashboard' | 'sessions' | 'escalations' | 'jobs';
 export type ThemeId = 'iron' | 'daylight' | 'midnight';
@@ -69,6 +70,12 @@ class AppState {
     this.sessionOutputs = new Map(this.sessionOutputs).set(label, existing);
   }
 
+  removeOutput(label: number): void {
+    const next = new Map(this.sessionOutputs);
+    next.delete(label);
+    this.sessionOutputs = next;
+  }
+
   getOutput(label: number): OutputLine[] {
     return this.sessionOutputs.get(label) ?? [];
   }
@@ -96,121 +103,8 @@ function wireEventHandlers(client: WsClient): void {
   });
 
   client.onEvent((event, payload) => {
-    handleEvent(event, payload);
+    handleEventPure(appState, { refreshJobs: () => refreshJobs(client) }, event, payload);
   });
-}
-
-function handleEvent(event: string, payload: unknown): void {
-  const data = payload as Record<string, unknown>;
-
-  switch (event) {
-    case 'daemon.status':
-      appState.daemonStatus = data as unknown as DaemonStatusDto;
-      break;
-
-    case 'session.created': {
-      const session = data as unknown as SessionDto;
-      appState.sessions = new Map(appState.sessions).set(session.label, session);
-      break;
-    }
-
-    case 'session.updated': {
-      const session = data as unknown as SessionDto;
-      appState.sessions = new Map(appState.sessions).set(session.label, session);
-      break;
-    }
-
-    case 'session.ended': {
-      const label = data.label as number;
-      const newSessions = new Map(appState.sessions);
-      newSessions.delete(label);
-      appState.sessions = newSessions;
-      const newOutputs = new Map(appState.sessionOutputs);
-      newOutputs.delete(label);
-      appState.sessionOutputs = newOutputs;
-      if (appState.selectedSessionLabel === label) {
-        appState.selectedSessionLabel = null;
-      }
-      break;
-    }
-
-    case 'session.thinking': {
-      const label = data.label as number;
-      // Update session status to 'processing' so the badge reflects activity
-      const existing = appState.sessions.get(label);
-      if (existing) {
-        appState.sessions = new Map(appState.sessions).set(label, { ...existing, status: 'processing' });
-      }
-      appState.addOutput(label, {
-        kind: 'thinking',
-        text: 'Thinking...',
-        timestamp: new Date().toISOString(),
-      });
-      break;
-    }
-
-    case 'session.tool_call': {
-      const label = data.label as number;
-      const toolName = data.toolName as string;
-      const preview = data.preview as string;
-      appState.addOutput(label, {
-        kind: 'tool_call',
-        text: `${toolName}: ${preview}`,
-        timestamp: new Date().toISOString(),
-      });
-      break;
-    }
-
-    case 'session.output': {
-      const label = data.label as number;
-      const text = data.text as string;
-      appState.addOutput(label, {
-        kind: 'assistant',
-        text,
-        timestamp: new Date().toISOString(),
-      });
-      break;
-    }
-
-    case 'session.budget_update': {
-      const label = data.label as number;
-      const budget = data.budget as BudgetSummaryDto;
-      const existingSession = appState.sessions.get(label);
-      if (existingSession) {
-        appState.sessions = new Map(appState.sessions).set(label, { ...existingSession, budget });
-      }
-      break;
-    }
-
-    case 'escalation.created': {
-      const esc = data as unknown as EscalationDto;
-      appState.pendingEscalations = new Map(appState.pendingEscalations).set(esc.escalationId, esc);
-      break;
-    }
-
-    case 'escalation.resolved': {
-      const id = data.escalationId as string;
-      const newEsc = new Map(appState.pendingEscalations);
-      newEsc.delete(id);
-      appState.pendingEscalations = newEsc;
-      break;
-    }
-
-    case 'escalation.expired': {
-      const id = data.escalationId as string;
-      const newEsc2 = new Map(appState.pendingEscalations);
-      newEsc2.delete(id);
-      appState.pendingEscalations = newEsc2;
-      break;
-    }
-
-    case 'job.list_changed':
-    case 'job.completed':
-    case 'job.failed':
-    case 'job.started':
-      refreshJobs(getWsClient());
-      break;
-  }
 }
 
 async function refreshAll(client: WsClient): Promise<void> {

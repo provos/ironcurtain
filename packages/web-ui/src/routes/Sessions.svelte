@@ -1,6 +1,7 @@
 <script lang="ts">
   import { appState, getWsClient } from '../lib/stores.svelte.js';
-  import type { ConversationTurn, PersonaListItem, OutputLine } from '../lib/types.js';
+  import type { ConversationTurn, PersonaListItem } from '../lib/types.js';
+  import { groupOutputLines } from '../lib/output-grouping.js';
   import { renderMarkdown } from '../lib/markdown.js';
   import { tick } from 'svelte';
 
@@ -31,54 +32,6 @@
 
   // Collapsible group expanded state (keyed by group index)
   let expandedGroups = $state<Set<number>>(new Set());
-
-  // Types for grouped output
-  type SingleEntry = { kind: 'single'; line: OutputLine };
-  type CollapsibleGroup = { kind: 'group'; lines: OutputLine[]; summary: string };
-  type OutputEntry = SingleEntry | CollapsibleGroup;
-
-  /** Whether a line kind should be grouped into collapsible sections. */
-  function isCollapsibleKind(kind: OutputLine['kind']): boolean {
-    return kind === 'thinking' || kind === 'tool_call';
-  }
-
-  /** Build a summary label for a collapsible group of lines. */
-  function buildGroupSummary(lines: OutputLine[]): string {
-    const toolCalls = lines.filter((l) => l.kind === 'tool_call').length;
-    const thinking = lines.filter((l) => l.kind === 'thinking').length;
-    const parts: string[] = [];
-    if (thinking > 0) parts.push(`${thinking} thinking`);
-    if (toolCalls > 0) parts.push(`${toolCalls} tool call${toolCalls === 1 ? '' : 's'}`);
-    return parts.join(', ');
-  }
-
-  /** Group consecutive thinking/tool_call lines into collapsible sections. */
-  function groupOutputLines(lines: OutputLine[]): OutputEntry[] {
-    const entries: OutputEntry[] = [];
-    let pendingGroup: OutputLine[] = [];
-
-    function flushGroup(): void {
-      if (pendingGroup.length > 0) {
-        entries.push({
-          kind: 'group',
-          lines: pendingGroup,
-          summary: buildGroupSummary(pendingGroup),
-        });
-        pendingGroup = [];
-      }
-    }
-
-    for (const line of lines) {
-      if (isCollapsibleKind(line.kind)) {
-        pendingGroup.push(line);
-      } else {
-        flushGroup();
-        entries.push({ kind: 'single', line });
-      }
-    }
-    flushGroup();
-    return entries;
-  }
 
   function toggleGroup(index: number): void {
     const next = new Set(expandedGroups);
