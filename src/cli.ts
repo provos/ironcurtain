@@ -34,6 +34,7 @@ const topLevelSpec: CommandSpec = {
     { name: 'refresh-lists', description: 'Re-resolve dynamic lists without full recompilation' },
     { name: 'customize-policy', description: 'Customize your policy via LLM-assisted conversation' },
     { name: 'config', description: 'Edit configuration interactively' },
+    { name: 'workflow', description: 'Run multi-agent workflows (start, resume, inspect)' },
     { name: 'help', description: 'Show this help message' },
   ],
   options: [
@@ -165,6 +166,11 @@ switch (subcommand) {
   case 'escalation-listener': {
     const { main: listenerMain } = await import('./escalation/listener-command.js');
     await listenerMain();
+    break;
+  }
+  case 'workflow': {
+    const { main: workflowMain } = await import('./workflow/workflow-command.js');
+    await workflowMain(process.argv.slice(3));
     break;
   }
   case 'setup-signal': {

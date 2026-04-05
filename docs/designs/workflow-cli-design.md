@@ -15,11 +15,11 @@ ironcurtain workflow --help
 
 ### Arguments
 
-| Subcommand | Positional Args | Flags |
-|---|---|---|
-| `start` | `<definition.json>` `"task"` | `--model <id>` (optional, overrides config default) |
-| `resume` | `<baseDir>` | `--state <name>` (optional, synthesize checkpoint at this state), `--model <id>` (optional, override model for this run) |
-| `inspect` | `<baseDir>` | `--all` (optional, show full message log instead of last 20) |
+| Subcommand | Positional Args              | Flags                                                                                                                    |
+| ---------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `start`    | `<definition.json>` `"task"` | `--model <id>` (optional, overrides config default)                                                                      |
+| `resume`   | `<baseDir>`                  | `--state <name>` (optional, synthesize checkpoint at this state), `--model <id>` (optional, override model for this run) |
+| `inspect`  | `<baseDir>`                  | `--all` (optional, show full message log instead of last 20)                                                             |
 
 Argument parsing uses `node:util parseArgs` consistent with the rest of the CLI. The `workflow` case in `src/cli.ts` passes `process.argv.slice(3)` to the workflow command module, which re-parses to determine the sub-subcommand (`start`/`resume`/`inspect`).
 
@@ -29,18 +29,18 @@ Argument parsing uses `node:util parseArgs` consistent with the rest of the CLI.
 
 Extracted from the spike, this module contains all reusable logic that both the CLI command and the spike script can import:
 
-| Export | Description | Origin in spike |
-|---|---|---|
-| `createGateHandler()` | Gate promise queue (raiseGate/dismissGate/waitForGate) | Lines 115-137 |
-| `promptGateInteractive()` | Readline-based interactive gate prompt | Lines 143-207 |
-| `createConsoleTab()` | `WorkflowTabHandle` that writes to stdout | Lines 213-225 |
-| `printLifecycleEvent()` | Formats `WorkflowLifecycleEvent` with ANSI colors | Lines 231-253 |
-| `printSummary()` | End-of-workflow summary with artifact listing | Lines 259-287 |
-| `printResumeInfo()` | Prints checkpoint details before resume | Lines 344-356 |
-| `selectResumableWorkflow()` | Picks most-recent checkpoint from a store | Lines 358-390 |
-| `synthesizeCheckpoint()` | Builds checkpoint for pre-checkpointing runs | Lines 398-472 |
-| `runEventLoop()` | Poll loop: status check, gate prompt, wait (accepts `AbortSignal`) | Lines 478-499 |
-| ANSI color constants | Shared palette | Lines 54-65 |
+| Export                      | Description                                                        | Origin in spike |
+| --------------------------- | ------------------------------------------------------------------ | --------------- |
+| `createGateHandler()`       | Gate promise queue (raiseGate/dismissGate/waitForGate)             | Lines 115-137   |
+| `promptGateInteractive()`   | Readline-based interactive gate prompt                             | Lines 143-207   |
+| `createConsoleTab()`        | `WorkflowTabHandle` that writes to stdout                          | Lines 213-225   |
+| `printLifecycleEvent()`     | Formats `WorkflowLifecycleEvent` with ANSI colors                  | Lines 231-253   |
+| `printSummary()`            | End-of-workflow summary with artifact listing                      | Lines 259-287   |
+| `printResumeInfo()`         | Prints checkpoint details before resume                            | Lines 344-356   |
+| `selectResumableWorkflow()` | Picks most-recent checkpoint from a store                          | Lines 358-390   |
+| `synthesizeCheckpoint()`    | Builds checkpoint for pre-checkpointing runs                       | Lines 398-472   |
+| `runEventLoop()`            | Poll loop: status check, gate prompt, wait (accepts `AbortSignal`) | Lines 478-499   |
+| ANSI color constants        | Shared palette                                                     | Lines 54-65     |
 
 **Output convention**: All functions in `cli-support.ts` use `process.stdout.write()` and `process.stderr.write()` for terminal output. Never use `console.log/warn/error` -- after `logger.setup()` hijacks `console.*`, those writes are redirected to the session log file and never reach the terminal. This is the established codebase pattern used in `cli-transport.ts`, `orchestrator.ts`, `index.ts`, and the spike. The `writeStderr()` helper in `orchestrator.ts` is the canonical example.
 
@@ -114,9 +114,7 @@ This follows the exact pattern of `persona`, `auth`, `daemon`, and other subcomm
 The session factory is the key integration point between the workflow orchestrator and the session layer.
 
 ```typescript
-function buildSessionFactory(
-  modelOverride: string | undefined,
-): (opts: SessionOptions) => Promise<Session> {
+function buildSessionFactory(modelOverride: string | undefined): (opts: SessionOptions) => Promise<Session> {
   const baseConfig = loadConfig();
 
   // Resolve model: --model flag > config default
@@ -225,10 +223,10 @@ No hard `process.exit(1)` during the poll loop. The abort signal allows the even
 
 ## Exit Codes
 
-| Code | Meaning |
-|---|---|
-| `0` | Workflow completed successfully |
-| `1` | Workflow failed or runtime error |
+| Code  | Meaning                                              |
+| ----- | ---------------------------------------------------- |
+| `0`   | Workflow completed successfully                      |
+| `1`   | Workflow failed or runtime error                     |
 | `130` | SIGINT (standard Unix convention for 128 + signal 2) |
 
 ## Help Spec
@@ -297,3 +295,14 @@ This is a pure refactor with no behavioral changes.
 2. Verify `inspect` output with a pre-built checkpoint fixture (default 20 messages + `--all`)
 3. Verify definition persistence: `start` copies definition, `resume` reads it
 4. Update top-level help examples in `cli.ts` to include a workflow example
+
+---
+
+## Implementation Status
+
+**Implemented** (2026-04-04). Actual file paths:
+
+- `src/workflow/cli-support.ts` -- shared helpers (session factory, gate handling, event loop, ANSI colors, resume helpers)
+- `src/workflow/workflow-command.ts` -- CLI entry point with `start`, `resume`, `inspect` subcommands
+- `src/cli.ts` -- wired `workflow` case into the subcommand switch
+- `examples/workflow-real-spike.ts` -- updated to import from `cli-support.ts`

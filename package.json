@@ -44,6 +44,7 @@
     "src/config/generated/compiled-policy.json",
     "src/config/generated/tool-annotations.json",
     "src/config/generated/test-scenarios.json",
+    "src/workflow/workflows/",
     "README.md",
     "LICENSE"
   ],
