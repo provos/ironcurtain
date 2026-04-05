@@ -6,7 +6,6 @@
 
   import { Button } from '$lib/components/ui/button/index.js';
   import { Badge } from '$lib/components/ui/badge/index.js';
-  import { Input } from '$lib/components/ui/input/index.js';
   import { DropdownMenu, DropdownMenuItem } from '$lib/components/ui/dropdown-menu/index.js';
 
   import Plus from 'phosphor-svelte/lib/Plus';
@@ -14,6 +13,7 @@
 
   let messageInput = $state('');
   let sending = $state(false);
+  let textareaEl: HTMLTextAreaElement | undefined = $state(undefined);
   let sessionHistory = $state<ConversationTurn[]>([]);
 
   // Session creation state
@@ -141,6 +141,7 @@
     const text = messageInput.trim();
     messageInput = '';
     sending = true;
+    if (textareaEl) textareaEl.style.height = 'auto';
 
     // Add user message to output immediately
     appState.addOutput(appState.selectedSessionLabel, {
@@ -162,6 +163,19 @@
       });
     } finally {
       sending = false;
+    }
+  }
+
+  function autoResizeTextarea(): void {
+    if (!textareaEl) return;
+    textareaEl.style.height = 'auto';
+    textareaEl.style.height = `${textareaEl.scrollHeight}px`;
+  }
+
+  function handleTextareaKeydown(e: KeyboardEvent): void {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage(e);
     }
   }
 
@@ -197,8 +211,8 @@
   });
 </script>
 
-<div class="flex h-full animate-fade-in">
-  <div class="w-64 border-r border-border bg-sidebar flex flex-col shrink-0">
+<div class="flex h-full min-h-0 animate-fade-in">
+  <div class="w-64 border-r border-border bg-sidebar flex flex-col shrink-0 min-h-0">
     <div class="px-4 py-3 border-b border-border flex items-center justify-between">
       <h3 class="text-sm font-semibold uppercase tracking-wider text-muted-foreground">Sessions</h3>
       <DropdownMenu bind:open={showPersonaPicker} align="bottom-right" contentClass="w-56">
@@ -297,7 +311,7 @@
   </div>
 
   <!-- Session detail / console -->
-  <div class="flex-1 flex flex-col">
+  <div class="flex-1 flex flex-col min-h-0 overflow-hidden">
     {#if appState.selectedSession}
       <div class="px-6 py-3 border-b border-border flex items-center justify-between bg-card/50">
         <div>
@@ -395,14 +409,17 @@
       </div>
 
       <!-- Input area -->
-      <form onsubmit={sendMessage} class="border-t border-border p-4 flex gap-2">
-        <Input
-          type="text"
+      <form onsubmit={sendMessage} class="border-t border-border p-4 flex items-end gap-2">
+        <textarea
+          bind:this={textareaEl}
           bind:value={messageInput}
+          oninput={autoResizeTextarea}
+          onkeydown={handleTextareaKeydown}
           placeholder="Send a message..."
           disabled={sending || appState.selectedSession.status !== 'ready'}
-          class="flex-1 font-mono"
-        />
+          rows="1"
+          class="flex-1 font-mono max-h-[150px] overflow-auto resize-none rounded-md border border-border bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+        ></textarea>
         <Button
           type="submit"
           loading={sending}

@@ -109,7 +109,7 @@
     </div>
   </div>
 {:else}
-  <div class="flex min-h-screen theme-transition">
+  <div class="flex h-screen theme-transition overflow-hidden">
     <nav class="w-56 bg-sidebar border-r border-border flex flex-col shrink-0">
       <div class="px-4 py-4 border-b border-border">
         <div class="flex items-center gap-2.5">
@@ -205,7 +205,7 @@
       </div>
     </nav>
 
-    <main class="flex-1 overflow-auto">
+    <main class="flex-1 min-h-0 overflow-hidden">
       {#if appState.currentView === 'dashboard'}
         <Dashboard />
       {:else if appState.currentView === 'sessions'}
