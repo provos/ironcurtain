@@ -30,7 +30,7 @@
   </div>
 
   <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-    <Card class="group p-4 hover:border-primary/30 transition-colors">
+    <Card data-testid="stat-sessions" class="group p-4 hover:border-primary/30 transition-colors">
       <div class="flex items-center justify-between mb-3">
         <span class="text-xs font-medium text-muted-foreground uppercase tracking-wider">Sessions</span>
         <ChatCircle size={16} class="text-muted-foreground/50" />
@@ -39,7 +39,7 @@
       <div class="text-[11px] text-muted-foreground mt-1">active</div>
     </Card>
 
-    <Card class="group p-4 hover:border-destructive/30 transition-colors {appState.escalationCount > 0 ? 'border-destructive/20' : ''}">
+    <Card data-testid="stat-escalations" class="group p-4 hover:border-destructive/30 transition-colors {appState.escalationCount > 0 ? 'border-destructive/20' : ''}">
       <div class="flex items-center justify-between mb-3">
         <span class="text-xs font-medium text-muted-foreground uppercase tracking-wider">Escalations</span>
         <Warning size={16} class={appState.escalationCount > 0 ? 'text-destructive' : 'text-muted-foreground/50'} />
@@ -48,7 +48,7 @@
       <div class="text-[11px] text-muted-foreground mt-1">pending</div>
     </Card>
 
-    <Card class="group p-4 hover:border-primary/30 transition-colors">
+    <Card data-testid="stat-scheduled" class="group p-4 hover:border-primary/30 transition-colors">
       <div class="flex items-center justify-between mb-3">
         <span class="text-xs font-medium text-muted-foreground uppercase tracking-wider">Scheduled</span>
         <Clock size={16} class="text-muted-foreground/50" />
@@ -57,7 +57,7 @@
       <div class="text-[11px] text-muted-foreground mt-1">enabled jobs</div>
     </Card>
 
-    <Card class="group p-4 hover:border-warning/30 transition-colors">
+    <Card data-testid="stat-running" class="group p-4 hover:border-warning/30 transition-colors">
       <div class="flex items-center justify-between mb-3">
         <span class="text-xs font-medium text-muted-foreground uppercase tracking-wider">Running</span>
         {#if (appState.daemonStatus?.jobs.running ?? 0) > 0}

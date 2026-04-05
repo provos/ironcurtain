@@ -118,7 +118,7 @@
           </div>
           <div>
             <span class="text-sm font-semibold tracking-tight">IronCurtain</span>
-            <div class="flex items-center gap-1.5 mt-0.5">
+            <div data-testid="connection-status" class="flex items-center gap-1.5 mt-0.5">
               <span class="inline-flex rounded-full h-2 w-2 {appState.connected ? 'bg-success' : 'bg-destructive'}"></span>
               <span class="text-[10px] text-muted-foreground uppercase tracking-wider">
                 {appState.connected ? 'Live' : 'Offline'}

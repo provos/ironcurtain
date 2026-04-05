@@ -165,7 +165,7 @@
 </script>
 
 <div class="flex h-full min-h-0 animate-fade-in">
-  <div class="w-64 border-r border-border bg-sidebar flex flex-col shrink-0 min-h-0">
+  <div data-testid="session-sidebar" class="w-64 border-r border-border bg-sidebar flex flex-col shrink-0 min-h-0">
     <div class="px-4 py-3 border-b border-border flex items-center justify-between">
       <h3 class="text-sm font-semibold uppercase tracking-wider text-muted-foreground">Sessions</h3>
       <DropdownMenu bind:open={showPersonaPicker} align="bottom-right" contentClass="w-56">
@@ -182,7 +182,7 @@
             {creatingSession ? 'Starting...' : 'New'}
           </Button>
         {/snippet}
-        <DropdownMenuItem onclick={() => createSession()} class="border-b border-border">
+        <DropdownMenuItem data-testid="persona-default" onclick={() => createSession()} class="border-b border-border">
           <div class="font-medium">Default</div>
           <div class="text-xs text-muted-foreground">No persona</div>
         </DropdownMenuItem>
@@ -233,6 +233,7 @@
       {/if}
       {#each [...appState.sessions.values()] as session (session.label)}
         <button
+          data-testid="session-item-{session.label}"
           onclick={() => appState.selectedSessionLabel = session.label}
           class="w-full text-left px-4 py-3 border-b border-border text-sm transition-colors
             {appState.selectedSessionLabel === session.label
@@ -305,7 +306,7 @@
         </div>
       </div>
 
-      <div bind:this={outputContainer} class="flex-1 overflow-auto p-5 space-y-2 font-mono text-sm">
+      <div bind:this={outputContainer} data-testid="session-output" class="flex-1 overflow-auto p-5 space-y-2 font-mono text-sm">
         {#each groupOutputLines(appState.getOutput(appState.selectedSessionLabel!)) as entry, groupIdx}
           {#if entry.kind === 'single'}
             {@const line = entry.line}

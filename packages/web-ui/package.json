@@ -9,9 +9,12 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
+    "e2e": "playwright test",
+    "e2e:headed": "playwright test --headed",
     "mock-server": "tsx scripts/mock-ws-server.ts"
   },
   "devDependencies": {
+    "@playwright/test": "^1.59.1",
     "@sveltejs/vite-plugin-svelte": "^5.0.3",
     "autoprefixer": "^10.4.21",
     "jsdom": "^29.0.1",
