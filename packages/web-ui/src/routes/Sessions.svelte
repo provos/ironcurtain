@@ -1,6 +1,8 @@
 <script lang="ts">
   import { appState, getWsClient } from '../lib/stores.svelte.js';
-  import type { ConversationTurn, PersonaListItem } from '../lib/types.js';
+  import type { ConversationTurn, PersonaListItem, OutputLine } from '../lib/types.js';
+  import { renderMarkdown } from '../lib/markdown.js';
+  import { tick } from 'svelte';
 
   let messageInput = $state('');
   let sending = $state(false);
@@ -15,6 +17,70 @@
 
   // Session end state
   let endingSession = $state<number | null>(null);
+
+  // Auto-scroll reference
+  let outputContainer: HTMLDivElement | undefined = $state(undefined);
+
+  // Collapsible group expanded state (keyed by group index)
+  let expandedGroups = $state<Set<number>>(new Set());
+
+  // Types for grouped output
+  type SingleEntry = { kind: 'single'; line: OutputLine };
+  type CollapsibleGroup = { kind: 'group'; lines: OutputLine[]; summary: string };
+  type OutputEntry = SingleEntry | CollapsibleGroup;
+
+  /** Whether a line kind should be grouped into collapsible sections. */
+  function isCollapsibleKind(kind: OutputLine['kind']): boolean {
+    return kind === 'thinking' || kind === 'tool_call';
+  }
+
+  /** Build a summary label for a collapsible group of lines. */
+  function buildGroupSummary(lines: OutputLine[]): string {
+    const toolCalls = lines.filter((l) => l.kind === 'tool_call').length;
+    const thinking = lines.filter((l) => l.kind === 'thinking').length;
+    const parts: string[] = [];
+    if (thinking > 0) parts.push(`${thinking} thinking`);
+    if (toolCalls > 0) parts.push(`${toolCalls} tool call${toolCalls === 1 ? '' : 's'}`);
+    return parts.join(', ');
+  }
+
+  /** Group consecutive thinking/tool_call lines into collapsible sections. */
+  function groupOutputLines(lines: OutputLine[]): OutputEntry[] {
+    const entries: OutputEntry[] = [];
+    let pendingGroup: OutputLine[] = [];
+
+    function flushGroup(): void {
+      if (pendingGroup.length > 0) {
+        entries.push({
+          kind: 'group',
+          lines: pendingGroup,
+          summary: buildGroupSummary(pendingGroup),
+        });
+        pendingGroup = [];
+      }
+    }
+
+    for (const line of lines) {
+      if (isCollapsibleKind(line.kind)) {
+        pendingGroup.push(line);
+      } else {
+        flushGroup();
+        entries.push({ kind: 'single', line });
+      }
+    }
+    flushGroup();
+    return entries;
+  }
+
+  function toggleGroup(index: number): void {
+    const next = new Set(expandedGroups);
+    if (next.has(index)) {
+      next.delete(index);
+    } else {
+      next.add(index);
+    }
+    expandedGroups = next;
+  }
 
   async function loadPersonas(): Promise<void> {
     loadingPersonas = true;
@@ -99,11 +165,27 @@
     }
   }
 
-  // Load history when session is selected
+  // Load history when session is selected; reset expanded groups
   $effect(() => {
     if (appState.selectedSessionLabel !== null) {
       loadHistory(appState.selectedSessionLabel);
+      expandedGroups = new Set();
     }
+  });
+
+  // Auto-scroll output container when new content arrives
+  $effect(() => {
+    const label = appState.selectedSessionLabel;
+    if (label === null) return;
+    // Access the output array to register as a reactive dependency
+    const output = appState.getOutput(label);
+    const _len = output.length;
+    // Scroll after the DOM updates
+    tick().then(() => {
+      if (outputContainer) {
+        outputContainer.scrollTop = outputContainer.scrollHeight;
+      }
+    });
   });
 </script>
 
@@ -200,7 +282,9 @@
         >
           <div class="flex items-center justify-between">
             <span class="font-mono font-medium">#{session.label}</span>
-            <span class="text-xs text-muted-foreground">{session.source.kind}</span>
+            <span class="text-xs text-muted-foreground">
+              {session.source.kind}{#if session.persona}&nbsp;&middot; {session.persona}{/if}
+            </span>
           </div>
           <div class="text-xs text-muted-foreground mt-1">
             {session.turnCount} turns &middot; {session.budget.estimatedCostUsd.toFixed(2)}
@@ -226,6 +310,11 @@
       <div class="px-6 py-3 border-b border-border flex items-center justify-between bg-card/50">
         <div>
           <span class="font-mono font-semibold">#{appState.selectedSession.label}</span>
+          {#if appState.selectedSession.persona}
+            <span class="ml-2 px-2 py-0.5 text-[11px] font-medium rounded-full bg-primary/15 text-primary">
+              {appState.selectedSession.persona}
+            </span>
+          {/if}
           <span class="inline-flex items-center gap-1.5 ml-2 px-2 py-0.5 text-[11px] font-medium rounded-full
             {appState.selectedSession.status === 'processing' ? 'bg-warning/15 text-warning' :
              appState.selectedSession.status === 'ready' ? 'bg-success/15 text-success' :
@@ -262,31 +351,56 @@
         </div>
       </div>
 
-      <div class="flex-1 overflow-auto p-5 space-y-2 font-mono text-sm">
-        {#each appState.getOutput(appState.selectedSessionLabel!) as line}
-          <div class="{line.kind === 'user' ? 'text-blue-400' :
-                       line.kind === 'assistant' ? 'text-foreground' :
-                       line.kind === 'tool_call' ? 'text-muted-foreground italic' :
-                       line.kind === 'thinking' ? 'text-yellow-400 animate-pulse' :
-                       line.kind === 'error' ? 'text-destructive' :
-                       'text-muted-foreground'}">
-            {#if line.kind === 'user'}
-              <span class="text-muted-foreground select-none">&gt; </span>{line.text}
-            {:else if line.kind === 'tool_call'}
-              <span class="select-none">  [tool] </span>{line.text}
-            {:else if line.kind === 'thinking'}
-              <span class="select-none">  </span>{line.text}
-            {:else}
-              <span class="whitespace-pre-wrap">{line.text}</span>
-            {/if}
-          </div>
+      <div bind:this={outputContainer} class="flex-1 overflow-auto p-5 space-y-2 font-mono text-sm">
+        {#each groupOutputLines(appState.getOutput(appState.selectedSessionLabel!)) as entry, groupIdx}
+          {#if entry.kind === 'single'}
+            {@const line = entry.line}
+            <div class="{line.kind === 'user' ? 'text-blue-400' :
+                         line.kind === 'assistant' ? 'text-foreground' :
+                         line.kind === 'error' ? 'text-destructive' :
+                         'text-muted-foreground'}">
+              {#if line.kind === 'user'}
+                <span class="text-muted-foreground select-none">&gt; </span>{line.text}
+              {:else}
+                <div class="prose-markdown">{@html renderMarkdown(line.text)}</div>
+              {/if}
+            </div>
+          {:else}
+            <!-- Collapsible group for thinking/tool_call lines -->
+            <div class="border border-border/50 rounded-md overflow-hidden">
+              <button
+                onclick={() => toggleGroup(groupIdx)}
+                class="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-muted-foreground
+                       hover:bg-accent/30 transition-colors select-none"
+              >
+                <span class="inline-block transition-transform {expandedGroups.has(groupIdx) ? 'rotate-90' : ''}"
+                  >&#9656;</span>
+                <span class="italic">{entry.summary}</span>
+              </button>
+              {#if expandedGroups.has(groupIdx)}
+                <div class="px-3 pb-2 space-y-1">
+                  {#each entry.lines as line}
+                    <div class="{line.kind === 'tool_call' ? 'text-muted-foreground italic' :
+                                 line.kind === 'thinking' ? 'text-yellow-400 animate-pulse' :
+                                 'text-muted-foreground'} text-xs">
+                      {#if line.kind === 'tool_call'}
+                        <span class="select-none">[tool] </span>{line.text}
+                      {:else}
+                        {line.text}
+                      {/if}
+                    </div>
+                  {/each}
+                </div>
+              {/if}
+            </div>
+          {/if}
         {/each}
         {#if appState.getOutput(appState.selectedSessionLabel!).length === 0 && sessionHistory.length > 0}
           {#each sessionHistory as turn}
             <div class="text-blue-400">
               <span class="text-muted-foreground select-none">&gt; </span>{turn.userMessage}
             </div>
-            <div class="whitespace-pre-wrap">{turn.assistantResponse}</div>
+            <div class="prose-markdown">{@html renderMarkdown(turn.assistantResponse)}</div>
           {/each}
         {/if}
       </div>

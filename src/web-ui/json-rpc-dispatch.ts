@@ -242,7 +242,7 @@ async function createWebSession(ctx: DispatchContext, persona?: string): Promise
     onDiagnostic: transport.createDiagnosticHandler(),
   });
 
-  const label = ctx.sessionManager.register(session, transport, { kind: 'web' });
+  const label = ctx.sessionManager.register(session, transport, { kind: 'web', persona });
   transport.sessionLabel = label;
 
   const runPromise = transport.run(session);
@@ -287,10 +287,20 @@ function sendToSession(ctx: DispatchContext, label: number, text: string): { acc
   const prev = ctx.sessionQueues.get(label) ?? Promise.resolve();
   const current = prev.then(async () => {
     ctx.eventBus.emit('session.thinking', { label, turnNumber });
+    // Emit session status update so the frontend shows 'processing'
+    const freshManaged = ctx.sessionManager.get(label);
+    if (freshManaged) {
+      ctx.eventBus.emit('session.updated', toSessionDto(freshManaged));
+    }
     try {
       const response = await transport.forwardMessage(text);
       ctx.eventBus.emit('session.output', { label, text: response, turnNumber });
       ctx.eventBus.emit('session.budget_update', { label, budget: toBudgetDto(managed) });
+      // Emit updated session so frontend picks up status change (e.g. back to 'ready')
+      const updatedManaged = ctx.sessionManager.get(label);
+      if (updatedManaged) {
+        ctx.eventBus.emit('session.updated', toSessionDto(updatedManaged));
+      }
     } catch (err) {
       if (err instanceof BudgetExhaustedError) {
         ctx.eventBus.emit('session.ended', { label, reason: `Budget exhausted: ${err.message}` });
@@ -341,6 +351,7 @@ function listJobs(ctx: DispatchContext): JobListDto[] {
 
 export function toSessionDto(managed: ManagedSession): SessionDto {
   const info = managed.session.getInfo();
+  const persona = managed.source.kind === 'web' ? managed.source.persona : undefined;
   return {
     label: managed.label,
     source: managed.source,
@@ -350,6 +361,7 @@ export function toSessionDto(managed: ManagedSession): SessionDto {
     hasPendingEscalation: managed.pendingEscalation !== null,
     messageInFlight: managed.messageInFlight,
     budget: toBudgetDto(managed),
+    ...(persona ? { persona } : {}),
   };
 }
 

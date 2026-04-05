@@ -127,7 +127,7 @@ ironcurtain start --persona my-assistant "Check my email"  # Use a persona
 
 ### Other running modes
 
-IronCurtain also supports PTY mode, session resume (`--resume <session-id>`), a Signal messaging transport for mobile approval, and a daemon mode for scheduled cron jobs. See [RUNNING_MODES.md](RUNNING_MODES.md) for details.
+IronCurtain also supports PTY mode, session resume (`--resume <session-id>`), a Signal messaging transport for mobile approval, and a daemon mode for scheduled cron jobs. The daemon has an optional [web UI](DAEMON.md#web-ui) (`--web-ui`) for browser-based monitoring and escalation handling. See [RUNNING_MODES.md](RUNNING_MODES.md) for details.
 
 ## Customizing Your Policy
 

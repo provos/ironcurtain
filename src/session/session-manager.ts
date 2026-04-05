@@ -46,7 +46,7 @@ export interface PendingEscalationData {
 export type SessionSource =
   | { readonly kind: 'signal' }
   | { readonly kind: 'cron'; readonly jobId: JobId; readonly jobName: string }
-  | { readonly kind: 'web' };
+  | { readonly kind: 'web'; readonly persona?: string };
 
 /**
  * Unified managed session entry. Used for both Signal-initiated

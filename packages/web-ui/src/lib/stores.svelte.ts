@@ -51,13 +51,22 @@ class AppState {
   }
 
   addOutput(label: number, line: OutputLine): void {
-    const existing = this.sessionOutputs.get(label) ?? [];
-    existing.push(line);
+    let existing = this.sessionOutputs.get(label) ?? [];
+
+    // Remove stale "Thinking..." lines when real content arrives
+    if (line.kind === 'tool_call' || line.kind === 'assistant') {
+      existing = existing.filter((l) => l.kind !== 'thinking');
+    }
+
+    existing = [...existing, line];
+
     // Cap output to prevent unbounded memory growth
     if (existing.length > MAX_OUTPUT_LINES) {
-      existing.splice(0, existing.length - MAX_OUTPUT_LINES);
+      existing = existing.slice(existing.length - MAX_OUTPUT_LINES);
     }
-    this.sessionOutputs.set(label, existing);
+
+    // Create a new Map so Svelte 5 detects the change
+    this.sessionOutputs = new Map(this.sessionOutputs).set(label, existing);
   }
 
   getOutput(label: number): OutputLine[] {
@@ -101,14 +110,24 @@ function handleEvent(event: string, payload: unknown): void {
 
     case 'session.created': {
       const session = data as unknown as SessionDto;
-      appState.sessions.set(session.label, session);
+      appState.sessions = new Map(appState.sessions).set(session.label, session);
+      break;
+    }
+
+    case 'session.updated': {
+      const session = data as unknown as SessionDto;
+      appState.sessions = new Map(appState.sessions).set(session.label, session);
       break;
     }
 
     case 'session.ended': {
       const label = data.label as number;
-      appState.sessions.delete(label);
-      appState.sessionOutputs.delete(label);
+      const newSessions = new Map(appState.sessions);
+      newSessions.delete(label);
+      appState.sessions = newSessions;
+      const newOutputs = new Map(appState.sessionOutputs);
+      newOutputs.delete(label);
+      appState.sessionOutputs = newOutputs;
       if (appState.selectedSessionLabel === label) {
         appState.selectedSessionLabel = null;
       }
@@ -117,6 +136,11 @@ function handleEvent(event: string, payload: unknown): void {
 
     case 'session.thinking': {
       const label = data.label as number;
+      // Update session status to 'processing' so the badge reflects activity
+      const existing = appState.sessions.get(label);
+      if (existing) {
+        appState.sessions = new Map(appState.sessions).set(label, { ...existing, status: 'processing' });
+      }
       appState.addOutput(label, {
         kind: 'thinking',
         text: 'Thinking...',
@@ -151,28 +175,32 @@ function handleEvent(event: string, payload: unknown): void {
     case 'session.budget_update': {
       const label = data.label as number;
       const budget = data.budget as BudgetSummaryDto;
-      const existing = appState.sessions.get(label);
-      if (existing) {
-        appState.sessions.set(label, { ...existing, budget });
+      const existingSession = appState.sessions.get(label);
+      if (existingSession) {
+        appState.sessions = new Map(appState.sessions).set(label, { ...existingSession, budget });
       }
       break;
     }
 
     case 'escalation.created': {
       const esc = data as unknown as EscalationDto;
-      appState.pendingEscalations.set(esc.escalationId, esc);
+      appState.pendingEscalations = new Map(appState.pendingEscalations).set(esc.escalationId, esc);
       break;
     }
 
     case 'escalation.resolved': {
       const id = data.escalationId as string;
-      appState.pendingEscalations.delete(id);
+      const newEsc = new Map(appState.pendingEscalations);
+      newEsc.delete(id);
+      appState.pendingEscalations = newEsc;
       break;
     }
 
     case 'escalation.expired': {
       const id = data.escalationId as string;
-      appState.pendingEscalations.delete(id);
+      const newEsc2 = new Map(appState.pendingEscalations);
+      newEsc2.delete(id);
+      appState.pendingEscalations = newEsc2;
       break;
     }
 
@@ -196,17 +224,19 @@ async function refreshAll(client: WsClient): Promise<void> {
 
     appState.daemonStatus = status;
 
-    appState.sessions.clear();
+    const newSessions = new Map<number, SessionDto>();
     for (const session of sessions) {
-      appState.sessions.set(session.label, session);
+      newSessions.set(session.label, session);
     }
+    appState.sessions = newSessions;
 
     appState.jobs = jobs;
 
-    appState.pendingEscalations.clear();
+    const newEscalations = new Map<string, EscalationDto>();
     for (const esc of escalations) {
-      appState.pendingEscalations.set(esc.escalationId, esc);
+      newEscalations.set(esc.escalationId, esc);
     }
+    appState.pendingEscalations = newEscalations;
   } catch (err) {
     console.error('Failed to refresh state:', err);
   }

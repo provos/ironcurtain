@@ -80,6 +80,7 @@ export interface SessionDto {
   readonly hasPendingEscalation: boolean;
   readonly messageInFlight: boolean;
   readonly budget: BudgetSummaryDto;
+  readonly persona?: string;
 }
 
 export interface BudgetSummaryDto {

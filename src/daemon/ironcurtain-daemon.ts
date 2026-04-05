@@ -683,6 +683,10 @@ export class IronCurtainDaemon {
     const url = await server.start();
     this.webUiServer = server;
     process.stderr.write(`  Web UI: ${url}\n`);
+    if (this.webUiOptions?.devMode) {
+      const token = url.split('token=')[1];
+      process.stderr.write(`  Web UI (dev): http://localhost:5173?token=${token}\n`);
+    }
   }
 
   private readLastRunSummary(workspace: string): string | null {

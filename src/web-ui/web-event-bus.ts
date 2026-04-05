@@ -18,6 +18,7 @@ import type { RunRecord } from '../cron/types.js';
 export interface WebEventMap {
   'session.created': SessionDto;
   'session.ended': { label: number; reason: string };
+  'session.updated': SessionDto;
   'session.thinking': { label: number; turnNumber: number };
   'session.tool_call': { label: number; toolName: string; preview: string };
   'session.tool_result': { label: number; toolName: string; stepIndex: number };
