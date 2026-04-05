@@ -2,38 +2,96 @@
 @tailwind components;
 @tailwind utilities;
 
+/*
+ * Three themed palettes for IronCurtain.
+ * Iron  — default dark, charcoal + amber accents
+ * Daylight — warm light with teal accents
+ * Midnight — deep navy + cool blue
+ */
+
 @layer base {
-  :root {
-    --background: 0 0% 100%;
-    --foreground: 240 10% 3.9%;
-    --card: 0 0% 100%;
-    --card-foreground: 240 10% 3.9%;
-    --primary: 240 5.9% 10%;
-    --primary-foreground: 0 0% 98%;
-    --muted: 240 4.8% 95.9%;
-    --muted-foreground: 240 3.8% 46.1%;
-    --accent: 240 4.8% 95.9%;
-    --accent-foreground: 240 5.9% 10%;
-    --destructive: 0 84.2% 60.2%;
+  /* ── Iron (dark default) ─────────────────────────────── */
+  [data-theme="iron"] {
+    --background: 220 14% 8%;
+    --foreground: 210 20% 92%;
+    --card: 220 14% 10%;
+    --card-foreground: 210 20% 92%;
+    --primary: 38 92% 55%;
+    --primary-foreground: 220 14% 8%;
+    --secondary: 220 12% 16%;
+    --secondary-foreground: 210 20% 82%;
+    --muted: 220 12% 16%;
+    --muted-foreground: 215 12% 52%;
+    --accent: 220 12% 14%;
+    --accent-foreground: 210 20% 92%;
+    --destructive: 0 72% 51%;
     --destructive-foreground: 0 0% 98%;
-    --border: 240 5.9% 90%;
+    --success: 142 72% 42%;
+    --success-foreground: 0 0% 98%;
+    --warning: 38 92% 55%;
+    --warning-foreground: 220 14% 8%;
+    --border: 220 12% 18%;
+    --ring: 38 92% 55%;
     --radius: 0.5rem;
+    --sidebar: 220 14% 6%;
+    --glow: 38 92% 55%;
+    color-scheme: dark;
   }
 
-  .dark {
-    --background: 240 10% 3.9%;
-    --foreground: 0 0% 98%;
-    --card: 240 10% 3.9%;
-    --card-foreground: 0 0% 98%;
-    --primary: 0 0% 98%;
-    --primary-foreground: 240 5.9% 10%;
-    --muted: 240 3.7% 15.9%;
-    --muted-foreground: 240 5% 64.9%;
-    --accent: 240 3.7% 15.9%;
-    --accent-foreground: 0 0% 98%;
-    --destructive: 0 62.8% 30.6%;
+  /* ── Daylight (light) ────────────────────────────────── */
+  [data-theme="daylight"] {
+    --background: 40 20% 97%;
+    --foreground: 220 20% 12%;
+    --card: 0 0% 100%;
+    --card-foreground: 220 20% 12%;
+    --primary: 172 66% 36%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 220 10% 94%;
+    --secondary-foreground: 220 20% 30%;
+    --muted: 220 10% 94%;
+    --muted-foreground: 220 10% 46%;
+    --accent: 220 10% 92%;
+    --accent-foreground: 220 20% 12%;
+    --destructive: 0 72% 51%;
     --destructive-foreground: 0 0% 98%;
-    --border: 240 3.7% 15.9%;
+    --success: 142 72% 36%;
+    --success-foreground: 0 0% 98%;
+    --warning: 38 92% 50%;
+    --warning-foreground: 220 14% 8%;
+    --border: 220 12% 88%;
+    --ring: 172 66% 36%;
+    --radius: 0.5rem;
+    --sidebar: 0 0% 100%;
+    --glow: 172 66% 36%;
+    color-scheme: light;
+  }
+
+  /* ── Midnight (dark blue) ────────────────────────────── */
+  [data-theme="midnight"] {
+    --background: 228 24% 8%;
+    --foreground: 215 20% 90%;
+    --card: 228 22% 11%;
+    --card-foreground: 215 20% 90%;
+    --primary: 213 94% 58%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 228 18% 16%;
+    --secondary-foreground: 215 20% 80%;
+    --muted: 228 18% 16%;
+    --muted-foreground: 220 14% 50%;
+    --accent: 228 18% 14%;
+    --accent-foreground: 215 20% 90%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 98%;
+    --success: 142 72% 42%;
+    --success-foreground: 0 0% 98%;
+    --warning: 45 93% 58%;
+    --warning-foreground: 228 24% 8%;
+    --border: 228 16% 18%;
+    --ring: 213 94% 58%;
+    --radius: 0.5rem;
+    --sidebar: 228 24% 6%;
+    --glow: 213 94% 58%;
+    color-scheme: dark;
   }
 }
 
@@ -43,5 +101,60 @@
   }
   body {
     @apply bg-background text-foreground;
+    font-family: 'DM Sans', system-ui, sans-serif;
+  }
+  code, .font-mono {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+  }
+}
+
+/* ── Transitions ─────────────────────────────────────── */
+@layer utilities {
+  .theme-transition {
+    transition: background-color 0.3s ease, color 0.2s ease, border-color 0.3s ease;
+  }
+}
+
+/* ── Scrollbar ───────────────────────────────────────── */
+@layer base {
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: hsl(var(--muted-foreground) / 0.25);
+    border-radius: 3px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: hsl(var(--muted-foreground) / 0.4);
+  }
+}
+
+/* ── Custom animations ───────────────────────────────── */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes slideIn {
+  from { opacity: 0; transform: translateX(-8px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+@keyframes glow-pulse {
+  0%, 100% { box-shadow: 0 0 4px hsl(var(--glow) / 0.3); }
+  50% { box-shadow: 0 0 12px hsl(var(--glow) / 0.5); }
+}
+
+@layer utilities {
+  .animate-fade-in {
+    animation: fadeIn 0.3s ease-out;
+  }
+  .animate-slide-in {
+    animation: slideIn 0.25s ease-out;
+  }
+  .animate-glow {
+    animation: glow-pulse 2s ease-in-out infinite;
   }
 }

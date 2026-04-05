@@ -9,8 +9,19 @@ import type { SessionDto, EscalationDto, DaemonStatusDto, JobListDto, OutputLine
 import { createWsClient, type WsClient } from './ws-client.js';
 
 export type ViewId = 'dashboard' | 'sessions' | 'escalations' | 'jobs';
+export type ThemeId = 'iron' | 'daylight' | 'midnight';
 
 const MAX_OUTPUT_LINES = 2000;
+const THEME_KEY = 'ic-theme';
+
+export function getTheme(): ThemeId {
+  return (localStorage.getItem(THEME_KEY) as ThemeId) || 'iron';
+}
+
+export function setTheme(theme: ThemeId): void {
+  localStorage.setItem(THEME_KEY, theme);
+  document.documentElement.setAttribute('data-theme', theme);
+}
 
 class AppState {
   connected: boolean = $state(false);

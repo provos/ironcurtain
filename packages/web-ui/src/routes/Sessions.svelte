@@ -107,11 +107,10 @@
   });
 </script>
 
-<div class="flex h-full">
-  <!-- Session list sidebar -->
-  <div class="w-64 border-r border-border bg-card/50 flex flex-col">
-    <div class="p-4 border-b border-border flex items-center justify-between">
-      <h3 class="font-medium">Sessions</h3>
+<div class="flex h-full animate-fade-in">
+  <div class="w-64 border-r border-border bg-sidebar flex flex-col shrink-0">
+    <div class="px-4 py-3 border-b border-border flex items-center justify-between">
+      <h3 class="text-sm font-semibold uppercase tracking-wider text-muted-foreground">Sessions</h3>
       <div class="relative">
         <button
           onclick={openPersonaPicker}
@@ -224,7 +223,6 @@
   <!-- Session detail / console -->
   <div class="flex-1 flex flex-col">
     {#if appState.selectedSession}
-      <!-- Session header -->
       <div class="px-6 py-3 border-b border-border flex items-center justify-between bg-card/50">
         <div>
           <span class="font-mono font-semibold">#{appState.selectedSession.label}</span>
@@ -259,8 +257,7 @@
         </div>
       </div>
 
-      <!-- Output area -->
-      <div class="flex-1 overflow-auto p-4 space-y-3 font-mono text-sm">
+      <div class="flex-1 overflow-auto p-5 space-y-2 font-mono text-sm">
         {#each appState.getOutput(appState.selectedSessionLabel!) as line}
           <div class="{line.kind === 'user' ? 'text-blue-400' :
                        line.kind === 'assistant' ? 'text-foreground' :
@@ -296,8 +293,9 @@
           bind:value={messageInput}
           placeholder="Send a message..."
           disabled={sending || appState.selectedSession.status !== 'ready'}
-          class="flex-1 px-3 py-2 bg-background border border-border rounded-md text-sm
-                 focus:outline-none focus:ring-2 focus:ring-primary disabled:opacity-50"
+          class="flex-1 px-3 py-2.5 bg-background border border-border rounded-lg text-sm font-mono
+                 focus:outline-none focus:ring-2 focus:ring-ring/40 focus:border-ring
+                 placeholder:text-muted-foreground/50 transition-all disabled:opacity-50"
         />
         <button
           type="submit"
