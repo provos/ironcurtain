@@ -22,7 +22,7 @@ import { SessionManager, type ManagedSession, type PendingEscalationData } from 
 import type { ControlRequestHandler, DaemonStatus } from '../../daemon/control-socket.js';
 import type { Session, SessionInfo, BudgetStatus, ConversationTurn, DiagnosticEvent } from '../../session/types.js';
 import type { Transport } from '../../session/transport.js';
-import type { JobDefinition, RunRecord } from '../../cron/types.js';
+import type { JobDefinition, JobId, RunRecord } from '../../cron/types.js';
 
 // ---------------------------------------------------------------------------
 // Mock external modules that dispatch() calls directly
@@ -69,6 +69,7 @@ function createMockBudgetStatus(): BudgetStatus {
       maxSteps: 200,
       maxSessionSeconds: 1800,
       maxEstimatedCostUsd: 5.0,
+      warnThresholdPercent: 80,
     },
     cumulative: {
       totalInputTokens: 5000,
@@ -76,6 +77,7 @@ function createMockBudgetStatus(): BudgetStatus {
       totalTokens: 7000,
       stepCount: 10,
       activeSeconds: 120,
+      estimatedCostUsd: 0.15,
     },
   };
 }
@@ -162,7 +164,7 @@ function createMockDaemonStatus(): DaemonStatus {
   };
 }
 
-function createMockHandler(overrides?: Partial<Record<keyof ControlRequestHandler, Mock>>): ControlRequestHandler {
+function createMockHandler(overrides?: Partial<ControlRequestHandler>): ControlRequestHandler {
   return {
     getStatus: vi.fn().mockReturnValue(createMockDaemonStatus()),
     addJob: vi.fn().mockResolvedValue(undefined),
@@ -184,7 +186,7 @@ function createMockHandler(overrides?: Partial<Record<keyof ControlRequestHandle
     listJobs: vi.fn().mockReturnValue([
       {
         job: {
-          id: 'daily-review',
+          id: 'daily-review' as JobId,
           name: 'Daily Code Review',
           schedule: '0 9 * * 1-5',
           taskDescription: 'Review PRs',
@@ -199,7 +201,7 @@ function createMockHandler(overrides?: Partial<Record<keyof ControlRequestHandle
       },
       {
         job: {
-          id: 'nightly-sync',
+          id: 'nightly-sync' as JobId,
           name: 'Nightly Sync',
           schedule: '0 2 * * *',
           taskDescription: 'Sync repos',
