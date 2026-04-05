@@ -136,6 +136,29 @@ Event handling and output grouping logic are extracted into pure, non-Svelte mod
 
 These can be tested without any Svelte, DOM, or WebSocket dependency.
 
+### E2E tests (Playwright)
+
+```bash
+npx playwright install chromium   # One-time: install browser
+npm run e2e                       # Run all 31 tests (auto-starts mock server + Vite)
+npm run e2e:headed                # Run with visible browser for debugging
+```
+
+Playwright auto-starts both the mock WS server (port 7400) and Vite dev server (port 5173) via the `webServer` config in `playwright.config.ts`. Tests reset mock state via `POST http://localhost:7401/__reset` in `beforeEach`.
+
+Tests cover: Dashboard stats, session lifecycle (create/send/end), escalation approve/deny, job actions, theme switching, error states.
+
+## Keeping the Mock WS Server in Sync
+
+The mock server (`scripts/mock-ws-server.ts`) must stay in sync with the real daemon's WebSocket protocol (`src/web-ui/`). When making protocol changes:
+
+1. **New JSON-RPC method** — Add the method to `MethodName` in `src/web-ui/web-ui-types.ts`, implement in `src/web-ui/json-rpc-dispatch.ts`, then add a corresponding handler in the mock server's `handleMethod` switch. Add the frontend type in `src/lib/types.ts`.
+2. **New event type** — Add to `WebEventMap` in `src/web-ui/web-event-bus.ts`, emit from the appropriate transport/dispatch code, add a handler in `src/lib/event-handler.ts`, then emit the event from the mock server where appropriate.
+3. **Changed DTO shape** — Update both `src/web-ui/web-ui-types.ts` (backend) and `src/lib/types.ts` (frontend), then update the mock server's canned data to match.
+4. **After any protocol change** — Run `npm run e2e` to verify the E2E tests still pass against the updated mock. If a new feature is untestable with the mock, add a handler or canned data.
+
+The mock server is the source of truth for E2E tests — if it diverges from the real protocol, tests pass but don't validate real behavior.
+
 ## WebSocket Client
 
 `ws-client.ts` implements a JSON-RPC client with:
