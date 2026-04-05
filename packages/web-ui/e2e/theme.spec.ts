@@ -1,8 +1,9 @@
 import { test, expect } from '@playwright/test';
-import { connectWithToken } from './helpers.js';
+import { connectWithToken, resetMockServer } from './helpers.js';
 
 test.describe('Theme switching', () => {
-  test.beforeEach(async ({ page }) => {
+  test.beforeEach(async ({ page, request }) => {
+    await resetMockServer(request);
     await connectWithToken(page);
   });
 

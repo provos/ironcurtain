@@ -1,8 +1,9 @@
 import { test, expect } from '@playwright/test';
-import { connectWithToken, navigateTo } from './helpers.js';
+import { connectWithToken, navigateTo, resetMockServer } from './helpers.js';
 
 test.describe('Jobs', () => {
-  test.beforeEach(async ({ page }) => {
+  test.beforeEach(async ({ page, request }) => {
+    await resetMockServer(request);
     await connectWithToken(page);
     await navigateTo(page, 'Jobs');
   });

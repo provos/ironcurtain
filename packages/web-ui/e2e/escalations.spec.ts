@@ -1,8 +1,9 @@
 import { test, expect } from '@playwright/test';
-import { connectWithToken, navigateTo, createDefaultSession, sendMessage } from './helpers.js';
+import { connectWithToken, navigateTo, createDefaultSession, sendMessage, resetMockServer } from './helpers.js';
 
 test.describe('Escalations', () => {
-  test.beforeEach(async ({ page }) => {
+  test.beforeEach(async ({ page, request }) => {
+    await resetMockServer(request);
     await connectWithToken(page);
   });
 

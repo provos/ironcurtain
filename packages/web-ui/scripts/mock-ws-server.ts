@@ -10,6 +10,7 @@
  */
 
 import { WebSocketServer, type WebSocket } from 'ws';
+import { createServer } from 'http';
 
 // ---------------------------------------------------------------------------
 // Types (mirrors the daemon protocol without importing from src/)
@@ -246,6 +247,15 @@ const CANNED_PERSONAS = [
 
 // Mutable copy of canned jobs so enable/disable/remove are stateful
 const jobs = structuredClone(CANNED_JOBS);
+
+/** Reset all mutable state for test isolation. */
+function resetState(): void {
+  sessions.clear();
+  escalations.clear();
+  nextLabel = 1;
+  jobs.length = 0;
+  jobs.push(...structuredClone(CANNED_JOBS));
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -551,6 +561,11 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
     case 'personas.list':
       return CANNED_PERSONAS;
 
+    case '__reset': {
+      resetState();
+      return undefined;
+    }
+
     default:
       return errorResult('METHOD_NOT_FOUND', `Unknown method: ${method}`);
   }
@@ -602,6 +617,20 @@ wss.on('connection', (ws) => {
     console.log(`  Client disconnected (${clients.size} total)`);
   });
 });
+
+// HTTP server for test-only endpoints (e.g., state reset)
+const RESET_PORT = parseInt(process.env.RESET_PORT ?? '7401', 10);
+const httpServer = createServer((req, res) => {
+  if (req.method === 'POST' && req.url === '/__reset') {
+    resetState();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
+  } else {
+    res.writeHead(404);
+    res.end();
+  }
+});
+httpServer.listen(RESET_PORT);
 
 // Periodic status broadcast
 setInterval(() => {

@@ -1,8 +1,9 @@
 import { test, expect } from '@playwright/test';
-import { connectWithToken, navigateTo, createDefaultSession, sendMessage } from './helpers.js';
+import { connectWithToken, navigateTo, createDefaultSession, sendMessage, resetMockServer } from './helpers.js';
 
 test.describe('Sessions', () => {
-  test.beforeEach(async ({ page }) => {
+  test.beforeEach(async ({ page, request }) => {
+    await resetMockServer(request);
     await connectWithToken(page);
   });
 
@@ -20,7 +21,7 @@ test.describe('Sessions', () => {
     await createDefaultSession(page);
     // The session sidebar should list at least one session item
     const sidebar = page.getByTestId('session-sidebar');
-    await expect(sidebar.locator('[data-testid^="session-item-"]')).toBeVisible();
+    await expect(sidebar.locator('[data-testid^="session-item-"]').first()).toBeVisible();
   });
 
   test('sends a message and receives assistant output', async ({ page }) => {
@@ -71,7 +72,7 @@ test.describe('Sessions', () => {
     await createDefaultSession(page);
 
     // The "End" button should be visible in the session header
-    const endButton = page.getByRole('button', { name: 'End' });
+    const endButton = page.getByRole('button', { name: 'End', exact: true });
     await expect(endButton).toBeVisible();
     await endButton.click();
 

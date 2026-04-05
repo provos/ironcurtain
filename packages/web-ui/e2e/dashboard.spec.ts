@@ -1,13 +1,14 @@
 import { test, expect } from '@playwright/test';
-import { connectWithToken } from './helpers.js';
+import { connectWithToken, resetMockServer } from './helpers.js';
 
 test.describe('Dashboard', () => {
-  test.beforeEach(async ({ page }) => {
+  test.beforeEach(async ({ page, request }) => {
+    await resetMockServer(request);
     await connectWithToken(page);
   });
 
   test('renders the dashboard view by default', async ({ page }) => {
-    await expect(page.getByText('Dashboard')).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible();
   });
 
   test('displays the four stat cards', async ({ page }) => {

@@ -1,4 +1,11 @@
-import { expect, type Page } from '@playwright/test';
+import { expect, type Page, type APIRequestContext } from '@playwright/test';
+
+/**
+ * Reset the mock server's mutable state so tests are isolated.
+ */
+export async function resetMockServer(request: APIRequestContext): Promise<void> {
+  await request.post('http://localhost:7401/__reset');
+}
 
 /**
  * Navigate to the app with the mock server's test token and wait
@@ -15,7 +22,7 @@ export async function connectWithToken(page: Page): Promise<void> {
  * Click a navigation item in the sidebar by its label text.
  */
 export async function navigateTo(page: Page, view: 'Dashboard' | 'Sessions' | 'Escalations' | 'Jobs'): Promise<void> {
-  await page.locator('nav').getByText(view, { exact: true }).click();
+  await page.locator('nav').getByRole('button', { name: view }).click();
 }
 
 /**
