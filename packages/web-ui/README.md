@@ -2,7 +2,7 @@
 
 Opt-in web dashboard for the IronCurtain daemon. Provides a browser-based interface to monitor sessions, respond to escalations, manage scheduled jobs, and track resource budgets. The frontend is a Svelte 5 SPA that communicates with the daemon over a JSON-RPC WebSocket protocol with bearer token authentication.
 
-<!-- TODO: add screenshot -->
+![Dashboard](docs/dashboard.png)
 
 ## Quick Start
 
