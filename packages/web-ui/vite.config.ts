@@ -1,9 +1,15 @@
 import { defineConfig } from 'vite';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
+import { sveltePhosphorOptimize } from 'phosphor-svelte/vite';
 import { resolve } from 'path';
 
 export default defineConfig({
-  plugins: [svelte()],
+  plugins: [svelte(), sveltePhosphorOptimize()],
+  resolve: {
+    alias: {
+      $lib: resolve(__dirname, 'src/lib'),
+    },
+  },
   build: {
     outDir: resolve(__dirname, '../../dist/web-ui-static'),
     emptyOutDir: true,

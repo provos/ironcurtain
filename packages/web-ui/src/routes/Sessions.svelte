@@ -4,6 +4,14 @@
   import { renderMarkdown } from '../lib/markdown.js';
   import { tick } from 'svelte';
 
+  import { Button } from '$lib/components/ui/button/index.js';
+  import { Badge } from '$lib/components/ui/badge/index.js';
+  import { Input } from '$lib/components/ui/input/index.js';
+  import { DropdownMenu, DropdownMenuItem } from '$lib/components/ui/dropdown-menu/index.js';
+
+  import Plus from 'phosphor-svelte/lib/Plus';
+  import CaretRight from 'phosphor-svelte/lib/CaretRight';
+
   let messageInput = $state('');
   let sending = $state(false);
   let sessionHistory = $state<ConversationTurn[]>([]);
@@ -193,67 +201,51 @@
   <div class="w-64 border-r border-border bg-sidebar flex flex-col shrink-0">
     <div class="px-4 py-3 border-b border-border flex items-center justify-between">
       <h3 class="text-sm font-semibold uppercase tracking-wider text-muted-foreground">Sessions</h3>
-      <div class="relative">
-        <button
-          onclick={openPersonaPicker}
-          disabled={creatingSession}
-          class="px-3 py-1 text-xs bg-primary text-primary-foreground rounded-md hover:opacity-90
-                 transition-opacity disabled:opacity-50"
-        >
-          {#if creatingSession}
-            <span class="inline-flex items-center gap-1">
-              <span class="w-3 h-3 border-2 border-primary-foreground/30 border-t-primary-foreground rounded-full animate-spin"></span>
-              Starting...
-            </span>
-          {:else}
-            New
-          {/if}
-        </button>
-
-        <!-- Persona picker dropdown -->
-        {#if showPersonaPicker}
-          <!-- Backdrop -->
-          <!-- svelte-ignore a11y_no_static_element_interactions -->
-          <div class="fixed inset-0 z-10" onclick={() => showPersonaPicker = false} onkeydown={() => {}}></div>
-          <div class="absolute right-0 top-full mt-1 z-20 w-56 bg-card border border-border rounded-lg shadow-lg overflow-hidden">
-            <button
-              onclick={() => createSession()}
-              class="w-full text-left px-3 py-2 text-sm hover:bg-accent transition-colors border-b border-border"
-            >
-              <div class="font-medium">Default</div>
-              <div class="text-xs text-muted-foreground">No persona</div>
-            </button>
-            {#if loadingPersonas}
-              <div class="px-3 py-3 text-xs text-muted-foreground text-center">
-                Loading personas...
-              </div>
-            {:else if personas.length === 0}
-              <div class="px-3 py-3 text-xs text-muted-foreground text-center">
-                No personas available
-              </div>
-            {:else}
-              {#each personas as persona (persona.name)}
-                <button
-                  onclick={() => createSession(persona.name)}
-                  disabled={!persona.compiled}
-                  class="w-full text-left px-3 py-2 text-sm hover:bg-accent transition-colors
-                         disabled:opacity-40 disabled:cursor-not-allowed"
-                >
-                  <div class="font-medium flex items-center gap-1.5">
-                    {persona.name}
-                    {#if !persona.compiled}
-                      <span class="text-xs text-yellow-400">(not compiled)</span>
-                    {/if}
-                  </div>
-                  {#if persona.description}
-                    <div class="text-xs text-muted-foreground truncate">{persona.description}</div>
-                  {/if}
-                </button>
-              {/each}
+      <DropdownMenu bind:open={showPersonaPicker} align="bottom-right" contentClass="w-56">
+        {#snippet trigger()}
+          <Button
+            variant="default"
+            size="sm"
+            loading={creatingSession}
+            onclick={openPersonaPicker}
+          >
+            {#if !creatingSession}
+              <Plus size={14} weight="bold" />
             {/if}
+            {creatingSession ? 'Starting...' : 'New'}
+          </Button>
+        {/snippet}
+        <DropdownMenuItem onclick={() => createSession()} class="border-b border-border">
+          <div class="font-medium">Default</div>
+          <div class="text-xs text-muted-foreground">No persona</div>
+        </DropdownMenuItem>
+        {#if loadingPersonas}
+          <div class="px-3 py-3 text-xs text-muted-foreground text-center">
+            Loading personas...
           </div>
+        {:else if personas.length === 0}
+          <div class="px-3 py-3 text-xs text-muted-foreground text-center">
+            No personas available
+          </div>
+        {:else}
+          {#each personas as persona (persona.name)}
+            <DropdownMenuItem
+              onclick={() => createSession(persona.name)}
+              disabled={!persona.compiled}
+            >
+              <div class="font-medium flex items-center gap-1.5">
+                {persona.name}
+                {#if !persona.compiled}
+                  <span class="text-xs text-yellow-400">(not compiled)</span>
+                {/if}
+              </div>
+              {#if persona.description}
+                <div class="text-xs text-muted-foreground truncate">{persona.description}</div>
+              {/if}
+            </DropdownMenuItem>
+          {/each}
         {/if}
-      </div>
+      </DropdownMenu>
     </div>
 
     {#if createError}
@@ -290,9 +282,9 @@
             {session.turnCount} turns &middot; {session.budget.estimatedCostUsd.toFixed(2)}
           </div>
           {#if session.hasPendingEscalation}
-            <span class="mt-1 inline-block px-1.5 py-0.5 text-xs bg-destructive/20 text-destructive rounded">
+            <Badge variant="destructive" class="mt-1">
               escalation
-            </span>
+            </Badge>
           {/if}
         </button>
       {/each}
@@ -311,21 +303,23 @@
         <div>
           <span class="font-mono font-semibold">#{appState.selectedSession.label}</span>
           {#if appState.selectedSession.persona}
-            <span class="ml-2 px-2 py-0.5 text-[11px] font-medium rounded-full bg-primary/15 text-primary">
+            <Badge variant="default" class="ml-2">
               {appState.selectedSession.persona}
-            </span>
+            </Badge>
           {/if}
-          <span class="inline-flex items-center gap-1.5 ml-2 px-2 py-0.5 text-[11px] font-medium rounded-full
-            {appState.selectedSession.status === 'processing' ? 'bg-warning/15 text-warning' :
-             appState.selectedSession.status === 'ready' ? 'bg-success/15 text-success' :
-             'bg-muted text-muted-foreground'}">
+          <Badge
+            variant={appState.selectedSession.status === 'processing' ? 'warning'
+                   : appState.selectedSession.status === 'ready' ? 'success'
+                   : 'secondary'}
+            class="ml-2"
+          >
             {#if appState.selectedSession.status === 'processing'}
               <span class="w-1.5 h-1.5 rounded-full bg-warning animate-pulse"></span>
             {:else if appState.selectedSession.status === 'ready'}
               <span class="w-1.5 h-1.5 rounded-full bg-success"></span>
             {/if}
             {appState.selectedSession.status}
-          </span>
+          </Badge>
         </div>
         <div class="flex items-center gap-4">
           <span class="text-xs text-muted-foreground">
@@ -333,21 +327,14 @@
             {appState.selectedSession.budget.stepCount} steps &middot;
             {Math.round(appState.selectedSession.budget.elapsedSeconds)}s
           </span>
-          <button
+          <Button
+            variant="destructive"
+            size="sm"
+            loading={endingSession === appState.selectedSessionLabel}
             onclick={() => endSession(appState.selectedSessionLabel!)}
-            disabled={endingSession === appState.selectedSessionLabel}
-            class="px-3 py-1 text-xs bg-destructive text-destructive-foreground rounded-md
-                   hover:opacity-90 disabled:opacity-50"
           >
-            {#if endingSession === appState.selectedSessionLabel}
-              <span class="inline-flex items-center gap-1">
-                <span class="w-3 h-3 border-2 border-destructive-foreground/30 border-t-destructive-foreground rounded-full animate-spin"></span>
-                Ending
-              </span>
-            {:else}
-              End
-            {/if}
-          </button>
+            {endingSession === appState.selectedSessionLabel ? 'Ending' : 'End'}
+          </Button>
         </div>
       </div>
 
@@ -373,8 +360,10 @@
                 class="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-muted-foreground
                        hover:bg-accent/30 transition-colors select-none"
               >
-                <span class="inline-block transition-transform {expandedGroups.has(groupIdx) ? 'rotate-90' : ''}"
-                  >&#9656;</span>
+                <CaretRight
+                  size={12}
+                  class="transition-transform {expandedGroups.has(groupIdx) ? 'rotate-90' : ''}"
+                />
                 <span class="italic">{entry.summary}</span>
               </button>
               {#if expandedGroups.has(groupIdx)}
@@ -407,30 +396,20 @@
 
       <!-- Input area -->
       <form onsubmit={sendMessage} class="border-t border-border p-4 flex gap-2">
-        <input
+        <Input
           type="text"
           bind:value={messageInput}
           placeholder="Send a message..."
           disabled={sending || appState.selectedSession.status !== 'ready'}
-          class="flex-1 px-3 py-2.5 bg-background border border-border rounded-lg text-sm font-mono
-                 focus:outline-none focus:ring-2 focus:ring-ring/40 focus:border-ring
-                 placeholder:text-muted-foreground/50 transition-all disabled:opacity-50"
+          class="flex-1 font-mono"
         />
-        <button
+        <Button
           type="submit"
-          disabled={sending || !messageInput.trim() || appState.selectedSession.status !== 'ready'}
-          class="px-4 py-2 bg-primary text-primary-foreground rounded-md text-sm font-medium
-                 hover:opacity-90 transition-opacity disabled:opacity-50"
+          loading={sending}
+          disabled={!messageInput.trim() || appState.selectedSession.status !== 'ready'}
         >
-          {#if sending}
-            <span class="inline-flex items-center gap-1">
-              <span class="w-3 h-3 border-2 border-primary-foreground/30 border-t-primary-foreground rounded-full animate-spin"></span>
-              Sending
-            </span>
-          {:else}
-            Send
-          {/if}
-        </button>
+          {sending ? 'Sending' : 'Send'}
+        </Button>
       </form>
     {:else}
       <div class="flex-1 flex items-center justify-center text-muted-foreground">

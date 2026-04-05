@@ -19,7 +19,12 @@
   },
   "dependencies": {
     "@types/dompurify": "^3.0.5",
+    "bits-ui": "^2.16.5",
+    "clsx": "^2.1.1",
     "dompurify": "^3.3.3",
-    "marked": "^15.0.12"
+    "marked": "^15.0.12",
+    "phosphor-svelte": "^3.1.0",
+    "tailwind-merge": "^3.5.0",
+    "tailwind-variants": "^3.2.2"
   }
 }
