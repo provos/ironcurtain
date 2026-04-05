@@ -28,6 +28,7 @@ export interface PendingEscalationData {
   readonly arguments: Record<string, unknown>;
   readonly reason: string;
   readonly context?: Record<string, string>;
+  readonly whitelistCandidates?: readonly { readonly description: string }[];
   readonly receivedAt: string;
 }
 

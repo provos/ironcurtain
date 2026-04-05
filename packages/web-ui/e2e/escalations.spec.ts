@@ -73,6 +73,34 @@ test.describe('Escalations', () => {
     await expect(page.getByText('No pending escalations')).toBeVisible({ timeout: 5_000 });
   });
 
+  test('whitelist candidates are displayed and can be selected before approval', async ({ page }) => {
+    await createDefaultSession(page);
+    await sendMessage(page, 'escalate');
+
+    await navigateTo(page, 'Escalations');
+
+    // Wait for the escalation card to appear
+    await expect(page.getByText('filesystem')).toBeVisible({ timeout: 10_000 });
+
+    // Verify whitelist candidates section is rendered
+    await expect(page.getByText('Whitelist (optional)')).toBeVisible();
+
+    // Verify both candidate descriptions are displayed
+    const candidate1 = page.getByText('Allow filesystem.write_file within /etc/');
+    const candidate2 = page.getByText('Allow filesystem.write_file for this exact path: /etc/hosts');
+    await expect(candidate1).toBeVisible();
+    await expect(candidate2).toBeVisible();
+
+    // Click the second whitelist candidate to select it
+    await candidate2.click();
+
+    // Approve with the whitelist selection
+    await page.getByRole('button', { name: 'Approve' }).click();
+
+    // The escalation card should disappear
+    await expect(page.getByText('No pending escalations')).toBeVisible({ timeout: 5_000 });
+  });
+
   test('escalation badge appears in sidebar nav', async ({ page }) => {
     await createDefaultSession(page);
     await sendMessage(page, 'escalate');

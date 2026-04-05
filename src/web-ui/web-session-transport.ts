@@ -95,6 +95,7 @@ export class WebSessionTransport extends BaseTransport {
         arguments: request.arguments,
         reason: request.reason,
         context: request.context as Record<string, string> | undefined,
+        whitelistCandidates: request.whitelistCandidates,
         receivedAt: new Date().toISOString(),
       };
 
