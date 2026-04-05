@@ -198,7 +198,7 @@ describe('SessionManager', () => {
 
       mgr.setPendingEscalation(label, 'esc-123');
       const managed = mgr.get(label)!;
-      expect(managed.pendingEscalationId).toBe('esc-123');
+      expect(managed.pendingEscalation?.escalationId).toBe('esc-123');
     });
 
     it('clearPendingEscalation resets the escalation state', () => {
@@ -209,7 +209,7 @@ describe('SessionManager', () => {
       mgr.clearPendingEscalation(label);
 
       const managed = mgr.get(label)!;
-      expect(managed.pendingEscalationId).toBeNull();
+      expect(managed.pendingEscalation).toBeNull();
       expect(managed.escalationResolving).toBe(false);
     });
 
@@ -246,7 +246,7 @@ describe('SessionManager', () => {
 
       expect(managed.label).toBe(label);
       expect(managed.messageInFlight).toBe(false);
-      expect(managed.pendingEscalationId).toBeNull();
+      expect(managed.pendingEscalation).toBeNull();
       expect(managed.escalationResolving).toBe(false);
     });
   });

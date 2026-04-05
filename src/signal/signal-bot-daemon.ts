@@ -545,7 +545,7 @@ export class SignalBotDaemon {
     let target: ManagedSession | undefined;
     if (explicitLabel !== null) {
       target = this.sessionManager.get(explicitLabel);
-      if (!target?.pendingEscalationId) {
+      if (!target?.pendingEscalation) {
         this.sendSignalMessage(`Session #${explicitLabel} has no pending escalation.`).catch(() => {});
         return true;
       }
@@ -568,7 +568,7 @@ export class SignalBotDaemon {
     }
 
     const decision = isApprove ? ('approved' as const) : ('denied' as const);
-    const escalationId = target.pendingEscalationId as string;
+    const escalationId = target.pendingEscalation?.escalationId ?? '';
     const managed = target;
     managed.escalationResolving = true;
 
@@ -587,8 +587,8 @@ export class SignalBotDaemon {
       })
       .finally(() => {
         managed.escalationResolving = false;
-        if (managed.pendingEscalationId === escalationId) {
-          managed.pendingEscalationId = null;
+        if (managed.pendingEscalation?.escalationId === escalationId) {
+          managed.pendingEscalation = null;
         }
       });
 

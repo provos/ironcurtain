@@ -48,7 +48,8 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc && node scripts/copy-assets.mjs",
+    "build": "tsc && node scripts/copy-assets.mjs && npm run build:web-ui --if-present",
+    "build:web-ui": "npm run build -w packages/web-ui",
     "start": "tsx src/cli.ts start",
     "annotate-tools": "tsx src/cli.ts annotate-tools",
     "compile-policy": "tsx src/cli.ts compile-policy",
@@ -126,7 +127,6 @@
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
     "typescript-eslint": "^8.56.0",
-    "vitest": "^4.0.18",
-    "ws": "^8.19.0"
+    "vitest": "^4.0.18"
   }
 }

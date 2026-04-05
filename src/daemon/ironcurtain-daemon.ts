@@ -44,6 +44,9 @@ export interface IronCurtainDaemonOptions {
 
   /** When true, skip starting Signal transport. */
   readonly noSignal?: boolean;
+
+  /** When set, starts the web UI server. */
+  readonly webUi?: { port?: number; host?: string; devMode?: boolean };
 }
 
 /**
@@ -87,12 +90,22 @@ export class IronCurtainDaemon {
   /** Signal daemon instance (null if Signal not configured). */
   private signalDaemon: import('../signal/signal-bot-daemon.js').SignalBotDaemon | null = null;
 
+  /** Web UI server (null if not enabled). */
+  private webUiServer: import('../web-ui/web-ui-server.js').WebUiServer | null = null;
+
+  /** Web UI options from constructor. */
+  private readonly webUiOptions: IronCurtainDaemonOptions['webUi'];
+
+  /** Control request handler (saved for web UI reuse). */
+  private controlRequestHandler: ControlRequestHandler | null = null;
+
   /** Resolve to exit the daemon. */
   private exitResolve: (() => void) | null = null;
 
   constructor(options: IronCurtainDaemonOptions) {
     this.mode = options.mode;
     this.noSignal = options.noSignal ?? false;
+    this.webUiOptions = options.webUi;
     this.scheduler = createCronScheduler();
   }
 
@@ -134,6 +147,16 @@ export class IronCurtainDaemon {
       }
     }
 
+    // Start web UI server if enabled
+    if (this.webUiOptions) {
+      try {
+        await this.startWebUiServer();
+      } catch (err) {
+        logger.warn(`[Daemon] Web UI not available: ${err instanceof Error ? err.message : String(err)}`);
+        logger.info('[Daemon] Continuing without web UI');
+      }
+    }
+
     process.stderr.write('IronCurtain daemon started.\n');
     if (this.controlSocket) {
       process.stderr.write('  Control socket: listening\n');
@@ -163,6 +186,16 @@ export class IronCurtainDaemon {
         logger.warn(`[Daemon] Error stopping control socket: ${String(err)}`);
       }
       this.controlSocket = null;
+    }
+
+    // Stop web UI server (ends web sessions)
+    if (this.webUiServer) {
+      try {
+        await this.webUiServer.stop();
+      } catch (err: unknown) {
+        logger.warn(`[Daemon] Error stopping web UI: ${String(err)}`);
+      }
+      this.webUiServer = null;
     }
 
     // Unschedule all jobs
@@ -620,6 +653,7 @@ export class IronCurtainDaemon {
       listJobs: () => this.listJobs(),
     };
 
+    this.controlRequestHandler = handler;
     this.controlSocket = new ControlSocketServer(handler);
     try {
       await this.controlSocket.start();
@@ -627,6 +661,28 @@ export class IronCurtainDaemon {
       logger.warn(`[Daemon] Failed to start control socket: ${err instanceof Error ? err.message : String(err)}`);
       this.controlSocket = null;
     }
+  }
+
+  private async startWebUiServer(): Promise<void> {
+    const { WebUiServer } = await import('../web-ui/web-ui-server.js');
+
+    if (!this.controlRequestHandler) {
+      throw new Error('Control socket must be started before web UI');
+    }
+
+    const server = new WebUiServer({
+      port: this.webUiOptions?.port ?? 7400,
+      host: this.webUiOptions?.host ?? '127.0.0.1',
+      handler: this.controlRequestHandler,
+      sessionManager: this.sessionManager,
+      mode: this.mode,
+      maxConcurrentWebSessions: 5,
+      devMode: this.webUiOptions?.devMode,
+    });
+
+    const url = await server.start();
+    this.webUiServer = server;
+    process.stderr.write(`  Web UI: ${url}\n`);
   }
 
   private readLastRunSummary(workspace: string): string | null {

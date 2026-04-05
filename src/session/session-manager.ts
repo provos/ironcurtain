@@ -16,6 +16,22 @@ import type { JobId } from '../cron/types.js';
 import * as logger from '../logger.js';
 
 /**
+ * Minimal escalation data stored on a ManagedSession. Allows
+ * late-connecting clients (e.g. a new browser tab) to enumerate
+ * pending escalations without having received the original event.
+ */
+export interface PendingEscalationData {
+  readonly escalationId: string;
+  readonly sessionLabel: number;
+  readonly toolName: string;
+  readonly serverName: string;
+  readonly arguments: Record<string, unknown>;
+  readonly reason: string;
+  readonly context?: Record<string, string>;
+  readonly receivedAt: string;
+}
+
+/**
  * Source discriminant for managed sessions.
  * Determines cleanup behavior, notification routing, and
  * message forwarding eligibility.
@@ -24,10 +40,13 @@ import * as logger from '../logger.js';
  *   Accepts follow-up messages via forwardToSession().
  * - 'cron': headless session created by the cron scheduler.
  *   Does NOT accept follow-up messages.
+ * - 'web': interactive session created via the web UI.
+ *   Always targeted by explicit label (no currentLabel focus).
  */
 export type SessionSource =
   | { readonly kind: 'signal' }
-  | { readonly kind: 'cron'; readonly jobId: JobId; readonly jobName: string };
+  | { readonly kind: 'cron'; readonly jobId: JobId; readonly jobName: string }
+  | { readonly kind: 'web' };
 
 /**
  * Unified managed session entry. Used for both Signal-initiated
@@ -43,7 +62,8 @@ export interface ManagedSession {
   readonly transport: Transport;
   readonly source: SessionSource;
   messageInFlight: boolean;
-  pendingEscalationId: string | null;
+  /** Full escalation data for late-connecting clients and expiry handling. */
+  pendingEscalation: PendingEscalationData | null;
   escalationResolving: boolean;
   /**
    * The promise returned by transport.run(). When set, SessionManager.end()
@@ -51,6 +71,11 @@ export interface ManagedSession {
    * giving the transport time to finish cleanup (e.g., auto-save).
    */
   runPromise: Promise<void> | null;
+}
+
+export interface EscalationResolutionResult {
+  readonly resolved: boolean;
+  readonly reason?: 'not_found' | 'no_escalation' | 'already_resolving';
 }
 
 /**
@@ -72,8 +97,8 @@ export class SessionManager {
    * When a Signal message arrives without an explicit #N prefix, it
    * is routed to this session.
    *
-   * Only updated by register() for Signal sessions. Cron sessions
-   * do not steal Signal focus.
+   * Only updated by register() for Signal sessions. Cron and web
+   * sessions do not steal Signal focus.
    */
   currentLabel: number | null = null;
 
@@ -81,7 +106,7 @@ export class SessionManager {
    * Registers a new session and returns its assigned label.
    *
    * For Signal sessions: sets currentLabel to the new session.
-   * For cron sessions: currentLabel is NOT changed.
+   * For cron/web sessions: currentLabel is NOT changed.
    */
   register(session: Session, transport: Transport, source: SessionSource): number {
     const label = this.nextLabel++;
@@ -92,7 +117,7 @@ export class SessionManager {
       transport,
       source,
       messageInFlight: false,
-      pendingEscalationId: null,
+      pendingEscalation: null,
       escalationResolving: false,
       runPromise: null,
     };
@@ -170,10 +195,23 @@ export class SessionManager {
   }
 
   /** Records that a session has a pending escalation. */
-  setPendingEscalation(label: number, escalationId: string): void {
+  setPendingEscalation(label: number, escalation: PendingEscalationData | string): void {
     const managed = this.sessions.get(label);
-    if (managed) {
-      managed.pendingEscalationId = escalationId;
+    if (!managed) return;
+
+    if (typeof escalation === 'string') {
+      // Backward compat: Signal transport passes just the ID
+      managed.pendingEscalation = {
+        escalationId: escalation,
+        sessionLabel: label,
+        toolName: '',
+        serverName: '',
+        arguments: {},
+        reason: '',
+        receivedAt: new Date().toISOString(),
+      };
+    } else {
+      managed.pendingEscalation = escalation;
     }
   }
 
@@ -181,14 +219,53 @@ export class SessionManager {
   clearPendingEscalation(label: number): void {
     const managed = this.sessions.get(label);
     if (managed) {
-      managed.pendingEscalationId = null;
+      managed.pendingEscalation = null;
       managed.escalationResolving = false;
     }
   }
 
   /** Returns sessions that have pending escalations. */
   withPendingEscalation(): readonly ManagedSession[] {
-    return [...this.sessions.values()].filter((m) => m.pendingEscalationId !== null);
+    return [...this.sessions.values()].filter((m) => m.pendingEscalation !== null);
+  }
+
+  /** Finds a session by pending escalation ID. */
+  findByEscalation(escalationId: string): ManagedSession | undefined {
+    return [...this.sessions.values()].find((m) => m.pendingEscalation?.escalationId === escalationId);
+  }
+
+  /**
+   * Resolves a pending escalation on any session. Encapsulates the
+   * escalationResolving guard, the resolveEscalation call, and the
+   * clearPendingEscalation cleanup.
+   *
+   * This is the single codepath for escalation resolution. All three
+   * transports (Signal, web, cron auto-deny) call through here.
+   */
+  async resolveSessionEscalation(
+    escalationId: string,
+    decision: 'approved' | 'denied',
+    options?: { whitelistSelection?: number },
+  ): Promise<EscalationResolutionResult> {
+    const managed = this.findByEscalation(escalationId);
+    if (!managed) {
+      return { resolved: false, reason: 'not_found' };
+    }
+
+    if (managed.escalationResolving) {
+      return { resolved: false, reason: 'already_resolving' };
+    }
+
+    managed.escalationResolving = true;
+    try {
+      await managed.session.resolveEscalation(escalationId, decision, options);
+      return { resolved: true };
+    } finally {
+      managed.escalationResolving = false;
+      if (managed.pendingEscalation?.escalationId === escalationId) {
+        managed.pendingEscalation = null;
+      }
+    }
   }
 
   /**
