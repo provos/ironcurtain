@@ -82,6 +82,8 @@ Icons use [phosphor-svelte](https://phosphor-icons.com/) v3. Import pattern:
 
 ## Development
 
+### With the real daemon
+
 ```bash
 # Terminal 1: Start daemon with web UI dev mode
 ironcurtain daemon --web-ui --web-ui-dev
@@ -90,7 +92,49 @@ ironcurtain daemon --web-ui --web-ui-dev
 cd packages/web-ui && npm run dev
 ```
 
-Vite's dev server runs on port 5173 and proxies `/ws` to the daemon on port 7400.
+Open `http://localhost:5173?token=<TOKEN>` (copy the token from Terminal 1's output). Vite's dev server runs on port 5173 and proxies `/ws` to the daemon on port 7400.
+
+### With the mock server (no Docker/LLM needed)
+
+```bash
+# Terminal 1: Start the mock WebSocket server
+cd packages/web-ui && npm run mock-server
+
+# Terminal 2: Start Vite dev server with HMR
+cd packages/web-ui && npm run dev
+```
+
+Open `http://localhost:5173?token=mock-token-for-dev` in your browser. The mock server simulates the full JSON-RPC protocol with canned data:
+
+- **Chat**: Messages produce realistic event sequences (thinking → tool calls → markdown response)
+- **Escalations**: Send a message containing the word "escalate" to trigger an escalation
+- **Jobs**: Three canned jobs with working enable/disable/remove actions
+- **Personas**: Three canned personas in the session creation picker
+- **Dashboard**: Live status updates every 10 seconds
+
+## Testing
+
+### Unit tests
+
+```bash
+npm test -w packages/web-ui       # Run all 36 tests
+npm run test:watch -w packages/web-ui  # Watch mode during development
+```
+
+Tests cover:
+- **`event-handler.test.ts`** -- All WebSocket event types, state mutations, edge cases (18 tests)
+- **`output-grouping.test.ts`** -- Collapsible group logic, summary formatting (11 tests)
+- **`ws-client.test.ts`** -- Request correlation, event dispatch, reconnect, timeouts (7 tests)
+
+Root `npm test` also runs the web-ui tests after the main test suite.
+
+### Architecture for testability
+
+Event handling and output grouping logic are extracted into pure, non-Svelte modules:
+- `src/lib/event-handler.ts` -- `handleEvent(state, effects, event, payload)` with `AppStateLike` interface
+- `src/lib/output-grouping.ts` -- `groupOutputLines(lines)` with `OutputEntry` types
+
+These can be tested without any Svelte, DOM, or WebSocket dependency.
 
 ## WebSocket Client
 

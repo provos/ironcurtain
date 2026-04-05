@@ -38,9 +38,11 @@ IronCurtain is a secure agent runtime that mediates between an AI agent and MCP 
 - `ironcurtain daemon --web-ui` - start daemon with web UI (opens on port 7400, prints auth URL to stderr)
 - `npm run build` - TypeScript compilation + copy config assets + web UI to `dist/`
 - `npm run build:web-ui` - build just the Svelte web UI to `dist/web-ui-static/`
-- `npm test` - run all tests (vitest)
+- `npm test` - run all tests including web UI unit tests (vitest)
+- `npm test -w packages/web-ui` - run web UI unit tests only (36 tests)
 - `npm test -- test/policy-engine.test.ts` - run a single test file
 - `npm test -- -t "denies delete_file"` - run a single test by name
+- `npm run mock-server -w packages/web-ui` - start mock WS server for UI development without Docker/LLM
 - `npm run lint` - run ESLint
 - `npm run format` - format code with Prettier (`format:check` for CI validation)
 
