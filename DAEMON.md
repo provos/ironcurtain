@@ -264,6 +264,37 @@ cd packages/web-ui && npm run dev
 
 The daemon prints a second URL for the dev server (`http://localhost:5173?token=...`). The Vite dev server proxies WebSocket connections to the daemon, so the frontend connects to the real backend while Vite handles hot reload. The `--web-ui-dev` flag skips Origin header validation to allow cross-origin requests from the Vite server.
 
+### Mock server (no Docker or LLM needed)
+
+For UI development and testing without starting Docker containers or using LLM API keys, use the mock WebSocket server:
+
+```bash
+# Terminal 1 — mock server simulating the daemon's JSON-RPC protocol
+cd packages/web-ui && npm run mock-server
+
+# Terminal 2 — Vite dev server with hot module replacement
+cd packages/web-ui && npm run dev
+```
+
+Open `http://localhost:5173?token=mock-token-for-dev` in your browser. The mock server provides:
+
+- **Chat simulation** — messages produce realistic event sequences (thinking, tool calls, markdown responses)
+- **Escalation testing** — send a message containing the word "escalate" to trigger an escalation in the Escalations view
+- **Job management** — pre-populated jobs with working enable/disable/remove actions
+- **Persona selection** — pre-populated personas in the session creation picker
+
+This is the recommended workflow for iterating on the frontend without incurring LLM costs.
+
+### Unit tests
+
+The web UI has unit tests covering event handling, output grouping, and WebSocket client logic:
+
+```bash
+npm test -w packages/web-ui
+```
+
+These tests run automatically as part of the root `npm test` suite.
+
 ## Troubleshooting
 
 | Issue | Guidance |
