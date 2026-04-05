@@ -8,7 +8,7 @@
 
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { resolve, dirname, extname } from 'node:path';
+import { resolve, dirname, extname, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import type { Socket } from 'node:net';
@@ -256,8 +256,16 @@ export class WebUiServer {
       "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws://127.0.0.1:* ws://localhost:*",
     );
 
-    const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
-    const pathname = decodeURIComponent(url.pathname);
+    let url: URL;
+    let pathname: string;
+    try {
+      url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+      pathname = decodeURIComponent(url.pathname);
+    } catch {
+      res.writeHead(400);
+      res.end('Bad Request');
+      return;
+    }
 
     if (pathname.includes('..')) {
       res.writeHead(403);
@@ -278,7 +286,7 @@ export class WebUiServer {
     }
 
     // Path containment check (both sides are canonical real paths)
-    if (!filePath.startsWith(this.staticRoot)) {
+    if (filePath !== this.staticRoot && !filePath.startsWith(this.staticRoot + sep)) {
       res.writeHead(403);
       res.end('Forbidden');
       return;
@@ -287,7 +295,14 @@ export class WebUiServer {
     const cached = this.serveFromCache(filePath, res);
     if (cached) return;
 
-    // SPA fallback — serve index.html for client-side routing
+    // SPA fallback — only for paths without a file extension (client-side routes).
+    // Requests for missing assets (e.g. /assets/app.js) get a proper 404.
+    if (extname(pathname)) {
+      res.writeHead(404);
+      res.end('Not Found');
+      return;
+    }
+
     const indexPath = resolve(this.staticRoot, 'index.html');
     if (this.serveFromCache(indexPath, res)) return;
 
@@ -322,7 +337,14 @@ export class WebUiServer {
     head: Buffer,
     wss: InstanceType<typeof WebSocketServer>,
   ): void {
-    const url = new URL(req.url ?? '', `http://${req.headers.host}`);
+    let url: URL;
+    try {
+      url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
+    } catch {
+      socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
+      socket.destroy();
+      return;
+    }
 
     if (url.pathname !== '/ws') {
       socket.write('HTTP/1.1 404 Not Found\r\n\r\n');

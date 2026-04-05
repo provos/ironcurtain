@@ -38,13 +38,6 @@
     triggerEl?.querySelector('button')?.focus();
   }
 
-  function handleKeydown(e: KeyboardEvent): void {
-    if (e.key === 'Escape') {
-      open = false;
-      triggerEl?.querySelector('button')?.focus();
-    }
-  }
-
   function focusFirstItem(): void {
     tick().then(() => {
       const firstItem = menuEl?.querySelector('[role="menuitem"]') as HTMLElement | null;
@@ -55,6 +48,14 @@
   $effect(() => {
     if (open) {
       focusFirstItem();
+      const handler = (e: KeyboardEvent) => {
+        if (e.key === 'Escape') {
+          open = false;
+          triggerEl?.querySelector('button')?.focus();
+        }
+      };
+      document.addEventListener('keydown', handler);
+      return () => document.removeEventListener('keydown', handler);
     }
   });
 </script>
@@ -66,7 +67,7 @@
 
   {#if open}
     <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="fixed inset-0 z-10" onclick={handleBackdropClick} onkeydown={handleKeydown}></div>
+    <div class="fixed inset-0 z-10" onclick={handleBackdropClick}></div>
     <div
       bind:this={menuEl}
       class={cn(

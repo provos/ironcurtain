@@ -122,6 +122,10 @@ export async function runDaemonCommand(argv: string[]): Promise<void> {
     // Start the daemon
     const webUiEnabled = values['web-ui'] as boolean | undefined;
     const webPort = values['web-port'] ? parseInt(values['web-port'] as string, 10) : undefined;
+    if (webPort !== undefined && (!Number.isFinite(webPort) || webPort < 1 || webPort > 65535)) {
+      process.stderr.write('Error: --web-port must be a number between 1 and 65535\n');
+      process.exit(1);
+    }
     const webUiDev = values['web-ui-dev'] as boolean | undefined;
 
     const daemon = new IronCurtainDaemon({
