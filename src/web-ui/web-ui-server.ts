@@ -113,7 +113,9 @@ export class WebUiServer {
       }
     }, 10_000);
 
-    return `http://${this.options.host}:${this.options.port}?token=${this.authToken}`;
+    const addr = httpServer.address();
+    const actualPort = typeof addr === 'object' && addr ? addr.port : this.options.port;
+    return `http://${this.options.host}:${actualPort}?token=${this.authToken}`;
   }
 
   async stop(): Promise<void> {
