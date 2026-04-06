@@ -35,10 +35,14 @@ IronCurtain is a secure agent runtime that mediates between an AI agent and MCP 
 - `ironcurtain annotate-tools --server <name>` - classify MCP tool arguments via LLM for a single server (or `npm run annotate-tools -- --server <name>`). Use `--all` to annotate all servers.
 - `ironcurtain compile-policy` - compile constitution into policy rules (or `npm run compile-policy`). Supports `--constitution <path>`, `--output-dir <path>`, and `--server <name>` flags for alternative constitutions, output directories, and single-server debugging. The read-only policy is compiled via `npm run compile-policy -- --no-mcp --constitution src/config/constitution-readonly.md --output-dir src/config/generated-readonly`.
 - `ironcurtain refresh-lists [--list <name>] [--with-mcp]` - re-resolve dynamic lists without full recompilation
-- `npm run build` - TypeScript compilation + copy config assets to `dist/`
-- `npm test` - run all tests (vitest)
+- `ironcurtain daemon --web-ui` - start daemon with web UI (opens on port 7400, prints auth URL to stderr)
+- `npm run build` - TypeScript compilation + copy config assets + web UI to `dist/`
+- `npm run build:web-ui` - build just the Svelte web UI to `dist/web-ui-static/`
+- `npm test` - run all tests including web UI unit tests (vitest)
+- `npm test -w packages/web-ui` - run web UI unit tests only (36 tests)
 - `npm test -- test/policy-engine.test.ts` - run a single test file
 - `npm test -- -t "denies delete_file"` - run a single test by name
+- `npm run mock-server -w packages/web-ui` - start mock WS server for UI development without Docker/LLM
 - `npm run lint` - run ESLint
 - `npm run format` - format code with Prettier (`format:check` for CI validation)
 
@@ -73,6 +77,9 @@ The Google Workspace MCP server (`@alanse/mcp-server-google-workspace`) intentio
 **Interactive Config Editor** (`config-command.ts`) - `ironcurtain config` subcommand. Uses `@clack/prompts` for a terminal UI to view and modify `~/.ironcurtain/config.json`. Covers models, security settings, resource budgets, auto-compaction, and audit redaction. API keys are excluded (use env vars). Changes are tracked as a partial `UserConfig`, diffed against the resolved config, and saved via `saveUserConfig()`.
 
 `loadConfig()` reads from environment variables (`ANTHROPIC_API_KEY`, `AUDIT_LOG_PATH`, `ALLOWED_DIRECTORY`) and `src/config/mcp-servers.json` for MCP server definitions. The `ALLOWED_DIRECTORY` defines the sandbox boundary for policy evaluation. In multi-turn sessions, each session gets its own sandbox at `~/.ironcurtain/sessions/{sessionId}/sandbox/`. When `--workspace <path>` is provided, the validated workspace replaces the session sandbox as `allowedDirectory` (see `src/session/workspace-validation.ts`). The fallback default is `$IRONCURTAIN_HOME/sandbox` (where `IRONCURTAIN_HOME` defaults to `~/.ironcurtain`). Requires a `.env` file (loaded via `dotenv/config` in `src/index.ts`). `loadGeneratedPolicy()` loads compiled artifacts (`compiled-policy.json`, `tool-annotations.json`, and optionally `dynamic-lists.json`) from `src/config/generated/`.
+
+### Web UI (`src/web-ui/` + `packages/web-ui/`)
+Opt-in Svelte 5 SPA served by the daemon via `--web-ui`. The daemon starts an HTTP+WS server (default port 7400) that serves compiled static assets and handles a JSON-RPC WebSocket protocol with bearer token auth. Backend modules: `WebUiServer` (HTTP/WS lifecycle), `json-rpc-dispatch` (19 methods with Zod validation mapping to `ControlRequestHandler` + `SessionManager`), `WebEventBus` (typed pub/sub), `WebSessionTransport` (follows `SignalSessionTransport` pattern). The frontend is a workspace package at `packages/web-ui/` built with Vite + Tailwind v3. Views: Dashboard, Sessions (with markdown rendering via `marked`), Escalations, Jobs. For development with hot reload: run `ironcurtain daemon --web-ui --web-ui-dev` in one terminal and `cd packages/web-ui && npm run dev` in another — Vite's dev server proxies `/ws` to the daemon.
 
 ### Types (`src/types/`)
 Shared types: `ToolCallRequest`/`ToolCallResult`/`PolicyDecision` in `mcp.ts`, `AuditEntry` in `audit.ts`. Policy decisions have three outcomes: `allow`, `deny`, `escalate`. The engine can produce all three, but compiled rules only use `allow` and `escalate` - `deny` comes from the default fallthrough when no rule matches.

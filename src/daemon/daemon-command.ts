@@ -41,6 +41,9 @@ const daemonSpec: CommandSpec = {
     { flag: 'agent', short: 'a', description: 'Agent mode (same as start)', placeholder: '<name>' },
     { flag: 'force', short: 'f', description: 'Skip confirmation prompts' },
     { flag: 'no-signal', description: 'Skip Signal transport (cron-only mode)' },
+    { flag: 'web-ui', description: 'Enable web UI server' },
+    { flag: 'web-port', description: 'Web UI port (default: 7400)', placeholder: '<port>' },
+    { flag: 'web-ui-dev', description: 'Skip Origin validation (for Vite dev server)' },
     { flag: 'runs', description: 'Number of recent runs to show (for logs)', placeholder: '<N>' },
   ],
 };
@@ -88,6 +91,9 @@ export async function runDaemonCommand(argv: string[]): Promise<void> {
     options: {
       agent: { type: 'string', short: 'a' },
       'no-signal': { type: 'boolean' },
+      'web-ui': { type: 'boolean' },
+      'web-port': { type: 'string' },
+      'web-ui-dev': { type: 'boolean' },
       force: { type: 'boolean', short: 'f' },
       runs: { type: 'string' },
       help: { type: 'boolean', short: 'h' },
@@ -114,9 +120,18 @@ export async function runDaemonCommand(argv: string[]): Promise<void> {
 
   if (!subcommand) {
     // Start the daemon
+    const webUiEnabled = values['web-ui'] as boolean | undefined;
+    const webPort = values['web-port'] ? parseInt(values['web-port'] as string, 10) : undefined;
+    if (webPort !== undefined && (!Number.isFinite(webPort) || webPort < 1 || webPort > 65535)) {
+      process.stderr.write('Error: --web-port must be a number between 1 and 65535\n');
+      process.exit(1);
+    }
+    const webUiDev = values['web-ui-dev'] as boolean | undefined;
+
     const daemon = new IronCurtainDaemon({
       mode,
       noSignal: values['no-signal'] as boolean | undefined,
+      webUi: webUiEnabled ? { port: webPort, devMode: webUiDev } : undefined,
     });
 
     // Handle shutdown signals
