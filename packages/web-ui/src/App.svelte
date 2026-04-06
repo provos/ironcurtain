@@ -208,6 +208,14 @@
                 {appState.escalationCount}
               </Badge>
             {/if}
+            {#if item.id === 'workflows' && appState.pendingGates.size > 0}
+              <Badge
+                variant="warning"
+                class="ml-auto px-1.5 font-mono font-semibold min-w-[18px] text-center text-[10px] leading-none"
+              >
+                {appState.pendingGates.size}
+              </Badge>
+            {/if}
             {#if item.id === 'sessions' && appState.activeSessionCount > 0}
               <span class="ml-auto text-[10px] font-mono text-muted-foreground">
                 {appState.activeSessionCount}

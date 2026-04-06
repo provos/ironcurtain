@@ -107,12 +107,27 @@ export type WorkflowLifecycleEvent =
       readonly verdict: string;
     };
 
+/** Extended workflow detail for the web UI. */
+export interface WorkflowDetail {
+  readonly definition: WorkflowDefinition;
+  readonly transitionHistory: readonly TransitionRecord[];
+  readonly workspacePath: string;
+  readonly context: {
+    readonly taskDescription: string;
+    readonly round: number;
+    readonly maxRounds: number;
+    readonly totalTokens: number;
+    readonly visitCounts: Record<string, number>;
+  };
+}
+
 /** The narrow controller interface exposed to the mux. */
 export interface WorkflowController {
   start(definitionPath: string, taskDescription: string, workspacePath?: string): Promise<WorkflowId>;
   resume(workflowId: WorkflowId): Promise<void>;
   listResumable(): WorkflowId[];
   getStatus(id: WorkflowId): WorkflowStatus | undefined;
+  getDetail(id: WorkflowId): WorkflowDetail | undefined;
   listActive(): readonly WorkflowId[];
   resolveGate(id: WorkflowId, event: HumanGateEvent): void;
   abort(id: WorkflowId): Promise<void>;
@@ -406,6 +421,27 @@ export class WorkflowOrchestrator implements WorkflowController {
       phase: 'running',
       currentState: instance.currentState,
       activeAgents: [],
+    };
+  }
+
+  getDetail(id: WorkflowId): WorkflowDetail | undefined {
+    const instance = this.workflows.get(id);
+    if (!instance) return undefined;
+
+    const snapshot = instance.actor.getSnapshot() as { context: WorkflowContext };
+    const ctx = snapshot.context;
+
+    return {
+      definition: instance.definition,
+      transitionHistory: [...instance.transitionHistory],
+      workspacePath: instance.workspacePath,
+      context: {
+        taskDescription: ctx.taskDescription,
+        round: ctx.round,
+        maxRounds: ctx.maxRounds,
+        totalTokens: ctx.totalTokens,
+        visitCounts: { ...ctx.visitCounts },
+      },
     };
   }
 

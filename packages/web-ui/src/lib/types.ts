@@ -170,6 +170,7 @@ export interface WorkflowSummaryDto {
 
 export interface HumanGateRequestDto {
   readonly gateId: string;
+  readonly workflowId: string;
   readonly stateName: string;
   readonly acceptedEvents: readonly string[];
   readonly presentedArtifacts: readonly string[];
@@ -194,4 +195,29 @@ export interface TransitionEdgeDto {
   readonly guard?: string;
   readonly event?: string;
   readonly label: string;
+}
+
+export interface TransitionRecordDto {
+  readonly from: string;
+  readonly to: string;
+  readonly event: string;
+  readonly timestamp: string;
+  readonly durationMs: number;
+}
+
+export interface WorkflowContextDto {
+  readonly taskDescription: string;
+  readonly round: number;
+  readonly maxRounds: number;
+  readonly totalTokens: number;
+  readonly visitCounts: Record<string, number>;
+}
+
+export interface WorkflowDetailDto extends WorkflowSummaryDto {
+  readonly description: string;
+  readonly stateGraph: StateGraphDto;
+  readonly transitionHistory: readonly TransitionRecordDto[];
+  readonly context: WorkflowContextDto;
+  readonly gate?: HumanGateRequestDto;
+  readonly workspacePath: string;
 }

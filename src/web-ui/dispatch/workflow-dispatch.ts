@@ -17,6 +17,15 @@ import {
 } from '../web-ui-types.js';
 import type { WorkflowManager } from '../workflow-manager.js';
 import type { WorkflowId, WorkflowStatus } from '../../workflow/types.js';
+import type { WorkflowDetail } from '../../workflow/orchestrator.js';
+import { extractStateGraph } from '../state-graph.js';
+import type { StateGraphDto } from '../web-ui-types.js';
+
+// ---------------------------------------------------------------------------
+// State graph cache (definition never changes during execution)
+// ---------------------------------------------------------------------------
+
+const stateGraphCache = new Map<WorkflowId, StateGraphDto>();
 
 // ---------------------------------------------------------------------------
 // Param validation schemas
@@ -77,7 +86,8 @@ export async function workflowDispatch(
       if (!status) {
         throw new RpcError('WORKFLOW_NOT_FOUND', `Workflow ${workflowId} not found`);
       }
-      return buildDetailDto(id, status);
+      const detail = controller.getDetail(id);
+      return buildDetailDto(id, status, detail);
     }
 
     case 'workflows.start': {
@@ -161,13 +171,40 @@ function buildSummaryDto(id: WorkflowId, status: WorkflowStatus): WorkflowSummar
   };
 }
 
-function buildDetailDto(id: WorkflowId, status: WorkflowStatus): Partial<WorkflowDetailDto> {
+function buildDetailDto(id: WorkflowId, status: WorkflowStatus, detail?: WorkflowDetail): WorkflowDetailDto {
+  const base = buildSummaryDto(id, status);
+  let stateGraph: StateGraphDto = { states: [], transitions: [] };
+  if (detail) {
+    let cached = stateGraphCache.get(id);
+    if (!cached) {
+      cached = extractStateGraph(detail.definition);
+      stateGraphCache.set(id, cached);
+    }
+    stateGraph = cached;
+  }
+  const transitionHistory = (detail?.transitionHistory ?? []).map((t) => ({
+    from: t.from,
+    to: t.to,
+    event: t.event,
+    timestamp: t.timestamp,
+    durationMs: t.duration_ms,
+  }));
+
   return {
-    workflowId: id,
-    name: id,
-    phase: status.phase,
-    currentState: getCurrentState(status),
-    startedAt: new Date().toISOString(),
+    ...base,
+    description: detail?.context.taskDescription ?? '',
+    stateGraph,
+    transitionHistory,
+    context: detail
+      ? {
+          taskDescription: detail.context.taskDescription,
+          round: detail.context.round,
+          maxRounds: detail.context.maxRounds,
+          totalTokens: detail.context.totalTokens,
+          visitCounts: detail.context.visitCounts,
+        }
+      : { taskDescription: '', round: 0, maxRounds: 0, totalTokens: 0, visitCounts: {} },
     gate: status.phase === 'waiting_human' ? toHumanGateRequestDto(status.gate) : undefined,
+    workspacePath: detail?.workspacePath ?? '',
   };
 }

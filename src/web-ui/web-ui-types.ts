@@ -199,6 +199,7 @@ export interface TransitionRecordDto {
 
 export interface HumanGateRequestDto {
   readonly gateId: string;
+  readonly workflowId: string;
   readonly stateName: string;
   readonly acceptedEvents: readonly string[];
   /** Artifact names only (not content). */
@@ -216,6 +217,7 @@ export interface HumanGateRequestDto {
 export function toHumanGateRequestDto(gate: HumanGateRequest): HumanGateRequestDto {
   return {
     gateId: gate.gateId,
+    workflowId: gate.workflowId,
     stateName: gate.stateName,
     acceptedEvents: gate.acceptedEvents,
     presentedArtifacts: Array.from(gate.presentedArtifacts.keys()),

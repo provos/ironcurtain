@@ -276,10 +276,9 @@ function applyEvent(state: AppStateLike, effects: EventSideEffects, parsed: WebE
         phase: 'completed',
         currentState: 'completed',
       });
-      // Clean up any pending gates for this workflow (gateId format: `${workflowId}-${gateName}`)
       const nextGates = new Map(state.pendingGates);
-      for (const [gateId] of nextGates) {
-        if (gateId.startsWith(workflowId)) nextGates.delete(gateId);
+      for (const [gateId, gate] of nextGates) {
+        if (gate.workflowId === workflowId) nextGates.delete(gateId);
       }
       state.pendingGates = nextGates;
       return true;

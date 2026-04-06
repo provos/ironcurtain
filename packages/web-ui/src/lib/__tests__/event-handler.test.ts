@@ -480,6 +480,7 @@ describe('handleEvent', () => {
         workflowId: 'wf-1',
         gate: {
           gateId: 'wf-1-plan_review',
+          workflowId: 'wf-1',
           stateName: 'plan_review',
           acceptedEvents: ['APPROVE', 'FORCE_REVISION'],
           presentedArtifacts: ['plan'],
@@ -499,6 +500,7 @@ describe('handleEvent', () => {
           'wf-1-plan_review',
           {
             gateId: 'wf-1-plan_review',
+            workflowId: 'wf-1',
             stateName: 'plan_review',
             acceptedEvents: ['APPROVE'],
             presentedArtifacts: [],
@@ -534,6 +536,7 @@ describe('handleEvent', () => {
           'wf-1-review',
           {
             gateId: 'wf-1-review',
+            workflowId: 'wf-1',
             stateName: 'review',
             acceptedEvents: ['APPROVE'],
             presentedArtifacts: [],

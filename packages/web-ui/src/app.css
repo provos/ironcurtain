@@ -18,7 +18,7 @@
     --radius: 0.5rem;
   }
 
-  [data-theme="iron"] {
+  [data-theme='iron'] {
     --background: 220 14% 8%;
     --foreground: 210 20% 92%;
     --card: 220 14% 10%;
@@ -40,7 +40,7 @@
     color-scheme: dark;
   }
 
-  [data-theme="daylight"] {
+  [data-theme='daylight'] {
     --background: 40 20% 97%;
     --foreground: 220 20% 12%;
     --card: 0 0% 100%;
@@ -62,7 +62,7 @@
     color-scheme: light;
   }
 
-  [data-theme="midnight"] {
+  [data-theme='midnight'] {
     --background: 228 24% 8%;
     --foreground: 215 20% 90%;
     --card: 228 22% 11%;
@@ -93,7 +93,8 @@
     @apply bg-background text-foreground;
     font-family: 'DM Sans', system-ui, sans-serif;
   }
-  code, .font-mono {
+  code,
+  .font-mono {
     font-family: 'JetBrains Mono', ui-monospace, monospace;
   }
 }
@@ -101,7 +102,10 @@
 /* ── Transitions ─────────────────────────────────────── */
 @layer utilities {
   .theme-transition {
-    transition: background-color 0.3s ease, color 0.2s ease, border-color 0.3s ease;
+    transition:
+      background-color 0.3s ease,
+      color 0.2s ease,
+      border-color 0.3s ease;
   }
 }
 
@@ -139,15 +143,25 @@
 .prose-markdown em {
   font-style: italic;
 }
-.prose-markdown h1, .prose-markdown h2, .prose-markdown h3,
-.prose-markdown h4, .prose-markdown h5, .prose-markdown h6 {
+.prose-markdown h1,
+.prose-markdown h2,
+.prose-markdown h3,
+.prose-markdown h4,
+.prose-markdown h5,
+.prose-markdown h6 {
   font-weight: 700;
   margin: 0.75em 0 0.25em;
   color: hsl(var(--foreground));
 }
-.prose-markdown h1 { font-size: 1.4em; }
-.prose-markdown h2 { font-size: 1.25em; }
-.prose-markdown h3 { font-size: 1.1em; }
+.prose-markdown h1 {
+  font-size: 1.4em;
+}
+.prose-markdown h2 {
+  font-size: 1.25em;
+}
+.prose-markdown h3 {
+  font-size: 1.1em;
+}
 .prose-markdown code {
   font-family: 'JetBrains Mono', ui-monospace, monospace;
   font-size: 0.875em;
@@ -168,13 +182,20 @@
   padding: 0;
   font-size: 0.85em;
 }
-.prose-markdown ul, .prose-markdown ol {
+.prose-markdown ul,
+.prose-markdown ol {
   margin: 0.35em 0;
   padding-left: 1.5em;
 }
-.prose-markdown ul { list-style: disc; }
-.prose-markdown ol { list-style: decimal; }
-.prose-markdown li { margin: 0.15em 0; }
+.prose-markdown ul {
+  list-style: disc;
+}
+.prose-markdown ol {
+  list-style: decimal;
+}
+.prose-markdown li {
+  margin: 0.15em 0;
+}
 .prose-markdown blockquote {
   border-left: 3px solid hsl(var(--border));
   margin: 0.5em 0;
@@ -187,7 +208,8 @@
   margin: 0.5em 0;
   font-size: 0.9em;
 }
-.prose-markdown th, .prose-markdown td {
+.prose-markdown th,
+.prose-markdown td {
   border: 1px solid hsl(var(--border));
   padding: 0.4em 0.75em;
   text-align: left;
@@ -212,8 +234,14 @@
 
 /* ── Custom animations ───────────────────────────────── */
 @keyframes fadeIn {
-  from { opacity: 0; transform: translateY(4px); }
-  to { opacity: 1; transform: translateY(0); }
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 @layer utilities {

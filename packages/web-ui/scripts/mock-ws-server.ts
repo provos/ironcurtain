@@ -290,10 +290,29 @@ const CANNED_WORKFLOWS: MockWorkflow[] = [
 
 const workflows = new Map<string, MockWorkflow>();
 const workflowGates = new Map<string, MockGate>();
+const workflowTimers = new Map<string, ReturnType<typeof setTimeout>[]>();
+
+function trackTimer(workflowId: string, timer: ReturnType<typeof setTimeout>): void {
+  const existing = workflowTimers.get(workflowId) ?? [];
+  existing.push(timer);
+  workflowTimers.set(workflowId, existing);
+}
+
+function clearWorkflowTimers(workflowId: string): void {
+  const timers = workflowTimers.get(workflowId);
+  if (timers) {
+    for (const t of timers) clearTimeout(t);
+    workflowTimers.delete(workflowId);
+  }
+}
 
 function initWorkflows(): void {
   workflows.clear();
   workflowGates.clear();
+  for (const timers of workflowTimers.values()) {
+    for (const t of timers) clearTimeout(t);
+  }
+  workflowTimers.clear();
   for (const wf of structuredClone(CANNED_WORKFLOWS)) {
     workflows.set(wf.workflowId, wf);
   }
@@ -309,6 +328,82 @@ function initWorkflows(): void {
   });
 }
 initWorkflows();
+
+// ---------------------------------------------------------------------------
+// Mock state graph for design-and-code workflow
+// ---------------------------------------------------------------------------
+
+const DESIGN_AND_CODE_GRAPH = {
+  states: [
+    { id: 'plan', type: 'agent' as const, persona: 'planner', label: 'Plan' },
+    { id: 'plan_review', type: 'human_gate' as const, label: 'Plan Review' },
+    { id: 'implement', type: 'agent' as const, persona: 'coder', label: 'Implement' },
+    { id: 'review', type: 'agent' as const, persona: 'critic', label: 'Review' },
+    { id: 'design_review', type: 'human_gate' as const, label: 'Design Review' },
+    { id: 'completed', type: 'terminal' as const, label: 'Completed' },
+    { id: 'aborted', type: 'terminal' as const, label: 'Aborted' },
+  ],
+  transitions: [
+    { from: 'plan', to: 'plan_review', label: '' },
+    { from: 'plan_review', to: 'implement', event: 'APPROVE', label: 'Approve' },
+    { from: 'plan_review', to: 'plan', event: 'FORCE_REVISION', label: 'Force Revision' },
+    { from: 'plan_review', to: 'aborted', event: 'ABORT', label: 'Abort' },
+    { from: 'implement', to: 'review', label: '' },
+    { from: 'review', to: 'implement', guard: 'isRejected', label: 'rejected' },
+    { from: 'review', to: 'design_review', guard: 'isApproved', label: 'approved' },
+    { from: 'design_review', to: 'completed', event: 'APPROVE', label: 'Approve' },
+    { from: 'design_review', to: 'implement', event: 'FORCE_REVISION', label: 'Force Revision' },
+    { from: 'design_review', to: 'aborted', event: 'ABORT', label: 'Abort' },
+  ],
+};
+
+const CODE_REVIEW_GRAPH = {
+  states: [
+    { id: 'analyze', type: 'agent' as const, persona: 'reviewer', label: 'Analyze' },
+    { id: 'report_review', type: 'human_gate' as const, label: 'Report Review' },
+    { id: 'completed', type: 'terminal' as const, label: 'Completed' },
+  ],
+  transitions: [
+    { from: 'analyze', to: 'report_review', label: '' },
+    { from: 'report_review', to: 'completed', event: 'APPROVE', label: 'Approve' },
+    { from: 'report_review', to: 'analyze', event: 'FORCE_REVISION', label: 'Force Revision' },
+  ],
+};
+
+function buildWorkflowDetailDto(wf: MockWorkflow, gate?: MockGate) {
+  const isDesignAndCode = wf.name.includes('design');
+  const graph = isDesignAndCode ? DESIGN_AND_CODE_GRAPH : CODE_REVIEW_GRAPH;
+
+  // Build transition history from the completed states
+  const transitionHistory = [];
+  const baseTime = new Date(wf.startedAt).getTime();
+  if (wf.currentState !== graph.states[0].id) {
+    // Simulate that at least the initial state transitioned
+    transitionHistory.push({
+      from: graph.states[0].id,
+      to: graph.states.length > 1 ? graph.states[1].id : graph.states[0].id,
+      event: 'auto',
+      timestamp: new Date(baseTime + 5000).toISOString(),
+      durationMs: 5000,
+    });
+  }
+
+  return {
+    ...wf,
+    description: `Mock workflow: ${wf.name}`,
+    stateGraph: graph,
+    transitionHistory,
+    context: {
+      taskDescription: `Execute the ${wf.name} workflow`,
+      round: 1,
+      maxRounds: 3,
+      totalTokens: 15000 + Math.floor(Math.random() * 10000),
+      visitCounts: { [wf.currentState]: 1 },
+    },
+    gate: gate ?? undefined,
+    workspacePath: `/tmp/ironcurtain-workflow/${wf.workflowId}`,
+  };
+}
 
 // Mutable copy of canned jobs so enable/disable/remove are stateful
 const jobs = structuredClone(CANNED_JOBS);
@@ -643,7 +738,7 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
       const wf = workflows.get(wfId);
       if (!wf) return errorResult('WORKFLOW_NOT_FOUND', `Workflow ${wfId} not found`);
       const gate = [...workflowGates.values()].find((g) => g.workflowId === wfId);
-      return { ...wf, gate };
+      return buildWorkflowDetailDto(wf, gate);
     }
 
     case 'workflows.start': {
@@ -652,22 +747,46 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
         workflowId: newId,
         name: String(params.definitionPath).split('/').pop()?.replace('.json', '') ?? 'workflow',
         phase: 'running',
-        currentState: 'initial',
+        currentState: 'plan',
         startedAt: new Date().toISOString(),
       };
       workflows.set(newId, newWf);
-      broadcast('workflow.state_entered', { workflowId: newId, state: 'initial' });
+      broadcast('workflow.agent_started', { workflowId: newId, stateId: 'plan', persona: 'planner' });
+      broadcast('workflow.state_entered', { workflowId: newId, state: 'plan' });
 
-      // Simulate progression after a delay
-      setTimeout(() => {
-        const wf = workflows.get(newId);
-        if (wf && wf.phase === 'running') {
-          wf.currentState = 'plan';
-          wf.phase = 'running';
-          broadcast('workflow.agent_started', { workflowId: newId, stateId: 'plan', persona: 'planner' });
-          broadcast('workflow.state_entered', { workflowId: newId, state: 'plan' });
-        }
-      }, 2000);
+      trackTimer(
+        newId,
+        setTimeout(() => {
+          const wf = workflows.get(newId);
+          if (wf && wf.phase === 'running') {
+            broadcast('workflow.agent_completed', { workflowId: newId, stateId: 'plan', verdict: 'success' });
+            wf.currentState = 'plan_review';
+            wf.phase = 'waiting_human';
+            const gateId = `${newId}-plan_review`;
+            const gate: MockGate = {
+              gateId,
+              workflowId: newId,
+              stateName: 'plan_review',
+              acceptedEvents: ['APPROVE', 'FORCE_REVISION', 'REPLAN', 'ABORT'],
+              presentedArtifacts: ['plan.md'],
+              summary: 'The planner has produced an implementation plan. Please review and approve.',
+            };
+            workflowGates.set(gateId, gate);
+            broadcast('workflow.state_entered', { workflowId: newId, state: 'plan_review' });
+            broadcast('workflow.gate_raised', {
+              workflowId: newId,
+              gate: {
+                gateId,
+                workflowId: newId,
+                stateName: gate.stateName,
+                acceptedEvents: gate.acceptedEvents,
+                presentedArtifacts: gate.presentedArtifacts,
+                summary: gate.summary,
+              },
+            });
+          }
+        }, 4000),
+      );
 
       return { workflowId: newId };
     }
@@ -678,7 +797,7 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
       if (!abortWf) return errorResult('WORKFLOW_NOT_FOUND', `Workflow ${abortId} not found`);
       abortWf.phase = 'aborted';
       abortWf.currentState = 'aborted';
-      // Remove any gates
+      clearWorkflowTimers(abortId);
       for (const [gateId, gate] of workflowGates) {
         if (gate.workflowId === abortId) workflowGates.delete(gateId);
       }
@@ -688,6 +807,7 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
 
     case 'workflows.resolveGate': {
       const resolveWfId = params.workflowId as string;
+      const resolveEvent = params.event as string;
       const resolveWf = workflows.get(resolveWfId);
       if (!resolveWf) return errorResult('WORKFLOW_NOT_FOUND', `Workflow ${resolveWfId} not found`);
       if (resolveWf.phase !== 'waiting_human') {
@@ -700,9 +820,40 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
           broadcast('workflow.gate_dismissed', { workflowId: resolveWfId, gateId });
         }
       }
-      resolveWf.phase = 'running';
-      resolveWf.currentState = 'implement';
-      broadcast('workflow.state_entered', { workflowId: resolveWfId, state: 'implement' });
+
+      if (resolveEvent === 'ABORT') {
+        resolveWf.phase = 'aborted';
+        resolveWf.currentState = 'aborted';
+        broadcast('workflow.failed', { workflowId: resolveWfId, error: 'Workflow aborted by user' });
+      } else {
+        const nextState = resolveEvent === 'FORCE_REVISION' ? 'plan' : 'implement';
+        resolveWf.phase = 'running';
+        resolveWf.currentState = nextState;
+        broadcast('workflow.agent_started', {
+          workflowId: resolveWfId,
+          stateId: nextState,
+          persona: nextState === 'plan' ? 'planner' : 'coder',
+        });
+        broadcast('workflow.state_entered', { workflowId: resolveWfId, state: nextState });
+
+        trackTimer(
+          resolveWfId,
+          setTimeout(() => {
+            const wf = workflows.get(resolveWfId);
+            if (wf && wf.phase === 'running') {
+              broadcast('workflow.agent_completed', {
+                workflowId: resolveWfId,
+                stateId: nextState,
+                verdict: 'success',
+              });
+              if (nextState === 'implement') {
+                wf.currentState = 'review';
+                broadcast('workflow.state_entered', { workflowId: resolveWfId, state: 'review' });
+              }
+            }
+          }, 3000),
+        );
+      }
       return undefined;
     }
 

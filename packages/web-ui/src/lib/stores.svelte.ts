@@ -16,6 +16,7 @@ import type {
   BudgetSummaryDto,
   PersonaListItem,
   WorkflowSummaryDto,
+  WorkflowDetailDto,
   HumanGateRequestDto,
 } from './types.js';
 import { createWsClient, type WsClient } from './ws-client.js';
@@ -54,6 +55,7 @@ class AppState {
 
   // Workflow state
   workflows: Map<string, WorkflowSummaryDto> = $state(new Map());
+  selectedWorkflowId: string | null = $state(null);
   pendingGates: Map<string, HumanGateRequestDto> = $state(new Map());
 
   get selectedSession(): SessionDto | null {
@@ -341,6 +343,10 @@ export async function refreshWorkflows(): Promise<void> {
   } catch {
     // Best-effort
   }
+}
+
+export async function getWorkflowDetail(workflowId: string): Promise<WorkflowDetailDto> {
+  return getWsClient().request<WorkflowDetailDto>('workflows.get', { workflowId });
 }
 
 export function connectWithToken(token: string): void {
