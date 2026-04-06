@@ -183,7 +183,7 @@ function applyEvent(state: AppStateLike, effects: EventSideEffects, parsed: WebE
       state.addOutput(esc.sessionLabel, {
         kind: 'escalation',
         text: `Pending escalation: ${esc.serverName}/${esc.toolName}`,
-        timestamp: new Date().toISOString(),
+        timestamp: esc.receivedAt,
         escalationId: esc.escalationId,
       });
       return true;
@@ -193,10 +193,10 @@ function applyEvent(state: AppStateLike, effects: EventSideEffects, parsed: WebE
     case 'escalation.expired': {
       const { escalationId } = parsed.payload;
       const esc = state.pendingEscalations.get(escalationId);
-      const next = new Map(state.pendingEscalations);
-      next.delete(escalationId);
-      state.pendingEscalations = next;
       if (esc) {
+        const next = new Map(state.pendingEscalations);
+        next.delete(escalationId);
+        state.pendingEscalations = next;
         state.filterOutput(esc.sessionLabel, (line) => line.escalationId !== escalationId);
       }
       return true;

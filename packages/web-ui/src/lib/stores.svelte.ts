@@ -151,6 +151,15 @@ async function refreshAll(client: WsClient): Promise<void> {
       newEscalations.set(esc.escalationId, { ...esc, displayNumber });
     }
     appState.pendingEscalations = newEscalations;
+    // Remove stale escalation output lines that are no longer pending
+    for (const [label, lines] of appState.sessionOutputs) {
+      const filtered = lines.filter(
+        (line) => line.kind !== 'escalation' || (line.escalationId && newEscalations.has(line.escalationId)),
+      );
+      if (filtered.length !== lines.length) {
+        appState.sessionOutputs = new Map(appState.sessionOutputs).set(label, filtered);
+      }
+    }
     // Mark all initially-loaded escalations as already seen so the modal
     // does not auto-open on first connect.
     appState.escalationDismissedAt = appState.escalationDisplayNumber;

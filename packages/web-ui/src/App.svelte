@@ -62,10 +62,6 @@
     }
   });
 
-  function openEscalationModalFromSession(): void {
-    escalationModalOpen = true;
-  }
-
   function recordDismissal(): void {
     appState.escalationDismissedAt = appState.escalationDisplayNumber;
     escalationModalOpen = false;
@@ -273,7 +269,7 @@
       {#if appState.currentView === 'dashboard'}
         <Dashboard />
       {:else if appState.currentView === 'sessions'}
-        <Sessions onOpenEscalation={openEscalationModalFromSession} />
+        <Sessions onOpenEscalation={() => (escalationModalOpen = true)} />
       {:else if appState.currentView === 'escalations'}
         <Escalations />
       {:else if appState.currentView === 'jobs'}
