@@ -121,7 +121,7 @@ export function createInitialContext(definition: WorkflowDefinition): Omit<Workf
     totalTokens: 0,
     flaggedForReview: false,
     lastError: null,
-    sessionsByRole: {},
+    sessionsByState: {},
     previousAgentOutput: null,
     previousStateName: null,
     visitCounts: {},
@@ -350,8 +350,8 @@ export function buildWorkflowMachine(definition: WorkflowDefinition, taskDescrip
           flaggedForReview: context.flaggedForReview || (output.verdict === 'approved' && output.confidence === 'low'),
           reviewHistory:
             output.verdict === 'rejected' ? [...context.reviewHistory, output.notes ?? ''] : context.reviewHistory,
-          sessionsByRole: {
-            ...context.sessionsByRole,
+          sessionsByState: {
+            ...context.sessionsByState,
             [stateId]: result.sessionId,
           },
           totalTokens: context.totalTokens,

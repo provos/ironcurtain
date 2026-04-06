@@ -588,10 +588,10 @@ export class WorkflowOrchestrator implements WorkflowController {
         : { kind: 'docker', agent: (settings.dockerAgent ?? 'claude-code') as AgentId };
 
     // Create session with resumeSessionId for same-role continuity.
-    // sessionsByRole is keyed by stateId (set by updateContextFromAgentResult).
+    // sessionsByState is keyed by stateId (set by updateContextFromAgentResult).
     // workspacePath ensures the agent writes to the artifact directory,
     // so files created by the agent are visible to the orchestrator.
-    const previousSessionId = context.sessionsByRole[stateId];
+    const previousSessionId = context.sessionsByState[stateId];
     let session: Session;
     try {
       session = await this.deps.createSession({

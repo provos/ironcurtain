@@ -96,7 +96,7 @@ function makeContext(overrides: Partial<WorkflowContext> = {}): WorkflowContext 
     totalTokens: 0,
     flaggedForReview: false,
     lastError: null,
-    sessionsByRole: {},
+    sessionsByState: {},
     previousAgentOutput: null,
     previousStateName: null,
     visitCounts: {},

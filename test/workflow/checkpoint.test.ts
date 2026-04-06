@@ -22,7 +22,7 @@ function makeCheckpoint(overrides?: Partial<WorkflowCheckpoint>): WorkflowCheckp
       totalTokens: 500,
       flaggedForReview: false,
       lastError: null,
-      sessionsByRole: {},
+      sessionsByState: {},
       previousAgentOutput: null,
       previousStateName: null,
       visitCounts: {},

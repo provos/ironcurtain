@@ -208,7 +208,7 @@ export interface WorkflowContext {
   readonly totalTokens: number;
   readonly flaggedForReview: boolean;
   readonly lastError: string | null;
-  readonly sessionsByRole: Record<string, string>;
+  readonly sessionsByState: Record<string, string>;
   /**
    * Response text from the last completed agent state. Truncated
    * at 32KB. Used to give the next agent visibility into what

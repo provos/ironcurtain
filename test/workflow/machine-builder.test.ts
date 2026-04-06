@@ -302,7 +302,7 @@ describe('buildWorkflowMachine', () => {
       expect(ctx.totalTokens).toBe(0);
       expect(ctx.flaggedForReview).toBe(false);
       expect(ctx.lastError).toBeNull();
-      expect(ctx.sessionsByRole).toEqual({});
+      expect(ctx.sessionsByState).toEqual({});
       expect(ctx.previousAgentOutput).toBeNull();
       expect(ctx.previousStateName).toBeNull();
       expect(ctx.visitCounts).toEqual({});
@@ -719,7 +719,7 @@ describe('buildWorkflowMachine', () => {
       expect(actor.getSnapshot().context.reviewHistory).toContain('issue found');
     });
 
-    it('tracks sessionsByRole from agent results', async () => {
+    it('tracks sessionsByState from agent results', async () => {
       const result = buildWorkflowMachine(linearDefinition, 'task');
       let sessionCounter = 0;
 
@@ -738,8 +738,8 @@ describe('buildWorkflowMachine', () => {
       await settle();
 
       const ctx = actor.getSnapshot().context;
-      expect(ctx.sessionsByRole['plan']).toBe('session-1');
-      expect(ctx.sessionsByRole['design']).toBe('session-2');
+      expect(ctx.sessionsByState['plan']).toBe('session-1');
+      expect(ctx.sessionsByState['design']).toBe('session-2');
     });
 
     it('updates previousTestCount from deterministic results', async () => {

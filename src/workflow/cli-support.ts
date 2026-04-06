@@ -396,7 +396,7 @@ export function synthesizeCheckpoint(
     totalTokens: 0,
     flaggedForReview: false,
     lastError: null,
-    sessionsByRole: {},
+    sessionsByState: {},
     previousAgentOutput: null,
     previousStateName: null,
     visitCounts: {},

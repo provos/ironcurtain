@@ -507,7 +507,7 @@ describe('WorkflowOrchestrator checkpoint + resume', () => {
           totalTokens: 0,
           flaggedForReview: false,
           lastError: null,
-          sessionsByRole: {},
+          sessionsByState: {},
           previousAgentOutput: null,
           previousStateName: null,
           visitCounts: {},
@@ -619,7 +619,7 @@ describe('WorkflowOrchestrator checkpoint + resume', () => {
         totalTokens: 0,
         flaggedForReview: false,
         lastError: 'crash',
-        sessionsByRole: {},
+        sessionsByState: {},
         previousAgentOutput: null,
         previousStateName: null,
         visitCounts: {},
@@ -692,7 +692,7 @@ describe('WorkflowOrchestrator checkpoint + resume', () => {
         totalTokens: 0,
         flaggedForReview: false,
         lastError: null,
-        sessionsByRole: {},
+        sessionsByState: {},
         previousAgentOutput: null,
         previousStateName: null,
         visitCounts: {},
@@ -782,7 +782,7 @@ describe('WorkflowOrchestrator checkpoint + resume', () => {
         totalTokens: 0,
         flaggedForReview: false,
         lastError: null,
-        sessionsByRole: {},
+        sessionsByState: {},
         previousAgentOutput: null,
         previousStateName: null,
         visitCounts: {},
@@ -867,7 +867,7 @@ describe('WorkflowOrchestrator checkpoint + resume', () => {
     const checkpoint = checkpointStore.load(workflowId);
     expect(checkpoint).toBeDefined();
     expect(checkpoint!.machineState).toBe('error_gate');
-    expect(checkpoint!.context.sessionsByRole['implement']).toBe('coder-session-1');
+    expect(checkpoint!.context.sessionsByState['implement']).toBe('coder-session-1');
 
     // Simulate crash: save checkpoint, shutdown (which removes it), re-save
     const savedCheckpoint = { ...checkpoint! };
