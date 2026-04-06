@@ -49,7 +49,8 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc && node scripts/copy-assets.mjs",
+    "build": "tsc && node scripts/copy-assets.mjs && npm run build:web-ui --if-present",
+    "build:web-ui": "npm run build -w packages/web-ui",
     "start": "tsx src/cli.ts start",
     "annotate-tools": "tsx src/cli.ts annotate-tools",
     "compile-policy": "tsx src/cli.ts compile-policy",
@@ -59,7 +60,8 @@
     "config": "tsx src/cli.ts config",
     "setup": "tsx src/cli.ts setup",
     "prepublishOnly": "npm run build",
-    "test": "vitest run",
+    "test": "vitest run && npm test -w packages/web-ui",
+    "test:web-ui": "npm test -w packages/web-ui",
     "test:watch": "vitest",
     "lint": "eslint src/ test/",
     "format": "prettier --log-level=warn --write 'src/**/*.ts' 'test/**/*.ts'",
@@ -95,6 +97,7 @@
     "turndown": "^7.2.2",
     "undici": "^7.24.0",
     "uuid": "^13.0.0",
+    "ws": "^8.20.0",
     "xstate": "^5.30.0",
     "zod": "^4.3.6"
   },
@@ -106,11 +109,14 @@
     "minimatch": "^10.2.1"
   },
   "lint-staged": {
-    "*.ts": [
-      "prettier --check"
-    ],
-    "{src,test}/**/*.ts": [
+    "!(packages/**)/*.ts": [
+      "prettier --check",
       "eslint"
+    ],
+    "packages/web-ui/**/*.{ts,svelte}": [
+      "prettier --check --config packages/web-ui/.prettierrc",
+      "npm run lint -w packages/web-ui",
+      "npm run check -w packages/web-ui"
     ]
   },
   "devDependencies": {
@@ -130,7 +136,6 @@
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
     "typescript-eslint": "^8.56.0",
-    "vitest": "^4.0.18",
-    "ws": "^8.19.0"
+    "vitest": "^4.0.18"
   }
 }

@@ -913,7 +913,7 @@ describe('SignalBotDaemon', () => {
       await waitForMessage(mockApi, (m) => m.includes('denied'));
 
       expect(mockApi.messageTexts.some((m) => m.includes('denied'))).toBe(true);
-      expect(createdMockSessions[1].session.resolveEscalation).toHaveBeenCalledWith('esc-d2', 'denied');
+      expect(createdMockSessions[1].session.resolveEscalation).toHaveBeenCalledWith('esc-d2', 'denied', undefined);
       expect(createdMockSessions[0].session.resolveEscalation).not.toHaveBeenCalled();
     });
   });
@@ -936,12 +936,16 @@ describe('SignalBotDaemon', () => {
       // Step 2: approve #1 with label
       mockApi.simulateIncomingMessage('+15559876543', 'approve #1');
       await waitForMessage(mockApi, (m) => m.includes('approved'));
-      expect(createdMockSessions[0].session.resolveEscalation).toHaveBeenCalledWith('esc-flow-1', 'approved');
+      expect(createdMockSessions[0].session.resolveEscalation).toHaveBeenCalledWith(
+        'esc-flow-1',
+        'approved',
+        undefined,
+      );
 
       // Step 3: deny #2 (now only one pending, bare deny should work)
       mockApi.simulateIncomingMessage('+15559876543', 'deny');
       await waitForMessage(mockApi, (m) => m.includes('denied'));
-      expect(createdMockSessions[1].session.resolveEscalation).toHaveBeenCalledWith('esc-flow-2', 'denied');
+      expect(createdMockSessions[1].session.resolveEscalation).toHaveBeenCalledWith('esc-flow-2', 'denied', undefined);
     });
   });
 
@@ -1032,7 +1036,11 @@ describe('SignalBotDaemon', () => {
       mockApi.simulateIncomingMessage('+15559876543', 'approve');
       await waitForMessage(mockApi, (m) => m.includes('approved'));
 
-      expect(createdMockSessions[1].session.resolveEscalation).toHaveBeenCalledWith('esc-cb-resolve', 'approved');
+      expect(createdMockSessions[1].session.resolveEscalation).toHaveBeenCalledWith(
+        'esc-cb-resolve',
+        'approved',
+        undefined,
+      );
       expect(createdMockSessions[0].session.resolveEscalation).not.toHaveBeenCalled();
     });
   });
@@ -1076,8 +1084,12 @@ describe('SignalBotDaemon', () => {
       mockApi.simulateIncomingMessage('+15559876543', 'deny');
       await waitForMessage(mockApi, (m) => m.includes('denied'));
 
-      expect(createdMockSessions[1].session.resolveEscalation).toHaveBeenCalledWith('esc-both-2', 'approved');
-      expect(createdMockSessions[0].session.resolveEscalation).toHaveBeenCalledWith('esc-both-1', 'denied');
+      expect(createdMockSessions[1].session.resolveEscalation).toHaveBeenCalledWith(
+        'esc-both-2',
+        'approved',
+        undefined,
+      );
+      expect(createdMockSessions[0].session.resolveEscalation).toHaveBeenCalledWith('esc-both-1', 'denied', undefined);
     });
   });
 

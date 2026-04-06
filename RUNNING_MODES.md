@@ -116,9 +116,12 @@ A unified long-running daemon that combines Signal messaging with scheduled cron
 ironcurtain daemon add-job        # Interactive wizard to define a scheduled job
 ironcurtain daemon                # Start the daemon (Signal + cron)
 ironcurtain daemon --no-signal    # Cron-only mode (no Signal transport)
+ironcurtain daemon --web-ui       # Start with browser-based dashboard
 ironcurtain daemon list-jobs      # List jobs with schedule and status
 ironcurtain daemon logs <id>      # Show recent run summaries
 ```
+
+The `--web-ui` flag enables a browser-based dashboard for monitoring sessions, handling escalations, and managing jobs. See the [Web UI section in DAEMON.md](DAEMON.md#web-ui) for details.
 
 Each job has its own task description, security constitution (compiled into per-job policy rules), persistent workspace, optional git repo sync, and configurable resource budgets. Escalations are auto-denied in headless mode unless Signal is configured for approval routing.
 

@@ -34,3 +34,7 @@ src/config/generated-readonly/servers/
 
 # Test Coverage
 coverage/
+
+# Playwright
+e2e-results/
+playwright-report/

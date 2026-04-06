@@ -79,6 +79,8 @@ All commands are subcommands of `ironcurtain daemon`:
 |--------|-------------|
 | `-a, --agent <name>` | Agent mode (same as `ironcurtain start`) |
 | `--no-signal` | Skip Signal transport (cron-only mode) |
+| `--web-ui` | Enable the web UI (see [Web UI](#web-ui)) |
+| `--web-port <port>` | Web UI port (default: 7400) |
 | `-f, --force` | Skip confirmation prompts |
 
 When a daemon is running, mutation commands (`run-job`, `remove-job`, `disable-job`, `enable-job`, `recompile-job`) are automatically forwarded to it via a Unix domain socket. If no daemon is running, they operate directly on the filesystem.
@@ -211,6 +213,88 @@ When a budget is exhausted, the run ends with outcome `budget_exhausted` and the
     └── {sessionId}/               # Per-run session data (audit, escalations, logs)
 ```
 
+## Web UI
+
+The daemon can optionally serve a browser-based dashboard for monitoring sessions, reviewing escalations, and managing jobs. The web UI is a Svelte 5 single-page application served on `127.0.0.1:7400` by default.
+
+### Starting the web UI
+
+```bash
+ironcurtain daemon --web-ui
+```
+
+On startup, the daemon prints an authenticated URL to stderr:
+
+```
+  Web UI: http://127.0.0.1:7400?token=<random-token>
+```
+
+Open this URL in your browser. The token parameter authenticates your session — treat it like a password. The web UI binds to localhost only, so it is not exposed to the network.
+
+To use a different port:
+
+```bash
+ironcurtain daemon --web-ui --web-port 8080
+```
+
+### Views
+
+| View | Description |
+|------|-------------|
+| **Dashboard** | Overview of daemon status, active sessions, and recent job runs. |
+| **Sessions** | Live session list with assistant message rendering (markdown). Supports persona-tagged sessions. |
+| **Escalations** | Pending escalations across all sessions. Approve or deny from the browser. |
+| **Jobs** | Job definitions, schedules, and run history. |
+
+### Authentication
+
+The web UI uses a bearer token generated randomly on each daemon start. The token is passed as a `?token=` query parameter in the URL printed to stderr. WebSocket connections are authenticated on upgrade using the same token.
+
+### Development workflow
+
+For frontend development with hot reload, run the daemon with the `--web-ui-dev` flag and the Vite dev server side by side:
+
+```bash
+# Terminal 1 — daemon with relaxed origin validation
+ironcurtain daemon --web-ui --web-ui-dev
+
+# Terminal 2 — Vite dev server with hot module replacement
+cd packages/web-ui && npm run dev
+```
+
+The daemon prints a second URL for the dev server (`http://localhost:5173?token=...`). The Vite dev server proxies WebSocket connections to the daemon, so the frontend connects to the real backend while Vite handles hot reload. The `--web-ui-dev` flag skips Origin header validation to allow cross-origin requests from the Vite server.
+
+### Mock server (no Docker or LLM needed)
+
+For UI development and testing without starting Docker containers or using LLM API keys, use the mock WebSocket server:
+
+```bash
+# Terminal 1 — mock server simulating the daemon's JSON-RPC protocol
+cd packages/web-ui && npm run mock-server
+
+# Terminal 2 — Vite dev server with hot module replacement
+cd packages/web-ui && npm run dev
+```
+
+Open `http://localhost:5173?token=mock-token-for-dev` in your browser. The mock server provides:
+
+- **Chat simulation** — messages produce realistic event sequences (thinking, tool calls, markdown responses)
+- **Escalation testing** — send a message containing the word "escalate" to trigger an escalation in the Escalations view
+- **Job management** — pre-populated jobs with working enable/disable/remove actions
+- **Persona selection** — pre-populated personas in the session creation picker
+
+This is the recommended workflow for iterating on the frontend without incurring LLM costs.
+
+### Unit tests
+
+The web UI has unit tests covering event handling, output grouping, and WebSocket client logic:
+
+```bash
+npm test -w packages/web-ui
+```
+
+These tests run automatically as part of the root `npm test` suite.
+
 ## Troubleshooting
 
 | Issue | Guidance |
@@ -223,3 +307,4 @@ When a budget is exhausted, the run ends with outcome `budget_exhausted` and the
 | **Run record shows `budget_exhausted`** | The job hit a resource limit. Increase the relevant budget via `edit-job` or set the field to `null` to disable the limit. |
 | **`last-run.md` missing** | This file is created by the agent, not the daemon. If the agent didn't write it, check the task description — the agent is prompted to use this file but may skip it if the task completes very quickly or errors out early. |
 | **Changes from previous run discarded** | This is expected behavior with `gitRepo` configured. Tracked files are reset to remote HEAD before each run. Untracked files (including `last-run.md`) are preserved. |
+| **Web UI not loading** | Ensure `--web-ui` was passed when starting the daemon. Check that the port (default 7400) is not in use. The URL with token is printed to stderr on startup — copy it exactly, as the token is required for authentication. |
