@@ -20,8 +20,7 @@ test.describe('Escalations', () => {
     await navigateTo(page, 'Escalations');
 
     // The mock server creates an escalation for filesystem/write_file
-    await expect(page.getByText('filesystem')).toBeVisible({ timeout: 10_000 });
-    await expect(page.getByText('write_file')).toBeVisible();
+    await expect(page.getByText('Write to protected system path')).toBeVisible({ timeout: 10_000 });
   });
 
   test('escalation card shows server name and tool info', async ({ page }) => {
@@ -31,10 +30,10 @@ test.describe('Escalations', () => {
     await navigateTo(page, 'Escalations');
 
     // Wait for the escalation card to appear
-    await expect(page.getByText('filesystem')).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByText('Write to protected system path')).toBeVisible({ timeout: 10_000 });
 
-    // Should show the reason
-    await expect(page.getByText('Write to protected system path')).toBeVisible();
+    // Should show the server and tool name
+    await expect(page.getByText('filesystem/filesystem__write_file')).toBeVisible();
 
     // Should show Approve and Deny buttons
     await expect(page.getByRole('button', { name: 'Approve' })).toBeVisible();
@@ -48,7 +47,7 @@ test.describe('Escalations', () => {
     await navigateTo(page, 'Escalations');
 
     // Wait for escalation to appear
-    await expect(page.getByText('filesystem')).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByText('Write to protected system path')).toBeVisible({ timeout: 10_000 });
 
     // Approve it
     await page.getByRole('button', { name: 'Approve' }).click();
@@ -64,7 +63,7 @@ test.describe('Escalations', () => {
     await navigateTo(page, 'Escalations');
 
     // Wait for escalation to appear
-    await expect(page.getByText('filesystem')).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByText('Write to protected system path')).toBeVisible({ timeout: 10_000 });
 
     // Deny it
     await page.getByRole('button', { name: 'Deny' }).click();
@@ -80,7 +79,7 @@ test.describe('Escalations', () => {
     await navigateTo(page, 'Escalations');
 
     // Wait for the escalation card to appear
-    await expect(page.getByText('filesystem')).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByText('Write to protected system path')).toBeVisible({ timeout: 10_000 });
 
     // Verify whitelist candidates section is rendered
     await expect(page.getByText('Whitelist (optional)')).toBeVisible();

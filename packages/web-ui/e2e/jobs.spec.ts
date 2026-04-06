@@ -28,10 +28,9 @@ test.describe('Jobs', () => {
     const firstRow = page.locator('tr', { hasText: 'Daily Security Scan' });
     await firstRow.getByRole('button', { name: 'Run' }).click();
 
-    // The mock server broadcasts job.started, which should show a running indicator
-    // The jobs list refreshes on job.started and job.completed events
-    // After 3s the mock sends job.completed
-    await expect(firstRow.getByText('Run...')).toBeVisible({ timeout: 3_000 });
+    // The mock server broadcasts job.started, which triggers a jobs.list refresh.
+    // The refreshed list shows isRunning=true, rendering a "running" badge.
+    await expect(firstRow.getByText('running')).toBeVisible({ timeout: 5_000 });
   });
 
   test('clicking Disable on an enabled job changes its status', async ({ page }) => {

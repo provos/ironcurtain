@@ -107,9 +107,13 @@
     "minimatch": "^10.2.1"
   },
   "lint-staged": {
-    "*.ts": [
+    "!(packages/**)/*.ts": [
       "prettier --check",
       "eslint"
+    ],
+    "packages/web-ui/**/*.{ts,svelte}": [
+      "prettier --check --config packages/web-ui/.prettierrc",
+      "eslint --config packages/web-ui/eslint.config.js"
     ]
   },
   "devDependencies": {

@@ -522,8 +522,11 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
 
     case 'jobs.run': {
       const jobId = params.jobId as string;
+      const runningJob = jobs.find((j) => j.job.id === jobId);
+      if (runningJob) runningJob.isRunning = true;
       broadcast('job.started', { jobId, sessionLabel: 0 });
       setTimeout(() => {
+        if (runningJob) runningJob.isRunning = false;
         broadcast('job.completed', {
           jobId,
           record: {
