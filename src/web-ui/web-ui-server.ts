@@ -149,6 +149,8 @@ export class WebUiServer {
       client.close(1001, 'Server shutting down');
     }
     this.clients.clear();
+    this.aliveClients.clear();
+    this.missedPings.clear();
 
     const webSessions = this.options.sessionManager.byKind('web');
     for (const managed of webSessions) {
