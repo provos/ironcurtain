@@ -282,10 +282,10 @@ function sendToSession(ctx: DispatchContext, label: number, text: string): { acc
   }
 
   const transport = managed.transport as WebSessionTransport;
-  const turnNumber = managed.session.getInfo().turnCount + 1;
 
   const prev = ctx.sessionQueues.get(label) ?? Promise.resolve();
   const current = prev.then(async () => {
+    const turnNumber = managed.session.getInfo().turnCount + 1;
     ctx.eventBus.emit('session.thinking', { label, turnNumber });
     // Emit session status update so the frontend shows 'processing'
     const freshManaged = ctx.sessionManager.get(label);

@@ -196,7 +196,9 @@ export class WebUiServer {
         this.missedPings.set(client, missed);
       }
       this.aliveClients.delete(client);
-      client.ping();
+      if (client.readyState === WsWebSocket.OPEN) {
+        client.ping();
+      }
     }
     this.startOrphanTimerIfNeeded();
   }
@@ -251,9 +253,10 @@ export class WebUiServer {
   private handleHttpRequest(req: IncomingMessage, res: ServerResponse): void {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('X-Frame-Options', 'DENY');
+    const connectSrc = this.options.devMode ? "'self' ws://127.0.0.1:* ws://localhost:*" : "'self'";
     res.setHeader(
       'Content-Security-Policy',
-      "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws://127.0.0.1:* ws://localhost:*",
+      `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src ${connectSrc}`,
     );
 
     let url: URL;

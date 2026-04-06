@@ -76,7 +76,7 @@ export interface ManagedSession {
 
 export interface EscalationResolutionResult {
   readonly resolved: boolean;
-  readonly reason?: 'not_found' | 'no_escalation' | 'already_resolving';
+  readonly reason?: 'not_found' | 'already_resolving';
 }
 
 /**
