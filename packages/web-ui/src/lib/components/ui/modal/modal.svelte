@@ -1,17 +1,18 @@
 <script lang="ts">
   import { cn } from '$lib/utils.js';
-  import { onMount } from 'svelte';
   import type { Snippet } from 'svelte';
 
   let {
     open,
     onclose,
+    onkeydown: externalKeydown,
     title,
     class: className,
     children,
   }: {
     open: boolean;
     onclose: () => void;
+    onkeydown?: (e: KeyboardEvent) => void;
     title?: string;
     class?: string;
     children?: Snippet;
@@ -57,6 +58,7 @@
       return;
     }
     trapFocus(e);
+    externalKeydown?.(e);
   }
 
   function handleBackdropClick(): void {

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { EscalationDto, PendingEscalation } from '../types.js';
+  import type { EscalationDto } from '../types.js';
   import { Button } from '$lib/components/ui/button/index.js';
   import { Badge } from '$lib/components/ui/badge/index.js';
   import { Card } from '$lib/components/ui/card/index.js';
@@ -11,7 +11,7 @@
     ondeny,
     onviewsession,
   }: {
-    escalation: PendingEscalation | EscalationDto;
+    escalation: EscalationDto;
     loading?: boolean;
     onapprove: (whitelistSelection?: number) => void;
     ondeny: () => void;
@@ -47,7 +47,7 @@
         <span>{new Date(escalation.receivedAt).toLocaleTimeString()}</span>
         {#if onviewsession}
           <span>&middot;</span>
-          <button class="text-primary hover:underline" onclick={() => onviewsession?.(escalation.sessionLabel)}>
+          <button class="text-primary hover:underline" onclick={() => onviewsession(escalation.sessionLabel)}>
             View Session
           </button>
         {/if}

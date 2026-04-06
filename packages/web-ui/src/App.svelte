@@ -53,7 +53,7 @@
 
     if (count === 0) {
       escalationModalOpen = false;
-    } else if (hasNew && count > 0 && !onEscalationsPage) {
+    } else if (hasNew && !onEscalationsPage) {
       escalationModalOpen = true;
       if (document.hidden) {
         stopFlash?.();

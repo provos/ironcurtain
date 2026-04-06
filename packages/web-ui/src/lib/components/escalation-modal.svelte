@@ -50,8 +50,6 @@
   }
 
   function handleKeydown(e: KeyboardEvent): void {
-    if (!open) return;
-
     // Skip keyboard shortcuts when focus is in an input or textarea
     const target = e.target;
     if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) return;
@@ -83,9 +81,7 @@
   }
 </script>
 
-<svelte:window onkeydown={handleKeydown} />
-
-<Modal {open} {onclose} title="Pending Escalations">
+<Modal {open} {onclose} title="Pending Escalations" onkeydown={handleKeydown}>
   {#if sortedEscalations.length > 1}
     <div class="flex border-b border-border overflow-x-auto scroll-snap-x" role="tablist">
       {#each sortedEscalations as esc (esc.escalationId)}
