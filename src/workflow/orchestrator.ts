@@ -21,7 +21,9 @@ import type {
   DeterministicStateDefinition,
   AgentOutput,
 } from './types.js';
-import { createWorkflowId, WORKFLOW_ARTIFACT_DIR } from './types.js';
+import { createWorkflowId, WORKFLOW_ARTIFACT_DIR, GLOBAL_PERSONA } from './types.js';
+import { getPersonaDefinitionPath } from '../persona/resolve.js';
+import { createPersonaName } from '../persona/types.js';
 import type { Session, SessionOptions, SessionMode } from '../session/types.js';
 import type { AgentId } from '../docker/agent-adapter.js';
 import {
@@ -161,6 +163,40 @@ export class WorkflowOrchestrator implements WorkflowController {
   }
 
   // -----------------------------------------------------------------------
+  // Pre-flight validation
+  // -----------------------------------------------------------------------
+
+  /**
+   * Validates that all non-"global" personas referenced in the workflow
+   * definition actually exist on disk. Fails fast with a clear error
+   * listing all missing personas.
+   *
+   * Only checks for persona.json existence -- does NOT verify compiled
+   * policy (that happens at session creation time via resolvePersona).
+   */
+  private validatePersonas(definition: WorkflowDefinition): void {
+    const missing: string[] = [];
+    for (const [stateId, state] of Object.entries(definition.states)) {
+      if (state.type !== 'agent') continue;
+      const persona = state.persona;
+      if (persona === GLOBAL_PERSONA) continue;
+
+      const defPath = getPersonaDefinitionPath(createPersonaName(persona));
+      if (!existsSync(defPath)) {
+        missing.push(`"${persona}" (used by state "${stateId}")`);
+      }
+    }
+
+    if (missing.length > 0) {
+      throw new Error(
+        `Workflow references personas that do not exist:\n` +
+          `  ${missing.join('\n  ')}\n` +
+          `Create them with: ironcurtain persona create <name>`,
+      );
+    }
+  }
+
+  // -----------------------------------------------------------------------
   // WorkflowController implementation
   // -----------------------------------------------------------------------
 
@@ -168,6 +204,7 @@ export class WorkflowOrchestrator implements WorkflowController {
     const definitionContent = readFileSync(definitionPath, 'utf-8');
     const raw = JSON.parse(definitionContent) as unknown;
     const definition = validateDefinition(raw);
+    this.validatePersonas(definition);
     const workflowId = createWorkflowId();
 
     const resolvedWorkspace = workspacePath ?? resolve(this.deps.baseDir, workflowId, 'workspace');

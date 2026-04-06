@@ -16,7 +16,14 @@ import { createInterface } from 'node:readline/promises';
 import { loadConfig } from '../config/index.js';
 import { createSession } from '../session/index.js';
 import type { Session, SessionOptions } from '../session/types.js';
-import type { WorkflowId, WorkflowCheckpoint, WorkflowContext, HumanGateRequest, HumanGateEventType } from './types.js';
+import {
+  GLOBAL_PERSONA,
+  type WorkflowId,
+  type WorkflowCheckpoint,
+  type WorkflowContext,
+  type HumanGateRequest,
+  type HumanGateEventType,
+} from './types.js';
 import type { WorkflowOrchestrator, WorkflowLifecycleEvent, WorkflowTabHandle } from './orchestrator.js';
 import { FileCheckpointStore } from './checkpoint.js';
 
@@ -55,8 +62,12 @@ export function writeStderr(msg: string): void {
 
 /**
  * Creates a session factory that loads config once and optionally
- * overrides the agent model. Strips persona from session options
- * (workflow role names are NOT IronCurtain personas).
+ * overrides the agent model.
+ *
+ * Persona handling:
+ * - `"global"` (GLOBAL_PERSONA): stripped to undefined -- uses global policy
+ * - Any other value: passed through to `createSession()` for per-persona
+ *   policy, memory, and prompt augmentation
  */
 export function createWorkflowSessionFactory(modelOverride?: string): (opts: SessionOptions) => Promise<Session> {
   const baseConfig = loadConfig();
@@ -74,7 +85,7 @@ export function createWorkflowSessionFactory(modelOverride?: string): (opts: Ses
     const effectiveOpts: SessionOptions = {
       ...opts,
       config: effectiveConfig,
-      persona: undefined,
+      persona: persona === GLOBAL_PERSONA ? undefined : persona,
     };
 
     try {

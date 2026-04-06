@@ -10,6 +10,17 @@ import { randomUUID } from 'node:crypto';
  */
 export const WORKFLOW_ARTIFACT_DIR = '.workflow';
 
+/**
+ * Reserved persona alias meaning "use the global policy".
+ * When a workflow state specifies this as its persona, the session
+ * factory strips the persona field (same as undefined), so the
+ * session uses the default global compiled policy and memory.
+ *
+ * Any other persona value is passed through to `createSession()`,
+ * which resolves it to a per-persona policy, memory, and prompt.
+ */
+export const GLOBAL_PERSONA = 'global';
+
 // ---------------------------------------------------------------------------
 // Branded identifiers
 // ---------------------------------------------------------------------------

@@ -6,7 +6,7 @@
  */
 
 import { vi } from 'vitest';
-import { mkdirSync, writeFileSync, readdirSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readdirSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type {
   SessionInfo,
@@ -17,7 +17,7 @@ import type {
   EscalationRequest,
 } from '../../src/session/types.js';
 import type { Session } from '../../src/session/types.js';
-import type { WorkflowId, HumanGateRequest } from '../../src/workflow/types.js';
+import { GLOBAL_PERSONA, type WorkflowId, type HumanGateRequest } from '../../src/workflow/types.js';
 import {
   WorkflowOrchestrator,
   type WorkflowOrchestratorDeps,
@@ -242,6 +242,64 @@ export function createDeps(
     baseDir: tmpDir,
     checkpointStore: createCheckpointStore(tmpDir),
     ...overrides,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Persona stub helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Extracts all unique persona names from a WorkflowDefinition,
+ * excluding "global" (which does not need a directory).
+ */
+function collectPersonaNames(definition: { states: Record<string, { type: string; persona?: string }> }): string[] {
+  const names = new Set<string>();
+  for (const state of Object.values(definition.states)) {
+    if (state.type === 'agent' && state.persona && state.persona !== GLOBAL_PERSONA) {
+      names.add(state.persona);
+    }
+  }
+  return [...names];
+}
+
+/**
+ * Creates stub persona directories so that `validatePersonas()` passes
+ * for test workflow definitions. Uses a sibling directory `{baseDir}-home`
+ * as IRONCURTAIN_HOME to avoid polluting the orchestrator's baseDir
+ * (which uses the same tmpDir and breaks `findWorkflowDir`).
+ *
+ * Returns a cleanup function that restores the original env var.
+ */
+export function stubPersonasForTest(
+  baseDir: string,
+  ...definitions: Array<{ states: Record<string, { type: string; persona?: string }> }>
+): () => void {
+  const originalHome = process.env.IRONCURTAIN_HOME;
+  const homeDir = `${baseDir}-home`;
+  mkdirSync(homeDir, { recursive: true });
+  process.env.IRONCURTAIN_HOME = homeDir;
+
+  const allNames = new Set<string>();
+  for (const def of definitions) {
+    for (const name of collectPersonaNames(def)) {
+      allNames.add(name);
+    }
+  }
+
+  for (const name of allNames) {
+    const personaDir = resolve(homeDir, 'personas', name);
+    mkdirSync(personaDir, { recursive: true });
+    writeFileSync(resolve(personaDir, 'persona.json'), JSON.stringify({ name, description: 'test stub' }));
+  }
+
+  return () => {
+    if (originalHome === undefined) {
+      delete process.env.IRONCURTAIN_HOME;
+    } else {
+      process.env.IRONCURTAIN_HOME = originalHome;
+    }
+    rmSync(homeDir, { recursive: true, force: true });
   };
 }
 

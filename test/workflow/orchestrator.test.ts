@@ -17,6 +17,7 @@ import {
   createDeps,
   waitForGate,
   waitForCompletion,
+  stubPersonasForTest,
 } from './test-helpers.js';
 
 // ---------------------------------------------------------------------------
@@ -164,10 +165,19 @@ const stallDetectionDef: WorkflowDefinition = {
 describe('WorkflowOrchestrator', () => {
   let tmpDir: string;
   let activeOrchestrator: WorkflowOrchestrator | undefined;
+  let cleanupPersonas: (() => void) | undefined;
 
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), 'orchestrator-test-'));
     activeOrchestrator = undefined;
+    // Stub persona directories for all definitions used in this suite
+    cleanupPersonas = stubPersonasForTest(
+      tmpDir,
+      linearWorkflowDef,
+      coderCriticLoopDef,
+      simpleAgentDef,
+      stallDetectionDef,
+    );
   });
 
   afterEach(async () => {
@@ -175,6 +185,7 @@ describe('WorkflowOrchestrator', () => {
     if (activeOrchestrator) {
       await activeOrchestrator.shutdownAll();
     }
+    cleanupPersonas?.();
     rmSync(tmpDir, { recursive: true, force: true });
     // Clean up sibling checkpoint directory
     const baseName = resolve(tmpDir).split('/').pop()!;
@@ -878,5 +889,122 @@ describe('WorkflowOrchestrator', () => {
     const reviewerCall2 = sessionFactory.mock.calls[3][0];
     expect(reviewerCall2.persona).toBe('reviewer');
     expect(reviewerCall2.resumeSessionId).toBe('reviewer-session-1');
+  });
+
+  // -----------------------------------------------------------------------
+  // Test 11: Persona validation — "global" passes without persona directory
+  // -----------------------------------------------------------------------
+
+  it('accepts "global" persona without requiring a persona directory', async () => {
+    const globalPersonaDef: WorkflowDefinition = {
+      name: 'global-persona-workflow',
+      description: 'Uses global persona alias',
+      initial: 'work',
+      settings: { mode: 'builtin' },
+      states: {
+        work: {
+          type: 'agent',
+          persona: 'global',
+          prompt: 'You are a worker.',
+          inputs: [],
+          outputs: ['result'],
+          transitions: [{ to: 'done' }],
+        },
+        done: { type: 'terminal' },
+      },
+    };
+
+    const defPath = writeDefinitionFile(tmpDir, globalPersonaDef);
+    const sessionFactory = vi.fn(async () =>
+      createArtifactAwareSession([{ text: approvedResponse('done'), artifacts: ['result'] }], tmpDir),
+    );
+    const deps = createDeps(tmpDir, { createSession: sessionFactory });
+    const orchestrator = new WorkflowOrchestrator(deps);
+    activeOrchestrator = orchestrator;
+
+    // Should not throw — "global" means use global policy, no persona dir needed
+    const workflowId = await orchestrator.start(defPath, 'test task');
+    await waitForCompletion(orchestrator, workflowId);
+
+    expect(orchestrator.getStatus(workflowId)?.phase).toBe('completed');
+  });
+
+  // -----------------------------------------------------------------------
+  // Test 12: Persona validation — missing persona fails fast
+  // -----------------------------------------------------------------------
+
+  it('rejects workflow with missing persona before starting', async () => {
+    const missingPersonaDef: WorkflowDefinition = {
+      name: 'missing-persona-workflow',
+      description: 'References a nonexistent persona',
+      initial: 'work',
+      settings: { mode: 'builtin' },
+      states: {
+        work: {
+          type: 'agent',
+          persona: 'nonexistent-persona',
+          prompt: 'You are a worker.',
+          inputs: [],
+          outputs: ['result'],
+          transitions: [{ to: 'done' }],
+        },
+        done: { type: 'terminal' },
+      },
+    };
+
+    const defPath = writeDefinitionFile(tmpDir, missingPersonaDef);
+    const deps = createDeps(tmpDir);
+    const orchestrator = new WorkflowOrchestrator(deps);
+    activeOrchestrator = orchestrator;
+
+    expect(() => orchestrator.start(defPath, 'test task')).toThrow(/nonexistent-persona/);
+    expect(() => orchestrator.start(defPath, 'test task')).toThrow(/do not exist/);
+  });
+
+  // -----------------------------------------------------------------------
+  // Test 13: Persona validation — error lists all missing personas
+  // -----------------------------------------------------------------------
+
+  it('lists all missing personas in the error message', async () => {
+    const multiMissingDef: WorkflowDefinition = {
+      name: 'multi-missing-workflow',
+      description: 'Multiple missing personas',
+      initial: 'plan',
+      settings: { mode: 'builtin' },
+      states: {
+        plan: {
+          type: 'agent',
+          persona: 'missing-planner',
+          prompt: 'You are a planner.',
+          inputs: [],
+          outputs: ['plan'],
+          transitions: [{ to: 'code' }],
+        },
+        code: {
+          type: 'agent',
+          persona: 'missing-coder',
+          prompt: 'You are a coder.',
+          inputs: ['plan'],
+          outputs: ['code'],
+          transitions: [{ to: 'done' }],
+        },
+        done: { type: 'terminal' },
+      },
+    };
+
+    const defPath = writeDefinitionFile(tmpDir, multiMissingDef);
+    const deps = createDeps(tmpDir);
+    const orchestrator = new WorkflowOrchestrator(deps);
+    activeOrchestrator = orchestrator;
+
+    try {
+      await orchestrator.start(defPath, 'test task');
+      expect.fail('should have thrown');
+    } catch (err) {
+      const msg = (err as Error).message;
+      expect(msg).toContain('missing-planner');
+      expect(msg).toContain('missing-coder');
+      expect(msg).toContain('ironcurtain persona create');
+    }
   });
 });

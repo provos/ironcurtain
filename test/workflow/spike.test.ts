@@ -19,6 +19,7 @@ import {
   findWorkflowDir,
   waitForGateOrCompletion,
   waitForCompletion,
+  stubPersonasForTest,
 } from './test-helpers.js';
 
 // ---------------------------------------------------------------------------
@@ -31,15 +32,27 @@ describe('workflow-spike demo definition', () => {
   const __dirname = dirname(fileURLToPath(import.meta.url));
   const definitionPath = resolve(__dirname, '../../examples/workflow-demo.json');
 
+  let cleanupPersonas: (() => void) | undefined;
+
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), 'spike-test-'));
     orchestrator = undefined;
+    // The demo definition uses personas: planner, architect, coder, critic
+    cleanupPersonas = stubPersonasForTest(tmpDir, {
+      states: {
+        plan: { type: 'agent', persona: 'planner' },
+        design: { type: 'agent', persona: 'architect' },
+        implement: { type: 'agent', persona: 'coder' },
+        review: { type: 'agent', persona: 'critic' },
+      },
+    });
   });
 
   afterEach(async () => {
     if (orchestrator) {
       await orchestrator.shutdownAll();
     }
+    cleanupPersonas?.();
     rmSync(tmpDir, { recursive: true, force: true });
   });
 

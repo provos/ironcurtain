@@ -16,6 +16,7 @@ import {
   createDeps,
   waitForGate,
   waitForCompletion,
+  stubPersonasForTest,
 } from './test-helpers.js';
 
 // ---------------------------------------------------------------------------
@@ -185,16 +186,25 @@ async function waitForLifecycleEvent(
 describe('WorkflowOrchestrator checkpoint + resume', () => {
   let tmpDir: string;
   let activeOrchestrators: WorkflowOrchestrator[];
+  let cleanupPersonas: (() => void) | undefined;
 
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), 'orchestrator-resume-test-'));
     activeOrchestrators = [];
+    cleanupPersonas = stubPersonasForTest(
+      tmpDir,
+      linearWorkflowDef,
+      simpleAgentDef,
+      agentWithErrorGateDef,
+      loopWithErrorGateDef,
+    );
   });
 
   afterEach(async () => {
     for (const o of activeOrchestrators) {
       await o.shutdownAll();
     }
+    cleanupPersonas?.();
     rmSync(tmpDir, { recursive: true, force: true });
     const baseName = resolve(tmpDir).split('/').pop()!;
     const ckptDir = resolve(tmpDir, '..', `${baseName}-ckpt`);

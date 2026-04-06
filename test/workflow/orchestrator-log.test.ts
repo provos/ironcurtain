@@ -24,6 +24,7 @@ import {
   createDeps,
   waitForGate,
   waitForCompletion,
+  stubPersonasForTest,
 } from './test-helpers.js';
 
 // ---------------------------------------------------------------------------
@@ -143,16 +144,19 @@ function readMessageLog(baseDir: string): MessageLogEntry[] {
 describe('WorkflowOrchestrator message log', () => {
   let tmpDir: string;
   let activeOrchestrator: WorkflowOrchestrator | undefined;
+  let cleanupPersonas: (() => void) | undefined;
 
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), 'orch-log-test-'));
     activeOrchestrator = undefined;
+    cleanupPersonas = stubPersonasForTest(tmpDir, linearWorkflowDef, coderCriticLoopDef, simpleAgentDef);
   });
 
   afterEach(async () => {
     if (activeOrchestrator) {
       await activeOrchestrator.shutdownAll();
     }
+    cleanupPersonas?.();
     rmSync(tmpDir, { recursive: true, force: true });
     const baseName = resolve(tmpDir).split('/').pop()!;
     const ckptDir = resolve(tmpDir, '..', `${baseName}-ckpt`);

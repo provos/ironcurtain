@@ -35,7 +35,13 @@ A workflow is a JSON file that defines a state machine. Each state is one of:
 - **`deterministic`** -- Runs shell commands (typecheck, lint, test) without an LLM.
 - **`terminal`** -- End state (success or aborted).
 
-Agents communicate through artifacts on disk and by passing their response text to the next agent. The orchestrator manages the state machine, creates Docker sessions, parses agent output, and handles retries.
+### Sessions and workspace
+
+Each agent state gets its own Docker session (container). All sessions share the same workspace directory — files written by one agent are visible to the next. The orchestrator passes the previous agent's response text to the next agent so it has context about what was done.
+
+Within a state that runs multiple rounds (e.g., the coder running again after critic rejection), the session is resumed via `claude --continue`. The agent retains its full conversation history from prior rounds, so it knows what it already did and what feedback it received. A new container is created for each round, but the conversation state is persisted on disk and mounted into the new container.
+
+Different states always get separate sessions — the planner, architect, coder, and critic each have their own conversation history and cannot see each other's internal reasoning. They communicate only through the shared workspace and the response text passed by the orchestrator.
 
 ## The design-and-code workflow
 
@@ -54,12 +60,12 @@ States in brackets `[...]` are human gates where you review and approve.
 
 **Agents:**
 
-| Role | What it does | Reads | Writes |
-|------|-------------|-------|--------|
-| Planner | Breaks down the task into steps | Workspace (if existing code) | `.workflow/plan/plan.md` |
-| Architect | Produces a technical design spec | Plan, workspace | `.workflow/spec/spec.md` |
-| Coder | Implements the design | Plan, spec | Code at workspace root |
-| Critic | Reviews code against the spec | Spec, code | `.workflow/reviews/review.md` |
+| Role      | What it does                     | Reads                        | Writes                        |
+| --------- | -------------------------------- | ---------------------------- | ----------------------------- |
+| Planner   | Breaks down the task into steps  | Workspace (if existing code) | `.workflow/plan/plan.md`      |
+| Architect | Produces a technical design spec | Plan, workspace              | `.workflow/spec/spec.md`      |
+| Coder     | Implements the design            | Plan, spec                   | Code at workspace root        |
+| Critic    | Reviews code against the spec    | Spec, code                   | `.workflow/reviews/review.md` |
 
 The coder and critic loop until the critic approves or the round limit is reached (default: 3 rounds). If the limit is reached, you're asked to intervene.
 
@@ -92,6 +98,7 @@ ironcurtain workflow start <definition.json> "task description" [options]
 ```
 
 Options:
+
 - `--model <model>` -- Override the model (e.g., `anthropic:claude-haiku-4-5`)
 - `--workspace <path>` -- Use an existing directory instead of creating a new one
 
@@ -104,6 +111,7 @@ ironcurtain workflow resume <baseDir> [options]
 ```
 
 Options:
+
 - `--state <stateName>` -- Resume from a specific state (synthesizes a checkpoint if none exists)
 - `--model <model>` -- Override the model for the resumed run
 
@@ -167,7 +175,7 @@ A workflow definition is a JSON file with this structure:
 }
 ```
 
-- **`persona`** -- A label for the agent's role (used for session management, not IronCurtain personas)
+- **`persona`** -- Either `"global"` (use the default global policy) or the name of an IronCurtain persona created via `ironcurtain persona create <name>`. When set to a real persona name, the agent session uses that persona's compiled policy, memory database, and system prompt augmentation. The orchestrator validates that all non-`"global"` personas exist before starting the workflow.
 - **`prompt`** -- Role instructions sent to the agent. Tell it what to do, where to read inputs, and where to write outputs. Use `.workflow/` prefix for artifact directories.
 - **`inputs`** -- Artifact directories the agent should read (under `.workflow/`)
 - **`outputs`** -- Artifact directories the agent must create (under `.workflow/`). Use `[]` for code-only states where the agent writes to the workspace root.
@@ -196,7 +204,10 @@ A workflow definition is a JSON file with this structure:
 ```json
 {
   "type": "deterministic",
-  "run": [["npm", "test"], ["npm", "run", "lint"]],
+  "run": [
+    ["npm", "test"],
+    ["npm", "run", "lint"]
+  ],
   "transitions": [
     { "to": "next", "guard": "isPassed" },
     { "to": "fix", "guard": "isRejected" }
@@ -219,15 +230,15 @@ Optional `outputs` lists artifacts to include in the final summary.
 
 ### Available guards
 
-| Guard | Checks |
-|-------|--------|
-| `isApproved` | Agent verdict is "approved" |
-| `isRejected` | Agent verdict is "rejected" |
-| `isLowConfidence` | Agent approved but with low confidence |
-| `isRoundLimitReached` | Per-state visit count >= maxRounds |
-| `isStalled` | Agent produced identical output as previous round |
+| Guard                    | Checks                                            |
+| ------------------------ | ------------------------------------------------- |
+| `isApproved`             | Agent verdict is "approved"                       |
+| `isRejected`             | Agent verdict is "rejected"                       |
+| `isLowConfidence`        | Agent approved but with low confidence            |
+| `isRoundLimitReached`    | Per-state visit count >= maxRounds                |
+| `isStalled`              | Agent produced identical output as previous round |
 | `hasTestCountRegression` | Test count dropped (agent may have deleted tests) |
-| `isPassed` | Deterministic state commands all passed |
+| `isPassed`               | Deterministic state commands all passed           |
 
 ## Agent status block
 
@@ -240,7 +251,7 @@ agent_status:
   confidence: high
   escalation: null
   test_count: null
-  notes: "Brief summary of what was done"
+  notes: 'Brief summary of what was done'
 ```
 
 The `prompt` field in your workflow definition should include instructions about what the agent does, but the orchestrator automatically appends status block format instructions. If the agent forgets the status block, the orchestrator retries once.
