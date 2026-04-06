@@ -131,7 +131,7 @@
     data-testid="session-output"
     class="flex-1 overflow-auto p-5 space-y-2 font-mono text-sm"
   >
-    {#each groupedOutput as entry}
+    {#each groupedOutput as entry, i (i)}
       {#if entry.kind === 'single'}
         {@const line = entry.line}
         {#if line.kind === 'escalation'}
@@ -175,7 +175,7 @@
           </button>
           {#if expandedGroups.has(gKey)}
             <div class="px-3 pb-2 space-y-1">
-              {#each entry.lines as line}
+              {#each entry.lines as line, j (j)}
                 <div
                   class="{line.kind === 'tool_call'
                     ? 'text-muted-foreground italic'
@@ -196,7 +196,7 @@
       {/if}
     {/each}
     {#if groupedOutput.length === 0 && history.length > 0}
-      {#each history as turn}
+      {#each history as turn (turn.turnNumber)}
         <div class="text-blue-400">
           <span class="text-muted-foreground select-none">&gt; </span>{turn.userMessage}
         </div>

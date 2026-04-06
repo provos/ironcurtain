@@ -53,6 +53,8 @@
 
     if (count === 0) {
       escalationModalOpen = false;
+      stopFlash?.();
+      stopFlash = null;
     } else if (hasNew && !onEscalationsPage) {
       escalationModalOpen = true;
       if (document.hidden) {
@@ -184,7 +186,7 @@
       </div>
 
       <div class="flex-1 py-2 px-2 space-y-0.5">
-        {#each navItems as item}
+        {#each navItems as item (item.id)}
           <button
             onclick={() => (appState.currentView = item.id)}
             aria-current={appState.currentView === item.id ? 'page' : undefined}

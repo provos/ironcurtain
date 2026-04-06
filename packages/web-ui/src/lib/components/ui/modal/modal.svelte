@@ -33,7 +33,11 @@
   function trapFocus(e: KeyboardEvent): void {
     if (e.key !== 'Tab') return;
     const focusable = getFocusableElements();
-    if (focusable.length === 0) return;
+    if (focusable.length === 0) {
+      e.preventDefault();
+      dialogEl?.focus();
+      return;
+    }
 
     const first = focusable[0];
     const last = focusable[focusable.length - 1];

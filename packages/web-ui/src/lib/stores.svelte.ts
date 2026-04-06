@@ -136,6 +136,8 @@ function wireEventHandlers(client: WsClient): void {
   });
 }
 
+let isInitialConnect = true;
+
 async function refreshAll(client: WsClient): Promise<void> {
   try {
     const [status, sessions, jobs, escalations] = await Promise.all([
@@ -170,9 +172,13 @@ async function refreshAll(client: WsClient): Promise<void> {
         appState.sessionOutputs = new Map(appState.sessionOutputs).set(label, filtered);
       }
     }
-    // Mark all initially-loaded escalations as already seen so the modal
-    // does not auto-open on first connect.
-    appState.escalationDismissedAt = appState.escalationDisplayNumber;
+    // On initial connect, suppress auto-open for pre-existing escalations.
+    // On reconnect, preserve the watermark so new escalations during
+    // disconnect will trigger the modal.
+    if (isInitialConnect) {
+      appState.escalationDismissedAt = appState.escalationDisplayNumber;
+      isInitialConnect = false;
+    }
   } catch (err) {
     console.error('Failed to refresh state:', err);
   }

@@ -97,7 +97,7 @@
           Whitelist (optional)
         </div>
         <div class="space-y-1.5">
-          {#each escalation.whitelistCandidates as candidate, idx}
+          {#each escalation.whitelistCandidates as candidate, idx (idx)}
             {@const isSelected = selectedWhitelist === idx}
             <button
               onclick={() => toggleWhitelist(idx)}

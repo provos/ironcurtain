@@ -113,6 +113,7 @@
     ],
     "packages/web-ui/**/*.{ts,svelte}": [
       "prettier --check --config packages/web-ui/.prettierrc",
+      "npm run lint -w packages/web-ui",
       "npm run check -w packages/web-ui"
     ]
   },
