@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { appState, getWsClient } from '../lib/stores.svelte.js';
+  import { appState, resolveEscalation } from '../lib/stores.svelte.js';
   import { Badge } from '$lib/components/ui/badge/index.js';
   import { Card } from '$lib/components/ui/card/index.js';
   import { Alert } from '$lib/components/ui/alert/index.js';
@@ -10,7 +10,7 @@
   let resolvingIds = $state<Set<string>>(new Set());
   let resolveError = $state('');
 
-  async function resolveEscalation(
+  async function handleResolve(
     escalationId: string,
     decision: 'approved' | 'denied',
     whitelistSelection?: number,
@@ -18,11 +18,7 @@
     resolvingIds = new Set([...resolvingIds, escalationId]);
     resolveError = '';
     try {
-      const params: Record<string, unknown> = { escalationId, decision };
-      if (decision === 'approved' && whitelistSelection != null) {
-        params.whitelistSelection = whitelistSelection;
-      }
-      await getWsClient().request('escalations.resolve', params);
+      await resolveEscalation(escalationId, decision, whitelistSelection);
     } catch (err) {
       resolveError = `Failed to ${decision === 'approved' ? 'approve' : 'deny'}: ${err instanceof Error ? err.message : String(err)}`;
     } finally {
@@ -61,8 +57,8 @@
         <EscalationCard
           escalation={esc}
           loading={resolvingIds.has(esc.escalationId)}
-          onapprove={(whitelistSelection) => resolveEscalation(esc.escalationId, 'approved', whitelistSelection)}
-          ondeny={() => resolveEscalation(esc.escalationId, 'denied')}
+          onapprove={(whitelistSelection) => handleResolve(esc.escalationId, 'approved', whitelistSelection)}
+          ondeny={() => handleResolve(esc.escalationId, 'denied')}
         />
       {/each}
     </div>

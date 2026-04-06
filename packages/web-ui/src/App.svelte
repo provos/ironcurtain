@@ -13,7 +13,7 @@
     appState,
     initConnection,
     connectWithToken,
-    getWsClient,
+    resolveEscalation,
     getTheme,
     setTheme,
     type ThemeId,
@@ -74,12 +74,8 @@
     decision: 'approved' | 'denied',
     whitelistSelection?: number,
   ): Promise<void> {
-    const params: Record<string, unknown> = { escalationId, decision };
-    if (decision === 'approved' && whitelistSelection != null) {
-      params.whitelistSelection = whitelistSelection;
-    }
     try {
-      await getWsClient().request('escalations.resolve', params);
+      await resolveEscalation(escalationId, decision, whitelistSelection);
     } catch (err) {
       console.error('Failed to resolve escalation from modal:', err);
       throw err;

@@ -214,6 +214,22 @@ export function initConnection(): void {
   client.connect(buildWsUrl(), token);
 }
 
+/**
+ * Send a resolve request for a pending escalation.
+ * Callers handle errors in their own way (rethrow, display, etc.).
+ */
+export async function resolveEscalation(
+  escalationId: string,
+  decision: 'approved' | 'denied',
+  whitelistSelection?: number,
+): Promise<void> {
+  const params: Record<string, unknown> = { escalationId, decision };
+  if (decision === 'approved' && whitelistSelection != null) {
+    params.whitelistSelection = whitelistSelection;
+  }
+  await getWsClient().request('escalations.resolve', params);
+}
+
 export function connectWithToken(token: string): void {
   sessionStorage.setItem('ic-auth-token', token);
   appState.hasToken = true;

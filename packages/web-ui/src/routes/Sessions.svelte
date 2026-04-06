@@ -33,15 +33,25 @@
   // Auto-scroll reference
   let outputContainer: HTMLDivElement | undefined = $state(undefined);
 
-  // Collapsible group expanded state (keyed by group index)
-  let expandedGroups = $state<Set<number>>(new Set());
+  // Memoized grouped output -- only recomputes when the output array reference changes
+  let groupedOutput = $derived(
+    appState.selectedSessionLabel !== null ? groupOutputLines(appState.getOutput(appState.selectedSessionLabel)) : [],
+  );
 
-  function toggleGroup(index: number): void {
+  // Collapsible group expanded state (keyed by stable group identifier)
+  let expandedGroups = $state<Set<string>>(new Set());
+
+  /** Derive a stable key for a collapsible group from its first line's timestamp + kind. */
+  function groupKey(group: import('../lib/output-grouping.js').CollapsibleGroup): string {
+    return `${group.lines[0].timestamp}:${group.lines[0].kind}`;
+  }
+
+  function toggleGroup(key: string): void {
     const next = new Set(expandedGroups);
-    if (next.has(index)) {
-      next.delete(index);
+    if (next.has(key)) {
+      next.delete(key);
     } else {
-      next.add(index);
+      next.add(key);
     }
     expandedGroups = next;
   }
@@ -309,7 +319,7 @@
         data-testid="session-output"
         class="flex-1 overflow-auto p-5 space-y-2 font-mono text-sm"
       >
-        {#each groupOutputLines(appState.getOutput(appState.selectedSessionLabel!)) as entry, groupIdx}
+        {#each groupedOutput as entry}
           {#if entry.kind === 'single'}
             {@const line = entry.line}
             {#if line.kind === 'escalation'}
@@ -341,16 +351,17 @@
             {/if}
           {:else}
             <!-- Collapsible group for thinking/tool_call lines -->
+            {@const gKey = groupKey(entry)}
             <div class="border border-border/50 rounded-md overflow-hidden">
               <button
-                onclick={() => toggleGroup(groupIdx)}
+                onclick={() => toggleGroup(gKey)}
                 class="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-muted-foreground
                        hover:bg-accent/30 transition-colors select-none"
               >
-                <CaretRight size={12} class="transition-transform {expandedGroups.has(groupIdx) ? 'rotate-90' : ''}" />
+                <CaretRight size={12} class="transition-transform {expandedGroups.has(gKey) ? 'rotate-90' : ''}" />
                 <span class="italic">{entry.summary}</span>
               </button>
-              {#if expandedGroups.has(groupIdx)}
+              {#if expandedGroups.has(gKey)}
                 <div class="px-3 pb-2 space-y-1">
                   {#each entry.lines as line}
                     <div
@@ -372,7 +383,7 @@
             </div>
           {/if}
         {/each}
-        {#if appState.getOutput(appState.selectedSessionLabel!).length === 0 && sessionHistory.length > 0}
+        {#if groupedOutput.length === 0 && sessionHistory.length > 0}
           {#each sessionHistory as turn}
             <div class="text-blue-400">
               <span class="text-muted-foreground select-none">&gt; </span>{turn.userMessage}
