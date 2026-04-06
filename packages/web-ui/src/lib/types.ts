@@ -148,7 +148,8 @@ export interface PendingEscalation extends EscalationDto {
 
 /** Output line for the session console. */
 export interface OutputLine {
-  readonly kind: 'user' | 'assistant' | 'tool_call' | 'thinking' | 'error' | 'system';
+  readonly kind: 'user' | 'assistant' | 'tool_call' | 'thinking' | 'error' | 'system' | 'escalation';
   readonly text: string;
   readonly timestamp: string;
+  readonly escalationId?: string;
 }

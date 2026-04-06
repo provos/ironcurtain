@@ -57,7 +57,7 @@ class AppState {
     let existing = this.sessionOutputs.get(label) ?? [];
 
     // Remove stale "Thinking..." lines when real content arrives
-    if (line.kind === 'tool_call' || line.kind === 'assistant') {
+    if (line.kind === 'tool_call' || line.kind === 'assistant' || line.kind === 'escalation') {
       existing = existing.filter((l) => l.kind !== 'thinking');
     }
 
@@ -70,6 +70,15 @@ class AppState {
 
     // Create a new Map so Svelte 5 detects the change
     this.sessionOutputs = new Map(this.sessionOutputs).set(label, existing);
+  }
+
+  filterOutput(label: number, predicate: (line: OutputLine) => boolean): void {
+    const existing = this.sessionOutputs.get(label);
+    if (!existing) return;
+    const filtered = existing.filter(predicate);
+    if (filtered.length !== existing.length) {
+      this.sessionOutputs = new Map(this.sessionOutputs).set(label, filtered);
+    }
   }
 
   removeOutput(label: number): void {

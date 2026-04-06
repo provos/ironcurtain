@@ -24,6 +24,7 @@ export interface AppStateLike {
   jobs: JobListDto[];
   addOutput(label: number, line: OutputLine): void;
   removeOutput(label: number): void;
+  filterOutput(label: number, predicate: (line: OutputLine) => boolean): void;
 }
 
 /** Side effects that handleEvent may request. */
@@ -179,15 +180,25 @@ function applyEvent(state: AppStateLike, effects: EventSideEffects, parsed: WebE
       const displayNumber = effects.assignDisplayNumber(esc.escalationId);
       const pending: PendingEscalation = { ...esc, displayNumber };
       state.pendingEscalations = new Map(state.pendingEscalations).set(esc.escalationId, pending);
+      state.addOutput(esc.sessionLabel, {
+        kind: 'escalation',
+        text: `Pending escalation: ${esc.serverName}/${esc.toolName}`,
+        timestamp: new Date().toISOString(),
+        escalationId: esc.escalationId,
+      });
       return true;
     }
 
     case 'escalation.resolved':
     case 'escalation.expired': {
       const { escalationId } = parsed.payload;
+      const esc = state.pendingEscalations.get(escalationId);
       const next = new Map(state.pendingEscalations);
       next.delete(escalationId);
       state.pendingEscalations = next;
+      if (esc) {
+        state.filterOutput(esc.sessionLabel, (line) => line.escalationId !== escalationId);
+      }
       return true;
     }
 

@@ -11,6 +11,9 @@
 
   import Plus from 'phosphor-svelte/lib/Plus';
   import CaretRight from 'phosphor-svelte/lib/CaretRight';
+  import Warning from 'phosphor-svelte/lib/Warning';
+
+  let { onOpenEscalation }: { onOpenEscalation?: () => void } = $props();
 
   let messageInput = $state('');
   let sending = $state(false);
@@ -309,21 +312,33 @@
         {#each groupOutputLines(appState.getOutput(appState.selectedSessionLabel!)) as entry, groupIdx}
           {#if entry.kind === 'single'}
             {@const line = entry.line}
-            <div
-              class={line.kind === 'user'
-                ? 'text-blue-400'
-                : line.kind === 'assistant'
-                  ? 'text-foreground'
-                  : line.kind === 'error'
-                    ? 'text-destructive'
-                    : 'text-muted-foreground'}
-            >
-              {#if line.kind === 'user'}
-                <span class="text-muted-foreground select-none">&gt; </span>{line.text}
-              {:else}
-                <div class="prose-markdown">{@html renderMarkdown(line.text)}</div>
-              {/if}
-            </div>
+            {#if line.kind === 'escalation'}
+              <button
+                onclick={() => onOpenEscalation?.()}
+                class="w-full text-left px-3 py-2 rounded-md bg-warning/10 border border-warning/30
+                       text-warning hover:bg-warning/20 transition-colors cursor-pointer flex items-center gap-2"
+              >
+                <Warning size={14} />
+                <span>{line.text}</span>
+                <span class="ml-auto text-xs opacity-70">Click to review</span>
+              </button>
+            {:else}
+              <div
+                class={line.kind === 'user'
+                  ? 'text-blue-400'
+                  : line.kind === 'assistant'
+                    ? 'text-foreground'
+                    : line.kind === 'error'
+                      ? 'text-destructive'
+                      : 'text-muted-foreground'}
+              >
+                {#if line.kind === 'user'}
+                  <span class="text-muted-foreground select-none">&gt; </span>{line.text}
+                {:else}
+                  <div class="prose-markdown">{@html renderMarkdown(line.text)}</div>
+                {/if}
+              </div>
+            {/if}
           {:else}
             <!-- Collapsible group for thinking/tool_call lines -->
             <div class="border border-border/50 rounded-md overflow-hidden">
