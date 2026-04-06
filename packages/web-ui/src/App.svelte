@@ -27,7 +27,7 @@
   import { Input } from '$lib/components/ui/input/index.js';
   import { DropdownMenu, DropdownMenuItem } from '$lib/components/ui/dropdown-menu/index.js';
   import { Badge } from '$lib/components/ui/badge/index.js';
-  import EscalationModal from '$lib/components/escalation-modal.svelte';
+  import EscalationModal from '$lib/components/features/escalation-modal.svelte';
   import { startFlashTitle } from '$lib/flash-title.js';
 
   import ShieldCheck from 'phosphor-svelte/lib/ShieldCheck';

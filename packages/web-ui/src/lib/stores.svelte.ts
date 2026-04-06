@@ -5,7 +5,17 @@
  * The WebSocket client feeds events into the store via handleEvent().
  */
 
-import type { SessionDto, EscalationDto, DaemonStatusDto, JobListDto, OutputLine, PendingEscalation } from './types.js';
+import type {
+  SessionDto,
+  EscalationDto,
+  DaemonStatusDto,
+  JobListDto,
+  OutputLine,
+  PendingEscalation,
+  ConversationTurn,
+  BudgetSummaryDto,
+  PersonaListItem,
+} from './types.js';
 import { createWsClient, type WsClient } from './ws-client.js';
 import { handleEvent as handleEventPure } from './event-handler.js';
 
@@ -228,6 +238,58 @@ export async function resolveEscalation(
     params.whitelistSelection = whitelistSelection;
   }
   await getWsClient().request('escalations.resolve', params);
+}
+
+// ── Session RPC actions ──────────────────────────────────────────────
+
+export async function createSession(persona?: string): Promise<{ label: number }> {
+  const params: Record<string, unknown> = {};
+  if (persona) params.persona = persona;
+  return getWsClient().request<{ label: number }>('sessions.create', params);
+}
+
+export async function sendSessionMessage(label: number, text: string): Promise<void> {
+  await getWsClient().request('sessions.send', { label, text });
+}
+
+export async function endSession(label: number): Promise<void> {
+  await getWsClient().request('sessions.end', { label });
+}
+
+export async function loadSessionHistory(label: number): Promise<ConversationTurn[]> {
+  return getWsClient().request<ConversationTurn[]>('sessions.history', { label });
+}
+
+export async function loadSessionBudget(label: number): Promise<BudgetSummaryDto> {
+  return getWsClient().request<BudgetSummaryDto>('sessions.budget', { label });
+}
+
+// ── Job RPC actions ──────────────────────────────────────────────────
+
+export async function runJob(jobId: string): Promise<void> {
+  await getWsClient().request('jobs.run', { jobId });
+}
+
+export async function enableJob(jobId: string): Promise<void> {
+  await getWsClient().request('jobs.enable', { jobId });
+}
+
+export async function disableJob(jobId: string): Promise<void> {
+  await getWsClient().request('jobs.disable', { jobId });
+}
+
+export async function removeJob(jobId: string): Promise<void> {
+  await getWsClient().request('jobs.remove', { jobId });
+}
+
+export async function recompileJob(jobId: string): Promise<void> {
+  await getWsClient().request('jobs.recompile', { jobId });
+}
+
+// ── Persona RPC actions ──────────────────────────────────────────────
+
+export async function listPersonas(): Promise<PersonaListItem[]> {
+  return getWsClient().request<PersonaListItem[]>('personas.list');
 }
 
 export function connectWithToken(token: string): void {

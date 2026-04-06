@@ -11,6 +11,43 @@ Opt-in Svelte 5 SPA served by the IronCurtain daemon via `--web-ui`. Communicate
 - **phosphor-svelte** for icons (tree-shaken via `sveltePhosphorOptimize` Vite plugin)
 - **marked** + **DOMPurify** for safe markdown rendering
 
+## Architecture & Design Principles
+
+### Layer structure
+
+```
+src/lib/components/ui/       -- Reusable UI primitives (Button, Badge, Card, etc.)
+                                No domain imports. Only cn(), svelte, third-party.
+src/lib/components/features/ -- Domain-specific components (EscalationCard, SessionConsole, etc.)
+                                May import from types.ts and ui/ components.
+src/lib/                     -- State, logic, utilities
+                                types.ts, stores.svelte.ts, event-handler.ts, etc.
+src/routes/                  -- Page-level views
+                                Orchestrate features + state. Thin coordinators.
+src/App.svelte               -- Root layout, routing, global concerns
+```
+
+### Dependency rules
+
+- `ui/` components MUST NOT import from `types.ts`, `stores.svelte.ts`, or any domain module
+- `ui/` components accept data through props with generic types
+- `features/` components MAY import from `types.ts` and `ui/` components
+- `features/` components MUST NOT import from `stores.svelte.ts` (receive data via props/callbacks)
+- Route views MAY import from `stores.svelte.ts`, `types.ts`, and any component
+- Route views MUST NOT import `getWsClient` directly -- use named action functions from stores
+- `event-handler.ts` depends only on `types.ts` via the `AppStateLike` interface
+- No circular imports
+
+### RPC abstraction
+
+All WebSocket RPC calls go through named functions in `stores.svelte.ts` (e.g., `createSession()`, `runJob()`, `resolveEscalation()`). Route views call these functions, never raw `getWsClient().request()`. This keeps network logic centralized and testable.
+
+### State management
+
+- `appState` is the single reactive store (Svelte 5 runes)
+- Event handling is in pure `event-handler.ts` via `AppStateLike` interface
+- Map mutations always create new Map instances for Svelte reactivity
+
 ## Directory Structure
 
 ```
@@ -20,14 +57,20 @@ src/
   app.css                 -- Tailwind directives, theme variables, prose styles
   lib/
     utils.ts              -- cn() utility (clsx + tailwind-merge)
-    stores.svelte.ts      -- AppState class (Svelte 5 runes), WS client wiring
+    stores.svelte.ts      -- AppState class (Svelte 5 runes), WS client wiring, RPC actions
     types.ts              -- Frontend DTO types mirroring daemon types
     ws-client.ts          -- Typed WebSocket client with auto-reconnect
     markdown.ts           -- marked + DOMPurify rendering helper
-    components/ui/        -- Reusable UI components (see below)
+    components/
+      ui/                 -- Reusable UI primitives (see below)
+      features/           -- Domain-specific components
+        escalation-card.svelte   -- Single escalation with approve/deny/whitelist
+        escalation-modal.svelte  -- Tabbed modal for pending escalations
+        session-sidebar.svelte   -- Session list with persona picker
+        session-console.svelte   -- Chat output, collapsible groups, message input
   routes/
     Dashboard.svelte      -- Overview cards, active sessions table, upcoming jobs
-    Sessions.svelte       -- Session list, chat console, message input
+    Sessions.svelte       -- Thin coordinator: wires sidebar + console to store
     Escalations.svelte    -- Pending escalation cards with approve/deny
     Jobs.svelte           -- Job table with run/enable/disable/recompile/remove
 ```

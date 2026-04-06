@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { PendingEscalation } from '../types.js';
+  import type { PendingEscalation } from '../../types.js';
   import { Modal } from '$lib/components/ui/modal/index.js';
   import EscalationCard from './escalation-card.svelte';
 

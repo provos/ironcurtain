@@ -3,7 +3,7 @@
   import { Badge } from '$lib/components/ui/badge/index.js';
   import { Card } from '$lib/components/ui/card/index.js';
   import { Alert } from '$lib/components/ui/alert/index.js';
-  import EscalationCard from '$lib/components/escalation-card.svelte';
+  import EscalationCard from '$lib/components/features/escalation-card.svelte';
 
   import CheckCircle from 'phosphor-svelte/lib/CheckCircle';
 

@@ -1,5 +1,12 @@
 <script lang="ts">
-  import { appState, getWsClient } from '../lib/stores.svelte.js';
+  import {
+    appState,
+    runJob as rpcRunJob,
+    enableJob as rpcEnableJob,
+    disableJob as rpcDisableJob,
+    removeJob as rpcRemoveJob,
+    recompileJob as rpcRecompileJob,
+  } from '../lib/stores.svelte.js';
   import { Button } from '$lib/components/ui/button/index.js';
   import { Badge } from '$lib/components/ui/badge/index.js';
   import { Card } from '$lib/components/ui/card/index.js';
@@ -27,34 +34,24 @@
   }
 
   function runJob(jobId: string): void {
-    withJobAction(jobId, 'Run', async () => {
-      await getWsClient().request('jobs.run', { jobId });
-    });
+    withJobAction(jobId, 'Run', () => rpcRunJob(jobId));
   }
 
   function enableJob(jobId: string): void {
-    withJobAction(jobId, 'Enable', async () => {
-      await getWsClient().request('jobs.enable', { jobId });
-    });
+    withJobAction(jobId, 'Enable', () => rpcEnableJob(jobId));
   }
 
   function disableJob(jobId: string): void {
-    withJobAction(jobId, 'Disable', async () => {
-      await getWsClient().request('jobs.disable', { jobId });
-    });
+    withJobAction(jobId, 'Disable', () => rpcDisableJob(jobId));
   }
 
   function removeJob(jobId: string): void {
     if (!confirm(`Remove job "${jobId}"?`)) return;
-    withJobAction(jobId, 'Remove', async () => {
-      await getWsClient().request('jobs.remove', { jobId });
-    });
+    withJobAction(jobId, 'Remove', () => rpcRemoveJob(jobId));
   }
 
   function recompileJob(jobId: string): void {
-    withJobAction(jobId, 'Recompile', async () => {
-      await getWsClient().request('jobs.recompile', { jobId });
-    });
+    withJobAction(jobId, 'Recompile', () => rpcRecompileJob(jobId));
   }
 </script>
 

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { EscalationDto } from '../types.js';
+  import type { EscalationDto } from '../../types.js';
   import { Button } from '$lib/components/ui/button/index.js';
   import { Badge } from '$lib/components/ui/badge/index.js';
   import { Card } from '$lib/components/ui/card/index.js';
