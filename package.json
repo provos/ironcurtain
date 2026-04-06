@@ -113,7 +113,7 @@
     ],
     "packages/web-ui/**/*.{ts,svelte}": [
       "prettier --check --config packages/web-ui/.prettierrc",
-      "eslint --config packages/web-ui/eslint.config.js"
+      "npm run check -w packages/web-ui"
     ]
   },
   "devDependencies": {

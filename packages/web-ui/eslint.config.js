@@ -6,17 +6,13 @@ import svelteParser from 'svelte-eslint-parser';
 /** @type {import('eslint').Linter.Config[]} */
 export default [
   {
-    ignores: ['dist/', 'e2e-results/', 'playwright-report/', '.svelte-kit/'],
+    ignores: ['dist/', 'e2e-results/', 'playwright-report/', '.svelte-kit/', 'e2e/', 'scripts/'],
   },
-  // TypeScript files
+  // TypeScript files (syntax linting only; type checking via svelte-check)
   {
-    files: ['src/**/*.ts', 'scripts/**/*.ts'],
+    files: ['src/**/*.ts'],
     languageOptions: {
       parser: tsParser,
-      parserOptions: {
-        project: './tsconfig.json',
-        extraFileExtensions: ['.svelte'],
-      },
     },
     plugins: {
       '@typescript-eslint': tsPlugin,
@@ -26,7 +22,7 @@ export default [
       '@typescript-eslint/no-explicit-any': 'warn',
     },
   },
-  // Svelte files
+  // Svelte files (syntax linting; type checking via svelte-check)
   ...sveltePlugin.configs['flat/recommended'],
   {
     files: ['src/**/*.svelte'],
@@ -34,7 +30,6 @@ export default [
       parser: svelteParser,
       parserOptions: {
         parser: tsParser,
-        project: './tsconfig.json',
       },
     },
   },

@@ -5,14 +5,22 @@
  * depending on Svelte runes or any other framework-specific API.
  */
 
-import type { SessionDto, EscalationDto, DaemonStatusDto, BudgetSummaryDto, OutputLine, JobListDto } from './types.js';
+import type {
+  SessionDto,
+  EscalationDto,
+  DaemonStatusDto,
+  BudgetSummaryDto,
+  OutputLine,
+  JobListDto,
+  PendingEscalation,
+} from './types.js';
 
 /** Minimal state surface that handleEvent needs to read and write. */
 export interface AppStateLike {
   daemonStatus: DaemonStatusDto | null;
   sessions: Map<number, SessionDto>;
   selectedSessionLabel: number | null;
-  pendingEscalations: Map<string, EscalationDto>;
+  pendingEscalations: Map<string, PendingEscalation>;
   jobs: JobListDto[];
   addOutput(label: number, line: OutputLine): void;
   removeOutput(label: number): void;
@@ -21,6 +29,7 @@ export interface AppStateLike {
 /** Side effects that handleEvent may request. */
 export interface EventSideEffects {
   refreshJobs(): void;
+  assignDisplayNumber(escalationId: string): number;
 }
 
 // ---------------------------------------------------------------------------
@@ -167,7 +176,9 @@ function applyEvent(state: AppStateLike, effects: EventSideEffects, parsed: WebE
 
     case 'escalation.created': {
       const esc = parsed.payload;
-      state.pendingEscalations = new Map(state.pendingEscalations).set(esc.escalationId, esc);
+      const displayNumber = effects.assignDisplayNumber(esc.escalationId);
+      const pending: PendingEscalation = { ...esc, displayNumber };
+      state.pendingEscalations = new Map(state.pendingEscalations).set(esc.escalationId, pending);
       return true;
     }
 

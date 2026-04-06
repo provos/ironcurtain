@@ -16,3 +16,5 @@ export { Card, CardHeader, CardTitle, CardContent } from './card/index.js';
 export { Input } from './input/index.js';
 
 export { Spinner } from './spinner/index.js';
+
+export { Modal } from './modal/index.js';

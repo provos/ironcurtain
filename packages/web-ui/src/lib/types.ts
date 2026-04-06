@@ -141,6 +141,11 @@ export interface PersonaListItem {
   readonly compiled: boolean;
 }
 
+/** An escalation enriched with a monotonic display number for modal ordering. */
+export interface PendingEscalation extends EscalationDto {
+  readonly displayNumber: number;
+}
+
 /** Output line for the session console. */
 export interface OutputLine {
   readonly kind: 'user' | 'assistant' | 'tool_call' | 'thinking' | 'error' | 'system';

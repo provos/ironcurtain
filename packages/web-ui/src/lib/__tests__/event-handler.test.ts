@@ -1,6 +1,6 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { handleEvent, type AppStateLike, type EventSideEffects } from '../event-handler.js';
-import type { SessionDto, EscalationDto, BudgetSummaryDto, OutputLine } from '../types.js';
+import type { SessionDto, EscalationDto, BudgetSummaryDto, OutputLine, PendingEscalation } from '../types.js';
 
 // ---------------------------------------------------------------------------
 // Factories
@@ -42,7 +42,7 @@ function createMockState(): AppStateLike & { outputs: Map<number, OutputLine[]> 
     daemonStatus: null,
     sessions: new Map(),
     selectedSessionLabel: null,
-    pendingEscalations: new Map(),
+    pendingEscalations: new Map<string, PendingEscalation>(),
     jobs: [],
     outputs,
     addOutput(label: number, line: OutputLine) {
@@ -60,8 +60,13 @@ function createMockState(): AppStateLike & { outputs: Map<number, OutputLine[]> 
   };
 }
 
+let displayNumberCounter = 0;
+
 function createMockEffects(): EventSideEffects {
-  return { refreshJobs: vi.fn() };
+  return {
+    refreshJobs: vi.fn(),
+    assignDisplayNumber: vi.fn(() => ++displayNumberCounter),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -69,6 +74,10 @@ function createMockEffects(): EventSideEffects {
 // ---------------------------------------------------------------------------
 
 describe('handleEvent', () => {
+  beforeEach(() => {
+    displayNumberCounter = 0;
+  });
+
   it('sets daemon status', () => {
     const state = createMockState();
     handleEvent(state, createMockEffects(), 'daemon.status', {
@@ -203,6 +212,27 @@ describe('handleEvent', () => {
     handleEvent(state, createMockEffects(), 'escalation.created', esc);
     expect(state.pendingEscalations.size).toBe(1);
     expect(state.pendingEscalations.get('esc-1')?.toolName).toBe('filesystem__write_file');
+  });
+
+  it('assigns a display number to escalations on escalation.created', () => {
+    const state = createMockState();
+    const effects = createMockEffects();
+    const esc: EscalationDto = {
+      escalationId: 'esc-dn-1',
+      sessionLabel: 1,
+      sessionSource: { kind: 'web' },
+      toolName: 'filesystem__write_file',
+      serverName: 'filesystem',
+      arguments: { path: '/etc/hosts' },
+      reason: 'Protected path',
+      receivedAt: '2026-01-01T00:00:00Z',
+    };
+    handleEvent(state, effects, 'escalation.created', esc);
+
+    const pending = state.pendingEscalations.get('esc-dn-1');
+    expect(pending).toBeDefined();
+    expect(pending!.displayNumber).toBe(1);
+    expect(effects.assignDisplayNumber).toHaveBeenCalledWith('esc-dn-1');
   });
 
   it('removes escalation on escalation.resolved', () => {

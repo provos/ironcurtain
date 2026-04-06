@@ -5,7 +5,7 @@
  * The WebSocket client feeds events into the store via handleEvent().
  */
 
-import type { SessionDto, EscalationDto, DaemonStatusDto, JobListDto, OutputLine } from './types.js';
+import type { SessionDto, EscalationDto, DaemonStatusDto, JobListDto, OutputLine, PendingEscalation } from './types.js';
 import { createWsClient, type WsClient } from './ws-client.js';
 import { handleEvent as handleEventPure } from './event-handler.js';
 
@@ -33,7 +33,9 @@ class AppState {
   daemonStatus: DaemonStatusDto | null = $state(null);
   sessions: Map<number, SessionDto> = $state(new Map());
   selectedSessionLabel: number | null = $state(null);
-  pendingEscalations: Map<string, EscalationDto> = $state(new Map());
+  pendingEscalations: Map<string, PendingEscalation> = $state(new Map());
+  escalationDisplayNumber: number = $state(0);
+  escalationDismissedAt: number = $state(0);
   jobs: JobListDto[] = $state([]);
   sessionOutputs: Map<number, OutputLine[]> = $state(new Map());
   currentView: ViewId = $state('dashboard');
@@ -103,7 +105,15 @@ function wireEventHandlers(client: WsClient): void {
   });
 
   client.onEvent((event, payload) => {
-    handleEventPure(appState, { refreshJobs: () => refreshJobs(client) }, event, payload);
+    handleEventPure(
+      appState,
+      {
+        refreshJobs: () => refreshJobs(client),
+        assignDisplayNumber: () => ++appState.escalationDisplayNumber,
+      },
+      event,
+      payload,
+    );
   });
 }
 
@@ -126,11 +136,15 @@ async function refreshAll(client: WsClient): Promise<void> {
 
     appState.jobs = jobs;
 
-    const newEscalations = new Map<string, EscalationDto>();
+    const newEscalations = new Map<string, PendingEscalation>();
     for (const esc of escalations) {
-      newEscalations.set(esc.escalationId, esc);
+      const displayNumber = ++appState.escalationDisplayNumber;
+      newEscalations.set(esc.escalationId, { ...esc, displayNumber });
     }
     appState.pendingEscalations = newEscalations;
+    // Mark all initially-loaded escalations as already seen so the modal
+    // does not auto-open on first connect.
+    appState.escalationDismissedAt = appState.escalationDisplayNumber;
   } catch (err) {
     console.error('Failed to refresh state:', err);
   }

@@ -9,7 +9,15 @@
 
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { appState, initConnection, connectWithToken, getTheme, setTheme, type ThemeId } from './lib/stores.svelte.js';
+  import {
+    appState,
+    initConnection,
+    connectWithToken,
+    getWsClient,
+    getTheme,
+    setTheme,
+    type ThemeId,
+  } from './lib/stores.svelte.js';
   import Dashboard from './routes/Dashboard.svelte';
   import Sessions from './routes/Sessions.svelte';
   import Escalations from './routes/Escalations.svelte';
@@ -19,6 +27,8 @@
   import { Input } from '$lib/components/ui/input/index.js';
   import { DropdownMenu, DropdownMenuItem } from '$lib/components/ui/dropdown-menu/index.js';
   import { Badge } from '$lib/components/ui/badge/index.js';
+  import EscalationModal from '$lib/components/escalation-modal.svelte';
+  import { startFlashTitle } from '$lib/flash-title.js';
 
   import ShieldCheck from 'phosphor-svelte/lib/ShieldCheck';
   import House from 'phosphor-svelte/lib/House';
@@ -31,6 +41,61 @@
   let tokenInput = $state('');
   let currentTheme = $state<ThemeId>('iron');
   let showThemePicker = $state(false);
+  let escalationModalOpen = $state(false);
+  let stopFlash: (() => void) | null = null;
+
+  // Auto-open the escalation modal when new escalations arrive (unless on the Escalations page),
+  // and auto-close when no escalations remain.
+  $effect(() => {
+    const hasNew = appState.escalationDisplayNumber > appState.escalationDismissedAt;
+    const count = appState.pendingEscalations.size;
+    const onEscalationsPage = appState.currentView === 'escalations';
+
+    if (count === 0) {
+      escalationModalOpen = false;
+    } else if (hasNew && count > 0 && !onEscalationsPage) {
+      escalationModalOpen = true;
+      if (document.hidden) {
+        stopFlash?.();
+        stopFlash = startFlashTitle('Action Required - Escalation');
+      }
+    }
+  });
+
+  function recordDismissal(): void {
+    appState.escalationDismissedAt = appState.escalationDisplayNumber;
+    escalationModalOpen = false;
+    stopFlash?.();
+    stopFlash = null;
+  }
+
+  async function resolveEscalationFromModal(
+    escalationId: string,
+    decision: 'approved' | 'denied',
+    whitelistSelection?: number,
+  ): Promise<void> {
+    const params: Record<string, unknown> = { escalationId, decision };
+    if (decision === 'approved' && whitelistSelection != null) {
+      params.whitelistSelection = whitelistSelection;
+    }
+    try {
+      await getWsClient().request('escalations.resolve', params);
+    } catch (err) {
+      console.error('Failed to resolve escalation from modal:', err);
+      throw err;
+    }
+    // The escalation.resolved event may have already closed the modal via
+    // the $effect, but if not (e.g., timing), force a check here.
+    if (appState.pendingEscalations.size === 0) {
+      escalationModalOpen = false;
+    }
+  }
+
+  function viewSessionFromModal(label: number): void {
+    recordDismissal();
+    appState.currentView = 'sessions';
+    appState.selectedSessionLabel = label;
+  }
 
   onMount(() => {
     currentTheme = getTheme();
@@ -211,5 +276,13 @@
         <Jobs />
       {/if}
     </main>
+
+    <EscalationModal
+      open={escalationModalOpen}
+      escalations={appState.pendingEscalations}
+      onclose={recordDismissal}
+      onresolve={resolveEscalationFromModal}
+      onviewsession={viewSessionFromModal}
+    />
   </div>
 {/if}
