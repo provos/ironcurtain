@@ -44,6 +44,8 @@ function createMockState(): AppStateLike & { outputs: Map<number, OutputLine[]> 
     selectedSessionLabel: null,
     pendingEscalations: new Map<string, PendingEscalation>(),
     jobs: [],
+    workflows: new Map(),
+    pendingGates: new Map(),
     outputs,
     addOutput(label: number, line: OutputLine) {
       let existing = outputs.get(label) ?? [];
@@ -387,5 +389,181 @@ describe('handleEvent', () => {
       nextFireTime: null,
     });
     expect(handled).toBe(true);
+  });
+
+  // ── Workflow events ──────────────────────────────────────────────────
+
+  describe('workflow events', () => {
+    it('updates workflow state on workflow.state_entered', () => {
+      const state = createMockState();
+      state.workflows = new Map([
+        [
+          'wf-1',
+          {
+            workflowId: 'wf-1',
+            name: 'test',
+            phase: 'running' as const,
+            currentState: 'plan',
+            startedAt: '2026-01-01T00:00:00Z',
+          },
+        ],
+      ]);
+
+      handleEvent(state, createMockEffects(), 'workflow.state_entered', {
+        workflowId: 'wf-1',
+        state: 'implement',
+      });
+
+      expect(state.workflows.get('wf-1')?.currentState).toBe('implement');
+      expect(state.workflows.get('wf-1')?.phase).toBe('running');
+    });
+
+    it('marks workflow completed on workflow.completed', () => {
+      const state = createMockState();
+      state.workflows = new Map([
+        [
+          'wf-1',
+          {
+            workflowId: 'wf-1',
+            name: 'test',
+            phase: 'running' as const,
+            currentState: 'implement',
+            startedAt: '2026-01-01T00:00:00Z',
+          },
+        ],
+      ]);
+
+      handleEvent(state, createMockEffects(), 'workflow.completed', { workflowId: 'wf-1' });
+
+      expect(state.workflows.get('wf-1')?.phase).toBe('completed');
+    });
+
+    it('marks workflow failed on workflow.failed', () => {
+      const state = createMockState();
+      state.workflows = new Map([
+        [
+          'wf-1',
+          {
+            workflowId: 'wf-1',
+            name: 'test',
+            phase: 'running' as const,
+            currentState: 'implement',
+            startedAt: '2026-01-01T00:00:00Z',
+          },
+        ],
+      ]);
+
+      handleEvent(state, createMockEffects(), 'workflow.failed', {
+        workflowId: 'wf-1',
+        error: 'Agent crashed',
+      });
+
+      expect(state.workflows.get('wf-1')?.phase).toBe('failed');
+    });
+
+    it('adds gate on workflow.gate_raised', () => {
+      const state = createMockState();
+      state.workflows = new Map([
+        [
+          'wf-1',
+          {
+            workflowId: 'wf-1',
+            name: 'test',
+            phase: 'running' as const,
+            currentState: 'plan',
+            startedAt: '2026-01-01T00:00:00Z',
+          },
+        ],
+      ]);
+
+      handleEvent(state, createMockEffects(), 'workflow.gate_raised', {
+        workflowId: 'wf-1',
+        gate: {
+          gateId: 'wf-1-plan_review',
+          stateName: 'plan_review',
+          acceptedEvents: ['APPROVE', 'FORCE_REVISION'],
+          presentedArtifacts: ['plan'],
+          summary: 'Review the plan',
+        },
+      });
+
+      expect(state.pendingGates.size).toBe(1);
+      expect(state.pendingGates.get('wf-1-plan_review')?.stateName).toBe('plan_review');
+      expect(state.workflows.get('wf-1')?.phase).toBe('waiting_human');
+    });
+
+    it('removes gate on workflow.gate_dismissed', () => {
+      const state = createMockState();
+      state.pendingGates = new Map([
+        [
+          'wf-1-plan_review',
+          {
+            gateId: 'wf-1-plan_review',
+            stateName: 'plan_review',
+            acceptedEvents: ['APPROVE'],
+            presentedArtifacts: [],
+            summary: 'Review',
+          },
+        ],
+      ]);
+
+      handleEvent(state, createMockEffects(), 'workflow.gate_dismissed', {
+        workflowId: 'wf-1',
+        gateId: 'wf-1-plan_review',
+      });
+
+      expect(state.pendingGates.size).toBe(0);
+    });
+
+    it('cleans up gates on workflow.completed', () => {
+      const state = createMockState();
+      state.workflows = new Map([
+        [
+          'wf-1',
+          {
+            workflowId: 'wf-1',
+            name: 'test',
+            phase: 'waiting_human' as const,
+            currentState: 'review',
+            startedAt: '2026-01-01T00:00:00Z',
+          },
+        ],
+      ]);
+      state.pendingGates = new Map([
+        [
+          'wf-1-review',
+          {
+            gateId: 'wf-1-review',
+            stateName: 'review',
+            acceptedEvents: ['APPROVE'],
+            presentedArtifacts: [],
+            summary: 'Review',
+          },
+        ],
+      ]);
+
+      handleEvent(state, createMockEffects(), 'workflow.completed', { workflowId: 'wf-1' });
+
+      expect(state.pendingGates.size).toBe(0);
+    });
+
+    it('returns true for workflow.agent_started and workflow.agent_completed', () => {
+      const state = createMockState();
+      const effects = createMockEffects();
+
+      const handled1 = handleEvent(state, effects, 'workflow.agent_started', {
+        workflowId: 'wf-1',
+        stateId: 'plan',
+        persona: 'planner',
+      });
+      expect(handled1).toBe(true);
+
+      const handled2 = handleEvent(state, effects, 'workflow.agent_completed', {
+        workflowId: 'wf-1',
+        stateId: 'plan',
+        verdict: 'approved',
+      });
+      expect(handled2).toBe(true);
+    });
   });
 });

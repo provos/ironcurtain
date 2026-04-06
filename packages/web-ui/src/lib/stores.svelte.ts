@@ -15,11 +15,13 @@ import type {
   ConversationTurn,
   BudgetSummaryDto,
   PersonaListItem,
+  WorkflowSummaryDto,
+  HumanGateRequestDto,
 } from './types.js';
 import { createWsClient, type WsClient } from './ws-client.js';
 import { handleEvent as handleEventPure } from './event-handler.js';
 
-export type ViewId = 'dashboard' | 'sessions' | 'escalations' | 'jobs';
+export type ViewId = 'dashboard' | 'sessions' | 'escalations' | 'jobs' | 'workflows';
 export type ThemeId = 'iron' | 'daylight' | 'midnight';
 
 const MAX_OUTPUT_LINES = 2000;
@@ -49,6 +51,10 @@ class AppState {
   jobs: JobListDto[] = $state([]);
   sessionOutputs: Map<number, OutputLine[]> = $state(new Map());
   currentView: ViewId = $state('dashboard');
+
+  // Workflow state
+  workflows: Map<string, WorkflowSummaryDto> = $state(new Map());
+  pendingGates: Map<string, HumanGateRequestDto> = $state(new Map());
 
   get selectedSession(): SessionDto | null {
     if (this.selectedSessionLabel === null) return null;
@@ -296,6 +302,45 @@ export async function recompileJob(jobId: string): Promise<void> {
 
 export async function listPersonas(): Promise<PersonaListItem[]> {
   return getWsClient().request<PersonaListItem[]>('personas.list');
+}
+
+// ── Workflow RPC actions ────────────────────────────────────────────
+
+export async function listWorkflows(): Promise<WorkflowSummaryDto[]> {
+  return getWsClient().request<WorkflowSummaryDto[]>('workflows.list');
+}
+
+export async function startWorkflow(
+  definitionPath: string,
+  taskDescription: string,
+  workspacePath?: string,
+): Promise<{ workflowId: string }> {
+  const params: Record<string, unknown> = { definitionPath, taskDescription };
+  if (workspacePath) params.workspacePath = workspacePath;
+  return getWsClient().request<{ workflowId: string }>('workflows.start', params);
+}
+
+export async function abortWorkflow(workflowId: string): Promise<void> {
+  await getWsClient().request('workflows.abort', { workflowId });
+}
+
+export async function resolveWorkflowGate(workflowId: string, event: string, prompt?: string): Promise<void> {
+  const params: Record<string, unknown> = { workflowId, event };
+  if (prompt) params.prompt = prompt;
+  await getWsClient().request('workflows.resolveGate', params);
+}
+
+export async function refreshWorkflows(): Promise<void> {
+  try {
+    const workflows = await listWorkflows();
+    const newMap = new Map<string, WorkflowSummaryDto>();
+    for (const wf of workflows) {
+      newMap.set(wf.workflowId, wf);
+    }
+    appState.workflows = newMap;
+  } catch {
+    // Best-effort
+  }
 }
 
 export function connectWithToken(token: string): void {

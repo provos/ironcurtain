@@ -92,7 +92,20 @@ export type WorkflowLifecycleEvent =
   | { readonly kind: 'completed'; readonly workflowId: WorkflowId }
   | { readonly kind: 'failed'; readonly workflowId: WorkflowId; readonly error: string }
   | { readonly kind: 'gate_raised'; readonly workflowId: WorkflowId; readonly gate: HumanGateRequest }
-  | { readonly kind: 'gate_dismissed'; readonly workflowId: WorkflowId; readonly gateId: string };
+  | { readonly kind: 'gate_dismissed'; readonly workflowId: WorkflowId; readonly gateId: string }
+  | {
+      readonly kind: 'agent_started';
+      readonly workflowId: WorkflowId;
+      readonly state: string;
+      readonly persona: string;
+    }
+  | {
+      readonly kind: 'agent_completed';
+      readonly workflowId: WorkflowId;
+      readonly state: string;
+      readonly persona: string;
+      readonly verdict: string;
+    };
 
 /** The narrow controller interface exposed to the mux. */
 export interface WorkflowController {
@@ -208,6 +221,14 @@ export class WorkflowOrchestrator implements WorkflowController {
     const workflowId = createWorkflowId();
 
     const resolvedWorkspace = workspacePath ?? resolve(this.deps.baseDir, workflowId, 'workspace');
+
+    // Reject if any active workflow already uses this workspace path
+    for (const instance of this.workflows.values()) {
+      if (instance.workspacePath === resolvedWorkspace && !instance.finalStatus) {
+        throw new Error(`Workspace ${resolvedWorkspace} is already in use by workflow ${instance.id}`);
+      }
+    }
+
     mkdirSync(resolvedWorkspace, { recursive: true });
 
     const artifactDir = resolve(resolvedWorkspace, WORKFLOW_ARTIFACT_DIR);
@@ -400,10 +421,14 @@ export class WorkflowOrchestrator implements WorkflowController {
     if (!instance) return;
 
     const gateId = instance.activeGateId;
-    if (gateId) {
-      this.deps.dismissGate(gateId);
-      instance.activeGateId = undefined;
+    if (!gateId) {
+      // No active gate -- prevent double-resolution
+      return;
     }
+
+    // Clear before sending to prevent concurrent double-resolution
+    instance.activeGateId = undefined;
+    this.deps.dismissGate(gateId);
 
     instance.messageLog.append({
       ...this.logBase(instance),
@@ -676,6 +701,13 @@ export class WorkflowOrchestrator implements WorkflowController {
         message: command,
       });
 
+      this.emitLifecycleEvent({
+        kind: 'agent_started',
+        workflowId,
+        state: stateId,
+        persona: stateConfig.persona,
+      });
+
       let responseText = await session.sendMessage(command);
       let agentOutput = parseAgentStatus(responseText);
       logReceived(responseText, agentOutput);
@@ -730,6 +762,14 @@ export class WorkflowOrchestrator implements WorkflowController {
       instance.tab.write(
         `[agent] "${stateId}" completed: verdict=${agentOutput.verdict}, artifacts=${Object.keys(artifacts).join(',') || 'none'}`,
       );
+
+      this.emitLifecycleEvent({
+        kind: 'agent_completed',
+        workflowId,
+        state: stateId,
+        persona: stateConfig.persona,
+        verdict: agentOutput.verdict,
+      });
 
       return {
         output: agentOutput,

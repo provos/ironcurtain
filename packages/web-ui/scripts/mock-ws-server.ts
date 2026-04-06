@@ -250,6 +250,66 @@ const CANNED_PERSONAS = [
   { name: 'devops', description: 'Infrastructure and deployment operations', compiled: false },
 ];
 
+// ---------------------------------------------------------------------------
+// Canned workflow data
+// ---------------------------------------------------------------------------
+
+interface MockWorkflow {
+  workflowId: string;
+  name: string;
+  phase: 'running' | 'waiting_human' | 'completed' | 'failed' | 'aborted';
+  currentState: string;
+  startedAt: string;
+}
+
+interface MockGate {
+  gateId: string;
+  workflowId: string;
+  stateName: string;
+  acceptedEvents: readonly string[];
+  presentedArtifacts: readonly string[];
+  summary: string;
+}
+
+const CANNED_WORKFLOWS: MockWorkflow[] = [
+  {
+    workflowId: 'wf-mock-001',
+    name: 'design-and-code',
+    phase: 'running',
+    currentState: 'implement',
+    startedAt: new Date(Date.now() - 120_000).toISOString(),
+  },
+  {
+    workflowId: 'wf-mock-002',
+    name: 'code-review',
+    phase: 'waiting_human',
+    currentState: 'plan_review',
+    startedAt: new Date(Date.now() - 300_000).toISOString(),
+  },
+];
+
+const workflows = new Map<string, MockWorkflow>();
+const workflowGates = new Map<string, MockGate>();
+
+function initWorkflows(): void {
+  workflows.clear();
+  workflowGates.clear();
+  for (const wf of structuredClone(CANNED_WORKFLOWS)) {
+    workflows.set(wf.workflowId, wf);
+  }
+  // Add a gate for the waiting workflow
+  const gateId = 'wf-mock-002-plan_review';
+  workflowGates.set(gateId, {
+    gateId,
+    workflowId: 'wf-mock-002',
+    stateName: 'plan_review',
+    acceptedEvents: ['APPROVE', 'FORCE_REVISION', 'REPLAN', 'ABORT'],
+    presentedArtifacts: ['plan'],
+    summary: 'Waiting for human review at plan_review',
+  });
+}
+initWorkflows();
+
 // Mutable copy of canned jobs so enable/disable/remove are stateful
 const jobs = structuredClone(CANNED_JOBS);
 
@@ -260,6 +320,7 @@ function resetState(): void {
   nextLabel = 1;
   jobs.length = 0;
   jobs.push(...structuredClone(CANNED_JOBS));
+  initWorkflows();
 }
 
 // ---------------------------------------------------------------------------
@@ -573,6 +634,82 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
     case 'personas.list':
       return CANNED_PERSONAS;
 
+    // Workflow methods
+    case 'workflows.list':
+      return [...workflows.values()];
+
+    case 'workflows.get': {
+      const wfId = params.workflowId as string;
+      const wf = workflows.get(wfId);
+      if (!wf) return errorResult('WORKFLOW_NOT_FOUND', `Workflow ${wfId} not found`);
+      const gate = [...workflowGates.values()].find((g) => g.workflowId === wfId);
+      return { ...wf, gate };
+    }
+
+    case 'workflows.start': {
+      const newId = `wf-mock-${Date.now()}`;
+      const newWf: MockWorkflow = {
+        workflowId: newId,
+        name: String(params.definitionPath).split('/').pop()?.replace('.json', '') ?? 'workflow',
+        phase: 'running',
+        currentState: 'initial',
+        startedAt: new Date().toISOString(),
+      };
+      workflows.set(newId, newWf);
+      broadcast('workflow.state_entered', { workflowId: newId, state: 'initial' });
+
+      // Simulate progression after a delay
+      setTimeout(() => {
+        const wf = workflows.get(newId);
+        if (wf && wf.phase === 'running') {
+          wf.currentState = 'plan';
+          wf.phase = 'running';
+          broadcast('workflow.agent_started', { workflowId: newId, stateId: 'plan', persona: 'planner' });
+          broadcast('workflow.state_entered', { workflowId: newId, state: 'plan' });
+        }
+      }, 2000);
+
+      return { workflowId: newId };
+    }
+
+    case 'workflows.abort': {
+      const abortId = params.workflowId as string;
+      const abortWf = workflows.get(abortId);
+      if (!abortWf) return errorResult('WORKFLOW_NOT_FOUND', `Workflow ${abortId} not found`);
+      abortWf.phase = 'aborted';
+      abortWf.currentState = 'aborted';
+      // Remove any gates
+      for (const [gateId, gate] of workflowGates) {
+        if (gate.workflowId === abortId) workflowGates.delete(gateId);
+      }
+      broadcast('workflow.failed', { workflowId: abortId, error: 'Workflow aborted by user' });
+      return undefined;
+    }
+
+    case 'workflows.resolveGate': {
+      const resolveWfId = params.workflowId as string;
+      const resolveWf = workflows.get(resolveWfId);
+      if (!resolveWf) return errorResult('WORKFLOW_NOT_FOUND', `Workflow ${resolveWfId} not found`);
+      if (resolveWf.phase !== 'waiting_human') {
+        return errorResult('WORKFLOW_NOT_AT_GATE', `Workflow ${resolveWfId} is not waiting at a gate`);
+      }
+      // Dismiss gate and resume
+      for (const [gateId, gate] of workflowGates) {
+        if (gate.workflowId === resolveWfId) {
+          workflowGates.delete(gateId);
+          broadcast('workflow.gate_dismissed', { workflowId: resolveWfId, gateId });
+        }
+      }
+      resolveWf.phase = 'running';
+      resolveWf.currentState = 'implement';
+      broadcast('workflow.state_entered', { workflowId: resolveWfId, state: 'implement' });
+      return undefined;
+    }
+
+    case 'workflows.resume':
+    case 'workflows.inspect':
+      return { accepted: true };
+
     case '__reset': {
       resetState();
       return undefined;
@@ -630,13 +767,29 @@ wss.on('connection', (ws) => {
   });
 });
 
-// HTTP server for test-only endpoints (e.g., state reset)
+// HTTP server for test-only endpoints (e.g., state reset, workflow event injection)
 const RESET_PORT = parseInt(process.env.RESET_PORT ?? '7401', 10);
 const httpServer = createServer((req, res) => {
   if (req.method === 'POST' && req.url === '/__reset') {
     resetState();
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: true }));
+  } else if (req.method === 'POST' && req.url === '/__workflow-event') {
+    let body = '';
+    req.on('data', (chunk: Buffer) => {
+      body += chunk.toString();
+    });
+    req.on('end', () => {
+      try {
+        const { event, payload } = JSON.parse(body) as { event: string; payload: unknown };
+        broadcast(event, payload);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+      } catch {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'Invalid JSON' }));
+      }
+    });
   } else {
     res.writeHead(404);
     res.end();

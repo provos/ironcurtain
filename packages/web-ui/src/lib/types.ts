@@ -153,3 +153,45 @@ export interface OutputLine {
   readonly timestamp: string;
   readonly escalationId?: string;
 }
+
+// ---------------------------------------------------------------------------
+// Workflow types
+// ---------------------------------------------------------------------------
+
+export type WorkflowPhase = 'running' | 'waiting_human' | 'completed' | 'failed' | 'aborted';
+
+export interface WorkflowSummaryDto {
+  readonly workflowId: string;
+  readonly name: string;
+  readonly phase: WorkflowPhase;
+  readonly currentState: string;
+  readonly startedAt: string;
+}
+
+export interface HumanGateRequestDto {
+  readonly gateId: string;
+  readonly stateName: string;
+  readonly acceptedEvents: readonly string[];
+  readonly presentedArtifacts: readonly string[];
+  readonly summary: string;
+}
+
+export interface StateGraphDto {
+  readonly states: readonly StateNodeDto[];
+  readonly transitions: readonly TransitionEdgeDto[];
+}
+
+export interface StateNodeDto {
+  readonly id: string;
+  readonly type: 'agent' | 'human_gate' | 'deterministic' | 'terminal';
+  readonly persona?: string;
+  readonly label: string;
+}
+
+export interface TransitionEdgeDto {
+  readonly from: string;
+  readonly to: string;
+  readonly guard?: string;
+  readonly event?: string;
+  readonly label: string;
+}

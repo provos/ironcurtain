@@ -13,6 +13,8 @@ import type {
   OutputLine,
   JobListDto,
   PendingEscalation,
+  WorkflowSummaryDto,
+  HumanGateRequestDto,
 } from './types.js';
 
 /** Minimal state surface that handleEvent needs to read and write. */
@@ -22,6 +24,8 @@ export interface AppStateLike {
   selectedSessionLabel: number | null;
   pendingEscalations: Map<string, PendingEscalation>;
   jobs: JobListDto[];
+  workflows: Map<string, WorkflowSummaryDto>;
+  pendingGates: Map<string, HumanGateRequestDto>;
   addOutput(label: number, line: OutputLine): void;
   removeOutput(label: number): void;
   filterOutput(label: number, predicate: (line: OutputLine) => boolean): void;
@@ -53,7 +57,20 @@ export type WebEvent =
   | { event: 'job.list_changed'; payload: Record<string, unknown> }
   | { event: 'job.completed'; payload: Record<string, unknown> }
   | { event: 'job.failed'; payload: Record<string, unknown> }
-  | { event: 'job.started'; payload: Record<string, unknown> };
+  | { event: 'job.started'; payload: Record<string, unknown> }
+  | {
+      event: 'workflow.state_entered';
+      payload: { workflowId: string; state: string; previousState?: string };
+    }
+  | { event: 'workflow.agent_started'; payload: { workflowId: string; stateId: string; persona: string } }
+  | {
+      event: 'workflow.agent_completed';
+      payload: { workflowId: string; stateId: string; verdict?: string; confidence?: string };
+    }
+  | { event: 'workflow.completed'; payload: { workflowId: string } }
+  | { event: 'workflow.failed'; payload: { workflowId: string; error: string } }
+  | { event: 'workflow.gate_raised'; payload: { workflowId: string; gate: HumanGateRequestDto } }
+  | { event: 'workflow.gate_dismissed'; payload: { workflowId: string; gateId: string } };
 
 /**
  * Parse a raw event name + payload into a typed WebEvent.
@@ -88,6 +105,32 @@ export function parseEvent(event: string, payload: unknown): WebEvent | undefine
     case 'job.failed':
     case 'job.started':
       return { event, payload: data };
+    case 'workflow.state_entered':
+      return {
+        event,
+        payload: data as { workflowId: string; state: string; previousState?: string },
+      };
+    case 'workflow.agent_started':
+      return {
+        event,
+        payload: data as { workflowId: string; stateId: string; persona: string },
+      };
+    case 'workflow.agent_completed':
+      return {
+        event,
+        payload: data as { workflowId: string; stateId: string; verdict?: string; confidence?: string },
+      };
+    case 'workflow.completed':
+      return { event, payload: data as { workflowId: string } };
+    case 'workflow.failed':
+      return { event, payload: data as { workflowId: string; error: string } };
+    case 'workflow.gate_raised':
+      return {
+        event,
+        payload: data as { workflowId: string; gate: HumanGateRequestDto },
+      };
+    case 'workflow.gate_dismissed':
+      return { event, payload: data as { workflowId: string; gateId: string } };
     default:
       return undefined;
   }
@@ -208,6 +251,72 @@ function applyEvent(state: AppStateLike, effects: EventSideEffects, parsed: WebE
     case 'job.started':
       effects.refreshJobs();
       return true;
+
+    // Workflow events
+    case 'workflow.state_entered': {
+      const { workflowId, state: stateName } = parsed.payload;
+      const existing = state.workflows.get(workflowId);
+      if (!existing) return true;
+      const updated: WorkflowSummaryDto = { ...existing, currentState: stateName, phase: 'running' };
+      state.workflows = new Map(state.workflows).set(workflowId, updated);
+      return true;
+    }
+
+    case 'workflow.agent_started':
+    case 'workflow.agent_completed':
+      // Informational events -- no state mutation needed for the basic dashboard
+      return true;
+
+    case 'workflow.completed': {
+      const { workflowId } = parsed.payload;
+      const wf = state.workflows.get(workflowId);
+      if (!wf) return true;
+      state.workflows = new Map(state.workflows).set(workflowId, {
+        ...wf,
+        phase: 'completed',
+        currentState: 'completed',
+      });
+      // Clean up any pending gates for this workflow (gateId format: `${workflowId}-${gateName}`)
+      const nextGates = new Map(state.pendingGates);
+      for (const [gateId] of nextGates) {
+        if (gateId.startsWith(workflowId)) nextGates.delete(gateId);
+      }
+      state.pendingGates = nextGates;
+      return true;
+    }
+
+    case 'workflow.failed': {
+      const { workflowId } = parsed.payload;
+      const wf = state.workflows.get(workflowId);
+      if (!wf) return true;
+      state.workflows = new Map(state.workflows).set(workflowId, {
+        ...wf,
+        phase: 'failed',
+      });
+      return true;
+    }
+
+    case 'workflow.gate_raised': {
+      const { workflowId, gate } = parsed.payload;
+      state.pendingGates = new Map(state.pendingGates).set(gate.gateId, gate);
+      const wf = state.workflows.get(workflowId);
+      if (wf) {
+        state.workflows = new Map(state.workflows).set(workflowId, {
+          ...wf,
+          phase: 'waiting_human',
+          currentState: gate.stateName,
+        });
+      }
+      return true;
+    }
+
+    case 'workflow.gate_dismissed': {
+      const { gateId } = parsed.payload;
+      const nextGates = new Map(state.pendingGates);
+      nextGates.delete(gateId);
+      state.pendingGates = nextGates;
+      return true;
+    }
 
     default:
       return false;

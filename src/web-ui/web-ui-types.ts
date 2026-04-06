@@ -6,6 +6,7 @@ import type { SessionSource } from '../session/session-manager.js';
 import type { SessionStatus, DiagnosticEvent, ConversationTurn } from '../session/types.js';
 import type { JobDefinition, RunRecord } from '../cron/types.js';
 import type { WhitelistCandidateIpc } from '../trusted-process/approval-whitelist.js';
+import type { HumanGateRequest } from '../workflow/types.js';
 
 // ---------------------------------------------------------------------------
 // JSON-RPC Frame Protocol
@@ -32,7 +33,14 @@ export type MethodName =
   | 'sessions.diagnostics'
   | 'escalations.list'
   | 'escalations.resolve'
-  | 'personas.list';
+  | 'personas.list'
+  | 'workflows.list'
+  | 'workflows.get'
+  | 'workflows.start'
+  | 'workflows.resume'
+  | 'workflows.abort'
+  | 'workflows.resolveGate'
+  | 'workflows.inspect';
 
 /** Browser -> Daemon request frame. */
 export interface RequestFrame {
@@ -61,6 +69,8 @@ export type ErrorCode =
   | 'ESCALATION_NOT_FOUND'
   | 'ESCALATION_EXPIRED'
   | 'SESSION_BUSY'
+  | 'WORKFLOW_NOT_FOUND'
+  | 'WORKFLOW_NOT_AT_GATE'
   | 'INVALID_PARAMS'
   | 'RATE_LIMITED'
   | 'METHOD_NOT_FOUND'
@@ -133,6 +143,92 @@ export interface JobListDto {
   readonly nextRun: string | null;
   readonly lastRun: RunRecord | null;
   readonly isRunning: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Workflow DTO Types
+// ---------------------------------------------------------------------------
+
+/** Slim summary returned by `workflows.list`. */
+export interface WorkflowSummaryDto {
+  readonly workflowId: string;
+  readonly name: string;
+  readonly phase: 'running' | 'waiting_human' | 'completed' | 'failed' | 'aborted';
+  readonly currentState: string;
+  readonly startedAt: string;
+}
+
+/** Full detail returned by `workflows.get`. */
+export interface WorkflowDetailDto extends WorkflowSummaryDto {
+  readonly description: string;
+  readonly stateGraph: StateGraphDto;
+  readonly transitionHistory: readonly TransitionRecordDto[];
+  readonly context: WorkflowContextDto;
+  readonly gate?: HumanGateRequestDto;
+  readonly workspacePath: string;
+}
+
+/** Minimal representation of the state machine graph for frontend rendering. */
+export interface StateGraphDto {
+  readonly states: readonly StateNodeDto[];
+  readonly transitions: readonly TransitionEdgeDto[];
+}
+
+export interface StateNodeDto {
+  readonly id: string;
+  readonly type: 'agent' | 'human_gate' | 'deterministic' | 'terminal';
+  readonly persona?: string;
+  readonly label: string;
+}
+
+export interface TransitionEdgeDto {
+  readonly from: string;
+  readonly to: string;
+  readonly guard?: string;
+  readonly event?: string;
+  readonly label: string;
+}
+
+export interface TransitionRecordDto {
+  readonly from: string;
+  readonly to: string;
+  readonly event: string;
+  readonly timestamp: string;
+  readonly durationMs: number;
+}
+
+export interface HumanGateRequestDto {
+  readonly gateId: string;
+  readonly stateName: string;
+  readonly acceptedEvents: readonly string[];
+  /** Artifact names only (not content). */
+  readonly presentedArtifacts: readonly string[];
+  readonly summary: string;
+}
+
+/**
+ * Converts a domain HumanGateRequest to the JSON-serializable DTO.
+ *
+ * HumanGateRequest.presentedArtifacts is a ReadonlyMap<string, string>
+ * which does not serialize to JSON. This converter extracts the keys
+ * as a plain array.
+ */
+export function toHumanGateRequestDto(gate: HumanGateRequest): HumanGateRequestDto {
+  return {
+    gateId: gate.gateId,
+    stateName: gate.stateName,
+    acceptedEvents: gate.acceptedEvents,
+    presentedArtifacts: Array.from(gate.presentedArtifacts.keys()),
+    summary: gate.summary,
+  };
+}
+
+export interface WorkflowContextDto {
+  readonly taskDescription: string;
+  readonly round: number;
+  readonly maxRounds: number;
+  readonly totalTokens: number;
+  readonly visitCounts: Record<string, number>;
 }
 
 // ---------------------------------------------------------------------------

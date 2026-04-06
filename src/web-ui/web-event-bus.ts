@@ -6,7 +6,13 @@
  * to all connected clients.
  */
 
-import type { SessionDto, BudgetSummaryDto, DaemonStatusDto, EscalationDto } from './web-ui-types.js';
+import type {
+  SessionDto,
+  BudgetSummaryDto,
+  DaemonStatusDto,
+  EscalationDto,
+  HumanGateRequestDto,
+} from './web-ui-types.js';
 import type { DiagnosticEvent } from '../session/types.js';
 import type { RunRecord } from '../cron/types.js';
 
@@ -34,6 +40,15 @@ export interface WebEventMap {
   'job.failed': { jobId: string; error: string };
   'job.list_changed': Record<string, never>;
   'daemon.status': DaemonStatusDto;
+
+  // Workflow events
+  'workflow.state_entered': { workflowId: string; state: string; previousState?: string };
+  'workflow.completed': { workflowId: string };
+  'workflow.failed': { workflowId: string; error: string };
+  'workflow.gate_raised': { workflowId: string; gate: HumanGateRequestDto };
+  'workflow.gate_dismissed': { workflowId: string; gateId: string };
+  'workflow.agent_started': { workflowId: string; stateId: string; persona: string };
+  'workflow.agent_completed': { workflowId: string; stateId: string; verdict?: string; confidence?: string };
 }
 
 export type WebEventName = keyof WebEventMap;

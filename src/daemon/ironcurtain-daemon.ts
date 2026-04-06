@@ -665,11 +665,13 @@ export class IronCurtainDaemon {
 
   private async startWebUiServer(): Promise<void> {
     const { WebUiServer } = await import('../web-ui/web-ui-server.js');
+    const { WorkflowManager } = await import('../web-ui/workflow-manager.js');
 
     if (!this.controlRequestHandler) {
       throw new Error('Control socket must be started before web UI');
     }
 
+    // Create server first, then create WorkflowManager using the server's event bus
     const server = new WebUiServer({
       port: this.webUiOptions?.port ?? 7400,
       host: this.webUiOptions?.host ?? '127.0.0.1',
@@ -679,6 +681,7 @@ export class IronCurtainDaemon {
       maxConcurrentWebSessions: 5,
       devMode: this.webUiOptions?.devMode,
     });
+    server.setWorkflowManager(new WorkflowManager({ eventBus: server.getEventBus() }));
 
     const url = await server.start();
     this.webUiServer = server;

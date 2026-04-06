@@ -19,7 +19,8 @@ import type { ControlRequestHandler } from '../daemon/control-socket.js';
 import type { SessionMode } from '../session/types.js';
 import { WebEventBus } from './web-event-bus.js';
 import { type RequestFrame, type ResponseFrame, type EventFrame, RpcError } from './web-ui-types.js';
-import { dispatch, buildStatusDto, type DispatchContext } from './json-rpc-dispatch.js';
+import { dispatch, buildStatusDto, type WorkflowDispatchContext } from './json-rpc-dispatch.js';
+import type { WorkflowManager } from './workflow-manager.js';
 import * as logger from '../logger.js';
 
 // ---------------------------------------------------------------------------
@@ -51,6 +52,8 @@ export interface WebUiServerOptions {
   readonly maxConcurrentWebSessions: number;
   /** When true, skip Origin validation (for Vite dev server). */
   readonly devMode?: boolean;
+  /** Optional WorkflowManager for workflow RPC methods. */
+  readonly workflowManager?: WorkflowManager;
 }
 
 export class WebUiServer {
@@ -60,7 +63,7 @@ export class WebUiServer {
   private readonly authToken: string;
   private readonly options: WebUiServerOptions;
   private readonly eventBus = new WebEventBus();
-  private readonly dispatchCtx: DispatchContext;
+  private readonly dispatchCtx: WorkflowDispatchContext;
   private eventSeq = 0;
   private statusInterval: ReturnType<typeof setInterval> | null = null;
   private pingInterval: ReturnType<typeof setInterval> | null = null;
@@ -88,6 +91,7 @@ export class WebUiServer {
       eventBus: this.eventBus,
       maxConcurrentWebSessions: options.maxConcurrentWebSessions,
       sessionQueues: new Map(),
+      workflowManager: options.workflowManager,
     };
 
     // Subscribe to own event bus and broadcast to WS clients
@@ -99,6 +103,11 @@ export class WebUiServer {
   /** Returns the event bus for external producers. */
   getEventBus(): WebEventBus {
     return this.eventBus;
+  }
+
+  /** Set the WorkflowManager after construction (avoids circular dependency). */
+  setWorkflowManager(manager: WorkflowManager): void {
+    this.dispatchCtx.workflowManager = manager;
   }
 
   async start(): Promise<string> {

@@ -22,6 +22,7 @@
   import Sessions from './routes/Sessions.svelte';
   import Escalations from './routes/Escalations.svelte';
   import Jobs from './routes/Jobs.svelte';
+  import Workflows from './routes/Workflows.svelte';
 
   import { Button } from '$lib/components/ui/button/index.js';
   import { Input } from '$lib/components/ui/input/index.js';
@@ -37,6 +38,7 @@
   import Clock from 'phosphor-svelte/lib/Clock';
   import Palette from 'phosphor-svelte/lib/Palette';
   import Check from 'phosphor-svelte/lib/Check';
+  import TreeStructure from 'phosphor-svelte/lib/TreeStructure';
 
   let tokenInput = $state('');
   let currentTheme = $state<ThemeId>('iron');
@@ -125,6 +127,7 @@
     { id: 'sessions', label: 'Sessions', icon: ChatCircle },
     { id: 'escalations', label: 'Escalations', icon: Warning },
     { id: 'jobs', label: 'Jobs', icon: Clock },
+    { id: 'workflows', label: 'Workflows', icon: TreeStructure },
   ] as const;
 </script>
 
@@ -272,6 +275,8 @@
         <Escalations />
       {:else if appState.currentView === 'jobs'}
         <Jobs />
+      {:else if appState.currentView === 'workflows'}
+        <Workflows />
       {/if}
     </main>
 
