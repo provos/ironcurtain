@@ -20,6 +20,9 @@ jobs:
           cache: npm
           registry-url: https://registry.npmjs.org
 
+      - name: Install Aikido safe-chain for supply chain protection
+        run: npm install -g @aikidosec/safe-chain && safe-chain setup
+
       - name: Upgrade npm for OIDC trusted publishing support
         run: npm install -g npm@latest
 
