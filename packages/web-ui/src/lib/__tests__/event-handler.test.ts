@@ -1,6 +1,6 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { handleEvent, type AppStateLike, type EventSideEffects } from '../event-handler.js';
-import type { SessionDto, EscalationDto, BudgetSummaryDto, OutputLine } from '../types.js';
+import type { SessionDto, EscalationDto, BudgetSummaryDto, OutputLine, PendingEscalation } from '../types.js';
 
 // ---------------------------------------------------------------------------
 // Factories
@@ -42,14 +42,14 @@ function createMockState(): AppStateLike & { outputs: Map<number, OutputLine[]> 
     daemonStatus: null,
     sessions: new Map(),
     selectedSessionLabel: null,
-    pendingEscalations: new Map(),
+    pendingEscalations: new Map<string, PendingEscalation>(),
     jobs: [],
     outputs,
     addOutput(label: number, line: OutputLine) {
       let existing = outputs.get(label) ?? [];
       // Replicate the thinking-line filtering from AppState.addOutput:
-      // when a tool_call or assistant line arrives, remove preceding thinking lines.
-      if (line.kind === 'tool_call' || line.kind === 'assistant') {
+      // when a tool_call, assistant, or escalation line arrives, remove preceding thinking lines.
+      if (line.kind === 'tool_call' || line.kind === 'assistant' || line.kind === 'escalation') {
         existing = existing.filter((l) => l.kind !== 'thinking');
       }
       outputs.set(label, [...existing, line]);
@@ -57,11 +57,24 @@ function createMockState(): AppStateLike & { outputs: Map<number, OutputLine[]> 
     removeOutput(label: number) {
       outputs.delete(label);
     },
+    filterOutput(label: number, predicate: (line: OutputLine) => boolean) {
+      const existing = outputs.get(label);
+      if (!existing) return;
+      const filtered = existing.filter(predicate);
+      if (filtered.length !== existing.length) {
+        outputs.set(label, filtered);
+      }
+    },
   };
 }
 
+let displayNumberCounter = 0;
+
 function createMockEffects(): EventSideEffects {
-  return { refreshJobs: vi.fn() };
+  return {
+    refreshJobs: vi.fn(),
+    assignDisplayNumber: vi.fn(() => ++displayNumberCounter),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -69,6 +82,10 @@ function createMockEffects(): EventSideEffects {
 // ---------------------------------------------------------------------------
 
 describe('handleEvent', () => {
+  beforeEach(() => {
+    displayNumberCounter = 0;
+  });
+
   it('sets daemon status', () => {
     const state = createMockState();
     handleEvent(state, createMockEffects(), 'daemon.status', {
@@ -203,6 +220,88 @@ describe('handleEvent', () => {
     handleEvent(state, createMockEffects(), 'escalation.created', esc);
     expect(state.pendingEscalations.size).toBe(1);
     expect(state.pendingEscalations.get('esc-1')?.toolName).toBe('filesystem__write_file');
+  });
+
+  it('assigns a display number to escalations on escalation.created', () => {
+    const state = createMockState();
+    const effects = createMockEffects();
+    const esc: EscalationDto = {
+      escalationId: 'esc-dn-1',
+      sessionLabel: 1,
+      sessionSource: { kind: 'web' },
+      toolName: 'filesystem__write_file',
+      serverName: 'filesystem',
+      arguments: { path: '/etc/hosts' },
+      reason: 'Protected path',
+      receivedAt: '2026-01-01T00:00:00Z',
+    };
+    handleEvent(state, effects, 'escalation.created', esc);
+
+    const pending = state.pendingEscalations.get('esc-dn-1');
+    expect(pending).toBeDefined();
+    expect(pending!.displayNumber).toBe(1);
+    expect(effects.assignDisplayNumber).toHaveBeenCalledWith('esc-dn-1');
+  });
+
+  it('injects an escalation output line on escalation.created', () => {
+    const state = createMockState();
+    const esc: EscalationDto = {
+      escalationId: 'esc-out-1',
+      sessionLabel: 1,
+      sessionSource: { kind: 'web' },
+      toolName: 'filesystem__write_file',
+      serverName: 'filesystem',
+      arguments: { path: '/etc/hosts' },
+      reason: 'Protected path',
+      receivedAt: '2026-01-01T00:00:00Z',
+    };
+    handleEvent(state, createMockEffects(), 'escalation.created', esc);
+
+    const lines = state.outputs.get(1) ?? [];
+    expect(lines.length).toBe(1);
+    expect(lines[0].kind).toBe('escalation');
+    expect(lines[0].text).toContain('filesystem/filesystem__write_file');
+    expect(lines[0].escalationId).toBe('esc-out-1');
+  });
+
+  it('removes escalation output line on escalation.resolved', () => {
+    const state = createMockState();
+    const effects = createMockEffects();
+    const esc: EscalationDto = {
+      escalationId: 'esc-rem-1',
+      sessionLabel: 1,
+      sessionSource: { kind: 'web' },
+      toolName: 'filesystem__write_file',
+      serverName: 'filesystem',
+      arguments: { path: '/etc/hosts' },
+      reason: 'Protected path',
+      receivedAt: '2026-01-01T00:00:00Z',
+    };
+    handleEvent(state, effects, 'escalation.created', esc);
+    expect(state.outputs.get(1)?.length).toBe(1);
+
+    handleEvent(state, effects, 'escalation.resolved', { escalationId: 'esc-rem-1', decision: 'approved' });
+    expect(state.outputs.get(1)?.length).toBe(0);
+  });
+
+  it('removes escalation output line on escalation.expired', () => {
+    const state = createMockState();
+    const effects = createMockEffects();
+    const esc: EscalationDto = {
+      escalationId: 'esc-exp-1',
+      sessionLabel: 1,
+      sessionSource: { kind: 'web' },
+      toolName: 'filesystem__delete_file',
+      serverName: 'filesystem',
+      arguments: { path: '/tmp/foo' },
+      reason: 'Delete outside sandbox',
+      receivedAt: '2026-01-01T00:00:00Z',
+    };
+    handleEvent(state, effects, 'escalation.created', esc);
+    expect(state.outputs.get(1)?.length).toBe(1);
+
+    handleEvent(state, effects, 'escalation.expired', { escalationId: 'esc-exp-1', sessionLabel: 1 });
+    expect(state.outputs.get(1)?.length).toBe(0);
   });
 
   it('removes escalation on escalation.resolved', () => {

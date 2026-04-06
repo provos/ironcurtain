@@ -5,7 +5,17 @@
  * The WebSocket client feeds events into the store via handleEvent().
  */
 
-import type { SessionDto, EscalationDto, DaemonStatusDto, JobListDto, OutputLine } from './types.js';
+import type {
+  SessionDto,
+  EscalationDto,
+  DaemonStatusDto,
+  JobListDto,
+  OutputLine,
+  PendingEscalation,
+  ConversationTurn,
+  BudgetSummaryDto,
+  PersonaListItem,
+} from './types.js';
 import { createWsClient, type WsClient } from './ws-client.js';
 import { handleEvent as handleEventPure } from './event-handler.js';
 
@@ -33,7 +43,9 @@ class AppState {
   daemonStatus: DaemonStatusDto | null = $state(null);
   sessions: Map<number, SessionDto> = $state(new Map());
   selectedSessionLabel: number | null = $state(null);
-  pendingEscalations: Map<string, EscalationDto> = $state(new Map());
+  pendingEscalations: Map<string, PendingEscalation> = $state(new Map());
+  escalationDisplayNumber: number = $state(0);
+  escalationDismissedAt: number = $state(0);
   jobs: JobListDto[] = $state([]);
   sessionOutputs: Map<number, OutputLine[]> = $state(new Map());
   currentView: ViewId = $state('dashboard');
@@ -55,7 +67,7 @@ class AppState {
     let existing = this.sessionOutputs.get(label) ?? [];
 
     // Remove stale "Thinking..." lines when real content arrives
-    if (line.kind === 'tool_call' || line.kind === 'assistant') {
+    if (line.kind === 'tool_call' || line.kind === 'assistant' || line.kind === 'escalation') {
       existing = existing.filter((l) => l.kind !== 'thinking');
     }
 
@@ -68,6 +80,15 @@ class AppState {
 
     // Create a new Map so Svelte 5 detects the change
     this.sessionOutputs = new Map(this.sessionOutputs).set(label, existing);
+  }
+
+  filterOutput(label: number, predicate: (line: OutputLine) => boolean): void {
+    const existing = this.sessionOutputs.get(label);
+    if (!existing) return;
+    const filtered = existing.filter(predicate);
+    if (filtered.length !== existing.length) {
+      this.sessionOutputs = new Map(this.sessionOutputs).set(label, filtered);
+    }
   }
 
   removeOutput(label: number): void {
@@ -103,9 +124,19 @@ function wireEventHandlers(client: WsClient): void {
   });
 
   client.onEvent((event, payload) => {
-    handleEventPure(appState, { refreshJobs: () => refreshJobs(client) }, event, payload);
+    handleEventPure(
+      appState,
+      {
+        refreshJobs: () => refreshJobs(client),
+        assignDisplayNumber: () => ++appState.escalationDisplayNumber,
+      },
+      event,
+      payload,
+    );
   });
 }
+
+let isInitialConnect = true;
 
 async function refreshAll(client: WsClient): Promise<void> {
   try {
@@ -126,11 +157,28 @@ async function refreshAll(client: WsClient): Promise<void> {
 
     appState.jobs = jobs;
 
-    const newEscalations = new Map<string, EscalationDto>();
+    const newEscalations = new Map<string, PendingEscalation>();
     for (const esc of escalations) {
-      newEscalations.set(esc.escalationId, esc);
+      const displayNumber = ++appState.escalationDisplayNumber;
+      newEscalations.set(esc.escalationId, { ...esc, displayNumber });
     }
     appState.pendingEscalations = newEscalations;
+    // Remove stale escalation output lines that are no longer pending
+    for (const [label, lines] of appState.sessionOutputs) {
+      const filtered = lines.filter(
+        (line) => line.kind !== 'escalation' || (line.escalationId && newEscalations.has(line.escalationId)),
+      );
+      if (filtered.length !== lines.length) {
+        appState.sessionOutputs = new Map(appState.sessionOutputs).set(label, filtered);
+      }
+    }
+    // On initial connect, suppress auto-open for pre-existing escalations.
+    // On reconnect, preserve the watermark so new escalations during
+    // disconnect will trigger the modal.
+    if (isInitialConnect) {
+      appState.escalationDismissedAt = appState.escalationDisplayNumber;
+      isInitialConnect = false;
+    }
   } catch (err) {
     console.error('Failed to refresh state:', err);
   }
@@ -180,6 +228,74 @@ export function initConnection(): void {
 
   appState.hasToken = true;
   client.connect(buildWsUrl(), token);
+}
+
+/**
+ * Send a resolve request for a pending escalation.
+ * Callers handle errors in their own way (rethrow, display, etc.).
+ */
+export async function resolveEscalation(
+  escalationId: string,
+  decision: 'approved' | 'denied',
+  whitelistSelection?: number,
+): Promise<void> {
+  const params: Record<string, unknown> = { escalationId, decision };
+  if (decision === 'approved' && whitelistSelection != null) {
+    params.whitelistSelection = whitelistSelection;
+  }
+  await getWsClient().request('escalations.resolve', params);
+}
+
+// ── Session RPC actions ──────────────────────────────────────────────
+
+export async function createSession(persona?: string): Promise<{ label: number }> {
+  const params: Record<string, unknown> = {};
+  if (persona) params.persona = persona;
+  return getWsClient().request<{ label: number }>('sessions.create', params);
+}
+
+export async function sendSessionMessage(label: number, text: string): Promise<void> {
+  await getWsClient().request('sessions.send', { label, text });
+}
+
+export async function endSession(label: number): Promise<void> {
+  await getWsClient().request('sessions.end', { label });
+}
+
+export async function loadSessionHistory(label: number): Promise<ConversationTurn[]> {
+  return getWsClient().request<ConversationTurn[]>('sessions.history', { label });
+}
+
+export async function loadSessionBudget(label: number): Promise<BudgetSummaryDto> {
+  return getWsClient().request<BudgetSummaryDto>('sessions.budget', { label });
+}
+
+// ── Job RPC actions ──────────────────────────────────────────────────
+
+export async function runJob(jobId: string): Promise<void> {
+  await getWsClient().request('jobs.run', { jobId });
+}
+
+export async function enableJob(jobId: string): Promise<void> {
+  await getWsClient().request('jobs.enable', { jobId });
+}
+
+export async function disableJob(jobId: string): Promise<void> {
+  await getWsClient().request('jobs.disable', { jobId });
+}
+
+export async function removeJob(jobId: string): Promise<void> {
+  await getWsClient().request('jobs.remove', { jobId });
+}
+
+export async function recompileJob(jobId: string): Promise<void> {
+  await getWsClient().request('jobs.recompile', { jobId });
+}
+
+// ── Persona RPC actions ──────────────────────────────────────────────
+
+export async function listPersonas(): Promise<PersonaListItem[]> {
+  return getWsClient().request<PersonaListItem[]>('personas.list');
 }
 
 export function connectWithToken(token: string): void {

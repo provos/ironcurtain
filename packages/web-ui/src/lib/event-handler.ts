@@ -5,22 +5,32 @@
  * depending on Svelte runes or any other framework-specific API.
  */
 
-import type { SessionDto, EscalationDto, DaemonStatusDto, BudgetSummaryDto, OutputLine, JobListDto } from './types.js';
+import type {
+  SessionDto,
+  EscalationDto,
+  DaemonStatusDto,
+  BudgetSummaryDto,
+  OutputLine,
+  JobListDto,
+  PendingEscalation,
+} from './types.js';
 
 /** Minimal state surface that handleEvent needs to read and write. */
 export interface AppStateLike {
   daemonStatus: DaemonStatusDto | null;
   sessions: Map<number, SessionDto>;
   selectedSessionLabel: number | null;
-  pendingEscalations: Map<string, EscalationDto>;
+  pendingEscalations: Map<string, PendingEscalation>;
   jobs: JobListDto[];
   addOutput(label: number, line: OutputLine): void;
   removeOutput(label: number): void;
+  filterOutput(label: number, predicate: (line: OutputLine) => boolean): void;
 }
 
 /** Side effects that handleEvent may request. */
 export interface EventSideEffects {
   refreshJobs(): void;
+  assignDisplayNumber(escalationId: string): number;
 }
 
 // ---------------------------------------------------------------------------
@@ -167,16 +177,28 @@ function applyEvent(state: AppStateLike, effects: EventSideEffects, parsed: WebE
 
     case 'escalation.created': {
       const esc = parsed.payload;
-      state.pendingEscalations = new Map(state.pendingEscalations).set(esc.escalationId, esc);
+      const displayNumber = effects.assignDisplayNumber(esc.escalationId);
+      const pending: PendingEscalation = { ...esc, displayNumber };
+      state.pendingEscalations = new Map(state.pendingEscalations).set(esc.escalationId, pending);
+      state.addOutput(esc.sessionLabel, {
+        kind: 'escalation',
+        text: `Pending escalation: ${esc.serverName}/${esc.toolName}`,
+        timestamp: esc.receivedAt,
+        escalationId: esc.escalationId,
+      });
       return true;
     }
 
     case 'escalation.resolved':
     case 'escalation.expired': {
       const { escalationId } = parsed.payload;
-      const next = new Map(state.pendingEscalations);
-      next.delete(escalationId);
-      state.pendingEscalations = next;
+      const esc = state.pendingEscalations.get(escalationId);
+      if (esc) {
+        const next = new Map(state.pendingEscalations);
+        next.delete(escalationId);
+        state.pendingEscalations = next;
+        state.filterOutput(esc.sessionLabel, (line) => line.escalationId !== escalationId);
+      }
       return true;
     }
 

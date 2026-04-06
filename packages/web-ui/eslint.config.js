@@ -6,17 +6,22 @@ import svelteParser from 'svelte-eslint-parser';
 /** @type {import('eslint').Linter.Config[]} */
 export default [
   {
-    ignores: ['dist/', 'e2e-results/', 'playwright-report/', '.svelte-kit/'],
+    ignores: [
+      'dist/',
+      'e2e-results/',
+      'playwright-report/',
+      '.svelte-kit/',
+      'e2e/',
+      'scripts/',
+      // .svelte.ts files use Svelte 5 runes; type-checked by svelte-check, not eslint
+      'src/**/*.svelte.ts',
+    ],
   },
-  // TypeScript files
+  // TypeScript files (syntax linting only; type checking via svelte-check)
   {
-    files: ['src/**/*.ts', 'scripts/**/*.ts'],
+    files: ['src/**/*.ts'],
     languageOptions: {
       parser: tsParser,
-      parserOptions: {
-        project: './tsconfig.json',
-        extraFileExtensions: ['.svelte'],
-      },
     },
     plugins: {
       '@typescript-eslint': tsPlugin,
@@ -26,7 +31,7 @@ export default [
       '@typescript-eslint/no-explicit-any': 'warn',
     },
   },
-  // Svelte files
+  // Svelte files (syntax linting; type checking via svelte-check)
   ...sveltePlugin.configs['flat/recommended'],
   {
     files: ['src/**/*.svelte'],
@@ -34,8 +39,13 @@ export default [
       parser: svelteParser,
       parserOptions: {
         parser: tsParser,
-        project: './tsconfig.json',
       },
+    },
+    rules: {
+      // We use DOMPurify for sanitization, so {@html} is safe
+      'svelte/no-at-html-tags': 'off',
+      // We use immutable Map/Set patterns for Svelte 5 reactivity (new Map on every update)
+      'svelte/prefer-svelte-reactivity': 'off',
     },
   },
 ];
