@@ -80,6 +80,33 @@ describe('workflow event handling', () => {
       expect(wf?.phase).toBe('running');
     });
 
+    it('preserves waiting_human phase when state_entered arrives after gate_raised', () => {
+      state.workflows.set('wf-1', mockWorkflow('wf-1'));
+
+      // Simulate the orchestrator event order: gate_raised fires before state_entered
+      const gate: HumanGateRequestDto = {
+        gateId: 'wf-1-plan_review',
+        workflowId: 'wf-1',
+        stateName: 'plan_review',
+        acceptedEvents: ['APPROVE', 'FORCE_REVISION', 'ABORT'],
+        presentedArtifacts: ['plan.md'],
+        summary: 'Review the plan',
+      };
+      handleEvent(state, effects, 'workflow.gate_raised', { workflowId: 'wf-1', gate });
+      expect(state.workflows.get('wf-1')?.phase).toBe('waiting_human');
+
+      // state_entered for the same gate state arrives right after
+      handleEvent(state, effects, 'workflow.state_entered', {
+        workflowId: 'wf-1',
+        state: 'plan_review',
+      });
+
+      // Phase must remain waiting_human, not revert to running
+      const wf = state.workflows.get('wf-1');
+      expect(wf?.phase).toBe('waiting_human');
+      expect(wf?.currentState).toBe('plan_review');
+    });
+
     it('ignores state_entered for unknown workflow', () => {
       const result = handleEvent(state, effects, 'workflow.state_entered', {
         workflowId: 'unknown',

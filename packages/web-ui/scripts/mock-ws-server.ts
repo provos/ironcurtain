@@ -1011,7 +1011,26 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
       return undefined;
     }
 
+    case 'workflows.listResumable':
+      return [
+        {
+          workflowId: 'wf-resumable-001',
+          lastState: 'plan_review',
+          timestamp: new Date(Date.now() - 3600_000).toISOString(),
+          taskDescription: 'Implement circle of fifths visualization component with SVG',
+          workspacePath: '/home/user/projects/music-app',
+        },
+        {
+          workflowId: 'wf-resumable-002',
+          lastState: 'code_review',
+          timestamp: new Date(Date.now() - 86400_000).toISOString(),
+          taskDescription: 'Add unit tests for authentication middleware',
+        },
+      ];
+
     case 'workflows.resume':
+      return { accepted: true, workflowId: (params.workflowId as string) ?? 'wf-imported-001' };
+
     case 'workflows.inspect':
       return { accepted: true };
 

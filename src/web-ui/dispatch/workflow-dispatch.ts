@@ -5,7 +5,7 @@
  * abort, resolveGate, inspect, fileTree, fileContent, artifacts.
  */
 
-import { readdirSync, readFileSync, statSync, type Dirent } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync, type Dirent } from 'node:fs';
 import { resolve, extname, normalize } from 'node:path';
 import { z } from 'zod';
 
@@ -13,6 +13,7 @@ import { type DispatchContext, validateParams } from './types.js';
 import {
   type WorkflowSummaryDto,
   type WorkflowDetailDto,
+  type ResumableWorkflowDto,
   type FileTreeEntryDto,
   type FileTreeResponseDto,
   type FileContentResponseDto,
@@ -122,10 +123,34 @@ export async function workflowDispatch(
       return { workflowId };
     }
 
+    case 'workflows.listResumable': {
+      return buildResumableList(manager);
+    }
+
     case 'workflows.resume': {
-      const { workflowId } = validateParams(workflowIdSchema, params);
-      await controller.resume(workflowId as WorkflowId);
-      return { accepted: true };
+      const schema = z.object({
+        workflowId: z.string().min(1).optional(),
+        baseDir: z.string().min(1).optional(),
+      });
+      const { workflowId, baseDir } = validateParams(schema, params);
+
+      let resolvedId: WorkflowId;
+      if (baseDir) {
+        if (!existsSync(baseDir)) {
+          throw new RpcError('INVALID_PARAMS', `Directory does not exist: ${baseDir}`);
+        }
+        if (!statSync(baseDir).isDirectory()) {
+          throw new RpcError('INVALID_PARAMS', `Path is not a directory: ${baseDir}`);
+        }
+        resolvedId = manager.importExternalCheckpoint(baseDir, workflowId);
+      } else if (workflowId) {
+        resolvedId = workflowId as WorkflowId;
+      } else {
+        throw new RpcError('INVALID_PARAMS', 'Either workflowId or baseDir must be provided');
+      }
+
+      await controller.resume(resolvedId);
+      return { accepted: true, workflowId: resolvedId };
     }
 
     case 'workflows.abort': {
@@ -422,6 +447,50 @@ function readArtifact(workspacePath: string, artifactName: string): ArtifactCont
   const files: ArtifactFileDto[] = [];
   collectArtifactFilesFromEntries(artifactDir, '', entries, files);
   return { files };
+}
+
+// ---------------------------------------------------------------------------
+// Resumable workflow helpers
+// ---------------------------------------------------------------------------
+
+function buildResumableList(manager: WorkflowManager): ResumableWorkflowDto[] {
+  const controller = manager.getOrchestrator();
+  const resumableIds = controller.listResumable();
+  const store = manager.getCheckpointStore();
+  const dtos: ResumableWorkflowDto[] = [];
+
+  for (const id of resumableIds) {
+    const checkpoint = store.load(id);
+    if (!checkpoint) continue;
+
+    // Determine last state from checkpoint's machine state
+    const lastState = extractLastState(checkpoint.machineState);
+    dtos.push({
+      workflowId: id,
+      lastState,
+      timestamp: checkpoint.timestamp,
+      taskDescription: checkpoint.context.taskDescription,
+      workspacePath: checkpoint.workspacePath,
+    });
+  }
+
+  // Sort by timestamp descending (most recent first)
+  dtos.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+  return dtos;
+}
+
+/**
+ * Extracts a human-readable state name from an XState machine state snapshot.
+ * The machineState can be a string (simple state) or a nested object (compound state).
+ */
+export function extractLastState(machineState: unknown): string {
+  if (typeof machineState === 'string') return machineState;
+  if (machineState && typeof machineState === 'object') {
+    // Nested XState value: { parentState: "childState" }
+    const keys = Object.keys(machineState as Record<string, unknown>);
+    if (keys.length > 0) return keys[0];
+  }
+  return 'unknown';
 }
 
 function collectArtifactFilesFromEntries(

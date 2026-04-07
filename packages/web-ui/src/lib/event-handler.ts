@@ -257,7 +257,10 @@ function applyEvent(state: AppStateLike, effects: EventSideEffects, parsed: WebE
       const { workflowId, state: stateName } = parsed.payload;
       const existing = state.workflows.get(workflowId);
       if (!existing) return true;
-      const updated: WorkflowSummaryDto = { ...existing, currentState: stateName, phase: 'running' };
+      // Preserve 'waiting_human' phase -- gate_raised may have arrived just before
+      // this state_entered event for the same transition.
+      const phase = existing.phase === 'waiting_human' ? existing.phase : 'running';
+      const updated: WorkflowSummaryDto = { ...existing, currentState: stateName, phase };
       state.workflows = new Map(state.workflows).set(workflowId, updated);
       return true;
     }

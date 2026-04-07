@@ -45,6 +45,7 @@ export type MethodName =
   | 'workflows.fileContent'
   | 'workflows.artifacts'
   | 'workflows.listDefinitions'
+  | 'workflows.listResumable'
   | 'personas.get'
   | 'personas.compile';
 
@@ -280,6 +281,15 @@ export interface ArtifactContentDto {
 // ---------------------------------------------------------------------------
 // Workflow Definition DTO Types
 // ---------------------------------------------------------------------------
+
+/** Resumable workflow returned by `workflows.listResumable`. */
+export interface ResumableWorkflowDto {
+  readonly workflowId: string;
+  readonly lastState: string;
+  readonly timestamp: string;
+  readonly taskDescription: string;
+  readonly workspacePath?: string;
+}
 
 /** Available workflow definition returned by `workflows.listDefinitions`. */
 export interface WorkflowDefinitionDto {

@@ -158,6 +158,15 @@ export interface OutputLine {
 // Workflow types
 // ---------------------------------------------------------------------------
 
+/** Resumable workflow returned by `workflows.listResumable`. */
+export interface ResumableWorkflowDto {
+  readonly workflowId: string;
+  readonly lastState: string;
+  readonly timestamp: string;
+  readonly taskDescription: string;
+  readonly workspacePath?: string;
+}
+
 export type WorkflowPhase = 'running' | 'waiting_human' | 'completed' | 'failed' | 'aborted';
 
 export interface WorkflowSummaryDto {

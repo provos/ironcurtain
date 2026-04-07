@@ -6,8 +6,7 @@
  * from the orchestrator are forwarded to the WebEventBus.
  */
 
-import { tmpdir } from 'node:os';
-import { mkdtempSync } from 'node:fs';
+import { mkdirSync, copyFileSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 import {
@@ -21,6 +20,8 @@ import { FileCheckpointStore } from '../workflow/checkpoint.js';
 import { createWorkflowSessionFactory } from '../workflow/cli-support.js';
 import type { WebEventBus } from './web-event-bus.js';
 import { type HumanGateRequestDto, toHumanGateRequestDto } from './web-ui-types.js';
+import { getIronCurtainHome } from '../config/paths.js';
+import type { WorkflowId } from '../workflow/types.js';
 
 // ---------------------------------------------------------------------------
 // Options
@@ -62,13 +63,88 @@ export class WorkflowManager {
     }
   }
 
+  /**
+   * Imports a checkpoint from an external directory into the daemon's own store.
+   *
+   * When `workflowId` is omitted, picks the most recent checkpoint in the external dir.
+   * Copies both the checkpoint and `definition.json` so that `resume()` can find them.
+   *
+   * @returns The workflow ID that was imported.
+   */
+  importExternalCheckpoint(externalBaseDir: string, workflowId?: string): WorkflowId {
+    const externalStore = new FileCheckpointStore(externalBaseDir);
+    let targetId: WorkflowId;
+
+    if (workflowId) {
+      targetId = workflowId as WorkflowId;
+    } else {
+      // Pick the most recent checkpoint
+      const allIds = externalStore.listAll();
+      if (allIds.length === 0) {
+        throw new Error(`No checkpoints found in ${externalBaseDir}`);
+      }
+      let latestId: WorkflowId | undefined;
+      let latestTimestamp = '';
+      for (const id of allIds) {
+        const cp = externalStore.load(id);
+        if (cp && cp.timestamp > latestTimestamp) {
+          latestId = id;
+          latestTimestamp = cp.timestamp;
+        }
+      }
+      if (!latestId) {
+        throw new Error(`No valid checkpoints found in ${externalBaseDir}`);
+      }
+      targetId = latestId;
+    }
+
+    const checkpoint = externalStore.load(targetId);
+    if (!checkpoint) {
+      throw new Error(`No checkpoint found for workflow ${targetId} in ${externalBaseDir}`);
+    }
+
+    // Save into daemon's own store
+    const localStore = this.getCheckpointStore();
+    localStore.save(targetId, checkpoint);
+
+    // Copy definition.json if it exists in the external dir
+    const externalDefPath = resolve(externalBaseDir, targetId, 'definition.json');
+    const localMetaDir = resolve(this.getBaseDir(), targetId);
+    mkdirSync(localMetaDir, { recursive: true });
+    if (existsSync(externalDefPath)) {
+      copyFileSync(externalDefPath, resolve(localMetaDir, 'definition.json'));
+    }
+
+    return targetId;
+  }
+
+  /** Returns the stable base directory for workflow data. */
+  getBaseDir(): string {
+    const baseDir = resolve(getIronCurtainHome(), 'workflow-runs');
+    mkdirSync(baseDir, { recursive: true });
+    return baseDir;
+  }
+
+  /** Returns the checkpoint store for the current orchestrator (creates orchestrator if needed). */
+  getCheckpointStore(): FileCheckpointStore {
+    // Ensure orchestrator is created so checkpoint store exists
+    this.getOrchestrator();
+    if (!this._checkpointStore) {
+      throw new Error('Checkpoint store not initialized -- orchestrator creation failed');
+    }
+    return this._checkpointStore;
+  }
+
   // -----------------------------------------------------------------------
   // Private
   // -----------------------------------------------------------------------
 
+  private _checkpointStore: FileCheckpointStore | null = null;
+
   private createOrchestrator(): WorkflowOrchestrator {
-    const baseDir = mkdtempSync(resolve(tmpdir(), 'ironcurtain-workflow-'));
+    const baseDir = this.getBaseDir();
     const checkpointStore = new FileCheckpointStore(baseDir);
+    this._checkpointStore = checkpointStore;
     const sessionFactory = createWorkflowSessionFactory();
 
     const deps: WorkflowOrchestratorDeps = {

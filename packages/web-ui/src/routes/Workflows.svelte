@@ -5,8 +5,10 @@
     abortWorkflow as rpcAbortWorkflow,
     refreshWorkflows,
     listWorkflowDefinitions,
+    listResumableWorkflows,
+    resumeWorkflow as rpcResumeWorkflow,
   } from '../lib/stores.svelte.js';
-  import type { WorkflowDefinitionDto } from '$lib/types.js';
+  import type { WorkflowDefinitionDto, ResumableWorkflowDto } from '$lib/types.js';
   import { phaseBadgeVariant } from '$lib/utils.js';
   import { Button } from '$lib/components/ui/button/index.js';
   import { Badge } from '$lib/components/ui/badge/index.js';
@@ -29,12 +31,21 @@
   // The auto-select effect will not re-select until the set of pending gates changes.
   let dismissedGateIds: Set<string> | null = $state(null);
 
+  // Resume section state
+  let resumableWorkflows: ResumableWorkflowDto[] = $state([]);
+  let resumingId: string | null = $state(null);
+  let importDirExpanded = $state(false);
+  let importDir = $state('');
+  let importing = $state(false);
+  let resumeMessage = $state('');
+
   const isCustomPath = $derived(selectedDefinition === CUSTOM_PATH_SENTINEL);
   const effectivePath = $derived(isCustomPath ? customPath.trim() : selectedDefinition);
 
   $effect(() => {
     refreshWorkflows();
     loadDefinitions();
+    loadResumable();
   });
 
   async function loadDefinitions(): Promise<void> {
@@ -42,6 +53,14 @@
       definitions = await listWorkflowDefinitions();
     } catch {
       // Best-effort; the dropdown will be empty
+    }
+  }
+
+  async function loadResumable(): Promise<void> {
+    try {
+      resumableWorkflows = await listResumableWorkflows();
+    } catch {
+      // Best-effort
     }
   }
 
@@ -60,6 +79,39 @@
       actionError = `Failed to start workflow: ${err instanceof Error ? err.message : String(err)}`;
     } finally {
       starting = false;
+    }
+  }
+
+  async function handleResume(workflowId: string): Promise<void> {
+    resumingId = workflowId;
+    actionError = '';
+    resumeMessage = '';
+    try {
+      await rpcResumeWorkflow(workflowId);
+      resumeMessage = `Workflow ${workflowId.slice(0, 8)}... resumed`;
+      await Promise.all([refreshWorkflows(), loadResumable()]);
+    } catch (err) {
+      actionError = `Failed to resume workflow: ${err instanceof Error ? err.message : String(err)}`;
+    } finally {
+      resumingId = null;
+    }
+  }
+
+  async function handleImportAndResume(): Promise<void> {
+    if (!importDir.trim()) return;
+    importing = true;
+    actionError = '';
+    resumeMessage = '';
+    try {
+      const result = await rpcResumeWorkflow(undefined, importDir.trim());
+      resumeMessage = `Imported and resumed workflow ${result.workflowId.slice(0, 8)}...`;
+      importDir = '';
+      importDirExpanded = false;
+      await Promise.all([refreshWorkflows(), loadResumable()]);
+    } catch (err) {
+      actionError = `Failed to import workflow: ${err instanceof Error ? err.message : String(err)}`;
+    } finally {
+      importing = false;
     }
   }
 
@@ -209,6 +261,63 @@
           <Button onclick={handleStart} loading={starting} disabled={!effectivePath || !taskDescription.trim()}>
             Start Workflow
           </Button>
+        </div>
+      </CardContent>
+    </Card>
+
+    {#if resumeMessage}
+      <Alert variant="default" dismissible ondismiss={() => (resumeMessage = '')}>{resumeMessage}</Alert>
+    {/if}
+
+    <Card>
+      <CardHeader>
+        <CardTitle>Resume Workflow</CardTitle>
+      </CardHeader>
+      <CardContent>
+        {#if resumableWorkflows.length > 0}
+          <div class="space-y-2 mb-4">
+            {#each resumableWorkflows as rw (rw.workflowId)}
+              <div class="flex items-center justify-between p-3 border border-border rounded-lg bg-background">
+                <div class="flex-1 min-w-0">
+                  <div class="flex items-center gap-2 text-sm">
+                    <Badge variant="outline">{rw.lastState}</Badge>
+                    <span class="text-muted-foreground">{new Date(rw.timestamp).toLocaleString()}</span>
+                  </div>
+                  <p class="text-sm mt-1 truncate" title={rw.taskDescription}>{rw.taskDescription}</p>
+                </div>
+                <Button
+                  size="sm"
+                  class="ml-3 shrink-0"
+                  loading={resumingId === rw.workflowId}
+                  disabled={resumingId !== null}
+                  onclick={() => handleResume(rw.workflowId)}
+                >
+                  Resume
+                </Button>
+              </div>
+            {/each}
+          </div>
+        {:else}
+          <p class="text-sm text-muted-foreground mb-4">No resumable workflows found.</p>
+        {/if}
+
+        <div>
+          <button
+            type="button"
+            class="text-sm text-muted-foreground hover:text-foreground flex items-center gap-1 transition-colors"
+            onclick={() => (importDirExpanded = !importDirExpanded)}
+          >
+            <span class="inline-block transition-transform" class:rotate-90={importDirExpanded}>&#9654;</span>
+            Import from directory
+          </button>
+          {#if importDirExpanded}
+            <div class="flex gap-2 mt-2">
+              <Input bind:value={importDir} placeholder="/path/to/workflow-runs/" class="flex-1" />
+              <Button size="sm" loading={importing} disabled={!importDir.trim()} onclick={handleImportAndResume}>
+                Import & Resume
+              </Button>
+            </div>
+          {/if}
         </div>
       </CardContent>
     </Card>

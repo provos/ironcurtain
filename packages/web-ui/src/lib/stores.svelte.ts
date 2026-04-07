@@ -17,6 +17,7 @@ import type {
   PersonaListItem,
   PersonaDetailDto,
   PersonaCompileResultDto,
+  ResumableWorkflowDto,
   WorkflowSummaryDto,
   WorkflowDetailDto,
   WorkflowDefinitionDto,
@@ -357,6 +358,17 @@ export async function refreshWorkflows(): Promise<void> {
 
 export async function getWorkflowDetail(workflowId: string): Promise<WorkflowDetailDto> {
   return getWsClient().request<WorkflowDetailDto>('workflows.get', { workflowId });
+}
+
+export async function listResumableWorkflows(): Promise<ResumableWorkflowDto[]> {
+  return getWsClient().request<ResumableWorkflowDto[]>('workflows.listResumable');
+}
+
+export async function resumeWorkflow(workflowId?: string, baseDir?: string): Promise<{ workflowId: string }> {
+  const params: Record<string, unknown> = {};
+  if (workflowId) params.workflowId = workflowId;
+  if (baseDir) params.baseDir = baseDir;
+  return getWsClient().request<{ workflowId: string }>('workflows.resume', params);
 }
 
 // ── Workflow file browser RPC actions ──────────────────────────────────
