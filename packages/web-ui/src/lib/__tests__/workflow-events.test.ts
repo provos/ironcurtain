@@ -230,6 +230,80 @@ describe('workflow event handling', () => {
     });
   });
 
+  describe('phase reverts to running after gate is dismissed', () => {
+    it('state_entered after gate_dismissed sets phase to running, not sticky waiting_human', () => {
+      state.workflows.set('wf-1', mockWorkflow('wf-1'));
+
+      // 1. gate_raised sets waiting_human
+      const gate: HumanGateRequestDto = {
+        gateId: 'wf-1-plan_review',
+        workflowId: 'wf-1',
+        stateName: 'plan_review',
+        acceptedEvents: ['APPROVE', 'FORCE_REVISION', 'ABORT'],
+        presentedArtifacts: ['plan.md'],
+        summary: 'Review the plan',
+      };
+      handleEvent(state, effects, 'workflow.gate_raised', { workflowId: 'wf-1', gate });
+      expect(state.workflows.get('wf-1')?.phase).toBe('waiting_human');
+
+      // 2. gate_dismissed removes the gate
+      handleEvent(state, effects, 'workflow.gate_dismissed', {
+        workflowId: 'wf-1',
+        gateId: 'wf-1-plan_review',
+      });
+      expect(state.pendingGates.size).toBe(0);
+
+      // 3. state_entered should revert to running (no active gate remains)
+      handleEvent(state, effects, 'workflow.state_entered', {
+        workflowId: 'wf-1',
+        state: 'implement',
+      });
+
+      const wf = state.workflows.get('wf-1');
+      expect(wf?.phase).toBe('running');
+      expect(wf?.currentState).toBe('implement');
+    });
+  });
+
+  describe('workflow.started', () => {
+    it('creates a new entry in the workflows Map', () => {
+      handleEvent(state, effects, 'workflow.started', {
+        workflowId: 'wf-new',
+        name: 'my-workflow',
+        taskDescription: 'Build something',
+      });
+
+      expect(state.workflows.size).toBe(1);
+      const wf = state.workflows.get('wf-new');
+      expect(wf).toBeDefined();
+      expect(wf?.workflowId).toBe('wf-new');
+      expect(wf?.name).toBe('my-workflow');
+      expect(wf?.phase).toBe('running');
+      expect(wf?.currentState).toBe('starting...');
+      expect(wf?.startedAt).toBeDefined();
+    });
+
+    it('subsequent state_entered updates the entry created by started', () => {
+      // workflow.started creates the entry
+      handleEvent(state, effects, 'workflow.started', {
+        workflowId: 'wf-new',
+        name: 'my-workflow',
+        taskDescription: 'Build something',
+      });
+      expect(state.workflows.get('wf-new')?.currentState).toBe('starting...');
+
+      // state_entered updates it
+      handleEvent(state, effects, 'workflow.state_entered', {
+        workflowId: 'wf-new',
+        state: 'plan',
+      });
+
+      const wf = state.workflows.get('wf-new');
+      expect(wf?.currentState).toBe('plan');
+      expect(wf?.phase).toBe('running');
+    });
+  });
+
   it('returns false for unrecognized event', () => {
     const result = handleEvent(state, effects, 'workflow.unknown_event', {});
     expect(result).toBe(false);

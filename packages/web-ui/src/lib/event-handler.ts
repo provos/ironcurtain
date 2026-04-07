@@ -59,6 +59,10 @@ export type WebEvent =
   | { event: 'job.failed'; payload: Record<string, unknown> }
   | { event: 'job.started'; payload: Record<string, unknown> }
   | {
+      event: 'workflow.started';
+      payload: { workflowId: string; name: string; taskDescription: string };
+    }
+  | {
       event: 'workflow.state_entered';
       payload: { workflowId: string; state: string; previousState?: string };
     }
@@ -105,6 +109,11 @@ export function parseEvent(event: string, payload: unknown): WebEvent | undefine
     case 'job.failed':
     case 'job.started':
       return { event, payload: data };
+    case 'workflow.started':
+      return {
+        event,
+        payload: data as { workflowId: string; name: string; taskDescription: string },
+      };
     case 'workflow.state_entered':
       return {
         event,
@@ -253,13 +262,33 @@ function applyEvent(state: AppStateLike, effects: EventSideEffects, parsed: WebE
       return true;
 
     // Workflow events
+    case 'workflow.started': {
+      const { workflowId, name } = parsed.payload;
+      const entry: WorkflowSummaryDto = {
+        workflowId,
+        name,
+        phase: 'running',
+        currentState: 'starting...',
+        startedAt: new Date().toISOString(),
+      };
+      state.workflows = new Map(state.workflows).set(workflowId, entry);
+      return true;
+    }
+
     case 'workflow.state_entered': {
       const { workflowId, state: stateName } = parsed.payload;
       const existing = state.workflows.get(workflowId);
       if (!existing) return true;
-      // Preserve 'waiting_human' phase -- gate_raised may have arrived just before
-      // this state_entered event for the same transition.
-      const phase = existing.phase === 'waiting_human' ? existing.phase : 'running';
+      // Preserve 'waiting_human' only if there is still an active gate for this workflow.
+      // Without this check, the phase would stay sticky after the gate is resolved.
+      let hasActiveGate = false;
+      for (const gate of state.pendingGates.values()) {
+        if (gate.workflowId === workflowId) {
+          hasActiveGate = true;
+          break;
+        }
+      }
+      const phase = hasActiveGate ? 'waiting_human' : 'running';
       const updated: WorkflowSummaryDto = { ...existing, currentState: stateName, phase };
       state.workflows = new Map(state.workflows).set(workflowId, updated);
       return true;

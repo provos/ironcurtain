@@ -183,6 +183,13 @@ export class WorkflowManager {
   /** Maps WorkflowLifecycleEvent to WebEventBus events. */
   private forwardLifecycleEvent(event: WorkflowLifecycleEvent): void {
     switch (event.kind) {
+      case 'started':
+        this.eventBus.emit('workflow.started', {
+          workflowId: event.workflowId,
+          name: event.name,
+          taskDescription: event.taskDescription,
+        });
+        break;
       case 'state_entered':
         this.eventBus.emit('workflow.state_entered', {
           workflowId: event.workflowId,

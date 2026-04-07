@@ -42,6 +42,7 @@ export interface WebEventMap {
   'daemon.status': DaemonStatusDto;
 
   // Workflow events
+  'workflow.started': { workflowId: string; name: string; taskDescription: string };
   'workflow.state_entered': { workflowId: string; state: string; previousState?: string };
   'workflow.completed': { workflowId: string };
   'workflow.failed': { workflowId: string; error: string };

@@ -8,8 +8,12 @@
     listResumableWorkflows,
     resumeWorkflow as rpcResumeWorkflow,
   } from '../lib/stores.svelte.js';
-  import type { WorkflowDefinitionDto, ResumableWorkflowDto } from '$lib/types.js';
+  import type { WorkflowSummaryDto, WorkflowDefinitionDto, ResumableWorkflowDto } from '$lib/types.js';
   import { phaseBadgeVariant } from '$lib/utils.js';
+
+  function createWorkflowPlaceholder(workflowId: string, currentState: string): WorkflowSummaryDto {
+    return { workflowId, name: workflowId, phase: 'running', currentState, startedAt: new Date().toISOString() };
+  }
   import { Button } from '$lib/components/ui/button/index.js';
   import { Badge } from '$lib/components/ui/badge/index.js';
   import { Card, CardHeader, CardTitle, CardContent } from '$lib/components/ui/card/index.js';
@@ -69,7 +73,15 @@
     starting = true;
     actionError = '';
     try {
-      await rpcStartWorkflow(effectivePath, taskDescription.trim(), workspacePath.trim() || undefined);
+      const result = await rpcStartWorkflow(effectivePath, taskDescription.trim(), workspacePath.trim() || undefined);
+      // Ensure the workflow exists in the Map so events arriving before
+      // refreshWorkflows() completes are not silently dropped.
+      if (!appState.workflows.has(result.workflowId)) {
+        appState.workflows = new Map(appState.workflows).set(
+          result.workflowId,
+          createWorkflowPlaceholder(result.workflowId, 'starting...'),
+        );
+      }
       selectedDefinition = '';
       customPath = '';
       taskDescription = '';
@@ -86,11 +98,22 @@
     resumingId = workflowId;
     actionError = '';
     resumeMessage = '';
+    // Insert a placeholder so events arriving before the RPC returns are not dropped.
+    if (!appState.workflows.has(workflowId)) {
+      appState.workflows = new Map(appState.workflows).set(
+        workflowId,
+        createWorkflowPlaceholder(workflowId, 'resuming...'),
+      );
+    }
     try {
       await rpcResumeWorkflow(workflowId);
       resumeMessage = `Workflow ${workflowId.slice(0, 8)}... resumed`;
       await Promise.all([refreshWorkflows(), loadResumable()]);
     } catch (err) {
+      // Remove the placeholder on failure
+      const next = new Map(appState.workflows);
+      next.delete(workflowId);
+      appState.workflows = next;
       actionError = `Failed to resume workflow: ${err instanceof Error ? err.message : String(err)}`;
     } finally {
       resumingId = null;
@@ -104,6 +127,13 @@
     resumeMessage = '';
     try {
       const result = await rpcResumeWorkflow(undefined, importDir.trim());
+      // Insert placeholder so events arriving before refresh are not dropped.
+      if (!appState.workflows.has(result.workflowId)) {
+        appState.workflows = new Map(appState.workflows).set(
+          result.workflowId,
+          createWorkflowPlaceholder(result.workflowId, 'resuming...'),
+        );
+      }
       resumeMessage = `Imported and resumed workflow ${result.workflowId.slice(0, 8)}...`;
       importDir = '';
       importDirExpanded = false;

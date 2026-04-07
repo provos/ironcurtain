@@ -88,6 +88,12 @@ export interface WorkflowOrchestratorDeps {
 
 /** Lifecycle events emitted by the orchestrator. */
 export type WorkflowLifecycleEvent =
+  | {
+      readonly kind: 'started';
+      readonly workflowId: WorkflowId;
+      readonly name: string;
+      readonly taskDescription: string;
+    }
   | { readonly kind: 'state_entered'; readonly workflowId: WorkflowId; readonly state: string }
   | { readonly kind: 'completed'; readonly workflowId: WorkflowId }
   | { readonly kind: 'failed'; readonly workflowId: WorkflowId; readonly error: string }
@@ -287,6 +293,7 @@ export class WorkflowOrchestrator implements WorkflowController {
     };
 
     this.workflows.set(workflowId, instance);
+    this.emitLifecycleEvent({ kind: 'started', workflowId, name: definition.name, taskDescription });
     this.subscribeToActor(instance);
     actor.start();
     return Promise.resolve(workflowId);
@@ -343,6 +350,12 @@ export class WorkflowOrchestrator implements WorkflowController {
     };
 
     this.workflows.set(workflowId, instance);
+    this.emitLifecycleEvent({
+      kind: 'started',
+      workflowId,
+      name: definition.name,
+      taskDescription: checkpoint.context.taskDescription,
+    });
     this.subscribeToActor(instance);
     actor.start();
 

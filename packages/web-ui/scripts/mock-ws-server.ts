@@ -905,6 +905,11 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
         startedAt: new Date().toISOString(),
       };
       workflows.set(newId, newWf);
+      broadcast('workflow.started', {
+        workflowId: newId,
+        name: newWf.name,
+        taskDescription: String(params.taskDescription ?? ''),
+      });
       broadcast('workflow.agent_started', { workflowId: newId, stateId: 'plan', persona: 'planner' });
       broadcast('workflow.state_entered', { workflowId: newId, state: 'plan' });
 
