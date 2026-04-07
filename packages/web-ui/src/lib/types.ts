@@ -221,3 +221,66 @@ export interface WorkflowDetailDto extends WorkflowSummaryDto {
   readonly gate?: HumanGateRequestDto;
   readonly workspacePath: string;
 }
+
+// ---------------------------------------------------------------------------
+// File browser types
+// ---------------------------------------------------------------------------
+
+export interface FileTreeEntryDto {
+  readonly name: string;
+  readonly type: 'file' | 'directory';
+  readonly size?: number;
+}
+
+export interface FileTreeResponseDto {
+  readonly entries: readonly FileTreeEntryDto[];
+}
+
+export interface FileContentResponseDto {
+  readonly content?: string;
+  readonly language?: string;
+  readonly binary?: boolean;
+  readonly error?: string;
+}
+
+export interface ArtifactFileDto {
+  readonly path: string;
+  readonly content: string;
+}
+
+export interface ArtifactContentDto {
+  readonly files: readonly ArtifactFileDto[];
+}
+
+// ---------------------------------------------------------------------------
+// Workflow definition types
+// ---------------------------------------------------------------------------
+
+export type WorkflowSource = 'bundled' | 'user' | 'custom';
+
+export interface WorkflowDefinitionDto {
+  readonly name: string;
+  readonly description: string;
+  readonly path: string;
+  readonly source: WorkflowSource;
+}
+
+// ---------------------------------------------------------------------------
+// Persona types
+// ---------------------------------------------------------------------------
+
+export interface PersonaDetailDto {
+  readonly name: string;
+  readonly description: string;
+  readonly createdAt: string;
+  readonly constitution: string;
+  readonly servers?: readonly string[];
+  readonly hasPolicy: boolean;
+  readonly policyRuleCount?: number;
+}
+
+export interface PersonaCompileResultDto {
+  readonly success: boolean;
+  readonly ruleCount: number;
+  readonly errors?: readonly string[];
+}

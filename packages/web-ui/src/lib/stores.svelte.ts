@@ -15,14 +15,20 @@ import type {
   ConversationTurn,
   BudgetSummaryDto,
   PersonaListItem,
+  PersonaDetailDto,
+  PersonaCompileResultDto,
   WorkflowSummaryDto,
   WorkflowDetailDto,
+  WorkflowDefinitionDto,
   HumanGateRequestDto,
+  FileTreeResponseDto,
+  FileContentResponseDto,
+  ArtifactContentDto,
 } from './types.js';
 import { createWsClient, type WsClient } from './ws-client.js';
 import { handleEvent as handleEventPure } from './event-handler.js';
 
-export type ViewId = 'dashboard' | 'sessions' | 'escalations' | 'jobs' | 'workflows';
+export type ViewId = 'dashboard' | 'sessions' | 'escalations' | 'jobs' | 'workflows' | 'personas';
 export type ThemeId = 'iron' | 'daylight' | 'midnight';
 
 const MAX_OUTPUT_LINES = 2000;
@@ -308,6 +314,10 @@ export async function listPersonas(): Promise<PersonaListItem[]> {
 
 // ── Workflow RPC actions ────────────────────────────────────────────
 
+export async function listWorkflowDefinitions(): Promise<WorkflowDefinitionDto[]> {
+  return getWsClient().request<WorkflowDefinitionDto[]>('workflows.listDefinitions');
+}
+
 export async function listWorkflows(): Promise<WorkflowSummaryDto[]> {
   return getWsClient().request<WorkflowSummaryDto[]>('workflows.list');
 }
@@ -347,6 +357,32 @@ export async function refreshWorkflows(): Promise<void> {
 
 export async function getWorkflowDetail(workflowId: string): Promise<WorkflowDetailDto> {
   return getWsClient().request<WorkflowDetailDto>('workflows.get', { workflowId });
+}
+
+// ── Workflow file browser RPC actions ──────────────────────────────────
+
+export async function getWorkflowFileTree(workflowId: string, path?: string): Promise<FileTreeResponseDto> {
+  const params: Record<string, unknown> = { workflowId };
+  if (path) params.path = path;
+  return getWsClient().request<FileTreeResponseDto>('workflows.fileTree', params);
+}
+
+export async function getWorkflowFileContent(workflowId: string, path: string): Promise<FileContentResponseDto> {
+  return getWsClient().request<FileContentResponseDto>('workflows.fileContent', { workflowId, path });
+}
+
+export async function getWorkflowArtifacts(workflowId: string, artifactName: string): Promise<ArtifactContentDto> {
+  return getWsClient().request<ArtifactContentDto>('workflows.artifacts', { workflowId, artifactName });
+}
+
+// ── Persona RPC actions (extended) ─────────────────────────────────────
+
+export async function getPersonaDetail(name: string): Promise<PersonaDetailDto> {
+  return getWsClient().request<PersonaDetailDto>('personas.get', { name });
+}
+
+export async function compilePersonaPolicy(name: string): Promise<PersonaCompileResultDto> {
+  return getWsClient().request<PersonaCompileResultDto>('personas.compile', { name });
 }
 
 export function connectWithToken(token: string): void {

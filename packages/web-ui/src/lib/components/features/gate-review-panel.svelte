@@ -1,22 +1,50 @@
 <script lang="ts">
-  import type { HumanGateRequestDto } from '$lib/types.js';
+  import type {
+    HumanGateRequestDto,
+    ArtifactContentDto,
+    FileTreeResponseDto,
+    FileContentResponseDto,
+  } from '$lib/types.js';
   import { Button } from '$lib/components/ui/button/index.js';
   import { Badge } from '$lib/components/ui/badge/index.js';
+  import { Spinner } from '$lib/components/ui/spinner/index.js';
+  import { renderMarkdown } from '$lib/markdown.js';
+  import WorkspaceBrowser from './workspace-browser.svelte';
 
   let {
     gate,
     workflowName,
+    workflowId,
     onResolve,
+    fetchArtifacts,
+    fetchFileTree,
+    fetchFileContent,
   }: {
     gate: HumanGateRequestDto;
     workflowName: string;
+    workflowId: string;
     onResolve: (event: string, prompt?: string) => void | Promise<void>;
+    fetchArtifacts?: (workflowId: string, artifactName: string) => Promise<ArtifactContentDto>;
+    fetchFileTree?: (workflowId: string, path?: string) => Promise<FileTreeResponseDto>;
+    fetchFileContent?: (workflowId: string, path: string) => Promise<FileContentResponseDto>;
   } = $props();
 
+  type TabId = 'summary' | 'artifacts' | 'files';
+
+  let activeTab = $state<TabId>('summary');
   let feedbackText = $state('');
   let showFeedback = $state(false);
   let confirmAbort = $state(false);
   let resolving = $state(false);
+
+  // Artifact loading
+  let artifactContents = $state<Map<string, ArtifactContentDto>>(new Map());
+  let artifactLoading = $state<Set<string>>(new Set());
+  let artifactErrors = $state<Set<string>>(new Set());
+  let selectedArtifact = $state<string | null>(null);
+
+  const hasArtifactsTab = $derived(gate.presentedArtifacts.length > 0 && fetchArtifacts != null);
+  const hasFilesTab = $derived(fetchFileTree != null && fetchFileContent != null);
 
   function hasEvent(event: string): boolean {
     return gate.acceptedEvents.includes(event);
@@ -78,6 +106,46 @@
     showFeedback = false;
     feedbackText = '';
   }
+
+  async function loadArtifact(name: string): Promise<void> {
+    if (artifactContents.has(name) || artifactErrors.has(name) || !fetchArtifacts) return;
+    const newLoading = new Set(artifactLoading);
+    newLoading.add(name);
+    artifactLoading = newLoading;
+    try {
+      const content = await fetchArtifacts(workflowId, name);
+      artifactContents = new Map(artifactContents).set(name, content);
+    } catch {
+      const newErrors = new Set(artifactErrors);
+      newErrors.add(name);
+      artifactErrors = newErrors;
+    }
+    const done = new Set(artifactLoading);
+    done.delete(name);
+    artifactLoading = done;
+  }
+
+  function selectArtifact(name: string): void {
+    selectedArtifact = name;
+    loadArtifact(name);
+  }
+
+  // Auto-select first artifact when switching to artifacts tab
+  $effect(() => {
+    if (activeTab === 'artifacts' && !selectedArtifact && gate.presentedArtifacts.length > 0) {
+      selectArtifact(gate.presentedArtifacts[0]);
+    }
+  });
+
+  function tabClass(tab: TabId): string {
+    return activeTab === tab
+      ? 'border-primary text-primary font-medium'
+      : 'border-transparent text-muted-foreground hover:text-foreground';
+  }
+
+  function isMarkdown(path: string): boolean {
+    return path.endsWith('.md');
+  }
 </script>
 
 <div class="border border-warning/30 bg-warning/5 rounded-lg p-5 space-y-4">
@@ -90,20 +158,105 @@
     <Badge variant="warning">Waiting for Review</Badge>
   </div>
 
-  <!-- Summary -->
-  {#if gate.summary}
-    <p class="text-sm text-foreground/80">{gate.summary}</p>
-  {/if}
+  <!-- Tabs -->
+  <div class="flex gap-1 border-b border-border">
+    <button
+      onclick={() => (activeTab = 'summary')}
+      class="px-3 py-1.5 text-sm transition-colors border-b-2 -mb-px {tabClass('summary')}"
+    >
+      Summary
+    </button>
+    {#if hasArtifactsTab}
+      <button
+        onclick={() => (activeTab = 'artifacts')}
+        class="px-3 py-1.5 text-sm transition-colors border-b-2 -mb-px {tabClass('artifacts')}"
+      >
+        Artifacts
+        <span class="text-xs text-muted-foreground ml-1">({gate.presentedArtifacts.length})</span>
+      </button>
+    {/if}
+    {#if hasFilesTab}
+      <button
+        onclick={() => (activeTab = 'files')}
+        class="px-3 py-1.5 text-sm transition-colors border-b-2 -mb-px {tabClass('files')}"
+      >
+        Files
+      </button>
+    {/if}
+  </div>
 
-  <!-- Presented artifacts -->
-  {#if gate.presentedArtifacts.length > 0}
-    <div>
-      <p class="text-xs text-muted-foreground mb-1.5 font-medium uppercase tracking-wider">Artifacts</p>
-      <div class="flex flex-wrap gap-2">
-        {#each gate.presentedArtifacts as artifact (artifact)}
-          <Badge variant="outline">{artifact}</Badge>
-        {/each}
+  <!-- Tab content -->
+  {#if activeTab === 'summary'}
+    <!-- Summary -->
+    {#if gate.summary}
+      <p class="text-sm text-foreground/80">{gate.summary}</p>
+    {/if}
+
+    {#if gate.presentedArtifacts.length > 0}
+      <div>
+        <p class="text-xs text-muted-foreground mb-1.5 font-medium uppercase tracking-wider">Artifacts</p>
+        <div class="flex flex-wrap gap-2">
+          {#each gate.presentedArtifacts as artifact (artifact)}
+            <Badge variant="outline">{artifact}</Badge>
+          {/each}
+        </div>
       </div>
+    {/if}
+  {:else if activeTab === 'artifacts'}
+    <!-- Artifact viewer -->
+    <div class="space-y-3">
+      {#if gate.presentedArtifacts.length > 1}
+        <div class="flex flex-wrap gap-2">
+          {#each gate.presentedArtifacts as artifact (artifact)}
+            <button
+              onclick={() => selectArtifact(artifact)}
+              class="px-2 py-1 text-xs rounded border transition-colors
+                {selectedArtifact === artifact
+                ? 'border-primary bg-primary/10 text-primary'
+                : 'border-border text-muted-foreground hover:text-foreground'}"
+            >
+              {artifact}
+            </button>
+          {/each}
+        </div>
+      {/if}
+
+      {#if selectedArtifact}
+        {#if artifactLoading.has(selectedArtifact)}
+          <div class="flex items-center justify-center py-4">
+            <Spinner size="sm" />
+          </div>
+        {:else if artifactErrors.has(selectedArtifact)}
+          <p class="text-sm text-destructive">Failed to load artifact.</p>
+        {:else}
+          {@const ac = artifactContents.get(selectedArtifact)}
+          {#if ac && ac.files.length > 0}
+            <div class="space-y-3">
+              {#each ac.files as file (file.path)}
+                <div class="border border-border rounded overflow-hidden">
+                  <div class="px-3 py-1.5 bg-muted/30 border-b border-border text-xs font-mono text-muted-foreground">
+                    {file.path}
+                  </div>
+                  {#if isMarkdown(file.path)}
+                    <div class="p-3 prose prose-sm max-w-none">
+                      {@html renderMarkdown(file.content)}
+                    </div>
+                  {:else}
+                    <pre class="p-3 text-xs overflow-x-auto"><code>{file.content}</code></pre>
+                  {/if}
+                </div>
+              {/each}
+            </div>
+          {:else}
+            <p class="text-sm text-muted-foreground">No files in this artifact.</p>
+          {/if}
+        {/if}
+      {/if}
+    </div>
+  {:else if activeTab === 'files' && fetchFileTree && fetchFileContent}
+    <!-- Workspace file browser -->
+    <div class="h-[400px]">
+      <WorkspaceBrowser {workflowId} {fetchFileTree} {fetchFileContent} />
     </div>
   {/if}
 

@@ -40,7 +40,13 @@ export type MethodName =
   | 'workflows.resume'
   | 'workflows.abort'
   | 'workflows.resolveGate'
-  | 'workflows.inspect';
+  | 'workflows.inspect'
+  | 'workflows.fileTree'
+  | 'workflows.fileContent'
+  | 'workflows.artifacts'
+  | 'workflows.listDefinitions'
+  | 'personas.get'
+  | 'personas.compile';
 
 /** Browser -> Daemon request frame. */
 export interface RequestFrame {
@@ -71,6 +77,9 @@ export type ErrorCode =
   | 'SESSION_BUSY'
   | 'WORKFLOW_NOT_FOUND'
   | 'WORKFLOW_NOT_AT_GATE'
+  | 'ARTIFACT_NOT_FOUND'
+  | 'PERSONA_NOT_FOUND'
+  | 'FILE_TOO_LARGE'
   | 'INVALID_PARAMS'
   | 'RATE_LIMITED'
   | 'METHOD_NOT_FOUND'
@@ -231,6 +240,75 @@ export interface WorkflowContextDto {
   readonly maxRounds: number;
   readonly totalTokens: number;
   readonly visitCounts: Record<string, number>;
+}
+
+// ---------------------------------------------------------------------------
+// File browser DTO Types
+// ---------------------------------------------------------------------------
+
+/** Entry in a directory listing returned by `workflows.fileTree`. */
+export interface FileTreeEntryDto {
+  readonly name: string;
+  readonly type: 'file' | 'directory';
+  readonly size?: number;
+}
+
+/** Response from `workflows.fileTree`. */
+export interface FileTreeResponseDto {
+  readonly entries: readonly FileTreeEntryDto[];
+}
+
+/** Response from `workflows.fileContent`. */
+export interface FileContentResponseDto {
+  readonly content?: string;
+  readonly language?: string;
+  readonly binary?: boolean;
+  readonly error?: string;
+}
+
+/** A single file in an artifact. */
+export interface ArtifactFileDto {
+  readonly path: string;
+  readonly content: string;
+}
+
+/** Response from `workflows.artifacts`. */
+export interface ArtifactContentDto {
+  readonly files: readonly ArtifactFileDto[];
+}
+
+// ---------------------------------------------------------------------------
+// Workflow Definition DTO Types
+// ---------------------------------------------------------------------------
+
+/** Available workflow definition returned by `workflows.listDefinitions`. */
+export interface WorkflowDefinitionDto {
+  readonly name: string;
+  readonly description: string;
+  readonly path: string;
+  readonly source: 'bundled' | 'user' | 'custom';
+}
+
+// ---------------------------------------------------------------------------
+// Persona DTO Types
+// ---------------------------------------------------------------------------
+
+/** Detail for a single persona returned by `personas.get`. */
+export interface PersonaDetailDto {
+  readonly name: string;
+  readonly description: string;
+  readonly createdAt: string;
+  readonly constitution: string;
+  readonly servers?: readonly string[];
+  readonly hasPolicy: boolean;
+  readonly policyRuleCount?: number;
+}
+
+/** Response from `personas.compile`. */
+export interface PersonaCompileResultDto {
+  readonly success: boolean;
+  readonly ruleCount: number;
+  readonly errors?: readonly string[];
 }
 
 // ---------------------------------------------------------------------------

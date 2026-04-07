@@ -4,7 +4,9 @@
     startWorkflow as rpcStartWorkflow,
     abortWorkflow as rpcAbortWorkflow,
     refreshWorkflows,
+    listWorkflowDefinitions,
   } from '../lib/stores.svelte.js';
+  import type { WorkflowDefinitionDto } from '$lib/types.js';
   import { phaseBadgeVariant } from '$lib/utils.js';
   import { Button } from '$lib/components/ui/button/index.js';
   import { Badge } from '$lib/components/ui/badge/index.js';
@@ -14,23 +16,43 @@
   import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '$lib/components/ui/table/index.js';
   import WorkflowDetail from './WorkflowDetail.svelte';
 
-  let definitionPath = $state('');
+  const CUSTOM_PATH_SENTINEL = '__custom__';
+
+  let definitions: WorkflowDefinitionDto[] = $state([]);
+  let selectedDefinition = $state('');
+  let customPath = $state('');
   let taskDescription = $state('');
   let workspacePath = $state('');
   let starting = $state(false);
   let actionError = $state('');
+  // Track the gate set that was visible when the user dismissed the detail view.
+  // The auto-select effect will not re-select until the set of pending gates changes.
+  let dismissedGateIds: Set<string> | null = $state(null);
+
+  const isCustomPath = $derived(selectedDefinition === CUSTOM_PATH_SENTINEL);
+  const effectivePath = $derived(isCustomPath ? customPath.trim() : selectedDefinition);
 
   $effect(() => {
     refreshWorkflows();
+    loadDefinitions();
   });
 
+  async function loadDefinitions(): Promise<void> {
+    try {
+      definitions = await listWorkflowDefinitions();
+    } catch {
+      // Best-effort; the dropdown will be empty
+    }
+  }
+
   async function handleStart(): Promise<void> {
-    if (!definitionPath.trim() || !taskDescription.trim()) return;
+    if (!effectivePath || !taskDescription.trim()) return;
     starting = true;
     actionError = '';
     try {
-      await rpcStartWorkflow(definitionPath.trim(), taskDescription.trim(), workspacePath.trim() || undefined);
-      definitionPath = '';
+      await rpcStartWorkflow(effectivePath, taskDescription.trim(), workspacePath.trim() || undefined);
+      selectedDefinition = '';
+      customPath = '';
       taskDescription = '';
       workspacePath = '';
       await refreshWorkflows();
@@ -52,11 +74,22 @@
     }
   }
 
+  function setsEqual(a: Set<string>, b: Set<string>): boolean {
+    if (a.size !== b.size) return false;
+    for (const v of a) {
+      if (!b.has(v)) return false;
+    }
+    return true;
+  }
+
   function selectWorkflow(id: string): void {
+    dismissedGateIds = null;
     appState.selectedWorkflowId = id;
   }
 
   function deselectWorkflow(): void {
+    // Snapshot current gate IDs so the auto-select effect won't immediately re-select.
+    dismissedGateIds = new Set(appState.pendingGates.keys());
     appState.selectedWorkflowId = null;
   }
 
@@ -73,10 +106,17 @@
     return undefined;
   });
 
-  // Auto-select a workflow when a gate is raised (if no workflow currently selected)
+  // Auto-select a workflow when a gate is raised (if no workflow currently selected).
+  // Skip if the user just dismissed the detail view and the gate set hasn't changed.
   $effect(() => {
     if (appState.selectedWorkflowId) return;
     if (appState.pendingGates.size === 0) return;
+
+    const currentGateIds = new Set(appState.pendingGates.keys());
+    if (dismissedGateIds && setsEqual(dismissedGateIds, currentGateIds)) return;
+    // Gate set changed (new gate arrived or one was resolved) -- clear the dismissal.
+    dismissedGateIds = null;
+
     for (const [, gate] of appState.pendingGates) {
       if (appState.workflows.has(gate.workflowId)) {
         appState.selectedWorkflowId = gate.workflowId;
@@ -84,6 +124,10 @@
       }
     }
   });
+
+  // Group definitions by source for the dropdown
+  const bundledDefs = $derived(definitions.filter((d) => d.source === 'bundled'));
+  const userDefs = $derived(definitions.filter((d) => d.source === 'user'));
 </script>
 
 {#if selectedWorkflow && appState.selectedWorkflowId}
@@ -118,18 +162,51 @@
       <CardContent>
         <div class="space-y-3">
           <div>
-            <label for="def-path" class="block text-sm text-muted-foreground mb-1">Definition file path</label>
-            <Input id="def-path" bind:value={definitionPath} placeholder="/path/to/workflow.json" />
+            <label for="def-select" class="block text-sm text-muted-foreground mb-1">Workflow definition</label>
+            <select
+              id="def-select"
+              bind:value={selectedDefinition}
+              class="w-full px-3 py-2.5 bg-background border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-ring/40 focus:border-ring transition-all"
+            >
+              <option value="">Select a workflow...</option>
+              {#if bundledDefs.length > 0}
+                <optgroup label="Bundled">
+                  {#each bundledDefs as def (def.path)}
+                    <option value={def.path}>{def.name} -- {def.description}</option>
+                  {/each}
+                </optgroup>
+              {/if}
+              {#if userDefs.length > 0}
+                <optgroup label="User">
+                  {#each userDefs as def (def.path)}
+                    <option value={def.path}>{def.name} -- {def.description}</option>
+                  {/each}
+                </optgroup>
+              {/if}
+              <option value={CUSTOM_PATH_SENTINEL}>Other (custom path)...</option>
+            </select>
           </div>
+          {#if isCustomPath}
+            <div>
+              <label for="custom-path" class="block text-sm text-muted-foreground mb-1">Definition file path</label>
+              <Input id="custom-path" bind:value={customPath} placeholder="/path/to/workflow.json" />
+            </div>
+          {/if}
           <div>
             <label for="task-desc" class="block text-sm text-muted-foreground mb-1">Task description</label>
-            <Input id="task-desc" bind:value={taskDescription} placeholder="Describe the task..." />
+            <textarea
+              id="task-desc"
+              bind:value={taskDescription}
+              placeholder="Describe the task in detail..."
+              rows="4"
+              class="w-full px-3 py-2.5 bg-background border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-ring/40 focus:border-ring placeholder:text-muted-foreground/50 transition-all disabled:opacity-50 resize-y min-h-[80px]"
+            ></textarea>
           </div>
           <div>
             <label for="ws-path" class="block text-sm text-muted-foreground mb-1">Workspace path (optional)</label>
             <Input id="ws-path" bind:value={workspacePath} placeholder="/path/to/workspace" />
           </div>
-          <Button onclick={handleStart} loading={starting} disabled={!definitionPath.trim() || !taskDescription.trim()}>
+          <Button onclick={handleStart} loading={starting} disabled={!effectivePath || !taskDescription.trim()}>
             Start Workflow
           </Button>
         </div>

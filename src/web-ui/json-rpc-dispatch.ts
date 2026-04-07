@@ -11,8 +11,8 @@ import { sessionDispatch } from './dispatch/session-dispatch.js';
 import { jobDispatch } from './dispatch/job-dispatch.js';
 import { escalationDispatch } from './dispatch/escalation-dispatch.js';
 import { workflowDispatch, type WorkflowDispatchContext } from './dispatch/workflow-dispatch.js';
+import { personaDispatch } from './dispatch/persona-dispatch.js';
 import { buildStatusDto } from './dispatch/types.js';
-import { scanPersonas } from '../mux/persona-scanner.js';
 
 // Re-export shared types for consumers (WebUiServer, tests)
 export { type DispatchContext, toSessionDto, toBudgetDto, buildStatusDto } from './dispatch/types.js';
@@ -34,13 +34,7 @@ export async function dispatch(
 
   if (method === 'status') return buildStatusDto(ctx);
 
-  if (method === 'personas.list') {
-    return scanPersonas().map((p) => ({
-      name: p.name,
-      description: p.description,
-      compiled: p.compiled,
-    }));
-  }
+  if (method.startsWith('personas.')) return personaDispatch(method, params);
 
   throw new MethodNotFoundError(method);
 }

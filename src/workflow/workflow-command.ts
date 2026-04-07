@@ -15,6 +15,7 @@ import { mkdtempSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
 import { formatHelp, type CommandSpec } from '../cli-help.js';
 import { FileCheckpointStore } from './checkpoint.js';
+import { discoverWorkflows, resolveWorkflowPath } from './discovery.js';
 import { MessageLog } from './message-log.js';
 import { WorkflowOrchestrator, type WorkflowOrchestratorDeps, type WorkflowTabHandle } from './orchestrator.js';
 import type { WorkflowId, WorkflowCheckpoint } from './types.js';
@@ -47,12 +48,14 @@ const workflowSpec: CommandSpec = {
   name: 'ironcurtain workflow',
   description: 'Run multi-agent workflows',
   usage: [
-    'ironcurtain workflow start <definition.json> "task" [--model <model>] [--workspace <path>]',
+    'ironcurtain workflow list',
+    'ironcurtain workflow start <name-or-path> "task" [--model <model>] [--workspace <path>]',
     'ironcurtain workflow resume <baseDir> [--state <stateName>] [--model <model>]',
     'ironcurtain workflow inspect <baseDir> [--all]',
   ],
   subcommands: [
-    { name: 'start', description: 'Start a new workflow from a definition file' },
+    { name: 'list', description: 'List available workflow definitions' },
+    { name: 'start', description: 'Start a workflow by name or definition file path' },
     { name: 'resume', description: 'Resume a checkpointed workflow' },
     { name: 'inspect', description: 'Show workflow status, artifacts, and recent messages' },
   ],
@@ -72,8 +75,10 @@ const workflowSpec: CommandSpec = {
     { flag: 'help', short: 'h', description: 'Show this help message' },
   ],
   examples: [
+    'ironcurtain workflow list',
+    'ironcurtain workflow start design-and-code "Build a REST API"',
     'ironcurtain workflow start ./my-workflow.json "Build a REST API"',
-    'ironcurtain workflow start ./my-workflow.json "task" --model anthropic:claude-haiku-4-5',
+    'ironcurtain workflow start design-and-code "task" --model anthropic:claude-haiku-4-5',
     'ironcurtain workflow resume /tmp/workflow-abc123',
     'ironcurtain workflow resume /tmp/workflow-abc123 --state review',
     'ironcurtain workflow resume /tmp/workflow-abc123 --model anthropic:claude-sonnet-4-6',
@@ -103,17 +108,19 @@ async function runStart(args: string[]): Promise<void> {
     return;
   }
 
-  const definitionPath = positionals[0];
+  const definitionRef = positionals[0];
   const taskDescription = positionals[1];
 
-  if (!definitionPath || !taskDescription) {
-    writeStderr(`${RED}Usage: ironcurtain workflow start <definition.json> "task" [--model <model>]${RESET}`);
+  if (!definitionRef || !taskDescription) {
+    writeStderr(`${RED}Usage: ironcurtain workflow start <name-or-path> "task" [--model <model>]${RESET}`);
     process.exit(1);
   }
 
-  const resolvedDef = resolve(definitionPath);
-  if (!existsSync(resolvedDef)) {
-    writeStderr(`${RED}Definition file not found: ${resolvedDef}${RESET}`);
+  const resolvedDef = resolveWorkflowPath(definitionRef);
+  if (!resolvedDef) {
+    writeStderr(`${RED}Workflow not found: ${definitionRef}${RESET}`);
+    writeStderr(`${DIM}Looked in bundled and user workflow directories.${RESET}`);
+    writeStderr(`${DIM}Run 'ironcurtain workflow list' to see available workflows.${RESET}`);
     process.exit(1);
   }
 
@@ -430,6 +437,29 @@ function truncate(text: string, maxLen: number): string {
 }
 
 // ---------------------------------------------------------------------------
+// List subcommand
+// ---------------------------------------------------------------------------
+
+function runList(): void {
+  const workflows = discoverWorkflows();
+  if (workflows.length === 0) {
+    writeStdout(`${DIM}No workflow definitions found.${RESET}`);
+    return;
+  }
+
+  const nameWidth = Math.max(4, ...workflows.map((w) => w.name.length));
+  const sourceWidth = Math.max(6, ...workflows.map((w) => w.source.length));
+
+  const header = `${'NAME'.padEnd(nameWidth)}  ${'SOURCE'.padEnd(sourceWidth)}  DESCRIPTION`;
+  writeStdout(`${BOLD}${header}${RESET}`);
+
+  for (const wf of workflows) {
+    const line = `${wf.name.padEnd(nameWidth)}  ${wf.source.padEnd(sourceWidth)}  ${wf.description}`;
+    writeStdout(line);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Main entry point
 // ---------------------------------------------------------------------------
 
@@ -444,6 +474,9 @@ export async function main(args: string[]): Promise<void> {
   }
 
   switch (subcommand) {
+    case 'list':
+      runList();
+      break;
     case 'start':
       await runStart(subArgs);
       break;

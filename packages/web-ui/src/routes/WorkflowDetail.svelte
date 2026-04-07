@@ -1,6 +1,13 @@
 <script lang="ts">
   import type { WorkflowDetailDto, WorkflowSummaryDto, HumanGateRequestDto } from '$lib/types.js';
-  import { appState, getWorkflowDetail, resolveWorkflowGate } from '$lib/stores.svelte.js';
+  import {
+    appState,
+    getWorkflowDetail,
+    resolveWorkflowGate,
+    getWorkflowFileTree,
+    getWorkflowFileContent,
+    getWorkflowArtifacts,
+  } from '$lib/stores.svelte.js';
   import { phaseBadgeVariant } from '$lib/utils.js';
   import { Badge } from '$lib/components/ui/badge/index.js';
   import { Button } from '$lib/components/ui/button/index.js';
@@ -9,6 +16,7 @@
   import { Spinner } from '$lib/components/ui/spinner/index.js';
   import StateMachineGraph from '$lib/components/features/state-machine-graph.svelte';
   import GateReviewPanel from '$lib/components/features/gate-review-panel.svelte';
+  import WorkspaceBrowser from '$lib/components/features/workspace-browser.svelte';
 
   let {
     workflowId,
@@ -26,6 +34,7 @@
   let loading = $state(true);
   let error = $state('');
   let resolveError = $state('');
+  let workspaceExpanded = $state(false);
 
   let fetchVersion = 0;
 
@@ -107,7 +116,15 @@
     <Alert variant="destructive">{error}</Alert>
   {:else if detail}
     {#if gate && summary.phase === 'waiting_human'}
-      <GateReviewPanel {gate} workflowName={summary.name} onResolve={handleGateResolve} />
+      <GateReviewPanel
+        {gate}
+        {workflowId}
+        workflowName={summary.name}
+        onResolve={handleGateResolve}
+        fetchArtifacts={getWorkflowArtifacts}
+        fetchFileTree={getWorkflowFileTree}
+        fetchFileContent={getWorkflowFileContent}
+      />
     {/if}
 
     <Card>
@@ -153,6 +170,30 @@
         </Card>
       </div>
     {/if}
+
+    <!-- Workspace Browser -->
+    <Card>
+      <CardHeader>
+        <button
+          onclick={() => (workspaceExpanded = !workspaceExpanded)}
+          class="flex items-center gap-2 w-full text-left"
+        >
+          <span class="text-muted-foreground">{workspaceExpanded ? '\u25BE' : '\u25B8'}</span>
+          <CardTitle>Workspace</CardTitle>
+        </button>
+      </CardHeader>
+      {#if workspaceExpanded}
+        <CardContent>
+          <div class="h-[400px]">
+            <WorkspaceBrowser
+              {workflowId}
+              fetchFileTree={getWorkflowFileTree}
+              fetchFileContent={getWorkflowFileContent}
+            />
+          </div>
+        </CardContent>
+      {/if}
+    </Card>
 
     {#if detail.transitionHistory.length > 0}
       <Card>

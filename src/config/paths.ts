@@ -269,6 +269,14 @@ export function computeConstitutionHash(basePath: string): string {
   return createHash('sha256').update(text).digest('hex');
 }
 
+/**
+ * Returns the user workflows directory: {home}/workflows/
+ * Users can place custom workflow definitions here.
+ */
+export function getUserWorkflowsDir(): string {
+  return resolve(getIronCurtainHome(), 'workflows');
+}
+
 // ---------------------------------------------------------------------------
 // OAuth paths
 // ---------------------------------------------------------------------------
