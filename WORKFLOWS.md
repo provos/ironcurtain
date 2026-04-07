@@ -89,18 +89,34 @@ When you don't provide `--workspace`, the orchestrator creates a fresh directory
 
 ## CLI commands
 
-### `ironcurtain workflow start`
+### `ironcurtain workflow list`
 
-Start a new workflow.
+List available workflow definitions (bundled and user-defined).
 
 ```bash
-ironcurtain workflow start <definition.json> "task description" [options]
+ironcurtain workflow list
+```
+
+### `ironcurtain workflow start`
+
+Start a new workflow. The first argument can be a workflow name (looked up from bundled and user directories) or a path to a definition JSON file.
+
+```bash
+ironcurtain workflow start <name-or-path> "task description" [options]
 ```
 
 Options:
 
 - `--model <model>` -- Override the model (e.g., `anthropic:claude-haiku-4-5`)
 - `--workspace <path>` -- Use an existing directory instead of creating a new one
+
+Examples:
+
+```bash
+ironcurtain workflow start design-and-code "Build a REST API"
+ironcurtain workflow start ./my-workflow.json "Build a REST API"
+ironcurtain workflow start design-and-code "task" --model anthropic:claude-haiku-4-5
+```
 
 ### `ironcurtain workflow resume`
 
@@ -275,3 +291,53 @@ ironcurtain workflow resume /path/to/base-dir --state review
 ```
 
 Artifacts and conversation state survive across resume. Docker sessions use `claude --continue` to preserve conversation history within each role.
+
+## Web UI
+
+Workflows can also be managed from the browser using the daemon's web UI. Start the daemon with the `--web-ui` flag:
+
+```bash
+ironcurtain daemon --web-ui
+```
+
+The daemon prints an authenticated URL (e.g., `http://127.0.0.1:7400?token=<TOKEN>`). Open it in a browser and navigate to the Workflows page from the sidebar.
+
+### Starting and resuming workflows
+
+The Workflows page provides a form to start new workflows. Select a definition from the dropdown (bundled and user-defined workflows are auto-discovered), enter a task description, and optionally specify a workspace path. The web UI also lists resumable workflows -- previously checkpointed runs that can be continued with one click. You can import a workflow from an external directory by providing its base directory path.
+
+### State machine visualization
+
+When you select a running workflow, a state machine graph shows all states and transitions from the workflow definition. The current state is highlighted, and completed states are visually distinguished. The transition history table shows timestamps and durations for each state change.
+
+### Gate review
+
+When a workflow pauses at a human gate, the web UI shows a review panel with the gate's accepted actions (Approve, Force Revision, Replan, Abort). The panel includes:
+
+- **Artifact browser** -- rendered markdown content from the `.workflow/` artifact directories (plan, spec, reviews) presented as tabs for quick comparison.
+- **Feedback input** -- when choosing Force Revision, a text area lets you provide feedback that gets included in the next agent's prompt.
+
+The Workflows page auto-selects a workflow when a gate is raised, so you are taken directly to the review panel when action is needed.
+
+### Workspace browser
+
+A collapsible file browser shows the workspace directory tree during and after workflow execution. You can navigate directories and view file contents with syntax highlighting. Binary files and files over 1MB are excluded. The `.git` and `node_modules` directories are filtered from listings.
+
+### Persona viewer
+
+The web UI includes a read-only Personas page (accessible from the sidebar) where you can view all configured personas, their constitutions (rendered as markdown), and compiled policy summaries. Personas are created and managed via the CLI (`ironcurtain persona create|compile|edit|delete`); the web UI provides a convenient way to review them.
+
+### Development and testing
+
+For frontend development without Docker or an API key, use the mock WebSocket server:
+
+```bash
+cd packages/web-ui && npm run mock-server   # Terminal 1
+cd packages/web-ui && npm run dev            # Terminal 2
+```
+
+Open `http://localhost:5173?token=mock-dev-token`. The mock server simulates workflow lifecycle events with realistic timing. See [docs/e2e-workflow-testing.md](docs/e2e-workflow-testing.md) for the full E2E testing guide.
+
+## User-defined workflows
+
+Custom workflow definitions can be placed in `~/.ironcurtain/workflows/`. Files in this directory are discovered by both `ironcurtain workflow list` and the web UI's definition dropdown. User-defined workflows override bundled ones if they share the same name.
