@@ -155,11 +155,12 @@ let isInitialConnect = true;
 
 async function refreshAll(client: WsClient): Promise<void> {
   try {
-    const [status, sessions, jobs, escalations] = await Promise.all([
+    const [status, sessions, jobs, escalations, workflowsList] = await Promise.all([
       client.request<DaemonStatusDto>('status'),
       client.request<SessionDto[]>('sessions.list'),
       client.request<JobListDto[]>('jobs.list'),
       client.request<EscalationDto[]>('escalations.list'),
+      client.request<WorkflowSummaryDto[]>('workflows.list').catch(() => [] as WorkflowSummaryDto[]),
     ]);
 
     appState.daemonStatus = status;
@@ -171,6 +172,12 @@ async function refreshAll(client: WsClient): Promise<void> {
     appState.sessions = newSessions;
 
     appState.jobs = jobs;
+
+    const newWorkflows = new Map<string, WorkflowSummaryDto>();
+    for (const wf of workflowsList) {
+      newWorkflows.set(wf.workflowId, wf);
+    }
+    appState.workflows = newWorkflows;
 
     const newEscalations = new Map<string, PendingEscalation>();
     for (const esc of escalations) {

@@ -89,9 +89,10 @@ interface ReplayConfig {
 const __scriptDir = dirname(fileURLToPath(import.meta.url));
 
 function parseReplayArgs(): ReplayConfig | null {
-  const { values, positionals } = parseArgs({
+  const { values } = parseArgs({
     options: {
-      replay: { type: 'string', default: undefined },
+      replay: { type: 'boolean', default: false },
+      'replay-file': { type: 'string', default: undefined },
       definition: { type: 'string', default: undefined },
       speedup: { type: 'string', default: '50' },
     },
@@ -99,16 +100,15 @@ function parseReplayArgs(): ReplayConfig | null {
     strict: false,
   });
 
-  // --replay can be a bare flag (no value) or --replay=<path>
-  // With parseArgs, bare --replay sets the value to '' if type is 'string'
-  // Check both values.replay and positionals for the flag
-  const hasReplay = values.replay !== undefined || process.argv.includes('--replay');
-  if (!hasReplay) return null;
+  // --replay enables replay mode. --replay-file=<path> specifies a custom JSONL.
+  // Bare --replay uses the bundled example files.
+  if (!values.replay) return null;
 
   const defaultJsonl = resolve(__scriptDir, '../workflow-example-messages.jsonl');
   const defaultDef = resolve(__scriptDir, '../workflow-example-definition.json');
 
-  let jsonlPath = values.replay && values.replay !== '' ? resolve(values.replay) : defaultJsonl;
+  const replayFile = values['replay-file'];
+  let jsonlPath = typeof replayFile === 'string' && replayFile !== '' ? resolve(replayFile) : defaultJsonl;
   let definitionPath = defaultDef;
 
   // Look for definition adjacent to a custom JSONL file
@@ -1199,6 +1199,15 @@ const wss = new WebSocketServer({ port: PORT });
 wss.on('connection', (ws) => {
   clients.add(ws);
   console.log(`  Client connected (${clients.size} total)`);
+
+  // In replay mode, auto-start the replay when the first client connects
+  // so the user immediately sees a running workflow without needing to
+  // fill out the Start Workflow form.
+  if (replayConfig && replayPlan && !replayController) {
+    replayController = createReplayController(replayPlan, broadcast, replayConfig.speedup);
+    replayController.start();
+    console.log('  Replay auto-started on first client connection');
+  }
 
   ws.on('message', (raw) => {
     let frame: RequestFrame;

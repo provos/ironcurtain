@@ -40,10 +40,18 @@
 
   $effect(() => {
     const id = workflowId;
+    // Re-fetch detail whenever the workflow's state or phase changes.
+    // These fields are updated by workflow.state_entered / workflow.completed / etc.
+    // events via the event handler, which triggers a fresh getWorkflowDetail() call
+    // so the transition history, context, and gate stay up-to-date.
+    const _currentState = summary.currentState;
+    const _phase = summary.phase;
     const version = ++fetchVersion;
-    loading = true;
+    // Only show the loading spinner on the initial fetch, not on re-fetches
+    if (!detail) {
+      loading = true;
+    }
     error = '';
-    detail = null;
 
     getWorkflowDetail(id)
       .then((d) => {
