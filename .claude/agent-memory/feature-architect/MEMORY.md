@@ -234,6 +234,21 @@ Both use the same PolicyEngine with compiled artifacts.
 - `SessionOptions.policyDir` loads per-job policy; `systemPromptAugmentation` injects task context
 - Review loop in `runJobReviewLoop()` with confirm/edit cycle using @clack/prompts
 
+## Multi-Agent Workflow System (designed 2026-03-31)
+- See `docs/designs/multi-agent-workflow-implementation.md` for full spec
+- WorkflowController: narrow interface (start, getStatus, resolveGate, abort) exposed to mux
+- WorkflowOrchestrator: concrete impl, deps injected (session factory, tab factory, escalation bridge)
+- XState v5 state machine, file-based checkpointing per transition
+- Workflow agents = builtin sessions via createSession(), driven by sendMessage()
+- Human gates reuse escalation picker (workflowGate field on PendingEscalation)
+- Read-only workflow tabs: same xterm buffer, readOnly flag on MuxTab
+- WorkflowSession wraps Session (composition), WorkflowTabHandle for output routing
+- Transition middleware: parseAgentStatus() (YAML block) + agentOutputToEvent() (pure functions)
+- Guards: isStalled (hash), hasTestCountRegression, isRoundLimitReached
+- WorktreeManager: git CLI via execFile, fast-forward then merge-commit strategy
+- Workflow definitions: JSON files with states/transitions/guards/parallel_key
+- 9-phase incremental implementation: types -> middleware -> machine -> checkpoint -> session -> mux -> gates -> worktrees -> scaffold
+
 ## Auto-Constitution Generation Design (designed 2026-03-05)
 - See `docs/designs/auto-constitution-generation.md`
 - LLM explores MCP servers via bridged tools (list-resolver pattern, NOT full Code Mode)

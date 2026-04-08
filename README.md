@@ -129,6 +129,17 @@ ironcurtain start --persona my-assistant "Check my email"  # Use a persona
 
 IronCurtain also supports PTY mode, session resume (`--resume <session-id>`), a Signal messaging transport for mobile approval, and a daemon mode for scheduled cron jobs. The daemon has an optional [web UI](DAEMON.md#web-ui) (`--web-ui`) for browser-based monitoring and escalation handling. See [RUNNING_MODES.md](RUNNING_MODES.md) for details.
 
+### Multi-agent workflows
+
+IronCurtain can orchestrate multiple AI agents through structured workflows -- plan, design, implement, and review cycles with human gates for quality control at each stage. Each agent runs in its own Docker container with role-specific policy boundaries, and the workflow engine manages state transitions, artifact passing, and checkpointing automatically. Tools like Amazon Kiro and Google Jules offer similar multi-agent orchestration for coding tasks, but IronCurtain's workflow system is open source, runs entirely on your machine, enforces per-agent security policies via its constitution-based policy engine, and works with any Docker-containerized agent.
+
+```bash
+ironcurtain workflow start design-and-code \
+  "Build a REST API with authentication" --model anthropic:claude-haiku-4-5
+```
+
+Workflows can also be started, monitored, and reviewed from the web UI (`ironcurtain daemon --web-ui`). See [WORKFLOWS.md](WORKFLOWS.md) for the full documentation.
+
 ## Customizing Your Policy
 
 The default policy works well for general development, but you can tailor it to your workflow:
@@ -244,13 +255,13 @@ Key configuration areas: models and API keys, resource budgets (token/step/time/
 
 IronCurtain ships with six pre-configured MCP servers. All tool calls (except memory) are governed by your compiled policy.
 
-| Server               | Tools | Key capabilities                                                                                                  |
-| -------------------- | ----- | ----------------------------------------------------------------------------------------------------------------- |
-| **Filesystem**       | 14    | Read, write, edit, search files; directory tree; move; diff calculation                                           |
-| **Git**              | 28    | Full git workflow: status, diff, log, commit, branch, push/pull/fetch, clone, stash, blame                        |
-| **Fetch**            | 2     | HTTP GET with HTML-to-markdown conversion; web search (Brave, Tavily, SerpAPI)                                    |
-| **GitHub**           | 41    | Issues, PRs, code search, reviews via `ghcr.io/github/github-mcp-server`; requires a GitHub personal access token |
-| **Google Workspace** | 128   | Gmail, Calendar, Drive, Docs, Sheets — requires OAuth setup via `ironcurtain auth`                                |
+| Server               | Tools | Key capabilities                                                                                                                                  |
+| -------------------- | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Filesystem**       | 14    | Read, write, edit, search files; directory tree; move; diff calculation                                                                           |
+| **Git**              | 28    | Full git workflow: status, diff, log, commit, branch, push/pull/fetch, clone, stash, blame                                                        |
+| **Fetch**            | 2     | HTTP GET with HTML-to-markdown conversion; web search (Brave, Tavily, SerpAPI)                                                                    |
+| **GitHub**           | 41    | Issues, PRs, code search, reviews via `ghcr.io/github/github-mcp-server`; requires a GitHub personal access token                                 |
+| **Google Workspace** | 128   | Gmail, Calendar, Drive, Docs, Sheets — requires OAuth setup via `ironcurtain auth`                                                                |
 | **Memory**           | 5     | Persistent semantic memory with hybrid vector+keyword search, LLM summarization, and automatic compaction. Enabled for persona and cron sessions. |
 
 Read-only operations are allowed by default policy; mutations (writes, pushes, PR creation) escalate for human approval. Tools use `server.tool` naming (e.g., `filesystem.read_file`, `memory.recall`). See [ADDING_MCP_SERVERS.md](ADDING_MCP_SERVERS.md) to add your own.
@@ -330,6 +341,8 @@ src/
 ├── daemon/                     # Unified daemon (Signal + cron scheduler, control socket)
 ├── cron/                       # Cron job management (scheduler, job store, git sync, policy)
 ├── docker/                     # Docker agent mode, PTY session, MITM proxy, registry proxy
+├── workflow/                   # Multi-agent workflow engine (orchestrator, state machine, gates)
+├── web-ui/                     # Web UI backend (JSON-RPC dispatch, event bus, workflow manager)
 ├── servers/                    # Built-in MCP servers (fetch, web search providers)
 └── types/                      # Shared type definitions
 packages/

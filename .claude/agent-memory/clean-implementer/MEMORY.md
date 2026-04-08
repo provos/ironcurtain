@@ -153,17 +153,21 @@ Zod v4 (^4.3.6) strict by default. Mock response JSON must exactly match Zod sch
 - **Constitution generator**: `context?: 'cron' | 'persona'` added to `ConstitutionGeneratorOptions` in `src/cron/constitution-generator.ts`
 - **Layout**: `~/.ironcurtain/personas/{name}/{persona.json, constitution.md, generated/, workspace/memory.md}`
 
-## Per-Server Policy Compilation
-- **Design**: `docs/designs/per-server-policy-compilation.md`
+## Per-Server Policy Compilation (with parallel support)
+- **Design**: `docs/designs/per-server-policy-compilation.md`, `docs/designs/parallel-compilation.md`
 - **Dispatch**: `run()` routes all modes through `runPerServer()` (monolithic path removed)
+- **Parallel execution**: `compileAllServers()` uses `p-limit` for both server concurrency (10) and LLM call throttling (8)
+- **Per-server model**: `createPerServerModel(baseLlm, logPath, serverName)` wraps base model with per-server logging middleware
+- **Throttled model**: `createThrottledModel(model, semaphore)` wraps `doGenerate`/`doStream` with p-limit semaphore
+- **Progress reporting**: `ServerProgressReporter` interface with `SpinnerProgressReporter` (sequential) and `ParallelProgressReporter` (parallel)
+- **Parallel display**: `src/pipeline/parallel-progress.ts` -- multi-line TTY status table with ANSI escapes; non-TTY line-based fallback; buffer-and-flush for warnings
+- **compileServer signature**: `(unit, config, hash, model, logContext, reporter)` -- per-server model+logContext enables safe concurrent execution
 - **Per-server artifacts**: `generated/servers/{serverName}/compiled-policy.json` and `test-scenarios.json`
 - **Schema enforcement**: `buildCompilerResponseSchema(names, tools, { requireServer: true })` makes `server` field required
-- **Prompt scoping**: `buildCompilerSystemPrompt(..., { serverScope: serverName })` adds "Server Scope" section
 - **Merge**: `mergeServerResults()` concatenates rules sorted alphabetically by server; `deduplicateListDefinitions()` first-wins
-- **Cross-server verification**: deterministic `executeScenarios()` sanity check post-merge (no LLM calls)
 - **Types**: `ServerCompiledPolicyFile` in `types.ts`; `ServerCompilationUnit`/`ServerCompilationResult` internal to pipeline-runner
 - **CLI**: `--server <name>` flag for single-server debugging via `serverFilter` on `PipelineRunConfig`
-- **Cache key**: `computeServerPolicyHash(serverName, constitution, annotations, promptTemplate)`
+- **PipelineModels**: now includes `baseLlm: LanguageModelV3` field for per-server model creation
 
 ## Design Documents
 - `docs/designs/policy-compilation-pipeline.md` -- pipeline design spec

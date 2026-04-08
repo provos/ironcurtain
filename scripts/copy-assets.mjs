@@ -3,7 +3,7 @@
  * so that __dirname-relative path resolution works from compiled output.
  */
 
-import { cpSync, chmodSync, existsSync, mkdirSync } from 'node:fs';
+import { cpSync, chmodSync, existsSync, mkdirSync, readdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -48,6 +48,16 @@ if (existsSync(readOnlyDir)) {
     if (existsSync(src)) {
       cpSync(src, resolve(distConfig, 'generated-readonly', file));
     }
+  }
+}
+
+// Copy bundled workflow definitions
+const srcWorkflows = resolve(__dirname, '..', 'src', 'workflow', 'workflows');
+const distWorkflows = resolve(__dirname, '..', 'dist', 'workflow', 'workflows');
+if (existsSync(srcWorkflows)) {
+  mkdirSync(distWorkflows, { recursive: true });
+  for (const file of readdirSync(srcWorkflows).filter((f) => f.endsWith('.json'))) {
+    cpSync(resolve(srcWorkflows, file), resolve(distWorkflows, file));
   }
 }
 

@@ -250,6 +250,279 @@ const CANNED_PERSONAS = [
   { name: 'devops', description: 'Infrastructure and deployment operations', compiled: false },
 ];
 
+const CANNED_PERSONA_DETAILS: Record<string, unknown> = {
+  default: {
+    name: 'default',
+    description: 'General-purpose assistant with standard policy',
+    createdAt: new Date(Date.now() - 30 * 86400_000).toISOString(),
+    constitution:
+      '# Default Persona\n\n## Principles\n\n- Allow read operations on all files\n- Escalate write operations to protected paths\n- Allow git read operations\n- Escalate destructive git operations\n',
+    servers: ['filesystem', 'git'],
+    hasPolicy: true,
+    policyRuleCount: 12,
+  },
+  researcher: {
+    name: 'researcher',
+    description: 'Read-only access focused on code analysis',
+    createdAt: new Date(Date.now() - 14 * 86400_000).toISOString(),
+    constitution:
+      '# Researcher Persona\n\n## Principles\n\n- Allow all read operations\n- Deny all write operations\n- Allow search and analysis tools\n',
+    servers: ['filesystem'],
+    hasPolicy: true,
+    policyRuleCount: 8,
+  },
+  devops: {
+    name: 'devops',
+    description: 'Infrastructure and deployment operations',
+    createdAt: new Date(Date.now() - 7 * 86400_000).toISOString(),
+    constitution:
+      '# DevOps Persona\n\n## Principles\n\n- Allow Docker operations\n- Allow deployment scripts\n- Escalate infrastructure changes\n',
+    servers: ['filesystem', 'git', 'github'],
+    hasPolicy: false,
+  },
+};
+
+const CANNED_FILE_TREE = {
+  entries: [
+    { name: '.workflow', type: 'directory' as const },
+    { name: 'src', type: 'directory' as const },
+    { name: 'package.json', type: 'file' as const, size: 1234 },
+    { name: 'tsconfig.json', type: 'file' as const, size: 456 },
+    { name: 'README.md', type: 'file' as const, size: 2048 },
+  ],
+};
+
+const CANNED_FILE_TREE_SRC = {
+  entries: [
+    { name: 'index.ts', type: 'file' as const, size: 890 },
+    { name: 'utils.ts', type: 'file' as const, size: 1200 },
+    { name: 'types.ts', type: 'file' as const, size: 650 },
+  ],
+};
+
+const CANNED_FILE_TREE_WORKFLOW = {
+  entries: [
+    { name: 'plan', type: 'directory' as const },
+    { name: 'spec', type: 'directory' as const },
+  ],
+};
+
+const CANNED_FILE_CONTENTS: Record<string, { content: string; language: string }> = {
+  'package.json': {
+    content:
+      '{\n  "name": "example-project",\n  "version": "1.0.0",\n  "type": "module",\n  "scripts": {\n    "build": "tsc",\n    "test": "vitest"\n  }\n}',
+    language: 'json',
+  },
+  'tsconfig.json': {
+    content: '{\n  "compilerOptions": {\n    "target": "ES2022",\n    "module": "Node16",\n    "strict": true\n  }\n}',
+    language: 'json',
+  },
+  'README.md': {
+    content:
+      '# Example Project\n\nThis is a generated workspace for the workflow.\n\n## Getting Started\n\n```bash\nnpm install\nnpm run build\n```\n',
+    language: 'markdown',
+  },
+  'src/index.ts': {
+    content:
+      'import { greet } from "./utils.js";\n\nconst name = process.argv[2] ?? "World";\nconsole.log(greet(name));\n',
+    language: 'typescript',
+  },
+  'src/utils.ts': {
+    content:
+      'export function greet(name: string): string {\n  return `Hello, ${name}!`;\n}\n\nexport function add(a: number, b: number): number {\n  return a + b;\n}\n',
+    language: 'typescript',
+  },
+  'src/types.ts': {
+    content: 'export interface Config {\n  readonly name: string;\n  readonly version: string;\n}\n',
+    language: 'typescript',
+  },
+};
+
+const CANNED_ARTIFACTS: Record<string, { files: Array<{ path: string; content: string }> }> = {
+  plan: {
+    files: [
+      {
+        path: 'plan.md',
+        content:
+          '# Implementation Plan\n\n## Overview\n\nThis plan outlines the steps to implement the requested feature.\n\n## Steps\n\n1. Create the data model\n2. Implement the service layer\n3. Add API endpoints\n4. Write tests\n\n## Timeline\n\nEstimated: 2 hours\n',
+      },
+    ],
+  },
+  spec: {
+    files: [
+      {
+        path: 'spec.md',
+        content:
+          '# Technical Specification\n\n## Data Model\n\n```typescript\ninterface Widget {\n  id: string;\n  name: string;\n  createdAt: Date;\n}\n```\n\n## API\n\n- `GET /widgets` - List all widgets\n- `POST /widgets` - Create a widget\n',
+      },
+    ],
+  },
+  'plan.md': {
+    files: [
+      {
+        path: 'plan.md',
+        content:
+          '# Implementation Plan\n\nDetailed plan for the workflow task.\n\n## Phase 1\n\n- Set up project structure\n- Install dependencies\n\n## Phase 2\n\n- Implement core logic\n- Add error handling\n',
+      },
+    ],
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Canned workflow data
+// ---------------------------------------------------------------------------
+
+interface MockWorkflow {
+  workflowId: string;
+  name: string;
+  phase: 'running' | 'waiting_human' | 'completed' | 'failed' | 'aborted';
+  currentState: string;
+  startedAt: string;
+}
+
+interface MockGate {
+  gateId: string;
+  workflowId: string;
+  stateName: string;
+  acceptedEvents: readonly string[];
+  presentedArtifacts: readonly string[];
+  summary: string;
+}
+
+const CANNED_WORKFLOWS: MockWorkflow[] = [
+  {
+    workflowId: 'wf-mock-001',
+    name: 'design-and-code',
+    phase: 'running',
+    currentState: 'implement',
+    startedAt: new Date(Date.now() - 120_000).toISOString(),
+  },
+  {
+    workflowId: 'wf-mock-002',
+    name: 'code-review',
+    phase: 'waiting_human',
+    currentState: 'plan_review',
+    startedAt: new Date(Date.now() - 300_000).toISOString(),
+  },
+];
+
+const workflows = new Map<string, MockWorkflow>();
+const workflowGates = new Map<string, MockGate>();
+const workflowTimers = new Map<string, ReturnType<typeof setTimeout>[]>();
+
+function trackTimer(workflowId: string, timer: ReturnType<typeof setTimeout>): void {
+  const existing = workflowTimers.get(workflowId) ?? [];
+  existing.push(timer);
+  workflowTimers.set(workflowId, existing);
+}
+
+function clearWorkflowTimers(workflowId: string): void {
+  const timers = workflowTimers.get(workflowId);
+  if (timers) {
+    for (const t of timers) clearTimeout(t);
+    workflowTimers.delete(workflowId);
+  }
+}
+
+function initWorkflows(): void {
+  workflows.clear();
+  workflowGates.clear();
+  for (const timers of workflowTimers.values()) {
+    for (const t of timers) clearTimeout(t);
+  }
+  workflowTimers.clear();
+  for (const wf of structuredClone(CANNED_WORKFLOWS)) {
+    workflows.set(wf.workflowId, wf);
+  }
+  // Add a gate for the waiting workflow
+  const gateId = 'wf-mock-002-plan_review';
+  workflowGates.set(gateId, {
+    gateId,
+    workflowId: 'wf-mock-002',
+    stateName: 'plan_review',
+    acceptedEvents: ['APPROVE', 'FORCE_REVISION', 'REPLAN', 'ABORT'],
+    presentedArtifacts: ['plan'],
+    summary: 'Waiting for human review at plan_review',
+  });
+}
+initWorkflows();
+
+// ---------------------------------------------------------------------------
+// Mock state graph for design-and-code workflow
+// ---------------------------------------------------------------------------
+
+const DESIGN_AND_CODE_GRAPH = {
+  states: [
+    { id: 'plan', type: 'agent' as const, persona: 'planner', label: 'Plan' },
+    { id: 'plan_review', type: 'human_gate' as const, label: 'Plan Review' },
+    { id: 'implement', type: 'agent' as const, persona: 'coder', label: 'Implement' },
+    { id: 'review', type: 'agent' as const, persona: 'critic', label: 'Review' },
+    { id: 'design_review', type: 'human_gate' as const, label: 'Design Review' },
+    { id: 'completed', type: 'terminal' as const, label: 'Completed' },
+    { id: 'aborted', type: 'terminal' as const, label: 'Aborted' },
+  ],
+  transitions: [
+    { from: 'plan', to: 'plan_review', label: '' },
+    { from: 'plan_review', to: 'implement', event: 'APPROVE', label: 'Approve' },
+    { from: 'plan_review', to: 'plan', event: 'FORCE_REVISION', label: 'Force Revision' },
+    { from: 'plan_review', to: 'aborted', event: 'ABORT', label: 'Abort' },
+    { from: 'implement', to: 'review', label: '' },
+    { from: 'review', to: 'implement', guard: 'isRejected', label: 'rejected' },
+    { from: 'review', to: 'design_review', guard: 'isApproved', label: 'approved' },
+    { from: 'design_review', to: 'completed', event: 'APPROVE', label: 'Approve' },
+    { from: 'design_review', to: 'implement', event: 'FORCE_REVISION', label: 'Force Revision' },
+    { from: 'design_review', to: 'aborted', event: 'ABORT', label: 'Abort' },
+  ],
+};
+
+const CODE_REVIEW_GRAPH = {
+  states: [
+    { id: 'analyze', type: 'agent' as const, persona: 'reviewer', label: 'Analyze' },
+    { id: 'report_review', type: 'human_gate' as const, label: 'Report Review' },
+    { id: 'completed', type: 'terminal' as const, label: 'Completed' },
+  ],
+  transitions: [
+    { from: 'analyze', to: 'report_review', label: '' },
+    { from: 'report_review', to: 'completed', event: 'APPROVE', label: 'Approve' },
+    { from: 'report_review', to: 'analyze', event: 'FORCE_REVISION', label: 'Force Revision' },
+  ],
+};
+
+function buildWorkflowDetailDto(wf: MockWorkflow, gate?: MockGate) {
+  const isDesignAndCode = wf.name.includes('design');
+  const graph = isDesignAndCode ? DESIGN_AND_CODE_GRAPH : CODE_REVIEW_GRAPH;
+
+  // Build transition history from the completed states
+  const transitionHistory = [];
+  const baseTime = new Date(wf.startedAt).getTime();
+  if (wf.currentState !== graph.states[0].id) {
+    // Simulate that at least the initial state transitioned
+    transitionHistory.push({
+      from: graph.states[0].id,
+      to: graph.states.length > 1 ? graph.states[1].id : graph.states[0].id,
+      event: 'auto',
+      timestamp: new Date(baseTime + 5000).toISOString(),
+      durationMs: 5000,
+    });
+  }
+
+  return {
+    ...wf,
+    description: `Mock workflow: ${wf.name}`,
+    stateGraph: graph,
+    transitionHistory,
+    context: {
+      taskDescription: `Execute the ${wf.name} workflow`,
+      round: 1,
+      maxRounds: 3,
+      totalTokens: 15000 + Math.floor(Math.random() * 10000),
+      visitCounts: { [wf.currentState]: 1 },
+    },
+    gate: gate ?? undefined,
+    workspacePath: `/tmp/ironcurtain-workflow/${wf.workflowId}`,
+  };
+}
+
 // Mutable copy of canned jobs so enable/disable/remove are stateful
 const jobs = structuredClone(CANNED_JOBS);
 
@@ -260,6 +533,7 @@ function resetState(): void {
   nextLabel = 1;
   jobs.length = 0;
   jobs.push(...structuredClone(CANNED_JOBS));
+  initWorkflows();
 }
 
 // ---------------------------------------------------------------------------
@@ -573,6 +847,224 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
     case 'personas.list':
       return CANNED_PERSONAS;
 
+    case 'personas.get': {
+      const pName = params.name as string;
+      const pDetail = CANNED_PERSONA_DETAILS[pName];
+      if (!pDetail) return errorResult('PERSONA_NOT_FOUND', `Persona "${pName}" not found`);
+      return pDetail;
+    }
+
+    case 'personas.compile': {
+      const pName = params.name as string;
+      if (!CANNED_PERSONA_DETAILS[pName]) return errorResult('PERSONA_NOT_FOUND', `Persona "${pName}" not found`);
+      // Simulate compilation success
+      return { success: true, ruleCount: 10 + Math.floor(Math.random() * 10) };
+    }
+
+    // Workflow methods
+    case 'workflows.listDefinitions':
+      return [
+        {
+          name: 'design-and-code',
+          description: 'Plan -> Design -> Implement -> Review workflow',
+          path: '/opt/ironcurtain/workflows/design-and-code.json',
+          source: 'bundled',
+        },
+        {
+          name: 'code-review',
+          description: 'Automated code review with multiple reviewers',
+          path: '/opt/ironcurtain/workflows/code-review.json',
+          source: 'bundled',
+        },
+        {
+          name: 'my-custom-flow',
+          description: 'Custom workflow for internal tooling',
+          path: '/home/user/.ironcurtain/workflows/my-custom-flow.json',
+          source: 'user',
+        },
+      ];
+
+    case 'workflows.list':
+      return [...workflows.values()];
+
+    case 'workflows.get': {
+      const wfId = params.workflowId as string;
+      const wf = workflows.get(wfId);
+      if (!wf) return errorResult('WORKFLOW_NOT_FOUND', `Workflow ${wfId} not found`);
+      const gate = [...workflowGates.values()].find((g) => g.workflowId === wfId);
+      return buildWorkflowDetailDto(wf, gate);
+    }
+
+    case 'workflows.start': {
+      const newId = `wf-mock-${Date.now()}`;
+      const newWf: MockWorkflow = {
+        workflowId: newId,
+        name: String(params.definitionPath).split('/').pop()?.replace('.json', '') ?? 'workflow',
+        phase: 'running',
+        currentState: 'plan',
+        startedAt: new Date().toISOString(),
+      };
+      workflows.set(newId, newWf);
+      broadcast('workflow.started', {
+        workflowId: newId,
+        name: newWf.name,
+        taskDescription: String(params.taskDescription ?? ''),
+      });
+      broadcast('workflow.agent_started', { workflowId: newId, stateId: 'plan', persona: 'planner' });
+      broadcast('workflow.state_entered', { workflowId: newId, state: 'plan' });
+
+      trackTimer(
+        newId,
+        setTimeout(() => {
+          const wf = workflows.get(newId);
+          if (wf && wf.phase === 'running') {
+            broadcast('workflow.agent_completed', { workflowId: newId, stateId: 'plan', verdict: 'success' });
+            wf.currentState = 'plan_review';
+            wf.phase = 'waiting_human';
+            const gateId = `${newId}-plan_review`;
+            const gate: MockGate = {
+              gateId,
+              workflowId: newId,
+              stateName: 'plan_review',
+              acceptedEvents: ['APPROVE', 'FORCE_REVISION', 'REPLAN', 'ABORT'],
+              presentedArtifacts: ['plan.md'],
+              summary: 'The planner has produced an implementation plan. Please review and approve.',
+            };
+            workflowGates.set(gateId, gate);
+            broadcast('workflow.state_entered', { workflowId: newId, state: 'plan_review' });
+            broadcast('workflow.gate_raised', {
+              workflowId: newId,
+              gate: {
+                gateId,
+                workflowId: newId,
+                stateName: gate.stateName,
+                acceptedEvents: gate.acceptedEvents,
+                presentedArtifacts: gate.presentedArtifacts,
+                summary: gate.summary,
+              },
+            });
+          }
+        }, 4000),
+      );
+
+      return { workflowId: newId };
+    }
+
+    case 'workflows.abort': {
+      const abortId = params.workflowId as string;
+      const abortWf = workflows.get(abortId);
+      if (!abortWf) return errorResult('WORKFLOW_NOT_FOUND', `Workflow ${abortId} not found`);
+      abortWf.phase = 'aborted';
+      abortWf.currentState = 'aborted';
+      clearWorkflowTimers(abortId);
+      for (const [gateId, gate] of workflowGates) {
+        if (gate.workflowId === abortId) workflowGates.delete(gateId);
+      }
+      broadcast('workflow.failed', { workflowId: abortId, error: 'Workflow aborted by user' });
+      return undefined;
+    }
+
+    case 'workflows.resolveGate': {
+      const resolveWfId = params.workflowId as string;
+      const resolveEvent = params.event as string;
+      const resolveWf = workflows.get(resolveWfId);
+      if (!resolveWf) return errorResult('WORKFLOW_NOT_FOUND', `Workflow ${resolveWfId} not found`);
+      if (resolveWf.phase !== 'waiting_human') {
+        return errorResult('WORKFLOW_NOT_AT_GATE', `Workflow ${resolveWfId} is not waiting at a gate`);
+      }
+      // Dismiss gate and resume
+      for (const [gateId, gate] of workflowGates) {
+        if (gate.workflowId === resolveWfId) {
+          workflowGates.delete(gateId);
+          broadcast('workflow.gate_dismissed', { workflowId: resolveWfId, gateId });
+        }
+      }
+
+      if (resolveEvent === 'ABORT') {
+        resolveWf.phase = 'aborted';
+        resolveWf.currentState = 'aborted';
+        broadcast('workflow.failed', { workflowId: resolveWfId, error: 'Workflow aborted by user' });
+      } else {
+        const nextState = resolveEvent === 'FORCE_REVISION' ? 'plan' : 'implement';
+        resolveWf.phase = 'running';
+        resolveWf.currentState = nextState;
+        broadcast('workflow.agent_started', {
+          workflowId: resolveWfId,
+          stateId: nextState,
+          persona: nextState === 'plan' ? 'planner' : 'coder',
+        });
+        broadcast('workflow.state_entered', { workflowId: resolveWfId, state: nextState });
+
+        trackTimer(
+          resolveWfId,
+          setTimeout(() => {
+            const wf = workflows.get(resolveWfId);
+            if (wf && wf.phase === 'running') {
+              broadcast('workflow.agent_completed', {
+                workflowId: resolveWfId,
+                stateId: nextState,
+                verdict: 'success',
+              });
+              if (nextState === 'implement') {
+                wf.currentState = 'review';
+                broadcast('workflow.state_entered', { workflowId: resolveWfId, state: 'review' });
+              }
+            }
+          }, 3000),
+        );
+      }
+      return undefined;
+    }
+
+    case 'workflows.listResumable':
+      return [
+        {
+          workflowId: 'wf-resumable-001',
+          lastState: 'plan_review',
+          timestamp: new Date(Date.now() - 3600_000).toISOString(),
+          taskDescription: 'Implement circle of fifths visualization component with SVG',
+          workspacePath: '/home/user/projects/music-app',
+        },
+        {
+          workflowId: 'wf-resumable-002',
+          lastState: 'code_review',
+          timestamp: new Date(Date.now() - 86400_000).toISOString(),
+          taskDescription: 'Add unit tests for authentication middleware',
+        },
+      ];
+
+    case 'workflows.import':
+      return { workflowId: 'wf-imported-001' };
+
+    case 'workflows.resume':
+      return { accepted: true, workflowId: params.workflowId as string };
+
+    case 'workflows.inspect':
+      return { accepted: true };
+
+    case 'workflows.fileTree': {
+      const relPath = (params.path as string) ?? '';
+      if (relPath === 'src') return CANNED_FILE_TREE_SRC;
+      if (relPath === '.workflow') return CANNED_FILE_TREE_WORKFLOW;
+      if (relPath === '') return CANNED_FILE_TREE;
+      // Sub-paths return empty
+      return { entries: [] };
+    }
+
+    case 'workflows.fileContent': {
+      const filePath = params.path as string;
+      const fc = CANNED_FILE_CONTENTS[filePath];
+      if (!fc) return errorResult('INVALID_PARAMS', `File not found: ${filePath}`);
+      return fc;
+    }
+
+    case 'workflows.artifacts': {
+      const artName = params.artifactName as string;
+      const art = CANNED_ARTIFACTS[artName];
+      if (!art) return errorResult('ARTIFACT_NOT_FOUND', `Artifact "${artName}" not found`);
+      return art;
+    }
+
     case '__reset': {
       resetState();
       return undefined;
@@ -630,13 +1122,29 @@ wss.on('connection', (ws) => {
   });
 });
 
-// HTTP server for test-only endpoints (e.g., state reset)
+// HTTP server for test-only endpoints (e.g., state reset, workflow event injection)
 const RESET_PORT = parseInt(process.env.RESET_PORT ?? '7401', 10);
 const httpServer = createServer((req, res) => {
   if (req.method === 'POST' && req.url === '/__reset') {
     resetState();
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: true }));
+  } else if (req.method === 'POST' && req.url === '/__workflow-event') {
+    let body = '';
+    req.on('data', (chunk: Buffer) => {
+      body += chunk.toString();
+    });
+    req.on('end', () => {
+      try {
+        const { event, payload } = JSON.parse(body) as { event: string; payload: unknown };
+        broadcast(event, payload);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+      } catch {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'Invalid JSON' }));
+      }
+    });
   } else {
     res.writeHead(404);
     res.end();

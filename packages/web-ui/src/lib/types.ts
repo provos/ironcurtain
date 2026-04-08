@@ -153,3 +153,143 @@ export interface OutputLine {
   readonly timestamp: string;
   readonly escalationId?: string;
 }
+
+// ---------------------------------------------------------------------------
+// Workflow types
+// ---------------------------------------------------------------------------
+
+/** Resumable workflow returned by `workflows.listResumable`. */
+export interface ResumableWorkflowDto {
+  readonly workflowId: string;
+  readonly lastState: string;
+  readonly timestamp: string;
+  readonly taskDescription: string;
+  readonly workspacePath?: string;
+}
+
+export type WorkflowPhase = 'running' | 'waiting_human' | 'completed' | 'failed' | 'aborted';
+
+export interface WorkflowSummaryDto {
+  readonly workflowId: string;
+  readonly name: string;
+  readonly phase: WorkflowPhase;
+  readonly currentState: string;
+  readonly startedAt: string;
+}
+
+export interface HumanGateRequestDto {
+  readonly gateId: string;
+  readonly workflowId: string;
+  readonly stateName: string;
+  readonly acceptedEvents: readonly string[];
+  readonly presentedArtifacts: readonly string[];
+  readonly summary: string;
+}
+
+export interface StateGraphDto {
+  readonly states: readonly StateNodeDto[];
+  readonly transitions: readonly TransitionEdgeDto[];
+}
+
+export interface StateNodeDto {
+  readonly id: string;
+  readonly type: 'agent' | 'human_gate' | 'deterministic' | 'terminal';
+  readonly persona?: string;
+  readonly label: string;
+}
+
+export interface TransitionEdgeDto {
+  readonly from: string;
+  readonly to: string;
+  readonly guard?: string;
+  readonly event?: string;
+  readonly label: string;
+}
+
+export interface TransitionRecordDto {
+  readonly from: string;
+  readonly to: string;
+  readonly event: string;
+  readonly timestamp: string;
+  readonly durationMs: number;
+}
+
+export interface WorkflowContextDto {
+  readonly taskDescription: string;
+  readonly round: number;
+  readonly maxRounds: number;
+  readonly totalTokens: number;
+  readonly visitCounts: Record<string, number>;
+}
+
+export interface WorkflowDetailDto extends WorkflowSummaryDto {
+  readonly description: string;
+  readonly stateGraph: StateGraphDto;
+  readonly transitionHistory: readonly TransitionRecordDto[];
+  readonly context: WorkflowContextDto;
+  readonly gate?: HumanGateRequestDto;
+  readonly workspacePath: string;
+}
+
+// ---------------------------------------------------------------------------
+// File browser types
+// ---------------------------------------------------------------------------
+
+export interface FileTreeEntryDto {
+  readonly name: string;
+  readonly type: 'file' | 'directory';
+  readonly size?: number;
+}
+
+export interface FileTreeResponseDto {
+  readonly entries: readonly FileTreeEntryDto[];
+}
+
+export interface FileContentResponseDto {
+  readonly content?: string;
+  readonly language?: string;
+  readonly binary?: boolean;
+  readonly error?: string;
+}
+
+export interface ArtifactFileDto {
+  readonly path: string;
+  readonly content: string;
+}
+
+export interface ArtifactContentDto {
+  readonly files: readonly ArtifactFileDto[];
+}
+
+// ---------------------------------------------------------------------------
+// Workflow definition types
+// ---------------------------------------------------------------------------
+
+export type WorkflowSource = 'bundled' | 'user' | 'custom';
+
+export interface WorkflowDefinitionDto {
+  readonly name: string;
+  readonly description: string;
+  readonly path: string;
+  readonly source: WorkflowSource;
+}
+
+// ---------------------------------------------------------------------------
+// Persona types
+// ---------------------------------------------------------------------------
+
+export interface PersonaDetailDto {
+  readonly name: string;
+  readonly description: string;
+  readonly createdAt: string;
+  readonly constitution: string;
+  readonly servers?: readonly string[];
+  readonly hasPolicy: boolean;
+  readonly policyRuleCount?: number;
+}
+
+export interface PersonaCompileResultDto {
+  readonly success: boolean;
+  readonly ruleCount: number;
+  readonly errors?: readonly string[];
+}

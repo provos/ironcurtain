@@ -1,0 +1,255 @@
+import { z } from 'zod';
+import type { WorkflowDefinition, WorkflowStateDefinition, HumanGateStateDefinition } from './types.js';
+import { REGISTERED_GUARDS } from './guards.js';
+
+// ---------------------------------------------------------------------------
+// Zod schemas
+// ---------------------------------------------------------------------------
+
+const agentTransitionSchema = z.object({
+  to: z.string(),
+  guard: z.string().optional(),
+  flag: z.string().optional(),
+});
+
+const humanGateTransitionSchema = z.object({
+  to: z.string(),
+  event: z.enum(['APPROVE', 'FORCE_REVISION', 'REPLAN', 'ABORT']),
+});
+
+const agentStateSchema = z.object({
+  type: z.literal('agent'),
+  persona: z.string(),
+  prompt: z.string().min(1),
+  inputs: z.array(z.string()),
+  outputs: z.array(z.string()),
+  transitions: z.array(agentTransitionSchema),
+  parallelKey: z.string().optional(),
+  worktree: z.boolean().optional(),
+});
+
+const humanGateStateSchema = z.object({
+  type: z.literal('human_gate'),
+  acceptedEvents: z.array(z.enum(['APPROVE', 'FORCE_REVISION', 'REPLAN', 'ABORT'])),
+  present: z.array(z.string()).optional(),
+  transitions: z.array(humanGateTransitionSchema),
+});
+
+const deterministicStateSchema = z.object({
+  type: z.literal('deterministic'),
+  run: z.array(z.array(z.string())),
+  transitions: z.array(agentTransitionSchema),
+});
+
+const terminalStateSchema = z.object({
+  type: z.literal('terminal'),
+  outputs: z.array(z.string()).optional(),
+  cleanup: z.array(z.array(z.string())).optional(),
+});
+
+const stateDefinitionSchema = z.discriminatedUnion('type', [
+  agentStateSchema,
+  humanGateStateSchema,
+  deterministicStateSchema,
+  terminalStateSchema,
+]);
+
+const workflowSettingsSchema = z
+  .object({
+    mode: z.enum(['docker', 'builtin']).optional(),
+    dockerAgent: z.string().optional(),
+    maxRounds: z.number().int().positive().optional(),
+    gitRepoPath: z.string().optional(),
+    maxParallelism: z.number().int().positive().optional(),
+    systemPrompt: z.string().optional(),
+  })
+  .optional();
+
+const workflowDefinitionSchema = z.object({
+  name: z.string().min(1),
+  description: z.string(),
+  initial: z.string(),
+  states: z.record(z.string(), stateDefinitionSchema),
+  settings: workflowSettingsSchema,
+});
+
+// ---------------------------------------------------------------------------
+// Validation error
+// ---------------------------------------------------------------------------
+
+export class WorkflowValidationError extends Error {
+  readonly issues: readonly string[];
+
+  constructor(issues: readonly string[]) {
+    super(`Workflow validation failed:\n  - ${issues.join('\n  - ')}`);
+    this.name = 'WorkflowValidationError';
+    this.issues = issues;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Semantic validation
+// ---------------------------------------------------------------------------
+
+function collectTransitionTargets(state: WorkflowStateDefinition): string[] {
+  switch (state.type) {
+    case 'agent':
+    case 'deterministic':
+      return state.transitions.map((t) => t.to);
+    case 'human_gate':
+      return state.transitions.map((t) => t.to);
+    case 'terminal':
+      return [];
+  }
+}
+
+function collectGuardNames(state: WorkflowStateDefinition): string[] {
+  if (state.type === 'agent' || state.type === 'deterministic') {
+    return state.transitions.filter((t): t is typeof t & { guard: string } => t.guard != null).map((t) => t.guard);
+  }
+  return [];
+}
+
+function collectOutputArtifacts(states: Record<string, WorkflowStateDefinition>): Set<string> {
+  const outputs = new Set<string>();
+  for (const state of Object.values(states)) {
+    if (state.type === 'agent' || state.type === 'terminal') {
+      for (const o of state.outputs ?? []) {
+        outputs.add(o);
+      }
+    }
+  }
+  return outputs;
+}
+
+function findReachableStates(initial: string, states: Record<string, WorkflowStateDefinition>): Set<string> {
+  const reachable = new Set<string>();
+  const queue = [initial];
+  while (queue.length > 0) {
+    const current = queue.pop();
+    if (current === undefined) continue;
+    if (reachable.has(current)) continue;
+    reachable.add(current);
+    const state = states[current] as WorkflowStateDefinition | undefined;
+    if (!state) continue;
+    for (const target of collectTransitionTargets(state)) {
+      if (!reachable.has(target)) {
+        queue.push(target);
+      }
+    }
+  }
+  return reachable;
+}
+
+function validateSemantics(definition: WorkflowDefinition): void {
+  const issues: string[] = [];
+  const stateNames = new Set(Object.keys(definition.states));
+
+  // Initial state must exist
+  if (!stateNames.has(definition.initial)) {
+    issues.push(`Initial state "${definition.initial}" does not exist`);
+  }
+
+  // At least one terminal state
+  const hasTerminal = Object.values(definition.states).some((s) => s.type === 'terminal');
+  if (!hasTerminal) {
+    issues.push('At least one terminal state is required');
+  }
+
+  // Validate each state
+  for (const [stateId, state] of Object.entries(definition.states)) {
+    // Transition targets must reference existing states
+    for (const target of collectTransitionTargets(state)) {
+      if (!stateNames.has(target)) {
+        issues.push(`State "${stateId}" has transition to unknown state "${target}"`);
+      }
+    }
+
+    // Guard names must be registered
+    for (const guard of collectGuardNames(state)) {
+      if (!REGISTERED_GUARDS.has(guard)) {
+        issues.push(`State "${stateId}" references unregistered guard "${guard}"`);
+      }
+    }
+
+    // Human gate-specific checks
+    if (state.type === 'human_gate') {
+      validateHumanGate(stateId, state, issues);
+    }
+
+    // parallelKey only on agent states
+    if (state.type !== 'agent' && 'parallelKey' in state) {
+      issues.push(`State "${stateId}" has parallelKey but is not an agent state`);
+    }
+  }
+
+  // Unreachable states
+  const reachable = findReachableStates(definition.initial, definition.states);
+  for (const stateId of stateNames) {
+    if (!reachable.has(stateId)) {
+      issues.push(`State "${stateId}" is unreachable from initial state`);
+    }
+  }
+
+  // Artifact input references
+  validateArtifactInputs(definition, issues);
+
+  if (issues.length > 0) {
+    throw new WorkflowValidationError(issues);
+  }
+}
+
+function validateHumanGate(stateId: string, state: HumanGateStateDefinition, issues: string[]): void {
+  if (state.transitions.length === 0) {
+    issues.push(`Human gate "${stateId}" must have at least one transition`);
+  }
+
+  const acceptedSet = new Set(state.acceptedEvents);
+  for (const t of state.transitions) {
+    if (!acceptedSet.has(t.event)) {
+      issues.push(`Human gate "${stateId}" transition uses event "${t.event}" not in acceptedEvents`);
+    }
+  }
+}
+
+function validateArtifactInputs(definition: WorkflowDefinition, issues: string[]): void {
+  const availableOutputs = collectOutputArtifacts(definition.states);
+
+  for (const [stateId, state] of Object.entries(definition.states)) {
+    if (state.type !== 'agent') continue;
+    const agentState = state;
+    for (const input of agentState.inputs) {
+      // Trailing `?` marks optional inputs
+      const isOptional = input.endsWith('?');
+      const artifactName = isOptional ? input.slice(0, -1) : input;
+      if (!isOptional && !availableOutputs.has(artifactName)) {
+        issues.push(`State "${stateId}" requires input artifact "${artifactName}" not produced by any state`);
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+/**
+ * Validates a raw JSON object as a WorkflowDefinition.
+ * Performs structural parsing (Zod) then semantic checks.
+ *
+ * @throws {WorkflowValidationError} with structured list of issues
+ */
+export function validateDefinition(raw: unknown): WorkflowDefinition {
+  let parsed: WorkflowDefinition;
+  try {
+    parsed = workflowDefinitionSchema.parse(raw) as WorkflowDefinition;
+  } catch (err) {
+    if (err instanceof z.ZodError) {
+      const issues = err.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`);
+      throw new WorkflowValidationError(issues);
+    }
+    throw err;
+  }
+  validateSemantics(parsed);
+  return parsed;
+}

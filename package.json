@@ -44,6 +44,7 @@
     "src/config/generated/compiled-policy.json",
     "src/config/generated/tool-annotations.json",
     "src/config/generated/test-scenarios.json",
+    "src/workflow/workflows/",
     "README.md",
     "LICENSE"
   ],
@@ -97,6 +98,7 @@
     "undici": "^7.24.0",
     "uuid": "^13.0.0",
     "ws": "^8.20.0",
+    "xstate": "^5.30.0",
     "zod": "^4.3.6"
   },
   "optionalDependencies": {

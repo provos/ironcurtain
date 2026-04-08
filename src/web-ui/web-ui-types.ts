@@ -6,6 +6,7 @@ import type { SessionSource } from '../session/session-manager.js';
 import type { SessionStatus, DiagnosticEvent, ConversationTurn } from '../session/types.js';
 import type { JobDefinition, RunRecord } from '../cron/types.js';
 import type { WhitelistCandidateIpc } from '../trusted-process/approval-whitelist.js';
+import type { HumanGateRequest } from '../workflow/types.js';
 
 // ---------------------------------------------------------------------------
 // JSON-RPC Frame Protocol
@@ -32,7 +33,22 @@ export type MethodName =
   | 'sessions.diagnostics'
   | 'escalations.list'
   | 'escalations.resolve'
-  | 'personas.list';
+  | 'personas.list'
+  | 'workflows.list'
+  | 'workflows.get'
+  | 'workflows.start'
+  | 'workflows.import'
+  | 'workflows.resume'
+  | 'workflows.abort'
+  | 'workflows.resolveGate'
+  | 'workflows.inspect'
+  | 'workflows.fileTree'
+  | 'workflows.fileContent'
+  | 'workflows.artifacts'
+  | 'workflows.listDefinitions'
+  | 'workflows.listResumable'
+  | 'personas.get'
+  | 'personas.compile';
 
 /** Browser -> Daemon request frame. */
 export interface RequestFrame {
@@ -61,6 +77,11 @@ export type ErrorCode =
   | 'ESCALATION_NOT_FOUND'
   | 'ESCALATION_EXPIRED'
   | 'SESSION_BUSY'
+  | 'WORKFLOW_NOT_FOUND'
+  | 'WORKFLOW_NOT_AT_GATE'
+  | 'ARTIFACT_NOT_FOUND'
+  | 'PERSONA_NOT_FOUND'
+  | 'FILE_TOO_LARGE'
   | 'INVALID_PARAMS'
   | 'RATE_LIMITED'
   | 'METHOD_NOT_FOUND'
@@ -133,6 +154,172 @@ export interface JobListDto {
   readonly nextRun: string | null;
   readonly lastRun: RunRecord | null;
   readonly isRunning: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Workflow DTO Types
+// ---------------------------------------------------------------------------
+
+/** Slim summary returned by `workflows.list`. */
+export interface WorkflowSummaryDto {
+  readonly workflowId: string;
+  readonly name: string;
+  readonly phase: 'running' | 'waiting_human' | 'completed' | 'failed' | 'aborted';
+  readonly currentState: string;
+  readonly startedAt: string;
+}
+
+/** Full detail returned by `workflows.get`. */
+export interface WorkflowDetailDto extends WorkflowSummaryDto {
+  readonly description: string;
+  readonly stateGraph: StateGraphDto;
+  readonly transitionHistory: readonly TransitionRecordDto[];
+  readonly context: WorkflowContextDto;
+  readonly gate?: HumanGateRequestDto;
+  readonly workspacePath: string;
+}
+
+/** Minimal representation of the state machine graph for frontend rendering. */
+export interface StateGraphDto {
+  readonly states: readonly StateNodeDto[];
+  readonly transitions: readonly TransitionEdgeDto[];
+}
+
+export interface StateNodeDto {
+  readonly id: string;
+  readonly type: 'agent' | 'human_gate' | 'deterministic' | 'terminal';
+  readonly persona?: string;
+  readonly label: string;
+}
+
+export interface TransitionEdgeDto {
+  readonly from: string;
+  readonly to: string;
+  readonly guard?: string;
+  readonly event?: string;
+  readonly label: string;
+}
+
+export interface TransitionRecordDto {
+  readonly from: string;
+  readonly to: string;
+  readonly event: string;
+  readonly timestamp: string;
+  readonly durationMs: number;
+}
+
+export interface HumanGateRequestDto {
+  readonly gateId: string;
+  readonly workflowId: string;
+  readonly stateName: string;
+  readonly acceptedEvents: readonly string[];
+  /** Artifact names only (not content). */
+  readonly presentedArtifacts: readonly string[];
+  readonly summary: string;
+}
+
+/**
+ * Converts a domain HumanGateRequest to the JSON-serializable DTO.
+ *
+ * HumanGateRequest.presentedArtifacts is a ReadonlyMap<string, string>
+ * which does not serialize to JSON. This converter extracts the keys
+ * as a plain array.
+ */
+export function toHumanGateRequestDto(gate: HumanGateRequest): HumanGateRequestDto {
+  return {
+    gateId: gate.gateId,
+    workflowId: gate.workflowId,
+    stateName: gate.stateName,
+    acceptedEvents: gate.acceptedEvents,
+    presentedArtifacts: Array.from(gate.presentedArtifacts.keys()),
+    summary: gate.summary,
+  };
+}
+
+export interface WorkflowContextDto {
+  readonly taskDescription: string;
+  readonly round: number;
+  readonly maxRounds: number;
+  readonly totalTokens: number;
+  readonly visitCounts: Record<string, number>;
+}
+
+// ---------------------------------------------------------------------------
+// File browser DTO Types
+// ---------------------------------------------------------------------------
+
+/** Entry in a directory listing returned by `workflows.fileTree`. */
+export interface FileTreeEntryDto {
+  readonly name: string;
+  readonly type: 'file' | 'directory';
+  readonly size?: number;
+}
+
+/** Response from `workflows.fileTree`. */
+export interface FileTreeResponseDto {
+  readonly entries: readonly FileTreeEntryDto[];
+}
+
+/** Response from `workflows.fileContent`. */
+export interface FileContentResponseDto {
+  readonly content?: string;
+  readonly language?: string;
+  readonly binary?: boolean;
+  readonly error?: string;
+}
+
+/** A single file in an artifact. */
+export interface ArtifactFileDto {
+  readonly path: string;
+  readonly content: string;
+}
+
+/** Response from `workflows.artifacts`. */
+export interface ArtifactContentDto {
+  readonly files: readonly ArtifactFileDto[];
+}
+
+// ---------------------------------------------------------------------------
+// Workflow Definition DTO Types
+// ---------------------------------------------------------------------------
+
+/** Resumable workflow returned by `workflows.listResumable`. */
+export interface ResumableWorkflowDto {
+  readonly workflowId: string;
+  readonly lastState: string;
+  readonly timestamp: string;
+  readonly taskDescription: string;
+  readonly workspacePath?: string;
+}
+
+/** Available workflow definition returned by `workflows.listDefinitions`. */
+export interface WorkflowDefinitionDto {
+  readonly name: string;
+  readonly description: string;
+  readonly path: string;
+  readonly source: 'bundled' | 'user' | 'custom';
+}
+
+// ---------------------------------------------------------------------------
+// Persona DTO Types
+// ---------------------------------------------------------------------------
+
+/** Detail for a single persona returned by `personas.get`. */
+export interface PersonaDetailDto {
+  readonly name: string;
+  readonly description: string;
+  readonly createdAt: string;
+  readonly constitution: string;
+  readonly servers?: readonly string[];
+  readonly hasPolicy: boolean;
+  readonly policyRuleCount?: number;
+}
+
+/** Response from `personas.compile`. */
+export interface PersonaCompileResultDto {
+  readonly success: boolean;
+  readonly ruleCount: number;
+  readonly errors?: readonly string[];
 }
 
 // ---------------------------------------------------------------------------

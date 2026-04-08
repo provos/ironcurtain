@@ -1,0 +1,86 @@
+{
+  "name": "design-and-code",
+  "description": "Plan -> Design -> Implement -> Review workflow with human gates and coder-critic loop",
+  "initial": "plan",
+  "settings": {
+    "mode": "docker",
+    "dockerAgent": "claude-code",
+    "maxRounds": 3,
+    "systemPrompt": "Workflow artifacts (plan, spec, reviews) go in `.workflow/`. Code goes directly at the workspace root."
+  },
+  "states": {
+    "plan": {
+      "type": "agent",
+      "persona": "global",
+      "prompt": "You are a project planner.\n\nYour responsibilities:\n- Analyze the task requirements\n- If there is existing code in the workspace, read it to understand the current architecture\n- Identify components, dependencies, and implementation order\n- Note key design decisions and trade-offs\n\nOutput: Create a `.workflow/plan/` directory with a `plan.md` file.\nWrite a structured markdown document with numbered steps.\nDo NOT write any code -- only the plan.",
+      "inputs": [],
+      "outputs": ["plan"],
+      "transitions": [{ "to": "plan_review" }]
+    },
+    "plan_review": {
+      "type": "human_gate",
+      "acceptedEvents": ["APPROVE", "FORCE_REVISION", "ABORT"],
+      "present": ["plan"],
+      "transitions": [
+        { "to": "design", "event": "APPROVE" },
+        { "to": "plan", "event": "FORCE_REVISION" },
+        { "to": "aborted", "event": "ABORT" }
+      ]
+    },
+    "design": {
+      "type": "agent",
+      "persona": "global",
+      "prompt": "You are a software architect. Produce a technical design specification.\n\nYour responsibilities:\n- Define module structure, interfaces, and data flow\n- Specify function signatures with TypeScript types\n- Document key design decisions and rationale\n- If there is existing code, design around it\n\nOutput: Create a `.workflow/spec/` directory with a `spec.md` file.\nDo NOT write implementation code.",
+      "inputs": ["plan"],
+      "outputs": ["spec"],
+      "transitions": [{ "to": "design_review" }]
+    },
+    "design_review": {
+      "type": "human_gate",
+      "acceptedEvents": ["APPROVE", "FORCE_REVISION", "ABORT"],
+      "present": ["spec"],
+      "transitions": [
+        { "to": "implement", "event": "APPROVE" },
+        { "to": "design", "event": "FORCE_REVISION" },
+        { "to": "aborted", "event": "ABORT" }
+      ]
+    },
+    "implement": {
+      "type": "agent",
+      "persona": "global",
+      "prompt": "You are an implementation engineer.\n\nYour responsibilities:\n- Implement all modules described in the spec\n- Write clean, well-typed TypeScript\n- Create unit tests\n- Run the tests to verify they pass\n\nWrite code directly at the workspace root (e.g., `src/`, `package.json`, `tests/`).\nDo NOT create a separate output directory for code.\nRun all tests to verify everything works.",
+      "inputs": ["plan", "spec"],
+      "outputs": [],
+      "transitions": [{ "to": "review" }]
+    },
+    "review": {
+      "type": "agent",
+      "persona": "global",
+      "prompt": "You are a code reviewer.\n\nYour responsibilities:\n- Verify correctness: does the code at the workspace root match the spec?\n- Check edge cases and error handling\n- Evaluate code quality, naming, and structure\n- Assess test coverage and test quality\n\nOutput: Create a `.workflow/reviews/` directory with a `review.md` file.\nIf issues are found, set verdict to \"rejected\" with specific, actionable feedback.\nIf the code is solid, set verdict to \"approved\".",
+      "inputs": ["spec"],
+      "outputs": ["reviews"],
+      "transitions": [
+        { "to": "done", "guard": "isApproved" },
+        { "to": "escalate_gate", "guard": "isRoundLimitReached" },
+        { "to": "implement", "guard": "isRejected" }
+      ]
+    },
+    "escalate_gate": {
+      "type": "human_gate",
+      "acceptedEvents": ["APPROVE", "FORCE_REVISION", "ABORT"],
+      "present": ["reviews"],
+      "transitions": [
+        { "to": "done", "event": "APPROVE" },
+        { "to": "implement", "event": "FORCE_REVISION" },
+        { "to": "aborted", "event": "ABORT" }
+      ]
+    },
+    "done": {
+      "type": "terminal",
+      "outputs": ["reviews"]
+    },
+    "aborted": {
+      "type": "terminal"
+    }
+  }
+}

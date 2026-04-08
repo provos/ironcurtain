@@ -34,6 +34,7 @@
     "vitest": "^4.1.2"
   },
   "dependencies": {
+    "@dagrejs/dagre": "^3.0.0",
     "@types/dompurify": "^3.0.5",
     "clsx": "^2.1.1",
     "dompurify": "^3.3.3",

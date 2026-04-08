@@ -15,11 +15,21 @@ import type {
   ConversationTurn,
   BudgetSummaryDto,
   PersonaListItem,
+  PersonaDetailDto,
+  PersonaCompileResultDto,
+  ResumableWorkflowDto,
+  WorkflowSummaryDto,
+  WorkflowDetailDto,
+  WorkflowDefinitionDto,
+  HumanGateRequestDto,
+  FileTreeResponseDto,
+  FileContentResponseDto,
+  ArtifactContentDto,
 } from './types.js';
 import { createWsClient, type WsClient } from './ws-client.js';
 import { handleEvent as handleEventPure } from './event-handler.js';
 
-export type ViewId = 'dashboard' | 'sessions' | 'escalations' | 'jobs';
+export type ViewId = 'dashboard' | 'sessions' | 'escalations' | 'jobs' | 'workflows' | 'personas';
 export type ThemeId = 'iron' | 'daylight' | 'midnight';
 
 const MAX_OUTPUT_LINES = 2000;
@@ -49,6 +59,11 @@ class AppState {
   jobs: JobListDto[] = $state([]);
   sessionOutputs: Map<number, OutputLine[]> = $state(new Map());
   currentView: ViewId = $state('dashboard');
+
+  // Workflow state
+  workflows: Map<string, WorkflowSummaryDto> = $state(new Map());
+  selectedWorkflowId: string | null = $state(null);
+  pendingGates: Map<string, HumanGateRequestDto> = $state(new Map());
 
   get selectedSession(): SessionDto | null {
     if (this.selectedSessionLabel === null) return null;
@@ -296,6 +311,91 @@ export async function recompileJob(jobId: string): Promise<void> {
 
 export async function listPersonas(): Promise<PersonaListItem[]> {
   return getWsClient().request<PersonaListItem[]>('personas.list');
+}
+
+// ── Workflow RPC actions ────────────────────────────────────────────
+
+export async function listWorkflowDefinitions(): Promise<WorkflowDefinitionDto[]> {
+  return getWsClient().request<WorkflowDefinitionDto[]>('workflows.listDefinitions');
+}
+
+export async function listWorkflows(): Promise<WorkflowSummaryDto[]> {
+  return getWsClient().request<WorkflowSummaryDto[]>('workflows.list');
+}
+
+export async function startWorkflow(
+  definitionPath: string,
+  taskDescription: string,
+  workspacePath?: string,
+): Promise<{ workflowId: string }> {
+  const params: Record<string, unknown> = { definitionPath, taskDescription };
+  if (workspacePath) params.workspacePath = workspacePath;
+  return getWsClient().request<{ workflowId: string }>('workflows.start', params);
+}
+
+export async function abortWorkflow(workflowId: string): Promise<void> {
+  await getWsClient().request('workflows.abort', { workflowId });
+}
+
+export async function resolveWorkflowGate(workflowId: string, event: string, prompt?: string): Promise<void> {
+  const params: Record<string, unknown> = { workflowId, event };
+  if (prompt) params.prompt = prompt;
+  await getWsClient().request('workflows.resolveGate', params);
+}
+
+export async function refreshWorkflows(): Promise<void> {
+  try {
+    const workflows = await listWorkflows();
+    const newMap = new Map<string, WorkflowSummaryDto>();
+    for (const wf of workflows) {
+      newMap.set(wf.workflowId, wf);
+    }
+    appState.workflows = newMap;
+  } catch {
+    // Best-effort
+  }
+}
+
+export async function getWorkflowDetail(workflowId: string): Promise<WorkflowDetailDto> {
+  return getWsClient().request<WorkflowDetailDto>('workflows.get', { workflowId });
+}
+
+export async function listResumableWorkflows(): Promise<ResumableWorkflowDto[]> {
+  return getWsClient().request<ResumableWorkflowDto[]>('workflows.listResumable');
+}
+
+export async function importWorkflow(baseDir: string): Promise<{ workflowId: string }> {
+  return getWsClient().request<{ workflowId: string }>('workflows.import', { baseDir });
+}
+
+export async function resumeWorkflow(workflowId: string): Promise<{ workflowId: string }> {
+  return getWsClient().request<{ workflowId: string }>('workflows.resume', { workflowId });
+}
+
+// ── Workflow file browser RPC actions ──────────────────────────────────
+
+export async function getWorkflowFileTree(workflowId: string, path?: string): Promise<FileTreeResponseDto> {
+  const params: Record<string, unknown> = { workflowId };
+  if (path) params.path = path;
+  return getWsClient().request<FileTreeResponseDto>('workflows.fileTree', params);
+}
+
+export async function getWorkflowFileContent(workflowId: string, path: string): Promise<FileContentResponseDto> {
+  return getWsClient().request<FileContentResponseDto>('workflows.fileContent', { workflowId, path });
+}
+
+export async function getWorkflowArtifacts(workflowId: string, artifactName: string): Promise<ArtifactContentDto> {
+  return getWsClient().request<ArtifactContentDto>('workflows.artifacts', { workflowId, artifactName });
+}
+
+// ── Persona RPC actions (extended) ─────────────────────────────────────
+
+export async function getPersonaDetail(name: string): Promise<PersonaDetailDto> {
+  return getWsClient().request<PersonaDetailDto>('personas.get', { name });
+}
+
+export async function compilePersonaPolicy(name: string): Promise<PersonaCompileResultDto> {
+  return getWsClient().request<PersonaCompileResultDto>('personas.compile', { name });
 }
 
 export function connectWithToken(token: string): void {

@@ -22,6 +22,8 @@
   import Sessions from './routes/Sessions.svelte';
   import Escalations from './routes/Escalations.svelte';
   import Jobs from './routes/Jobs.svelte';
+  import Workflows from './routes/Workflows.svelte';
+  import Personas from './routes/Personas.svelte';
 
   import { Button } from '$lib/components/ui/button/index.js';
   import { Input } from '$lib/components/ui/input/index.js';
@@ -37,6 +39,8 @@
   import Clock from 'phosphor-svelte/lib/Clock';
   import Palette from 'phosphor-svelte/lib/Palette';
   import Check from 'phosphor-svelte/lib/Check';
+  import TreeStructure from 'phosphor-svelte/lib/TreeStructure';
+  import UserCircle from 'phosphor-svelte/lib/UserCircle';
 
   let tokenInput = $state('');
   let currentTheme = $state<ThemeId>('iron');
@@ -125,6 +129,8 @@
     { id: 'sessions', label: 'Sessions', icon: ChatCircle },
     { id: 'escalations', label: 'Escalations', icon: Warning },
     { id: 'jobs', label: 'Jobs', icon: Clock },
+    { id: 'workflows', label: 'Workflows', icon: TreeStructure },
+    { id: 'personas', label: 'Personas', icon: UserCircle },
   ] as const;
 </script>
 
@@ -205,6 +211,14 @@
                 {appState.escalationCount}
               </Badge>
             {/if}
+            {#if item.id === 'workflows' && appState.pendingGates.size > 0}
+              <Badge
+                variant="warning"
+                class="ml-auto px-1.5 font-mono font-semibold min-w-[18px] text-center text-[10px] leading-none"
+              >
+                {appState.pendingGates.size}
+              </Badge>
+            {/if}
             {#if item.id === 'sessions' && appState.activeSessionCount > 0}
               <span class="ml-auto text-[10px] font-mono text-muted-foreground">
                 {appState.activeSessionCount}
@@ -272,6 +286,10 @@
         <Escalations />
       {:else if appState.currentView === 'jobs'}
         <Jobs />
+      {:else if appState.currentView === 'workflows'}
+        <Workflows />
+      {:else if appState.currentView === 'personas'}
+        <Personas />
       {/if}
     </main>
 
