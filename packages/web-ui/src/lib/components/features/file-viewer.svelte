@@ -39,8 +39,6 @@
         }
       });
   });
-
-  const fileName = $derived(path.split('/').pop() ?? path);
 </script>
 
 <div class="flex flex-col h-full">

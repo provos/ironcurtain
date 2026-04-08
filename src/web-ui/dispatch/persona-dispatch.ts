@@ -60,7 +60,7 @@ function resolvePersonaOrThrow(nameRaw: string): { name: PersonaName; persona: P
   try {
     name = createPersonaName(nameRaw);
   } catch {
-    throw new RpcError('PERSONA_NOT_FOUND', `Invalid persona name: ${nameRaw}`);
+    throw new RpcError('INVALID_PARAMS', `Invalid persona name: ${nameRaw}`);
   }
 
   let persona;

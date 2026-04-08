@@ -64,13 +64,23 @@ export function hasAnyFiles(dir: string): boolean {
 }
 
 function hasAnyFilesInDir(currentDir: string): boolean {
-  const entries = readdirSync(currentDir);
+  let entries: string[];
+  try {
+    entries = readdirSync(currentDir);
+  } catch {
+    return false; // Directory removed or inaccessible
+  }
   for (const entry of entries) {
     const fullPath = resolve(currentDir, entry);
-    const lstats = lstatSync(fullPath);
-    if (lstats.isSymbolicLink()) continue;
-    if (lstats.isFile()) return true;
-    if (lstats.isDirectory() && hasAnyFilesInDir(fullPath)) return true;
+    try {
+      const lstats = lstatSync(fullPath);
+      if (lstats.isSymbolicLink()) continue;
+      if (lstats.isFile()) return true;
+      if (lstats.isDirectory() && hasAnyFilesInDir(fullPath)) return true;
+    } catch {
+      // File removed between readdir and lstat, or permission error — skip
+      continue;
+    }
   }
   return false;
 }

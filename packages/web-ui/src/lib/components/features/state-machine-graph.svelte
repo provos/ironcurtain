@@ -68,8 +68,9 @@
     for (const state of g.states) {
       dg.setNode(state.id, { width: NODE_WIDTH, height: NODE_HEIGHT });
     }
-    for (const t of g.transitions) {
-      const edgeKey = t.guard || t.event || `${t.from}-${t.to}`;
+    for (let i = 0; i < g.transitions.length; i++) {
+      const t = g.transitions[i];
+      const edgeKey = `${t.from}-${t.to}-${i}`;
       dg.setEdge(t.from, t.to, {}, edgeKey);
     }
 
