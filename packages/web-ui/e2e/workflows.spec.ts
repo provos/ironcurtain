@@ -43,6 +43,8 @@ test.describe('Start Workflow', () => {
   });
 
   test('starts a new workflow via the form', async ({ page }) => {
+    // Select the custom path option to reveal the definition file path input
+    await page.getByLabel('Workflow definition').selectOption('__custom__');
     // Fill in the start form
     await page.getByLabel('Definition file path').fill('/path/to/design-and-code.json');
     await page.getByLabel('Task description').fill('Implement a feature');
@@ -57,6 +59,7 @@ test.describe('Start Workflow', () => {
   });
 
   test('new workflow transitions to waiting_human after lifecycle simulation', async ({ page }) => {
+    await page.getByLabel('Workflow definition').selectOption('__custom__');
     await page.getByLabel('Definition file path').fill('/path/to/my-workflow.json');
     await page.getByLabel('Task description').fill('Run the workflow');
 
@@ -73,7 +76,8 @@ test.describe('Start Workflow', () => {
     const startButton = page.getByRole('button', { name: 'Start Workflow' });
     await expect(startButton).toBeDisabled();
 
-    // Fill only definition path -- still disabled
+    // Select custom path and fill definition path -- still disabled (no task description)
+    await page.getByLabel('Workflow definition').selectOption('__custom__');
     await page.getByLabel('Definition file path').fill('/some/path.json');
     await expect(startButton).toBeDisabled();
 

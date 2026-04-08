@@ -40,8 +40,6 @@ import type { WorkflowController, WorkflowLifecycleEvent, WorkflowId } from '../
 export interface WorkflowManagerOptions {
   readonly baseDir: string;
   readonly createSession: WorkflowOrchestratorDeps['createSession'];
-  /** Maximum concurrent Docker agent sessions across ALL workflows. Default: 4. */
-  readonly maxConcurrentAgentSessions?: number;
 }
 
 export class WorkflowManager {
@@ -73,20 +71,7 @@ This is an orchestrator fix, not a web UI concern, but it is a prerequisite for 
 
 The `WorkflowManager` is instantiated in `IronCurtainDaemon` alongside `SessionManager`. It wires lifecycle events to the `WebEventBus` for frontend consumption.
 
-**Global agent session limit.** The `maxConcurrentAgentSessions` setting (default: 4) limits the total number of Docker containers running across all workflows simultaneously. This is separate from the per-workflow `maxParallelism` setting in `WorkflowDefinition.settings`, which controls fan-out within a single workflow. The global limit protects the host machine from resource exhaustion when multiple workflows are active.
-
-The limit is enforced in `WorkflowOrchestratorDeps` (or a shared counter injected into the orchestrator). Before creating a new agent session in `executeAgentState()`, the orchestrator checks:
-
-```typescript
-// In executeAgentState(), before creating the session:
-const activeCount = this.countActiveAgentSessions(); // sum across all WorkflowInstance.activeSessions
-if (activeCount >= this.maxConcurrentAgentSessions) {
-  // Wait or throw -- TBD. Waiting with a bounded timeout is friendlier than failing.
-  throw new Error(`Global agent session limit reached (${this.maxConcurrentAgentSessions})`);
-}
-```
-
-The default of 4 is conservative for a developer laptop. Users can increase it via `WorkflowManagerOptions` or a future user config field. The per-workflow `maxParallelism` (currently 1 -- sequential states) remains the inner constraint; the global limit is the outer constraint. A workflow with `maxParallelism: 2` that tries to start two agents while three other agents are running across other workflows would be throttled to one new agent.
+**Global agent session limit.** A global limit on concurrent Docker containers across all workflows is planned but not yet implemented. The per-workflow `maxParallelism` setting in `WorkflowDefinition.settings` controls fan-out within a single workflow (currently 1 -- sequential states). A global limit will be added when parallel workflow execution is supported.
 
 **No new abstraction for gate callbacks.** The `WorkflowOrchestrator` already receives `raiseGate` and `dismissGate` as callbacks via `WorkflowOrchestratorDeps`. The TUI provides readline-based callbacks; the web UI provides `WebEventBus`-based callbacks. Same interface, different implementations -- the orchestrator is already agnostic to the UI layer. The `WorkflowManager` simply wires these callbacks when constructing the orchestrator:
 
@@ -158,24 +143,24 @@ This is a pure refactoring step -- no new features, no behavior changes. It shou
 
 New methods added to the `MethodName` union in `web-ui-types.ts` and dispatched in `dispatch/workflow-dispatch.ts`:
 
-| Method | Params | Response | Notes |
-|--------|--------|----------|-------|
-| `workflows.list` | -- | `WorkflowSummaryDto[]` | Active workflows only (from memory). Historic listing via checkpoint scanning deferred to future work. |
-| `workflows.get` | `{ workflowId: string }` | `WorkflowDetailDto` | Full detail: graph, history, context, gate info |
-| `workflows.start` | `{ definitionPath: string, taskDescription: string, workspacePath?: string }` | `{ workflowId: string }` | Fire-and-forget; progress via events |
-| `workflows.resume` | `{ workflowId: string }` | `{ accepted: true }` | Resume from checkpoint |
-| `workflows.abort` | `{ workflowId: string }` | -- | |
-| `workflows.resolveGate` | `{ workflowId: string, event: HumanGateEventType, prompt?: string }` | -- | |
-| `workflows.definitions` | -- | `WorkflowDefinitionSummary[]` | List available definitions |
-| `workflows.artifacts` | `{ workflowId: string, artifactName: string }` | `ArtifactContentDto` | Read artifact content for review |
-| `workflows.messageLog` | `{ workflowId: string, limit?: number }` | `MessageLogEntry[]` | Read message log entries |
-| `workflows.diff` | `{ workflowId: string }` | `DiffEntry[]` | Git diff of workspace changes |
-| `workflows.fileTree` | `{ workflowId: string, path?: string }` | `FileTreeNode[]` | Browse workspace files |
-| `workflows.fileContent` | `{ workflowId: string, path: string }` | `{ content: string, language: string }` | Read a single file |
-| `personas.list` | -- | `PersonaListItem[]` | Already exists |
-| `personas.get` | `{ name: string }` | `PersonaDetailDto` | Full persona definition |
-| `personas.create` | `{ name: string, description: string, servers?: string[] }` | -- | |
-| `personas.compilePolicy` | `{ name: string }` | `{ accepted: true }` | Async; status via events |
+| Method                   | Params                                                                        | Response                                | Notes                                                                                                  |
+| ------------------------ | ----------------------------------------------------------------------------- | --------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `workflows.list`         | --                                                                            | `WorkflowSummaryDto[]`                  | Active workflows only (from memory). Historic listing via checkpoint scanning deferred to future work. |
+| `workflows.get`          | `{ workflowId: string }`                                                      | `WorkflowDetailDto`                     | Full detail: graph, history, context, gate info                                                        |
+| `workflows.start`        | `{ definitionPath: string, taskDescription: string, workspacePath?: string }` | `{ workflowId: string }`                | Fire-and-forget; progress via events                                                                   |
+| `workflows.resume`       | `{ workflowId: string }`                                                      | `{ accepted: true }`                    | Resume from checkpoint                                                                                 |
+| `workflows.abort`        | `{ workflowId: string }`                                                      | --                                      |                                                                                                        |
+| `workflows.resolveGate`  | `{ workflowId: string, event: HumanGateEventType, prompt?: string }`          | --                                      |                                                                                                        |
+| `workflows.definitions`  | --                                                                            | `WorkflowDefinitionSummary[]`           | List available definitions                                                                             |
+| `workflows.artifacts`    | `{ workflowId: string, artifactName: string }`                                | `ArtifactContentDto`                    | Read artifact content for review                                                                       |
+| `workflows.messageLog`   | `{ workflowId: string, limit?: number }`                                      | `MessageLogEntry[]`                     | Read message log entries                                                                               |
+| `workflows.diff`         | `{ workflowId: string }`                                                      | `DiffEntry[]`                           | Git diff of workspace changes                                                                          |
+| `workflows.fileTree`     | `{ workflowId: string, path?: string }`                                       | `FileTreeNode[]`                        | Browse workspace files                                                                                 |
+| `workflows.fileContent`  | `{ workflowId: string, path: string }`                                        | `{ content: string, language: string }` | Read a single file                                                                                     |
+| `personas.list`          | --                                                                            | `PersonaListItem[]`                     | Already exists                                                                                         |
+| `personas.get`           | `{ name: string }`                                                            | `PersonaDetailDto`                      | Full persona definition                                                                                |
+| `personas.create`        | `{ name: string, description: string, servers?: string[] }`                   | --                                      |                                                                                                        |
+| `personas.compilePolicy` | `{ name: string }`                                                            | `{ accepted: true }`                    | Async; status via events                                                                               |
 
 **Param validation schemas** (following existing pattern with Zod):
 
@@ -401,8 +386,19 @@ The lifecycle event wiring in `WorkflowManager` maps existing `WorkflowLifecycle
 ```typescript
 export type WorkflowLifecycleEvent =
   // ... existing kinds ...
-  | { readonly kind: 'agent_started'; readonly workflowId: WorkflowId; readonly state: string; readonly persona: string }
-  | { readonly kind: 'agent_completed'; readonly workflowId: WorkflowId; readonly state: string; readonly persona: string; readonly verdict: string };
+  | {
+      readonly kind: 'agent_started';
+      readonly workflowId: WorkflowId;
+      readonly state: string;
+      readonly persona: string;
+    }
+  | {
+      readonly kind: 'agent_completed';
+      readonly workflowId: WorkflowId;
+      readonly state: string;
+      readonly persona: string;
+      readonly verdict: string;
+    };
 ```
 
 **Emission points in `executeAgentState()`:**
@@ -415,7 +411,13 @@ export type WorkflowLifecycleEvent =
 this.emitLifecycleEvent({ kind: 'agent_started', workflowId, state: stateId, persona: stateConfig.persona });
 
 // In executeAgentState(), after successful parsing, before return:
-this.emitLifecycleEvent({ kind: 'agent_completed', workflowId, state: stateId, persona: stateConfig.persona, verdict: agentOutput.verdict });
+this.emitLifecycleEvent({
+  kind: 'agent_completed',
+  workflowId,
+  state: stateId,
+  persona: stateConfig.persona,
+  verdict: agentOutput.verdict,
+});
 ```
 
 ### 2.6 State Graph Extraction
@@ -527,18 +529,19 @@ The `StateMachineGraph` component:
 
 ### 3.3 Node Shapes and Colors
 
-| State Type | Shape | Default Color | Active Color |
-|-----------|-------|--------------|--------------|
-| `agent` | Rounded rectangle | `--muted` fill | `--primary` border, pulsing glow |
-| `human_gate` | Octagon | `--warning` fill (amber) | `--warning` border, pulsing |
-| `deterministic` | Rectangle with gear icon | `--muted` fill | `--primary` border |
-| `terminal` | Double-bordered rectangle | `--muted` fill | `--success` fill (completed) or `--destructive` fill (aborted) |
+| State Type      | Shape                     | Default Color            | Active Color                                                   |
+| --------------- | ------------------------- | ------------------------ | -------------------------------------------------------------- |
+| `agent`         | Rounded rectangle         | `--muted` fill           | `--primary` border, pulsing glow                               |
+| `human_gate`    | Octagon                   | `--warning` fill (amber) | `--warning` border, pulsing                                    |
+| `deterministic` | Rectangle with gear icon  | `--muted` fill           | `--primary` border                                             |
+| `terminal`      | Double-bordered rectangle | `--muted` fill           | `--success` fill (completed) or `--destructive` fill (aborted) |
 
 Persona labels appear inside agent nodes in smaller text. Guard labels appear as annotations on transition edges.
 
 ### 3.4 Real-Time Updates
 
 When a `workflow.state_entered` event arrives:
+
 1. Update the `currentState` in the workflow store.
 2. CSS classes on the previous state node transition from "active" to "completed" (with a brief animation).
 3. CSS classes on the new state node transition to "active" (pulsing glow begins).
@@ -558,13 +561,13 @@ The `implement` <-> `review` loop is the most complex visual element. The round 
 
 Gates are different from escalations in important ways:
 
-| Dimension | Escalation | Workflow Gate |
-|-----------|-----------|---------------|
-| Scope | Single tool call | Body of work (plan, spec, code) |
-| Context | Tool name + arguments | Full artifacts + workspace |
-| Actions | Approve / Deny | Approve / Force Revision / Replan / Abort |
-| Feedback | None | Free-text prompt for revision |
-| Duration | Seconds | Minutes (reviewing a plan or code) |
+| Dimension | Escalation            | Workflow Gate                             |
+| --------- | --------------------- | ----------------------------------------- |
+| Scope     | Single tool call      | Body of work (plan, spec, code)           |
+| Context   | Tool name + arguments | Full artifacts + workspace                |
+| Actions   | Approve / Deny        | Approve / Force Revision / Replan / Abort |
+| Feedback  | None                  | Free-text prompt for revision             |
+| Duration  | Seconds               | Minutes (reviewing a plan or code)        |
 
 Because gate review takes longer and requires exploring artifacts, a modal is insufficient. Instead, the gate review is a **full-page panel** within the Workflow Detail view. When a workflow reaches a gate, the Workflow Detail view automatically switches to the Gate Review layout.
 
@@ -606,15 +609,18 @@ The state machine graph is rendered in compact mode at the top (smaller, non-int
 The artifact viewer renders content based on the artifact type:
 
 **Markdown artifacts** (plan.md, spec.md, review.md):
+
 - Rendered as styled HTML using the existing `marked` + `DOMPurify` pipeline from `markdown.ts`.
 - Syntax highlighting for code blocks within the markdown (already supported by marked).
 
 **File tree** (workspace browsing):
+
 - Hierarchical tree view with expand/collapse.
 - Clicking a file opens it in a code viewer with syntax highlighting.
 - The `.workflow/` directory is visually separated from the workspace root to distinguish artifacts from code.
 
 **Diff view** (for code review at `design_review` or `escalate_gate`):
+
 - Uses `workflows.diff` RPC to get git diff of the workspace.
 - Rendered as a unified or side-by-side diff view.
 - The diff viewer is a custom component using `<pre>` elements with line-by-line coloring (additions green, deletions red).
@@ -637,12 +643,12 @@ The notification pattern follows the escalation modal precedent -- auto-surface 
 
 The action buttons are dynamically rendered based on the gate's `acceptedEvents` array:
 
-| Event | Button | Style | Behavior |
-|-------|--------|-------|----------|
-| `APPROVE` | "Approve" | `success` variant | Sends `workflows.resolveGate` with `event: 'APPROVE'` |
-| `FORCE_REVISION` | "Request Revision" | `default` variant | Requires non-empty feedback textarea. Sends with `prompt` field. |
-| `REPLAN` | "Replan" | `outline` variant | Optional feedback. Sends with `event: 'REPLAN'`. |
-| `ABORT` | "Abort Workflow" | `destructive` variant | Confirmation dialog before sending. |
+| Event            | Button             | Style                 | Behavior                                                         |
+| ---------------- | ------------------ | --------------------- | ---------------------------------------------------------------- |
+| `APPROVE`        | "Approve"          | `success` variant     | Sends `workflows.resolveGate` with `event: 'APPROVE'`            |
+| `FORCE_REVISION` | "Request Revision" | `default` variant     | Requires non-empty feedback textarea. Sends with `prompt` field. |
+| `REPLAN`         | "Replan"           | `outline` variant     | Optional feedback. Sends with `event: 'REPLAN'`.                 |
+| `ABORT`          | "Abort Workflow"   | `destructive` variant | Confirmation dialog before sending.                              |
 
 The "Request Revision" button is disabled until the feedback textarea has content. This prevents accidental empty revision requests.
 
@@ -655,6 +661,7 @@ When multiple workflows have pending gates simultaneously, the UI must make it c
 **Gate notification banner:** The `GateNotificationBanner` component shows the most recently raised gate. If there are additional pending gates from other workflows, the banner includes a secondary indicator: "2 more pending" (linking to the Workflows dashboard where all gates are visible). The banner always identifies the workflow: "Workflow 'design-and-code' is waiting for review at plan_review".
 
 **Gate list in dashboard:** Each gate card in the Workflows dashboard Active Workflows section shows:
+
 - The workflow name (e.g., "design-and-code")
 - The current state name where the gate is waiting (e.g., "plan_review")
 - A "Review" button that navigates to the specific workflow's detail page with the gate review panel active
@@ -680,21 +687,25 @@ When the web UI receives a `workflow.gate_raised` event, it should guide the use
 The workflow dashboard is a new view accessible from the sidebar. It shows:
 
 **Active Workflows** (top section):
+
 - Card per active workflow showing: name, current state, phase badge (running/waiting), progress indicator, elapsed time, total tokens consumed.
 - Clicking a card navigates to the Workflow Detail view.
 - "Abort" button on each card (with confirmation).
 
 **Resumable Workflows** (middle section):
+
 - List of workflows with checkpoints that are not currently running.
 - Each entry shows: name, last state, failure reason (if failed), timestamp.
 - "Resume" button on each entry.
 
 **Completed/Failed History** (bottom section -- deferred):
+
 - Deferred to future work. Requires checkpoint scanning to surface completed/failed history.
 - Phase 1 shows only active (in-memory) workflows.
 - When implemented: table of recently completed/failed/aborted workflows with columns: name, status, started, completed, total tokens, final state. Clicking navigates to a read-only Workflow Detail view.
 
 **Start New Workflow** (sidebar action or button):
+
 - Opens a form with:
   - Workflow definition selector (dropdown listing available definitions from `workflows.definitions`).
   - Task description (textarea).
@@ -711,6 +722,7 @@ The detail view is the primary workflow interaction surface:
 **State Machine Graph:** Full interactive visualization (section 3).
 
 **Tabbed Content Area:**
+
 - **Activity** -- Live feed of state transitions and agent activity (from lifecycle events). Shows what each agent is doing in real-time.
 - **Artifacts** -- Browse and view generated artifacts (plan, spec, reviews).
 - **Workspace** -- File tree browser for the full workspace.
@@ -718,6 +730,7 @@ The detail view is the primary workflow interaction surface:
 - **Gate Review** -- Shown only when the workflow is at a gate (section 4).
 
 **Action Bar:** Context-dependent buttons:
+
 - Running: "Abort"
 - At gate: Action buttons per section 4.5
 - Failed: "Resume", "Inspect"
@@ -732,15 +745,18 @@ The detail view is the primary workflow interaction surface:
 Persona CRUD from the web UI is straightforward because personas are simple on-disk structures:
 
 **View personas:**
+
 - Table listing all personas with name, description, server allowlist, compiled status.
 - Already partially implemented (`personas.list` RPC exists).
 
 **Create persona:**
+
 - Form: name (validated slug), description, optional server allowlist (multi-select from available servers).
 - Backend: creates `~/.ironcurtain/personas/{name}/persona.json` and `constitution.md` (from a template).
 - The user would then edit the constitution and compile the policy.
 
 **Edit persona constitution:**
+
 - In-browser markdown editor (textarea with preview) for `constitution.md`.
 - Save writes to disk via a new `personas.updateConstitution` RPC.
 - "Compile Policy" button triggers `personas.compilePolicy` (async, reports success/failure via event).
@@ -752,12 +768,14 @@ Persona CRUD from the web UI is straightforward because personas are simple on-d
 A visual workflow editor is significantly more complex:
 
 **Minimal viable approach: JSON editor with live preview.**
+
 - Left panel: JSON editor (Monaco editor or CodeMirror) with the workflow definition.
 - Right panel: live-rendered state machine graph (reusing `StateMachineGraph` component).
 - JSON schema validation with inline error markers.
 - The state machine graph updates on every valid JSON change, giving immediate visual feedback.
 
 **Advanced approach: visual drag-and-drop editor (aspirational).**
+
 - Drag state nodes from a palette onto a canvas.
 - Connect states with edges by dragging between connection points.
 - Configure state properties (type, persona, prompt, transitions) via a side panel.
@@ -773,35 +791,35 @@ A visual workflow editor is significantly more complex:
 
 ### 7.1 New UI Components (`src/lib/components/ui/`)
 
-| Component | Directory | Purpose |
-|-----------|-----------|---------|
-| `Tabs` | `tabs/` | Tab bar with content panels. Used for artifact/workspace/log tabs in detail view. |
-| `Textarea` | `textarea/` | Multi-line text input for gate feedback. |
-| `Toast` | `toast/` | Non-modal notification for gate raised events. Auto-dismiss after configurable timeout. |
-| `Tree` | `tree/` | Hierarchical tree view with expand/collapse. For file tree browsing. |
-| `CodeBlock` | `code-block/` | Syntax-highlighted code display. For file viewer and diff hunks. |
-| `DiffView` | `diff-view/` | Unified or side-by-side diff renderer. For code review at gates. |
-| `Progress` | `progress/` | Stepped progress indicator. For workflow phase display. |
+| Component   | Directory     | Purpose                                                                                 |
+| ----------- | ------------- | --------------------------------------------------------------------------------------- |
+| `Tabs`      | `tabs/`       | Tab bar with content panels. Used for artifact/workspace/log tabs in detail view.       |
+| `Textarea`  | `textarea/`   | Multi-line text input for gate feedback.                                                |
+| `Toast`     | `toast/`      | Non-modal notification for gate raised events. Auto-dismiss after configurable timeout. |
+| `Tree`      | `tree/`       | Hierarchical tree view with expand/collapse. For file tree browsing.                    |
+| `CodeBlock` | `code-block/` | Syntax-highlighted code display. For file viewer and diff hunks.                        |
+| `DiffView`  | `diff-view/`  | Unified or side-by-side diff renderer. For code review at gates.                        |
+| `Progress`  | `progress/`   | Stepped progress indicator. For workflow phase display.                                 |
 
 ### 7.2 New Feature Components (`src/lib/components/features/`)
 
-| Component | File | Purpose |
-|-----------|------|---------|
-| `StateMachineGraph` | `state-machine-graph.svelte` | SVG state machine visualization with dagre layout. |
-| `WorkflowCard` | `workflow-card.svelte` | Summary card for dashboard listing. |
-| `GateReviewPanel` | `gate-review-panel.svelte` | Full gate review experience: artifacts, feedback, actions. |
-| `ArtifactViewer` | `artifact-viewer.svelte` | Renders artifact content (markdown, code, file tree). |
-| `WorkflowActivity` | `workflow-activity.svelte` | Live feed of state transitions and agent events. |
-| `WorkspaceBrowser` | `workspace-browser.svelte` | File tree + file viewer for workspace exploration. |
-| `MessageLogViewer` | `message-log-viewer.svelte` | Searchable message log table. |
-| `WorkflowStartForm` | `workflow-start-form.svelte` | Form for starting a new workflow. |
-| `GateNotificationBanner` | `gate-notification-banner.svelte` | Persistent banner when a gate needs attention. |
+| Component                | File                              | Purpose                                                    |
+| ------------------------ | --------------------------------- | ---------------------------------------------------------- |
+| `StateMachineGraph`      | `state-machine-graph.svelte`      | SVG state machine visualization with dagre layout.         |
+| `WorkflowCard`           | `workflow-card.svelte`            | Summary card for dashboard listing.                        |
+| `GateReviewPanel`        | `gate-review-panel.svelte`        | Full gate review experience: artifacts, feedback, actions. |
+| `ArtifactViewer`         | `artifact-viewer.svelte`          | Renders artifact content (markdown, code, file tree).      |
+| `WorkflowActivity`       | `workflow-activity.svelte`        | Live feed of state transitions and agent events.           |
+| `WorkspaceBrowser`       | `workspace-browser.svelte`        | File tree + file viewer for workspace exploration.         |
+| `MessageLogViewer`       | `message-log-viewer.svelte`       | Searchable message log table.                              |
+| `WorkflowStartForm`      | `workflow-start-form.svelte`      | Form for starting a new workflow.                          |
+| `GateNotificationBanner` | `gate-notification-banner.svelte` | Persistent banner when a gate needs attention.             |
 
 ### 7.3 New Route Views (`src/routes/`)
 
-| View | File | Purpose |
-|------|------|---------|
-| `Workflows` | `Workflows.svelte` | Dashboard: active, resumable, history. |
+| View             | File                    | Purpose                                |
+| ---------------- | ----------------------- | -------------------------------------- |
+| `Workflows`      | `Workflows.svelte`      | Dashboard: active, resumable, history. |
 | `WorkflowDetail` | `WorkflowDetail.svelte` | Single workflow: graph, tabs, actions. |
 
 ### 7.4 Store Extensions
@@ -925,6 +943,7 @@ Gate watermarks follow the same reconnect pattern as escalations -- suppress aut
 ### Phase 1: Backend Foundation + Basic Dashboard (1-2 weeks)
 
 **Backend:**
+
 - Add `WorkflowManager` to the daemon.
 - Add workspace collision detection to `WorkflowOrchestrator.start()` (see section 2.1).
 - Add global agent session limit enforcement to `executeAgentState()` (see section 2.1).
@@ -933,12 +952,14 @@ Gate watermarks follow the same reconnect pattern as escalations -- suppress aut
 - Implement `extractStateGraph()` for graph DTO generation.
 
 **Frontend:**
+
 - Add workflow state to `AppState` and event handling for workflow events.
 - Build `Workflows.svelte` dashboard view with active/resumable/history sections.
 - Build `WorkflowStartForm` with definition selector and task input.
 - Add "Workflows" to sidebar navigation.
 
 **Testing:**
+
 - Unit tests for `extractStateGraph()`.
 - Unit tests for workflow event handling in `event-handler.ts`.
 - Mock server entries for workflow RPCs.
@@ -947,6 +968,7 @@ Gate watermarks follow the same reconnect pattern as escalations -- suppress aut
 ### Phase 2: State Machine Visualization + Gate Review (2-3 weeks)
 
 **Frontend:**
+
 - Build `StateMachineGraph` component with dagre layout and SVG rendering.
 - Build `WorkflowDetail.svelte` with graph and tabbed content area.
 - Build `GateReviewPanel` with artifact rendering and action buttons.
@@ -955,11 +977,13 @@ Gate watermarks follow the same reconnect pattern as escalations -- suppress aut
 - CSS animations for state transitions.
 
 **Backend:**
+
 - Implement `workflows.artifacts` RPC for reading artifact content.
 - Implement `workflows.messageLog` RPC.
 - Add `agent_started` / `agent_completed` lifecycle events to orchestrator.
 
 **Testing:**
+
 - Visual regression tests for state machine graph (snapshot testing).
 - E2E test: workflow reaches gate, user reviews and approves.
 - E2E test: gate notification appears when on a different page.
@@ -967,16 +991,19 @@ Gate watermarks follow the same reconnect pattern as escalations -- suppress aut
 ### Phase 3: Workspace Browser + Diff View + Persona Management (2-3 weeks)
 
 **Frontend:**
+
 - Build `WorkspaceBrowser` with file tree and code viewer.
 - Build `DiffView` component.
 - Build persona management views (list, create, edit constitution).
 
 **Backend:**
+
 - Implement `workflows.diff`, `workflows.fileTree`, `workflows.fileContent` RPCs.
 - Implement `personas.create`, `personas.get`, `personas.updateConstitution`, `personas.compilePolicy` RPCs.
 - Add `persona.compile_started` / `persona.compile_completed` events.
 
 **Testing:**
+
 - E2E test: browse workspace files during gate review.
 - E2E test: view diff of workspace changes.
 - E2E test: create persona, compile policy.
@@ -984,16 +1011,19 @@ Gate watermarks follow the same reconnect pattern as escalations -- suppress aut
 ### Phase 4: Workflow Authoring + Polish (2-3 weeks)
 
 **Frontend:**
+
 - JSON editor with live state machine preview.
 - Workflow resume UI with state selection.
 - Polish: animation timing, responsive layout, keyboard shortcuts.
 - Accessibility audit for state machine graph (ARIA labels, screen reader support).
 
 **Backend:**
+
 - Implement `workflows.resume` with optional state override.
 - Workflow definition save/load RPCs.
 
 **Dependencies:**
+
 - `@dagrejs/dagre` (layout) -- ~30KB, MIT license, bundled in frontend.
 - No other new frontend dependencies for Phase 1-3.
 - Phase 4 (JSON editor) adds a code editor dependency (CodeMirror ~200KB or a lighter alternative).
@@ -1099,7 +1129,13 @@ const CANNED_STATE_GRAPH: StateGraphDto = {
 const CANNED_ARTIFACTS: Record<string, ArtifactContentDto> = {
   plan: {
     name: 'plan',
-    files: [{ path: 'plan.md', content: '# Implementation Plan\n\n## Goals\n- Build X\n- Integrate Y\n\n## Steps\n1. ...', language: 'markdown' }],
+    files: [
+      {
+        path: 'plan.md',
+        content: '# Implementation Plan\n\n## Goals\n- Build X\n- Integrate Y\n\n## Steps\n1. ...',
+        language: 'markdown',
+      },
+    ],
   },
   spec: {
     name: 'spec',
@@ -1116,9 +1152,32 @@ const CANNED_ARTIFACTS: Record<string, ArtifactContentDto> = {
 
 ```typescript
 const CANNED_MESSAGE_LOG: MessageLogEntry[] = [
-  { ts: '...', workflowId: 'wf-running-1', state: 'plan', type: 'agent_sent', role: 'planner', message: 'Create a plan for...' },
-  { ts: '...', workflowId: 'wf-running-1', state: 'plan', type: 'agent_received', role: 'planner', message: '...', verdict: 'approved', confidence: 'high' },
-  { ts: '...', workflowId: 'wf-running-1', state: 'plan_review', type: 'gate_resolved', event: 'APPROVE', prompt: null },
+  {
+    ts: '...',
+    workflowId: 'wf-running-1',
+    state: 'plan',
+    type: 'agent_sent',
+    role: 'planner',
+    message: 'Create a plan for...',
+  },
+  {
+    ts: '...',
+    workflowId: 'wf-running-1',
+    state: 'plan',
+    type: 'agent_received',
+    role: 'planner',
+    message: '...',
+    verdict: 'approved',
+    confidence: 'high',
+  },
+  {
+    ts: '...',
+    workflowId: 'wf-running-1',
+    state: 'plan_review',
+    type: 'gate_resolved',
+    event: 'APPROVE',
+    prompt: null,
+  },
 ];
 ```
 

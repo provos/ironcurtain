@@ -164,7 +164,7 @@ function buildAgentOnDoneTransitions(transitions: readonly AgentTransitionDefini
   return transitions.map((t) => ({
     target: t.to,
     ...(t.guard ? { guard: t.guard } : {}),
-    actions: ['updateContextFromAgentResult', ...(t.flag ? [{ type: 'setFlag', params: { flag: t.flag } }] : [])],
+    actions: ['updateContextFromAgentResult', ...(t.flag ? ['setFlag'] : [])],
   }));
 }
 
@@ -195,10 +195,7 @@ function buildDeterministicState(
   const onDoneTransitions = config.transitions.map((t) => ({
     target: t.to,
     ...(t.guard ? { guard: t.guard } : {}),
-    actions: [
-      'updateContextFromDeterministicResult',
-      ...(t.flag ? [{ type: 'setFlag', params: { flag: t.flag } }] : []),
-    ],
+    actions: ['updateContextFromDeterministicResult', ...(t.flag ? ['setFlag'] : [])],
   }));
 
   return {

@@ -1,4 +1,5 @@
-import { appendFileSync, readFileSync, existsSync } from 'node:fs';
+import { appendFileSync, readFileSync, existsSync, mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
 
 // ---------------------------------------------------------------------------
 // Log entry types
@@ -74,7 +75,9 @@ export type MessageLogEntry =
  * Each line is a self-contained JSON object for easy grep/jq inspection.
  */
 export class MessageLog {
-  constructor(private readonly logPath: string) {}
+  constructor(private readonly logPath: string) {
+    mkdirSync(dirname(logPath), { recursive: true });
+  }
 
   /** Append a single entry as a JSON line. */
   append(entry: MessageLogEntry): void {

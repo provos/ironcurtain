@@ -37,7 +37,8 @@
     from: string;
     to: string;
     points: Array<{ x: number; y: number }>;
-    edge: TransitionEdgeDto;
+    /** All transitions between this from/to pair (may be multiple with different guards). */
+    edges: TransitionEdgeDto[];
   }
 
   let layoutNodes: LayoutNode[] = $state([]);
@@ -60,7 +61,7 @@
     edges: LayoutEdge[];
     viewBox: string;
   } {
-    const dg = new dagre.graphlib.Graph();
+    const dg = new dagre.graphlib.Graph({ multigraph: true });
     dg.setGraph({ rankdir: 'TB', nodesep: 60, ranksep: 80, marginx: NODE_PADDING, marginy: NODE_PADDING });
     dg.setDefaultEdgeLabel(() => ({}));
 
@@ -68,7 +69,8 @@
       dg.setNode(state.id, { width: NODE_WIDTH, height: NODE_HEIGHT });
     }
     for (const t of g.transitions) {
-      dg.setEdge(t.from, t.to);
+      const edgeKey = t.guard || t.event || `${t.from}-${t.to}`;
+      dg.setEdge(t.from, t.to, {}, edgeKey);
     }
 
     dagre.layout(dg);
@@ -91,21 +93,33 @@
       });
     }
 
-    const edgeMap = new Map<string, TransitionEdgeDto>();
+    // Group all transitions by from->to pair so multiple guards are preserved
+    const edgeMap = new Map<string, TransitionEdgeDto[]>();
     for (const t of g.transitions) {
-      edgeMap.set(`${t.from}->${t.to}`, t);
+      const key = `${t.from}->${t.to}`;
+      const list = edgeMap.get(key);
+      if (list) {
+        list.push(t);
+      } else {
+        edgeMap.set(key, [t]);
+      }
     }
 
+    // Dagre may produce multiple edge entries for multigraph; deduplicate by from->to pair
+    const seenEdgePairs = new Set<string>();
     const edges: LayoutEdge[] = [];
     for (const e of dg.edges()) {
+      const pairKey = `${e.v}->${e.w}`;
+      if (seenEdgePairs.has(pairKey)) continue;
+      seenEdgePairs.add(pairKey);
       const edgeData = dg.edge(e);
-      const edgeDto = edgeMap.get(`${e.v}->${e.w}`);
-      if (!edgeData || !edgeDto) continue;
+      const edgeDtos = edgeMap.get(pairKey);
+      if (!edgeData || !edgeDtos) continue;
       edges.push({
         from: e.v,
         to: e.w,
         points: edgeData.points ?? [],
-        edge: edgeDto,
+        edges: edgeDtos,
       });
     }
 
@@ -212,8 +226,9 @@
 
   <!-- Edges -->
   {#each layoutEdges as le (le.from + '->' + le.to)}
-    {@const isBackEdge =
-      le.edge.guard?.toLowerCase().includes('reject') || le.edge.guard?.toLowerCase().includes('revision')}
+    {@const isBackEdge = le.edges.some(
+      (e) => e.guard?.toLowerCase().includes('reject') || e.guard?.toLowerCase().includes('revision'),
+    )}
     <path
       d={edgePath(le.points)}
       fill="none"
@@ -222,11 +237,14 @@
       stroke-dasharray={isBackEdge ? '6,4' : 'none'}
       marker-end="url(#arrowhead)"
     />
-    {#if le.edge.label && !compact}
-      {@const pos = edgeLabelPos(le.points)}
-      <text x={pos.x} y={pos.y} text-anchor="middle" class="fill-muted-foreground text-[9px]">
-        {le.edge.label}
-      </text>
+    {#if !compact}
+      {@const labels = le.edges.map((e) => e.label).filter(Boolean)}
+      {#if labels.length > 0}
+        {@const pos = edgeLabelPos(le.points)}
+        <text x={pos.x} y={pos.y} text-anchor="middle" class="fill-muted-foreground text-[9px]">
+          {labels.join(' | ')}
+        </text>
+      {/if}
     {/if}
   {/each}
 

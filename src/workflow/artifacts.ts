@@ -1,5 +1,5 @@
 import { readFileSync, mkdirSync, readdirSync, existsSync, lstatSync } from 'node:fs';
-import { resolve, relative } from 'node:path';
+import { resolve, relative, sep } from 'node:path';
 import { createHash } from 'node:crypto';
 import type { WorkflowId } from './types.js';
 
@@ -38,7 +38,7 @@ function walkDir(rootDir: string, currentDir: string, results: CollectedFile[]):
       walkDir(rootDir, fullPath, results);
     } else if (lstats.isFile()) {
       results.push({
-        relativePath: relative(rootDir, fullPath),
+        relativePath: relative(rootDir, fullPath).split(sep).join('/'),
         fullPath,
       });
     }

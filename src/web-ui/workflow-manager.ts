@@ -29,8 +29,6 @@ import type { WorkflowId } from '../workflow/types.js';
 
 export interface WorkflowManagerOptions {
   readonly eventBus: WebEventBus;
-  /** Maximum concurrent Docker agent sessions across ALL workflows. Default: 4. */
-  readonly maxConcurrentAgentSessions?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -40,11 +38,9 @@ export interface WorkflowManagerOptions {
 export class WorkflowManager {
   private orchestrator: WorkflowOrchestrator | null = null;
   private readonly eventBus: WebEventBus;
-  private readonly maxConcurrentAgentSessions: number;
 
   constructor(options: WorkflowManagerOptions) {
     this.eventBus = options.eventBus;
-    this.maxConcurrentAgentSessions = options.maxConcurrentAgentSessions ?? 4;
   }
 
   /** Lazily creates the orchestrator on first use. */

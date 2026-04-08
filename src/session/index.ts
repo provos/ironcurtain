@@ -159,6 +159,7 @@ async function createDockerSession(
   // if we don't teardown on error, all subsequent console output (including
   // error messages from the orchestrator and XState) silently goes to a log
   // file instead of the terminal.
+  let session: InstanceType<typeof import('../docker/docker-agent-session.js').DockerAgentSession> | undefined;
   try {
     const { prepareDockerInfrastructure } = await import('../docker/docker-infrastructure.js');
     const { DockerAgentSession } = await import('../docker/docker-agent-session.js');
@@ -195,7 +196,7 @@ async function createDockerSession(
       }
     }
 
-    const session = new DockerAgentSession({
+    session = new DockerAgentSession({
       config: sessionConfig.config,
       sessionId,
       adapter: infra.adapter,
@@ -227,6 +228,7 @@ async function createDockerSession(
     await session.initialize();
     return session;
   } catch (error) {
+    await session?.close().catch(() => {});
     if (!loggerWasActive) logger.teardown();
     throw error instanceof SessionError
       ? error
