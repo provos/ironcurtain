@@ -12,6 +12,7 @@ dist/
 # Logs
 logs/
 *.jsonl
+!packages/web-ui/workflow-example-messages.jsonl
 
 # OS files
 .DS_Store
