@@ -322,7 +322,7 @@ export function createGateHandler() {
     };
   }
 
-  function dismissGate(_gateId: string): void {
+  function dismissGate(_workflowId: string, _gateId: string): void {
     pendingGate = undefined;
   }
 
