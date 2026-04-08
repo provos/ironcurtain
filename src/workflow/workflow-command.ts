@@ -7,12 +7,11 @@
  *   inspect <baseDir> [--all]
  */
 
-import { existsSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
-import { tmpdir } from 'node:os';
-import { mkdtempSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
+import { getIronCurtainHome } from '../config/paths.js';
 import { formatHelp, type CommandSpec } from '../cli-help.js';
 import { FileCheckpointStore } from './checkpoint.js';
 import { discoverWorkflows, resolveWorkflowPath } from './discovery.js';
@@ -135,7 +134,8 @@ async function runStart(args: string[]): Promise<void> {
   }
 
   const modelOverride = values.model as string | undefined;
-  const baseDir = mkdtempSync(resolve(tmpdir(), 'ironcurtain-workflow-'));
+  const baseDir = resolve(getIronCurtainHome(), 'workflow-runs');
+  mkdirSync(baseDir, { recursive: true });
 
   const checkpointStore = new FileCheckpointStore(baseDir);
   const gateHandler = createGateHandler();

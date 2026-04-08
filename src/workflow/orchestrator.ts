@@ -270,10 +270,7 @@ export class WorkflowOrchestrator implements WorkflowController {
     const providedMachine = this.provideActors(machine, workflowId, definition);
     const actor = createActor(providedMachine);
     const tab = this.deps.createWorkflowTab(definition.name, workflowId);
-    // WARNING: messages.jsonl is inside the agent's workspace mount and is writable
-    // by the agent. This is acceptable for diagnostic purposes but the log should
-    // not be used for security-critical decisions.
-    const messageLog = new MessageLog(resolve(artifactDir, 'messages.jsonl'));
+    const messageLog = new MessageLog(resolve(this.deps.baseDir, workflowId, 'messages.jsonl'));
 
     const instance: WorkflowInstance = {
       id: workflowId,
@@ -330,7 +327,7 @@ export class WorkflowOrchestrator implements WorkflowController {
 
     const tab = this.deps.createWorkflowTab(definition.name, workflowId);
     // Append to existing log file (resume must not overwrite)
-    const messageLog = new MessageLog(resolve(artifactDir, 'messages.jsonl'));
+    const messageLog = new MessageLog(resolve(this.deps.baseDir, workflowId, 'messages.jsonl'));
 
     const instance: WorkflowInstance = {
       id: workflowId,

@@ -133,7 +133,7 @@ const simpleAgentDef: WorkflowDefinition = {
 /** Read the message log for the first workflow dir in baseDir. */
 function readMessageLog(baseDir: string): MessageLogEntry[] {
   const wfDir = findWorkflowDir(baseDir);
-  const log = new MessageLog(resolve(wfDir, 'workspace', '.workflow', 'messages.jsonl'));
+  const log = new MessageLog(resolve(wfDir, 'messages.jsonl'));
   return log.readAll();
 }
 
