@@ -101,7 +101,7 @@ export function discoverWorkflows(): WorkflowEntry[] {
  */
 export function resolveWorkflowPath(ref: string): string | undefined {
   // If it looks like a file path (has extension or separators), treat as path
-  if (ref.includes('/') || ref.includes('\\') || extname(ref) !== '') {
+  if (ref.includes('/') || ref.includes('\\') || extname(ref) === '.json') {
     const resolved = resolve(ref);
     return existsSync(resolved) ? resolved : undefined;
   }

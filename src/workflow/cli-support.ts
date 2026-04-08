@@ -124,7 +124,7 @@ export function createConsoleTab(label: string): WorkflowTabHandle {
 
 export interface GateHandler {
   raiseGate: (gate: HumanGateRequest) => void;
-  dismissGate: (gateId: string) => void;
+  dismissGate: (workflowId: string, gateId: string) => void;
   waitForGate: () => Promise<HumanGateRequest>;
 }
 
@@ -140,7 +140,7 @@ export function createGateHandler(): GateHandler {
   }
 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  function dismissGate(gateId: string): void {
+  function dismissGate(_workflowId: string, _gateId: string): void {
     pendingGate = undefined;
   }
 

@@ -153,10 +153,7 @@ export class WorkflowManager {
           gate: dto,
         });
       },
-      dismissGate: (gateId) => {
-        // gateId format: `${workflowId}-${gateName}` where workflowId is a UUID.
-        // UUIDs are 36 chars (8-4-4-4-12), so split after the UUID portion.
-        const workflowId = gateId.length > 36 ? gateId.substring(0, 36) : gateId;
+      dismissGate: (workflowId, gateId) => {
         this.eventBus.emit('workflow.gate_dismissed', { workflowId, gateId });
       },
       baseDir,

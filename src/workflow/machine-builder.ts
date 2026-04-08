@@ -146,7 +146,11 @@ function findErrorTarget(
     if (targetState.type === 'human_gate') return t.to;
   }
 
-  // Fall back to any terminal state
+  // Fall back: prefer terminal states named 'aborted' or 'failed'
+  for (const [id, state] of Object.entries(definition.states)) {
+    if (state.type === 'terminal' && (id === 'aborted' || id === 'failed')) return id;
+  }
+  // Then any terminal
   for (const [id, state] of Object.entries(definition.states)) {
     if (state.type === 'terminal') return id;
   }

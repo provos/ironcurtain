@@ -77,7 +77,7 @@ export interface WorkflowOrchestratorDeps {
   readonly raiseGate: (gate: HumanGateRequest) => void;
 
   /** Callback to dismiss a human gate from the mux UI. */
-  readonly dismissGate: (gateId: string) => void;
+  readonly dismissGate: (workflowId: WorkflowId, gateId: string) => void;
 
   /** Base directory for workflow artifacts and checkpoints. */
   readonly baseDir: string;
@@ -477,7 +477,7 @@ export class WorkflowOrchestrator implements WorkflowController {
 
     // Clear before sending to prevent concurrent double-resolution
     instance.activeGateId = undefined;
-    this.deps.dismissGate(gateId);
+    this.deps.dismissGate(instance.id, gateId);
 
     instance.messageLog.append({
       ...this.logBase(instance),

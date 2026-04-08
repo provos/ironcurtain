@@ -28,19 +28,28 @@ export function collectFilesRecursive(dir: string): CollectedFile[] {
 }
 
 function walkDir(rootDir: string, currentDir: string, results: CollectedFile[]): void {
-  const entries = readdirSync(currentDir);
+  let entries: string[];
+  try {
+    entries = readdirSync(currentDir);
+  } catch {
+    return; // Directory removed or inaccessible
+  }
   for (const entry of entries) {
     const fullPath = resolve(currentDir, entry);
-    // Skip symlinks for safety
-    const lstats = lstatSync(fullPath);
-    if (lstats.isSymbolicLink()) continue;
-    if (lstats.isDirectory()) {
-      walkDir(rootDir, fullPath, results);
-    } else if (lstats.isFile()) {
-      results.push({
-        relativePath: relative(rootDir, fullPath).split(sep).join('/'),
-        fullPath,
-      });
+    try {
+      const lstats = lstatSync(fullPath);
+      if (lstats.isSymbolicLink()) continue;
+      if (lstats.isDirectory()) {
+        walkDir(rootDir, fullPath, results);
+      } else if (lstats.isFile()) {
+        results.push({
+          relativePath: relative(rootDir, fullPath).split(sep).join('/'),
+          fullPath,
+        });
+      }
+    } catch {
+      // File removed between readdir and lstat, or permission error — skip
+      continue;
     }
   }
 }
