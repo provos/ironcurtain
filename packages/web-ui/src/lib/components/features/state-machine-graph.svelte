@@ -19,10 +19,9 @@
   } = $props();
 
   // Layout constants
-  const NODE_WIDTH = 160;
-  const NODE_HEIGHT = 50;
+  const NODE_WIDTH = 180;
+  const NODE_HEIGHT = 56;
   const NODE_PADDING = 40;
-  const COMPACT_SCALE = 0.7;
 
   interface LayoutNode {
     id: string;
@@ -41,28 +40,45 @@
     edges: TransitionEdgeDto[];
   }
 
-  let layoutNodes: LayoutNode[] = $state([]);
-  let layoutEdges: LayoutEdge[] = $state([]);
-  let viewBox = $state('0 0 400 300');
+  // Responsive layout direction based on container dimensions
+  let containerEl: HTMLDivElement | undefined = $state();
+  let rankDir = $state<'LR' | 'TB'>('LR');
+
+  $effect(() => {
+    if (!containerEl) return;
+    const observer = new ResizeObserver((entries) => {
+      const { width, height } = entries[0].contentRect;
+      rankDir = width >= height * 1.3 ? 'LR' : 'TB';
+    });
+    observer.observe(containerEl);
+    return () => observer.disconnect();
+  });
 
   const completedSet = $derived(new Set(completedStates));
 
-  // Recompute layout when graph changes
-  $effect(() => {
-    if (!graph || graph.states.length === 0) return;
-    const result = computeLayout(graph);
-    layoutNodes = result.nodes;
-    layoutEdges = result.edges;
-    viewBox = result.viewBox;
+  // Recompute layout when graph or rankDir changes
+  const layoutResult = $derived.by(() => {
+    if (!graph || graph.states.length === 0) return null;
+    return computeLayout(graph, rankDir);
   });
 
-  function computeLayout(g: StateGraphDto): {
+  const layoutNodes = $derived(layoutResult?.nodes ?? []);
+  const layoutEdges = $derived(layoutResult?.edges ?? []);
+  const viewBox = $derived(layoutResult?.viewBox ?? '0 0 400 300');
+
+  function computeLayout(
+    g: StateGraphDto,
+    dir: 'LR' | 'TB',
+  ): {
     nodes: LayoutNode[];
     edges: LayoutEdge[];
     viewBox: string;
   } {
+    const nodesep = dir === 'LR' ? 40 : 50;
+    const ranksep = dir === 'LR' ? 90 : 70;
+
     const dg = new dagre.graphlib.Graph({ multigraph: true });
-    dg.setGraph({ rankdir: 'TB', nodesep: 60, ranksep: 80, marginx: NODE_PADDING, marginy: NODE_PADDING });
+    dg.setGraph({ rankdir: dir, nodesep, ranksep, marginx: NODE_PADDING, marginy: NODE_PADDING });
     dg.setDefaultEdgeLabel(() => ({}));
 
     for (const state of g.states) {
@@ -212,118 +228,120 @@
   }
 </script>
 
-<svg
-  class="w-full {compact ? 'max-h-48' : 'max-h-[500px]'}"
-  {viewBox}
-  preserveAspectRatio="xMidYMid meet"
-  role="img"
-  aria-label="Workflow state machine graph"
->
-  <defs>
-    <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
-      <polygon points="0 0, 8 3, 0 6" class="fill-muted-foreground/60" />
-    </marker>
-  </defs>
+<div bind:this={containerEl} class="w-full {compact ? 'max-h-48' : 'max-h-[60vh]'} overflow-auto">
+  <svg
+    class="w-full"
+    {viewBox}
+    preserveAspectRatio="xMidYMid meet"
+    role="img"
+    aria-label="Workflow state machine graph"
+  >
+    <defs>
+      <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+        <polygon points="0 0, 8 3, 0 6" class="fill-muted-foreground/60" />
+      </marker>
+    </defs>
 
-  <!-- Edges -->
-  {#each layoutEdges as le (le.from + '->' + le.to)}
-    {@const isBackEdge = le.edges.some(
-      (e) => e.guard?.toLowerCase().includes('reject') || e.guard?.toLowerCase().includes('revision'),
-    )}
-    <path
-      d={edgePath(le.points)}
-      fill="none"
-      class="stroke-muted-foreground/40"
-      stroke-width={compact ? 1 : 1.5}
-      stroke-dasharray={isBackEdge ? '6,4' : 'none'}
-      marker-end="url(#arrowhead)"
-    />
-    {#if !compact}
-      {@const labels = le.edges.map((e) => e.label).filter(Boolean)}
-      {#if labels.length > 0}
-        {@const pos = edgeLabelPos(le.points)}
-        <text x={pos.x} y={pos.y} text-anchor="middle" class="fill-muted-foreground text-[9px]">
-          {labels.join(' | ')}
-        </text>
-      {/if}
-    {/if}
-  {/each}
-
-  <!-- Nodes -->
-  {#each layoutNodes as ln (ln.id)}
-    {@const status = nodeStatus(ln.id)}
-    {@const fill = nodeFillClass(ln.node, status)}
-    {@const vc = visitCounts[ln.id]}
-    <g class={status === 'active' ? 'animate-pulse-slow' : ''}>
+    <!-- Edges -->
+    {#each layoutEdges as le (le.from + '->' + le.to)}
+      {@const isBackEdge = le.edges.some(
+        (e) => e.guard?.toLowerCase().includes('reject') || e.guard?.toLowerCase().includes('revision'),
+      )}
       <path
-        d={shapePath(ln.node, ln.x, ln.y, ln.width, ln.height)}
-        class={fill}
-        stroke-width={status === 'active' ? 2 : 1}
+        d={edgePath(le.points)}
+        fill="none"
+        class="stroke-muted-foreground/40"
+        stroke-width={compact ? 1 : 1.5}
+        stroke-dasharray={isBackEdge ? '6,4' : 'none'}
+        marker-end="url(#arrowhead)"
       />
-
-      {#if ln.node.type === 'terminal' && status !== 'failed'}
-        <!-- Double border for terminal -->
-        <path
-          d={shapePath(ln.node, ln.x, ln.y, ln.width - 6, ln.height - 6)}
-          class={fill}
-          stroke-width={0.5}
-          fill="none"
-        />
+      {#if !compact}
+        {@const labels = le.edges.map((e) => e.label).filter(Boolean)}
+        {#if labels.length > 0}
+          {@const pos = edgeLabelPos(le.points)}
+          <text x={pos.x} y={pos.y} text-anchor="middle" class="fill-muted-foreground/70 text-[11px]">
+            {labels.join(' | ')}
+          </text>
+        {/if}
       {/if}
+    {/each}
 
-      <!-- Label -->
-      <text
-        x={ln.x}
-        y={ln.node.persona && !compact ? ln.y - 4 : ln.y + 1}
-        text-anchor="middle"
-        dominant-baseline="middle"
-        class="fill-foreground text-[11px] font-medium pointer-events-none"
-      >
-        {ln.node.label}
-      </text>
+    <!-- Nodes -->
+    {#each layoutNodes as ln (ln.id)}
+      {@const status = nodeStatus(ln.id)}
+      {@const fill = nodeFillClass(ln.node, status)}
+      {@const vc = visitCounts[ln.id]}
+      <g class={status === 'active' ? 'animate-pulse-slow' : ''}>
+        <path
+          d={shapePath(ln.node, ln.x, ln.y, ln.width, ln.height)}
+          class={fill}
+          stroke-width={status === 'active' ? 2 : 1}
+        />
 
-      <!-- Persona sub-label -->
-      {#if ln.node.persona && !compact}
+        {#if ln.node.type === 'terminal' && status !== 'failed'}
+          <!-- Double border for terminal -->
+          <path
+            d={shapePath(ln.node, ln.x, ln.y, ln.width - 6, ln.height - 6)}
+            class={fill}
+            stroke-width={0.5}
+            fill="none"
+          />
+        {/if}
+
+        <!-- Label -->
         <text
           x={ln.x}
-          y={ln.y + 12}
+          y={ln.node.persona && !compact ? ln.y - 4 : ln.y + 1}
           text-anchor="middle"
           dominant-baseline="middle"
-          class="fill-muted-foreground text-[9px] pointer-events-none"
+          class="fill-foreground text-[11px] font-medium pointer-events-none"
         >
-          {ln.node.persona}
+          {ln.node.label}
         </text>
-      {/if}
 
-      <!-- Visit count badge -->
-      {#if vc && vc > 1 && !compact}
-        <circle cx={ln.x + ln.width / 2 - 4} cy={ln.y - ln.height / 2 + 4} r="9" class="fill-primary" />
-        <text
-          x={ln.x + ln.width / 2 - 4}
-          y={ln.y - ln.height / 2 + 4}
-          text-anchor="middle"
-          dominant-baseline="middle"
-          class="fill-primary-foreground text-[8px] font-bold pointer-events-none"
-        >
-          {vc}x
-        </text>
-      {/if}
+        <!-- Persona sub-label -->
+        {#if ln.node.persona && !compact}
+          <text
+            x={ln.x}
+            y={ln.y + 12}
+            text-anchor="middle"
+            dominant-baseline="middle"
+            class="fill-muted-foreground text-[9px] pointer-events-none"
+          >
+            {ln.node.persona}
+          </text>
+        {/if}
 
-      <!-- Completed check overlay (hidden when visit count badge is shown) -->
-      {#if status === 'completed' && !(vc && vc > 1 && !compact)}
-        <text
-          x={ln.x + ln.width / 2 - 4}
-          y={ln.y - ln.height / 2 + 6}
-          text-anchor="middle"
-          dominant-baseline="middle"
-          class="fill-success text-[12px] pointer-events-none"
-        >
-          &#10003;
-        </text>
-      {/if}
-    </g>
-  {/each}
-</svg>
+        <!-- Visit count badge -->
+        {#if vc && vc > 1 && !compact}
+          <circle cx={ln.x + ln.width / 2 - 4} cy={ln.y - ln.height / 2 + 4} r="9" class="fill-primary" />
+          <text
+            x={ln.x + ln.width / 2 - 4}
+            y={ln.y - ln.height / 2 + 4}
+            text-anchor="middle"
+            dominant-baseline="middle"
+            class="fill-primary-foreground text-[8px] font-bold pointer-events-none"
+          >
+            {vc}x
+          </text>
+        {/if}
+
+        <!-- Completed check overlay (hidden when visit count badge is shown) -->
+        {#if status === 'completed' && !(vc && vc > 1 && !compact)}
+          <text
+            x={ln.x + ln.width / 2 - 4}
+            y={ln.y - ln.height / 2 + 6}
+            text-anchor="middle"
+            dominant-baseline="middle"
+            class="fill-success text-[12px] pointer-events-none"
+          >
+            &#10003;
+          </text>
+        {/if}
+      </g>
+    {/each}
+  </svg>
+</div>
 
 <style>
   @keyframes pulse-slow {
