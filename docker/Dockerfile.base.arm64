@@ -58,6 +58,13 @@ RUN uv python install 3.12
 
 RUN npm install -g node-gyp
 
+# Playwright + Chromium: pre-install so containers work with --network=none.
+# Install system deps as root, then browser to a shared path.
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
+RUN npx playwright install-deps chromium && \
+    npx playwright install chromium && \
+    chmod -R o+rx /opt/playwright-browsers
+
 RUN mkdir -p /workspace /etc/ironcurtain /run/ironcurtain && \
     chown codespace:codespace /workspace /etc/ironcurtain /run/ironcurtain
 
