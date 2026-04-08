@@ -101,7 +101,7 @@ test.describe('Workflow Detail View', () => {
 
     // Detail view should show the workflow name and a back button
     await expect(page.getByRole('button', { name: /Back/ })).toBeVisible();
-    await expect(page.getByText('design-and-code')).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'design-and-code' })).toBeVisible();
   });
 
   test('detail view renders the state machine graph SVG', async ({ page }) => {

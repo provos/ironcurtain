@@ -6,11 +6,18 @@
  *
  * Usage:
  *   cd packages/web-ui && npm run mock-server
+ *   cd packages/web-ui && npm run mock-server -- --replay
+ *   cd packages/web-ui && npm run mock-server -- --replay --replay-file path/to/messages.jsonl
  *   # Then in another terminal: npm run dev
  */
 
 import { WebSocketServer, type WebSocket } from 'ws';
 import { createServer } from 'http';
+import { resolve, dirname } from 'path';
+import { existsSync } from 'fs';
+import { fileURLToPath } from 'url';
+import { parseArgs } from 'util';
+import { loadReplayPlan, createReplayController, type ReplayController, type ReplayPlan } from './replay-engine.js';
 
 // ---------------------------------------------------------------------------
 // Types (mirrors the daemon protocol without importing from src/)
@@ -68,6 +75,69 @@ interface MockEscalation {
 const PORT = parseInt(process.env.PORT ?? '7400', 10);
 const MOCK_TOKEN = 'mock-dev-token';
 const startTime = Date.now();
+
+// ---------------------------------------------------------------------------
+// Replay mode CLI parsing
+// ---------------------------------------------------------------------------
+
+interface ReplayConfig {
+  readonly jsonlPath: string;
+  readonly definitionPath: string;
+  readonly speedup: number;
+}
+
+const __scriptDir = dirname(fileURLToPath(import.meta.url));
+
+function parseReplayArgs(): ReplayConfig | null {
+  const { values } = parseArgs({
+    options: {
+      replay: { type: 'boolean', default: false },
+      'replay-file': { type: 'string', default: undefined },
+      definition: { type: 'string', default: undefined },
+      speedup: { type: 'string', default: '50' },
+    },
+    allowPositionals: true,
+    strict: false,
+  });
+
+  // --replay enables replay mode. --replay-file=<path> specifies a custom JSONL.
+  // Bare --replay uses the bundled example files.
+  if (!values.replay) return null;
+
+  const defaultJsonl = resolve(__scriptDir, '../workflow-example-messages.jsonl');
+  const defaultDef = resolve(__scriptDir, '../workflow-example-definition.json');
+
+  const replayFile = values['replay-file'];
+  let jsonlPath = typeof replayFile === 'string' && replayFile !== '' ? resolve(replayFile) : defaultJsonl;
+  let definitionPath = defaultDef;
+
+  // Look for definition adjacent to a custom JSONL file
+  if (jsonlPath !== defaultJsonl) {
+    const adjacentDef = resolve(dirname(jsonlPath), 'workflow-example-definition.json');
+    const adjacentDef2 = resolve(dirname(jsonlPath), 'definition.json');
+    if (existsSync(adjacentDef)) {
+      definitionPath = adjacentDef;
+    } else if (existsSync(adjacentDef2)) {
+      definitionPath = adjacentDef2;
+    }
+  }
+
+  // Explicit definition override
+  if (values.definition) {
+    definitionPath = resolve(values.definition);
+  }
+
+  // Speedup factor
+  const speedup = Math.max(1, parseInt(values.speedup ?? '50', 10) || 50);
+
+  return { jsonlPath, definitionPath, speedup };
+}
+
+const replayConfig = parseReplayArgs();
+const replayPlan: ReplayPlan | null = replayConfig
+  ? loadReplayPlan(replayConfig.jsonlPath, replayConfig.definitionPath)
+  : null;
+let replayController: ReplayController | null = null;
 
 let nextLabel = 1;
 let eventSeq = 0;
@@ -531,9 +601,14 @@ function resetState(): void {
   sessions.clear();
   escalations.clear();
   nextLabel = 1;
+  eventSeq = 0;
   jobs.length = 0;
   jobs.push(...structuredClone(CANNED_JOBS));
   initWorkflows();
+  if (replayController) {
+    replayController.abort();
+    replayController = null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -884,10 +959,18 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
         },
       ];
 
-    case 'workflows.list':
+    case 'workflows.list': {
+      if (replayConfig) {
+        return replayController ? [replayController.getStatus()] : [];
+      }
       return [...workflows.values()];
+    }
 
     case 'workflows.get': {
+      if (replayConfig) {
+        if (!replayController) return errorResult('WORKFLOW_NOT_FOUND', 'No active replay');
+        return replayController.getDetail();
+      }
       const wfId = params.workflowId as string;
       const wf = workflows.get(wfId);
       if (!wf) return errorResult('WORKFLOW_NOT_FOUND', `Workflow ${wfId} not found`);
@@ -896,6 +979,14 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
     }
 
     case 'workflows.start': {
+      if (replayConfig && replayPlan) {
+        if (replayController?.isActive()) {
+          return errorResult('INVALID_PARAMS', 'Replay already in progress');
+        }
+        replayController = createReplayController(replayPlan, broadcast, replayConfig.speedup);
+        replayController.start();
+        return { workflowId: replayPlan.workflowId };
+      }
       const newId = `wf-mock-${Date.now()}`;
       const newWf: MockWorkflow = {
         workflowId: newId,
@@ -951,6 +1042,11 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
     }
 
     case 'workflows.abort': {
+      if (replayConfig && replayController) {
+        replayController.abort();
+        replayController = null;
+        return undefined;
+      }
       const abortId = params.workflowId as string;
       const abortWf = workflows.get(abortId);
       if (!abortWf) return errorResult('WORKFLOW_NOT_FOUND', `Workflow ${abortId} not found`);
@@ -965,6 +1061,12 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
     }
 
     case 'workflows.resolveGate': {
+      if (replayConfig && replayController) {
+        const rEvent = params.event as string;
+        const rPrompt = params.prompt as string | undefined;
+        replayController.resolveGate(rEvent, rPrompt);
+        return undefined;
+      }
       const resolveWfId = params.workflowId as string;
       const resolveEvent = params.event as string;
       const resolveWf = workflows.get(resolveWfId);
@@ -1016,7 +1118,8 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
       return undefined;
     }
 
-    case 'workflows.listResumable':
+    case 'workflows.listResumable': {
+      if (replayConfig) return [];
       return [
         {
           workflowId: 'wf-resumable-001',
@@ -1032,6 +1135,7 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
           taskDescription: 'Add unit tests for authentication middleware',
         },
       ];
+    }
 
     case 'workflows.import':
       return { workflowId: 'wf-imported-001' };
@@ -1096,6 +1200,15 @@ wss.on('connection', (ws) => {
   clients.add(ws);
   console.log(`  Client connected (${clients.size} total)`);
 
+  // In replay mode, auto-start the replay when the first client connects
+  // so the user immediately sees a running workflow without needing to
+  // fill out the Start Workflow form.
+  if (replayConfig && replayPlan && !replayController) {
+    replayController = createReplayController(replayPlan, broadcast, replayConfig.speedup);
+    replayController.start();
+    console.log('  Replay auto-started on first client connection');
+  }
+
   ws.on('message', (raw) => {
     let frame: RequestFrame;
     try {
@@ -1157,7 +1270,17 @@ setInterval(() => {
   broadcast('daemon.status', buildStatusDto());
 }, 10_000);
 
-console.log(`
+if (replayConfig && replayPlan) {
+  const jsonlName = replayConfig.jsonlPath.split('/').pop();
+  console.log(`
+  Mock WS server listening on port ${PORT}
+  Replay mode: ${jsonlName} (${replayPlan.entries.length} entries, speedup: ${replayConfig.speedup}x)
+
+  Open the web UI with this URL:
+    http://localhost:5173/?token=${MOCK_TOKEN}
+`);
+} else {
+  console.log(`
   Mock WebSocket server listening on ws://127.0.0.1:${PORT}
 
   Open the web UI with this URL:
@@ -1167,3 +1290,4 @@ console.log(`
     Terminal 1: cd packages/web-ui && npm run mock-server
     Terminal 2: cd packages/web-ui && npm run dev
 `);
+}

@@ -41,6 +41,26 @@ import { validateDefinition } from './validate.js';
 
 const execFileAsync = promisify(execFileCb);
 
+// ---------------------------------------------------------------------------
+// Transition message truncation
+// ---------------------------------------------------------------------------
+
+const MAX_TRANSITION_MESSAGE_BYTES = 4096;
+const TRANSITION_TRUNCATION_NOTICE = '\n\n[... truncated]';
+
+function truncateForTransition(text: string | null | undefined): string | undefined {
+  if (!text) return undefined;
+  if (Buffer.byteLength(text, 'utf-8') <= MAX_TRANSITION_MESSAGE_BYTES) {
+    return text;
+  }
+  const noticeBudget = MAX_TRANSITION_MESSAGE_BYTES - Buffer.byteLength(TRANSITION_TRUNCATION_NOTICE, 'utf-8');
+  let truncated = text;
+  while (Buffer.byteLength(truncated, 'utf-8') > noticeBudget) {
+    truncated = truncated.slice(0, Math.floor(truncated.length * 0.9));
+  }
+  return truncated + TRANSITION_TRUNCATION_NOTICE;
+}
+
 function toErrorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
@@ -592,12 +612,23 @@ export class WorkflowOrchestrator implements WorkflowController {
       // Record transition and checkpoint only on actual state changes
       if (stateValue !== previousState) {
         const duration = instance.stateEnteredAt ? now - instance.stateEnteredAt : 0;
+
+        const stateType = definition.states[previousState].type;
+        let agentMessage: string | undefined;
+        if (stateType === 'human_gate') {
+          agentMessage = truncateForTransition(snapshot.context.humanPrompt ?? snapshot.context.previousAgentOutput);
+        } else if (stateType === 'agent') {
+          agentMessage = truncateForTransition(snapshot.context.previousAgentOutput);
+        }
+        // deterministic and terminal: no agentMessage (leave undefined)
+
         instance.transitionHistory.push({
           from: previousState,
           to: stateValue,
           event: 'transition',
           timestamp: new Date(now).toISOString(),
           duration_ms: duration,
+          agentMessage,
         });
         instance.stateEnteredAt = now;
         this.saveCheckpoint(instance, snapshot);
