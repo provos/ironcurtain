@@ -37,6 +37,7 @@ export type MethodName =
   | 'workflows.list'
   | 'workflows.get'
   | 'workflows.start'
+  | 'workflows.import'
   | 'workflows.resume'
   | 'workflows.abort'
   | 'workflows.resolveGate'

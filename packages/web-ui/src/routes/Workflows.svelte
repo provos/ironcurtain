@@ -7,6 +7,7 @@
     listWorkflowDefinitions,
     listResumableWorkflows,
     resumeWorkflow as rpcResumeWorkflow,
+    importWorkflow as rpcImportWorkflow,
   } from '../lib/stores.svelte.js';
   import type { WorkflowSummaryDto, WorkflowDefinitionDto, ResumableWorkflowDto } from '$lib/types.js';
   import { phaseBadgeVariant } from '$lib/utils.js';
@@ -126,15 +127,17 @@
     actionError = '';
     resumeMessage = '';
     try {
-      const result = await rpcResumeWorkflow(undefined, importDir.trim());
-      // Insert placeholder so events arriving before refresh are not dropped.
-      if (!appState.workflows.has(result.workflowId)) {
+      // Two-step: import first to get the workflowId, insert placeholder, then resume.
+      // This ensures the placeholder is in place before resume emits lifecycle events.
+      const { workflowId } = await rpcImportWorkflow(importDir.trim());
+      if (!appState.workflows.has(workflowId)) {
         appState.workflows = new Map(appState.workflows).set(
-          result.workflowId,
-          createWorkflowPlaceholder(result.workflowId, 'resuming...'),
+          workflowId,
+          createWorkflowPlaceholder(workflowId, 'resuming...'),
         );
       }
-      resumeMessage = `Imported and resumed workflow ${result.workflowId.slice(0, 8)}...`;
+      await rpcResumeWorkflow(workflowId);
+      resumeMessage = `Imported and resumed workflow ${workflowId.slice(0, 8)}...`;
       importDir = '';
       importDirExpanded = false;
       await Promise.all([refreshWorkflows(), loadResumable()]);

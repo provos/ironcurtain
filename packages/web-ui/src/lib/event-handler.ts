@@ -306,7 +306,6 @@ function applyEvent(state: AppStateLike, effects: EventSideEffects, parsed: WebE
       state.workflows = new Map(state.workflows).set(workflowId, {
         ...wf,
         phase: 'completed',
-        currentState: 'completed',
       });
       const nextGates = new Map(state.pendingGates);
       for (const [gateId, gate] of nextGates) {

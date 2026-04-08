@@ -1033,8 +1033,11 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
         },
       ];
 
+    case 'workflows.import':
+      return { workflowId: 'wf-imported-001' };
+
     case 'workflows.resume':
-      return { accepted: true, workflowId: (params.workflowId as string) ?? 'wf-imported-001' };
+      return { accepted: true, workflowId: params.workflowId as string };
 
     case 'workflows.inspect':
       return { accepted: true };

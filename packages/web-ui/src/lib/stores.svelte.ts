@@ -364,11 +364,12 @@ export async function listResumableWorkflows(): Promise<ResumableWorkflowDto[]> 
   return getWsClient().request<ResumableWorkflowDto[]>('workflows.listResumable');
 }
 
-export async function resumeWorkflow(workflowId?: string, baseDir?: string): Promise<{ workflowId: string }> {
-  const params: Record<string, unknown> = {};
-  if (workflowId) params.workflowId = workflowId;
-  if (baseDir) params.baseDir = baseDir;
-  return getWsClient().request<{ workflowId: string }>('workflows.resume', params);
+export async function importWorkflow(baseDir: string): Promise<{ workflowId: string }> {
+  return getWsClient().request<{ workflowId: string }>('workflows.import', { baseDir });
+}
+
+export async function resumeWorkflow(workflowId: string): Promise<{ workflowId: string }> {
+  return getWsClient().request<{ workflowId: string }>('workflows.resume', { workflowId });
 }
 
 // ── Workflow file browser RPC actions ──────────────────────────────────

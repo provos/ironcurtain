@@ -418,7 +418,7 @@ describe('handleEvent', () => {
       expect(state.workflows.get('wf-1')?.phase).toBe('running');
     });
 
-    it('marks workflow completed on workflow.completed', () => {
+    it('marks workflow completed on workflow.completed and preserves terminal state name', () => {
       const state = createMockState();
       state.workflows = new Map([
         [
@@ -427,7 +427,7 @@ describe('handleEvent', () => {
             workflowId: 'wf-1',
             name: 'test',
             phase: 'running' as const,
-            currentState: 'implement',
+            currentState: 'done',
             startedAt: '2026-01-01T00:00:00Z',
           },
         ],
@@ -436,6 +436,8 @@ describe('handleEvent', () => {
       handleEvent(state, createMockEffects(), 'workflow.completed', { workflowId: 'wf-1' });
 
       expect(state.workflows.get('wf-1')?.phase).toBe('completed');
+      // currentState should preserve the terminal state name set by the prior state_entered event
+      expect(state.workflows.get('wf-1')?.currentState).toBe('done');
     });
 
     it('marks workflow failed on workflow.failed', () => {

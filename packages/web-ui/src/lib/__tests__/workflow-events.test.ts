@@ -177,7 +177,8 @@ describe('workflow event handling', () => {
       handleEvent(state, effects, 'workflow.completed', { workflowId: 'wf-1' });
 
       expect(state.workflows.get('wf-1')?.phase).toBe('completed');
-      expect(state.workflows.get('wf-1')?.currentState).toBe('completed');
+      // currentState preserves the last known state name (set by prior state_entered event)
+      expect(state.workflows.get('wf-1')?.currentState).toBe('plan');
       expect(state.pendingGates.size).toBe(0);
     });
 

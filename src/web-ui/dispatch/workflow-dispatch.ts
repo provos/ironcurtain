@@ -127,6 +127,23 @@ export async function workflowDispatch(
       return buildResumableList(manager);
     }
 
+    case 'workflows.import': {
+      const schema = z.object({
+        baseDir: z.string().min(1),
+        workflowId: z.string().min(1).optional(),
+      });
+      const { baseDir, workflowId } = validateParams(schema, params);
+
+      if (!existsSync(baseDir)) {
+        throw new RpcError('INVALID_PARAMS', `Directory does not exist: ${baseDir}`);
+      }
+      if (!statSync(baseDir).isDirectory()) {
+        throw new RpcError('INVALID_PARAMS', `Path is not a directory: ${baseDir}`);
+      }
+      const importedId = manager.importExternalCheckpoint(baseDir, workflowId);
+      return { workflowId: importedId };
+    }
+
     case 'workflows.resume': {
       const schema = z.object({
         workflowId: z.string().min(1).optional(),
