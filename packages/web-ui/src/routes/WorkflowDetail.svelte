@@ -17,6 +17,7 @@
   import StateMachineGraph from '$lib/components/features/state-machine-graph.svelte';
   import GateReviewPanel from '$lib/components/features/gate-review-panel.svelte';
   import WorkspaceBrowser from '$lib/components/features/workspace-browser.svelte';
+  import { renderMarkdown } from '$lib/markdown.js';
 
   let {
     workflowId,
@@ -35,6 +36,17 @@
   let error = $state('');
   let resolveError = $state('');
   let workspaceExpanded = $state(false);
+  let expandedMessages = $state(new Set<number>());
+
+  function toggleMessage(index: number): void {
+    const next = new Set(expandedMessages);
+    if (next.has(index)) {
+      next.delete(index);
+    } else {
+      next.add(index);
+    }
+    expandedMessages = next;
+  }
 
   let fetchVersion = 0;
 
@@ -211,15 +223,27 @@
         <CardContent>
           <div class="space-y-1.5">
             {#each detail.transitionHistory as t, i (i)}
-              <div class="flex items-center gap-2 text-sm font-mono">
-                <span class="text-muted-foreground text-xs w-16 shrink-0">{formatTime(t.timestamp)}</span>
-                <span class="text-foreground/70">{t.from}</span>
-                <span class="text-muted-foreground">&rarr;</span>
-                <span class="text-foreground">{t.to}</span>
-                {#if t.event}
-                  <Badge variant="outline" class="ml-1">{t.event}</Badge>
+              <div>
+                <div class="flex items-center gap-2 text-sm font-mono">
+                  <span class="text-muted-foreground text-xs w-16 shrink-0">{formatTime(t.timestamp)}</span>
+                  <span class="text-foreground/70">{t.from}</span>
+                  <span class="text-muted-foreground">&rarr;</span>
+                  <span class="text-foreground">{t.to}</span>
+                  {#if t.event}
+                    <Badge variant="outline" class="ml-1">{t.event}</Badge>
+                  {/if}
+                  <span class="text-muted-foreground text-xs ml-auto">{formatDuration(t.durationMs)}</span>
+                  {#if t.agentMessage}
+                    <button class="text-xs text-primary hover:underline ml-2" onclick={() => toggleMessage(i)}>
+                      {expandedMessages.has(i) ? 'hide' : 'show'} message
+                    </button>
+                  {/if}
+                </div>
+                {#if t.agentMessage && expandedMessages.has(i)}
+                  <div class="ml-20 mt-1 mb-2 p-3 rounded bg-muted/50 text-sm prose prose-invert max-w-none">
+                    {@html renderMarkdown(t.agentMessage)}
+                  </div>
                 {/if}
-                <span class="text-muted-foreground text-xs ml-auto">{formatDuration(t.durationMs)}</span>
               </div>
             {/each}
           </div>

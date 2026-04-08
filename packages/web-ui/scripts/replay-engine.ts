@@ -121,6 +121,7 @@ interface TransitionRecord {
   readonly event: string;
   readonly timestamp: string;
   readonly durationMs: number;
+  readonly agentMessage?: string;
 }
 
 /** Accumulated state built up during replay. */
@@ -135,6 +136,7 @@ export interface ReplayState {
   transitionHistory: TransitionRecord[];
   activeGateId: string | null;
   lastAgentMessage: string | null;
+  lastHumanPrompt: string | null;
   lastStateEntryTime: string;
 }
 
@@ -230,6 +232,27 @@ function extractTaskDescription(message: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Transition message truncation
+// ---------------------------------------------------------------------------
+
+const MAX_TRANSITION_MESSAGE_BYTES = 4096;
+const TRANSITION_TRUNCATION_NOTICE = '\n\n[... truncated]';
+
+function truncateForTransition(text: string | null | undefined): string | undefined {
+  if (!text) return undefined;
+  const encoded = Buffer.byteLength(text, 'utf-8');
+  if (encoded <= MAX_TRANSITION_MESSAGE_BYTES) {
+    return text;
+  }
+  const noticeBudget = MAX_TRANSITION_MESSAGE_BYTES - Buffer.byteLength(TRANSITION_TRUNCATION_NOTICE, 'utf-8');
+  let truncated = text;
+  while (Buffer.byteLength(truncated, 'utf-8') > noticeBudget) {
+    truncated = truncated.slice(0, Math.floor(truncated.length * 0.9));
+  }
+  return truncated + TRANSITION_TRUNCATION_NOTICE;
+}
+
+// ---------------------------------------------------------------------------
 // Event Translation
 // ---------------------------------------------------------------------------
 
@@ -276,12 +299,23 @@ export function translateEntry(entry: JournalEntry, definition: WorkflowDefiniti
       const now = new Date(entry.ts).getTime();
       const prevTime = new Date(state.lastStateEntryTime).getTime();
 
+      const prevStateDef = definition.states[prevState];
+      let agentMessage: string | undefined;
+      if (prevStateDef?.type === 'human_gate') {
+        agentMessage = truncateForTransition(state.lastHumanPrompt ?? state.lastAgentMessage);
+        state.lastHumanPrompt = null; // consumed — prevent leaking to future gates
+      } else if (prevStateDef?.type === 'agent') {
+        agentMessage = truncateForTransition(state.lastAgentMessage);
+      }
+      // deterministic and terminal: no agentMessage
+
       state.transitionHistory.push({
         from: prevState,
         to: targetState,
         event: entry.event ?? 'auto',
         timestamp: entry.ts,
         durationMs: now - prevTime,
+        agentMessage,
       });
 
       state.currentState = targetState;
@@ -335,6 +369,7 @@ export function translateEntry(entry: JournalEntry, definition: WorkflowDefiniti
       const gateId = `${state.workflowId}-${entry.state}`;
       state.activeGateId = null;
       state.phase = 'running';
+      state.lastHumanPrompt = entry.prompt ?? null;
 
       events.push({
         event: 'workflow.gate_dismissed',
@@ -445,6 +480,7 @@ function createReplayState(plan: ReplayPlan): ReplayState {
     transitionHistory: [],
     activeGateId: null,
     lastAgentMessage: null,
+    lastHumanPrompt: null,
     lastStateEntryTime: plan.entries[0].ts,
   };
 }

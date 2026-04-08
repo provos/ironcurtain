@@ -306,4 +306,6 @@ export interface TransitionRecord {
   readonly event: string;
   readonly timestamp: string;
   readonly duration_ms: number;
+  /** Summary of the agent's output that produced this transition (if any). */
+  readonly agentMessage?: string;
 }

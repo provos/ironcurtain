@@ -276,6 +276,7 @@ function buildDetailDto(id: WorkflowId, status: WorkflowStatus, detail?: Workflo
     event: t.event,
     timestamp: t.timestamp,
     durationMs: t.duration_ms,
+    agentMessage: t.agentMessage,
   }));
 
   return {

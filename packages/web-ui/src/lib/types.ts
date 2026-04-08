@@ -212,6 +212,8 @@ export interface TransitionRecordDto {
   readonly event: string;
   readonly timestamp: string;
   readonly durationMs: number;
+  /** Summary of the agent output that produced this transition. */
+  readonly agentMessage?: string;
 }
 
 export interface WorkflowContextDto {

@@ -70,6 +70,7 @@ function makeReplayState() {
     }>,
     activeGateId: null as string | null,
     lastAgentMessage: null as string | null,
+    lastHumanPrompt: null as string | null,
     lastStateEntryTime: '2026-04-07T19:04:00.000Z',
   };
 }
