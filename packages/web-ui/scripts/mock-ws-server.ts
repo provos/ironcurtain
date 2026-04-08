@@ -7,7 +7,7 @@
  * Usage:
  *   cd packages/web-ui && npm run mock-server
  *   cd packages/web-ui && npm run mock-server -- --replay
- *   cd packages/web-ui && npm run mock-server -- --replay path/to/messages.jsonl
+ *   cd packages/web-ui && npm run mock-server -- --replay --replay-file path/to/messages.jsonl
  *   # Then in another terminal: npm run dev
  */
 

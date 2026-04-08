@@ -59,8 +59,10 @@
     const _currentState = summary.currentState;
     const _phase = summary.phase;
     const version = ++fetchVersion;
-    // Only show the loading spinner on the initial fetch, not on re-fetches
-    if (!detail) {
+    // Only show the loading spinner on the initial fetch, not on re-fetches.
+    // Use the version counter instead of reading `detail` to avoid making it
+    // a reactive dependency of this $effect (which would cause a re-fetch loop).
+    if (version === 1) {
       loading = true;
     }
     error = '';

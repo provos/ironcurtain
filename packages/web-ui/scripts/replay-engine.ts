@@ -549,6 +549,14 @@ export function createReplayController(
     while (entryIndex < plan.entries.length && !aborted) {
       const entry = plan.entries[entryIndex];
 
+      // If this is a gate_resolved entry and we're waiting for user resolution, skip it.
+      // The user's resolveGate() call already handled the dismissal.
+      // Check BEFORE computing the delay so skipped entries don't incur waits.
+      if (entry.type === 'gate_resolved' && state.activeGateId === null) {
+        entryIndex++;
+        continue;
+      }
+
       // Compute delay from previous entry
       if (entryIndex > 0) {
         const prevTs = new Date(plan.entries[entryIndex - 1].ts).getTime();
@@ -560,13 +568,6 @@ export function createReplayController(
           await waitFor(cappedDelay);
           if (aborted) return;
         }
-      }
-
-      // If this is a gate_resolved entry and we're waiting for user resolution, skip it.
-      // The user's resolveGate() call already handled the dismissal.
-      if (entry.type === 'gate_resolved' && state.activeGateId === null) {
-        entryIndex++;
-        continue;
       }
 
       const events = translateEntry(entry, plan.definition, state);
@@ -653,6 +654,7 @@ export function createReplayController(
       const gateId = state.activeGateId;
       state.activeGateId = null;
       state.phase = 'running';
+      state.lastHumanPrompt = prompt ?? null;
 
       broadcast('workflow.gate_dismissed', {
         workflowId: state.workflowId,
