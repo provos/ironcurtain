@@ -178,6 +178,54 @@ const deterministicLoopDefinition: WorkflowDefinition = {
   },
 };
 
+/** Coder -> critic loop using `when` clauses instead of named guards */
+const coderCriticWhenDefinition: WorkflowDefinition = {
+  name: 'coder-critic-when-test',
+  description: 'Workflow with coder-critic loop using when clauses',
+  initial: 'implement',
+  settings: { maxRounds: 3 },
+  states: {
+    implement: {
+      type: 'agent',
+      persona: 'coder',
+      prompt: 'You are a coder.',
+      inputs: [],
+      outputs: ['code'],
+      transitions: [{ to: 'review' }],
+    },
+    review: {
+      type: 'agent',
+      persona: 'critic',
+      prompt: 'You are a critic.',
+      inputs: ['code'],
+      outputs: ['review'],
+      transitions: [
+        { to: 'done', when: { verdict: 'approved' } },
+        { to: 'escalate_gate', guard: 'isRoundLimitReached' },
+        { to: 'implement', when: { verdict: 'rejected' } },
+        { to: 'escalate_gate' },
+      ],
+    },
+    escalate_gate: {
+      type: 'human_gate',
+      acceptedEvents: ['APPROVE', 'FORCE_REVISION', 'ABORT'],
+      present: ['code', 'review'],
+      transitions: [
+        { to: 'done', event: 'APPROVE' },
+        { to: 'implement', event: 'FORCE_REVISION' },
+        { to: 'aborted', event: 'ABORT' },
+      ],
+    },
+    done: {
+      type: 'terminal',
+      outputs: ['code'],
+    },
+    aborted: {
+      type: 'terminal',
+    },
+  },
+};
+
 /** Coder -> critic loop with guards and round limits */
 const coderCriticDefinition: WorkflowDefinition = {
   name: 'coder-critic-test',
@@ -965,6 +1013,405 @@ describe('buildWorkflowMachine', () => {
 
       const ctx = actor.getSnapshot().context;
       expect(ctx.lastError).toBe('Command failed');
+    });
+  });
+
+  describe('when clause guard evaluation', () => {
+    it('routes via when: { verdict: "approved" } on approved output', async () => {
+      const result = buildWorkflowMachine(coderCriticWhenDefinition, 'task');
+
+      const testMachine = result.machine.provide({
+        actors: {
+          agentService: fromPromise(async ({ input }: { input: AgentInvokeInput }) => {
+            if (input.stateId === 'review') {
+              return makeAgentResult(); // approved
+            }
+            return makeAgentResult();
+          }),
+        },
+      });
+
+      const actor = createActor(testMachine);
+      const visited = trackStates(actor);
+      actor.start();
+
+      await settle();
+
+      expect(visited).toContain('implement');
+      expect(visited).toContain('review');
+      expect(visited).toContain('done');
+      expect(actor.getSnapshot().status).toBe('done');
+    });
+
+    it('routes via when: { verdict: "rejected" } on rejected output', async () => {
+      const result = buildWorkflowMachine(coderCriticWhenDefinition, 'task');
+      let reviewCount = 0;
+
+      const testMachine = result.machine.provide({
+        actors: {
+          agentService: fromPromise(async ({ input }: { input: AgentInvokeInput }) => {
+            if (input.stateId === 'review') {
+              reviewCount++;
+              if (reviewCount === 1) return makeRejectedResult();
+              return makeAgentResult(); // approve second time
+            }
+            return makeAgentResult();
+          }),
+        },
+      });
+
+      const actor = createActor(testMachine);
+      const visited = trackStates(actor);
+      actor.start();
+
+      await settle();
+
+      // implement -> review(reject) -> implement -> review(approve) -> done
+      expect(visited.filter((s) => s === 'implement').length).toBe(2);
+      expect(visited.filter((s) => s === 'review').length).toBe(2);
+      expect(actor.getSnapshot().status).toBe('done');
+    });
+
+    it('multi-field when requires all fields to match', async () => {
+      // Build a definition where done requires both approved + high confidence
+      const multiFieldDef: WorkflowDefinition = {
+        name: 'multi-field-when-test',
+        description: 'Test multi-field when',
+        initial: 'implement',
+        states: {
+          implement: {
+            type: 'agent',
+            persona: 'coder',
+            prompt: 'You are a coder.',
+            inputs: [],
+            outputs: ['code'],
+            transitions: [{ to: 'review' }],
+          },
+          review: {
+            type: 'agent',
+            persona: 'critic',
+            prompt: 'You are a critic.',
+            inputs: ['code'],
+            outputs: ['review'],
+            transitions: [
+              { to: 'done', when: { verdict: 'approved', confidence: 'high' } },
+              { to: 'escalate_gate' }, // fallthrough
+            ],
+          },
+          escalate_gate: {
+            type: 'human_gate',
+            acceptedEvents: ['APPROVE', 'ABORT'],
+            transitions: [
+              { to: 'done', event: 'APPROVE' },
+              { to: 'aborted', event: 'ABORT' },
+            ],
+          },
+          done: { type: 'terminal' },
+          aborted: { type: 'terminal' },
+        },
+      };
+
+      const result = buildWorkflowMachine(multiFieldDef, 'task');
+
+      // Agent returns approved but LOW confidence -- should NOT match the when
+      const testMachine = result.machine.provide({
+        actors: {
+          agentService: fromPromise(async ({ input }: { input: AgentInvokeInput }) => {
+            if (input.stateId === 'review') {
+              return makeAgentResult({
+                output: {
+                  completed: true,
+                  verdict: 'approved',
+                  confidence: 'low', // does not match "high"
+                  escalation: null,
+                  testCount: null,
+                  notes: null,
+                },
+              });
+            }
+            return makeAgentResult();
+          }),
+        },
+      });
+
+      const actor = createActor(testMachine);
+      actor.start();
+
+      await settle();
+
+      // Should fall through to escalate_gate, not done
+      expect(actor.getSnapshot().matches('escalate_gate')).toBe(true);
+    });
+
+    it('when falls through on non-match to unconditional transition', async () => {
+      // Agent returns "blocked" -- neither approved nor rejected when matches
+      const result = buildWorkflowMachine(coderCriticWhenDefinition, 'task');
+
+      const testMachine = result.machine.provide({
+        actors: {
+          agentService: fromPromise(async ({ input }: { input: AgentInvokeInput }) => {
+            if (input.stateId === 'review') {
+              return makeAgentResult({
+                output: {
+                  completed: true,
+                  verdict: 'blocked',
+                  confidence: 'high',
+                  escalation: null,
+                  testCount: null,
+                  notes: null,
+                },
+              });
+            }
+            return makeAgentResult();
+          }),
+        },
+      });
+
+      const actor = createActor(testMachine);
+      actor.start();
+
+      await settle();
+
+      // Neither when clause matches, isRoundLimitReached is false (round 0),
+      // so falls through to the unconditional escalate_gate transition
+      expect(actor.getSnapshot().matches('escalate_gate')).toBe(true);
+    });
+
+    it('when with null value matches null field', async () => {
+      const nullMatchDef: WorkflowDefinition = {
+        name: 'null-when-test',
+        description: 'Test null matching',
+        initial: 'agent',
+        states: {
+          agent: {
+            type: 'agent',
+            persona: 'worker',
+            prompt: 'Do work.',
+            inputs: [],
+            outputs: ['result'],
+            transitions: [{ to: 'done', when: { escalation: null } }, { to: 'escalated' }],
+          },
+          done: { type: 'terminal' },
+          escalated: { type: 'terminal' },
+        },
+      };
+
+      // Test that null matches null
+      const result1 = buildWorkflowMachine(nullMatchDef, 'task');
+      const machine1 = result1.machine.provide({
+        actors: {
+          agentService: fromPromise(async () =>
+            makeAgentResult({
+              output: {
+                completed: true,
+                verdict: 'approved',
+                confidence: 'high',
+                escalation: null, // matches when: { escalation: null }
+                testCount: null,
+                notes: null,
+              },
+            }),
+          ),
+        },
+      });
+      const actor1 = createActor(machine1);
+      actor1.start();
+      await settle();
+      expect(actor1.getSnapshot().matches('done')).toBe(true);
+
+      // Test that non-null does NOT match null
+      const result2 = buildWorkflowMachine(nullMatchDef, 'task');
+      const machine2 = result2.machine.provide({
+        actors: {
+          agentService: fromPromise(async () =>
+            makeAgentResult({
+              output: {
+                completed: true,
+                verdict: 'approved',
+                confidence: 'high',
+                escalation: 'needs human review', // does NOT match when: { escalation: null }
+                testCount: null,
+                notes: null,
+              },
+            }),
+          ),
+        },
+      });
+      const actor2 = createActor(machine2);
+      actor2.start();
+      await settle();
+      expect(actor2.getSnapshot().matches('escalated')).toBe(true);
+    });
+
+    it('when coexists with guard on different transitions', async () => {
+      // coderCriticWhenDefinition already has when + isRoundLimitReached guard
+      const result = buildWorkflowMachine(coderCriticWhenDefinition, 'task');
+      let reviewCount = 0;
+
+      const testMachine = result.machine.provide({
+        actors: {
+          agentService: fromPromise(async ({ input }: { input: AgentInvokeInput }) => {
+            if (input.stateId === 'review') {
+              reviewCount++;
+              // Always reject to exhaust rounds
+              return makeRejectedResult(`rejection ${reviewCount}`);
+            }
+            return makeAgentResult();
+          }),
+        },
+      });
+
+      const actor = createActor(testMachine);
+      actor.start();
+
+      await settle(200);
+
+      // With maxRounds=3, the guard isRoundLimitReached fires
+      expect(actor.getSnapshot().matches('escalate_gate')).toBe(true);
+    });
+
+    it('when preserves flag behavior', async () => {
+      const flagDef: WorkflowDefinition = {
+        name: 'flag-when-test',
+        description: 'Test flag with when',
+        initial: 'review',
+        states: {
+          review: {
+            type: 'agent',
+            persona: 'critic',
+            prompt: 'Review.',
+            inputs: [],
+            outputs: ['review'],
+            transitions: [{ to: 'done', when: { verdict: 'approved' }, flag: 'low confidence approval' }],
+          },
+          done: { type: 'terminal' },
+        },
+      };
+
+      const result = buildWorkflowMachine(flagDef, 'task');
+      const testMachine = result.machine.provide({
+        actors: {
+          agentService: fromPromise(async () => makeAgentResult()),
+        },
+      });
+
+      const actor = createActor(testMachine);
+      actor.start();
+      await settle();
+
+      expect(actor.getSnapshot().context.flaggedForReview).toBe(true);
+      expect(actor.getSnapshot().status).toBe('done');
+    });
+
+    it('when: { completed: false } matches falsy boolean', async () => {
+      const boolDef: WorkflowDefinition = {
+        name: 'bool-when-test',
+        description: 'Test boolean false matching',
+        initial: 'agent',
+        states: {
+          agent: {
+            type: 'agent',
+            persona: 'worker',
+            prompt: 'Do work.',
+            inputs: [],
+            outputs: ['result'],
+            transitions: [{ to: 'retry', when: { completed: false } }, { to: 'done' }],
+          },
+          retry: { type: 'terminal' },
+          done: { type: 'terminal' },
+        },
+      };
+
+      const result = buildWorkflowMachine(boolDef, 'task');
+      const testMachine = result.machine.provide({
+        actors: {
+          agentService: fromPromise(async () =>
+            makeAgentResult({
+              output: {
+                completed: false, // falsy but should match false exactly
+                verdict: 'approved',
+                confidence: 'high',
+                escalation: null,
+                testCount: null,
+                notes: null,
+              },
+            }),
+          ),
+        },
+      });
+
+      const actor = createActor(testMachine);
+      actor.start();
+      await settle();
+
+      // Should match when: { completed: false }, not fall through to done
+      expect(actor.getSnapshot().matches('retry')).toBe(true);
+    });
+
+    it('transition without when or guard fires unconditionally (existing behavior)', async () => {
+      const result = buildWorkflowMachine(linearDefinition, 'task');
+
+      const testMachine = result.machine.provide({
+        actors: {
+          agentService: fromPromise(async () => makeAgentResult()),
+        },
+      });
+
+      const actor = createActor(testMachine);
+      const visited = trackStates(actor);
+      actor.start();
+
+      await settle();
+
+      // Linear definition has no guards or when -- transitions fire unconditionally
+      expect(visited).toContain('plan');
+      expect(visited).toContain('design');
+      expect(visited).toContain('done');
+      expect(actor.getSnapshot().status).toBe('done');
+    });
+
+    it('empty when object fails closed (defensive: bypasses validation)', async () => {
+      // Normally validation rejects empty `when: {}`. This test passes an
+      // unvalidated definition directly to buildWorkflowMachine to verify
+      // the guard's defensive check falls through rather than silently
+      // matching (vacuous `every` over empty would otherwise return true).
+      const bypassDef: WorkflowDefinition = {
+        name: 'empty-when-test',
+        description: 'Bypasses validation with empty when',
+        initial: 'agent',
+        states: {
+          agent: {
+            type: 'agent',
+            persona: 'worker',
+            prompt: 'Do work.',
+            inputs: [],
+            outputs: ['result'],
+            transitions: [
+              // Empty when -- defensive check must reject this
+              { to: 'should_not_reach', when: {} },
+              // Unconditional fallthrough
+              { to: 'safe_done' },
+            ],
+          },
+          should_not_reach: { type: 'terminal' },
+          safe_done: { type: 'terminal' },
+        },
+      };
+
+      const result = buildWorkflowMachine(bypassDef, 'task');
+      const testMachine = result.machine.provide({
+        actors: {
+          agentService: fromPromise(async () => makeAgentResult()),
+        },
+      });
+
+      const actor = createActor(testMachine);
+      actor.start();
+      await settle();
+
+      // Guard must fail closed on empty when, falling through to safe_done
+      expect(actor.getSnapshot().matches('safe_done')).toBe(true);
+      expect(actor.getSnapshot().matches('should_not_reach')).toBe(false);
     });
   });
 });

@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { AgentOutput } from './types.js';
+import { VERDICT_VALUES, CONFIDENCE_VALUES } from './types.js';
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -21,8 +22,8 @@ export class AgentStatusParseError extends Error {
 
 const agentOutputSchema = z.object({
   completed: z.boolean(),
-  verdict: z.enum(['approved', 'rejected', 'blocked', 'spec_flaw']),
-  confidence: z.enum(['high', 'medium', 'low']),
+  verdict: z.enum(VERDICT_VALUES),
+  confidence: z.enum(CONFIDENCE_VALUES),
   escalation: z.string().nullable(),
   test_count: z.number().int().nullable(),
   notes: z.string().nullable(),

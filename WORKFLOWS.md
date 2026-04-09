@@ -185,8 +185,9 @@ A workflow definition is a JSON file with this structure:
   "inputs": ["plan", "spec"],
   "outputs": ["reviews"],
   "transitions": [
-    { "to": "next_state", "guard": "isApproved" },
-    { "to": "retry_state", "guard": "isRejected" }
+    { "to": "next_state", "when": { "verdict": "approved" } },
+    { "to": "retry_state", "when": { "verdict": "rejected" } },
+    { "to": "escalate", "guard": "isRoundLimitReached" }
   ]
 }
 ```
@@ -195,7 +196,7 @@ A workflow definition is a JSON file with this structure:
 - **`prompt`** -- Role instructions sent to the agent. Tell it what to do, where to read inputs, and where to write outputs. Use `.workflow/` prefix for artifact directories.
 - **`inputs`** -- Artifact directories the agent should read (under `.workflow/`)
 - **`outputs`** -- Artifact directories the agent must create (under `.workflow/`). Use `[]` for code-only states where the agent writes to the workspace root.
-- **`transitions`** -- Where to go next, optionally gated by guards
+- **`transitions`** -- Where to go next, using `when` for declarative conditions or `guard` for complex checks
 
 ### Human gate states
 
@@ -244,7 +245,23 @@ Commands are arrays of argument arrays (no shell strings). Use `isPassed` guard 
 
 Optional `outputs` lists artifacts to include in the final summary.
 
-### Available guards
+### Transition conditions
+
+There are two ways to control transitions: declarative `when` conditions and code-based `guard` functions. Use `when` for simple checks against agent output fields, and `guard` for conditions that need workflow context.
+
+**`when` — declarative conditions (preferred for simple checks):**
+
+```json
+{ "to": "done", "when": { "verdict": "approved" } }
+{ "to": "fix", "when": { "verdict": "rejected" } }
+{ "to": "review", "when": { "verdict": "approved", "confidence": "low" } }
+```
+
+`when` matches against the agent's status block output. All specified fields must match (AND semantics). Matchable fields: `completed`, `verdict`, `confidence`, `escalation`, `testCount`, `notes`. The `verdict` and `confidence` fields are validated against their allowed values at definition load time, catching typos early.
+
+`when` is only available on agent state transitions (not deterministic states). A transition cannot have both `when` and `guard`.
+
+**`guard` — code-based conditions (for complex checks):**
 
 | Guard                    | Checks                                            |
 | ------------------------ | ------------------------------------------------- |
@@ -255,6 +272,8 @@ Optional `outputs` lists artifacts to include in the final summary.
 | `isStalled`              | Agent produced identical output as previous round |
 | `hasTestCountRegression` | Test count dropped (agent may have deleted tests) |
 | `isPassed`               | Deterministic state commands all passed           |
+
+Use `guard` for conditions that depend on workflow context (round limits, stall detection, test count regression) or for deterministic state transitions (`isPassed`). The simple verdict guards (`isApproved`, `isRejected`, `isLowConfidence`) still work but `when` is preferred for new workflows.
 
 ## Agent status block
 

@@ -1,14 +1,18 @@
 import { z } from 'zod';
-import type { WorkflowDefinition, WorkflowStateDefinition, HumanGateStateDefinition } from './types.js';
+import type { WorkflowDefinition, WorkflowStateDefinition, HumanGateStateDefinition, AgentOutput } from './types.js';
+import { AGENT_OUTPUT_FIELDS, VERDICT_VALUES, CONFIDENCE_VALUES } from './types.js';
 import { REGISTERED_GUARDS } from './guards.js';
 
 // ---------------------------------------------------------------------------
 // Zod schemas
 // ---------------------------------------------------------------------------
 
+const whenValueSchema = z.union([z.string(), z.number(), z.boolean(), z.null()]);
+
 const agentTransitionSchema = z.object({
   to: z.string(),
   guard: z.string().optional(),
+  when: z.record(z.string(), whenValueSchema).optional(),
   flag: z.string().optional(),
 });
 
@@ -141,6 +145,85 @@ function findReachableStates(initial: string, states: Record<string, WorkflowSta
   return reachable;
 }
 
+const AGENT_OUTPUT_FIELD_SET: ReadonlySet<string> = new Set(AGENT_OUTPUT_FIELDS);
+const VERDICT_VALUE_SET: ReadonlySet<string> = new Set(VERDICT_VALUES);
+const CONFIDENCE_VALUE_SET: ReadonlySet<string> = new Set(CONFIDENCE_VALUES);
+
+/**
+ * Expected runtime type for each AgentOutput field used in `when` clauses.
+ * `expected` is the human-readable error label; `check` is the runtime test.
+ */
+const WHEN_KEY_TYPES: {
+  readonly [K in keyof AgentOutput]: { readonly expected: string; readonly check: (v: unknown) => boolean };
+} = {
+  completed: { expected: 'boolean', check: (v) => typeof v === 'boolean' },
+  verdict: { expected: 'string', check: (v) => typeof v === 'string' },
+  confidence: { expected: 'string', check: (v) => typeof v === 'string' },
+  escalation: { expected: 'string or null', check: (v) => typeof v === 'string' || v === null },
+  testCount: { expected: 'number or null', check: (v) => typeof v === 'number' || v === null },
+  notes: { expected: 'string or null', check: (v) => typeof v === 'string' || v === null },
+};
+
+function describeRuntimeType(value: unknown): string {
+  if (value === null) return 'null';
+  return typeof value;
+}
+
+function validateWhenClauses(stateId: string, state: WorkflowStateDefinition, issues: string[]): void {
+  if (state.type === 'terminal' || state.type === 'human_gate') return;
+
+  for (const t of state.transitions) {
+    // Mutual exclusivity: guard + when on same transition
+    if (t.guard && t.when) {
+      issues.push(
+        `State "${stateId}" has transition to "${t.to}" with both "guard" and "when" — they are mutually exclusive`,
+      );
+    }
+
+    // Agent-only scope: when on deterministic state
+    if (state.type === 'deterministic' && t.when) {
+      issues.push(`State "${stateId}" is deterministic and cannot use "when" (agent output not available)`);
+    }
+
+    if (!t.when) continue;
+
+    // Empty when rejected
+    if (Object.keys(t.when).length === 0) {
+      issues.push(
+        `State "${stateId}" transition to "${t.to}" has empty "when" — use no guard for unconditional transitions`,
+      );
+    }
+
+    // Key and value validation
+    for (const [key, value] of Object.entries(t.when)) {
+      if (!AGENT_OUTPUT_FIELD_SET.has(key)) {
+        issues.push(
+          `State "${stateId}" transition to "${t.to}" has "when" key "${key}" — not a valid AgentOutput field`,
+        );
+        continue;
+      }
+
+      // Per-key runtime type check (runs before enum value checks so that a
+      // wrong-type value reports "wrong type" instead of "invalid value").
+      const typeSpec = WHEN_KEY_TYPES[key as keyof AgentOutput];
+      if (!typeSpec.check(value)) {
+        issues.push(
+          `State "${stateId}" transition to "${t.to}" has 'when' key '${key}' with wrong type: expected ${typeSpec.expected}, got ${describeRuntimeType(value)}`,
+        );
+        continue;
+      }
+
+      // Enum value checks run only when the type is already correct.
+      if (key === 'verdict' && typeof value === 'string' && !VERDICT_VALUE_SET.has(value)) {
+        issues.push(`State "${stateId}" transition to "${t.to}" has invalid verdict value "${value}"`);
+      }
+      if (key === 'confidence' && typeof value === 'string' && !CONFIDENCE_VALUE_SET.has(value)) {
+        issues.push(`State "${stateId}" transition to "${t.to}" has invalid confidence value "${value}"`);
+      }
+    }
+  }
+}
+
 function validateSemantics(definition: WorkflowDefinition): void {
   const issues: string[] = [];
   const stateNames = new Set(Object.keys(definition.states));
@@ -171,6 +254,9 @@ function validateSemantics(definition: WorkflowDefinition): void {
         issues.push(`State "${stateId}" references unregistered guard "${guard}"`);
       }
     }
+
+    // When clause validation (mutual exclusivity, agent-only, keys, values, empty)
+    validateWhenClauses(stateId, state, issues);
 
     // Human gate-specific checks
     if (state.type === 'human_gate') {

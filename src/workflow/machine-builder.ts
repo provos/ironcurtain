@@ -8,6 +8,7 @@ import type {
   HumanGateStateDefinition,
   AgentOutput,
   AgentTransitionDefinition,
+  WhenValue,
 } from './types.js';
 import { guardImplementations } from './guards.js';
 
@@ -165,11 +166,20 @@ function findErrorTarget(
 }
 
 function buildAgentOnDoneTransitions(transitions: readonly AgentTransitionDefinition[]): readonly object[] {
-  return transitions.map((t) => ({
-    target: t.to,
-    ...(t.guard ? { guard: t.guard } : {}),
-    actions: ['updateContextFromAgentResult', ...(t.flag ? ['setFlag'] : [])],
-  }));
+  return transitions.map((t) => {
+    let guard: string | { type: string; params: { when: Readonly<Record<string, WhenValue>> } } | undefined;
+    if (t.when) {
+      guard = { type: '__matchesWhen', params: { when: t.when } };
+    } else if (t.guard) {
+      guard = t.guard;
+    }
+
+    return {
+      target: t.to,
+      ...(guard ? { guard } : {}),
+      actions: ['updateContextFromAgentResult', ...(t.flag ? ['setFlag'] : [])],
+    };
+  });
 }
 
 function buildAgentState(stateId: string, config: AgentStateDefinition, definition: WorkflowDefinition): object {
@@ -277,7 +287,11 @@ export function buildWorkflowMachine(definition: WorkflowDefinition, taskDescrip
   // XState v5 guards receive ({ context, event }) but the event type
   // during onDone is the xstate done event, not our WorkflowEvent.
   // We need to adapt our guards to work with the done event's output.
-  const xstateGuards: Record<string, (params: { context: WorkflowContext; event: unknown }) => boolean> = {};
+  // The second `params` argument is used by parameterized guards like __matchesWhen.
+  const xstateGuards: Record<
+    string,
+    (args: { context: WorkflowContext; event: unknown }, params?: unknown) => boolean
+  > = {};
 
   for (const [name, guardFn] of Object.entries(guardImplementations)) {
     xstateGuards[name] = ({ context, event }: { context: WorkflowContext; event: unknown }) => {
@@ -315,6 +329,39 @@ export function buildWorkflowMachine(definition: WorkflowDefinition, taskDescrip
       return guardFn({ context, event: workflowEvent });
     };
   }
+
+  // Register the __matchesWhen parameterized guard. This intentionally
+  // bypasses the guard adapter loop above because it operates on AgentOutput
+  // directly (via extractInvokeResult inline) rather than on WorkflowEvent.
+  xstateGuards['__matchesWhen'] = ({ event }, params) => {
+    const doneEvent = event as { type: string; output?: unknown };
+    let agentOutput: AgentOutput | undefined;
+
+    if (doneEvent.type.startsWith('xstate.done.actor.')) {
+      const result = extractInvokeResult(doneEvent as { output?: unknown });
+      if (result) {
+        agentOutput = result.output;
+      }
+    }
+
+    if (!agentOutput) return false;
+
+    // Defensive: fail closed if params are missing or when is empty/missing.
+    // Validation prevents these cases, but we don't want a silent unconditional
+    // match if validation is bypassed.
+    if (!params || typeof params !== 'object') return false;
+    const whenMap = (params as { when?: unknown }).when;
+    if (!whenMap || typeof whenMap !== 'object' || Object.keys(whenMap).length === 0) {
+      return false;
+    }
+    const when = whenMap as Readonly<Record<string, WhenValue>>;
+
+    for (const [key, expected] of Object.entries(when)) {
+      const actual = agentOutput[key as keyof AgentOutput];
+      if (actual !== expected) return false;
+    }
+    return true;
+  };
 
   const machine = setup({
     types: {
