@@ -287,7 +287,11 @@ export function buildWorkflowMachine(definition: WorkflowDefinition, taskDescrip
   // XState v5 guards receive ({ context, event }) but the event type
   // during onDone is the xstate done event, not our WorkflowEvent.
   // We need to adapt our guards to work with the done event's output.
-  const xstateGuards: Record<string, (params: { context: WorkflowContext; event: unknown }) => boolean> = {};
+  // The second `params` argument is used by parameterized guards like __matchesWhen.
+  const xstateGuards: Record<
+    string,
+    (args: { context: WorkflowContext; event: unknown }, params?: unknown) => boolean
+  > = {};
 
   for (const [name, guardFn] of Object.entries(guardImplementations)) {
     xstateGuards[name] = ({ context, event }: { context: WorkflowContext; event: unknown }) => {
@@ -329,10 +333,7 @@ export function buildWorkflowMachine(definition: WorkflowDefinition, taskDescrip
   // Register the __matchesWhen parameterized guard. This intentionally
   // bypasses the guard adapter loop above because it operates on AgentOutput
   // directly (via extractInvokeResult inline) rather than on WorkflowEvent.
-  xstateGuards['__matchesWhen'] = (
-    { event }: { context: WorkflowContext; event: unknown },
-    params: { when: Record<string, WhenValue> },
-  ) => {
+  xstateGuards['__matchesWhen'] = ({ event }, params) => {
     const doneEvent = event as { type: string; output?: unknown };
     let agentOutput: AgentOutput | undefined;
 
@@ -345,7 +346,8 @@ export function buildWorkflowMachine(definition: WorkflowDefinition, taskDescrip
 
     if (!agentOutput) return false;
 
-    for (const [key, expected] of Object.entries(params.when)) {
+    const { when } = params as { when: Record<string, WhenValue> };
+    for (const [key, expected] of Object.entries(when)) {
       const actual = agentOutput[key as keyof AgentOutput];
       if (actual !== expected) return false;
     }
