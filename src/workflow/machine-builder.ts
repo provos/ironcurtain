@@ -346,7 +346,16 @@ export function buildWorkflowMachine(definition: WorkflowDefinition, taskDescrip
 
     if (!agentOutput) return false;
 
-    const { when } = params as { when: Readonly<Record<string, WhenValue>> };
+    // Defensive: fail closed if params are missing or when is empty/missing.
+    // Validation prevents these cases, but we don't want a silent unconditional
+    // match if validation is bypassed.
+    if (!params || typeof params !== 'object') return false;
+    const whenMap = (params as { when?: unknown }).when;
+    if (!whenMap || typeof whenMap !== 'object' || Object.keys(whenMap).length === 0) {
+      return false;
+    }
+    const when = whenMap as Readonly<Record<string, WhenValue>>;
+
     for (const [key, expected] of Object.entries(when)) {
       const actual = agentOutput[key as keyof AgentOutput];
       if (actual !== expected) return false;

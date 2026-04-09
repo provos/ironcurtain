@@ -27,6 +27,10 @@ In `src/workflow/types.ts`, extend `AgentTransitionDefinition`:
 /** Allowed value types in a `when` clause. Matches AgentOutput field types. */
 export type WhenValue = string | number | boolean | null;
 
+/** Per-key typed when clause: keys must be AgentOutput fields,
+ *  values must match each field's type. */
+export type WhenClause = { readonly [K in keyof AgentOutput]?: AgentOutput[K] };
+
 export interface AgentTransitionDefinition {
   readonly to: string;
   /**
@@ -35,15 +39,16 @@ export interface AgentTransitionDefinition {
   readonly guard?: string;
   /**
    * Declarative field-match condition on AgentOutput.
-   * Keys must be valid AgentOutput field names.
    * All entries must match (AND semantics).
    * Mutually exclusive with `guard`.
    */
-  readonly when?: Readonly<Record<string, WhenValue>>;
+  readonly when?: WhenClause;
   /** If truthy, sets flaggedForReview in context. */
   readonly flag?: string;
 }
 ```
+
+`WhenClause` uses a mapped type rather than a plain `Record<string, WhenValue>` so that TypeScript callers get compile-time validation of both keys (must be in `keyof AgentOutput`) and values (must match each field's declared type — e.g. `completed` must be `boolean`, `verdict` must be a valid `Verdict` literal). `WhenValue` is kept as a separate exported type for the runtime guard code in `machine-builder.ts`, which iterates with `Object.entries` and therefore needs a flat value union.
 
 The `WhenValue` type covers every `AgentOutput` field type: `string` for `verdict`/`confidence`/`escalation`/`notes`, `number` for `testCount`, `boolean` for `completed`, and `null` for nullable fields.
 
@@ -278,7 +283,7 @@ This replaces the separate `isLowConfidence` guard with inline `when` clauses.
 | `test/workflow/machine-builder.test.ts` | Add tests for `__matchesWhen` guard behavior (see test plan). |
 | `src/workflow/workflows/design-and-code.json` | Optional: replace `isApproved`/`isRejected` with `when` clauses. Not required for the feature to ship. |
 
-No new files are created.
+No additional implementation files are required beyond the updates listed above; this design doc is itself a new file in the PR.
 
 ## Test plan
 

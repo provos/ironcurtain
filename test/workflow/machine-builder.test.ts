@@ -1369,5 +1369,49 @@ describe('buildWorkflowMachine', () => {
       expect(visited).toContain('done');
       expect(actor.getSnapshot().status).toBe('done');
     });
+
+    it('empty when object fails closed (defensive: bypasses validation)', async () => {
+      // Normally validation rejects empty `when: {}`. This test passes an
+      // unvalidated definition directly to buildWorkflowMachine to verify
+      // the guard's defensive check falls through rather than silently
+      // matching (vacuous `every` over empty would otherwise return true).
+      const bypassDef: WorkflowDefinition = {
+        name: 'empty-when-test',
+        description: 'Bypasses validation with empty when',
+        initial: 'agent',
+        states: {
+          agent: {
+            type: 'agent',
+            persona: 'worker',
+            prompt: 'Do work.',
+            inputs: [],
+            outputs: ['result'],
+            transitions: [
+              // Empty when -- defensive check must reject this
+              { to: 'should_not_reach', when: {} },
+              // Unconditional fallthrough
+              { to: 'safe_done' },
+            ],
+          },
+          should_not_reach: { type: 'terminal' },
+          safe_done: { type: 'terminal' },
+        },
+      };
+
+      const result = buildWorkflowMachine(bypassDef, 'task');
+      const testMachine = result.machine.provide({
+        actors: {
+          agentService: fromPromise(async () => makeAgentResult()),
+        },
+      });
+
+      const actor = createActor(testMachine);
+      actor.start();
+      await settle();
+
+      // Guard must fail closed on empty when, falling through to safe_done
+      expect(actor.getSnapshot().matches('safe_done')).toBe(true);
+      expect(actor.getSnapshot().matches('should_not_reach')).toBe(false);
+    });
   });
 });
