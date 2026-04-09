@@ -409,5 +409,111 @@ describe('validateDefinition', () => {
         expect(err.issues).toEqual(expect.arrayContaining([expect.stringContaining('empty "when"')]));
       }
     });
+
+    it('rejects when with wrong type for completed (string instead of boolean)', () => {
+      const def = deepClone(validDefinition());
+      const states = def.states as Record<string, Record<string, unknown>>;
+      states.review.transitions = [{ to: 'gate', when: { completed: 'true' } }, { to: 'plan' }];
+      try {
+        validateDefinition(def);
+        expect.fail('should have thrown');
+      } catch (e) {
+        const err = e as WorkflowValidationError;
+        expect(err.issues).toEqual(
+          expect.arrayContaining([
+            expect.stringMatching(/'when' key 'completed' with wrong type: expected boolean, got string/),
+          ]),
+        );
+      }
+    });
+
+    it('rejects when with wrong type for completed (number instead of boolean)', () => {
+      const def = deepClone(validDefinition());
+      const states = def.states as Record<string, Record<string, unknown>>;
+      states.review.transitions = [{ to: 'gate', when: { completed: 1 } }, { to: 'plan' }];
+      try {
+        validateDefinition(def);
+        expect.fail('should have thrown');
+      } catch (e) {
+        const err = e as WorkflowValidationError;
+        expect(err.issues).toEqual(
+          expect.arrayContaining([
+            expect.stringMatching(/'when' key 'completed' with wrong type: expected boolean, got number/),
+          ]),
+        );
+      }
+    });
+
+    it('rejects when with wrong type for verdict (number instead of string)', () => {
+      const def = deepClone(validDefinition());
+      const states = def.states as Record<string, Record<string, unknown>>;
+      states.review.transitions = [{ to: 'gate', when: { verdict: 1 } }, { to: 'plan' }];
+      try {
+        validateDefinition(def);
+        expect.fail('should have thrown');
+      } catch (e) {
+        const err = e as WorkflowValidationError;
+        expect(err.issues).toEqual(
+          expect.arrayContaining([
+            expect.stringMatching(/'when' key 'verdict' with wrong type: expected string, got number/),
+          ]),
+        );
+        // Type check runs first, so the enum-value error should NOT be
+        // emitted for a wrong-type value.
+        expect(err.issues.some((issue) => issue.includes('invalid verdict value'))).toBe(false);
+      }
+    });
+
+    it('rejects when with wrong type for testCount (string instead of number)', () => {
+      const def = deepClone(validDefinition());
+      const states = def.states as Record<string, Record<string, unknown>>;
+      states.review.transitions = [{ to: 'gate', when: { testCount: 'five' } }, { to: 'plan' }];
+      try {
+        validateDefinition(def);
+        expect.fail('should have thrown');
+      } catch (e) {
+        const err = e as WorkflowValidationError;
+        expect(err.issues).toEqual(
+          expect.arrayContaining([
+            expect.stringMatching(/'when' key 'testCount' with wrong type: expected number or null, got string/),
+          ]),
+        );
+      }
+    });
+
+    it('accepts when with numeric testCount', () => {
+      const def = deepClone(validDefinition());
+      const states = def.states as Record<string, Record<string, unknown>>;
+      states.review.transitions = [{ to: 'gate', when: { testCount: 5 } }, { to: 'plan' }];
+      expect(() => validateDefinition(def)).not.toThrow();
+    });
+
+    it('accepts when with null testCount', () => {
+      const def = deepClone(validDefinition());
+      const states = def.states as Record<string, Record<string, unknown>>;
+      states.review.transitions = [{ to: 'gate', when: { testCount: null } }, { to: 'plan' }];
+      expect(() => validateDefinition(def)).not.toThrow();
+    });
+
+    it('accepts when with string escalation', () => {
+      const def = deepClone(validDefinition());
+      const states = def.states as Record<string, Record<string, unknown>>;
+      states.review.transitions = [{ to: 'gate', when: { escalation: 'blocked_on_dependency' } }, { to: 'plan' }];
+      expect(() => validateDefinition(def)).not.toThrow();
+    });
+
+    it('accepts when with null escalation', () => {
+      const def = deepClone(validDefinition());
+      const states = def.states as Record<string, Record<string, unknown>>;
+      states.review.transitions = [{ to: 'gate', when: { escalation: null } }, { to: 'plan' }];
+      expect(() => validateDefinition(def)).not.toThrow();
+    });
+
+    it('accepts when with string notes', () => {
+      const def = deepClone(validDefinition());
+      const states = def.states as Record<string, Record<string, unknown>>;
+      states.review.transitions = [{ to: 'gate', when: { notes: 'some note' } }, { to: 'plan' }];
+      expect(() => validateDefinition(def)).not.toThrow();
+    });
   });
 });

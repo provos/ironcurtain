@@ -167,7 +167,7 @@ function findErrorTarget(
 
 function buildAgentOnDoneTransitions(transitions: readonly AgentTransitionDefinition[]): readonly object[] {
   return transitions.map((t) => {
-    let guard: string | { type: string; params: { when: Record<string, WhenValue> } } | undefined;
+    let guard: string | { type: string; params: { when: Readonly<Record<string, WhenValue>> } } | undefined;
     if (t.when) {
       guard = { type: '__matchesWhen', params: { when: t.when } };
     } else if (t.guard) {
@@ -346,7 +346,7 @@ export function buildWorkflowMachine(definition: WorkflowDefinition, taskDescrip
 
     if (!agentOutput) return false;
 
-    const { when } = params as { when: Record<string, WhenValue> };
+    const { when } = params as { when: Readonly<Record<string, WhenValue>> };
     for (const [key, expected] of Object.entries(when)) {
       const actual = agentOutput[key as keyof AgentOutput];
       if (actual !== expected) return false;

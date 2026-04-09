@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { WorkflowDefinition, WorkflowStateDefinition, HumanGateStateDefinition } from './types.js';
+import type { WorkflowDefinition, WorkflowStateDefinition, HumanGateStateDefinition, AgentOutput } from './types.js';
 import { AGENT_OUTPUT_FIELDS, VERDICT_VALUES, CONFIDENCE_VALUES } from './types.js';
 import { REGISTERED_GUARDS } from './guards.js';
 
@@ -149,6 +149,26 @@ const AGENT_OUTPUT_FIELD_SET: ReadonlySet<string> = new Set(AGENT_OUTPUT_FIELDS)
 const VERDICT_VALUE_SET: ReadonlySet<string> = new Set(VERDICT_VALUES);
 const CONFIDENCE_VALUE_SET: ReadonlySet<string> = new Set(CONFIDENCE_VALUES);
 
+/**
+ * Expected runtime type for each AgentOutput field used in `when` clauses.
+ * `expected` is the human-readable error label; `check` is the runtime test.
+ */
+const WHEN_KEY_TYPES: {
+  readonly [K in keyof AgentOutput]: { readonly expected: string; readonly check: (v: unknown) => boolean };
+} = {
+  completed: { expected: 'boolean', check: (v) => typeof v === 'boolean' },
+  verdict: { expected: 'string', check: (v) => typeof v === 'string' },
+  confidence: { expected: 'string', check: (v) => typeof v === 'string' },
+  escalation: { expected: 'string or null', check: (v) => typeof v === 'string' || v === null },
+  testCount: { expected: 'number or null', check: (v) => typeof v === 'number' || v === null },
+  notes: { expected: 'string or null', check: (v) => typeof v === 'string' || v === null },
+};
+
+function describeRuntimeType(value: unknown): string {
+  if (value === null) return 'null';
+  return typeof value;
+}
+
 function validateWhenClauses(stateId: string, state: WorkflowStateDefinition, issues: string[]): void {
   if (state.type === 'terminal' || state.type === 'human_gate') return;
 
@@ -180,7 +200,20 @@ function validateWhenClauses(stateId: string, state: WorkflowStateDefinition, is
         issues.push(
           `State "${stateId}" transition to "${t.to}" has "when" key "${key}" — not a valid AgentOutput field`,
         );
+        continue;
       }
+
+      // Per-key runtime type check (runs before enum value checks so that a
+      // wrong-type value reports "wrong type" instead of "invalid value").
+      const typeSpec = WHEN_KEY_TYPES[key as keyof AgentOutput];
+      if (!typeSpec.check(value)) {
+        issues.push(
+          `State "${stateId}" transition to "${t.to}" has 'when' key '${key}' with wrong type: expected ${typeSpec.expected}, got ${describeRuntimeType(value)}`,
+        );
+        continue;
+      }
+
+      // Enum value checks run only when the type is already correct.
       if (key === 'verdict' && typeof value === 'string' && !VERDICT_VALUE_SET.has(value)) {
         issues.push(`State "${stateId}" transition to "${t.to}" has invalid verdict value "${value}"`);
       }

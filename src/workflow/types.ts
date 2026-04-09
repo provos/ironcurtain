@@ -148,6 +148,17 @@ export interface TerminalStateDefinition {
 /** Allowed value types in a `when` clause. Matches AgentOutput field types. */
 export type WhenValue = string | number | boolean | null;
 
+/**
+ * Per-key typed shape for `when` clauses. Using a mapped type here
+ * enforces compile-time validation of both key names (must be in
+ * AgentOutput) and value types (must match the field's type, e.g.
+ * `completed` must be boolean, `verdict` must be a valid union member).
+ *
+ * Prefer this type over `Readonly<Record<string, WhenValue>>` when
+ * writing workflow definitions in TypeScript.
+ */
+export type WhenClause = { readonly [K in keyof AgentOutput]?: AgentOutput[K] };
+
 export interface AgentTransitionDefinition {
   readonly to: string;
   /**
@@ -160,11 +171,12 @@ export interface AgentTransitionDefinition {
   readonly guard?: string;
   /**
    * Declarative field-match condition on AgentOutput.
-   * Keys must be valid AgentOutput field names.
+   * Keys must be valid AgentOutput field names and values must match
+   * the field's type (enforced at compile time via the mapped type).
    * All entries must match (AND semantics).
    * Mutually exclusive with `guard`.
    */
-  readonly when?: Readonly<Record<string, WhenValue>>;
+  readonly when?: WhenClause;
   /** If truthy, sets flaggedForReview in context. */
   readonly flag?: string;
 }
