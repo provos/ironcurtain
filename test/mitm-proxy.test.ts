@@ -510,7 +510,7 @@ describe('MitmProxy', () => {
     }
   });
 
-  it('forwards plain HTTP proxy requests to registry hosts', async () => {
+  it('forwards plain HTTP proxy requests to Debian registry hosts', async () => {
     const upstream = http.createServer((req, res) => {
       res.writeHead(200, { 'Content-Type': 'text/plain' });
       res.end(JSON.stringify({ ok: true, path: req.url, method: req.method }));
@@ -529,58 +529,55 @@ describe('MitmProxy', () => {
         type: 'debian',
       };
 
+      // Include a non-Debian registry to verify it does NOT get plain HTTP forwarding
+      const npmRegistry: RegistryConfig = {
+        host: 'registry.npmjs.org',
+        displayName: 'npm',
+        type: 'npm',
+      };
+
       proxy = createMitmProxy({
         socketPath,
         ca,
         providers: [],
-        registries: [debianRegistry],
+        registries: [debianRegistry, npmRegistry],
         dnsLookup: localhostDnsLookup,
       });
       await proxy.start();
 
-      // Registry host should be forwarded
-      const { statusCode, body } = await new Promise<{ statusCode: number; body: string }>((resolve, reject) => {
-        const req = http.request(
-          {
-            socketPath,
-            method: 'GET',
-            path: `http://deb.debian.org:${upstreamPort}/debian/dists/bookworm/InRelease`,
-          },
-          (res) => {
+      const fetchStatus = async (url: string): Promise<{ statusCode: number; body: string }> =>
+        new Promise((resolve, reject) => {
+          const req = http.request({ socketPath, method: 'GET', path: url }, (res) => {
             let data = '';
             res.on('data', (chunk: Buffer) => (data += chunk.toString()));
             res.on('end', () => resolve({ statusCode: res.statusCode ?? 0, body: data }));
-          },
-        );
-        req.on('error', reject);
-        req.end();
-      });
+          });
+          req.on('error', reject);
+          req.end();
+        });
 
-      expect(statusCode).toBe(200);
-      const parsed = JSON.parse(body);
+      // Debian registry host should be forwarded
+      const debian = await fetchStatus(`http://deb.debian.org:${upstreamPort}/debian/dists/bookworm/InRelease`);
+      expect(debian.statusCode).toBe(200);
+      const parsed = JSON.parse(debian.body);
       expect(parsed.ok).toBe(true);
       expect(parsed.path).toBe('/debian/dists/bookworm/InRelease');
 
-      // Non-registry, non-passthrough host should still get 403
-      const blockedStatus = await new Promise<number>((resolve, reject) => {
-        const req = http.request(
-          {
-            socketPath,
-            method: 'GET',
-            path: `http://evil.example.com:${upstreamPort}/malware`,
-          },
-          (res) => {
-            resolve(res.statusCode ?? 0);
-            res.resume();
-          },
-        );
-        req.on('error', reject);
-        req.end();
-      });
+      // Non-Debian registry (npm) should NOT be forwarded via plain HTTP
+      const npm = await fetchStatus(`http://registry.npmjs.org:${upstreamPort}/express`);
+      expect(npm.statusCode).toBe(403);
 
-      expect(blockedStatus).toBe(403);
+      // Unknown host should still get 403
+      const unknown = await fetchStatus(`http://evil.example.com:${upstreamPort}/malware`);
+      expect(unknown.statusCode).toBe(403);
+
+      // Out-of-range port (>65535) is rejected by URL parser, returns 405 (not a proxy request)
+      const badPort = await fetchStatus('http://deb.debian.org:99999/debian/dists/bookworm/InRelease');
+      expect(badPort.statusCode).toBe(405);
     } finally {
-      upstream.close();
+      await new Promise<void>((resolve, reject) => {
+        upstream.close((err) => (err ? reject(err) : resolve()));
+      });
     }
   });
 

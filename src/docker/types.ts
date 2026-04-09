@@ -67,8 +67,8 @@ export interface DockerContainerConfig {
    *
    * Agent containers add capabilities needed for `sudo apt-get install`
    * to work inside the container (SETUID, SETGID, CHOWN, FOWNER,
-   * DAC_OVERRIDE, AUDIT_WRITE, SYS_ADMIN). Service containers may need
-   * additional capabilities for their entrypoints.
+   * DAC_OVERRIDE, AUDIT_WRITE). Service containers may need additional
+   * capabilities for their entrypoints.
    */
   readonly capAdd?: readonly string[];
 

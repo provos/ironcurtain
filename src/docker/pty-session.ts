@@ -468,7 +468,6 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
         'FOWNER', // apt-get set permissions on files it doesn't own
         'DAC_OVERRIDE', // apt-get read/write files regardless of permissions during install
         'AUDIT_WRITE', // sudo audit logging
-        'SYS_ADMIN', // needed by systemd post-install scripts (e.g., dpkg triggers)
       ],
       tty: true,
     });
