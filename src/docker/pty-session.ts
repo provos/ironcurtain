@@ -329,11 +329,16 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
       const mcpPort = proxy.port;
       const mitmPort = mitmAddr.port;
 
+      const proxyUrl = `http://host.docker.internal:${mitmPort}`;
       env = {
         ...adapter.buildEnv(sessionConfig, fakeKeys),
-        HTTPS_PROXY: `http://host.docker.internal:${mitmPort}`,
-        HTTP_PROXY: `http://host.docker.internal:${mitmPort}`,
+        HTTPS_PROXY: proxyUrl,
+        HTTP_PROXY: proxyUrl,
       };
+
+      // Write apt proxy config so sudo apt-get routes through the MITM proxy
+      const aptProxyPath = resolve(orientationDir, 'apt-proxy.conf');
+      writeFileSync(aptProxyPath, `Acquire::http::Proxy "${proxyUrl}";\nAcquire::https::Proxy "${proxyUrl}";\n`);
 
       await docker.createNetwork(internalNetworkName, {
         internal: true,
@@ -391,19 +396,30 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
       mounts = [
         { source: sandboxDir, target: CONTAINER_WORKSPACE_DIR, readonly: false },
         { source: orientationDir, target: '/etc/ironcurtain', readonly: true },
+        { source: aptProxyPath, target: '/etc/apt/apt.conf.d/90-ironcurtain-proxy', readonly: true },
       ];
     } else {
       // Linux UDS mode
+      const linuxProxyUrl = 'http://127.0.0.1:18080';
       env = {
         ...adapter.buildEnv(sessionConfig, fakeKeys),
-        HTTPS_PROXY: 'http://127.0.0.1:18080',
-        HTTP_PROXY: 'http://127.0.0.1:18080',
+        HTTPS_PROXY: linuxProxyUrl,
+        HTTP_PROXY: linuxProxyUrl,
       };
       network = null;
+
+      // Write apt proxy config so sudo apt-get routes through the MITM proxy
+      const aptProxyPathLinux = resolve(orientationDir, 'apt-proxy.conf');
+      writeFileSync(
+        aptProxyPathLinux,
+        `Acquire::http::Proxy "${linuxProxyUrl}";\nAcquire::https::Proxy "${linuxProxyUrl}";\n`,
+      );
+
       mounts = [
         { source: sandboxDir, target: CONTAINER_WORKSPACE_DIR, readonly: false },
         { source: socketsDir, target: '/run/ironcurtain', readonly: false },
         { source: orientationDir, target: '/etc/ironcurtain', readonly: true },
+        { source: aptProxyPathLinux, target: '/etc/apt/apt.conf.d/90-ironcurtain-proxy', readonly: true },
       ];
     }
 
@@ -445,6 +461,15 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
       sessionLabel: effectiveSessionId,
       resources: { memoryMb: 8192, cpus: 4 },
       extraHosts,
+      capAdd: [
+        'SETUID', // sudo setuid
+        'SETGID', // sudo setgid
+        'CHOWN', // apt-get chown on installed files
+        'FOWNER', // apt-get set permissions on files it doesn't own
+        'DAC_OVERRIDE', // apt-get read/write files regardless of permissions during install
+        'AUDIT_WRITE', // sudo audit logging
+        'SYS_ADMIN', // needed by systemd post-install scripts (e.g., dpkg triggers)
+      ],
       tty: true,
     });
 

@@ -13,6 +13,7 @@ import {
   shouldRewriteBody,
   type ProviderConfig,
 } from '../src/docker/provider-config.js';
+import type { RegistryConfig } from '../src/docker/package-types.js';
 import { generateFakeKey } from '../src/docker/fake-keys.js';
 
 // --- Test helpers ---
@@ -504,6 +505,80 @@ describe('MitmProxy', () => {
       expect(parsed.ok).toBe(true);
       expect(parsed.path).toBe('/test/path');
       expect(parsed.method).toBe('GET');
+    } finally {
+      upstream.close();
+    }
+  });
+
+  it('forwards plain HTTP proxy requests to registry hosts', async () => {
+    const upstream = http.createServer((req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end(JSON.stringify({ ok: true, path: req.url, method: req.method }));
+    });
+    const upstreamPort = await new Promise<number>((resolve) => {
+      upstream.listen(0, '127.0.0.1', () => {
+        const addr = upstream.address() as import('node:net').AddressInfo;
+        resolve(addr.port);
+      });
+    });
+
+    try {
+      const debianRegistry: RegistryConfig = {
+        host: 'deb.debian.org',
+        displayName: 'Debian',
+        type: 'debian',
+      };
+
+      proxy = createMitmProxy({
+        socketPath,
+        ca,
+        providers: [],
+        registries: [debianRegistry],
+        dnsLookup: localhostDnsLookup,
+      });
+      await proxy.start();
+
+      // Registry host should be forwarded
+      const { statusCode, body } = await new Promise<{ statusCode: number; body: string }>((resolve, reject) => {
+        const req = http.request(
+          {
+            socketPath,
+            method: 'GET',
+            path: `http://deb.debian.org:${upstreamPort}/debian/dists/bookworm/InRelease`,
+          },
+          (res) => {
+            let data = '';
+            res.on('data', (chunk: Buffer) => (data += chunk.toString()));
+            res.on('end', () => resolve({ statusCode: res.statusCode ?? 0, body: data }));
+          },
+        );
+        req.on('error', reject);
+        req.end();
+      });
+
+      expect(statusCode).toBe(200);
+      const parsed = JSON.parse(body);
+      expect(parsed.ok).toBe(true);
+      expect(parsed.path).toBe('/debian/dists/bookworm/InRelease');
+
+      // Non-registry, non-passthrough host should still get 403
+      const blockedStatus = await new Promise<number>((resolve, reject) => {
+        const req = http.request(
+          {
+            socketPath,
+            method: 'GET',
+            path: `http://evil.example.com:${upstreamPort}/malware`,
+          },
+          (res) => {
+            resolve(res.statusCode ?? 0);
+            res.resume();
+          },
+        );
+        req.on('error', reject);
+        req.end();
+      });
+
+      expect(blockedStatus).toBe(403);
     } finally {
       upstream.close();
     }
