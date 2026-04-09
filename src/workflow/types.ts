@@ -145,6 +145,9 @@ export interface TerminalStateDefinition {
 // Transition definitions
 // ---------------------------------------------------------------------------
 
+/** Allowed value types in a `when` clause. Matches AgentOutput field types. */
+export type WhenValue = string | number | boolean | null;
+
 export interface AgentTransitionDefinition {
   readonly to: string;
   /**
@@ -152,8 +155,16 @@ export interface AgentTransitionDefinition {
    * layer -- use names directly: isApproved, isRejected,
    * isRoundLimitReached, isStalled, hasTestCountRegression,
    * isLowConfidence, isPassed.
+   * Mutually exclusive with `when`.
    */
   readonly guard?: string;
+  /**
+   * Declarative field-match condition on AgentOutput.
+   * Keys must be valid AgentOutput field names.
+   * All entries must match (AND semantics).
+   * Mutually exclusive with `guard`.
+   */
+  readonly when?: Readonly<Record<string, WhenValue>>;
   /** If truthy, sets flaggedForReview in context. */
   readonly flag?: string;
 }
@@ -170,15 +181,31 @@ export type HumanGateEventType = 'APPROVE' | 'FORCE_REVISION' | 'REPLAN' | 'ABOR
 // Agent output
 // ---------------------------------------------------------------------------
 
+export const VERDICT_VALUES = ['approved', 'rejected', 'blocked', 'spec_flaw'] as const;
+export type Verdict = (typeof VERDICT_VALUES)[number];
+
+export const CONFIDENCE_VALUES = ['high', 'medium', 'low'] as const;
+export type Confidence = (typeof CONFIDENCE_VALUES)[number];
+
 /** Structured output parsed from the agent's response text. */
 export interface AgentOutput {
   readonly completed: boolean;
-  readonly verdict: 'approved' | 'rejected' | 'blocked' | 'spec_flaw';
-  readonly confidence: 'high' | 'medium' | 'low';
+  readonly verdict: Verdict;
+  readonly confidence: Confidence;
   readonly escalation: string | null;
   readonly testCount: number | null;
   readonly notes: string | null;
 }
+
+/** Valid keys for `when` clauses. Must match AgentOutput field names. */
+export const AGENT_OUTPUT_FIELDS = [
+  'completed',
+  'verdict',
+  'confidence',
+  'escalation',
+  'testCount',
+  'notes',
+] as const satisfies readonly (keyof AgentOutput)[];
 
 // ---------------------------------------------------------------------------
 // Workflow events (XState event discriminated union)

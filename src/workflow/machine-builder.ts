@@ -8,6 +8,7 @@ import type {
   HumanGateStateDefinition,
   AgentOutput,
   AgentTransitionDefinition,
+  WhenValue,
 } from './types.js';
 import { guardImplementations } from './guards.js';
 
@@ -165,11 +166,20 @@ function findErrorTarget(
 }
 
 function buildAgentOnDoneTransitions(transitions: readonly AgentTransitionDefinition[]): readonly object[] {
-  return transitions.map((t) => ({
-    target: t.to,
-    ...(t.guard ? { guard: t.guard } : {}),
-    actions: ['updateContextFromAgentResult', ...(t.flag ? ['setFlag'] : [])],
-  }));
+  return transitions.map((t) => {
+    let guard: string | { type: string; params: { when: Record<string, WhenValue> } } | undefined;
+    if (t.when) {
+      guard = { type: '__matchesWhen', params: { when: t.when } };
+    } else if (t.guard) {
+      guard = t.guard;
+    }
+
+    return {
+      target: t.to,
+      ...(guard ? { guard } : {}),
+      actions: ['updateContextFromAgentResult', ...(t.flag ? ['setFlag'] : [])],
+    };
+  });
 }
 
 function buildAgentState(stateId: string, config: AgentStateDefinition, definition: WorkflowDefinition): object {
@@ -315,6 +325,32 @@ export function buildWorkflowMachine(definition: WorkflowDefinition, taskDescrip
       return guardFn({ context, event: workflowEvent });
     };
   }
+
+  // Register the __matchesWhen parameterized guard. This intentionally
+  // bypasses the guard adapter loop above because it operates on AgentOutput
+  // directly (via extractInvokeResult inline) rather than on WorkflowEvent.
+  xstateGuards['__matchesWhen'] = (
+    { event }: { context: WorkflowContext; event: unknown },
+    params: { when: Record<string, WhenValue> },
+  ) => {
+    const doneEvent = event as { type: string; output?: unknown };
+    let agentOutput: AgentOutput | undefined;
+
+    if (doneEvent.type.startsWith('xstate.done.actor.')) {
+      const result = extractInvokeResult(doneEvent as { output?: unknown });
+      if (result) {
+        agentOutput = result.output;
+      }
+    }
+
+    if (!agentOutput) return false;
+
+    for (const [key, expected] of Object.entries(params.when)) {
+      const actual = agentOutput[key as keyof AgentOutput];
+      if (actual !== expected) return false;
+    }
+    return true;
+  };
 
   const machine = setup({
     types: {
