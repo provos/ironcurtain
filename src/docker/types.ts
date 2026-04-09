@@ -65,9 +65,10 @@ export interface DockerContainerConfig {
    * Linux capabilities to re-add after --cap-drop=ALL.
    * Optional. Defaults to none (fully unprivileged).
    *
-   * Third-party service containers may need specific capabilities
-   * for their entrypoints (e.g., CHOWN, SETUID). Agent containers
-   * must NEVER set this field.
+   * Agent containers add capabilities needed for `sudo apt-get install`
+   * to work inside the container (SETUID, SETGID, CHOWN, FOWNER,
+   * DAC_OVERRIDE, AUDIT_WRITE). Service containers may need additional
+   * capabilities for their entrypoints.
    */
   readonly capAdd?: readonly string[];
 

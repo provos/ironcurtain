@@ -699,10 +699,14 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
 
   // Outer server - UDS listener, handles CONNECT and plain HTTP proxy requests
   const outerServer = http.createServer((req, res) => {
-    // Handle plain HTTP proxy requests for passthrough domains.
+    // Handle plain HTTP proxy requests for passthrough and Debian registry domains.
     // HTTP proxy clients send absolute URLs: "GET http://host:port/path".
+    // Only Debian registries are included here because apt uses plain HTTP
+    // by default. npm/PyPI use HTTPS CONNECT and go through the registry-proxy
+    // validation path instead.
     const parsed = req.url ? tryParseProxyUrl(req.url) : null;
-    if (parsed && passthroughHosts.has(parsed.hostname)) {
+    const isDebianRegistry = parsed ? registriesByHost.get(parsed.hostname)?.type === 'debian' : false;
+    if (parsed && (passthroughHosts.has(parsed.hostname) || isDebianRegistry)) {
       forwardPlainHttpPassthrough(req, res, parsed.hostname, parsed.port, parsed.path);
       return;
     }

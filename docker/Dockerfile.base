@@ -26,6 +26,8 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
 ENV UV_NATIVE_TLS=1
 ENV UV_PYTHON_INSTALL_DIR=/opt/uv-python
 RUN uv python install 3.12
+# Install pip so agents can use `pip install` directly.
+RUN apt-get update && apt-get install -y --no-install-recommends python3-pip && rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /workspace /etc/ironcurtain /run/ironcurtain && \
     chown codespace:codespace /workspace /etc/ironcurtain /run/ironcurtain

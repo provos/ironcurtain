@@ -13,6 +13,7 @@ import {
   shouldRewriteBody,
   type ProviderConfig,
 } from '../src/docker/provider-config.js';
+import type { RegistryConfig } from '../src/docker/package-types.js';
 import { generateFakeKey } from '../src/docker/fake-keys.js';
 
 // --- Test helpers ---
@@ -506,6 +507,77 @@ describe('MitmProxy', () => {
       expect(parsed.method).toBe('GET');
     } finally {
       upstream.close();
+    }
+  });
+
+  it('forwards plain HTTP proxy requests to Debian registry hosts', async () => {
+    const upstream = http.createServer((req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end(JSON.stringify({ ok: true, path: req.url, method: req.method }));
+    });
+    const upstreamPort = await new Promise<number>((resolve) => {
+      upstream.listen(0, '127.0.0.1', () => {
+        const addr = upstream.address() as import('node:net').AddressInfo;
+        resolve(addr.port);
+      });
+    });
+
+    try {
+      const debianRegistry: RegistryConfig = {
+        host: 'deb.debian.org',
+        displayName: 'Debian',
+        type: 'debian',
+      };
+
+      // Include a non-Debian registry to verify it does NOT get plain HTTP forwarding
+      const npmRegistry: RegistryConfig = {
+        host: 'registry.npmjs.org',
+        displayName: 'npm',
+        type: 'npm',
+      };
+
+      proxy = createMitmProxy({
+        socketPath,
+        ca,
+        providers: [],
+        registries: [debianRegistry, npmRegistry],
+        dnsLookup: localhostDnsLookup,
+      });
+      await proxy.start();
+
+      const fetchStatus = async (url: string): Promise<{ statusCode: number; body: string }> =>
+        new Promise((resolve, reject) => {
+          const req = http.request({ socketPath, method: 'GET', path: url }, (res) => {
+            let data = '';
+            res.on('data', (chunk: Buffer) => (data += chunk.toString()));
+            res.on('end', () => resolve({ statusCode: res.statusCode ?? 0, body: data }));
+          });
+          req.on('error', reject);
+          req.end();
+        });
+
+      // Debian registry host should be forwarded
+      const debian = await fetchStatus(`http://deb.debian.org:${upstreamPort}/debian/dists/bookworm/InRelease`);
+      expect(debian.statusCode).toBe(200);
+      const parsed = JSON.parse(debian.body);
+      expect(parsed.ok).toBe(true);
+      expect(parsed.path).toBe('/debian/dists/bookworm/InRelease');
+
+      // Non-Debian registry (npm) should NOT be forwarded via plain HTTP
+      const npm = await fetchStatus(`http://registry.npmjs.org:${upstreamPort}/express`);
+      expect(npm.statusCode).toBe(403);
+
+      // Unknown host should still get 403
+      const unknown = await fetchStatus(`http://evil.example.com:${upstreamPort}/malware`);
+      expect(unknown.statusCode).toBe(403);
+
+      // Out-of-range port (>65535) is rejected by URL parser, returns 405 (not a proxy request)
+      const badPort = await fetchStatus('http://deb.debian.org:99999/debian/dists/bookworm/InRelease');
+      expect(badPort.statusCode).toBe(405);
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        upstream.close((err) => (err ? reject(err) : resolve()));
+      });
     }
   });
 

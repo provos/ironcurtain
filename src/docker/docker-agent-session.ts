@@ -236,11 +236,16 @@ export class DockerAgentSession implements Session {
       const mcpPort = this.proxy.port;
       const mitmPort = mitmAddr.port;
 
+      const proxyUrl = `http://host.docker.internal:${mitmPort}`;
       env = {
         ...this.adapter.buildEnv(this.config, this.fakeKeys),
-        HTTPS_PROXY: `http://host.docker.internal:${mitmPort}`,
-        HTTP_PROXY: `http://host.docker.internal:${mitmPort}`,
+        HTTPS_PROXY: proxyUrl,
+        HTTP_PROXY: proxyUrl,
       };
+
+      // Write apt proxy config so sudo apt-get routes through the MITM proxy
+      const aptProxyPath = resolve(orientationDir, 'apt-proxy.conf');
+      writeFileSync(aptProxyPath, `Acquire::http::Proxy "${proxyUrl}";\nAcquire::https::Proxy "${proxyUrl}";\n`);
 
       // Create a per-session --internal Docker network that blocks internet egress.
       // Assign to this.networkName immediately so the catch block can clean it up
@@ -293,6 +298,7 @@ export class DockerAgentSession implements Session {
         { source: this.sandboxDir, target: CONTAINER_WORKSPACE_DIR, readonly: false },
         // No session dir mount needed for sockets (TCP mode) -- only orientation subdir is mounted
         { source: orientationDir, target: '/etc/ironcurtain', readonly: true },
+        { source: aptProxyPath, target: '/etc/apt/apt.conf.d/90-ironcurtain-proxy', readonly: true },
       ];
 
       // Mount conversation state directory for session resume (e.g., claude --continue)
@@ -305,12 +311,21 @@ export class DockerAgentSession implements Session {
       }
     } else {
       // Linux UDS mode: --network=none, session dir with sockets mounted
+      const linuxProxyUrl = 'http://127.0.0.1:18080';
       env = {
         ...this.adapter.buildEnv(this.config, this.fakeKeys),
-        HTTPS_PROXY: 'http://127.0.0.1:18080',
-        HTTP_PROXY: 'http://127.0.0.1:18080',
+        HTTPS_PROXY: linuxProxyUrl,
+        HTTP_PROXY: linuxProxyUrl,
       };
       network = null;
+
+      // Write apt proxy config so sudo apt-get routes through the MITM proxy
+      const aptProxyPathLinux = resolve(orientationDir, 'apt-proxy.conf');
+      writeFileSync(
+        aptProxyPathLinux,
+        `Acquire::http::Proxy "${linuxProxyUrl}";\nAcquire::https::Proxy "${linuxProxyUrl}";\n`,
+      );
+
       // Mount only the sockets subdirectory into the container -- not the full
       // session dir. This prevents the container from accessing escalation files,
       // audit logs, or other session data. proxy.sock and mitm-proxy.sock are
@@ -321,6 +336,7 @@ export class DockerAgentSession implements Session {
         { source: this.sandboxDir, target: CONTAINER_WORKSPACE_DIR, readonly: false },
         { source: socketsDir, target: '/run/ironcurtain', readonly: false },
         { source: orientationDir, target: '/etc/ironcurtain', readonly: true },
+        { source: aptProxyPathLinux, target: '/etc/apt/apt.conf.d/90-ironcurtain-proxy', readonly: true },
       ];
 
       // Mount conversation state directory for session resume (e.g., claude --continue)
@@ -344,6 +360,14 @@ export class DockerAgentSession implements Session {
         sessionLabel: this.sessionId,
         resources: { memoryMb: 8192, cpus: 4 },
         extraHosts,
+        capAdd: [
+          'SETUID', // sudo setuid
+          'SETGID', // sudo setgid
+          'CHOWN', // apt-get chown on installed files
+          'FOWNER', // apt-get set permissions on files it doesn't own
+          'DAC_OVERRIDE', // apt-get read/write files regardless of permissions during install
+          'AUDIT_WRITE', // sudo audit logging
+        ],
       });
 
       await this.docker.start(this.containerId);
