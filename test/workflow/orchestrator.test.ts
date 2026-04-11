@@ -32,6 +32,7 @@ const linearWorkflowDef: WorkflowDefinition = {
   states: {
     plan: {
       type: 'agent',
+      description: 'Creates a plan',
       persona: 'planner',
       prompt: 'You are a planner.',
       inputs: [],
@@ -40,6 +41,7 @@ const linearWorkflowDef: WorkflowDefinition = {
     },
     plan_gate: {
       type: 'human_gate',
+      description: 'Human review gate',
       acceptedEvents: ['APPROVE', 'FORCE_REVISION', 'ABORT'],
       present: ['plan'],
       transitions: [
@@ -50,6 +52,7 @@ const linearWorkflowDef: WorkflowDefinition = {
     },
     implement: {
       type: 'agent',
+      description: 'Writes code',
       persona: 'coder',
       prompt: 'You are a coder.',
       inputs: ['plan'],
@@ -58,6 +61,7 @@ const linearWorkflowDef: WorkflowDefinition = {
     },
     review: {
       type: 'agent',
+      description: 'Reviews code',
       persona: 'reviewer',
       prompt: 'You are a reviewer.',
       inputs: ['code'],
@@ -67,8 +71,8 @@ const linearWorkflowDef: WorkflowDefinition = {
         { to: 'implement', guard: 'isRejected' },
       ],
     },
-    done: { type: 'terminal' },
-    aborted: { type: 'terminal' },
+    done: { type: 'terminal', description: 'Done' },
+    aborted: { type: 'terminal', description: 'Aborted' },
   },
 };
 
@@ -80,6 +84,7 @@ const coderCriticLoopDef: WorkflowDefinition = {
   states: {
     implement: {
       type: 'agent',
+      description: 'Writes code',
       persona: 'coder',
       prompt: 'You are a coder.',
       inputs: [],
@@ -88,6 +93,7 @@ const coderCriticLoopDef: WorkflowDefinition = {
     },
     review: {
       type: 'agent',
+      description: 'Reviews code',
       persona: 'reviewer',
       prompt: 'You are a reviewer.',
       inputs: ['code'],
@@ -97,7 +103,7 @@ const coderCriticLoopDef: WorkflowDefinition = {
         { to: 'implement', guard: 'isRejected' },
       ],
     },
-    done: { type: 'terminal' },
+    done: { type: 'terminal', description: 'Done' },
   },
 };
 
@@ -109,13 +115,14 @@ const simpleAgentDef: WorkflowDefinition = {
   states: {
     implement: {
       type: 'agent',
+      description: 'Writes code',
       persona: 'coder',
       prompt: 'You are a coder.',
       inputs: [],
       outputs: ['code'],
       transitions: [{ to: 'done' }],
     },
-    done: { type: 'terminal' },
+    done: { type: 'terminal', description: 'Done' },
   },
 };
 
@@ -127,6 +134,7 @@ const stallDetectionDef: WorkflowDefinition = {
   states: {
     implement: {
       type: 'agent',
+      description: 'Writes code',
       persona: 'coder',
       prompt: 'You are a coder.',
       inputs: [],
@@ -135,6 +143,7 @@ const stallDetectionDef: WorkflowDefinition = {
     },
     review: {
       type: 'agent',
+      description: 'Reviews code',
       persona: 'reviewer',
       prompt: 'You are a reviewer.',
       inputs: ['code'],
@@ -146,6 +155,7 @@ const stallDetectionDef: WorkflowDefinition = {
     },
     stalled: {
       type: 'human_gate',
+      description: 'Stall escalation gate',
       acceptedEvents: ['FORCE_REVISION', 'ABORT'],
       present: ['code'],
       transitions: [
@@ -153,8 +163,8 @@ const stallDetectionDef: WorkflowDefinition = {
         { to: 'aborted', event: 'ABORT' },
       ],
     },
-    done: { type: 'terminal' },
-    aborted: { type: 'terminal' },
+    done: { type: 'terminal', description: 'Done' },
+    aborted: { type: 'terminal', description: 'Aborted' },
   },
 };
 
@@ -740,6 +750,7 @@ describe('WorkflowOrchestrator', () => {
       states: {
         implement: {
           type: 'agent',
+          description: 'Writes code',
           persona: 'coder',
           prompt: 'You are a coder.',
           inputs: [],
@@ -748,6 +759,7 @@ describe('WorkflowOrchestrator', () => {
         },
         review: {
           type: 'agent',
+          description: 'Reviews code',
           persona: 'reviewer',
           prompt: 'You are a reviewer.',
           inputs: ['code'],
@@ -757,7 +769,7 @@ describe('WorkflowOrchestrator', () => {
             { to: 'implement', guard: 'isRejected' },
           ],
         },
-        done: { type: 'terminal' },
+        done: { type: 'terminal', description: 'Done' },
       },
     };
 
@@ -904,13 +916,14 @@ describe('WorkflowOrchestrator', () => {
       states: {
         work: {
           type: 'agent',
+          description: 'Does work',
           persona: 'global',
           prompt: 'You are a worker.',
           inputs: [],
           outputs: ['result'],
           transitions: [{ to: 'done' }],
         },
-        done: { type: 'terminal' },
+        done: { type: 'terminal', description: 'Done' },
       },
     };
 
@@ -942,13 +955,14 @@ describe('WorkflowOrchestrator', () => {
       states: {
         work: {
           type: 'agent',
+          description: 'Does work',
           persona: 'nonexistent-persona',
           prompt: 'You are a worker.',
           inputs: [],
           outputs: ['result'],
           transitions: [{ to: 'done' }],
         },
-        done: { type: 'terminal' },
+        done: { type: 'terminal', description: 'Done' },
       },
     };
 
@@ -974,6 +988,7 @@ describe('WorkflowOrchestrator', () => {
       states: {
         plan: {
           type: 'agent',
+          description: 'Creates a plan',
           persona: 'missing-planner',
           prompt: 'You are a planner.',
           inputs: [],
@@ -982,13 +997,14 @@ describe('WorkflowOrchestrator', () => {
         },
         code: {
           type: 'agent',
+          description: 'Writes code',
           persona: 'missing-coder',
           prompt: 'You are a coder.',
           inputs: ['plan'],
           outputs: ['code'],
           transitions: [{ to: 'done' }],
         },
-        done: { type: 'terminal' },
+        done: { type: 'terminal', description: 'Done' },
       },
     };
 

@@ -14,6 +14,7 @@ function validDefinition(): Record<string, unknown> {
     states: {
       plan: {
         type: 'agent',
+        description: 'Creates a plan',
         persona: 'planner',
         prompt: 'You are a planner. Create a plan.',
         inputs: [],
@@ -22,6 +23,7 @@ function validDefinition(): Record<string, unknown> {
       },
       review: {
         type: 'agent',
+        description: 'Reviews the plan',
         persona: 'reviewer',
         prompt: 'You are a reviewer. Review the plan.',
         inputs: ['plan'],
@@ -33,6 +35,7 @@ function validDefinition(): Record<string, unknown> {
       },
       gate: {
         type: 'human_gate',
+        description: 'Human review gate',
         acceptedEvents: ['APPROVE', 'ABORT'],
         present: ['review'],
         transitions: [
@@ -42,10 +45,12 @@ function validDefinition(): Record<string, unknown> {
       },
       done: {
         type: 'terminal',
+        description: 'Workflow complete',
         outputs: ['review'],
       },
       aborted: {
         type: 'terminal',
+        description: 'Workflow aborted',
       },
     },
   };
@@ -75,6 +80,7 @@ describe('validateDefinition', () => {
         states: {
           start: {
             type: 'agent',
+            description: 'Does work',
             persona: 'worker',
             prompt: 'You are a worker.',
             inputs: [],
@@ -83,6 +89,7 @@ describe('validateDefinition', () => {
           },
           done: {
             type: 'terminal',
+            description: 'Done',
           },
         },
       };
@@ -107,6 +114,7 @@ describe('validateDefinition', () => {
       ];
       states.test = {
         type: 'deterministic',
+        description: 'Runs tests',
         run: [['npm', 'test']],
         transitions: [{ to: 'gate', guard: 'isPassed' }, { to: 'plan' }],
       };
@@ -160,6 +168,7 @@ describe('validateDefinition', () => {
         states: {
           start: {
             type: 'agent',
+            description: 'Does work',
             persona: 'worker',
             prompt: 'You are a worker.',
             inputs: [],
@@ -204,7 +213,9 @@ describe('validateDefinition', () => {
       const states = def.states as Record<string, Record<string, unknown>>;
       states.orphan = {
         type: 'agent',
+        description: 'Orphan state',
         persona: 'orphan',
+        prompt: 'You are orphaned.',
         inputs: [],
         outputs: [],
         transitions: [{ to: 'done' }],
@@ -310,6 +321,7 @@ describe('validateDefinition', () => {
       states.review.transitions = [{ to: 'test' }];
       states.test = {
         type: 'deterministic',
+        description: 'Runs tests',
         run: [['npm', 'test']],
         transitions: [{ to: 'gate', when: { verdict: 'approved' } }, { to: 'plan' }],
       };

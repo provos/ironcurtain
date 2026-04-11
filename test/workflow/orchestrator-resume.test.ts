@@ -31,6 +31,7 @@ const linearWorkflowDef: WorkflowDefinition = {
   states: {
     plan: {
       type: 'agent',
+      description: 'Creates a plan',
       persona: 'planner',
       prompt: 'You are a planner.',
       inputs: [],
@@ -39,6 +40,7 @@ const linearWorkflowDef: WorkflowDefinition = {
     },
     plan_gate: {
       type: 'human_gate',
+      description: 'Human review gate',
       acceptedEvents: ['APPROVE', 'FORCE_REVISION', 'ABORT'],
       present: ['plan'],
       transitions: [
@@ -49,6 +51,7 @@ const linearWorkflowDef: WorkflowDefinition = {
     },
     implement: {
       type: 'agent',
+      description: 'Writes code',
       persona: 'coder',
       prompt: 'You are a coder.',
       inputs: ['plan'],
@@ -57,6 +60,7 @@ const linearWorkflowDef: WorkflowDefinition = {
     },
     review: {
       type: 'agent',
+      description: 'Reviews code',
       persona: 'reviewer',
       prompt: 'You are a reviewer.',
       inputs: ['code'],
@@ -66,8 +70,8 @@ const linearWorkflowDef: WorkflowDefinition = {
         { to: 'implement', guard: 'isRejected' },
       ],
     },
-    done: { type: 'terminal' },
-    aborted: { type: 'terminal' },
+    done: { type: 'terminal', description: 'Done' },
+    aborted: { type: 'terminal', description: 'Aborted' },
   },
 };
 
@@ -79,13 +83,14 @@ const simpleAgentDef: WorkflowDefinition = {
   states: {
     implement: {
       type: 'agent',
+      description: 'Writes code',
       persona: 'coder',
       prompt: 'You are a coder.',
       inputs: [],
       outputs: ['code'],
       transitions: [{ to: 'done' }],
     },
-    done: { type: 'terminal' },
+    done: { type: 'terminal', description: 'Done' },
   },
 };
 
@@ -101,6 +106,7 @@ const agentWithErrorGateDef: WorkflowDefinition = {
   states: {
     implement: {
       type: 'agent',
+      description: 'Writes code',
       persona: 'coder',
       prompt: 'You are a coder.',
       inputs: [],
@@ -109,14 +115,15 @@ const agentWithErrorGateDef: WorkflowDefinition = {
     },
     error_gate: {
       type: 'human_gate',
+      description: 'Error escalation gate',
       acceptedEvents: ['APPROVE', 'ABORT'],
       transitions: [
         { to: 'done', event: 'APPROVE' },
         { to: 'aborted', event: 'ABORT' },
       ],
     },
-    done: { type: 'terminal' },
-    aborted: { type: 'terminal' },
+    done: { type: 'terminal', description: 'Done' },
+    aborted: { type: 'terminal', description: 'Aborted' },
   },
 };
 
@@ -131,6 +138,7 @@ const loopWithErrorGateDef: WorkflowDefinition = {
   states: {
     implement: {
       type: 'agent',
+      description: 'Writes code',
       persona: 'coder',
       prompt: 'You are a coder.',
       inputs: [],
@@ -139,6 +147,7 @@ const loopWithErrorGateDef: WorkflowDefinition = {
     },
     review: {
       type: 'agent',
+      description: 'Reviews code',
       persona: 'reviewer',
       prompt: 'You are a reviewer.',
       inputs: ['code'],
@@ -150,14 +159,15 @@ const loopWithErrorGateDef: WorkflowDefinition = {
     },
     error_gate: {
       type: 'human_gate',
+      description: 'Error escalation gate',
       acceptedEvents: ['APPROVE', 'ABORT'],
       transitions: [
         { to: 'implement', event: 'APPROVE' },
         { to: 'aborted', event: 'ABORT' },
       ],
     },
-    done: { type: 'terminal' },
-    aborted: { type: 'terminal' },
+    done: { type: 'terminal', description: 'Done' },
+    aborted: { type: 'terminal', description: 'Aborted' },
   },
 };
 

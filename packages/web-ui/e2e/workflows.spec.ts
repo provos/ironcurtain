@@ -124,10 +124,10 @@ test.describe('Workflow Detail View', () => {
     await expect(svg).toBeVisible({ timeout: 5_000 });
 
     // The design-and-code graph includes these states: Plan, Plan Review, Implement, etc.
-    // Use exact match to avoid matching substrings (e.g., "Plan" in "Plan Review")
-    await expect(svg.getByText('Plan', { exact: true })).toBeVisible();
-    await expect(svg.getByText('Implement', { exact: true })).toBeVisible();
-    await expect(svg.getByText('Review', { exact: true })).toBeVisible();
+    // Scope to SVG <text> elements to avoid matching <title> tooltip elements
+    await expect(svg.locator('text', { hasText: /^Plan$/ })).toBeVisible();
+    await expect(svg.locator('text', { hasText: /^Implement$/ })).toBeVisible();
+    await expect(svg.locator('text', { hasText: /^Review$/ })).toBeVisible();
   });
 
   test('detail view shows context info cards', async ({ page }) => {

@@ -23,6 +23,7 @@ describe('extractStateGraph', () => {
     const definition = makeMinimalDefinition({
       plan: {
         type: 'agent',
+        description: 'Creates a plan',
         persona: 'planner',
         prompt: 'Create a plan',
         inputs: [],
@@ -32,8 +33,8 @@ describe('extractStateGraph', () => {
           { to: 'failed', guard: 'isStalled' },
         ],
       },
-      review: { type: 'terminal' },
-      failed: { type: 'terminal' },
+      review: { type: 'terminal', description: 'Done' },
+      failed: { type: 'terminal', description: 'Failed' },
     });
 
     const graph = extractStateGraph(definition);
@@ -44,12 +45,14 @@ describe('extractStateGraph', () => {
       type: 'agent',
       persona: 'planner',
       label: 'Plan',
+      description: 'Creates a plan',
     });
     expect(graph.states[1]).toEqual({
       id: 'review',
       type: 'terminal',
       persona: undefined,
       label: 'Review',
+      description: 'Done',
     });
 
     expect(graph.transitions).toHaveLength(2);
@@ -65,6 +68,7 @@ describe('extractStateGraph', () => {
     const definition = makeMinimalDefinition({
       plan_review: {
         type: 'human_gate',
+        description: 'Human review gate',
         acceptedEvents: ['APPROVE', 'FORCE_REVISION', 'ABORT'],
         transitions: [
           { to: 'implement', event: 'APPROVE' },
@@ -72,9 +76,9 @@ describe('extractStateGraph', () => {
           { to: 'aborted', event: 'ABORT' },
         ],
       },
-      implement: { type: 'terminal' },
-      plan: { type: 'terminal' },
-      aborted: { type: 'terminal' },
+      implement: { type: 'terminal', description: 'Implement' },
+      plan: { type: 'terminal', description: 'Plan' },
+      aborted: { type: 'terminal', description: 'Aborted' },
     });
 
     const graph = extractStateGraph(definition);
@@ -85,6 +89,7 @@ describe('extractStateGraph', () => {
       type: 'human_gate',
       persona: undefined,
       label: 'Plan Review',
+      description: 'Human review gate',
     });
 
     const gateTransitions = graph.transitions.filter((t) => t.from === 'plan_review');
@@ -101,14 +106,15 @@ describe('extractStateGraph', () => {
     const definition = makeMinimalDefinition({
       validate: {
         type: 'deterministic',
+        description: 'Runs tests',
         run: [['npm', 'test']],
         transitions: [
           { to: 'done', guard: 'isPassed' },
           { to: 'fix', guard: 'isRejected' },
         ],
       },
-      done: { type: 'terminal' },
-      fix: { type: 'terminal' },
+      done: { type: 'terminal', description: 'Done' },
+      fix: { type: 'terminal', description: 'Fix' },
     });
 
     const graph = extractStateGraph(definition);
@@ -123,7 +129,7 @@ describe('extractStateGraph', () => {
 
   it('handles terminal states with no transitions', () => {
     const definition = makeMinimalDefinition({
-      done: { type: 'terminal' },
+      done: { type: 'terminal', description: 'Done' },
     });
 
     const graph = extractStateGraph(definition);
@@ -134,6 +140,7 @@ describe('extractStateGraph', () => {
       type: 'terminal',
       persona: undefined,
       label: 'Done',
+      description: 'Done',
     });
     expect(graph.transitions).toHaveLength(0);
   });
@@ -142,10 +149,11 @@ describe('extractStateGraph', () => {
     const definition = makeMinimalDefinition({
       design_review_gate: {
         type: 'human_gate',
+        description: 'Design review gate',
         acceptedEvents: ['APPROVE'],
         transitions: [{ to: 'done', event: 'APPROVE' }],
       },
-      done: { type: 'terminal' },
+      done: { type: 'terminal', description: 'Done' },
     });
 
     const graph = extractStateGraph(definition);
@@ -158,6 +166,7 @@ describe('extractStateGraph', () => {
       {
         plan: {
           type: 'agent',
+          description: 'Creates a plan',
           persona: 'planner',
           prompt: 'Create plan',
           inputs: [],
@@ -166,6 +175,7 @@ describe('extractStateGraph', () => {
         },
         plan_review: {
           type: 'human_gate',
+          description: 'Human review gate',
           acceptedEvents: ['APPROVE', 'FORCE_REVISION', 'ABORT'],
           present: ['plan'],
           transitions: [
@@ -176,6 +186,7 @@ describe('extractStateGraph', () => {
         },
         implement: {
           type: 'agent',
+          description: 'Writes code',
           persona: 'coder',
           prompt: 'Implement',
           inputs: ['plan'],
@@ -187,6 +198,7 @@ describe('extractStateGraph', () => {
         },
         review: {
           type: 'agent',
+          description: 'Reviews code',
           persona: 'critic',
           prompt: 'Review',
           inputs: ['code'],
@@ -196,8 +208,8 @@ describe('extractStateGraph', () => {
             { to: 'implement', guard: 'isRejected' },
           ],
         },
-        done: { type: 'terminal' },
-        aborted: { type: 'terminal' },
+        done: { type: 'terminal', description: 'Done' },
+        aborted: { type: 'terminal', description: 'Aborted' },
       },
       'plan',
     );

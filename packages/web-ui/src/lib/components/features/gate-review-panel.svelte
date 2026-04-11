@@ -15,6 +15,7 @@
     gate,
     workflowName,
     workflowId,
+    stateDescription,
     onResolve,
     fetchArtifacts,
     fetchFileTree,
@@ -23,6 +24,7 @@
     gate: HumanGateRequestDto;
     workflowName: string;
     workflowId: string;
+    stateDescription?: string;
     onResolve: (event: string, prompt?: string) => void | Promise<void>;
     fetchArtifacts?: (workflowId: string, artifactName: string) => Promise<ArtifactContentDto>;
     fetchFileTree?: (workflowId: string, path?: string) => Promise<FileTreeResponseDto>;
@@ -153,6 +155,9 @@
   <div class="flex items-center justify-between">
     <div>
       <h3 class="text-lg font-semibold">Review Required: {gate.stateName}</h3>
+      {#if stateDescription}
+        <p class="text-sm text-muted-foreground mt-0.5">{stateDescription}</p>
+      {/if}
       <p class="text-sm text-muted-foreground mt-0.5">{workflowName}</p>
     </div>
     <Badge variant="warning">Waiting for Review</Badge>

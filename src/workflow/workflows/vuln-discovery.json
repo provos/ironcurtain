@@ -1,0 +1,161 @@
+{
+  "name": "vuln-discovery",
+  "description": "Orchestrator-driven vulnerability discovery: analyze code, validate hypotheses cheaply, then build instrumented harnesses for live confirmation",
+  "initial": "analyze",
+  "settings": {
+    "mode": "docker",
+    "dockerAgent": "claude-code",
+    "maxRounds": 12,
+    "systemPrompt": "Workflow artifacts go in `.workflow/`. The harness and all build modifications go directly in the workspace. The target file path is specified in the task description.\n\nIMPORTANT: The investigation journal at `.workflow/journal/state.json` is the source of truth for what has been tried, what worked, and what failed. Read it before starting any work. Update it (via the orchestrator) after completing work."
+  },
+  "states": {
+    "analyze": {
+      "type": "agent",
+      "description": "Structural code analysis — maps call chains, entry points, and build system",
+      "persona": "global",
+      "prompt": "You are a code analyst mapping the structure of a target file for a vulnerability investigation. You have access to a source tree at the workspace root.\n\nYour target file is specified in the task description.\n\nYour job is STRUCTURAL ANALYSIS ONLY. Do NOT attempt to identify specific vulnerabilities or propose exploits. The discovery phase comes later with proper tooling.\n\n1. Read the target file. Understand what it does, what data it processes, and what trust boundaries it sits on.\n2. Trace the call graph backward: what functions call into this file? Keep tracing until you reach an external entry point (network socket, file input, IPC, CLI argument, HTTP handler, etc.). Document the full call chain from external input to target.\n3. Identify the language and build system. Determine what coverage instrumentation is available (gcov, llvm-cov, coverage.py, c8/v8, llvm-cov for Rust, etc.) and what sanitizers apply (ASAN, UBSAN, MSAN for C/C++; equivalents for other languages).\n4. Identify existing test infrastructure: are there tests, fuzzers, or harnesses already in the project that exercise this code?\n5. Note any protocol state machines or multi-step interactions required to reach the target (e.g., TCP handshake before SACK processing, OAuth flow before auth check).\n6. Catalog the key functions in the target file, their signatures, what data types they manipulate, and what invariants the code assumes (comments like 'should never happen', assertions, unchecked casts, etc.).\n\nWrite your analysis to `.workflow/analysis/analysis.md`. Include: target summary, function catalog, call chain(s) from external entry points, language/tooling inventory, existing test infrastructure, and required interaction sequences.",
+      "inputs": [],
+      "outputs": ["analysis"],
+      "transitions": [{ "to": "orchestrator" }]
+    },
+    "orchestrator": {
+      "type": "agent",
+      "description": "Investigation strategy and routing — decides what to do next",
+      "persona": "global",
+      "prompt": "You are the investigation orchestrator for a vulnerability discovery workflow. You maintain strategic oversight of the entire investigation and decide what to do next.\n\nOn every invocation, FIRST read the investigation journal at `.workflow/journal/state.json` (create it if it does not exist). Then read any new artifacts from the state that just completed.\n\nYour journal must track:\n- **Hypotheses**: what vulnerability hypotheses have been formed, tested, confirmed, or rejected\n- **Phase**: where the investigation is (analysis, hypothesis testing, harness building, live discovery, triage)\n- **Confidence**: per-layer confidence (hypothesis confidence, infrastructure confidence, delivery confidence)\n- **Rounds spent**: how many times each state has been visited\n- **Blockers**: what is preventing progress\n- **Strategy**: your current plan and why\n\nAfter updating the journal, decide the next action using this routing table:\n\n| Verdict | Confidence | Destination | When to use |\n|---------|-----------|-------------|-------------|\n| approved | high | thesis_validate | Validate a hypothesis cheaply before building infrastructure. Extract the function, fuzz locally. |\n| approved | medium | harness_design | Build/upgrade an end-to-end harness. Use AFTER thesis confirms trigger values, or when the vulnerability cannot be tested in isolation. Be specific in your output about what to build. |\n| approved | low | discover | Run hypothesis-driven research using an existing working harness. |\n| blocked | high | differential_validate | Isolated test succeeded but live system diverges. Need to diagnose the gap. |\n| blocked | medium/low | human_escalation | Investigation is stuck. Write a clear description of what was tried and what decision you need. |\n| rejected | any | triage | Enough evidence collected. Dispatch to triage for independent validation. |\n| spec_flaw | any | analyze | Current hypothesis is fundamentally wrong. Need fresh structural analysis. |\n\nIMPORTANT: Always update `.workflow/journal/state.json` before setting your verdict. The journal is the persistent memory of this investigation — your conversation history may be long but the journal is the structured summary.\n\nIf you detect stall patterns (same state visited 3+ times without progress, contradictory results between layers, or your own uncertainty about strategy), set verdict to blocked to escalate to the human rather than continuing to burn rounds.",
+      "inputs": ["analysis?", "thesis_results?", "harness_design?", "harness_build?", "harness_validate?", "discoveries?", "differential?"],
+      "outputs": ["journal"],
+      "transitions": [
+        { "to": "thesis_validate",       "when": { "verdict": "approved", "confidence": "high" } },
+        { "to": "harness_design",        "when": { "verdict": "approved", "confidence": "medium" } },
+        { "to": "discover",              "when": { "verdict": "approved", "confidence": "low" } },
+        { "to": "differential_validate", "when": { "verdict": "blocked", "confidence": "high" } },
+        { "to": "human_escalation",      "when": { "verdict": "blocked" } },
+        { "to": "triage",               "when": { "verdict": "rejected" } },
+        { "to": "analyze",              "when": { "verdict": "spec_flaw" } },
+        { "to": "done",                 "guard": "isRoundLimitReached" }
+      ]
+    },
+    "human_escalation": {
+      "type": "human_gate",
+      "description": "Human review when investigation is stuck",
+      "acceptedEvents": ["APPROVE", "FORCE_REVISION", "ABORT"],
+      "present": ["journal", "analysis", "discoveries?"],
+      "transitions": [
+        { "to": "orchestrator", "event": "APPROVE" },
+        { "to": "orchestrator", "event": "FORCE_REVISION" },
+        { "to": "aborted", "event": "ABORT" }
+      ]
+    },
+    "thesis_validate": {
+      "type": "agent",
+      "description": "Lightweight isolated validation of vulnerability hypotheses",
+      "persona": "global",
+      "prompt": "You have a vulnerability hypothesis from the orchestrator. Read the orchestrator's previous output and the investigation journal at `.workflow/journal/state.json` to understand what you are validating.\n\nYour job: build the CHEAPEST possible test that confirms or rejects the hypothesis WITHOUT the full end-to-end harness.\n\nFor different vulnerability classes, this means different things:\n- **Integer overflow / memory corruption (C/C++/Rust)**: Extract the vulnerable function into a standalone .c file. Stub external dependencies with minimal types and constants. Write a fuzzer that iterates over candidate input values and checks whether the hypothesized condition (NULL deref, buffer overrun, integer wrap) actually occurs. Compile and run it.\n- **TOCTOU / race condition**: Write a minimal concurrent test that creates the race window with tight loops.\n- **Logic error / auth bypass**: Write a unit test that exercises the specific branch sequence.\n- **Injection (SQL, command, XSS)**: Feed crafted payloads to the parser/handler in isolation.\n\nThe test MUST faithfully preserve:\n- The exact semantics of the vulnerability site (types, casts, comparison operators, macros)\n- The control flow that reaches it (which branches, which loops)\n- Any state that accumulates across iterations (linked lists, counters, caches)\n\nThe test CAN stub:\n- I/O, networking, filesystem\n- Allocation (use malloc instead of kernel pool allocators)\n- Logging, statistics, error reporting\n- Global state not relevant to the vulnerability path\n\nRun the test. Report concrete trigger values if found, or report that the hypothesis was exhaustively tested and no trigger exists.\n\nWrite results to `.workflow/thesis_results/results.md`. If trigger values are found, also write them to `.workflow/thesis_results/trigger.json` in a structured format the harness designer can consume.",
+      "inputs": ["analysis", "journal"],
+      "outputs": ["thesis_results"],
+      "transitions": [{ "to": "orchestrator" }]
+    },
+    "harness_design": {
+      "type": "agent",
+      "description": "Designs instrumented test harness specifications",
+      "persona": "global",
+      "prompt": "You are a security tooling architect. Read the analysis in `.workflow/analysis/analysis.md`, the investigation journal at `.workflow/journal/state.json`, and any thesis validation results in `.workflow/thesis_results/`.\n\nThe orchestrator's previous output tells you what kind of harness to build and why. Follow its directive.\n\nDesign a harness that provides:\n\n**Reachability:** A driver that sends external inputs through the real entry points identified in the analysis, following the full call chain into the target file. If protocol state is required (handshakes, session setup), the driver must implement it.\n\n**Session reset:** A mechanism to reset all state between test runs. Specify whether this means process restart, VM snapshot/restore, database reset, or connection teardown. Must be fast.\n\n**Stateful interaction:** An API for multi-step interactions within a single session where state persists between steps.\n\n**Coverage reporting:** Instrument the build so that after each session, a coverage report is produced showing line and branch coverage for the target file. Machine-readable output (JSON or lcov).\n\n**Branch tracing:** Branch-level coverage, not just line coverage.\n\nIf thesis_results/trigger.json exists, the harness must be able to deliver those specific trigger values through the real protocol stack. Document how the trigger values map to protocol-level inputs.\n\nBe concrete. Name specific tools, flags, file paths, and API functions.\n\nWrite your design to `.workflow/harness_design/design.md`.",
+      "inputs": ["analysis", "journal", "thesis_results?"],
+      "outputs": ["harness_design"],
+      "transitions": [{ "to": "harness_review" }]
+    },
+    "harness_review": {
+      "type": "human_gate",
+      "description": "Human review of harness design before implementation",
+      "acceptedEvents": ["APPROVE", "FORCE_REVISION", "ABORT"],
+      "present": ["analysis", "harness_design", "journal"],
+      "transitions": [
+        { "to": "harness_build", "event": "APPROVE" },
+        { "to": "harness_design", "event": "FORCE_REVISION" },
+        { "to": "aborted", "event": "ABORT" }
+      ]
+    },
+    "harness_build": {
+      "type": "agent",
+      "description": "Implements harness from design specification",
+      "persona": "global",
+      "prompt": "You are a security tooling engineer. Read the harness design in `.workflow/harness_design/design.md`, the analysis in `.workflow/analysis/analysis.md`, and the investigation journal at `.workflow/journal/state.json`.\n\nImplement the harness exactly as specified:\n\n1. Build system modifications: compiler flags, instrumentation, sanitizer configuration.\n2. The driver: code that sends external inputs through real entry points. Implement all required protocol layers.\n3. The session API: a script or program for running multi-step interactions and collecting results.\n4. Reset mechanism: implement and verify session reset.\n5. Coverage extraction: ensure coverage reports are produced in the specified format.\n\nThe harness should be invocable as a CLI tool or script. The discovery agent needs to: start a session, perform multiple steps, observe coverage after each run, and reset cleanly.\n\nInstall all required dependencies. Build the project with instrumentation enabled. Verify the harness compiles and the basic run and reset commands work. If any dependency is missing or cannot be installed, report verdict rejected with the specific error — do NOT report approved if the harness cannot actually run.\n\nWrite build/run instructions to `.workflow/harness_build/README.md`.",
+      "inputs": ["analysis", "harness_design", "journal"],
+      "outputs": ["harness_build"],
+      "transitions": [{ "to": "harness_validate" }]
+    },
+    "harness_validate": {
+      "type": "agent",
+      "description": "Verifies the harness actually runs and produces coverage",
+      "persona": "global",
+      "prompt": "You are a harness validation engineer. Your job is to verify the harness ACTUALLY WORKS by running it.\n\nRead the build/run instructions in `.workflow/harness_build/README.md` and the design in `.workflow/harness_design/design.md`.\n\nPerform these validation steps:\n\n1. Run the harness reset command. Verify it exits cleanly.\n2. Run the harness with a baseline input. Verify it exits without errors.\n3. Run the harness coverage command. Verify the target file appears in the report with non-zero coverage.\n4. If the harness supports interactive/stateful sessions, run a short multi-step session.\n5. Verify branch-level coverage data is present.\n\nCRITICAL: If ANY step fails because of missing dependencies (scapy, QEMU, pip, etc.), infrastructure issues (no network, no VM), or permission errors — you MUST report verdict rejected. Do NOT report approved with caveats about 'infrastructure limitations'. A harness that cannot run is not validated.\n\nWrite validation results to `.workflow/harness_validate/validation.md`.",
+      "inputs": ["harness_design", "harness_build"],
+      "outputs": ["harness_validate"],
+      "transitions": [
+        { "to": "orchestrator", "when": { "verdict": "approved" } },
+        { "to": "harness_critique", "when": { "verdict": "rejected" } }
+      ]
+    },
+    "harness_critique": {
+      "type": "agent",
+      "description": "Diagnoses harness validation failures",
+      "persona": "global",
+      "prompt": "You are a security tooling reviewer. The harness failed validation.\n\nRead the validation results in `.workflow/harness_validate/validation.md`, the design in `.workflow/harness_design/design.md`, the analysis in `.workflow/analysis/analysis.md`, and the investigation journal at `.workflow/journal/state.json`.\n\nDiagnose the failure:\n\n1. Does the harness build without errors?\n2. Does the driver reach the target through the correct entry points?\n3. Does coverage show the target file was reached?\n4. Does session reset work?\n5. Are required dependencies available in this environment?\n\nDetermine whether the failure is:\n- **Implementation bug** (design is sound, code has errors) → set verdict to rejected (back to harness_build)\n- **Design flaw** (wrong call chain, wrong tooling, missing dependencies that cannot be installed) → set verdict to approved (back to harness_design for redesign)\n\nWrite diagnosis to `.workflow/harness_critique/critique.md`.",
+      "inputs": ["analysis", "harness_design", "harness_build", "harness_validate"],
+      "outputs": ["harness_critique"],
+      "transitions": [
+        { "to": "orchestrator", "guard": "isRoundLimitReached" },
+        { "to": "harness_build", "when": { "verdict": "rejected" } },
+        { "to": "harness_design", "when": { "verdict": "approved" } }
+      ]
+    },
+    "discover": {
+      "type": "agent",
+      "description": "Hypothesis-driven vulnerability research using the harness",
+      "persona": "global",
+      "prompt": "You are a vulnerability researcher. You have a working instrumented harness for the target file. Read the analysis, harness build instructions, investigation journal, and any thesis validation results.\n\nYour goal: find an externally exploitable vulnerability in the target file using the harness.\n\nMethodology:\n\n1. **Read the target file carefully.** Understand every code path, trust boundary, and assumption. Pay attention to: integer arithmetic (overflow, truncation, sign confusion), buffer management, state machine transitions, comparison functions, sentinel values, error handling, and implicit invariants.\n\n2. **Form a hypothesis.** Identify a specific code path that looks potentially vulnerable. Articulate what would need to be true for it to be exploitable.\n\n3. **Design an input sequence** that exercises the hypothesized vulnerability. Use the harness to send this input.\n\n4. **Observe results.** Read coverage to see which lines and branches were hit. Check for sanitizer output and crashes.\n\n5. **Refine or reject.** If coverage shows you missed the target path, adjust inputs. If you reached it with no violation, re-examine your hypothesis.\n\n6. **Repeat systematically.** Don't abandon a hypothesis too quickly — try multiple variations.\n\nIMPORTANT: If thesis validation results exist in `.workflow/thesis_results/trigger.json`, use those validated trigger values as your starting point. They have been confirmed to trigger the vulnerability in isolation — your job is to deliver them through the real protocol stack.\n\nIf the harness is insufficient (can't reach a branch, missing protocol feature), set verdict to rejected.\nIf you find an exploitable condition, document it and set verdict to approved.\nIf you exhaust hypotheses without findings, set verdict to blocked.\n\nWrite findings to `.workflow/discoveries/findings.md`.",
+      "inputs": ["analysis", "harness_build", "journal", "thesis_results?"],
+      "outputs": ["discoveries"],
+      "transitions": [{ "to": "orchestrator" }]
+    },
+    "differential_validate": {
+      "type": "agent",
+      "description": "Diagnoses divergence between isolated tests and live system",
+      "persona": "global",
+      "prompt": "You are a systems debugging specialist. The lightweight thesis validation found trigger values, but the full harness did not reproduce the expected behavior.\n\nRead the investigation journal at `.workflow/journal/state.json`, the thesis results in `.workflow/thesis_results/`, and the discovery findings in `.workflow/discoveries/findings.md`.\n\nYour job: determine WHY the isolated test and the live system diverge.\n\nInstrument the live system to observe actual behavior at the vulnerability site. Compare against the isolated test's predictions. Common divergences:\n- **Input transformation**: firewalls stripping options, proxies rewriting headers, serializers normalizing data\n- **State differences**: prior operations, initialization, caching, connection state\n- **Timing/ordering**: async processing, buffering, interrupt handling\n- **Type/encoding**: byte order, padding, alignment, type promotion differences\n- **Environment**: missing dependencies, different compiler flags, optimization levels\n\nUse the harness coverage data to confirm whether the vulnerable function is even reached. If coverage shows zero hits on the target function, the problem is reachability, not values.\n\nAdd debug output (printf/logging) to the vulnerable function if needed to observe intermediate values.\n\nWrite your diagnosis to `.workflow/differential/diagnosis.md`. Include: the specific divergence found, which layer is wrong (isolated test assumptions vs live system behavior), and what needs to change.",
+      "inputs": ["journal", "thesis_results", "discoveries", "harness_build"],
+      "outputs": ["differential"],
+      "transitions": [{ "to": "orchestrator" }]
+    },
+    "triage": {
+      "type": "agent",
+      "description": "Independent validation and severity assessment of findings",
+      "persona": "global",
+      "prompt": "You are a senior vulnerability triager. Read the findings in `.workflow/discoveries/findings.md` and the investigation journal at `.workflow/journal/state.json`.\n\nFor each reported finding:\n\n1. **Reproduce it.** Run the exact input sequence through the harness. Confirm the crash or violation occurs.\n2. **Validate severity.** Is the assessment accurate? A crash under ASAN might be a controlled abort, not exploitable. An OOB write to attacker-controlled data is more severe than an OOB read of one byte.\n3. **Confirm external exploitability.** Trace the input path: does it originate from an external/untrusted source? Could an attacker deliver this input in a real deployment?\n4. **Check for duplicates.** Search the project's issue tracker, CVE databases, and changelog for known issues.\n5. **Collect evidence.** Preserve crash logs, stack traces, coverage data, and the exact reproduction commands.\n\nWrite your triage report to `.workflow/triage/triage.md`.",
+      "inputs": ["discoveries", "harness_build", "journal"],
+      "outputs": ["triage"],
+      "transitions": [{ "to": "report_review" }]
+    },
+    "report_review": {
+      "type": "human_gate",
+      "description": "Human review of final vulnerability report",
+      "acceptedEvents": ["APPROVE", "FORCE_REVISION", "ABORT"],
+      "present": ["discoveries", "triage", "journal"],
+      "transitions": [
+        { "to": "done", "event": "APPROVE" },
+        { "to": "orchestrator", "event": "FORCE_REVISION" },
+        { "to": "aborted", "event": "ABORT" }
+      ]
+    },
+    "done": {
+      "type": "terminal",
+      "description": "Investigation complete",
+      "outputs": ["triage", "discoveries", "journal"]
+    },
+    "aborted": {
+      "type": "terminal",
+      "description": "Investigation aborted"
+    }
+  }
+}

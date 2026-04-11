@@ -1,4 +1,10 @@
-import type { AgentStateDefinition, WorkflowContext } from './types.js';
+import type {
+  AgentStateDefinition,
+  AgentTransitionDefinition,
+  WorkflowContext,
+  WorkflowDefinition,
+  WorkflowStateDefinition,
+} from './types.js';
 import { WORKFLOW_ARTIFACT_DIR } from './types.js';
 import { STATUS_BLOCK_INSTRUCTIONS } from './status-parser.js';
 
@@ -24,12 +30,13 @@ export function buildAgentCommand(
   stateId: string,
   stateConfig: AgentStateDefinition,
   context: WorkflowContext,
+  definition: WorkflowDefinition,
 ): string {
   const isReVisit = (context.visitCounts[stateId] ?? 0) > 1;
   if (isReVisit) {
     return buildReVisitPrompt(stateId, context);
   }
-  return buildFirstVisitPrompt(stateConfig, context);
+  return buildFirstVisitPrompt(stateConfig, context, definition);
 }
 
 // ---------------------------------------------------------------------------
@@ -41,7 +48,11 @@ export function buildAgentCommand(
  * Includes role instructions, task, previous agent output, artifact
  * references, expected outputs, human feedback, and status format.
  */
-function buildFirstVisitPrompt(stateConfig: AgentStateDefinition, context: WorkflowContext): string {
+function buildFirstVisitPrompt(
+  stateConfig: AgentStateDefinition,
+  context: WorkflowContext,
+  definition: WorkflowDefinition,
+): string {
   const sections: string[] = [];
 
   // 1. Role instructions from workflow definition
@@ -81,7 +92,13 @@ function buildFirstVisitPrompt(stateConfig: AgentStateDefinition, context: Workf
     sections.push(`## Human Feedback\n\n${context.humanPrompt}`);
   }
 
-  // 7. Status block instructions (always last)
+  // 7. Handoff clause (before status block, which must be last)
+  const handoff = buildHandoffClause(stateConfig.transitions, definition);
+  if (handoff) {
+    sections.push(handoff);
+  }
+
+  // 8. Status block instructions (always last)
   sections.push(STATUS_BLOCK_INSTRUCTIONS);
 
   return sections.join('\n\n---\n\n');
@@ -126,6 +143,53 @@ function buildReVisitPrompt(stateId: string, context: WorkflowContext): string {
   sections.push(STATUS_BLOCK_INSTRUCTIONS);
 
   return sections.join('\n\n---\n\n');
+}
+
+// ---------------------------------------------------------------------------
+// Handoff clause
+// ---------------------------------------------------------------------------
+
+/** Human-readable labels for named guard conditions. */
+const GUARD_LABELS: Record<string, string> = {
+  isRoundLimitReached: 'round limit reached',
+  isStalled: 'stall detected',
+  isApproved: 'approved',
+  isRejected: 'rejected',
+  isLowConfidence: 'low confidence',
+  isPassed: 'all checks passed',
+  hasTestCountRegression: 'test count regression',
+};
+
+/**
+ * Builds the "What happens with your output" section for first-visit prompts.
+ * Returns `undefined` when there are no transitions to describe.
+ */
+export function buildHandoffClause(
+  transitions: readonly AgentTransitionDefinition[],
+  definition: WorkflowDefinition,
+): string | undefined {
+  if (transitions.length === 0) return undefined;
+
+  const lines = transitions.map((t) => {
+    const condition = formatTransitionCondition(t);
+    const desc = (definition.states[t.to] as WorkflowStateDefinition | undefined)?.description ?? t.to;
+    return `- ${condition} \u2192 ${t.to} (${desc})`;
+  });
+
+  return '## What happens with your output\n\n' + 'Your verdict determines the next step:\n' + lines.join('\n');
+}
+
+/** Formats the condition portion of a transition line. */
+function formatTransitionCondition(transition: AgentTransitionDefinition): string {
+  if (transition.when) {
+    const pairs = Object.entries(transition.when).map(([k, v]) => `${k}=${String(v)}`);
+    return pairs.join(', ');
+  }
+  if (transition.guard) {
+    const label = GUARD_LABELS[transition.guard] ?? transition.guard;
+    return label;
+  }
+  return '(default)';
 }
 
 // ---------------------------------------------------------------------------

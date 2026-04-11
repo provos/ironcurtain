@@ -523,13 +523,36 @@ initWorkflows();
 
 const DESIGN_AND_CODE_GRAPH = {
   states: [
-    { id: 'plan', type: 'agent' as const, persona: 'planner', label: 'Plan' },
-    { id: 'plan_review', type: 'human_gate' as const, label: 'Plan Review' },
-    { id: 'implement', type: 'agent' as const, persona: 'coder', label: 'Implement' },
-    { id: 'review', type: 'agent' as const, persona: 'critic', label: 'Review' },
-    { id: 'design_review', type: 'human_gate' as const, label: 'Design Review' },
-    { id: 'completed', type: 'terminal' as const, label: 'Completed' },
-    { id: 'aborted', type: 'terminal' as const, label: 'Aborted' },
+    {
+      id: 'plan',
+      type: 'agent' as const,
+      persona: 'planner',
+      label: 'Plan',
+      description: 'Breaks down the task into implementation steps',
+    },
+    { id: 'plan_review', type: 'human_gate' as const, label: 'Plan Review', description: 'Human review of the plan' },
+    {
+      id: 'implement',
+      type: 'agent' as const,
+      persona: 'coder',
+      label: 'Implement',
+      description: 'Implements all modules per the design spec',
+    },
+    {
+      id: 'review',
+      type: 'agent' as const,
+      persona: 'critic',
+      label: 'Review',
+      description: 'Reviews code against the spec for correctness and quality',
+    },
+    {
+      id: 'design_review',
+      type: 'human_gate' as const,
+      label: 'Design Review',
+      description: 'Human review of the design specification',
+    },
+    { id: 'completed', type: 'terminal' as const, label: 'Completed', description: 'Workflow complete' },
+    { id: 'aborted', type: 'terminal' as const, label: 'Aborted', description: 'Workflow aborted' },
   ],
   transitions: [
     { from: 'plan', to: 'plan_review', label: '' },
@@ -547,9 +570,20 @@ const DESIGN_AND_CODE_GRAPH = {
 
 const CODE_REVIEW_GRAPH = {
   states: [
-    { id: 'analyze', type: 'agent' as const, persona: 'reviewer', label: 'Analyze' },
-    { id: 'report_review', type: 'human_gate' as const, label: 'Report Review' },
-    { id: 'completed', type: 'terminal' as const, label: 'Completed' },
+    {
+      id: 'analyze',
+      type: 'agent' as const,
+      persona: 'reviewer',
+      label: 'Analyze',
+      description: 'Analyzes code for issues and improvements',
+    },
+    {
+      id: 'report_review',
+      type: 'human_gate' as const,
+      label: 'Report Review',
+      description: 'Human review of the analysis report',
+    },
+    { id: 'completed', type: 'terminal' as const, label: 'Completed', description: 'Review complete' },
   ],
   transitions: [
     { from: 'analyze', to: 'report_review', label: '' },

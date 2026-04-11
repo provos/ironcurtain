@@ -81,6 +81,7 @@ const linearDefinition: WorkflowDefinition = {
   states: {
     plan: {
       type: 'agent',
+      description: 'Creates a plan',
       persona: 'planner',
       prompt: 'You are a planner.',
       inputs: [],
@@ -89,6 +90,7 @@ const linearDefinition: WorkflowDefinition = {
     },
     design: {
       type: 'agent',
+      description: 'Creates a design',
       persona: 'architect',
       prompt: 'You are an architect.',
       inputs: ['plan'],
@@ -97,6 +99,7 @@ const linearDefinition: WorkflowDefinition = {
     },
     done: {
       type: 'terminal',
+      description: 'Done',
       outputs: ['plan', 'design'],
     },
   },
@@ -110,6 +113,7 @@ const gatedDefinition: WorkflowDefinition = {
   states: {
     plan: {
       type: 'agent',
+      description: 'Creates a plan',
       persona: 'planner',
       prompt: 'You are a planner.',
       inputs: [],
@@ -118,6 +122,7 @@ const gatedDefinition: WorkflowDefinition = {
     },
     review_gate: {
       type: 'human_gate',
+      description: 'Human review gate',
       acceptedEvents: ['APPROVE', 'FORCE_REVISION', 'ABORT'],
       present: ['plan'],
       transitions: [
@@ -128,6 +133,7 @@ const gatedDefinition: WorkflowDefinition = {
     },
     design: {
       type: 'agent',
+      description: 'Creates a design',
       persona: 'architect',
       prompt: 'You are an architect.',
       inputs: ['plan'],
@@ -136,10 +142,12 @@ const gatedDefinition: WorkflowDefinition = {
     },
     done: {
       type: 'terminal',
+      description: 'Done',
       outputs: ['plan', 'design'],
     },
     aborted: {
       type: 'terminal',
+      description: 'Aborted',
     },
   },
 };
@@ -152,6 +160,7 @@ const deterministicLoopDefinition: WorkflowDefinition = {
   states: {
     plan: {
       type: 'agent',
+      description: 'Creates a plan',
       persona: 'planner',
       prompt: 'You are a planner.',
       inputs: [],
@@ -160,6 +169,7 @@ const deterministicLoopDefinition: WorkflowDefinition = {
     },
     implement: {
       type: 'agent',
+      description: 'Writes code',
       persona: 'coder',
       prompt: 'You are a coder.',
       inputs: ['plan'],
@@ -168,11 +178,13 @@ const deterministicLoopDefinition: WorkflowDefinition = {
     },
     test: {
       type: 'deterministic',
+      description: 'Runs tests',
       run: [['npm', 'test']],
       transitions: [{ to: 'done', guard: 'isPassed' }, { to: 'implement' }],
     },
     done: {
       type: 'terminal',
+      description: 'Done',
       outputs: ['plan', 'code'],
     },
   },
@@ -187,6 +199,7 @@ const coderCriticWhenDefinition: WorkflowDefinition = {
   states: {
     implement: {
       type: 'agent',
+      description: 'Writes code',
       persona: 'coder',
       prompt: 'You are a coder.',
       inputs: [],
@@ -195,6 +208,7 @@ const coderCriticWhenDefinition: WorkflowDefinition = {
     },
     review: {
       type: 'agent',
+      description: 'Reviews code',
       persona: 'critic',
       prompt: 'You are a critic.',
       inputs: ['code'],
@@ -208,6 +222,7 @@ const coderCriticWhenDefinition: WorkflowDefinition = {
     },
     escalate_gate: {
       type: 'human_gate',
+      description: 'Human escalation gate',
       acceptedEvents: ['APPROVE', 'FORCE_REVISION', 'ABORT'],
       present: ['code', 'review'],
       transitions: [
@@ -218,10 +233,12 @@ const coderCriticWhenDefinition: WorkflowDefinition = {
     },
     done: {
       type: 'terminal',
+      description: 'Done',
       outputs: ['code'],
     },
     aborted: {
       type: 'terminal',
+      description: 'Aborted',
     },
   },
 };
@@ -235,6 +252,7 @@ const coderCriticDefinition: WorkflowDefinition = {
   states: {
     implement: {
       type: 'agent',
+      description: 'Writes code',
       persona: 'coder',
       prompt: 'You are a coder.',
       inputs: [],
@@ -243,6 +261,7 @@ const coderCriticDefinition: WorkflowDefinition = {
     },
     review: {
       type: 'agent',
+      description: 'Reviews code',
       persona: 'critic',
       prompt: 'You are a critic.',
       inputs: ['code'],
@@ -256,6 +275,7 @@ const coderCriticDefinition: WorkflowDefinition = {
     },
     escalate_gate: {
       type: 'human_gate',
+      description: 'Human escalation gate',
       acceptedEvents: ['APPROVE', 'FORCE_REVISION', 'ABORT'],
       present: ['code', 'review'],
       transitions: [
@@ -266,10 +286,12 @@ const coderCriticDefinition: WorkflowDefinition = {
     },
     done: {
       type: 'terminal',
+      description: 'Done',
       outputs: ['code'],
     },
     aborted: {
       type: 'terminal',
+      description: 'Aborted',
     },
   },
 };
@@ -282,6 +304,7 @@ const parallelDefinition: WorkflowDefinition = {
   states: {
     plan: {
       type: 'agent',
+      description: 'Creates a plan',
       persona: 'planner',
       prompt: 'You are a planner.',
       inputs: [],
@@ -290,6 +313,7 @@ const parallelDefinition: WorkflowDefinition = {
     },
     implement: {
       type: 'agent',
+      description: 'Writes code',
       persona: 'coder',
       prompt: 'You are a coder.',
       inputs: ['spec'],
@@ -300,6 +324,7 @@ const parallelDefinition: WorkflowDefinition = {
     },
     done: {
       type: 'terminal',
+      description: 'Done',
       outputs: ['spec', 'code'],
     },
   },
@@ -1081,6 +1106,7 @@ describe('buildWorkflowMachine', () => {
         states: {
           implement: {
             type: 'agent',
+            description: 'Writes code',
             persona: 'coder',
             prompt: 'You are a coder.',
             inputs: [],
@@ -1089,6 +1115,7 @@ describe('buildWorkflowMachine', () => {
           },
           review: {
             type: 'agent',
+            description: 'Reviews code',
             persona: 'critic',
             prompt: 'You are a critic.',
             inputs: ['code'],
@@ -1100,14 +1127,15 @@ describe('buildWorkflowMachine', () => {
           },
           escalate_gate: {
             type: 'human_gate',
+            description: 'Human escalation gate',
             acceptedEvents: ['APPROVE', 'ABORT'],
             transitions: [
               { to: 'done', event: 'APPROVE' },
               { to: 'aborted', event: 'ABORT' },
             ],
           },
-          done: { type: 'terminal' },
-          aborted: { type: 'terminal' },
+          done: { type: 'terminal', description: 'Done' },
+          aborted: { type: 'terminal', description: 'Aborted' },
         },
       };
 
@@ -1185,14 +1213,15 @@ describe('buildWorkflowMachine', () => {
         states: {
           agent: {
             type: 'agent',
+            description: 'Does work',
             persona: 'worker',
             prompt: 'Do work.',
             inputs: [],
             outputs: ['result'],
             transitions: [{ to: 'done', when: { escalation: null } }, { to: 'escalated' }],
           },
-          done: { type: 'terminal' },
-          escalated: { type: 'terminal' },
+          done: { type: 'terminal', description: 'Done' },
+          escalated: { type: 'terminal', description: 'Escalated' },
         },
       };
 
@@ -1278,13 +1307,14 @@ describe('buildWorkflowMachine', () => {
         states: {
           review: {
             type: 'agent',
+            description: 'Reviews code',
             persona: 'critic',
             prompt: 'Review.',
             inputs: [],
             outputs: ['review'],
             transitions: [{ to: 'done', when: { verdict: 'approved' }, flag: 'low confidence approval' }],
           },
-          done: { type: 'terminal' },
+          done: { type: 'terminal', description: 'Done' },
         },
       };
 
@@ -1311,14 +1341,15 @@ describe('buildWorkflowMachine', () => {
         states: {
           agent: {
             type: 'agent',
+            description: 'Does work',
             persona: 'worker',
             prompt: 'Do work.',
             inputs: [],
             outputs: ['result'],
             transitions: [{ to: 'retry', when: { completed: false } }, { to: 'done' }],
           },
-          retry: { type: 'terminal' },
-          done: { type: 'terminal' },
+          retry: { type: 'terminal', description: 'Retry' },
+          done: { type: 'terminal', description: 'Done' },
         },
       };
 
@@ -1382,6 +1413,7 @@ describe('buildWorkflowMachine', () => {
         states: {
           agent: {
             type: 'agent',
+            description: 'Does work',
             persona: 'worker',
             prompt: 'Do work.',
             inputs: [],
@@ -1393,8 +1425,8 @@ describe('buildWorkflowMachine', () => {
               { to: 'safe_done' },
             ],
           },
-          should_not_reach: { type: 'terminal' },
-          safe_done: { type: 'terminal' },
+          should_not_reach: { type: 'terminal', description: 'Should not reach' },
+          safe_done: { type: 'terminal', description: 'Safe done' },
         },
       };
 

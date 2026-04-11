@@ -95,6 +95,10 @@
 
   const visitCounts = $derived(detail?.context?.visitCounts ?? {});
 
+  const gateStateDescription = $derived(
+    gate && detail?.stateGraph ? detail.stateGraph.states.find((s) => s.id === gate.stateName)?.description : undefined,
+  );
+
   async function handleGateResolve(event: string, prompt?: string): Promise<void> {
     resolveError = '';
     try {
@@ -142,6 +146,7 @@
         {gate}
         {workflowId}
         workflowName={summary.name}
+        stateDescription={gateStateDescription}
         onResolve={handleGateResolve}
         fetchArtifacts={getWorkflowArtifacts}
         fetchFileTree={getWorkflowFileTree}

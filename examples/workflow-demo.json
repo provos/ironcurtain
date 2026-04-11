@@ -9,6 +9,7 @@
   "states": {
     "plan": {
       "type": "agent",
+      "description": "Breaks down the task into a clear plan",
       "persona": "planner",
       "prompt": "You are a project planner. Break down the task into a clear plan with numbered steps.",
       "inputs": [],
@@ -17,6 +18,7 @@
     },
     "plan_review": {
       "type": "human_gate",
+      "description": "Human review of the plan",
       "acceptedEvents": ["APPROVE", "FORCE_REVISION", "ABORT"],
       "present": ["plan"],
       "transitions": [
@@ -27,6 +29,7 @@
     },
     "design": {
       "type": "agent",
+      "description": "Produces technical design spec with interfaces",
       "persona": "architect",
       "prompt": "You are a software architect. Produce a technical design spec with interfaces and data flow.",
       "inputs": ["plan"],
@@ -35,6 +38,7 @@
     },
     "design_review": {
       "type": "human_gate",
+      "description": "Human review of the design specification",
       "acceptedEvents": ["APPROVE", "FORCE_REVISION", "ABORT"],
       "present": ["spec"],
       "transitions": [
@@ -45,6 +49,7 @@
     },
     "implement": {
       "type": "agent",
+      "description": "Writes working code with tests",
       "persona": "coder",
       "prompt": "You are an implementation engineer. Write working code with tests based on the plan and spec.",
       "inputs": ["plan", "spec"],
@@ -53,11 +58,13 @@
     },
     "validate": {
       "type": "deterministic",
+      "description": "Runs automated test validation",
       "run": [["echo", "3 tests passed"]],
       "transitions": [{ "to": "review", "guard": "isPassed" }, { "to": "implement" }]
     },
     "review": {
       "type": "agent",
+      "description": "Reviews code against the spec",
       "persona": "critic",
       "prompt": "You are a code reviewer. Review the implementation against the spec and provide a verdict.",
       "inputs": ["code", "spec"],
@@ -70,6 +77,7 @@
     },
     "escalate_gate": {
       "type": "human_gate",
+      "description": "Human review when coder-critic loop reaches round limit",
       "acceptedEvents": ["APPROVE", "FORCE_REVISION", "ABORT"],
       "present": ["code", "reviews"],
       "transitions": [
@@ -80,10 +88,12 @@
     },
     "done": {
       "type": "terminal",
+      "description": "Workflow complete",
       "outputs": ["code", "reviews"]
     },
     "aborted": {
-      "type": "terminal"
+      "type": "terminal",
+      "description": "Workflow aborted"
     }
   }
 }

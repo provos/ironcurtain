@@ -79,6 +79,7 @@ export type WorkflowStateDefinition =
 
 export interface AgentStateDefinition {
   readonly type: 'agent';
+  readonly description: string;
   readonly persona: string;
   /**
    * Prompt template sent to the agent on FIRST invocation of this state.
@@ -114,6 +115,7 @@ export interface AgentStateDefinition {
 
 export interface HumanGateStateDefinition {
   readonly type: 'human_gate';
+  readonly description: string;
   /** Event types this gate accepts. Each maps to a HUMAN_* WorkflowEvent. */
   readonly acceptedEvents: readonly HumanGateEventType[];
   /** Artifact names to present to the human for review. */
@@ -127,6 +129,7 @@ export interface HumanGateStateDefinition {
 
 export interface DeterministicStateDefinition {
   readonly type: 'deterministic';
+  readonly description: string;
   /**
    * Commands to execute. Each command is an array of [binary, ...args].
    * Never a shell string -- per CLAUDE.md safe coding rules.
@@ -137,6 +140,7 @@ export interface DeterministicStateDefinition {
 
 export interface TerminalStateDefinition {
   readonly type: 'terminal';
+  readonly description: string;
   readonly outputs?: readonly string[];
   readonly cleanup?: readonly (readonly string[])[];
 }

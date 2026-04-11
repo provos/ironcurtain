@@ -719,7 +719,7 @@ export class WorkflowOrchestrator implements WorkflowController {
 
     instance.tab.write(`[agent] Starting "${stateId}" (persona: ${stateConfig.persona})`);
 
-    const command = buildAgentCommand(stateId, stateConfig, context);
+    const command = buildAgentCommand(stateId, stateConfig, context, definition);
 
     const mode: SessionMode =
       settings.mode === 'builtin'

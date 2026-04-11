@@ -22,6 +22,7 @@ export function extractStateGraph(definition: WorkflowDefinition): StateGraphDto
       type: state.type,
       persona: state.type === 'agent' ? state.persona : undefined,
       label: formatStateLabel(id),
+      description: state.description,
     });
 
     switch (state.type) {
