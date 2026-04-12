@@ -21,16 +21,28 @@ states:
 
       Your target file is specified in the task description.
 
-      Your job is STRUCTURAL ANALYSIS ONLY. Do NOT attempt to identify specific vulnerabilities or propose exploits. The discovery phase comes later with proper tooling.
+      Your job is STRUCTURAL ANALYSIS. Map the code's architecture, data flow, and assumptions. Do NOT claim specific code paths are vulnerable, propose exploits, or assess severity — later agents handle that with execution-based tooling.
 
-      1. Read the target file. Understand what it does, what data it processes, and what trust boundaries it sits on.
-      2. Trace the call graph backward: what functions call into this file? Keep tracing until you reach an external entry point (network socket, file input, IPC, CLI argument, HTTP handler, etc.). Document the full call chain from external input to target.
-      3. Identify the language and build system. Determine what coverage instrumentation is available (gcov, llvm-cov, coverage.py, c8/v8, llvm-cov for Rust, etc.) and what sanitizers apply (ASAN, UBSAN, MSAN for C/C++; equivalents for other languages).
-      4. Identify existing test infrastructure: are there tests, fuzzers, or harnesses already in the project that exercise this code?
-      5. Note any protocol state machines or multi-step interactions required to reach the target (e.g., TCP handshake before SACK processing, OAuth flow before auth check).
-      6. Catalog the key functions in the target file, their signatures, what data types they manipulate, and what invariants the code assumes (comments like 'should never happen', assertions, unchecked casts, etc.).
+      1. **Code role and data flow.** Read the target file. What does it do? What data does it process? What trust boundaries does it sit on? Where does untrusted input enter?
 
-      Write your analysis to `.workflow/analysis/analysis.md`. Include: target summary, function catalog, call chain(s) from external entry points, language/tooling inventory, existing test infrastructure, and required interaction sequences.
+      2. **Call graph to external entry points.** Trace backward from the target file's functions: what calls them? Keep tracing until you reach an external entry point (network socket, file input, IPC, CLI argument, HTTP handler, etc.). Document every call chain from external input to target.
+
+      3. **Language, build system, and tooling.** What language and build system? What coverage instrumentation is available? What sanitizers or runtime checkers apply?
+
+      4. **Existing test infrastructure.** Are there tests, fuzzers, or harnesses that exercise this code? What do they cover and what do they miss?
+
+      5. **Protocol and interaction sequences.** What multi-step interactions are required to reach the target code (handshakes, authentication, session setup, state machine transitions)?
+
+      6. **Function catalog with assumption inventory.** For each key function in the target file, document:
+         - Signature, parameters, and return type
+         - Data types used — especially type widths, signed/unsigned distinctions, casts between types, and any macros or wrappers around comparisons or arithmetic
+         - Stated invariants: assertions, comments like "should never happen," documented preconditions
+         - Unstated assumptions: values that are used without validation, conditions that are assumed true but never checked, state that is expected to be non-null or within bounds without guards
+         - Where external input reaches this function and what validation (if any) occurs before it arrives
+
+      The function catalog is the most important output. It gives downstream agents the raw material to form hypotheses. Focus on precision: exact type names, exact macro definitions, exact check conditions. Do not editorialize about what might be exploitable.
+
+      Write your analysis to `.workflow/analysis/analysis.md`.
     inputs: []
     outputs:
       - analysis
@@ -58,13 +70,26 @@ states:
 
       | Verdict | Destination | When to use |
       |---------|-------------|-------------|
-      | thesis_validate | thesis_validate | Validate a hypothesis cheaply before building infrastructure. Extract the function, fuzz locally. |
-      | harness_design | harness_design | Build/upgrade an end-to-end harness. Use AFTER thesis confirms trigger values, or when the vulnerability cannot be tested in isolation. Be specific in your output about what to build. |
+      | thesis_validate | thesis_validate | Validate a hypothesis cheaply before building infrastructure. |
+      | harness_design | harness_design | Build/upgrade an end-to-end harness. Be specific about what to build. |
       | discover | discover | Run hypothesis-driven research using an existing working harness. |
-      | differential_validate | differential_validate | Isolated test succeeded but live system diverges. Need to diagnose the gap. |
-      | escalate | human_escalation | Investigation is stuck. Write a clear description of what was tried and what decision you need. |
-      | triage | triage | Enough evidence collected. Dispatch to triage for independent validation. |
-      | reanalyze | analyze | Current hypothesis is fundamentally wrong. Need fresh structural analysis. |
+      | differential_validate | differential_validate | Isolated test succeeded but live system diverges. |
+      | escalate | human_escalation | Investigation is stuck. Describe what was tried and what you need. |
+      | triage | triage | Enough evidence collected for independent validation. |
+      | reanalyze | analyze | Current hypothesis is fundamentally wrong. Need fresh analysis. |
+
+      ## Strategic principles
+
+      **Cheap validation first.** When a hypothesis involves specific input values that trigger a condition, ALWAYS route to thesis_validate before building an end-to-end harness. Isolated tests run millions of trials per second; live harnesses run one per minute. Building infrastructure for unvalidated values wastes hours.
+
+      **Route to harness_design only when:**
+      - thesis_validate has confirmed trigger values and you need to deliver them through a real system, OR
+      - the vulnerability fundamentally cannot be tested in isolation (requires multi-process interaction, kernel/userland boundary, real network stack behavior, timing-dependent races across components)
+
+      **Diagnosing failures.** When the discover agent reports that validated trigger values don't work through the live harness:
+      - If coverage shows the target function IS reached but the condition doesn't fire → the values need adjustment for the live context (protocol encoding, byte order, framing). Route to differential_validate.
+      - If coverage shows the target function is NOT reached → the harness has a reachability problem (firewall, routing, wrong entry point). Route to harness_design for redesign.
+      - If the discover agent couldn't run the harness at all → infrastructure problem. Route to harness_design.
 
       IMPORTANT: Always update `.workflow/journal/state.json` before setting your verdict. The journal is the persistent memory of this investigation — your conversation history may be long but the journal is the structured summary.
 
@@ -130,28 +155,48 @@ states:
     prompt: |
       You have a vulnerability hypothesis from the orchestrator. Read the orchestrator's previous output and the investigation journal at `.workflow/journal/state.json` to understand what you are validating.
 
-      Your job: build the CHEAPEST possible test that confirms or rejects the hypothesis WITHOUT the full end-to-end harness.
+      Your job: build the CHEAPEST possible test that confirms or rejects the hypothesis WITHOUT the full end-to-end harness. This test is the false-positive filter — it runs millions of trials in seconds, catching errors that would waste hours in a live harness.
 
-      For different vulnerability classes, this means different things:
-      - **Integer overflow / memory corruption (C/C++/Rust)**: Extract the vulnerable function into a standalone .c file. Stub external dependencies with minimal types and constants. Write a fuzzer that iterates over candidate input values and checks whether the hypothesized condition (NULL deref, buffer overrun, integer wrap) actually occurs. Compile and run it.
-      - **TOCTOU / race condition**: Write a minimal concurrent test that creates the race window with tight loops.
-      - **Logic error / auth bypass**: Write a unit test that exercises the specific branch sequence.
-      - **Injection (SQL, command, XSS)**: Feed crafted payloads to the parser/handler in isolation.
+      ## Approach
+
+      Extract the code path from the hypothesis into a standalone, self-contained test program. The form depends on the vulnerability class:
+      - **Value-dependent bugs** (overflow, truncation, sign confusion, comparison errors): Extract the relevant function(s). Stub external dependencies with minimal types and constants. Write a test that systematically iterates over input values, focusing on boundaries of the types involved. Compile and run it.
+      - **State-dependent bugs** (use-after-free, double-free, state machine violations): Extract the state management code. Build a driver that exercises state transitions in sequences that could violate invariants.
+      - **Race conditions**: Write a minimal concurrent test that creates the race window with tight loops.
+      - **Logic errors** (auth bypass, access control, protocol violations): Write a test that exercises the specific branch sequence.
+      - **Input handling bugs** (injection, deserialization, parsing errors): Feed crafted payloads to the handler in isolation.
+
+      ## What to preserve and what to stub
 
       The test MUST faithfully preserve:
-      - The exact semantics of the vulnerability site (types, casts, comparison operators, macros)
-      - The control flow that reaches it (which branches, which loops)
-      - Any state that accumulates across iterations (linked lists, counters, caches)
+      - The exact semantics of the vulnerability site — same types, same casts, same operators, same macros or helper functions. Copy them verbatim from the source.
+      - The control flow that reaches the vulnerability — which branches, which loops, which conditions
+      - Any state that accumulates across iterations (linked lists, counters, caches, lookup tables)
 
       The test CAN stub:
-      - I/O, networking, filesystem
-      - Allocation (use malloc instead of kernel pool allocators)
+      - I/O, networking, filesystem, timers
+      - Memory allocation (use the language's standard allocator instead of custom pools)
       - Logging, statistics, error reporting
       - Global state not relevant to the vulnerability path
 
-      Run the test. Report concrete trigger values if found, or report that the hypothesis was exhaustively tested and no trigger exists.
+      ## Testing strategy
 
-      Write results to `.workflow/thesis_results/results.md`. If trigger values are found, also write them to `.workflow/thesis_results/trigger.json` in a structured format the harness designer can consume.
+      Do NOT test a single hand-picked set of values. The point of this stage is to search the input space cheaply:
+      - Focus on boundaries of the types involved — for each input variable, test values at and near the minimum, maximum, zero, and any type-width boundaries
+      - If the hypothesis involves arithmetic that wraps or overflows, test values that approach the wrap point from both directions
+      - If the search space is small enough (< 100M combinations), enumerate exhaustively
+      - If the space is too large, sample densely near boundaries and randomly elsewhere
+      - Run the test and observe: does the hypothesized condition (crash, assertion failure, invariant violation, unexpected output) actually occur?
+
+      ## Output
+
+      Write results to `.workflow/thesis_results/results.md`. Include:
+      - The complete standalone test program (so differential_validate can compare against the live system later)
+      - How many trials were run and what space was covered
+      - If trigger values were found: the exact values, the observed behavior, and why these values trigger the condition
+      - If no trigger was found after thorough search: what space was covered and why you believe the hypothesis is invalid under the tested conditions
+
+      If trigger values are found, also write them to `.workflow/thesis_results/trigger.json` in a structured format the harness designer can consume.
     inputs:
       - analysis
       - journal
@@ -181,7 +226,17 @@ states:
 
       **Branch tracing:** Branch-level coverage, not just line coverage.
 
-      If thesis_results/trigger.json exists, the harness must be able to deliver those specific trigger values through the real protocol stack. Document how the trigger values map to protocol-level inputs.
+      If thesis_results/trigger.json exists, the harness's primary job is delivering those validated trigger values through the real system. Document exactly how the trigger values map to protocol-level inputs (encoding, framing, byte order, field placement).
+
+      ## Diagnostic checkpoints
+
+      The design must include verification steps that confirm the harness works BEFORE attempting to deliver exploit values:
+      1. **Baseline reachability:** Send a benign input through the harness and confirm via coverage that the target function is executed. If coverage shows zero hits on the target function, the call chain is broken — stop and diagnose before proceeding.
+      2. **Input integrity:** Verify that inputs arrive at the target function unmodified. Middleware (firewalls, proxies, serializers, protocol stacks) may transform, strip, or reject inputs silently.
+
+      ## Infrastructure assumptions
+
+      Explicitly list every external dependency the harness requires (VMs, packages, network access, kernel modules, special permissions) and what happens if each is unavailable. The build agent and validate agent will use this list to diagnose failures.
 
       Be concrete. Name specific tools, flags, file paths, and API functions.
 
@@ -255,12 +310,12 @@ states:
       Perform these validation steps:
 
       1. Run the harness reset command. Verify it exits cleanly.
-      2. Run the harness with a baseline input. Verify it exits without errors.
-      3. Run the harness coverage command. Verify the target file appears in the report with non-zero coverage.
-      4. If the harness supports interactive/stateful sessions, run a short multi-step session.
-      5. Verify branch-level coverage data is present.
+      2. Run the harness with a baseline input (a simple, normal-case input). Verify it exits without errors.
+      3. Run the harness coverage command. Verify the **target function** (not just the target file) appears in coverage with non-zero hits. If the target file has coverage but the target function does not, the call chain is broken — this is a failure.
+      4. If the harness supports interactive/stateful sessions, run a short multi-step session and verify state persists between steps.
+      5. Verify branch-level coverage data is present, not just line coverage.
 
-      CRITICAL: If ANY step fails because of missing dependencies (scapy, QEMU, pip, etc.), infrastructure issues (no network, no VM), or permission errors — you MUST report verdict rejected. Do NOT report approved with caveats about 'infrastructure limitations'. A harness that cannot run is not validated.
+      CRITICAL: If ANY step fails — whether from missing dependencies, infrastructure issues, permission errors, or the target function not appearing in coverage — you MUST report verdict rejected with the specific failure. Do NOT report approved with caveats. A harness that cannot demonstrate coverage of the target function is not validated.
 
       Write validation results to `.workflow/harness_validate/validation.md`.
     inputs:
@@ -322,27 +377,41 @@ states:
     prompt: |
       You are a vulnerability researcher. You have a working instrumented harness for the target file. Read the analysis, harness build instructions, investigation journal, and any thesis validation results.
 
-      Your goal: find an externally exploitable vulnerability in the target file using the harness.
+      Your goal: find an externally exploitable vulnerability in the target file by running experiments through the harness and observing results.
 
-      Methodology:
+      ## First action: verify the harness
 
-      1. **Read the target file carefully.** Understand every code path, trust boundary, and assumption. Pay attention to: integer arithmetic (overflow, truncation, sign confusion), buffer management, state machine transitions, comparison functions, sentinel values, error handling, and implicit invariants.
+      Before forming hypotheses, run the harness with a baseline input and read the coverage output. Confirm:
+      - The harness executes without errors
+      - The target function appears in the coverage report
+      - You can observe which branches were taken
 
-      2. **Form a hypothesis.** Identify a specific code path that looks potentially vulnerable. Articulate what would need to be true for it to be exploitable.
+      If the harness doesn't work, set verdict to rejected immediately. Do not attempt to find vulnerabilities by reading code alone — that is not your job. Your value comes from execution-based evidence.
 
-      3. **Design an input sequence** that exercises the hypothesized vulnerability. Use the harness to send this input.
+      ## If thesis validation results exist
 
-      4. **Observe results.** Read coverage to see which lines and branches were hit. Check for sanitizer output and crashes.
+      Read `.workflow/thesis_results/trigger.json`. These values have been confirmed to trigger the vulnerability in isolation. Your job is to deliver them through the real protocol stack:
 
-      5. **Refine or reject.** If coverage shows you missed the target path, adjust inputs. If you reached it with no violation, re-examine your hypothesis.
+      1. Map the trigger values to harness inputs (protocol encoding, framing, byte order)
+      2. Send them through the harness
+      3. Observe coverage and check for the expected behavior (crash, sanitizer output, invariant violation)
+      4. If the expected behavior doesn't occur, compare coverage against what the isolated test predicted. Report what diverged.
 
-      6. **Repeat systematically.** Don't abandon a hypothesis too quickly — try multiple variations.
+      ## If no thesis results exist (open-ended discovery)
 
-      IMPORTANT: If thesis validation results exist in `.workflow/thesis_results/trigger.json`, use those validated trigger values as your starting point. They have been confirmed to trigger the vulnerability in isolation — your job is to deliver them through the real protocol stack.
+      Use the function catalog from the analysis to guide hypothesis formation:
 
-      If the harness is insufficient (can't reach a branch, missing protocol feature), set verdict to rejected.
-      If you find an exploitable condition, document it and set verdict to approved.
-      If you exhaust hypotheses without findings, set verdict to blocked.
+      1. **Form a hypothesis** from the analysis's function catalog. Look for unstated assumptions, unchecked conditions, and type boundary risks documented there.
+      2. **Design an input sequence** that exercises the hypothesized code path. Use the harness to send it.
+      3. **Observe results.** Read coverage to see which lines and branches were hit. Check for sanitizer output and crashes.
+      4. **Refine or pivot.** If coverage shows you missed the target path, adjust inputs to hit the right branch. If you reached it with no violation, try variations before moving to a new hypothesis.
+      5. **Repeat systematically.** Work through the function catalog's assumption inventory.
+
+      ## Verdicts
+
+      - **approved**: Found an exploitable condition. Document the vulnerability, reproduction steps, and severity assessment.
+      - **rejected**: The harness is insufficient (can't reach the target, missing protocol feature, broken infrastructure).
+      - **blocked**: Exhausted hypotheses without findings, or the validated trigger values don't produce the expected result in the live system.
 
       Write findings to `.workflow/discoveries/findings.md`.
     inputs:
