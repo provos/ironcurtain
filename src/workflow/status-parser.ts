@@ -53,7 +53,15 @@ export function parseAgentStatus(responseText: string): AgentOutput | undefined 
   // One of the two capture groups will match (regex alternation).
   // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
   const rawBlock = match[1] ?? match[2];
-  const parsed: unknown = YAML.parse(rawBlock);
+  let parsed: unknown;
+  try {
+    parsed = YAML.parse(rawBlock, { maxAliasCount: 0 });
+  } catch (err) {
+    throw new AgentStatusParseError(
+      `YAML parse error in agent_status block: ${err instanceof Error ? err.message : String(err)}`,
+      rawBlock,
+    );
+  }
 
   // YAML.parse returns { agent_status: { ... } } — unwrap the outer key
   const inner =
