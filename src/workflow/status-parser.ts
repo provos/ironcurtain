@@ -1,3 +1,4 @@
+import YAML from 'yaml';
 import { z } from 'zod';
 import type { AgentOutput } from './types.js';
 import { CONFIDENCE_VALUES } from './types.js';
@@ -30,59 +31,6 @@ const agentOutputSchema = z.object({
 });
 
 // ---------------------------------------------------------------------------
-// Simple YAML key-value parser (flat structure only)
-// ---------------------------------------------------------------------------
-
-/**
- * Parses a flat YAML-like block into key-value pairs.
- * Handles: strings (quoted and unquoted), numbers, booleans, null.
- * Does NOT handle nested structures, arrays, or multi-line values.
- */
-function parseSimpleYaml(block: string): Record<string, unknown> {
-  const result: Record<string, unknown> = {};
-  const lines = block.split('\n');
-
-  for (const line of lines) {
-    const trimmed = line.trim();
-    // Skip empty lines, comments, and the header line
-    if (!trimmed || trimmed.startsWith('#') || trimmed === 'agent_status:') {
-      continue;
-    }
-
-    const colonIndex = trimmed.indexOf(':');
-    if (colonIndex === -1) continue;
-
-    const key = trimmed.slice(0, colonIndex).trim();
-    const rawValue = trimmed.slice(colonIndex + 1).trim();
-
-    result[key] = parseYamlValue(rawValue);
-  }
-
-  return result;
-}
-
-function parseYamlValue(raw: string): unknown {
-  // null
-  if (raw === 'null' || raw === '~' || raw === '') {
-    return null;
-  }
-  // boolean
-  if (raw === 'true') return true;
-  if (raw === 'false') return false;
-  // quoted string
-  if ((raw.startsWith('"') && raw.endsWith('"')) || (raw.startsWith("'") && raw.endsWith("'"))) {
-    return raw.slice(1, -1);
-  }
-  // number
-  const num = Number(raw);
-  if (!Number.isNaN(num) && raw !== '') {
-    return num;
-  }
-  // unquoted string
-  return raw;
-}
-
-// ---------------------------------------------------------------------------
 // Status block extraction
 // ---------------------------------------------------------------------------
 
@@ -105,9 +53,15 @@ export function parseAgentStatus(responseText: string): AgentOutput | undefined 
   // One of the two capture groups will match (regex alternation).
   // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
   const rawBlock = match[1] ?? match[2];
-  const parsed = parseSimpleYaml(rawBlock);
+  const parsed: unknown = YAML.parse(rawBlock);
 
-  const result = agentOutputSchema.safeParse(parsed);
+  // YAML.parse returns { agent_status: { ... } } — unwrap the outer key
+  const inner =
+    parsed != null && typeof parsed === 'object' && 'agent_status' in parsed
+      ? (parsed as Record<string, unknown>).agent_status
+      : parsed;
+
+  const result = agentOutputSchema.safeParse(inner);
   if (!result.success) {
     const issues = result.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ');
     throw new AgentStatusParseError(`Malformed agent_status block: ${issues}`, rawBlock);
