@@ -51,12 +51,16 @@ if (existsSync(readOnlyDir)) {
   }
 }
 
-// Copy bundled workflow definitions
+// Copy bundled workflow definitions (.yaml, .yml, .json)
 const srcWorkflows = resolve(__dirname, '..', 'src', 'workflow', 'workflows');
 const distWorkflows = resolve(__dirname, '..', 'dist', 'workflow', 'workflows');
+const WORKFLOW_EXTS = new Set(['.yaml', '.yml', '.json']);
 if (existsSync(srcWorkflows)) {
   mkdirSync(distWorkflows, { recursive: true });
-  for (const file of readdirSync(srcWorkflows).filter((f) => f.endsWith('.json'))) {
+  for (const file of readdirSync(srcWorkflows).filter((f) => {
+    const ext = f.slice(f.lastIndexOf('.'));
+    return WORKFLOW_EXTS.has(ext);
+  })) {
     cpSync(resolve(srcWorkflows, file), resolve(distWorkflows, file));
   }
 }

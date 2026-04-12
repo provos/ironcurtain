@@ -976,19 +976,19 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
         {
           name: 'design-and-code',
           description: 'Plan -> Design -> Implement -> Review workflow',
-          path: '/opt/ironcurtain/workflows/design-and-code.json',
+          path: '/opt/ironcurtain/workflows/design-and-code.yaml',
           source: 'bundled',
         },
         {
           name: 'code-review',
           description: 'Automated code review with multiple reviewers',
-          path: '/opt/ironcurtain/workflows/code-review.json',
+          path: '/opt/ironcurtain/workflows/code-review.yaml',
           source: 'bundled',
         },
         {
           name: 'my-custom-flow',
           description: 'Custom workflow for internal tooling',
-          path: '/home/user/.ironcurtain/workflows/my-custom-flow.json',
+          path: '/home/user/.ironcurtain/workflows/my-custom-flow.yaml',
           source: 'user',
         },
       ];
@@ -1024,7 +1024,11 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
       const newId = `wf-mock-${Date.now()}`;
       const newWf: MockWorkflow = {
         workflowId: newId,
-        name: String(params.definitionPath).split('/').pop()?.replace('.json', '') ?? 'workflow',
+        name:
+          String(params.definitionPath)
+            .split('/')
+            .pop()
+            ?.replace(/\.(json|ya?ml)$/, '') ?? 'workflow',
         phase: 'running',
         currentState: 'plan',
         startedAt: new Date().toISOString(),

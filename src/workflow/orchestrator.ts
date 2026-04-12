@@ -38,6 +38,7 @@ import { parseAgentStatus, buildStatusBlockReprompt } from './status-parser.js';
 import { buildAgentCommand, buildArtifactReprompt } from './prompt-builder.js';
 import { collectFilesRecursive, hasAnyFiles } from './artifacts.js';
 import { validateDefinition } from './validate.js';
+import { parseDefinitionFile } from './discovery.js';
 
 const execFileAsync = promisify(execFileCb);
 
@@ -255,8 +256,7 @@ export class WorkflowOrchestrator implements WorkflowController {
   // -----------------------------------------------------------------------
 
   start(definitionPath: string, taskDescription: string, workspacePath?: string): Promise<WorkflowId> {
-    const definitionContent = readFileSync(definitionPath, 'utf-8');
-    const raw = JSON.parse(definitionContent) as unknown;
+    const raw = parseDefinitionFile(definitionPath);
     const definition = validateDefinition(raw);
     this.validatePersonas(definition);
     const workflowId = createWorkflowId();
@@ -324,7 +324,8 @@ export class WorkflowOrchestrator implements WorkflowController {
 
     const definitionCopyPath = resolve(this.deps.baseDir, workflowId, 'definition.json');
     const definitionPath = existsSync(definitionCopyPath) ? definitionCopyPath : checkpoint.definitionPath;
-    const raw = JSON.parse(readFileSync(definitionPath, 'utf-8')) as unknown;
+    // Runtime copies are always JSON; original user files may be YAML
+    const raw = parseDefinitionFile(definitionPath);
     const definition = validateDefinition(raw);
 
     const { machine, gateStateNames, terminalStateNames } = buildWorkflowMachine(

@@ -2,19 +2,19 @@
  * CLI entry point for `ironcurtain workflow`.
  *
  * Subcommands:
- *   start   <definition.json> "task" [--model <model>] [--workspace <path>]
+ *   start   <definition> "task" [--model <model>] [--workspace <path>]
  *   resume  <baseDir> [--state <stateName>] [--model <model>]
  *   inspect <baseDir> [--all]
  */
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { createInterface } from 'node:readline/promises';
 import { getIronCurtainHome } from '../config/paths.js';
 import { formatHelp, type CommandSpec } from '../cli-help.js';
 import { FileCheckpointStore } from './checkpoint.js';
-import { discoverWorkflows, resolveWorkflowPath } from './discovery.js';
+import { discoverWorkflows, resolveWorkflowPath, parseDefinitionFile } from './discovery.js';
 import { MessageLog } from './message-log.js';
 import { WorkflowOrchestrator, type WorkflowOrchestratorDeps, type WorkflowTabHandle } from './orchestrator.js';
 import type { WorkflowId, WorkflowCheckpoint, WorkflowDefinition } from './types.js';
@@ -76,7 +76,7 @@ const workflowSpec: CommandSpec = {
   examples: [
     'ironcurtain workflow list',
     'ironcurtain workflow start design-and-code "Build a REST API"',
-    'ironcurtain workflow start ./my-workflow.json "Build a REST API"',
+    'ironcurtain workflow start ./my-workflow.yaml "Build a REST API"',
     'ironcurtain workflow start design-and-code "task" --model anthropic:claude-haiku-4-5',
     'ironcurtain workflow resume /tmp/workflow-abc123',
     'ironcurtain workflow resume /tmp/workflow-abc123 --state review',
@@ -331,7 +331,7 @@ function runInspect(args: string[]): void {
     let stateDescriptions: Map<string, string> | undefined;
     if (existsSync(earlyDefPath)) {
       try {
-        const def = JSON.parse(readFileSync(earlyDefPath, 'utf-8')) as WorkflowDefinition;
+        const def = parseDefinitionFile(earlyDefPath) as WorkflowDefinition;
         stateDescriptions = new Map(
           Object.entries(def.states)
             .filter(([, s]) => s.description)

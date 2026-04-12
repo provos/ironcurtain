@@ -47,7 +47,7 @@ test.describe('Start Workflow', () => {
     // Select the custom path option to reveal the definition file path input
     await page.getByLabel('Workflow definition').selectOption('__custom__');
     // Fill in the start form
-    await page.getByLabel('Definition file path').fill('/path/to/design-and-code.json');
+    await page.getByLabel('Definition file path').fill('/path/to/design-and-code.yaml');
     await page.getByLabel('Task description').fill('Implement a feature');
 
     // Start button should be enabled
@@ -61,7 +61,7 @@ test.describe('Start Workflow', () => {
 
   test('new workflow transitions to waiting_human after lifecycle simulation', async ({ page }) => {
     await page.getByLabel('Workflow definition').selectOption('__custom__');
-    await page.getByLabel('Definition file path').fill('/path/to/my-workflow.json');
+    await page.getByLabel('Definition file path').fill('/path/to/my-workflow.yaml');
     await page.getByLabel('Task description').fill('Run the workflow');
 
     await page.getByRole('button', { name: 'Start Workflow' }).click();

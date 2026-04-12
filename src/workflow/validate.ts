@@ -321,8 +321,9 @@ function validateArtifactInputs(definition: WorkflowDefinition, issues: string[]
 // ---------------------------------------------------------------------------
 
 /**
- * Validates a raw JSON object as a WorkflowDefinition.
+ * Validates a parsed object as a WorkflowDefinition.
  * Performs structural parsing (Zod) then semantic checks.
+ * The input can come from JSON.parse() or YAML.parse().
  *
  * @throws {WorkflowValidationError} with structured list of issues
  */

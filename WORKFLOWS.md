@@ -6,16 +6,16 @@ IronCurtain workflows orchestrate multiple AI agents through a state machine to 
 
 ```bash
 # Run the built-in design-and-code workflow on a new project
-ironcurtain workflow start src/workflow/workflows/design-and-code.json \
+ironcurtain workflow start design-and-code \
   "Build a TypeScript CLI that converts CSV files to JSON"
 
 # Run it on an existing codebase
-ironcurtain workflow start src/workflow/workflows/design-and-code.json \
+ironcurtain workflow start design-and-code \
   "Add rate limiting to the API endpoints" \
   --workspace ~/src/my-api
 
 # Use a cheaper model for experimentation
-ironcurtain workflow start src/workflow/workflows/design-and-code.json \
+ironcurtain workflow start design-and-code \
   "Build a palindrome checker" \
   --model anthropic:claude-haiku-4-5
 ```
@@ -28,7 +28,7 @@ ironcurtain workflow start src/workflow/workflows/design-and-code.json \
 
 ## How workflows work
 
-A workflow is a JSON file that defines a state machine. Each state is one of:
+A workflow is a YAML or JSON file that defines a state machine. Each state is one of:
 
 - **`agent`** -- Runs an AI agent with a role-specific prompt. The agent can read/write files, run commands, and use all available MCP tools. The policy engine controls what's allowed.
 - **`human_gate`** -- Pauses execution and asks for your input: approve, request revision, or abort.
@@ -45,7 +45,7 @@ Different states always get separate sessions — the planner, architect, coder,
 
 ## The design-and-code workflow
 
-The built-in `design-and-code.json` workflow follows this flow:
+The built-in `design-and-code` workflow follows this flow:
 
 ```
 plan --> [plan_review] --> design --> [design_review] --> implement --> review
@@ -99,7 +99,7 @@ ironcurtain workflow list
 
 ### `ironcurtain workflow start`
 
-Start a new workflow. The first argument can be a workflow name (looked up from bundled and user directories) or a path to a definition JSON file.
+Start a new workflow. The first argument can be a workflow name (looked up from bundled and user directories) or a path to a definition file (YAML or JSON).
 
 ```bash
 ironcurtain workflow start <name-or-path> "task description" [options]
@@ -114,7 +114,7 @@ Examples:
 
 ```bash
 ironcurtain workflow start design-and-code "Build a REST API"
-ironcurtain workflow start ./my-workflow.json "Build a REST API"
+ironcurtain workflow start ./my-workflow.yaml "Build a REST API"
 ironcurtain workflow start design-and-code "task" --model anthropic:claude-haiku-4-5
 ```
 
@@ -154,42 +154,51 @@ Your feedback text is included in the next agent's prompt.
 
 ## Creating custom workflows
 
-A workflow definition is a JSON file with this structure:
+A workflow definition is a YAML (preferred) or JSON file. YAML is recommended because prompts can use `|` literal blocks for multi-line strings instead of escaped newlines.
 
-```json
-{
-  "name": "my-workflow",
-  "description": "What this workflow does",
-  "initial": "first_state",
-  "settings": {
-    "mode": "docker",
-    "dockerAgent": "claude-code",
-    "maxRounds": 3,
-    "systemPrompt": "Optional persistent context for all agents"
-  },
-  "states": {
-    "first_state": { ... },
-    "second_state": { ... },
-    "done": { "type": "terminal" }
-  }
-}
+```yaml
+name: my-workflow
+description: What this workflow does
+initial: first_state
+
+settings:
+  mode: docker
+  dockerAgent: claude-code
+  maxRounds: 3
+  systemPrompt: Optional persistent context for all agents
+
+states:
+  first_state:
+    # ...
+  second_state:
+    # ...
+  done:
+    type: terminal
+    description: Workflow complete
 ```
 
 ### Agent states
 
-```json
-{
-  "type": "agent",
-  "persona": "role-name",
-  "prompt": "You are a ... Your responsibilities: ...",
-  "inputs": ["plan", "spec"],
-  "outputs": ["reviews"],
-  "transitions": [
-    { "to": "next_state", "when": { "verdict": "approved" } },
-    { "to": "retry_state", "when": { "verdict": "rejected" } },
-    { "to": "escalate", "guard": "isRoundLimitReached" }
-  ]
-}
+```yaml
+my_state:
+  type: agent
+  persona: role-name
+  prompt: |
+    You are a ... Your responsibilities: ...
+  inputs:
+    - plan
+    - spec
+  outputs:
+    - reviews
+  transitions:
+    - to: next_state
+      when:
+        verdict: approved
+    - to: retry_state
+      when:
+        verdict: rejected
+    - to: escalate
+      guard: isRoundLimitReached
 ```
 
 - **`persona`** -- Either `"global"` (use the default global policy) or the name of an IronCurtain persona created via `ironcurtain persona create <name>`. When set to a real persona name, the agent session uses that persona's compiled policy, memory database, and system prompt augmentation. The orchestrator validates that all non-`"global"` personas exist before starting the workflow.
@@ -200,17 +209,23 @@ A workflow definition is a JSON file with this structure:
 
 ### Human gate states
 
-```json
-{
-  "type": "human_gate",
-  "acceptedEvents": ["APPROVE", "FORCE_REVISION", "ABORT"],
-  "present": ["plan"],
-  "transitions": [
-    { "to": "next", "event": "APPROVE" },
-    { "to": "revise", "event": "FORCE_REVISION" },
-    { "to": "aborted", "event": "ABORT" }
-  ]
-}
+```yaml
+my_gate:
+  type: human_gate
+  description: Human review
+  acceptedEvents:
+    - APPROVE
+    - FORCE_REVISION
+    - ABORT
+  present:
+    - plan
+  transitions:
+    - to: next
+      event: APPROVE
+    - to: revise
+      event: FORCE_REVISION
+    - to: aborted
+      event: ABORT
 ```
 
 - **`acceptedEvents`** -- Which options to show the user. Choose from: `APPROVE`, `FORCE_REVISION`, `REPLAN`, `ABORT`.
@@ -218,29 +233,33 @@ A workflow definition is a JSON file with this structure:
 
 ### Deterministic states
 
-```json
-{
-  "type": "deterministic",
-  "run": [
-    ["npm", "test"],
-    ["npm", "run", "lint"]
-  ],
-  "transitions": [
-    { "to": "next", "guard": "isPassed" },
-    { "to": "fix", "guard": "isRejected" }
-  ]
-}
+```yaml
+validate:
+  type: deterministic
+  description: Run tests and lint
+  run:
+    - - npm
+      - test
+    - - npm
+      - run
+      - lint
+  transitions:
+    - to: next
+      guard: isPassed
+    - to: fix
+      guard: isRejected
 ```
 
 Commands are arrays of argument arrays (no shell strings). Use `isPassed` guard for success transitions.
 
 ### Terminal states
 
-```json
-{
-  "type": "terminal",
-  "outputs": ["reviews"]
-}
+```yaml
+done:
+  type: terminal
+  description: Workflow complete
+  outputs:
+    - reviews
 ```
 
 Optional `outputs` lists artifacts to include in the final summary.
@@ -249,14 +268,19 @@ Optional `outputs` lists artifacts to include in the final summary.
 
 There are two ways to control transitions: declarative `when` conditions and code-based `guard` functions. Use `when` for simple checks against agent output fields, and `guard` for conditions that need workflow context.
 
-**`when` — declarative conditions (preferred for simple checks):**
+**`when` -- declarative conditions (preferred for simple checks):**
 
-```json
-{ "to": "done", "when": { "verdict": "approved" } }
-{ "to": "fix", "when": { "verdict": "rejected" } }
-{ "to": "validate", "when": { "verdict": "thesis_validate" } }
-{ "to": "escalate", "when": { "verdict": "escalate" } }
-{ "to": "review", "when": { "verdict": "approved", "confidence": "low" } }
+```yaml
+- to: done
+  when: { verdict: approved }
+- to: fix
+  when: { verdict: rejected }
+- to: validate
+  when: { verdict: thesis_validate }
+- to: escalate
+  when: { verdict: escalate }
+- to: review
+  when: { verdict: approved, confidence: low }
 ```
 
 `when` matches against the agent's status block output. All specified fields must match (AND semantics). Matchable fields: `completed`, `verdict`, `confidence`, `escalation`, `testCount`, `notes`.
@@ -365,4 +389,4 @@ Open `http://localhost:5173?token=mock-dev-token`. The mock server simulates wor
 
 ## User-defined workflows
 
-Custom workflow definitions can be placed in `~/.ironcurtain/workflows/`. Files in this directory are discovered by both `ironcurtain workflow list` and the web UI's definition dropdown. User-defined workflows override bundled ones if they share the same name.
+Custom workflow definitions (`.yaml`, `.yml`, or `.json`) can be placed in `~/.ironcurtain/workflows/`. Files in this directory are discovered by both `ironcurtain workflow list` and the web UI's definition dropdown. User-defined workflows override bundled ones if they share the same name. When both YAML and JSON versions exist with the same name, YAML takes precedence.
