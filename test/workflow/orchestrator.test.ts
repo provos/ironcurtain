@@ -353,9 +353,9 @@ describe('WorkflowOrchestrator', () => {
     expect(secondCoderCall.persona).toBe('coder');
     expect(secondCoderCall.resumeSessionId).toBe('coder-session-1');
 
-    // Second coder's prompt includes review history
+    // Second coder's prompt includes reviewer's output (status block stripped)
     const secondCoderSession = allSessions[2];
-    expect(secondCoderSession.sentMessages[0]).toContain('missing error handling');
+    expect(secondCoderSession.sentMessages[0]).toContain('Found issues.');
 
     // Lifecycle events show the loop
     const stateEvents = lifecycleEvents

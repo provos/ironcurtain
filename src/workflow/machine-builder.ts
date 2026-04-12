@@ -11,6 +11,7 @@ import type {
   WhenValue,
 } from './types.js';
 import { guardImplementations } from './guards.js';
+import { stripStatusBlock } from './status-parser.js';
 
 // ---------------------------------------------------------------------------
 // Invoke input/result types
@@ -404,7 +405,7 @@ export function buildWorkflowMachine(definition: WorkflowDefinition, taskDescrip
             [stateId]: result.sessionId,
           },
           totalTokens: context.totalTokens,
-          previousAgentOutput: truncateAgentOutput(result.responseText),
+          previousAgentOutput: truncateAgentOutput(stripStatusBlock(result.responseText)),
           previousStateName: stateId,
           humanPrompt: null,
         };

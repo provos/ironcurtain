@@ -3,6 +3,7 @@ import {
   parseAgentStatus,
   AgentStatusParseError,
   buildStatusBlockReprompt,
+  stripStatusBlock,
   STATUS_BLOCK_INSTRUCTIONS,
 } from '../../src/workflow/status-parser.js';
 
@@ -242,5 +243,107 @@ describe('STATUS_BLOCK_INSTRUCTIONS', () => {
     expect(STATUS_BLOCK_INSTRUCTIONS).toContain('escalation');
     expect(STATUS_BLOCK_INSTRUCTIONS).toContain('test_count');
     expect(STATUS_BLOCK_INSTRUCTIONS).toContain('notes');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// stripStatusBlock
+// ---------------------------------------------------------------------------
+
+describe('stripStatusBlock', () => {
+  it('strips a backtick-fenced status block from the end of a response', () => {
+    const text = [
+      'I completed the analysis.',
+      '',
+      '```',
+      'agent_status:',
+      '  completed: true',
+      '  verdict: approved',
+      '  confidence: high',
+      '  escalation: null',
+      '  test_count: null',
+      '  notes: "done"',
+      '```',
+    ].join('\n');
+    expect(stripStatusBlock(text)).toBe('I completed the analysis.');
+  });
+
+  it('strips a tilde-fenced status block', () => {
+    const text = [
+      'Results here.',
+      '',
+      '~~~',
+      'agent_status:',
+      '  completed: true',
+      '  verdict: rejected',
+      '  confidence: medium',
+      '  escalation: null',
+      '  test_count: 5',
+      '  notes: null',
+      '~~~',
+    ].join('\n');
+    expect(stripStatusBlock(text)).toBe('Results here.');
+  });
+
+  it('handles response with no status block (returns text unchanged)', () => {
+    const text = 'Just some text without any status block.';
+    expect(stripStatusBlock(text)).toBe(text);
+  });
+
+  it('strips status block with language tag (```yaml)', () => {
+    const text = [
+      'Analysis complete.',
+      '',
+      '```yaml',
+      'agent_status:',
+      '  completed: true',
+      '  verdict: thesis_validate',
+      '  confidence: high',
+      '  escalation: null',
+      '  test_count: null',
+      '  notes: "routing"',
+      '```',
+    ].join('\n');
+    expect(stripStatusBlock(text)).toBe('Analysis complete.');
+  });
+
+  it('preserves all text before the status block', () => {
+    const preamble = [
+      '## Findings',
+      '',
+      'Found 3 issues in the target file.',
+      '',
+      '1. Buffer overflow in parse_header()',
+      '2. Integer truncation in validate_length()',
+      '3. Unchecked return value in process_input()',
+    ].join('\n');
+    const block = [
+      '',
+      '```',
+      'agent_status:',
+      '  completed: true',
+      '  verdict: approved',
+      '  confidence: high',
+      '  escalation: null',
+      '  test_count: 3',
+      '  notes: "found issues"',
+      '```',
+    ].join('\n');
+    expect(stripStatusBlock(preamble + block)).toBe(preamble);
+  });
+
+  it('handles response that is ONLY a status block (returns empty string)', () => {
+    const text = [
+      '```',
+      'agent_status:',
+      '  completed: true',
+      '  verdict: approved',
+      '  confidence: high',
+      '  escalation: null',
+      '  test_count: null',
+      '  notes: null',
+      '```',
+    ].join('\n');
+    expect(stripStatusBlock(text)).toBe('');
   });
 });

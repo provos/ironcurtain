@@ -1,5 +1,5 @@
 name: vuln-discovery
-description: "Orchestrator-driven vulnerability discovery: analyze code, validate hypotheses cheaply, then build instrumented harnesses for live confirmation"
+description: 'Orchestrator-driven vulnerability discovery: analyze code, validate hypotheses cheaply, then build instrumented harnesses for live confirmation'
 initial: orchestrator
 
 settings:
@@ -15,7 +15,7 @@ settings:
 states:
   analyze:
     type: agent
-    description: "Structural code analysis — maps call chains, entry points, and build system"
+    description: 'Structural code analysis — maps call chains, entry points, and build system'
     persona: global
     prompt: |
       You are a code analyst mapping the structure of a target file for a vulnerability investigation. You have access to a source tree at the workspace root.
@@ -52,7 +52,7 @@ states:
 
   orchestrator:
     type: agent
-    description: "Investigation strategy and routing — decides what to do next"
+    description: 'Investigation strategy and routing — decides what to do next'
     persona: global
     prompt: |
       You are the investigation orchestrator for a vulnerability discovery workflow. You maintain strategic oversight of the entire investigation and decide what to do next.
@@ -64,6 +64,16 @@ states:
       ## Cold start
 
       If the journal at `.workflow/journal/journal.md` does not exist, this is a cold start. Create the journal with the initial header and set verdict to `reanalyze` to dispatch the analyze agent. Do not attempt any other routing on cold start.
+
+      ## Output format
+
+      Structure your response as follows:
+
+      1. **Directive for next agent** (FIRST in your output): A clear, actionable instruction for whichever agent you are dispatching to. This is the only part the next agent will focus on. Be specific — tell it exactly what to investigate, what to build, or what to validate.
+
+      2. **Journal update** (SECOND): Your reasoning about the investigation state. This provides context but the directive above is what matters to the next agent.
+
+      3. **Status block** (LAST): The agent_status YAML block with your verdict.
 
       ## Standard procedure
 

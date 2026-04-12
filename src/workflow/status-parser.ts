@@ -87,6 +87,28 @@ export function parseAgentStatus(responseText: string): AgentOutput | undefined 
 }
 
 // ---------------------------------------------------------------------------
+// Status block stripping
+// ---------------------------------------------------------------------------
+
+/**
+ * Regex matching the entire fenced status block (including fences) at the
+ * end of the response. Handles both ``` and ~~~ fences with optional
+ * language tag. Anchored to end-of-string with optional trailing whitespace.
+ */
+const STATUS_BLOCK_FENCE_REGEX = /(?:```[^\n]*\nagent_status:\n[\s\S]*?```|~~~[^\n]*\nagent_status:\n[\s\S]*?~~~)\s*$/;
+
+/**
+ * Removes the fenced agent_status block from the end of the response text.
+ * The status block is already parsed into AgentOutput by `parseAgentStatus`,
+ * so passing it as raw text to the next agent is redundant noise.
+ *
+ * @returns text with the trailing status block removed and whitespace trimmed
+ */
+export function stripStatusBlock(responseText: string): string {
+  return responseText.replace(STATUS_BLOCK_FENCE_REGEX, '').trimEnd();
+}
+
+// ---------------------------------------------------------------------------
 // Re-prompt instructions
 // ---------------------------------------------------------------------------
 
