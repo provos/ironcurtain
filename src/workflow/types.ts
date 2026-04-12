@@ -206,7 +206,8 @@ export type Confidence = (typeof CONFIDENCE_VALUES)[number];
 /** Structured output parsed from the agent's response text. */
 export interface AgentOutput {
   readonly completed: boolean;
-  readonly verdict: Verdict;
+  /** Free-form verdict string. Well-known values: approved, rejected, blocked, spec_flaw. Workflows may define custom verdicts for direct routing. */
+  readonly verdict: string;
   readonly confidence: Confidence;
   readonly escalation: string | null;
   readonly testCount: number | null;

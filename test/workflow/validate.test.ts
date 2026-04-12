@@ -347,17 +347,11 @@ describe('validateDefinition', () => {
       }
     });
 
-    it('rejects invalid verdict value', () => {
+    it('accepts custom verdict values (free-form string)', () => {
       const def = deepClone(validDefinition());
       const states = def.states as Record<string, Record<string, unknown>>;
-      states.review.transitions = [{ to: 'gate', when: { verdict: 'aproved' } }, { to: 'plan' }];
-      try {
-        validateDefinition(def);
-        expect.fail('should have thrown');
-      } catch (e) {
-        const err = e as WorkflowValidationError;
-        expect(err.issues).toEqual(expect.arrayContaining([expect.stringContaining('invalid verdict value')]));
-      }
+      states.review.transitions = [{ to: 'gate', when: { verdict: 'thesis_validate' } }, { to: 'plan' }];
+      expect(() => validateDefinition(def)).not.toThrow();
     });
 
     it('rejects invalid confidence value', () => {
@@ -392,7 +386,7 @@ describe('validateDefinition', () => {
       const states = def.states as Record<string, Record<string, unknown>>;
       states.review.transitions = [
         { to: 'gate', when: { mood: 'happy' } },
-        { to: 'plan', when: { verdict: 'aproved' } },
+        { to: 'plan', when: { confidence: 'super_high' } },
       ];
       try {
         validateDefinition(def);
@@ -403,7 +397,7 @@ describe('validateDefinition', () => {
         expect(err.issues).toEqual(
           expect.arrayContaining([
             expect.stringContaining('not a valid AgentOutput field'),
-            expect.stringContaining('invalid verdict value'),
+            expect.stringContaining('invalid confidence value'),
           ]),
         );
       }
@@ -470,9 +464,9 @@ describe('validateDefinition', () => {
             expect.stringMatching(/'when' key 'verdict' with wrong type: expected string, got number/),
           ]),
         );
-        // Type check runs first, so the enum-value error should NOT be
-        // emitted for a wrong-type value.
-        expect(err.issues.some((issue) => issue.includes('invalid verdict value'))).toBe(false);
+        // Type check runs first -- verdict accepts any string but a number
+        // is still the wrong type.
+        expect(err.issues.every((issue) => issue.includes('wrong type'))).toBe(true);
       }
     });
 
@@ -525,6 +519,63 @@ describe('validateDefinition', () => {
       const def = deepClone(validDefinition());
       const states = def.states as Record<string, Record<string, unknown>>;
       states.review.transitions = [{ to: 'gate', when: { notes: 'some note' } }, { to: 'plan' }];
+      expect(() => validateDefinition(def)).not.toThrow();
+    });
+
+    it('accepts custom verdicts for direct routing in when clauses', () => {
+      const def = {
+        name: 'custom-verdict-workflow',
+        description: 'Workflow with custom verdict routing',
+        initial: 'orchestrator',
+        states: {
+          orchestrator: {
+            type: 'agent',
+            description: 'Routes to different states via custom verdicts',
+            persona: 'router',
+            prompt: 'You are a router.',
+            inputs: [],
+            outputs: ['journal'],
+            transitions: [
+              { to: 'analyze', when: { verdict: 'reanalyze' } },
+              { to: 'validate', when: { verdict: 'thesis_validate' } },
+              { to: 'escalate', when: { verdict: 'escalate' } },
+              { to: 'done', guard: 'isRoundLimitReached' },
+            ],
+          },
+          analyze: {
+            type: 'agent',
+            description: 'Analyzes',
+            persona: 'analyst',
+            prompt: 'Analyze.',
+            inputs: ['journal'],
+            outputs: ['analysis'],
+            transitions: [{ to: 'orchestrator' }],
+          },
+          validate: {
+            type: 'agent',
+            description: 'Validates',
+            persona: 'validator',
+            prompt: 'Validate.',
+            inputs: ['journal'],
+            outputs: ['results'],
+            transitions: [{ to: 'orchestrator' }],
+          },
+          escalate: {
+            type: 'human_gate',
+            description: 'Human escalation',
+            acceptedEvents: ['APPROVE', 'ABORT'],
+            transitions: [
+              { to: 'orchestrator', event: 'APPROVE' },
+              { to: 'done', event: 'ABORT' },
+            ],
+          },
+          done: {
+            type: 'terminal',
+            description: 'Done',
+            outputs: ['journal'],
+          },
+        },
+      };
       expect(() => validateDefinition(def)).not.toThrow();
     });
   });

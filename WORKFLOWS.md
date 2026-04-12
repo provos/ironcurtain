@@ -254,10 +254,14 @@ There are two ways to control transitions: declarative `when` conditions and cod
 ```json
 { "to": "done", "when": { "verdict": "approved" } }
 { "to": "fix", "when": { "verdict": "rejected" } }
+{ "to": "validate", "when": { "verdict": "thesis_validate" } }
+{ "to": "escalate", "when": { "verdict": "escalate" } }
 { "to": "review", "when": { "verdict": "approved", "confidence": "low" } }
 ```
 
-`when` matches against the agent's status block output. All specified fields must match (AND semantics). Matchable fields: `completed`, `verdict`, `confidence`, `escalation`, `testCount`, `notes`. The `verdict` and `confidence` fields are validated against their allowed values at definition load time, catching typos early.
+`when` matches against the agent's status block output. All specified fields must match (AND semantics). Matchable fields: `completed`, `verdict`, `confidence`, `escalation`, `testCount`, `notes`.
+
+The `verdict` field accepts any string value, enabling custom verdicts for direct routing (e.g., `"thesis_validate"`, `"escalate"`, `"reanalyze"`). Well-known values are `approved`, `rejected`, `blocked`, and `spec_flaw`. The `confidence` field is validated against its allowed values (`high`, `medium`, `low`) at definition load time, catching typos early.
 
 `when` is only available on agent state transitions (not deterministic states). A transition cannot have both `when` and `guard`.
 
@@ -273,7 +277,7 @@ There are two ways to control transitions: declarative `when` conditions and cod
 | `hasTestCountRegression` | Test count dropped (agent may have deleted tests) |
 | `isPassed`               | Deterministic state commands all passed           |
 
-Use `guard` for conditions that depend on workflow context (round limits, stall detection, test count regression) or for deterministic state transitions (`isPassed`). The simple verdict guards (`isApproved`, `isRejected`, `isLowConfidence`) still work but `when` is preferred for new workflows.
+Use `guard` for conditions that depend on workflow context (round limits, stall detection, test count regression) or for deterministic state transitions (`isPassed`). The simple verdict guards (`isApproved`, `isRejected`, `isLowConfidence`) still work for the well-known verdict values but `when` is preferred for new workflows, especially when using custom verdict strings for direct routing.
 
 ## Agent status block
 
@@ -288,6 +292,8 @@ agent_status:
   test_count: null
   notes: 'Brief summary of what was done'
 ```
+
+The `verdict` field is a free-form string. Well-known values are `approved`, `rejected`, `blocked`, and `spec_flaw`, but workflow definitions may instruct agents to use custom verdict strings for direct routing (e.g., `thesis_validate`, `escalate`).
 
 The `prompt` field in your workflow definition should include instructions about what the agent does, but the orchestrator automatically appends status block format instructions. If the agent forgets the status block, the orchestrator retries once.
 

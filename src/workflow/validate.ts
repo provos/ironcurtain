@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { WorkflowDefinition, WorkflowStateDefinition, HumanGateStateDefinition, AgentOutput } from './types.js';
-import { AGENT_OUTPUT_FIELDS, VERDICT_VALUES, CONFIDENCE_VALUES } from './types.js';
+import { AGENT_OUTPUT_FIELDS, CONFIDENCE_VALUES } from './types.js';
 import { REGISTERED_GUARDS } from './guards.js';
 
 // ---------------------------------------------------------------------------
@@ -150,7 +150,6 @@ function findReachableStates(initial: string, states: Record<string, WorkflowSta
 }
 
 const AGENT_OUTPUT_FIELD_SET: ReadonlySet<string> = new Set(AGENT_OUTPUT_FIELDS);
-const VERDICT_VALUE_SET: ReadonlySet<string> = new Set(VERDICT_VALUES);
 const CONFIDENCE_VALUE_SET: ReadonlySet<string> = new Set(CONFIDENCE_VALUES);
 
 /**
@@ -218,9 +217,7 @@ function validateWhenClauses(stateId: string, state: WorkflowStateDefinition, is
       }
 
       // Enum value checks run only when the type is already correct.
-      if (key === 'verdict' && typeof value === 'string' && !VERDICT_VALUE_SET.has(value)) {
-        issues.push(`State "${stateId}" transition to "${t.to}" has invalid verdict value "${value}"`);
-      }
+      // Verdict accepts any string (custom verdicts for direct routing).
       if (key === 'confidence' && typeof value === 'string' && !CONFIDENCE_VALUE_SET.has(value)) {
         issues.push(`State "${stateId}" transition to "${t.to}" has invalid confidence value "${value}"`);
       }

@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { AgentOutput } from './types.js';
-import { VERDICT_VALUES, CONFIDENCE_VALUES } from './types.js';
+import { CONFIDENCE_VALUES } from './types.js';
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -22,7 +22,7 @@ export class AgentStatusParseError extends Error {
 
 const agentOutputSchema = z.object({
   completed: z.boolean(),
-  verdict: z.enum(VERDICT_VALUES),
+  verdict: z.string().min(1),
   confidence: z.enum(CONFIDENCE_VALUES),
   escalation: z.string().nullable(),
   test_count: z.number().int().nullable(),
@@ -144,7 +144,7 @@ agent_status:
 
 Field descriptions:
 - completed: true when work is done, false if blocked
-- verdict: one of approved, rejected, blocked, spec_flaw
+- verdict: a free-form string describing the outcome. Well-known values are approved, rejected, blocked, and spec_flaw. Workflow definitions may specify custom verdict strings for direct routing — use whatever verdict values the workflow prompt instructs.
 - confidence: one of high, medium, low
 - escalation: null or a string describing what needs human attention
 - test_count: null or the number of passing tests
