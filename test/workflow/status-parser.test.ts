@@ -182,7 +182,7 @@ describe('parseAgentStatus', () => {
     expect(result?.notes).toBe('first');
   });
 
-  it('accepts custom verdict strings', () => {
+  it('accepts custom verdict strings for direct routing', () => {
     const yaml = [
       'agent_status:',
       '  completed: true',
@@ -195,21 +195,6 @@ describe('parseAgentStatus', () => {
     ].join('\n');
     const result = parseAgentStatus(wrapInFence(yaml));
     expect(result?.verdict).toBe('thesis_validate');
-  });
-
-  it('accepts arbitrary verdict strings for direct routing', () => {
-    const yaml = [
-      'agent_status:',
-      '  completed: true',
-      '  verdict: harness_design',
-      '  confidence: medium',
-      '  escalation: null',
-      '  test_count: null',
-      '  notes: null',
-      '',
-    ].join('\n');
-    const result = parseAgentStatus(wrapInFence(yaml));
-    expect(result?.verdict).toBe('harness_design');
   });
 
   it('handles unquoted string values', () => {

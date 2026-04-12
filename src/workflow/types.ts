@@ -197,9 +197,6 @@ export type HumanGateEventType = 'APPROVE' | 'FORCE_REVISION' | 'REPLAN' | 'ABOR
 // Agent output
 // ---------------------------------------------------------------------------
 
-export const VERDICT_VALUES = ['approved', 'rejected', 'blocked', 'spec_flaw'] as const;
-export type Verdict = (typeof VERDICT_VALUES)[number];
-
 export const CONFIDENCE_VALUES = ['high', 'medium', 'low'] as const;
 export type Confidence = (typeof CONFIDENCE_VALUES)[number];
 

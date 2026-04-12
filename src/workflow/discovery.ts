@@ -88,8 +88,14 @@ function scanDirectory(dir: string, source: WorkflowSource): WorkflowEntry[] {
     const filePath = resolve(dir, fileName);
     const name = basename(fileName, ext);
 
-    // YAML files win over JSON when both exist with the same name
-    if (byName.has(name) && ext === '.json') continue;
+    // When multiple files share a name, higher-priority extensions win (.yaml > .yml > .json)
+    const existing = byName.get(name);
+    if (existing) {
+      const existingExt = extname(existing.path).toLowerCase();
+      const existingPri = EXTENSION_PRIORITY.indexOf(existingExt as (typeof EXTENSION_PRIORITY)[number]);
+      const newPri = EXTENSION_PRIORITY.indexOf(ext as (typeof EXTENSION_PRIORITY)[number]);
+      if (newPri >= existingPri) continue;
+    }
 
     try {
       const raw: unknown = parseDefinitionFile(filePath);

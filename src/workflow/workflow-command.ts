@@ -326,19 +326,19 @@ function runInspect(args: string[]): void {
     // but checkpoint display runs first -- we load definition eagerly here)
     const checkpoint = checkpointStore.load(workflowId);
 
-    // Eagerly load definition for state descriptions used below
-    const earlyDefPath = resolve(workflowDir, 'definition.json');
+    // Load definition for state descriptions and definition path display
+    const defPath = resolve(workflowDir, 'definition.json');
     let stateDescriptions: Map<string, string> | undefined;
-    if (existsSync(earlyDefPath)) {
+    if (existsSync(defPath)) {
       try {
-        const def = parseDefinitionFile(earlyDefPath) as WorkflowDefinition;
+        const def = parseDefinitionFile(defPath) as WorkflowDefinition;
         stateDescriptions = new Map(
           Object.entries(def.states)
             .filter(([, s]) => s.description)
             .map(([id, s]) => [id, s.description]),
         );
       } catch {
-        // Non-fatal
+        // Non-fatal — definition may be from older schema
       }
     }
 
@@ -365,8 +365,7 @@ function runInspect(args: string[]): void {
       writeStdout(`  Artifacts: ${artifactNames.join(', ') || '(none)'}`);
     }
 
-    // Definition path
-    const defPath = resolve(workflowDir, 'definition.json');
+    // Definition path (reuses defPath from above)
     if (existsSync(defPath)) {
       writeStdout(`  Definition: ${defPath}`);
     }

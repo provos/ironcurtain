@@ -54,6 +54,7 @@ if (existsSync(readOnlyDir)) {
 // Copy bundled workflow definitions (.yaml, .yml, .json)
 const srcWorkflows = resolve(__dirname, '..', 'src', 'workflow', 'workflows');
 const distWorkflows = resolve(__dirname, '..', 'dist', 'workflow', 'workflows');
+// Keep in sync with DEFINITION_EXTENSIONS in src/workflow/discovery.ts
 const WORKFLOW_EXTS = new Set(['.yaml', '.yml', '.json']);
 if (existsSync(srcWorkflows)) {
   mkdirSync(distWorkflows, { recursive: true });
