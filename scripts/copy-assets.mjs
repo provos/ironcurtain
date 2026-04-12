@@ -4,7 +4,7 @@
  */
 
 import { cpSync, chmodSync, existsSync, mkdirSync, readdirSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { dirname, extname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -58,10 +58,7 @@ const distWorkflows = resolve(__dirname, '..', 'dist', 'workflow', 'workflows');
 const WORKFLOW_EXTS = new Set(['.yaml', '.yml', '.json']);
 if (existsSync(srcWorkflows)) {
   mkdirSync(distWorkflows, { recursive: true });
-  for (const file of readdirSync(srcWorkflows).filter((f) => {
-    const ext = f.slice(f.lastIndexOf('.'));
-    return WORKFLOW_EXTS.has(ext);
-  })) {
+  for (const file of readdirSync(srcWorkflows).filter((f) => WORKFLOW_EXTS.has(extname(f)))) {
     cpSync(resolve(srcWorkflows, file), resolve(distWorkflows, file));
   }
 }

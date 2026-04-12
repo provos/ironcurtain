@@ -176,7 +176,11 @@ export function buildHandoffClause(
     return `- ${condition} \u2192 ${t.to} (${desc})`;
   });
 
-  return '## What happens with your output\n\n' + 'Your verdict determines the next step:\n' + lines.join('\n');
+  return (
+    '## What happens with your output\n\n' +
+    'The next step depends on the transition conditions below:\n' +
+    lines.join('\n')
+  );
 }
 
 /** Formats the condition portion of a transition line. */
