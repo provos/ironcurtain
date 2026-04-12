@@ -408,8 +408,8 @@ function runInspect(args: string[]): void {
             writeStdout(`${prefix} ${RED}[error]${RESET} ${entry.error}`);
             break;
           case 'state_transition': {
-            const toDesc = stateDescriptions?.get(entry.state);
-            const toLabel = toDesc ? `${entry.state} ${DIM}\u2014 "${toDesc}"${RESET}` : entry.state;
+            const toDesc = stateDescriptions?.get(entry.event);
+            const toLabel = toDesc ? `${entry.event} ${DIM}\u2014 "${toDesc}"${RESET}` : entry.event;
             writeStdout(`${prefix} ${BLUE}[transition]${RESET} ${entry.from} -> ${toLabel}`);
             break;
           }

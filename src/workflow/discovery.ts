@@ -48,7 +48,9 @@ export function parseDefinitionFile(filePath: string): unknown {
   const content = readFileSync(filePath, 'utf-8');
 
   if (ext === '.yaml' || ext === '.yml') {
-    return YAML.parse(content);
+    // Workflow definitions should not use YAML aliases/anchors.
+    // Limit alias expansion to prevent YAML bomb DoS.
+    return YAML.parse(content, { maxAliasCount: 100 });
   }
   return JSON.parse(content);
 }
