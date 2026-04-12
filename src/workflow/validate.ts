@@ -70,6 +70,7 @@ const workflowSettingsSchema = z
     gitRepoPath: z.string().optional(),
     maxParallelism: z.number().int().positive().optional(),
     systemPrompt: z.string().optional(),
+    maxSessionSeconds: z.number().positive().optional(),
   })
   .optional();
 

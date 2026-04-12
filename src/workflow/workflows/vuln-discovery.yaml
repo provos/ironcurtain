@@ -1,11 +1,12 @@
 name: vuln-discovery
 description: "Orchestrator-driven vulnerability discovery: analyze code, validate hypotheses cheaply, then build instrumented harnesses for live confirmation"
-initial: analyze
+initial: orchestrator
 
 settings:
   mode: docker
   dockerAgent: claude-code
   maxRounds: 12
+  maxSessionSeconds: 10800
   systemPrompt: |
     Workflow artifacts go in `.workflow/`. The harness and all build modifications go directly in the workspace. The target file path is specified in the task description.
 
@@ -56,7 +57,17 @@ states:
     prompt: |
       You are the investigation orchestrator for a vulnerability discovery workflow. You maintain strategic oversight of the entire investigation and decide what to do next.
 
-      On every invocation, FIRST read the investigation journal at `.workflow/journal/state.json` (create it if it does not exist). Then read any new artifacts from the state that just completed.
+      ## HARD CONSTRAINT: You are a ROUTER
+
+      You are a ROUTER. Do NOT read source code files, do NOT analyze code, do NOT write code. Your job is to read the journal and artifacts produced by other agents, assess progress, and decide which agent to dispatch next. If you need deeper code understanding, route to analyze or discover.
+
+      ## Cold start
+
+      If the journal at `.workflow/journal/state.json` does not exist and no artifacts have been produced (`.workflow/analysis/` does not exist or is empty), this is a cold start. Your first action MUST be to create the initial journal and set verdict to `reanalyze` to dispatch the analyze agent. Do not attempt any other routing on cold start.
+
+      ## Standard procedure
+
+      On every invocation after cold start, FIRST read the investigation journal at `.workflow/journal/state.json`. Then read any new artifacts from the state that just completed.
 
       Your journal must track:
       - **Hypotheses**: what vulnerability hypotheses have been formed, tested, confirmed, or rejected
@@ -76,7 +87,7 @@ states:
       | differential_validate | differential_validate | Isolated test succeeded but live system diverges. |
       | escalate | human_escalation | Investigation is stuck. Describe what was tried and what you need. |
       | triage | triage | Enough evidence collected for independent validation. |
-      | reanalyze | analyze | Current hypothesis is fundamentally wrong. Need fresh analysis. |
+      | reanalyze | analyze | Route to analyze when you need the structural analysis expanded. Your output text tells the analyze agent what to focus on (e.g., "the initial analysis missed ref-counting patterns, look deeper at memory lifecycle functions"). |
 
       ## Strategic principles
 

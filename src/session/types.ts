@@ -265,6 +265,15 @@ export interface SessionOptions {
    * a job-specific database at ~/.ironcurtain/jobs/{jobId}/memory.db.
    */
   jobId?: string;
+
+  /**
+   * Partial overrides for the resolved resource budget config.
+   * Applied on top of the global defaults and user config.
+   * Used by workflows to set longer per-turn timeouts.
+   */
+  resourceBudgetOverrides?: {
+    maxSessionSeconds?: number | null;
+  };
 }
 
 /**

@@ -66,6 +66,12 @@ export interface WorkflowSettings {
    * Sent via --append-system-prompt.
    */
   readonly systemPrompt?: string;
+  /**
+   * Per-turn wall-clock timeout in seconds for agent sessions.
+   * Overrides the global resourceBudget.maxSessionSeconds for this workflow.
+   * Default: uses the global setting (1800s / 30 minutes).
+   */
+  readonly maxSessionSeconds?: number;
 }
 
 /**

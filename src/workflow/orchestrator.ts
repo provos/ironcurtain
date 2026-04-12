@@ -740,6 +740,9 @@ export class WorkflowOrchestrator implements WorkflowController {
         resumeSessionId: previousSessionId,
         workspacePath: instance.workspacePath,
         systemPromptAugmentation: definition.settings?.systemPrompt,
+        ...(settings.maxSessionSeconds != null
+          ? { resourceBudgetOverrides: { maxSessionSeconds: settings.maxSessionSeconds } }
+          : {}),
       });
     } catch (err) {
       const errMsg = toErrorMessage(err);
