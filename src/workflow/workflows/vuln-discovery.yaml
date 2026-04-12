@@ -10,7 +10,7 @@ settings:
   systemPrompt: |
     Workflow artifacts go in `.workflow/`. The harness and all build modifications go directly in the workspace. The target file path is specified in the task description.
 
-    IMPORTANT: The investigation journal at `.workflow/journal/state.json` is the source of truth for what has been tried, what worked, and what failed. Read it before starting any work. Update it (via the orchestrator) after completing work.
+    IMPORTANT: The investigation journal at `.workflow/journal/journal.md` is the source of truth for what has been tried, what worked, and what failed. Read it before starting any work. Only the orchestrator updates it.
 
 states:
   analyze:
@@ -63,19 +63,39 @@ states:
 
       ## Cold start
 
-      If the journal at `.workflow/journal/state.json` does not exist and no artifacts have been produced (`.workflow/analysis/` does not exist or is empty), this is a cold start. Your first action MUST be to create the initial journal and set verdict to `reanalyze` to dispatch the analyze agent. Do not attempt any other routing on cold start.
+      If the journal at `.workflow/journal/journal.md` does not exist, this is a cold start. Create the journal with the initial header and set verdict to `reanalyze` to dispatch the analyze agent. Do not attempt any other routing on cold start.
 
       ## Standard procedure
 
-      On every invocation after cold start, FIRST read the investigation journal at `.workflow/journal/state.json`. Then read any new artifacts from the state that just completed.
+      On every invocation after cold start, FIRST read the investigation journal at `.workflow/journal/journal.md`. Then read any new artifacts from the state that just completed.
 
-      Your journal must track:
-      - **Hypotheses**: what vulnerability hypotheses have been formed, tested, confirmed, or rejected
-      - **Phase**: where the investigation is (analysis, hypothesis testing, harness building, live discovery, triage)
-      - **Confidence**: per-layer confidence (hypothesis confidence, infrastructure confidence, delivery confidence)
-      - **Rounds spent**: how many times each state has been visited
-      - **Blockers**: what is preventing progress
-      - **Strategy**: your current plan and why
+      ## Journal format
+
+      The journal is a markdown file at `.workflow/journal/journal.md`. It has two parts:
+
+      **Status header** (lines 1-10, updated in-place each round):
+      ```
+      # Investigation Journal
+      ## Status
+      - **Phase**: [analysis | hypothesis testing | harness building | live discovery | triage]
+      - **Active hypothesis**: [current hypothesis or "none"]
+      - **Round**: [N]
+      - **Blocker**: [current blocker or "none"]
+      ```
+
+      **Append-only log** (everything after the header, never edited, only appended):
+      ```
+      ## Round N — Post [state_name]
+      ### Results
+      - [what the completed agent found]
+      ### Assessment
+      [your interpretation of the results]
+      ### Decision
+      Verdict: [verdict]
+      Directive: [what the next agent should focus on]
+      ```
+
+      On each invocation: update the status header in-place, then APPEND a new round section at the end. Never edit or delete previous round sections — they are the investigation's permanent record.
 
       After updating the journal, decide the next action by setting your verdict to one of these routing values:
 
@@ -102,7 +122,7 @@ states:
       - If coverage shows the target function is NOT reached → the harness has a reachability problem (firewall, routing, wrong entry point). Route to harness_design for redesign.
       - If the discover agent couldn't run the harness at all → infrastructure problem. Route to harness_design.
 
-      IMPORTANT: Always update `.workflow/journal/state.json` before setting your verdict. The journal is the persistent memory of this investigation — your conversation history may be long but the journal is the structured summary.
+      IMPORTANT: Always update `.workflow/journal/journal.md` before setting your verdict. The journal is the persistent memory of this investigation — your conversation history may be long but the journal is the structured summary.
 
       If you detect stall patterns (same state visited 3+ times without progress, contradictory results between layers, or your own uncertainty about strategy), set verdict to escalate rather than continuing to burn rounds.
     inputs:
@@ -164,7 +184,7 @@ states:
     description: Lightweight isolated validation of vulnerability hypotheses
     persona: global
     prompt: |
-      You have a vulnerability hypothesis from the orchestrator. Read the orchestrator's previous output and the investigation journal at `.workflow/journal/state.json` to understand what you are validating.
+      You have a vulnerability hypothesis from the orchestrator. Read the orchestrator's previous output and the investigation journal at `.workflow/journal/journal.md` to understand what you are validating.
 
       Your job: build the CHEAPEST possible test that confirms or rejects the hypothesis WITHOUT the full end-to-end harness. This test is the false-positive filter — it runs millions of trials in seconds, catching errors that would waste hours in a live harness.
 
@@ -221,7 +241,7 @@ states:
     description: Designs instrumented test harness specifications
     persona: global
     prompt: |
-      You are a security tooling architect. Read the analysis in `.workflow/analysis/analysis.md`, the investigation journal at `.workflow/journal/state.json`, and any thesis validation results in `.workflow/thesis_results/`.
+      You are a security tooling architect. Read the analysis in `.workflow/analysis/analysis.md`, the investigation journal at `.workflow/journal/journal.md`, and any thesis validation results in `.workflow/thesis_results/`.
 
       The orchestrator's previous output tells you what kind of harness to build and why. Follow its directive.
 
@@ -285,7 +305,7 @@ states:
     description: Implements harness from design specification
     persona: global
     prompt: |
-      You are a security tooling engineer. Read the harness design in `.workflow/harness_design/design.md`, the analysis in `.workflow/analysis/analysis.md`, and the investigation journal at `.workflow/journal/state.json`.
+      You are a security tooling engineer. Read the harness design in `.workflow/harness_design/design.md`, the analysis in `.workflow/analysis/analysis.md`, and the investigation journal at `.workflow/journal/journal.md`.
 
       Implement the harness exactly as specified:
 
@@ -349,7 +369,7 @@ states:
     prompt: |
       You are a security tooling reviewer. The harness failed validation.
 
-      Read the validation results in `.workflow/harness_validate/validation.md`, the design in `.workflow/harness_design/design.md`, the analysis in `.workflow/analysis/analysis.md`, and the investigation journal at `.workflow/journal/state.json`.
+      Read the validation results in `.workflow/harness_validate/validation.md`, the design in `.workflow/harness_design/design.md`, the analysis in `.workflow/analysis/analysis.md`, and the investigation journal at `.workflow/journal/journal.md`.
 
       Diagnose the failure:
 
@@ -442,7 +462,7 @@ states:
     prompt: |
       You are a systems debugging specialist. The lightweight thesis validation found trigger values, but the full harness did not reproduce the expected behavior.
 
-      Read the investigation journal at `.workflow/journal/state.json`, the thesis results in `.workflow/thesis_results/`, and the discovery findings in `.workflow/discoveries/findings.md`.
+      Read the investigation journal at `.workflow/journal/journal.md`, the thesis results in `.workflow/thesis_results/`, and the discovery findings in `.workflow/discoveries/findings.md`.
 
       Your job: determine WHY the isolated test and the live system diverge.
 
@@ -473,7 +493,7 @@ states:
     description: Independent validation and severity assessment of findings
     persona: global
     prompt: |
-      You are a senior vulnerability triager. Read the findings in `.workflow/discoveries/findings.md` and the investigation journal at `.workflow/journal/state.json`.
+      You are a senior vulnerability triager. Read the findings in `.workflow/discoveries/findings.md` and the investigation journal at `.workflow/journal/journal.md`.
 
       For each reported finding:
 
