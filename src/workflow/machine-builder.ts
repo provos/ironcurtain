@@ -184,6 +184,7 @@ function buildAgentOnDoneTransitions(transitions: readonly AgentTransitionDefini
 
 function buildAgentState(stateId: string, config: AgentStateDefinition, definition: WorkflowDefinition): object {
   return {
+    entry: [{ type: 'incrementVisitCount', params: { stateId } }],
     invoke: {
       id: stateId,
       src: 'agentService',
@@ -405,10 +406,6 @@ export function buildWorkflowMachine(definition: WorkflowDefinition, taskDescrip
           totalTokens: context.totalTokens,
           previousAgentOutput: truncateAgentOutput(result.responseText),
           previousStateName: stateId,
-          visitCounts: {
-            ...context.visitCounts,
-            [stateId]: (context.visitCounts[stateId] ?? 0) + 1,
-          },
           humanPrompt: null,
         };
       }),
@@ -448,6 +445,12 @@ export function buildWorkflowMachine(definition: WorkflowDefinition, taskDescrip
       }),
       setFlag: assign(() => ({
         flaggedForReview: true,
+      })),
+      incrementVisitCount: assign(({ context }, params: { stateId: string }) => ({
+        visitCounts: {
+          ...context.visitCounts,
+          [params.stateId]: (context.visitCounts[params.stateId] ?? 0) + 1,
+        },
       })),
     },
   }).createMachine({
