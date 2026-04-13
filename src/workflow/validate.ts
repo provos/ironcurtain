@@ -198,6 +198,18 @@ function validateWhenClauses(stateId: string, state: WorkflowStateDefinition, is
       );
     }
 
+    // Only "verdict" is currently supported for when-clause routing.
+    // The condensed status instructions only communicate verdict values
+    // to agents, so routing on other fields would silently break.
+    const nonVerdictKeys = Object.keys(t.when).filter((k) => k !== 'verdict');
+    if (nonVerdictKeys.length > 0) {
+      for (const k of nonVerdictKeys) {
+        issues.push(
+          `State "${stateId}" transition to "${t.to}" uses when clause key "${k}" — only "verdict" is currently supported for when-clause routing. Multi-field when conditions are a planned future feature.`,
+        );
+      }
+    }
+
     // Key and value validation
     for (const [key, value] of Object.entries(t.when)) {
       if (!AGENT_OUTPUT_FIELD_SET.has(key)) {
