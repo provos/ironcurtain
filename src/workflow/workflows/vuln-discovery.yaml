@@ -39,7 +39,21 @@ states:
          - Unstated assumptions: values that are used without validation, conditions that are assumed true but never checked, state that is expected to be non-null or within bounds without guards
          - Where external input reaches this function and what validation (if any) occurs before it arrives
 
-      The function catalog is the most important output. It gives downstream agents the raw material to form hypotheses. Focus on precision: exact type names, exact macro definitions, exact check conditions. Do not editorialize about what might be exploitable.
+      7. **Cross-cutting data flow analysis.** After completing the function catalog, trace these patterns ACROSS function boundaries. The most important bugs live at the intersection of separately-correct functions.
+
+         - **Type narrowing at storage boundaries.** Where does a wider type get stored into a narrower container (e.g., int into uint16_t, long into int, double into float)? What is the maximum value the source can reach? What value gets stored at the truncation point? Trace every write where source and destination types differ in width.
+
+         - **Sentinel and magic value reachability.** Identify every sentinel or magic value used in the code (-1, 0, NULL, 0xFFFF, MAX_INT, special constants). For each one, trace whether any computed value — through normal execution, overflow, truncation, or wrapping — can equal the sentinel. Pay special attention to counters or accumulators that grow toward a sentinel value.
+
+         - **Check-use separation.** Where is a value validated in one place and consumed in another? Can the value change between the check and the use — through concurrent access, callbacks, re-reads from shared or global state, or intervening function calls that modify it?
+
+         - **Unbounded growth meeting fixed-size storage.** Where does a counter or accumulator grow without a hard cap? Where is it stored in or compared against a fixed-width field? What happens when the counter reaches the maximum representable value of the storage type?
+
+         - **Arithmetic result range vs destination range.** Where can a multiplication, addition, or shift produce a value that exceeds the range of its destination type or comparison operand?
+
+         For each pattern found, document: the source location (file:line), the data flow path, the types involved, and the boundary value where the pattern activates. Do not assess exploitability — just document the structural fact.
+
+      The function catalog and cross-cutting analysis are the most important outputs. They give downstream agents the raw material to form hypotheses. Focus on precision: exact type names, exact macro definitions, exact check conditions. Do not editorialize about what might be exploitable.
 
       Write your analysis to `.workflow/analysis/analysis.md`.
     inputs: []
