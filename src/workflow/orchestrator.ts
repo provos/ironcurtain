@@ -34,7 +34,12 @@ import {
   type DeterministicInvokeResult,
 } from './machine-builder.js';
 import type { CheckpointStore } from './checkpoint.js';
-import { parseAgentStatus, buildStatusBlockReprompt } from './status-parser.js';
+import {
+  parseAgentStatus,
+  buildStatusBlockReprompt,
+  getValidVerdicts,
+  buildInvalidVerdictReprompt,
+} from './status-parser.js';
 import { buildAgentCommand, buildArtifactReprompt, buildStatusInstructions } from './prompt-builder.js';
 import { collectFilesRecursive, hasAnyFiles } from './artifacts.js';
 import { validateDefinition } from './validate.js';
@@ -813,6 +818,42 @@ export class WorkflowOrchestrator implements WorkflowController {
         if (!agentOutput) {
           throw new Error('Agent failed to provide agent_status block after retry');
         }
+      }
+
+      // Validate verdict against valid transitions before the result reaches XState.
+      // This prevents silent deadlocks when the agent returns a verdict that no
+      // transition's `when` clause matches.
+      const validVerdicts = getValidVerdicts(stateConfig.transitions);
+      if (validVerdicts && !validVerdicts.has(agentOutput.verdict)) {
+        const retryMsg = buildInvalidVerdictReprompt(agentOutput.verdict, stateConfig.transitions);
+        messageLog.append({
+          ...this.logBase(instance),
+          type: 'agent_retry',
+          role: stateConfig.persona,
+          reason: 'invalid_verdict',
+          details: `Verdict "${agentOutput.verdict}" not in valid set: ${[...validVerdicts].join(', ')}`,
+          retryMessage: retryMsg,
+        });
+
+        responseText = await session.sendMessage(retryMsg);
+        const retryOutput = parseAgentStatus(responseText);
+        logReceived(responseText, retryOutput);
+
+        if (!retryOutput) {
+          throw new Error(
+            `Agent verdict "${agentOutput.verdict}" is not valid for this state ` +
+              `(expected one of: ${[...validVerdicts].join(', ')}), and retry did not include a status block`,
+          );
+        }
+
+        if (!validVerdicts.has(retryOutput.verdict)) {
+          throw new Error(
+            `Agent returned invalid verdict "${retryOutput.verdict}" after retry ` +
+              `(expected one of: ${[...validVerdicts].join(', ')})`,
+          );
+        }
+
+        agentOutput = retryOutput;
       }
 
       const missingArtifacts = this.findMissingArtifacts(stateConfig, instance.artifactDir);

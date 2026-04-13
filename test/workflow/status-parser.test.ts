@@ -6,6 +6,8 @@ import {
   stripStatusBlock,
   MINIMAL_STATUS_INSTRUCTIONS,
   buildConditionalStatusInstructions,
+  getValidVerdicts,
+  buildInvalidVerdictReprompt,
 } from '../../src/workflow/status-parser.js';
 import type { AgentTransitionDefinition } from '../../src/workflow/types.js';
 
@@ -486,5 +488,97 @@ describe('stripStatusBlock', () => {
       '```',
     ].join('\n');
     expect(stripStatusBlock(text)).toBe('');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getValidVerdicts
+// ---------------------------------------------------------------------------
+
+describe('getValidVerdicts', () => {
+  it('returns verdict set from when clauses', () => {
+    const transitions: AgentTransitionDefinition[] = [
+      { to: 'a', when: { verdict: 'implement' } },
+      { to: 'b', when: { verdict: 'research' } },
+      { to: 'c', when: { verdict: 'done' } },
+    ];
+    const result = getValidVerdicts(transitions);
+    expect(result).toEqual(new Set(['implement', 'research', 'done']));
+  });
+
+  it('returns undefined when a transition is unconditional', () => {
+    const transitions: AgentTransitionDefinition[] = [
+      { to: 'a', when: { verdict: 'implement' } },
+      { to: 'b' }, // unconditional fallthrough
+    ];
+    expect(getValidVerdicts(transitions)).toBeUndefined();
+  });
+
+  it('returns undefined when all transitions are unconditional', () => {
+    const transitions: AgentTransitionDefinition[] = [{ to: 'next' }];
+    expect(getValidVerdicts(transitions)).toBeUndefined();
+  });
+
+  it('returns undefined for guard-only transitions (no when clauses)', () => {
+    const transitions: AgentTransitionDefinition[] = [
+      { to: 'done', guard: 'isApproved' },
+      { to: 'implement', guard: 'isRejected' },
+    ];
+    expect(getValidVerdicts(transitions)).toBeUndefined();
+  });
+
+  it('returns verdict set for mixed when + guard transitions', () => {
+    const transitions: AgentTransitionDefinition[] = [
+      { to: 'done', when: { verdict: 'approved' } },
+      { to: 'escalated', guard: 'isRoundLimitReached' },
+      { to: 'review', when: { verdict: 'rejected' } },
+    ];
+    const result = getValidVerdicts(transitions);
+    expect(result).toEqual(new Set(['approved', 'rejected']));
+  });
+
+  it('deduplicates identical verdict values', () => {
+    const transitions: AgentTransitionDefinition[] = [
+      { to: 'a', when: { verdict: 'done' } },
+      { to: 'b', when: { verdict: 'done' } },
+    ];
+    const result = getValidVerdicts(transitions);
+    expect(result).toEqual(new Set(['done']));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildInvalidVerdictReprompt
+// ---------------------------------------------------------------------------
+
+describe('buildInvalidVerdictReprompt', () => {
+  it('includes the invalid verdict and valid options', () => {
+    const transitions: AgentTransitionDefinition[] = [
+      { to: 'implement', when: { verdict: 'implement' } },
+      { to: 'research', when: { verdict: 'research' } },
+      { to: 'done', when: { verdict: 'done' } },
+    ];
+    const result = buildInvalidVerdictReprompt('no-vuln', transitions);
+
+    expect(result).toContain('"no-vuln"');
+    expect(result).toContain('not a valid routing option');
+    expect(result).toContain('implement: dispatches to implement');
+    expect(result).toContain('research: dispatches to research');
+    expect(result).toContain('done: dispatches to done');
+    expect(result).toContain('revise your response');
+  });
+
+  it('only lists when-clause transitions, not guard transitions', () => {
+    const transitions: AgentTransitionDefinition[] = [
+      { to: 'done', when: { verdict: 'approved' } },
+      { to: 'escalated', guard: 'isRoundLimitReached' },
+      { to: 'review', when: { verdict: 'rejected' } },
+    ];
+    const result = buildInvalidVerdictReprompt('maybe', transitions);
+
+    expect(result).toContain('approved: dispatches to done');
+    expect(result).toContain('rejected: dispatches to review');
+    expect(result).not.toContain('isRoundLimitReached');
+    expect(result).not.toContain('escalated');
   });
 });

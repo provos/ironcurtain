@@ -132,7 +132,7 @@ agent_status:
  * Extracts verdict values from `when` clauses that match on the `verdict` key.
  * Returns deduplicated values in definition order.
  */
-function extractVerdictValues(transitions: readonly AgentTransitionDefinition[]): string[] {
+export function extractVerdictValues(transitions: readonly AgentTransitionDefinition[]): string[] {
   const seen = new Set<string>();
   const values: string[] = [];
   for (const t of transitions) {
@@ -201,5 +201,55 @@ export function buildStatusBlockReprompt(statusInstructions?: string): string {
     'Please include it at the end of your response.',
     '',
     statusInstructions ?? MINIMAL_STATUS_INSTRUCTIONS,
+  ].join('\n');
+}
+
+// ---------------------------------------------------------------------------
+// Verdict validation
+// ---------------------------------------------------------------------------
+
+/**
+ * Determines whether a state's transitions require verdict validation
+ * and, if so, returns the set of valid verdict strings.
+ *
+ * Validation is skipped (returns `undefined`) when:
+ * - No transitions have `when` clauses (pure guard-based or unconditional)
+ * - Any transition is unconditional (no `guard` and no `when`), meaning
+ *   it acts as a fallthrough that accepts any verdict
+ *
+ * @returns set of valid verdict strings, or undefined if validation should be skipped
+ */
+export function getValidVerdicts(transitions: readonly AgentTransitionDefinition[]): ReadonlySet<string> | undefined {
+  const hasUnconditional = transitions.some((t) => !t.guard && !t.when);
+  if (hasUnconditional) return undefined;
+
+  const verdicts = extractVerdictValues(transitions);
+  if (verdicts.length === 0) return undefined;
+
+  return new Set(verdicts);
+}
+
+/**
+ * Builds the re-prompt message when the agent's verdict doesn't match
+ * any valid transition for the current state.
+ *
+ * @param invalidVerdict - the verdict the agent returned
+ * @param transitions - the state's transition definitions (valid verdicts and targets derived from `when` clauses)
+ */
+export function buildInvalidVerdictReprompt(
+  invalidVerdict: string,
+  transitions: readonly AgentTransitionDefinition[],
+): string {
+  const verdictLines = transitions
+    .filter((t): t is AgentTransitionDefinition & { when: { verdict: string } } => t.when?.verdict != null)
+    .map((t) => `- ${t.when.verdict}: dispatches to ${t.to}`);
+
+  return [
+    `Your verdict "${invalidVerdict}" is not a valid routing option for this state.`,
+    '',
+    'Valid verdicts for this state:',
+    ...verdictLines,
+    '',
+    'Please revise your response and use one of the valid verdicts above.',
   ].join('\n');
 }
