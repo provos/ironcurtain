@@ -293,10 +293,33 @@ The `verdict` field accepts any string value, enabling custom verdicts for direc
 | `isApproved`          | Agent verdict is "approved"                       |
 | `isRejected`          | Agent verdict is "rejected"                       |
 | `isRoundLimitReached` | Per-state visit count >= maxRounds                |
-| `isStalled`           | Agent produced identical output as previous round |
+| `isStalled`           | Agent produced identical output artifacts as previous round |
 | `isPassed`            | Deterministic state commands all passed            |
 
 Use `guard` for conditions that depend on workflow context (round limits, stall detection) or for deterministic state transitions (`isPassed`). The simple verdict guards (`isApproved`, `isRejected`) still work but `when` is preferred for new workflows -- `when: { verdict: approved }` is equivalent to `guard: isApproved` and supports custom verdict strings for direct routing.
+
+### Stall detection
+
+The `isStalled` guard compares SHA-256 hashes of a state's output artifact files between consecutive visits. If an agent produces byte-identical output on two consecutive invocations of the same state, the guard returns true — the agent is stuck in a loop producing the same result.
+
+This is useful for coder-critic loops where the coder might repeat the same implementation after being rejected:
+
+```yaml
+review:
+  type: agent
+  description: Reviews code against the spec
+  transitions:
+    - to: done
+      when:
+        verdict: approved
+    - to: escalate_gate
+      guard: isStalled
+    - to: implement
+      when:
+        verdict: rejected
+```
+
+The `isStalled` transition should be ordered before the rejection transition so it fires first when the output is identical. This routes to a human gate or alternative state instead of letting the loop continue indefinitely.
 
 ## Agent status block
 

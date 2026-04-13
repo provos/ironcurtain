@@ -34,7 +34,7 @@ export function buildAgentCommand(
 ): string {
   const isReVisit = (context.visitCounts[stateId] ?? 0) > 1;
   if (isReVisit) {
-    return buildReVisitPrompt(stateId, context);
+    return buildReVisitPrompt(stateId, stateConfig, context);
   }
   return buildFirstVisitPrompt(stateConfig, context, definition);
 }
@@ -139,7 +139,7 @@ function appendExpectedOutputs(sections: string[], outputs: readonly string[]): 
  * The agent already has role instructions and task context in its
  * conversation history via --continue. Only new information is sent.
  */
-function buildReVisitPrompt(stateId: string, context: WorkflowContext): string {
+function buildReVisitPrompt(stateId: string, stateConfig: AgentStateDefinition, context: WorkflowContext): string {
   const sections: string[] = [];
 
   // 1. What's new: previous agent's output
@@ -165,8 +165,8 @@ function buildReVisitPrompt(stateId: string, context: WorkflowContext): string {
     sections.push(`## Human Feedback\n\n${context.humanPrompt}`);
   }
 
-  // 4. Status block instructions (always last — minimal for re-visits)
-  sections.push(MINIMAL_STATUS_INSTRUCTIONS);
+  // 4. Status block instructions (state-specific for conditional transitions)
+  sections.push(buildStatusInstructions(stateConfig.transitions));
 
   return sections.join('\n\n---\n\n');
 }
