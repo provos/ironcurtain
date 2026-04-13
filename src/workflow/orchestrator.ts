@@ -35,7 +35,7 @@ import {
 } from './machine-builder.js';
 import type { CheckpointStore } from './checkpoint.js';
 import { parseAgentStatus, buildStatusBlockReprompt } from './status-parser.js';
-import { buildAgentCommand, buildArtifactReprompt } from './prompt-builder.js';
+import { buildAgentCommand, buildArtifactReprompt, buildStatusInstructions } from './prompt-builder.js';
 import { collectFilesRecursive, hasAnyFiles } from './artifacts.js';
 import { validateDefinition } from './validate.js';
 import { parseDefinitionFile } from './discovery.js';
@@ -763,6 +763,7 @@ export class WorkflowOrchestrator implements WorkflowController {
       instance.tab.write(`[agent] Sending command to "${stateId}"...`);
 
       const { messageLog } = instance;
+      const statusInstructions = buildStatusInstructions(stateConfig.transitions);
 
       const logReceived = (text: string, output: AgentOutput | undefined) => {
         messageLog.append({
@@ -771,6 +772,7 @@ export class WorkflowOrchestrator implements WorkflowController {
           role: stateConfig.persona,
           message: text,
           verdict: output?.verdict ?? null,
+          // eslint-disable-next-line @typescript-eslint/no-deprecated -- logged for diagnostics
           confidence: output?.confidence ?? null,
         });
       };
@@ -794,7 +796,7 @@ export class WorkflowOrchestrator implements WorkflowController {
       logReceived(responseText, agentOutput);
 
       if (!agentOutput) {
-        const retryMsg = buildStatusBlockReprompt();
+        const retryMsg = buildStatusBlockReprompt(statusInstructions);
         messageLog.append({
           ...this.logBase(instance),
           type: 'agent_retry',
@@ -815,7 +817,7 @@ export class WorkflowOrchestrator implements WorkflowController {
 
       const missingArtifacts = this.findMissingArtifacts(stateConfig, instance.artifactDir);
       if (missingArtifacts.length > 0) {
-        const artifactRetryMsg = buildArtifactReprompt(missingArtifacts);
+        const artifactRetryMsg = buildArtifactReprompt(missingArtifacts, stateConfig.transitions);
         messageLog.append({
           ...this.logBase(instance),
           type: 'agent_retry',

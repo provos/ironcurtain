@@ -202,10 +202,10 @@ my_state:
 ```
 
 - **`persona`** -- Either `"global"` (use the default global policy) or the name of an IronCurtain persona created via `ironcurtain persona create <name>`. When set to a real persona name, the agent session uses that persona's compiled policy, memory database, and system prompt augmentation. The orchestrator validates that all non-`"global"` personas exist before starting the workflow.
-- **`prompt`** -- Role instructions sent to the agent. Tell it what to do, where to read inputs, and where to write outputs. Use `.workflow/` prefix for artifact directories.
-- **`inputs`** -- Artifact directories the agent should read (under `.workflow/`)
+- **`prompt`** -- Role instructions sent to the agent. The orchestrator automatically appends workflow context (task description, previous agent output, artifact locations) and status block format instructions after your prompt. On re-invocation of the same state (round 2+ via `--continue`), only new information is sent (the role instructions are already in the conversation history).
+- **`inputs`** -- Artifact directories the agent should read (under `.workflow/`). Trailing `?` marks optional inputs (e.g., `reviews?`).
 - **`outputs`** -- Artifact directories the agent must create (under `.workflow/`). Use `[]` for code-only states where the agent writes to the workspace root.
-- **`transitions`** -- Where to go next, using `when` for declarative conditions or `guard` for complex checks
+- **`transitions`** -- Where to go next, using `when` for declarative conditions or `guard` for context-based checks
 
 ### Human gate states
 
@@ -247,7 +247,6 @@ validate:
     - to: next
       guard: isPassed
     - to: fix
-      guard: isRejected
 ```
 
 Commands are arrays of argument arrays (no shell strings). Use `isPassed` guard for success transitions.
@@ -266,9 +265,9 @@ Optional `outputs` lists artifacts to include in the final summary.
 
 ### Transition conditions
 
-There are two ways to control transitions: declarative `when` conditions and code-based `guard` functions. Use `when` for simple checks against agent output fields, and `guard` for conditions that need workflow context.
+There are two ways to control transitions: declarative `when` conditions and code-based `guard` functions. `when` clauses with free-form verdict strings are the primary routing mechanism for agent states. Guards are reserved for conditions that require workflow context.
 
-**`when` -- declarative conditions (preferred for simple checks):**
+**`when` -- declarative conditions (preferred):**
 
 ```yaml
 - to: done
@@ -279,45 +278,45 @@ There are two ways to control transitions: declarative `when` conditions and cod
   when: { verdict: thesis_validate }
 - to: escalate
   when: { verdict: escalate }
-- to: review
-  when: { verdict: approved, confidence: low }
 ```
 
-`when` matches against the agent's status block output. All specified fields must match (AND semantics). Matchable fields: `completed`, `verdict`, `confidence`, `escalation`, `testCount`, `notes`.
+`when` matches against the agent's status block output. All specified fields must match (AND semantics). The primary matchable field is `verdict`. Other fields (`completed`, `confidence`, `escalation`, `testCount`, `notes`) are also available but are deprecated for routing -- use `verdict` and `notes` instead.
 
-The `verdict` field accepts any string value, enabling custom verdicts for direct routing (e.g., `"thesis_validate"`, `"escalate"`, `"reanalyze"`). Well-known values are `approved`, `rejected`, `blocked`, and `spec_flaw`. The `confidence` field is validated against its allowed values (`high`, `medium`, `low`) at definition load time, catching typos early.
+The `verdict` field accepts any string value, enabling custom verdicts for direct routing (e.g., `"thesis_validate"`, `"escalate"`, `"reanalyze"`). Well-known values are `approved`, `rejected`, `blocked`, and `spec_flaw`. This is the recommended pattern for new workflows: instruct the agent to use specific verdict strings in its prompt, then match on them with `when`.
 
 `when` is only available on agent state transitions (not deterministic states). A transition cannot have both `when` and `guard`.
 
-**`guard` — code-based conditions (for complex checks):**
+**`guard` -- code-based conditions (for context-based checks):**
 
-| Guard                    | Checks                                            |
-| ------------------------ | ------------------------------------------------- |
-| `isApproved`             | Agent verdict is "approved"                       |
-| `isRejected`             | Agent verdict is "rejected"                       |
-| `isLowConfidence`        | Agent approved but with low confidence            |
-| `isRoundLimitReached`    | Per-state visit count >= maxRounds                |
-| `isStalled`              | Agent produced identical output as previous round |
-| `hasTestCountRegression` | Test count dropped (agent may have deleted tests) |
-| `isPassed`               | Deterministic state commands all passed           |
+| Guard                 | Checks                                            |
+| --------------------- | ------------------------------------------------- |
+| `isApproved`          | Agent verdict is "approved"                       |
+| `isRejected`          | Agent verdict is "rejected"                       |
+| `isRoundLimitReached` | Per-state visit count >= maxRounds                |
+| `isStalled`           | Agent produced identical output as previous round |
+| `isPassed`            | Deterministic state commands all passed            |
 
-Use `guard` for conditions that depend on workflow context (round limits, stall detection, test count regression) or for deterministic state transitions (`isPassed`). The simple verdict guards (`isApproved`, `isRejected`, `isLowConfidence`) still work for the well-known verdict values but `when` is preferred for new workflows, especially when using custom verdict strings for direct routing.
+Use `guard` for conditions that depend on workflow context (round limits, stall detection) or for deterministic state transitions (`isPassed`). The simple verdict guards (`isApproved`, `isRejected`) still work but `when` is preferred for new workflows -- `when: { verdict: approved }` is equivalent to `guard: isApproved` and supports custom verdict strings for direct routing.
 
 ## Agent status block
 
-Every agent must end its response with a YAML status block:
+Every agent must end its response with a YAML status block. The orchestrator automatically appends format instructions to the agent's prompt, so you only need to describe what verdicts to use in your prompt template. The minimal required fields are:
 
 ```yaml
 agent_status:
-  completed: true
   verdict: approved
-  confidence: high
-  escalation: null
-  test_count: null
   notes: 'Brief summary of what was done'
 ```
 
-The `verdict` field is a free-form string. Well-known values are `approved`, `rejected`, `blocked`, and `spec_flaw`, but workflow definitions may instruct agents to use custom verdict strings for direct routing (e.g., `thesis_validate`, `escalate`).
+- **`verdict`** -- Free-form string that drives transition routing. Well-known values are `approved`, `rejected`, `blocked`, and `spec_flaw`, but workflows may define custom verdict strings for direct routing (e.g., `thesis_validate`, `escalate`).
+- **`notes`** -- Brief summary passed to the next agent as context.
+
+The following fields are parsed if present but are deprecated and should not be relied upon for routing:
+
+- `completed` -- Defaults to `true`. Use `verdict` instead.
+- `confidence` -- Defaults to `"high"`. Validated against `high`/`medium`/`low` but not used for routing.
+- `escalation` -- Defaults to `null`. Use `notes` for inter-agent context.
+- `test_count` -- Defaults to `null`. No longer consumed by any guard.
 
 The `prompt` field in your workflow definition should include instructions about what the agent does, but the orchestrator automatically appends status block format instructions. If the agent forgets the status block, the orchestrator retries once.
 

@@ -181,9 +181,7 @@ export const GUARD_LABELS: Record<string, string> = {
   isStalled: 'stall detected',
   isApproved: 'approved',
   isRejected: 'rejected',
-  isLowConfidence: 'low confidence',
   isPassed: 'all checks passed',
-  hasTestCountRegression: 'test count regression',
 };
 
 /**
@@ -247,14 +245,22 @@ function formatTransitionCondition(transition: AgentTransitionDefinition): strin
 /**
  * Builds a re-prompt for missing artifacts. Uses relative paths only
  * (no host-absolute paths, since Docker agents see /workspace).
+ *
+ * @param missing - artifact names that were not created
+ * @param transitions - optional state transitions; when provided, status
+ *   instructions include the correct verdict values for conditional routing
  */
-export function buildArtifactReprompt(missing: readonly string[]): string {
+export function buildArtifactReprompt(
+  missing: readonly string[],
+  transitions?: readonly AgentTransitionDefinition[],
+): string {
   const paths = missing.map((name) => `  - \`${WORKFLOW_ARTIFACT_DIR}/${name}/\``);
+  const statusInstructions = transitions ? buildStatusInstructions(transitions) : MINIMAL_STATUS_INSTRUCTIONS;
   return (
     'The following required output artifacts were not created in your workspace:\n' +
     paths.join('\n') +
     '\n\nPlease create them now. Each artifact should be a ' +
     'directory containing at least one file.\n\n' +
-    MINIMAL_STATUS_INSTRUCTIONS
+    statusInstructions
   );
 }

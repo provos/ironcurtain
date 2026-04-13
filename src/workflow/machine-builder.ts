@@ -395,9 +395,7 @@ export function buildWorkflowMachine(definition: WorkflowDefinition, taskDescrip
             ...context.previousOutputHashes,
             [stateId]: result.outputHash,
           },
-          previousTestCount: output.testCount ?? context.previousTestCount,
           round: context.round + 1,
-          flaggedForReview: context.flaggedForReview || (output.verdict === 'approved' && output.confidence === 'low'),
           reviewHistory:
             output.verdict === 'rejected' ? [...context.reviewHistory, output.notes ?? ''] : context.reviewHistory,
           sessionsByState: {

@@ -35,11 +35,6 @@ const isRejected: GuardFunction = ({ event }) => {
   return output?.verdict === 'rejected';
 };
 
-const isLowConfidence: GuardFunction = ({ event }) => {
-  const output = extractAgentOutput(event);
-  return output?.verdict === 'approved' && output.confidence === 'low';
-};
-
 /**
  * Per-state round limit check. Compares the maximum visit count
  * across all states against maxRounds. This fires when any state
@@ -61,14 +56,6 @@ const isRoundLimitReached: GuardFunction = ({ context }) => {
 // validation via REGISTERED_GUARDS.
 const isStalled: GuardFunction = () => false;
 
-const hasTestCountRegression: GuardFunction = ({ context, event }) => {
-  const output = extractAgentOutput(event);
-  if (context.previousTestCount == null || output?.testCount == null) {
-    return false;
-  }
-  return output.testCount < context.previousTestCount;
-};
-
 const isPassed: GuardFunction = ({ event }) => {
   return event.type === 'VALIDATION_PASSED';
 };
@@ -80,10 +67,8 @@ const isPassed: GuardFunction = ({ event }) => {
 export const guardImplementations: Readonly<Record<string, GuardFunction>> = {
   isApproved,
   isRejected,
-  isLowConfidence,
   isRoundLimitReached,
   isStalled,
-  hasTestCountRegression,
   isPassed,
 };
 

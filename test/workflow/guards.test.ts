@@ -49,17 +49,14 @@ function completedEvent(outputOverrides: Partial<AgentOutput> = {}): WorkflowEve
 // Tests
 // ---------------------------------------------------------------------------
 
-const { isApproved, isRejected, isLowConfidence, isRoundLimitReached, isStalled, hasTestCountRegression, isPassed } =
-  guardImplementations;
+const { isApproved, isRejected, isRoundLimitReached, isStalled, isPassed } = guardImplementations;
 
 describe('REGISTERED_GUARDS', () => {
   it('contains all guard names', () => {
     expect(REGISTERED_GUARDS).toContain('isApproved');
     expect(REGISTERED_GUARDS).toContain('isRejected');
-    expect(REGISTERED_GUARDS).toContain('isLowConfidence');
     expect(REGISTERED_GUARDS).toContain('isRoundLimitReached');
     expect(REGISTERED_GUARDS).toContain('isStalled');
-    expect(REGISTERED_GUARDS).toContain('hasTestCountRegression');
     expect(REGISTERED_GUARDS).toContain('isPassed');
   });
 
@@ -90,7 +87,7 @@ describe('isApproved', () => {
   });
 
   it('returns false for non-agent events', () => {
-    expect(isApproved({ context: baseContext(), event: { type: 'AGENT_FAILED', error: 'oops' } })).toBe(false);
+    expect(isApproved({ context: baseContext(), event: { type: 'VALIDATION_FAILED', errors: 'oops' } })).toBe(false);
   });
 });
 
@@ -101,35 +98,6 @@ describe('isRejected', () => {
 
   it('returns false for approved verdict', () => {
     expect(isRejected({ context: baseContext(), event: completedEvent({ verdict: 'approved' }) })).toBe(false);
-  });
-});
-
-describe('isLowConfidence', () => {
-  it('returns true for approved + low confidence', () => {
-    expect(
-      isLowConfidence({
-        context: baseContext(),
-        event: completedEvent({ verdict: 'approved', confidence: 'low' }),
-      }),
-    ).toBe(true);
-  });
-
-  it('returns false for approved + high confidence', () => {
-    expect(
-      isLowConfidence({
-        context: baseContext(),
-        event: completedEvent({ verdict: 'approved', confidence: 'high' }),
-      }),
-    ).toBe(false);
-  });
-
-  it('returns false for rejected + low confidence', () => {
-    expect(
-      isLowConfidence({
-        context: baseContext(),
-        event: completedEvent({ verdict: 'rejected', confidence: 'low' }),
-      }),
-    ).toBe(false);
   });
 });
 
@@ -173,68 +141,12 @@ describe('isRoundLimitReached', () => {
 
 describe('isStalled', () => {
   it('returns false for non-agent events', () => {
-    expect(isStalled({ context: baseContext(), event: { type: 'AGENT_FAILED', error: 'err' } })).toBe(false);
+    expect(isStalled({ context: baseContext(), event: { type: 'VALIDATION_FAILED', errors: 'err' } })).toBe(false);
   });
 
   it('returns false for agent completed events (Phase 1 stub)', () => {
     // Stall detection requires machine builder integration for stateId+hash
     expect(isStalled({ context: baseContext(), event: completedEvent() })).toBe(false);
-  });
-});
-
-describe('hasTestCountRegression', () => {
-  it('detects count decrease', () => {
-    expect(
-      hasTestCountRegression({
-        context: baseContext({ previousTestCount: 10 }),
-        event: completedEvent({ testCount: 5 }),
-      }),
-    ).toBe(true);
-  });
-
-  it('returns false when count increases', () => {
-    expect(
-      hasTestCountRegression({
-        context: baseContext({ previousTestCount: 5 }),
-        event: completedEvent({ testCount: 10 }),
-      }),
-    ).toBe(false);
-  });
-
-  it('returns false when count is equal', () => {
-    expect(
-      hasTestCountRegression({
-        context: baseContext({ previousTestCount: 10 }),
-        event: completedEvent({ testCount: 10 }),
-      }),
-    ).toBe(false);
-  });
-
-  it('returns false when previousTestCount is null', () => {
-    expect(
-      hasTestCountRegression({
-        context: baseContext({ previousTestCount: null }),
-        event: completedEvent({ testCount: 5 }),
-      }),
-    ).toBe(false);
-  });
-
-  it('returns false when current testCount is null', () => {
-    expect(
-      hasTestCountRegression({
-        context: baseContext({ previousTestCount: 10 }),
-        event: completedEvent({ testCount: null }),
-      }),
-    ).toBe(false);
-  });
-
-  it('returns false for non-agent events', () => {
-    expect(
-      hasTestCountRegression({
-        context: baseContext({ previousTestCount: 10 }),
-        event: { type: 'AGENT_FAILED', error: 'err' },
-      }),
-    ).toBe(false);
   });
 });
 

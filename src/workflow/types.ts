@@ -174,8 +174,7 @@ export interface AgentTransitionDefinition {
   /**
    * Guard name matching a registered XState guard. No translation
    * layer -- use names directly: isApproved, isRejected,
-   * isRoundLimitReached, isStalled, hasTestCountRegression,
-   * isLowConfidence, isPassed.
+   * isRoundLimitReached, isStalled, isPassed.
    * Mutually exclusive with `when`.
    */
   readonly guard?: string;
@@ -208,11 +207,29 @@ export type Confidence = (typeof CONFIDENCE_VALUES)[number];
 
 /** Structured output parsed from the agent's response text. */
 export interface AgentOutput {
+  /**
+   * @deprecated Maintained for backward compatibility. Defaults to `true`
+   * at parse time. Workflows should use free-form `verdict` strings for
+   * routing decisions instead of relying on this boolean.
+   */
   readonly completed: boolean;
   /** Free-form verdict string. Well-known values: approved, rejected, blocked, spec_flaw. Workflows may define custom verdicts for direct routing. */
   readonly verdict: string;
+  /**
+   * @deprecated Maintained for backward compatibility. Defaults to `'high'`
+   * at parse time. Should not be relied upon for routing decisions; use
+   * `verdict` and `notes` instead.
+   */
   readonly confidence: Confidence;
+  /**
+   * @deprecated Maintained for backward compatibility. Defaults to `null`
+   * at parse time. Use `notes` for inter-agent context instead.
+   */
   readonly escalation: string | null;
+  /**
+   * @deprecated Maintained for backward compatibility. Defaults to `null`
+   * at parse time. Should not be relied upon for routing decisions.
+   */
   readonly testCount: number | null;
   readonly notes: string | null;
 }
@@ -233,11 +250,8 @@ export const AGENT_OUTPUT_FIELDS = [
 
 export type WorkflowEvent =
   | { readonly type: 'AGENT_COMPLETED'; readonly output: AgentOutput }
-  | { readonly type: 'AGENT_FAILED'; readonly error: string }
   | { readonly type: 'VALIDATION_PASSED'; readonly testCount: number }
   | { readonly type: 'VALIDATION_FAILED'; readonly errors: string }
-  | { readonly type: 'STALL_DETECTED' }
-  | { readonly type: 'SPEC_FLAW_DETECTED' }
   | { readonly type: 'HUMAN_APPROVE'; readonly prompt?: string }
   | { readonly type: 'HUMAN_FORCE_REVISION'; readonly prompt?: string }
   | { readonly type: 'HUMAN_REPLAN'; readonly prompt?: string }

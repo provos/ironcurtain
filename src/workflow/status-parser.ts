@@ -22,6 +22,8 @@ export class AgentStatusParseError extends Error {
 // ---------------------------------------------------------------------------
 
 const agentOutputSchema = z.object({
+  // Deprecated fields — defaults maintained for backward compatibility.
+  // Workflows should use free-form `verdict` for routing and `notes` for context.
   completed: z.boolean().default(true),
   verdict: z.string().min(1),
   confidence: z.enum(CONFIDENCE_VALUES).default('high'),
@@ -185,14 +187,19 @@ export function buildConditionalStatusInstructions(
 }
 
 /**
- * Returns the re-prompt message with minimal format instructions.
- * Used when the agent's response is missing the status block.
+ * Returns the re-prompt message when the agent's response is missing the
+ * status block.
+ *
+ * @param statusInstructions - optional pre-built instructions string (e.g.
+ *   from `buildStatusInstructions`). When provided, replaces the default
+ *   minimal instructions so that conditional states list the correct verdict
+ *   values for routing. When omitted, falls back to `MINIMAL_STATUS_INSTRUCTIONS`.
  */
-export function buildStatusBlockReprompt(): string {
+export function buildStatusBlockReprompt(statusInstructions?: string): string {
   return [
     'Your response is missing the required agent_status block.',
     'Please include it at the end of your response.',
     '',
-    MINIMAL_STATUS_INSTRUCTIONS,
+    statusInstructions ?? MINIMAL_STATUS_INSTRUCTIONS,
   ].join('\n');
 }
