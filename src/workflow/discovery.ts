@@ -49,8 +49,8 @@ export function parseDefinitionFile(filePath: string): unknown {
 
   if (ext === '.yaml' || ext === '.yml') {
     // Workflow definitions should not use YAML aliases/anchors.
-    // Limit alias expansion to prevent YAML bomb DoS.
-    return YAML.parse(content, { maxAliasCount: 100 });
+    // Disallow alias expansion to prevent YAML bomb DoS.
+    return YAML.parse(content, { maxAliasCount: 0 });
   }
   return JSON.parse(content);
 }

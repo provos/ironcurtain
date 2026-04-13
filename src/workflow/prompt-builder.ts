@@ -6,7 +6,7 @@ import type {
   WorkflowStateDefinition,
 } from './types.js';
 import { WORKFLOW_ARTIFACT_DIR } from './types.js';
-import { STATUS_BLOCK_INSTRUCTIONS } from './status-parser.js';
+import { MINIMAL_STATUS_INSTRUCTIONS, buildConditionalStatusInstructions } from './status-parser.js';
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -16,9 +16,9 @@ import { STATUS_BLOCK_INSTRUCTIONS } from './status-parser.js';
  * Assembles the command string sent to an agent session.
  *
  * Two modes:
- * - **First visit**: Full prompt with role instructions, task, previous
- *   agent output, artifact path references, expected outputs, and status
- *   format. Used when entering a state for the first time.
+ * - **First visit**: Full prompt with workflow context, previous agent
+ *   output, artifact path references, role instructions, expected outputs,
+ *   and status format. Used when entering a state for the first time.
  * - **Re-visit**: Abbreviated prompt with only what's new: previous agent
  *   output, round number, human feedback, and status format. The agent
  *   already has role instructions and task context via --continue.
@@ -40,13 +40,21 @@ export function buildAgentCommand(
 }
 
 // ---------------------------------------------------------------------------
-// First-visit prompt (cross-state transition)
+// First-visit prompt
 // ---------------------------------------------------------------------------
 
 /**
  * Full prompt for the first time an agent state is entered.
- * Includes role instructions, task, previous agent output, artifact
- * references, expected outputs, human feedback, and status format.
+ *
+ * Uses one universal layout for ALL agents (workers and orchestrators alike):
+ * 1. Workflow Context — task as quoted context
+ * 2. Previous agent output (if any)
+ * 3. Input artifacts
+ * 4. Your Role — the role prompt (last substantive instruction for recency bias)
+ * 5. Expected outputs
+ * 6. Human feedback (if any)
+ * 7. Handoff clause
+ * 8. Status block instructions
  */
 function buildFirstVisitPrompt(
   stateConfig: AgentStateDefinition,
@@ -55,13 +63,15 @@ function buildFirstVisitPrompt(
 ): string {
   const sections: string[] = [];
 
-  // 1. Role instructions from workflow definition
-  sections.push(stateConfig.prompt);
+  // 1. Workflow context with task description as quoted text
+  sections.push(
+    '## Workflow Context\n\n' +
+      'You are one agent in a multi-agent workflow. The overall workflow goal is:\n\n' +
+      `> ${context.taskDescription}\n\n` +
+      'Your specific role and instructions follow below. Focus on YOUR assigned responsibilities, not the overall goal.',
+  );
 
-  // 2. Task description
-  sections.push(`## Task\n\n${context.taskDescription}`);
-
-  // 3. Previous agent's output
+  // 2. Previous agent's output
   if (context.previousAgentOutput && context.previousStateName) {
     sections.push(
       `## Output from ${context.previousStateName}\n\n` +
@@ -70,22 +80,14 @@ function buildFirstVisitPrompt(
     );
   }
 
-  // 4. Input artifacts as path references (not content)
-  for (const inputRef of stateConfig.inputs) {
-    const isOptional = inputRef.endsWith('?');
-    const name = isOptional ? inputRef.slice(0, -1) : inputRef;
-    sections.push(
-      `## Input: ${name}\n\n` +
-        `Read the contents of the \`${WORKFLOW_ARTIFACT_DIR}/${name}/\` directory ` +
-        `in your workspace using your file reading tools.`,
-    );
-  }
+  // 3. Input artifacts as path references (not content)
+  appendInputArtifacts(sections, stateConfig.inputs);
+
+  // 4. Role prompt (last substantive instruction for recency bias)
+  sections.push(`## Your Role\n\n${stateConfig.prompt}`);
 
   // 5. Expected outputs
-  if (stateConfig.outputs.length > 0) {
-    const outputList = stateConfig.outputs.map((o) => `- \`${WORKFLOW_ARTIFACT_DIR}/${o}/\``).join('\n');
-    sections.push(`## Expected Outputs\n\nCreate the following artifact directories in your workspace:\n${outputList}`);
-  }
+  appendExpectedOutputs(sections, stateConfig.outputs);
 
   // 6. Human feedback from gate
   if (context.humanPrompt) {
@@ -99,9 +101,33 @@ function buildFirstVisitPrompt(
   }
 
   // 8. Status block instructions (always last)
-  sections.push(STATUS_BLOCK_INSTRUCTIONS);
+  sections.push(buildStatusInstructions(stateConfig.transitions));
 
   return sections.join('\n\n---\n\n');
+}
+
+// ---------------------------------------------------------------------------
+// Shared section helpers
+// ---------------------------------------------------------------------------
+
+/** Appends input artifact path reference sections. */
+function appendInputArtifacts(sections: string[], inputs: readonly string[]): void {
+  for (const inputRef of inputs) {
+    const isOptional = inputRef.endsWith('?');
+    const name = isOptional ? inputRef.slice(0, -1) : inputRef;
+    const instruction = isOptional
+      ? `Read the contents of the \`${WORKFLOW_ARTIFACT_DIR}/${name}/\` directory in your workspace if it exists. This input is optional — skip it if the directory is not present.`
+      : `Read the contents of the \`${WORKFLOW_ARTIFACT_DIR}/${name}/\` directory in your workspace using your file reading tools.`;
+    sections.push(`## Input: ${name}\n\n${instruction}`);
+  }
+}
+
+/** Appends expected outputs section if there are any outputs. */
+function appendExpectedOutputs(sections: string[], outputs: readonly string[]): void {
+  if (outputs.length > 0) {
+    const outputList = outputs.map((o) => `- \`${WORKFLOW_ARTIFACT_DIR}/${o}/\``).join('\n');
+    sections.push(`## Expected Outputs\n\nCreate the following artifact directories in your workspace:\n${outputList}`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -139,18 +165,18 @@ function buildReVisitPrompt(stateId: string, context: WorkflowContext): string {
     sections.push(`## Human Feedback\n\n${context.humanPrompt}`);
   }
 
-  // 4. Status block instructions (always last)
-  sections.push(STATUS_BLOCK_INSTRUCTIONS);
+  // 4. Status block instructions (always last — minimal for re-visits)
+  sections.push(MINIMAL_STATUS_INSTRUCTIONS);
 
   return sections.join('\n\n---\n\n');
 }
 
 // ---------------------------------------------------------------------------
-// Handoff clause
+// Status instruction selection
 // ---------------------------------------------------------------------------
 
 /** Human-readable labels for named guard conditions. */
-const GUARD_LABELS: Record<string, string> = {
+export const GUARD_LABELS: Record<string, string> = {
   isRoundLimitReached: 'round limit reached',
   isStalled: 'stall detected',
   isApproved: 'approved',
@@ -159,6 +185,24 @@ const GUARD_LABELS: Record<string, string> = {
   isPassed: 'all checks passed',
   hasTestCountRegression: 'test count regression',
 };
+
+/**
+ * Selects the appropriate status block instructions for a state's transitions.
+ *
+ * - Unconditional transitions (no `when`, no `guard`) get minimal instructions.
+ * - Conditional transitions get instructions with extracted verdict values.
+ */
+export function buildStatusInstructions(transitions: readonly AgentTransitionDefinition[]): string {
+  const hasConditional = transitions.some((t) => t.when != null || t.guard != null);
+  if (!hasConditional) {
+    return MINIMAL_STATUS_INSTRUCTIONS;
+  }
+  return buildConditionalStatusInstructions(transitions, GUARD_LABELS);
+}
+
+// ---------------------------------------------------------------------------
+// Handoff clause
+// ---------------------------------------------------------------------------
 
 /**
  * Builds the "What happens with your output" section for first-visit prompts.
@@ -197,7 +241,7 @@ function formatTransitionCondition(transition: AgentTransitionDefinition): strin
 }
 
 // ---------------------------------------------------------------------------
-// Artifact re-prompt (unchanged)
+// Artifact re-prompt
 // ---------------------------------------------------------------------------
 
 /**
@@ -211,6 +255,6 @@ export function buildArtifactReprompt(missing: readonly string[]): string {
     paths.join('\n') +
     '\n\nPlease create them now. Each artifact should be a ' +
     'directory containing at least one file.\n\n' +
-    STATUS_BLOCK_INSTRUCTIONS
+    MINIMAL_STATUS_INSTRUCTIONS
   );
 }

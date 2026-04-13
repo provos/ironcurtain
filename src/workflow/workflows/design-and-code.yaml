@@ -132,11 +132,13 @@ states:
       - reviews
     transitions:
       - to: done
-        guard: isApproved
+        when:
+          verdict: approved
       - to: escalate_gate
         guard: isRoundLimitReached
       - to: implement
-        guard: isRejected
+        when:
+          verdict: rejected
 
   escalate_gate:
     type: human_gate

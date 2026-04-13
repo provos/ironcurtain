@@ -365,7 +365,6 @@ function runInspect(args: string[]): void {
       writeStdout(`  Artifacts: ${artifactNames.join(', ') || '(none)'}`);
     }
 
-    // Definition path (reuses defPath from above)
     if (existsSync(defPath)) {
       writeStdout(`  Definition: ${defPath}`);
     }

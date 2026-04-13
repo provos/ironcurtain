@@ -23,7 +23,7 @@ const humanGateTransitionSchema = z.object({
 
 const agentStateSchema = z.object({
   type: z.literal('agent'),
-  description: z.string().default(''),
+  description: z.string().min(1),
   persona: z.string(),
   prompt: z.string().min(1),
   inputs: z.array(z.string()),
@@ -35,7 +35,7 @@ const agentStateSchema = z.object({
 
 const humanGateStateSchema = z.object({
   type: z.literal('human_gate'),
-  description: z.string().default(''),
+  description: z.string().min(1),
   acceptedEvents: z.array(z.enum(['APPROVE', 'FORCE_REVISION', 'REPLAN', 'ABORT'])),
   present: z.array(z.string()).optional(),
   transitions: z.array(humanGateTransitionSchema),
@@ -43,14 +43,14 @@ const humanGateStateSchema = z.object({
 
 const deterministicStateSchema = z.object({
   type: z.literal('deterministic'),
-  description: z.string().default(''),
+  description: z.string().min(1),
   run: z.array(z.array(z.string())),
   transitions: z.array(agentTransitionSchema),
 });
 
 const terminalStateSchema = z.object({
   type: z.literal('terminal'),
-  description: z.string().default(''),
+  description: z.string().min(1),
   outputs: z.array(z.string()).optional(),
   cleanup: z.array(z.array(z.string())).optional(),
 });

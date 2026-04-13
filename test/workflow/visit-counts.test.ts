@@ -144,20 +144,23 @@ describe('visitCounts prompt selection', () => {
     expect(implement1.stateId).toBe('implement');
     // First visit gets the full prompt with role instructions
     expect(implement1.command).toContain('You are a coder. Write clean code.');
-    expect(implement1.command).toContain('## Task');
+    // All agents use Workflow Context heading
+    expect(implement1.command).toContain('## Workflow Context');
 
     // -- review: first entry (visitCount=1) --
     const review1 = capturedCommands[1];
     expect(review1.stateId).toBe('review');
     expect(review1.command).toContain('You are a code reviewer. Check for bugs.');
-    expect(review1.command).toContain('## Task');
+    expect(review1.command).toContain('## Workflow Context');
 
     // -- implement: second entry (visitCount=2) -> re-visit prompt --
     const implement2 = capturedCommands[2];
     expect(implement2.stateId).toBe('implement');
-    // Re-visit prompt should NOT contain the role instructions
+    // Re-visit prompt should NOT contain the role instructions or section headings
     expect(implement2.command).not.toContain('You are a coder. Write clean code.');
     expect(implement2.command).not.toContain('## Task');
+    expect(implement2.command).not.toContain('## Workflow Context');
+    expect(implement2.command).not.toContain('## Your Role');
     // Re-visit prompt SHOULD contain the previous agent output
     expect(implement2.command).toContain('## New Input from review');
     expect(implement2.command).toContain('Found bugs in the code');
@@ -169,6 +172,8 @@ describe('visitCounts prompt selection', () => {
     expect(review2.stateId).toBe('review');
     expect(review2.command).not.toContain('You are a code reviewer. Check for bugs.');
     expect(review2.command).not.toContain('## Task');
+    expect(review2.command).not.toContain('## Workflow Context');
+    expect(review2.command).not.toContain('## Your Role');
     expect(review2.command).toContain('## New Input from implement');
   });
 

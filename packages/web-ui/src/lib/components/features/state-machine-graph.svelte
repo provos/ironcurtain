@@ -272,7 +272,7 @@
       {@const fill = nodeFillClass(ln.node, status)}
       {@const vc = visitCounts[ln.id]}
       <g class={status === 'active' ? 'animate-pulse-slow' : ''}>
-        <title>{ln.node.description ?? ln.node.label}</title>
+        <title>{ln.node.description || ln.node.label}</title>
         <path
           d={shapePath(ln.node, ln.x, ln.y, ln.width, ln.height)}
           class={fill}

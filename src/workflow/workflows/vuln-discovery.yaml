@@ -18,9 +18,7 @@ states:
     description: 'Structural code analysis — maps call chains, entry points, and build system'
     persona: global
     prompt: |
-      You are a code analyst mapping the structure of a target file for a vulnerability investigation. You have access to a source tree at the workspace root.
-
-      Your target file is specified in the task description.
+      You are a code analyst mapping the structure of a target file for a vulnerability investigation. You have access to a source tree at the workspace root. The target file path is given in the workflow context above.
 
       Your job is STRUCTURAL ANALYSIS. Map the code's architecture, data flow, and assumptions. Do NOT claim specific code paths are vulnerable, propose exploits, or assess severity — later agents handle that with execution-based tooling.
 

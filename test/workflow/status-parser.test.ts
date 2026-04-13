@@ -4,8 +4,10 @@ import {
   AgentStatusParseError,
   buildStatusBlockReprompt,
   stripStatusBlock,
-  STATUS_BLOCK_INSTRUCTIONS,
+  MINIMAL_STATUS_INSTRUCTIONS,
+  buildConditionalStatusInstructions,
 } from '../../src/workflow/status-parser.js';
+import type { AgentTransitionDefinition } from '../../src/workflow/types.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -53,13 +55,14 @@ describe('parseAgentStatus', () => {
     expect(parseAgentStatus(text)).toBeUndefined();
   });
 
-  it('throws AgentStatusParseError on malformed block', () => {
-    const text = '```\nagent_status:\n  completed: maybe\n```';
+  it('throws AgentStatusParseError on truly invalid block', () => {
+    // verdict is required and has min(1), empty string should fail
+    const text = '```\nagent_status:\n  verdict: ""\n```';
     expect(() => parseAgentStatus(text)).toThrow(AgentStatusParseError);
   });
 
   it('preserves rawBlock on parse error', () => {
-    const text = '```\nagent_status:\n  completed: maybe\n```';
+    const text = '```\nagent_status:\n  verdict: ""\n```';
     try {
       parseAgentStatus(text);
       expect.fail('should have thrown');
@@ -212,6 +215,53 @@ describe('parseAgentStatus', () => {
     const result = parseAgentStatus(wrapInFence(yaml));
     expect(result?.notes).toBe('everything looks good');
   });
+
+  // -- Partial block tests (defaults applied at parse time) --
+
+  it('parses a minimal block with only verdict', () => {
+    const yaml = ['agent_status:', '  verdict: done', ''].join('\n');
+    const result = parseAgentStatus(wrapInFence(yaml));
+    expect(result).toEqual({
+      completed: true,
+      verdict: 'done',
+      confidence: 'high',
+      escalation: null,
+      testCount: null,
+      notes: null,
+    });
+  });
+
+  it('parses verdict + notes with other fields defaulted', () => {
+    const yaml = ['agent_status:', '  verdict: approved', '  notes: "all tests pass"', ''].join('\n');
+    const result = parseAgentStatus(wrapInFence(yaml));
+    expect(result).toEqual({
+      completed: true,
+      verdict: 'approved',
+      confidence: 'high',
+      escalation: null,
+      testCount: null,
+      notes: 'all tests pass',
+    });
+  });
+
+  it('allows overriding default completed to false', () => {
+    const yaml = ['agent_status:', '  completed: false', '  verdict: blocked', ''].join('\n');
+    const result = parseAgentStatus(wrapInFence(yaml));
+    expect(result?.completed).toBe(false);
+    expect(result?.confidence).toBe('high'); // defaulted
+  });
+
+  it('allows overriding default confidence', () => {
+    const yaml = ['agent_status:', '  verdict: done', '  confidence: low', ''].join('\n');
+    const result = parseAgentStatus(wrapInFence(yaml));
+    expect(result?.confidence).toBe('low');
+    expect(result?.completed).toBe(true); // defaulted
+  });
+
+  it('rejects block missing verdict (the only required field)', () => {
+    const yaml = ['agent_status:', '  completed: true', '  notes: "no verdict"', ''].join('\n');
+    expect(() => parseAgentStatus(wrapInFence(yaml))).toThrow(AgentStatusParseError);
+  });
 });
 
 describe('buildStatusBlockReprompt', () => {
@@ -229,20 +279,111 @@ describe('buildStatusBlockReprompt', () => {
     const prompt = buildStatusBlockReprompt();
     expect(prompt).toContain('missing');
   });
+
+  it('uses the minimal format with verdict and notes', () => {
+    const prompt = buildStatusBlockReprompt();
+    expect(prompt).toContain('verdict: done');
+    expect(prompt).toContain('notes:');
+  });
 });
 
-describe('STATUS_BLOCK_INSTRUCTIONS', () => {
+describe('MINIMAL_STATUS_INSTRUCTIONS', () => {
   it('is a non-empty string', () => {
-    expect(STATUS_BLOCK_INSTRUCTIONS.length).toBeGreaterThan(0);
+    expect(MINIMAL_STATUS_INSTRUCTIONS.length).toBeGreaterThan(0);
   });
 
-  it('contains the expected fields', () => {
-    expect(STATUS_BLOCK_INSTRUCTIONS).toContain('completed');
-    expect(STATUS_BLOCK_INSTRUCTIONS).toContain('verdict');
-    expect(STATUS_BLOCK_INSTRUCTIONS).toContain('confidence');
-    expect(STATUS_BLOCK_INSTRUCTIONS).toContain('escalation');
-    expect(STATUS_BLOCK_INSTRUCTIONS).toContain('test_count');
-    expect(STATUS_BLOCK_INSTRUCTIONS).toContain('notes');
+  it('contains verdict and notes fields', () => {
+    expect(MINIMAL_STATUS_INSTRUCTIONS).toContain('verdict');
+    expect(MINIMAL_STATUS_INSTRUCTIONS).toContain('notes');
+  });
+
+  it('does not contain the verbose fields', () => {
+    // Minimal instructions omit completed, confidence, escalation, test_count
+    expect(MINIMAL_STATUS_INSTRUCTIONS).not.toContain('completed:');
+    expect(MINIMAL_STATUS_INSTRUCTIONS).not.toContain('confidence:');
+    expect(MINIMAL_STATUS_INSTRUCTIONS).not.toContain('escalation:');
+    expect(MINIMAL_STATUS_INSTRUCTIONS).not.toContain('test_count:');
+  });
+});
+
+describe('buildConditionalStatusInstructions', () => {
+  const guardLabels: Record<string, string> = {
+    isApproved: 'approved',
+    isRejected: 'rejected',
+    isRoundLimitReached: 'round limit reached',
+  };
+
+  it('lists verdict values from when clauses', () => {
+    const transitions: AgentTransitionDefinition[] = [
+      { to: 'done', when: { verdict: 'approved' } },
+      { to: 'implement', when: { verdict: 'rejected' } },
+    ];
+
+    const result = buildConditionalStatusInstructions(transitions, guardLabels);
+
+    expect(result).toContain('`approved`');
+    expect(result).toContain('`rejected`');
+    expect(result).toContain('verdict: approved'); // example uses first value
+  });
+
+  it('deduplicates verdict values', () => {
+    const transitions: AgentTransitionDefinition[] = [
+      { to: 'a', when: { verdict: 'approved' } },
+      { to: 'b', when: { verdict: 'approved' } },
+    ];
+
+    const result = buildConditionalStatusInstructions(transitions, guardLabels);
+
+    // Should appear only once in the list
+    const matches = result.match(/`approved`/g);
+    expect(matches).toHaveLength(1);
+  });
+
+  it('includes guard descriptions when guards are present', () => {
+    const transitions: AgentTransitionDefinition[] = [
+      { to: 'done', guard: 'isApproved' },
+      { to: 'escalate', guard: 'isRoundLimitReached' },
+      { to: 'implement', guard: 'isRejected' },
+    ];
+
+    const result = buildConditionalStatusInstructions(transitions, guardLabels);
+
+    expect(result).toContain('Additional routing conditions');
+    expect(result).toContain('approved');
+    expect(result).toContain('round limit reached');
+    expect(result).toContain('rejected');
+  });
+
+  it('handles mixed when and guard transitions', () => {
+    const transitions: AgentTransitionDefinition[] = [
+      { to: 'next', when: { verdict: 'thesis_validate' } },
+      { to: 'done', guard: 'isRoundLimitReached' },
+    ];
+
+    const result = buildConditionalStatusInstructions(transitions, guardLabels);
+
+    expect(result).toContain('`thesis_validate`');
+    expect(result).toContain('Additional routing conditions');
+    expect(result).toContain('round limit reached');
+  });
+
+  it('falls back to guard name for unknown guards', () => {
+    const transitions: AgentTransitionDefinition[] = [{ to: 'next', guard: 'customGuard' }];
+
+    const result = buildConditionalStatusInstructions(transitions, guardLabels);
+
+    expect(result).toContain('customGuard');
+  });
+
+  it('handles guard-only transitions with (see prompt) verdict list', () => {
+    const transitions: AgentTransitionDefinition[] = [
+      { to: 'done', guard: 'isApproved' },
+      { to: 'implement', guard: 'isRejected' },
+    ];
+
+    const result = buildConditionalStatusInstructions(transitions, guardLabels);
+
+    expect(result).toContain('(see prompt)');
   });
 });
 

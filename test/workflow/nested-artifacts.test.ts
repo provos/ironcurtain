@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { computeOutputHash } from '../../src/workflow/orchestrator.js';
-import { buildAgentCommand, buildHandoffClause } from '../../src/workflow/prompt-builder.js';
+import { buildAgentCommand, buildHandoffClause, buildStatusInstructions } from '../../src/workflow/prompt-builder.js';
 import type {
   AgentStateDefinition,
   AgentTransitionDefinition,
@@ -119,13 +119,104 @@ function makeDefinition(states: WorkflowDefinition['states'] = {}): WorkflowDefi
   };
 }
 
-describe('buildAgentCommand first-visit mode', () => {
-  it('includes role prompt, task, expected outputs, and status block on first visit', () => {
+// ---------------------------------------------------------------------------
+// buildStatusInstructions
+// ---------------------------------------------------------------------------
+
+describe('buildStatusInstructions', () => {
+  it('returns minimal instructions for unconditional transitions', () => {
+    const result = buildStatusInstructions([{ to: 'next' }]);
+    expect(result).toContain('verdict: done');
+    expect(result).not.toContain('determines what happens next');
+  });
+
+  it('returns minimal instructions for empty transitions', () => {
+    const result = buildStatusInstructions([]);
+    expect(result).toContain('verdict: done');
+  });
+
+  it('returns conditional instructions for when-clause transitions', () => {
+    const result = buildStatusInstructions([
+      { to: 'a', when: { verdict: 'approved' } },
+      { to: 'b', when: { verdict: 'rejected' } },
+    ]);
+    expect(result).toContain('determines what happens next');
+    expect(result).toContain('`approved`');
+    expect(result).toContain('`rejected`');
+  });
+
+  it('returns conditional instructions for guard transitions', () => {
+    const result = buildStatusInstructions([
+      { to: 'done', guard: 'isApproved' },
+      { to: 'implement', guard: 'isRejected' },
+    ]);
+    expect(result).toContain('Additional routing conditions');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Worker vs Router prompt patterns
+// ---------------------------------------------------------------------------
+
+describe('buildAgentCommand with unconditional transitions', () => {
+  it('puts task in Workflow Context before role prompt', () => {
     const stateConfig: AgentStateDefinition = {
       type: 'agent',
       description: 'Plans the project',
       persona: 'planner',
       prompt: 'You are a project planner.',
+      inputs: [],
+      outputs: ['plan'],
+      transitions: [], // no verdict routing -> worker
+    };
+
+    const command = buildAgentCommand(
+      'plan',
+      stateConfig,
+      makeContext({ taskDescription: 'Build a CLI tool' }),
+      makeDefinition(),
+    );
+
+    // Worker pattern: Workflow Context (with task) before role prompt
+    expect(command).toContain('## Workflow Context');
+    expect(command).toContain('> Build a CLI tool');
+    expect(command).toContain('## Your Role');
+    expect(command).toContain('You are a project planner.');
+
+    // Task description should appear BEFORE role prompt
+    const contextIndex = command.indexOf('## Workflow Context');
+    const roleIndex = command.indexOf('## Your Role');
+    expect(contextIndex).toBeLessThan(roleIndex);
+  });
+
+  it('does not use ## Task heading for workers', () => {
+    const stateConfig: AgentStateDefinition = {
+      type: 'agent',
+      description: 'Worker',
+      persona: 'worker',
+      prompt: 'You are a worker.',
+      inputs: [],
+      outputs: [],
+      transitions: [{ to: 'next' }], // unconditional -> worker
+    };
+
+    const command = buildAgentCommand(
+      'work',
+      stateConfig,
+      makeContext({ taskDescription: 'Do something' }),
+      makeDefinition(),
+    );
+
+    expect(command).not.toContain('## Task');
+    expect(command).toContain('## Workflow Context');
+  });
+
+  it('includes expected outputs and status block', () => {
+    const stateConfig: AgentStateDefinition = {
+      type: 'agent',
+      description: 'Creates a plan',
+      persona: 'planner',
+      prompt: 'You are a planner.',
       inputs: [],
       outputs: ['plan'],
       transitions: [],
@@ -138,14 +229,70 @@ describe('buildAgentCommand first-visit mode', () => {
       makeDefinition(),
     );
 
-    expect(command).toContain('You are a project planner.');
-    expect(command).toContain('## Task');
-    expect(command).toContain('Build a CLI tool');
     expect(command).toContain('## Expected Outputs');
     expect(command).toContain('`.workflow/plan/`');
     expect(command).toContain('agent_status');
   });
+});
 
+describe('buildAgentCommand with conditional transitions', () => {
+  it('uses Workflow Context and Your Role for verdict-routed states', () => {
+    const stateConfig: AgentStateDefinition = {
+      type: 'agent',
+      description: 'Routes work',
+      persona: 'orchestrator',
+      prompt: 'You are an orchestrator.',
+      inputs: [],
+      outputs: ['journal'],
+      transitions: [
+        { to: 'analyze', when: { verdict: 'reanalyze' } },
+        { to: 'validate', when: { verdict: 'validate' } },
+      ],
+    };
+
+    const command = buildAgentCommand(
+      'orchestrator',
+      stateConfig,
+      makeContext({ taskDescription: 'Find vulnerabilities' }),
+      makeDefinition(),
+    );
+
+    // Universal pattern: Workflow Context (with task) before Your Role
+    expect(command).toContain('## Workflow Context');
+    expect(command).toContain('> Find vulnerabilities');
+    expect(command).toContain('## Your Role');
+    expect(command).toContain('You are an orchestrator.');
+    expect(command).not.toContain('## Task');
+
+    // Workflow Context should appear BEFORE role prompt
+    const contextIndex = command.indexOf('## Workflow Context');
+    const roleIndex = command.indexOf('## Your Role');
+    expect(contextIndex).toBeLessThan(roleIndex);
+  });
+
+  it('uses conditional status instructions with verdict values', () => {
+    const stateConfig: AgentStateDefinition = {
+      type: 'agent',
+      description: 'Routes work',
+      persona: 'orchestrator',
+      prompt: 'You are an orchestrator.',
+      inputs: [],
+      outputs: [],
+      transitions: [
+        { to: 'a', when: { verdict: 'approved' } },
+        { to: 'b', when: { verdict: 'rejected' } },
+      ],
+    };
+
+    const command = buildAgentCommand('orch', stateConfig, makeContext(), makeDefinition());
+
+    expect(command).toContain('determines what happens next');
+    expect(command).toContain('`approved`');
+    expect(command).toContain('`rejected`');
+  });
+});
+
+describe('buildAgentCommand first-visit mode (shared behavior)', () => {
   it('includes previous agent output when available', () => {
     const stateConfig: AgentStateDefinition = {
       type: 'agent',
@@ -284,9 +431,11 @@ describe('buildAgentCommand re-visit mode', () => {
       makeDefinition(),
     );
 
-    // Re-visit should NOT include role prompt or task
+    // Re-visit should NOT include role prompt, task, or section headings
     expect(command).not.toContain('You are an implementation engineer.');
     expect(command).not.toContain('## Task');
+    expect(command).not.toContain('## Workflow Context');
+    expect(command).not.toContain('## Your Role');
     // Should include new input and round info
     expect(command).toContain('## New Input from review');
     expect(command).toContain('Rejected: missing tests');

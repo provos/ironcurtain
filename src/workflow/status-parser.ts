@@ -1,6 +1,6 @@
 import YAML from 'yaml';
 import { z } from 'zod';
-import type { AgentOutput } from './types.js';
+import type { AgentOutput, AgentTransitionDefinition } from './types.js';
 import { CONFIDENCE_VALUES } from './types.js';
 
 // ---------------------------------------------------------------------------
@@ -22,12 +22,12 @@ export class AgentStatusParseError extends Error {
 // ---------------------------------------------------------------------------
 
 const agentOutputSchema = z.object({
-  completed: z.boolean(),
+  completed: z.boolean().default(true),
   verdict: z.string().min(1),
-  confidence: z.enum(CONFIDENCE_VALUES),
-  escalation: z.string().nullable(),
-  test_count: z.number().int().nullable(),
-  notes: z.string().nullable(),
+  confidence: z.enum(CONFIDENCE_VALUES).default('high'),
+  escalation: z.string().nullable().default(null),
+  test_count: z.number().int().nullable().default(null),
+  notes: z.string().nullable().default(null),
 });
 
 // ---------------------------------------------------------------------------
@@ -109,34 +109,83 @@ export function stripStatusBlock(responseText: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Re-prompt instructions
+// Status block instructions
 // ---------------------------------------------------------------------------
 
-/** Instruction text telling the agent to include a status block. */
-export const STATUS_BLOCK_INSTRUCTIONS = `
+/** Minimal status instructions for unconditional transitions. */
+export const MINIMAL_STATUS_INSTRUCTIONS = `
 When you have completed your work, include the following YAML block at the end of your response inside a fenced code block:
 
 \`\`\`
 agent_status:
-  completed: true
-  verdict: approved
-  confidence: high
-  escalation: null
-  test_count: null
-  notes: "brief summary of what was done"
+  verdict: done
+  notes: "brief summary of what was done and key findings for the next agent"
 \`\`\`
 
-Field descriptions:
-- completed: true when work is done, false if blocked
-- verdict: a free-form string describing the outcome. Well-known values are approved, rejected, blocked, and spec_flaw. Workflow definitions may specify custom verdict strings for direct routing — use whatever verdict values the workflow prompt instructs.
-- confidence: one of high, medium, low
-- escalation: null or a string describing what needs human attention
-- test_count: null or the number of passing tests
-- notes: null or a brief summary
+- verdict: a short label for your outcome (e.g. "done", "approved", "rejected")
+- notes: a brief summary — this is passed to the next agent as context
 `.trim();
 
 /**
- * Returns the re-prompt message with format instructions.
+ * Extracts verdict values from `when` clauses that match on the `verdict` key.
+ * Returns deduplicated values in definition order.
+ */
+function extractVerdictValues(transitions: readonly AgentTransitionDefinition[]): string[] {
+  const seen = new Set<string>();
+  const values: string[] = [];
+  for (const t of transitions) {
+    const v = t.when?.verdict;
+    if (typeof v === 'string' && !seen.has(v)) {
+      seen.add(v);
+      values.push(v);
+    }
+  }
+  return values;
+}
+
+/**
+ * Builds context-sensitive status block instructions for states with
+ * conditional transitions (`when` clauses or `guard` functions).
+ *
+ * @param transitions - the state's transition definitions
+ * @param guardLabels - human-readable labels for named guard conditions
+ */
+export function buildConditionalStatusInstructions(
+  transitions: readonly AgentTransitionDefinition[],
+  guardLabels: Readonly<Record<string, string>>,
+): string {
+  const verdictValues = extractVerdictValues(transitions);
+  const verdictExample = verdictValues[0] ?? 'approved';
+  const verdictList = verdictValues.length > 0 ? verdictValues.map((v) => `\`${v}\``).join(', ') : '(see prompt)';
+
+  const lines = [
+    'When you have completed your work, include the following YAML block at the end of your response inside a fenced code block:',
+    '',
+    '```',
+    'agent_status:',
+    `  verdict: ${verdictExample}`,
+    '  notes: "brief summary of what was done"',
+    '```',
+    '',
+    'Fields:',
+    `- verdict: determines what happens next. Use one of: ${verdictList}`,
+    '- notes: brief summary passed to the next agent as context',
+  ];
+
+  // Add guard descriptions if any transitions use guards
+  const guardNames = transitions
+    .map((t) => t.guard)
+    .filter((g): g is string => g != null)
+    .map((g) => guardLabels[g] ?? g);
+  if (guardNames.length > 0) {
+    lines.push(`\nAdditional routing conditions are checked automatically: ${guardNames.join(', ')}`);
+  }
+
+  return lines.join('\n');
+}
+
+/**
+ * Returns the re-prompt message with minimal format instructions.
  * Used when the agent's response is missing the status block.
  */
 export function buildStatusBlockReprompt(): string {
@@ -144,6 +193,6 @@ export function buildStatusBlockReprompt(): string {
     'Your response is missing the required agent_status block.',
     'Please include it at the end of your response.',
     '',
-    STATUS_BLOCK_INSTRUCTIONS,
+    MINIMAL_STATUS_INSTRUCTIONS,
   ].join('\n');
 }
