@@ -161,7 +161,7 @@
             <CardTitle>Constitution</CardTitle>
           </CardHeader>
           <CardContent>
-            <div class="prose prose-sm max-w-none">
+            <div class="prose-markdown text-sm">
               {@html renderMarkdown(detail.constitution)}
             </div>
           </CardContent>
