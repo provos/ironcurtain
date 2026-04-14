@@ -25,11 +25,13 @@ function extractAgentOutput(event: WorkflowEvent): AgentOutput | undefined {
 // Guard implementations
 // ---------------------------------------------------------------------------
 
+/** @deprecated Use `when: { verdict: "approved" }` in transition definitions instead. */
 const isApproved: GuardFunction = ({ event }) => {
   const output = extractAgentOutput(event);
   return output?.verdict === 'approved';
 };
 
+/** @deprecated Use `when: { verdict: "rejected" }` in transition definitions instead. */
 const isRejected: GuardFunction = ({ event }) => {
   const output = extractAgentOutput(event);
   return output?.verdict === 'rejected';
@@ -65,7 +67,9 @@ const isPassed: GuardFunction = ({ event }) => {
 // ---------------------------------------------------------------------------
 
 export const guardImplementations: Readonly<Record<string, GuardFunction>> = {
+  // eslint-disable-next-line @typescript-eslint/no-deprecated -- kept in registry for backward compatibility
   isApproved,
+  // eslint-disable-next-line @typescript-eslint/no-deprecated -- kept in registry for backward compatibility
   isRejected,
   isRoundLimitReached,
   isStalled,

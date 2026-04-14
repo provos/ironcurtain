@@ -88,12 +88,23 @@ export interface AgentStateDefinition {
   readonly description: string;
   readonly persona: string;
   /**
-   * Prompt template sent to the agent on FIRST invocation of this state.
+   * Role instructions sent to the agent on FIRST invocation of this state.
    *
-   * Contains the role's instructions, responsibilities, and output
-   * expectations. The orchestrator appends standard context sections
-   * (task, previous agent output, artifacts, status format) AFTER
-   * this template.
+   * The orchestrator assembles a full prompt with this template embedded
+   * in a specific position. The layout on first visit is:
+   *
+   * 1. Workflow Context (task description as quoted context)
+   * 2. Previous agent output (from the preceding state, if any)
+   * 3. Input artifacts (path references the agent reads itself)
+   * 4. **Your Role** -- this prompt template
+   * 5. Expected outputs (artifact directories to create)
+   * 6. Human feedback (from a preceding gate, if any)
+   * 7. Handoff clause (describes transition targets)
+   * 8. Status block instructions (verdict format)
+   *
+   * The role prompt is placed AFTER context/inputs and BEFORE
+   * outputs/handoff/status so it benefits from recency bias while
+   * still being preceded by the information the agent needs.
    *
    * On re-invocation of the same state (round 2+ via --continue),
    * only the new information is sent (previous agent output, round

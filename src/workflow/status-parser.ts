@@ -222,7 +222,7 @@ function appendGuardDescriptions(
     .filter((g): g is string => g != null)
     .map((g) => guardLabels[g] ?? g);
   if (guardNames.length > 0) {
-    lines.push(`\nAutomatic routing conditions (independent of your verdict): ${guardNames.join(', ')}`);
+    lines.push(`\nAutomatic routing conditions (evaluated separately from your verdict): ${guardNames.join(', ')}`);
   }
 }
 
