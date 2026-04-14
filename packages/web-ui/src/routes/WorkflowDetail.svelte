@@ -247,7 +247,7 @@
                   {/if}
                 </div>
                 {#if t.agentMessage && expandedMessages.has(i)}
-                  <div class="ml-20 mt-1 mb-2 p-3 rounded bg-muted/50 text-sm prose prose-invert max-w-none">
+                  <div class="ml-20 mt-1 mb-2 p-3 rounded bg-muted/50 text-sm prose-markdown">
                     {@html renderMarkdown(t.agentMessage)}
                   </div>
                 {/if}

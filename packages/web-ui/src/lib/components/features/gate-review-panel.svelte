@@ -243,7 +243,7 @@
                     {file.path}
                   </div>
                   {#if isMarkdown(file.path)}
-                    <div class="p-3 prose prose-sm max-w-none">
+                    <div class="p-3 prose-markdown text-sm">
                       {@html renderMarkdown(file.content)}
                     </div>
                   {:else}
