@@ -869,8 +869,8 @@ export class WorkflowOrchestrator implements WorkflowController {
         });
 
         const retryResponse = await session.sendMessage(artifactRetryMsg);
-        logReceived(retryResponse, parseAgentStatus(retryResponse));
         const retryOutput = parseAgentStatus(retryResponse);
+        logReceived(retryResponse, retryOutput);
         if (retryOutput) {
           agentOutput = retryOutput;
         }

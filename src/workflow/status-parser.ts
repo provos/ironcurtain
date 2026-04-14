@@ -114,20 +114,23 @@ export function stripStatusBlock(responseText: string): string {
 // Status block instructions
 // ---------------------------------------------------------------------------
 
+/** Base informational status block lines (verdict does not affect routing). */
+const INFORMATIONAL_STATUS_LINES: readonly string[] = [
+  'When you have completed your work, include the following YAML block at the end of your response inside a fenced code block:',
+  '',
+  '```',
+  'agent_status:',
+  '  verdict: completed',
+  '  notes: "brief summary of what was done"',
+  '```',
+  '',
+  'Fields:',
+  '- verdict: a free-form label summarizing your outcome (e.g. completed, needs_revision, inconclusive). It does not affect routing for this state but is logged for diagnostics.',
+  '- notes: brief summary passed to the next agent as context',
+];
+
 /** Minimal status instructions for unconditional transitions (no guards, no when clauses). */
-export const MINIMAL_STATUS_INSTRUCTIONS = `
-When you have completed your work, include the following YAML block at the end of your response inside a fenced code block:
-
-\`\`\`
-agent_status:
-  verdict: completed
-  notes: "brief summary of what was done and key findings for the next agent"
-\`\`\`
-
-Fields:
-- verdict: a free-form label summarizing your outcome (e.g. completed, needs_revision, inconclusive). It does not affect routing for this state but is logged for diagnostics.
-- notes: brief summary passed to the next agent as context
-`.trim();
+export const MINIMAL_STATUS_INSTRUCTIONS = INFORMATIONAL_STATUS_LINES.join('\n');
 
 /**
  * Extracts verdict values from `when` clauses that match on the `verdict` key.
@@ -203,20 +206,7 @@ function buildGuardOnlyInstructions(
   transitions: readonly AgentTransitionDefinition[],
   guardLabels: Readonly<Record<string, string>>,
 ): string {
-  const lines = [
-    'When you have completed your work, include the following YAML block at the end of your response inside a fenced code block:',
-    '',
-    '```',
-    'agent_status:',
-    '  verdict: completed',
-    '  notes: "brief summary of what was done"',
-    '```',
-    '',
-    'Fields:',
-    '- verdict: a free-form label summarizing your outcome (e.g. completed, needs_revision, inconclusive). It does not affect routing for this state but is logged for diagnostics.',
-    '- notes: brief summary passed to the next agent as context',
-  ];
-
+  const lines = [...INFORMATIONAL_STATUS_LINES];
   appendGuardDescriptions(lines, transitions, guardLabels);
   return lines.join('\n');
 }
