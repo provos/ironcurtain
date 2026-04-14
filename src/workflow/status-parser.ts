@@ -114,18 +114,19 @@ export function stripStatusBlock(responseText: string): string {
 // Status block instructions
 // ---------------------------------------------------------------------------
 
-/** Minimal status instructions for unconditional transitions. */
+/** Minimal status instructions for unconditional transitions (no guards, no when clauses). */
 export const MINIMAL_STATUS_INSTRUCTIONS = `
 When you have completed your work, include the following YAML block at the end of your response inside a fenced code block:
 
 \`\`\`
 agent_status:
-  verdict: done
+  verdict: completed
   notes: "brief summary of what was done and key findings for the next agent"
 \`\`\`
 
-- verdict: a short label for your outcome (e.g. "done", "approved", "rejected")
-- notes: a brief summary — this is passed to the next agent as context
+Fields:
+- verdict: a free-form label summarizing your outcome (e.g. completed, needs_revision, inconclusive). It does not affect routing for this state but is logged for diagnostics.
+- notes: brief summary passed to the next agent as context
 `.trim();
 
 /**
@@ -149,6 +150,12 @@ export function extractVerdictValues(transitions: readonly AgentTransitionDefini
  * Builds context-sensitive status block instructions for states with
  * conditional transitions (`when` clauses or `guard` functions).
  *
+ * Two modes:
+ * - **Verdict-routed**: transitions have `when` clauses keyed on verdict.
+ *   Instructions list the valid verdict values and explain they control routing.
+ * - **Guard-only**: transitions use only `guard` functions (no `when` clauses).
+ *   Verdict is informational — instructions make this clear to avoid confusion.
+ *
  * @param transitions - the state's transition definitions
  * @param guardLabels - human-readable labels for named guard conditions
  */
@@ -157,8 +164,21 @@ export function buildConditionalStatusInstructions(
   guardLabels: Readonly<Record<string, string>>,
 ): string {
   const verdictValues = extractVerdictValues(transitions);
-  const verdictExample = verdictValues[0] ?? 'approved';
-  const verdictList = verdictValues.length > 0 ? verdictValues.map((v) => `\`${v}\``).join(', ') : '(see prompt)';
+
+  if (verdictValues.length > 0) {
+    return buildVerdictRoutedInstructions(verdictValues, transitions, guardLabels);
+  }
+  return buildGuardOnlyInstructions(transitions, guardLabels);
+}
+
+/** Instructions when verdict values determine routing (has `when` clauses). */
+function buildVerdictRoutedInstructions(
+  verdictValues: string[],
+  transitions: readonly AgentTransitionDefinition[],
+  guardLabels: Readonly<Record<string, string>>,
+): string {
+  const verdictExample = verdictValues[0];
+  const verdictList = verdictValues.map((v) => `\`${v}\``).join(', ');
 
   const lines = [
     'When you have completed your work, include the following YAML block at the end of your response inside a fenced code block:',
@@ -170,20 +190,50 @@ export function buildConditionalStatusInstructions(
     '```',
     '',
     'Fields:',
-    `- verdict: determines what happens next. Use one of: ${verdictList}`,
+    `- verdict: determines what happens next. Set this to exactly one of: ${verdictList}`,
     '- notes: brief summary passed to the next agent as context',
   ];
 
-  // Add guard descriptions if any transitions use guards
+  appendGuardDescriptions(lines, transitions, guardLabels);
+  return lines.join('\n');
+}
+
+/** Instructions when routing is guard-only (verdict is informational). */
+function buildGuardOnlyInstructions(
+  transitions: readonly AgentTransitionDefinition[],
+  guardLabels: Readonly<Record<string, string>>,
+): string {
+  const lines = [
+    'When you have completed your work, include the following YAML block at the end of your response inside a fenced code block:',
+    '',
+    '```',
+    'agent_status:',
+    '  verdict: completed',
+    '  notes: "brief summary of what was done"',
+    '```',
+    '',
+    'Fields:',
+    '- verdict: a free-form label summarizing your outcome (e.g. completed, needs_revision, inconclusive). It does not affect routing for this state but is logged for diagnostics.',
+    '- notes: brief summary passed to the next agent as context',
+  ];
+
+  appendGuardDescriptions(lines, transitions, guardLabels);
+  return lines.join('\n');
+}
+
+/** Appends guard description lines if any transitions use guards. */
+function appendGuardDescriptions(
+  lines: string[],
+  transitions: readonly AgentTransitionDefinition[],
+  guardLabels: Readonly<Record<string, string>>,
+): void {
   const guardNames = transitions
     .map((t) => t.guard)
     .filter((g): g is string => g != null)
     .map((g) => guardLabels[g] ?? g);
   if (guardNames.length > 0) {
-    lines.push(`\nAdditional routing conditions are checked automatically: ${guardNames.join(', ')}`);
+    lines.push(`\nAutomatic routing conditions (independent of your verdict): ${guardNames.join(', ')}`);
   }
-
-  return lines.join('\n');
 }
 
 /**

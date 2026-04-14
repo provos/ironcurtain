@@ -126,13 +126,13 @@ function makeDefinition(states: WorkflowDefinition['states'] = {}): WorkflowDefi
 describe('buildStatusInstructions', () => {
   it('returns minimal instructions for unconditional transitions', () => {
     const result = buildStatusInstructions([{ to: 'next' }]);
-    expect(result).toContain('verdict: done');
+    expect(result).toContain('verdict: completed');
     expect(result).not.toContain('determines what happens next');
   });
 
   it('returns minimal instructions for empty transitions', () => {
     const result = buildStatusInstructions([]);
-    expect(result).toContain('verdict: done');
+    expect(result).toContain('verdict: completed');
   });
 
   it('returns conditional instructions for when-clause transitions', () => {
@@ -150,7 +150,7 @@ describe('buildStatusInstructions', () => {
       { to: 'done', guard: 'isApproved' },
       { to: 'implement', guard: 'isRejected' },
     ]);
-    expect(result).toContain('Additional routing conditions');
+    expect(result).toContain('Automatic routing conditions');
   });
 });
 

@@ -284,7 +284,7 @@ describe('buildStatusBlockReprompt', () => {
 
   it('uses the minimal format with verdict and notes', () => {
     const prompt = buildStatusBlockReprompt();
-    expect(prompt).toContain('verdict: done');
+    expect(prompt).toContain('verdict: completed');
     expect(prompt).toContain('notes:');
   });
 });
@@ -305,6 +305,15 @@ describe('MINIMAL_STATUS_INSTRUCTIONS', () => {
     expect(MINIMAL_STATUS_INSTRUCTIONS).not.toContain('confidence:');
     expect(MINIMAL_STATUS_INSTRUCTIONS).not.toContain('escalation:');
     expect(MINIMAL_STATUS_INSTRUCTIONS).not.toContain('test_count:');
+  });
+
+  it('says verdict does not affect routing', () => {
+    expect(MINIMAL_STATUS_INSTRUCTIONS).toContain('does not affect routing');
+    expect(MINIMAL_STATUS_INSTRUCTIONS).toContain('logged for diagnostics');
+  });
+
+  it('uses completed as the example verdict', () => {
+    expect(MINIMAL_STATUS_INSTRUCTIONS).toContain('verdict: completed');
   });
 });
 
@@ -350,7 +359,7 @@ describe('buildConditionalStatusInstructions', () => {
 
     const result = buildConditionalStatusInstructions(transitions, guardLabels);
 
-    expect(result).toContain('Additional routing conditions');
+    expect(result).toContain('Automatic routing conditions');
     expect(result).toContain('approved');
     expect(result).toContain('round limit reached');
     expect(result).toContain('rejected');
@@ -365,7 +374,7 @@ describe('buildConditionalStatusInstructions', () => {
     const result = buildConditionalStatusInstructions(transitions, guardLabels);
 
     expect(result).toContain('`thesis_validate`');
-    expect(result).toContain('Additional routing conditions');
+    expect(result).toContain('Automatic routing conditions');
     expect(result).toContain('round limit reached');
   });
 
@@ -377,7 +386,7 @@ describe('buildConditionalStatusInstructions', () => {
     expect(result).toContain('customGuard');
   });
 
-  it('handles guard-only transitions with (see prompt) verdict list', () => {
+  it('uses informational verdict for guard-only transitions', () => {
     const transitions: AgentTransitionDefinition[] = [
       { to: 'done', guard: 'isApproved' },
       { to: 'implement', guard: 'isRejected' },
@@ -385,7 +394,37 @@ describe('buildConditionalStatusInstructions', () => {
 
     const result = buildConditionalStatusInstructions(transitions, guardLabels);
 
-    expect(result).toContain('(see prompt)');
+    expect(result).toContain('does not affect routing');
+    expect(result).toContain('verdict: completed');
+    expect(result).not.toContain('determines what happens next');
+  });
+
+  it('uses informational verdict for mixed guard + unconditional transitions', () => {
+    const transitions: AgentTransitionDefinition[] = [
+      { to: 'done', guard: 'isRoundLimitReached' },
+      { to: 'next' }, // unconditional fallthrough
+    ];
+
+    const result = buildConditionalStatusInstructions(transitions, guardLabels);
+
+    expect(result).toContain('does not affect routing');
+    expect(result).toContain('verdict: completed');
+    expect(result).toContain('Automatic routing conditions');
+    expect(result).toContain('round limit reached');
+  });
+
+  it('uses verdict-routed instructions when when clauses are present', () => {
+    const transitions: AgentTransitionDefinition[] = [
+      { to: 'done', when: { verdict: 'approved' } },
+      { to: 'revise', when: { verdict: 'rejected' } },
+    ];
+
+    const result = buildConditionalStatusInstructions(transitions, guardLabels);
+
+    expect(result).toContain('determines what happens next');
+    expect(result).toContain('`approved`');
+    expect(result).toContain('`rejected`');
+    expect(result).not.toContain('does not affect routing');
   });
 });
 
