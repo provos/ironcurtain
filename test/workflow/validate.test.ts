@@ -590,6 +590,20 @@ describe('validateDefinition', () => {
       }
     });
 
+    it('accepts freshSession: true on agent state', () => {
+      const def = deepClone(validDefinition());
+      const states = def.states as Record<string, Record<string, unknown>>;
+      states.plan.freshSession = true;
+      expect(() => validateDefinition(def)).not.toThrow();
+    });
+
+    it('accepts freshSession: false on agent state', () => {
+      const def = deepClone(validDefinition());
+      const states = def.states as Record<string, Record<string, unknown>>;
+      states.plan.freshSession = false;
+      expect(() => validateDefinition(def)).not.toThrow();
+    });
+
     it('accepts custom verdicts for direct routing in when clauses', () => {
       const def = {
         name: 'custom-verdict-workflow',

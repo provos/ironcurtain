@@ -32,7 +32,7 @@ export function buildAgentCommand(
   context: WorkflowContext,
   definition: WorkflowDefinition,
 ): string {
-  const isReVisit = (context.visitCounts[stateId] ?? 0) > 1;
+  const isReVisit = !stateConfig.freshSession && (context.visitCounts[stateId] ?? 0) > 1;
   if (isReVisit) {
     return buildReVisitPrompt(stateId, stateConfig, context);
   }

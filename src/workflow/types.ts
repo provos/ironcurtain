@@ -117,6 +117,15 @@ export interface AgentStateDefinition {
   readonly parallelKey?: string;
   /** When true, each parallel instance gets a dedicated git worktree. */
   readonly worktree?: boolean;
+  /**
+   * When true, each invocation of this state starts a fresh agent session
+   * even if a previous session exists. The agent bootstraps from artifacts
+   * on disk rather than conversation history via --continue.
+   *
+   * When false or omitted (default), re-invocations resume the previous
+   * session via --continue with an abbreviated re-visit prompt.
+   */
+  readonly freshSession?: boolean;
 }
 
 export interface HumanGateStateDefinition {

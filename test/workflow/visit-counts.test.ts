@@ -228,6 +228,159 @@ describe('visitCounts prompt selection', () => {
     expect(contextSnapshots[3].visitCounts['review']).toBe(2);
   });
 
+  it('fresh-session state gets full first-visit prompt on re-entry', async () => {
+    // Same loop definition but with freshSession: true on "implement"
+    const freshDef: WorkflowDefinition = {
+      ...loopDefinition,
+      states: {
+        ...loopDefinition.states,
+        implement: {
+          ...loopDefinition.states.implement,
+          freshSession: true,
+        } as WorkflowDefinition['states'][string],
+      },
+    };
+
+    const { machine } = buildWorkflowMachine(freshDef, 'Build a widget');
+    const capturedCommands: Array<{ stateId: string; command: string }> = [];
+    let invocationCount = 0;
+
+    const testMachine = machine.provide({
+      actors: {
+        agentService: fromPromise(async ({ input }: { input: AgentInvokeInput }) => {
+          const command = buildAgentCommand(input.stateId, input.stateConfig, input.context, freshDef);
+          capturedCommands.push({ stateId: input.stateId, command });
+          invocationCount++;
+
+          if (input.stateId === 'review') {
+            if (invocationCount <= 2) {
+              return makeRejectedResult('Found bugs in the code');
+            }
+            return makeAgentResult({ responseText: 'Looks good now' });
+          }
+          return makeAgentResult({ responseText: 'Here is the code' });
+        }),
+      },
+    });
+
+    const actor = createActor(testMachine);
+    actor.start();
+    await settle(200);
+
+    expect(actor.getSnapshot().status).toBe('done');
+    // Flow: implement(1) -> review(1) -> implement(2) -> review(2) -> done
+    expect(capturedCommands).toHaveLength(4);
+
+    // implement second entry (visitCount=2) should still get the full first-visit prompt
+    // because freshSession is true
+    const implement2 = capturedCommands[2];
+    expect(implement2.stateId).toBe('implement');
+    expect(implement2.command).toContain('You are a coder. Write clean code.');
+    expect(implement2.command).toContain('## Workflow Context');
+    expect(implement2.command).toContain('## Your Role');
+    // Should NOT use the re-visit format
+    expect(implement2.command).not.toContain('## Round');
+    expect(implement2.command).not.toContain('## New Input from');
+  });
+
+  it('non-fresh-session state still gets re-visit prompt on re-entry', async () => {
+    // Use the original loopDefinition (no freshSession) and verify the existing
+    // re-visit behavior is preserved
+    const { machine } = buildWorkflowMachine(loopDefinition, 'Build a widget');
+    const capturedCommands: Array<{ stateId: string; command: string }> = [];
+    let invocationCount = 0;
+
+    const testMachine = machine.provide({
+      actors: {
+        agentService: fromPromise(async ({ input }: { input: AgentInvokeInput }) => {
+          const command = buildAgentCommand(input.stateId, input.stateConfig, input.context, loopDefinition);
+          capturedCommands.push({ stateId: input.stateId, command });
+          invocationCount++;
+
+          if (input.stateId === 'review') {
+            if (invocationCount <= 2) {
+              return makeRejectedResult('Found bugs in the code');
+            }
+            return makeAgentResult({ responseText: 'Looks good now' });
+          }
+          return makeAgentResult({ responseText: 'Here is the code' });
+        }),
+      },
+    });
+
+    const actor = createActor(testMachine);
+    actor.start();
+    await settle(200);
+
+    expect(actor.getSnapshot().status).toBe('done');
+    expect(capturedCommands).toHaveLength(4);
+
+    // implement second entry should get abbreviated re-visit prompt (default behavior)
+    const implement2 = capturedCommands[2];
+    expect(implement2.stateId).toBe('implement');
+    expect(implement2.command).not.toContain('You are a coder. Write clean code.');
+    expect(implement2.command).not.toContain('## Your Role');
+    expect(implement2.command).toContain('## Round');
+  });
+
+  it('fresh-session state has undefined previousSessionId on re-entry', async () => {
+    const freshDef: WorkflowDefinition = {
+      ...loopDefinition,
+      states: {
+        ...loopDefinition.states,
+        implement: {
+          ...loopDefinition.states.implement,
+          freshSession: true,
+        } as WorkflowDefinition['states'][string],
+      },
+    };
+
+    const { machine } = buildWorkflowMachine(freshDef, 'Build a widget');
+    const capturedInputs: Array<{ stateId: string; previousSessionId: string | undefined }> = [];
+    let invocationCount = 0;
+
+    const testMachine = machine.provide({
+      actors: {
+        agentService: fromPromise(async ({ input }: { input: AgentInvokeInput }) => {
+          // Track the previousSessionId that would be used by the orchestrator
+          const previousSessionId = input.stateConfig.freshSession
+            ? undefined
+            : input.context.sessionsByState[input.stateId];
+          capturedInputs.push({ stateId: input.stateId, previousSessionId });
+          invocationCount++;
+
+          if (input.stateId === 'review') {
+            if (invocationCount <= 2) {
+              return makeRejectedResult('Found bugs');
+            }
+            return makeAgentResult();
+          }
+          return makeAgentResult({ sessionId: `session-${input.stateId}-${invocationCount}` });
+        }),
+      },
+    });
+
+    const actor = createActor(testMachine);
+    actor.start();
+    await settle(200);
+
+    expect(actor.getSnapshot().status).toBe('done');
+    expect(capturedInputs).toHaveLength(4);
+
+    // implement first entry: no previous session exists
+    expect(capturedInputs[0].stateId).toBe('implement');
+    expect(capturedInputs[0].previousSessionId).toBeUndefined();
+
+    // implement second entry: freshSession=true -> previousSessionId is undefined
+    // even though sessionsByState has a session ID from the first invocation
+    expect(capturedInputs[2].stateId).toBe('implement');
+    expect(capturedInputs[2].previousSessionId).toBeUndefined();
+
+    // review (non-fresh) second entry: should have the previous session ID
+    expect(capturedInputs[3].stateId).toBe('review');
+    expect(capturedInputs[3].previousSessionId).toBeDefined();
+  });
+
   it('isRoundLimitReached fires correctly with entry-based counts', async () => {
     // Use a definition where the round limit guard is in the transition chain
     const roundLimitDef: WorkflowDefinition = {

@@ -31,6 +31,7 @@ const agentStateSchema = z.object({
   transitions: z.array(agentTransitionSchema),
   parallelKey: z.string().optional(),
   worktree: z.boolean().optional(),
+  freshSession: z.boolean().optional(),
 });
 
 const humanGateStateSchema = z.object({

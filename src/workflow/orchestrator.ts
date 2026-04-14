@@ -736,7 +736,7 @@ export class WorkflowOrchestrator implements WorkflowController {
     // sessionsByState is keyed by stateId (set by updateContextFromAgentResult).
     // workspacePath ensures the agent writes to the artifact directory,
     // so files created by the agent are visible to the orchestrator.
-    const previousSessionId = context.sessionsByState[stateId];
+    const previousSessionId = stateConfig.freshSession ? undefined : context.sessionsByState[stateId];
     let session: Session;
     try {
       session = await this.deps.createSession({
