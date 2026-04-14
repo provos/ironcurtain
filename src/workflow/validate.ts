@@ -28,7 +28,7 @@ const agentStateSchema = z.object({
   prompt: z.string().min(1),
   inputs: z.array(z.string()),
   outputs: z.array(z.string()),
-  transitions: z.array(agentTransitionSchema),
+  transitions: z.array(agentTransitionSchema).min(1),
   parallelKey: z.string().optional(),
   worktree: z.boolean().optional(),
   freshSession: z.boolean().optional(),
@@ -46,7 +46,7 @@ const deterministicStateSchema = z.object({
   type: z.literal('deterministic'),
   description: z.string().min(1),
   run: z.array(z.array(z.string())),
-  transitions: z.array(agentTransitionSchema),
+  transitions: z.array(agentTransitionSchema).min(1),
 });
 
 const terminalStateSchema = z.object({

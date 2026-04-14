@@ -291,5 +291,7 @@ export function buildInvalidVerdictReprompt(
     ...verdictLines,
     '',
     'Please revise your response and use one of the valid verdicts above.',
+    '',
+    'Include the required `agent_status` YAML block with your chosen verdict in your revised response.',
   ].join('\n');
 }

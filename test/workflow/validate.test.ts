@@ -144,6 +144,13 @@ describe('validateDefinition', () => {
       def.settings = { maxRounds: -1 };
       expect(() => validateDefinition(def)).toThrow(WorkflowValidationError);
     });
+
+    it('rejects agent state with empty transitions array', () => {
+      const def = deepClone(validDefinition());
+      const states = def.states as Record<string, Record<string, unknown>>;
+      states.plan.transitions = [];
+      expect(() => validateDefinition(def)).toThrow(WorkflowValidationError);
+    });
   });
 
   describe('semantic validation', () => {

@@ -1205,10 +1205,10 @@ describe('buildWorkflowMachine', () => {
       expect(actor.getSnapshot().matches('escalate_gate')).toBe(true);
     });
 
-    it('when with null value matches null field', async () => {
-      const nullMatchDef: WorkflowDefinition = {
-        name: 'null-when-test',
-        description: 'Test null matching',
+    it('when with verdict routes to matching transition', async () => {
+      const verdictMatchDef: WorkflowDefinition = {
+        name: 'verdict-match-test',
+        description: 'Test verdict matching',
         initial: 'agent',
         states: {
           agent: {
@@ -1218,24 +1218,24 @@ describe('buildWorkflowMachine', () => {
             prompt: 'Do work.',
             inputs: [],
             outputs: ['result'],
-            transitions: [{ to: 'done', when: { escalation: null } }, { to: 'escalated' }],
+            transitions: [{ to: 'done', when: { verdict: 'clean' } }, { to: 'escalated' }],
           },
           done: { type: 'terminal', description: 'Done' },
           escalated: { type: 'terminal', description: 'Escalated' },
         },
       };
 
-      // Test that null matches null
-      const result1 = buildWorkflowMachine(nullMatchDef, 'task');
+      // Test that matching verdict routes to the when-guarded transition
+      const result1 = buildWorkflowMachine(verdictMatchDef, 'task');
       const machine1 = result1.machine.provide({
         actors: {
           agentService: fromPromise(async () =>
             makeAgentResult({
               output: {
                 completed: true,
-                verdict: 'approved',
+                verdict: 'clean', // matches when: { verdict: 'clean' }
                 confidence: 'high',
-                escalation: null, // matches when: { escalation: null }
+                escalation: null,
                 testCount: null,
                 notes: null,
               },
@@ -1248,17 +1248,17 @@ describe('buildWorkflowMachine', () => {
       await settle();
       expect(actor1.getSnapshot().matches('done')).toBe(true);
 
-      // Test that non-null does NOT match null
-      const result2 = buildWorkflowMachine(nullMatchDef, 'task');
+      // Test that non-matching verdict falls through to unconditional transition
+      const result2 = buildWorkflowMachine(verdictMatchDef, 'task');
       const machine2 = result2.machine.provide({
         actors: {
           agentService: fromPromise(async () =>
             makeAgentResult({
               output: {
                 completed: true,
-                verdict: 'approved',
+                verdict: 'needs_review', // does NOT match when: { verdict: 'clean' }
                 confidence: 'high',
-                escalation: 'needs human review', // does NOT match when: { escalation: null }
+                escalation: null,
                 testCount: null,
                 notes: null,
               },
@@ -1333,10 +1333,10 @@ describe('buildWorkflowMachine', () => {
       expect(actor.getSnapshot().status).toBe('done');
     });
 
-    it('when: { completed: false } matches falsy boolean', async () => {
-      const boolDef: WorkflowDefinition = {
-        name: 'bool-when-test',
-        description: 'Test boolean false matching',
+    it('when: { verdict: "retry" } uses strict equality (does not match prefix)', async () => {
+      const strictDef: WorkflowDefinition = {
+        name: 'strict-match-test',
+        description: 'Test strict verdict matching',
         initial: 'agent',
         states: {
           agent: {
@@ -1346,21 +1346,22 @@ describe('buildWorkflowMachine', () => {
             prompt: 'Do work.',
             inputs: [],
             outputs: ['result'],
-            transitions: [{ to: 'retry', when: { completed: false } }, { to: 'done' }],
+            transitions: [{ to: 'retry', when: { verdict: 'retry' } }, { to: 'done' }],
           },
           retry: { type: 'terminal', description: 'Retry' },
           done: { type: 'terminal', description: 'Done' },
         },
       };
 
-      const result = buildWorkflowMachine(boolDef, 'task');
-      const testMachine = result.machine.provide({
+      // Exact match routes to the when-guarded transition
+      const result1 = buildWorkflowMachine(strictDef, 'task');
+      const machine1 = result1.machine.provide({
         actors: {
           agentService: fromPromise(async () =>
             makeAgentResult({
               output: {
-                completed: false, // falsy but should match false exactly
-                verdict: 'approved',
+                completed: true,
+                verdict: 'retry', // exact match
                 confidence: 'high',
                 escalation: null,
                 testCount: null,
@@ -1370,13 +1371,33 @@ describe('buildWorkflowMachine', () => {
           ),
         },
       });
-
-      const actor = createActor(testMachine);
-      actor.start();
+      const actor1 = createActor(machine1);
+      actor1.start();
       await settle();
+      expect(actor1.getSnapshot().matches('retry')).toBe(true);
 
-      // Should match when: { completed: false }, not fall through to done
-      expect(actor.getSnapshot().matches('retry')).toBe(true);
+      // Similar but non-equal verdict falls through
+      const result2 = buildWorkflowMachine(strictDef, 'task');
+      const machine2 = result2.machine.provide({
+        actors: {
+          agentService: fromPromise(async () =>
+            makeAgentResult({
+              output: {
+                completed: true,
+                verdict: 'retry_later', // not an exact match for "retry"
+                confidence: 'high',
+                escalation: null,
+                testCount: null,
+                notes: null,
+              },
+            }),
+          ),
+        },
+      });
+      const actor2 = createActor(machine2);
+      actor2.start();
+      await settle();
+      expect(actor2.getSnapshot().matches('done')).toBe(true);
     });
 
     it('transition without when or guard fires unconditionally (existing behavior)', async () => {
