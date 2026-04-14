@@ -90,6 +90,7 @@ states:
   implement:
     type: agent
     description: Implements all modules per the design spec
+    freshSession: false
     persona: global
     prompt: |
       You are an implementation engineer.

@@ -67,6 +67,7 @@ states:
   implement:
     type: agent
     description: Writes working code with tests
+    freshSession: false
     persona: coder
     prompt: You are an implementation engineer. Write working code with tests based on the plan and spec.
     inputs:

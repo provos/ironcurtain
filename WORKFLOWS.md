@@ -206,7 +206,7 @@ my_state:
 - **`inputs`** -- Artifact directories the agent should read (under `.workflow/`). Trailing `?` marks optional inputs (e.g., `reviews?`).
 - **`outputs`** -- Artifact directories the agent must create (under `.workflow/`). Use `[]` for code-only states where the agent writes to the workspace root.
 - **`transitions`** -- Where to go next, using `when` for declarative conditions or `guard` for context-based checks
-- **`freshSession`** -- When `true`, each invocation of this state starts a new agent session instead of resuming the previous one via `--continue`. The agent gets the full first-visit prompt (with role instructions and workflow context) every time, bootstrapping from artifacts on disk rather than conversation history. Useful for states that are re-entered after many intermediate steps, where the conversation context would be stale. Default: `false`.
+- **`freshSession`** -- When `false`, re-invocations of this state resume the previous agent session via `--continue`, receiving an abbreviated re-visit prompt. Use this for iterative refinement loops where the agent benefits from retaining its prior reasoning (e.g., a coder receiving critic feedback). Default: `true` (each invocation starts a fresh session, bootstrapping from artifacts on disk).
 
 ### Human gate states
 

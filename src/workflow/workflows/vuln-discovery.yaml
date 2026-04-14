@@ -129,6 +129,7 @@ states:
       | differential_validate | differential_validate | Isolated test succeeded but live system diverges. |
       | escalate | human_escalation | Investigation is stuck. Describe what was tried and what you need. |
       | triage | triage | Enough evidence collected for independent validation. |
+      | complete | conclude | Investigation finished — vulnerability confirmed and triaged, OR thorough search completed with no findings. Route here when the journal shows conclusive results. |
       | reanalyze | analyze | Route to analyze when you need the structural analysis expanded. Your output text tells the analyze agent what to focus on (e.g., "the initial analysis missed ref-counting patterns, look deeper at memory lifecycle functions"). |
 
       ## Strategic principles
@@ -146,6 +147,18 @@ states:
 
       IMPORTANT: Always update `.workflow/journal/journal.md` before setting your verdict. The journal is the persistent memory of this investigation — your conversation history may be long but the journal is the structured summary.
 
+      **Mitigated findings are not findings.** If thesis_validate or discover reports that a
+      vulnerability exists only when existing guards are removed, that hypothesis is closed.
+      Log it in the journal as "confirmed mechanism, already mitigated by [location]" and
+      move to the next hypothesis. Do NOT route to harness_design or triage for mitigated
+      issues.
+
+      **Completing the investigation.** When the evidence chain is conclusive — either a
+      vulnerability is confirmed and fully documented, or all viable hypotheses from the
+      analysis have been tested — set verdict to `complete`. Do NOT escalate for clean
+      completion. Escalation is for being stuck; completion is for being done. "No
+      exploitable vulnerability found" is a valid and valuable outcome.
+
       If you detect stall patterns (same state visited 3+ times without progress, contradictory results between layers, or your own uncertainty about strategy), set verdict to escalate rather than continuing to burn rounds.
     inputs:
       - analysis?
@@ -155,6 +168,7 @@ states:
       - harness_validate?
       - discoveries?
       - differential?
+      - triage?
     outputs:
       - journal
     transitions:
@@ -176,6 +190,9 @@ states:
       - to: triage
         when:
           verdict: triage
+      - to: conclude
+        when:
+          verdict: complete
       - to: analyze
         when:
           verdict: reanalyze
@@ -241,6 +258,18 @@ states:
       - If the space is too large, sample densely near boundaries and randomly elsewhere
       - Run the test and observe: does the hypothesized condition (crash, assertion failure, invariant violation, unexpected output) actually occur?
 
+      ## Mitigation awareness
+
+      Your test MUST be run against the UNMODIFIED source code first. If the hypothesized
+      condition does not trigger on the current codebase (because a guard, check, or error
+      handler intercepts it), report this clearly:
+
+      - Document the mitigation: what code prevents the condition, where it is, and whether
+        it is comprehensive
+      - Set your verdict to `mitigated` and note "mitigated by [location]" — this is NOT a
+        confirmed vulnerability
+      - Only report verdict `confirmed` if the condition triggers on unmodified code
+
       ## Output
 
       Write results to `.workflow/thesis_results/results.md`. Include:
@@ -261,6 +290,7 @@ states:
   harness_design:
     type: agent
     description: Designs instrumented test harness specifications
+    freshSession: false
     persona: global
     prompt: |
       You are a security tooling architect. Read the analysis in `.workflow/analysis/analysis.md`, the investigation journal at `.workflow/journal/journal.md`, and any thesis validation results in `.workflow/thesis_results/`.
@@ -325,6 +355,7 @@ states:
   harness_build:
     type: agent
     description: Implements harness from design specification
+    freshSession: false
     persona: global
     prompt: |
       You are a security tooling engineer. Read the harness design in `.workflow/harness_design/design.md`, the analysis in `.workflow/analysis/analysis.md`, and the investigation journal at `.workflow/journal/journal.md`.
@@ -533,6 +564,57 @@ states:
     outputs:
       - triage
     transitions:
+      - to: orchestrator
+
+  conclude:
+    type: agent
+    description: Writes final investigation report from all artifacts
+    persona: global
+    prompt: |
+      You are a security report writer. Read all investigation artifacts and write
+      a comprehensive final report.
+
+      Read these artifacts:
+      - `.workflow/journal/journal.md` — the investigation journal
+      - `.workflow/analysis/analysis.md` — structural analysis
+      - `.workflow/thesis_results/` — validation results (if present)
+      - `.workflow/discoveries/` — live findings (if present)
+      - `.workflow/differential/` — differential analysis (if present)
+      - `.workflow/triage/` — triage results (if present)
+
+      Write a final report to `.workflow/report/report.md` with these sections:
+
+      ## Executive Summary
+      One paragraph: what was investigated, what was found (or not found), key conclusion.
+
+      ## Findings
+      For each confirmed, exploitable finding (or "No exploitable vulnerabilities found"):
+      - Description, CWE classification, location (file:line)
+      - Trigger mechanism and reproduction steps
+      - Evidence chain (which validation rounds confirmed it and how)
+      - Severity assessment and external exploitability
+      Note: mitigated vulnerabilities are NOT findings — list them separately under
+      "Mitigated Issues" with a note about the existing mitigation.
+
+      ## Investigation Coverage
+      - Hypotheses tested and their outcomes (confirmed/rejected/mitigated)
+      - Code paths exercised via harness (if applicable)
+      - What was NOT tested and why (time limits, infrastructure gaps, etc.)
+
+      ## Recommendations
+      - For confirmed findings: suggested fixes
+      - For mitigated findings: assessment of mitigation robustness
+      - For coverage gaps: suggested follow-up investigations
+    inputs:
+      - journal
+      - analysis
+      - thesis_results?
+      - discoveries?
+      - differential?
+      - triage?
+    outputs:
+      - report
+    transitions:
       - to: report_review
 
   report_review:
@@ -543,6 +625,7 @@ states:
       - FORCE_REVISION
       - ABORT
     present:
+      - report
       - discoveries
       - triage
       - journal
@@ -558,6 +641,7 @@ states:
     type: terminal
     description: Investigation complete
     outputs:
+      - report
       - triage
       - discoveries
       - journal

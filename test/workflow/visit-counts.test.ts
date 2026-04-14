@@ -15,7 +15,7 @@ import {
   type AgentInvokeResult,
 } from '../../src/workflow/machine-builder.js';
 import { buildAgentCommand } from '../../src/workflow/prompt-builder.js';
-import type { WorkflowDefinition } from '../../src/workflow/types.js';
+import type { AgentStateDefinition, WorkflowDefinition } from '../../src/workflow/types.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -73,6 +73,7 @@ const loopDefinition: WorkflowDefinition = {
       type: 'agent',
       description: 'Writes code',
       persona: 'coder',
+      freshSession: false,
       prompt: 'You are a coder. Write clean code.',
       inputs: [],
       outputs: ['code'],
@@ -82,6 +83,7 @@ const loopDefinition: WorkflowDefinition = {
       type: 'agent',
       description: 'Reviews code',
       persona: 'reviewer',
+      freshSession: false,
       prompt: 'You are a code reviewer. Check for bugs.',
       inputs: ['code'],
       outputs: ['reviews'],
@@ -229,14 +231,16 @@ describe('visitCounts prompt selection', () => {
   });
 
   it('fresh-session state gets full first-visit prompt on re-entry', async () => {
-    // Same loop definition but with freshSession: true on "implement"
+    // Override implement to use default freshSession (true) instead of the
+    // loopDefinition's explicit false — verifying that the default produces
+    // a fresh session with the full first-visit prompt on re-entry.
     const freshDef: WorkflowDefinition = {
       ...loopDefinition,
       states: {
         ...loopDefinition.states,
         implement: {
-          ...loopDefinition.states.implement,
-          freshSession: true,
+          ...(loopDefinition.states.implement as AgentStateDefinition),
+          freshSession: undefined,
         } as WorkflowDefinition['states'][string],
       },
     };
@@ -284,7 +288,7 @@ describe('visitCounts prompt selection', () => {
   });
 
   it('non-fresh-session state still gets re-visit prompt on re-entry', async () => {
-    // Use the original loopDefinition (no freshSession) and verify the existing
+    // Use the loopDefinition (freshSession: false) and verify the
     // re-visit behavior is preserved
     const { machine } = buildWorkflowMachine(loopDefinition, 'Build a widget');
     const capturedCommands: Array<{ stateId: string; command: string }> = [];
@@ -324,13 +328,15 @@ describe('visitCounts prompt selection', () => {
   });
 
   it('fresh-session state has undefined previousSessionId on re-entry', async () => {
+    // Override implement to use default freshSession (true) — verifying
+    // that previousSessionId is undefined when freshSession is not false.
     const freshDef: WorkflowDefinition = {
       ...loopDefinition,
       states: {
         ...loopDefinition.states,
         implement: {
-          ...loopDefinition.states.implement,
-          freshSession: true,
+          ...(loopDefinition.states.implement as AgentStateDefinition),
+          freshSession: undefined,
         } as WorkflowDefinition['states'][string],
       },
     };
@@ -343,9 +349,8 @@ describe('visitCounts prompt selection', () => {
       actors: {
         agentService: fromPromise(async ({ input }: { input: AgentInvokeInput }) => {
           // Track the previousSessionId that would be used by the orchestrator
-          const previousSessionId = input.stateConfig.freshSession
-            ? undefined
-            : input.context.sessionsByState[input.stateId];
+          const previousSessionId =
+            input.stateConfig.freshSession === false ? input.context.sessionsByState[input.stateId] : undefined;
           capturedInputs.push({ stateId: input.stateId, previousSessionId });
           invocationCount++;
 
