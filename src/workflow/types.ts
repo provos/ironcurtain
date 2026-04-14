@@ -195,8 +195,8 @@ export interface AgentTransitionDefinition {
   readonly to: string;
   /**
    * Guard name matching a registered XState guard. No translation
-   * layer -- use names directly: isApproved, isRejected,
-   * isRoundLimitReached, isStalled, isPassed.
+   * layer -- use names directly: isRoundLimitReached, isStalled, isPassed.
+   * For verdict-based routing, prefer `when` clauses instead.
    * Mutually exclusive with `when`.
    */
   readonly guard?: string;

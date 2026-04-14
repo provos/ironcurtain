@@ -267,9 +267,9 @@ const coderCriticDefinition: WorkflowDefinition = {
       inputs: ['code'],
       outputs: ['review'],
       transitions: [
-        { to: 'done', guard: 'isApproved' },
+        { to: 'done', when: { verdict: 'approved' } },
         { to: 'escalate_gate', guard: 'isRoundLimitReached' },
-        { to: 'implement', guard: 'isRejected' },
+        { to: 'implement', when: { verdict: 'rejected' } },
         { to: 'escalate_gate' },
       ],
     },
@@ -540,8 +540,8 @@ describe('buildWorkflowMachine', () => {
     });
   });
 
-  describe('guard evaluation', () => {
-    it('routes via isApproved guard on approved verdict', async () => {
+  describe('when clause evaluation', () => {
+    it('routes via when clause on approved verdict', async () => {
       const result = buildWorkflowMachine(coderCriticDefinition, 'task');
 
       const testMachine = result.machine.provide({
@@ -567,7 +567,7 @@ describe('buildWorkflowMachine', () => {
       expect(actor.getSnapshot().status).toBe('done');
     });
 
-    it('routes via isRejected guard on rejected verdict', async () => {
+    it('routes via when clause on rejected verdict', async () => {
       const result = buildWorkflowMachine(coderCriticDefinition, 'task');
       let reviewCount = 0;
 
@@ -620,7 +620,7 @@ describe('buildWorkflowMachine', () => {
       await settle(200);
 
       // With maxRounds=3, after 3 rounds the isRoundLimitReached guard fires
-      // before isRejected can route back to implement
+      // before the rejected when clause can route back to implement
       expect(actor.getSnapshot().matches('escalate_gate')).toBe(true);
     });
   });

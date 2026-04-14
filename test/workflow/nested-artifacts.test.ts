@@ -145,12 +145,12 @@ describe('buildStatusInstructions', () => {
     expect(result).toContain('`rejected`');
   });
 
-  it('returns conditional instructions for guard transitions', () => {
+  it('returns conditional instructions for when clause transitions', () => {
     const result = buildStatusInstructions([
-      { to: 'done', guard: 'isApproved' },
-      { to: 'implement', guard: 'isRejected' },
+      { to: 'done', when: { verdict: 'approved' } },
+      { to: 'implement', when: { verdict: 'rejected' } },
     ]);
-    expect(result).toContain('Automatic routing conditions');
+    expect(result).toContain('determines what happens next');
   });
 });
 
@@ -681,7 +681,7 @@ describe('buildHandoffClause', () => {
 
     const transitions: AgentTransitionDefinition[] = [
       { to: 'done', guard: 'isRoundLimitReached' },
-      { to: 'implement', guard: 'isRejected' },
+      { to: 'implement', when: { verdict: 'rejected' } },
     ];
 
     const result = buildHandoffClause(transitions, definition);
@@ -689,7 +689,7 @@ describe('buildHandoffClause', () => {
     expect(result).toContain('round limit reached');
     expect(result).toContain('done');
     expect(result).toContain('Workflow complete');
-    expect(result).toContain('rejected');
+    expect(result).toContain('verdict=rejected');
     expect(result).toContain('implement');
   });
 

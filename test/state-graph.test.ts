@@ -29,7 +29,7 @@ describe('extractStateGraph', () => {
         inputs: [],
         outputs: ['plan'],
         transitions: [
-          { to: 'review', guard: 'isApproved' },
+          { to: 'review', when: { verdict: 'approved' } },
           { to: 'failed', guard: 'isStalled' },
         ],
       },
@@ -59,8 +59,8 @@ describe('extractStateGraph', () => {
     expect(graph.transitions[0]).toEqual({
       from: 'plan',
       to: 'review',
-      guard: 'isApproved',
-      label: expect.any(String),
+      guard: undefined,
+      label: 'approved',
     });
   });
 
@@ -110,7 +110,7 @@ describe('extractStateGraph', () => {
         run: [['npm', 'test']],
         transitions: [
           { to: 'done', guard: 'isPassed' },
-          { to: 'fix', guard: 'isRejected' },
+          { to: 'fix', when: { verdict: 'rejected' } },
         ],
       },
       done: { type: 'terminal', description: 'Done' },
@@ -192,7 +192,7 @@ describe('extractStateGraph', () => {
           inputs: ['plan'],
           outputs: ['code'],
           transitions: [
-            { to: 'review', guard: 'isApproved' },
+            { to: 'review', when: { verdict: 'approved' } },
             { to: 'done', guard: 'isRoundLimitReached' },
           ],
         },
@@ -204,8 +204,8 @@ describe('extractStateGraph', () => {
           inputs: ['code'],
           outputs: ['review'],
           transitions: [
-            { to: 'done', guard: 'isApproved' },
-            { to: 'implement', guard: 'isRejected' },
+            { to: 'done', when: { verdict: 'approved' } },
+            { to: 'implement', when: { verdict: 'rejected' } },
           ],
         },
         done: { type: 'terminal', description: 'Done' },
@@ -222,6 +222,6 @@ describe('extractStateGraph', () => {
     // Verify the loop: review -> implement (backward edge)
     const backEdge = graph.transitions.find((t) => t.from === 'review' && t.to === 'implement');
     expect(backEdge).toBeDefined();
-    expect(backEdge?.guard).toBe('isRejected');
+    expect(backEdge?.label).toBe('rejected');
   });
 });

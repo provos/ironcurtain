@@ -49,15 +49,18 @@ function completedEvent(outputOverrides: Partial<AgentOutput> = {}): WorkflowEve
 // Tests
 // ---------------------------------------------------------------------------
 
-const { isApproved, isRejected, isRoundLimitReached, isStalled, isPassed } = guardImplementations;
+const { isRoundLimitReached, isStalled, isPassed } = guardImplementations;
 
 describe('REGISTERED_GUARDS', () => {
   it('contains all guard names', () => {
-    expect(REGISTERED_GUARDS).toContain('isApproved');
-    expect(REGISTERED_GUARDS).toContain('isRejected');
     expect(REGISTERED_GUARDS).toContain('isRoundLimitReached');
     expect(REGISTERED_GUARDS).toContain('isStalled');
     expect(REGISTERED_GUARDS).toContain('isPassed');
+  });
+
+  it('does not contain removed guards', () => {
+    expect(REGISTERED_GUARDS).not.toContain('isApproved');
+    expect(REGISTERED_GUARDS).not.toContain('isRejected');
   });
 
   it('matches the keys of guardImplementations', () => {
@@ -65,39 +68,6 @@ describe('REGISTERED_GUARDS', () => {
     for (const key of Object.keys(guardImplementations)) {
       expect(REGISTERED_GUARDS).toContain(key);
     }
-  });
-});
-
-describe('isApproved', () => {
-  it('returns true for approved verdict', () => {
-    expect(isApproved({ context: baseContext(), event: completedEvent({ verdict: 'approved' }) })).toBe(true);
-  });
-
-  it('returns true for approved with low confidence', () => {
-    expect(
-      isApproved({
-        context: baseContext(),
-        event: completedEvent({ verdict: 'approved', confidence: 'low' }),
-      }),
-    ).toBe(true);
-  });
-
-  it('returns false for rejected verdict', () => {
-    expect(isApproved({ context: baseContext(), event: completedEvent({ verdict: 'rejected' }) })).toBe(false);
-  });
-
-  it('returns false for non-agent events', () => {
-    expect(isApproved({ context: baseContext(), event: { type: 'VALIDATION_FAILED', errors: 'oops' } })).toBe(false);
-  });
-});
-
-describe('isRejected', () => {
-  it('returns true for rejected verdict', () => {
-    expect(isRejected({ context: baseContext(), event: completedEvent({ verdict: 'rejected' }) })).toBe(true);
-  });
-
-  it('returns false for approved verdict', () => {
-    expect(isRejected({ context: baseContext(), event: completedEvent({ verdict: 'approved' }) })).toBe(false);
   });
 });
 

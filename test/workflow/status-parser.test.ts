@@ -319,8 +319,6 @@ describe('MINIMAL_STATUS_INSTRUCTIONS', () => {
 
 describe('buildConditionalStatusInstructions', () => {
   const guardLabels: Record<string, string> = {
-    isApproved: 'approved',
-    isRejected: 'rejected',
     isRoundLimitReached: 'round limit reached',
   };
 
@@ -352,17 +350,17 @@ describe('buildConditionalStatusInstructions', () => {
 
   it('includes guard descriptions when guards are present', () => {
     const transitions: AgentTransitionDefinition[] = [
-      { to: 'done', guard: 'isApproved' },
+      { to: 'done', when: { verdict: 'approved' } },
       { to: 'escalate', guard: 'isRoundLimitReached' },
-      { to: 'implement', guard: 'isRejected' },
+      { to: 'implement', when: { verdict: 'rejected' } },
     ];
 
     const result = buildConditionalStatusInstructions(transitions, guardLabels);
 
     expect(result).toContain('Automatic routing conditions');
-    expect(result).toContain('approved');
+    expect(result).toContain('`approved`');
     expect(result).toContain('round limit reached');
-    expect(result).toContain('rejected');
+    expect(result).toContain('`rejected`');
   });
 
   it('handles mixed when and guard transitions', () => {
@@ -386,17 +384,17 @@ describe('buildConditionalStatusInstructions', () => {
     expect(result).toContain('customGuard');
   });
 
-  it('uses informational verdict for guard-only transitions', () => {
+  it('uses verdict-based routing for when clause transitions', () => {
     const transitions: AgentTransitionDefinition[] = [
-      { to: 'done', guard: 'isApproved' },
-      { to: 'implement', guard: 'isRejected' },
+      { to: 'done', when: { verdict: 'approved' } },
+      { to: 'implement', when: { verdict: 'rejected' } },
     ];
 
     const result = buildConditionalStatusInstructions(transitions, guardLabels);
 
-    expect(result).toContain('does not affect routing');
-    expect(result).toContain('verdict: completed');
-    expect(result).not.toContain('determines what happens next');
+    expect(result).toContain('determines what happens next');
+    expect(result).toContain('`approved`');
+    expect(result).toContain('`rejected`');
   });
 
   it('uses informational verdict for mixed guard + unconditional transitions', () => {
@@ -560,8 +558,8 @@ describe('getValidVerdicts', () => {
 
   it('returns undefined for guard-only transitions (no when clauses)', () => {
     const transitions: AgentTransitionDefinition[] = [
-      { to: 'done', guard: 'isApproved' },
-      { to: 'implement', guard: 'isRejected' },
+      { to: 'done', guard: 'isRoundLimitReached' },
+      { to: 'implement', guard: 'isStalled' },
     ];
     expect(getValidVerdicts(transitions)).toBeUndefined();
   });

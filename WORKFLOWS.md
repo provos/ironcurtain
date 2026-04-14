@@ -291,13 +291,11 @@ The `verdict` field accepts any string value, enabling custom verdicts for direc
 
 | Guard                 | Checks                                                      |
 | --------------------- | ----------------------------------------------------------- |
-| `isApproved`          | Agent verdict is "approved"                                 |
-| `isRejected`          | Agent verdict is "rejected"                                 |
 | `isRoundLimitReached` | Per-state visit count >= maxRounds                          |
 | `isStalled`           | Agent produced identical output artifacts as previous round |
 | `isPassed`            | Deterministic state commands all passed                     |
 
-Use `guard` for conditions that depend on workflow context (round limits, stall detection) or for deterministic state transitions (`isPassed`). The simple verdict guards (`isApproved`, `isRejected`) still work but `when` is preferred for new workflows -- `when: { verdict: approved }` is equivalent to `guard: isApproved` and supports custom verdict strings for direct routing.
+Use `guard` for conditions that depend on workflow context (round limits, stall detection) or for deterministic state transitions (`isPassed`). For verdict-based routing, use `when` clauses -- e.g., `when: { verdict: "approved" }` supports any verdict string for direct routing.
 
 ### Stall detection
 

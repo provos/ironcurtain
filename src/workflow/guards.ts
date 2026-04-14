@@ -1,4 +1,4 @@
-import type { WorkflowContext, WorkflowEvent, AgentOutput } from './types.js';
+import type { WorkflowContext, WorkflowEvent } from './types.js';
 
 // ---------------------------------------------------------------------------
 // Guard function type
@@ -7,35 +7,8 @@ import type { WorkflowContext, WorkflowEvent, AgentOutput } from './types.js';
 export type GuardFunction = (params: { readonly context: WorkflowContext; readonly event: WorkflowEvent }) => boolean;
 
 // ---------------------------------------------------------------------------
-// Extraction helpers
-// ---------------------------------------------------------------------------
-
-/**
- * Extracts AgentOutput from an AGENT_COMPLETED event.
- * Returns undefined if the event is not an AGENT_COMPLETED event.
- */
-function extractAgentOutput(event: WorkflowEvent): AgentOutput | undefined {
-  if (event.type === 'AGENT_COMPLETED') {
-    return event.output;
-  }
-  return undefined;
-}
-
-// ---------------------------------------------------------------------------
 // Guard implementations
 // ---------------------------------------------------------------------------
-
-/** @deprecated Use `when: { verdict: "approved" }` in transition definitions instead. */
-const isApproved: GuardFunction = ({ event }) => {
-  const output = extractAgentOutput(event);
-  return output?.verdict === 'approved';
-};
-
-/** @deprecated Use `when: { verdict: "rejected" }` in transition definitions instead. */
-const isRejected: GuardFunction = ({ event }) => {
-  const output = extractAgentOutput(event);
-  return output?.verdict === 'rejected';
-};
 
 /**
  * Per-state round limit check. Compares the maximum visit count
@@ -67,10 +40,6 @@ const isPassed: GuardFunction = ({ event }) => {
 // ---------------------------------------------------------------------------
 
 export const guardImplementations: Readonly<Record<string, GuardFunction>> = {
-  // eslint-disable-next-line @typescript-eslint/no-deprecated -- kept in registry for backward compatibility
-  isApproved,
-  // eslint-disable-next-line @typescript-eslint/no-deprecated -- kept in registry for backward compatibility
-  isRejected,
   isRoundLimitReached,
   isStalled,
   isPassed,

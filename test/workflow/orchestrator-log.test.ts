@@ -74,8 +74,8 @@ const linearWorkflowDef: WorkflowDefinition = {
       inputs: ['code'],
       outputs: ['reviews'],
       transitions: [
-        { to: 'done', guard: 'isApproved' },
-        { to: 'implement', guard: 'isRejected' },
+        { to: 'done', when: { verdict: 'approved' } },
+        { to: 'implement', when: { verdict: 'rejected' } },
       ],
     },
     done: { type: 'terminal', description: 'Done' },
@@ -106,8 +106,8 @@ const coderCriticLoopDef: WorkflowDefinition = {
       inputs: ['code'],
       outputs: ['reviews'],
       transitions: [
-        { to: 'done', guard: 'isApproved' },
-        { to: 'implement', guard: 'isRejected' },
+        { to: 'done', when: { verdict: 'approved' } },
+        { to: 'implement', when: { verdict: 'rejected' } },
       ],
     },
     done: { type: 'terminal', description: 'Done' },

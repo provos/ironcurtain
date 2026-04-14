@@ -88,8 +88,8 @@ const loopDefinition: WorkflowDefinition = {
       inputs: ['code'],
       outputs: ['reviews'],
       transitions: [
-        { to: 'done', guard: 'isApproved' },
-        { to: 'implement', guard: 'isRejected' },
+        { to: 'done', when: { verdict: 'approved' } },
+        { to: 'implement', when: { verdict: 'rejected' } },
       ],
     },
     done: { type: 'terminal', description: 'Done' },
@@ -411,9 +411,9 @@ describe('visitCounts prompt selection', () => {
           inputs: ['code'],
           outputs: ['reviews'],
           transitions: [
-            { to: 'done', guard: 'isApproved' },
+            { to: 'done', when: { verdict: 'approved' } },
             { to: 'escalated', guard: 'isRoundLimitReached' },
-            { to: 'implement', guard: 'isRejected' },
+            { to: 'implement', when: { verdict: 'rejected' } },
           ],
         },
         done: { type: 'terminal', description: 'Done' },

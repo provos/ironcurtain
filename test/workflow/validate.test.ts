@@ -29,8 +29,8 @@ function validDefinition(): Record<string, unknown> {
         inputs: ['plan'],
         outputs: ['review'],
         transitions: [
-          { to: 'gate', guard: 'isApproved' },
-          { to: 'plan', guard: 'isRejected' },
+          { to: 'gate', when: { verdict: 'approved' } },
+          { to: 'plan', when: { verdict: 'rejected' } },
         ],
       },
       gate: {
@@ -109,8 +109,8 @@ describe('validateDefinition', () => {
 
       // Insert a deterministic state between review and gate
       states.review.transitions = [
-        { to: 'test', guard: 'isApproved' },
-        { to: 'plan', guard: 'isRejected' },
+        { to: 'test', when: { verdict: 'approved' } },
+        { to: 'plan', when: { verdict: 'rejected' } },
       ];
       states.test = {
         type: 'deterministic',
@@ -315,7 +315,10 @@ describe('validateDefinition', () => {
     it('rejects when + guard on same transition', () => {
       const def = deepClone(validDefinition());
       const states = def.states as Record<string, Record<string, unknown>>;
-      states.review.transitions = [{ to: 'gate', guard: 'isApproved', when: { verdict: 'approved' } }, { to: 'plan' }];
+      states.review.transitions = [
+        { to: 'gate', guard: 'isRoundLimitReached', when: { verdict: 'approved' } },
+        { to: 'plan' },
+      ];
       try {
         validateDefinition(def);
         expect.fail('should have thrown');

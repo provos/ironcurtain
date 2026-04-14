@@ -66,8 +66,8 @@ const linearWorkflowDef: WorkflowDefinition = {
       inputs: ['code'],
       outputs: ['reviews'],
       transitions: [
-        { to: 'done', guard: 'isApproved' },
-        { to: 'implement', guard: 'isRejected' },
+        { to: 'done', when: { verdict: 'approved' } },
+        { to: 'implement', when: { verdict: 'rejected' } },
       ],
     },
     done: { type: 'terminal', description: 'Done' },
@@ -155,8 +155,8 @@ const loopWithErrorGateDef: WorkflowDefinition = {
       inputs: ['code'],
       outputs: ['reviews'],
       transitions: [
-        { to: 'done', guard: 'isApproved' },
-        { to: 'error_gate', guard: 'isRejected' },
+        { to: 'done', when: { verdict: 'approved' } },
+        { to: 'error_gate', when: { verdict: 'rejected' } },
       ],
     },
     error_gate: {

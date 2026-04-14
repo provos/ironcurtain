@@ -179,8 +179,6 @@ function buildReVisitPrompt(stateId: string, stateConfig: AgentStateDefinition, 
 export const GUARD_LABELS: Record<string, string> = {
   isRoundLimitReached: 'round limit reached',
   isStalled: 'stall detected',
-  isApproved: 'approved',
-  isRejected: 'rejected',
   isPassed: 'all checks passed',
 };
 
