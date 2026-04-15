@@ -35,6 +35,7 @@ const topLevelSpec: CommandSpec = {
     { name: 'customize-policy', description: 'Customize your policy via LLM-assisted conversation' },
     { name: 'config', description: 'Edit configuration interactively' },
     { name: 'workflow', description: 'Run multi-agent workflows (start, resume, inspect)' },
+    { name: 'observe', description: 'Watch live LLM token output for running sessions' },
     { name: 'help', description: 'Show this help message' },
   ],
   options: [
@@ -171,6 +172,11 @@ switch (subcommand) {
   case 'workflow': {
     const { main: workflowMain } = await import('./workflow/workflow-command.js');
     await workflowMain(process.argv.slice(3));
+    break;
+  }
+  case 'observe': {
+    const { runObserveCommand } = await import('./observe/observe-command.js');
+    await runObserveCommand(process.argv.slice(3));
     break;
   }
   case 'setup-signal': {

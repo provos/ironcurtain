@@ -17,10 +17,13 @@ import { WebSocketServer, WebSocket as WsWebSocket } from 'ws';
 import type { SessionManager } from '../session/session-manager.js';
 import type { ControlRequestHandler } from '../daemon/control-socket.js';
 import type { SessionMode } from '../session/types.js';
+import type { TokenStreamBus } from '../docker/token-stream-bus.js';
+import type { TokenStreamBridge } from './token-stream-bridge.js';
 import { WebEventBus } from './web-event-bus.js';
 import { type RequestFrame, type ResponseFrame, type EventFrame, RpcError } from './web-ui-types.js';
 import { dispatch, buildStatusDto, type WorkflowDispatchContext } from './json-rpc-dispatch.js';
 import type { WorkflowManager } from './workflow-manager.js';
+import { wsDataToString } from './ws-utils.js';
 import * as logger from '../logger.js';
 
 // ---------------------------------------------------------------------------
@@ -54,6 +57,8 @@ export interface WebUiServerOptions {
   readonly devMode?: boolean;
   /** Optional WorkflowManager for workflow RPC methods. */
   readonly workflowManager?: WorkflowManager;
+  /** Shared token stream bus for real-time LLM output observation. */
+  readonly tokenStreamBus?: TokenStreamBus;
 }
 
 export class WebUiServer {
@@ -64,6 +69,7 @@ export class WebUiServer {
   private readonly options: WebUiServerOptions;
   private readonly eventBus = new WebEventBus();
   private readonly dispatchCtx: WorkflowDispatchContext;
+  private tokenStreamBridge: TokenStreamBridge | null = null;
   private eventSeq = 0;
   private statusInterval: ReturnType<typeof setInterval> | null = null;
   private pingInterval: ReturnType<typeof setInterval> | null = null;
@@ -92,6 +98,7 @@ export class WebUiServer {
       maxConcurrentWebSessions: options.maxConcurrentWebSessions,
       sessionQueues: new Map(),
       workflowManager: options.workflowManager,
+      tokenStreamBus: options.tokenStreamBus,
     };
 
     // Subscribe to own event bus and broadcast to WS clients
@@ -108,6 +115,23 @@ export class WebUiServer {
   /** Set the WorkflowManager after construction (avoids circular dependency). */
   setWorkflowManager(manager: WorkflowManager): void {
     this.dispatchCtx.workflowManager = manager;
+  }
+
+  /** Returns the bearer auth token for external consumers (e.g., CLI observe). */
+  getAuthToken(): string {
+    return this.authToken;
+  }
+
+  /** Returns the actual port the server is listening on. */
+  getPort(): number {
+    const addr = this.httpServer?.address();
+    return typeof addr === 'object' && addr ? addr.port : this.options.port;
+  }
+
+  /** Set the TokenStreamBridge after construction. */
+  setTokenStreamBridge(bridge: TokenStreamBridge): void {
+    this.tokenStreamBridge = bridge;
+    this.dispatchCtx.tokenStreamBridge = bridge;
   }
 
   async start(): Promise<string> {
@@ -183,9 +207,18 @@ export class WebUiServer {
   }
 
   private broadcast(event: string, payload: unknown): void {
+    this.sendToSubscribers(this.clients, event, payload);
+  }
+
+  /**
+   * Send an event frame to a specific set of clients (targeted delivery).
+   * Used by TokenStreamBridge for per-subscription delivery without
+   * modifying the generic broadcast() path.
+   */
+  sendToSubscribers(clients: ReadonlySet<WsWebSocket>, event: string, payload: unknown): void {
     const frame: EventFrame = { event, payload, seq: ++this.eventSeq };
     const data = JSON.stringify(frame);
-    for (const client of this.clients) {
+    for (const client of clients) {
       if (client.readyState === WsWebSocket.OPEN) {
         client.send(data);
       }
@@ -401,11 +434,7 @@ export class WebUiServer {
       });
 
       ws.on('message', (data: Buffer | ArrayBuffer | Buffer[]) => {
-        const text = Buffer.isBuffer(data)
-          ? data.toString()
-          : data instanceof ArrayBuffer
-            ? Buffer.from(data).toString()
-            : Buffer.concat(data).toString();
+        const text = wsDataToString(data);
         this.handleMessage(ws, text).catch((err: unknown) => {
           logger.error(`[WebUI] Error handling message: ${String(err)}`);
         });
@@ -413,6 +442,7 @@ export class WebUiServer {
 
       ws.on('close', () => {
         this.removeClient(ws);
+        this.tokenStreamBridge?.removeAllForClient(ws);
         logger.info(`[WebUI] Client disconnected (${this.clients.size} active)`);
         this.startOrphanTimerIfNeeded();
       });
@@ -420,6 +450,7 @@ export class WebUiServer {
       ws.on('error', (err) => {
         logger.warn(`[WebUI] WebSocket error: ${err.message}`);
         this.removeClient(ws);
+        this.tokenStreamBridge?.removeAllForClient(ws);
         this.startOrphanTimerIfNeeded();
       });
     });
@@ -460,7 +491,7 @@ export class WebUiServer {
     }
 
     try {
-      const payload = await dispatch(this.dispatchCtx, frame.method, frame.params ?? {});
+      const payload = await dispatch(this.dispatchCtx, frame.method, frame.params ?? {}, client);
       client.send(JSON.stringify({ id: frame.id, ok: true, payload } satisfies ResponseFrame));
     } catch (err: unknown) {
       const response: ResponseFrame =

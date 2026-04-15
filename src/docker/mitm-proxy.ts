@@ -31,6 +31,9 @@ import type { OAuthTokenManager } from './oauth-token-manager.js';
 import type { RegistryConfig, PackageValidator, AllowedVersionCache } from './package-types.js';
 import { DENY_ALL_VALIDATOR } from './package-validator.js';
 import { validateDomain, type DomainListing } from './proxy-tools.js';
+import type { TokenStreamBus } from './token-stream-bus.js';
+import type { SseProvider } from './token-stream-types.js';
+import { SseExtractorTransform } from './sse-extractor.js';
 import * as logger from '../logger.js';
 
 /**
@@ -128,6 +131,20 @@ export interface MitmProxyOptions {
    * Used in tests to avoid real DNS resolution.
    */
   readonly dnsLookup?: http.RequestOptions['lookup'];
+  /**
+   * Shared daemon-level token stream bus. When provided together with
+   * `sessionId`, the proxy taps SSE responses from LLM API endpoints
+   * and pushes parsed token events into the bus.
+   *
+   * Both `tokenStreamBus` and `sessionId` must be provided together.
+   * If one is set without the other, `createMitmProxy()` throws.
+   */
+  readonly tokenStreamBus?: TokenStreamBus;
+  /**
+   * Session ID for token stream routing. Required when `tokenStreamBus`
+   * is provided. Used to key events pushed into the bus.
+   */
+  readonly sessionId?: string;
 }
 
 export interface ProviderKeyMapping {
@@ -171,7 +188,31 @@ function bufferRequestBody(req: http.IncomingMessage, maxBytes: number): Promise
   });
 }
 
+/**
+ * Maps a target hostname to the SSE provider for token stream parsing.
+ * Only Anthropic and OpenAI hosts are recognized; everything else
+ * falls back to 'unknown'.
+ */
+export function resolveSseProvider(hostname: string): SseProvider {
+  if (hostname === 'api.anthropic.com' || hostname === 'platform.claude.com') {
+    return 'anthropic';
+  }
+  if (hostname === 'api.openai.com') {
+    return 'openai';
+  }
+  return 'unknown';
+}
+
 export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
+  // Validate token stream options: both must be provided together
+  const hasBus = options.tokenStreamBus !== undefined;
+  const hasSessionId = options.sessionId !== undefined;
+  if (hasBus !== hasSessionId) {
+    throw new Error('tokenStreamBus and sessionId must be provided together');
+  }
+  const tokenBus = options.tokenStreamBus;
+  const tokenSessionId = options.sessionId;
+
   // Parse CA cert and key from PEM
   const caCert = forge.pki.certificateFromPem(options.ca.certPem);
   const caKey = forge.pki.privateKeyFromPem(options.ca.keyPem);
@@ -461,7 +502,17 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
           clientRes.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers);
           clientRes.flushHeaders();
           clientRes.socket?.setNoDelay(true);
-          upstreamRes.pipe(clientRes);
+
+          const contentType = upstreamRes.headers['content-type'] ?? '';
+          if (tokenBus && tokenSessionId && contentType.includes('text/event-stream')) {
+            const sseProvider = resolveSseProvider(targetHost);
+            const extractor = new SseExtractorTransform(sseProvider, (event) => {
+              tokenBus.push(tokenSessionId as import('../session/types.js').SessionId, event);
+            });
+            upstreamRes.pipe(extractor).pipe(clientRes);
+          } else {
+            upstreamRes.pipe(clientRes);
+          }
         },
       );
 

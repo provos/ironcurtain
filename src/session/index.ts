@@ -178,6 +178,7 @@ async function createDockerSession(
       sessionConfig.escalationDir,
       sessionConfig.auditLogPath,
       sessionId,
+      options.tokenStreamBus,
     );
 
     // Write CLAUDE.md into conversation state dir (unconditionally, even on
