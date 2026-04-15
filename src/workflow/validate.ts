@@ -72,6 +72,7 @@ const workflowSettingsSchema = z
     maxParallelism: z.number().int().positive().optional(),
     systemPrompt: z.string().optional(),
     maxSessionSeconds: z.number().positive().optional(),
+    unversionedArtifacts: z.array(z.string()).optional(),
   })
   .optional();
 

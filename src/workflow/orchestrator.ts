@@ -41,7 +41,7 @@ import {
   buildInvalidVerdictReprompt,
 } from './status-parser.js';
 import { buildAgentCommand, buildArtifactReprompt, buildStatusInstructions } from './prompt-builder.js';
-import { collectFilesRecursive, hasAnyFiles } from './artifacts.js';
+import { collectFilesRecursive, hasAnyFiles, snapshotArtifacts } from './artifacts.js';
 import { validateDefinition } from './validate.js';
 import { parseDefinitionFile } from './discovery.js';
 
@@ -722,6 +722,13 @@ export class WorkflowOrchestrator implements WorkflowController {
     if (!instance) throw new Error(`Workflow ${workflowId} not found`);
 
     const settings = definition.settings ?? {};
+
+    // Version artifact directories before re-entering a state
+    const visitCount = context.visitCounts[stateId] ?? 0;
+    if (visitCount > 1) {
+      const unversioned = new Set(settings.unversionedArtifacts ?? []);
+      snapshotArtifacts(instance.artifactDir, stateConfig.outputs, visitCount, unversioned);
+    }
 
     instance.tab.write(`[agent] Starting "${stateId}" (persona: ${stateConfig.persona})`);
 

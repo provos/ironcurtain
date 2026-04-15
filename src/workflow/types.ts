@@ -72,6 +72,8 @@ export interface WorkflowSettings {
    * Default: uses the global setting (1800s / 30 minutes).
    */
   readonly maxSessionSeconds?: number;
+  /** Output artifact names excluded from versioning (e.g., append-only journals). */
+  readonly unversionedArtifacts?: readonly string[];
 }
 
 /**
