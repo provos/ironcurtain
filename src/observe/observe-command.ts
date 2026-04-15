@@ -3,6 +3,11 @@
  *
  * Connects to the daemon's WebSocket server, subscribes to token
  * stream events, and renders LLM output to stdout in real time.
+ *
+ * When stdout is a TTY (and --json is not set), the command uses a
+ * full-screen TUI with a Matrix rain panel and formatted text panel.
+ * Otherwise (pipe, --json, --no-tui), it falls back to the plain
+ * line-oriented renderer.
  */
 
 import { parseArgs } from 'node:util';
@@ -15,6 +20,8 @@ import { getWebUiStatePath } from '../config/paths.js';
 import { renderEventBatch, renderConnected, renderSessionEnded, type RenderOptions } from './observe-renderer.js';
 import { wsDataToString } from '../web-ui/ws-utils.js';
 import type { TokenStreamEvent } from '../docker/token-stream-types.js';
+import type { ObserveEventSink } from './observe-tui-types.js';
+import { createObserveTui, type ObserveTui } from './observe-tui.js';
 
 // ---------------------------------------------------------------------------
 // Command spec (for --help)
@@ -33,12 +40,14 @@ const observeSpec: CommandSpec = {
     { flag: 'workflow', description: 'Observe all sessions in a named workflow', placeholder: '<name>' },
     { flag: 'raw', description: 'Show all event types, not just text' },
     { flag: 'json', description: 'Output events as newline-delimited JSON' },
+    { flag: 'no-tui', description: 'Disable TUI mode (plain text output)' },
   ],
   examples: [
-    'ironcurtain observe 3                 # Watch session #3',
+    'ironcurtain observe 3                 # Watch session #3 (TUI mode)',
     'ironcurtain observe --all             # Watch all sessions',
     'ironcurtain observe --workflow build   # Watch workflow "build"',
-    'ironcurtain observe 3 --raw           # Include tool use and message markers',
+    'ironcurtain observe 3 --no-tui        # Plain text output',
+    'ironcurtain observe 3 --raw           # Show tool use + message markers in TUI',
     'ironcurtain observe --all --json      # NDJSON output for piping',
   ],
 };
@@ -76,6 +85,80 @@ function sendRpc(ws: WebSocket, method: string, params: Record<string, unknown> 
 }
 
 // ---------------------------------------------------------------------------
+// Plain renderer adapter
+// ---------------------------------------------------------------------------
+
+/**
+ * Wraps the existing plain-text renderer functions into the
+ * ObserveEventSink interface so observe-command can use either
+ * the TUI or the plain renderer interchangeably.
+ */
+function createPlainSink(renderOptions: RenderOptions): ObserveEventSink {
+  return {
+    pushEvents(label: number, events: readonly TokenStreamEvent[]): void {
+      const output = renderEventBatch(label, events, renderOptions);
+      if (output) process.stdout.write(output);
+    },
+    sessionEnded(label: number, reason: string): void {
+      process.stderr.write(renderSessionEnded(label, reason));
+    },
+    connectionLost(reason: string): void {
+      process.stderr.write(`\nConnection lost: ${reason}\n`);
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Push event handler
+// ---------------------------------------------------------------------------
+
+/**
+ * Routes a single WebSocket push event to the event sink.
+ *
+ * Workflow filtering happens here -- events from sessions not in the
+ * workflow label set are dropped before reaching the sink. This keeps
+ * the sink completely unaware of workflow semantics.
+ */
+function handlePushEvent(
+  event: string,
+  payload: Record<string, unknown>,
+  sink: ObserveEventSink,
+  targetLabel: number | undefined,
+  workflowLabels: Set<number> | null,
+  cleanup: () => void,
+): void {
+  if (event === 'session.token_stream') {
+    const label = payload.label as number;
+    const events = payload.events as TokenStreamEvent[];
+
+    // Workflow filtering: skip events from non-workflow sessions
+    if (workflowLabels && !workflowLabels.has(label)) return;
+
+    sink.pushEvents(label, events);
+    return;
+  }
+
+  if (event === 'session.ended') {
+    const endedLabel = payload.label as number;
+    const reason = (payload.reason as string | undefined) ?? 'unknown';
+
+    // For single-session mode, exit when the watched session ends
+    if (targetLabel !== undefined && endedLabel === targetLabel) {
+      sink.sessionEnded(endedLabel, reason);
+      cleanup();
+      return;
+    }
+
+    // For multi-session modes, just show a notification
+    if (targetLabel === undefined) {
+      sink.sessionEnded(endedLabel, reason);
+      // Remove from workflow labels if tracking
+      workflowLabels?.delete(endedLabel);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Main command
 // ---------------------------------------------------------------------------
 
@@ -87,6 +170,7 @@ export async function runObserveCommand(argv: string[]): Promise<void> {
       workflow: { type: 'string' },
       raw: { type: 'boolean' },
       json: { type: 'boolean' },
+      'no-tui': { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
     },
     allowPositionals: true,
@@ -98,6 +182,7 @@ export async function runObserveCommand(argv: string[]): Promise<void> {
   const allMode = values.all as boolean | undefined;
   const workflowName = values.workflow as string | undefined;
   const labelArg = positionals[0];
+  const noTui = values['no-tui'] as boolean | undefined;
 
   // Validate argument combinations
   if (!allMode && !workflowName && !labelArg) {
@@ -119,15 +204,34 @@ export async function runObserveCommand(argv: string[]): Promise<void> {
     process.exit(1);
   }
 
+  const showLabel = !!allMode || !!workflowName;
+
   const renderOptions: RenderOptions = {
     raw: !!values.raw,
     json: !!values.json,
-    showLabel: !!allMode || !!workflowName,
+    showLabel,
   };
+
+  // Mode selection: TUI when stdout is a TTY and not in JSON or --no-tui mode
+  const isTty = process.stdout.isTTY;
+  const useTui = isTty && !renderOptions.json && !noTui;
+
+  // Create the event sink
+  let sink: ObserveEventSink;
+  let tui: ObserveTui | null = null;
+
+  if (useTui) {
+    tui = createObserveTui({ raw: !!values.raw, showLabel });
+    tui.start();
+    sink = tui;
+  } else {
+    sink = createPlainSink(renderOptions);
+  }
 
   // Load daemon connection info
   const state = loadWebUiState();
   if (!state) {
+    tui?.destroy();
     process.stderr.write(
       chalk.red('Error: cannot connect to daemon. Is the daemon running with --web-ui?\n') +
         chalk.dim('Start with: ironcurtain daemon --web-ui\n'),
@@ -152,6 +256,9 @@ export async function runObserveCommand(argv: string[]): Promise<void> {
       if (closing) return;
       closing = true;
 
+      // Destroy TUI before unsubscribing (restores terminal state)
+      tui?.destroy();
+
       // Unsubscribe before closing
       if (ws.readyState === WebSocket.OPEN) {
         if (label !== undefined) {
@@ -169,13 +276,16 @@ export async function runObserveCommand(argv: string[]): Promise<void> {
       }
     };
 
-    // Handle Ctrl+C
-    const sigHandler = () => {
-      process.stderr.write(chalk.dim('\n'));
-      cleanup();
-    };
-    process.on('SIGINT', sigHandler);
-    process.on('SIGTERM', sigHandler);
+    // Handle Ctrl+C -- only register for plain mode; TUI handles its own signals
+    let sigHandler: (() => void) | null = null;
+    if (!useTui) {
+      sigHandler = () => {
+        process.stderr.write(chalk.dim('\n'));
+        cleanup();
+      };
+      process.on('SIGINT', sigHandler);
+      process.on('SIGTERM', sigHandler);
+    }
 
     ws.on('open', () => {
       // Subscribe
@@ -205,12 +315,16 @@ export async function runObserveCommand(argv: string[]): Promise<void> {
       if ('id' in frame && typeof frame.id === 'string') {
         if (frame.id === subscribeId) {
           if (frame.ok) {
-            process.stderr.write(renderConnected(label));
+            // In TUI mode the text panel shows state; in plain mode write to stderr
+            if (!useTui) {
+              process.stderr.write(renderConnected(label));
+            }
           } else {
             const err = frame.error as { message?: string } | undefined;
-            process.stderr.write(chalk.red(`Error: ${err?.message ?? 'subscription failed'}\n`));
-            ws.close();
-            resolve();
+            if (!useTui) {
+              process.stderr.write(chalk.red(`Error: ${err?.message ?? 'subscription failed'}\n`));
+            }
+            cleanup();
           }
           return;
         }
@@ -219,11 +333,6 @@ export async function runObserveCommand(argv: string[]): Promise<void> {
           return;
         }
         if (frame.id === sessionListId && frame.ok && workflowName) {
-          // Filter sessions by workflow -- sessions don't currently expose
-          // workflow membership directly, so this is a best-effort filter.
-          // For now, we accept all sessions when using --workflow and rely
-          // on the workflow name being part of the session persona or source.
-          // This will be refined when workflow-session association is available.
           workflowLabels = new Set<number>();
           const payload = frame.payload as Array<{ label: number; source?: { kind: string; jobName?: string } }>;
           if (Array.isArray(payload)) {
@@ -238,72 +347,37 @@ export async function runObserveCommand(argv: string[]): Promise<void> {
 
       // Push event
       if ('event' in frame && typeof frame.event === 'string') {
-        handlePushEvent(
-          frame.event,
-          frame.payload as Record<string, unknown>,
-          renderOptions,
-          label,
-          workflowLabels,
-          cleanup,
-        );
+        handlePushEvent(frame.event, frame.payload as Record<string, unknown>, sink, label, workflowLabels, cleanup);
       }
     });
 
     ws.on('error', (err: Error) => {
-      process.stderr.write(chalk.red(`WebSocket error: ${err.message}\n`));
-      reject(err);
+      // Notify the sink of the connection loss
+      sink.connectionLost(err.message);
+      if (tui) {
+        // TUI manages its own 3-second exit timer; do not destroy immediately.
+        // The promise resolves so runObserveCommand returns, but the TUI's
+        // frame loop and stdin keep the event loop alive until destroy() fires.
+        resolve();
+      } else {
+        reject(err);
+      }
     });
 
-    ws.on('close', () => {
-      process.off('SIGINT', sigHandler);
-      process.off('SIGTERM', sigHandler);
+    ws.on('close', (code: number) => {
+      // Remove signal handlers if we registered them (plain mode only)
+      if (sigHandler) {
+        process.off('SIGINT', sigHandler);
+        process.off('SIGTERM', sigHandler);
+      }
+
+      // If not a clean close triggered by our cleanup, notify the sink
+      if (!closing) {
+        sink.connectionLost(`WebSocket closed (code ${code})`);
+        // In TUI mode, the 3-second exit timer handles cleanup
+      }
+
       resolve();
     });
   });
-}
-
-// ---------------------------------------------------------------------------
-// Push event handler
-// ---------------------------------------------------------------------------
-
-function handlePushEvent(
-  event: string,
-  payload: Record<string, unknown>,
-  options: RenderOptions,
-  targetLabel: number | undefined,
-  workflowLabels: Set<number> | null,
-  cleanup: () => void,
-): void {
-  if (event === 'session.token_stream') {
-    const label = payload.label as number;
-    const events = payload.events as TokenStreamEvent[];
-
-    // Workflow filtering: skip events from non-workflow sessions
-    if (workflowLabels && !workflowLabels.has(label)) return;
-
-    const output = renderEventBatch(label, events, options);
-    if (output) {
-      process.stdout.write(output);
-    }
-    return;
-  }
-
-  if (event === 'session.ended') {
-    const endedLabel = payload.label as number;
-    const reason = (payload.reason as string | undefined) ?? 'unknown';
-
-    // For single-session mode, exit when the watched session ends
-    if (targetLabel !== undefined && endedLabel === targetLabel) {
-      process.stderr.write(renderSessionEnded(endedLabel, reason));
-      cleanup();
-      return;
-    }
-
-    // For multi-session modes, just show a notification
-    if (targetLabel === undefined) {
-      process.stderr.write(renderSessionEnded(endedLabel, reason));
-      // Remove from workflow labels if tracking
-      workflowLabels?.delete(endedLabel);
-    }
-  }
 }
