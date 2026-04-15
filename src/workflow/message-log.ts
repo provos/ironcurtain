@@ -28,7 +28,7 @@ export interface AgentReceivedEntry extends BaseEntry {
 export interface AgentRetryEntry extends BaseEntry {
   readonly type: 'agent_retry';
   readonly role: string;
-  readonly reason: 'missing_status_block' | 'missing_artifacts';
+  readonly reason: 'missing_status_block' | 'missing_artifacts' | 'invalid_verdict';
   readonly details: string;
   readonly retryMessage: string;
 }

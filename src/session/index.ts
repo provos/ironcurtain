@@ -300,6 +300,7 @@ export function buildSessionConfig(
     | 'persona'
     | 'systemPromptAugmentation'
     | 'jobId'
+    | 'resourceBudgetOverrides'
   > = {},
 ): SessionDirConfig {
   let { workspacePath, policyDir, systemPromptAugmentation } = opts;
@@ -364,6 +365,19 @@ export function buildSessionConfig(
     logger.info(`Resumed from session: ${resumeSessionId}`);
   }
 
+  // Build userConfig overrides (auto-approver disable, resource budget).
+  // Composed incrementally so multiple overrides don't clobber each other.
+  let patchedUserConfig = config.userConfig;
+  if (disableAutoApprove) {
+    patchedUserConfig = { ...patchedUserConfig, autoApprove: { ...patchedUserConfig.autoApprove, enabled: false } };
+  }
+  if (opts.resourceBudgetOverrides) {
+    patchedUserConfig = {
+      ...patchedUserConfig,
+      resourceBudget: { ...patchedUserConfig.resourceBudget, ...opts.resourceBudgetOverrides },
+    };
+  }
+
   // Override config paths for this session's isolated directories.
   // Deep-clone mcpServers so patching doesn't mutate the caller's config.
   const sessionConfig = {
@@ -384,10 +398,7 @@ export function buildSessionConfig(
         }
       : {}),
     mcpServers: JSON.parse(JSON.stringify(config.mcpServers)) as typeof config.mcpServers,
-    // Disable auto-approver for headless sessions (no interactive user context)
-    ...(disableAutoApprove
-      ? { userConfig: { ...config.userConfig, autoApprove: { ...config.userConfig.autoApprove, enabled: false } } }
-      : {}),
+    userConfig: patchedUserConfig,
   };
 
   // Apply server allowlist if persona specifies one

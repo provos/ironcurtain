@@ -1,4 +1,4 @@
-import type { WorkflowContext, WorkflowEvent, AgentOutput } from './types.js';
+import type { WorkflowContext, WorkflowEvent } from './types.js';
 
 // ---------------------------------------------------------------------------
 // Guard function type
@@ -7,38 +7,8 @@ import type { WorkflowContext, WorkflowEvent, AgentOutput } from './types.js';
 export type GuardFunction = (params: { readonly context: WorkflowContext; readonly event: WorkflowEvent }) => boolean;
 
 // ---------------------------------------------------------------------------
-// Extraction helpers
-// ---------------------------------------------------------------------------
-
-/**
- * Extracts AgentOutput from an AGENT_COMPLETED event.
- * Returns undefined if the event is not an AGENT_COMPLETED event.
- */
-function extractAgentOutput(event: WorkflowEvent): AgentOutput | undefined {
-  if (event.type === 'AGENT_COMPLETED') {
-    return event.output;
-  }
-  return undefined;
-}
-
-// ---------------------------------------------------------------------------
 // Guard implementations
 // ---------------------------------------------------------------------------
-
-const isApproved: GuardFunction = ({ event }) => {
-  const output = extractAgentOutput(event);
-  return output?.verdict === 'approved';
-};
-
-const isRejected: GuardFunction = ({ event }) => {
-  const output = extractAgentOutput(event);
-  return output?.verdict === 'rejected';
-};
-
-const isLowConfidence: GuardFunction = ({ event }) => {
-  const output = extractAgentOutput(event);
-  return output?.verdict === 'approved' && output.confidence === 'low';
-};
 
 /**
  * Per-state round limit check. Compares the maximum visit count
@@ -61,14 +31,6 @@ const isRoundLimitReached: GuardFunction = ({ context }) => {
 // validation via REGISTERED_GUARDS.
 const isStalled: GuardFunction = () => false;
 
-const hasTestCountRegression: GuardFunction = ({ context, event }) => {
-  const output = extractAgentOutput(event);
-  if (context.previousTestCount == null || output?.testCount == null) {
-    return false;
-  }
-  return output.testCount < context.previousTestCount;
-};
-
 const isPassed: GuardFunction = ({ event }) => {
   return event.type === 'VALIDATION_PASSED';
 };
@@ -78,12 +40,8 @@ const isPassed: GuardFunction = ({ event }) => {
 // ---------------------------------------------------------------------------
 
 export const guardImplementations: Readonly<Record<string, GuardFunction>> = {
-  isApproved,
-  isRejected,
-  isLowConfidence,
   isRoundLimitReached,
   isStalled,
-  hasTestCountRegression,
   isPassed,
 };
 

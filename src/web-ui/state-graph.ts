@@ -5,7 +5,7 @@
  * (agent, human_gate, deterministic, terminal) exhaustively.
  */
 
-import type { WorkflowDefinition } from '../workflow/types.js';
+import type { WorkflowDefinition, WhenClause } from '../workflow/types.js';
 import type { StateGraphDto, StateNodeDto, TransitionEdgeDto } from './web-ui-types.js';
 
 /**
@@ -22,6 +22,7 @@ export function extractStateGraph(definition: WorkflowDefinition): StateGraphDto
       type: state.type,
       persona: state.type === 'agent' ? state.persona : undefined,
       label: formatStateLabel(id),
+      description: state.description,
     });
 
     switch (state.type) {
@@ -32,7 +33,7 @@ export function extractStateGraph(definition: WorkflowDefinition): StateGraphDto
             from: id,
             to: t.to,
             guard: t.guard,
-            label: t.guard ? formatGuardLabel(t.guard) : '',
+            label: t.when ? formatWhenLabel(t.when) : t.guard ? formatGuardLabel(t.guard) : '',
           });
         }
         break;
@@ -76,6 +77,13 @@ function formatGuardLabel(guard: string): string {
     .replace(/([A-Z])/g, ' $1')
     .trim()
     .toLowerCase();
+}
+
+/** Formats a when clause into a readable label (e.g., "approved"). */
+function formatWhenLabel(when: WhenClause): string {
+  return Object.values(when)
+    .map((v) => String(v))
+    .join(', ');
 }
 
 /** Formats an event type into a readable label. */

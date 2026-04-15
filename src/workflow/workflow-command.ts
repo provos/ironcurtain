@@ -2,7 +2,7 @@
  * CLI entry point for `ironcurtain workflow`.
  *
  * Subcommands:
- *   start   <definition.json> "task" [--model <model>] [--workspace <path>]
+ *   start   <definition> "task" [--model <model>] [--workspace <path>]
  *   resume  <baseDir> [--state <stateName>] [--model <model>]
  *   inspect <baseDir> [--all]
  */
@@ -14,10 +14,10 @@ import { createInterface } from 'node:readline/promises';
 import { getIronCurtainHome } from '../config/paths.js';
 import { formatHelp, type CommandSpec } from '../cli-help.js';
 import { FileCheckpointStore } from './checkpoint.js';
-import { discoverWorkflows, resolveWorkflowPath } from './discovery.js';
+import { discoverWorkflows, resolveWorkflowPath, parseDefinitionFile } from './discovery.js';
 import { MessageLog } from './message-log.js';
 import { WorkflowOrchestrator, type WorkflowOrchestratorDeps, type WorkflowTabHandle } from './orchestrator.js';
-import type { WorkflowId, WorkflowCheckpoint } from './types.js';
+import type { WorkflowId, WorkflowCheckpoint, WorkflowDefinition } from './types.js';
 import {
   createWorkflowSessionFactory,
   createConsoleTab,
@@ -76,7 +76,7 @@ const workflowSpec: CommandSpec = {
   examples: [
     'ironcurtain workflow list',
     'ironcurtain workflow start design-and-code "Build a REST API"',
-    'ironcurtain workflow start ./my-workflow.json "Build a REST API"',
+    'ironcurtain workflow start ./my-workflow.yaml "Build a REST API"',
     'ironcurtain workflow start design-and-code "task" --model anthropic:claude-haiku-4-5',
     'ironcurtain workflow resume /tmp/workflow-abc123',
     'ironcurtain workflow resume /tmp/workflow-abc123 --state review',
@@ -322,10 +322,33 @@ function runInspect(args: string[]): void {
 
     writeStdout(`${BOLD}${CYAN}Workflow: ${workflowId}${RESET}`);
 
-    // Checkpoint info
+    // Checkpoint info (stateDescriptions populated below after definition is loaded,
+    // but checkpoint display runs first -- we load definition eagerly here)
     const checkpoint = checkpointStore.load(workflowId);
+
+    // Load definition for state descriptions and definition path display
+    const defPath = resolve(workflowDir, 'definition.json');
+    let stateDescriptions: Map<string, string> | undefined;
+    if (existsSync(defPath)) {
+      try {
+        const def = parseDefinitionFile(defPath) as WorkflowDefinition;
+        stateDescriptions = new Map(
+          Object.entries(def.states)
+            .filter(([, s]) => s.description)
+            .map(([id, s]) => [id, s.description]),
+        );
+      } catch {
+        // Non-fatal — definition may be from older schema
+      }
+    }
+
     if (checkpoint) {
-      writeStdout(`  State: ${BOLD}${String(checkpoint.machineState)}${RESET}`);
+      const stateStr = String(checkpoint.machineState);
+      const desc = stateDescriptions?.get(stateStr);
+      const stateLabel = desc
+        ? `${BOLD}${stateStr}${RESET} ${DIM}\u2014 "${desc}"${RESET}`
+        : `${BOLD}${stateStr}${RESET}`;
+      writeStdout(`  State: ${stateLabel}`);
       writeStdout(`  Timestamp: ${checkpoint.timestamp}`);
       if (checkpoint.context.lastError) {
         writeStdout(`  Error: ${RED}${checkpoint.context.lastError}${RESET}`);
@@ -342,8 +365,6 @@ function runInspect(args: string[]): void {
       writeStdout(`  Artifacts: ${artifactNames.join(', ') || '(none)'}`);
     }
 
-    // Definition
-    const defPath = resolve(workflowDir, 'definition.json');
     if (existsSync(defPath)) {
       writeStdout(`  Definition: ${defPath}`);
     }
@@ -385,9 +406,12 @@ function runInspect(args: string[]): void {
           case 'error':
             writeStdout(`${prefix} ${RED}[error]${RESET} ${entry.error}`);
             break;
-          case 'state_transition':
-            writeStdout(`${prefix} ${BLUE}[transition]${RESET} ${entry.from} -> ${entry.state}`);
+          case 'state_transition': {
+            const toDesc = stateDescriptions?.get(entry.event);
+            const toLabel = toDesc ? `${entry.event} ${DIM}\u2014 "${toDesc}"${RESET}` : entry.event;
+            writeStdout(`${prefix} ${BLUE}[transition]${RESET} ${entry.from} -> ${toLabel}`);
             break;
+          }
         }
       }
     } else {

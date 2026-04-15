@@ -30,7 +30,7 @@ describe('workflow-spike demo definition', () => {
   let tmpDir: string;
   let orchestrator: WorkflowOrchestrator | undefined;
   const __dirname = dirname(fileURLToPath(import.meta.url));
-  const definitionPath = resolve(__dirname, '../../examples/workflow-demo.json');
+  const definitionPath = resolve(__dirname, '../../examples/workflow-demo.yaml');
 
   let cleanupPersonas: (() => void) | undefined;
 
