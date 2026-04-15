@@ -1,5 +1,5 @@
 name: vuln-discovery
-description: 'Orchestrator-driven vulnerability discovery: analyze code, validate hypotheses cheaply, then build instrumented harnesses for live confirmation'
+description: 'Orchestrator-driven vulnerability discovery: analyze code, build tiered harnesses, and confirm vulnerabilities through execution'
 initial: orchestrator
 
 settings:
@@ -7,6 +7,8 @@ settings:
   dockerAgent: claude-code
   maxRounds: 12
   maxSessionSeconds: 10800
+  unversionedArtifacts:
+    - journal
   systemPrompt: |
     Workflow artifacts go in `.workflow/`. The harness and all build modifications go directly in the workspace. The target file path is specified in the task description.
 
@@ -108,14 +110,19 @@ states:
       **Append-only log** (everything after the header, never edited, only appended):
       ```
       ## Round N — Post [state_name]
-      ### Results
-      - [what the completed agent found]
+      ### Evidence
+      - **Artifacts written**: [list of file paths the completed agent wrote or modified]
+      - **Key findings**: [specific facts from the agent's output — what was tested, what values were used, what code paths were hit, what mitigations were found and where]
+      - **Harness tier**: [tier N, or N/A if not a harness state]
+      - **Hypothesis scope**: [single-function | cross-component (N functions) | full-system — describes how many components the current hypothesis involves]
       ### Assessment
-      [your interpretation of the results]
+      [your interpretation of the evidence — why the results support or refute the hypothesis, what gaps remain]
       ### Decision
       Verdict: [verdict]
       Directive: [what the next agent should focus on]
       ```
+
+      **What to capture in Evidence.** You are a router — you don't read source code. But you DO read the output files written by other agents. When filling in "Key findings," extract the specific details from those files: which function was tested, what input values were tried, what coverage showed, what mitigations were cited and at what source locations, what error messages appeared. A good evidence section lets someone reconstruct WHY the agent reached its verdict without re-reading the full artifact. A bad one says "the agent found it was mitigated."
 
       On each invocation: update the status header in-place, then APPEND a new round section at the end. Never edit or delete previous round sections — they are the investigation's permanent record.
 
@@ -123,46 +130,57 @@ states:
 
       | Verdict | Destination | When to use |
       |---------|-------------|-------------|
-      | thesis_validate | thesis_validate | Validate a hypothesis cheaply before building infrastructure. |
-      | harness_design | harness_design | Build/upgrade an end-to-end harness. Be specific about what to build. |
+      | harness_design | harness_design | Build or upgrade a harness. Your directive MUST specify the tier (see below). |
       | discover | discover | Run hypothesis-driven research using an existing working harness. |
-      | differential_validate | differential_validate | Isolated test succeeded but live system diverges. |
+      | differential_validate | differential_validate | Harness test diverges from expected behavior. |
       | escalate | human_escalation | Investigation is stuck. Describe what was tried and what you need. |
       | triage | triage | Enough evidence collected for independent validation. |
-      | complete | conclude | Investigation finished — vulnerability confirmed and triaged, OR thorough search completed with no findings. Route here when the journal shows conclusive results. |
-      | reanalyze | analyze | Route to analyze when you need the structural analysis expanded. Your output text tells the analyze agent what to focus on (e.g., "the initial analysis missed ref-counting patterns, look deeper at memory lifecycle functions"). |
+      | complete | conclude | Investigation finished — vulnerability confirmed and triaged, OR thorough search completed with no findings. |
+      | reanalyze | analyze | Need the structural analysis expanded. Your directive tells analyze what to focus on. |
+
+      ## Tiered harness strategy
+
+      When routing to harness_design, your directive MUST specify a tier. The tier tells harness_design how much infrastructure to build:
+
+      **Tier 1 — Isolated function test.** Extract the relevant function(s) into a standalone program. Stub external dependencies. Systematically test input values at type boundaries. Use this when the hypothesis is about arithmetic in a single function (overflow, truncation, sign confusion). Runs millions of trials per second.
+
+      **Tier 2 — Multi-component harness.** Link multiple source files from the project. Preserve the real data structures, type definitions, and inter-function calls. Use this when the vulnerability involves cross-function interaction — a value computed in one function being consumed or compared in another, sentinel collisions across components, or state accumulated across multiple call sites.
+
+      **Tier 3 — Full build with instrumented input.** Compile the actual project (or a substantial subset) with sanitizers and coverage. Feed crafted input files or protocol messages through real entry points. Use this when the bug depends on initialization sequences, global state, runtime configuration, or protocol-level framing that can't be faithfully stubbed.
+
+      **Picking the right tier.** Match tier to hypothesis scope. The analysis documents which functions and components each cross-cutting pattern involves — use that to decide:
+      - Hypothesis names ONE function → Tier 1
+      - Hypothesis involves a value flowing between 2+ functions, or a sentinel/type used across components → Tier 2 minimum
+      - Hypothesis requires real initialization, protocol framing, or global state → Tier 3
+      Never use Tier 1 for a cross-component hypothesis. If in doubt, go higher.
+
+      **Tier escalation on "mitigated".** When harness_design reports "mitigated":
+      - If the tier was lower than the hypothesis scope warrants (e.g., Tier 1 for a cross-component bug), the verdict is unreliable. Re-route to harness_design at the next tier. This is automatic — do not judge the test quality, just compare the tier to the hypothesis scope.
+      - If the tier already matched the scope (Tier 2+ for a multi-component hypothesis), accept the "mitigated" verdict and close the hypothesis.
+      - A "confirmed" verdict at any tier → route to discover or triage depending on evidence strength.
+
+      **After human feedback, skip to Tier 2 or higher.** When you receive human feedback from report_review, the human is telling you that previous analysis was wrong or incomplete. Do NOT re-run the same tier that produced the disputed result. Escalate at least one tier. If the human describes a cross-component interaction, go directly to Tier 2 or 3.
 
       ## Strategic principles
 
-      **Cheap validation first.** When a hypothesis involves specific input values that trigger a condition, ALWAYS route to thesis_validate before building an end-to-end harness. Isolated tests run millions of trials per second; live harnesses run one per minute. Building infrastructure for unvalidated values wastes hours.
-
-      **Route to harness_design only when:**
-      - thesis_validate has confirmed trigger values and you need to deliver them through a real system, OR
-      - the vulnerability fundamentally cannot be tested in isolation (requires multi-process interaction, kernel/userland boundary, real network stack behavior, timing-dependent races across components)
-
-      **Diagnosing failures.** When the discover agent reports that validated trigger values don't work through the live harness:
+      **Diagnosing failures.** When the discover agent reports that trigger values don't work through the live harness:
       - If coverage shows the target function IS reached but the condition doesn't fire → the values need adjustment for the live context (protocol encoding, byte order, framing). Route to differential_validate.
-      - If coverage shows the target function is NOT reached → the harness has a reachability problem (firewall, routing, wrong entry point). Route to harness_design for redesign.
+      - If coverage shows the target function is NOT reached → the harness has a reachability problem. Route to harness_design for redesign at a higher tier.
       - If the discover agent couldn't run the harness at all → infrastructure problem. Route to harness_design.
 
       IMPORTANT: Always update `.workflow/journal/journal.md` before setting your verdict. The journal is the persistent memory of this investigation — your conversation history may be long but the journal is the structured summary.
 
-      **Mitigated findings are not findings.** If thesis_validate or discover reports that a
-      vulnerability exists only when existing guards are removed, that hypothesis is closed.
-      Log it in the journal as "confirmed mechanism, already mitigated by [location]" and
-      move to the next hypothesis. Do NOT route to harness_design or triage for mitigated
-      issues.
+      **Human feedback overrides agent verdicts.** When you receive human feedback from report_review that contradicts an agent's "mitigated" or "ruled_out" verdict, the human's assessment takes precedence. Route to harness_design at a higher tier. Do NOT re-route to the same tier — the human is telling you that tier's test was wrong.
 
       **Completing the investigation.** When the evidence chain is conclusive — either a
       vulnerability is confirmed and fully documented, or all viable hypotheses from the
-      analysis have been tested — set verdict to `complete`. Do NOT escalate for clean
+      analysis have been tested at appropriate tiers — set verdict to `complete`. Do NOT escalate for clean
       completion. Escalation is for being stuck; completion is for being done. "No
       exploitable vulnerability found" is a valid and valuable outcome.
 
       If you detect stall patterns (same state visited 3+ times without progress, contradictory results between layers, or your own uncertainty about strategy), set verdict to escalate rather than continuing to burn rounds.
     inputs:
       - analysis?
-      - thesis_results?
       - harness_design?
       - harness_build?
       - harness_validate?
@@ -172,9 +190,6 @@ states:
     outputs:
       - journal
     transitions:
-      - to: thesis_validate
-        when:
-          verdict: thesis_validate
       - to: harness_design
         when:
           verdict: harness_design
@@ -218,116 +233,59 @@ states:
       - to: aborted
         event: ABORT
 
-  thesis_validate:
-    type: agent
-    description: Lightweight isolated validation of vulnerability hypotheses
-    persona: global
-    prompt: |
-      You have a vulnerability hypothesis from the orchestrator. Read the orchestrator's previous output and the investigation journal at `.workflow/journal/journal.md` to understand what you are validating.
-
-      Your job: build the CHEAPEST possible test that confirms or rejects the hypothesis WITHOUT the full end-to-end harness. This test is the false-positive filter — it runs millions of trials in seconds, catching errors that would waste hours in a live harness.
-
-      ## Approach
-
-      Extract the code path from the hypothesis into a standalone, self-contained test program. The form depends on the vulnerability class:
-      - **Value-dependent bugs** (overflow, truncation, sign confusion, comparison errors): Extract the relevant function(s). Stub external dependencies with minimal types and constants. Write a test that systematically iterates over input values, focusing on boundaries of the types involved. Compile and run it.
-      - **State-dependent bugs** (use-after-free, double-free, state machine violations): Extract the state management code. Build a driver that exercises state transitions in sequences that could violate invariants.
-      - **Race conditions**: Write a minimal concurrent test that creates the race window with tight loops.
-      - **Logic errors** (auth bypass, access control, protocol violations): Write a test that exercises the specific branch sequence.
-      - **Input handling bugs** (injection, deserialization, parsing errors): Feed crafted payloads to the handler in isolation.
-
-      ## What to preserve and what to stub
-
-      The test MUST faithfully preserve:
-      - The exact semantics of the vulnerability site — same types, same casts, same operators, same macros or helper functions. Copy them verbatim from the source.
-      - The control flow that reaches the vulnerability — which branches, which loops, which conditions
-      - Any state that accumulates across iterations (linked lists, counters, caches, lookup tables)
-
-      The test CAN stub:
-      - I/O, networking, filesystem, timers
-      - Memory allocation (use the language's standard allocator instead of custom pools)
-      - Logging, statistics, error reporting
-      - Global state not relevant to the vulnerability path
-
-      ## Testing strategy
-
-      Do NOT test a single hand-picked set of values. The point of this stage is to search the input space cheaply:
-      - Focus on boundaries of the types involved — for each input variable, test values at and near the minimum, maximum, zero, and any type-width boundaries
-      - If the hypothesis involves arithmetic that wraps or overflows, test values that approach the wrap point from both directions
-      - If the search space is small enough (< 100M combinations), enumerate exhaustively
-      - If the space is too large, sample densely near boundaries and randomly elsewhere
-      - Run the test and observe: does the hypothesized condition (crash, assertion failure, invariant violation, unexpected output) actually occur?
-
-      ## Mitigation awareness
-
-      Your test MUST be run against the UNMODIFIED source code first. If the hypothesized
-      condition does not trigger on the current codebase (because a guard, check, or error
-      handler intercepts it), report this clearly:
-
-      - Document the mitigation: what code prevents the condition, where it is, and whether
-        it is comprehensive
-      - Set your verdict to `mitigated` and note "mitigated by [location]" — this is NOT a
-        confirmed vulnerability
-      - Only report verdict `confirmed` if the condition triggers on unmodified code
-
-      ## Output
-
-      Write results to `.workflow/thesis_results/results.md`. Include:
-      - The complete standalone test program (so differential_validate can compare against the live system later)
-      - How many trials were run and what space was covered
-      - If trigger values were found: the exact values, the observed behavior, and why these values trigger the condition
-      - If no trigger was found after thorough search: what space was covered and why you believe the hypothesis is invalid under the tested conditions
-
-      If trigger values are found, also write them to `.workflow/thesis_results/trigger.json` in a structured format the harness designer can consume.
-    inputs:
-      - analysis
-      - journal
-    outputs:
-      - thesis_results
-    transitions:
-      - to: orchestrator
-
   harness_design:
     type: agent
     description: Designs instrumented test harness specifications
     freshSession: false
     persona: global
     prompt: |
-      You are a security tooling architect. Read the analysis in `.workflow/analysis/analysis.md`, the investigation journal at `.workflow/journal/journal.md`, and any thesis validation results in `.workflow/thesis_results/`.
+      You are a security tooling architect. Read the analysis in `.workflow/analysis/analysis.md` and the investigation journal at `.workflow/journal/journal.md`.
 
-      The orchestrator's previous output tells you what kind of harness to build and why. Follow its directive.
+      The orchestrator's previous output tells you what kind of harness to build, at what tier, and why. Follow its directive.
 
-      Design a harness that provides:
+      ## Harness tiers
 
-      **Reachability:** A driver that sends external inputs through the real entry points identified in the analysis, following the full call chain into the target file. If protocol state is required (handshakes, session setup), the driver must implement it.
+      The orchestrator specifies a tier. Your design must match:
 
-      **Session reset:** A mechanism to reset all state between test runs. Specify whether this means process restart, VM snapshot/restore, database reset, or connection teardown. Must be fast.
+      ### Tier 1 — Isolated function test
+      Extract the relevant function(s) into a standalone, self-contained program. Copy the exact types, macros, and helper functions verbatim from the source. Stub only I/O, networking, and allocation. The program must:
+      - Systematically test input values at type boundaries (min, max, zero, width boundaries, wrap points)
+      - If the search space is < 100M combinations, enumerate exhaustively; otherwise sample densely near boundaries
+      - Check for the hypothesized condition (crash, assertion failure, invariant violation, sentinel collision, unexpected output)
+      - Report trigger values if found
 
-      **Stateful interaction:** An API for multi-step interactions within a single session where state persists between steps.
+      **Critical for Tier 1:** The test must faithfully preserve ALL code paths that interact with the vulnerability site. If the hypothesis involves a value computed in function A being consumed in function B, BOTH functions must be included — do not test A in isolation and assume B's behavior.
 
-      **Coverage reporting:** Instrument the build so that after each session, a coverage report is produced showing line and branch coverage for the target file. Machine-readable output (JSON or lcov).
+      ### Tier 2 — Multi-component harness
+      Link multiple real source files from the project. Preserve the actual data structures, type definitions, inter-function calls, and state that accumulates across calls. The program must:
+      - Exercise the full interaction between components described in the hypothesis
+      - Test the vulnerability through the actual code path, not a simplified version
+      - Cover ALL consumers of the vulnerable value, not just the first one found
+      - Include coverage instrumentation (compile with `-fprofile-instr-generate -fcoverage-mapping` or equivalent)
 
-      **Branch tracing:** Branch-level coverage, not just line coverage.
+      ### Tier 3 — Full build with instrumented input
+      Compile the actual project with sanitizers (ASAN, UBSAN) and coverage. Design a driver that feeds crafted inputs through real entry points. The driver must:
+      - Follow the protocol/interaction sequence documented in the analysis
+      - Implement any required setup (handshakes, session establishment, state machine transitions)
+      - Support session reset between test runs (process restart, state cleanup)
+      - Produce machine-readable coverage reports (lcov or JSON)
 
-      If thesis_results/trigger.json exists, the harness's primary job is delivering those validated trigger values through the real system. Document exactly how the trigger values map to protocol-level inputs (encoding, framing, byte order, field placement).
+      ## Requirements for all tiers
 
-      ## Diagnostic checkpoints
+      **Diagnostic checkpoints.** The design must include verification steps:
+      1. **Baseline reachability:** Run with a benign input and confirm the target function is executed. If not reached, the harness is broken — stop and diagnose.
+      2. **Input integrity:** Verify inputs arrive at the target function unmodified.
 
-      The design must include verification steps that confirm the harness works BEFORE attempting to deliver exploit values:
-      1. **Baseline reachability:** Send a benign input through the harness and confirm via coverage that the target function is executed. If coverage shows zero hits on the target function, the call chain is broken — stop and diagnose before proceeding.
-      2. **Input integrity:** Verify that inputs arrive at the target function unmodified. Middleware (firewalls, proxies, serializers, protocol stacks) may transform, strip, or reject inputs silently.
+      **Mitigation testing.** The harness MUST test against UNMODIFIED source code. If the hypothesized condition doesn't trigger, document exactly which code prevents it and whether that code covers ALL relevant paths (not just the first path found).
 
-      ## Infrastructure assumptions
-
-      Explicitly list every external dependency the harness requires (VMs, packages, network access, kernel modules, special permissions) and what happens if each is unavailable. The build agent and validate agent will use this list to diagnose failures.
+      **Infrastructure assumptions.** List every external dependency and what happens if unavailable.
 
       Be concrete. Name specific tools, flags, file paths, and API functions.
 
-      Write your design to `.workflow/harness_design/design.md`.
+      Write your design to `.workflow/harness_design/design.md`. Include the tier number prominently at the top.
     inputs:
       - analysis
       - journal
-      - thesis_results?
     outputs:
       - harness_design
     transitions:
@@ -459,7 +417,7 @@ states:
     description: Hypothesis-driven vulnerability research using the harness
     persona: global
     prompt: |
-      You are a vulnerability researcher. You have a working instrumented harness for the target file. Read the analysis, harness build instructions, investigation journal, and any thesis validation results.
+      You are a vulnerability researcher. You have a working instrumented harness for the target file. Read the analysis, harness build instructions, and investigation journal.
 
       Your goal: find an externally exploitable vulnerability in the target file by running experiments through the harness and observing results.
 
@@ -472,24 +430,14 @@ states:
 
       If the harness doesn't work, set verdict to rejected immediately. Do not attempt to find vulnerabilities by reading code alone — that is not your job. Your value comes from execution-based evidence.
 
-      ## If thesis validation results exist
+      ## Hypothesis-driven discovery
 
-      Read `.workflow/thesis_results/trigger.json`. These values have been confirmed to trigger the vulnerability in isolation. Your job is to deliver them through the real protocol stack:
+      The orchestrator's directive tells you what to test. Use the harness to:
 
-      1. Map the trigger values to harness inputs (protocol encoding, framing, byte order)
-      2. Send them through the harness
-      3. Observe coverage and check for the expected behavior (crash, sanitizer output, invariant violation)
-      4. If the expected behavior doesn't occur, compare coverage against what the isolated test predicted. Report what diverged.
-
-      ## If no thesis results exist (open-ended discovery)
-
-      Use the function catalog from the analysis to guide hypothesis formation:
-
-      1. **Form a hypothesis** from the analysis's function catalog. Look for unstated assumptions, unchecked conditions, and type boundary risks documented there.
-      2. **Design an input sequence** that exercises the hypothesized code path. Use the harness to send it.
-      3. **Observe results.** Read coverage to see which lines and branches were hit. Check for sanitizer output and crashes.
-      4. **Refine or pivot.** If coverage shows you missed the target path, adjust inputs to hit the right branch. If you reached it with no violation, try variations before moving to a new hypothesis.
-      5. **Repeat systematically.** Work through the function catalog's assumption inventory.
+      1. **Design an input sequence** that exercises the hypothesized code path. Use the analysis's function catalog for guidance on types, boundaries, and assumptions.
+      2. **Send it through the harness** and observe results. Read coverage to see which lines and branches were hit. Check for sanitizer output, crashes, and invariant violations.
+      3. **Refine or pivot.** If coverage shows you missed the target path, adjust inputs to hit the right branch. If you reached it with no violation, try variations before moving to a new hypothesis.
+      4. **Repeat systematically.** Work through the hypotheses in the orchestrator's directive.
 
       ## Verdicts
 
@@ -502,7 +450,6 @@ states:
       - analysis
       - harness_build
       - journal
-      - thesis_results?
     outputs:
       - discoveries
     transitions:
@@ -513,13 +460,13 @@ states:
     description: Diagnoses divergence between isolated tests and live system
     persona: global
     prompt: |
-      You are a systems debugging specialist. The lightweight thesis validation found trigger values, but the full harness did not reproduce the expected behavior.
+      You are a systems debugging specialist. A lower-tier harness produced different results than a higher-tier harness or the full system, OR the harness behaves differently than expected based on code analysis.
 
-      Read the investigation journal at `.workflow/journal/journal.md`, the thesis results in `.workflow/thesis_results/`, and the discovery findings in `.workflow/discoveries/findings.md`.
+      Read the investigation journal at `.workflow/journal/journal.md` and the discovery findings in `.workflow/discoveries/findings.md`.
 
-      Your job: determine WHY the isolated test and the live system diverge.
+      Your job: determine WHY results diverge between tiers or between the harness and expected behavior.
 
-      Instrument the live system to observe actual behavior at the vulnerability site. Compare against the isolated test's predictions. Common divergences:
+      Instrument the live system to observe actual behavior at the vulnerability site. Common divergences:
       - **Input transformation**: firewalls stripping options, proxies rewriting headers, serializers normalizing data
       - **State differences**: prior operations, initialization, caching, connection state
       - **Timing/ordering**: async processing, buffering, interrupt handling
@@ -530,10 +477,9 @@ states:
 
       Add debug output (printf/logging) to the vulnerable function if needed to observe intermediate values.
 
-      Write your diagnosis to `.workflow/differential/diagnosis.md`. Include: the specific divergence found, which layer is wrong (isolated test assumptions vs live system behavior), and what needs to change.
+      Write your diagnosis to `.workflow/differential/diagnosis.md`. Include: the specific divergence found, which layer is wrong (lower-tier test assumptions vs higher-tier behavior), and what needs to change.
     inputs:
       - journal
-      - thesis_results
       - discoveries
       - harness_build
     outputs:
@@ -577,7 +523,6 @@ states:
       Read these artifacts:
       - `.workflow/journal/journal.md` — the investigation journal
       - `.workflow/analysis/analysis.md` — structural analysis
-      - `.workflow/thesis_results/` — validation results (if present)
       - `.workflow/discoveries/` — live findings (if present)
       - `.workflow/differential/` — differential analysis (if present)
       - `.workflow/triage/` — triage results (if present)
@@ -608,7 +553,6 @@ states:
     inputs:
       - journal
       - analysis
-      - thesis_results?
       - discoveries?
       - differential?
       - triage?
