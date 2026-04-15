@@ -26,6 +26,7 @@ import type {
   FileContentResponseDto,
   ArtifactContentDto,
 } from './types.js';
+import { PHASE } from './types.js';
 import { createWsClient, type WsClient } from './ws-client.js';
 import { handleEvent as handleEventPure } from './event-handler.js';
 
@@ -119,6 +120,16 @@ class AppState {
 
 export const appState = new AppState();
 
+/**
+ * Monotonically increasing counter bumped whenever connection-driven
+ * refresh state is triggered, including the initial WebSocket connect
+ * and any later reconnects.
+ * Components can read `.value` as a $effect dependency to force
+ * re-fetches after a connection event, even when other reactive
+ * values haven't changed.
+ */
+export const connectionGeneration = $state({ value: 0 });
+
 // WebSocket client singleton
 let wsClient: WsClient | null = null;
 
@@ -143,7 +154,7 @@ function wireEventHandlers(client: WsClient): void {
       appState,
       {
         refreshJobs: () => refreshJobs(client),
-        assignDisplayNumber: () => ++appState.escalationDisplayNumber,
+        assignDisplayNumber: (_escalationId: string) => ++appState.escalationDisplayNumber,
       },
       event,
       payload,
@@ -178,6 +189,33 @@ async function refreshAll(client: WsClient): Promise<void> {
       newWorkflows.set(wf.workflowId, wf);
     }
     appState.workflows = newWorkflows;
+
+    // Repopulate pending gates for any workflow stuck at a human gate.
+    // Events may have been lost during disconnect, leaving pendingGates empty.
+    const newGates = new Map<string, HumanGateRequestDto>();
+    const gatePromises = workflowsList
+      .filter((wf) => wf.phase === PHASE.WAITING_HUMAN)
+      .map(async (wf) => {
+        try {
+          const detail = await client.request<WorkflowDetailDto>('workflows.get', { workflowId: wf.workflowId });
+          if (detail.gate) {
+            newGates.set(detail.gate.gateId, detail.gate);
+          }
+        } catch {
+          // Best-effort -- gate will appear on next event
+        }
+      });
+    await Promise.all(gatePromises);
+    // Merge fetched gates into current pendingGates rather than replacing,
+    // so gate_raised events that arrived during the async fetch are preserved.
+    const merged = new Map(appState.pendingGates);
+    for (const [id, gate] of newGates) {
+      merged.set(id, gate);
+    }
+    appState.pendingGates = merged;
+
+    // Bump connection generation so detail views re-fetch
+    connectionGeneration.value++;
 
     const newEscalations = new Map<string, PendingEscalation>();
     for (const esc of escalations) {
