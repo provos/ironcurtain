@@ -274,6 +274,29 @@ describe('TokenStreamBridge', () => {
       expect(sender.calls).toHaveLength(1);
       expect(sender.calls[0].clients.size).toBe(1);
     });
+
+    it('delivers events for sessions registered after global subscribe', () => {
+      const bridge = new TokenStreamBridge(sender, bus, 50);
+      const ws1 = mockWs();
+      const sid = sessionId('late-session');
+
+      // Subscribe globally FIRST, before the session exists
+      bridge.addGlobalClient(ws1);
+
+      // Then register the session (simulates session.created handler)
+      bridge.registerSession(3, sid);
+
+      // Push events for the late-registered session
+      bus.push(sid, textDelta('late-event'));
+      vi.advanceTimersByTime(50);
+
+      expect(sender.calls).toHaveLength(1);
+      expect(sender.calls[0].clients.has(ws1)).toBe(true);
+      const payload = sender.calls[0].payload as { label: number; events: TokenStreamEvent[] };
+      expect(payload.label).toBe(3);
+      expect(payload.events).toHaveLength(1);
+      expect((payload.events[0] as { kind: string; text: string }).text).toBe('late-event');
+    });
   });
 
   // -----------------------------------------------------------------------

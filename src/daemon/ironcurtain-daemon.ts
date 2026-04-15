@@ -702,9 +702,17 @@ export class IronCurtainDaemon {
     const bridge = new TokenStreamBridge(server, this.tokenStreamBus);
     server.setTokenStreamBridge(bridge);
 
-    // Clean up bridge state when sessions end
+    // Auto-register new sessions and clean up ended sessions on the bridge.
+    // Without the session.created handler, sessions created after a global
+    // subscribeAll would never be registered, silently dropping their events.
     server.getEventBus().subscribe((event, payload) => {
-      if (event === 'session.ended') {
+      if (event === 'session.created') {
+        const { label } = payload as { label: number };
+        const managed = this.sessionManager.get(label);
+        if (managed) {
+          bridge.registerSession(label, managed.session.getInfo().id);
+        }
+      } else if (event === 'session.ended') {
         bridge.closeSession((payload as { label: number }).label);
       }
     });
