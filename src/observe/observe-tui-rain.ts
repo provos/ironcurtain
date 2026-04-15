@@ -195,7 +195,7 @@ export function createRainEngine(options: CreateRainEngineOptions): RainEngine {
   const queue = new TokenQueue(RAIN_QUEUE_CAPACITY);
 
   let rainCols = options.layout.rainCols;
-  let rows = options.layout.rows;
+  let rows = options.layout.textRows;
   let clearLine = ' '.repeat(rainCols);
 
   // Active drops
@@ -359,7 +359,7 @@ export function createRainEngine(options: CreateRainEngineOptions): RainEngine {
 
     resize(layout: TuiLayout): void {
       rainCols = layout.rainCols;
-      rows = layout.rows;
+      rows = layout.textRows;
       clearLine = ' '.repeat(rainCols);
 
       // Kill out-of-bounds drops
