@@ -16,6 +16,7 @@ import type {
   WorkflowSummaryDto,
   HumanGateRequestDto,
 } from './types.js';
+import { PHASE } from './types.js';
 
 /** Minimal state surface that handleEvent needs to read and write. */
 export interface AppStateLike {
@@ -35,6 +36,18 @@ export interface AppStateLike {
 export interface EventSideEffects {
   refreshJobs(): void;
   assignDisplayNumber(escalationId: string): number;
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/** Returns true if any gate in the map belongs to the given workflow. */
+function hasGateForWorkflow(gates: ReadonlyMap<string, HumanGateRequestDto>, workflowId: string): boolean {
+  for (const gate of gates.values()) {
+    if (gate.workflowId === workflowId) return true;
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -267,7 +280,7 @@ function applyEvent(state: AppStateLike, effects: EventSideEffects, parsed: WebE
       const entry: WorkflowSummaryDto = {
         workflowId,
         name,
-        phase: 'running',
+        phase: PHASE.RUNNING,
         currentState: 'starting...',
         startedAt: new Date().toISOString(),
       };
@@ -281,14 +294,7 @@ function applyEvent(state: AppStateLike, effects: EventSideEffects, parsed: WebE
       if (!existing) return true;
       // Preserve 'waiting_human' only if there is still an active gate for this workflow.
       // Without this check, the phase would stay sticky after the gate is resolved.
-      let hasActiveGate = false;
-      for (const gate of state.pendingGates.values()) {
-        if (gate.workflowId === workflowId) {
-          hasActiveGate = true;
-          break;
-        }
-      }
-      const phase = hasActiveGate ? 'waiting_human' : 'running';
+      const phase = hasGateForWorkflow(state.pendingGates, workflowId) ? PHASE.WAITING_HUMAN : PHASE.RUNNING;
       const updated: WorkflowSummaryDto = { ...existing, currentState: stateName, phase };
       state.workflows = new Map(state.workflows).set(workflowId, updated);
       return true;
@@ -305,7 +311,7 @@ function applyEvent(state: AppStateLike, effects: EventSideEffects, parsed: WebE
       if (!wf) return true;
       state.workflows = new Map(state.workflows).set(workflowId, {
         ...wf,
-        phase: 'completed',
+        phase: PHASE.COMPLETED,
       });
       const nextGates = new Map(state.pendingGates);
       for (const [gateId, gate] of nextGates) {
@@ -321,7 +327,7 @@ function applyEvent(state: AppStateLike, effects: EventSideEffects, parsed: WebE
       if (!wf) return true;
       state.workflows = new Map(state.workflows).set(workflowId, {
         ...wf,
-        phase: 'failed',
+        phase: PHASE.FAILED,
       });
       return true;
     }
@@ -333,7 +339,7 @@ function applyEvent(state: AppStateLike, effects: EventSideEffects, parsed: WebE
       if (wf) {
         state.workflows = new Map(state.workflows).set(workflowId, {
           ...wf,
-          phase: 'waiting_human',
+          phase: PHASE.WAITING_HUMAN,
           currentState: gate.stateName,
         });
       }
@@ -341,10 +347,17 @@ function applyEvent(state: AppStateLike, effects: EventSideEffects, parsed: WebE
     }
 
     case 'workflow.gate_dismissed': {
-      const { gateId } = parsed.payload;
+      const { workflowId, gateId } = parsed.payload;
       const nextGates = new Map(state.pendingGates);
       nextGates.delete(gateId);
       state.pendingGates = nextGates;
+      const wf = state.workflows.get(workflowId);
+      if (wf && wf.phase === PHASE.WAITING_HUMAN && !hasGateForWorkflow(nextGates, workflowId)) {
+        state.workflows = new Map(state.workflows).set(workflowId, {
+          ...wf,
+          phase: PHASE.RUNNING,
+        });
+      }
       return true;
     }
 

@@ -36,6 +36,7 @@ const {
 
 vi.mock('$lib/stores.svelte.js', () => ({
   appState: mockAppState,
+  connectionGeneration: { value: 0 },
   getWorkflowDetail: (...args: unknown[]) => mockGetWorkflowDetail(...(args as [string])),
   resolveWorkflowGate: (...args: unknown[]) =>
     mockResolveWorkflowGate(...(args as [string, string, string | undefined])),

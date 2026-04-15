@@ -519,6 +519,128 @@ describe('handleEvent', () => {
       expect(state.pendingGates.size).toBe(0);
     });
 
+    it('transitions phase from waiting_human to running on gate_dismissed when no gates remain', () => {
+      const state = createMockState();
+      state.workflows = new Map([
+        [
+          'wf-1',
+          {
+            workflowId: 'wf-1',
+            name: 'test',
+            phase: 'waiting_human' as const,
+            currentState: 'plan_review',
+            startedAt: '2026-01-01T00:00:00Z',
+          },
+        ],
+      ]);
+      state.pendingGates = new Map([
+        [
+          'wf-1-plan_review',
+          {
+            gateId: 'wf-1-plan_review',
+            workflowId: 'wf-1',
+            stateName: 'plan_review',
+            acceptedEvents: ['APPROVE'],
+            presentedArtifacts: [],
+            summary: 'Review',
+          },
+        ],
+      ]);
+
+      handleEvent(state, createMockEffects(), 'workflow.gate_dismissed', {
+        workflowId: 'wf-1',
+        gateId: 'wf-1-plan_review',
+      });
+
+      expect(state.pendingGates.size).toBe(0);
+      expect(state.workflows.get('wf-1')?.phase).toBe('running');
+    });
+
+    it('keeps waiting_human phase on gate_dismissed when other gates remain for same workflow', () => {
+      const state = createMockState();
+      state.workflows = new Map([
+        [
+          'wf-1',
+          {
+            workflowId: 'wf-1',
+            name: 'test',
+            phase: 'waiting_human' as const,
+            currentState: 'plan_review',
+            startedAt: '2026-01-01T00:00:00Z',
+          },
+        ],
+      ]);
+      state.pendingGates = new Map([
+        [
+          'wf-1-gate-a',
+          {
+            gateId: 'wf-1-gate-a',
+            workflowId: 'wf-1',
+            stateName: 'review_a',
+            acceptedEvents: ['APPROVE'],
+            presentedArtifacts: [],
+            summary: 'Review A',
+          },
+        ],
+        [
+          'wf-1-gate-b',
+          {
+            gateId: 'wf-1-gate-b',
+            workflowId: 'wf-1',
+            stateName: 'review_b',
+            acceptedEvents: ['APPROVE'],
+            presentedArtifacts: [],
+            summary: 'Review B',
+          },
+        ],
+      ]);
+
+      handleEvent(state, createMockEffects(), 'workflow.gate_dismissed', {
+        workflowId: 'wf-1',
+        gateId: 'wf-1-gate-a',
+      });
+
+      expect(state.pendingGates.size).toBe(1);
+      expect(state.workflows.get('wf-1')?.phase).toBe('waiting_human');
+    });
+
+    it('does not change phase on gate_dismissed when workflow is not waiting_human', () => {
+      const state = createMockState();
+      state.workflows = new Map([
+        [
+          'wf-1',
+          {
+            workflowId: 'wf-1',
+            name: 'test',
+            phase: 'completed' as const,
+            currentState: 'done',
+            startedAt: '2026-01-01T00:00:00Z',
+          },
+        ],
+      ]);
+      state.pendingGates = new Map([
+        [
+          'wf-1-leftover',
+          {
+            gateId: 'wf-1-leftover',
+            workflowId: 'wf-1',
+            stateName: 'review',
+            acceptedEvents: ['APPROVE'],
+            presentedArtifacts: [],
+            summary: 'Leftover gate',
+          },
+        ],
+      ]);
+
+      handleEvent(state, createMockEffects(), 'workflow.gate_dismissed', {
+        workflowId: 'wf-1',
+        gateId: 'wf-1-leftover',
+      });
+
+      expect(state.pendingGates.size).toBe(0);
+      expect(state.workflows.get('wf-1')?.phase).toBe('completed');
+    });
+
     it('cleans up gates on workflow.completed', () => {
       const state = createMockState();
       state.workflows = new Map([
@@ -550,6 +672,133 @@ describe('handleEvent', () => {
       handleEvent(state, createMockEffects(), 'workflow.completed', { workflowId: 'wf-1' });
 
       expect(state.pendingGates.size).toBe(0);
+    });
+
+    it('removes gate on gate_dismissed even when workflowId is unknown', () => {
+      const state = createMockState();
+      state.pendingGates = new Map([
+        [
+          'orphan-gate',
+          {
+            gateId: 'orphan-gate',
+            workflowId: 'wf-unknown',
+            stateName: 'review',
+            acceptedEvents: ['APPROVE'],
+            presentedArtifacts: [],
+            summary: 'Orphan gate',
+          },
+        ],
+      ]);
+
+      handleEvent(state, createMockEffects(), 'workflow.gate_dismissed', {
+        workflowId: 'wf-unknown',
+        gateId: 'orphan-gate',
+      });
+
+      expect(state.pendingGates.size).toBe(0);
+      // workflows map should remain empty (unchanged)
+      expect(state.workflows.size).toBe(0);
+    });
+
+    it('handles gate_dismissed with unknown gateId without crashing', () => {
+      const state = createMockState();
+      state.workflows = new Map([
+        [
+          'wf-1',
+          {
+            workflowId: 'wf-1',
+            name: 'test',
+            phase: 'running' as const,
+            currentState: 'plan',
+            startedAt: '2026-01-01T00:00:00Z',
+          },
+        ],
+      ]);
+      state.pendingGates = new Map([
+        [
+          'wf-1-real-gate',
+          {
+            gateId: 'wf-1-real-gate',
+            workflowId: 'wf-1',
+            stateName: 'review',
+            acceptedEvents: ['APPROVE'],
+            presentedArtifacts: [],
+            summary: 'Real gate',
+          },
+        ],
+      ]);
+
+      const result = handleEvent(state, createMockEffects(), 'workflow.gate_dismissed', {
+        workflowId: 'wf-1',
+        gateId: 'wf-1-nonexistent',
+      });
+
+      expect(result).toBe(true);
+      // The real gate should still be present
+      expect(state.pendingGates.size).toBe(1);
+      expect(state.pendingGates.has('wf-1-real-gate')).toBe(true);
+    });
+
+    it('keeps waiting_human phase on state_entered when workflow has active gates', () => {
+      const state = createMockState();
+      state.workflows = new Map([
+        [
+          'wf-1',
+          {
+            workflowId: 'wf-1',
+            name: 'test',
+            phase: 'waiting_human' as const,
+            currentState: 'plan_review',
+            startedAt: '2026-01-01T00:00:00Z',
+          },
+        ],
+      ]);
+      state.pendingGates = new Map([
+        [
+          'wf-1-gate',
+          {
+            gateId: 'wf-1-gate',
+            workflowId: 'wf-1',
+            stateName: 'plan_review',
+            acceptedEvents: ['APPROVE'],
+            presentedArtifacts: [],
+            summary: 'Review gate',
+          },
+        ],
+      ]);
+
+      handleEvent(state, createMockEffects(), 'workflow.state_entered', {
+        workflowId: 'wf-1',
+        state: 'implement',
+      });
+
+      expect(state.workflows.get('wf-1')?.currentState).toBe('implement');
+      expect(state.workflows.get('wf-1')?.phase).toBe('waiting_human');
+    });
+
+    it('sets running phase on state_entered when workflow has no active gates', () => {
+      const state = createMockState();
+      state.workflows = new Map([
+        [
+          'wf-1',
+          {
+            workflowId: 'wf-1',
+            name: 'test',
+            phase: 'waiting_human' as const,
+            currentState: 'plan_review',
+            startedAt: '2026-01-01T00:00:00Z',
+          },
+        ],
+      ]);
+      // No pending gates
+
+      handleEvent(state, createMockEffects(), 'workflow.state_entered', {
+        workflowId: 'wf-1',
+        state: 'implement',
+      });
+
+      expect(state.workflows.get('wf-1')?.currentState).toBe('implement');
+      expect(state.workflows.get('wf-1')?.phase).toBe('running');
     });
 
     it('returns true for workflow.agent_started and workflow.agent_completed', () => {

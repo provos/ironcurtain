@@ -2,6 +2,7 @@
   import type { WorkflowDetailDto, WorkflowSummaryDto, HumanGateRequestDto } from '$lib/types.js';
   import {
     appState,
+    connectionGeneration,
     getWorkflowDetail,
     resolveWorkflowGate,
     getWorkflowFileTree,
@@ -56,8 +57,10 @@
     // These fields are updated by workflow.state_entered / workflow.completed / etc.
     // events via the event handler, which triggers a fresh getWorkflowDetail() call
     // so the transition history, context, and gate stay up-to-date.
-    const _currentState = summary.currentState;
-    const _phase = summary.phase;
+    void summary.currentState;
+    void summary.phase;
+    // Force re-fetch on WebSocket reconnect so we pick up any missed events.
+    void connectionGeneration.value;
     const version = ++fetchVersion;
     // Only show the loading spinner on the initial fetch, not on re-fetches.
     // Use the version counter instead of reading `detail` to avoid making it
