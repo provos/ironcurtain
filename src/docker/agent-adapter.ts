@@ -141,8 +141,12 @@ export interface AgentAdapter {
    *
    * @param message - the user's message for this turn
    * @param systemPrompt - the orientation prompt
+   * @param modelOverride - qualified model ID ("provider:model-name") to use
+   *   for this turn instead of the adapter's captured default. Adapters that
+   *   cannot switch models per-turn (e.g., Goose reads `GOOSE_MODEL` at
+   *   container start) must document their limitation.
    */
-  buildCommand(message: string, systemPrompt: string): readonly string[];
+  buildCommand(message: string, systemPrompt: string, modelOverride?: string): readonly string[];
 
   /**
    * Builds the system prompt to append to the agent's default system prompt.

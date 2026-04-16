@@ -61,7 +61,7 @@ const resourceBudgetSchema = z
  * the --model CLI flag. Config values should use explicit provider prefixes
  * when colons are present to avoid ambiguity.
  */
-const qualifiedModelId = z
+export const qualifiedModelId = z
   .string()
   .min(1)
   .refine(

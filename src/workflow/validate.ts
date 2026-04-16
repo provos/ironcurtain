@@ -2,6 +2,7 @@ import { z } from 'zod';
 import type { WorkflowDefinition, WorkflowStateDefinition, HumanGateStateDefinition, AgentOutput } from './types.js';
 import { AGENT_OUTPUT_FIELDS, CONFIDENCE_VALUES } from './types.js';
 import { REGISTERED_GUARDS } from './guards.js';
+import { qualifiedModelId } from '../config/user-config.js';
 
 // ---------------------------------------------------------------------------
 // Zod schemas
@@ -32,6 +33,7 @@ const agentStateSchema = z.object({
   parallelKey: z.string().optional(),
   worktree: z.boolean().optional(),
   freshSession: z.boolean().optional(),
+  model: qualifiedModelId.optional(),
 });
 
 const humanGateStateSchema = z.object({
@@ -73,6 +75,7 @@ const workflowSettingsSchema = z
     systemPrompt: z.string().optional(),
     maxSessionSeconds: z.number().positive().optional(),
     unversionedArtifacts: z.array(z.string()).optional(),
+    model: qualifiedModelId.optional(),
   })
   .optional();
 

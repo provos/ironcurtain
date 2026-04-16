@@ -57,6 +57,33 @@ describe('Claude Code Adapter', () => {
     expect(cmd).toContain('Fix the bug');
   });
 
+  it('uses per-turn modelOverride for --model when provided', () => {
+    const cmd = claudeCodeAdapter.buildCommand('Fix the bug', 'You are sandboxed', 'anthropic:claude-opus-4-6');
+    const modelIdx = cmd.indexOf('--model');
+    expect(modelIdx).toBeGreaterThanOrEqual(0);
+    // Provider prefix is stripped; Claude CLI receives the bare model name.
+    expect(cmd[modelIdx + 1]).toBe('claude-opus-4-6');
+  });
+
+  it('omits --model when neither adapter default nor override is set', () => {
+    const cmd = claudeCodeAdapter.buildCommand('Fix the bug', 'You are sandboxed');
+    expect(cmd).not.toContain('--model');
+  });
+
+  it('per-turn modelOverride wins over the adapter default model', () => {
+    const adapter = createClaudeCodeAdapter({
+      agentModelId: 'anthropic:claude-sonnet-4-6',
+    } as unknown as Parameters<typeof createClaudeCodeAdapter>[0]);
+
+    const defaultCmd = adapter.buildCommand('msg', 'prompt');
+    const defaultIdx = defaultCmd.indexOf('--model');
+    expect(defaultCmd[defaultIdx + 1]).toBe('claude-sonnet-4-6');
+
+    const overrideCmd = adapter.buildCommand('msg', 'prompt', 'anthropic:claude-haiku-4-5');
+    const overrideIdx = overrideCmd.indexOf('--model');
+    expect(overrideCmd[overrideIdx + 1]).toBe('claude-haiku-4-5');
+  });
+
   it('builds system prompt with Code Mode + Docker layers', () => {
     const prompt = claudeCodeAdapter.buildSystemPrompt(sampleContext);
 

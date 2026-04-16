@@ -74,6 +74,14 @@ export interface WorkflowSettings {
   readonly maxSessionSeconds?: number;
   /** Output artifact names excluded from versioning (e.g., append-only journals). */
   readonly unversionedArtifacts?: readonly string[];
+  /**
+   * Default model ID for all agent states in this workflow.
+   * Format: "provider:model-name" (e.g., "anthropic:claude-sonnet-4-6").
+   * Can be overridden per state via `states.<name>.model`.
+   * Takes precedence over `agentModelId` from user config but is
+   * overridden by the `--model` CLI flag.
+   */
+  readonly model?: string;
 }
 
 /**
@@ -90,28 +98,11 @@ export interface AgentStateDefinition {
   readonly description: string;
   readonly persona: string;
   /**
-   * Role instructions sent to the agent on FIRST invocation of this state.
-   *
-   * The orchestrator assembles a full prompt with this template embedded
-   * in a specific position. The layout on first visit is:
-   *
-   * 1. Workflow Context (task description as quoted context)
-   * 2. Previous agent output (from the preceding state, if any)
-   * 3. Input artifacts (path references the agent reads itself)
-   * 4. **Your Role** -- this prompt template
-   * 5. Expected outputs (artifact directories to create)
-   * 6. Human feedback (from a preceding gate, if any)
-   * 7. Handoff clause (describes transition targets)
-   * 8. Status block instructions (verdict format)
-   *
-   * The role prompt is placed AFTER context/inputs and BEFORE
-   * outputs/handoff/status so it benefits from recency bias while
-   * still being preceded by the information the agent needs.
-   *
-   * On re-invocation of the same state (round 2+ via --continue),
-   * only the new information is sent (previous agent output, round
-   * number, human feedback, status format). The role instructions
-   * are already in the conversation history.
+   * Role instructions for the agent. Embedded in the full prompt assembled
+   * by the orchestrator; see `buildFirstVisitPrompt` / `buildReVisitPrompt`
+   * in prompt-builder.ts for the section layout. The role prompt is
+   * positioned for recency bias on first visit; re-invocations reuse the
+   * conversation history via `--continue`.
    */
   readonly prompt: string;
   /**
@@ -141,6 +132,12 @@ export interface AgentStateDefinition {
    * from artifacts on disk).
    */
   readonly freshSession?: boolean;
+  /**
+   * Per-state model override. Format: "provider:model-name".
+   * Takes precedence over `settings.model` at the workflow level.
+   * Overridden only by the `--model` CLI flag.
+   */
+  readonly model?: string;
 }
 
 export interface HumanGateStateDefinition {

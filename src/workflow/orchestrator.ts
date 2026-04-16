@@ -739,6 +739,8 @@ export class WorkflowOrchestrator implements WorkflowController {
         ? { kind: 'builtin' }
         : { kind: 'docker', agent: (settings.dockerAgent ?? 'claude-code') as AgentId };
 
+    const effectiveModel = stateConfig.model ?? settings.model;
+
     // Create session with resumeSessionId for same-role continuity.
     // sessionsByState is keyed by stateId (set by updateContextFromAgentResult).
     // workspacePath ensures the agent writes to the artifact directory,
@@ -752,6 +754,7 @@ export class WorkflowOrchestrator implements WorkflowController {
         resumeSessionId: previousSessionId,
         workspacePath: instance.workspacePath,
         systemPromptAugmentation: definition.settings?.systemPrompt,
+        ...(effectiveModel != null ? { agentModelOverride: effectiveModel } : {}),
         ...(settings.maxSessionSeconds != null
           ? { resourceBudgetOverrides: { maxSessionSeconds: settings.maxSessionSeconds } }
           : {}),

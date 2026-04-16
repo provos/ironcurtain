@@ -163,7 +163,7 @@ exit $STATUS
       ];
     },
 
-    buildCommand(message: string, systemPrompt: string): readonly string[] {
+    buildCommand(message: string, systemPrompt: string, modelOverride?: string): readonly string[] {
       const cmd = [
         'claude',
         '--continue',
@@ -175,8 +175,9 @@ exit $STATUS
         '--append-system-prompt',
         systemPrompt,
       ];
-      if (modelId) {
-        cmd.push('--model', modelId);
+      const effectiveModelId = modelOverride ? parseModelId(modelOverride).modelId : modelId;
+      if (effectiveModelId) {
+        cmd.push('--model', effectiveModelId);
       }
       cmd.push('-p', message);
       return cmd;

@@ -111,6 +111,13 @@ export class AgentSession implements Session {
   /** Additional content appended to the system prompt (e.g., cron task context). */
   private readonly systemPromptAugmentation?: string;
 
+  /**
+   * Resolved model ID for this session. Shared across the budget tracker,
+   * cache strategy, and model creation — all three must agree so tokenizer
+   * and pricing estimates match the model actually invoked.
+   */
+  private readonly agentModelId: string;
+
   constructor(
     config: IronCurtainConfig,
     sessionId: SessionId,
@@ -128,10 +135,11 @@ export class AgentSession implements Session {
     this.onEscalationResolved = options.onEscalationResolved;
     this.onDiagnostic = options.onDiagnostic;
     this.systemPromptAugmentation = options.systemPromptAugmentation;
+    this.agentModelId = options.agentModelOverride ?? config.agentModelId;
     this.createdAt = new Date().toISOString();
-    this.budgetTracker = new ResourceBudgetTracker(config.userConfig.resourceBudget, config.agentModelId);
+    this.budgetTracker = new ResourceBudgetTracker(config.userConfig.resourceBudget, this.agentModelId);
     this.compactor = new MessageCompactor(config.userConfig.autoCompact);
-    this.cacheStrategy = createCacheStrategy(config.agentModelId);
+    this.cacheStrategy = createCacheStrategy(this.agentModelId);
   }
 
   /**
@@ -352,7 +360,7 @@ export class AgentSession implements Session {
   }
 
   private async buildModel(): Promise<LanguageModel> {
-    const baseModel = await createLanguageModel(this.config.agentModelId, this.config.userConfig);
+    const baseModel = await createLanguageModel(this.agentModelId, this.config.userConfig);
     if (!this.config.llmLogPath) return baseModel;
 
     const logContext: LlmLogContext = { stepName: 'agent' };

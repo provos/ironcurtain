@@ -208,6 +208,54 @@ my_state:
 - **`transitions`** -- Where to go next, using `when` for declarative conditions or `guard` for context-based checks
 - **`freshSession`** -- When `false`, re-invocations of this state resume the previous agent session via `--continue`, receiving an abbreviated re-visit prompt. Use this for iterative refinement loops where the agent benefits from retaining its prior reasoning (e.g., a coder receiving critic feedback). Default: `true` (each invocation starts a fresh session, bootstrapping from artifacts on disk).
 
+### Model selection
+
+Workflows can pin a specific LLM at two levels. Both use a qualified model ID (`provider:model-name`, e.g. `anthropic:claude-opus-4-6`, `anthropic:claude-haiku-4-5`, `openai:gpt-5`, `google:gemini-2.5-pro`). A bare model name with no prefix defaults to Anthropic.
+
+- **Workflow-level** (`settings.model`) -- default for every agent state in the workflow.
+- **State-level** (`model` on any agent state) -- overrides the workflow default for that state only.
+
+```yaml
+name: mixed-models
+settings:
+  mode: docker
+  dockerAgent: claude-code
+  model: anthropic:claude-sonnet-4-6 # default for every agent state
+
+states:
+  plan:
+    type: agent
+    persona: planner
+    prompt: 'Plan the work.'
+    model: anthropic:claude-opus-4-6 # overrides workflow default for this state
+    outputs: [plan]
+    transitions:
+      - to: implement
+
+  implement:
+    type: agent
+    persona: coder
+    prompt: 'Implement the plan.'
+    # no `model` -- inherits settings.model (sonnet)
+    inputs: [plan]
+    outputs: []
+    transitions:
+      - to: done
+
+  done:
+    type: terminal
+```
+
+**Precedence** (highest wins):
+
+1. `--model` CLI flag on `ironcurtain workflow start` / `resume`
+2. State-level `model` in the YAML
+3. Workflow-level `settings.model` in the YAML
+4. `agentModelId` in `~/.ironcurtain/config.json`
+5. Hardcoded default (`anthropic:claude-sonnet-4-6`)
+
+**Goose caveat.** Per-state switching only takes effect at container spawn for the Goose adapter: Goose reads `GOOSE_MODEL` from its container environment at startup and cannot change models per turn. Claude Code supports per-turn switching via `--model`, so per-state overrides within a single state's multi-round loop work as expected.
+
 ### Human gate states
 
 ```yaml
