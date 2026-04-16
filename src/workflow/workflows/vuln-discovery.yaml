@@ -10,7 +10,14 @@ settings:
   unversionedArtifacts:
     - journal
   systemPrompt: |
-    Workflow artifacts go in `.workflow/`. The harness and all build modifications go directly in the workspace. The target file path is specified in the task description.
+    Workflow artifacts go in `.workflow/`. The harness and all build modifications go directly in the workspace.
+
+    IMPORTANT: The task description is the source of truth for:
+    - **Scope**: what code is being investigated (a file, a directory, a module, a subsystem)
+    - **Goal**: what kind of vulnerability to find (memory corruption, local privilege escalation, auth bypass, logic flaw, info disclosure, etc.)
+    - **Threat model**: who the attacker is and how inputs reach the code (external network, local user, co-tenant, malicious file, etc.)
+
+    Every agent must re-read the task description and let it override defaults in these prompts. Where a prompt says "target file" or "external entry point," substitute what the task actually specifies. Where a prompt says "externally exploitable vulnerability," substitute the vulnerability class and threat model from the task.
 
     IMPORTANT: The investigation journal at `.workflow/journal/journal.md` is the source of truth for what has been tried, what worked, and what failed. Read it before starting any work. Only the orchestrator updates it.
 
@@ -20,13 +27,13 @@ states:
     description: 'Structural code analysis — maps call chains, entry points, and build system'
     persona: global
     prompt: |
-      You are a code analyst mapping the structure of a target file for a vulnerability investigation. You have access to a source tree at the workspace root. The target file path is given in the workflow context above.
+      You are a code analyst mapping the structure of code in scope for a vulnerability investigation. Read the task description first — it defines the scope (file, directory, module, subsystem) and the threat model (who can reach this code and how). You have access to a source tree at the workspace root.
 
       Your job is STRUCTURAL ANALYSIS. Map the code's architecture, data flow, and assumptions. Do NOT claim specific code paths are vulnerable, propose exploits, or assess severity — later agents handle that with execution-based tooling.
 
-      1. **Code role and data flow.** Read the target file. What does it do? What data does it process? What trust boundaries does it sit on? Where does untrusted input enter?
+      1. **Code role and data flow.** Read the in-scope code. What does it do? What data does it process? What trust boundaries does it sit on? Where does input from the attacker (as defined by the task's threat model) enter?
 
-      2. **Call graph to external entry points.** Trace backward from the target file's functions: what calls them? Keep tracing until you reach an external entry point (network socket, file input, IPC, CLI argument, HTTP handler, etc.). Document every call chain from external input to target.
+      2. **Call graph to attacker-reachable entry points.** Trace backward from the in-scope functions: what calls them? Keep tracing until you reach an entry point the attacker can reach under the task's threat model (network socket, file input, IPC, CLI argument, HTTP handler, setuid binary, shared library boundary, etc.). Document every call chain from attacker-controlled input to the in-scope code.
 
       3. **Language, build system, and tooling.** What language and build system? What coverage instrumentation is available? What sanitizers or runtime checkers apply?
 
@@ -34,7 +41,7 @@ states:
 
       5. **Protocol and interaction sequences.** What multi-step interactions are required to reach the target code (handshakes, authentication, session setup, state machine transitions)?
 
-      6. **Function catalog with assumption inventory.** For each key function in the target file, document:
+      6. **Function catalog with assumption inventory.** For each key function in the in-scope code, document:
          - Signature, parameters, and return type
          - Data types used — especially type widths, signed/unsigned distinctions, casts between types, and any macros or wrappers around comparisons or arithmetic
          - Stated invariants: assertions, comments like "should never happen," documented preconditions
@@ -161,6 +168,8 @@ states:
 
       **After human feedback, skip to Tier 2 or higher.** When you receive human feedback from report_review, the human is telling you that previous analysis was wrong or incomplete. Do NOT re-run the same tier that produced the disputed result. Escalate at least one tier. If the human describes a cross-component interaction, go directly to Tier 2 or 3.
 
+      **The orchestrator scopes, harness_design designs.** When routing to harness_design, specify the hypothesis, the tier, the component scope, and WHY this tier was chosen. Do NOT prescribe specific test cases, fixed input values, or enumerated scenarios (T1, T2, T3...) — that is harness_design's job. The designer is instructed to fuzz the input space; your prescriptive test list would defeat that. Trust the downstream agent to pick the right sweep strategy given the hypothesis you describe.
+
       ## Strategic principles
 
       **Diagnosing failures.** When the discover agent reports that trigger values don't work through the live harness:
@@ -236,51 +245,82 @@ states:
   harness_design:
     type: agent
     description: Designs instrumented test harness specifications
-    freshSession: false
     persona: global
     prompt: |
       You are a security tooling architect. Read the analysis in `.workflow/analysis/analysis.md` and the investigation journal at `.workflow/journal/journal.md`.
 
       The orchestrator's previous output tells you what kind of harness to build, at what tier, and why. Follow its directive.
 
+      ## Your scope: DESIGN ONLY
+
+      You produce a design document. You do NOT write the harness code, compile it, or run it. A separate `harness_build` agent implements what you design, and a `harness_validate` agent runs the experiments. Your output is a specification — detailed enough that the build agent can implement it without guessing, but NOT the implementation itself.
+
+      Do NOT include:
+      - Full C/Python/etc. source code for the harness
+      - Build scripts or compile commands with full flag lists (reference them abstractly: "compile with ASAN+UBSAN")
+      - Test execution results or tables of "expected outcomes" — you haven't run anything yet
+
+      DO include:
+      - What source files to link and why
+      - What types and structs to preserve
+      - What input variables to sweep and over what range
+      - What conditions constitute a positive finding
+      - What instrumentation (sanitizers, canaries, coverage) to use
+
+      Keep the design document concise. Aim for something the build agent can read and act on without wading through reference implementation.
+
       ## Harness tiers
 
       The orchestrator specifies a tier. Your design must match:
 
       ### Tier 1 — Isolated function test
-      Extract the relevant function(s) into a standalone, self-contained program. Copy the exact types, macros, and helper functions verbatim from the source. Stub only I/O, networking, and allocation. The program must:
-      - Systematically test input values at type boundaries (min, max, zero, width boundaries, wrap points)
-      - If the search space is < 100M combinations, enumerate exhaustively; otherwise sample densely near boundaries
-      - Check for the hypothesized condition (crash, assertion failure, invariant violation, sentinel collision, unexpected output)
-      - Report trigger values if found
+      Extract the relevant function(s) into a standalone, self-contained program. Copy the exact types, macros, and helper functions verbatim from the source. Stub only I/O, networking, and allocation.
 
       **Critical for Tier 1:** The test must faithfully preserve ALL code paths that interact with the vulnerability site. If the hypothesis involves a value computed in function A being consumed in function B, BOTH functions must be included — do not test A in isolation and assume B's behavior.
 
       ### Tier 2 — Multi-component harness
-      Link multiple real source files from the project. Preserve the actual data structures, type definitions, inter-function calls, and state that accumulates across calls. The program must:
-      - Exercise the full interaction between components described in the hypothesis
-      - Test the vulnerability through the actual code path, not a simplified version
-      - Cover ALL consumers of the vulnerable value, not just the first one found
-      - Include coverage instrumentation (compile with `-fprofile-instr-generate -fcoverage-mapping` or equivalent)
+      Link multiple real source files from the project. Preserve the actual data structures, type definitions, inter-function calls, and state that accumulates across calls. Specify:
+      - Which source files to link
+      - Which functions' logic must be preserved vs stubbed
+      - Which struct layouts must match the real project
+      - Coverage instrumentation (e.g., `-fprofile-instr-generate -fcoverage-mapping`)
 
       ### Tier 3 — Full build with instrumented input
-      Compile the actual project with sanitizers (ASAN, UBSAN) and coverage. Design a driver that feeds crafted inputs through real entry points. The driver must:
-      - Follow the protocol/interaction sequence documented in the analysis
-      - Implement any required setup (handshakes, session establishment, state machine transitions)
-      - Support session reset between test runs (process restart, state cleanup)
-      - Produce machine-readable coverage reports (lcov or JSON)
+      Compile the actual project with sanitizers (ASAN, UBSAN) and coverage. Design a driver that feeds crafted inputs through real entry points. Specify:
+      - The protocol/interaction sequence the driver must follow
+      - Any required setup (handshakes, session establishment, state machine transitions)
+      - Session reset mechanism between runs
+      - Coverage report format (lcov or JSON)
+
+      ## Systematic input exploration (required for all tiers)
+
+      The harness must FUZZ, not unit-test. Hand-picked scenarios miss the interesting boundary values. For each input variable in the hypothesis, the design must specify:
+
+      - **The sweep range**: the full range of values to iterate over. Cover the entire representable range of the type, not just "a few specific values." For wide ranges, specify dense sampling near type boundaries (min, max, zero, `2^N - 1` for each relevant N, sign-flip points) plus sparse sampling elsewhere.
+      - **The search strategy**: exhaustive enumeration if the space is < 100M combinations; boundary-dense + random sampling otherwise.
+      - **The observables**: at each input value, what should the harness record? (e.g., "stored value in `slice_table`", "result of the comparison at line 2344", "return value of `ff_h264_parse_ref_count`", "ASAN error", "canary state")
+      - **The positive finding condition**: what pattern in the observables indicates the hypothesis is confirmed? Be specific — not "a crash happens" but "the comparison at line 2344 evaluates to equal when the neighbor MB was not actually part of the current slice."
+
+      The design specifies input variables and ranges. The build agent implements the sweep. Do NOT prescribe individual "Test A / Test B / Test C" scenarios with fixed values — that's unit testing and will miss the actual boundary.
+
+      **Leverage existing fuzzing tools when appropriate.** For large input spaces, structured inputs, or whenever coverage-guided exploration would outperform a hand-rolled loop, design the harness around an existing fuzzer rather than reinventing one:
+      - **libFuzzer** — in-process, coverage-guided. Natural fit for Tier 1/2 when you can expose a `LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)` entry point.
+      - **AFL/AFL++** — out-of-process, coverage-guided. Good for Tier 3 with file/stdin-driven binaries.
+      - **Honggfuzz** — hardware performance-counter feedback, works well for complex native targets.
+
+      The build agent is responsible for installing these tools (typically via `apt-get` or building from source). Your design specifies WHICH tool to use and WHY, plus the harness entry point shape (e.g., "libFuzzer target accepting a 4-byte slice_num value and returning 0"). Do not write the fuzzer invocation commands — that is the build agent's job.
 
       ## Requirements for all tiers
 
       **Diagnostic checkpoints.** The design must include verification steps:
-      1. **Baseline reachability:** Run with a benign input and confirm the target function is executed. If not reached, the harness is broken — stop and diagnose.
+      1. **Baseline reachability:** With a benign input, confirm the target function is executed. If not reached, the harness is broken.
       2. **Input integrity:** Verify inputs arrive at the target function unmodified.
 
-      **Mitigation testing.** The harness MUST test against UNMODIFIED source code. If the hypothesized condition doesn't trigger, document exactly which code prevents it and whether that code covers ALL relevant paths (not just the first path found).
+      **Mitigation testing.** The harness MUST test against UNMODIFIED source code. If the hypothesized condition doesn't trigger within the swept range, document which code intercepts it and whether that code covers ALL relevant paths.
 
       **Infrastructure assumptions.** List every external dependency and what happens if unavailable.
 
-      Be concrete. Name specific tools, flags, file paths, and API functions.
+      Be concrete. Name specific source files, function names, struct fields, and sanitizer flags — but as specifications, not implementations.
 
       Write your design to `.workflow/harness_design/design.md`. Include the tier number prominently at the top.
     inputs:
@@ -313,7 +353,6 @@ states:
   harness_build:
     type: agent
     description: Implements harness from design specification
-    freshSession: false
     persona: global
     prompt: |
       You are a security tooling engineer. Read the harness design in `.workflow/harness_design/design.md`, the analysis in `.workflow/analysis/analysis.md`, and the investigation journal at `.workflow/journal/journal.md`.
@@ -417,9 +456,9 @@ states:
     description: Hypothesis-driven vulnerability research using the harness
     persona: global
     prompt: |
-      You are a vulnerability researcher. You have a working instrumented harness for the target file. Read the analysis, harness build instructions, and investigation journal.
+      You are a vulnerability researcher. You have a working instrumented harness for the code in scope. Read the task description, the analysis, harness build instructions, and investigation journal.
 
-      Your goal: find an externally exploitable vulnerability in the target file by running experiments through the harness and observing results.
+      Your goal: find a vulnerability matching the task's scope, vulnerability class, and threat model, by running experiments through the harness and observing results. The task defines what counts as a finding — for example, "externally reachable memory corruption in this file" is very different from "local privilege escalation via any user-reachable path in this directory" or "authentication bypass in these endpoints." Let the task's definition drive what inputs you craft, what behaviors you watch for, and what counts as exploitable.
 
       ## First action: verify the harness
 
