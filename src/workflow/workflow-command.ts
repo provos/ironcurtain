@@ -430,11 +430,12 @@ function runInspect(args: string[]): void {
     // Load definition for state descriptions and definition path display
     const defPath = resolve(workflowDir, 'definition.json');
     let stateDescriptions: Map<string, string> | undefined;
+    let loadedDef: WorkflowDefinition | undefined;
     if (existsSync(defPath)) {
       try {
-        const def = parseDefinitionFile(defPath) as WorkflowDefinition;
+        loadedDef = parseDefinitionFile(defPath) as WorkflowDefinition;
         stateDescriptions = new Map(
-          Object.entries(def.states)
+          Object.entries(loadedDef.states)
             .filter(([, s]) => s.description)
             .map(([id, s]) => [id, s.description]),
         );
@@ -468,6 +469,19 @@ function runInspect(args: string[]): void {
 
     if (existsSync(defPath)) {
       writeStdout(`  Definition: ${defPath}`);
+    }
+
+    // Informational lint of the checkpointed definition. Read-only — never
+    // affects exit code.
+    if (loadedDef) {
+      const diagnostics = lintWorkflow(loadedDef, createCliLintContext());
+      if (diagnostics.length > 0) {
+        const { errors, warnings } = countBySeverity(diagnostics);
+        writeStdout(`  ${BOLD}Lint:${RESET} ${errors} error(s), ${warnings} warning(s)`);
+        for (const d of diagnostics) {
+          for (const line of formatDiagnostic(d)) writeStdout(`    ${line}`);
+        }
+      }
     }
 
     // Message log

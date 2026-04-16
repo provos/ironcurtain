@@ -109,6 +109,10 @@ Options:
 
 - `--model <model>` -- Override the model (e.g., `anthropic:claude-haiku-4-5`)
 - `--workspace <path>` -- Use an existing directory instead of creating a new one
+- `--no-lint` -- Skip the pre-flight lint pass
+- `--strict-lint` -- Treat lint warnings as errors
+
+A pre-flight lint pass runs before the workflow starts; error-severity diagnostics abort the start. See [`ironcurtain workflow lint`](#ironcurtain-workflow-lint) for the full check catalog.
 
 Examples:
 
@@ -130,6 +134,10 @@ Options:
 
 - `--state <stateName>` -- Resume from a specific state (synthesizes a checkpoint if none exists)
 - `--model <model>` -- Override the model for the resumed run
+- `--no-lint` -- Skip the pre-flight lint pass
+- `--strict-lint` -- Treat lint warnings as errors
+
+The same pre-flight lint pass as `start` runs before resuming (skipped if the original definition file has been moved or deleted).
 
 ### `ironcurtain workflow inspect`
 
@@ -139,7 +147,48 @@ View the status of a workflow without running it.
 ironcurtain workflow inspect <baseDir> [--all]
 ```
 
-Shows: workflow ID, current state, artifacts, and the last 20 message log entries. Use `--all` for the full log.
+Shows: workflow ID, current state, artifacts, lint diagnostics on the checkpointed definition, and the last 20 message log entries. Use `--all` for the full log.
+
+Lint output is informational only — it never changes the exit code.
+
+### `ironcurtain workflow lint`
+
+Run semantic checks on a workflow definition without executing it. The linter catches cross-cutting issues that structural (Zod) validation doesn't: unreachable states, dangling artifact references, missing personas, and similar smells.
+
+```bash
+ironcurtain workflow lint <name-or-path> [--strict]
+```
+
+Options:
+
+- `--strict` -- Treat warnings as errors (exit code 2)
+
+Exit codes:
+
+- `0` -- No diagnostics, or warnings only (without `--strict`)
+- `1` -- One or more errors
+- `2` -- Warnings present and `--strict` was passed
+
+#### Check catalog
+
+| Code | Severity | Catches |
+|------|----------|---------|
+| `WF001` | error | State cannot reach any terminal — workflow would loop forever if it enters |
+| `WF002` | warning | `settings.unversionedArtifacts` entry not produced by any state (silently versioned) |
+| `WF003` | warning | Terminal `outputs:` entry not produced by any reachable state |
+| `WF004` | error | Human-gate `present:` entry not produced (human would approve blind) |
+| `WF005` | error | State uses `parallelKey` + `worktree: true` but `settings.gitRepoPath` is not set |
+| `WF006` | warning | `settings.maxRounds` set but no transition uses `isRoundLimitReached` guard (limit silently ignored) |
+| `WF007` | warning | Agent state references a persona not installed locally (runtime failure) |
+
+Example:
+
+```bash
+ironcurtain workflow lint design-and-code
+ironcurtain workflow lint ./my-workflow.yaml --strict
+```
+
+When a workflow is started via the daemon/web UI, error-severity diagnostics abort with a `LINT_FAILED` JSON-RPC error carrying the full diagnostic list so the UI can render it inline.
 
 ## Human gates
 
