@@ -315,6 +315,68 @@ describe('WorkflowOrchestrator message log', () => {
   });
 
   // -----------------------------------------------------------------------
+  // Test 2b: Malformed status block triggers retry (not abort)
+  // -----------------------------------------------------------------------
+
+  it('logs agent_retry and recovers when status block is present but malformed', async () => {
+    const defPath = writeDefinitionFile(tmpDir, simpleAgentDef);
+
+    const sentMessages: string[] = [];
+    let callCount = 0;
+
+    // Fenced agent_status block with wrong field name (`status` instead of
+    // `verdict`) plus extra keys — should trigger a retry, not an abort.
+    const malformedResponse = [
+      'I analyzed the code thoroughly.',
+      '```',
+      'agent_status:',
+      '  status: complete',
+      '  scope: "src/foo.ts"',
+      '  artifacts:',
+      '    - foo.md',
+      '```',
+    ].join('\n');
+
+    const sessionFactory = vi.fn(async () => {
+      return new MockSession({
+        sessionId: 'malformed-session',
+        responses: (msg: string) => {
+          sentMessages.push(msg);
+          callCount++;
+          if (callCount === 1) {
+            simulateArtifacts(findWorkflowDir(tmpDir), ['code']);
+            return malformedResponse;
+          }
+          return approvedResponse('done');
+        },
+      });
+    });
+
+    const deps = createDeps(tmpDir, { createSession: sessionFactory });
+    const orchestrator = new WorkflowOrchestrator(deps);
+    activeOrchestrator = orchestrator;
+
+    const workflowId = await orchestrator.start(defPath, 'malformed test');
+    await waitForCompletion(orchestrator, workflowId);
+
+    const status = orchestrator.getStatus(workflowId);
+    expect(status?.phase).toBe('completed');
+
+    const entries = readMessageLog(tmpDir);
+    const retries = entries.filter((e) => e.type === 'agent_retry');
+    expect(retries).toHaveLength(1);
+    expect(retries[0].reason).toBe('malformed_status_block');
+    expect(retries[0].details).toContain('Malformed agent_status block');
+    expect(retries[0].details).toContain('verdict');
+
+    // The retry message sent back to the agent should include the parse error
+    // so it knows what to correct.
+    expect(sentMessages).toHaveLength(2);
+    expect(sentMessages[1]).toContain('malformed');
+    expect(sentMessages[1]).toContain('Parse error:');
+  });
+
+  // -----------------------------------------------------------------------
   // Test 3: Error is logged
   // -----------------------------------------------------------------------
 

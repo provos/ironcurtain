@@ -124,6 +124,8 @@ const INFORMATIONAL_STATUS_LINES: readonly string[] = [
   '  notes: "brief summary of what was done"',
   '```',
   '',
+  'Use EXACTLY these field names (`verdict`, `notes`). Do NOT add additional fields, rename fields, or use synonyms (e.g. `status`, `result`, `scope`, `artifacts`) — extra or renamed fields will cause the workflow to abort. If you want to include more context, put it in the `notes` string.',
+  '',
   'Fields:',
   '- verdict: a free-form label summarizing your outcome (e.g. completed, needs_revision, inconclusive). It does not affect routing for this state but is logged for diagnostics.',
   '- notes: brief summary passed to the next agent as context',
@@ -227,21 +229,21 @@ function appendGuardDescriptions(
 }
 
 /**
- * Returns the re-prompt message when the agent's response is missing the
- * status block.
- *
- * @param statusInstructions - optional pre-built instructions string (e.g.
- *   from `buildStatusInstructions`). When provided, replaces the default
- *   minimal instructions so that conditional states list the correct verdict
- *   values for routing. When omitted, falls back to `MINIMAL_STATUS_INSTRUCTIONS`.
+ * Returns the re-prompt message when the agent's response is missing or
+ * malformed. Passing `parseError` switches the wording to the malformed-block
+ * form and includes the validation detail. Passing `statusInstructions`
+ * overrides the default template (e.g. to list state-specific verdicts).
  */
-export function buildStatusBlockReprompt(statusInstructions?: string): string {
-  return [
-    'Your response is missing the required agent_status block.',
-    'Please include it at the end of your response.',
-    '',
-    statusInstructions ?? MINIMAL_STATUS_INSTRUCTIONS,
-  ].join('\n');
+export function buildStatusBlockReprompt(statusInstructions?: string, parseError?: AgentStatusParseError): string {
+  const header = parseError
+    ? [
+        'Your previous response had a malformed `agent_status` block and could not be parsed.',
+        `Parse error: ${parseError.message}`,
+        'Please emit a new block using exactly the fields shown below.',
+      ]
+    : ['Your response is missing the required agent_status block.', 'Please include it at the end of your response.'];
+
+  return [...header, '', statusInstructions ?? MINIMAL_STATUS_INSTRUCTIONS].join('\n');
 }
 
 // ---------------------------------------------------------------------------
