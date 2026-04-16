@@ -46,6 +46,7 @@ function makeContext(overrides: Partial<WorkflowContext> = {}): WorkflowContext 
     lastError: null,
     sessionsByState: {},
     previousAgentOutput: null,
+    previousAgentNotes: null,
     previousStateName: null,
     visitCounts: {},
     ...overrides,
@@ -198,5 +199,119 @@ describe('buildAgentCommand — re-visit FORCE_REVISION framing', () => {
     // actually the same state self-revising.
     expect(command).not.toContain('reviewed your work');
     expect(command).not.toContain('## Your Previous Output');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Scoping section: body + notes forwarding across state boundaries
+// ---------------------------------------------------------------------------
+
+describe('buildAgentCommand — scoping section (body + notes)', () => {
+  it('renders both Directive and Notes subsections when both are present', () => {
+    const state = makeAgentState();
+    const context = makeContext({
+      previousAgentOutput: '## Directive for next agent\n\nTest nslices=65535 with P-slices.',
+      previousAgentNotes: 'routing discover to exercise sentinel boundary',
+      previousStateName: 'orchestrator',
+    });
+
+    const command = buildAgentCommand('work', state, context, definition);
+
+    expect(command).toContain('## Output from orchestrator');
+    expect(command).toContain('### Directive');
+    expect(command).toContain('Test nslices=65535 with P-slices.');
+    expect(command).toContain('### Notes');
+    expect(command).toContain('routing discover to exercise sentinel boundary');
+
+    // Directive appears before Notes (body is authoritative)
+    const directiveIdx = command.indexOf('### Directive');
+    const notesIdx = command.indexOf('### Notes');
+    expect(directiveIdx).toBeGreaterThan(-1);
+    expect(notesIdx).toBeGreaterThan(directiveIdx);
+  });
+
+  it('renders only the Notes subsection when body is empty', () => {
+    const state = makeAgentState();
+    const context = makeContext({
+      previousAgentOutput: '',
+      previousAgentNotes: 'all scoping lives in notes this round',
+      previousStateName: 'orchestrator',
+    });
+
+    const command = buildAgentCommand('work', state, context, definition);
+
+    expect(command).toContain('## Output from orchestrator');
+    expect(command).not.toContain('### Directive');
+    expect(command).toContain('### Notes');
+    expect(command).toContain('all scoping lives in notes this round');
+  });
+
+  it('renders only the Directive subsection when notes is null', () => {
+    const state = makeAgentState();
+    const context = makeContext({
+      previousAgentOutput: 'A full directive with no notes summary.',
+      previousAgentNotes: null,
+      previousStateName: 'orchestrator',
+    });
+
+    const command = buildAgentCommand('work', state, context, definition);
+
+    expect(command).toContain('## Output from orchestrator');
+    expect(command).toContain('### Directive');
+    expect(command).toContain('A full directive with no notes summary.');
+    expect(command).not.toContain('### Notes');
+  });
+
+  it('omits the scoping section entirely when both body and notes are empty', () => {
+    const state = makeAgentState();
+    const context = makeContext({
+      previousAgentOutput: '',
+      previousAgentNotes: null,
+      previousStateName: 'orchestrator',
+    });
+
+    const command = buildAgentCommand('work', state, context, definition);
+
+    expect(command).not.toContain('## Output from orchestrator');
+    expect(command).not.toContain('### Directive');
+    expect(command).not.toContain('### Notes');
+  });
+
+  it('re-visit path also renders both subsections under "New Input from"', () => {
+    const state = makeAgentState({ freshSession: false });
+    const context = makeContext({
+      previousAgentOutput: 'Cross-state directive body.',
+      previousAgentNotes: 'short notes',
+      previousStateName: 'reviewer',
+      visitCounts: { work: 2 },
+    });
+
+    const command = buildAgentCommand('work', state, context, definition);
+
+    expect(command).toContain('## New Input from reviewer');
+    expect(command).toContain('### Directive');
+    expect(command).toContain('Cross-state directive body.');
+    expect(command).toContain('### Notes');
+    expect(command).toContain('short notes');
+  });
+
+  it('same-state re-entry keeps self-revision framing (no Directive/Notes subsections)', () => {
+    const state = makeAgentState();
+    const context = makeContext({
+      humanPrompt: 'Please revise.',
+      previousAgentOutput: 'Prior output body.',
+      previousAgentNotes: 'some notes',
+      previousStateName: 'work',
+      visitCounts: { work: 2 },
+    });
+
+    const command = buildAgentCommand('work', state, context, definition);
+
+    // Self-revision framing preserved
+    expect(command).toContain('## Your Previous Output');
+    expect(command).toContain('This is your own prior output');
+    // Directive/Notes split is only used for cross-state handoffs
+    expect(command).not.toContain('### Directive');
+    expect(command).not.toContain('### Notes');
   });
 });

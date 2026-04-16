@@ -125,6 +125,7 @@ export function createInitialContext(definition: WorkflowDefinition): Omit<Workf
     lastError: null,
     sessionsByState: {},
     previousAgentOutput: null,
+    previousAgentNotes: null,
     previousStateName: null,
     visitCounts: {},
   };
@@ -404,6 +405,7 @@ export function buildWorkflowMachine(definition: WorkflowDefinition, taskDescrip
           },
           totalTokens: context.totalTokens,
           previousAgentOutput: truncateAgentOutput(stripStatusBlock(result.responseText)),
+          previousAgentNotes: output.notes ? truncateAgentOutput(output.notes) : null,
           previousStateName: stateId,
           humanPrompt: null,
         };

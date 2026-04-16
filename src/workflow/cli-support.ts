@@ -440,6 +440,7 @@ export function synthesizeCheckpoint(
     lastError: null,
     sessionsByState: {},
     previousAgentOutput: null,
+    previousAgentNotes: null,
     previousStateName: null,
     visitCounts: {},
   };

@@ -303,11 +303,19 @@ export interface WorkflowContext {
   readonly lastError: string | null;
   readonly sessionsByState: Record<string, string>;
   /**
-   * Response text from the last completed agent state. Truncated
-   * at 32KB. Used to give the next agent visibility into what
-   * the previous agent said.
+   * Response text from the last completed agent state, with the trailing
+   * `agent_status` YAML block stripped. Truncated at 32KB. Used as the
+   * "body" portion of the "Scoping from the previous agent" section in the
+   * next agent's prompt — carries the full directive, not just the summary.
    */
   readonly previousAgentOutput: string | null;
+  /**
+   * The `notes` field from the last agent's `agent_status` block. Rendered
+   * as the "Notes" sub-section under "Scoping from the previous agent".
+   * When the orchestrator writes a bare status block with no directive, this
+   * is often the only surviving scoping signal.
+   */
+  readonly previousAgentNotes: string | null;
   /**
    * The state name that produced `previousAgentOutput`. Used to
    * label the output in the next agent's prompt.

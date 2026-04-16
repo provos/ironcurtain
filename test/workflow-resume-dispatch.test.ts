@@ -64,6 +64,7 @@ function makeContext(taskDescription: string): WorkflowContext {
     lastError: null,
     sessionsByState: {},
     previousAgentOutput: null,
+    previousAgentNotes: null,
     previousStateName: null,
     visitCounts: {},
   };

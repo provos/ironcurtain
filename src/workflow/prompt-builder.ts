@@ -115,9 +115,10 @@ function appendHumanFeedback(sections: string[], humanPrompt: string | null, isS
 }
 
 /**
- * Appends the previous-output section. `crossStateHeading` controls the
- * heading used when the previous state is different from the current one;
- * same-state re-entry always uses the "Your Previous Output" framing.
+ * Appends the previous-output section. Same-state re-entry uses the
+ * "Your Previous Output" self-revision framing. Cross-state routing uses
+ * the "Scoping from the previous agent" framing with separate Directive
+ * and Notes subsections; see `buildScopingSection`.
  */
 function appendPreviousOutput(
   sections: string[],
@@ -125,15 +126,49 @@ function appendPreviousOutput(
   isSameStateReEntry: boolean,
   crossStateHeading: 'Output from' | 'New Input from',
 ): void {
-  if (!context.previousAgentOutput || !context.previousStateName) return;
-  const section = isSameStateReEntry
-    ? `## Your Previous Output\n\n` +
-      `This is your own prior output. Revise it to address the human feedback above.\n\n` +
-      context.previousAgentOutput
-    : `## ${crossStateHeading} ${context.previousStateName}\n\n` +
-      `The ${context.previousStateName} agent produced the following output:\n\n` +
-      context.previousAgentOutput;
-  sections.push(section);
+  if (!context.previousStateName) return;
+
+  if (isSameStateReEntry) {
+    if (!context.previousAgentOutput) return;
+    sections.push(
+      `## Your Previous Output\n\n` +
+        `This is your own prior output. Revise it to address the human feedback above.\n\n` +
+        context.previousAgentOutput,
+    );
+    return;
+  }
+
+  const scoping = buildScopingSection(context, crossStateHeading);
+  if (scoping) sections.push(scoping);
+}
+
+/**
+ * Builds the cross-state "Scoping from the previous agent" section, rendering
+ * the directive body and the `notes` summary as labeled sub-sections.
+ * Returns `null` when both are empty so the caller omits the whole block.
+ */
+function buildScopingSection(
+  context: WorkflowContext,
+  crossStateHeading: 'Output from' | 'New Input from',
+): string | null {
+  const trimmedBody = context.previousAgentOutput?.trim() ?? '';
+  const trimmedNotes = context.previousAgentNotes?.trim() ?? '';
+  if (!trimmedBody && !trimmedNotes) return null;
+
+  const header =
+    `## ${crossStateHeading} ${context.previousStateName}\n\n` +
+    `The ${context.previousStateName} agent produced the following output. ` +
+    `Treat this as the authoritative scoping for what to do this round — ` +
+    `if it is missing or vague, STOP and report back rather than improvising.`;
+
+  const parts: string[] = [header];
+  if (trimmedBody) {
+    parts.push(`### Directive\n\n${trimmedBody}`);
+  }
+  if (trimmedNotes) {
+    parts.push(`### Notes\n\n${trimmedNotes}`);
+  }
+  return parts.join('\n\n');
 }
 
 /** Appends input artifact path reference sections. */

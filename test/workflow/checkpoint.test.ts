@@ -24,6 +24,7 @@ function makeCheckpoint(overrides?: Partial<WorkflowCheckpoint>): WorkflowCheckp
       lastError: null,
       sessionsByState: {},
       previousAgentOutput: null,
+      previousAgentNotes: null,
       previousStateName: null,
       visitCounts: {},
     },

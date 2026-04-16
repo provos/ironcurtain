@@ -30,6 +30,8 @@ states:
     prompt: |
       You are a code analyst mapping the structure of code in scope for a vulnerability investigation. Read the task description first — it defines the scope (file, directory, module, subsystem) and the threat model (who can reach this code and how). You have access to a source tree at the workspace root.
 
+      **First action**: if a "Scoping from the previous agent" section is present at the top of this message, read its Directive and Notes subsections — they tell you what specifically to focus on this round (e.g., "prior analysis missed X, look deeper at Y"). If the scoping section is absent on cold start that is expected; otherwise, if it is missing or vague, STOP and report back with an `escalate`-style agent_status rather than improvising from the task description alone.
+
       Your job is STRUCTURAL ANALYSIS. Map the code's architecture, data flow, and assumptions. Do NOT claim specific code paths are vulnerable, propose exploits, or assess severity — later agents handle that with execution-based tooling.
 
       1. **Code role and data flow.** Read the in-scope code. What does it do? What data does it process? What trust boundaries does it sit on? Where does input from the attacker (as defined by the task's threat model) enter?
@@ -91,11 +93,15 @@ states:
 
       Structure your response as follows:
 
-      1. **Directive for next agent** (FIRST in your output): A clear, actionable instruction for whichever agent you are dispatching to. This is the only part the next agent will focus on. Be specific — tell it exactly what to investigate, what to build, or what to validate.
+      1. **Directive for next agent** (FIRST in your output, REQUIRED): A clear, actionable instruction for whichever agent you are dispatching to. This section is what scopes the next agent's round — it is forwarded verbatim into the next agent's prompt as the authoritative "Directive" subsection. Be specific: tell it exactly what target to examine, what hypothesis to test, what tier to build at, and WHY. Aim for 1,500–4,000 characters of concrete scoping, not a one-liner.
+
+         **The directive is REQUIRED.** If you cannot write a concrete, specific directive — if the best you can produce is "continue investigating" or "pick something reasonable" — the investigation is stalled. Do NOT route to the next agent with a weak directive. Set verdict to `escalate` instead (see the stall/escalate rule below).
 
       2. **Journal update** (SECOND): Your reasoning about the investigation state. This provides context but the directive above is what matters to the next agent.
 
       3. **Status block** (LAST): The agent_status YAML block with your verdict.
+
+         The `notes` field inside the status block is a **1–2 sentence summary of your directive**, intended for journal readability. It is NOT a substitute for the directive — it is forwarded as a short "Notes" subsection alongside the directive, not instead of it. If you find yourself trying to pack real scoping content into `notes` because you didn't write a proper directive, that's the signal to either write a full directive or escalate.
 
       ## Standard procedure
 
@@ -146,6 +152,27 @@ states:
       | complete | conclude | Investigation finished — vulnerability confirmed and triaged, OR thorough search completed with no findings. |
       | reanalyze | analyze | Need the structural analysis expanded. Your directive tells analyze what to focus on. |
 
+      ## State responsibilities — scope, don't duplicate
+
+      Every downstream state has its OWN detailed prompt covering the methodology it uses. Your directive must NOT re-specify that methodology — the state's prompt already covers it, and duplicating it creates tension and wastes tokens. Your directive should supply what is SPECIFIC to this invocation: the target, the hypothesis, the focus area, any human feedback, and WHY this state is being routed to now.
+
+      Phase dictionary — what each state already handles per its own prompt:
+
+      | State | Handles per its own prompt | Your directive should supply |
+      |-------|----------------------------|-----------------------------|
+      | analyze | Function catalog, cross-cutting data flow, call graphs, type narrowing, sentinel reachability, check-use separation, assumption inventory | Target code path, any specific focus (e.g., "the initial analysis missed X, look deeper at Y") |
+      | harness_design | Tier structure (1/2/3), fuzzing requirements, systematic input sweeping, design-only scope (separate from build) | Hypothesis, tier, component scope, WHY this tier |
+      | harness_build | Installing dependencies, building with sanitizers, implementing the design | Nothing extra — it reads the design doc |
+      | harness_validate | Reachability checks, coverage verification, baseline testing | Nothing extra — it reads the build output |
+      | discover | Hypothesis-driven experimentation, running harness, reading coverage, iterating inputs | The hypothesis to test and any specific trigger conditions from prior rounds |
+      | differential_validate | Diagnosing divergences between tiers or live system behavior | What diverged and what hypothesis to test |
+      | triage | Independent reproduction, severity, exploitability, duplicate checking | Nothing extra — reads findings |
+      | conclude | Writing the final report from artifacts | Nothing extra — reads all artifacts |
+
+      **Cold-start rule (analyze on first invocation).** On cold start, your directive to analyze is minimal: specify the target code as given in the task description. Do NOT re-specify what kinds of analysis to do — analyze's prompt covers that. Example minimal directive: "Perform structural analysis on the target code per your prompt and the task description."
+
+      **Feedback-driven directives.** When human feedback or prior-round evidence changes the focus, your directive should point the next agent AT the specific thing to investigate, not prescribe how to investigate it. Example shape: "Re-analyze focusing on the interaction between [function A] and [data structure B] — prior round missed [the specific case]." Let the agent's prompt drive HOW.
+
       ## Tiered harness strategy
 
       When routing to harness_design, your directive MUST specify a tier. The tier tells harness_design how much infrastructure to build:
@@ -189,6 +216,8 @@ states:
       exploitable vulnerability found" is a valid and valuable outcome.
 
       If you detect stall patterns (same state visited 3+ times without progress, contradictory results between layers, or your own uncertainty about strategy), set verdict to escalate rather than continuing to burn rounds.
+
+      **Underspecified directive → escalate.** If you cannot write a concrete, specific `## Directive for next agent` — if the best you can produce is "continue investigating," "pick something reasonable," or bare notes without scoping — the investigation is stalled even if you can't articulate why. Set verdict to `escalate` and describe in the escalation what's unclear: the hypothesis space feels exhausted, prior evidence is contradictory, or you need the human to pick a direction. Do NOT route to the next agent with a weak directive hoping it will figure out the scoping itself — that feedback loop does not work.
     inputs:
       - analysis?
       - harness_design?
@@ -250,7 +279,7 @@ states:
     prompt: |
       You are a security tooling architect. Read the analysis in `.workflow/analysis/analysis.md` and the investigation journal at `.workflow/journal/journal.md`.
 
-      The orchestrator's previous output tells you what kind of harness to build, at what tier, and why. Follow its directive.
+      **First action**: read the "Scoping from the previous agent" section at the top of this message. Its Directive subsection is the orchestrator's authoritative description of what to design — the hypothesis, the tier, the component scope, and WHY this tier. The Notes subsection is a short summary. If the scoping section is missing or the directive does not specify a tier and hypothesis, STOP and report back with an `escalate`-style agent_status — do not pick a tier or hypothesis by guessing from the analysis or journal alone.
 
       ## Your scope: DESIGN ONLY
 
@@ -459,6 +488,8 @@ states:
     prompt: |
       You are a vulnerability researcher. You have a working instrumented harness for the code in scope. Read the task description, the analysis, harness build instructions, and investigation journal.
 
+      **First action**: read the "Scoping from the previous agent" section at the top of this message. Its Directive subsection is the orchestrator's authoritative description of WHAT to test this round — specific hypothesis, trigger conditions, input values to sweep, component scope. If the scoping section is missing or the directive is vague ("try something reasonable", generic exploration without a hypothesis), STOP and report back with an `escalate`-style agent_status — do not improvise hypotheses from the analysis or journal alone. Your value comes from executing scoped experiments the orchestrator asked for, not from re-deriving scope each round.
+
       Your goal: find a vulnerability matching the task's scope, vulnerability class, and threat model, by running experiments through the harness and observing results. The task defines what counts as a finding — for example, "externally reachable memory corruption in this file" is very different from "local privilege escalation via any user-reachable path in this directory" or "authentication bypass in these endpoints." Let the task's definition drive what inputs you craft, what behaviors you watch for, and what counts as exploitable.
 
       ## First action: verify the harness
@@ -502,6 +533,8 @@ states:
     prompt: |
       You are a systems debugging specialist. A lower-tier harness produced different results than a higher-tier harness or the full system, OR the harness behaves differently than expected based on code analysis.
 
+      **First action**: read the "Scoping from the previous agent" section at the top of this message. Its Directive subsection tells you which divergence to diagnose and what hypothesis to test. If the scoping section is missing or the directive does not identify a specific divergence, STOP and report back with an `escalate`-style agent_status rather than picking a divergence to chase.
+
       Read the investigation journal at `.workflow/journal/journal.md` and the discovery findings in `.workflow/discoveries/findings.md`.
 
       Your job: determine WHY results diverge between tiers or between the harness and expected behavior.
@@ -533,6 +566,8 @@ states:
     persona: global
     prompt: |
       You are a senior vulnerability triager. Read the findings in `.workflow/discoveries/findings.md` and the investigation journal at `.workflow/journal/journal.md`.
+
+      **First action**: read the "Scoping from the previous agent" section at the top of this message. The orchestrator's Directive may call out specific findings to prioritize, duplicates to check, or severity questions to resolve. If the scoping section is absent, default to triaging every finding in `.workflow/discoveries/findings.md`; if it is present but vague on what to triage, STOP and report back with an `escalate`-style agent_status.
 
       For each reported finding:
 
