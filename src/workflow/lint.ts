@@ -9,7 +9,7 @@
  */
 import type { WorkflowDefinition, WorkflowStateDefinition, AgentStateDefinition } from './types.js';
 import { GLOBAL_PERSONA } from './types.js';
-import { collectOutputArtifacts, findReachableStates, parseArtifactRef } from './validate.js';
+import { findReachableStates, parseArtifactRef } from './validate.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -49,13 +49,13 @@ export type LintResult = readonly Diagnostic[];
  */
 export function lintWorkflow(def: WorkflowDefinition, ctx: LintContext): LintResult {
   const reachable = findReachableStates(def.initial, def.states);
-  const reachableOutputs = collectReachableOutputs(def, reachable);
+  const reachableAgentOutputs = collectReachableAgentOutputs(def, reachable);
 
   return [
     ...checkUnreachableTerminal(def, reachable),
-    ...checkUnversionedArtifacts(def),
-    ...checkTerminalOutputs(def, reachable, reachableOutputs),
-    ...checkHumanGatePresent(def, reachable, reachableOutputs),
+    ...checkUnversionedArtifacts(def, reachableAgentOutputs),
+    ...checkTerminalOutputs(def, reachable, reachableAgentOutputs),
+    ...checkHumanGatePresent(def, reachable, reachableAgentOutputs),
     ...checkWorktreeNeedsGitRepo(def),
     ...checkMaxRoundsHasGuard(def),
     ...checkPersonaExists(def, ctx),
@@ -78,10 +78,11 @@ export function countBySeverity(diagnostics: readonly Diagnostic[]): { errors: n
 
 /**
  * Output artifacts produced by reachable agent states. Terminal
- * `outputs:` are declarations of expected arrival state, not production,
- * so they don't count: WF003/WF004 ask "is this name actually produced?"
+ * `outputs:` are declarations of expected arrival state, not production
+ * (no runtime code writes them), so they don't count: WF002/WF003/WF004
+ * all ask "is this name actually produced?"
  */
-function collectReachableOutputs(def: WorkflowDefinition, reachable: ReadonlySet<string>): Set<string> {
+function collectReachableAgentOutputs(def: WorkflowDefinition, reachable: ReadonlySet<string>): Set<string> {
   const outputs = new Set<string>();
   for (const [stateId, state] of Object.entries(def.states)) {
     if (!reachable.has(stateId)) continue;
@@ -134,11 +135,10 @@ function checkUnreachableTerminal(def: WorkflowDefinition, reachable: ReadonlySe
 // WF002 — unversionedArtifacts entry not produced by any state
 // ---------------------------------------------------------------------------
 
-function checkUnversionedArtifacts(def: WorkflowDefinition): Diagnostic[] {
+function checkUnversionedArtifacts(def: WorkflowDefinition, produced: ReadonlySet<string>): Diagnostic[] {
   const entries = def.settings?.unversionedArtifacts ?? [];
   if (entries.length === 0) return [];
 
-  const produced = collectOutputArtifacts(def.states);
   const diagnostics: Diagnostic[] = [];
   for (const name of entries) {
     if (!produced.has(name)) {
@@ -146,7 +146,7 @@ function checkUnversionedArtifacts(def: WorkflowDefinition): Diagnostic[] {
         code: 'WF002',
         severity: 'warning',
         message: `settings.unversionedArtifacts entry "${name}" is not produced by any state — it will be silently versioned.`,
-        hint: "Remove the entry, or add the artifact to some state's outputs list.",
+        hint: "Remove the entry, or add the artifact to some agent state's outputs list.",
       });
     }
   }
@@ -175,7 +175,7 @@ function checkTerminalOutputs(
           severity: 'warning',
           stateId,
           message: `Terminal "${stateId}" lists output "${name}" which is not produced by any reachable state.`,
-          hint: 'Remove the output from the terminal, or ensure a reachable agent/terminal state produces it.',
+          hint: 'Remove the output from the terminal, or ensure a reachable agent state produces it.',
         });
       }
     }
@@ -207,7 +207,7 @@ function checkHumanGatePresent(
           severity: 'error',
           stateId,
           message: `Human gate "${stateId}" presents artifact "${name}" which is not produced by any reachable state — the human will approve without seeing it.`,
-          hint: 'Fix the artifact name, or ensure a reachable agent/terminal state produces it.',
+          hint: 'Fix the artifact name, or ensure a reachable agent state produces it.',
         });
       }
     }
