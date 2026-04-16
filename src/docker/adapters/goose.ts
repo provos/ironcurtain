@@ -214,7 +214,12 @@ export function createGooseAdapter(userConfig?: ResolvedUserConfig): AgentAdapte
       ];
     },
 
-    buildCommand(message: string, systemPrompt: string): readonly string[] {
+    buildCommand(
+      message: string,
+      systemPrompt: string,
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars -- Goose batch mode does not use session resume options
+      _options: { readonly sessionId: string; readonly firstTurn: boolean },
+    ): readonly string[] {
       const instructions = `${systemPrompt}\n\n---\n\nUser request:\n${message}`;
       const { delimiter } = escapeHeredoc(instructions);
 

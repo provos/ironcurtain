@@ -41,11 +41,24 @@ describe('Claude Code Adapter', () => {
     expect(servers.ironcurtain.args).toContain('UNIX-CONNECT:/run/ironcurtain/proxy.sock');
   });
 
-  it('builds command with --continue and --append-system-prompt', () => {
-    const cmd = claudeCodeAdapter.buildCommand('Fix the bug', 'You are sandboxed');
+  it('pins a fresh session id on the first turn via --session-id', () => {
+    const sessionId = '11111111-2222-3333-4444-555555555555';
+    const cmd = claudeCodeAdapter.buildCommand('Fix the bug', 'You are sandboxed', {
+      sessionId,
+      firstTurn: true,
+    });
 
     expect(cmd).toContain('claude');
-    expect(cmd).toContain('--continue');
+    expect(cmd).toContain('--session-id');
+    expect(cmd).toContain(sessionId);
+    expect(cmd).not.toContain('--resume');
+    expect(cmd).not.toContain('--continue');
+
+    // --session-id and the uuid must be adjacent, in that order
+    const flagIdx = cmd.indexOf('--session-id');
+    expect(cmd[flagIdx + 1]).toBe(sessionId);
+
+    // Other standard flags must still be present
     expect(cmd).toContain('--dangerously-skip-permissions');
     expect(cmd).toContain('--output-format');
     expect(cmd).toContain('json');
@@ -55,6 +68,23 @@ describe('Claude Code Adapter', () => {
     expect(cmd).toContain('You are sandboxed');
     expect(cmd).toContain('-p');
     expect(cmd).toContain('Fix the bug');
+  });
+
+  it('resumes an existing session on subsequent turns via --resume', () => {
+    const sessionId = '11111111-2222-3333-4444-555555555555';
+    const cmd = claudeCodeAdapter.buildCommand('Next step', 'You are sandboxed', {
+      sessionId,
+      firstTurn: false,
+    });
+
+    expect(cmd).toContain('--resume');
+    expect(cmd).toContain(sessionId);
+    expect(cmd).not.toContain('--session-id');
+    expect(cmd).not.toContain('--continue');
+
+    // --resume and the uuid must be adjacent, in that order
+    const flagIdx = cmd.indexOf('--resume');
+    expect(cmd[flagIdx + 1]).toBe(sessionId);
   });
 
   it('builds system prompt with Code Mode + Docker layers', () => {
