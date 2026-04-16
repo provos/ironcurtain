@@ -274,7 +274,7 @@
           {#if isCustomPath}
             <div>
               <label for="custom-path" class="block text-sm text-muted-foreground mb-1">Definition file path</label>
-              <Input id="custom-path" bind:value={customPath} placeholder="/path/to/workflow.json" />
+              <Input id="custom-path" bind:value={customPath} placeholder="/path/to/workflow.yaml" />
             </div>
           {/if}
           <div>

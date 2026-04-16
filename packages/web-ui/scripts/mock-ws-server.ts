@@ -523,13 +523,36 @@ initWorkflows();
 
 const DESIGN_AND_CODE_GRAPH = {
   states: [
-    { id: 'plan', type: 'agent' as const, persona: 'planner', label: 'Plan' },
-    { id: 'plan_review', type: 'human_gate' as const, label: 'Plan Review' },
-    { id: 'implement', type: 'agent' as const, persona: 'coder', label: 'Implement' },
-    { id: 'review', type: 'agent' as const, persona: 'critic', label: 'Review' },
-    { id: 'design_review', type: 'human_gate' as const, label: 'Design Review' },
-    { id: 'completed', type: 'terminal' as const, label: 'Completed' },
-    { id: 'aborted', type: 'terminal' as const, label: 'Aborted' },
+    {
+      id: 'plan',
+      type: 'agent' as const,
+      persona: 'planner',
+      label: 'Plan',
+      description: 'Breaks down the task into implementation steps',
+    },
+    { id: 'plan_review', type: 'human_gate' as const, label: 'Plan Review', description: 'Human review of the plan' },
+    {
+      id: 'implement',
+      type: 'agent' as const,
+      persona: 'coder',
+      label: 'Implement',
+      description: 'Implements all modules per the design spec',
+    },
+    {
+      id: 'review',
+      type: 'agent' as const,
+      persona: 'critic',
+      label: 'Review',
+      description: 'Reviews code against the spec for correctness and quality',
+    },
+    {
+      id: 'design_review',
+      type: 'human_gate' as const,
+      label: 'Design Review',
+      description: 'Human review of the design specification',
+    },
+    { id: 'completed', type: 'terminal' as const, label: 'Completed', description: 'Workflow complete' },
+    { id: 'aborted', type: 'terminal' as const, label: 'Aborted', description: 'Workflow aborted' },
   ],
   transitions: [
     { from: 'plan', to: 'plan_review', label: '' },
@@ -537,8 +560,8 @@ const DESIGN_AND_CODE_GRAPH = {
     { from: 'plan_review', to: 'plan', event: 'FORCE_REVISION', label: 'Force Revision' },
     { from: 'plan_review', to: 'aborted', event: 'ABORT', label: 'Abort' },
     { from: 'implement', to: 'review', label: '' },
-    { from: 'review', to: 'implement', guard: 'isRejected', label: 'rejected' },
-    { from: 'review', to: 'design_review', guard: 'isApproved', label: 'approved' },
+    { from: 'review', to: 'implement', label: 'rejected' },
+    { from: 'review', to: 'design_review', label: 'approved' },
     { from: 'design_review', to: 'completed', event: 'APPROVE', label: 'Approve' },
     { from: 'design_review', to: 'implement', event: 'FORCE_REVISION', label: 'Force Revision' },
     { from: 'design_review', to: 'aborted', event: 'ABORT', label: 'Abort' },
@@ -547,9 +570,20 @@ const DESIGN_AND_CODE_GRAPH = {
 
 const CODE_REVIEW_GRAPH = {
   states: [
-    { id: 'analyze', type: 'agent' as const, persona: 'reviewer', label: 'Analyze' },
-    { id: 'report_review', type: 'human_gate' as const, label: 'Report Review' },
-    { id: 'completed', type: 'terminal' as const, label: 'Completed' },
+    {
+      id: 'analyze',
+      type: 'agent' as const,
+      persona: 'reviewer',
+      label: 'Analyze',
+      description: 'Analyzes code for issues and improvements',
+    },
+    {
+      id: 'report_review',
+      type: 'human_gate' as const,
+      label: 'Report Review',
+      description: 'Human review of the analysis report',
+    },
+    { id: 'completed', type: 'terminal' as const, label: 'Completed', description: 'Review complete' },
   ],
   transitions: [
     { from: 'analyze', to: 'report_review', label: '' },
@@ -942,19 +976,19 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
         {
           name: 'design-and-code',
           description: 'Plan -> Design -> Implement -> Review workflow',
-          path: '/opt/ironcurtain/workflows/design-and-code.json',
+          path: '/opt/ironcurtain/workflows/design-and-code.yaml',
           source: 'bundled',
         },
         {
           name: 'code-review',
           description: 'Automated code review with multiple reviewers',
-          path: '/opt/ironcurtain/workflows/code-review.json',
+          path: '/opt/ironcurtain/workflows/code-review.yaml',
           source: 'bundled',
         },
         {
           name: 'my-custom-flow',
           description: 'Custom workflow for internal tooling',
-          path: '/home/user/.ironcurtain/workflows/my-custom-flow.json',
+          path: '/home/user/.ironcurtain/workflows/my-custom-flow.yaml',
           source: 'user',
         },
       ];
@@ -990,7 +1024,11 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
       const newId = `wf-mock-${Date.now()}`;
       const newWf: MockWorkflow = {
         workflowId: newId,
-        name: String(params.definitionPath).split('/').pop()?.replace('.json', '') ?? 'workflow',
+        name:
+          String(params.definitionPath)
+            .split('/')
+            .pop()
+            ?.replace(/\.(json|ya?ml)$/, '') ?? 'workflow',
         phase: 'running',
         currentState: 'plan',
         startedAt: new Date().toISOString(),

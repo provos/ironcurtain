@@ -274,6 +274,15 @@ export interface SessionOptions {
    * Ignored for builtin sessions (no MITM proxy to tap).
    */
   tokenStreamBus?: import('../docker/token-stream-bus.js').TokenStreamBus;
+
+  /**
+   * Partial overrides for the resolved resource budget config.
+   * Applied on top of the global defaults and user config.
+   * Used by workflows to set longer per-turn timeouts.
+   */
+  resourceBudgetOverrides?: {
+    maxSessionSeconds?: number | null;
+  };
 }
 
 /**

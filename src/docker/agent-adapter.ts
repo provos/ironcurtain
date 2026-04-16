@@ -141,8 +141,19 @@ export interface AgentAdapter {
    *
    * @param message - the user's message for this turn
    * @param systemPrompt - the orientation prompt
+   * @param options - per-turn options:
+   *   - sessionId: stable identifier for the conversation (e.g., for
+   *     `claude --session-id <uuid>` / `--resume <uuid>`). Typically
+   *     the session's UUID.
+   *   - firstTurn: true when this is the first turn of a fresh
+   *     conversation state; false when resuming an existing
+   *     conversation. Adapters that don't distinguish may ignore.
    */
-  buildCommand(message: string, systemPrompt: string): readonly string[];
+  buildCommand(
+    message: string,
+    systemPrompt: string,
+    options: { readonly sessionId: string; readonly firstTurn: boolean },
+  ): readonly string[];
 
   /**
    * Builds the system prompt to append to the agent's default system prompt.

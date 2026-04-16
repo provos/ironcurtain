@@ -123,7 +123,7 @@ async function main(): Promise<void> {
   const cliArgs = parseCliArgs();
 
   const __dirname = dirname(fileURLToPath(import.meta.url));
-  const definitionPath = resolve(__dirname, '..', 'src', 'workflow', 'workflows', 'design-and-code.json');
+  const definitionPath = resolve(__dirname, '..', 'src', 'workflow', 'workflows', 'design-and-code.yaml');
 
   const baseDir = cliArgs.mode === 'resume' ? cliArgs.baseDir : mkdtempSync(resolve(tmpdir(), 'workflow-real-spike-'));
 

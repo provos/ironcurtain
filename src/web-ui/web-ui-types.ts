@@ -194,6 +194,7 @@ export interface StateNodeDto {
   readonly type: 'agent' | 'human_gate' | 'deterministic' | 'terminal';
   readonly persona?: string;
   readonly label: string;
+  readonly description?: string;
 }
 
 export interface TransitionEdgeDto {

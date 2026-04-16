@@ -169,6 +169,15 @@ export interface ResumableWorkflowDto {
 
 export type WorkflowPhase = 'running' | 'waiting_human' | 'completed' | 'failed' | 'aborted';
 
+/** Constants for WorkflowPhase values — avoids magic strings in event handlers. */
+export const PHASE = {
+  RUNNING: 'running',
+  WAITING_HUMAN: 'waiting_human',
+  COMPLETED: 'completed',
+  FAILED: 'failed',
+  ABORTED: 'aborted',
+} as const satisfies Record<string, WorkflowPhase>;
+
 export interface WorkflowSummaryDto {
   readonly workflowId: string;
   readonly name: string;
@@ -196,6 +205,7 @@ export interface StateNodeDto {
   readonly type: 'agent' | 'human_gate' | 'deterministic' | 'terminal';
   readonly persona?: string;
   readonly label: string;
+  readonly description?: string;
 }
 
 export interface TransitionEdgeDto {

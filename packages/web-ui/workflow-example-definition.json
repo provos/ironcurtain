@@ -111,7 +111,7 @@
       "transitions": [
         {
           "to": "done",
-          "guard": "isApproved"
+          "when": { "verdict": "approved" }
         },
         {
           "to": "escalate_gate",
@@ -119,7 +119,7 @@
         },
         {
           "to": "implement",
-          "guard": "isRejected"
+          "when": { "verdict": "rejected" }
         }
       ]
     },

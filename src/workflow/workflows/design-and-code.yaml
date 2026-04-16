@@ -1,0 +1,169 @@
+name: design-and-code
+description: "Plan -> Design -> Implement -> Review workflow with human gates and coder-critic loop"
+initial: plan
+
+settings:
+  mode: docker
+  dockerAgent: claude-code
+  maxRounds: 3
+  systemPrompt: "Workflow artifacts (plan, spec, reviews) go in `.workflow/`. Code goes directly at the workspace root."
+
+states:
+  plan:
+    type: agent
+    description: Breaks down the task into implementation steps
+    persona: global
+    prompt: |
+      You are a project planner.
+
+      Your responsibilities:
+      - Analyze the task requirements
+      - If there is existing code in the workspace, read it to understand the current architecture
+      - Identify components, dependencies, and implementation order
+      - Note key design decisions and trade-offs
+
+      Output: Create a `.workflow/plan/` directory with a `plan.md` file.
+      Write a structured markdown document with numbered steps.
+      Do NOT write any code -- only the plan.
+    inputs: []
+    outputs:
+      - plan
+    transitions:
+      - to: plan_review
+
+  plan_review:
+    type: human_gate
+    description: Human review of the plan
+    acceptedEvents:
+      - APPROVE
+      - FORCE_REVISION
+      - ABORT
+    present:
+      - plan
+    transitions:
+      - to: design
+        event: APPROVE
+      - to: plan
+        event: FORCE_REVISION
+      - to: aborted
+        event: ABORT
+
+  design:
+    type: agent
+    description: Produces technical design specification with interfaces and types
+    persona: global
+    prompt: |
+      You are a software architect. Produce a technical design specification.
+
+      Your responsibilities:
+      - Define module structure, interfaces, and data flow
+      - Specify function signatures with TypeScript types
+      - Document key design decisions and rationale
+      - If there is existing code, design around it
+
+      Output: Create a `.workflow/spec/` directory with a `spec.md` file.
+      Do NOT write implementation code.
+    inputs:
+      - plan
+    outputs:
+      - spec
+    transitions:
+      - to: design_review
+
+  design_review:
+    type: human_gate
+    description: Human review of the design specification
+    acceptedEvents:
+      - APPROVE
+      - FORCE_REVISION
+      - ABORT
+    present:
+      - spec
+    transitions:
+      - to: implement
+        event: APPROVE
+      - to: design
+        event: FORCE_REVISION
+      - to: aborted
+        event: ABORT
+
+  implement:
+    type: agent
+    description: Implements all modules per the design spec
+    freshSession: false
+    persona: global
+    prompt: |
+      You are an implementation engineer.
+
+      Your responsibilities:
+      - Implement all modules described in the spec
+      - Write clean, well-typed TypeScript
+      - Create unit tests
+      - Run the tests to verify they pass
+
+      Write code directly at the workspace root (e.g., `src/`, `package.json`, `tests/`).
+      Do NOT create a separate output directory for code.
+      Run all tests to verify everything works.
+    inputs:
+      - plan
+      - spec
+    outputs: []
+    transitions:
+      - to: review
+
+  review:
+    type: agent
+    description: Reviews code against the spec for correctness and quality
+    persona: global
+    prompt: |
+      You are a code reviewer.
+
+      Your responsibilities:
+      - Verify correctness: does the code at the workspace root match the spec?
+      - Check edge cases and error handling
+      - Evaluate code quality, naming, and structure
+      - Assess test coverage and test quality
+
+      Output: Create a `.workflow/reviews/` directory with a `review.md` file.
+      If issues are found, set verdict to "rejected" with specific, actionable feedback.
+      If the code is solid, set verdict to "approved".
+    inputs:
+      - spec
+    outputs:
+      - reviews
+    transitions:
+      - to: done
+        when:
+          verdict: approved
+      - to: escalate_gate
+        guard: isRoundLimitReached
+      - to: implement
+        when:
+          verdict: rejected
+
+  escalate_gate:
+    type: human_gate
+    description: Human review when coder-critic loop reaches round limit
+    acceptedEvents:
+      - APPROVE
+      - FORCE_REVISION
+      - ABORT
+    present:
+      - reviews
+    transitions:
+      - to: done
+        event: APPROVE
+      - to: implement
+        event: FORCE_REVISION
+      - to: aborted
+        event: ABORT
+
+  done:
+    type: terminal
+    description: Workflow complete
+    outputs:
+      - reviews
+
+  aborted:
+    type: terminal
+    description: Workflow aborted

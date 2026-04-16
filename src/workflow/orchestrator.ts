@@ -34,10 +34,16 @@ import {
   type DeterministicInvokeResult,
 } from './machine-builder.js';
 import type { CheckpointStore } from './checkpoint.js';
-import { parseAgentStatus, buildStatusBlockReprompt } from './status-parser.js';
-import { buildAgentCommand, buildArtifactReprompt } from './prompt-builder.js';
+import {
+  parseAgentStatus,
+  buildStatusBlockReprompt,
+  getValidVerdicts,
+  buildInvalidVerdictReprompt,
+} from './status-parser.js';
+import { buildAgentCommand, buildArtifactReprompt, buildStatusInstructions } from './prompt-builder.js';
 import { collectFilesRecursive, hasAnyFiles } from './artifacts.js';
 import { validateDefinition } from './validate.js';
+import { parseDefinitionFile } from './discovery.js';
 
 const execFileAsync = promisify(execFileCb);
 
@@ -255,8 +261,7 @@ export class WorkflowOrchestrator implements WorkflowController {
   // -----------------------------------------------------------------------
 
   start(definitionPath: string, taskDescription: string, workspacePath?: string): Promise<WorkflowId> {
-    const definitionContent = readFileSync(definitionPath, 'utf-8');
-    const raw = JSON.parse(definitionContent) as unknown;
+    const raw = parseDefinitionFile(definitionPath);
     const definition = validateDefinition(raw);
     this.validatePersonas(definition);
     const workflowId = createWorkflowId();
@@ -324,7 +329,8 @@ export class WorkflowOrchestrator implements WorkflowController {
 
     const definitionCopyPath = resolve(this.deps.baseDir, workflowId, 'definition.json');
     const definitionPath = existsSync(definitionCopyPath) ? definitionCopyPath : checkpoint.definitionPath;
-    const raw = JSON.parse(readFileSync(definitionPath, 'utf-8')) as unknown;
+    // Runtime copies are always JSON; original user files may be YAML
+    const raw = parseDefinitionFile(definitionPath);
     const definition = validateDefinition(raw);
 
     const { machine, gateStateNames, terminalStateNames } = buildWorkflowMachine(
@@ -719,7 +725,7 @@ export class WorkflowOrchestrator implements WorkflowController {
 
     instance.tab.write(`[agent] Starting "${stateId}" (persona: ${stateConfig.persona})`);
 
-    const command = buildAgentCommand(stateId, stateConfig, context);
+    const command = buildAgentCommand(stateId, stateConfig, context, definition);
 
     const mode: SessionMode =
       settings.mode === 'builtin'
@@ -730,7 +736,7 @@ export class WorkflowOrchestrator implements WorkflowController {
     // sessionsByState is keyed by stateId (set by updateContextFromAgentResult).
     // workspacePath ensures the agent writes to the artifact directory,
     // so files created by the agent are visible to the orchestrator.
-    const previousSessionId = context.sessionsByState[stateId];
+    const previousSessionId = stateConfig.freshSession === false ? context.sessionsByState[stateId] : undefined;
     let session: Session;
     try {
       session = await this.deps.createSession({
@@ -739,6 +745,9 @@ export class WorkflowOrchestrator implements WorkflowController {
         resumeSessionId: previousSessionId,
         workspacePath: instance.workspacePath,
         systemPromptAugmentation: definition.settings?.systemPrompt,
+        ...(settings.maxSessionSeconds != null
+          ? { resourceBudgetOverrides: { maxSessionSeconds: settings.maxSessionSeconds } }
+          : {}),
       });
     } catch (err) {
       const errMsg = toErrorMessage(err);
@@ -759,6 +768,7 @@ export class WorkflowOrchestrator implements WorkflowController {
       instance.tab.write(`[agent] Sending command to "${stateId}"...`);
 
       const { messageLog } = instance;
+      const statusInstructions = buildStatusInstructions(stateConfig.transitions);
 
       const logReceived = (text: string, output: AgentOutput | undefined) => {
         messageLog.append({
@@ -767,6 +777,7 @@ export class WorkflowOrchestrator implements WorkflowController {
           role: stateConfig.persona,
           message: text,
           verdict: output?.verdict ?? null,
+          // eslint-disable-next-line @typescript-eslint/no-deprecated -- logged for diagnostics
           confidence: output?.confidence ?? null,
         });
       };
@@ -790,7 +801,7 @@ export class WorkflowOrchestrator implements WorkflowController {
       logReceived(responseText, agentOutput);
 
       if (!agentOutput) {
-        const retryMsg = buildStatusBlockReprompt();
+        const retryMsg = buildStatusBlockReprompt(statusInstructions);
         messageLog.append({
           ...this.logBase(instance),
           type: 'agent_retry',
@@ -809,9 +820,45 @@ export class WorkflowOrchestrator implements WorkflowController {
         }
       }
 
+      // Validate verdict against valid transitions before the result reaches XState.
+      // This prevents silent deadlocks when the agent returns a verdict that no
+      // transition's `when` clause matches.
+      const validVerdicts = getValidVerdicts(stateConfig.transitions);
+      if (validVerdicts && !validVerdicts.has(agentOutput.verdict)) {
+        const retryMsg = buildInvalidVerdictReprompt(agentOutput.verdict, stateConfig.transitions);
+        messageLog.append({
+          ...this.logBase(instance),
+          type: 'agent_retry',
+          role: stateConfig.persona,
+          reason: 'invalid_verdict',
+          details: `Verdict "${agentOutput.verdict}" not in valid set: ${[...validVerdicts].join(', ')}`,
+          retryMessage: retryMsg,
+        });
+
+        responseText = await session.sendMessage(retryMsg);
+        const retryOutput = parseAgentStatus(responseText);
+        logReceived(responseText, retryOutput);
+
+        if (!retryOutput) {
+          throw new Error(
+            `Agent verdict "${agentOutput.verdict}" is not valid for this state ` +
+              `(expected one of: ${[...validVerdicts].join(', ')}), and retry did not include a status block`,
+          );
+        }
+
+        if (!validVerdicts.has(retryOutput.verdict)) {
+          throw new Error(
+            `Agent returned invalid verdict "${retryOutput.verdict}" after retry ` +
+              `(expected one of: ${[...validVerdicts].join(', ')})`,
+          );
+        }
+
+        agentOutput = retryOutput;
+      }
+
       const missingArtifacts = this.findMissingArtifacts(stateConfig, instance.artifactDir);
       if (missingArtifacts.length > 0) {
-        const artifactRetryMsg = buildArtifactReprompt(missingArtifacts);
+        const artifactRetryMsg = buildArtifactReprompt(missingArtifacts, stateConfig.transitions);
         messageLog.append({
           ...this.logBase(instance),
           type: 'agent_retry',
@@ -822,8 +869,8 @@ export class WorkflowOrchestrator implements WorkflowController {
         });
 
         const retryResponse = await session.sendMessage(artifactRetryMsg);
-        logReceived(retryResponse, parseAgentStatus(retryResponse));
         const retryOutput = parseAgentStatus(retryResponse);
+        logReceived(retryResponse, retryOutput);
         if (retryOutput) {
           agentOutput = retryOutput;
         }

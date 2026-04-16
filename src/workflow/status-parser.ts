@@ -1,6 +1,7 @@
+import YAML from 'yaml';
 import { z } from 'zod';
-import type { AgentOutput } from './types.js';
-import { VERDICT_VALUES, CONFIDENCE_VALUES } from './types.js';
+import type { AgentOutput, AgentTransitionDefinition } from './types.js';
+import { CONFIDENCE_VALUES } from './types.js';
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -21,66 +22,15 @@ export class AgentStatusParseError extends Error {
 // ---------------------------------------------------------------------------
 
 const agentOutputSchema = z.object({
-  completed: z.boolean(),
-  verdict: z.enum(VERDICT_VALUES),
-  confidence: z.enum(CONFIDENCE_VALUES),
-  escalation: z.string().nullable(),
-  test_count: z.number().int().nullable(),
-  notes: z.string().nullable(),
+  // Deprecated fields — defaults maintained for backward compatibility.
+  // Workflows should use free-form `verdict` for routing and `notes` for context.
+  completed: z.boolean().default(true),
+  verdict: z.string().min(1),
+  confidence: z.enum(CONFIDENCE_VALUES).default('high'),
+  escalation: z.string().nullable().default(null),
+  test_count: z.number().int().nullable().default(null),
+  notes: z.string().nullable().default(null),
 });
-
-// ---------------------------------------------------------------------------
-// Simple YAML key-value parser (flat structure only)
-// ---------------------------------------------------------------------------
-
-/**
- * Parses a flat YAML-like block into key-value pairs.
- * Handles: strings (quoted and unquoted), numbers, booleans, null.
- * Does NOT handle nested structures, arrays, or multi-line values.
- */
-function parseSimpleYaml(block: string): Record<string, unknown> {
-  const result: Record<string, unknown> = {};
-  const lines = block.split('\n');
-
-  for (const line of lines) {
-    const trimmed = line.trim();
-    // Skip empty lines, comments, and the header line
-    if (!trimmed || trimmed.startsWith('#') || trimmed === 'agent_status:') {
-      continue;
-    }
-
-    const colonIndex = trimmed.indexOf(':');
-    if (colonIndex === -1) continue;
-
-    const key = trimmed.slice(0, colonIndex).trim();
-    const rawValue = trimmed.slice(colonIndex + 1).trim();
-
-    result[key] = parseYamlValue(rawValue);
-  }
-
-  return result;
-}
-
-function parseYamlValue(raw: string): unknown {
-  // null
-  if (raw === 'null' || raw === '~' || raw === '') {
-    return null;
-  }
-  // boolean
-  if (raw === 'true') return true;
-  if (raw === 'false') return false;
-  // quoted string
-  if ((raw.startsWith('"') && raw.endsWith('"')) || (raw.startsWith("'") && raw.endsWith("'"))) {
-    return raw.slice(1, -1);
-  }
-  // number
-  const num = Number(raw);
-  if (!Number.isNaN(num) && raw !== '') {
-    return num;
-  }
-  // unquoted string
-  return raw;
-}
 
 // ---------------------------------------------------------------------------
 // Status block extraction
@@ -105,9 +55,23 @@ export function parseAgentStatus(responseText: string): AgentOutput | undefined 
   // One of the two capture groups will match (regex alternation).
   // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
   const rawBlock = match[1] ?? match[2];
-  const parsed = parseSimpleYaml(rawBlock);
+  let parsed: unknown;
+  try {
+    parsed = YAML.parse(rawBlock, { maxAliasCount: 0 });
+  } catch (err) {
+    throw new AgentStatusParseError(
+      `YAML parse error in agent_status block: ${err instanceof Error ? err.message : String(err)}`,
+      rawBlock,
+    );
+  }
 
-  const result = agentOutputSchema.safeParse(parsed);
+  // YAML.parse returns { agent_status: { ... } } — unwrap the outer key
+  const inner =
+    parsed != null && typeof parsed === 'object' && 'agent_status' in parsed
+      ? (parsed as Record<string, unknown>).agent_status
+      : parsed;
+
+  const result = agentOutputSchema.safeParse(inner);
   if (!result.success) {
     const issues = result.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ');
     throw new AgentStatusParseError(`Malformed agent_status block: ${issues}`, rawBlock);
@@ -125,41 +89,209 @@ export function parseAgentStatus(responseText: string): AgentOutput | undefined 
 }
 
 // ---------------------------------------------------------------------------
-// Re-prompt instructions
+// Status block stripping
 // ---------------------------------------------------------------------------
 
-/** Instruction text telling the agent to include a status block. */
-export const STATUS_BLOCK_INSTRUCTIONS = `
-When you have completed your work, include the following YAML block at the end of your response inside a fenced code block:
-
-\`\`\`
-agent_status:
-  completed: true
-  verdict: approved
-  confidence: high
-  escalation: null
-  test_count: null
-  notes: "brief summary of what was done"
-\`\`\`
-
-Field descriptions:
-- completed: true when work is done, false if blocked
-- verdict: one of approved, rejected, blocked, spec_flaw
-- confidence: one of high, medium, low
-- escalation: null or a string describing what needs human attention
-- test_count: null or the number of passing tests
-- notes: null or a brief summary
-`.trim();
+/**
+ * Regex matching the entire fenced status block (including fences) at the
+ * end of the response. Handles both ``` and ~~~ fences with optional
+ * language tag. Anchored to end-of-string with optional trailing whitespace.
+ */
+const STATUS_BLOCK_FENCE_REGEX = /(?:```[^\n]*\nagent_status:\n[\s\S]*?```|~~~[^\n]*\nagent_status:\n[\s\S]*?~~~)\s*$/;
 
 /**
- * Returns the re-prompt message with format instructions.
- * Used when the agent's response is missing the status block.
+ * Removes the fenced agent_status block from the end of the response text.
+ * The status block is already parsed into AgentOutput by `parseAgentStatus`,
+ * so passing it as raw text to the next agent is redundant noise.
+ *
+ * @returns text with the trailing status block removed and whitespace trimmed
  */
-export function buildStatusBlockReprompt(): string {
+export function stripStatusBlock(responseText: string): string {
+  return responseText.replace(STATUS_BLOCK_FENCE_REGEX, '').trimEnd();
+}
+
+// ---------------------------------------------------------------------------
+// Status block instructions
+// ---------------------------------------------------------------------------
+
+/** Base informational status block lines (verdict does not affect routing). */
+const INFORMATIONAL_STATUS_LINES: readonly string[] = [
+  'When you have completed your work, include the following YAML block at the end of your response inside a fenced code block:',
+  '',
+  '```',
+  'agent_status:',
+  '  verdict: completed',
+  '  notes: "brief summary of what was done"',
+  '```',
+  '',
+  'Fields:',
+  '- verdict: a free-form label summarizing your outcome (e.g. completed, needs_revision, inconclusive). It does not affect routing for this state but is logged for diagnostics.',
+  '- notes: brief summary passed to the next agent as context',
+];
+
+/** Minimal status instructions for unconditional transitions (no guards, no when clauses). */
+export const MINIMAL_STATUS_INSTRUCTIONS = INFORMATIONAL_STATUS_LINES.join('\n');
+
+/**
+ * Extracts verdict values from `when` clauses that match on the `verdict` key.
+ * Returns deduplicated values in definition order.
+ */
+export function extractVerdictValues(transitions: readonly AgentTransitionDefinition[]): string[] {
+  const seen = new Set<string>();
+  const values: string[] = [];
+  for (const t of transitions) {
+    const v = t.when?.verdict;
+    if (typeof v === 'string' && !seen.has(v)) {
+      seen.add(v);
+      values.push(v);
+    }
+  }
+  return values;
+}
+
+/**
+ * Builds context-sensitive status block instructions for states with
+ * conditional transitions (`when` clauses or `guard` functions).
+ *
+ * Two modes:
+ * - **Verdict-routed**: transitions have `when` clauses keyed on verdict.
+ *   Instructions list the valid verdict values and explain they control routing.
+ * - **Guard-only**: transitions use only `guard` functions (no `when` clauses).
+ *   Verdict is informational — instructions make this clear to avoid confusion.
+ *
+ * @param transitions - the state's transition definitions
+ * @param guardLabels - human-readable labels for named guard conditions
+ */
+export function buildConditionalStatusInstructions(
+  transitions: readonly AgentTransitionDefinition[],
+  guardLabels: Readonly<Record<string, string>>,
+): string {
+  const verdictValues = extractVerdictValues(transitions);
+
+  if (verdictValues.length > 0) {
+    return buildVerdictRoutedInstructions(verdictValues, transitions, guardLabels);
+  }
+  return buildGuardOnlyInstructions(transitions, guardLabels);
+}
+
+/** Instructions when verdict values determine routing (has `when` clauses). */
+function buildVerdictRoutedInstructions(
+  verdictValues: string[],
+  transitions: readonly AgentTransitionDefinition[],
+  guardLabels: Readonly<Record<string, string>>,
+): string {
+  const verdictExample = verdictValues[0];
+  const verdictList = verdictValues.map((v) => `\`${v}\``).join(', ');
+
+  const lines = [
+    'When you have completed your work, include the following YAML block at the end of your response inside a fenced code block:',
+    '',
+    '```',
+    'agent_status:',
+    `  verdict: ${verdictExample}`,
+    '  notes: "brief summary of what was done"',
+    '```',
+    '',
+    'Fields:',
+    `- verdict: determines what happens next. Set this to exactly one of: ${verdictList}`,
+    '- notes: brief summary passed to the next agent as context',
+  ];
+
+  appendGuardDescriptions(lines, transitions, guardLabels);
+  return lines.join('\n');
+}
+
+/** Instructions when routing is guard-only (verdict is informational). */
+function buildGuardOnlyInstructions(
+  transitions: readonly AgentTransitionDefinition[],
+  guardLabels: Readonly<Record<string, string>>,
+): string {
+  const lines = [...INFORMATIONAL_STATUS_LINES];
+  appendGuardDescriptions(lines, transitions, guardLabels);
+  return lines.join('\n');
+}
+
+/** Appends guard description lines if any transitions use guards. */
+function appendGuardDescriptions(
+  lines: string[],
+  transitions: readonly AgentTransitionDefinition[],
+  guardLabels: Readonly<Record<string, string>>,
+): void {
+  const guardNames = transitions
+    .map((t) => t.guard)
+    .filter((g): g is string => g != null)
+    .map((g) => guardLabels[g] ?? g);
+  if (guardNames.length > 0) {
+    lines.push(`\nAutomatic routing conditions (evaluated separately from your verdict): ${guardNames.join(', ')}`);
+  }
+}
+
+/**
+ * Returns the re-prompt message when the agent's response is missing the
+ * status block.
+ *
+ * @param statusInstructions - optional pre-built instructions string (e.g.
+ *   from `buildStatusInstructions`). When provided, replaces the default
+ *   minimal instructions so that conditional states list the correct verdict
+ *   values for routing. When omitted, falls back to `MINIMAL_STATUS_INSTRUCTIONS`.
+ */
+export function buildStatusBlockReprompt(statusInstructions?: string): string {
   return [
     'Your response is missing the required agent_status block.',
     'Please include it at the end of your response.',
     '',
-    STATUS_BLOCK_INSTRUCTIONS,
+    statusInstructions ?? MINIMAL_STATUS_INSTRUCTIONS,
+  ].join('\n');
+}
+
+// ---------------------------------------------------------------------------
+// Verdict validation
+// ---------------------------------------------------------------------------
+
+/**
+ * Determines whether a state's transitions require verdict validation
+ * and, if so, returns the set of valid verdict strings.
+ *
+ * Validation is skipped (returns `undefined`) when:
+ * - No transitions have `when` clauses (pure guard-based or unconditional)
+ * - Any transition is unconditional (no `guard` and no `when`), meaning
+ *   it acts as a fallthrough that accepts any verdict
+ *
+ * @returns set of valid verdict strings, or undefined if validation should be skipped
+ */
+export function getValidVerdicts(transitions: readonly AgentTransitionDefinition[]): ReadonlySet<string> | undefined {
+  const hasUnconditional = transitions.some((t) => !t.guard && !t.when);
+  if (hasUnconditional) return undefined;
+
+  const verdicts = extractVerdictValues(transitions);
+  if (verdicts.length === 0) return undefined;
+
+  return new Set(verdicts);
+}
+
+/**
+ * Builds the re-prompt message when the agent's verdict doesn't match
+ * any valid transition for the current state.
+ *
+ * @param invalidVerdict - the verdict the agent returned
+ * @param transitions - the state's transition definitions (valid verdicts and targets derived from `when` clauses)
+ */
+export function buildInvalidVerdictReprompt(
+  invalidVerdict: string,
+  transitions: readonly AgentTransitionDefinition[],
+): string {
+  const verdictLines = transitions
+    .filter((t): t is AgentTransitionDefinition & { when: { verdict: string } } => t.when?.verdict != null)
+    .map((t) => `- ${t.when.verdict}: dispatches to ${t.to}`);
+
+  return [
+    `Your verdict "${invalidVerdict}" is not a valid routing option for this state.`,
+    '',
+    'Valid verdicts for this state:',
+    ...verdictLines,
+    '',
+    'Please revise your response and use one of the valid verdicts above.',
+    '',
+    'Include the required `agent_status` YAML block with your chosen verdict in your revised response.',
   ].join('\n');
 }

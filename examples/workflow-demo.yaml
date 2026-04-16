@@ -1,0 +1,139 @@
+name: demo-workflow
+description: "Plan -> Design -> Implement -> Validate -> Review workflow with human gates and coder-critic loop"
+initial: plan
+
+settings:
+  mode: builtin
+  maxRounds: 3
+
+states:
+  plan:
+    type: agent
+    description: Breaks down the task into a clear plan
+    persona: planner
+    prompt: You are a project planner. Break down the task into a clear plan with numbered steps.
+    inputs: []
+    outputs:
+      - plan
+    transitions:
+      - to: plan_review
+
+  plan_review:
+    type: human_gate
+    description: Human review of the plan
+    acceptedEvents:
+      - APPROVE
+      - FORCE_REVISION
+      - ABORT
+    present:
+      - plan
+    transitions:
+      - to: design
+        event: APPROVE
+      - to: plan
+        event: FORCE_REVISION
+      - to: aborted
+        event: ABORT
+
+  design:
+    type: agent
+    description: Produces technical design spec with interfaces
+    persona: architect
+    prompt: You are a software architect. Produce a technical design spec with interfaces and data flow.
+    inputs:
+      - plan
+    outputs:
+      - spec
+    transitions:
+      - to: design_review
+
+  design_review:
+    type: human_gate
+    description: Human review of the design specification
+    acceptedEvents:
+      - APPROVE
+      - FORCE_REVISION
+      - ABORT
+    present:
+      - spec
+    transitions:
+      - to: implement
+        event: APPROVE
+      - to: design
+        event: FORCE_REVISION
+      - to: aborted
+        event: ABORT
+
+  implement:
+    type: agent
+    description: Writes working code with tests
+    freshSession: false
+    persona: coder
+    prompt: You are an implementation engineer. Write working code with tests based on the plan and spec.
+    inputs:
+      - plan
+      - spec
+    outputs:
+      - code
+    transitions:
+      - to: validate
+
+  validate:
+    type: deterministic
+    description: Runs automated test validation
+    run:
+      - - echo
+        - 3 tests passed
+    transitions:
+      - to: review
+        guard: isPassed
+      - to: implement
+
+  review:
+    type: agent
+    description: Reviews code against the spec
+    persona: critic
+    prompt: You are a code reviewer. Review the implementation against the spec and provide a verdict.
+    inputs:
+      - code
+      - spec
+    outputs:
+      - reviews
+    transitions:
+      - to: done
+        when:
+          verdict: approved
+      - to: escalate_gate
+        guard: isRoundLimitReached
+      - to: implement
+        when:
+          verdict: rejected
+
+  escalate_gate:
+    type: human_gate
+    description: Human review when coder-critic loop reaches round limit
+    acceptedEvents:
+      - APPROVE
+      - FORCE_REVISION
+      - ABORT
+    present:
+      - code
+      - reviews
+    transitions:
+      - to: done
+        event: APPROVE
+      - to: implement
+        event: FORCE_REVISION
+      - to: aborted
+        event: ABORT
+
+  done:
+    type: terminal
+    description: Workflow complete
+    outputs:
+      - code
+      - reviews
+
+  aborted:
+    type: terminal
+    description: Workflow aborted

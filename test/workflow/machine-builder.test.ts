@@ -81,6 +81,7 @@ const linearDefinition: WorkflowDefinition = {
   states: {
     plan: {
       type: 'agent',
+      description: 'Creates a plan',
       persona: 'planner',
       prompt: 'You are a planner.',
       inputs: [],
@@ -89,6 +90,7 @@ const linearDefinition: WorkflowDefinition = {
     },
     design: {
       type: 'agent',
+      description: 'Creates a design',
       persona: 'architect',
       prompt: 'You are an architect.',
       inputs: ['plan'],
@@ -97,6 +99,7 @@ const linearDefinition: WorkflowDefinition = {
     },
     done: {
       type: 'terminal',
+      description: 'Done',
       outputs: ['plan', 'design'],
     },
   },
@@ -110,6 +113,7 @@ const gatedDefinition: WorkflowDefinition = {
   states: {
     plan: {
       type: 'agent',
+      description: 'Creates a plan',
       persona: 'planner',
       prompt: 'You are a planner.',
       inputs: [],
@@ -118,6 +122,7 @@ const gatedDefinition: WorkflowDefinition = {
     },
     review_gate: {
       type: 'human_gate',
+      description: 'Human review gate',
       acceptedEvents: ['APPROVE', 'FORCE_REVISION', 'ABORT'],
       present: ['plan'],
       transitions: [
@@ -128,6 +133,7 @@ const gatedDefinition: WorkflowDefinition = {
     },
     design: {
       type: 'agent',
+      description: 'Creates a design',
       persona: 'architect',
       prompt: 'You are an architect.',
       inputs: ['plan'],
@@ -136,10 +142,12 @@ const gatedDefinition: WorkflowDefinition = {
     },
     done: {
       type: 'terminal',
+      description: 'Done',
       outputs: ['plan', 'design'],
     },
     aborted: {
       type: 'terminal',
+      description: 'Aborted',
     },
   },
 };
@@ -152,6 +160,7 @@ const deterministicLoopDefinition: WorkflowDefinition = {
   states: {
     plan: {
       type: 'agent',
+      description: 'Creates a plan',
       persona: 'planner',
       prompt: 'You are a planner.',
       inputs: [],
@@ -160,6 +169,7 @@ const deterministicLoopDefinition: WorkflowDefinition = {
     },
     implement: {
       type: 'agent',
+      description: 'Writes code',
       persona: 'coder',
       prompt: 'You are a coder.',
       inputs: ['plan'],
@@ -168,11 +178,13 @@ const deterministicLoopDefinition: WorkflowDefinition = {
     },
     test: {
       type: 'deterministic',
+      description: 'Runs tests',
       run: [['npm', 'test']],
       transitions: [{ to: 'done', guard: 'isPassed' }, { to: 'implement' }],
     },
     done: {
       type: 'terminal',
+      description: 'Done',
       outputs: ['plan', 'code'],
     },
   },
@@ -187,6 +199,7 @@ const coderCriticWhenDefinition: WorkflowDefinition = {
   states: {
     implement: {
       type: 'agent',
+      description: 'Writes code',
       persona: 'coder',
       prompt: 'You are a coder.',
       inputs: [],
@@ -195,6 +208,7 @@ const coderCriticWhenDefinition: WorkflowDefinition = {
     },
     review: {
       type: 'agent',
+      description: 'Reviews code',
       persona: 'critic',
       prompt: 'You are a critic.',
       inputs: ['code'],
@@ -208,6 +222,7 @@ const coderCriticWhenDefinition: WorkflowDefinition = {
     },
     escalate_gate: {
       type: 'human_gate',
+      description: 'Human escalation gate',
       acceptedEvents: ['APPROVE', 'FORCE_REVISION', 'ABORT'],
       present: ['code', 'review'],
       transitions: [
@@ -218,10 +233,12 @@ const coderCriticWhenDefinition: WorkflowDefinition = {
     },
     done: {
       type: 'terminal',
+      description: 'Done',
       outputs: ['code'],
     },
     aborted: {
       type: 'terminal',
+      description: 'Aborted',
     },
   },
 };
@@ -235,6 +252,7 @@ const coderCriticDefinition: WorkflowDefinition = {
   states: {
     implement: {
       type: 'agent',
+      description: 'Writes code',
       persona: 'coder',
       prompt: 'You are a coder.',
       inputs: [],
@@ -243,19 +261,21 @@ const coderCriticDefinition: WorkflowDefinition = {
     },
     review: {
       type: 'agent',
+      description: 'Reviews code',
       persona: 'critic',
       prompt: 'You are a critic.',
       inputs: ['code'],
       outputs: ['review'],
       transitions: [
-        { to: 'done', guard: 'isApproved' },
+        { to: 'done', when: { verdict: 'approved' } },
         { to: 'escalate_gate', guard: 'isRoundLimitReached' },
-        { to: 'implement', guard: 'isRejected' },
+        { to: 'implement', when: { verdict: 'rejected' } },
         { to: 'escalate_gate' },
       ],
     },
     escalate_gate: {
       type: 'human_gate',
+      description: 'Human escalation gate',
       acceptedEvents: ['APPROVE', 'FORCE_REVISION', 'ABORT'],
       present: ['code', 'review'],
       transitions: [
@@ -266,10 +286,12 @@ const coderCriticDefinition: WorkflowDefinition = {
     },
     done: {
       type: 'terminal',
+      description: 'Done',
       outputs: ['code'],
     },
     aborted: {
       type: 'terminal',
+      description: 'Aborted',
     },
   },
 };
@@ -282,6 +304,7 @@ const parallelDefinition: WorkflowDefinition = {
   states: {
     plan: {
       type: 'agent',
+      description: 'Creates a plan',
       persona: 'planner',
       prompt: 'You are a planner.',
       inputs: [],
@@ -290,6 +313,7 @@ const parallelDefinition: WorkflowDefinition = {
     },
     implement: {
       type: 'agent',
+      description: 'Writes code',
       persona: 'coder',
       prompt: 'You are a coder.',
       inputs: ['spec'],
@@ -300,6 +324,7 @@ const parallelDefinition: WorkflowDefinition = {
     },
     done: {
       type: 'terminal',
+      description: 'Done',
       outputs: ['spec', 'code'],
     },
   },
@@ -515,8 +540,8 @@ describe('buildWorkflowMachine', () => {
     });
   });
 
-  describe('guard evaluation', () => {
-    it('routes via isApproved guard on approved verdict', async () => {
+  describe('when clause evaluation', () => {
+    it('routes via when clause on approved verdict', async () => {
       const result = buildWorkflowMachine(coderCriticDefinition, 'task');
 
       const testMachine = result.machine.provide({
@@ -542,7 +567,7 @@ describe('buildWorkflowMachine', () => {
       expect(actor.getSnapshot().status).toBe('done');
     });
 
-    it('routes via isRejected guard on rejected verdict', async () => {
+    it('routes via when clause on rejected verdict', async () => {
       const result = buildWorkflowMachine(coderCriticDefinition, 'task');
       let reviewCount = 0;
 
@@ -595,7 +620,7 @@ describe('buildWorkflowMachine', () => {
       await settle(200);
 
       // With maxRounds=3, after 3 rounds the isRoundLimitReached guard fires
-      // before isRejected can route back to implement
+      // before the rejected when clause can route back to implement
       expect(actor.getSnapshot().matches('escalate_gate')).toBe(true);
     });
   });
@@ -1081,6 +1106,7 @@ describe('buildWorkflowMachine', () => {
         states: {
           implement: {
             type: 'agent',
+            description: 'Writes code',
             persona: 'coder',
             prompt: 'You are a coder.',
             inputs: [],
@@ -1089,6 +1115,7 @@ describe('buildWorkflowMachine', () => {
           },
           review: {
             type: 'agent',
+            description: 'Reviews code',
             persona: 'critic',
             prompt: 'You are a critic.',
             inputs: ['code'],
@@ -1100,14 +1127,15 @@ describe('buildWorkflowMachine', () => {
           },
           escalate_gate: {
             type: 'human_gate',
+            description: 'Human escalation gate',
             acceptedEvents: ['APPROVE', 'ABORT'],
             transitions: [
               { to: 'done', event: 'APPROVE' },
               { to: 'aborted', event: 'ABORT' },
             ],
           },
-          done: { type: 'terminal' },
-          aborted: { type: 'terminal' },
+          done: { type: 'terminal', description: 'Done' },
+          aborted: { type: 'terminal', description: 'Aborted' },
         },
       };
 
@@ -1177,36 +1205,37 @@ describe('buildWorkflowMachine', () => {
       expect(actor.getSnapshot().matches('escalate_gate')).toBe(true);
     });
 
-    it('when with null value matches null field', async () => {
-      const nullMatchDef: WorkflowDefinition = {
-        name: 'null-when-test',
-        description: 'Test null matching',
+    it('when with verdict routes to matching transition', async () => {
+      const verdictMatchDef: WorkflowDefinition = {
+        name: 'verdict-match-test',
+        description: 'Test verdict matching',
         initial: 'agent',
         states: {
           agent: {
             type: 'agent',
+            description: 'Does work',
             persona: 'worker',
             prompt: 'Do work.',
             inputs: [],
             outputs: ['result'],
-            transitions: [{ to: 'done', when: { escalation: null } }, { to: 'escalated' }],
+            transitions: [{ to: 'done', when: { verdict: 'clean' } }, { to: 'escalated' }],
           },
-          done: { type: 'terminal' },
-          escalated: { type: 'terminal' },
+          done: { type: 'terminal', description: 'Done' },
+          escalated: { type: 'terminal', description: 'Escalated' },
         },
       };
 
-      // Test that null matches null
-      const result1 = buildWorkflowMachine(nullMatchDef, 'task');
+      // Test that matching verdict routes to the when-guarded transition
+      const result1 = buildWorkflowMachine(verdictMatchDef, 'task');
       const machine1 = result1.machine.provide({
         actors: {
           agentService: fromPromise(async () =>
             makeAgentResult({
               output: {
                 completed: true,
-                verdict: 'approved',
+                verdict: 'clean', // matches when: { verdict: 'clean' }
                 confidence: 'high',
-                escalation: null, // matches when: { escalation: null }
+                escalation: null,
                 testCount: null,
                 notes: null,
               },
@@ -1219,17 +1248,17 @@ describe('buildWorkflowMachine', () => {
       await settle();
       expect(actor1.getSnapshot().matches('done')).toBe(true);
 
-      // Test that non-null does NOT match null
-      const result2 = buildWorkflowMachine(nullMatchDef, 'task');
+      // Test that non-matching verdict falls through to unconditional transition
+      const result2 = buildWorkflowMachine(verdictMatchDef, 'task');
       const machine2 = result2.machine.provide({
         actors: {
           agentService: fromPromise(async () =>
             makeAgentResult({
               output: {
                 completed: true,
-                verdict: 'approved',
+                verdict: 'needs_review', // does NOT match when: { verdict: 'clean' }
                 confidence: 'high',
-                escalation: 'needs human review', // does NOT match when: { escalation: null }
+                escalation: null,
                 testCount: null,
                 notes: null,
               },
@@ -1278,13 +1307,14 @@ describe('buildWorkflowMachine', () => {
         states: {
           review: {
             type: 'agent',
+            description: 'Reviews code',
             persona: 'critic',
             prompt: 'Review.',
             inputs: [],
             outputs: ['review'],
             transitions: [{ to: 'done', when: { verdict: 'approved' }, flag: 'low confidence approval' }],
           },
-          done: { type: 'terminal' },
+          done: { type: 'terminal', description: 'Done' },
         },
       };
 
@@ -1303,33 +1333,35 @@ describe('buildWorkflowMachine', () => {
       expect(actor.getSnapshot().status).toBe('done');
     });
 
-    it('when: { completed: false } matches falsy boolean', async () => {
-      const boolDef: WorkflowDefinition = {
-        name: 'bool-when-test',
-        description: 'Test boolean false matching',
+    it('when: { verdict: "retry" } uses strict equality (does not match prefix)', async () => {
+      const strictDef: WorkflowDefinition = {
+        name: 'strict-match-test',
+        description: 'Test strict verdict matching',
         initial: 'agent',
         states: {
           agent: {
             type: 'agent',
+            description: 'Does work',
             persona: 'worker',
             prompt: 'Do work.',
             inputs: [],
             outputs: ['result'],
-            transitions: [{ to: 'retry', when: { completed: false } }, { to: 'done' }],
+            transitions: [{ to: 'retry', when: { verdict: 'retry' } }, { to: 'done' }],
           },
-          retry: { type: 'terminal' },
-          done: { type: 'terminal' },
+          retry: { type: 'terminal', description: 'Retry' },
+          done: { type: 'terminal', description: 'Done' },
         },
       };
 
-      const result = buildWorkflowMachine(boolDef, 'task');
-      const testMachine = result.machine.provide({
+      // Exact match routes to the when-guarded transition
+      const result1 = buildWorkflowMachine(strictDef, 'task');
+      const machine1 = result1.machine.provide({
         actors: {
           agentService: fromPromise(async () =>
             makeAgentResult({
               output: {
-                completed: false, // falsy but should match false exactly
-                verdict: 'approved',
+                completed: true,
+                verdict: 'retry', // exact match
                 confidence: 'high',
                 escalation: null,
                 testCount: null,
@@ -1339,13 +1371,33 @@ describe('buildWorkflowMachine', () => {
           ),
         },
       });
-
-      const actor = createActor(testMachine);
-      actor.start();
+      const actor1 = createActor(machine1);
+      actor1.start();
       await settle();
+      expect(actor1.getSnapshot().matches('retry')).toBe(true);
 
-      // Should match when: { completed: false }, not fall through to done
-      expect(actor.getSnapshot().matches('retry')).toBe(true);
+      // Similar but non-equal verdict falls through
+      const result2 = buildWorkflowMachine(strictDef, 'task');
+      const machine2 = result2.machine.provide({
+        actors: {
+          agentService: fromPromise(async () =>
+            makeAgentResult({
+              output: {
+                completed: true,
+                verdict: 'retry_later', // not an exact match for "retry"
+                confidence: 'high',
+                escalation: null,
+                testCount: null,
+                notes: null,
+              },
+            }),
+          ),
+        },
+      });
+      const actor2 = createActor(machine2);
+      actor2.start();
+      await settle();
+      expect(actor2.getSnapshot().matches('done')).toBe(true);
     });
 
     it('transition without when or guard fires unconditionally (existing behavior)', async () => {
@@ -1382,6 +1434,7 @@ describe('buildWorkflowMachine', () => {
         states: {
           agent: {
             type: 'agent',
+            description: 'Does work',
             persona: 'worker',
             prompt: 'Do work.',
             inputs: [],
@@ -1393,8 +1446,8 @@ describe('buildWorkflowMachine', () => {
               { to: 'safe_done' },
             ],
           },
-          should_not_reach: { type: 'terminal' },
-          safe_done: { type: 'terminal' },
+          should_not_reach: { type: 'terminal', description: 'Should not reach' },
+          safe_done: { type: 'terminal', description: 'Safe done' },
         },
       };
 

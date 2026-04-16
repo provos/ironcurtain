@@ -66,6 +66,12 @@ export interface WorkflowSettings {
    * Sent via --append-system-prompt.
    */
   readonly systemPrompt?: string;
+  /**
+   * Per-turn wall-clock timeout in seconds for agent sessions.
+   * Overrides the global resourceBudget.maxSessionSeconds for this workflow.
+   * Default: uses the global setting (1800s / 30 minutes).
+   */
+  readonly maxSessionSeconds?: number;
 }
 
 /**
@@ -79,14 +85,26 @@ export type WorkflowStateDefinition =
 
 export interface AgentStateDefinition {
   readonly type: 'agent';
+  readonly description: string;
   readonly persona: string;
   /**
-   * Prompt template sent to the agent on FIRST invocation of this state.
+   * Role instructions sent to the agent on FIRST invocation of this state.
    *
-   * Contains the role's instructions, responsibilities, and output
-   * expectations. The orchestrator appends standard context sections
-   * (task, previous agent output, artifacts, status format) AFTER
-   * this template.
+   * The orchestrator assembles a full prompt with this template embedded
+   * in a specific position. The layout on first visit is:
+   *
+   * 1. Workflow Context (task description as quoted context)
+   * 2. Previous agent output (from the preceding state, if any)
+   * 3. Input artifacts (path references the agent reads itself)
+   * 4. **Your Role** -- this prompt template
+   * 5. Expected outputs (artifact directories to create)
+   * 6. Human feedback (from a preceding gate, if any)
+   * 7. Handoff clause (describes transition targets)
+   * 8. Status block instructions (verdict format)
+   *
+   * The role prompt is placed AFTER context/inputs and BEFORE
+   * outputs/handoff/status so it benefits from recency bias while
+   * still being preceded by the information the agent needs.
    *
    * On re-invocation of the same state (round 2+ via --continue),
    * only the new information is sent (previous agent output, round
@@ -110,10 +128,22 @@ export interface AgentStateDefinition {
   readonly parallelKey?: string;
   /** When true, each parallel instance gets a dedicated git worktree. */
   readonly worktree?: boolean;
+  /**
+   * When false, re-invocations of this state resume the previous agent
+   * session via --continue, receiving an abbreviated re-visit prompt.
+   * Use this for iterative refinement loops where the agent benefits
+   * from retaining its prior reasoning (e.g., harness design/build after
+   * critique feedback).
+   *
+   * Default: true (each invocation starts a fresh session, bootstrapping
+   * from artifacts on disk).
+   */
+  readonly freshSession?: boolean;
 }
 
 export interface HumanGateStateDefinition {
   readonly type: 'human_gate';
+  readonly description: string;
   /** Event types this gate accepts. Each maps to a HUMAN_* WorkflowEvent. */
   readonly acceptedEvents: readonly HumanGateEventType[];
   /** Artifact names to present to the human for review. */
@@ -127,6 +157,7 @@ export interface HumanGateStateDefinition {
 
 export interface DeterministicStateDefinition {
   readonly type: 'deterministic';
+  readonly description: string;
   /**
    * Commands to execute. Each command is an array of [binary, ...args].
    * Never a shell string -- per CLAUDE.md safe coding rules.
@@ -137,6 +168,7 @@ export interface DeterministicStateDefinition {
 
 export interface TerminalStateDefinition {
   readonly type: 'terminal';
+  readonly description: string;
   readonly outputs?: readonly string[];
   readonly cleanup?: readonly (readonly string[])[];
 }
@@ -163,9 +195,8 @@ export interface AgentTransitionDefinition {
   readonly to: string;
   /**
    * Guard name matching a registered XState guard. No translation
-   * layer -- use names directly: isApproved, isRejected,
-   * isRoundLimitReached, isStalled, hasTestCountRegression,
-   * isLowConfidence, isPassed.
+   * layer -- use names directly: isRoundLimitReached, isStalled, isPassed.
+   * For verdict-based routing, prefer `when` clauses instead.
    * Mutually exclusive with `when`.
    */
   readonly guard?: string;
@@ -193,18 +224,34 @@ export type HumanGateEventType = 'APPROVE' | 'FORCE_REVISION' | 'REPLAN' | 'ABOR
 // Agent output
 // ---------------------------------------------------------------------------
 
-export const VERDICT_VALUES = ['approved', 'rejected', 'blocked', 'spec_flaw'] as const;
-export type Verdict = (typeof VERDICT_VALUES)[number];
-
 export const CONFIDENCE_VALUES = ['high', 'medium', 'low'] as const;
 export type Confidence = (typeof CONFIDENCE_VALUES)[number];
 
 /** Structured output parsed from the agent's response text. */
 export interface AgentOutput {
+  /**
+   * @deprecated Maintained for backward compatibility. Defaults to `true`
+   * at parse time. Workflows should use free-form `verdict` strings for
+   * routing decisions instead of relying on this boolean.
+   */
   readonly completed: boolean;
-  readonly verdict: Verdict;
+  /** Free-form verdict string. Well-known values: approved, rejected, blocked, spec_flaw. Workflows may define custom verdicts for direct routing. */
+  readonly verdict: string;
+  /**
+   * @deprecated Maintained for backward compatibility. Defaults to `'high'`
+   * at parse time. Should not be relied upon for routing decisions; use
+   * `verdict` and `notes` instead.
+   */
   readonly confidence: Confidence;
+  /**
+   * @deprecated Maintained for backward compatibility. Defaults to `null`
+   * at parse time. Use `notes` for inter-agent context instead.
+   */
   readonly escalation: string | null;
+  /**
+   * @deprecated Maintained for backward compatibility. Defaults to `null`
+   * at parse time. Should not be relied upon for routing decisions.
+   */
   readonly testCount: number | null;
   readonly notes: string | null;
 }
@@ -225,11 +272,8 @@ export const AGENT_OUTPUT_FIELDS = [
 
 export type WorkflowEvent =
   | { readonly type: 'AGENT_COMPLETED'; readonly output: AgentOutput }
-  | { readonly type: 'AGENT_FAILED'; readonly error: string }
   | { readonly type: 'VALIDATION_PASSED'; readonly testCount: number }
   | { readonly type: 'VALIDATION_FAILED'; readonly errors: string }
-  | { readonly type: 'STALL_DETECTED' }
-  | { readonly type: 'SPEC_FLAW_DETECTED' }
   | { readonly type: 'HUMAN_APPROVE'; readonly prompt?: string }
   | { readonly type: 'HUMAN_FORCE_REVISION'; readonly prompt?: string }
   | { readonly type: 'HUMAN_REPLAN'; readonly prompt?: string }

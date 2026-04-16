@@ -6,16 +6,16 @@ IronCurtain workflows orchestrate multiple AI agents through a state machine to 
 
 ```bash
 # Run the built-in design-and-code workflow on a new project
-ironcurtain workflow start src/workflow/workflows/design-and-code.json \
+ironcurtain workflow start design-and-code \
   "Build a TypeScript CLI that converts CSV files to JSON"
 
 # Run it on an existing codebase
-ironcurtain workflow start src/workflow/workflows/design-and-code.json \
+ironcurtain workflow start design-and-code \
   "Add rate limiting to the API endpoints" \
   --workspace ~/src/my-api
 
 # Use a cheaper model for experimentation
-ironcurtain workflow start src/workflow/workflows/design-and-code.json \
+ironcurtain workflow start design-and-code \
   "Build a palindrome checker" \
   --model anthropic:claude-haiku-4-5
 ```
@@ -28,7 +28,7 @@ ironcurtain workflow start src/workflow/workflows/design-and-code.json \
 
 ## How workflows work
 
-A workflow is a JSON file that defines a state machine. Each state is one of:
+A workflow is a YAML or JSON file that defines a state machine. Each state is one of:
 
 - **`agent`** -- Runs an AI agent with a role-specific prompt. The agent can read/write files, run commands, and use all available MCP tools. The policy engine controls what's allowed.
 - **`human_gate`** -- Pauses execution and asks for your input: approve, request revision, or abort.
@@ -45,7 +45,7 @@ Different states always get separate sessions — the planner, architect, coder,
 
 ## The design-and-code workflow
 
-The built-in `design-and-code.json` workflow follows this flow:
+The built-in `design-and-code` workflow follows this flow:
 
 ```
 plan --> [plan_review] --> design --> [design_review] --> implement --> review
@@ -99,7 +99,7 @@ ironcurtain workflow list
 
 ### `ironcurtain workflow start`
 
-Start a new workflow. The first argument can be a workflow name (looked up from bundled and user directories) or a path to a definition JSON file.
+Start a new workflow. The first argument can be a workflow name (looked up from bundled and user directories) or a path to a definition file (YAML or JSON).
 
 ```bash
 ironcurtain workflow start <name-or-path> "task description" [options]
@@ -114,7 +114,7 @@ Examples:
 
 ```bash
 ironcurtain workflow start design-and-code "Build a REST API"
-ironcurtain workflow start ./my-workflow.json "Build a REST API"
+ironcurtain workflow start ./my-workflow.yaml "Build a REST API"
 ironcurtain workflow start design-and-code "task" --model anthropic:claude-haiku-4-5
 ```
 
@@ -154,63 +154,79 @@ Your feedback text is included in the next agent's prompt.
 
 ## Creating custom workflows
 
-A workflow definition is a JSON file with this structure:
+A workflow definition is a YAML (preferred) or JSON file. YAML is recommended because prompts can use `|` literal blocks for multi-line strings instead of escaped newlines.
 
-```json
-{
-  "name": "my-workflow",
-  "description": "What this workflow does",
-  "initial": "first_state",
-  "settings": {
-    "mode": "docker",
-    "dockerAgent": "claude-code",
-    "maxRounds": 3,
-    "systemPrompt": "Optional persistent context for all agents"
-  },
-  "states": {
-    "first_state": { ... },
-    "second_state": { ... },
-    "done": { "type": "terminal" }
-  }
-}
+```yaml
+name: my-workflow
+description: What this workflow does
+initial: first_state
+
+settings:
+  mode: docker
+  dockerAgent: claude-code
+  maxRounds: 3
+  systemPrompt: Optional persistent context for all agents
+
+states:
+  first_state:
+    # ...
+  second_state:
+    # ...
+  done:
+    type: terminal
+    description: Workflow complete
 ```
 
 ### Agent states
 
-```json
-{
-  "type": "agent",
-  "persona": "role-name",
-  "prompt": "You are a ... Your responsibilities: ...",
-  "inputs": ["plan", "spec"],
-  "outputs": ["reviews"],
-  "transitions": [
-    { "to": "next_state", "when": { "verdict": "approved" } },
-    { "to": "retry_state", "when": { "verdict": "rejected" } },
-    { "to": "escalate", "guard": "isRoundLimitReached" }
-  ]
-}
+```yaml
+my_state:
+  type: agent
+  persona: role-name
+  prompt: |
+    You are a ... Your responsibilities: ...
+  inputs:
+    - plan
+    - spec
+  outputs:
+    - reviews
+  transitions:
+    - to: next_state
+      when:
+        verdict: approved
+    - to: retry_state
+      when:
+        verdict: rejected
+    - to: escalate
+      guard: isRoundLimitReached
 ```
 
 - **`persona`** -- Either `"global"` (use the default global policy) or the name of an IronCurtain persona created via `ironcurtain persona create <name>`. When set to a real persona name, the agent session uses that persona's compiled policy, memory database, and system prompt augmentation. The orchestrator validates that all non-`"global"` personas exist before starting the workflow.
-- **`prompt`** -- Role instructions sent to the agent. Tell it what to do, where to read inputs, and where to write outputs. Use `.workflow/` prefix for artifact directories.
-- **`inputs`** -- Artifact directories the agent should read (under `.workflow/`)
+- **`prompt`** -- Role instructions sent to the agent. The orchestrator automatically appends workflow context (task description, previous agent output, artifact locations) and status block format instructions after your prompt. On re-invocation of the same state (round 2+ via `--continue`), only new information is sent (the role instructions are already in the conversation history).
+- **`inputs`** -- Artifact directories the agent should read (under `.workflow/`). Trailing `?` marks optional inputs (e.g., `reviews?`).
 - **`outputs`** -- Artifact directories the agent must create (under `.workflow/`). Use `[]` for code-only states where the agent writes to the workspace root.
-- **`transitions`** -- Where to go next, using `when` for declarative conditions or `guard` for complex checks
+- **`transitions`** -- Where to go next, using `when` for declarative conditions or `guard` for context-based checks
+- **`freshSession`** -- When `false`, re-invocations of this state resume the previous agent session via `--continue`, receiving an abbreviated re-visit prompt. Use this for iterative refinement loops where the agent benefits from retaining its prior reasoning (e.g., a coder receiving critic feedback). Default: `true` (each invocation starts a fresh session, bootstrapping from artifacts on disk).
 
 ### Human gate states
 
-```json
-{
-  "type": "human_gate",
-  "acceptedEvents": ["APPROVE", "FORCE_REVISION", "ABORT"],
-  "present": ["plan"],
-  "transitions": [
-    { "to": "next", "event": "APPROVE" },
-    { "to": "revise", "event": "FORCE_REVISION" },
-    { "to": "aborted", "event": "ABORT" }
-  ]
-}
+```yaml
+my_gate:
+  type: human_gate
+  description: Human review
+  acceptedEvents:
+    - APPROVE
+    - FORCE_REVISION
+    - ABORT
+  present:
+    - plan
+  transitions:
+    - to: next
+      event: APPROVE
+    - to: revise
+      event: FORCE_REVISION
+    - to: aborted
+      event: ABORT
 ```
 
 - **`acceptedEvents`** -- Which options to show the user. Choose from: `APPROVE`, `FORCE_REVISION`, `REPLAN`, `ABORT`.
@@ -218,76 +234,111 @@ A workflow definition is a JSON file with this structure:
 
 ### Deterministic states
 
-```json
-{
-  "type": "deterministic",
-  "run": [
-    ["npm", "test"],
-    ["npm", "run", "lint"]
-  ],
-  "transitions": [
-    { "to": "next", "guard": "isPassed" },
-    { "to": "fix", "guard": "isRejected" }
-  ]
-}
+```yaml
+validate:
+  type: deterministic
+  description: Run tests and lint
+  run:
+    - - npm
+      - test
+    - - npm
+      - run
+      - lint
+  transitions:
+    - to: next
+      guard: isPassed
+    - to: fix
 ```
 
 Commands are arrays of argument arrays (no shell strings). Use `isPassed` guard for success transitions.
 
 ### Terminal states
 
-```json
-{
-  "type": "terminal",
-  "outputs": ["reviews"]
-}
+```yaml
+done:
+  type: terminal
+  description: Workflow complete
+  outputs:
+    - reviews
 ```
 
 Optional `outputs` lists artifacts to include in the final summary.
 
 ### Transition conditions
 
-There are two ways to control transitions: declarative `when` conditions and code-based `guard` functions. Use `when` for simple checks against agent output fields, and `guard` for conditions that need workflow context.
+There are two ways to control transitions: declarative `when` conditions and code-based `guard` functions. `when` clauses with free-form verdict strings are the primary routing mechanism for agent states. Guards are reserved for conditions that require workflow context.
 
-**`when` — declarative conditions (preferred for simple checks):**
+**`when` -- declarative conditions (preferred):**
 
-```json
-{ "to": "done", "when": { "verdict": "approved" } }
-{ "to": "fix", "when": { "verdict": "rejected" } }
-{ "to": "review", "when": { "verdict": "approved", "confidence": "low" } }
+```yaml
+- to: done
+  when: { verdict: approved }
+- to: fix
+  when: { verdict: rejected }
+- to: validate
+  when: { verdict: thesis_validate }
+- to: escalate
+  when: { verdict: escalate }
 ```
 
-`when` matches against the agent's status block output. All specified fields must match (AND semantics). Matchable fields: `completed`, `verdict`, `confidence`, `escalation`, `testCount`, `notes`. The `verdict` and `confidence` fields are validated against their allowed values at definition load time, catching typos early.
+`when` matches against the agent's status block output. All specified fields must match (AND semantics). The primary matchable field is `verdict`. Other fields (`completed`, `confidence`, `escalation`, `testCount`, `notes`) are also available but are deprecated for routing -- use `verdict` and `notes` instead.
+
+The `verdict` field accepts any string value, enabling custom verdicts for direct routing (e.g., `"thesis_validate"`, `"escalate"`, `"reanalyze"`). Well-known values are `approved`, `rejected`, `blocked`, and `spec_flaw`. This is the recommended pattern for new workflows: instruct the agent to use specific verdict strings in its prompt, then match on them with `when`.
 
 `when` is only available on agent state transitions (not deterministic states). A transition cannot have both `when` and `guard`.
 
-**`guard` — code-based conditions (for complex checks):**
+**`guard` -- code-based conditions (for context-based checks):**
 
-| Guard                    | Checks                                            |
-| ------------------------ | ------------------------------------------------- |
-| `isApproved`             | Agent verdict is "approved"                       |
-| `isRejected`             | Agent verdict is "rejected"                       |
-| `isLowConfidence`        | Agent approved but with low confidence            |
-| `isRoundLimitReached`    | Per-state visit count >= maxRounds                |
-| `isStalled`              | Agent produced identical output as previous round |
-| `hasTestCountRegression` | Test count dropped (agent may have deleted tests) |
-| `isPassed`               | Deterministic state commands all passed           |
+| Guard                 | Checks                                                      |
+| --------------------- | ----------------------------------------------------------- |
+| `isRoundLimitReached` | Per-state visit count >= maxRounds                          |
+| `isStalled`           | Agent produced identical output artifacts as previous round |
+| `isPassed`            | Deterministic state commands all passed                     |
 
-Use `guard` for conditions that depend on workflow context (round limits, stall detection, test count regression) or for deterministic state transitions (`isPassed`). The simple verdict guards (`isApproved`, `isRejected`, `isLowConfidence`) still work but `when` is preferred for new workflows.
+Use `guard` for conditions that depend on workflow context (round limits, stall detection) or for deterministic state transitions (`isPassed`). For verdict-based routing, use `when` clauses -- e.g., `when: { verdict: "approved" }` supports any verdict string for direct routing.
+
+### Stall detection
+
+The `isStalled` guard compares SHA-256 hashes of a state's output artifact files between consecutive visits. If an agent produces byte-identical output on two consecutive invocations of the same state, the guard returns true — the agent is stuck in a loop producing the same result.
+
+This is useful for coder-critic loops where the coder might repeat the same implementation after being rejected:
+
+```yaml
+review:
+  type: agent
+  description: Reviews code against the spec
+  transitions:
+    - to: done
+      when:
+        verdict: approved
+    - to: escalate_gate
+      guard: isStalled
+    - to: implement
+      when:
+        verdict: rejected
+```
+
+The `isStalled` transition should be ordered before the rejection transition so it fires first when the output is identical. This routes to a human gate or alternative state instead of letting the loop continue indefinitely.
 
 ## Agent status block
 
-Every agent must end its response with a YAML status block:
+Every agent must end its response with a YAML status block. The orchestrator automatically appends format instructions to the agent's prompt, so you only need to describe what verdicts to use in your prompt template. The minimal required fields are:
 
 ```yaml
 agent_status:
-  completed: true
   verdict: approved
-  confidence: high
-  escalation: null
-  test_count: null
   notes: 'Brief summary of what was done'
 ```
+
+- **`verdict`** -- Free-form string that drives transition routing. Well-known values are `approved`, `rejected`, `blocked`, and `spec_flaw`, but workflows may define custom verdict strings for direct routing (e.g., `thesis_validate`, `escalate`).
+- **`notes`** -- Brief summary passed to the next agent as context.
+
+The following fields are parsed if present but are deprecated and should not be relied upon for routing:
+
+- `completed` -- Defaults to `true`. Use `verdict` instead.
+- `confidence` -- Defaults to `"high"`. Validated against `high`/`medium`/`low` but not used for routing.
+- `escalation` -- Defaults to `null`. Use `notes` for inter-agent context.
+- `test_count` -- Defaults to `null`. No longer consumed by any guard.
 
 The `prompt` field in your workflow definition should include instructions about what the agent does, but the orchestrator automatically appends status block format instructions. If the agent forgets the status block, the orchestrator retries once.
 
@@ -359,4 +410,4 @@ Open `http://localhost:5173?token=mock-dev-token`. The mock server simulates wor
 
 ## User-defined workflows
 
-Custom workflow definitions can be placed in `~/.ironcurtain/workflows/`. Files in this directory are discovered by both `ironcurtain workflow list` and the web UI's definition dropdown. User-defined workflows override bundled ones if they share the same name.
+Custom workflow definitions (`.yaml`, `.yml`, or `.json`) can be placed in `~/.ironcurtain/workflows/`. Files in this directory are discovered by both `ironcurtain workflow list` and the web UI's definition dropdown. User-defined workflows override bundled ones if they share the same name. When both YAML and JSON versions exist with the same name, YAML takes precedence.

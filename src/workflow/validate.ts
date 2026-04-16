@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { WorkflowDefinition, WorkflowStateDefinition, HumanGateStateDefinition, AgentOutput } from './types.js';
-import { AGENT_OUTPUT_FIELDS, VERDICT_VALUES, CONFIDENCE_VALUES } from './types.js';
+import { AGENT_OUTPUT_FIELDS, CONFIDENCE_VALUES } from './types.js';
 import { REGISTERED_GUARDS } from './guards.js';
 
 // ---------------------------------------------------------------------------
@@ -23,17 +23,20 @@ const humanGateTransitionSchema = z.object({
 
 const agentStateSchema = z.object({
   type: z.literal('agent'),
+  description: z.string().min(1),
   persona: z.string(),
   prompt: z.string().min(1),
   inputs: z.array(z.string()),
   outputs: z.array(z.string()),
-  transitions: z.array(agentTransitionSchema),
+  transitions: z.array(agentTransitionSchema).min(1),
   parallelKey: z.string().optional(),
   worktree: z.boolean().optional(),
+  freshSession: z.boolean().optional(),
 });
 
 const humanGateStateSchema = z.object({
   type: z.literal('human_gate'),
+  description: z.string().min(1),
   acceptedEvents: z.array(z.enum(['APPROVE', 'FORCE_REVISION', 'REPLAN', 'ABORT'])),
   present: z.array(z.string()).optional(),
   transitions: z.array(humanGateTransitionSchema),
@@ -41,12 +44,14 @@ const humanGateStateSchema = z.object({
 
 const deterministicStateSchema = z.object({
   type: z.literal('deterministic'),
+  description: z.string().min(1),
   run: z.array(z.array(z.string())),
-  transitions: z.array(agentTransitionSchema),
+  transitions: z.array(agentTransitionSchema).min(1),
 });
 
 const terminalStateSchema = z.object({
   type: z.literal('terminal'),
+  description: z.string().min(1),
   outputs: z.array(z.string()).optional(),
   cleanup: z.array(z.array(z.string())).optional(),
 });
@@ -66,6 +71,7 @@ const workflowSettingsSchema = z
     gitRepoPath: z.string().optional(),
     maxParallelism: z.number().int().positive().optional(),
     systemPrompt: z.string().optional(),
+    maxSessionSeconds: z.number().positive().optional(),
   })
   .optional();
 
@@ -146,7 +152,6 @@ function findReachableStates(initial: string, states: Record<string, WorkflowSta
 }
 
 const AGENT_OUTPUT_FIELD_SET: ReadonlySet<string> = new Set(AGENT_OUTPUT_FIELDS);
-const VERDICT_VALUE_SET: ReadonlySet<string> = new Set(VERDICT_VALUES);
 const CONFIDENCE_VALUE_SET: ReadonlySet<string> = new Set(CONFIDENCE_VALUES);
 
 /**
@@ -194,6 +199,18 @@ function validateWhenClauses(stateId: string, state: WorkflowStateDefinition, is
       );
     }
 
+    // Only "verdict" is currently supported for when-clause routing.
+    // The condensed status instructions only communicate verdict values
+    // to agents, so routing on other fields would silently break.
+    const nonVerdictKeys = Object.keys(t.when).filter((k) => k !== 'verdict');
+    if (nonVerdictKeys.length > 0) {
+      for (const k of nonVerdictKeys) {
+        issues.push(
+          `State "${stateId}" transition to "${t.to}" uses when clause key "${k}" — only "verdict" is currently supported for when-clause routing. Multi-field when conditions are a planned future feature.`,
+        );
+      }
+    }
+
     // Key and value validation
     for (const [key, value] of Object.entries(t.when)) {
       if (!AGENT_OUTPUT_FIELD_SET.has(key)) {
@@ -214,9 +231,7 @@ function validateWhenClauses(stateId: string, state: WorkflowStateDefinition, is
       }
 
       // Enum value checks run only when the type is already correct.
-      if (key === 'verdict' && typeof value === 'string' && !VERDICT_VALUE_SET.has(value)) {
-        issues.push(`State "${stateId}" transition to "${t.to}" has invalid verdict value "${value}"`);
-      }
+      // Verdict accepts any string (custom verdicts for direct routing).
       if (key === 'confidence' && typeof value === 'string' && !CONFIDENCE_VALUE_SET.has(value)) {
         issues.push(`State "${stateId}" transition to "${t.to}" has invalid confidence value "${value}"`);
       }
@@ -320,8 +335,9 @@ function validateArtifactInputs(definition: WorkflowDefinition, issues: string[]
 // ---------------------------------------------------------------------------
 
 /**
- * Validates a raw JSON object as a WorkflowDefinition.
+ * Validates a parsed object as a WorkflowDefinition.
  * Performs structural parsing (Zod) then semantic checks.
+ * The input can come from JSON.parse() or YAML.parse().
  *
  * @throws {WorkflowValidationError} with structured list of issues
  */
