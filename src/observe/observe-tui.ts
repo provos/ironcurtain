@@ -5,12 +5,20 @@
  * runs the 15fps frame loop, routes token stream events to the rain
  * engine and text panel, and renders the divider and status bar.
  *
- * Depends on observe-tui-types.ts, observe-tui-rain.ts, and
- * observe-tui-text-panel.ts. No external dependencies beyond Node built-ins.
+ * Computes the dominant agent phase across active sessions and
+ * communicates it to the rain engine for phase-driven color shifts.
+ * Uses TF-IDF scoring to select interesting words from LLM output
+ * and tool calls for rain panel word drops.
+ *
+ * Depends on observe-tui-types.ts, observe-tui-rain.ts,
+ * observe-tui-text-panel.ts, and observe-tui-word-scorer.ts.
+ * No external dependencies beyond Node built-ins.
  */
 
 import type { TokenStreamEvent } from '../docker/token-stream-types.js';
+import { truncate } from '../mux/mux-renderer.js';
 import {
+  type AgentPhase,
   type ObserveEventSink,
   type ObserveTuiOptions,
   type RainToken,
@@ -25,6 +33,25 @@ import {
 } from './observe-tui-types.js';
 import { createRainEngine, type RainEngine } from './observe-tui-rain.js';
 import { createTextPanel, type TextPanel } from './observe-tui-text-panel.js';
+import {
+  type SessionWordState,
+  createWordScorer,
+  createSessionWordState,
+  processEventForWords,
+} from './observe-tui-word-scorer.js';
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/** Maximum visible characters for model name in status bar. */
+const STATUS_MODEL_MAX_LEN = 20;
+
+/** Maximum visible characters for tool name in status bar. */
+const STATUS_TOOL_MAX_LEN = 25;
+
+/** Frames to keep error phase active (~2 seconds at 15fps). */
+const ERROR_PHASE_FRAMES = 30;
 
 // ---------------------------------------------------------------------------
 // Rain token extraction
@@ -44,6 +71,9 @@ export function extractRainTokens(event: TokenStreamEvent): RainToken[] {
       return charsToTokens(event.text, 'text');
     case 'tool_use':
       return charsToTokens(event.toolName, 'tool');
+    case 'tool_result':
+      // Extract a few characters from tool result content for rain effect
+      return charsToTokens(event.content.slice(0, 8), 'tool');
     case 'error':
       return charsToTokens(event.message, 'error');
     default:
@@ -74,6 +104,7 @@ function createSessionState(label: number): SessionState {
     lastEventTime: Date.now(),
     ended: false,
     endReason: null,
+    currentToolName: null,
   };
 }
 
@@ -87,10 +118,15 @@ export function updateSessionState(state: SessionState, event: TokenStreamEvent)
   switch (event.kind) {
     case 'text_delta':
       state.phase = 'thinking';
+      state.currentToolName = null;
       break;
     case 'tool_use':
       state.phase = 'tool_use';
-      state.toolCount++;
+      // Only increment toolCount for new tool calls (non-empty toolName)
+      if (event.toolName !== '') {
+        state.toolCount++;
+        state.currentToolName = event.toolName;
+      }
       break;
     case 'message_start':
       state.model = event.model;
@@ -99,9 +135,31 @@ export function updateSessionState(state: SessionState, event: TokenStreamEvent)
       state.inputTokens += event.inputTokens;
       state.outputTokens += event.outputTokens;
       state.phase = 'idle';
+      state.currentToolName = null;
       break;
-    // error and raw events do not change phase or counters
+    // error, tool_result, and raw events do not change phase or counters
   }
+}
+
+// ---------------------------------------------------------------------------
+// Dominant phase computation
+// ---------------------------------------------------------------------------
+
+/**
+ * Compute the dominant agent phase across all active sessions.
+ * Priority: error > tool_use > thinking > idle.
+ * Error phase is tracked separately via errorFramesRemaining.
+ */
+export function computeDominantPhase(sessions: Map<number, SessionState>, errorActive: boolean): AgentPhase {
+  if (errorActive) return 'error';
+
+  let dominant: AgentPhase = 'idle';
+  for (const s of sessions.values()) {
+    if (s.ended) continue;
+    if (s.phase === 'tool_use') dominant = 'tool_use';
+    if (s.phase === 'thinking' && dominant === 'idle') dominant = 'thinking';
+  }
+  return dominant;
 }
 
 // ---------------------------------------------------------------------------
@@ -114,6 +172,12 @@ interface AggregateMetrics {
   totalSessions: number;
   queueDepth: number;
   tokensPerSec: number;
+  /** Model name from the most recently active session. */
+  model: string | null;
+  /** Dominant agent phase across active sessions. */
+  phase: AgentPhase;
+  /** Current tool name (when phase is tool_use). */
+  currentToolName: string | null;
 }
 
 /**
@@ -154,13 +218,28 @@ function computeMetrics(
   sessions: Map<number, SessionState>,
   queueDepth: number,
   rateTracker: TokenRateTracker,
+  dominantPhase: AgentPhase,
 ): AggregateMetrics {
   let totalTokens = 0;
   let activeSessions = 0;
+  let model: string | null = null;
+  let currentToolName: string | null = null;
+  let latestEventTime = 0;
 
   for (const s of sessions.values()) {
     totalTokens += s.inputTokens + s.outputTokens;
-    if (!s.ended) activeSessions++;
+    if (!s.ended) {
+      activeSessions++;
+      // Track model from most recently active non-ended session
+      if (s.model && s.lastEventTime > latestEventTime) {
+        model = s.model;
+        latestEventTime = s.lastEventTime;
+      }
+      // Track current tool name from session in tool_use phase
+      if (s.phase === 'tool_use' && s.currentToolName) {
+        currentToolName = s.currentToolName;
+      }
+    }
   }
 
   rateTracker.record(Date.now(), totalTokens);
@@ -171,6 +250,9 @@ function computeMetrics(
     totalSessions: sessions.size,
     queueDepth,
     tokensPerSec: rateTracker.rate(),
+    model,
+    phase: dominantPhase,
+    currentToolName,
   };
 }
 
@@ -178,7 +260,7 @@ function computeMetrics(
 // Divider rendering
 // ---------------------------------------------------------------------------
 
-const BOX_VERTICAL = '\u2502'; // │
+const BOX_VERTICAL = '\u2502'; // |
 const ASCII_VERTICAL = '|';
 
 function renderDivider(layout: TuiLayout, utf8: boolean): string {
@@ -224,6 +306,29 @@ function renderStatusBar(layout: TuiLayout, metrics: AggregateMetrics, connectio
     );
   }
 
+  // Model name (truncated)
+  if (metrics.model) {
+    const truncModel = truncate(metrics.model, STATUS_MODEL_MAX_LEN);
+    parts.push(`${SGR.STATUS_VALUE}${truncModel}${SGR.RESET}`);
+  }
+
+  // Phase indicator with color
+  const phaseColor: Record<AgentPhase, string> = {
+    thinking: SGR.STATUS_PHASE_THINKING,
+    tool_use: SGR.STATUS_PHASE_TOOL,
+    idle: SGR.STATUS_PHASE_IDLE,
+    error: SGR.STATUS_PHASE_ERROR,
+  };
+  const pColor = phaseColor[metrics.phase];
+  let phaseLabel: string;
+  if (metrics.phase === 'tool_use' && metrics.currentToolName) {
+    const truncTool = truncate(metrics.currentToolName, STATUS_TOOL_MAX_LEN);
+    phaseLabel = `TOOL: ${truncTool}`;
+  } else {
+    phaseLabel = metrics.phase.toUpperCase();
+  }
+  parts.push(`${pColor}${phaseLabel}${SGR.RESET}`);
+
   // Total tokens (input + output)
   parts.push(
     `${SGR.STATUS_LABEL}tokens${SGR.RESET} ${SGR.STATUS_VALUE}${formatTokenCount(metrics.totalTokens)}${SGR.RESET}`,
@@ -244,7 +349,15 @@ function renderStatusBar(layout: TuiLayout, metrics: AggregateMetrics, connectio
   // Exit hint
   parts.push(`${SGR.STATUS_HINT}Ctrl+C exit${SGR.RESET}`);
 
-  const content = ` ${parts.join(sep)} `;
+  let content = ` ${parts.join(sep)} `;
+
+  // If content exceeds terminal width, drop low-priority segments
+  while (visibleLength(content) > layout.cols && parts.length > 3) {
+    // Drop second-to-last segment (queue or tok/s, before exit hint)
+    parts.splice(parts.length - 2, 1);
+    content = ` ${parts.join(sep)} `;
+  }
+
   const padding = Math.max(0, layout.cols - visibleLength(content));
 
   return `\x1b[${row};1H${SGR.STATUS_BG}${content}${' '.repeat(padding)}${SGR.RESET}`;
@@ -269,11 +382,14 @@ function getTerminalSize(): { cols: number; rows: number } {
 }
 
 export function createObserveTui(options: ObserveTuiOptions): ObserveTui {
-  const { raw, showLabel } = options;
+  const { raw, showLabel, debug } = options;
+  const effectiveRaw = raw || debug;
   const utf8 = isUtf8Locale();
 
   // State
   const sessions = new Map<number, SessionState>();
+  const sessionWordStates = new Map<number, SessionWordState>();
+  const wordScorer = createWordScorer();
   let started = false;
   let destroyed = false;
   let frameTimer: ReturnType<typeof setTimeout> | null = null;
@@ -302,11 +418,25 @@ export function createObserveTui(options: ObserveTuiOptions): ObserveTui {
   let connectionError: string | null = null;
   let connectionExitTimer: ReturnType<typeof setTimeout> | null = null;
 
+  let errorFramesRemaining = 0;
+
+  // Current dominant phase (cached for status bar)
+  let dominantPhase: AgentPhase = 'idle';
+
   // Signal handlers (stored for removal on destroy)
   let sigintHandler: (() => void) | null = null;
   let sigtermHandler: (() => void) | null = null;
   let sigwinchHandler: (() => void) | null = null;
   let stdinHandler: ((data: Buffer) => void) | null = null;
+
+  // ------------------------------------------------------------------
+  // Phase computation helper
+  // ------------------------------------------------------------------
+
+  function recomputePhase(): void {
+    dominantPhase = computeDominantPhase(sessions, errorFramesRemaining > 0);
+    rainEngine.setPhase(dominantPhase);
+  }
 
   // ------------------------------------------------------------------
   // Frame loop
@@ -315,14 +445,20 @@ export function createObserveTui(options: ObserveTuiOptions): ObserveTui {
   /** Schedule the next frame, yielding to I/O between frames. */
   function scheduleNextFrame(): void {
     if (destroyed) return;
-    // setTimeout yields to the I/O poll phase between frames,
-    // ensuring WebSocket messages are processed promptly even
-    // when stdout writes are slow.
     frameTimer = setTimeout(tick, FRAME_MS);
   }
 
   function tick(): void {
     if (destroyed) return;
+
+    // Decrement error counter
+    if (errorFramesRemaining > 0) {
+      errorFramesRemaining--;
+      if (errorFramesRemaining === 0) {
+        recomputePhase();
+        statusDirty = true;
+      }
+    }
 
     const buf: string[] = [];
     const tooSmall = layout.rows < MIN_USABLE_ROWS;
@@ -349,9 +485,9 @@ export function createObserveTui(options: ObserveTuiOptions): ObserveTui {
       rainEngine.tick();
     }
 
-    // 4. Status bar (only when dirty or on first frame)
+    // 4. Status bar (always re-render when metrics may have changed)
     if (statusDirty) {
-      const metrics = computeMetrics(sessions, rainEngine.queueDepth, rateTracker);
+      const metrics = computeMetrics(sessions, rainEngine.queueDepth, rateTracker, dominantPhase);
       buf.push(renderStatusBar(layout, metrics, connectionError));
       statusDirty = false;
     }
@@ -508,7 +644,16 @@ export function createObserveTui(options: ObserveTuiOptions): ObserveTui {
         sessions.set(label, state);
       }
 
+      // Ensure per-session word scoring state exists
+      let wordState = sessionWordStates.get(label);
+      if (!wordState) {
+        wordState = createSessionWordState();
+        sessionWordStates.set(label, wordState);
+      }
+
       for (const event of events) {
+        const previousPhase = state.phase;
+
         // Update session state
         updateSessionState(state, event);
 
@@ -518,9 +663,31 @@ export function createObserveTui(options: ObserveTuiOptions): ObserveTui {
           rainEngine.enqueueTokens(rainTokens);
         }
 
-        // Forward to text panel
-        textPanel.appendEvent(label, event, { raw, showLabel });
+        // TF-IDF word scoring: process event for word drop candidates
+        const candidates = processEventForWords(event, wordState, wordScorer);
+        for (const c of candidates) {
+          rainEngine.enqueueWord(c.word, c.source);
+        }
+
+        // Word drops: phase transition to thinking
+        if (previousPhase !== state.phase && state.phase === 'thinking') {
+          rainEngine.enqueueWord('thinking...', 'phase');
+        }
+
+        if (event.kind === 'error') {
+          errorFramesRemaining = ERROR_PHASE_FRAMES;
+        }
+
+        // Forward to text panel (with debug flag threading)
+        textPanel.appendEvent(label, event, {
+          raw: effectiveRaw,
+          showLabel,
+          debug,
+        });
       }
+
+      // Recompute dominant phase after processing all events
+      recomputePhase();
 
       textDirty = true;
       statusDirty = true;
@@ -534,8 +701,12 @@ export function createObserveTui(options: ObserveTuiOptions): ObserveTui {
         state.ended = true;
         state.endReason = reason;
         state.phase = 'idle';
+        state.currentToolName = null;
       }
+
       textPanel.sessionEnded(label, reason, showLabel);
+
+      recomputePhase();
       textDirty = true;
       statusDirty = true;
     },

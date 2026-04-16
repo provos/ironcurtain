@@ -7,6 +7,7 @@ import type { TokenStreamEvent } from '../src/docker/token-stream-types.js';
 import {
   extractRainTokens,
   updateSessionState,
+  computeDominantPhase,
   createObserveTui,
   TokenRateTracker,
   formatTokenCount,
@@ -54,6 +55,7 @@ function freshState(label = 0): SessionState {
     lastEventTime: 0,
     ended: false,
     endReason: null,
+    currentToolName: null,
   };
 }
 
@@ -109,6 +111,37 @@ describe('extractRainTokens', () => {
     expect(tokens[0].char).toBe('\u00e9');
     expect(tokens[1].char).toBe('\u00e8');
   });
+
+  it('extracts tool_result content characters as tool tokens (truncated to 8 chars)', () => {
+    const event: TokenStreamEvent = {
+      kind: 'tool_result',
+      toolUseId: 'tu_1',
+      toolName: '',
+      content: 'Hello World from tool',
+      isError: false,
+      timestamp: Date.now(),
+    };
+    const tokens = extractRainTokens(event);
+    // Only first 8 characters of content
+    expect(tokens).toHaveLength(8);
+    expect(tokens[0]).toEqual({ char: 'H', kind: 'tool' });
+    expect(tokens[7]).toEqual({ char: 'o', kind: 'tool' });
+  });
+
+  it('handles tool_result with short content', () => {
+    const event: TokenStreamEvent = {
+      kind: 'tool_result',
+      toolUseId: 'tu_2',
+      toolName: '',
+      content: 'ok',
+      isError: false,
+      timestamp: Date.now(),
+    };
+    const tokens = extractRainTokens(event);
+    expect(tokens).toHaveLength(2);
+    expect(tokens[0]).toEqual({ char: 'o', kind: 'tool' });
+    expect(tokens[1]).toEqual({ char: 'k', kind: 'tool' });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -120,16 +153,27 @@ describe('updateSessionState', () => {
     const state = freshState();
     updateSessionState(state, textDelta('hello'));
     expect(state.phase).toBe('thinking');
+    expect(state.currentToolName).toBeNull();
   });
 
-  it('sets phase to tool_use and increments toolCount on tool_use', () => {
+  it('sets phase to tool_use and increments toolCount on tool_use with name', () => {
     const state = freshState();
     updateSessionState(state, toolUse('read_file', '{}'));
     expect(state.phase).toBe('tool_use');
     expect(state.toolCount).toBe(1);
+    expect(state.currentToolName).toBe('read_file');
+  });
 
-    updateSessionState(state, toolUse('write_file', '{}'));
-    expect(state.toolCount).toBe(2);
+  it('does not increment toolCount for input_json_delta (empty toolName)', () => {
+    const state = freshState();
+    // First: content_block_start with toolName
+    updateSessionState(state, toolUse('read_file', ''));
+    expect(state.toolCount).toBe(1);
+
+    // Then: input_json_delta with empty toolName
+    updateSessionState(state, toolUse('', '{"path":"/foo"}'));
+    expect(state.toolCount).toBe(1); // unchanged
+    expect(state.currentToolName).toBe('read_file'); // unchanged
   });
 
   it('records model from message_start', () => {
@@ -141,15 +185,24 @@ describe('updateSessionState', () => {
   it('accumulates tokens and sets phase to idle on message_end', () => {
     const state = freshState();
     state.phase = 'thinking';
+    state.currentToolName = 'some_tool';
 
     updateSessionState(state, messageEnd('end_turn', 100, 50));
     expect(state.inputTokens).toBe(100);
     expect(state.outputTokens).toBe(50);
     expect(state.phase).toBe('idle');
+    expect(state.currentToolName).toBeNull();
 
     updateSessionState(state, messageEnd('end_turn', 200, 80));
     expect(state.inputTokens).toBe(300);
     expect(state.outputTokens).toBe(130);
+  });
+
+  it('clears currentToolName on text_delta', () => {
+    const state = freshState();
+    state.currentToolName = 'read_file';
+    updateSessionState(state, textDelta('output'));
+    expect(state.currentToolName).toBeNull();
   });
 
   it('updates lastEventTime on every event', () => {
@@ -172,6 +225,73 @@ describe('updateSessionState', () => {
     state.phase = 'tool_use';
     updateSessionState(state, rawEvent('ping', '{}'));
     expect(state.phase).toBe('tool_use');
+  });
+
+  it('does not change phase on tool_result event', () => {
+    const state = freshState();
+    state.phase = 'thinking';
+    const event: TokenStreamEvent = {
+      kind: 'tool_result',
+      toolUseId: 'tu_1',
+      toolName: '',
+      content: 'output',
+      isError: false,
+      timestamp: Date.now(),
+    };
+    updateSessionState(state, event);
+    expect(state.phase).toBe('thinking');
+    expect(state.toolCount).toBe(0); // not incremented
+  });
+});
+
+// ---------------------------------------------------------------------------
+// computeDominantPhase
+// ---------------------------------------------------------------------------
+
+describe('computeDominantPhase', () => {
+  it('returns error when errorActive is true', () => {
+    const sessions = new Map<number, SessionState>();
+    sessions.set(0, { ...freshState(0), phase: 'thinking' });
+    expect(computeDominantPhase(sessions, true)).toBe('error');
+  });
+
+  it('returns idle when all sessions are idle', () => {
+    const sessions = new Map<number, SessionState>();
+    sessions.set(0, freshState(0));
+    sessions.set(1, freshState(1));
+    expect(computeDominantPhase(sessions, false)).toBe('idle');
+  });
+
+  it('returns thinking when any session is thinking', () => {
+    const sessions = new Map<number, SessionState>();
+    sessions.set(0, { ...freshState(0), phase: 'thinking' });
+    sessions.set(1, freshState(1));
+    expect(computeDominantPhase(sessions, false)).toBe('thinking');
+  });
+
+  it('tool_use takes priority over thinking', () => {
+    const sessions = new Map<number, SessionState>();
+    sessions.set(0, { ...freshState(0), phase: 'thinking' });
+    sessions.set(1, { ...freshState(1), phase: 'tool_use' });
+    expect(computeDominantPhase(sessions, false)).toBe('tool_use');
+  });
+
+  it('error takes priority over tool_use', () => {
+    const sessions = new Map<number, SessionState>();
+    sessions.set(0, { ...freshState(0), phase: 'tool_use' });
+    expect(computeDominantPhase(sessions, true)).toBe('error');
+  });
+
+  it('ignores ended sessions', () => {
+    const sessions = new Map<number, SessionState>();
+    sessions.set(0, { ...freshState(0), phase: 'tool_use', ended: true });
+    sessions.set(1, freshState(1));
+    expect(computeDominantPhase(sessions, false)).toBe('idle');
+  });
+
+  it('returns idle for empty session map', () => {
+    const sessions = new Map<number, SessionState>();
+    expect(computeDominantPhase(sessions, false)).toBe('idle');
   });
 });
 
@@ -196,12 +316,7 @@ describe('createObserveTui pushEvents', () => {
   });
 
   it('creates session state on first event for a label', () => {
-    const tui = createObserveTui({ raw: false, showLabel: false });
-    // pushEvents before start() would fail since sub-systems aren't created.
-    // We need to start first, but starting enters alternate screen + raw mode.
-    // Instead, test the exported helpers directly (extractRainTokens + updateSessionState)
-    // which are the core logic.
-
+    const tui = createObserveTui({ raw: false, showLabel: false, debug: false });
     // Verify the create function returns the expected interface
     expect(typeof tui.pushEvents).toBe('function');
     expect(typeof tui.sessionEnded).toBe('function');
@@ -216,9 +331,6 @@ describe('createObserveTui pushEvents', () => {
 // ---------------------------------------------------------------------------
 
 describe('TUI event routing (without screen lifecycle)', () => {
-  // These tests verify that the extractRainTokens + updateSessionState functions
-  // compose correctly, which is the core logic that pushEvents relies on.
-
   it('text_delta produces rain tokens and updates phase', () => {
     const state = freshState();
     const event = textDelta('hello');
@@ -284,10 +396,12 @@ describe('TUI event routing (without screen lifecycle)', () => {
     updateSessionState(state, toolUse('read_file', '{"path":"/tmp/test"}'));
     expect(state.phase).toBe('tool_use');
     expect(state.toolCount).toBe(1);
+    expect(state.currentToolName).toBe('read_file');
 
     // text_delta (after tool result)
     updateSessionState(state, textDelta('The file contains...'));
     expect(state.phase).toBe('thinking');
+    expect(state.currentToolName).toBeNull();
 
     // message_end
     updateSessionState(state, messageEnd('end_turn', 1234, 567));
@@ -321,14 +435,14 @@ describe('destroy() cleanup', () => {
   });
 
   it('destroy is idempotent (calling twice does not throw)', () => {
-    const tui = createObserveTui({ raw: false, showLabel: false });
+    const tui = createObserveTui({ raw: false, showLabel: false, debug: false });
     // Destroy without start -- should not throw
     tui.destroy();
     tui.destroy(); // second call is a no-op
   });
 
   it('destroy writes cursor restore and alternate screen exit', () => {
-    const tui = createObserveTui({ raw: false, showLabel: false });
+    const tui = createObserveTui({ raw: false, showLabel: false, debug: false });
 
     // In test environments stdin is not a TTY, so setRawMode doesn't exist.
     // Temporarily define it so start() can call it without error.

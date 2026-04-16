@@ -39,6 +39,7 @@ const observeSpec: CommandSpec = {
     { flag: 'all', description: 'Observe all active sessions' },
     { flag: 'workflow', description: 'Observe all sessions in a named workflow', placeholder: '<name>' },
     { flag: 'raw', description: 'Show all event types, not just text' },
+    { flag: 'debug', description: 'Show all events including protocol noise (implies --raw)' },
     { flag: 'json', description: 'Output events as newline-delimited JSON' },
     { flag: 'no-tui', description: 'Disable TUI mode (plain text output)' },
   ],
@@ -48,6 +49,7 @@ const observeSpec: CommandSpec = {
     'ironcurtain observe --workflow build   # Watch workflow "build"',
     'ironcurtain observe 3 --no-tui        # Plain text output',
     'ironcurtain observe 3 --raw           # Show tool use + message markers in TUI',
+    'ironcurtain observe 3 --debug         # Show everything including protocol noise',
     'ironcurtain observe --all --json      # NDJSON output for piping',
   ],
 };
@@ -169,6 +171,7 @@ export async function runObserveCommand(argv: string[]): Promise<void> {
       all: { type: 'boolean' },
       workflow: { type: 'string' },
       raw: { type: 'boolean' },
+      debug: { type: 'boolean' },
       json: { type: 'boolean' },
       'no-tui': { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
@@ -205,9 +208,10 @@ export async function runObserveCommand(argv: string[]): Promise<void> {
   }
 
   const showLabel = !!allMode || !!workflowName;
+  const debugMode = !!values.debug;
 
   const renderOptions: RenderOptions = {
-    raw: !!values.raw,
+    raw: !!values.raw || debugMode,
     json: !!values.json,
     showLabel,
   };
@@ -221,7 +225,7 @@ export async function runObserveCommand(argv: string[]): Promise<void> {
   let tui: ObserveTui | null = null;
 
   if (useTui) {
-    tui = createObserveTui({ raw: !!values.raw, showLabel });
+    tui = createObserveTui({ raw: !!values.raw || debugMode, showLabel, debug: debugMode });
     tui.start();
     sink = tui;
   } else {

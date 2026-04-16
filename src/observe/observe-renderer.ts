@@ -81,6 +81,10 @@ function renderText(label: number, event: TokenStreamEvent, options: RenderOptio
     case 'error':
       return `${prefix}${chalk.red(`[error] ${event.message}`)}\n`;
 
+    case 'tool_result':
+      if (!options.raw) return null;
+      return `${prefix}${chalk.dim(`[tool_result] ${truncate(event.content, 120)}`)}\n`;
+
     case 'raw':
       if (!options.raw) return null;
       return `${prefix}${chalk.dim(`[${event.eventType}] ${truncate(event.data, 120)}`)}\n`;

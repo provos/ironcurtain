@@ -134,6 +134,50 @@ describe('renderEvent (text mode)', () => {
     // The full 200-char input should not appear
     expect(result).not.toContain(longInput);
   });
+
+  it('suppresses tool_result in non-raw mode', () => {
+    const event: TokenStreamEvent = {
+      kind: 'tool_result',
+      toolUseId: 'tu_1',
+      toolName: '',
+      content: 'some output',
+      isError: false,
+      timestamp: ts,
+    };
+    const result = renderEvent(1, event, defaultOptions);
+    expect(result).toBeNull();
+  });
+
+  it('renders tool_result in raw mode with truncated content', () => {
+    const event: TokenStreamEvent = {
+      kind: 'tool_result',
+      toolUseId: 'tu_1',
+      toolName: '',
+      content: 'Tool output text',
+      isError: false,
+      timestamp: ts,
+    };
+    const result = renderEvent(1, event, rawOptions);
+    expect(result).toContain('[tool_result]');
+    expect(result).toContain('Tool output text');
+    expect(result).toMatch(/\n$/);
+  });
+
+  it('truncates long tool_result content in raw mode', () => {
+    const longContent = 'y'.repeat(200);
+    const event: TokenStreamEvent = {
+      kind: 'tool_result',
+      toolUseId: 'tu_2',
+      toolName: '',
+      content: longContent,
+      isError: false,
+      timestamp: ts,
+    };
+    const result = renderEvent(1, event, rawOptions);
+    expect(result).toContain('[tool_result]');
+    expect(result).toContain('\u2026');
+    expect(result).not.toContain(longContent);
+  });
 });
 
 // ---------------------------------------------------------------------------

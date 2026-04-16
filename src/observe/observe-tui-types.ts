@@ -30,7 +30,7 @@ export const FRAME_MS = 66;
 // ---------------------------------------------------------------------------
 
 /** Fraction of terminal width allocated to the rain panel. */
-export const RAIN_WIDTH_FRACTION = 0.27;
+export const RAIN_WIDTH_FRACTION = 0.18;
 
 /** Minimum columns for the rain panel when visible. */
 export const MIN_RAIN_COLS = 15;
@@ -108,6 +108,21 @@ export const SGR = {
   STATUS_SEPARATOR: '\x1b[38;2;40;70;40m', // dim green separators
   STATUS_HINT: '\x1b[38;2;60;80;60m', // very dim hint text
   STATUS_ERROR: '\x1b[1;38;2;255;70;70m', // bright red for connection lost
+
+  // Word drop colors (brighter than regular rain to stand out)
+  WORD_TEXT: '\x1b[1;38;2;150;255;150m', // bright green (text fragments)
+  WORD_TOOL: '\x1b[1;38;2;100;255;255m', // bright cyan (tool names)
+  WORD_PHASE: '\x1b[1;38;2;255;255;180m', // bright warm yellow (phase labels)
+  WORD_MODEL: '\x1b[1;38;2;180;180;255m', // bright lavender (model name)
+
+  // Thinking text in text panel
+  TEXT_THINKING: '\x1b[2;3;38;2;0;200;100m', // dim italic green
+
+  // Status bar phase indicators
+  STATUS_PHASE_THINKING: '\x1b[38;2;0;255;70m', // green
+  STATUS_PHASE_TOOL: '\x1b[38;2;0;200;255m', // cyan
+  STATUS_PHASE_IDLE: '\x1b[38;2;80;80;80m', // dim grey
+  STATUS_PHASE_ERROR: '\x1b[38;2;255;70;70m', // red
 } as const;
 
 /** Session label colors, indexed by `label % SESSION_COLORS.length`. */
@@ -150,7 +165,7 @@ export interface TuiLayout {
 /**
  * Computes the TUI layout for the given terminal dimensions.
  *
- * When `cols >= MIN_TOTAL_COLS`, the rain panel gets ~27% of the width.
+ * When `cols >= MIN_TOTAL_COLS`, the rain panel gets ~18% of the width.
  * Otherwise the rain panel is hidden and text takes the full width.
  */
 export function calculateTuiLayout(cols: number, rows: number): TuiLayout {
@@ -187,6 +202,94 @@ export function calculateTuiLayout(cols: number, rows: number): TuiLayout {
     statusRow,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Agent phase
+// ---------------------------------------------------------------------------
+
+/**
+ * Agent phase as tracked by the orchestrator and communicated
+ * to the rain engine for color selection.
+ *
+ * Extends the existing SessionState.phase with an 'error' pseudo-phase
+ * that the rain engine can react to (triggered by error events, auto-clears).
+ */
+export type AgentPhase = 'thinking' | 'tool_use' | 'idle' | 'error';
+
+// ---------------------------------------------------------------------------
+// Word drop types
+// ---------------------------------------------------------------------------
+
+/** Lifecycle phase of a word drop. */
+export type WordDropPhase = 'forming' | 'holding' | 'dissolving';
+
+/** Source category for word drop content, determines color. */
+export type WordDropSource = 'tool' | 'phase' | 'model' | 'text';
+
+/**
+ * A word that materializes horizontally in the rain panel.
+ *
+ * The word occupies a contiguous horizontal span at a fixed row.
+ * Each character tracks whether it has been "revealed" (formation),
+ * is "held" (static), or "released" (converted to a falling drop).
+ */
+export interface WordDrop {
+  /** The word to display. */
+  readonly word: string;
+  /** Source category (determines color). */
+  readonly source: WordDropSource;
+  /** Top-left column (0-indexed within rain panel). */
+  readonly col: number;
+  /** Row position (0-indexed). */
+  readonly row: number;
+  /** Current lifecycle phase. */
+  phase: WordDropPhase;
+  /** Frame counter within the current phase. */
+  phaseFrame: number;
+  /**
+   * Per-character state.
+   * - During 'forming': index < revealedCount are visible.
+   * - During 'holding': all visible.
+   * - During 'dissolving': dissolveOrder tracks release sequence.
+   */
+  revealedCount: number;
+  /**
+   * Randomized dissolution order. Indices into `word` specifying
+   * which character dissolves on each frame of the dissolving phase.
+   * Length = word.length. Built once at transition to 'dissolving'.
+   */
+  dissolveOrder: number[];
+  /** Number of characters dissolved so far. */
+  dissolvedCount: number;
+  /** Number of frames to hold (chosen at formation). */
+  holdDuration: number;
+}
+
+// ---------------------------------------------------------------------------
+// Tool accumulator types
+// ---------------------------------------------------------------------------
+
+/** Tracks accumulated tool_use input fragments per session. */
+export interface ToolAccumulator {
+  /** Tool name from the content_block_start event. */
+  toolName: string;
+  /** Accumulated inputDelta JSON fragments. */
+  inputBuffer: string;
+  /** Whether we have received at least one inputDelta fragment. */
+  hasInput: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Filtered raw event types
+// ---------------------------------------------------------------------------
+
+/** Raw SSE event types that are suppressed in --raw mode (shown only in --debug). */
+export const SUPPRESSED_RAW_EVENTS: ReadonlySet<string> = new Set([
+  'content_block_stop',
+  'message_stop',
+  'ping',
+  'signature_delta',
+]);
 
 // ---------------------------------------------------------------------------
 // Rain types
@@ -267,6 +370,8 @@ export interface SessionState {
   ended: boolean;
   /** Reason for session end, if ended. */
   endReason: string | null;
+  /** Name of the tool currently being invoked (null when not in tool_use phase). */
+  currentToolName: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -298,6 +403,8 @@ export interface ObserveTuiOptions {
   readonly raw: boolean;
   /** Prefix output lines with a session label (multi-session mode). */
   readonly showLabel: boolean;
+  /** Show absolutely all events including protocol noise. Implies raw. */
+  readonly debug: boolean;
 }
 
 // ---------------------------------------------------------------------------

@@ -18,6 +18,14 @@ import type { SessionId } from '../src/session/types.js';
 
 // --- Test helpers ---
 
+/** Type-safe event filter that narrows the union. */
+function eventsOfKind<K extends TokenStreamEvent['kind']>(
+  events: TokenStreamEvent[],
+  kind: K,
+): Array<Extract<TokenStreamEvent, { kind: K }>> {
+  return events.filter((e): e is Extract<TokenStreamEvent, { kind: K }> => e.kind === kind);
+}
+
 /** DNS lookup that resolves all hostnames to 127.0.0.1 for testing. */
 const localhostDnsLookup: MitmProxyOptions['dnsLookup'] = (_hostname, opts, cb) => {
   if ((opts as { all?: boolean }).all) {
@@ -367,9 +375,14 @@ describe('MitmProxy token stream integration', () => {
     }
   });
 
-  it('does not tap non-SSE responses even when bus is configured', async () => {
-    // Create a regular JSON upstream (explicit content-length to avoid chunked encoding)
-    const jsonBody = JSON.stringify({ count: 42 });
+  it('extracts events from non-streaming JSON responses on LLM endpoints', async () => {
+    // Create a JSON upstream that returns a real-looking Anthropic response
+    const jsonBody = JSON.stringify({
+      model: 'claude-sonnet-4-20250514',
+      content: [{ type: 'text', text: 'Hello from JSON' }],
+      stop_reason: 'end_turn',
+      usage: { input_tokens: 100, output_tokens: 50 },
+    });
     const jsonServer = http.createServer((_req, res) => {
       res.writeHead(200, {
         'Content-Type': 'application/json',
@@ -416,11 +429,23 @@ describe('MitmProxy token stream integration', () => {
       });
 
       expect(response.statusCode).toBe(200);
-      const parsed = JSON.parse(response.body);
-      expect(parsed.count).toBe(42);
 
-      // No SSE events should have been emitted (non-SSE content type)
-      expect(events).toHaveLength(0);
+      // Wait briefly for the async end handler to fire
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // JSON response extraction should produce message_start, text_delta, and message_end
+      const starts = eventsOfKind(events, 'message_start');
+      expect(starts).toHaveLength(1);
+      expect(starts[0].model).toBe('claude-sonnet-4-20250514');
+
+      const deltas = eventsOfKind(events, 'text_delta');
+      expect(deltas).toHaveLength(1);
+      expect(deltas[0].text).toBe('Hello from JSON');
+
+      const ends = eventsOfKind(events, 'message_end');
+      expect(ends).toHaveLength(1);
+      expect(ends[0].inputTokens).toBe(100);
+      expect(ends[0].outputTokens).toBe(50);
     } finally {
       jsonServer.close();
     }

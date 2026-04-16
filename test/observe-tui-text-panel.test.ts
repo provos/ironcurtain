@@ -3,9 +3,9 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { createTextPanel, type TextPanelOptions } from '../src/observe/observe-tui-text-panel.js';
+import { createTextPanel, extractThinkingText, type TextPanelOptions } from '../src/observe/observe-tui-text-panel.js';
 import type { TokenStreamEvent } from '../src/docker/token-stream-types.js';
-import { SGR, TEXT_BUFFER_CAPACITY } from '../src/observe/observe-tui-types.js';
+import { SGR, SUPPRESSED_RAW_EVENTS, TEXT_BUFFER_CAPACITY } from '../src/observe/observe-tui-types.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -19,10 +19,21 @@ function stripAnsi(s: string): string {
 }
 
 /** Standard panel options for most tests. */
-const DEFAULT_OPTS: TextPanelOptions = { raw: false, showLabel: false };
-const RAW_OPTS: TextPanelOptions = { raw: true, showLabel: false };
-const LABEL_OPTS: TextPanelOptions = { raw: false, showLabel: true };
-const RAW_LABEL_OPTS: TextPanelOptions = { raw: true, showLabel: true };
+const DEFAULT_OPTS: TextPanelOptions = { raw: false, showLabel: false, debug: false };
+const RAW_OPTS: TextPanelOptions = { raw: true, showLabel: false, debug: false };
+const LABEL_OPTS: TextPanelOptions = { raw: false, showLabel: true, debug: false };
+const RAW_LABEL_OPTS: TextPanelOptions = { raw: true, showLabel: true, debug: false };
+const DEBUG_OPTS: TextPanelOptions = { raw: true, showLabel: false, debug: true };
+
+/** Create a tool_use event with a tool name (content_block_start style). */
+function toolStart(toolName: string): TokenStreamEvent {
+  return { kind: 'tool_use', toolName, inputDelta: '', timestamp: Date.now() };
+}
+
+/** Create a tool_use event with input delta (input_json_delta style). */
+function toolInput(inputDelta: string): TokenStreamEvent {
+  return { kind: 'tool_use', toolName: '', inputDelta, timestamp: Date.now() };
+}
 
 function textDelta(text: string): TokenStreamEvent {
   return { kind: 'text_delta', text, timestamp: Date.now() };
@@ -46,6 +57,15 @@ function errorEvent(message: string): TokenStreamEvent {
 
 function rawEvent(eventType: string, data: string): TokenStreamEvent {
   return { kind: 'raw', eventType, data, timestamp: Date.now() };
+}
+
+/** Create a raw event simulating a thinking_delta. */
+function thinkingDelta(text: string): TokenStreamEvent {
+  const data = JSON.stringify({
+    type: 'content_block_delta',
+    delta: { type: 'thinking_delta', thinking: text },
+  });
+  return { kind: 'raw', eventType: 'content_block_delta', data, timestamp: Date.now() };
 }
 
 // ---------------------------------------------------------------------------
@@ -255,21 +275,105 @@ describe('Ring buffer', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Event type formatting
+// Tool input accumulation (Phase 4)
 // ---------------------------------------------------------------------------
 
-describe('tool_use formatting', () => {
-  it('shows tool name with cyan marker in raw mode', () => {
+describe('tool_use accumulation', () => {
+  it('shows working indicator on tool start', () => {
     const panel = createTextPanel(0, 80, 10);
-    panel.appendEvent(0, toolUse('filesystem__read_file', '{"path":"/src/foo.ts"}'), RAW_OPTS);
+    panel.appendEvent(0, toolStart('read_file'), RAW_OPTS);
 
     expect(panel.lineCount).toBe(1);
 
     const output = panel.render();
     expect(output).toContain(SGR.TEXT_TOOL);
     const plain = stripAnsi(output);
-    expect(plain).toContain('\u25B8 filesystem__read_file');
-    expect(plain).toContain('/src/foo.ts');
+    expect(plain).toContain('\u25B8 read_file');
+    expect(plain).toContain('working...');
+  });
+
+  it('accumulates tool input fragments', () => {
+    const panel = createTextPanel(0, 80, 10);
+    panel.appendEvent(0, toolStart('read_file'), RAW_OPTS);
+    panel.appendEvent(0, toolInput('{"path":"/src/'), RAW_OPTS);
+    panel.appendEvent(0, toolInput('index.ts"}'), RAW_OPTS);
+
+    // Flush via next non-tool event
+    panel.appendEvent(0, textDelta('file contents here\n'), RAW_OPTS);
+
+    const output = panel.render();
+    const plain = stripAnsi(output);
+    expect(plain).toContain('read_file');
+    expect(plain).toContain('path=/src/index.ts');
+  });
+
+  it('flushes accumulator on non-tool_use event', () => {
+    const panel = createTextPanel(0, 80, 10);
+    panel.appendEvent(0, toolStart('search_files'), RAW_OPTS);
+    panel.appendEvent(0, toolInput('{"path":"/src","pattern":"TODO","include":"*.ts"}'), RAW_OPTS);
+
+    // Next text event triggers flush
+    panel.appendEvent(0, textDelta('results\n'), RAW_OPTS);
+
+    const output = panel.render();
+    const plain = stripAnsi(output);
+    expect(plain).toContain('search_files');
+    expect(plain).toContain('path=/src');
+    expect(plain).toContain('pattern=TODO');
+  });
+
+  it('renders execute_code as multi-line code block', () => {
+    const panel = createTextPanel(0, 80, 20);
+    panel.appendEvent(0, toolStart('execute_code'), RAW_OPTS);
+    panel.appendEvent(0, toolInput('{"code":"const x = 1;\\nconsole.log(x);"}'), RAW_OPTS);
+
+    // Flush
+    panel.appendEvent(0, textDelta('output\n'), RAW_OPTS);
+
+    const output = panel.render();
+    expect(output).toContain(SGR.TEXT_TOOL_DIM);
+    const plain = stripAnsi(output);
+    expect(plain).toContain('execute_code');
+    expect(plain).toContain('const x = 1;');
+    expect(plain).toContain('console.log(x);');
+  });
+
+  it('handles JSON parse failure with raw truncated output', () => {
+    const panel = createTextPanel(0, 80, 10);
+    panel.appendEvent(0, toolStart('my_tool'), RAW_OPTS);
+    panel.appendEvent(0, toolInput('not valid json'), RAW_OPTS);
+
+    panel.appendEvent(0, textDelta('next\n'), RAW_OPTS);
+
+    const output = panel.render();
+    const plain = stripAnsi(output);
+    expect(plain).toContain('not valid json');
+  });
+
+  it('flushes accumulator on session end', () => {
+    const panel = createTextPanel(0, 80, 10);
+    panel.appendEvent(0, toolStart('long_tool'), RAW_OPTS);
+    panel.appendEvent(0, toolInput('{"key":"value"}'), RAW_OPTS);
+
+    panel.sessionEnded(0, 'completed', false);
+
+    const output = panel.render();
+    const plain = stripAnsi(output);
+    expect(plain).toContain('long_tool');
+    expect(plain).toContain('key=value');
+    expect(plain).toContain('session 0 ended');
+  });
+
+  it('explicit flushToolAccumulator works', () => {
+    const panel = createTextPanel(0, 80, 10);
+    panel.appendEvent(0, toolStart('my_tool'), RAW_OPTS);
+    panel.appendEvent(0, toolInput('{"a":"1"}'), RAW_OPTS);
+
+    panel.flushToolAccumulator(0, false);
+
+    const output = panel.render();
+    const plain = stripAnsi(output);
+    expect(plain).toContain('a=1');
   });
 
   it('is suppressed when not in raw mode', () => {
@@ -279,19 +383,168 @@ describe('tool_use formatting', () => {
     expect(panel.lineCount).toBe(0);
   });
 
-  it('truncates long tool input', () => {
-    const panel = createTextPanel(0, 40, 10);
-    const longInput = '{"path":"/' + 'a'.repeat(200) + '"}';
-    panel.appendEvent(0, toolUse('tool', longInput), RAW_OPTS);
+  it('flushes previous accumulator when new tool starts', () => {
+    const panel = createTextPanel(0, 80, 10);
+    panel.appendEvent(0, toolStart('first_tool'), RAW_OPTS);
+    panel.appendEvent(0, toolInput('{"key":"val1"}'), RAW_OPTS);
+
+    // Starting a new tool flushes the previous one
+    panel.appendEvent(0, toolStart('second_tool'), RAW_OPTS);
+
+    const output = panel.render();
+    const plain = stripAnsi(output);
+    expect(plain).toContain('first_tool');
+    expect(plain).toContain('key=val1');
+    expect(plain).toContain('second_tool');
+    expect(plain).toContain('working...');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Thinking text extraction (Phase 5)
+// ---------------------------------------------------------------------------
+
+describe('extractThinkingText', () => {
+  it('extracts thinking text from valid thinking_delta', () => {
+    const data = JSON.stringify({
+      type: 'content_block_delta',
+      delta: { type: 'thinking_delta', thinking: 'Let me analyze this...' },
+    });
+    expect(extractThinkingText(data)).toBe('Let me analyze this...');
+  });
+
+  it('returns null for non-thinking delta', () => {
+    const data = JSON.stringify({
+      type: 'content_block_delta',
+      delta: { type: 'text_delta', text: 'hello' },
+    });
+    expect(extractThinkingText(data)).toBeNull();
+  });
+
+  it('returns null for non-JSON data', () => {
+    expect(extractThinkingText('not json')).toBeNull();
+  });
+
+  it('returns null for missing delta field', () => {
+    expect(extractThinkingText('{}')).toBeNull();
+  });
+
+  it('returns null for wrong delta type', () => {
+    const data = JSON.stringify({
+      delta: { type: 'other', text: 'hello' },
+    });
+    expect(extractThinkingText(data)).toBeNull();
+  });
+});
+
+describe('Thinking text rendering', () => {
+  it('renders thinking text with TEXT_THINKING color', () => {
+    const panel = createTextPanel(0, 80, 10);
+    panel.appendEvent(0, thinkingDelta('Let me think about this\n'), RAW_OPTS);
+
+    expect(panel.lineCount).toBe(1);
+
+    const output = panel.render();
+    expect(output).toContain(SGR.TEXT_THINKING);
+    const plain = stripAnsi(output);
+    expect(plain).toContain('Let me think about this');
+  });
+
+  it('accumulates thinking text across fragments', () => {
+    const panel = createTextPanel(0, 80, 10);
+    panel.appendEvent(0, thinkingDelta('First part '), RAW_OPTS);
+    panel.appendEvent(0, thinkingDelta('second part\n'), RAW_OPTS);
 
     expect(panel.lineCount).toBe(1);
 
     const output = panel.render();
     const plain = stripAnsi(output);
-    // Should contain the ellipsis
-    expect(plain).toContain('\u2026');
+    expect(plain).toContain('First part second part');
+  });
+
+  it('non-JSON content_block_delta falls through to raw handler', () => {
+    const panel = createTextPanel(0, 80, 10);
+    panel.appendEvent(0, rawEvent('content_block_delta', 'not json'), RAW_OPTS);
+
+    expect(panel.lineCount).toBe(1);
+
+    const output = panel.render();
+    const plain = stripAnsi(output);
+    expect(plain).toContain('[content_block_delta]');
+    expect(plain).toContain('not json');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Event filtering (Phase 5)
+// ---------------------------------------------------------------------------
+
+describe('Event filtering', () => {
+  it('suppresses content_block_stop in raw mode', () => {
+    const panel = createTextPanel(0, 80, 10);
+    panel.appendEvent(0, rawEvent('content_block_stop', '{}'), RAW_OPTS);
+
+    expect(panel.lineCount).toBe(0);
+  });
+
+  it('suppresses message_stop in raw mode', () => {
+    const panel = createTextPanel(0, 80, 10);
+    panel.appendEvent(0, rawEvent('message_stop', '{}'), RAW_OPTS);
+
+    expect(panel.lineCount).toBe(0);
+  });
+
+  it('suppresses ping in raw mode', () => {
+    const panel = createTextPanel(0, 80, 10);
+    panel.appendEvent(0, rawEvent('ping', '{}'), RAW_OPTS);
+
+    expect(panel.lineCount).toBe(0);
+  });
+
+  it('suppresses signature_delta in raw mode', () => {
+    const panel = createTextPanel(0, 80, 10);
+    panel.appendEvent(0, rawEvent('signature_delta', '{}'), RAW_OPTS);
+
+    expect(panel.lineCount).toBe(0);
+  });
+
+  it('shows suppressed events in debug mode', () => {
+    const panel = createTextPanel(0, 80, 10);
+    panel.appendEvent(0, rawEvent('content_block_stop', '{}'), DEBUG_OPTS);
+
+    expect(panel.lineCount).toBe(1);
+
+    const output = panel.render();
+    const plain = stripAnsi(output);
+    expect(plain).toContain('[content_block_stop]');
+  });
+
+  it('shows ping in debug mode', () => {
+    const panel = createTextPanel(0, 80, 10);
+    panel.appendEvent(0, rawEvent('ping', '{}'), DEBUG_OPTS);
+
+    expect(panel.lineCount).toBe(1);
+  });
+
+  it('SUPPRESSED_RAW_EVENTS contains expected event types', () => {
+    expect(SUPPRESSED_RAW_EVENTS.has('content_block_stop')).toBe(true);
+    expect(SUPPRESSED_RAW_EVENTS.has('message_stop')).toBe(true);
+    expect(SUPPRESSED_RAW_EVENTS.has('ping')).toBe(true);
+    expect(SUPPRESSED_RAW_EVENTS.has('signature_delta')).toBe(true);
+    expect(SUPPRESSED_RAW_EVENTS.size).toBe(4);
+  });
+
+  it('does not suppress unknown raw event types', () => {
+    const panel = createTextPanel(0, 80, 10);
+    panel.appendEvent(0, rawEvent('content_block_start', '{"type":"text"}'), RAW_OPTS);
+
+    expect(panel.lineCount).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// message_start formatting
+// ---------------------------------------------------------------------------
 
 describe('message_start formatting', () => {
   it('shows model name as separator in raw mode', () => {
@@ -315,6 +568,10 @@ describe('message_start formatting', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// message_end formatting
+// ---------------------------------------------------------------------------
+
 describe('message_end formatting', () => {
   it('shows stop reason and token counts in raw mode', () => {
     const panel = createTextPanel(0, 80, 10);
@@ -335,6 +592,10 @@ describe('message_end formatting', () => {
     expect(panel.lineCount).toBe(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Error formatting
+// ---------------------------------------------------------------------------
 
 describe('error formatting', () => {
   it('shows error in red', () => {
@@ -357,6 +618,10 @@ describe('error formatting', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Raw event formatting
+// ---------------------------------------------------------------------------
+
 describe('raw event formatting', () => {
   it('shows event type and data in dim text when raw', () => {
     const panel = createTextPanel(0, 80, 10);
@@ -373,7 +638,7 @@ describe('raw event formatting', () => {
 
   it('is suppressed when not in raw mode', () => {
     const panel = createTextPanel(0, 80, 10);
-    panel.appendEvent(0, rawEvent('ping', ''), DEFAULT_OPTS);
+    panel.appendEvent(0, rawEvent('content_block_start', ''), DEFAULT_OPTS);
 
     expect(panel.lineCount).toBe(0);
   });
@@ -425,7 +690,7 @@ describe('Session label prefixing', () => {
 
   it('prefixes tool_use with label in raw+label mode', () => {
     const panel = createTextPanel(0, 80, 10);
-    panel.appendEvent(3, toolUse('my_tool', '{}'), RAW_LABEL_OPTS);
+    panel.appendEvent(3, toolStart('my_tool'), RAW_LABEL_OPTS);
 
     const output = panel.render();
     const plain = stripAnsi(output);
@@ -564,6 +829,20 @@ describe('sessionEnded', () => {
     // Only the finalized line + end marker, no spurious empty line
     expect(panel.lineCount).toBe(2);
   });
+
+  it('flushes tool accumulator on session end', () => {
+    const panel = createTextPanel(0, 80, 10);
+    panel.appendEvent(0, toolStart('pending_tool'), RAW_OPTS);
+    panel.appendEvent(0, toolInput('{"status":"running"}'), RAW_OPTS);
+
+    panel.sessionEnded(0, 'done', false);
+
+    const output = panel.render();
+    const plain = stripAnsi(output);
+    expect(plain).toContain('pending_tool');
+    expect(plain).toContain('status=running');
+    expect(plain).toContain('session 0 ended');
+  });
 });
 
 describe('connectionLost', () => {
@@ -670,5 +949,84 @@ describe('resize', () => {
     // Should only show last 5 lines
     expect(plain).toContain('line 14');
     expect(plain).toContain('line 10');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// tool_result rendering
+// ---------------------------------------------------------------------------
+
+function toolResult(content: string, isError = false): TokenStreamEvent {
+  return {
+    kind: 'tool_result',
+    toolUseId: 'tu_test',
+    toolName: '',
+    content,
+    isError,
+    timestamp: Date.now(),
+  };
+}
+
+describe('tool_result rendering', () => {
+  it('renders tool_result in non-raw mode', () => {
+    const panel = createTextPanel(0, 80, 20);
+    panel.appendEvent(0, toolResult('File contents here'), DEFAULT_OPTS);
+
+    const output = panel.render();
+    const plain = stripAnsi(output);
+    expect(plain).toContain('[tool_result]');
+    expect(plain).toContain('File contents here');
+  });
+
+  it('renders tool_result in raw mode', () => {
+    const panel = createTextPanel(0, 80, 20);
+    panel.appendEvent(0, toolResult('Some output'), RAW_OPTS);
+
+    const output = panel.render();
+    const plain = stripAnsi(output);
+    expect(plain).toContain('[tool_result]');
+    expect(plain).toContain('Some output');
+  });
+
+  it('renders error tool_result with error icon', () => {
+    const panel = createTextPanel(0, 80, 20);
+    panel.appendEvent(0, toolResult('Command failed', true), DEFAULT_OPTS);
+
+    const output = panel.render();
+    const plain = stripAnsi(output);
+    expect(plain).toContain('[tool_result]');
+    expect(plain).toContain('Command failed');
+    // Error results use the X icon
+    expect(plain).toContain('\u2717');
+  });
+
+  it('renders non-error tool_result with left-arrow icon', () => {
+    const panel = createTextPanel(0, 80, 20);
+    panel.appendEvent(0, toolResult('Success output'), DEFAULT_OPTS);
+
+    const output = panel.render();
+    const plain = stripAnsi(output);
+    // Non-error results use the left-pointing triangle
+    expect(plain).toContain('\u25C1');
+  });
+
+  it('shows only first line of multi-line content', () => {
+    const panel = createTextPanel(0, 80, 20);
+    panel.appendEvent(0, toolResult('First line\nSecond line\nThird line'), DEFAULT_OPTS);
+
+    const output = panel.render();
+    const plain = stripAnsi(output);
+    expect(plain).toContain('First line');
+    expect(plain).not.toContain('Second line');
+  });
+
+  it('renders with session label when showLabel is true', () => {
+    const panel = createTextPanel(0, 80, 20);
+    panel.appendEvent(2, toolResult('Output'), { ...DEFAULT_OPTS, showLabel: true });
+
+    const output = panel.render();
+    const plain = stripAnsi(output);
+    expect(plain).toContain('[2]');
+    expect(plain).toContain('[tool_result]');
   });
 });

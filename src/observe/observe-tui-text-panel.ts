@@ -5,6 +5,10 @@
  * per-session text_delta accumulation with word wrapping, and
  * renders the visible viewport for the right-hand panel.
  *
+ * Supports tool input accumulation (rendering compact summaries
+ * instead of raw JSON fragments), thinking text extraction from
+ * raw SSE events, and filtering of zero-value protocol events.
+ *
  * Depends on observe-tui-types.ts, mux-renderer.ts (truncate), and Node built-ins.
  */
 
@@ -13,7 +17,9 @@ import { truncate } from '../mux/mux-renderer.js';
 import {
   type PanelLine,
   type SessionPartialLine,
+  type ToolAccumulator,
   SGR,
+  SUPPRESSED_RAW_EVENTS,
   TEXT_BUFFER_CAPACITY,
   sessionColor,
   visibleLength,
@@ -29,6 +35,8 @@ export interface TextPanelOptions {
   readonly raw: boolean;
   /** Prefix lines with session labels (multi-session mode). */
   readonly showLabel: boolean;
+  /** Show absolutely all events including protocol noise. Implies raw. */
+  readonly debug: boolean;
 }
 
 /** Public interface for the text panel. */
@@ -43,6 +51,8 @@ export interface TextPanel {
   sessionEnded(label: number, reason: string, showLabel: boolean): void;
   /** Add a connection-lost error marker. */
   connectionLost(reason: string): void;
+  /** Flush any pending tool accumulator for the given session. */
+  flushToolAccumulator(label: number, showLabel: boolean): void;
   /** Total lines in the buffer (for status bar). */
   readonly lineCount: number;
 }
@@ -73,7 +83,7 @@ function makeLine(ansi: string): PanelLine {
   return { ansi, plainLen: visibleLength(ansi) };
 }
 
-/** Build a centered separator like "──── model ────" with optional label prefix. */
+/** Build a centered separator like "---- model ----" with optional label prefix. */
 function buildCenteredSeparator(prefix: string, inner: string, textCols: number, prefixWidth: number): PanelLine {
   const dashCount = Math.max(0, textCols - prefixWidth - inner.length);
   const leftDashes = Math.floor(dashCount / 2);
@@ -119,12 +129,18 @@ function wordWrap(text: string, width: number): string[] {
 }
 
 /**
- * Wrap a finalized line with optional label prefix.
+ * Wrap a finalized line with optional label prefix and configurable color.
  *
  * The first visual line gets the label prefix.
  * Continuation lines are indented by the label width but have no prefix.
  */
-function wrapFinalizedLine(text: string, textCols: number, showLabel: boolean, label: number): PanelLine[] {
+function wrapFinalizedLine(
+  text: string,
+  textCols: number,
+  showLabel: boolean,
+  label: number,
+  color: string = SGR.TEXT_NORMAL,
+): PanelLine[] {
   const { prefix, prefixWidth } = labelInfo(label, showLabel);
   const contentWidth = textCols - prefixWidth;
 
@@ -138,16 +154,103 @@ function wrapFinalizedLine(text: string, textCols: number, showLabel: boolean, l
 
   for (let i = 0; i < wrappedPlain.length; i++) {
     if (i === 0) {
-      const ansi = `${prefix}${SGR.TEXT_NORMAL}${wrappedPlain[i]}${SGR.RESET}`;
+      const ansi = `${prefix}${color}${wrappedPlain[i]}${SGR.RESET}`;
       result.push(makeLine(ansi));
     } else {
       // Continuation line: indent by label width, no prefix
       const indent = ' '.repeat(prefixWidth);
-      const ansi = `${indent}${SGR.TEXT_NORMAL}${wrappedPlain[i]}${SGR.RESET}`;
+      const ansi = `${indent}${color}${wrappedPlain[i]}${SGR.RESET}`;
       result.push(makeLine(ansi));
     }
   }
   return result;
+}
+
+// ---------------------------------------------------------------------------
+// Thinking text extraction
+// ---------------------------------------------------------------------------
+
+/**
+ * Extract thinking text from a content_block_delta raw event.
+ * Returns the thinking string, or null if the event is not a thinking delta.
+ */
+export function extractThinkingText(data: string): string | null {
+  try {
+    const parsed = JSON.parse(data) as Record<string, unknown>;
+    const delta = parsed['delta'] as Record<string, unknown> | undefined;
+    if (delta && delta['type'] === 'thinking_delta' && typeof delta['thinking'] === 'string') {
+      return delta['thinking'];
+    }
+  } catch {
+    // Not JSON or wrong shape -- not a thinking delta
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Tool accumulator flush rendering
+// ---------------------------------------------------------------------------
+
+/** Maximum value length in compact key=value rendering. */
+const MAX_KV_VALUE_LEN = 40;
+
+/**
+ * Render a compact key=value summary for a tool's parsed input JSON.
+ * Each key-value pair is formatted as key=value, joined with " | ".
+ */
+function renderCompactToolInput(
+  toolName: string,
+  input: Record<string, unknown>,
+  textCols: number,
+  prefixWidth: number,
+): PanelLine[] {
+  const pairs: string[] = [];
+  for (const [key, value] of Object.entries(input)) {
+    const valStr = typeof value === 'string' ? value : JSON.stringify(value);
+    const truncVal = truncate(valStr, MAX_KV_VALUE_LEN);
+    pairs.push(`${key}=${truncVal}`);
+  }
+  const summary = pairs.join(' | ');
+  const headerText = `\u25B8 ${toolName}`;
+  const available = textCols - prefixWidth - visibleLength(headerText) - 2;
+  const truncSummary = available > 0 ? '  ' + truncate(summary, available) : '';
+  return [makeLine(headerText + truncSummary)];
+}
+
+/**
+ * Render execute_code tool input as a multi-line code block.
+ * Extracts the "code" field from the parsed JSON.
+ */
+function renderExecuteCodeInput(
+  input: Record<string, unknown>,
+  textCols: number,
+  label: number,
+  showLabel: boolean,
+): PanelLine[] {
+  const { prefix, prefixWidth } = labelInfo(label, showLabel);
+  const lines: PanelLine[] = [];
+
+  // Header line
+  const headerAnsi = `${prefix}${SGR.TEXT_TOOL}\u25B8 execute_code${SGR.RESET}`;
+  lines.push(makeLine(headerAnsi));
+
+  // Extract code field
+  const code = typeof input['code'] === 'string' ? input['code'] : null;
+  if (!code) return lines;
+
+  const contentWidth = textCols - prefixWidth - 2; // 2-space indent
+  if (contentWidth <= 0) return lines;
+
+  const codeLines = code.split('\n');
+  for (const codeLine of codeLines) {
+    const wrapped = wordWrap(codeLine, contentWidth);
+    for (const wl of wrapped) {
+      const indent = ' '.repeat(prefixWidth) + '  ';
+      const ansi = `${indent}${SGR.TEXT_TOOL_DIM}${wl}${SGR.RESET}`;
+      lines.push(makeLine(ansi));
+    }
+  }
+  return lines;
 }
 
 // ---------------------------------------------------------------------------
@@ -212,31 +315,42 @@ export function createTextPanel(startCol: number, textCols: number, textRows: nu
 
   const lines = new LineRingBuffer(TEXT_BUFFER_CAPACITY);
   const partials = new Map<number, SessionPartialLine>();
+  const thinkingPartials = new Map<number, SessionPartialLine>();
+  const toolAccumulators = new Map<number, ToolAccumulator>();
 
   // ------------------------------------------------------------------
   // Partial line management
   // ------------------------------------------------------------------
 
-  function getOrCreatePartial(label: number, showLabel: boolean): SessionPartialLine {
-    let partial = partials.get(label);
+  function getOrCreatePartial(
+    map: Map<number, SessionPartialLine>,
+    label: number,
+    showLabel: boolean,
+  ): SessionPartialLine {
+    let partial = map.get(label);
     if (!partial) {
       partial = {
         buffer: '',
         prefix: showLabel ? buildLabelPrefix(label) : '',
       };
-      partials.set(label, partial);
+      map.set(label, partial);
     }
     return partial;
   }
 
-  function finalizePartial(label: number, showLabel: boolean): void {
-    const partial = partials.get(label);
+  function finalizePartial(
+    map: Map<number, SessionPartialLine>,
+    label: number,
+    showLabel: boolean,
+    color: string = SGR.TEXT_NORMAL,
+  ): void {
+    const partial = map.get(label);
     if (!partial || partial.buffer.length === 0) {
-      partials.delete(label);
+      map.delete(label);
       return;
     }
 
-    const wrapped = wrapFinalizedLine(partial.buffer, _textCols, showLabel, label);
+    const wrapped = wrapFinalizedLine(partial.buffer, _textCols, showLabel, label, color);
     for (const line of wrapped) {
       lines.push(line);
     }
@@ -245,11 +359,72 @@ export function createTextPanel(startCol: number, textCols: number, textRows: nu
   }
 
   // ------------------------------------------------------------------
+  // Tool accumulator management
+  // ------------------------------------------------------------------
+
+  function doFlushToolAccumulator(label: number, showLabel: boolean): void {
+    const acc = toolAccumulators.get(label);
+    if (!acc) return;
+    toolAccumulators.delete(label);
+
+    if (!acc.hasInput) return;
+
+    const { prefix, prefixWidth } = labelInfo(label, showLabel);
+
+    let parsed: Record<string, unknown> | null = null;
+    try {
+      parsed = JSON.parse(acc.inputBuffer) as Record<string, unknown>;
+    } catch {
+      // JSON parse failure: show raw truncated
+    }
+
+    if (parsed && acc.toolName === 'execute_code') {
+      const codeLines = renderExecuteCodeInput(parsed, _textCols, label, showLabel);
+      // Replace the "working..." line: we already pushed a header, now add code
+      for (const line of codeLines) {
+        lines.push(line);
+      }
+      return;
+    }
+
+    if (parsed) {
+      const compactLines = renderCompactToolInput(acc.toolName, parsed, _textCols, prefixWidth);
+      for (const cl of compactLines) {
+        const ansi = `${prefix}${SGR.TEXT_TOOL}${cl.ansi}${SGR.RESET}`;
+        lines.push(makeLine(ansi));
+      }
+      return;
+    }
+
+    // Fallback: raw accumulated string
+    const available = _textCols - prefixWidth;
+    const truncStr = available > 0 ? truncate(acc.inputBuffer, available) : '';
+    const ansi = `${prefix}${SGR.TEXT_TOOL_DIM}${truncStr}${SGR.RESET}`;
+    lines.push(makeLine(ansi));
+  }
+
+  // ------------------------------------------------------------------
   // Event handlers
   // ------------------------------------------------------------------
 
-  function handleTextDelta(label: number, text: string, showLabel: boolean): void {
-    const partial = getOrCreatePartial(label, showLabel);
+  /**
+   * Shared handler for streaming text deltas (both regular text and thinking).
+   * Flushes the alternate partial map, appends to the primary, and word-wraps
+   * completed lines.
+   */
+  function handleStreamDelta(
+    label: number,
+    text: string,
+    showLabel: boolean,
+    primaryMap: Map<number, SessionPartialLine>,
+    alternateMap: Map<number, SessionPartialLine>,
+    color?: string,
+  ): void {
+    // Flush the alternate partial for this session (clean boundary)
+    const altColor = alternateMap === thinkingPartials ? SGR.TEXT_THINKING : SGR.TEXT_NORMAL;
+    finalizePartial(alternateMap, label, showLabel, altColor);
+
+    const partial = getOrCreatePartial(primaryMap, label, showLabel);
     const segments = text.split('\n');
 
     // Append first segment to current partial
@@ -257,30 +432,49 @@ export function createTextPanel(startCol: number, textCols: number, textRows: nu
 
     if (segments.length > 1) {
       // Finalize current partial line
-      finalizePartial(label, showLabel);
+      finalizePartial(primaryMap, label, showLabel, color);
 
       // Push middle segments as complete lines
       for (let i = 1; i < segments.length - 1; i++) {
-        const wrapped = wrapFinalizedLine(segments[i], _textCols, showLabel, label);
+        const wrapped = wrapFinalizedLine(segments[i], _textCols, showLabel, label, color);
         for (const line of wrapped) {
           lines.push(line);
         }
       }
 
       // Last segment becomes new partial
-      const newPartial = getOrCreatePartial(label, showLabel);
+      const newPartial = getOrCreatePartial(primaryMap, label, showLabel);
       newPartial.buffer = segments[segments.length - 1];
     }
   }
 
-  function handleToolUse(label: number, toolName: string, inputDelta: string, showLabel: boolean): void {
-    const { prefix, prefixWidth } = labelInfo(label, showLabel);
-    const headerText = `\u25B8 ${toolName}`;
-    const availableForInput = _textCols - prefixWidth - visibleLength(headerText) - 1;
-    const truncatedInput = availableForInput > 0 ? ' ' + truncate(inputDelta, availableForInput) : '';
+  function handleTextDelta(label: number, text: string, showLabel: boolean): void {
+    handleStreamDelta(label, text, showLabel, partials, thinkingPartials);
+  }
 
-    const ansi = `${prefix}${SGR.TEXT_TOOL}${headerText}${SGR.TEXT_TOOL_DIM}${truncatedInput}${SGR.RESET}`;
-    lines.push(makeLine(ansi));
+  function handleToolUse(label: number, toolName: string, inputDelta: string, showLabel: boolean): void {
+    let acc = toolAccumulators.get(label);
+
+    if (toolName !== '') {
+      // content_block_start: new tool invocation. Flush any previous accumulator.
+      doFlushToolAccumulator(label, showLabel);
+
+      acc = { toolName, inputBuffer: '', hasInput: false };
+      toolAccumulators.set(label, acc);
+
+      // Show a "working..." indicator line
+      const { prefix } = labelInfo(label, showLabel);
+      const ansi = `${prefix}${SGR.TEXT_TOOL}\u25B8 ${toolName}${SGR.TEXT_DIM} working...${SGR.RESET}`;
+      lines.push(makeLine(ansi));
+    } else if (acc) {
+      // input_json_delta: accumulate
+      acc.inputBuffer += inputDelta;
+      acc.hasInput = true;
+    }
+  }
+
+  function handleThinkingDelta(label: number, text: string, showLabel: boolean): void {
+    handleStreamDelta(label, text, showLabel, thinkingPartials, partials, SGR.TEXT_THINKING);
   }
 
   function handleMessageStart(label: number, model: string, showLabel: boolean): void {
@@ -307,6 +501,19 @@ export function createTextPanel(startCol: number, textCols: number, textRows: nu
     lines.push(makeLine(ansi));
   }
 
+  function handleToolResult(label: number, content: string, isError: boolean, showLabel: boolean): void {
+    const { prefix, prefixWidth } = labelInfo(label, showLabel);
+    const color = isError ? SGR.TEXT_ERROR : SGR.TEXT_META;
+    const icon = isError ? '\u2717' : '\u25C1';
+    const headerText = `${icon} [tool_result] `;
+    const available = _textCols - prefixWidth - headerText.length;
+    // Show first line of content, truncated
+    const firstLine = content.split('\n')[0];
+    const truncContent = available > 0 ? truncate(firstLine, available) : '';
+    const ansi = `${prefix}${color}${headerText}${truncContent}${SGR.RESET}`;
+    lines.push(makeLine(ansi));
+  }
+
   function handleRaw(label: number, eventType: string, data: string, showLabel: boolean): void {
     const { prefix, prefixWidth } = labelInfo(label, showLabel);
     const headerText = `[${eventType}] `;
@@ -321,7 +528,7 @@ export function createTextPanel(startCol: number, textCols: number, textRows: nu
   // Rendering
   // ------------------------------------------------------------------
 
-  function renderPartialLine(partial: SessionPartialLine): PanelLine | null {
+  function renderPartialLine(partial: SessionPartialLine, color: string = SGR.TEXT_NORMAL): PanelLine | null {
     if (partial.buffer.length === 0) return null;
 
     const prefixWidth = visibleLength(partial.prefix);
@@ -329,7 +536,7 @@ export function createTextPanel(startCol: number, textCols: number, textRows: nu
 
     // Truncate display (buffer retains full text for eventual finalization)
     const displayText = contentWidth > 0 ? truncate(partial.buffer, contentWidth) : '';
-    const ansi = `${partial.prefix}${SGR.TEXT_NORMAL}${displayText}${SGR.RESET}`;
+    const ansi = `${partial.prefix}${color}${displayText}${SGR.RESET}`;
     return makeLine(ansi);
   }
 
@@ -343,6 +550,11 @@ export function createTextPanel(startCol: number, textCols: number, textRows: nu
     },
 
     appendEvent(label: number, event: TokenStreamEvent, options: TextPanelOptions): void {
+      // Flush tool accumulator before non-tool events
+      if (event.kind !== 'tool_use') {
+        doFlushToolAccumulator(label, options.showLabel);
+      }
+
       switch (event.kind) {
         case 'text_delta':
           handleTextDelta(label, event.text, options.showLabel);
@@ -367,10 +579,31 @@ export function createTextPanel(startCol: number, textCols: number, textRows: nu
           handleError(label, event.message, options.showLabel);
           break;
 
-        case 'raw':
+        case 'tool_result':
+          // Show tool results in both raw and non-raw mode (informative)
+          handleToolResult(label, event.content, event.isError, options.showLabel);
+          break;
+
+        case 'raw': {
           if (!options.raw) return;
+
+          // Extract thinking text from content_block_delta events
+          if (event.eventType === 'content_block_delta') {
+            const thinkingText = extractThinkingText(event.data);
+            if (thinkingText !== null) {
+              handleThinkingDelta(label, thinkingText, options.showLabel);
+              return;
+            }
+          }
+
+          // Filter zero-value protocol events (unless in debug mode)
+          if (!options.debug && SUPPRESSED_RAW_EVENTS.has(event.eventType)) {
+            return;
+          }
+
           handleRaw(label, event.eventType, event.data, options.showLabel);
           break;
+        }
       }
     },
 
@@ -381,6 +614,10 @@ export function createTextPanel(startCol: number, textCols: number, textRows: nu
       const activePartials: PanelLine[] = [];
       for (const partial of partials.values()) {
         const rendered = renderPartialLine(partial);
+        if (rendered) activePartials.push(rendered);
+      }
+      for (const partial of thinkingPartials.values()) {
+        const rendered = renderPartialLine(partial, SGR.TEXT_THINKING);
         if (rendered) activePartials.push(rendered);
       }
 
@@ -414,17 +651,19 @@ export function createTextPanel(startCol: number, textCols: number, textRows: nu
       _startCol = startCol;
       _textCols = cols;
       _textRows = rows;
-      // Note: We do not re-wrap existing lines on resize.
-      // The ring buffer stores pre-formatted lines. Re-wrapping would require
-      // storing the original plain text alongside each line, adding complexity.
-      // New lines will use the updated width.
     },
 
     sessionEnded(label: number, reason: string, showLabel: boolean): void {
       // Flush any pending partial line for this session before the end marker.
       const partial = partials.get(label);
       const hasLabel = partial !== undefined && partial.prefix.length > 0;
-      finalizePartial(label, hasLabel);
+      finalizePartial(partials, label, hasLabel);
+
+      // Flush thinking partials too
+      finalizePartial(thinkingPartials, label, hasLabel, SGR.TEXT_THINKING);
+
+      // Flush any pending tool accumulator
+      doFlushToolAccumulator(label, showLabel);
 
       const { prefix, prefixWidth } = labelInfo(label, showLabel);
       lines.push(buildCenteredSeparator(prefix, ` session ${label} ended: ${reason} `, _textCols, prefixWidth));
@@ -433,6 +672,10 @@ export function createTextPanel(startCol: number, textCols: number, textRows: nu
     connectionLost(reason: string): void {
       const ansi = `${SGR.TEXT_ERROR}\u2717 connection lost: ${reason}${SGR.RESET}`;
       lines.push(makeLine(ansi));
+    },
+
+    flushToolAccumulator(label: number, showLabel: boolean): void {
+      doFlushToolAccumulator(label, showLabel);
     },
   };
 }

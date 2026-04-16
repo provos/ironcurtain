@@ -48,6 +48,14 @@ export type TokenStreamEvent =
       readonly timestamp: number;
     }
   | {
+      readonly kind: 'tool_result';
+      readonly toolUseId: string;
+      readonly toolName: string;
+      readonly content: string;
+      readonly isError: boolean;
+      readonly timestamp: number;
+    }
+  | {
       readonly kind: 'raw';
       readonly eventType: string;
       readonly data: string;

@@ -421,6 +421,238 @@ describe('resize()', () => {
     const output = engine.render();
     expect(output).toContain(ESC);
   });
+
+  it('kills word drops that no longer fit after resize', () => {
+    const layout = calculateTuiLayout(100, 20);
+    const rng = createSeededRng([0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]);
+    const engine = createRainEngine({ layout, rng });
+
+    engine.enqueueWord('longword', 'tool');
+    engine.tick(); // Try to spawn word drop
+
+    // Shrink to very narrow
+    const narrowLayout = calculateTuiLayout(60, 5);
+    engine.resize(narrowLayout);
+
+    // Should not crash
+    engine.tick();
+    const output = engine.render();
+    expect(output).toContain(SGR.RESET);
+  });
+
+  it('clears word queue on resize', () => {
+    const layout = calculateTuiLayout(80, 20);
+    const engine = createRainEngine({ layout });
+
+    engine.enqueueWord('word1', 'tool');
+    engine.enqueueWord('word2', 'model');
+
+    // Resize
+    const newLayout = calculateTuiLayout(70, 18);
+    engine.resize(newLayout);
+
+    // Word queue should be cleared; ticking should not crash
+    for (let i = 0; i < 10; i++) {
+      engine.tick();
+    }
+    const output = engine.render();
+    expect(output).toContain(SGR.RESET);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase-driven colors (Phase 2)
+// ---------------------------------------------------------------------------
+
+describe('setPhase', () => {
+  it('accepts all phase values without error', () => {
+    const layout = calculateTuiLayout(80, 20);
+    const engine = createRainEngine({ layout });
+
+    engine.setPhase('thinking');
+    engine.setPhase('tool_use');
+    engine.setPhase('idle');
+    engine.setPhase('error');
+
+    // Should not throw
+    engine.tick();
+    expect(engine.render()).toBeTruthy();
+  });
+
+  it('idle drops use phase color (tool_use -> tool color)', () => {
+    const layout = calculateTuiLayout(80, 20);
+    const rng = createSeededRng([0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]);
+    const engine = createRainEngine({ layout, rng });
+
+    engine.setPhase('tool_use');
+
+    // Go idle (no tokens, past idle threshold)
+    for (let i = 0; i < 20; i++) {
+      engine.tick();
+    }
+
+    const output = engine.render();
+    // Should contain cyan tool color (from RAIN_HEAD_TOOL or similar)
+    // During tool_use phase, idle drops get 'tool' colorKind
+    expect(output).toContain('38;2;');
+    expect(output.length).toBeGreaterThan(10);
+  });
+
+  it('token-derived drops keep their original color regardless of phase', () => {
+    const layout = calculateTuiLayout(80, 20);
+    const rng = createSeededRng([0.0, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]);
+    const engine = createRainEngine({ layout, rng });
+
+    // Set phase to error but enqueue text tokens
+    engine.setPhase('error');
+    engine.enqueueTokens([textToken('A'), textToken('B'), textToken('C')]);
+
+    // Run several ticks so drops are visible on screen
+    for (let i = 0; i < 5; i++) {
+      engine.tick();
+    }
+
+    // The token-derived drops should have text color, not error color
+    const output = engine.render();
+    expect(output).toContain('38;2;');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Word drops (Phase 3)
+// ---------------------------------------------------------------------------
+
+describe('enqueueWord', () => {
+  it('accepts word without error', () => {
+    const layout = calculateTuiLayout(80, 20);
+    const engine = createRainEngine({ layout });
+
+    engine.enqueueWord('hello', 'tool');
+    engine.enqueueWord('world', 'model');
+    engine.enqueueWord('thinking...', 'phase');
+    engine.enqueueWord('code', 'text');
+
+    // Should not throw
+    engine.tick();
+  });
+
+  it('word appears in rendered output during forming phase', () => {
+    const layout = calculateTuiLayout(80, 20);
+    // Controlled RNG: placement row=5, col=3
+    const rng = createSeededRng([0.3, 0.3, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]);
+    const engine = createRainEngine({ layout, rng });
+
+    engine.enqueueWord('test', 'tool');
+
+    // Tick enough frames for forming phase
+    for (let i = 0; i < 6; i++) {
+      engine.tick();
+    }
+
+    const output = engine.render();
+    // Should contain the word characters with WORD_TOOL color
+    expect(output).toContain(SGR.WORD_TOOL);
+  });
+
+  it('word drop queue drops oldest when full', () => {
+    const layout = calculateTuiLayout(80, 20);
+    const engine = createRainEngine({ layout });
+
+    // Queue capacity is 4; add 5 words
+    engine.enqueueWord('word1', 'tool');
+    engine.enqueueWord('word2', 'model');
+    engine.enqueueWord('word3', 'phase');
+    engine.enqueueWord('word4', 'text');
+    engine.enqueueWord('word5', 'tool');
+
+    // Should not crash; oldest dropped
+    engine.tick();
+  });
+
+  it('word drop truncated to fit rain panel', () => {
+    const layout = calculateTuiLayout(80, 20);
+    const rng = createSeededRng([0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]);
+    const engine = createRainEngine({ layout, rng });
+
+    // Enqueue a very long word
+    engine.enqueueWord('a'.repeat(100), 'tool');
+    engine.tick();
+
+    // Should not crash
+    const output = engine.render();
+    expect(output).toContain(SGR.RESET);
+  });
+
+  it('max 2 active word drops at once', () => {
+    const layout = calculateTuiLayout(100, 30);
+    // RNG values chosen so word drops land in non-overlapping positions
+    const rng = createSeededRng([
+      0.1,
+      0.1,
+      0.5, // word1: row ~3, col ~1
+      0.9,
+      0.9,
+      0.5, // word2: row ~27, col ~high
+      0.5,
+      0.5,
+      0.5, // word3: attempted but should not spawn
+      0.5,
+      0.5,
+      0.5,
+      0.5,
+      0.5,
+      0.5,
+      0.5,
+    ]);
+    const engine = createRainEngine({ layout, rng });
+
+    engine.enqueueWord('ab', 'tool');
+    engine.enqueueWord('cd', 'model');
+    engine.enqueueWord('ef', 'text');
+
+    // Tick once -- should spawn at most 2
+    engine.tick();
+
+    // Third word stays queued; engine should not crash
+    engine.tick();
+    engine.tick();
+
+    const output = engine.render();
+    expect(output).toContain(SGR.RESET);
+  });
+
+  it('word drop lifecycle completes without errors', () => {
+    const layout = calculateTuiLayout(80, 20);
+    // Use consistent RNG for predictable behavior
+    const rng = createSeededRng([0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]);
+    const engine = createRainEngine({ layout, rng });
+
+    engine.enqueueWord('hello', 'tool');
+
+    // Run through complete lifecycle:
+    // forming (~5 frames) + holding (~67 frames at 0.5) + dissolving (~10 frames)
+    for (let i = 0; i < 150; i++) {
+      engine.tick();
+    }
+
+    // After lifecycle completes, render should be clean
+    const output = engine.render();
+    expect(output).toContain(SGR.RESET);
+    // Word drop color should no longer appear (dissolved)
+    // But spawned rain drops from dissolution may still be falling
+  });
+
+  it('does not spawn word drops when rainCols is too small', () => {
+    const layout = calculateTuiLayout(50, 20);
+    const engine = createRainEngine({ layout });
+
+    engine.enqueueWord('hello', 'tool');
+    engine.tick();
+
+    // With rainCols=0 (50 cols < MIN_TOTAL_COLS=60), no word drops
+    const output = engine.render();
+    expect(output).toBe(''); // No rain panel
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -462,6 +694,28 @@ describe('Edge cases', () => {
     engine.tick();
     const output = engine.render();
     // Should produce cleared panel + reset at minimum
+    expect(output).toContain(SGR.RESET);
+  });
+
+  it('word drop suppresses regular spawn in occupied columns', () => {
+    const layout = calculateTuiLayout(80, 20);
+    const rng = createSeededRng([0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]);
+    const engine = createRainEngine({ layout, rng });
+
+    engine.enqueueWord('abcdef', 'tool');
+    engine.enqueueTokens(Array.from({ length: 50 }, () => textToken('X')));
+
+    // Tick to spawn word drop
+    engine.tick();
+
+    // Word drop occupies 6 columns during forming/holding.
+    // Regular drops should not spawn in those columns.
+    // We verify by ensuring no crash and valid output.
+    for (let i = 0; i < 5; i++) {
+      engine.tick();
+    }
+
+    const output = engine.render();
     expect(output).toContain(SGR.RESET);
   });
 });

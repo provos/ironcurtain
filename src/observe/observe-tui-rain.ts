@@ -5,15 +5,22 @@
  * Each drop carries characters from LLM token events (text, tool, error)
  * or random katakana when idle, rendered with per-kind color gradients.
  *
+ * Supports word drops (words that materialize horizontally, hold, then
+ * dissolve back into falling rain) and phase-driven ambient color
+ * transitions that shift the visual atmosphere based on agent state.
+ *
  * Adapted from mux-splash.ts drop mechanics but uses continuous
  * free-falling drops instead of target-locking drops.
  */
 
 import {
+  type AgentPhase,
   type RainToken,
   type RainDrop,
   type RainColorKind,
   type TuiLayout,
+  type WordDrop,
+  type WordDropSource,
   SGR,
   RAIN_QUEUE_CAPACITY,
   getRainChars,
@@ -32,6 +39,36 @@ const MAX_SPEED = 3;
 /** Frames with no tokens before transitioning to idle mode. */
 const IDLE_THRESHOLD_FRAMES = 15;
 
+/** Maximum number of simultaneously active word drops. */
+const MAX_ACTIVE_WORD_DROPS = 2;
+
+/** Maximum pending word queue size. */
+const MAX_WORD_QUEUE = 4;
+
+/** Minimum hold duration for word drops (in frames, ~3 seconds at 15fps). */
+const MIN_HOLD_FRAMES = 45;
+
+/** Maximum hold duration for word drops (in frames, ~6 seconds at 15fps). */
+const MAX_HOLD_FRAMES = 90;
+
+/** Minimum forming duration for word drops (frames). */
+const MIN_FORMING_FRAMES = 5;
+
+/** Maximum forming duration for word drops (frames). */
+const MAX_FORMING_FRAMES = 10;
+
+/** Minimum dissolving duration for word drops (frames). */
+const MIN_DISSOLVING_FRAMES = 10;
+
+/** Maximum dissolving duration for word drops (frames). */
+const MAX_DISSOLVING_FRAMES = 15;
+
+/** Vertical gap rows to keep between word drops for overlap checking. */
+const WORD_DROP_VERTICAL_GAP = 2;
+
+/** Max placement attempts before re-queuing a word. */
+const MAX_PLACEMENT_ATTEMPTS = 4;
+
 // ---------------------------------------------------------------------------
 // RainEngine interface
 // ---------------------------------------------------------------------------
@@ -48,6 +85,10 @@ export interface RainEngine {
   resize(layout: TuiLayout): void;
   /** Current queue depth (for status bar display). */
   readonly queueDepth: number;
+  /** Queue a word for materialization in the rain panel. */
+  enqueueWord(word: string, source: WordDropSource): void;
+  /** Set the current agent phase for ambient color selection. */
+  setPhase(phase: AgentPhase): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -95,6 +136,45 @@ function trailColor(kind: RainColorKind, distFromHead: number): string {
   if (distFromHead === 0) return set.head;
   if (distFromHead <= 2) return set.near;
   return set.far;
+}
+
+/** Map WordDropSource to SGR color string. */
+const WORD_COLORS: Record<WordDropSource, string> = {
+  text: SGR.WORD_TEXT,
+  tool: SGR.WORD_TOOL,
+  phase: SGR.WORD_PHASE,
+  model: SGR.WORD_MODEL,
+};
+
+/** Map WordDropSource to RainColorKind for spawned rain drops on dissolution. */
+const WORD_SOURCE_TO_COLOR_KIND: Record<WordDropSource, RainColorKind> = {
+  text: 'text',
+  tool: 'tool',
+  phase: 'text',
+  model: 'text',
+};
+
+// ---------------------------------------------------------------------------
+// Phase-driven color resolution
+// ---------------------------------------------------------------------------
+
+/**
+ * Determine the color kind for a newly spawned drop.
+ * Token-derived drops keep their original color; idle/ambient drops
+ * use the current agent phase to determine color.
+ */
+function resolveDropColor(token: RainToken | undefined, phase: AgentPhase): RainColorKind {
+  if (token) return token.kind;
+  switch (phase) {
+    case 'thinking':
+      return 'text';
+    case 'tool_use':
+      return 'tool';
+    case 'error':
+      return 'error';
+    case 'idle':
+      return 'idle';
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -165,6 +245,13 @@ function createDrop(col: number, char: string, colorKind: RainColorKind, rng: Ra
   };
 }
 
+/** Create a drop at a specific row (used by word drop dissolution). */
+function createDropAtRow(col: number, row: number, char: string, colorKind: RainColorKind, rng: RainRng): RainDrop {
+  const drop = createDrop(col, char, colorKind, rng);
+  drop.headRow = row;
+  return drop;
+}
+
 // ---------------------------------------------------------------------------
 // Spawn logic
 // ---------------------------------------------------------------------------
@@ -178,6 +265,44 @@ function spawnCount(rainCols: number, idle: boolean): number {
 /** Compute column cooldown frames after a spawn. */
 function columnCooldown(trailLen: number, rng: RainRng): number {
   return trailLen + randInt(2, 2 + MAX_COOLDOWN_JITTER, rng);
+}
+
+// ---------------------------------------------------------------------------
+// Word drop helpers
+// ---------------------------------------------------------------------------
+
+/** Fisher-Yates shuffle to produce a random dissolution order. */
+function shuffleIndices(length: number, rng: RainRng): number[] {
+  const indices = Array.from({ length }, (_, i) => i);
+  for (let i = length - 1; i > 0; i--) {
+    const j = Math.floor(rng.random() * (i + 1));
+    const tmp = indices[i];
+    indices[i] = indices[j];
+    indices[j] = tmp;
+  }
+  return indices;
+}
+
+/** Check if two word drops overlap (with vertical gap). */
+function wordDropsOverlap(a: WordDrop, b: { col: number; row: number; wordLen: number }): boolean {
+  const rowOverlap = Math.abs(a.row - b.row) <= WORD_DROP_VERTICAL_GAP;
+  if (!rowOverlap) return false;
+  const aEnd = a.col + a.word.length;
+  const bEnd = b.col + b.wordLen;
+  return a.col < bEnd && b.col < aEnd;
+}
+
+/** Get columns occupied by active word drops during forming/holding phases. */
+function getOccupiedColumns(wordDrops: WordDrop[]): Set<number> {
+  const occupied = new Set<number>();
+  for (const wd of wordDrops) {
+    if (wd.phase === 'forming' || wd.phase === 'holding') {
+      for (let c = wd.col; c < wd.col + wd.word.length; c++) {
+        occupied.add(c);
+      }
+    }
+  }
+  return occupied;
 }
 
 // ---------------------------------------------------------------------------
@@ -207,6 +332,13 @@ export function createRainEngine(options: CreateRainEngineOptions): RainEngine {
   // Frame counter (for idle detection)
   let frameCount = 0;
   let lastTokenFrame = 0;
+
+  // Phase-driven color state
+  let currentPhase: AgentPhase = 'idle';
+
+  // Word drop state
+  const activeWordDrops: WordDrop[] = [];
+  const wordQueue: Array<{ word: string; source: WordDropSource }> = [];
 
   // ------------------------------------------------------------------
   // Tick: advance existing drops
@@ -243,6 +375,106 @@ export function createRainEngine(options: CreateRainEngineOptions): RainEngine {
   }
 
   // ------------------------------------------------------------------
+  // Tick: word drop lifecycle
+  // ------------------------------------------------------------------
+
+  function trySpawnWordDrop(): void {
+    if (activeWordDrops.length >= MAX_ACTIVE_WORD_DROPS) return;
+    if (wordQueue.length === 0) return;
+    if (rainCols <= 4) return;
+
+    const item = wordQueue.shift();
+    if (!item) return;
+
+    // Truncate to fit rain panel (leave 2-char margin)
+    const maxLen = rainCols - 2;
+    const word = item.word.length > maxLen ? item.word.slice(0, maxLen) : item.word;
+    if (word.length === 0) return;
+
+    // Try to find a non-overlapping position
+    for (let attempt = 0; attempt < MAX_PLACEMENT_ATTEMPTS; attempt++) {
+      const row = randInt(2, Math.max(2, rows - 3), rng);
+      const maxCol = Math.max(1, rainCols - word.length - 1);
+      const col = randInt(1, maxCol, rng);
+
+      const candidate = { col, row, wordLen: word.length };
+      const overlaps = activeWordDrops.some((existing) => wordDropsOverlap(existing, candidate));
+
+      if (!overlaps) {
+        const holdDuration = randInt(MIN_HOLD_FRAMES, MAX_HOLD_FRAMES, rng);
+        const wd: WordDrop = {
+          word,
+          source: item.source,
+          col,
+          row,
+          phase: 'forming',
+          phaseFrame: 0,
+          revealedCount: 0,
+          dissolveOrder: [],
+          dissolvedCount: 0,
+          holdDuration,
+        };
+        activeWordDrops.push(wd);
+        return;
+      }
+    }
+
+    // All attempts failed: re-queue at front for next frame
+    wordQueue.unshift(item);
+  }
+
+  function advanceWordDrops(): void {
+    let wi = 0;
+    for (let i = 0; i < activeWordDrops.length; i++) {
+      const wd = activeWordDrops[i];
+      wd.phaseFrame++;
+
+      if (wd.phase === 'forming') {
+        // Reveal one character per frame
+        if (wd.revealedCount < wd.word.length) {
+          wd.revealedCount++;
+        }
+        const formDuration = Math.min(MAX_FORMING_FRAMES, Math.max(MIN_FORMING_FRAMES, wd.word.length));
+        if (wd.phaseFrame >= formDuration && wd.revealedCount >= wd.word.length) {
+          wd.phase = 'holding';
+          wd.phaseFrame = 0;
+        }
+      } else if (wd.phase === 'holding') {
+        if (wd.phaseFrame >= wd.holdDuration) {
+          wd.phase = 'dissolving';
+          wd.phaseFrame = 0;
+          wd.dissolveOrder = shuffleIndices(wd.word.length, rng);
+          wd.dissolvedCount = 0;
+        }
+      } else {
+        // dissolving phase
+        const dissolveDuration = Math.min(MAX_DISSOLVING_FRAMES, Math.max(MIN_DISSOLVING_FRAMES, wd.word.length));
+        // Dissolve proportionally: release chars at even intervals
+        const targetDissolved = Math.min(
+          wd.word.length,
+          Math.floor((wd.phaseFrame / dissolveDuration) * wd.word.length) + 1,
+        );
+        while (wd.dissolvedCount < targetDissolved && wd.dissolvedCount < wd.word.length) {
+          const charIdx = wd.dissolveOrder[wd.dissolvedCount];
+          const char = wd.word[charIdx];
+          const dropCol = wd.col + charIdx;
+          const colorKind = WORD_SOURCE_TO_COLOR_KIND[wd.source];
+          if (dropCol < rainCols) {
+            drops.push(createDropAtRow(dropCol, wd.row, char, colorKind, rng));
+          }
+          wd.dissolvedCount++;
+        }
+        if (wd.dissolvedCount >= wd.word.length) {
+          // Word drop complete, remove
+          continue; // skip the retain step
+        }
+      }
+      activeWordDrops[wi++] = wd;
+    }
+    activeWordDrops.length = wi;
+  }
+
+  // ------------------------------------------------------------------
   // Tick: spawn new drops
   // ------------------------------------------------------------------
 
@@ -257,10 +489,13 @@ export function createRainEngine(options: CreateRainEngineOptions): RainEngine {
     const idle = frameCount - lastTokenFrame >= IDLE_THRESHOLD_FRAMES;
     const count = spawnCount(rainCols, idle);
 
-    // Build list of available columns (cooldown expired)
+    // Columns occupied by forming/holding word drops suppress regular spawns
+    const occupiedCols = getOccupiedColumns(activeWordDrops);
+
+    // Build list of available columns (cooldown expired AND not occupied by word drops)
     const available: number[] = [];
     for (let c = 0; c < rainCols; c++) {
-      if (cooldowns[c] <= 0) available.push(c);
+      if (cooldowns[c] <= 0 && !occupiedCols.has(c)) available.push(c);
     }
 
     for (let i = 0; i < count && available.length > 0; i++) {
@@ -276,16 +511,16 @@ export function createRainEngine(options: CreateRainEngineOptions): RainEngine {
 
       if (idle) {
         char = randChar(rainChars, rng);
-        colorKind = 'idle';
+        colorKind = resolveDropColor(undefined, currentPhase);
       } else {
         const token = queue.shift();
         if (token) {
           char = token.char;
-          colorKind = token.kind;
+          colorKind = resolveDropColor(token, currentPhase);
         } else {
-          // Queue drained mid-spawn: fill with idle char
+          // Queue drained mid-spawn: fill with ambient char
           char = randChar(rainChars, rng);
-          colorKind = 'idle';
+          colorKind = resolveDropColor(undefined, currentPhase);
         }
       }
 
@@ -323,6 +558,32 @@ export function createRainEngine(options: CreateRainEngineOptions): RainEngine {
     }
   }
 
+  function renderWordDrops(buf: string[]): void {
+    for (const wd of activeWordDrops) {
+      const color = WORD_COLORS[wd.source];
+      const dissolvedSet = new Set<number>();
+
+      if (wd.phase === 'dissolving') {
+        for (let d = 0; d < wd.dissolvedCount; d++) {
+          dissolvedSet.add(wd.dissolveOrder[d]);
+        }
+      }
+
+      for (let ci = 0; ci < wd.word.length; ci++) {
+        // During forming: only show revealed characters
+        if (wd.phase === 'forming' && ci >= wd.revealedCount) continue;
+        // During dissolving: skip dissolved characters
+        if (wd.phase === 'dissolving' && dissolvedSet.has(ci)) continue;
+
+        const screenCol = wd.col + ci + 1; // 1-indexed
+        const screenRow = wd.row + 1; // 1-indexed
+        if (screenRow <= rows) {
+          buf.push(`\x1b[${screenRow};${screenCol}H${color}${wd.word[ci]}`);
+        }
+      }
+    }
+  }
+
   // ------------------------------------------------------------------
   // Public interface
   // ------------------------------------------------------------------
@@ -337,9 +598,22 @@ export function createRainEngine(options: CreateRainEngineOptions): RainEngine {
       lastTokenFrame = frameCount;
     },
 
+    enqueueWord(word: string, source: WordDropSource): void {
+      if (wordQueue.length >= MAX_WORD_QUEUE) {
+        wordQueue.shift(); // drop oldest
+      }
+      wordQueue.push({ word, source });
+    },
+
+    setPhase(phase: AgentPhase): void {
+      currentPhase = phase;
+    },
+
     tick(): void {
       frameCount++;
       advanceDrops();
+      trySpawnWordDrop();
+      advanceWordDrops();
       spawnDrops();
     },
 
@@ -352,6 +626,9 @@ export function createRainEngine(options: CreateRainEngineOptions): RainEngine {
       for (const drop of drops) {
         renderDrop(drop, buf);
       }
+
+      // Word drops render on top of regular drops
+      renderWordDrops(buf);
 
       buf.push(SGR.RESET);
       return buf.join('');
@@ -368,6 +645,17 @@ export function createRainEngine(options: CreateRainEngineOptions): RainEngine {
         if (drops[i].col < rainCols && drops[i].alive) drops[wi++] = drops[i];
       }
       drops.length = wi;
+
+      // Kill out-of-bounds word drops and clear queue
+      let wdWi = 0;
+      for (let i = 0; i < activeWordDrops.length; i++) {
+        const wd = activeWordDrops[i];
+        if (wd.col + wd.word.length <= rainCols && wd.row < rows) {
+          activeWordDrops[wdWi++] = wd;
+        }
+      }
+      activeWordDrops.length = wdWi;
+      wordQueue.length = 0;
 
       // Resize cooldowns array
       const newCooldowns = new Array<number>(rainCols).fill(0);
