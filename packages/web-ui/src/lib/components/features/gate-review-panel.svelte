@@ -32,10 +32,15 @@
   } = $props();
 
   type TabId = 'summary' | 'artifacts' | 'files';
+  type FeedbackEvent = 'FORCE_REVISION' | 'REPLAN';
 
   let activeTab = $state<TabId>('summary');
   let feedbackText = $state('');
-  let showFeedback = $state(false);
+  // Which event the feedback form is collecting for. `null` = form hidden.
+  // FORCE_REVISION and REPLAN both loop back with feedback, and the next
+  // agent's prompt directly references what the human wrote -- so empty
+  // feedback would produce an incoherent re-entry prompt.
+  let feedbackEvent = $state<FeedbackEvent | null>(null);
   let confirmAbort = $state(false);
   let resolving = $state(false);
 
@@ -61,28 +66,20 @@
     }
   }
 
-  async function handleForceRevision(): Promise<void> {
-    if (!showFeedback) {
-      showFeedback = true;
+  async function handleFeedbackEvent(eventType: FeedbackEvent): Promise<void> {
+    if (feedbackEvent !== eventType) {
+      feedbackEvent = eventType;
       return;
     }
-    if (!feedbackText.trim()) return;
+    const trimmed = feedbackText.trim();
+    if (!trimmed) return;
     resolving = true;
     try {
-      await onResolve('FORCE_REVISION', feedbackText.trim());
+      await onResolve(eventType, trimmed);
     } finally {
       resolving = false;
       feedbackText = '';
-      showFeedback = false;
-    }
-  }
-
-  async function handleReplan(): Promise<void> {
-    resolving = true;
-    try {
-      await onResolve('REPLAN');
-    } finally {
-      resolving = false;
+      feedbackEvent = null;
     }
   }
 
@@ -105,8 +102,15 @@
   }
 
   function cancelFeedback(): void {
-    showFeedback = false;
+    feedbackEvent = null;
     feedbackText = '';
+  }
+
+  const feedbackLabel = $derived(feedbackEvent === 'REPLAN' ? 'Replan feedback' : 'Revision feedback');
+  const feedbackSubmitLabel = $derived(feedbackEvent === 'REPLAN' ? 'Submit Replan' : 'Submit Revision');
+
+  function submitFeedback(): Promise<void> {
+    return feedbackEvent ? handleFeedbackEvent(feedbackEvent) : Promise.resolve();
   }
 
   async function loadArtifact(name: string): Promise<void> {
@@ -265,10 +269,10 @@
     </div>
   {/if}
 
-  <!-- Feedback area (shown when Force Revision is selected) -->
-  {#if showFeedback}
+  <!-- Feedback area (shown when Force Revision or Replan is selected) -->
+  {#if feedbackEvent !== null}
     <div class="space-y-2">
-      <label for="gate-feedback" class="block text-sm font-medium">Revision feedback</label>
+      <label for="gate-feedback" class="block text-sm font-medium">{feedbackLabel}</label>
       <textarea
         id="gate-feedback"
         bind:value={feedbackText}
@@ -282,11 +286,11 @@
         <Button
           variant="default"
           size="sm"
-          onclick={handleForceRevision}
+          onclick={submitFeedback}
           disabled={!feedbackText.trim() || resolving}
           loading={resolving}
         >
-          Submit Revision
+          {feedbackSubmitLabel}
         </Button>
         <Button variant="ghost" size="sm" onclick={cancelFeedback}>Cancel</Button>
       </div>
@@ -307,16 +311,18 @@
   {/if}
 
   <!-- Action buttons -->
-  {#if !showFeedback && !confirmAbort}
+  {#if feedbackEvent === null && !confirmAbort}
     <div class="flex flex-wrap gap-2 pt-1">
       {#if hasEvent('APPROVE')}
         <Button variant="success" onclick={handleApprove} disabled={resolving} loading={resolving}>Approve</Button>
       {/if}
       {#if hasEvent('FORCE_REVISION')}
-        <Button variant="default" onclick={handleForceRevision} disabled={resolving}>Request Revision</Button>
+        <Button variant="default" onclick={() => handleFeedbackEvent('FORCE_REVISION')} disabled={resolving}>
+          Request Revision
+        </Button>
       {/if}
       {#if hasEvent('REPLAN')}
-        <Button variant="outline" onclick={handleReplan} disabled={resolving} loading={resolving}>Replan</Button>
+        <Button variant="outline" onclick={() => handleFeedbackEvent('REPLAN')} disabled={resolving}>Replan</Button>
       {/if}
       {#if hasEvent('ABORT')}
         <Button variant="destructive" onclick={handleAbort} disabled={resolving}>Abort Workflow</Button>

@@ -46,11 +46,25 @@ const workflowStartSchema = z.object({
   taskDescription: z.string().min(1),
   workspacePath: z.string().min(1).optional(),
 });
-const workflowResolveGateSchema = z.object({
-  workflowId: z.string().min(1),
-  event: z.enum(['APPROVE', 'FORCE_REVISION', 'REPLAN', 'ABORT']),
-  prompt: z.string().optional(),
-});
+// FORCE_REVISION and REPLAN require non-empty feedback: the orchestrator
+// injects this into the next agent's prompt, and an empty string produces
+// an incoherent re-entry prompt. Orchestrator validates too; this is the
+// first line of defense for external (JSON-RPC) callers.
+const workflowIdField = { workflowId: z.string().min(1) };
+const workflowResolveGateSchema = z.discriminatedUnion('event', [
+  z.object({ ...workflowIdField, event: z.literal('APPROVE'), prompt: z.string().optional() }),
+  z.object({ ...workflowIdField, event: z.literal('ABORT'), prompt: z.string().optional() }),
+  z.object({
+    ...workflowIdField,
+    event: z.literal('FORCE_REVISION'),
+    prompt: z.string().trim().min(1, 'Feedback is required for FORCE_REVISION events'),
+  }),
+  z.object({
+    ...workflowIdField,
+    event: z.literal('REPLAN'),
+    prompt: z.string().trim().min(1, 'Feedback is required for REPLAN events'),
+  }),
+]);
 const workflowFileTreeSchema = z.object({
   workflowId: z.string().min(1),
   path: z.string().optional(),

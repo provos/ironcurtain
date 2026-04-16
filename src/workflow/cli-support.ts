@@ -224,11 +224,34 @@ export async function promptGateInteractive(
     }
 
     if (eventType === 'FORCE_REVISION' || eventType === 'REPLAN') {
-      const feedback = await rl.question(`${CYAN}Feedback: ${RESET}`);
-      return { type: eventType, prompt: feedback || undefined };
+      const feedback = await promptRequiredFeedback(rl, eventType);
+      return { type: eventType, prompt: feedback };
     }
 
     return { type: eventType };
+  }
+}
+
+/**
+ * FORCE_REVISION and REPLAN route the workflow back to an earlier state
+ * and the next agent's prompt references the feedback directly, so empty
+ * feedback would produce an incoherent re-entry prompt. When stdin is
+ * closed (piped invocation, EOF) we abort instead of spinning.
+ */
+async function promptRequiredFeedback(
+  rl: ReturnType<typeof createInterface>,
+  eventType: 'FORCE_REVISION' | 'REPLAN',
+): Promise<string> {
+  for (;;) {
+    if (process.stdin.readableEnded) {
+      throw new Error(`Feedback is required for ${eventType} but stdin was closed before a response was provided.`);
+    }
+    const answer = await rl.question(`${CYAN}Feedback: ${RESET}`);
+    const trimmed = answer.trim();
+    if (trimmed.length > 0) {
+      return trimmed;
+    }
+    writeStdout(`${RED}Feedback is required for ${eventType}. Please enter a non-empty response.${RESET}`);
   }
 }
 

@@ -442,6 +442,44 @@ describe('WorkflowOrchestrator', () => {
   });
 
   // -----------------------------------------------------------------------
+  // Test: resolveGate rejects empty feedback for FORCE_REVISION / REPLAN
+  // -----------------------------------------------------------------------
+
+  it('resolveGate throws when FORCE_REVISION is submitted without feedback', async () => {
+    const defPath = writeDefinitionFile(tmpDir, linearWorkflowDef);
+    const sessionFactory = vi.fn(async (opts: SessionOptions) => {
+      const persona = opts.persona!;
+      if (persona === 'planner') {
+        return createArtifactAwareSession([{ text: approvedResponse('plan v1'), artifacts: ['plan'] }], tmpDir);
+      }
+      return createArtifactAwareSession([{ text: approvedResponse('done'), artifacts: ['code'] }], tmpDir);
+    });
+    const raiseGate = vi.fn();
+    const deps = createDeps(tmpDir, { createSession: sessionFactory, raiseGate });
+    const orchestrator = new WorkflowOrchestrator(deps);
+    activeOrchestrator = orchestrator;
+    const workflowId = await orchestrator.start(defPath, 'task');
+
+    await waitForGate(raiseGate, 1);
+
+    expect(() => orchestrator.resolveGate(workflowId, { type: 'FORCE_REVISION' })).toThrow(/Feedback is required/);
+    expect(() => orchestrator.resolveGate(workflowId, { type: 'FORCE_REVISION', prompt: '' })).toThrow(
+      /Feedback is required/,
+    );
+    expect(() => orchestrator.resolveGate(workflowId, { type: 'FORCE_REVISION', prompt: '   ' })).toThrow(
+      /Feedback is required/,
+    );
+    expect(() => orchestrator.resolveGate(workflowId, { type: 'REPLAN' })).toThrow(/Feedback is required/);
+    expect(() => orchestrator.resolveGate(workflowId, { type: 'REPLAN', prompt: '\t\n' })).toThrow(
+      /Feedback is required/,
+    );
+
+    // Approve to let the workflow finish cleanly
+    orchestrator.resolveGate(workflowId, { type: 'APPROVE' });
+    await waitForCompletion(orchestrator, workflowId);
+  });
+
+  // -----------------------------------------------------------------------
   // Test 4: Abort
   // -----------------------------------------------------------------------
 

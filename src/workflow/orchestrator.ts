@@ -489,6 +489,18 @@ export class WorkflowOrchestrator implements WorkflowController {
   }
 
   resolveGate(id: WorkflowId, event: HumanGateEvent): void {
+    // FORCE_REVISION and REPLAN loop back to an earlier state with the
+    // feedback injected into the next agent's prompt (via context.humanPrompt).
+    // Without feedback the agent has no signal for what to change and the
+    // re-entry prompt ("Revise it to address the human feedback above")
+    // references content that does not exist. Require non-empty feedback at
+    // the source so every entry point (CLI, web UI, programmatic) fails fast.
+    if (event.type === 'FORCE_REVISION' || event.type === 'REPLAN') {
+      if (!event.prompt || event.prompt.trim().length === 0) {
+        throw new Error(`Feedback is required for ${event.type} events`);
+      }
+    }
+
     const instance = this.workflows.get(id);
     if (!instance) return;
 

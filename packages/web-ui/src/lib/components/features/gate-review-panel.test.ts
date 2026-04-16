@@ -107,13 +107,39 @@ describe('GateReviewPanel', () => {
 
   // ── Replan flow ───────────────────────────────────────────────────
 
-  it('calls onResolve with REPLAN when Replan is clicked', async () => {
+  it('shows feedback form on first click of Replan, does not call onResolve yet', async () => {
     const onResolve = vi.fn();
     render(GateReviewPanel, { props: makeProps({ onResolve }) });
 
     await fireEvent.click(screen.getByText('Replan'));
 
-    expect(onResolve).toHaveBeenCalledWith('REPLAN');
+    expect(screen.getByLabelText('Replan feedback')).toBeTruthy();
+    expect(screen.getByPlaceholderText('Describe what should be changed...')).toBeTruthy();
+    expect(onResolve).not.toHaveBeenCalled();
+  });
+
+  it('submits replan feedback when Submit Replan is clicked with text', async () => {
+    const onResolve = vi.fn();
+    render(GateReviewPanel, { props: makeProps({ onResolve }) });
+
+    await fireEvent.click(screen.getByText('Replan'));
+
+    const textarea = screen.getByPlaceholderText('Describe what should be changed...');
+    await fireEvent.input(textarea, { target: { value: 'Rethink the design approach' } });
+
+    await fireEvent.click(screen.getByText('Submit Replan'));
+
+    expect(onResolve).toHaveBeenCalledWith('REPLAN', 'Rethink the design approach');
+  });
+
+  it('keeps Submit Replan disabled with empty feedback', async () => {
+    const onResolve = vi.fn();
+    render(GateReviewPanel, { props: makeProps({ onResolve }) });
+
+    await fireEvent.click(screen.getByText('Replan'));
+
+    const submitBtn = screen.getByText('Submit Replan');
+    expect(submitBtn.closest('button')?.disabled).toBe(true);
   });
 
   // ── Force Revision flow ───────────────────────────────────────────
