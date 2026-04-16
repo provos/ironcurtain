@@ -21,7 +21,6 @@ import { renderEventBatch, renderConnected, renderSessionEnded, type RenderOptio
 import { wsDataToString } from '../web-ui/ws-utils.js';
 import type { TokenStreamEvent } from '../docker/token-stream-types.js';
 import type { ObserveEventSink } from './observe-tui-types.js';
-import type { SessionDto } from '../web-ui/web-ui-types.js';
 import { createObserveTui, type ObserveTui } from './observe-tui.js';
 
 // ---------------------------------------------------------------------------
@@ -34,11 +33,9 @@ const observeSpec: CommandSpec = {
   usage: [
     'ironcurtain observe <label>             Watch a single session by label',
     'ironcurtain observe --all               Watch all active sessions',
-    'ironcurtain observe --workflow <name>    Watch sessions in a workflow',
   ],
   options: [
     { flag: 'all', description: 'Observe all active sessions' },
-    { flag: 'workflow', description: 'Observe all sessions in a named workflow', placeholder: '<name>' },
     { flag: 'raw', description: 'Show all event types, not just text' },
     { flag: 'debug', description: 'Show all events including protocol noise (implies --raw)' },
     { flag: 'json', description: 'Output events as newline-delimited JSON' },
@@ -47,7 +44,6 @@ const observeSpec: CommandSpec = {
   examples: [
     'ironcurtain observe 3                 # Watch session #3 (TUI mode)',
     'ironcurtain observe --all             # Watch all sessions',
-    'ironcurtain observe --workflow build   # Watch workflow "build"',
     'ironcurtain observe 3 --no-tui        # Plain text output',
     'ironcurtain observe 3 --raw           # Show tool use + message markers in TUI',
     'ironcurtain observe 3 --debug         # Show everything including protocol noise',
@@ -117,26 +113,17 @@ function createPlainSink(renderOptions: RenderOptions): ObserveEventSink {
 
 /**
  * Routes a single WebSocket push event to the event sink.
- *
- * Workflow filtering happens here -- events from sessions not in the
- * workflow label set are dropped before reaching the sink. This keeps
- * the sink completely unaware of workflow semantics.
  */
 function handlePushEvent(
   event: string,
   payload: Record<string, unknown>,
   sink: ObserveEventSink,
   targetLabel: number | undefined,
-  workflowLabels: Set<number> | null,
   cleanup: () => void,
 ): void {
   if (event === 'session.token_stream') {
     const label = payload.label as number;
     const events = payload.events as TokenStreamEvent[];
-
-    // Workflow filtering: skip events from non-workflow sessions
-    if (workflowLabels && !workflowLabels.has(label)) return;
-
     sink.pushEvents(label, events);
     return;
   }
@@ -152,11 +139,9 @@ function handlePushEvent(
       return;
     }
 
-    // For multi-session modes, just show a notification
+    // For multi-session mode (--all), just show a notification
     if (targetLabel === undefined) {
       sink.sessionEnded(endedLabel, reason);
-      // Remove from workflow labels if tracking
-      workflowLabels?.delete(endedLabel);
     }
   }
 }
@@ -170,7 +155,6 @@ export async function runObserveCommand(argv: string[]): Promise<void> {
     args: argv,
     options: {
       all: { type: 'boolean' },
-      workflow: { type: 'string' },
       raw: { type: 'boolean' },
       debug: { type: 'boolean' },
       json: { type: 'boolean' },
@@ -184,21 +168,16 @@ export async function runObserveCommand(argv: string[]): Promise<void> {
   if (checkHelp(values as { help?: boolean }, observeSpec)) return;
 
   const allMode = values.all as boolean | undefined;
-  const workflowName = values.workflow as string | undefined;
   const labelArg = positionals[0];
   const noTui = values['no-tui'] as boolean | undefined;
 
   // Validate argument combinations
-  if (!allMode && !workflowName && !labelArg) {
-    process.stderr.write(chalk.red('Error: provide a session label, --all, or --workflow <name>\n'));
+  if (!allMode && !labelArg) {
+    process.stderr.write(chalk.red('Error: provide a session label or --all\n'));
     process.exit(1);
   }
-  if (labelArg && (allMode || workflowName)) {
-    process.stderr.write(chalk.red('Error: cannot combine a session label with --all or --workflow\n'));
-    process.exit(1);
-  }
-  if (allMode && workflowName) {
-    process.stderr.write(chalk.red('Error: cannot combine --all with --workflow\n'));
+  if (labelArg && allMode) {
+    process.stderr.write(chalk.red('Error: cannot combine a session label with --all\n'));
     process.exit(1);
   }
 
@@ -208,7 +187,7 @@ export async function runObserveCommand(argv: string[]): Promise<void> {
     process.exit(1);
   }
 
-  const showLabel = !!allMode || !!workflowName;
+  const showLabel = !!allMode;
   const debugMode = !!values.debug;
 
   const renderOptions: RenderOptions = {
@@ -248,13 +227,9 @@ export async function runObserveCommand(argv: string[]): Promise<void> {
   const wsUrl = `ws://${state.host}:${state.port}/ws?token=${state.token}`;
   const ws = new WebSocket(wsUrl);
 
-  // Track workflow session labels for --workflow filtering
-  let workflowLabels: Set<number> | null = null;
-
   await new Promise<void>((resolve, reject) => {
     let subscribeId: string | null = null;
     let unsubscribeId: string | null = null;
-    let sessionListId: string | null = null;
     let closing = false;
 
     const cleanup = () => {
@@ -299,11 +274,6 @@ export async function runObserveCommand(argv: string[]): Promise<void> {
       } else {
         subscribeId = sendRpc(ws, 'sessions.subscribeAllTokenStreams');
       }
-
-      // If workflow mode, query sessions to find workflow members
-      if (workflowName) {
-        sessionListId = sendRpc(ws, 'sessions.list');
-      }
     });
 
     ws.on('message', (data: Buffer | ArrayBuffer | Buffer[]) => {
@@ -337,27 +307,12 @@ export async function runObserveCommand(argv: string[]): Promise<void> {
           // Unsubscribe response -- close handled by timeout
           return;
         }
-        if (frame.id === sessionListId && frame.ok && workflowName) {
-          workflowLabels = new Set<number>();
-          const payload = frame.payload as SessionDto[];
-          if (Array.isArray(payload)) {
-            // TODO(observe --workflow): SessionSource has no 'workflow' kind, so
-            // this filter is always empty. Extend the DTO with a workflow identifier,
-            // then match on that + workflowName.
-            for (const s of payload) {
-              if ((s.source as { kind: string }).kind === 'workflow') {
-                workflowLabels.add(s.label);
-              }
-            }
-          }
-          return;
-        }
         return;
       }
 
       // Push event
       if ('event' in frame && typeof frame.event === 'string') {
-        handlePushEvent(frame.event, frame.payload as Record<string, unknown>, sink, label, workflowLabels, cleanup);
+        handlePushEvent(frame.event, frame.payload as Record<string, unknown>, sink, label, cleanup);
       }
     });
 

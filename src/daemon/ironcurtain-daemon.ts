@@ -97,6 +97,9 @@ export class IronCurtainDaemon {
   /** Web UI server (null if not enabled). */
   private webUiServer: import('../web-ui/web-ui-server.js').WebUiServer | null = null;
 
+  /** Token stream bridge (null if web UI not enabled). */
+  private tokenStreamBridge: import('../web-ui/token-stream-bridge.js').TokenStreamBridge | null = null;
+
   /** Web UI options from constructor. */
   private readonly webUiOptions: IronCurtainDaemonOptions['webUi'];
 
@@ -200,6 +203,7 @@ export class IronCurtainDaemon {
         logger.warn(`[Daemon] Error stopping web UI: ${String(err)}`);
       }
       this.webUiServer = null;
+      this.tokenStreamBridge = null;
       this.removeWebUiState();
     }
 
@@ -226,6 +230,7 @@ export class IronCurtainDaemon {
           logger.warn(`[Daemon] Error ending session #${s.label}: ${String(err)}`);
         }
         this.tokenStreamBus.endSession(sessionId);
+        this.tokenStreamBridge?.closeSession(s.label);
       }),
     );
 
@@ -285,6 +290,7 @@ export class IronCurtainDaemon {
       const sessionId = managed?.session.getInfo().id;
       await this.sessionManager.end(activeLabel);
       if (sessionId) this.tokenStreamBus.endSession(sessionId);
+      this.tokenStreamBridge?.closeSession(activeLabel);
       this.activeJobRuns.delete(jobId);
     }
 
@@ -522,6 +528,12 @@ export class IronCurtainDaemon {
     const label = this.sessionManager.register(session, transport, source);
     this.activeJobRuns.set(job.id, label);
 
+    // Register with the token stream bridge so an active `observe --all`
+    // subscription can route this session's events. The bridge may not
+    // exist if the web UI is not enabled; registerSession is idempotent,
+    // so re-registration from the web UI's event bus subscription is safe.
+    this.tokenStreamBridge?.registerSession(label, session.getInfo().id);
+
     logger.info(`[Daemon] Started job ${job.id} as session #${label}`);
 
     let outcome: RunOutcome;
@@ -579,6 +591,7 @@ export class IronCurtainDaemon {
     const sessionId = session.getInfo().id;
     await this.sessionManager.end(label);
     this.tokenStreamBus.endSession(sessionId);
+    this.tokenStreamBridge?.closeSession(label);
 
     logger.info(`[Daemon] Job ${job.id} completed: ${outcome.kind}`);
     return record;
@@ -634,6 +647,15 @@ export class IronCurtainDaemon {
       containerManager,
       mode: this.mode,
       sessionManager: this.sessionManager,
+      // Wire Signal-created sessions into the token stream bridge so that
+      // an active `observe --all` subscription receives their events.
+      // The bridge may not exist (web UI disabled) -- calls are null-safe.
+      onSessionRegistered: (label, managed) => {
+        this.tokenStreamBridge?.registerSession(label, managed.session.getInfo().id);
+      },
+      onSessionEnded: (label) => {
+        this.tokenStreamBridge?.closeSession(label);
+      },
     });
 
     // Await the connection phase (starts Docker, health check, WebSocket).
@@ -701,10 +723,13 @@ export class IronCurtainDaemon {
     // Wire token stream bridge for per-client subscription delivery
     const bridge = new TokenStreamBridge(server, this.tokenStreamBus);
     server.setTokenStreamBridge(bridge);
+    this.tokenStreamBridge = bridge;
 
-    // Auto-register new sessions and clean up ended sessions on the bridge.
-    // Without the session.created handler, sessions created after a global
-    // subscribeAll would never be registered, silently dropping their events.
+    // Belt-and-suspenders: the web UI also emits session.created / session.ended
+    // events. registerSession is idempotent (Map.set overwrite), so repeat
+    // registrations from this bus event and the direct executeJob()/Signal
+    // paths are safe. Cron/Signal sessions are registered directly at their
+    // creation sites because they do not go through the web UI event bus.
     server.getEventBus().subscribe((event, payload) => {
       if (event === 'session.created') {
         const { label } = payload as { label: number };
@@ -729,11 +754,28 @@ export class IronCurtainDaemon {
     this.writeWebUiState(server);
   }
 
+  /**
+   * Normalize a bind host into a host a CLI client can actually connect to.
+   *
+   * The daemon may bind to a wildcard address (0.0.0.0 or ::) to accept
+   * connections on all interfaces, but wildcards are not valid *destination*
+   * hosts, so persisting them verbatim would break `ironcurtain observe`.
+   * The server's bind host is unchanged; only the persisted connect host is
+   * normalized.
+   */
+  private getWebUiConnectHost(host: string | undefined): string {
+    if (!host || host.trim() === '') return '127.0.0.1';
+    const normalized = host.trim();
+    if (normalized === '0.0.0.0') return '127.0.0.1';
+    if (normalized === '::' || normalized === '[::]' || normalized === '::0') return 'localhost';
+    return normalized;
+  }
+
   /** Write web UI connection info to a well-known file for CLI consumers. */
   private writeWebUiState(server: import('../web-ui/web-ui-server.js').WebUiServer): void {
     const state = {
       port: server.getPort(),
-      host: this.webUiOptions?.host ?? '127.0.0.1',
+      host: this.getWebUiConnectHost(this.webUiOptions?.host),
       token: server.getAuthToken(),
     };
     try {

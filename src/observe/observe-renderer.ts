@@ -68,6 +68,9 @@ function renderText(label: number, event: TokenStreamEvent, options: RenderOptio
 
     case 'tool_use':
       if (!options.raw) return null;
+      // Mid-stream input_json_delta fragments arrive with an empty toolName;
+      // skip them in plain mode so we do not emit noisy "[tool: ]" lines.
+      if (event.toolName === '') return null;
       return `${prefix}${chalk.cyan(`[tool: ${event.toolName}]`)} ${chalk.dim(truncate(event.inputDelta, 120))}\n`;
 
     case 'message_start':

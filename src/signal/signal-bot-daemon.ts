@@ -77,6 +77,19 @@ export interface SignalBotDaemonOptions {
   readonly containerManager: SignalContainerManager;
   readonly mode: SessionMode;
   readonly sessionManager?: SessionManager;
+  /**
+   * Optional hook called immediately after a Signal session is registered
+   * with the SessionManager. Used to wire sessions into the token stream
+   * bridge so that `observe` subscribers can receive events from Signal
+   * sessions created while the daemon is running.
+   */
+  readonly onSessionRegistered?: (label: number, managed: ManagedSession) => void;
+  /**
+   * Optional hook called after a Signal session is ended (either via /quit
+   * or transport exit). Used to tear down any external bookkeeping tied to
+   * the session's label.
+   */
+  readonly onSessionEnded?: (label: number) => void;
 }
 
 export class SignalBotDaemon {
@@ -94,6 +107,9 @@ export class SignalBotDaemon {
   private static readonly BASE_RECONNECT_DELAY_MS = 1_000;
 
   private readonly maxConcurrentSessions: number;
+
+  private readonly onSessionRegistered?: (label: number, managed: ManagedSession) => void;
+  private readonly onSessionEnded?: (label: number) => void;
 
   // Identity verification state
   private identityLocked = false;
@@ -117,6 +133,8 @@ export class SignalBotDaemon {
     this.mode = options.mode;
     this.maxConcurrentSessions = options.config.maxConcurrentSessions;
     this.sessionManager = options.sessionManager ?? new SessionManager();
+    this.onSessionRegistered = options.onSessionRegistered;
+    this.onSessionEnded = options.onSessionEnded;
   }
 
   /**
@@ -185,11 +203,14 @@ export class SignalBotDaemon {
     // End all Signal sessions without letting a single failure abort shutdown
     const signalSessions = this.sessionManager.byKind('signal');
     await Promise.allSettled(
-      signalSessions.map((managed) =>
-        this.sessionManager.end(managed.label).catch((err: unknown) => {
+      signalSessions.map(async (managed) => {
+        try {
+          await this.sessionManager.end(managed.label);
+        } catch (err: unknown) {
           logger.error(`[Signal Daemon] Failed to end session #${managed.label} during shutdown: ${String(err)}`);
-        }),
-      ),
+        }
+        this.onSessionEnded?.(managed.label);
+      }),
     );
 
     if (this.ws) {
@@ -442,6 +463,7 @@ export class SignalBotDaemon {
           ),
         );
         await this.sessionManager.end(managed.label);
+        this.onSessionEnded?.(managed.label);
       } else {
         const message = error instanceof Error ? error.message : String(error);
         await this.sendSignalMessage(prefixWithLabel(`Error: ${message}`, managed.label, this.sessionManager.size));
@@ -486,12 +508,18 @@ export class SignalBotDaemon {
     const label = this.sessionManager.register(session, transport, { kind: 'signal' });
     transport.sessionLabel = label;
 
+    // Notify external observers (e.g., token stream bridge) so that a
+    // pre-existing `observe --all` subscription routes this session's events.
+    const managed = this.sessionManager.get(label);
+    if (managed && this.onSessionRegistered) {
+      this.onSessionRegistered(label, managed);
+    }
+
     // Start the transport in the background. Store the run promise so
     // SessionManager.end() can await it (giving auto-save time to finish)
     // before closing the session.
     const runPromise = transport.run(session);
 
-    const managed = this.sessionManager.get(label);
     if (managed) {
       managed.runPromise = runPromise;
     }
@@ -505,6 +533,7 @@ export class SignalBotDaemon {
           this.sessionManager.end(label).catch((err: unknown) => {
             logger.error(`[Signal Daemon] Failed to clean up session #${label}: ${String(err)}`);
           });
+          this.onSessionEnded?.(label);
         }
       })
       .catch((err: unknown) => {
@@ -627,6 +656,7 @@ export class SignalBotDaemon {
           await this.sendSignalMessage(`Failed to end session #${labelToEnd}: ${msg}`);
           return;
         }
+        this.onSessionEnded?.(labelToEnd);
 
         if (wasCurrent && this.sessionManager.size > 0 && this.sessionManager.currentLabel !== null) {
           await this.sendSignalMessage(

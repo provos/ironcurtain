@@ -135,6 +135,13 @@ describe('renderEvent (text mode)', () => {
     expect(result).not.toContain(longInput);
   });
 
+  it('suppresses tool_use with empty toolName in raw mode (mid-stream delta)', () => {
+    // input_json_delta fragments arrive with empty toolName; they should not
+    // render as "[tool: ]" in plain mode.
+    const result = renderEvent(1, toolUse('', '{"partial":'), rawOptions);
+    expect(result).toBeNull();
+  });
+
   it('suppresses tool_result in non-raw mode', () => {
     const event: TokenStreamEvent = {
       kind: 'tool_result',
