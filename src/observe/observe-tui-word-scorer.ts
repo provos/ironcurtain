@@ -194,8 +194,38 @@ function isStopWord(word: string): boolean {
 /** Pattern for splitting text into word candidates. */
 const WORD_SPLIT_RE = /[\s,.;:!?()[\]{}<>"'`|/\\=+*&#@^~]+/;
 
-/** Words that are all digits or look like hex/base64. */
-const NUMERIC_OR_HEX_RE = /^[0-9a-f]+$/i;
+/** Strings that are purely numeric -- always rejected. */
+const PURE_NUMERIC_RE = /^[0-9]+$/;
+
+/** Strings that contain only hex characters (case-insensitive). */
+const HEX_CHARS_ONLY_RE = /^[0-9a-f]+$/i;
+
+/** Strings containing at least one digit. */
+const CONTAINS_DIGIT_RE = /[0-9]/;
+
+/**
+ * Minimum length for a hex-looking string to be considered an
+ * identifier/hash rather than an English word. Below this we
+ * prefer to keep the word (e.g., "face", "cafe", "decade").
+ */
+const MIN_HEX_IDENTIFIER_LENGTH = 8;
+
+/**
+ * Reject strings that are purely numeric or clearly hash/identifier-like.
+ *
+ * Purely numeric: always rejected.
+ * Hex-looking: rejected only when long enough AND containing at least one
+ * digit. This catches commit SHAs and content hashes (e.g., `a3f92c1b8d4e`)
+ * while preserving real English words that happen to use only hex letters
+ * (e.g., `face`, `cafe`, `beef`, `decade`, `feedback`).
+ */
+function isNumericOrHashLike(lower: string): boolean {
+  if (PURE_NUMERIC_RE.test(lower)) return true;
+  if (HEX_CHARS_ONLY_RE.test(lower) && lower.length >= MIN_HEX_IDENTIFIER_LENGTH && CONTAINS_DIGIT_RE.test(lower)) {
+    return true;
+  }
+  return false;
+}
 
 /**
  * Extract candidate words from plain text.
@@ -215,8 +245,8 @@ export function extractWordsFromText(text: string): Array<{ original: string; lo
 
     const lower = cleaned.toLowerCase();
 
-    // Skip all-digit or hex/base64-looking tokens
-    if (NUMERIC_OR_HEX_RE.test(lower)) continue;
+    // Skip all-digit tokens and hash-like identifiers
+    if (isNumericOrHashLike(lower)) continue;
 
     // Skip stop words
     if (isStopWord(cleaned)) continue;
@@ -251,7 +281,7 @@ export function extractWordsFromCode(code: string): Array<{ original: string; lo
     const lower = original.toLowerCase();
     if (lower.length < MIN_WORD_LENGTH) return;
     if (seen.has(lower)) return;
-    if (NUMERIC_OR_HEX_RE.test(lower)) return;
+    if (isNumericOrHashLike(lower)) return;
     if (isStopWord(original)) return;
     seen.add(lower);
     results.push({ original, lower });

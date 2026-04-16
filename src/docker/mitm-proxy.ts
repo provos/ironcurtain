@@ -166,6 +166,75 @@ function isConnectionReset(err: NodeJS.ErrnoException): boolean {
 const MAX_REWRITE_BODY_BYTES = 10 * 1024 * 1024; // 10 MB
 /** Max Content-Length for which we buffer solely for 401 retry (1 MB). */
 const MAX_RETRY_BODY_BYTES = 1 * 1024 * 1024;
+/**
+ * Max bytes buffered from a non-streaming JSON response body for token stream
+ * extraction. The response is still streamed to the client unchanged; only
+ * the extraction side stops capturing once the cap is hit. This protects the
+ * proxy from unbounded memory growth on very large completions.
+ */
+export const MAX_JSON_RESPONSE_CAPTURE_BYTES = 2 * 1024 * 1024; // 2 MB
+
+/**
+ * Output of `createBoundedJsonResponseCapture` -- the stateful hooks used to
+ * drive a bounded capture over a chunked response stream.
+ *
+ * Exposed primarily for unit testing the OOM guard without standing up the
+ * full mitm proxy pipeline.
+ */
+export interface BoundedJsonResponseCapture {
+  /** Feed a chunk into the capture buffer. Always safe to call. */
+  onData(chunk: Buffer): void;
+  /**
+   * Signal end-of-stream. If the limit was exceeded during capture this is
+   * a no-op; otherwise it invokes `onComplete` with the concatenated buffer.
+   */
+  onEnd(onComplete: (body: Buffer) => void): void;
+  /** True if the stream exceeded the cap and capture was aborted. */
+  readonly overflowed: boolean;
+  /** Bytes accounted for (capped at the limit). */
+  readonly capturedBytes: number;
+}
+
+/**
+ * Create a size-bounded capture for a JSON response body.
+ *
+ * Up to `maxBytes` of data is accumulated into an internal chunk array.
+ * Once that threshold is crossed, any already-buffered chunks are released
+ * (so large responses do not pin memory) and further chunks are ignored.
+ * The caller is still responsible for piping the stream through to the
+ * client -- this helper only manages the extraction-side buffer.
+ */
+export function createBoundedJsonResponseCapture(
+  maxBytes: number = MAX_JSON_RESPONSE_CAPTURE_BYTES,
+): BoundedJsonResponseCapture {
+  let chunks: Buffer[] = [];
+  let capturedBytes = 0;
+  let overflowed = false;
+
+  return {
+    onData(chunk: Buffer): void {
+      if (overflowed) return;
+      capturedBytes += chunk.length;
+      if (capturedBytes > maxBytes) {
+        overflowed = true;
+        // Release memory immediately.
+        chunks = [];
+        return;
+      }
+      chunks.push(chunk);
+    },
+    onEnd(onComplete: (body: Buffer) => void): void {
+      if (overflowed) return;
+      onComplete(Buffer.concat(chunks));
+    },
+    get overflowed(): boolean {
+      return overflowed;
+    },
+    get capturedBytes(): number {
+      return capturedBytes;
+    },
+  };
+}
 
 /**
  * Buffers the entire request body into a single Buffer.
@@ -729,17 +798,23 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
             isLlmMessagesEndpoint(path as string) &&
             contentType.includes('application/json')
           ) {
-            // Non-streaming JSON response: buffer for extraction while piping to client
+            // Non-streaming JSON response: buffer for extraction while piping to client.
+            // The passthrough stream always forwards the full response to the client.
+            // Capture is bounded at MAX_JSON_RESPONSE_CAPTURE_BYTES: once exceeded,
+            // we stop accumulating chunks (and skip extraction at end-of-stream),
+            // but the passthrough listener stays attached so the stream completes
+            // normally and the client still sees every byte.
             const passthrough = new PassThrough();
-            const chunks: Buffer[] = [];
-            passthrough.on('data', (chunk: Buffer) => chunks.push(chunk));
+            const capture = createBoundedJsonResponseCapture();
+            passthrough.on('data', (chunk: Buffer) => capture.onData(chunk));
             passthrough.on('end', () => {
-              try {
-                const body = Buffer.concat(chunks);
-                extractFromJsonResponse(body, tokenBus, tokenSessionId as import('../session/types.js').SessionId);
-              } catch {
-                // Extraction errors must never affect the forwarding path
-              }
+              capture.onEnd((body) => {
+                try {
+                  extractFromJsonResponse(body, tokenBus, tokenSessionId as import('../session/types.js').SessionId);
+                } catch {
+                  // Extraction errors must never affect the forwarding path
+                }
+              });
             });
             upstreamRes.pipe(passthrough);
             passthrough.pipe(clientRes);

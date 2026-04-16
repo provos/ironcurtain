@@ -71,13 +71,38 @@ describe('extractWordsFromText', () => {
     expect(originals).toContain('version');
   });
 
-  it('skips hex/base64 looking tokens', () => {
-    const words = extractWordsFromText('hash a1b2c3d4 token deadbeef');
+  it('skips hash-like hex tokens (>=8 chars with at least one digit)', () => {
+    // SHA-like tokens: 8+ chars, mix of letters and digits -> rejected
+    const words = extractWordsFromText('hash a1b2c3d4 commit deadb33f token 9f8e7d6c5b4a');
     const originals = words.map((w) => w.original);
     expect(originals).not.toContain('a1b2c3d4');
-    expect(originals).not.toContain('deadbeef');
+    expect(originals).not.toContain('deadb33f');
+    expect(originals).not.toContain('9f8e7d6c5b4a');
     expect(originals).toContain('hash');
+    expect(originals).toContain('commit');
     expect(originals).toContain('token');
+  });
+
+  it('preserves hex-letter-only English words regardless of length', () => {
+    // Pure letters (no digits) -> always kept, even if they look hex
+    const words = extractWordsFromText('face cafe beef dead decade feedback deadbeef abcdef');
+    const originals = words.map((w) => w.original);
+    expect(originals).toContain('face');
+    expect(originals).toContain('cafe');
+    expect(originals).toContain('beef');
+    expect(originals).toContain('dead');
+    expect(originals).toContain('decade');
+    expect(originals).toContain('feedback');
+    // Long pure-letter hex-looking words should also survive
+    expect(originals).toContain('deadbeef');
+    expect(originals).toContain('abcdef');
+  });
+
+  it('preserves short hex-ish tokens with digits (below identifier length threshold)', () => {
+    // Length < 8 with digits -> still a "real" word in our judgment
+    const words = extractWordsFromText('using sha1a hash');
+    const originals = words.map((w) => w.original);
+    expect(originals).toContain('sha1a');
   });
 
   it('preserves original casing', () => {

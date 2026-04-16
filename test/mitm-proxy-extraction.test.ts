@@ -2,11 +2,16 @@
  * Tests for extractToolResults and extractFromJsonResponse in mitm-proxy.ts.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { createTokenStreamBus } from '../src/docker/token-stream-bus.js';
 import type { TokenStreamEvent } from '../src/docker/token-stream-types.js';
 import type { SessionId } from '../src/session/types.js';
-import { extractToolResults, extractFromJsonResponse } from '../src/docker/mitm-proxy.js';
+import {
+  extractToolResults,
+  extractFromJsonResponse,
+  createBoundedJsonResponseCapture,
+  MAX_JSON_RESPONSE_CAPTURE_BYTES,
+} from '../src/docker/mitm-proxy.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -374,5 +379,64 @@ describe('extractFromJsonResponse', () => {
     const ends = eventsOfKind(events, 'message_end');
     expect(ends).toHaveLength(1);
     expect(ends[0].stopReason).toBe('stop');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// createBoundedJsonResponseCapture (OOM guard)
+// ---------------------------------------------------------------------------
+
+describe('createBoundedJsonResponseCapture', () => {
+  it('exposes a sensible default cap', () => {
+    expect(MAX_JSON_RESPONSE_CAPTURE_BYTES).toBe(2 * 1024 * 1024);
+  });
+
+  it('accumulates chunks and delivers them at end', () => {
+    const capture = createBoundedJsonResponseCapture(1024);
+    capture.onData(Buffer.from('hello '));
+    capture.onData(Buffer.from('world'));
+    expect(capture.overflowed).toBe(false);
+
+    const onComplete = vi.fn<(body: Buffer) => void>();
+    capture.onEnd(onComplete);
+    expect(onComplete).toHaveBeenCalledOnce();
+    const body = onComplete.mock.calls[0][0];
+    expect(body.toString()).toBe('hello world');
+  });
+
+  it('marks overflow and skips onEnd callback once the cap is exceeded', () => {
+    const capture = createBoundedJsonResponseCapture(10);
+    capture.onData(Buffer.from('12345'));
+    capture.onData(Buffer.from('678'));
+    expect(capture.overflowed).toBe(false);
+
+    // Pushes past the cap
+    capture.onData(Buffer.from('9abcd'));
+    expect(capture.overflowed).toBe(true);
+
+    const onComplete = vi.fn();
+    capture.onEnd(onComplete);
+    expect(onComplete).not.toHaveBeenCalled();
+  });
+
+  it('ignores further chunks after overflow (best-effort, no-throw)', () => {
+    const capture = createBoundedJsonResponseCapture(4);
+    capture.onData(Buffer.from('aaaaaa')); // single chunk blows the cap
+    expect(capture.overflowed).toBe(true);
+
+    // Must not throw, must not un-mark overflow.
+    expect(() => capture.onData(Buffer.from('bbbb'))).not.toThrow();
+    expect(capture.overflowed).toBe(true);
+  });
+
+  it('exactly-at-cap is allowed (only strictly greater overflows)', () => {
+    const capture = createBoundedJsonResponseCapture(8);
+    capture.onData(Buffer.from('01234567')); // exactly 8 bytes
+    expect(capture.overflowed).toBe(false);
+
+    const onComplete = vi.fn<(body: Buffer) => void>();
+    capture.onEnd(onComplete);
+    expect(onComplete).toHaveBeenCalledOnce();
+    expect(onComplete.mock.calls[0][0].toString()).toBe('01234567');
   });
 });

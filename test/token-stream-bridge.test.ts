@@ -372,6 +372,61 @@ describe('TokenStreamBridge', () => {
   });
 
   // -----------------------------------------------------------------------
+  // teardownLabel semantics (bidirectional maps preserved on unsubscribe)
+  // -----------------------------------------------------------------------
+
+  describe('per-session teardown preserves global routing', () => {
+    it('global subscribers still receive events after the last per-session client unsubscribes', () => {
+      const bridge = new TokenStreamBridge(sender, bus, 50);
+      const wsSession = mockWs();
+      const wsGlobal = mockWs();
+      const sid = sessionId('sess-1');
+
+      // Per-session subscription establishes the label<->sessionId mapping.
+      bridge.addClient(wsSession, 1, sid);
+      bridge.addGlobalClient(wsGlobal);
+
+      // The sole per-session client unsubscribes -- this used to also
+      // delete sessionToLabel/labelToSession, which silently broke the
+      // global subscriber's routing. It must NOT do that anymore.
+      bridge.removeClient(wsSession, 1);
+
+      bus.push(sid, textDelta('global-still-works'));
+      vi.advanceTimersByTime(50);
+
+      expect(sender.calls).toHaveLength(1);
+      expect(sender.calls[0].clients.has(wsGlobal)).toBe(true);
+      expect(sender.calls[0].clients.has(wsSession)).toBe(false);
+      const payload = sender.calls[0].payload as { label: number; events: TokenStreamEvent[] };
+      expect(payload.label).toBe(1);
+      expect(payload.events).toHaveLength(1);
+    });
+
+    it('closeSession still severs global routing for that session', () => {
+      const bridge = new TokenStreamBridge(sender, bus, 50);
+      const wsSession = mockWs();
+      const wsGlobal = mockWs();
+      const sid = sessionId('sess-1');
+
+      bridge.addClient(wsSession, 1, sid);
+      bridge.addGlobalClient(wsGlobal);
+
+      // Per-session unsubscribe: global should still work.
+      bridge.removeClient(wsSession, 1);
+      bus.push(sid, textDelta('before-close'));
+      vi.advanceTimersByTime(50);
+      expect(sender.calls).toHaveLength(1);
+
+      // Actual session end: globals must no longer see events.
+      sender.calls.length = 0;
+      bridge.closeSession(1);
+      bus.push(sid, textDelta('after-close'));
+      vi.advanceTimersByTime(50);
+      expect(sender.calls).toHaveLength(0);
+    });
+  });
+
+  // -----------------------------------------------------------------------
   // removeAllForClient
   // -----------------------------------------------------------------------
 

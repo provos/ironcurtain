@@ -67,11 +67,27 @@ export function createTokenStreamBus(): TokenStreamBus {
 
   return {
     push(sessionId, event) {
+      // Each listener is wrapped in try/catch to honor the "push never throws"
+      // invariant. A misbehaving consumer must never break the MITM proxy
+      // forwarding path or fan-out to other subscribers.
       const listeners = sessions.get(sessionId);
       if (listeners) {
-        for (const fn of listeners) fn(sessionId, event);
+        for (const fn of listeners) {
+          try {
+            fn(sessionId, event);
+          } catch {
+            // Intentionally swallow -- the bus is best-effort and has no
+            // sensible recovery path for subscriber errors.
+          }
+        }
       }
-      for (const fn of globalListeners) fn(sessionId, event);
+      for (const fn of globalListeners) {
+        try {
+          fn(sessionId, event);
+        } catch {
+          // Same rationale as above.
+        }
+      }
     },
 
     subscribe(sessionId, listener) {

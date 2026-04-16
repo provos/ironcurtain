@@ -180,6 +180,44 @@ describe('TokenStreamBus', () => {
     expect(global).toHaveBeenCalledWith(sidB, expect.objectContaining({ text: 'from-b' }));
   });
 
+  it('push does not throw if a per-session listener throws', () => {
+    const bus = createTokenStreamBus();
+    const bad = vi.fn(() => {
+      throw new Error('consumer boom');
+    });
+    const good = vi.fn();
+    const sid = sessionId('with-bad-listener');
+
+    bus.subscribe(sid, bad);
+    bus.subscribe(sid, good);
+
+    // Must not throw out of push(); must still invoke the good listener.
+    expect(() => bus.push(sid, textDelta('survive'))).not.toThrow();
+    expect(bad).toHaveBeenCalledOnce();
+    expect(good).toHaveBeenCalledOnce();
+  });
+
+  it('push does not throw if a global listener throws', () => {
+    const bus = createTokenStreamBus();
+    const badGlobal = vi.fn(() => {
+      throw new Error('global boom');
+    });
+    const goodGlobal = vi.fn();
+    const perSession = vi.fn();
+    const sid = sessionId('session-a');
+
+    bus.subscribe(sid, perSession);
+    bus.subscribeAll(badGlobal);
+    bus.subscribeAll(goodGlobal);
+
+    // Bad global listener must not prevent other global listeners or the
+    // per-session listener from receiving the event.
+    expect(() => bus.push(sid, textDelta('global-survive'))).not.toThrow();
+    expect(perSession).toHaveBeenCalledOnce();
+    expect(badGlobal).toHaveBeenCalledOnce();
+    expect(goodGlobal).toHaveBeenCalledOnce();
+  });
+
   it('unsubscribing last per-session listener cleans up session entry', () => {
     const bus = createTokenStreamBus();
     const listener = vi.fn();

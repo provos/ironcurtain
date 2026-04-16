@@ -338,10 +338,25 @@ export async function runObserveCommand(argv: string[]): Promise<void> {
         }
         if (frame.id === sessionListId && frame.ok && workflowName) {
           workflowLabels = new Set<number>();
-          const payload = frame.payload as Array<{ label: number; source?: { kind: string; jobName?: string } }>;
+          const payload = frame.payload as Array<{
+            label: number;
+            source?: { kind: string; jobName?: string };
+          }>;
           if (Array.isArray(payload)) {
+            // TODO(observe --workflow): SessionSource does not currently expose
+            // workflow membership (no `kind: 'workflow'` variant, and workflow
+            // orchestrators create sessions internally without registering
+            // them with SessionManager). Until the DTO surfaces which workflow
+            // a session belongs to, filter strictly on `kind === 'workflow'`
+            // so we at least don't match signal/cron/web sessions. This will
+            // produce an empty set today and silently yield no events, which
+            // is the correct failure mode until the DTO is extended. When the
+            // DTO grows a workflow identifier field, match on that + the
+            // user-supplied `workflowName` here.
             for (const s of payload) {
-              workflowLabels.add(s.label);
+              if (s.source?.kind === 'workflow') {
+                workflowLabels.add(s.label);
+              }
             }
           }
           return;

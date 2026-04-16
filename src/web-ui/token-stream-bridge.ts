@@ -154,7 +154,13 @@ export class TokenStreamBridge {
   /**
    * Clean up all state for a session: cancel pending timers,
    * discard buffered events, unsubscribe from the bus, and
-   * remove all tracking entries.
+   * remove all tracking entries (including the bidirectional
+   * label<->SessionId mappings).
+   *
+   * `teardownLabel()` deliberately preserves the bidirectional maps
+   * so that per-session unsubscribes do not break global subscribers.
+   * `closeSession()` is the only path that represents actual session
+   * end, and is therefore responsible for removing those mappings.
    */
   closeSession(label: number): void {
     const sub = this.subscriptions.get(label);
@@ -165,15 +171,19 @@ export class TokenStreamBridge {
       }
       this.teardownLabel(label, sub);
     } else {
-      // No subscription, but bidirectional maps may exist from registerSession()
+      // No per-session subscription -- still need to clean pending state.
       this.cancelTimer(label);
       this.pending.delete(label);
-      const sessionId = this.labelToSession.get(label);
-      if (sessionId !== undefined) {
-        this.sessionToLabel.delete(sessionId);
-      }
-      this.labelToSession.delete(label);
     }
+
+    // Always drop bidirectional maps on session close, whether or not
+    // there was a per-session subscription. This is the authoritative
+    // place where the label<->SessionId relationship ends.
+    const sessionId = this.labelToSession.get(label);
+    if (sessionId !== undefined) {
+      this.sessionToLabel.delete(sessionId);
+    }
+    this.labelToSession.delete(label);
   }
 
   /** Remove all subscriptions for a disconnecting client. */
@@ -278,13 +288,21 @@ export class TokenStreamBridge {
     this.sender.sendToSubscribers(recipients, 'session.token_stream', { label, events });
   }
 
+  /**
+   * Tear down the bus subscription and batching state for a label,
+   * leaving the bidirectional label<->SessionId maps intact so that
+   * global subscribers can still resolve events for this session.
+   *
+   * Called when the last per-session client unsubscribes OR as part
+   * of `closeSession()` (which additionally clears the maps).
+   */
   private teardownLabel(label: number, sub: SessionSubscription): void {
     sub.unsubscribe();
     this.cancelTimer(label);
     this.pending.delete(label);
     this.subscriptions.delete(label);
-    this.sessionToLabel.delete(sub.sessionId);
-    this.labelToSession.delete(label);
+    // Intentionally do NOT delete sessionToLabel / labelToSession here;
+    // those are owned by closeSession() (i.e. true session lifecycle end).
   }
 
   private cancelTimer(label: number): void {
