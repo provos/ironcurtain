@@ -212,6 +212,7 @@ async function createDockerSession(
       useTcp: infra.useTcp,
       conversationStateDir: infra.conversationStateDir,
       conversationStateConfig: infra.conversationStateConfig,
+      agentModelOverride: options.agentModelOverride,
       onEscalation: options.onEscalation,
       onEscalationExpired: options.onEscalationExpired,
       onEscalationResolved: options.onEscalationResolved,

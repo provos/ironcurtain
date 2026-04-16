@@ -36,12 +36,13 @@ import {
 import type { CheckpointStore } from './checkpoint.js';
 import {
   parseAgentStatus,
+  AgentStatusParseError,
   buildStatusBlockReprompt,
   getValidVerdicts,
   buildInvalidVerdictReprompt,
 } from './status-parser.js';
 import { buildAgentCommand, buildArtifactReprompt, buildStatusInstructions } from './prompt-builder.js';
-import { collectFilesRecursive, hasAnyFiles } from './artifacts.js';
+import { collectFilesRecursive, hasAnyFiles, snapshotArtifacts } from './artifacts.js';
 import { validateDefinition } from './validate.js';
 import { parseDefinitionFile } from './discovery.js';
 
@@ -69,6 +70,29 @@ function truncateForTransition(text: string | null | undefined): string | undefi
 
 function toErrorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * Parses an agent_status block into one of three explicit states: `ok` with the
+ * parsed output, `missing` when no block was present, or `malformed` when a
+ * block was present but failed YAML or schema validation. Callers branch on the
+ * `kind` discriminator to decide whether to retry, abort, or proceed.
+ */
+type ParseResult =
+  | { kind: 'ok'; output: AgentOutput }
+  | { kind: 'missing' }
+  | { kind: 'malformed'; error: AgentStatusParseError };
+
+function tryParseAgentStatus(responseText: string): ParseResult {
+  try {
+    const output = parseAgentStatus(responseText);
+    return output ? { kind: 'ok', output } : { kind: 'missing' };
+  } catch (err) {
+    if (err instanceof AgentStatusParseError) {
+      return { kind: 'malformed', error: err };
+    }
+    throw err;
+  }
 }
 
 /**
@@ -489,6 +513,18 @@ export class WorkflowOrchestrator implements WorkflowController {
   }
 
   resolveGate(id: WorkflowId, event: HumanGateEvent): void {
+    // FORCE_REVISION and REPLAN loop back to an earlier state with the
+    // feedback injected into the next agent's prompt (via context.humanPrompt).
+    // Without feedback the agent has no signal for what to change and the
+    // re-entry prompt ("Revise it to address the human feedback above")
+    // references content that does not exist. Require non-empty feedback at
+    // the source so every entry point (CLI, web UI, programmatic) fails fast.
+    if (event.type === 'FORCE_REVISION' || event.type === 'REPLAN') {
+      if (!event.prompt || event.prompt.trim().length === 0) {
+        throw new Error(`Feedback is required for ${event.type} events`);
+      }
+    }
+
     const instance = this.workflows.get(id);
     if (!instance) return;
 
@@ -723,6 +759,13 @@ export class WorkflowOrchestrator implements WorkflowController {
 
     const settings = definition.settings ?? {};
 
+    // Version artifact directories before re-entering a state
+    const visitCount = context.visitCounts[stateId] ?? 0;
+    if (visitCount > 1) {
+      const unversioned = new Set(settings.unversionedArtifacts ?? []);
+      snapshotArtifacts(instance.artifactDir, stateConfig.outputs, visitCount, unversioned);
+    }
+
     instance.tab.write(`[agent] Starting "${stateId}" (persona: ${stateConfig.persona})`);
 
     const command = buildAgentCommand(stateId, stateConfig, context, definition);
@@ -731,6 +774,8 @@ export class WorkflowOrchestrator implements WorkflowController {
       settings.mode === 'builtin'
         ? { kind: 'builtin' }
         : { kind: 'docker', agent: (settings.dockerAgent ?? 'claude-code') as AgentId };
+
+    const effectiveModel = stateConfig.model ?? settings.model;
 
     // Create session with resumeSessionId for same-role continuity.
     // sessionsByState is keyed by stateId (set by updateContextFromAgentResult).
@@ -745,6 +790,7 @@ export class WorkflowOrchestrator implements WorkflowController {
         resumeSessionId: previousSessionId,
         workspacePath: instance.workspacePath,
         systemPromptAugmentation: definition.settings?.systemPrompt,
+        ...(effectiveModel != null ? { agentModelOverride: effectiveModel } : {}),
         ...(settings.maxSessionSeconds != null
           ? { resourceBudgetOverrides: { maxSessionSeconds: settings.maxSessionSeconds } }
           : {}),
@@ -797,27 +843,38 @@ export class WorkflowOrchestrator implements WorkflowController {
       });
 
       let responseText = await session.sendMessage(command);
-      let agentOutput = parseAgentStatus(responseText);
-      logReceived(responseText, agentOutput);
+      let parseResult = tryParseAgentStatus(responseText);
+      logReceived(responseText, parseResult.kind === 'ok' ? parseResult.output : undefined);
 
-      if (!agentOutput) {
-        const retryMsg = buildStatusBlockReprompt(statusInstructions);
+      let agentOutput: AgentOutput;
+      if (parseResult.kind === 'ok') {
+        agentOutput = parseResult.output;
+      } else {
+        const malformed = parseResult.kind === 'malformed' ? parseResult.error : undefined;
+        const retryMsg = buildStatusBlockReprompt(statusInstructions, malformed);
         messageLog.append({
           ...this.logBase(instance),
           type: 'agent_retry',
           role: stateConfig.persona,
-          reason: 'missing_status_block',
-          details: 'Response did not contain an agent_status block',
+          reason: malformed ? 'malformed_status_block' : 'missing_status_block',
+          details: malformed
+            ? `Malformed agent_status block: ${malformed.message}`
+            : 'Response did not contain an agent_status block',
           retryMessage: retryMsg,
         });
 
         responseText = await session.sendMessage(retryMsg);
-        agentOutput = parseAgentStatus(responseText);
-        logReceived(responseText, agentOutput);
+        parseResult = tryParseAgentStatus(responseText);
+        logReceived(responseText, parseResult.kind === 'ok' ? parseResult.output : undefined);
 
-        if (!agentOutput) {
-          throw new Error('Agent failed to provide agent_status block after retry');
+        if (parseResult.kind !== 'ok') {
+          throw new Error(
+            parseResult.kind === 'malformed'
+              ? `Agent produced a malformed agent_status block after retry: ${parseResult.error.message}`
+              : 'Agent failed to provide agent_status block after retry',
+          );
         }
+        agentOutput = parseResult.output;
       }
 
       // Validate verdict against valid transitions before the result reaches XState.
@@ -836,24 +893,28 @@ export class WorkflowOrchestrator implements WorkflowController {
         });
 
         responseText = await session.sendMessage(retryMsg);
-        const retryOutput = parseAgentStatus(responseText);
-        logReceived(responseText, retryOutput);
+        const retryParse = tryParseAgentStatus(responseText);
+        logReceived(responseText, retryParse.kind === 'ok' ? retryParse.output : undefined);
 
-        if (!retryOutput) {
+        if (retryParse.kind !== 'ok') {
+          const suffix =
+            retryParse.kind === 'malformed'
+              ? `retry produced a malformed status block: ${retryParse.error.message}`
+              : 'retry did not include a status block';
           throw new Error(
             `Agent verdict "${agentOutput.verdict}" is not valid for this state ` +
-              `(expected one of: ${[...validVerdicts].join(', ')}), and retry did not include a status block`,
+              `(expected one of: ${[...validVerdicts].join(', ')}), and ${suffix}`,
           );
         }
 
-        if (!validVerdicts.has(retryOutput.verdict)) {
+        if (!validVerdicts.has(retryParse.output.verdict)) {
           throw new Error(
-            `Agent returned invalid verdict "${retryOutput.verdict}" after retry ` +
+            `Agent returned invalid verdict "${retryParse.output.verdict}" after retry ` +
               `(expected one of: ${[...validVerdicts].join(', ')})`,
           );
         }
 
-        agentOutput = retryOutput;
+        agentOutput = retryParse.output;
       }
 
       const missingArtifacts = this.findMissingArtifacts(stateConfig, instance.artifactDir);
@@ -869,10 +930,12 @@ export class WorkflowOrchestrator implements WorkflowController {
         });
 
         const retryResponse = await session.sendMessage(artifactRetryMsg);
-        const retryOutput = parseAgentStatus(retryResponse);
-        logReceived(retryResponse, retryOutput);
-        if (retryOutput) {
-          agentOutput = retryOutput;
+        const retryParse = tryParseAgentStatus(retryResponse);
+        if (retryParse.kind === 'ok') {
+          logReceived(retryResponse, retryParse.output);
+          agentOutput = retryParse.output;
+        } else {
+          logReceived(retryResponse, undefined);
         }
         const stillMissing = this.findMissingArtifacts(stateConfig, instance.artifactDir);
         if (stillMissing.length > 0) {

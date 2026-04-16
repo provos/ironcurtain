@@ -287,6 +287,26 @@ describe('buildStatusBlockReprompt', () => {
     expect(prompt).toContain('verdict: completed');
     expect(prompt).toContain('notes:');
   });
+
+  it('surfaces the parse error detail when the block was malformed', () => {
+    const parseError = new AgentStatusParseError(
+      'Malformed agent_status block: verdict: Invalid input: expected string, received undefined',
+      'agent_status:\n  status: complete',
+    );
+    const prompt = buildStatusBlockReprompt(undefined, parseError);
+    expect(prompt).toContain('malformed');
+    expect(prompt).toContain('Parse error:');
+    expect(prompt).toContain('verdict: Invalid input');
+    // Still shows the canonical instructions
+    expect(prompt).toContain('agent_status:');
+    expect(prompt).toContain('verdict: completed');
+  });
+
+  it('uses missing-block wording when no parse error is supplied', () => {
+    const prompt = buildStatusBlockReprompt();
+    expect(prompt).toContain('missing the required agent_status block');
+    expect(prompt).not.toContain('malformed');
+  });
 });
 
 describe('MINIMAL_STATUS_INSTRUCTIONS', () => {
@@ -314,6 +334,15 @@ describe('MINIMAL_STATUS_INSTRUCTIONS', () => {
 
   it('uses completed as the example verdict', () => {
     expect(MINIMAL_STATUS_INSTRUCTIONS).toContain('verdict: completed');
+  });
+
+  it('instructs the agent to use exactly these field names', () => {
+    // Guards against models emitting `status:` instead of `verdict:` or
+    // adding extra keys like `scope`, `artifacts`, `top_hypotheses`.
+    expect(MINIMAL_STATUS_INSTRUCTIONS).toMatch(/EXACTLY these field names/);
+    expect(MINIMAL_STATUS_INSTRUCTIONS).toContain('`verdict`');
+    expect(MINIMAL_STATUS_INSTRUCTIONS).toContain('`notes`');
+    expect(MINIMAL_STATUS_INSTRUCTIONS.toLowerCase()).toMatch(/hard error|reject/);
   });
 });
 

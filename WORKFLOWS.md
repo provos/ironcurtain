@@ -109,6 +109,10 @@ Options:
 
 - `--model <model>` -- Override the model (e.g., `anthropic:claude-haiku-4-5`)
 - `--workspace <path>` -- Use an existing directory instead of creating a new one
+- `--no-lint` -- Skip the pre-flight lint pass
+- `--strict-lint` -- Treat lint warnings as errors
+
+A pre-flight lint pass runs before the workflow starts; error-severity diagnostics abort the start. See [`ironcurtain workflow lint`](#ironcurtain-workflow-lint) for the full check catalog.
 
 Examples:
 
@@ -130,6 +134,10 @@ Options:
 
 - `--state <stateName>` -- Resume from a specific state (synthesizes a checkpoint if none exists)
 - `--model <model>` -- Override the model for the resumed run
+- `--no-lint` -- Skip the pre-flight lint pass
+- `--strict-lint` -- Treat lint warnings as errors
+
+The same pre-flight lint pass as `start` runs before resuming (skipped if the original definition file has been moved or deleted).
 
 ### `ironcurtain workflow inspect`
 
@@ -139,7 +147,48 @@ View the status of a workflow without running it.
 ironcurtain workflow inspect <baseDir> [--all]
 ```
 
-Shows: workflow ID, current state, artifacts, and the last 20 message log entries. Use `--all` for the full log.
+Shows: workflow ID, current state, artifacts, lint diagnostics on the checkpointed definition, and the last 20 message log entries. Use `--all` for the full log.
+
+Lint output is informational only — it never changes the exit code.
+
+### `ironcurtain workflow lint`
+
+Run semantic checks on a workflow definition without executing it. The linter catches cross-cutting issues that structural (Zod) validation doesn't: unreachable states, dangling artifact references, missing personas, and similar smells.
+
+```bash
+ironcurtain workflow lint <name-or-path> [--strict]
+```
+
+Options:
+
+- `--strict` -- Treat warnings as errors (exit code 2)
+
+Exit codes:
+
+- `0` -- No diagnostics, or warnings only (without `--strict`)
+- `1` -- One or more errors
+- `2` -- Warnings present and `--strict` was passed
+
+#### Check catalog
+
+| Code | Severity | Catches |
+|------|----------|---------|
+| `WF001` | error | State cannot reach any terminal — workflow would loop forever if it enters |
+| `WF002` | warning | `settings.unversionedArtifacts` entry not produced by any state (silently versioned) |
+| `WF003` | warning | Terminal `outputs:` entry not produced by any reachable state |
+| `WF004` | error | Human-gate `present:` entry not produced (human would approve blind) |
+| `WF005` | error | State uses `parallelKey` + `worktree: true` but `settings.gitRepoPath` is not set |
+| `WF006` | warning | `settings.maxRounds` set but no transition uses `isRoundLimitReached` guard (limit silently ignored) |
+| `WF007` | warning | Agent state references a persona not installed locally (runtime failure) |
+
+Example:
+
+```bash
+ironcurtain workflow lint design-and-code
+ironcurtain workflow lint ./my-workflow.yaml --strict
+```
+
+When a workflow is started via the daemon/web UI, error-severity diagnostics abort with a `LINT_FAILED` JSON-RPC error carrying the full diagnostic list so the UI can render it inline.
 
 ## Human gates
 
@@ -207,6 +256,60 @@ my_state:
 - **`outputs`** -- Artifact directories the agent must create (under `.workflow/`). Use `[]` for code-only states where the agent writes to the workspace root.
 - **`transitions`** -- Where to go next, using `when` for declarative conditions or `guard` for context-based checks
 - **`freshSession`** -- When `false`, re-invocations of this state resume the previous agent session via `--continue`, receiving an abbreviated re-visit prompt. Use this for iterative refinement loops where the agent benefits from retaining its prior reasoning (e.g., a coder receiving critic feedback). Default: `true` (each invocation starts a fresh session, bootstrapping from artifacts on disk).
+
+### Model selection
+
+Workflows can pin a specific LLM at two levels. Both use a qualified model ID (`provider:model-name`). A bare model name with no prefix defaults to Anthropic.
+
+Valid IDs depend on which agent is running the workflow:
+
+- **`mode: builtin`** -- any configured provider: `anthropic:claude-opus-4-6`, `openai:gpt-5`, `google:gemini-2.5-pro`, etc.
+- **`dockerAgent: claude-code`** -- the adapter passes the bare model name to the `claude --model` CLI flag. By default that targets Anthropic's API. To run a non-Anthropic model (e.g. an Ollama-served `glm-5.1:cloud`, an OpenRouter model, or any other Anthropic-compatible proxy), set `ANTHROPIC_BASE_URL` in the environment to the proxy endpoint; the same model name is then forwarded to that endpoint.
+- **`dockerAgent: goose`** -- provider is selected at container startup via the user's `gooseProvider` setting, not via the workflow's `model` field. See the Goose caveat below.
+
+- **Workflow-level** (`settings.model`) -- default for every agent state in the workflow.
+- **State-level** (`model` on any agent state) -- overrides the workflow default for that state only.
+
+```yaml
+name: mixed-models
+settings:
+  mode: docker
+  dockerAgent: claude-code
+  model: anthropic:claude-sonnet-4-6 # default for every agent state
+
+states:
+  plan:
+    type: agent
+    persona: planner
+    prompt: 'Plan the work.'
+    model: anthropic:claude-opus-4-6 # overrides workflow default for this state
+    outputs: [plan]
+    transitions:
+      - to: implement
+
+  implement:
+    type: agent
+    persona: coder
+    prompt: 'Implement the plan.'
+    # no `model` -- inherits settings.model (sonnet)
+    inputs: [plan]
+    outputs: []
+    transitions:
+      - to: done
+
+  done:
+    type: terminal
+```
+
+**Precedence** (highest wins):
+
+1. `--model` CLI flag on `ironcurtain workflow start` / `resume`
+2. State-level `model` in the YAML
+3. Workflow-level `settings.model` in the YAML
+4. `agentModelId` in `~/.ironcurtain/config.json`
+5. Hardcoded default (`anthropic:claude-sonnet-4-6`)
+
+**Goose caveat.** Per-state switching only takes effect at container spawn for the Goose adapter: Goose reads `GOOSE_MODEL` from its container environment at startup and cannot change models per turn. Claude Code supports per-turn switching via `--model`, so per-state overrides within a single state's multi-round loop work as expected.
 
 ### Human gate states
 

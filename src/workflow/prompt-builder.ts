@@ -7,6 +7,7 @@ import type {
 } from './types.js';
 import { WORKFLOW_ARTIFACT_DIR } from './types.js';
 import { MINIMAL_STATUS_INSTRUCTIONS, buildConditionalStatusInstructions } from './status-parser.js';
+import { parseArtifactRef } from './validate.js';
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -36,7 +37,7 @@ export function buildAgentCommand(
   if (isReVisit) {
     return buildReVisitPrompt(stateId, stateConfig, context);
   }
-  return buildFirstVisitPrompt(stateConfig, context, definition);
+  return buildFirstVisitPrompt(stateId, stateConfig, context, definition);
 }
 
 // ---------------------------------------------------------------------------
@@ -46,24 +47,30 @@ export function buildAgentCommand(
 /**
  * Full prompt for the first time an agent state is entered.
  *
- * Uses one universal layout for ALL agents (workers and orchestrators alike):
- * 1. Workflow Context — task as quoted context
- * 2. Previous agent output (if any)
- * 3. Input artifacts
- * 4. Your Role — the role prompt (last substantive instruction for recency bias)
- * 5. Expected outputs
- * 6. Human feedback (if any)
- * 7. Handoff clause
- * 8. Status block instructions
+ * Layout:
+ *   1. Human feedback (if any)
+ *   2. Workflow Context (task as quoted text)
+ *   3. Previous agent output
+ *   4. Input artifacts
+ *   5. Your Role
+ *   6. Expected outputs
+ *   7. Handoff clause
+ *   8. Status block instructions
+ *
+ * Human feedback is at the top so FORCE_REVISION feedback takes precedence
+ * over previous output. Role is near the end for recency bias.
  */
 function buildFirstVisitPrompt(
+  stateId: string,
   stateConfig: AgentStateDefinition,
   context: WorkflowContext,
   definition: WorkflowDefinition,
 ): string {
   const sections: string[] = [];
+  const isSameStateReEntry = context.previousStateName !== null && context.previousStateName === stateId;
 
-  // 1. Workflow context with task description as quoted text
+  appendHumanFeedback(sections, context.humanPrompt, isSameStateReEntry);
+
   sections.push(
     '## Workflow Context\n\n' +
       'You are one agent in a multi-agent workflow. The overall workflow goal is:\n\n' +
@@ -71,36 +78,19 @@ function buildFirstVisitPrompt(
       'Your specific role and instructions follow below. Focus on YOUR assigned responsibilities, not the overall goal.',
   );
 
-  // 2. Previous agent's output
-  if (context.previousAgentOutput && context.previousStateName) {
-    sections.push(
-      `## Output from ${context.previousStateName}\n\n` +
-        `The ${context.previousStateName} agent produced the following output:\n\n` +
-        context.previousAgentOutput,
-    );
-  }
+  appendPreviousOutput(sections, context, isSameStateReEntry, 'Output from');
 
-  // 3. Input artifacts as path references (not content)
   appendInputArtifacts(sections, stateConfig.inputs);
 
-  // 4. Role prompt (last substantive instruction for recency bias)
   sections.push(`## Your Role\n\n${stateConfig.prompt}`);
 
-  // 5. Expected outputs
   appendExpectedOutputs(sections, stateConfig.outputs);
 
-  // 6. Human feedback from gate
-  if (context.humanPrompt) {
-    sections.push(`## Human Feedback\n\n${context.humanPrompt}`);
-  }
-
-  // 7. Handoff clause (before status block, which must be last)
   const handoff = buildHandoffClause(stateConfig.transitions, definition);
   if (handoff) {
     sections.push(handoff);
   }
 
-  // 8. Status block instructions (always last)
   sections.push(buildStatusInstructions(stateConfig.transitions));
 
   return sections.join('\n\n---\n\n');
@@ -110,11 +100,81 @@ function buildFirstVisitPrompt(
 // Shared section helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Appends the human-feedback section. Same-state re-entry uses a
+ * self-revision framing so the agent recognizes the feedback as directed
+ * at its own prior output rather than a new task.
+ */
+function appendHumanFeedback(sections: string[], humanPrompt: string | null, isSameStateReEntry: boolean): void {
+  if (!humanPrompt) return;
+  const heading = isSameStateReEntry
+    ? '## Human Feedback — revise your previous work\n\n' +
+      'You are being asked to revise your previous work based on this feedback:\n\n'
+    : '## Human Feedback\n\n';
+  sections.push(heading + humanPrompt);
+}
+
+/**
+ * Appends the previous-output section. Same-state re-entry uses the
+ * "Your Previous Output" self-revision framing. Cross-state routing uses
+ * the "Scoping from the previous agent" framing with separate Directive
+ * and Notes subsections; see `buildScopingSection`.
+ */
+function appendPreviousOutput(
+  sections: string[],
+  context: WorkflowContext,
+  isSameStateReEntry: boolean,
+  crossStateHeading: 'Output from' | 'New Input from',
+): void {
+  if (!context.previousStateName) return;
+
+  if (isSameStateReEntry) {
+    if (!context.previousAgentOutput) return;
+    sections.push(
+      `## Your Previous Output\n\n` +
+        `This is your own prior output. Revise it to address the human feedback above.\n\n` +
+        context.previousAgentOutput,
+    );
+    return;
+  }
+
+  const scoping = buildScopingSection(context, crossStateHeading);
+  if (scoping) sections.push(scoping);
+}
+
+/**
+ * Builds the cross-state "Scoping from the previous agent" section, rendering
+ * the directive body and the `notes` summary as labeled sub-sections.
+ * Returns `null` when both are empty so the caller omits the whole block.
+ */
+function buildScopingSection(
+  context: WorkflowContext,
+  crossStateHeading: 'Output from' | 'New Input from',
+): string | null {
+  const trimmedBody = context.previousAgentOutput?.trim() ?? '';
+  const trimmedNotes = context.previousAgentNotes?.trim() ?? '';
+  if (!trimmedBody && !trimmedNotes) return null;
+
+  const header =
+    `## ${crossStateHeading} ${context.previousStateName}\n\n` +
+    `The ${context.previousStateName} agent produced the following output. ` +
+    `Treat this as the authoritative scoping for what to do this round — ` +
+    `if it is missing or vague, STOP and report back rather than improvising.`;
+
+  const parts: string[] = [header];
+  if (trimmedBody) {
+    parts.push(`### Directive\n\n${trimmedBody}`);
+  }
+  if (trimmedNotes) {
+    parts.push(`### Notes\n\n${trimmedNotes}`);
+  }
+  return parts.join('\n\n');
+}
+
 /** Appends input artifact path reference sections. */
 function appendInputArtifacts(sections: string[], inputs: readonly string[]): void {
   for (const inputRef of inputs) {
-    const isOptional = inputRef.endsWith('?');
-    const name = isOptional ? inputRef.slice(0, -1) : inputRef;
+    const { name, isOptional } = parseArtifactRef(inputRef);
     const instruction = isOptional
       ? `Read the contents of the \`${WORKFLOW_ARTIFACT_DIR}/${name}/\` directory in your workspace if it exists. This input is optional — skip it if the directory is not present.`
       : `Read the contents of the \`${WORKFLOW_ARTIFACT_DIR}/${name}/\` directory in your workspace using your file reading tools.`;
@@ -137,22 +197,16 @@ function appendExpectedOutputs(sections: string[], outputs: readonly string[]): 
 /**
  * Abbreviated prompt for re-entering a previously visited state.
  * The agent already has role instructions and task context in its
- * conversation history via --continue. Only new information is sent.
+ * conversation history via --continue, so only new information is sent:
+ * human feedback, previous output, round number, and status instructions.
  */
 function buildReVisitPrompt(stateId: string, stateConfig: AgentStateDefinition, context: WorkflowContext): string {
   const sections: string[] = [];
+  const isSameStateReEntry = context.previousStateName !== null && context.previousStateName === stateId;
 
-  // 1. What's new: previous agent's output
-  if (context.previousAgentOutput && context.previousStateName) {
-    sections.push(
-      `## New Input from ${context.previousStateName}\n\n` +
-        `The ${context.previousStateName} agent reviewed your work and ` +
-        `produced the following output:\n\n` +
-        context.previousAgentOutput,
-    );
-  }
+  appendHumanFeedback(sections, context.humanPrompt, isSameStateReEntry);
+  appendPreviousOutput(sections, context, isSameStateReEntry, 'New Input from');
 
-  // 2. Round number (per-state count, not global)
   const stateRound = context.visitCounts[stateId] ?? 1;
   sections.push(
     `## Round\n\nThis is round ${stateRound} ` +
@@ -160,12 +214,6 @@ function buildReVisitPrompt(stateId: string, stateConfig: AgentStateDefinition, 
       `Please address the feedback above and update your outputs.`,
   );
 
-  // 3. Human feedback from gate
-  if (context.humanPrompt) {
-    sections.push(`## Human Feedback\n\n${context.humanPrompt}`);
-  }
-
-  // 4. Status block instructions (state-specific for conditional transitions)
   sections.push(buildStatusInstructions(stateConfig.transitions));
 
   return sections.join('\n\n---\n\n');

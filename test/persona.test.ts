@@ -23,6 +23,7 @@ import {
   getPersonaConstitutionPath,
   getPersonaWorkspaceDir,
   loadPersona,
+  personaExists,
   resolvePersona,
   applyServerAllowlist,
 } from '../src/persona/resolve.js';
@@ -212,6 +213,33 @@ describe('path helpers', () => {
   it('getPersonaWorkspaceDir returns correct path', () => {
     const name = createPersonaName('test');
     expect(getPersonaWorkspaceDir(name)).toBe(resolve(TEST_HOME, 'personas', 'test', 'workspace'));
+  });
+});
+
+describe('personaExists', () => {
+  it('returns true for an installed persona', () => {
+    createTestPersona('installed');
+    expect(personaExists('installed')).toBe(true);
+  });
+
+  it('returns false for a missing persona', () => {
+    expect(personaExists('nonexistent')).toBe(false);
+  });
+
+  it('returns false for path-traversal names without touching the filesystem', () => {
+    // The brand-then-check ordering is load-bearing: if existsSync received
+    // "../evil" unescaped, it could probe arbitrary locations outside
+    // the personas directory. createPersonaName rejects the pattern first,
+    // so existsSync is never called.
+    expect(personaExists('../evil')).toBe(false);
+    expect(personaExists('../../../etc/passwd')).toBe(false);
+    expect(personaExists('foo/bar')).toBe(false);
+  });
+
+  it('returns false for invalid slug characters', () => {
+    expect(personaExists('Bad!')).toBe(false);
+    expect(personaExists('my persona')).toBe(false);
+    expect(personaExists('')).toBe(false);
   });
 });
 

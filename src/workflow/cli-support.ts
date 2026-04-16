@@ -61,32 +61,40 @@ export function writeStderr(msg: string): void {
 // ---------------------------------------------------------------------------
 
 /**
- * Creates a session factory that loads config once and optionally
- * overrides the agent model.
+ * Creates a session factory that loads config once and routes model
+ * selection through:
  *
- * Persona handling:
- * - `"global"` (GLOBAL_PERSONA): stripped to undefined -- uses global policy
- * - Any other value: passed through to `createSession()` for per-persona
- *   policy, memory, and prompt augmentation
+ *   `--model` CLI flag  >  per-call `agentModelOverride`  >  user config
+ *
+ * Resolution happens per call so per-state `SessionOptions.agentModelOverride`
+ * values are honored on each invocation.
+ *
+ * Persona `"global"` (GLOBAL_PERSONA) is stripped to undefined (uses global
+ * policy); any other value passes through for per-persona policy/memory.
  */
 export function createWorkflowSessionFactory(modelOverride?: string): (opts: SessionOptions) => Promise<Session> {
   const baseConfig = loadConfig();
-  const agentModelId = modelOverride ?? baseConfig.userConfig.agentModelId;
-  const effectiveConfig = {
-    ...baseConfig,
-    userConfig: {
-      ...baseConfig.userConfig,
-      agentModelId,
-    },
-  };
 
   return async (opts: SessionOptions): Promise<Session> => {
     const persona = opts.persona;
-    const effectiveOpts: SessionOptions = {
-      ...opts,
-      config: effectiveConfig,
-      persona: persona === GLOBAL_PERSONA ? undefined : persona,
-    };
+    const personaStripped = persona === GLOBAL_PERSONA ? undefined : persona;
+
+    // Only rebuild the config when a model override is actually in play.
+    // The common case (no per-state and no --model) passes the base config
+    // through unchanged.
+    const override = modelOverride ?? opts.agentModelOverride;
+    const effectiveOpts: SessionOptions = override
+      ? {
+          ...opts,
+          config: {
+            ...baseConfig,
+            agentModelId: override,
+            userConfig: { ...baseConfig.userConfig, agentModelId: override },
+          },
+          agentModelOverride: override,
+          persona: personaStripped,
+        }
+      : { ...opts, config: baseConfig, persona: personaStripped };
 
     try {
       return await createSession(effectiveOpts);
@@ -216,11 +224,34 @@ export async function promptGateInteractive(
     }
 
     if (eventType === 'FORCE_REVISION' || eventType === 'REPLAN') {
-      const feedback = await rl.question(`${CYAN}Feedback: ${RESET}`);
-      return { type: eventType, prompt: feedback || undefined };
+      const feedback = await promptRequiredFeedback(rl, eventType);
+      return { type: eventType, prompt: feedback };
     }
 
     return { type: eventType };
+  }
+}
+
+/**
+ * FORCE_REVISION and REPLAN route the workflow back to an earlier state
+ * and the next agent's prompt references the feedback directly, so empty
+ * feedback would produce an incoherent re-entry prompt. When stdin is
+ * closed (piped invocation, EOF) we abort instead of spinning.
+ */
+async function promptRequiredFeedback(
+  rl: ReturnType<typeof createInterface>,
+  eventType: 'FORCE_REVISION' | 'REPLAN',
+): Promise<string> {
+  for (;;) {
+    if (process.stdin.readableEnded) {
+      throw new Error(`Feedback is required for ${eventType} but stdin was closed before a response was provided.`);
+    }
+    const answer = await rl.question(`${CYAN}Feedback: ${RESET}`);
+    const trimmed = answer.trim();
+    if (trimmed.length > 0) {
+      return trimmed;
+    }
+    writeStdout(`${RED}Feedback is required for ${eventType}. Please enter a non-empty response.${RESET}`);
   }
 }
 
@@ -409,6 +440,7 @@ export function synthesizeCheckpoint(
     lastError: null,
     sessionsByState: {},
     previousAgentOutput: null,
+    previousAgentNotes: null,
     previousStateName: null,
     visitCounts: {},
   };

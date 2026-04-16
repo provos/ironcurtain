@@ -166,7 +166,11 @@ exit $STATUS
     buildCommand(
       message: string,
       systemPrompt: string,
-      options: { readonly sessionId: string; readonly firstTurn: boolean },
+      options: {
+        readonly sessionId: string;
+        readonly firstTurn: boolean;
+        readonly modelOverride?: string;
+      },
     ): readonly string[] {
       // `claude -p --continue` in non-interactive print mode does NOT update
       // ~/.claude.json's project->session mapping, so subsequent `--continue`
@@ -185,8 +189,9 @@ exit $STATUS
         '--append-system-prompt',
         systemPrompt,
       ];
-      if (modelId) {
-        cmd.push('--model', modelId);
+      const effectiveModelId = options.modelOverride ? parseModelId(options.modelOverride).modelId : modelId;
+      if (effectiveModelId) {
+        cmd.push('--model', effectiveModelId);
       }
       cmd.push('-p', message);
       return cmd;

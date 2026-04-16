@@ -274,6 +274,12 @@ export interface SessionOptions {
   resourceBudgetOverrides?: {
     maxSessionSeconds?: number | null;
   };
+
+  /**
+   * Qualified model ID ("provider:model-name") for this session only.
+   * Takes precedence over `config.agentModelId` when set.
+   */
+  agentModelOverride?: string;
 }
 
 /**

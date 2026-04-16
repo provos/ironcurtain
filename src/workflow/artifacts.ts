@@ -1,4 +1,4 @@
-import { readFileSync, mkdirSync, readdirSync, existsSync, lstatSync } from 'node:fs';
+import { readFileSync, mkdirSync, readdirSync, existsSync, lstatSync, cpSync } from 'node:fs';
 import { resolve, relative, sep } from 'node:path';
 import { createHash } from 'node:crypto';
 import type { WorkflowId } from './types.js';
@@ -83,6 +83,52 @@ function hasAnyFilesInDir(currentDir: string): boolean {
     }
   }
   return false;
+}
+
+// ---------------------------------------------------------------------------
+// Artifact versioning
+// ---------------------------------------------------------------------------
+
+/**
+ * Copies output artifact directories to versioned backups before a state
+ * is re-entered. Agents always write to the same canonical paths — versioning
+ * is transparent to them.
+ *
+ * On the Nth visit (N > 1), each output's directory is copied to `<name>.v<N-1>`.
+ * For example, the second visit creates `.v1`, the third creates `.v2`.
+ *
+ * Idempotency: if the versioned directory already exists (e.g., on resume),
+ * the copy is skipped to avoid overwriting a clean snapshot with corrupted data.
+ */
+export function snapshotArtifacts(
+  artifactDir: string,
+  outputs: readonly string[],
+  visitNumber: number,
+  unversionedArtifacts: ReadonlySet<string>,
+): void {
+  if (visitNumber <= 1) return;
+
+  const versionSuffix = `.v${visitNumber - 1}`;
+
+  for (const output of outputs) {
+    if (unversionedArtifacts.has(output)) continue;
+
+    const src = resolve(artifactDir, output);
+    if (!existsSync(src)) continue;
+
+    const dest = resolve(artifactDir, `${output}${versionSuffix}`);
+    if (existsSync(dest)) continue;
+
+    try {
+      cpSync(src, dest, { recursive: true });
+    } catch (err) {
+      // Best-effort: a single failed copy must not abort a long-running agent run.
+      // Write directly to stderr to bypass any console hijacking
+      // (logger.setup() redirects console.error to a log file).
+      const message = err instanceof Error ? err.message : String(err);
+      process.stderr.write(`[workflow] snapshotArtifacts: failed to copy "${src}" to "${dest}": ${message}\n`);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------

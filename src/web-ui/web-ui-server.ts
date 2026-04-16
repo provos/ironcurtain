@@ -465,7 +465,11 @@ export class WebUiServer {
     } catch (err: unknown) {
       const response: ResponseFrame =
         err instanceof RpcError
-          ? { id: frame.id, ok: false, error: { code: err.code, message: err.message } }
+          ? {
+              id: frame.id,
+              ok: false,
+              error: { code: err.code, message: err.message, data: err.data },
+            }
           : {
               id: frame.id,
               ok: false,

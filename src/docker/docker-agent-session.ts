@@ -61,6 +61,8 @@ export interface DockerAgentSessionDeps {
   readonly conversationStateDir?: string;
   /** Conversation state config from the adapter (mount path, resume flags). */
   readonly conversationStateConfig?: ConversationStateConfig;
+  /** Qualified model ID ("provider:model-name") to use for this session's turns, overriding the adapter default. */
+  readonly agentModelOverride?: string;
   readonly onEscalation?: (request: EscalationRequest) => void;
   readonly onEscalationExpired?: () => void;
   readonly onEscalationResolved?: (escalationId: string, decision: 'approved' | 'denied') => void;
@@ -93,6 +95,7 @@ export class DockerAgentSession implements Session {
   private readonly useTcp: boolean;
   private readonly conversationStateDir?: string;
   private readonly conversationStateConfig?: ConversationStateConfig;
+  private readonly agentModelOverride?: string;
 
   private status: SessionStatus = 'initializing';
   private readonly createdAt: string;
@@ -142,6 +145,7 @@ export class DockerAgentSession implements Session {
     this.useTcp = deps.useTcp ?? false;
     this.conversationStateDir = deps.conversationStateDir;
     this.conversationStateConfig = deps.conversationStateConfig;
+    this.agentModelOverride = deps.agentModelOverride;
     this.onEscalation = deps.onEscalation;
     this.onEscalationExpired = deps.onEscalationExpired;
     this.onEscalationResolved = deps.onEscalationResolved;
@@ -460,6 +464,7 @@ export class DockerAgentSession implements Session {
     const command = this.adapter.buildCommand(userMessage, this.systemPrompt, {
       sessionId: this.sessionId,
       firstTurn: !this.firstTurnComplete,
+      modelOverride: this.agentModelOverride,
     });
     logger.info(`[docker-agent] exec: ${formatCommand(command)}`);
 

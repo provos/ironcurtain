@@ -23,6 +23,7 @@ function baseContext(overrides: Partial<WorkflowContext> = {}): WorkflowContext 
     lastError: null,
     sessionsByState: {},
     previousAgentOutput: null,
+    previousAgentNotes: null,
     previousStateName: null,
     visitCounts: {},
     ...overrides,

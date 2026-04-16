@@ -50,6 +50,27 @@ export function getPersonaDefinitionPath(name: PersonaName): string {
   return resolve(getPersonaDir(name), 'persona.json');
 }
 
+/**
+ * Returns true iff a persona directory exists on disk.
+ *
+ * Takes a plain string (not branded) because callers get raw values from
+ * YAML/JSON and should not have to brand them. Invalid names (that fail
+ * the slug pattern) return `false` rather than throwing — the linter
+ * treats them the same as missing.
+ */
+export function personaExists(name: string): boolean {
+  // load-bearing ordering: brand-then-check prevents path traversal via existsSync.
+  // `createPersonaName` rejects anything outside the slug pattern (e.g. "../evil",
+  // absolute paths, NUL bytes), so `existsSync` only sees validated segments.
+  let branded: PersonaName;
+  try {
+    branded = createPersonaName(name);
+  } catch {
+    return false;
+  }
+  return existsSync(getPersonaDir(branded));
+}
+
 // ---------------------------------------------------------------------------
 // Loading
 // ---------------------------------------------------------------------------

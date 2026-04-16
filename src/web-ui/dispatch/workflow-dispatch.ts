@@ -29,6 +29,12 @@ import type { WorkflowDetail } from '../../workflow/orchestrator.js';
 import { extractStateGraph } from '../state-graph.js';
 import type { StateGraphDto } from '../web-ui-types.js';
 import { isWithinDirectory } from '../../types/argument-roles.js';
+import { parseDefinitionFile } from '../../workflow/discovery.js';
+import { validateDefinition, WorkflowValidationError } from '../../workflow/validate.js';
+import { preflightLint } from '../../workflow/lint-integration.js';
+import { countBySeverity, type LintContext } from '../../workflow/lint.js';
+import { personaExists } from '../../persona/resolve.js';
+import * as logger from '../../logger.js';
 
 // ---------------------------------------------------------------------------
 // State graph cache (definition never changes during execution)
@@ -46,11 +52,25 @@ const workflowStartSchema = z.object({
   taskDescription: z.string().min(1),
   workspacePath: z.string().min(1).optional(),
 });
-const workflowResolveGateSchema = z.object({
-  workflowId: z.string().min(1),
-  event: z.enum(['APPROVE', 'FORCE_REVISION', 'REPLAN', 'ABORT']),
-  prompt: z.string().optional(),
-});
+// FORCE_REVISION and REPLAN require non-empty feedback: the orchestrator
+// injects this into the next agent's prompt, and an empty string produces
+// an incoherent re-entry prompt. Orchestrator validates too; this is the
+// first line of defense for external (JSON-RPC) callers.
+const workflowIdField = { workflowId: z.string().min(1) };
+const workflowResolveGateSchema = z.discriminatedUnion('event', [
+  z.object({ ...workflowIdField, event: z.literal('APPROVE'), prompt: z.string().optional() }),
+  z.object({ ...workflowIdField, event: z.literal('ABORT'), prompt: z.string().optional() }),
+  z.object({
+    ...workflowIdField,
+    event: z.literal('FORCE_REVISION'),
+    prompt: z.string().trim().min(1, 'Feedback is required for FORCE_REVISION events'),
+  }),
+  z.object({
+    ...workflowIdField,
+    event: z.literal('REPLAN'),
+    prompt: z.string().trim().min(1, 'Feedback is required for REPLAN events'),
+  }),
+]);
 const workflowFileTreeSchema = z.object({
   workflowId: z.string().min(1),
   path: z.string().optional(),
@@ -70,6 +90,53 @@ const workflowArtifactSchema = z.object({
 
 export interface WorkflowDispatchContext extends DispatchContext {
   workflowManager?: WorkflowManager;
+}
+
+// ---------------------------------------------------------------------------
+// Lint pre-flight (daemon)
+// ---------------------------------------------------------------------------
+
+/** Real `LintContext` backed by the filesystem. Shared with the CLI path. */
+const daemonLintContext: LintContext = { personaExists };
+
+/**
+ * Parses + validates the definition file, then runs the shared
+ * `preflightLint()` helper in `warn` mode. Errors abort via
+ * `LINT_FAILED`; warnings are logged and ignored.
+ *
+ * The `warn` mode is the right default for the daemon: warnings are
+ * advisory and should not block a workflow start from the web UI,
+ * whereas true errors indicate a workflow that will not run correctly.
+ */
+function preflightLintForDaemon(definitionPath: string): void {
+  let definition;
+  try {
+    const raw = parseDefinitionFile(definitionPath);
+    definition = validateDefinition(raw);
+  } catch (err) {
+    if (err instanceof WorkflowValidationError) {
+      throw new RpcError('INVALID_PARAMS', `Workflow validation failed: ${err.issues.join('; ')}`);
+    }
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new RpcError('INVALID_PARAMS', `Failed to load workflow definition: ${msg}`);
+  }
+
+  const result = preflightLint(definition, daemonLintContext, 'warn');
+  const { errors, warnings } = countBySeverity(result.diagnostics);
+
+  if (!result.ok) {
+    throw new RpcError('LINT_FAILED', `Workflow lint failed: ${errors} error(s), ${warnings} warning(s).`, {
+      diagnostics: result.diagnostics,
+    });
+  }
+
+  if (warnings > 0) {
+    logger.warn(
+      `[workflow-dispatch] Lint warnings for ${definitionPath}: ${result.diagnostics
+        .map((d) => `[${d.code}] ${d.message}`)
+        .join(' | ')}`,
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -119,6 +186,10 @@ export async function workflowDispatch(
 
     case 'workflows.start': {
       const { definitionPath, taskDescription, workspacePath } = validateParams(workflowStartSchema, params);
+      // Pre-flight lint: runs in `warn` mode (errors abort, warnings log and pass).
+      // Controller.start() re-parses and re-validates internally; this extra
+      // parse is the cheapest way to reach a validated WorkflowDefinition.
+      preflightLintForDaemon(definitionPath);
       const workflowId = await controller.start(definitionPath, taskDescription, workspacePath);
       return { workflowId };
     }
