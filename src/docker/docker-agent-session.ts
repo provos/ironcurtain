@@ -622,20 +622,15 @@ export class DockerAgentSession implements Session {
 }
 
 /**
- * Returns true if the conversation state dir contains prior content beyond
- * the empty seed (i.e., the agent has actually written session metadata).
+ * Returns true if the conversation state dir contains prior Claude Code
+ * conversation history beyond the empty seed.
  *
  * On fresh sessions, `prepareConversationStateDir()` seeds an empty
- * `projects/` directory; we must look inside it to detect whether the
- * agent has populated any per-project session files. Any file anywhere
- * under the state dir (outside of the hidden `.credentials.json` that is
- * scrubbed on every start) counts as "prior content".
- */
-/**
- * Check whether the conversation state dir contains a prior Claude Code
- * conversation transcript. Claude Code writes transcripts as .jsonl files
- * under `projects/<cwd-hash>/`. Seed files (hook scripts, configs) are not
- * considered — only actual conversation history.
+ * `projects/` directory. Claude Code writes transcripts as `.jsonl` files
+ * under `projects/<cwd-hash>/`, so we must look inside that tree to detect
+ * whether the agent has populated any per-project session files. Seed files
+ * (hook scripts, configs) are not considered; only actual conversation
+ * history counts as prior content.
  */
 function hasConversationStateContent(stateDir: string): boolean {
   try {
