@@ -221,10 +221,8 @@ const MIN_HEX_IDENTIFIER_LENGTH = 8;
  */
 function isNumericOrHashLike(lower: string): boolean {
   if (PURE_NUMERIC_RE.test(lower)) return true;
-  if (HEX_CHARS_ONLY_RE.test(lower) && lower.length >= MIN_HEX_IDENTIFIER_LENGTH && CONTAINS_DIGIT_RE.test(lower)) {
-    return true;
-  }
-  return false;
+  if (lower.length < MIN_HEX_IDENTIFIER_LENGTH) return false;
+  return HEX_CHARS_ONLY_RE.test(lower) && CONTAINS_DIGIT_RE.test(lower);
 }
 
 /**
@@ -245,7 +243,6 @@ export function extractWordsFromText(text: string): Array<{ original: string; lo
 
     const lower = cleaned.toLowerCase();
 
-    // Skip all-digit tokens and hash-like identifiers
     if (isNumericOrHashLike(lower)) continue;
 
     // Skip stop words

@@ -11,6 +11,19 @@ import type { SessionId } from '../session/types.js';
 import type { TokenStreamEvent, TokenStreamListener } from './token-stream-types.js';
 
 /**
+ * Invoke a listener without propagating errors. The bus is best-effort;
+ * listener errors are swallowed so `push()` never throws and one misbehaving
+ * consumer cannot break fan-out to other subscribers.
+ */
+function safeInvoke(fn: TokenStreamListener, sessionId: SessionId, event: TokenStreamEvent): void {
+  try {
+    fn(sessionId, event);
+  } catch {
+    // Intentionally swallow -- no sensible recovery for subscriber errors.
+  }
+}
+
+/**
  * Stateless pub/sub dispatcher for LLM token stream events.
  *
  * The bus maintains two listener collections:
@@ -67,27 +80,12 @@ export function createTokenStreamBus(): TokenStreamBus {
 
   return {
     push(sessionId, event) {
-      // Each listener is wrapped in try/catch to honor the "push never throws"
-      // invariant. A misbehaving consumer must never break the MITM proxy
-      // forwarding path or fan-out to other subscribers.
+      // Invariant: push() never throws, even if a listener does.
       const listeners = sessions.get(sessionId);
       if (listeners) {
-        for (const fn of listeners) {
-          try {
-            fn(sessionId, event);
-          } catch {
-            // Intentionally swallow -- the bus is best-effort and has no
-            // sensible recovery path for subscriber errors.
-          }
-        }
+        for (const fn of listeners) safeInvoke(fn, sessionId, event);
       }
-      for (const fn of globalListeners) {
-        try {
-          fn(sessionId, event);
-        } catch {
-          // Same rationale as above.
-        }
-      }
+      for (const fn of globalListeners) safeInvoke(fn, sessionId, event);
     },
 
     subscribe(sessionId, listener) {

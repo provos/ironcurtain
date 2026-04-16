@@ -176,14 +176,11 @@ export class TokenStreamBridge {
       this.pending.delete(label);
     }
 
-    // Always drop bidirectional maps on session close, whether or not
-    // there was a per-session subscription. This is the authoritative
-    // place where the label<->SessionId relationship ends.
     const sessionId = this.labelToSession.get(label);
     if (sessionId !== undefined) {
       this.sessionToLabel.delete(sessionId);
+      this.labelToSession.delete(label);
     }
-    this.labelToSession.delete(label);
   }
 
   /** Remove all subscriptions for a disconnecting client. */

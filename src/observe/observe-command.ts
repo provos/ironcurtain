@@ -21,6 +21,7 @@ import { renderEventBatch, renderConnected, renderSessionEnded, type RenderOptio
 import { wsDataToString } from '../web-ui/ws-utils.js';
 import type { TokenStreamEvent } from '../docker/token-stream-types.js';
 import type { ObserveEventSink } from './observe-tui-types.js';
+import type { SessionDto } from '../web-ui/web-ui-types.js';
 import { createObserveTui, type ObserveTui } from './observe-tui.js';
 
 // ---------------------------------------------------------------------------
@@ -338,23 +339,13 @@ export async function runObserveCommand(argv: string[]): Promise<void> {
         }
         if (frame.id === sessionListId && frame.ok && workflowName) {
           workflowLabels = new Set<number>();
-          const payload = frame.payload as Array<{
-            label: number;
-            source?: { kind: string; jobName?: string };
-          }>;
+          const payload = frame.payload as SessionDto[];
           if (Array.isArray(payload)) {
-            // TODO(observe --workflow): SessionSource does not currently expose
-            // workflow membership (no `kind: 'workflow'` variant, and workflow
-            // orchestrators create sessions internally without registering
-            // them with SessionManager). Until the DTO surfaces which workflow
-            // a session belongs to, filter strictly on `kind === 'workflow'`
-            // so we at least don't match signal/cron/web sessions. This will
-            // produce an empty set today and silently yield no events, which
-            // is the correct failure mode until the DTO is extended. When the
-            // DTO grows a workflow identifier field, match on that + the
-            // user-supplied `workflowName` here.
+            // TODO(observe --workflow): SessionSource has no 'workflow' kind, so
+            // this filter is always empty. Extend the DTO with a workflow identifier,
+            // then match on that + workflowName.
             for (const s of payload) {
-              if (s.source?.kind === 'workflow') {
+              if ((s.source as { kind: string }).kind === 'workflow') {
                 workflowLabels.add(s.label);
               }
             }

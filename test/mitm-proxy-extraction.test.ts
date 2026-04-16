@@ -395,48 +395,48 @@ describe('createBoundedJsonResponseCapture', () => {
     const capture = createBoundedJsonResponseCapture(1024);
     capture.onData(Buffer.from('hello '));
     capture.onData(Buffer.from('world'));
-    expect(capture.overflowed).toBe(false);
 
-    const onComplete = vi.fn<(body: Buffer) => void>();
+    const onComplete = vi.fn<(body: Buffer | null) => void>();
     capture.onEnd(onComplete);
     expect(onComplete).toHaveBeenCalledOnce();
     const body = onComplete.mock.calls[0][0];
-    expect(body.toString()).toBe('hello world');
+    expect(body).not.toBeNull();
+    expect(body?.toString()).toBe('hello world');
   });
 
-  it('marks overflow and skips onEnd callback once the cap is exceeded', () => {
+  it('passes null to onEnd callback once the cap is exceeded', () => {
     const capture = createBoundedJsonResponseCapture(10);
     capture.onData(Buffer.from('12345'));
     capture.onData(Buffer.from('678'));
-    expect(capture.overflowed).toBe(false);
 
     // Pushes past the cap
     capture.onData(Buffer.from('9abcd'));
-    expect(capture.overflowed).toBe(true);
 
-    const onComplete = vi.fn();
+    const onComplete = vi.fn<(body: Buffer | null) => void>();
     capture.onEnd(onComplete);
-    expect(onComplete).not.toHaveBeenCalled();
+    expect(onComplete).toHaveBeenCalledOnce();
+    expect(onComplete.mock.calls[0][0]).toBeNull();
   });
 
   it('ignores further chunks after overflow (best-effort, no-throw)', () => {
     const capture = createBoundedJsonResponseCapture(4);
     capture.onData(Buffer.from('aaaaaa')); // single chunk blows the cap
-    expect(capture.overflowed).toBe(true);
 
-    // Must not throw, must not un-mark overflow.
+    // Must not throw; overflow state persists.
     expect(() => capture.onData(Buffer.from('bbbb'))).not.toThrow();
-    expect(capture.overflowed).toBe(true);
+
+    const onComplete = vi.fn<(body: Buffer | null) => void>();
+    capture.onEnd(onComplete);
+    expect(onComplete.mock.calls[0][0]).toBeNull();
   });
 
   it('exactly-at-cap is allowed (only strictly greater overflows)', () => {
     const capture = createBoundedJsonResponseCapture(8);
     capture.onData(Buffer.from('01234567')); // exactly 8 bytes
-    expect(capture.overflowed).toBe(false);
 
-    const onComplete = vi.fn<(body: Buffer) => void>();
+    const onComplete = vi.fn<(body: Buffer | null) => void>();
     capture.onEnd(onComplete);
     expect(onComplete).toHaveBeenCalledOnce();
-    expect(onComplete.mock.calls[0][0].toString()).toBe('01234567');
+    expect(onComplete.mock.calls[0][0]?.toString()).toBe('01234567');
   });
 });

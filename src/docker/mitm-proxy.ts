@@ -185,14 +185,10 @@ export interface BoundedJsonResponseCapture {
   /** Feed a chunk into the capture buffer. Always safe to call. */
   onData(chunk: Buffer): void;
   /**
-   * Signal end-of-stream. If the limit was exceeded during capture this is
-   * a no-op; otherwise it invokes `onComplete` with the concatenated buffer.
+   * Signal end-of-stream. The callback receives the concatenated buffer,
+   * or `null` if the capture overflowed and was discarded.
    */
-  onEnd(onComplete: (body: Buffer) => void): void;
-  /** True if the stream exceeded the cap and capture was aborted. */
-  readonly overflowed: boolean;
-  /** Bytes accounted for (capped at the limit). */
-  readonly capturedBytes: number;
+  onEnd(onComplete: (body: Buffer | null) => void): void;
 }
 
 /**
@@ -209,29 +205,25 @@ export function createBoundedJsonResponseCapture(
 ): BoundedJsonResponseCapture {
   let chunks: Buffer[] = [];
   let capturedBytes = 0;
-  let overflowed = false;
 
   return {
     onData(chunk: Buffer): void {
-      if (overflowed) return;
+      if (capturedBytes > maxBytes) return;
       capturedBytes += chunk.length;
       if (capturedBytes > maxBytes) {
-        overflowed = true;
-        // Release memory immediately.
         chunks = [];
         return;
       }
       chunks.push(chunk);
     },
-    onEnd(onComplete: (body: Buffer) => void): void {
-      if (overflowed) return;
-      onComplete(Buffer.concat(chunks));
-    },
-    get overflowed(): boolean {
-      return overflowed;
-    },
-    get capturedBytes(): number {
-      return capturedBytes;
+    onEnd(onComplete: (body: Buffer | null) => void): void {
+      if (capturedBytes > maxBytes) {
+        onComplete(null);
+        return;
+      }
+      const body = Buffer.concat(chunks);
+      chunks = [];
+      onComplete(body);
     },
   };
 }
@@ -809,6 +801,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
             passthrough.on('data', (chunk: Buffer) => capture.onData(chunk));
             passthrough.on('end', () => {
               capture.onEnd((body) => {
+                if (body === null) return; // overflowed -- skip extraction
                 try {
                   extractFromJsonResponse(body, tokenBus, tokenSessionId as import('../session/types.js').SessionId);
                 } catch {
