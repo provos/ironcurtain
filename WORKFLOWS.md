@@ -259,7 +259,13 @@ my_state:
 
 ### Model selection
 
-Workflows can pin a specific LLM at two levels. Both use a qualified model ID (`provider:model-name`, e.g. `anthropic:claude-opus-4-6`, `anthropic:claude-haiku-4-5`, `openai:gpt-5`, `google:gemini-2.5-pro`). A bare model name with no prefix defaults to Anthropic.
+Workflows can pin a specific LLM at two levels. Both use a qualified model ID (`provider:model-name`). A bare model name with no prefix defaults to Anthropic.
+
+Valid IDs depend on which agent is running the workflow:
+
+- **`mode: builtin`** -- any configured provider: `anthropic:claude-opus-4-6`, `openai:gpt-5`, `google:gemini-2.5-pro`, etc.
+- **`dockerAgent: claude-code`** -- the adapter passes the bare model name to the `claude --model` CLI flag. By default that targets Anthropic's API. To run a non-Anthropic model (e.g. an Ollama-served `glm-5.1:cloud`, an OpenRouter model, or any other Anthropic-compatible proxy), set `ANTHROPIC_BASE_URL` in the environment to the proxy endpoint; the same model name is then forwarded to that endpoint.
+- **`dockerAgent: goose`** -- provider is selected at container startup via the user's `gooseProvider` setting, not via the workflow's `model` field. See the Goose caveat below.
 
 - **Workflow-level** (`settings.model`) -- default for every agent state in the workflow.
 - **State-level** (`model` on any agent state) -- overrides the workflow default for that state only.

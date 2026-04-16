@@ -124,7 +124,7 @@ const INFORMATIONAL_STATUS_LINES: readonly string[] = [
   '  notes: "brief summary of what was done"',
   '```',
   '',
-  'Use EXACTLY these field names (`verdict`, `notes`). Do NOT add additional fields, rename fields, or use synonyms (e.g. `status`, `result`, `scope`, `artifacts`) — extra or renamed fields will cause the workflow to abort. If you want to include more context, put it in the `notes` string.',
+  'Use EXACTLY these field names (`verdict`, `notes`). Do NOT add additional fields, rename fields, or use synonyms (e.g. `status`, `result`, `scope`, `artifacts`) — any deviation is a hard error and will force the workflow to reject your response. If you want to include more context, put it in the `notes` string.',
   '',
   'Fields:',
   '- verdict: a free-form label summarizing your outcome (e.g. completed, needs_revision, inconclusive). It does not affect routing for this state but is logged for diagnostics.',

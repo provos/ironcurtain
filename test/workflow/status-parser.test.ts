@@ -337,12 +337,12 @@ describe('MINIMAL_STATUS_INSTRUCTIONS', () => {
   });
 
   it('instructs the agent to use exactly these field names', () => {
-    // Guards against models (e.g. Opus 4.6) emitting `status:` instead of `verdict:`
-    // or adding extra keys like `scope`, `artifacts`, `top_hypotheses`.
+    // Guards against models emitting `status:` instead of `verdict:` or
+    // adding extra keys like `scope`, `artifacts`, `top_hypotheses`.
     expect(MINIMAL_STATUS_INSTRUCTIONS).toMatch(/EXACTLY these field names/);
     expect(MINIMAL_STATUS_INSTRUCTIONS).toContain('`verdict`');
     expect(MINIMAL_STATUS_INSTRUCTIONS).toContain('`notes`');
-    expect(MINIMAL_STATUS_INSTRUCTIONS.toLowerCase()).toContain('abort');
+    expect(MINIMAL_STATUS_INSTRUCTIONS.toLowerCase()).toMatch(/hard error|reject/);
   });
 });
 
