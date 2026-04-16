@@ -117,6 +117,16 @@ function collectTransitionTargets(state: WorkflowStateDefinition): string[] {
   }
 }
 
+/**
+ * Parses a workflow input artifact reference. A trailing `?` marks the
+ * input as optional — the consumer may skip it if the artifact isn't
+ * produced.
+ */
+export function parseArtifactRef(ref: string): { readonly name: string; readonly isOptional: boolean } {
+  const isOptional = ref.endsWith('?');
+  return { name: isOptional ? ref.slice(0, -1) : ref, isOptional };
+}
+
 function collectGuardNames(state: WorkflowStateDefinition): string[] {
   if (state.type === 'agent' || state.type === 'deterministic') {
     return state.transitions.filter((t): t is typeof t & { guard: string } => t.guard != null).map((t) => t.guard);
@@ -124,7 +134,7 @@ function collectGuardNames(state: WorkflowStateDefinition): string[] {
   return [];
 }
 
-function collectOutputArtifacts(states: Record<string, WorkflowStateDefinition>): Set<string> {
+export function collectOutputArtifacts(states: Record<string, WorkflowStateDefinition>): Set<string> {
   const outputs = new Set<string>();
   for (const state of Object.values(states)) {
     if (state.type === 'agent' || state.type === 'terminal') {
@@ -136,7 +146,7 @@ function collectOutputArtifacts(states: Record<string, WorkflowStateDefinition>)
   return outputs;
 }
 
-function findReachableStates(initial: string, states: Record<string, WorkflowStateDefinition>): Set<string> {
+export function findReachableStates(initial: string, states: Record<string, WorkflowStateDefinition>): Set<string> {
   const reachable = new Set<string>();
   const queue = [initial];
   while (queue.length > 0) {
@@ -324,11 +334,9 @@ function validateArtifactInputs(definition: WorkflowDefinition, issues: string[]
     if (state.type !== 'agent') continue;
     const agentState = state;
     for (const input of agentState.inputs) {
-      // Trailing `?` marks optional inputs
-      const isOptional = input.endsWith('?');
-      const artifactName = isOptional ? input.slice(0, -1) : input;
-      if (!isOptional && !availableOutputs.has(artifactName)) {
-        issues.push(`State "${stateId}" requires input artifact "${artifactName}" not produced by any state`);
+      const { name, isOptional } = parseArtifactRef(input);
+      if (!isOptional && !availableOutputs.has(name)) {
+        issues.push(`State "${stateId}" requires input artifact "${name}" not produced by any state`);
       }
     }
   }

@@ -7,6 +7,7 @@ import type {
 } from './types.js';
 import { WORKFLOW_ARTIFACT_DIR } from './types.js';
 import { MINIMAL_STATUS_INSTRUCTIONS, buildConditionalStatusInstructions } from './status-parser.js';
+import { parseArtifactRef } from './validate.js';
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -138,8 +139,7 @@ function appendPreviousOutput(
 /** Appends input artifact path reference sections. */
 function appendInputArtifacts(sections: string[], inputs: readonly string[]): void {
   for (const inputRef of inputs) {
-    const isOptional = inputRef.endsWith('?');
-    const name = isOptional ? inputRef.slice(0, -1) : inputRef;
+    const { name, isOptional } = parseArtifactRef(inputRef);
     const instruction = isOptional
       ? `Read the contents of the \`${WORKFLOW_ARTIFACT_DIR}/${name}/\` directory in your workspace if it exists. This input is optional — skip it if the directory is not present.`
       : `Read the contents of the \`${WORKFLOW_ARTIFACT_DIR}/${name}/\` directory in your workspace using your file reading tools.`;

@@ -15,9 +15,13 @@ import { getIronCurtainHome } from '../config/paths.js';
 import { formatHelp, type CommandSpec } from '../cli-help.js';
 import { FileCheckpointStore } from './checkpoint.js';
 import { discoverWorkflows, resolveWorkflowPath, parseDefinitionFile } from './discovery.js';
+import { personaExists } from '../persona/resolve.js';
+import { countBySeverity, lintWorkflow, type Diagnostic, type LintContext } from './lint.js';
+import { preflightLint, type LintMode } from './lint-integration.js';
 import { MessageLog } from './message-log.js';
 import { WorkflowOrchestrator, type WorkflowOrchestratorDeps, type WorkflowTabHandle } from './orchestrator.js';
 import type { WorkflowId, WorkflowCheckpoint, WorkflowDefinition } from './types.js';
+import { validateDefinition, WorkflowValidationError } from './validate.js';
 import {
   createWorkflowSessionFactory,
   createConsoleTab,
@@ -48,15 +52,17 @@ const workflowSpec: CommandSpec = {
   description: 'Run multi-agent workflows',
   usage: [
     'ironcurtain workflow list',
-    'ironcurtain workflow start <name-or-path> "task" [--model <model>] [--workspace <path>]',
-    'ironcurtain workflow resume <baseDir> [--state <stateName>] [--model <model>]',
+    'ironcurtain workflow start <name-or-path> "task" [--model <model>] [--workspace <path>] [--no-lint] [--strict-lint]',
+    'ironcurtain workflow resume <baseDir> [--state <stateName>] [--model <model>] [--no-lint] [--strict-lint]',
     'ironcurtain workflow inspect <baseDir> [--all]',
+    'ironcurtain workflow lint <name-or-path> [--strict]',
   ],
   subcommands: [
     { name: 'list', description: 'List available workflow definitions' },
     { name: 'start', description: 'Start a workflow by name or definition file path' },
     { name: 'resume', description: 'Resume a checkpointed workflow' },
     { name: 'inspect', description: 'Show workflow status, artifacts, and recent messages' },
+    { name: 'lint', description: 'Run semantic checks on a workflow definition' },
   ],
   options: [
     { flag: 'model', description: 'Override the agent model (start, resume)', placeholder: '<model-id>' },
@@ -71,6 +77,9 @@ const workflowSpec: CommandSpec = {
       placeholder: '<name>',
     },
     { flag: 'all', description: 'Show full message log (inspect only)' },
+    { flag: 'no-lint', description: 'Skip pre-flight linting (start, resume)' },
+    { flag: 'strict-lint', description: 'Treat lint warnings as errors (start, resume)' },
+    { flag: 'strict', description: 'Treat lint warnings as errors (lint only)' },
     { flag: 'help', short: 'h', description: 'Show this help message' },
   ],
   examples: [
@@ -87,6 +96,80 @@ const workflowSpec: CommandSpec = {
 };
 
 // ---------------------------------------------------------------------------
+// Lint helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Builds a `LintContext` for CLI use. `personaExists` resolves against
+ * the user's persona directory under `~/.ironcurtain/personas/`.
+ */
+function createCliLintContext(): LintContext {
+  return { personaExists };
+}
+
+function formatDiagnostic(d: Diagnostic): string[] {
+  const sevColor = d.severity === 'error' ? RED : CYAN;
+  const location = d.stateId ? ` (state: ${d.stateId})` : '';
+  const lines = [`${DIM}[${d.code}]${RESET} ${sevColor}${d.severity}${RESET} ${d.message}${location}`];
+  if (d.hint) lines.push(`  ${DIM}hint: ${d.hint}${RESET}`);
+  return lines;
+}
+
+function printDiagnostics(diagnostics: readonly Diagnostic[]): void {
+  for (const d of diagnostics) {
+    for (const line of formatDiagnostic(d)) writeStderr(line);
+  }
+}
+
+/**
+ * Loads + validates a workflow definition from a path. Prints and
+ * exits on structural validation errors (they take precedence over
+ * lint diagnostics).
+ */
+function loadAndValidateDefinition(path: string): WorkflowDefinition {
+  try {
+    const raw = parseDefinitionFile(path);
+    return validateDefinition(raw);
+  } catch (err) {
+    if (err instanceof WorkflowValidationError) {
+      writeStderr(`${RED}Workflow validation failed:${RESET}`);
+      for (const issue of err.issues) writeStderr(`  ${RED}- ${issue}${RESET}`);
+    } else {
+      const msg = err instanceof Error ? err.message : String(err);
+      writeStderr(`${RED}Failed to load workflow: ${msg}${RESET}`);
+    }
+    process.exit(1);
+  }
+}
+
+/**
+ * Runs the shared `preflightLint()` helper and handles the CLI-specific
+ * reporting: prints diagnostics to stderr, exits on failure. On success
+ * with warnings-only output, prints a short continue notice.
+ */
+function runCliPreflightLint(def: WorkflowDefinition, mode: LintMode): void {
+  const result = preflightLint(def, createCliLintContext(), mode);
+  if (result.diagnostics.length === 0) return;
+
+  printDiagnostics(result.diagnostics);
+  const { errors, warnings } = countBySeverity(result.diagnostics);
+
+  if (!result.ok) {
+    writeStderr(`${RED}Lint failed: ${errors} error(s), ${warnings} warning(s).${RESET}`);
+    writeStderr(`${DIM}Rerun with --no-lint to bypass (not recommended).${RESET}`);
+    process.exit(1);
+  }
+
+  writeStderr(`${DIM}Lint: 0 errors, ${warnings} warning(s) — continuing.${RESET}`);
+}
+
+function resolveLintMode(noLint: unknown, strictLint: unknown): LintMode {
+  if (noLint === true) return 'off';
+  if (strictLint === true) return 'strict';
+  return 'warn';
+}
+
+// ---------------------------------------------------------------------------
 // Subcommand implementations
 // ---------------------------------------------------------------------------
 
@@ -96,6 +179,8 @@ async function runStart(args: string[]): Promise<void> {
     options: {
       model: { type: 'string' },
       workspace: { type: 'string' },
+      'no-lint': { type: 'boolean' },
+      'strict-lint': { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
     },
     allowPositionals: true,
@@ -122,6 +207,11 @@ async function runStart(args: string[]): Promise<void> {
     writeStderr(`${DIM}Run 'ironcurtain workflow list' to see available workflows.${RESET}`);
     process.exit(1);
   }
+
+  // Pre-flight: validate + lint before any orchestrator side effects.
+  const definition = loadAndValidateDefinition(resolvedDef);
+  const lintMode = resolveLintMode(values['no-lint'], values['strict-lint']);
+  runCliPreflightLint(definition, lintMode);
 
   let workspacePath: string | undefined;
   if (values.workspace) {
@@ -191,6 +281,8 @@ async function runResume(args: string[]): Promise<void> {
     options: {
       state: { type: 'string' },
       model: { type: 'string' },
+      'no-lint': { type: 'boolean' },
+      'strict-lint': { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
     },
     allowPositionals: true,
@@ -230,6 +322,15 @@ async function runResume(args: string[]): Promise<void> {
     selected = synthesizeCheckpoint(baseDir, overrideState, definitionPath, checkpointStore);
   } else {
     selected = selectResumableWorkflow(checkpointStore);
+  }
+
+  // Pre-flight lint before orchestrator.resume(). The checkpoint carries
+  // a definitionPath we can re-validate + lint.
+  const defPath = selected.checkpoint.definitionPath;
+  if (defPath && existsSync(defPath)) {
+    const definition = loadAndValidateDefinition(defPath);
+    const lintMode = resolveLintMode(values['no-lint'], values['strict-lint']);
+    runCliPreflightLint(definition, lintMode);
   }
 
   printResumeInfo(baseDir, selected.workflowId, selected.checkpoint);
@@ -461,6 +562,58 @@ function truncate(text: string, maxLen: number): string {
 }
 
 // ---------------------------------------------------------------------------
+// Lint subcommand
+// ---------------------------------------------------------------------------
+
+function runLintCommand(args: string[]): void {
+  const { values, positionals } = parseArgs({
+    args,
+    options: {
+      strict: { type: 'boolean' },
+      help: { type: 'boolean', short: 'h' },
+    },
+    allowPositionals: true,
+    strict: false,
+  });
+
+  if (values.help) {
+    process.stderr.write(formatHelp(workflowSpec) + '\n');
+    return;
+  }
+
+  const definitionRef = positionals[0];
+  if (!definitionRef) {
+    writeStderr(`${RED}Usage: ironcurtain workflow lint <name-or-path> [--strict]${RESET}`);
+    process.exit(1);
+  }
+
+  const resolved = resolveWorkflowPath(definitionRef);
+  if (!resolved) {
+    writeStderr(`${RED}Workflow not found: ${definitionRef}${RESET}`);
+    writeStderr(`${DIM}Looked in bundled and user workflow directories.${RESET}`);
+    process.exit(1);
+  }
+
+  // Structural validation first — a malformed definition cannot be linted.
+  const definition = loadAndValidateDefinition(resolved);
+
+  const diagnostics = lintWorkflow(definition, createCliLintContext());
+
+  if (diagnostics.length === 0) {
+    writeStderr(`${DIM}No lint diagnostics for ${resolved}.${RESET}`);
+    process.exit(0);
+  }
+
+  printDiagnostics(diagnostics);
+  const { errors, warnings } = countBySeverity(diagnostics);
+  writeStderr(`${DIM}Summary: ${errors} error(s), ${warnings} warning(s).${RESET}`);
+
+  if (errors > 0) process.exit(1);
+  if (values.strict === true && warnings > 0) process.exit(2);
+  process.exit(0);
+}
+
+// ---------------------------------------------------------------------------
 // List subcommand
 // ---------------------------------------------------------------------------
 
@@ -509,6 +662,9 @@ export async function main(args: string[]): Promise<void> {
       break;
     case 'inspect':
       runInspect(subArgs);
+      break;
+    case 'lint':
+      runLintCommand(subArgs);
       break;
     default:
       writeStderr(`${RED}Unknown workflow subcommand: ${subcommand}${RESET}`);

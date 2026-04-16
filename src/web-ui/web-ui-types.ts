@@ -60,7 +60,11 @@ export interface RequestFrame {
 /** Daemon -> Browser response to a specific request. */
 export type ResponseFrame =
   | { readonly id: string; readonly ok: true; readonly payload?: unknown }
-  | { readonly id: string; readonly ok: false; readonly error: { readonly code: ErrorCode; readonly message: string } };
+  | {
+      readonly id: string;
+      readonly ok: false;
+      readonly error: { readonly code: ErrorCode; readonly message: string; readonly data?: unknown };
+    };
 
 /** Daemon -> Browser unsolicited push event. */
 export interface EventFrame {
@@ -85,6 +89,7 @@ export type ErrorCode =
   | 'INVALID_PARAMS'
   | 'RATE_LIMITED'
   | 'METHOD_NOT_FOUND'
+  | 'LINT_FAILED'
   | 'INTERNAL_ERROR';
 
 // ---------------------------------------------------------------------------
@@ -333,6 +338,7 @@ export class RpcError extends Error {
   constructor(
     readonly code: ErrorCode,
     message: string,
+    readonly data?: unknown,
   ) {
     super(message);
     this.name = 'RpcError';
