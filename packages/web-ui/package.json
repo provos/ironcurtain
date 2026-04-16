@@ -38,7 +38,7 @@
     "@dagrejs/dagre": "^3.0.0",
     "@types/dompurify": "^3.0.5",
     "clsx": "^2.1.1",
-    "dompurify": "^3.3.3",
+    "dompurify": "^3.4.0",
     "marked": "^15.0.12",
     "phosphor-svelte": "^3.1.0",
     "tailwind-merge": "^3.5.0"
