@@ -215,9 +215,18 @@ export function createGooseAdapter(userConfig?: ResolvedUserConfig): AgentAdapte
     },
 
     // Goose reads GOOSE_MODEL from container env at startup, so a per-turn
-    // override cannot switch models inside a running container.
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    buildCommand(message: string, systemPrompt: string, _modelOverride?: string): readonly string[] {
+    // override cannot switch models inside a running container. Goose batch
+    // mode also doesn't use session resume options.
+    buildCommand(
+      message: string,
+      systemPrompt: string,
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      _options: {
+        readonly sessionId: string;
+        readonly firstTurn: boolean;
+        readonly modelOverride?: string;
+      },
+    ): readonly string[] {
       const instructions = `${systemPrompt}\n\n---\n\nUser request:\n${message}`;
       const { delimiter } = escapeHeredoc(instructions);
 

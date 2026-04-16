@@ -163,10 +163,24 @@ exit $STATUS
       ];
     },
 
-    buildCommand(message: string, systemPrompt: string, modelOverride?: string): readonly string[] {
+    buildCommand(
+      message: string,
+      systemPrompt: string,
+      options: {
+        readonly sessionId: string;
+        readonly firstTurn: boolean;
+        readonly modelOverride?: string;
+      },
+    ): readonly string[] {
+      // `claude -p --continue` in non-interactive print mode does NOT update
+      // ~/.claude.json's project->session mapping, so subsequent `--continue`
+      // calls silently start new sessions. Instead, pin the session UUID on
+      // the first turn with `--session-id`, then resume it explicitly with
+      // `--resume <uuid>` on later turns.
       const cmd = [
         'claude',
-        '--continue',
+        options.firstTurn ? '--session-id' : '--resume',
+        options.sessionId,
         '--dangerously-skip-permissions',
         '--output-format',
         'json',
@@ -175,7 +189,7 @@ exit $STATUS
         '--append-system-prompt',
         systemPrompt,
       ];
-      const effectiveModelId = modelOverride ? parseModelId(modelOverride).modelId : modelId;
+      const effectiveModelId = options.modelOverride ? parseModelId(options.modelOverride).modelId : modelId;
       if (effectiveModelId) {
         cmd.push('--model', effectiveModelId);
       }

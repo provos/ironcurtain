@@ -141,12 +141,27 @@ export interface AgentAdapter {
    *
    * @param message - the user's message for this turn
    * @param systemPrompt - the orientation prompt
-   * @param modelOverride - qualified model ID ("provider:model-name") to use
-   *   for this turn instead of the adapter's captured default. Adapters that
-   *   cannot switch models per-turn (e.g., Goose reads `GOOSE_MODEL` at
-   *   container start) must document their limitation.
+   * @param options - per-turn options:
+   *   - sessionId: stable identifier for the conversation (e.g., for
+   *     `claude --session-id <uuid>` / `--resume <uuid>`). Typically
+   *     the session's UUID.
+   *   - firstTurn: true when this is the first turn of a fresh
+   *     conversation state; false when resuming an existing
+   *     conversation. Adapters that don't distinguish may ignore.
+   *   - modelOverride: qualified model ID ("provider:model-name") to use
+   *     for this turn instead of the adapter's captured default. Adapters
+   *     that cannot switch models per-turn (e.g., Goose reads `GOOSE_MODEL`
+   *     at container start) must document their limitation.
    */
-  buildCommand(message: string, systemPrompt: string, modelOverride?: string): readonly string[];
+  buildCommand(
+    message: string,
+    systemPrompt: string,
+    options: {
+      readonly sessionId: string;
+      readonly firstTurn: boolean;
+      readonly modelOverride?: string;
+    },
+  ): readonly string[];
 
   /**
    * Builds the system prompt to append to the agent's default system prompt.

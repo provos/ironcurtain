@@ -41,11 +41,24 @@ describe('Claude Code Adapter', () => {
     expect(servers.ironcurtain.args).toContain('UNIX-CONNECT:/run/ironcurtain/proxy.sock');
   });
 
-  it('builds command with --continue and --append-system-prompt', () => {
-    const cmd = claudeCodeAdapter.buildCommand('Fix the bug', 'You are sandboxed');
+  it('pins a fresh session id on the first turn via --session-id', () => {
+    const sessionId = '11111111-2222-3333-4444-555555555555';
+    const cmd = claudeCodeAdapter.buildCommand('Fix the bug', 'You are sandboxed', {
+      sessionId,
+      firstTurn: true,
+    });
 
     expect(cmd).toContain('claude');
-    expect(cmd).toContain('--continue');
+    expect(cmd).toContain('--session-id');
+    expect(cmd).toContain(sessionId);
+    expect(cmd).not.toContain('--resume');
+    expect(cmd).not.toContain('--continue');
+
+    // --session-id and the uuid must be adjacent, in that order
+    const flagIdx = cmd.indexOf('--session-id');
+    expect(cmd[flagIdx + 1]).toBe(sessionId);
+
+    // Other standard flags must still be present
     expect(cmd).toContain('--dangerously-skip-permissions');
     expect(cmd).toContain('--output-format');
     expect(cmd).toContain('json');
@@ -57,8 +70,29 @@ describe('Claude Code Adapter', () => {
     expect(cmd).toContain('Fix the bug');
   });
 
+  it('resumes an existing session on subsequent turns via --resume', () => {
+    const sessionId = '11111111-2222-3333-4444-555555555555';
+    const cmd = claudeCodeAdapter.buildCommand('Next step', 'You are sandboxed', {
+      sessionId,
+      firstTurn: false,
+    });
+
+    expect(cmd).toContain('--resume');
+    expect(cmd).toContain(sessionId);
+    expect(cmd).not.toContain('--session-id');
+    expect(cmd).not.toContain('--continue');
+
+    // --resume and the uuid must be adjacent, in that order
+    const flagIdx = cmd.indexOf('--resume');
+    expect(cmd[flagIdx + 1]).toBe(sessionId);
+  });
+
   it('uses per-turn modelOverride for --model when provided', () => {
-    const cmd = claudeCodeAdapter.buildCommand('Fix the bug', 'You are sandboxed', 'anthropic:claude-opus-4-6');
+    const cmd = claudeCodeAdapter.buildCommand('Fix the bug', 'You are sandboxed', {
+      sessionId: '11111111-2222-3333-4444-555555555555',
+      firstTurn: true,
+      modelOverride: 'anthropic:claude-opus-4-6',
+    });
     const modelIdx = cmd.indexOf('--model');
     expect(modelIdx).toBeGreaterThanOrEqual(0);
     // Provider prefix is stripped; Claude CLI receives the bare model name.
@@ -66,7 +100,10 @@ describe('Claude Code Adapter', () => {
   });
 
   it('omits --model when neither adapter default nor override is set', () => {
-    const cmd = claudeCodeAdapter.buildCommand('Fix the bug', 'You are sandboxed');
+    const cmd = claudeCodeAdapter.buildCommand('Fix the bug', 'You are sandboxed', {
+      sessionId: '11111111-2222-3333-4444-555555555555',
+      firstTurn: true,
+    });
     expect(cmd).not.toContain('--model');
   });
 
@@ -75,11 +112,16 @@ describe('Claude Code Adapter', () => {
       agentModelId: 'anthropic:claude-sonnet-4-6',
     } as unknown as Parameters<typeof createClaudeCodeAdapter>[0]);
 
-    const defaultCmd = adapter.buildCommand('msg', 'prompt');
+    const sessionId = '11111111-2222-3333-4444-555555555555';
+    const defaultCmd = adapter.buildCommand('msg', 'prompt', { sessionId, firstTurn: true });
     const defaultIdx = defaultCmd.indexOf('--model');
     expect(defaultCmd[defaultIdx + 1]).toBe('claude-sonnet-4-6');
 
-    const overrideCmd = adapter.buildCommand('msg', 'prompt', 'anthropic:claude-haiku-4-5');
+    const overrideCmd = adapter.buildCommand('msg', 'prompt', {
+      sessionId,
+      firstTurn: true,
+      modelOverride: 'anthropic:claude-haiku-4-5',
+    });
     const overrideIdx = overrideCmd.indexOf('--model');
     expect(overrideCmd[overrideIdx + 1]).toBe('claude-haiku-4-5');
   });
