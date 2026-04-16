@@ -170,7 +170,10 @@ describe('GooseAdapter.buildCommand', () => {
   const adapter = createGooseAdapter();
 
   it('returns a shell command with goose run --no-session', () => {
-    const cmd = adapter.buildCommand('Fix the bug', 'You are sandboxed');
+    const cmd = adapter.buildCommand('Fix the bug', 'You are sandboxed', {
+      sessionId: 'test-session',
+      firstTurn: true,
+    });
 
     expect(cmd).toHaveLength(3);
     expect(cmd[0]).toBe('/bin/sh');
@@ -179,23 +182,32 @@ describe('GooseAdapter.buildCommand', () => {
   });
 
   it('includes -i flag for instructions file', () => {
-    const cmd = adapter.buildCommand('Fix the bug', 'You are sandboxed');
+    const cmd = adapter.buildCommand('Fix the bug', 'You are sandboxed', {
+      sessionId: 'test-session',
+      firstTurn: true,
+    });
     expect(cmd[2]).toContain('-i "$PROMPT_FILE"');
   });
 
   it('includes system prompt in instructions', () => {
-    const cmd = adapter.buildCommand('Fix the bug', 'You are sandboxed');
+    const cmd = adapter.buildCommand('Fix the bug', 'You are sandboxed', {
+      sessionId: 'test-session',
+      firstTurn: true,
+    });
     expect(cmd[2]).toContain('You are sandboxed');
     expect(cmd[2]).toContain('Fix the bug');
   });
 
   it('uses IRONCURTAIN_EOF delimiter for heredoc', () => {
-    const cmd = adapter.buildCommand('hello', 'prompt');
+    const cmd = adapter.buildCommand('hello', 'prompt', { sessionId: 'test-session', firstTurn: true });
     expect(cmd[2]).toContain('IRONCURTAIN_EOF');
   });
 
   it('escapes heredoc delimiter when input contains IRONCURTAIN_EOF', () => {
-    const cmd = adapter.buildCommand('IRONCURTAIN_EOF', 'system prompt');
+    const cmd = adapter.buildCommand('IRONCURTAIN_EOF', 'system prompt', {
+      sessionId: 'test-session',
+      firstTurn: true,
+    });
     // The delimiter should have a suffix to avoid collision
     const shellCmd = cmd[2];
     // The default delimiter should not appear without a suffix

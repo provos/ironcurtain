@@ -12,7 +12,7 @@
  * 3. close() -- stop container, stop proxies, clean up
  */
 
-import { mkdirSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdirSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { quote } from 'shell-quote';
 import type {
@@ -97,6 +97,16 @@ export class DockerAgentSession implements Session {
   private status: SessionStatus = 'initializing';
   private readonly createdAt: string;
 
+  /**
+   * Whether the first turn of this conversation has completed at least once.
+   * Used to decide whether to pin a fresh session id (`--session-id`) or
+   * resume an existing one (`--resume`) for agents like Claude Code. Set to
+   * true in the constructor if the conversation state dir already contains
+   * prior content (resumed session); otherwise flipped to true after the
+   * first successful sendMessage() turn.
+   */
+  private firstTurnComplete = false;
+
   private containerId: string | null = null;
   private sidecarContainerId: string | null = null;
   private networkName: string | null = null;
@@ -138,6 +148,13 @@ export class DockerAgentSession implements Session {
     this.onDiagnostic = deps.onDiagnostic;
     this.preBuiltInfrastructure = deps.preBuiltInfrastructure;
     this.createdAt = new Date().toISOString();
+
+    // If the conversation state dir already has real content (beyond the
+    // empty `projects/` seed), treat this as a resumed session -- the next
+    // turn should use `--resume <uuid>` rather than pin a fresh session id.
+    if (this.conversationStateDir && hasConversationStateContent(this.conversationStateDir)) {
+      this.firstTurnComplete = true;
+    }
   }
 
   /**
@@ -440,7 +457,10 @@ export class DockerAgentSession implements Session {
     // Write user context for the auto-approver
     this.writeUserContext(userMessage);
 
-    const command = this.adapter.buildCommand(userMessage, this.systemPrompt);
+    const command = this.adapter.buildCommand(userMessage, this.systemPrompt, {
+      sessionId: this.sessionId,
+      firstTurn: !this.firstTurnComplete,
+    });
     logger.info(`[docker-agent] exec: ${formatCommand(command)}`);
 
     const execStartMs = Date.now();
@@ -481,6 +501,13 @@ export class DockerAgentSession implements Session {
       timestamp: turnStart,
     };
     this.turns.push(turn);
+
+    // Only mark the first turn as complete on success. On a failed turn
+    // (non-zero exit), the agent may not have created the session yet, so
+    // the next turn must still pin a fresh session id rather than resume.
+    if (exitCode === 0) {
+      this.firstTurnComplete = true;
+    }
 
     this.status = 'ready';
     return response.text;
@@ -591,6 +618,35 @@ export class DockerAgentSession implements Session {
     } catch {
       // Ignore write failures
     }
+  }
+}
+
+/**
+ * Returns true if the conversation state dir contains prior content beyond
+ * the empty seed (i.e., the agent has actually written session metadata).
+ *
+ * On fresh sessions, `prepareConversationStateDir()` seeds an empty
+ * `projects/` directory; we must look inside it to detect whether the
+ * agent has populated any per-project session files. Any file anywhere
+ * under the state dir (outside of the hidden `.credentials.json` that is
+ * scrubbed on every start) counts as "prior content".
+ */
+/**
+ * Check whether the conversation state dir contains a prior Claude Code
+ * conversation transcript. Claude Code writes transcripts as .jsonl files
+ * under `projects/<cwd-hash>/`. Seed files (hook scripts, configs) are not
+ * considered — only actual conversation history.
+ */
+function hasConversationStateContent(stateDir: string): boolean {
+  try {
+    const projectsDir = resolve(stateDir, 'projects');
+    if (!existsSync(projectsDir)) return false;
+    for (const entry of readdirSync(projectsDir, { withFileTypes: true, recursive: true })) {
+      if (entry.isFile() && entry.name.endsWith('.jsonl')) return true;
+    }
+    return false;
+  } catch {
+    return false;
   }
 }
 
