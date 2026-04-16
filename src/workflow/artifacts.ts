@@ -119,7 +119,15 @@ export function snapshotArtifacts(
     const dest = resolve(artifactDir, `${output}${versionSuffix}`);
     if (existsSync(dest)) continue;
 
-    cpSync(src, dest, { recursive: true });
+    try {
+      cpSync(src, dest, { recursive: true });
+    } catch (err) {
+      // Best-effort: a single failed copy must not abort a long-running agent run.
+      // Write directly to stderr to bypass any console hijacking
+      // (logger.setup() redirects console.error to a log file).
+      const message = err instanceof Error ? err.message : String(err);
+      process.stderr.write(`[workflow] snapshotArtifacts: failed to copy "${src}" to "${dest}": ${message}\n`);
+    }
   }
 }
 

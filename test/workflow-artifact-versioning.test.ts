@@ -2,10 +2,17 @@
  * Tests for artifact versioning via snapshotArtifacts().
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, cpSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { tmpdir } from 'node:os';
+
+// Passthrough mock so individual tests can override cpSync via mockImplementationOnce.
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return { ...actual, cpSync: vi.fn(actual.cpSync) };
+});
+
 import { snapshotArtifacts } from '../src/workflow/artifacts.js';
 
 // ---------------------------------------------------------------------------
@@ -130,5 +137,40 @@ describe('snapshotArtifacts', () => {
 
     expect(readVersionedFile('analysis', 1, 'analysis.md')).toBe('analysis content');
     expect(existsSync(resolve(artifactDir, 'journal.v1'))).toBe(false);
+  });
+
+  it('logs a warning and continues when a single copy fails', () => {
+    writeArtifactFile('broken', 'broken.md', 'triggers copy error');
+    writeArtifactFile('analysis', 'analysis.md', 'analysis content');
+
+    // Fail the first cpSync call only; the second call proceeds normally.
+    const mockedCpSync = vi.mocked(cpSync);
+    mockedCpSync.mockImplementationOnce(() => {
+      throw new Error('simulated copy failure');
+    });
+
+    const stderrWrites: string[] = [];
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => {
+      stderrWrites.push(typeof chunk === 'string' ? chunk : String(chunk));
+      return true;
+    });
+
+    try {
+      expect(() => snapshotArtifacts(artifactDir, ['broken', 'analysis'], 2, new Set())).not.toThrow();
+    } finally {
+      stderrSpy.mockRestore();
+    }
+
+    // The failed artifact was not snapshotted.
+    expect(existsSync(resolve(artifactDir, 'broken.v1'))).toBe(false);
+    // The subsequent artifact in the same call still got snapshotted.
+    expect(readVersionedFile('analysis', 1, 'analysis.md')).toBe('analysis content');
+
+    // A warning was written to stderr mentioning src, dest, and the error message.
+    const combined = stderrWrites.join('');
+    expect(combined).toMatch(/snapshotArtifacts/);
+    expect(combined).toContain(resolve(artifactDir, 'broken'));
+    expect(combined).toContain(resolve(artifactDir, 'broken.v1'));
+    expect(combined).toContain('simulated copy failure');
   });
 });
