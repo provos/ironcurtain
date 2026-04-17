@@ -37,14 +37,6 @@ import {
   type ToolCallResponse,
 } from './tool-call-pipeline.js';
 import type { ResolvedSandboxConfig } from './sandbox-integration.js';
-import {
-  ERROR_PREFIX_DENIED,
-  ERROR_PREFIX_ESCALATION_REQUIRED,
-  ERROR_PREFIX_ESCALATION_DENIED,
-  ERROR_PREFIX_CIRCUIT_BREAKER,
-  ERROR_PREFIX_UNKNOWN_ARGS,
-  ERROR_PREFIX_MISSING_ANNOTATION,
-} from './error-prefixes.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -282,10 +274,18 @@ export class ToolCallCoordinator {
     });
 
     const isError = response.isError === true;
-    const status: ToolCallResult['status'] = isError ? extractStatusFromErrorContent(response.content) : 'success';
+    // The pipeline always stamps `_policyDecision` on its responses, so
+    // the decision's own `status` field is the authoritative signal for
+    // whether a failure was a policy deny vs. a downstream runtime error.
+    // Fall back to 'error' only if the decision is missing entirely.
+    const status: ToolCallResult['status'] = isError
+      ? response._policyDecision?.status === 'deny'
+        ? 'denied'
+        : 'error'
+      : 'success';
 
     const policyDecision: PolicyDecision = response._policyDecision ?? {
-      status: isError ? (status === 'denied' ? 'deny' : 'allow') : 'allow',
+      status: 'allow',
       rule: 'synthesized',
       reason: extractTextFromContent(response.content) ?? (isError ? 'error' : 'ok'),
     };
@@ -369,28 +369,4 @@ export class ToolCallCoordinator {
     }
     await this.auditLog.close();
   }
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/**
- * Infers a `ToolCallResult.status` from an error response's text.
- * Used by `handleStructuredToolCall` to distinguish `denied` from `error`.
- */
-function extractStatusFromErrorContent(content: unknown): 'denied' | 'error' {
-  const text = extractTextFromContent(content) ?? '';
-  if (
-    text.startsWith(ERROR_PREFIX_DENIED) ||
-    text.startsWith(ERROR_PREFIX_ESCALATION_REQUIRED) ||
-    text.startsWith(ERROR_PREFIX_ESCALATION_DENIED) ||
-    text.startsWith(ERROR_PREFIX_CIRCUIT_BREAKER)
-  ) {
-    return 'denied';
-  }
-  if (text.startsWith(ERROR_PREFIX_UNKNOWN_ARGS) || text.startsWith(ERROR_PREFIX_MISSING_ANNOTATION)) {
-    return 'denied';
-  }
-  return 'error';
 }

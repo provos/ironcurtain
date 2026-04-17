@@ -205,6 +205,14 @@ function readEscalationResponse(responsePath: string): EscalationResponseData | 
   if (!existsSync(responsePath)) return undefined;
   const raw = JSON.parse(readFileSync(responsePath, 'utf-8')) as Record<string, unknown>;
 
+  // Fail-closed: anything other than an explicit 'approved' or 'denied'
+  // string (typos, missing field, null, etc.) must collapse to denied.
+  // Treating unrecognized values as approval would silently fail-open
+  // on any malformed escalation response.
+  if (raw.decision !== 'approved' && raw.decision !== 'denied') {
+    return { decision: 'denied' };
+  }
+
   // Validate whitelistSelection: must be an integer if present, discard otherwise
   let whitelistSelection: number | undefined;
   if (typeof raw.whitelistSelection === 'number' && Number.isInteger(raw.whitelistSelection)) {
@@ -212,7 +220,7 @@ function readEscalationResponse(responsePath: string): EscalationResponseData | 
   }
 
   return {
-    decision: raw.decision as 'approved' | 'denied',
+    decision: raw.decision,
     ...(whitelistSelection !== undefined ? { whitelistSelection } : {}),
   };
 }

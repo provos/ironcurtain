@@ -1,4 +1,3 @@
-import type { LanguageModelV3 } from '@ai-sdk/provider';
 import type { IronCurtainConfig } from '../config/types.js';
 import type { ToolCallRequest, ToolCallResult } from '../types/mcp.js';
 import {
@@ -16,6 +15,7 @@ import * as logger from '../logger.js';
 import { extractPolicyRoots, toMcpRoots } from './policy-roots.js';
 import { buildTrustedServerSet } from '../memory/memory-annotations.js';
 import { ToolCallCoordinator, type EscalationPromptFn } from './tool-call-coordinator.js';
+import { checkSandboxAvailability, resolveSandboxConfigsForAudit } from './sandbox-integration.js';
 import type { ProxiedTool } from './tool-call-pipeline.js';
 
 /** Re-export for backward compatibility with callers that import from here. */
@@ -38,52 +38,38 @@ export interface TrustedProcessOptions {
  *
  * After Step 1, both in-process and Code Mode paths share the same
  * coordinator implementation for policy evaluation and audit logging.
+ *
+ * Lifecycle: `new TrustedProcess(config)` + `await initialize()`. The
+ * coordinator is constructed during `initialize()` (not the constructor)
+ * so the auto-approve model can be built first and threaded into
+ * construction-time invariants, rather than being attached after the
+ * fact.
  */
 export class TrustedProcess {
-  private coordinator: ToolCallCoordinator;
+  private coordinator: ToolCallCoordinator | null = null;
   private mcpManager: MCPClientManager;
-  private mcpRoots: McpRoot[];
+  private mcpRoots: McpRoot[] = [];
   private escalation: EscalationHandler;
-  private autoApproveModel: LanguageModelV3 | null = null;
-  private lastUserMessage: string | null = null;
+  private readonly options: TrustedProcessOptions;
 
   constructor(
     private config: IronCurtainConfig,
     options?: TrustedProcessOptions,
   ) {
-    const { compiledPolicy, toolAnnotations, dynamicLists } = loadGeneratedPolicy({
-      policyDir: config.generatedDir,
-      toolAnnotationsDir: config.toolAnnotationsDir ?? config.generatedDir,
-      fallbackDir: getPackageGeneratedDir(),
-    });
-    checkConstitutionFreshness(compiledPolicy, config.constitutionPath);
-
-    const serverDomainAllowlists = extractServerDomainAllowlists(config.mcpServers);
-    const trustedServers = buildTrustedServerSet(config.mcpServers);
-
+    this.options = options ?? {};
     // In-process mode uses its own MCPClientManager so each `connect`
     // call spawns a real backend directly (no router subprocess). The
     // coordinator wraps it for the policy gate.
     this.mcpManager = new McpClientManagerImpl();
-    this.coordinator = new ToolCallCoordinator({
-      compiledPolicy,
-      toolAnnotations,
-      protectedPaths: config.protectedPaths,
-      allowedDirectory: config.allowedDirectory,
-      serverDomainAllowlists,
-      dynamicLists,
-      trustedServers,
-      auditLogPath: config.auditLogPath,
-      auditRedact: config.userConfig.auditRedaction.enabled,
-      escalationDir: config.escalationDir,
-      mcpManager: this.mcpManager,
-      onEscalation: options?.onEscalation,
-    });
-
-    const policyRoots = extractPolicyRoots(compiledPolicy, config.allowedDirectory);
-    this.mcpRoots = toMcpRoots(policyRoots);
-
     this.escalation = new EscalationHandler();
+  }
+
+  /** Internal accessor: throws if used before `initialize()`. */
+  private requireCoordinator(): ToolCallCoordinator {
+    if (!this.coordinator) {
+      throw new Error('TrustedProcess used before initialize() -- call initialize() first.');
+    }
+    return this.coordinator;
   }
 
   /**
@@ -91,11 +77,78 @@ export class TrustedProcess {
    * Called by the session layer before each agent turn.
    */
   setLastUserMessage(message: string): void {
-    this.lastUserMessage = message;
-    this.coordinator.setLastUserMessage(message);
+    this.requireCoordinator().setLastUserMessage(message);
   }
 
   async initialize(): Promise<void> {
+    const { compiledPolicy, toolAnnotations, dynamicLists } = loadGeneratedPolicy({
+      policyDir: this.config.generatedDir,
+      toolAnnotationsDir: this.config.toolAnnotationsDir ?? this.config.generatedDir,
+      fallbackDir: getPackageGeneratedDir(),
+    });
+    checkConstitutionFreshness(compiledPolicy, this.config.constitutionPath);
+
+    const serverDomainAllowlists = extractServerDomainAllowlists(this.config.mcpServers);
+    const trustedServers = buildTrustedServerSet(this.config.mcpServers);
+
+    // Build the auto-approve model BEFORE constructing the coordinator
+    // so it can be passed in as a construction-time invariant.
+    const autoApproveModel = await this.buildAutoApproveModel();
+
+    // Compute per-server sandbox disposition for audit annotation.
+    const { platformSupported } = checkSandboxAvailability();
+    const resolvedSandboxConfigs = resolveSandboxConfigsForAudit(
+      this.config.mcpServers,
+      this.config.allowedDirectory,
+      platformSupported,
+      this.config.sandboxPolicy ?? 'warn',
+    );
+
+    this.coordinator = new ToolCallCoordinator({
+      compiledPolicy,
+      toolAnnotations,
+      protectedPaths: this.config.protectedPaths,
+      allowedDirectory: this.config.allowedDirectory,
+      serverDomainAllowlists,
+      dynamicLists,
+      trustedServers,
+      auditLogPath: this.config.auditLogPath,
+      auditRedact: this.config.userConfig.auditRedaction.enabled,
+      escalationDir: this.config.escalationDir,
+      mcpManager: this.mcpManager,
+      onEscalation: this.options.onEscalation,
+      autoApproveModel,
+      resolvedSandboxConfigs,
+    });
+
+    const policyRoots = extractPolicyRoots(compiledPolicy, this.config.allowedDirectory);
+    this.mcpRoots = toMcpRoots(policyRoots);
+
+    await this.connectMcpServers();
+  }
+
+  /**
+   * Creates the auto-approve language model when enabled in user config.
+   * Returns `null` when auto-approve is disabled or model construction
+   * fails (non-fatal: the session continues with manual escalation).
+   */
+  private async buildAutoApproveModel() {
+    const autoApproveConfig = this.config.userConfig.autoApprove;
+    if (!autoApproveConfig.enabled) return null;
+    try {
+      return await createLanguageModel(autoApproveConfig.modelId, this.config.userConfig);
+    } catch {
+      logger.warn('[auto-approve] Failed to create model; auto-approve disabled');
+      return null;
+    }
+  }
+
+  /**
+   * Connects to every configured MCP server and registers its tools
+   * with the coordinator. Unavailable servers are logged and skipped.
+   */
+  private async connectMcpServers(): Promise<void> {
+    const coordinator = this.requireCoordinator();
     const failedServers: string[] = [];
     for (const [name, serverConfig] of Object.entries(this.config.mcpServers)) {
       const missingVars = getMissingEnvVars(serverConfig.args);
@@ -122,7 +175,7 @@ export class TrustedProcess {
             description: t.description,
             inputSchema: (t.inputSchema ?? {}) as Record<string, unknown>,
           }));
-          this.coordinator.registerTools(name, proxiedTools, clientState);
+          coordinator.registerTools(name, proxiedTools, clientState);
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -132,24 +185,6 @@ export class TrustedProcess {
     }
     if (failedServers.length > 0) {
       logger.warn(`Unavailable MCP servers: ${failedServers.join(', ')}. Their tools will not be available.`);
-    }
-
-    // Create auto-approve model if enabled.
-    // NOTE: auto-approve model creation after coordinator construction
-    // is a known limitation -- the coordinator's `handleCallTool` only
-    // reads the model passed at construction time. For in-process tests
-    // with auto-approve enabled, wire the model into
-    // `ToolCallCoordinatorOptions.autoApproveModel` directly and skip
-    // this branch. Kept here for parity with the legacy API until the
-    // session layer is updated to build the model before constructing
-    // the coordinator.
-    const autoApproveConfig = this.config.userConfig.autoApprove;
-    if (autoApproveConfig.enabled) {
-      try {
-        this.autoApproveModel = await createLanguageModel(autoApproveConfig.modelId, this.config.userConfig);
-      } catch {
-        logger.warn('[auto-approve] Failed to create model; auto-approve disabled');
-      }
     }
   }
 
@@ -162,13 +197,7 @@ export class TrustedProcess {
    * Mirrors the legacy TrustedProcess.handleToolCall signature.
    */
   async handleToolCall(request: ToolCallRequest): Promise<ToolCallResult> {
-    // Temporarily unused; retained for future integration with the
-    // coordinator's auto-approver context (the coordinator currently
-    // reads user context from the escalation directory, not here).
-    void this.autoApproveModel;
-    void this.lastUserMessage;
-    void this.escalation;
-    return this.coordinator.handleStructuredToolCall(request);
+    return this.requireCoordinator().handleStructuredToolCall(request);
   }
 
   async shutdown(): Promise<void> {
@@ -177,7 +206,9 @@ export class TrustedProcess {
     // the coordinator will NOT close it. Do that here, then close the
     // coordinator (which flushes the audit log).
     await this.mcpManager.closeAll();
-    await this.coordinator.close();
+    if (this.coordinator) {
+      await this.coordinator.close();
+    }
   }
 }
 

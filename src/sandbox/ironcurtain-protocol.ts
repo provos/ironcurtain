@@ -147,7 +147,10 @@ class IronCurtainCommunicationProtocol extends CommunicationProtocol {
     const backendToolName = stripped.slice(dotIdx + 1);
 
     const response = await coordinator.handleToolCall(serverName, backendToolName, toolArgs);
-    return response;
+    // Strip internal fields (e.g. `_policyDecision`) at the sandbox
+    // boundary. The V8 isolate runs untrusted LLM-generated code and
+    // must not be able to fingerprint policy rule names/reasons.
+    return { content: response.content, isError: response.isError };
   }
 
   async *callToolStreaming(

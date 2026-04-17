@@ -16,7 +16,11 @@ import { Protocol } from '@modelcontextprotocol/sdk/shared/protocol.js';
 import type { IronCurtainConfig, MCPServerConfig } from '../config/types.js';
 import { CONTAINER_WORKSPACE_DIR } from '../docker/agent-adapter.js';
 import { createLanguageModel } from '../config/model-provider.js';
-import { resolveNodeModulesBin } from '../trusted-process/sandbox-integration.js';
+import {
+  resolveNodeModulesBin,
+  checkSandboxAvailability,
+  resolveSandboxConfigsForAudit,
+} from '../trusted-process/sandbox-integration.js';
 import { ToolCallCoordinator, type CoordinatorTool } from '../trusted-process/tool-call-coordinator.js';
 import { loadGeneratedPolicy, extractServerDomainAllowlists, getPackageGeneratedDir } from '../config/index.js';
 import { buildTrustedServerSet } from '../memory/memory-annotations.js';
@@ -604,6 +608,18 @@ async function buildCoordinator(config: IronCurtainConfig): Promise<CoordinatorB
   // virtual-only mode with MITM_CONTROL_ADDR set.
   const controlApiClient = config.mitmControlAddr ? createControlApiClient(config.mitmControlAddr) : null;
 
+  // Compute per-server sandbox disposition for audit-log annotation.
+  // The subprocesses own the actual sandbox wrapping (srt settings files,
+  // command wrapping); the parent only needs the boolean to stamp audit
+  // entries and annotate EPERM/EACCES errors as sandbox violations.
+  const { platformSupported } = checkSandboxAvailability();
+  const resolvedSandboxConfigs = resolveSandboxConfigsForAudit(
+    config.mcpServers,
+    config.allowedDirectory,
+    platformSupported,
+    config.sandboxPolicy ?? 'warn',
+  );
+
   const coordinator = new ToolCallCoordinator({
     compiledPolicy,
     toolAnnotations,
@@ -617,6 +633,7 @@ async function buildCoordinator(config: IronCurtainConfig): Promise<CoordinatorB
     autoApproveModel,
     escalationDir: config.escalationDir,
     controlApiClient,
+    resolvedSandboxConfigs,
   });
 
   // Derive initial MCP roots from the compiled policy using the same
