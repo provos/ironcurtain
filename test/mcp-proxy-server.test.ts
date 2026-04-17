@@ -741,6 +741,19 @@ describe('handleCallTool', () => {
     expect(deps.auditLog.log).toHaveBeenCalledTimes(1);
   });
 
+  it('uses a server-qualified circuit breaker key (no bare-tool-name bucket sharing)', async () => {
+    // Pre-fix this passed only `toolInfo.name` to `circuitBreaker.check`,
+    // which silently shared a rate-limit bucket across two servers that
+    // expose the same bare tool name. Post-fix the key is
+    // `${serverName}__${toolName}`.
+    const deps = createMockDeps();
+    await handleCallTool('read_file', { path: '/tmp/foo' }, deps);
+
+    expect(deps.circuitBreaker.check).toHaveBeenCalledTimes(1);
+    const [keyArg] = vi.mocked(deps.circuitBreaker.check).mock.calls[0];
+    expect(keyArg).toBe('fs__read_file');
+  });
+
   it('returns error when no client connection exists for the server', async () => {
     const deps = createMockDeps();
     deps.clientStates.clear();

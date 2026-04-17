@@ -1,8 +1,12 @@
 /**
- * Shared string prefixes used to tag error responses from the tool-call
- * pipeline. Producers (tool-call-pipeline, call-circuit-breaker) prepend
- * these to error text; the coordinator matches against them to classify
- * the response status.
+ * Shared error-message prefixes used by the pipeline to tag error
+ * responses with a recognizable category. Consumers (logs, UI, user
+ * messages) can pattern-match on these to identify the error category
+ * without relying on internal decision fields.
+ *
+ * The coordinator itself classifies tool-call outcomes via the
+ * `_policyDecision.status` field stamped on every response, not by
+ * matching these prefixes.
  */
 
 export const ERROR_PREFIX_DENIED = 'DENIED:';

@@ -442,6 +442,122 @@ describe('ToolCallCoordinator', () => {
     });
   });
 
+  describe('requestId/timestamp correlation', () => {
+    it('preserves the caller-supplied requestId and timestamp in the audit entry', async () => {
+      // Structured callers (coordinator handleStructuredToolCall) carry
+      // their own requestId/timestamp. Pre-fix, handleCallTool synthesized
+      // fresh values and dropped the caller's -- breaking correlation
+      // between caller-side tracing and the audit log.
+      const { coordinator, auditPath } = makeCoordinator('requestid-correlation');
+      const callerRequestId = 'caller-trace-0000-aaaa-bbbb-cccc';
+      const callerTimestamp = '2025-01-15T12:34:56.789Z';
+      try {
+        const req = makeRequest({
+          requestId: callerRequestId,
+          timestamp: callerTimestamp,
+          toolName: 'list_allowed_directories',
+          arguments: {},
+        });
+        const result = await coordinator.handleStructuredToolCall(req);
+        expect(result.status).toBe('success');
+        // The coordinator echoes the caller's requestId on the result.
+        expect(result.requestId).toBe(callerRequestId);
+      } finally {
+        await coordinator.close();
+      }
+
+      const entries = readAudit(auditPath);
+      expect(entries.length).toBe(1);
+      const entry = entries[0] as { requestId: string; timestamp: string };
+      expect(entry.requestId).toBe(callerRequestId);
+      expect(entry.timestamp).toBe(callerTimestamp);
+    });
+  });
+
+  describe('escalation with no handler configured', () => {
+    it('returns status:denied (not error) when no escalation handler is available', async () => {
+      // Pre-fix the `_policyDecision.status` on this branch carried the
+      // original 'escalate' value, causing the coordinator's classifier
+      // to report `status:'error'` instead of `'denied'`. The outcome
+      // IS a denial (we have no way to escalate), so it must be labeled
+      // as such.
+      const auditPath = makeAuditPath('escalate-no-handler');
+      const client = mockSuccessClient();
+
+      const coordinator = new ToolCallCoordinator({
+        compiledPolicy: testCompiledPolicy,
+        toolAnnotations: testToolAnnotations,
+        protectedPaths: TEST_PROTECTED_PATHS,
+        allowedDirectory: TEST_SANDBOX_DIR,
+        auditLogPath: auditPath,
+        // Deliberately leave `onEscalation` and `escalationDir` unset.
+      });
+      registerFilesystemTools(coordinator, client);
+
+      try {
+        const req = makeRequest({
+          toolName: 'write_file',
+          arguments: { path: '/tmp/outside-sandbox/f.txt' },
+        });
+        const result = await coordinator.handleStructuredToolCall(req);
+        expect(result.status).toBe('denied');
+        expect(result.policyDecision.status).toBe('deny');
+      } finally {
+        await coordinator.close();
+      }
+    });
+  });
+
+  describe('human-denied escalation: audit and returned decision agree', () => {
+    it('writes a deny-status audit entry that matches the returned PolicyDecision', async () => {
+      // Pre-fix the outer `policyDecision` (captured by the audit
+      // closure) still had status:'escalate' and the original
+      // evaluation reason, while the returned `_policyDecision`
+      // reported status:'deny' with 'Denied by human during escalation'.
+      // Audit and returned decision must agree.
+      const auditPath = makeAuditPath('escalate-denied-audit-agrees');
+      const client = mockSuccessClient();
+
+      const coordinator = new ToolCallCoordinator({
+        compiledPolicy: testCompiledPolicy,
+        toolAnnotations: testToolAnnotations,
+        protectedPaths: TEST_PROTECTED_PATHS,
+        allowedDirectory: TEST_SANDBOX_DIR,
+        auditLogPath: auditPath,
+        onEscalation: async () => ({ decision: 'denied' }),
+      });
+      registerFilesystemTools(coordinator, client);
+
+      try {
+        const req = makeRequest({
+          toolName: 'write_file',
+          arguments: { path: '/tmp/outside-sandbox/f.txt' },
+        });
+        const result = await coordinator.handleStructuredToolCall(req);
+        expect(result.status).toBe('denied');
+        expect(result.policyDecision.status).toBe('deny');
+        expect(result.policyDecision.reason).toBe('Denied by human during escalation');
+      } finally {
+        await coordinator.close();
+      }
+
+      const entries = readAudit(auditPath);
+      expect(entries.length).toBe(1);
+      const entry = entries[0] as {
+        policyDecision: { status: string; reason: string };
+        result: { status: string; error?: string };
+        escalationResult?: string;
+      };
+      // Audit must reflect the human-denial outcome, not the original
+      // 'escalate' decision from the policy engine.
+      expect(entry.policyDecision.status).toBe('deny');
+      expect(entry.policyDecision.reason).toBe('Denied by human during escalation');
+      expect(entry.result.status).toBe('denied');
+      expect(entry.result.error).toBe('Denied by human during escalation');
+      expect(entry.escalationResult).toBe('denied');
+    });
+  });
+
   describe('handleStructuredToolCall: synthetic entries are not leaked', () => {
     it('does not mutate toolMap for unregistered tools', async () => {
       const { coordinator } = makeCoordinator('synth-no-leak');

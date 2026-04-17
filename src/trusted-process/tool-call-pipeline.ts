@@ -327,6 +327,41 @@ export function buildToolMap(allTools: ProxiedTool[]): Map<string, ProxiedTool> 
 }
 
 /**
+ * Asserts that no two tools share the same bare name across servers.
+ *
+ * The relay's `CallTool` handler (in `mcp-proxy-server.ts`) routes by
+ * bare tool name via `toolMap`, which is last-write-wins on
+ * collisions. When `SERVER_FILTER` is set, only one backend is loaded
+ * and the check is trivially satisfied; multi-backend modes (e.g. the
+ * pipeline's list resolver) must not load two servers that expose the
+ * same tool name, or calls would silently route to the wrong backend.
+ *
+ * Throws with a descriptive message listing each duplicate tool and
+ * the servers that exposed it. Safe in single-server mode: no work.
+ */
+export function assertUniqueToolNames(allTools: readonly ProxiedTool[]): void {
+  const byName = new Map<string, string[]>();
+  for (const tool of allTools) {
+    const owners = byName.get(tool.name);
+    if (owners) {
+      owners.push(tool.serverName);
+    } else {
+      byName.set(tool.name, [tool.serverName]);
+    }
+  }
+  const collisions = [...byName.entries()].filter(([, owners]) => owners.length > 1);
+  if (collisions.length === 0) return;
+  const details = collisions.map(([name, owners]) => `  "${name}" exposed by: ${owners.join(', ')}`).join('\n');
+  throw new Error(
+    'Relay subprocess cannot load multiple backends that expose the same tool name. ' +
+      'The CallTool handler routes by bare tool name, so collisions would route to ' +
+      'the wrong backend. Either set SERVER_FILTER to load a single server, or ' +
+      'resolve the collisions at the backend layer.\n' +
+      `Duplicate tool names:\n${details}`,
+  );
+}
+
+/**
  * Creates an audit entry and logs it. Extracted so the audit shape
  * construction is testable independently.
  */
@@ -436,17 +471,44 @@ export interface CallToolDeps {
 // ---------------------------------------------------------------------------
 
 /**
+ * Optional caller-provided request identity. Structured callers
+ * (e.g. `ToolCallCoordinator.handleStructuredToolCall`) have their
+ * own `requestId`/`timestamp` on the inbound request; passing them
+ * through here preserves correlation between caller-side tracing
+ * and the audit entries emitted by this pipeline.
+ *
+ * When omitted, `handleCallTool` synthesizes both fields internally
+ * (the low-level UTCP path has no externally-assigned request id).
+ */
+export interface RequestContext {
+  readonly requestId: string;
+  readonly timestamp: string;
+}
+
+/**
  * Handles a single tool call request: policy evaluation, escalation,
  * circuit breaker check, and forwarding to the real MCP server.
  *
  * This is the core security logic -- the single source of truth for
  * the policy evaluation pipeline.
+ *
+ * @param requestContext - optional caller-provided requestId/timestamp
+ *        so structured callers keep correlation with audit entries.
+ *        When omitted, both are generated internally.
  */
 export async function handleCallTool(
   toolName: string,
   rawArgs: Record<string, unknown>,
   deps: CallToolDeps,
+  requestContext?: RequestContext,
 ): Promise<ToolCallResponse> {
+  // Use the caller's requestId/timestamp when supplied so structured
+  // callers can correlate their tracing with the audit entries we
+  // emit. Low-level callers (e.g. UTCP) leave `requestContext` unset
+  // and we synthesize fresh values below.
+  const callerRequestId = requestContext?.requestId ?? uuidv4();
+  const callerTimestamp = requestContext?.timestamp ?? new Date().toISOString();
+
   const toolInfo = deps.toolMap.get(toolName);
 
   if (!toolInfo) {
@@ -455,8 +517,8 @@ export async function handleCallTool(
     const reason = `Unknown tool: ${toolName}`;
     const [unknownServer, unknownTool] = splitToolKey(toolName);
     deps.auditLog.log({
-      timestamp: new Date().toISOString(),
-      requestId: uuidv4(),
+      timestamp: callerTimestamp,
+      requestId: callerRequestId,
       serverName: unknownServer,
       toolName: unknownTool,
       arguments: rawArgs,
@@ -480,8 +542,8 @@ export async function handleCallTool(
     const reason = `${ERROR_PREFIX_MISSING_ANNOTATION} ${toolInfo.serverName}__${toolInfo.name}. Re-run 'ironcurtain annotate-tools' to update.`;
     // Security invariant: every tool call outcome is audited.
     deps.auditLog.log({
-      timestamp: new Date().toISOString(),
-      requestId: uuidv4(),
+      timestamp: callerTimestamp,
+      requestId: callerRequestId,
       serverName: toolInfo.serverName,
       toolName: toolInfo.name,
       arguments: rawArgs,
@@ -502,8 +564,8 @@ export async function handleCallTool(
     const validationError = validateToolArguments(rawArgs, toolInfo.inputSchema);
     if (validationError) {
       deps.auditLog.log({
-        timestamp: new Date().toISOString(),
-        requestId: uuidv4(),
+        timestamp: callerTimestamp,
+        requestId: callerRequestId,
         serverName: toolInfo.serverName,
         toolName: toolInfo.name,
         arguments: rawArgs,
@@ -546,11 +608,11 @@ export async function handleCallTool(
         deps.auditLog.log(
           buildAuditEntry(
             {
-              requestId: uuidv4(),
+              requestId: callerRequestId,
               serverName: toolInfo.serverName,
               toolName: toolInfo.name,
               arguments: rawArgs,
-              timestamp: new Date().toISOString(),
+              timestamp: callerTimestamp,
             },
             rawArgs,
             { status: 'deny', rule: 'git-path-enrichment-failed', reason: errorMsg },
@@ -577,11 +639,11 @@ export async function handleCallTool(
   }
 
   const request: ToolCallRequest = {
-    requestId: uuidv4(),
+    requestId: callerRequestId,
     serverName: toolInfo.serverName,
     toolName: toolInfo.name,
     arguments: argsForPolicy,
-    timestamp: new Date().toISOString(),
+    timestamp: callerTimestamp,
   };
 
   const evaluation = deps.policyEngine.evaluate(request);
@@ -634,6 +696,10 @@ export async function handleCallTool(
       const hasInProcess = typeof deps.onEscalation === 'function';
       if (!hasInProcess && !deps.escalationDir) {
         logAudit({ status: 'denied', error: evaluation.reason }, 0, 'denied');
+        // No escalation handler is available, so the outcome is a
+        // denial -- not a runtime error. Stamp the returned decision
+        // as `deny` so the coordinator's status classifier sees it
+        // correctly.
         return {
           content: [
             {
@@ -642,7 +708,7 @@ export async function handleCallTool(
             },
           ],
           isError: true,
-          _policyDecision: { ...policyDecision },
+          _policyDecision: { ...policyDecision, status: 'deny' },
         };
       }
 
@@ -745,7 +811,12 @@ export async function handleCallTool(
             rule: policyDecision.rule,
             reason: 'Denied by human during escalation',
           };
-          logAudit({ status: 'denied', error: evaluation.reason }, 0, 'denied');
+          // Align the outer `policyDecision` (the object `logAudit`
+          // closes over) with the decision we return to the caller so
+          // the audit entry and the returned PolicyDecision agree.
+          policyDecision.status = deniedDecision.status;
+          policyDecision.reason = deniedDecision.reason;
+          logAudit({ status: 'denied', error: deniedDecision.reason }, 0, 'denied');
           return {
             content: [{ type: 'text', text: `${ERROR_PREFIX_ESCALATION_DENIED} ${evaluation.reason}` }],
             isError: true,
@@ -792,8 +863,11 @@ export async function handleCallTool(
     };
   }
 
-  // Circuit breaker: deny if the same tool+args is called too many times
-  const cbVerdict = deps.circuitBreaker.check(toolInfo.name, argsForTransport);
+  // Circuit breaker: deny if the same tool+args is called too many times.
+  // Key is server-qualified so two backends that happen to expose tools
+  // with the same bare name do not share a rate-limit bucket.
+  const circuitBreakerKey = `${toolInfo.serverName}__${toolInfo.name}`;
+  const cbVerdict = deps.circuitBreaker.check(circuitBreakerKey, argsForTransport);
   if (!cbVerdict.allowed) {
     logAudit({ status: 'denied', error: cbVerdict.reason }, 0);
     return {

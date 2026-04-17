@@ -270,7 +270,13 @@ export class ToolCallCoordinator {
 
     const response = await this.callMutex.withLock(async () => {
       const deps = this.buildCallToolDeps(synthetic);
-      return handleCallTool(key, request.arguments, deps);
+      // Preserve the caller's requestId/timestamp so audit entries
+      // correlate with caller-side tracing. Low-level UTCP callers
+      // route through `handleToolCall` below, which omits this.
+      return handleCallTool(key, request.arguments, deps, {
+        requestId: request.requestId,
+        timestamp: request.timestamp,
+      });
     });
 
     const isError = response.isError === true;

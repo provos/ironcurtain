@@ -81,7 +81,7 @@ import {
   type ControlApiClient,
 } from '../docker/proxy-tools.js';
 
-import { type ProxiedTool, type ClientState, buildToolMap } from './tool-call-pipeline.js';
+import { type ProxiedTool, type ClientState, buildToolMap, assertUniqueToolNames } from './tool-call-pipeline.js';
 
 // ---------------------------------------------------------------------------
 // Subprocess helpers
@@ -605,6 +605,12 @@ async function main(): Promise<void> {
     }
     controlApiClient = createControlApiClient(mitmControlAddr);
   }
+
+  // Defense-in-depth: the relay's CallTool handler routes by bare
+  // tool name, so two backends exposing the same tool name would
+  // silently collide and route to the wrong server. Fail fast if we
+  // ever end up with such a collision in the loaded tool set.
+  assertUniqueToolNames(allTools);
 
   const toolMap = buildToolMap(allTools);
   const toolDescriptionHints = loadToolDescriptionHints();
