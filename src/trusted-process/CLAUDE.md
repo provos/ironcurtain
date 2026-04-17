@@ -1,11 +1,16 @@
-# MCP Proxy Server & Trusted Process (`src/trusted-process/`)
+# Trusted Process (`src/trusted-process/`)
 
 ## Overview
 
-The security kernel of IronCurtain. Every tool call from the agent passes through this layer for policy evaluation, audit logging, and routing to real MCP servers. Two modes of operation:
+The security kernel of IronCurtain. Every tool call from the agent passes through this layer for policy evaluation, audit logging, and routing to real MCP servers.
 
-1. **Proxy mode** (`mcp-proxy-server.ts`) - standalone MCP server process for Code Mode. Has its own PolicyEngine, AuditLog, and approval whitelist instances. Uses the low-level `Server` class (not `McpServer`) to pass through raw JSON schemas. In single-shot mode, escalations are auto-denied. In interactive sessions, escalations are routed via file-based IPC for human approval.
-2. **In-process mode** (`index.ts`) - `TrustedProcess` class used by integration tests and the direct-tool-call fallback. Orchestrates PolicyEngine, MCPClientManager, EscalationHandler, and AuditLog.
+**`ToolCallCoordinator`** (`tool-call-coordinator.ts`) — centralizes all security-kernel components as single instances: PolicyEngine, AuditLog, CallCircuitBreaker, ApprovalWhitelist, AutoApprover, and ServerContextMap. Instantiated once per session in the Sandbox/CodeModeProxy layer. Two mutexes serialize concurrent access: a call mutex (protects RMW caches during `handleToolCall`) and a policy mutex (reserved for future `loadPolicy` hot-swap).
+
+**`tool-call-pipeline.ts`** — the security pipeline. Contains `handleCallTool` and all helpers: argument validation, `prepareToolArgs` normalization, git enrichment, policy evaluation, escalation flow, audit write, circuit breaker check, and `ServerContext` post-success update.
+
+**`mcp-proxy-server.ts`** — pure MCP relay subprocess. Spawned per-backend-server by `MCPClientManager`. Handles OAuth credential injection, sandbox-runtime wrapping, and stdio MCP transport. Forwards `CallTool` requests to the real backend and returns raw results. No policy evaluation, no audit writes, no escalation handling.
+
+**`TrustedProcess`** (`index.ts`) — thin wrapper around `ToolCallCoordinator` used by integration tests and the direct-tool-call fallback.
 
 ## Policy Engine
 
@@ -37,7 +42,7 @@ The annotation map stores `StoredToolAnnotation` (may contain conditional role s
 
 **MCPClientManager** (`mcp-client-manager.ts`) - manages stdio-based MCP client connections. Unavailable servers are logged as warnings and skipped gracefully.
 
-**CallCircuitBreaker** (`call-circuit-breaker.ts`) - proxy-level rate limiter. Denies repeated identical (tool, argsHash) calls exceeding a sliding-window threshold (default: 20 calls per 60s). Runs after policy evaluation so every call is audited.
+**CallCircuitBreaker** (`call-circuit-breaker.ts`) - centralized rate limiter managed by the ToolCallCoordinator. Denies repeated identical (tool, argsHash) calls exceeding a sliding-window threshold (default: 20 calls per 60s). Runs after policy evaluation so every call is audited.
 
 **Transport layers** for Docker Agent Mode:
 - `uds-server-transport.ts` - Unix domain socket transport (Linux containers with bind mounts).
