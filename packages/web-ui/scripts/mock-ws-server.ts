@@ -1229,10 +1229,60 @@ function isRpcError(value: unknown): value is RpcErrorResult {
 }
 
 // ---------------------------------------------------------------------------
-// WebSocket server
+// WebSocket + HTTP server (shared port for WS upgrade and /ws/auth preflight)
 // ---------------------------------------------------------------------------
 
-const wss = new WebSocketServer({ port: PORT });
+/**
+ * Simulate the daemon's bearer-token check. Real daemon uses a 32-byte
+ * random token; here we just compare to the well-known mock token so
+ * E2E tests can exercise the bad-token path.
+ */
+function isMockTokenValid(token: string | null): boolean {
+  return token === MOCK_TOKEN;
+}
+
+const wsHttpServer = createServer((req, res) => {
+  const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+  if (req.method === 'GET' && url.pathname === '/ws/auth') {
+    const token = url.searchParams.get('token');
+    // CORS is not needed in production (Vite proxies same-origin), but
+    // is convenient when a test hits this endpoint directly from another
+    // origin. Keep it permissive for the mock only.
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    if (isMockTokenValid(token)) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end('{"ok":true}');
+    } else {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end('{"ok":false,"error":"invalid_token"}');
+    }
+    return;
+  }
+  res.writeHead(404);
+  res.end();
+});
+
+const wss = new WebSocketServer({ noServer: true });
+
+wsHttpServer.on('upgrade', (req, socket, head) => {
+  const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
+  if (url.pathname !== '/ws') {
+    socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
+    socket.destroy();
+    return;
+  }
+  const token = url.searchParams.get('token');
+  if (!isMockTokenValid(token)) {
+    socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+    socket.destroy();
+    return;
+  }
+  wss.handleUpgrade(req, socket, head, (ws) => {
+    wss.emit('connection', ws, req);
+  });
+});
+
+wsHttpServer.listen(PORT);
 
 wss.on('connection', (ws) => {
   clients.add(ws);

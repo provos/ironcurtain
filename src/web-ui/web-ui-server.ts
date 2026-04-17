@@ -320,6 +320,30 @@ export class WebUiServer {
       return;
     }
 
+    // Auth preflight endpoint -- lets the client distinguish a bad token
+    // (stop retrying, show error) from a daemon-down condition (keep
+    // retrying). Uses the same timing-safe verifier as the WS upgrade.
+    // GET only; any other method hits the explicit 404 branch below.
+    // `Cache-Control: no-store` keeps the browser and any intermediary
+    // from caching a response keyed by the token-bearing URL.
+    if (pathname === '/ws/auth' && req.method === 'GET') {
+      const token = url.searchParams.get('token');
+      const headers = { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' };
+      if (token && this.verifyToken(token)) {
+        res.writeHead(200, headers);
+        res.end('{"ok":true}');
+      } else {
+        res.writeHead(401, headers);
+        res.end('{"ok":false,"error":"invalid_token"}');
+      }
+      return;
+    }
+    if (pathname === '/ws/auth') {
+      res.writeHead(404);
+      res.end('Not Found');
+      return;
+    }
+
     const rawFilePath =
       pathname === '/' ? resolve(this.staticRoot, 'index.html') : resolve(this.staticRoot, pathname.slice(1));
 

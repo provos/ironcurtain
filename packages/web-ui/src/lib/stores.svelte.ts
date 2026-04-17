@@ -27,7 +27,7 @@ import type {
   ArtifactContentDto,
 } from './types.js';
 import { PHASE } from './types.js';
-import { createWsClient, type WsClient } from './ws-client.js';
+import { createWsClient, type PreflightResult, type WsClient } from './ws-client.js';
 import { handleEvent as handleEventPure } from './event-handler.js';
 
 export type ViewId = 'dashboard' | 'sessions' | 'escalations' | 'jobs' | 'workflows' | 'personas';
@@ -35,6 +35,7 @@ export type ThemeId = 'iron' | 'daylight' | 'midnight';
 
 const MAX_OUTPUT_LINES = 2000;
 const THEME_KEY = 'ic-theme';
+const AUTH_TOKEN_KEY = 'ic-auth-token';
 
 const VALID_THEMES: ReadonlySet<string> = new Set<ThemeId>(['iron', 'daylight', 'midnight']);
 
@@ -51,6 +52,13 @@ export function setTheme(theme: ThemeId): void {
 class AppState {
   connected: boolean = $state(false);
   hasToken: boolean = $state(false);
+  /**
+   * Non-null when the last auth preflight (or server-side rejection)
+   * indicated the token is bad. The browser WebSocket API hides HTTP
+   * status codes, so we rely on an HTTP preflight to `/ws/auth` and
+   * surface the result here to drive UI state.
+   */
+  authError: 'invalid_token' | null = $state(null);
   daemonStatus: DaemonStatusDto | null = $state(null);
   sessions: Map<number, SessionDto> = $state(new Map());
   selectedSessionLabel: number | null = $state(null);
@@ -135,18 +143,47 @@ let wsClient: WsClient | null = null;
 
 export function getWsClient(): WsClient {
   if (!wsClient) {
-    wsClient = createWsClient();
+    wsClient = createWsClient(verifyAuthToken);
     wireEventHandlers(wsClient);
   }
   return wsClient;
+}
+
+/**
+ * HTTP preflight against the daemon's `/ws/auth` endpoint. The status is
+ * mapped to three outcomes:
+ *   - 200 → 'ok'
+ *   - 401 → 'invalid' (clear the token and stop retrying)
+ *   - anything else, including network errors → 'offline' (keep retrying;
+ *     a transient 5xx must not destructively purge a good token)
+ *
+ * Exported for testing.
+ */
+export async function verifyAuthToken(token: string, fetchImpl: typeof fetch = fetch): Promise<PreflightResult> {
+  try {
+    const url = buildDaemonUrl(`/ws/auth?token=${encodeURIComponent(token)}`, { ws: false });
+    const res = await fetchImpl(url, { method: 'GET', cache: 'no-store' });
+    if (res.status === 200) return 'ok';
+    if (res.status === 401) return 'invalid';
+    return 'offline';
+  } catch {
+    return 'offline';
+  }
 }
 
 function wireEventHandlers(client: WsClient): void {
   client.onConnectionChange((connected) => {
     appState.connected = connected;
     if (connected) {
+      // Connection success clears any stale auth error from a previous
+      // attempt (e.g. user pasted a bad token, then a good one).
+      appState.authError = null;
       refreshAll(client);
     }
+  });
+
+  client.onAuthError(() => {
+    handleAuthError();
   });
 
   client.onEvent((event, payload) => {
@@ -160,6 +197,13 @@ function wireEventHandlers(client: WsClient): void {
       payload,
     );
   });
+}
+
+/** Purge the bad token and flip the UI back to the token input. */
+function handleAuthError(): void {
+  sessionStorage.removeItem(AUTH_TOKEN_KEY);
+  appState.hasToken = false;
+  appState.authError = 'invalid_token';
 }
 
 let isInitialConnect = true;
@@ -258,36 +302,49 @@ function refreshJobs(client: WsClient): void {
   }, 300);
 }
 
+/**
+ * Build a daemon-relative URL. `ws: true` selects ws(s) for the WebSocket
+ * endpoint; otherwise http(s) is used for plain HTTP requests like the
+ * auth preflight. The scheme mirrors the page's own protocol so dev
+ * (http) and prod (https) Just Work.
+ */
+function buildDaemonUrl(path: string, opts: { ws: boolean }): string {
+  const isHttps = window.location.protocol === 'https:';
+  const protocol = opts.ws ? (isHttps ? 'wss:' : 'ws:') : isHttps ? 'https:' : 'http:';
+  return `${protocol}//${window.location.host}${path}`;
+}
+
 function buildWsUrl(): string {
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return `${protocol}//${window.location.host}/ws`;
+  return buildDaemonUrl('/ws', { ws: true });
 }
 
 /**
  * Initialize the WebSocket connection. Extracts token from URL
- * or sessionStorage.
+ * or sessionStorage. `hasToken` is only flipped to `true` after the
+ * store-level preflight inside `startConnectionWithToken()` succeeds or
+ * returns 'offline' — we don't flip it here so a bad token doesn't
+ * flash the dashboard.
  */
-export function initConnection(): void {
+export async function initConnection(): Promise<void> {
   const client = getWsClient();
 
   const params = new URLSearchParams(window.location.search);
   let token = params.get('token');
 
   if (token) {
-    sessionStorage.setItem('ic-auth-token', token);
+    sessionStorage.setItem(AUTH_TOKEN_KEY, token);
     const url = new URL(window.location.href);
     url.searchParams.delete('token');
     window.history.replaceState({}, '', url.toString());
   } else {
-    token = sessionStorage.getItem('ic-auth-token');
+    token = sessionStorage.getItem(AUTH_TOKEN_KEY);
   }
 
   if (!token) {
     return;
   }
 
-  appState.hasToken = true;
-  client.connect(buildWsUrl(), token);
+  await startConnectionWithToken(client, token);
 }
 
 /**
@@ -443,9 +500,31 @@ export async function compilePersonaPolicy(name: string): Promise<PersonaCompile
   return getWsClient().request<PersonaCompileResultDto>('personas.compile', { name });
 }
 
-export function connectWithToken(token: string): void {
-  sessionStorage.setItem('ic-auth-token', token);
-  appState.hasToken = true;
+export async function connectWithToken(token: string): Promise<void> {
+  sessionStorage.setItem(AUTH_TOKEN_KEY, token);
+  // Deliberately do NOT clear `authError` here. If the user re-pastes the
+  // same bad token, clearing upfront blanks the banner for one tick and
+  // then `handleAuthError()` sets it back — a visible flash. The banner
+  // is cleared on successful connection in `onConnectionChange(true)`.
   const client = getWsClient();
+  await startConnectionWithToken(client, token);
+}
+
+/**
+ * Shared entry point for starting a connection with a token: runs the
+ * HTTP preflight so the UI can distinguish an invalid token from an
+ * unreachable daemon, then kicks off the WS client. The client's
+ * reconnect loop will preflight again on each retry.
+ */
+async function startConnectionWithToken(client: WsClient, token: string): Promise<void> {
+  const result = await verifyAuthToken(token);
+  if (result === 'invalid') {
+    handleAuthError();
+    return;
+  }
+  // 'ok' or 'offline' — in both cases we're committing to the token and
+  // want the UI past the login gate. On 'offline' the WS client will
+  // enter the reconnect loop and preflight again each time.
+  appState.hasToken = true;
   client.connect(buildWsUrl(), token);
 }
