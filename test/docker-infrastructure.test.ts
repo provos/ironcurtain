@@ -1,10 +1,16 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, existsSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, existsSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import type { DockerInfrastructure } from '../src/docker/docker-infrastructure.js';
-import { prepareConversationStateDir } from '../src/docker/docker-infrastructure.js';
-import type { ConversationStateConfig } from '../src/docker/agent-adapter.js';
+import type { DockerInfrastructure, PreContainerInfrastructure } from '../src/docker/docker-infrastructure.js';
+import { prepareConversationStateDir, createSessionContainers } from '../src/docker/docker-infrastructure.js';
+import type { ConversationStateConfig, AgentAdapter, AgentId } from '../src/docker/agent-adapter.js';
+import type { DockerProxy } from '../src/docker/code-mode-proxy.js';
+import type { MitmProxy } from '../src/docker/mitm-proxy.js';
+import type { CertificateAuthority } from '../src/docker/ca.js';
+import type { DockerContainerConfig, DockerExecResult, DockerManager } from '../src/docker/types.js';
+import type { IronCurtainConfig } from '../src/config/types.js';
+import { getInternalNetworkName } from '../src/docker/platform.js';
 
 /**
  * Type-level tests for the DockerInfrastructure interface.
@@ -82,6 +88,8 @@ describe('DockerInfrastructure interface', () => {
       socketsDir: '/tmp/test/sessions/test-session-id/sockets',
       mitmAddr: { socketPath: '/tmp/mitm.sock' },
       authKind: 'apikey',
+      containerId: 'container-id',
+      containerName: 'ironcurtain-test-session',
     };
 
     // Verify key fields are accessible at runtime
@@ -92,6 +100,8 @@ describe('DockerInfrastructure interface', () => {
     expect(infra.systemPrompt).toBe('Test system prompt');
     expect(infra.image).toBe('test-image:latest');
     expect(infra.socketsDir).toContain('sockets');
+    expect(infra.containerId).toBe('container-id');
+    expect(infra.containerName).toBe('ironcurtain-test-session');
   });
 
   it('supports TCP mode with port-based mitmAddr', () => {
@@ -217,5 +227,328 @@ describe('prepareConversationStateDir', () => {
 
     const stateDir = prepareConversationStateDir(sessionDir, config);
     expect(readFileSync(join(stateDir, 'deep', 'nested', 'file.txt'), 'utf-8')).toBe('hello');
+  });
+});
+
+// --- createSessionContainers tests ---
+//
+// These tests exercise the container-creation helper used by
+// createDockerInfrastructure(). They drive a scripted PreContainerInfrastructure
+// with a mock DockerManager to verify:
+//   - the main container's mount configuration (security: only sockets subdir
+//     in UDS mode, never the full session dir with escalation/audit files)
+//   - rollback semantics when a downstream step (connectivity check) fails
+//     after the main container has already been created and started
+
+/** Overrides for the scripted DockerManager returned by makeMockDocker. */
+interface MockDockerOverrides {
+  /** Script behavior of `docker.exec` (used for connectivity check). */
+  readonly exec?: (container: string, cmd: readonly string[]) => Promise<DockerExecResult>;
+  /** Intercept `docker.create` calls after they have been captured. */
+  readonly create?: (config: DockerContainerConfig) => Promise<string>;
+}
+
+/**
+ * Builds a DockerManager mock that records every docker.create/start/stop/...
+ * call so tests can assert on the exact container configuration and on which
+ * resources were cleaned up.
+ */
+function makeMockDocker(overrides: MockDockerOverrides = {}): {
+  docker: DockerManager;
+  createCalls: DockerContainerConfig[];
+  startCalls: string[];
+  stoppedContainers: string[];
+  removedContainers: string[];
+  removedNetworks: string[];
+  createdNetworks: Array<{ name: string; options?: Record<string, unknown> }>;
+} {
+  const createCalls: DockerContainerConfig[] = [];
+  const startCalls: string[] = [];
+  const stoppedContainers: string[] = [];
+  const removedContainers: string[] = [];
+  const removedNetworks: string[] = [];
+  const createdNetworks: Array<{ name: string; options?: Record<string, unknown> }> = [];
+
+  let createSeq = 0;
+
+  const docker: DockerManager = {
+    async preflight() {},
+    async create(config: DockerContainerConfig) {
+      createCalls.push(config);
+      if (overrides.create) return overrides.create(config);
+      createSeq++;
+      // Sidecar is always created first in TCP mode; app container second.
+      // In UDS mode only the app container is created.
+      return `container-${createSeq}`;
+    },
+    async start(id: string) {
+      startCalls.push(id);
+    },
+    async exec(container: string, cmd: readonly string[]) {
+      if (overrides.exec) return overrides.exec(container, cmd);
+      return { exitCode: 0, stdout: '', stderr: '' };
+    },
+    async stop(id: string) {
+      stoppedContainers.push(id);
+    },
+    async remove(id: string) {
+      removedContainers.push(id);
+    },
+    async isRunning() {
+      return true;
+    },
+    async imageExists() {
+      // All images "exist" so the ensureImage()/pullImage() path doesn't fire
+      // during createSessionContainers tests. Image builds are exercised
+      // elsewhere (ensureImage tests live in docker-session tests).
+      return true;
+    },
+    async pullImage() {},
+    async buildImage() {},
+    async getImageLabel() {
+      return undefined;
+    },
+    async createNetwork(name: string, options?: { internal?: boolean; subnet?: string; gateway?: string }) {
+      createdNetworks.push({ name, options });
+    },
+    async removeNetwork(name: string) {
+      removedNetworks.push(name);
+    },
+    async connectNetwork() {},
+    async getContainerIp() {
+      return '172.30.0.3';
+    },
+    async containerExists() {
+      return false;
+    },
+    async getContainerLabel() {
+      return undefined;
+    },
+    async getImageId() {
+      return undefined;
+    },
+    async removeStaleContainer() {
+      return false;
+    },
+  };
+
+  return {
+    docker,
+    createCalls,
+    startCalls,
+    stoppedContainers,
+    removedContainers,
+    removedNetworks,
+    createdNetworks,
+  };
+}
+
+function makeMockAdapter(): AgentAdapter {
+  return {
+    id: 'test-agent' as AgentId,
+    displayName: 'Test Agent',
+    async getImage() {
+      return 'ironcurtain-claude-code:latest';
+    },
+    generateMcpConfig() {
+      return [];
+    },
+    generateOrientationFiles() {
+      return [];
+    },
+    buildCommand() {
+      return ['test-agent'];
+    },
+    buildSystemPrompt() {
+      return 'You are a test agent.';
+    },
+    getProviders() {
+      return [];
+    },
+    buildEnv() {
+      return { TEST_KEY: 'test-value' };
+    },
+    extractResponse(exitCode: number, stdout: string) {
+      return exitCode === 0 ? { text: stdout } : { text: `Error: exit ${exitCode}` };
+    },
+  };
+}
+
+function makeMockProxy(socketPath: string, port?: number): DockerProxy {
+  return {
+    socketPath,
+    port,
+    async start() {},
+    getHelpData() {
+      return { serverDescriptions: {}, toolsByServer: {} };
+    },
+    async stop() {},
+  };
+}
+
+function makeMockMitmProxy(): MitmProxy {
+  return {
+    async start() {
+      return { socketPath: '/tmp/test-mitm-proxy.sock' };
+    },
+    async stop() {},
+  };
+}
+
+function makeMockCA(tempDir: string): CertificateAuthority {
+  const certPath = join(tempDir, 'ca-cert.pem');
+  const keyPath = join(tempDir, 'ca-key.pem');
+  writeFileSync(certPath, 'MOCK-CERT');
+  writeFileSync(keyPath, 'MOCK-KEY');
+  return { certPem: 'MOCK-CERT', keyPem: 'MOCK-KEY', certPath, keyPath };
+}
+
+/** Minimal config accepted by createSessionContainers. */
+function makeMockConfig(): IronCurtainConfig {
+  return {
+    mcpServers: {},
+    userConfig: {
+      anthropicApiKey: 'sk-test',
+      resourceBudget: {
+        maxTotalTokens: null,
+        maxSteps: null,
+        maxSessionSeconds: null,
+        maxEstimatedCostUsd: null,
+      },
+      escalationTimeoutSeconds: 120,
+      auditRedaction: { enabled: true },
+    },
+  } as unknown as IronCurtainConfig;
+}
+
+/** Options for configuring the mock PreContainerInfrastructure. */
+interface MockCoreOptions {
+  readonly tempDir: string;
+  readonly useTcp: boolean;
+  readonly docker: DockerManager;
+  readonly adapter?: AgentAdapter;
+}
+
+/**
+ * Builds a PreContainerInfrastructure rooted at `tempDir`, with on-disk
+ * session/sandbox/sockets/orientation directories so the real
+ * `writeFileSync(orientationDir, ...)` call inside createSessionContainers
+ * actually works.
+ */
+function makeMockCore(opts: MockCoreOptions): PreContainerInfrastructure {
+  const sessionId = 'test-session-id';
+  const sessionDir = join(opts.tempDir, 'session');
+  const sandboxDir = join(opts.tempDir, 'sandbox');
+  const escalationDir = join(opts.tempDir, 'escalations');
+  const orientationDir = join(sessionDir, 'orientation');
+  const socketsDir = join(sessionDir, 'sockets');
+  const auditLogPath = join(opts.tempDir, 'audit.jsonl');
+
+  mkdirSync(sessionDir, { recursive: true });
+  mkdirSync(sandboxDir, { recursive: true });
+  mkdirSync(escalationDir, { recursive: true });
+  mkdirSync(orientationDir, { recursive: true });
+  mkdirSync(socketsDir, { recursive: true });
+
+  const proxyPort = opts.useTcp ? 9123 : undefined;
+  const mitmAddr: PreContainerInfrastructure['mitmAddr'] = opts.useTcp
+    ? { port: 8443 }
+    : { socketPath: '/tmp/test-mitm-proxy.sock' };
+
+  return {
+    sessionId,
+    sessionDir,
+    sandboxDir,
+    escalationDir,
+    auditLogPath,
+    proxy: makeMockProxy(join(socketsDir, 'proxy.sock'), proxyPort),
+    mitmProxy: makeMockMitmProxy(),
+    docker: opts.docker,
+    adapter: opts.adapter ?? makeMockAdapter(),
+    ca: makeMockCA(opts.tempDir),
+    fakeKeys: new Map([['api.test.com', 'sk-test-fake-key']]),
+    orientationDir,
+    systemPrompt: 'You are a test agent.',
+    image: 'ironcurtain-claude-code:latest',
+    useTcp: opts.useTcp,
+    socketsDir,
+    mitmAddr,
+    authKind: 'apikey',
+  };
+}
+
+describe('createSessionContainers', () => {
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), 'create-session-containers-'));
+  });
+
+  afterEach(() => {
+    if (existsSync(tempDir)) {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  // --- Test A (security-relevant) ---
+  it('mounts only sockets subdirectory in UDS mode, not the full session dir', async () => {
+    const { docker, createCalls } = makeMockDocker();
+    const core = makeMockCore({ tempDir, useTcp: false, docker });
+
+    const result = await createSessionContainers(core, makeMockConfig());
+
+    expect(result.containerId).toBeDefined();
+    expect(result.sidecarContainerId).toBeUndefined();
+    expect(result.internalNetwork).toBeUndefined();
+
+    // Only one docker.create call in UDS mode: the main container.
+    expect(createCalls).toHaveLength(1);
+    const mounts = createCalls[0].mounts;
+
+    // Defense-in-depth: /run/ironcurtain must map to sockets/ only, so the
+    // container cannot reach escalation files, audit log, or other session data.
+    const runMount = mounts.find((m) => m.target === '/run/ironcurtain');
+    expect(runMount).toBeDefined();
+    expect(runMount!.source).toBe(core.socketsDir);
+    expect(runMount!.source).not.toBe(core.sessionDir);
+
+    // Symmetric sanity check: the session dir itself is never mounted anywhere.
+    expect(mounts.some((m) => m.source === core.sessionDir)).toBe(false);
+    // And neither is the escalation dir or audit log.
+    expect(mounts.some((m) => m.source === core.escalationDir)).toBe(false);
+    expect(mounts.some((m) => m.source === core.auditLogPath)).toBe(false);
+  });
+
+  // --- Test B (error-path critical) ---
+  // This is the test that would have caught Fix 1's bug: the pre-fix catch
+  // passed containerId:null to cleanupContainers, so a failed connectivity
+  // check would leak the already-started main container. The test fails
+  // both TCP-mode resources (sidecar + network) AND the main container
+  // to defend against regressions from either end of the rollback path.
+  it('throws when connectivity check fails and cleans up sidecar, network, and main container', async () => {
+    const { docker, stoppedContainers, removedContainers, removedNetworks } = makeMockDocker({
+      async exec() {
+        // Simulate the connectivity check failing: container can't reach
+        // host-side proxies through the socat sidecar.
+        return { exitCode: 1, stdout: '', stderr: 'Connection refused' };
+      },
+    });
+    const core = makeMockCore({ tempDir, useTcp: true, docker });
+
+    await expect(createSessionContainers(core, makeMockConfig())).rejects.toThrow(
+      /Internal network connectivity check failed/,
+    );
+
+    // The sidecar is `container-1` (first docker.create call) and the main
+    // container is `container-2` (second). Both must be stopped and removed
+    // regardless of where the failure occurred in the try block.
+    expect(stoppedContainers).toContain('container-1'); // sidecar
+    expect(stoppedContainers).toContain('container-2'); // main
+    expect(removedContainers).toContain('container-1');
+    expect(removedContainers).toContain('container-2');
+
+    // The per-session internal network must also be cleaned up.
+    const expectedNetworkName = getInternalNetworkName('test-session'.substring(0, 12));
+    expect(removedNetworks).toContain(expectedNetworkName);
   });
 });

@@ -4,12 +4,13 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { AuditLogTailer } from '../src/docker/audit-log-tailer.js';
 import { DockerAgentSession, type DockerAgentSessionDeps } from '../src/docker/docker-agent-session.js';
+import type { DockerInfrastructure } from '../src/docker/docker-infrastructure.js';
 import type { DockerProxy } from '../src/docker/code-mode-proxy.js';
 import type { MitmProxy } from '../src/docker/mitm-proxy.js';
 import type { CertificateAuthority } from '../src/docker/ca.js';
 import type { AgentAdapter, AgentId, AgentResponse, ConversationStateConfig } from '../src/docker/agent-adapter.js';
 import type { ProviderConfig } from '../src/docker/provider-config.js';
-import type { DockerManager, DockerContainerConfig } from '../src/docker/types.js';
+import type { DockerManager } from '../src/docker/types.js';
 import type { IronCurtainConfig } from '../src/config/types.js';
 import type { DiagnosticEvent, EscalationRequest } from '../src/session/types.js';
 import { getInternalNetworkName } from '../src/docker/platform.js';
@@ -269,6 +270,78 @@ function createMockCA(tempDir: string): CertificateAuthority {
   return { certPem, keyPem, certPath, keyPath };
 }
 
+/** Options for overriding fields on the mock DockerInfrastructure bundle. */
+interface MockInfraOptions {
+  readonly sessionId?: string;
+  readonly sessionDir: string;
+  readonly sandboxDir: string;
+  readonly escalationDir: string;
+  readonly auditLogPath: string;
+  readonly tempDir: string;
+  readonly adapter?: AgentAdapter;
+  readonly docker?: DockerManager;
+  readonly proxy?: DockerProxy;
+  readonly mitmProxy?: MitmProxy;
+  readonly useTcp?: boolean;
+  readonly containerId?: string;
+  readonly containerName?: string;
+  readonly sidecarContainerId?: string;
+  readonly internalNetwork?: string;
+  readonly conversationStateDir?: string;
+  readonly conversationStateConfig?: ConversationStateConfig;
+}
+
+/**
+ * Builds a mock DockerInfrastructure bundle suitable for DockerAgentSession
+ * tests. Representing a post-`createDockerInfrastructure()` state: the main
+ * container is already "created" and "started"; the session only drives it.
+ */
+function createMockInfra(opts: MockInfraOptions): DockerInfrastructure {
+  const sessionId = opts.sessionId ?? 'test-session-id';
+  const shortId = sessionId.substring(0, 12);
+  const useTcp = opts.useTcp ?? false;
+  const mitmProxy =
+    opts.mitmProxy ??
+    (useTcp
+      ? ({
+          async start() {
+            return { port: 8443 };
+          },
+          async stop() {},
+        } as MitmProxy)
+      : createMockMitmProxy());
+  const proxy = opts.proxy ?? createMockProxy(join(opts.sessionDir, 'proxy.sock'), useTcp ? 9123 : undefined);
+  const mitmAddr: DockerInfrastructure['mitmAddr'] = useTcp
+    ? { port: 8443 }
+    : { socketPath: '/tmp/test-mitm-proxy.sock' };
+  return {
+    sessionId,
+    sessionDir: opts.sessionDir,
+    sandboxDir: opts.sandboxDir,
+    escalationDir: opts.escalationDir,
+    auditLogPath: opts.auditLogPath,
+    proxy,
+    mitmProxy,
+    docker: opts.docker ?? createMockDocker(),
+    adapter: opts.adapter ?? createMockAdapter(),
+    ca: createMockCA(opts.tempDir),
+    fakeKeys: new Map([['api.test.com', 'sk-test-fake-key']]),
+    orientationDir: join(opts.sessionDir, 'orientation'),
+    systemPrompt: 'You are a test agent.',
+    image: 'ironcurtain-claude-code:latest',
+    useTcp,
+    socketsDir: join(opts.sessionDir, 'sockets'),
+    mitmAddr,
+    authKind: 'apikey',
+    conversationStateDir: opts.conversationStateDir,
+    conversationStateConfig: opts.conversationStateConfig,
+    containerId: opts.containerId ?? 'container-abc123',
+    containerName: opts.containerName ?? `ironcurtain-${shortId}`,
+    sidecarContainerId: opts.sidecarContainerId,
+    internalNetwork: opts.internalNetwork,
+  };
+}
+
 function createTestDeps(tempDir: string): DockerAgentSessionDeps {
   const sessionDir = join(tempDir, 'session');
   const sandboxDir = join(tempDir, 'sandbox');
@@ -294,15 +367,18 @@ function createTestDeps(tempDir: string): DockerAgentSessionDeps {
     },
   } as unknown as IronCurtainConfig;
 
+  const infra = createMockInfra({
+    tempDir,
+    sessionDir,
+    sandboxDir,
+    escalationDir,
+    auditLogPath,
+  });
+
   return {
     config,
     sessionId: 'test-session-id' as import('../src/session/types.js').SessionId,
-    adapter: createMockAdapter(),
-    docker: createMockDocker(),
-    proxy: createMockProxy(join(sessionDir, 'proxy.sock')),
-    mitmProxy: createMockMitmProxy(),
-    ca: createMockCA(tempDir),
-    fakeKeys: new Map([['api.test.com', 'sk-test-fake-key']]),
+    infra,
     sessionDir,
     sandboxDir,
     escalationDir,
@@ -388,7 +464,7 @@ describe('DockerAgentSession', () => {
       costUsd: 0.42,
     });
 
-    session = new DockerAgentSession({ ...deps, adapter: costAdapter });
+    session = new DockerAgentSession({ ...deps, infra: { ...deps.infra, adapter: costAdapter } });
     await session.initialize();
 
     await session.sendMessage('Do something');
@@ -441,7 +517,7 @@ describe('DockerAgentSession', () => {
       stderr: 'error details',
     });
 
-    session = new DockerAgentSession({ ...deps, docker: customDocker });
+    session = new DockerAgentSession({ ...deps, infra: { ...deps.infra, docker: customDocker } });
     await session.initialize();
 
     const response = await session.sendMessage('Do something');
@@ -585,126 +661,14 @@ describe('DockerAgentSession', () => {
     expect(existsSync(contextPath)).toBe(true);
   });
 
-  it('mounts only sockets subdirectory in UDS mode, not the full session dir', async () => {
-    const createCalls: DockerContainerConfig[] = [];
-    const docker: DockerManager = {
-      ...createMockDocker(),
-      async create(config: DockerContainerConfig) {
-        createCalls.push(config);
-        return 'container-uds-123';
-      },
-    };
-
-    session = new DockerAgentSession({ ...deps, docker, useTcp: false });
-    await session.initialize();
-
-    expect(createCalls).toHaveLength(1);
-    const config = createCalls[0];
-    const mounts = config.mounts;
-
-    // The /run/ironcurtain mount must point to the sockets/ subdirectory,
-    // not the full session directory (which contains escalation files, audit logs, etc.)
-    const ironcurtainMount = mounts.find((m) => m.target === '/run/ironcurtain');
-    expect(ironcurtainMount).toBeDefined();
-    expect(ironcurtainMount!.source).toBe(join(deps.sessionDir, 'sockets'));
-    expect(ironcurtainMount!.source).not.toBe(deps.sessionDir);
-
-    // The sockets directory should have been created on disk
-    expect(existsSync(join(deps.sessionDir, 'sockets'))).toBe(true);
-  });
-
-  it('mounts conversation state directory when configured (UDS mode)', async () => {
-    const createCalls: DockerContainerConfig[] = [];
-    const docker: DockerManager = {
-      ...createMockDocker(),
-      async create(config: DockerContainerConfig) {
-        createCalls.push(config);
-        return 'container-state-123';
-      },
-    };
-
-    const stateConfig: ConversationStateConfig = {
-      hostDirName: 'claude-state',
-      containerMountPath: '/home/codespace/.claude/',
-      seed: [],
-      resumeFlags: ['--continue'],
-    };
-    const conversationStateDir = join(deps.sessionDir, 'claude-state');
-    mkdirSync(conversationStateDir, { recursive: true });
-
-    session = new DockerAgentSession({
-      ...deps,
-      docker,
-      useTcp: false,
-      conversationStateDir,
-      conversationStateConfig: stateConfig,
-    });
-    await session.initialize();
-
-    expect(createCalls).toHaveLength(1);
-    const mounts = createCalls[0].mounts;
-
-    const stateMount = mounts.find((m) => m.target === '/home/codespace/.claude/');
-    expect(stateMount).toBeDefined();
-    expect(stateMount!.source).toBe(conversationStateDir);
-    expect(stateMount!.readonly).toBe(false);
-  });
-
-  it('mounts conversation state directory when configured (TCP mode)', async () => {
-    const createCalls: DockerContainerConfig[] = [];
-    const docker: DockerManager = {
-      ...createMockDocker(),
-      async create(config: DockerContainerConfig) {
-        createCalls.push(config);
-        return 'container-state-tcp-123';
-      },
-    };
-
-    const stateConfig: ConversationStateConfig = {
-      hostDirName: 'claude-state',
-      containerMountPath: '/home/codespace/.claude/',
-      seed: [],
-      resumeFlags: ['--continue'],
-    };
-    const conversationStateDir = join(deps.sessionDir, 'claude-state');
-    mkdirSync(conversationStateDir, { recursive: true });
-
-    session = new DockerAgentSession({
-      ...deps,
-      docker,
-      useTcp: true,
-      conversationStateDir,
-      conversationStateConfig: stateConfig,
-    });
-    await session.initialize();
-
-    expect(createCalls).toHaveLength(1);
-    const mounts = createCalls[0].mounts;
-
-    const stateMount = mounts.find((m) => m.target === '/home/codespace/.claude/');
-    expect(stateMount).toBeDefined();
-    expect(stateMount!.source).toBe(conversationStateDir);
-    expect(stateMount!.readonly).toBe(false);
-  });
-
-  it('does not mount conversation state directory when not configured', async () => {
-    const createCalls: DockerContainerConfig[] = [];
-    const docker: DockerManager = {
-      ...createMockDocker(),
-      async create(config: DockerContainerConfig) {
-        createCalls.push(config);
-        return 'container-nostate-123';
-      },
-    };
-
-    session = new DockerAgentSession({ ...deps, docker, useTcp: false });
-    await session.initialize();
-
-    expect(createCalls).toHaveLength(1);
-    const mounts = createCalls[0].mounts;
-
-    expect(mounts.some((m) => m.target === '/home/codespace/.claude/')).toBe(false);
-  });
+  // NOTE: Tests for mount configuration (sockets subdir in UDS mode,
+  // conversation state directory, absence of conversation state mount) and
+  // TCP sidecar/network setup moved to `createDockerInfrastructure()` as of
+  // the workflow-container-lifecycle refactor (round 1). Those tests used
+  // to exercise `DockerAgentSession.initialize()` back when the session
+  // created the container itself; the session no longer owns container
+  // creation, so such assertions belong to the infrastructure factory's
+  // test surface. Round 2+ will add dedicated coverage for the factory.
 
   it('getDiagnosticLog returns accumulated events', async () => {
     session = new DockerAgentSession(deps);
@@ -715,133 +679,20 @@ describe('DockerAgentSession', () => {
   });
 
   describe('TCP mode with internal network', () => {
-    function createTcpDeps(tempDir: string): DockerAgentSessionDeps {
-      const baseDeps = createTestDeps(tempDir);
-      return {
-        ...baseDeps,
-        useTcp: true,
-        proxy: createMockProxy(join(tempDir, 'session', 'proxy.sock'), 9123),
-        mitmProxy: {
-          async start() {
-            return { port: 8443 };
-          },
-          async stop() {},
-        },
-      };
-    }
-
-    /**
-     * Creates a mock DockerManager for TCP mode tests.
-     * Returns the sidecar ID on the first `create()` call, and the app
-     * container ID on the second. Overrides can replace any method.
-     */
-    function createTcpMockDocker(
-      sidecarId: string,
-      appId: string,
-      overrides?: Partial<DockerManager>,
-    ): { docker: DockerManager; createCount: () => number } {
-      let createCount = 0;
-      const docker = {
-        ...createMockDocker(),
-        async createNetwork() {},
-        async connectNetwork() {},
-        async getContainerIp() {
-          return '172.30.0.3';
-        },
-        async create() {
-          createCount++;
-          return createCount === 1 ? sidecarId : appId;
-        },
-        async exec() {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        },
-        ...overrides,
-      } as unknown as DockerManager;
-      return { docker, createCount: () => createCount };
-    }
-
-    it('creates sidecar and routes via sidecar IP in TCP mode', async () => {
-      const tcpDeps = createTcpDeps(tempDir);
-      const createNetworkCalls: Array<{ name: string; options?: Record<string, unknown> }> = [];
-      const createCalls: Array<Record<string, unknown>> = [];
-      const connectNetworkCalls: Array<{ network: string; container: string }> = [];
-
-      const { docker } = createTcpMockDocker('sidecar-123', 'container-tcp-123', {
-        async createNetwork(name: string, options?: { internal?: boolean; subnet?: string; gateway?: string }) {
-          createNetworkCalls.push({ name, options });
-        },
-        async create(config: Record<string, unknown>) {
-          createCalls.push(config);
-          return createCalls.length === 1 ? 'sidecar-123' : 'container-tcp-123';
-        },
-        async connectNetwork(network: string, container: string) {
-          connectNetworkCalls.push({ network, container });
-        },
-      } as unknown as Partial<DockerManager>);
-
-      session = new DockerAgentSession({ ...tcpDeps, docker });
-      await session.initialize();
-
-      // Verify per-session internal network was created (name derived from session ID)
-      const expectedNetworkName = getInternalNetworkName('test-session'.substring(0, 12));
-      expect(createNetworkCalls).toHaveLength(1);
-      expect(createNetworkCalls[0].name).toBe(expectedNetworkName);
-      expect(createNetworkCalls[0].options).toEqual({
-        internal: true,
-      });
-
-      // Verify two containers created: sidecar first, then app
-      expect(createCalls).toHaveLength(2);
-
-      // Sidecar: created on bridge network with socat command
-      const sidecarConfig = createCalls[0];
-      expect(sidecarConfig.image).toBe('alpine/socat');
-      expect(sidecarConfig.network).toBe('bridge');
-
-      // Sidecar connected to internal network
-      expect(connectNetworkCalls).toHaveLength(1);
-      expect(connectNetworkCalls[0].network).toBe(expectedNetworkName);
-      expect(connectNetworkCalls[0].container).toBe('sidecar-123');
-
-      // App container: created on internal network with sidecar IP as host
-      const appConfig = createCalls[1];
-      expect(appConfig.network).toBe(expectedNetworkName);
-      expect(appConfig.extraHosts).toEqual(['host.docker.internal:172.30.0.3']);
-    });
-
-    it('throws when connectivity check fails and cleans up sidecar', async () => {
-      const tcpDeps = createTcpDeps(tempDir);
-      const stoppedContainers: string[] = [];
-      const removedContainers: string[] = [];
-
-      const { docker } = createTcpMockDocker('sidecar-fail', 'container-fail', {
-        async start() {},
-        async stop(id: string) {
-          stoppedContainers.push(id);
-        },
-        async remove(id: string) {
-          removedContainers.push(id);
-        },
-        async exec() {
-          return { exitCode: 1, stdout: '', stderr: 'Connection refused' };
-        },
-      });
-
-      session = new DockerAgentSession({ ...tcpDeps, docker });
-      await expect(session.initialize()).rejects.toThrow('Internal network connectivity check failed');
-
-      // Sidecar should have been cleaned up on failure
-      expect(stoppedContainers).toContain('sidecar-fail');
-      expect(removedContainers).toContain('sidecar-fail');
-    });
+    // The sidecar/network creation and connectivity-check tests moved to
+    // `createDockerInfrastructure()` (round 1 of workflow-container-lifecycle).
+    // What remains here: verifying that `close()` tears down the sidecar,
+    // the main container, and the internal network that were handed to the
+    // session via the pre-built infrastructure bundle.
 
     it('removes sidecar and internal network on close', async () => {
-      const tcpDeps = createTcpDeps(tempDir);
+      const baseDeps = createTestDeps(tempDir);
       const removedNetworks: string[] = [];
       const stoppedContainers: string[] = [];
       const removedContainers: string[] = [];
 
-      const { docker } = createTcpMockDocker('sidecar-cleanup', 'container-cleanup', {
+      const docker: DockerManager = {
+        ...createMockDocker(),
         async stop(id: string) {
           stoppedContainers.push(id);
         },
@@ -851,9 +702,20 @@ describe('DockerAgentSession', () => {
         async removeNetwork(name: string) {
           removedNetworks.push(name);
         },
-      });
+      };
 
-      session = new DockerAgentSession({ ...tcpDeps, docker });
+      const expectedNetworkName = getInternalNetworkName('test-session'.substring(0, 12));
+      const infra: DockerInfrastructure = {
+        ...baseDeps.infra,
+        docker,
+        useTcp: true,
+        containerId: 'container-cleanup',
+        sidecarContainerId: 'sidecar-cleanup',
+        internalNetwork: expectedNetworkName,
+        mitmAddr: { port: 8443 },
+      };
+
+      session = new DockerAgentSession({ ...baseDeps, infra });
       await session.initialize();
       await session.close();
 
@@ -862,7 +724,7 @@ describe('DockerAgentSession', () => {
       expect(stoppedContainers).toContain('sidecar-cleanup');
       expect(removedContainers).toContain('container-cleanup');
       expect(removedContainers).toContain('sidecar-cleanup');
-      expect(removedNetworks).toContain(getInternalNetworkName('test-session'.substring(0, 12)));
+      expect(removedNetworks).toContain(expectedNetworkName);
     });
   });
 });

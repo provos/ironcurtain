@@ -138,9 +138,11 @@ async function createBuiltinSession(options: SessionOptions): Promise<Session> {
 /**
  * Creates a DockerAgentSession that runs an external agent in a container.
  *
- * Uses prepareDockerInfrastructure() for shared Docker setup (proxies,
- * orientation, image resolution), then creates the session with pre-built
- * infrastructure so initialize() only does container creation + watchers.
+ * Calls `createDockerInfrastructure()` to stand up the full infrastructure
+ * bundle (proxies, orientation, image, running agent container, sidecar and
+ * internal network for TCP mode). The session is then constructed with that
+ * bundle and only needs to wire up session-local state (escalation watcher,
+ * audit tailer).
  */
 async function createDockerSession(
   agentId: import('../docker/agent-adapter.js').AgentId,
@@ -161,7 +163,7 @@ async function createDockerSession(
   // file instead of the terminal.
   let session: InstanceType<typeof import('../docker/docker-agent-session.js').DockerAgentSession> | undefined;
   try {
-    const { prepareDockerInfrastructure } = await import('../docker/docker-infrastructure.js');
+    const { createDockerInfrastructure } = await import('../docker/docker-infrastructure.js');
     const { DockerAgentSession } = await import('../docker/docker-agent-session.js');
     const { buildDockerClaudeMd } = await import('../docker/claude-md-seed.js');
 
@@ -170,7 +172,7 @@ async function createDockerSession(
       memoryEnabled: config.userConfig.memory.enabled,
     });
 
-    const infra = await prepareDockerInfrastructure(
+    const infra = await createDockerInfrastructure(
       sessionConfig.config,
       { kind: 'docker', agent: agentId },
       sessionConfig.sessionDir,
@@ -197,34 +199,24 @@ async function createDockerSession(
       }
     }
 
+    const systemPromptOverride = sessionConfig.systemPromptAugmentation
+      ? `${infra.systemPrompt}\n\n${sessionConfig.systemPromptAugmentation}`
+      : undefined;
+
     session = new DockerAgentSession({
       config: sessionConfig.config,
       sessionId,
-      adapter: infra.adapter,
-      docker: infra.docker,
-      proxy: infra.proxy,
-      mitmProxy: infra.mitmProxy,
-      ca: infra.ca,
-      fakeKeys: infra.fakeKeys,
+      infra,
       sessionDir: sessionConfig.sessionDir,
       sandboxDir: sessionConfig.sandboxDir,
       escalationDir: sessionConfig.escalationDir,
       auditLogPath: sessionConfig.auditLogPath,
-      useTcp: infra.useTcp,
-      conversationStateDir: infra.conversationStateDir,
-      conversationStateConfig: infra.conversationStateConfig,
       agentModelOverride: options.agentModelOverride,
       onEscalation: options.onEscalation,
       onEscalationExpired: options.onEscalationExpired,
       onEscalationResolved: options.onEscalationResolved,
       onDiagnostic: options.onDiagnostic,
-      preBuiltInfrastructure: {
-        systemPrompt: sessionConfig.systemPromptAugmentation
-          ? `${infra.systemPrompt}\n\n${sessionConfig.systemPromptAugmentation}`
-          : infra.systemPrompt,
-        image: infra.image,
-        mitmAddr: infra.mitmAddr,
-      },
+      systemPromptOverride,
     });
 
     await session.initialize();
