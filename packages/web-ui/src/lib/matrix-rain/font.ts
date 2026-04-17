@@ -10,7 +10,7 @@
 export const WORD = 'IronCurtain';
 
 /** Subtitle rendered below the main wordmark. */
-export const SUBTITLE = 'Secure Agent Runtime';
+export const SUBTITLE = 'Secure* Agent Runtime';
 
 /**
  * Katakana + digits used for both assembly and ambient drop characters.
