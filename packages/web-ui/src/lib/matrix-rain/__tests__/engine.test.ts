@@ -505,6 +505,73 @@ describe('createRainEngine -- background rain during assembly', () => {
   });
 });
 
+describe('createRainEngine -- resize', () => {
+  /** Shift every locked cell one column to the right -- simulates the
+   *  wordmark re-centering on a viewport width change without a
+   *  cellSize change. */
+  function shiftCellsRight(layout: LayoutPlan, delta: number): LayoutPlan {
+    return {
+      ...layout,
+      lockedCells: layout.lockedCells.map((c) => ({ ...c, col: c.col + delta })),
+    };
+  }
+
+  it('updates locked-cell snapshot when geometry shifts at the same cellSize (hold/ambient)', () => {
+    const layout = buildTwoPhaseLayout();
+    const engine = createRainEngine(layout, { seed: 42 });
+    // Drive into ambient so the snapshot is locked in.
+    driveTicks(engine, MAX_ASSEMBLY_TICKS + HOLD_TICKS + 5);
+    expect(engine.phase).toBe('ambient');
+
+    const shifted = shiftCellsRight(layout, 3);
+    engine.resize(shifted);
+
+    const frame = engine.getFrame();
+    // Every locked cell in the frame must match the shifted layout, not
+    // the original. This is the regression test for the stale-snapshot bug.
+    for (const cell of frame.lockedCells) {
+      const match = shifted.lockedCells.find((c) => c.col === cell.col && c.row === cell.row);
+      expect(match).toBeDefined();
+    }
+    expect(frame.lockedCells).toHaveLength(shifted.lockedCells.length);
+  });
+
+  it('rebuilds assembly drops when locked cells shift during assembly', () => {
+    const layout = buildTwoPhaseLayout();
+    const engine = createRainEngine(layout, { seed: 42 });
+    driveTicks(engine, 3);
+    expect(engine.phase).toBe('assembly');
+
+    const shifted = shiftCellsRight(layout, 5);
+    engine.resize(shifted);
+
+    // Drive assembly to completion. If drops still targeted the old
+    // columns, the shifted title cells would never lock.
+    driveTicks(engine, MAX_ASSEMBLY_TICKS + SUBTITLE_REVEAL_TICKS + 2);
+    const finalFrame = engine.getFrame();
+    const titleCount = shifted.lockedCells.filter((c) => c.group === 'title').length;
+    const lockedTitleCols = new Set(
+      finalFrame.lockedCells
+        .filter((c) => shifted.lockedCells.some((lc) => lc.group === 'title' && lc.col === c.col && lc.row === c.row))
+        .map((c) => c.col),
+    );
+    expect(lockedTitleCols.size).toBe(titleCount);
+  });
+
+  it('is a no-op when the new layout has identical lockedCells and cellSize', () => {
+    const layout = buildTwoPhaseLayout();
+    const engine = createRainEngine(layout, { seed: 42 });
+    driveTicks(engine, MAX_ASSEMBLY_TICKS + HOLD_TICKS + 5);
+    const before = snapshot(engine.getFrame());
+
+    // Same content, different array identity — must not tear down state.
+    engine.resize({ ...layout, lockedCells: layout.lockedCells.map((c) => ({ ...c })) });
+
+    const after = snapshot(engine.getFrame());
+    expect(after).toBe(before);
+  });
+});
+
 describe('createSeededRng', () => {
   it('produces a deterministic sequence for a given seed', () => {
     const a = createSeededRng(99);

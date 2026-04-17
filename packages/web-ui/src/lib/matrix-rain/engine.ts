@@ -601,14 +601,17 @@ export function createRainEngine(layout: LayoutPlan, options: RainEngineOptions 
 
     resize(newLayout: LayoutPlan): void {
       const cellSizeChanged = newLayout.cellSize !== currentLayout.cellSize;
+      // A viewport shape change can shift wordmark centering even when
+      // cellSize stays the same — every `(col, row)` in `lockedCells`
+      // moves. Without this check, hold/ambient would keep emitting
+      // stale coordinates and assembly drops would target stale cells.
+      const lockedCellsChanged = !lockedCellsEqual(currentLayout.lockedCells, newLayout.lockedCells);
       currentLayout = newLayout;
       const partitioned = partitionCells(currentLayout.lockedCells);
       titleCells = partitioned.titleCells;
       subtitleCells = partitioned.subtitleCells;
 
-      if (cellSizeChanged) {
-        // Re-seed from scratch. Phase is kept so we don't rewind, but we
-        // rebuild drops at the new grid dimensions.
+      if (cellSizeChanged || lockedCellsChanged) {
         if (phase === 'assembly') {
           assemblyDrops = buildAssemblyDrops(titleCells, rng);
           lockedSnapshotBuf = [];
@@ -617,6 +620,11 @@ export function createRainEngine(layout: LayoutPlan, options: RainEngineOptions 
         } else {
           lockedSnapshotBuf = allLockedCellsSnapshot(currentLayout);
         }
+      }
+      // Only a true grid-dimension change (cellSize) invalidates the
+      // ambient drop population; a wordmark shift alone leaves the grid
+      // intact and ambient drops can keep falling uninterrupted.
+      if (cellSizeChanged) {
         ambientDrops = [];
       }
       // Always resize the cooldown array to the new column count.
@@ -678,4 +686,19 @@ function trailColorKind(distFromHead: number): DropColorKind {
   if (distFromHead === 0) return 'head';
   if (distFromHead <= 2) return 'near';
   return 'far';
+}
+
+/**
+ * Shallow structural equality for two locked-cell arrays. A few hundred
+ * cells at most; a linear scan on resize is free.
+ */
+function lockedCellsEqual(a: ReadonlyArray<LockedCellCoord>, b: ReadonlyArray<LockedCellCoord>): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i].col !== b[i].col || a[i].row !== b[i].row || a[i].group !== b[i].group) {
+      return false;
+    }
+  }
+  return true;
 }
