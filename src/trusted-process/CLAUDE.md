@@ -8,7 +8,7 @@ The security kernel of IronCurtain. Every tool call from the agent passes throug
 
 **`tool-call-pipeline.ts`** — the security pipeline. Contains `handleCallTool` and all helpers: argument validation, `prepareToolArgs` normalization, git enrichment, policy evaluation, escalation flow, audit write, circuit breaker check, and `ServerContext` post-success update.
 
-**`mcp-proxy-server.ts`** — pure MCP relay subprocess. Spawned per-backend-server by `MCPClientManager`. Handles OAuth credential injection, sandbox-runtime wrapping, and stdio MCP transport. Forwards `CallTool` requests to the real backend and returns raw results. No policy evaluation, no audit writes, no escalation handling.
+**`mcp-proxy-server.ts`** — pure MCP relay subprocess. Spawned per-backend-server by `MCPClientManager`. Handles OAuth credential injection, sandbox-runtime wrapping, and stdio MCP transport. Forwards `CallTool` requests to the real backend and returns raw results. No policy evaluation, no audit writes, no escalation handling. Bridges roots: when the coordinator sends `notifications/roots/list_changed`, the relay fetches the new list via `server.listRoots()`, updates the shared `relayRoots` array, and forwards the notification to each backend client so they re-query.
 
 **`TrustedProcess`** (`index.ts`) — thin wrapper around `ToolCallCoordinator` used by integration tests and the direct-tool-call fallback.
 

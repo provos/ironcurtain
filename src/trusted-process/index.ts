@@ -16,7 +16,7 @@ import * as logger from '../logger.js';
 import { extractPolicyRoots, toMcpRoots } from './policy-roots.js';
 import { buildTrustedServerSet } from '../memory/memory-annotations.js';
 import { ToolCallCoordinator, type EscalationPromptFn } from './tool-call-coordinator.js';
-import type { ProxiedTool, ClientState } from './tool-call-pipeline.js';
+import type { ProxiedTool } from './tool-call-pipeline.js';
 
 /** Re-export for backward compatibility with callers that import from here. */
 export type { EscalationPromptFn };
@@ -110,20 +110,18 @@ export class TrustedProcess {
         logger.info(`Connected to MCP server: ${name}`);
 
         // Publish this server's tools to the coordinator so the policy
-        // gate can route calls through it. Use the live MCP client as
-        // the `ClientState` so `handleCallTool`'s escalation/roots
-        // expansion path remains functional.
+        // gate can route calls through it. Share the manager's live
+        // `ClientState` so `addRootToClient` mutates the same roots
+        // array the manager returns from its `roots/list` handler.
         const tools = await this.mcpManager.listTools(name);
-        const client = this.mcpManager.getClient(name);
-        const roots = this.mcpManager.getRoots(name);
-        if (client) {
+        const clientState = this.mcpManager.getClientState(name);
+        if (clientState) {
           const proxiedTools: ProxiedTool[] = tools.map((t) => ({
             serverName: name,
             name: t.name,
             description: t.description,
             inputSchema: (t.inputSchema ?? {}) as Record<string, unknown>,
           }));
-          const clientState: ClientState = { client, roots: roots ?? [] };
           this.coordinator.registerTools(name, proxiedTools, clientState);
         }
       } catch (err) {

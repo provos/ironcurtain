@@ -15,6 +15,10 @@
  *   - CallTool handler (pure forward to backend)
  *   - Virtual proxy tools (MITM_CONTROL_ADDR)
  *   - Tool description hints injection
+ *   - Roots bridging: on `notifications/roots/list_changed` from the
+ *     coordinator, fetch fresh roots via `server.listRoots()`, update
+ *     the shared `relayRoots` array, and notify each backend client so
+ *     they re-query their `roots/list` handlers with the new set.
  *
  * Configuration via environment variables:
  *   MCP_SERVERS_CONFIG -- JSON string of MCP server configs to proxy
@@ -36,6 +40,7 @@ import {
   CompatibilityCallToolResultSchema,
   ListToolsRequestSchema,
   ListRootsRequestSchema,
+  RootsListChangedNotificationSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
@@ -357,6 +362,13 @@ async function main(): Promise<void> {
   const policyRoots = extractPolicyRoots(compiledPolicy, allowedDirectory ?? '/tmp');
   const mcpRoots = toMcpRoots(policyRoots);
 
+  // Shared mutable roots array bridged to the coordinator. The proxy
+  // server's `notifications/roots/list_changed` handler (registered
+  // below) refreshes this in place via `server.listRoots()`, and each
+  // backend client's `roots/list` handler returns it. All backends
+  // observe the same authoritative set.
+  const relayRoots: { uri: string; name: string }[] = [...mcpRoots];
+
   // ── Sandbox availability & config resolution ──────────────────────
   const { sandboxAvailable } = validateSandboxAvailability(sandboxPolicy, sessionLogPath, process.platform);
   const { resolvedSandboxConfigs, settingsDir, serverCwdPaths } = resolveServerSandboxConfigs(
@@ -532,7 +544,11 @@ async function main(): Promise<void> {
       },
     );
 
-    const state: ClientState = { client, roots: [...mcpRoots] };
+    // All backend clients share the single `relayRoots` array so a
+    // coordinator-driven roots update (see the proxy server's
+    // `roots/list_changed` handler below) is visible to every backend
+    // on its next `roots/list` request.
+    const state: ClientState = { client, roots: relayRoots };
 
     client.setRequestHandler(ListRootsRequestSchema, () => {
       if (state.rootsRefreshed) {
@@ -606,6 +622,48 @@ async function main(): Promise<void> {
   const server = new Server({ name: 'ironcurtain-proxy', version: VERSION }, { capabilities: { tools: {} } });
 
   server.setRequestHandler(ListToolsRequestSchema, () => listToolsResponse);
+
+  // ── Roots bridging (coordinator → relay → backends) ───────────────
+  // The coordinator in the parent process is the authoritative source
+  // of MCP roots. On escalation approval it expands its roots and
+  // sends `notifications/roots/list_changed` to this relay. We fetch
+  // the fresh list from the coordinator via `server.listRoots()`,
+  // replace `relayRoots` in place, and propagate the notification to
+  // every backend client so they re-query via their `roots/list`
+  // handlers (registered above).
+  server.setNotificationHandler(RootsListChangedNotificationSchema, async () => {
+    try {
+      const { roots: updatedRoots } = await server.listRoots();
+      // Replace contents in-place so all backend clientStates -- which
+      // share the same array reference as `relayRoots` -- see the new
+      // set on their next `roots/list` call. MCP `Root.name` is
+      // optional in the spec; fall back to the URI so our internal
+      // `name: string` contract holds.
+      relayRoots.length = 0;
+      for (const r of updatedRoots) {
+        relayRoots.push({ uri: r.uri, name: r.name ?? r.uri });
+      }
+    } catch (err) {
+      if (sessionLogPath) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logToSessionFile(sessionLogPath, `[proxy] Failed to fetch roots from coordinator: ${msg}`);
+      }
+      return;
+    }
+
+    await Promise.all(
+      [...clientStates.values()].map(async (state) => {
+        try {
+          await state.client.sendRootsListChanged();
+        } catch (err) {
+          if (sessionLogPath) {
+            const msg = err instanceof Error ? err.message : String(err);
+            logToSessionFile(sessionLogPath, `[proxy] sendRootsListChanged to backend failed: ${msg}`);
+          }
+        }
+      }),
+    );
+  });
 
   // Pass-through CallTool handler: forward to the backend client,
   // return the raw result. No policy evaluation -- the coordinator

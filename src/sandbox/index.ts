@@ -21,6 +21,8 @@ import { ToolCallCoordinator, type CoordinatorTool } from '../trusted-process/to
 import { loadGeneratedPolicy, extractServerDomainAllowlists, getPackageGeneratedDir } from '../config/index.js';
 import { buildTrustedServerSet } from '../memory/memory-annotations.js';
 import { proxyAnnotations, proxyPolicyRules, createControlApiClient } from '../docker/proxy-tools.js';
+import { extractPolicyRoots, toMcpRoots } from '../trusted-process/policy-roots.js';
+import type { McpRoot } from '../trusted-process/mcp-client-manager.js';
 import {
   registerIronCurtainProtocol,
   bindCoordinatorToManual,
@@ -380,7 +382,7 @@ export class Sandbox {
     // Build the coordinator. It owns policy evaluation, audit logging,
     // the circuit breaker, the approval whitelist, and the server-context
     // map. All of these used to be duplicated per subprocess.
-    const coordinator = await buildCoordinator(config);
+    const { coordinator, initialRoots } = await buildCoordinator(config);
     this.coordinator = coordinator;
     bindCoordinatorToManual(this.manualName, coordinator);
 
@@ -389,7 +391,7 @@ export class Sandbox {
     // sandbox-runtime wrapping, and the stdio MCP connection to the
     // real backend, but forwards CallTool requests verbatim -- the
     // coordinator owns the policy gate.
-    await connectBackendSubprocesses(coordinator, config);
+    await connectBackendSubprocesses(coordinator, config, initialRoots);
 
     // Register a single virtual UTCP manual. The UTCP variable
     // substitutor deep-clones `config` into a plain object, so class
@@ -546,11 +548,23 @@ function wrapAutoApproveModel(model: LanguageModelV3, llmLogPath?: string): Lang
 }
 
 /**
+ * Bundle returned by `buildCoordinator`: the coordinator plus the
+ * initial MCP roots derived from the compiled policy. The roots are
+ * passed to `MCPClientManager.connect()` when the coordinator talks
+ * to relay subprocesses so that escalation-time root expansion has
+ * the correct base set on which to extend.
+ */
+interface CoordinatorBundle {
+  coordinator: ToolCallCoordinator;
+  initialRoots: McpRoot[];
+}
+
+/**
  * Builds the `ToolCallCoordinator` from the loaded policy artifacts.
  * Merges proxy-tool annotations/rules so the coordinator can evaluate
  * virtual proxy tools the same way the subprocess used to.
  */
-async function buildCoordinator(config: IronCurtainConfig): Promise<ToolCallCoordinator> {
+async function buildCoordinator(config: IronCurtainConfig): Promise<CoordinatorBundle> {
   const { compiledPolicy, toolAnnotations, dynamicLists } = loadGeneratedPolicy({
     policyDir: config.generatedDir,
     toolAnnotationsDir: config.toolAnnotationsDir ?? config.generatedDir,
@@ -590,7 +604,7 @@ async function buildCoordinator(config: IronCurtainConfig): Promise<ToolCallCoor
   // virtual-only mode with MITM_CONTROL_ADDR set.
   const controlApiClient = config.mitmControlAddr ? createControlApiClient(config.mitmControlAddr) : null;
 
-  return new ToolCallCoordinator({
+  const coordinator = new ToolCallCoordinator({
     compiledPolicy,
     toolAnnotations,
     protectedPaths: config.protectedPaths,
@@ -604,6 +618,16 @@ async function buildCoordinator(config: IronCurtainConfig): Promise<ToolCallCoor
     escalationDir: config.escalationDir,
     controlApiClient,
   });
+
+  // Derive initial MCP roots from the compiled policy using the same
+  // rule the relay subprocess applied in the legacy single-process
+  // path. Passing these to `manager.connect()` makes the coordinator's
+  // client advertise `roots.listChanged` and seeds the mutable roots
+  // array that `addRootToClient` extends on escalation approval.
+  const policyRoots = extractPolicyRoots(compiledPolicy, config.allowedDirectory);
+  const initialRoots: McpRoot[] = toMcpRoots(policyRoots);
+
+  return { coordinator, initialRoots };
 }
 
 /**
@@ -614,8 +638,17 @@ async function buildCoordinator(config: IronCurtainConfig): Promise<ToolCallCoor
  * The subprocesses are driven through the coordinator's
  * `MCPClientManager`. After each connects, its tool list is registered
  * with the coordinator so UTCP sees every tool.
+ *
+ * `initialRoots` seeds the mutable roots array each relay connection
+ * advertises. Passing the same set to every subprocess ensures the
+ * policy-derived roots are visible through the relay before any
+ * escalation-time expansion.
  */
-async function connectBackendSubprocesses(coordinator: ToolCallCoordinator, config: IronCurtainConfig): Promise<void> {
+async function connectBackendSubprocesses(
+  coordinator: ToolCallCoordinator,
+  config: IronCurtainConfig,
+  initialRoots: McpRoot[],
+): Promise<void> {
   const manager = coordinator.getMcpManager();
   const proxyEnv = buildProxySubprocessEnv(config);
 
@@ -632,7 +665,7 @@ async function connectBackendSubprocesses(coordinator: ToolCallCoordinator, conf
       sandbox: false,
     };
     try {
-      await manager.connect(serverName, subprocessConfig);
+      await manager.connect(serverName, subprocessConfig, initialRoots);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       logger.warn(`Failed to connect MCP server "${serverName}": ${message} -- skipping`);
@@ -657,7 +690,7 @@ async function connectBackendSubprocesses(coordinator: ToolCallCoordinator, conf
       sandbox: false,
     };
     try {
-      await manager.connect('proxy', virtualProxyConfig);
+      await manager.connect('proxy', virtualProxyConfig, initialRoots);
       await registerServerToolsWithCoordinator(coordinator, 'proxy');
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -668,14 +701,14 @@ async function connectBackendSubprocesses(coordinator: ToolCallCoordinator, conf
 
 /**
  * Asks the subprocess for its tool list and registers each tool with
- * the coordinator. Wraps the `ClientState` so the coordinator's
- * escalation path (root expansion) can reach the client.
+ * the coordinator. The coordinator shares the manager's live
+ * `ClientState` so `addRootToClient` mutates the same array the
+ * manager returns from its `roots/list` handler.
  */
 async function registerServerToolsWithCoordinator(coordinator: ToolCallCoordinator, serverName: string): Promise<void> {
   const manager = coordinator.getMcpManager();
-  const client = manager.getClient(serverName);
-  const roots = manager.getRoots(serverName);
-  if (!client) {
+  const clientState = manager.getClientState(serverName);
+  if (!clientState) {
     logger.warn(`[sandbox] No live client for server "${serverName}" after connect -- skipping`);
     return;
   }
@@ -686,10 +719,7 @@ async function registerServerToolsWithCoordinator(coordinator: ToolCallCoordinat
     description: t.description,
     inputSchema: (t.inputSchema ?? {}) as Record<string, unknown>,
   }));
-  coordinator.registerTools(serverName, coordinatorTools, {
-    client,
-    roots: roots ?? [],
-  });
+  coordinator.registerTools(serverName, coordinatorTools, clientState);
 }
 
 /**

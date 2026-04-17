@@ -20,7 +20,7 @@ import { directoryForPath } from './policy-roots.js';
 import { annotateSandboxViolation, type ResolvedSandboxConfig } from './sandbox-integration.js';
 import type { ToolCallRequest, PolicyDecision } from '../types/mcp.js';
 import type { AuditEntry } from '../types/audit.js';
-import { ROOTS_REFRESH_TIMEOUT_MS, type McpRoot } from './mcp-client-manager.js';
+import { ROOTS_REFRESH_TIMEOUT_MS, type ClientState, type McpRoot } from './mcp-client-manager.js';
 import { CallCircuitBreaker } from './call-circuit-breaker.js';
 import { autoApprove, extractArgsForAutoApprove, readUserContext, type UserContext } from './auto-approver.js';
 import { extractMcpErrorMessage } from './mcp-error-utils.js';
@@ -41,7 +41,6 @@ import {
   ERROR_PREFIX_MISSING_ANNOTATION,
 } from './error-prefixes.js';
 import { CompatibilityCallToolResultSchema } from '@modelcontextprotocol/sdk/types.js';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -65,11 +64,8 @@ interface EscalationFileRequest {
   whitelistCandidates?: WhitelistCandidateIpc[];
 }
 
-export interface ClientState {
-  client: Client;
-  roots: McpRoot[];
-  rootsRefreshed?: () => void;
-}
+/** Re-exported from `mcp-client-manager.ts` for call-sites that import it from here. */
+export type { ClientState } from './mcp-client-manager.js';
 
 /**
  * Adds a root to a client's root list and waits for the server to
@@ -266,9 +262,20 @@ export function extractTextFromContent(content: unknown): string | undefined {
 }
 
 /**
- * Validates that all argument keys exist in the tool's inputSchema.
- * Returns null if valid, or an error message listing unknown and valid keys.
- * Skips validation when the schema has no properties or allows additional properties.
+ * Validates that all argument keys exist in the tool's `inputSchema`.
+ * Returns `null` if valid, or an error message listing unknown and
+ * valid keys.
+ *
+ * Skips validation in two cases:
+ *   1. The schema has no `properties` object (nothing to check against).
+ *   2. `additionalProperties` is truthy (explicit opt-out).
+ *
+ * NOTE: This is stricter than plain JSON Schema, which treats a
+ * missing `additionalProperties` as equivalent to `true`. Here we
+ * treat it as forbidding unknown keys so typos in tool arguments
+ * fail fast instead of silently passing through to the MCP server.
+ * Servers that genuinely accept extra keys must declare
+ * `additionalProperties: true` explicitly.
  */
 export function validateToolArguments(
   args: Record<string, unknown>,
@@ -288,6 +295,18 @@ export function validateToolArguments(
     .map((k) => `"${k}"`)
     .join(', ');
   return `${ERROR_PREFIX_UNKNOWN_ARGS} ${unknownList}. Valid parameters are: ${validList}`;
+}
+
+/**
+ * Splits a coordinator tool key of the form `server__tool` into its
+ * component parts. Falls back to `('unknown', key)` when the key has
+ * no separator (e.g. a raw tool name passed from an unregistered
+ * caller). Used for audit-log attribution on unknown-tool rejections.
+ */
+export function splitToolKey(key: string): [server: string, tool: string] {
+  const sep = key.indexOf('__');
+  if (sep < 0) return ['unknown', key];
+  return [key.slice(0, sep), key.slice(sep + 2)];
 }
 
 /** Builds a lookup map from tool name to ProxiedTool for routing. */
@@ -423,10 +442,24 @@ export async function handleCallTool(
   const toolInfo = deps.toolMap.get(toolName);
 
   if (!toolInfo) {
+    // Security invariant: every tool call outcome is audited, even
+    // the ones that short-circuit before policy evaluation.
+    const reason = `Unknown tool: ${toolName}`;
+    const [unknownServer, unknownTool] = splitToolKey(toolName);
+    deps.auditLog.log({
+      timestamp: new Date().toISOString(),
+      requestId: uuidv4(),
+      serverName: unknownServer,
+      toolName: unknownTool,
+      arguments: rawArgs,
+      policyDecision: { status: 'deny', rule: 'unknown-tool', reason },
+      result: { status: 'denied', error: reason },
+      durationMs: 0,
+    });
     return {
-      content: [{ type: 'text', text: `Unknown tool: ${toolName}` }],
+      content: [{ type: 'text', text: reason }],
       isError: true,
-      _policyDecision: { status: 'deny', rule: 'unknown-tool', reason: `Unknown tool: ${toolName}` },
+      _policyDecision: { status: 'deny', rule: 'unknown-tool', reason },
     };
   }
 
@@ -437,6 +470,17 @@ export async function handleCallTool(
 
   if (!annotation && !isTrusted) {
     const reason = `${ERROR_PREFIX_MISSING_ANNOTATION} ${toolInfo.serverName}__${toolInfo.name}. Re-run 'ironcurtain annotate-tools' to update.`;
+    // Security invariant: every tool call outcome is audited.
+    deps.auditLog.log({
+      timestamp: new Date().toISOString(),
+      requestId: uuidv4(),
+      serverName: toolInfo.serverName,
+      toolName: toolInfo.name,
+      arguments: rawArgs,
+      policyDecision: { status: 'deny', rule: 'missing-annotation', reason },
+      result: { status: 'denied', error: reason },
+      durationMs: 0,
+    });
     return {
       content: [{ type: 'text', text: reason }],
       isError: true,

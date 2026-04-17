@@ -14,7 +14,15 @@
 - `PROXY_ROUTER_MODE` env var has been removed entirely
 - `mcp-proxy-server.ts` always acts as a pure MCP relay: forwards CallTool to backend, returns raw result
 - Still keeps OAuth injection, srt wrapping, stdio/UDS/TCP transport, virtual-proxy handling for `SERVER_FILTER=proxy`
-- `MCPClientManager` has `getClient(serverName)` and `getRoots(serverName)` so the coordinator can wire an existing client into a `ClientState` for the pipeline's escalation/root-expansion path
+- `MCPClientManager.getClientState(serverName)` returns the live `ClientState` (moved to `mcp-client-manager.ts`, re-exported from `tool-call-pipeline.ts`). Callers share this reference so `addRootToClient` mutates the same `roots` array the manager returns from its `roots/list` handler.
+
+## Roots bridging across the relay subprocess (security-critical)
+- Coordinator is authoritative for MCP roots. On escalation approval, `addRootToClient` pushes a root and calls `sendRootsListChanged()` on the manager's client → hits the relay's MCP Server.
+- Relay's `setNotificationHandler(RootsListChangedNotificationSchema, ...)` fetches the new list via `server.listRoots()`, replaces a **single shared mutable `relayRoots` array** (each backend ClientState points at it), then calls `sendRootsListChanged()` on every backend client.
+- Backend MCP servers re-query via `roots/list` on relay's client → relay's existing `ListRootsRequestSchema` handler returns the updated `relayRoots`.
+- Initial roots for each relay connection come from `extractPolicyRoots`+`toMcpRoots` and are passed via `manager.connect(name, cfg, initialRoots)`. `buildCoordinator()` in `src/sandbox/index.ts` returns `{ coordinator, initialRoots }` so `connectBackendSubprocesses` can thread them through.
+- Previous bug (fixed): relay never observed roots updates; backend stayed pinned to startup roots, so approved-but-outside-sandbox filesystem calls failed with "outside allowed directories".
+- Regression test: `test/roots-expansion-bridging.integration.test.ts` (spawns real relay subprocess + real filesystem MCP).
 
 ## Key types (in tool-call-pipeline.ts)
 - `CallToolDeps` -- injected dependencies for `handleCallTool`
