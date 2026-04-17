@@ -379,6 +379,7 @@ function createTestDeps(tempDir: string): DockerAgentSessionDeps {
     config,
     sessionId: 'test-session-id' as import('../src/session/types.js').SessionId,
     infra,
+    ownsInfra: true,
     sessionDir,
     sandboxDir,
     escalationDir,
@@ -725,6 +726,169 @@ describe('DockerAgentSession', () => {
       expect(removedContainers).toContain('container-cleanup');
       expect(removedContainers).toContain('sidecar-cleanup');
       expect(removedNetworks).toContain(expectedNetworkName);
+    });
+  });
+
+  describe('infrastructure ownership (ownsInfra flag)', () => {
+    // Counts calls to the underlying infra teardown primitives. When
+    // `ownsInfra=true`, these are invoked as part of close(); when
+    // `ownsInfra=false`, close() leaves them untouched for the external
+    // owner to invoke later via destroyDockerInfrastructure().
+    interface TeardownSpies {
+      readonly docker: DockerManager;
+      readonly mitmProxy: MitmProxy;
+      readonly proxy: DockerProxy;
+      readonly counts: {
+        containerStops: number;
+        containerRemoves: number;
+        mitmStops: number;
+        proxyStops: number;
+      };
+    }
+
+    function createTeardownSpies(sessionDir: string): TeardownSpies {
+      const counts = {
+        containerStops: 0,
+        containerRemoves: 0,
+        mitmStops: 0,
+        proxyStops: 0,
+      };
+
+      const docker: DockerManager = {
+        ...createMockDocker(),
+        async stop() {
+          counts.containerStops++;
+        },
+        async remove() {
+          counts.containerRemoves++;
+        },
+      };
+
+      const mitmProxy: MitmProxy = {
+        async start() {
+          return { socketPath: '/tmp/test-mitm-proxy.sock' };
+        },
+        async stop() {
+          counts.mitmStops++;
+        },
+      };
+
+      const proxy: DockerProxy = {
+        ...createMockProxy(join(sessionDir, 'proxy.sock')),
+        async stop() {
+          counts.proxyStops++;
+        },
+      };
+
+      return { docker, mitmProxy, proxy, counts };
+    }
+
+    it('close() DOES call destroyDockerInfrastructure when ownsInfra=true', async () => {
+      const spies = createTeardownSpies(deps.sessionDir);
+      session = new DockerAgentSession({
+        ...deps,
+        ownsInfra: true,
+        infra: {
+          ...deps.infra,
+          docker: spies.docker,
+          mitmProxy: spies.mitmProxy,
+          proxy: spies.proxy,
+        },
+      });
+      await session.initialize();
+      await session.close();
+
+      // Each infra resource should have been released exactly once.
+      expect(spies.counts.containerStops).toBe(1);
+      expect(spies.counts.containerRemoves).toBe(1);
+      expect(spies.counts.mitmStops).toBe(1);
+      expect(spies.counts.proxyStops).toBe(1);
+    });
+
+    it('close() does NOT call destroyDockerInfrastructure when ownsInfra=false', async () => {
+      const spies = createTeardownSpies(deps.sessionDir);
+      session = new DockerAgentSession({
+        ...deps,
+        ownsInfra: false,
+        infra: {
+          ...deps.infra,
+          docker: spies.docker,
+          mitmProxy: spies.mitmProxy,
+          proxy: spies.proxy,
+        },
+      });
+      await session.initialize();
+      await session.close();
+
+      // Borrowed infra stays alive; the external owner is responsible for
+      // calling destroyDockerInfrastructure() later.
+      expect(spies.counts.containerStops).toBe(0);
+      expect(spies.counts.containerRemoves).toBe(0);
+      expect(spies.counts.mitmStops).toBe(0);
+      expect(spies.counts.proxyStops).toBe(0);
+    });
+
+    it('close() stops escalation watcher and audit tailer regardless of ownsInfra value', async () => {
+      // Both ownsInfra branches must tear down the escalation watcher and
+      // audit tailer, since those lifecycles are session-owned (not
+      // infra-owned). Verified behaviorally via two post-close signals:
+      //   1. Dropping a fresh escalation request after close does not fire
+      //      the onEscalation callback (poll interval stopped).
+      //   2. The session rejects sendMessage with a "closed" error.
+      vi.useFakeTimers();
+
+      for (const ownsInfra of [true, false] as const) {
+        const localTempDir = mkdtempSync(join(tmpdir(), 'owns-infra-watchers-'));
+        try {
+          const localDeps = createTestDeps(localTempDir);
+          const escalations: EscalationRequest[] = [];
+          const local = new DockerAgentSession({
+            ...localDeps,
+            ownsInfra,
+            onEscalation: (req) => escalations.push(req),
+          });
+          await local.initialize();
+
+          // Sanity-check: the watcher was actively polling before close.
+          const warmupRequest: EscalationRequest = {
+            escalationId: 'owns-infra-warmup',
+            toolName: 'write_file',
+            serverName: 'filesystem',
+            arguments: { path: '/warmup' },
+            reason: 'Warmup',
+          };
+          writeFileSync(join(localDeps.escalationDir, 'request-owns-infra-warmup.json'), JSON.stringify(warmupRequest));
+          vi.advanceTimersByTime(350);
+          expect(escalations).toHaveLength(1);
+
+          await local.close();
+          const callbacksBeforePostClose = escalations.length;
+
+          // Post-close: a fresh escalation request must NOT fire the
+          // onEscalation callback, because the poll interval was stopped.
+          const postCloseRequest: EscalationRequest = {
+            escalationId: 'owns-infra-post-close',
+            toolName: 'write_file',
+            serverName: 'filesystem',
+            arguments: { path: '/post' },
+            reason: 'Post-close',
+          };
+          writeFileSync(
+            join(localDeps.escalationDir, 'request-owns-infra-post-close.json'),
+            JSON.stringify(postCloseRequest),
+          );
+          vi.advanceTimersByTime(1000);
+          expect(escalations.length).toBe(callbacksBeforePostClose);
+
+          // Post-close: the session refuses further work regardless of which
+          // ownership mode was used.
+          await expect(local.sendMessage('hi')).rejects.toThrow('closed');
+        } finally {
+          rmSync(localTempDir, { recursive: true, force: true });
+        }
+      }
+
+      vi.useRealTimers();
     });
   });
 });

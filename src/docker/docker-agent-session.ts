@@ -12,10 +12,20 @@
  * handed to this class as a `DockerInfrastructure` bundle. The session
  * is a thin exec-harness over that bundle.
  *
+ * Infrastructure ownership (`ownsInfra`):
+ * - `ownsInfra: true` (standalone mode): the session owns the bundle and
+ *   its `close()` method tears down proxies, container, sidecar, and
+ *   internal network along with session-local state.
+ * - `ownsInfra: false` (borrow mode): the session uses a bundle owned by
+ *   an external caller (e.g., a workflow that shares one container across
+ *   multiple sessions). `close()` stops session-owned state (escalation
+ *   watcher, audit tailer) but leaves the infrastructure alive for the
+ *   caller to destroy via `destroyDockerInfrastructure()`.
+ *
  * Lifecycle:
  * 1. initialize() -- write system prompt; start escalation watcher and audit tailer
  * 2. sendMessage() -- docker exec agent command, wait for exit, collect output
- * 3. close() -- tear down watchers, container, sidecar, network, and proxies
+ * 3. close() -- tear down watchers; tear down infra too iff `ownsInfra` is true
  */
 
 import { mkdirSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
@@ -58,6 +68,21 @@ export interface DockerAgentSessionDeps {
    */
   readonly infra: DockerInfrastructure;
   /**
+   * Whether this session owns the infrastructure bundle.
+   *
+   * - `true`: standalone mode -- `close()` invokes
+   *   `destroyDockerInfrastructure(infra)` to tear down proxies, container,
+   *   sidecar, and internal network alongside session-local state.
+   * - `false`: borrow mode -- the bundle is owned by an external caller
+   *   (e.g., a workflow driver sharing one container across sessions).
+   *   `close()` leaves the infrastructure alive and the caller is
+   *   responsible for invoking `destroyDockerInfrastructure` when done.
+   *
+   * This flag is required: callers must state ownership explicitly so a
+   * missing value never silently selects the wrong teardown behavior.
+   */
+  readonly ownsInfra: boolean;
+  /**
    * Optional system prompt override composed by the caller (e.g., with
    * persona augmentation appended). When unset, `infra.systemPrompt` is
    * used as-is.
@@ -75,6 +100,7 @@ export class DockerAgentSession implements Session {
   private readonly sessionId: SessionId;
   private readonly config: IronCurtainConfig;
   private readonly infra: DockerInfrastructure;
+  private readonly ownsInfra: boolean;
   private readonly sessionDir: string;
   private readonly sandboxDir: string;
   private readonly escalationDir: string;
@@ -112,6 +138,7 @@ export class DockerAgentSession implements Session {
     this.sessionId = deps.sessionId;
     this.config = deps.config;
     this.infra = deps.infra;
+    this.ownsInfra = deps.ownsInfra;
     this.sessionDir = deps.sessionDir;
     this.sandboxDir = deps.sandboxDir;
     this.escalationDir = deps.escalationDir;
@@ -309,13 +336,19 @@ export class DockerAgentSession implements Session {
   }
 
   async close(): Promise<void> {
+    // Session-owned state (status, escalation watcher, audit tailer) is
+    // always torn down. Infrastructure teardown is gated on `ownsInfra`:
+    // borrow mode leaves the bundle alive for the external owner to
+    // destroy via `destroyDockerInfrastructure()`.
     if (this.status === 'closed') return;
     this.status = 'closed';
 
     this.escalationWatcher?.stop();
     this.auditTailer?.stop();
 
-    await destroyDockerInfrastructure(this.infra);
+    if (this.ownsInfra) {
+      await destroyDockerInfrastructure(this.infra);
+    }
   }
 
   // --- Private helpers ---
