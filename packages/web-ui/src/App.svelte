@@ -50,14 +50,20 @@
   let stopFlash: (() => void) | null = null;
 
   // Reduced-motion detection for Matrix rain login splash.
-  // Synchronous initial read avoids a race with CSS animation-delay.
-  let reducedMotion = $state(false);
+  // Initialized synchronously so the first paint (including the card's
+  // animation-delay) already reflects the user's preference — setting it
+  // from an $effect after mount would start the CSS animation on the wrong
+  // schedule and can't be retimed mid-flight.
+  function readReducedMotion(): boolean {
+    if (typeof window === 'undefined' || !window.matchMedia) return false;
+    return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  }
+  let reducedMotion = $state(readReducedMotion());
   let cardDelayMs = $derived(reducedMotion ? 0 : 2300);
 
   $effect(() => {
     if (typeof window === 'undefined' || !window.matchMedia) return;
     const mql = window.matchMedia('(prefers-reduced-motion: reduce)');
-    reducedMotion = mql.matches;
     const onChange = (e: MediaQueryListEvent) => {
       reducedMotion = e.matches;
     };

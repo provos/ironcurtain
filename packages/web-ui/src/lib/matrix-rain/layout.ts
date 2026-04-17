@@ -115,12 +115,18 @@ export function computeLayout(
 // Internals
 // ---------------------------------------------------------------------------
 
-/** Clamp cell size to valid range, adapting to viewport width. */
+/**
+ * Clamp cell size to valid range, adapting to viewport width.
+ *
+ * `preferred` acts as a lower-bound hint; `responsive` scales with viewport
+ * width so wider viewports get larger cells. The result is whichever is
+ * bigger, keeping cells legible on big displays without dropping below the
+ * caller's preference on smaller ones.
+ */
 function clampCellSize(preferred: number, viewportW: number): number {
-  // Derive a responsive cell size: larger viewports get larger cells.
   const responsive = Math.max(MIN_CELL_SIZE, Math.min(MAX_CELL_SIZE, Math.floor(viewportW / 120)));
   const clamped = Math.max(MIN_CELL_SIZE, Math.min(MAX_CELL_SIZE, Math.floor(preferred)));
-  return Math.min(clamped, responsive);
+  return Math.max(clamped, responsive);
 }
 
 /** Compute a responsive font size based on viewport dimensions. */

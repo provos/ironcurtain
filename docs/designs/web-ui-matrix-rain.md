@@ -16,11 +16,11 @@ atmosphere. Once the user connects, the canvas unmounts and the existing dashboa
 
 ### Animation phases
 
-| Phase | Timing | Visual |
-|-------|--------|--------|
-| Assembly | 0 – 2.5s | Full-bleed Matrix rain; drops fall into target positions to form the "IronCurtain" wordmark in the viewport center |
-| Hold | 2.5 – 4.0s | Wordmark held static; briefly dims (opacity 1.0 → 0.55) |
-| Ambient | 4.0s+ | Wordmark held at 0.55 opacity; new free-falling drops at low density, loops indefinitely |
+| Phase    | Timing     | Visual                                                                                                             |
+| -------- | ---------- | ------------------------------------------------------------------------------------------------------------------ |
+| Assembly | 0 – 2.5s   | Full-bleed Matrix rain; drops fall into target positions to form the "IronCurtain" wordmark in the viewport center |
+| Hold     | 2.5 – 4.0s | Wordmark held static; briefly dims (opacity 1.0 → 0.55)                                                            |
+| Ambient  | 4.0s+      | Wordmark held at 0.55 opacity; new free-falling drops at low density, loops indefinitely                           |
 
 Login card fades in at ~2.5s (coinciding with assembly completion) via the existing `animate-fade-in` keyframe with
 a 2300ms `animation-delay`. The card uses `backdrop-blur-md` and a semi-transparent background so the rain remains
@@ -107,9 +107,9 @@ export interface EngineOptions {
 }
 
 export interface RainPalette {
-  readonly head: string;   // bright head character
-  readonly near: string;   // 1-2 chars behind head
-  readonly far: string;    // tail
+  readonly head: string; // bright head character
+  readonly near: string; // 1-2 chars behind head
+  readonly far: string; // tail
   readonly locked: string; // wordmark cells after assembly
 }
 
@@ -125,7 +125,7 @@ export interface FrameState {
 }
 
 export interface LockedCellSnapshot {
-  readonly col: number;   // cell-coordinate column (wordmark-relative is OK; renderer offsets by layout.originX/Y)
+  readonly col: number; // cell-coordinate column (wordmark-relative is OK; renderer offsets by layout.originX/Y)
   readonly row: number;
   readonly color: string; // hex; typically palette.locked, but the engine may progressively reveal during assembly
   /**
@@ -183,9 +183,12 @@ Algorithm:
 
 ```typescript
 function step(nowMs: number): void {
-  if (lastTick === 0) { lastTick = nowMs; return; }  // first call: prime, no advance
+  if (lastTick === 0) {
+    lastTick = nowMs;
+    return;
+  } // first call: prime, no advance
   const delta = nowMs - lastTick;
-  if (delta <= 0) return;                            // same or rewound timestamp: no-op
+  if (delta <= 0) return; // same or rewound timestamp: no-op
 
   if (delta >= MAX_CATCH_UP_TICKS * FRAME_MS) {
     // Soft pause (e.g., tab was hidden). Skip the catch-up entirely; advance one tick and resync.
@@ -226,27 +229,39 @@ never completes. If the engine has executed this many logical ticks in the `asse
 drop locking, it force-locks all drops and transitions to `hold`. This ensures the animation cannot be
 stuck forever.
 
-## 4. Visual idiom: all cells are text
+## 4. Visual idiom: text rain + image-backed wordmark reveal
 
-**Decision:** every visible cell — falling drop character AND locked wordmark cell — is drawn via
-`ctx.fillText()`. Drops use katakana/digit characters; locked cells use the Unicode full block `'\u2588'`.
+**Decision:** falling drops are drawn as text glyphs via `ctx.fillText()`, but the assembled wordmark
+is not painted from block characters. Instead, `computeLayout()` rasterizes the full "IronCurtain"
+wordmark (plus the "Secure Agent Runtime" subtitle) into an offscreen canvas using the real Orbitron
+font, samples the pixel data, and records which grid cells fall inside filled glyph regions. At render
+time, those cells reveal the corresponding slices of the pre-rendered image via `ctx.drawImage()`.
+
+This replaces the earlier plan to draw locked cells as `'\u2588'` full-block characters. The offscreen
+image approach lets the wordmark use a real typeface with antialiased curves that block-character
+quantization cannot reproduce, and it keeps the renderer doing exactly one shape per cell (a clipped
+image blit) instead of juggling font metrics between drops and locked cells.
 
 Rationale:
 
-- `fillRect` for locked cells and `fillText` for drops produces a visible metric mismatch at the moment a
-  drop locks: the character "jumps" from an antialiased glyph to a geometric square of a different
-  effective size. Using `fillText('\u2588', ...)` for locked cells keeps font metrics, baseline, and
-  alignment identical.
-- The terminal splash uses `'\u2588'` as a character too. Matching that idiom produces the same chunky
-  CRT/terminal look without introducing a second rendering path.
-- One rendering path is simpler. The renderer has exactly one shape: "draw a char at a cell."
+- A rasterized Orbitron wordmark looks like the finished logo the UI is trying to evoke. Full-block
+  characters, at any cell size small enough to resolve the letterforms, still read as an obvious grid
+  rather than as type.
+- Using the real font makes the wordmark responsive: font size scales with the viewport in
+  `computeLayout()`, and the offscreen canvas is re-rasterized on resize. A hardcoded pixel font would
+  pin the wordmark to a fixed resolution.
+- The renderer only needs two primitives: `fillText` for drops, `drawImage` for locked cells. Both
+  paths share the same cell grid and `frame.globalAlpha`, so the compositing stays simple.
 
-The pixel font (`FONT` dict from mux-splash) is used only for determining *which cells* are locked in the
-wordmark. Each `#` in a glyph's 6-row grid becomes one `(col, row)` pair in `layout.wordmarkCells`. At
-render time each such cell gets a `fillText('\u2588', x, y)` in `palette.locked`.
+The web UI further separates the two primitives onto two stacked canvases: one opaque canvas for the
+rain (`drawRainFrame`) and one transparent canvas for the wordmark reveal (`drawWordmarkFrame`). The
+wordmark canvas carries a CSS `filter: drop-shadow` for the green glow, which is GPU-accelerated and
+avoids the cell-edge artifacts of per-cell `ctx.shadowBlur`. The single-canvas `drawFrame` helper is
+kept as a backward-compatible path for tests and simple embedders.
 
-Port FONT and `RAIN_CHARS` verbatim to `matrix-rain/font.ts`. Keep `GLYPH_HEIGHT = 6` and `GLYPH_SPACING = 1`
-constants.
+`RAIN_CHARS` and the Orbitron font family live in `matrix-rain/font.ts`. There is no longer a FONT
+dict or `GLYPH_HEIGHT`/`GLYPH_SPACING` — glyph shape is discovered at runtime by pixel-sampling the
+offscreen canvas.
 
 ## 5. Drop lifecycle
 
@@ -414,7 +429,7 @@ function resizeCanvas(canvas: HTMLCanvasElement, w: number, h: number): void {
   const cssH = Math.floor(h);
   canvas.style.width = `${cssW}px`;
   canvas.style.height = `${cssH}px`;
-  canvas.width = cssW * dpr;   // integer: cssW is integer, dpr may be fractional, product is the backing size
+  canvas.width = cssW * dpr; // integer: cssW is integer, dpr may be fractional, product is the backing size
   canvas.height = cssH * dpr;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   // Note: setting canvas.width/height resets all ctx state. The renderer sets what it needs per frame (§6.1).
@@ -473,20 +488,16 @@ The wordmark scales with viewport width. The layout algorithm:
 // matrix-rain/layout.ts
 export interface LayoutPlan {
   readonly cellSize: number;
-  readonly originX: number;       // top-left of wordmark in pixels
+  readonly originX: number; // top-left of wordmark in pixels
   readonly originY: number;
   readonly wordmarkCells: ReadonlyArray<{ x: number; y: number }>; // cell coordinates of every '#'
-  readonly viewportCols: number;  // columns available for ambient drops
+  readonly viewportCols: number; // columns available for ambient drops
   readonly viewportRows: number;
   readonly viewportWidth: number; // logical CSS pixels
   readonly viewportHeight: number;
 }
 
-export function computeLayout(
-  word: string,
-  viewportWidth: number,
-  viewportHeight: number,
-): LayoutPlan | null;  // null if viewport too small
+export function computeLayout(word: string, viewportWidth: number, viewportHeight: number): LayoutPlan | null; // null if viewport too small
 ```
 
 ### Debounce
@@ -524,7 +535,7 @@ const ro = new ResizeObserver((entries) => {
 ### Allocation discipline
 
 - No object allocations in the hot path. Drops are mutated in place; a free-list pattern isn't needed at
-  these counts but *never* use `.map()`, spread, or `filter()` inside `step()`/`getFrame()`/`drawFrame()`.
+  these counts but _never_ use `.map()`, spread, or `filter()` inside `step()`/`getFrame()`/`drawFrame()`.
 - `getFrame()` returns references to internal buffers typed as `ReadonlyArray`. The renderer must not
   mutate them; the engine reuses them next tick.
 - Pre-allocate the drops array to max capacity at engine construction.
@@ -556,7 +567,7 @@ not via any `onready` callback:
 The same boolean is passed to `<MatrixRain reducedMotion={reducedMotion} />` AND used to compute the
 card's `animation-delay`. There is no race: both values come from the same synchronous read at mount.
 
-Why not use `onready` for this? Changing `animation-delay` on a div *mid-session* does not restart or
+Why not use `onready` for this? Changing `animation-delay` on a div _mid-session_ does not restart or
 retime a CSS animation — the keyframe's position in the timeline is frozen once the animation starts.
 So an `onready`-triggered delay change would silently fail. Pulling the decision forward to mount time
 removes the race entirely.
@@ -815,6 +826,7 @@ These deliberately do **not** block the initial design; list them for tracking d
 ## 15. Files changed / created
 
 **Created:**
+
 - `packages/web-ui/src/lib/matrix-rain/types.ts`
 - `packages/web-ui/src/lib/matrix-rain/font.ts`
 - `packages/web-ui/src/lib/matrix-rain/layout.ts`
@@ -822,16 +834,21 @@ These deliberately do **not** block the initial design; list them for tracking d
 - `packages/web-ui/src/lib/matrix-rain/engine.ts`
 - `packages/web-ui/src/lib/matrix-rain/renderer.ts`
 - `packages/web-ui/src/lib/components/features/matrix-rain.svelte`
-- `packages/web-ui/test/matrix-rain-engine.test.ts`
-- `packages/web-ui/test/matrix-rain-renderer.test.ts`
-- `packages/web-ui/test/matrix-rain-layout.test.ts`
+- `packages/web-ui/src/lib/matrix-rain/__tests__/engine.test.ts`
+- `packages/web-ui/src/lib/matrix-rain/__tests__/renderer.test.ts`
+- `packages/web-ui/src/lib/matrix-rain/__tests__/layout.test.ts`
 
 **Modified:**
+
 - `packages/web-ui/src/App.svelte` — auth-gate branch replaced with rain + card layout; adds
-  `prefers-reduced-motion` detection at mount.
+  synchronous `prefers-reduced-motion` detection so the first paint already reflects user preference.
+- `packages/web-ui/src/app.css` — imports Orbitron from Google Fonts for the wordmark typeface; the
+  existing `animate-fade-in` keyframe is re-used unchanged for the login card.
+- `packages/web-ui/tsconfig.json` — adds the `lib` entry needed by the renderer test for
+  `Array.prototype.findLastIndex`.
 
 **Unchanged:**
-- `packages/web-ui/src/app.css` — `animate-fade-in` keyframe re-used as-is; no new CSS needed
+
 - `packages/web-ui/src/lib/stores.svelte.ts` — no changes; rain is purely presentational
 - `src/mux/mux-splash.ts` — reference only; not imported
 - `src/observe/observe-tui-rain.ts` — reference only; not imported

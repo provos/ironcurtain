@@ -109,7 +109,12 @@ const defaultRng: RainRng = { random: () => Math.random() };
 
 /**
  * Assembly drop: falls from above toward `targetRow`, then locks.
- * Trail is reconstructed on demand from the RNG; no ring buffer needed.
+ *
+ * Characters for the head + trail are carried on the drop and advanced
+ * during `step()`, not during snapshot construction — this keeps the
+ * engine's RNG stream independent of how many times `getFrame()` is
+ * called. Index 0 is the head; indices 1..ASSEMBLY_TRAIL_LEN are the
+ * trail cells in increasing distance from the head.
  */
 interface AssemblyDrop {
   col: number;
@@ -117,6 +122,7 @@ interface AssemblyDrop {
   startFrame: number;
   headRow: number;
   locked: boolean;
+  chars: string[];
 }
 
 /**
@@ -266,6 +272,11 @@ export function createRainEngine(layout: LayoutPlan, options: RainEngineOptions 
         continue;
       }
       drop.headRow++;
+      // Advance characters: shift trail down and generate a new head char.
+      // Doing this in step() (rather than getFrame()) keeps snapshot
+      // construction free of RNG side effects.
+      for (let i = drop.chars.length - 1; i > 0; i--) drop.chars[i] = drop.chars[i - 1];
+      drop.chars[0] = pickRandomChar();
       if (drop.headRow >= drop.targetRow) {
         drop.locked = true;
       } else {
@@ -506,14 +517,14 @@ export function createRainEngine(layout: LayoutPlan, options: RainEngineOptions 
       trail.push({
         col: drop.col,
         row,
-        char: pickRandomChar(),
+        char: drop.chars[d],
         colorKind: trailColorKind(d),
       });
     }
     return {
       col: drop.col,
       row: head,
-      char: pickRandomChar(),
+      char: drop.chars[0],
       colorKind: 'head',
       trail,
     };
@@ -639,12 +650,17 @@ export function createRainEngine(layout: LayoutPlan, options: RainEngineOptions 
 function buildAssemblyDrops(titleCells: ReadonlyArray<LockedCellCoord>, rng: RainRng): AssemblyDrop[] {
   const drops: AssemblyDrop[] = [];
   for (const cell of titleCells) {
+    const chars = new Array<string>(ASSEMBLY_TRAIL_LEN + 1);
+    for (let i = 0; i < chars.length; i++) {
+      chars[i] = RAIN_CHARS[Math.floor(rng.random() * RAIN_CHARS.length)];
+    }
     drops.push({
       col: cell.col,
       targetRow: cell.row,
       startFrame: Math.floor(rng.random() * MAX_ASSEMBLY_START_FRAME),
       headRow: -1 - Math.floor(rng.random() * 5),
       locked: false,
+      chars,
     });
   }
   return drops;

@@ -111,7 +111,12 @@ export function drawFrame(
   options: DrawOptions,
 ): void {
   drawRainFrame(ctx, frame, layout, viewportWidth, viewportHeight, options);
+
+  // drawRainFrame() restores ctx.globalAlpha to 1.0, so re-apply the frame
+  // alpha before drawing locked cells in this single-canvas path.
+  ctx.globalAlpha = frame.globalAlpha;
   drawLockedCells(ctx, frame, layout);
+  ctx.globalAlpha = 1.0;
 }
 
 // ---------------------------------------------------------------------------

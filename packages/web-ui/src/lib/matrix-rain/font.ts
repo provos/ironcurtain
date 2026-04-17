@@ -23,6 +23,3 @@ export const WORDMARK_FONT_FAMILY = '"Orbitron", sans-serif';
 
 /** Font weight for the wordmark rendering. */
 export const WORDMARK_FONT_WEIGHT = '700';
-
-/** System font fallback if Orbitron fails to load. */
-export const WORDMARK_FALLBACK_FONT = '"Impact", "Arial Black", sans-serif';
