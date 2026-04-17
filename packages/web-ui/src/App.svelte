@@ -30,6 +30,7 @@
   import { DropdownMenu, DropdownMenuItem } from '$lib/components/ui/dropdown-menu/index.js';
   import { Badge } from '$lib/components/ui/badge/index.js';
   import EscalationModal from '$lib/components/features/escalation-modal.svelte';
+  import MatrixRain from '$lib/components/features/matrix-rain.svelte';
   import { startFlashTitle } from '$lib/flash-title.js';
 
   import ShieldCheck from 'phosphor-svelte/lib/ShieldCheck';
@@ -47,6 +48,22 @@
   let showThemePicker = $state(false);
   let escalationModalOpen = $state(false);
   let stopFlash: (() => void) | null = null;
+
+  // Reduced-motion detection for Matrix rain login splash.
+  // Synchronous initial read avoids a race with CSS animation-delay.
+  let reducedMotion = $state(false);
+  let cardDelayMs = $derived(reducedMotion ? 0 : 2300);
+
+  $effect(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) return;
+    const mql = window.matchMedia('(prefers-reduced-motion: reduce)');
+    reducedMotion = mql.matches;
+    const onChange = (e: MediaQueryListEvent) => {
+      reducedMotion = e.matches;
+    };
+    mql.addEventListener('change', onChange);
+    return () => mql.removeEventListener('change', onChange);
+  });
 
   // Auto-open the escalation modal when new escalations arrive (unless on the Escalations page),
   // and auto-close when no escalations remain.
@@ -135,38 +152,39 @@
 </script>
 
 {#if !appState.connected && !appState.hasToken}
-  <div class="flex items-center justify-center min-h-screen relative overflow-hidden">
-    <div class="absolute inset-0 bg-gradient-to-br from-background via-background to-primary/5"></div>
-    <div class="relative z-10 w-full max-w-sm mx-4 animate-fade-in">
-      <div class="text-center mb-8">
-        <div
-          class="inline-flex items-center justify-center w-14 h-14 rounded-xl bg-primary/10 border border-primary/20 mb-4"
-        >
-          <ShieldCheck size={28} class="text-primary" weight="duotone" />
+  <div class="relative min-h-screen overflow-hidden bg-black">
+    <!-- Layer 0: Matrix rain canvas (full-bleed, z-0) -->
+    <MatrixRain class="absolute inset-0 z-0" word="IronCurtain" {reducedMotion} />
+
+    <!-- Layer 1: Login card (z-10, fades in after assembly completes).
+         On mobile, push the card to the bottom half so the wordmark has room above. -->
+    <div
+      class="relative z-10 flex items-end sm:items-center justify-center min-h-screen p-4 pb-[15vh] sm:pb-4 sm:pt-[20vh]"
+    >
+      <div
+        class="w-full max-w-sm animate-fade-in"
+        style="animation-delay: {cardDelayMs}ms; animation-fill-mode: both; opacity: 0;"
+      >
+        <div class="bg-card/75 backdrop-blur-md border border-border/50 rounded-xl p-6 shadow-2xl shadow-black/40">
+          <p class="text-sm text-muted-foreground mb-5">Paste the auth token from the daemon output to connect.</p>
+          <form onsubmit={handleTokenSubmit}>
+            <Input type="text" bind:value={tokenInput} placeholder="Auth token..." class="font-mono" />
+            <Button type="submit" class="w-full mt-3">Connect</Button>
+          </form>
         </div>
-        <h1 class="text-2xl font-semibold tracking-tight">IronCurtain</h1>
-        <p class="text-sm text-muted-foreground mt-1">Secure Agent Runtime</p>
-      </div>
 
-      <div class="bg-card border border-border rounded-xl p-6 shadow-lg shadow-black/5">
-        <p class="text-sm text-muted-foreground mb-5">Paste the auth token from the daemon output to connect.</p>
-        <form onsubmit={handleTokenSubmit}>
-          <Input type="text" bind:value={tokenInput} placeholder="Auth token..." class="font-mono" />
-          <Button type="submit" class="w-full mt-3">Connect</Button>
-        </form>
-      </div>
-
-      <div class="flex justify-center gap-1 mt-6">
-        {#each themes as t (t.id)}
-          <Button
-            variant="ghost"
-            size="sm"
-            onclick={() => switchTheme(t.id)}
-            class={currentTheme === t.id ? 'bg-primary/15 text-primary font-medium' : 'text-muted-foreground'}
-          >
-            {t.label}
-          </Button>
-        {/each}
+        <div class="flex justify-center gap-1 mt-6 opacity-80">
+          {#each themes as t (t.id)}
+            <Button
+              variant="ghost"
+              size="sm"
+              onclick={() => switchTheme(t.id)}
+              class={currentTheme === t.id ? 'bg-primary/15 text-primary font-medium' : 'text-white/60'}
+            >
+              {t.label}
+            </Button>
+          {/each}
+        </div>
       </div>
     </div>
   </div>
