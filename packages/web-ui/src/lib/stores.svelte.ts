@@ -157,6 +157,14 @@ export function getWsClient(): WsClient {
  * first, we can surface a meaningful error to the user and stop the
  * reconnect loop when the token is known-bad.
  *
+ * Status-to-result mapping:
+ *   - 200 → 'ok': token accepted, open the WS
+ *   - 401 → 'invalid': token rejected, clear it and stop retrying
+ *   - anything else (502/503/504 from a reverse proxy, daemon restarting,
+ *     fetch reject on network error) → 'offline': keep the stored token
+ *     and let the reconnect loop keep probing. Treating transient 5xx as
+ *     'invalid' would destructively purge a good token on a brief blip.
+ *
  * Exported for testing.
  */
 export async function verifyAuthToken(token: string, fetchImpl: typeof fetch = fetch): Promise<PreflightResult> {
@@ -166,9 +174,7 @@ export async function verifyAuthToken(token: string, fetchImpl: typeof fetch = f
     const res = await fetchImpl(url, { method: 'GET', cache: 'no-store' });
     if (res.status === 200) return 'ok';
     if (res.status === 401) return 'invalid';
-    // Any other status (e.g. 403 from reverse proxy) — treat as invalid
-    // rather than offline so we don't spin on an unrecoverable state.
-    return 'invalid';
+    return 'offline';
   } catch {
     // fetch throws on network failure, CORS issues, aborted requests, etc.
     return 'offline';
@@ -494,7 +500,10 @@ export async function compilePersonaPolicy(name: string): Promise<PersonaCompile
 
 export async function connectWithToken(token: string): Promise<void> {
   sessionStorage.setItem('ic-auth-token', token);
-  appState.authError = null;
+  // Deliberately do NOT clear `authError` here. If the user re-pastes the
+  // same bad token, clearing upfront blanks the banner for one tick and
+  // then `handleAuthError()` sets it back — a visible flash. The banner
+  // is cleared on successful connection in `onConnectionChange(true)`.
   const client = getWsClient();
   await startConnectionWithToken(client, token);
 }

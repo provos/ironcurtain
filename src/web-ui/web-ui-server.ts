@@ -323,7 +323,9 @@ export class WebUiServer {
     // Auth preflight endpoint -- lets the client distinguish a bad token
     // (stop retrying, show error) from a daemon-down condition (keep
     // retrying). Uses the same timing-safe verifier as the WS upgrade.
-    if (pathname === '/ws/auth') {
+    // GET only; anything else falls through to the static handler which
+    // will 404 (parity with the mock server and the rest of this file).
+    if (pathname === '/ws/auth' && req.method === 'GET') {
       const token = url.searchParams.get('token');
       if (token && this.verifyToken(token)) {
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -332,6 +334,11 @@ export class WebUiServer {
         res.writeHead(401, { 'Content-Type': 'application/json' });
         res.end('{"ok":false,"error":"invalid_token"}');
       }
+      return;
+    }
+    if (pathname === '/ws/auth') {
+      res.writeHead(404);
+      res.end('Not Found');
       return;
     }
 

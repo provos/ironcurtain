@@ -41,12 +41,22 @@ describe('verifyAuthToken preflight', () => {
     expect(result).toBe('invalid');
   });
 
-  it('returns "invalid" on other non-2xx (403, 500, etc.)', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(new Response('', { status: 500 }));
+  it('returns "offline" on 503 (transient reverse-proxy / daemon-restarting)', async () => {
+    // A transient 5xx must NOT be treated as invalid — that would purge
+    // a good token on a brief blip. Keep the token, keep retrying.
+    const fetchMock = vi.fn().mockResolvedValue(new Response('', { status: 503 }));
 
     const result = await verifyAuthToken('some-token', fetchMock);
 
-    expect(result).toBe('invalid');
+    expect(result).toBe('offline');
+  });
+
+  it('returns "offline" on other non-200/non-401 (403, 500, 502, 504, etc.)', async () => {
+    for (const status of [403, 500, 502, 504]) {
+      const fetchMock = vi.fn().mockResolvedValue(new Response('', { status }));
+      const result = await verifyAuthToken('some-token', fetchMock);
+      expect(result, `status ${status}`).toBe('offline');
+    }
   });
 
   it('returns "offline" when fetch rejects (network error, daemon down)', async () => {
