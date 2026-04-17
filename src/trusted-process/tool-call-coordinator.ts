@@ -198,7 +198,7 @@ export class ToolCallCoordinator {
    */
   registerTools(serverName: string, tools: CoordinatorTool[], clientState?: ClientState): void {
     for (const tool of tools) {
-      this.toolMap.set(tool.name, tool);
+      this.toolMap.set(`${serverName}__${tool.name}`, tool);
     }
     if (clientState) {
       this.clientStates.set(serverName, clientState);
@@ -228,14 +228,19 @@ export class ToolCallCoordinator {
    * mutex so the coordinator-owned caches remain consistent under
    * concurrent callers.
    *
-   * Accepts the low-level `(toolName, rawArgs)` pair. Returns the MCP
-   * response shape (`content`, `isError`). For the structured
-   * `ToolCallResult` form, use `handleStructuredToolCall`.
+   * @param serverName - the MCP server that owns the tool
+   * @param toolName - the bare tool name (e.g. `read_file`, not `filesystem__read_file`)
+   * @param rawArgs - the tool's arguments
    */
-  async handleToolCall(toolName: string, rawArgs: Record<string, unknown>): Promise<ToolCallResponse> {
+  async handleToolCall(
+    serverName: string,
+    toolName: string,
+    rawArgs: Record<string, unknown>,
+  ): Promise<ToolCallResponse> {
+    const key = `${serverName}__${toolName}`;
     return this.callMutex.withLock(async () => {
       const deps = this.buildCallToolDeps();
-      return handleCallTool(toolName, rawArgs, deps);
+      return handleCallTool(key, rawArgs, deps);
     });
   }
 
@@ -262,7 +267,8 @@ export class ToolCallCoordinator {
     // never persisted in `this.toolMap`, which would cause unbounded
     // growth and cross-server collisions when two servers expose the
     // same tool name.
-    const synthetic: CoordinatorTool | null = this.toolMap.has(request.toolName)
+    const key = `${request.serverName}__${request.toolName}`;
+    const synthetic: CoordinatorTool | null = this.toolMap.has(key)
       ? null
       : {
           serverName: request.serverName,
@@ -272,7 +278,7 @@ export class ToolCallCoordinator {
 
     const response = await this.callMutex.withLock(async () => {
       const deps = this.buildCallToolDeps(synthetic);
-      return handleCallTool(request.toolName, request.arguments, deps);
+      return handleCallTool(key, request.arguments, deps);
     });
 
     const isError = response.isError === true;
@@ -314,7 +320,9 @@ export class ToolCallCoordinator {
     // overlays it on the real registry. The overlay is local to this
     // call; it never mutates `this.toolMap`. Without a synthetic
     // entry, reuse the real map directly to avoid per-call copies.
-    const toolMap = syntheticTool ? new Map([...this.toolMap, [syntheticTool.name, syntheticTool]]) : this.toolMap;
+    const toolMap = syntheticTool
+      ? new Map([...this.toolMap, [`${syntheticTool.serverName}__${syntheticTool.name}`, syntheticTool]])
+      : this.toolMap;
 
     return {
       toolMap,

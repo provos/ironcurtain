@@ -131,23 +131,22 @@ class IronCurtainCommunicationProtocol extends CommunicationProtocol {
   ): Promise<unknown> {
     const coordinator = resolveCoordinator(toolCallTemplate);
 
-    // Strip "<manual>." and "<server>." prefixes to recover the raw
-    // backend tool name. This mirrors @utcp/mcp's own name parsing at
-    // `callTool` and matches how the sandbox constructs tool aliases.
+    // UTCP tool names arrive as "<manual>.<server>.<tool>". Parse both
+    // the server name (for policy routing) and the bare tool name.
     const manualName = toolCallTemplate.name ?? 'tools';
     const prefix = `${manualName}.`;
     const stripped = toolName.startsWith(prefix) ? toolName.slice(prefix.length) : toolName;
     const dotIdx = stripped.indexOf('.');
-    const backendToolName = dotIdx >= 0 ? stripped.slice(dotIdx + 1) : stripped;
+    if (dotIdx < 0) {
+      return {
+        content: [{ type: 'text', text: `Malformed tool name (missing server segment): ${toolName}` }],
+        isError: true,
+      };
+    }
+    const serverName = stripped.slice(0, dotIdx);
+    const backendToolName = stripped.slice(dotIdx + 1);
 
-    // Return the MCP response shape as-is. The pre-refactor behavior
-    // (from `@utcp/mcp._processMcpToolResult`) did not throw on
-    // `isError:true` -- it simply returned the processed content.
-    // Agent code inside the V8 isolate expects a readable error payload
-    // (e.g., `{ content: [...], isError: true }`), not a thrown
-    // exception. Throwing here would turn every policy-denied /
-    // permission-denied call into an uncaught sandbox error.
-    const response = await coordinator.handleToolCall(backendToolName, toolArgs);
+    const response = await coordinator.handleToolCall(serverName, backendToolName, toolArgs);
     return response;
   }
 
