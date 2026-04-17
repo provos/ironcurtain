@@ -12,11 +12,24 @@ type PendingRequest = {
 
 type EventHandler = (event: string, payload: unknown) => void;
 type ConnectionHandler = (connected: boolean) => void;
+type AuthErrorHandler = () => void;
+
+/**
+ * Result of the HTTP auth preflight.
+ * - 'ok': token verified, proceed with WS upgrade
+ * - 'invalid': server rejected the token (401); stop retrying
+ * - 'offline': network/CORS error; daemon may be down; keep retrying
+ */
+export type PreflightResult = 'ok' | 'invalid' | 'offline';
+
+export type PreflightFn = (token: string) => Promise<PreflightResult>;
 
 export interface WsClient {
   request<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T>;
   onEvent(handler: EventHandler): () => void;
   onConnectionChange(handler: ConnectionHandler): () => void;
+  /** Fires once when the preflight returns 'invalid'. Reconnects stop. */
+  onAuthError(handler: AuthErrorHandler): () => void;
   readonly isConnected: boolean;
   connect(url: string, token: string): void;
   disconnect(): void;
@@ -26,7 +39,7 @@ const REQUEST_TIMEOUT_MS = 120_000;
 const MAX_RECONNECT_DELAY_MS = 30_000;
 const BASE_RECONNECT_DELAY_MS = 1_000;
 
-export function createWsClient(): WsClient {
+export function createWsClient(preflight?: PreflightFn): WsClient {
   let ws: WebSocket | null = null;
   let connected = false;
   let closed = false;
@@ -37,6 +50,7 @@ export function createWsClient(): WsClient {
   const pending = new Map<string, PendingRequest>();
   const eventHandlers = new Set<EventHandler>();
   const connectionHandlers = new Set<ConnectionHandler>();
+  const authErrorHandlers = new Set<AuthErrorHandler>();
   let idCounter = 0;
 
   function setConnected(value: boolean): void {
@@ -46,8 +60,31 @@ export function createWsClient(): WsClient {
     }
   }
 
-  function doConnect(): void {
+  function fireAuthError(): void {
+    for (const handler of authErrorHandlers) {
+      handler();
+    }
+  }
+
+  async function doConnect(): Promise<void> {
     if (closed) return;
+
+    // Preflight before opening the WebSocket. The browser WebSocket API
+    // hides HTTP 401s (they surface as a generic close 1006), so we use
+    // an HTTP probe to distinguish "bad token" from "daemon unreachable".
+    if (preflight) {
+      const result = await preflight(authToken);
+      if (closed) return;
+      if (result === 'invalid') {
+        closed = true;
+        fireAuthError();
+        return;
+      }
+      if (result === 'offline') {
+        scheduleReconnect();
+        return;
+      }
+    }
 
     const separator = wsUrl.includes('?') ? '&' : '?';
     const fullUrl = `${wsUrl}${separator}token=${authToken}`;
@@ -118,7 +155,9 @@ export function createWsClient(): WsClient {
     reconnectAttempts++;
     const delay = Math.min(BASE_RECONNECT_DELAY_MS * Math.pow(1.5, reconnectAttempts), MAX_RECONNECT_DELAY_MS);
     setTimeout(() => {
-      if (!closed) doConnect();
+      if (!closed) {
+        void doConnect();
+      }
     }, delay);
   }
 
@@ -132,7 +171,7 @@ export function createWsClient(): WsClient {
       authToken = token;
       closed = false;
       reconnectAttempts = 0;
-      doConnect();
+      void doConnect();
     },
 
     disconnect() {
@@ -176,6 +215,11 @@ export function createWsClient(): WsClient {
     onConnectionChange(handler: ConnectionHandler): () => void {
       connectionHandlers.add(handler);
       return () => connectionHandlers.delete(handler);
+    },
+
+    onAuthError(handler: AuthErrorHandler): () => void {
+      authErrorHandlers.add(handler);
+      return () => authErrorHandlers.delete(handler);
     },
   };
 }
