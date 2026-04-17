@@ -12,13 +12,13 @@
  * Signal works for both Signal-initiated and cron-initiated sessions.
  */
 
-import { mkdirSync, readFileSync, existsSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, unlinkSync, existsSync } from 'node:fs';
 import { syncGitRepo } from '../cron/git-sync.js';
 import { resolve } from 'node:path';
 import { createSession } from '../session/index.js';
 import { loadConfig } from '../config/index.js';
 import { loadUserConfig, type ResolvedUserConfig } from '../config/user-config.js';
-import { getJobWorkspaceDir, getJobGeneratedDir, getJobDir } from '../config/paths.js';
+import { getJobWorkspaceDir, getJobGeneratedDir, getJobDir, getWebUiStatePath } from '../config/paths.js';
 import type { IronCurtainConfig } from '../config/types.js';
 import type { SessionMode, EscalationRequest } from '../session/types.js';
 import { SessionManager, type SessionSource } from '../session/session-manager.js';
@@ -34,6 +34,7 @@ import { BudgetExhaustedError } from '../session/errors.js';
 import { validateWorkspacePath } from '../session/workspace-validation.js';
 import * as logger from '../logger.js';
 import { getDaemonLogPath } from '../config/paths.js';
+import { createTokenStreamBus, type TokenStreamBus } from '../docker/token-stream-bus.js';
 import { ControlSocketServer, type ControlRequestHandler, type DaemonStatus } from './control-socket.js';
 
 export type { SessionSource, ManagedSession } from '../session/session-manager.js';
@@ -78,6 +79,9 @@ export class IronCurtainDaemon {
   private readonly sessionManager = new SessionManager();
   private readonly scheduler: CronScheduler;
 
+  /** Shared token stream bus for real-time LLM output observation. */
+  private readonly tokenStreamBus: TokenStreamBus = createTokenStreamBus();
+
   /** Time the daemon was started (for uptime calculation). */
   private startTime: Date | null = null;
 
@@ -92,6 +96,9 @@ export class IronCurtainDaemon {
 
   /** Web UI server (null if not enabled). */
   private webUiServer: import('../web-ui/web-ui-server.js').WebUiServer | null = null;
+
+  /** Token stream bridge (null if web UI not enabled). */
+  private tokenStreamBridge: import('../web-ui/token-stream-bridge.js').TokenStreamBridge | null = null;
 
   /** Web UI options from constructor. */
   private readonly webUiOptions: IronCurtainDaemonOptions['webUi'];
@@ -196,6 +203,8 @@ export class IronCurtainDaemon {
         logger.warn(`[Daemon] Error stopping web UI: ${String(err)}`);
       }
       this.webUiServer = null;
+      this.tokenStreamBridge = null;
+      this.removeWebUiState();
     }
 
     // Unschedule all jobs
@@ -214,11 +223,14 @@ export class IronCurtainDaemon {
     const remaining = this.sessionManager.all();
     await Promise.allSettled(
       remaining.map(async (s) => {
+        const sessionId = s.session.getInfo().id;
         try {
           await this.sessionManager.end(s.label);
         } catch (err: unknown) {
           logger.warn(`[Daemon] Error ending session #${s.label}: ${String(err)}`);
         }
+        this.tokenStreamBus.endSession(sessionId);
+        this.tokenStreamBridge?.closeSession(s.label);
       }),
     );
 
@@ -274,7 +286,11 @@ export class IronCurtainDaemon {
     // Stop active run if any
     const activeLabel = this.activeJobRuns.get(jobId);
     if (activeLabel !== undefined) {
+      const managed = this.sessionManager.get(activeLabel);
+      const sessionId = managed?.session.getInfo().id;
       await this.sessionManager.end(activeLabel);
+      if (sessionId) this.tokenStreamBus.endSession(sessionId);
+      this.tokenStreamBridge?.closeSession(activeLabel);
       this.activeJobRuns.delete(jobId);
     }
 
@@ -487,6 +503,7 @@ export class IronCurtainDaemon {
       jobId: job.id,
       systemPromptAugmentation: augmentation,
       disableAutoApprove: true,
+      tokenStreamBus: this.tokenStreamBus,
       onEscalation: (request) => {
         escalationsEncountered++;
         this.handleCronEscalation(request, job);
@@ -510,6 +527,12 @@ export class IronCurtainDaemon {
     const source: SessionSource = { kind: 'cron', jobId: job.id, jobName: job.name };
     const label = this.sessionManager.register(session, transport, source);
     this.activeJobRuns.set(job.id, label);
+
+    // Register with the token stream bridge so an active `observe --all`
+    // subscription can route this session's events. The bridge may not
+    // exist if the web UI is not enabled; registerSession is idempotent,
+    // so re-registration from the web UI's event bus subscription is safe.
+    this.tokenStreamBridge?.registerSession(label, session.getInfo().id);
 
     logger.info(`[Daemon] Started job ${job.id} as session #${label}`);
 
@@ -565,7 +588,10 @@ export class IronCurtainDaemon {
 
     // Cleanup
     this.activeJobRuns.delete(job.id);
+    const sessionId = session.getInfo().id;
     await this.sessionManager.end(label);
+    this.tokenStreamBus.endSession(sessionId);
+    this.tokenStreamBridge?.closeSession(label);
 
     logger.info(`[Daemon] Job ${job.id} completed: ${outcome.kind}`);
     return record;
@@ -621,6 +647,15 @@ export class IronCurtainDaemon {
       containerManager,
       mode: this.mode,
       sessionManager: this.sessionManager,
+      // Wire Signal-created sessions into the token stream bridge so that
+      // an active `observe --all` subscription receives their events.
+      // The bridge may not exist (web UI disabled) -- calls are null-safe.
+      onSessionRegistered: (label, managed) => {
+        this.tokenStreamBridge?.registerSession(label, managed.session.getInfo().id);
+      },
+      onSessionEnded: (label) => {
+        this.tokenStreamBridge?.closeSession(label);
+      },
     });
 
     // Await the connection phase (starts Docker, health check, WebSocket).
@@ -666,6 +701,7 @@ export class IronCurtainDaemon {
   private async startWebUiServer(): Promise<void> {
     const { WebUiServer } = await import('../web-ui/web-ui-server.js');
     const { WorkflowManager } = await import('../web-ui/workflow-manager.js');
+    const { TokenStreamBridge } = await import('../web-ui/token-stream-bridge.js');
 
     if (!this.controlRequestHandler) {
       throw new Error('Control socket must be started before web UI');
@@ -680,8 +716,31 @@ export class IronCurtainDaemon {
       mode: this.mode,
       maxConcurrentWebSessions: 5,
       devMode: this.webUiOptions?.devMode,
+      tokenStreamBus: this.tokenStreamBus,
     });
     server.setWorkflowManager(new WorkflowManager({ eventBus: server.getEventBus() }));
+
+    // Wire token stream bridge for per-client subscription delivery
+    const bridge = new TokenStreamBridge(server, this.tokenStreamBus);
+    server.setTokenStreamBridge(bridge);
+    this.tokenStreamBridge = bridge;
+
+    // Belt-and-suspenders: the web UI also emits session.created / session.ended
+    // events. registerSession is idempotent (Map.set overwrite), so repeat
+    // registrations from this bus event and the direct executeJob()/Signal
+    // paths are safe. Cron/Signal sessions are registered directly at their
+    // creation sites because they do not go through the web UI event bus.
+    server.getEventBus().subscribe((event, payload) => {
+      if (event === 'session.created') {
+        const { label } = payload as { label: number };
+        const managed = this.sessionManager.get(label);
+        if (managed) {
+          bridge.registerSession(label, managed.session.getInfo().id);
+        }
+      } else if (event === 'session.ended') {
+        bridge.closeSession((payload as { label: number }).label);
+      }
+    });
 
     const url = await server.start();
     this.webUiServer = server;
@@ -689,6 +748,49 @@ export class IronCurtainDaemon {
     if (this.webUiOptions?.devMode) {
       const token = url.split('token=')[1];
       process.stderr.write(`  Web UI (dev): http://localhost:5173?token=${token}\n`);
+    }
+
+    // Persist connection info so CLI commands (e.g., `observe`) can connect
+    this.writeWebUiState(server);
+  }
+
+  /**
+   * Normalize a bind host into a host a CLI client can actually connect to.
+   *
+   * The daemon may bind to a wildcard address (0.0.0.0 or ::) to accept
+   * connections on all interfaces, but wildcards are not valid *destination*
+   * hosts, so persisting them verbatim would break `ironcurtain observe`.
+   * The server's bind host is unchanged; only the persisted connect host is
+   * normalized.
+   */
+  private getWebUiConnectHost(host: string | undefined): string {
+    if (!host || host.trim() === '') return '127.0.0.1';
+    const normalized = host.trim();
+    if (normalized === '0.0.0.0') return '127.0.0.1';
+    if (normalized === '::' || normalized === '[::]' || normalized === '::0') return 'localhost';
+    return normalized;
+  }
+
+  /** Write web UI connection info to a well-known file for CLI consumers. */
+  private writeWebUiState(server: import('../web-ui/web-ui-server.js').WebUiServer): void {
+    const state = {
+      port: server.getPort(),
+      host: this.getWebUiConnectHost(this.webUiOptions?.host),
+      token: server.getAuthToken(),
+    };
+    try {
+      writeFileSync(getWebUiStatePath(), JSON.stringify(state) + '\n', { mode: 0o600 });
+    } catch (err) {
+      logger.warn(`[Daemon] Could not write web UI state: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /** Remove the web UI state file (called on shutdown). */
+  private removeWebUiState(): void {
+    try {
+      unlinkSync(getWebUiStatePath());
+    } catch {
+      // File may not exist -- that's fine
     }
   }
 

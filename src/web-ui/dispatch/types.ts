@@ -10,8 +10,16 @@ import { z } from 'zod';
 import type { SessionManager, ManagedSession } from '../../session/session-manager.js';
 import type { ControlRequestHandler } from '../../daemon/control-socket.js';
 import type { SessionMode } from '../../session/types.js';
+import type { TokenStreamBus } from '../../docker/token-stream-bus.js';
+import type { TokenStreamBridge } from '../token-stream-bridge.js';
 import type { WebEventBus } from '../web-event-bus.js';
 import { type SessionDto, type BudgetSummaryDto, type DaemonStatusDto, InvalidParamsError } from '../web-ui-types.js';
+
+// ---------------------------------------------------------------------------
+// Shared param schemas
+// ---------------------------------------------------------------------------
+
+export const labelSchema = z.object({ label: z.number().int().positive() });
 
 // ---------------------------------------------------------------------------
 // Dispatch context
@@ -25,6 +33,10 @@ export interface DispatchContext {
   readonly maxConcurrentWebSessions: number;
   /** @internal Sequencing queues per session -- managed by dispatch module. */
   readonly sessionQueues: Map<number, Promise<void>>;
+  /** Shared token stream bus for real-time LLM output observation. */
+  readonly tokenStreamBus?: TokenStreamBus;
+  /** Bridge for per-client token stream subscriptions. */
+  tokenStreamBridge?: TokenStreamBridge;
 }
 
 // ---------------------------------------------------------------------------

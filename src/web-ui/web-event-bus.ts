@@ -15,6 +15,7 @@ import type {
 } from './web-ui-types.js';
 import type { DiagnosticEvent } from '../session/types.js';
 import type { RunRecord } from '../cron/types.js';
+import type { TokenStreamEvent } from '../docker/token-stream-types.js';
 
 /**
  * Typed event map. Each key maps to a specific payload type.
@@ -50,6 +51,9 @@ export interface WebEventMap {
   'workflow.gate_dismissed': { workflowId: string; gateId: string };
   'workflow.agent_started': { workflowId: string; stateId: string; persona: string };
   'workflow.agent_completed': { workflowId: string; stateId: string; verdict?: string; confidence?: string };
+
+  // Token stream events (targeted delivery via bridge, not broadcast)
+  'session.token_stream': { label: number; events: readonly TokenStreamEvent[] };
 }
 
 export type WebEventName = keyof WebEventMap;

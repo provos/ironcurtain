@@ -6,8 +6,9 @@
  */
 
 import { z } from 'zod';
+import type { WebSocket as WsWebSocket } from 'ws';
 
-import { type DispatchContext, validateParams, toSessionDto, toBudgetDto } from './types.js';
+import { type DispatchContext, validateParams, toSessionDto, toBudgetDto, labelSchema } from './types.js';
 import {
   type SessionDto,
   type SessionDetailDto,
@@ -15,6 +16,7 @@ import {
   SessionNotFoundError,
   MethodNotFoundError,
 } from '../web-ui-types.js';
+import { tokenStreamDispatch } from './token-stream-dispatch.js';
 import { WebSessionTransport } from '../web-session-transport.js';
 import { loadConfig } from '../../config/index.js';
 import { createSession } from '../../session/index.js';
@@ -26,7 +28,6 @@ import * as logger from '../../logger.js';
 // Param validation schemas
 // ---------------------------------------------------------------------------
 
-const labelSchema = z.object({ label: z.number().int().positive() });
 const sessionCreateSchema = z.object({ persona: z.string().min(1).optional() });
 const sessionSendSchema = z.object({ label: z.number().int().positive(), text: z.string().min(1) });
 
@@ -38,7 +39,16 @@ export async function sessionDispatch(
   ctx: DispatchContext,
   method: string,
   params: Record<string, unknown>,
+  client?: WsWebSocket,
 ): Promise<unknown> {
+  // Delegate token stream methods to dedicated dispatch module
+  if (method.startsWith('sessions.subscribe') || method.startsWith('sessions.unsubscribe')) {
+    if (!client) {
+      throw new RpcError('INTERNAL_ERROR', 'Token stream methods require a WebSocket client');
+    }
+    return tokenStreamDispatch(ctx, method, params, client);
+  }
+
   switch (method) {
     case 'sessions.list':
       return listSessions(ctx);
@@ -52,7 +62,10 @@ export async function sessionDispatch(
     }
     case 'sessions.end': {
       const { label } = validateParams(labelSchema, params);
+      const endManaged = ctx.sessionManager.get(label);
+      const endSessionId = endManaged?.session.getInfo().id;
       await ctx.sessionManager.end(label);
+      if (endSessionId) ctx.tokenStreamBus?.endSession(endSessionId);
       cleanupSessionQueue(ctx, label);
       ctx.eventBus.emit('session.ended', { label, reason: 'user_ended' });
       return;
@@ -125,6 +138,7 @@ async function createWebSession(ctx: DispatchContext, persona?: string): Promise
     config,
     mode: ctx.mode,
     persona,
+    tokenStreamBus: ctx.tokenStreamBus,
     onEscalation: transport.createEscalationHandler(),
     onEscalationExpired: transport.createEscalationExpiredHandler(),
     onEscalationResolved: transport.createEscalationResolvedHandler(),
@@ -140,6 +154,7 @@ async function createWebSession(ctx: DispatchContext, persona?: string): Promise
     managed.runPromise = runPromise;
   }
 
+  const sessionId = session.getInfo().id;
   runPromise
     .then(() => {
       const m = ctx.sessionManager.get(label);
@@ -148,6 +163,7 @@ async function createWebSession(ctx: DispatchContext, persona?: string): Promise
           logger.error(`[WebUI] Failed to clean up session #${label}: ${String(err)}`);
         });
       }
+      ctx.tokenStreamBus?.endSession(sessionId);
     })
     .catch((err: unknown) => {
       logger.error(`[WebUI] Transport #${label} error: ${String(err)}`);
@@ -192,8 +208,10 @@ function sendToSession(ctx: DispatchContext, label: number, text: string): { acc
       }
     } catch (err) {
       if (err instanceof BudgetExhaustedError) {
+        const budgetSessionId = managed.session.getInfo().id;
         ctx.eventBus.emit('session.ended', { label, reason: `Budget exhausted: ${err.message}` });
         await ctx.sessionManager.end(label);
+        ctx.tokenStreamBus?.endSession(budgetSessionId);
         cleanupSessionQueue(ctx, label);
       } else {
         const message = err instanceof Error ? err.message : String(err);

@@ -29,6 +29,7 @@ import type { MitmProxy } from './mitm-proxy.js';
 import type { CertificateAuthority } from './ca.js';
 import type { DockerManager } from './types.js';
 import type { ProviderKeyMapping } from './mitm-proxy.js';
+import type { TokenStreamBus } from './token-stream-bus.js';
 import { parseUpstreamBaseUrl, type ProviderConfig, type UpstreamTarget } from './provider-config.js';
 import * as logger from '../logger.js';
 
@@ -79,6 +80,7 @@ export async function prepareDockerInfrastructure(
   escalationDir: string,
   auditLogPath: string,
   sessionId: string,
+  tokenStreamBus?: TokenStreamBus,
 ): Promise<DockerInfrastructure> {
   // Dynamic imports to avoid loading Docker dependencies for built-in sessions
   const { registerBuiltinAdapters, getAgent } = await import('./agent-registry.js');
@@ -198,6 +200,8 @@ export async function prepareDockerInfrastructure(
         registries,
         packageValidation,
         controlPort: 0,
+        tokenStreamBus,
+        sessionId: tokenStreamBus ? sessionId : undefined,
       })
     : createMitmProxy({
         socketPath: resolve(socketsDir, 'mitm-proxy.sock'),
@@ -206,6 +210,8 @@ export async function prepareDockerInfrastructure(
         registries,
         packageValidation,
         controlSocketPath: resolve(sessionDir, 'mitm-control.sock'),
+        tokenStreamBus,
+        sessionId: tokenStreamBus ? sessionId : undefined,
       });
 
   const docker = createDockerManager();

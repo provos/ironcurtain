@@ -31,6 +31,10 @@ import type { OAuthTokenManager } from './oauth-token-manager.js';
 import type { RegistryConfig, PackageValidator, AllowedVersionCache } from './package-types.js';
 import { DENY_ALL_VALIDATOR } from './package-validator.js';
 import { validateDomain, type DomainListing } from './proxy-tools.js';
+import { PassThrough } from 'node:stream';
+import type { TokenStreamBus } from './token-stream-bus.js';
+import type { SseProvider } from './token-stream-types.js';
+import { SseExtractorTransform } from './sse-extractor.js';
 import * as logger from '../logger.js';
 
 /**
@@ -128,6 +132,20 @@ export interface MitmProxyOptions {
    * Used in tests to avoid real DNS resolution.
    */
   readonly dnsLookup?: http.RequestOptions['lookup'];
+  /**
+   * Shared daemon-level token stream bus. When provided together with
+   * `sessionId`, the proxy taps SSE responses from LLM API endpoints
+   * and pushes parsed token events into the bus.
+   *
+   * Both `tokenStreamBus` and `sessionId` must be provided together.
+   * If one is set without the other, `createMitmProxy()` throws.
+   */
+  readonly tokenStreamBus?: TokenStreamBus;
+  /**
+   * Session ID for token stream routing. Required when `tokenStreamBus`
+   * is provided. Used to key events pushed into the bus.
+   */
+  readonly sessionId?: string;
 }
 
 export interface ProviderKeyMapping {
@@ -148,6 +166,67 @@ function isConnectionReset(err: NodeJS.ErrnoException): boolean {
 const MAX_REWRITE_BODY_BYTES = 10 * 1024 * 1024; // 10 MB
 /** Max Content-Length for which we buffer solely for 401 retry (1 MB). */
 const MAX_RETRY_BODY_BYTES = 1 * 1024 * 1024;
+/**
+ * Max bytes buffered from a non-streaming JSON response body for token stream
+ * extraction. The response is still streamed to the client unchanged; only
+ * the extraction side stops capturing once the cap is hit. This protects the
+ * proxy from unbounded memory growth on very large completions.
+ */
+export const MAX_JSON_RESPONSE_CAPTURE_BYTES = 2 * 1024 * 1024; // 2 MB
+
+/**
+ * Output of `createBoundedJsonResponseCapture` -- the stateful hooks used to
+ * drive a bounded capture over a chunked response stream.
+ *
+ * Exposed primarily for unit testing the OOM guard without standing up the
+ * full mitm proxy pipeline.
+ */
+export interface BoundedJsonResponseCapture {
+  /** Feed a chunk into the capture buffer. Always safe to call. */
+  onData(chunk: Buffer): void;
+  /**
+   * Signal end-of-stream. The callback receives the concatenated buffer,
+   * or `null` if the capture overflowed and was discarded.
+   */
+  onEnd(onComplete: (body: Buffer | null) => void): void;
+}
+
+/**
+ * Create a size-bounded capture for a JSON response body.
+ *
+ * Up to `maxBytes` of data is accumulated into an internal chunk array.
+ * Once that threshold is crossed, any already-buffered chunks are released
+ * (so large responses do not pin memory) and further chunks are ignored.
+ * The caller is still responsible for piping the stream through to the
+ * client -- this helper only manages the extraction-side buffer.
+ */
+export function createBoundedJsonResponseCapture(
+  maxBytes: number = MAX_JSON_RESPONSE_CAPTURE_BYTES,
+): BoundedJsonResponseCapture {
+  let chunks: Buffer[] = [];
+  let capturedBytes = 0;
+
+  return {
+    onData(chunk: Buffer): void {
+      if (capturedBytes > maxBytes) return;
+      capturedBytes += chunk.length;
+      if (capturedBytes > maxBytes) {
+        chunks = [];
+        return;
+      }
+      chunks.push(chunk);
+    },
+    onEnd(onComplete: (body: Buffer | null) => void): void {
+      if (capturedBytes > maxBytes) {
+        onComplete(null);
+        return;
+      }
+      const body = Buffer.concat(chunks);
+      chunks = [];
+      onComplete(body);
+    },
+  };
+}
 
 /**
  * Buffers the entire request body into a single Buffer.
@@ -171,7 +250,243 @@ function bufferRequestBody(req: http.IncomingMessage, maxBytes: number): Promise
   });
 }
 
+/**
+ * Maps a target hostname to the SSE provider for token stream parsing.
+ * Only Anthropic and OpenAI hosts are recognized; everything else
+ * falls back to 'unknown'.
+ */
+export function resolveSseProvider(hostname: string): SseProvider {
+  if (hostname === 'api.anthropic.com' || hostname === 'platform.claude.com') {
+    return 'anthropic';
+  }
+  if (hostname === 'api.openai.com') {
+    return 'openai';
+  }
+  return 'unknown';
+}
+
+/** Maximum characters for tool_result content before truncation. */
+const MAX_TOOL_RESULT_CONTENT_LEN = 500;
+
+/** Truncate tool result content to MAX_TOOL_RESULT_CONTENT_LEN, appending ellipsis if needed. */
+function truncateToolResult(text: string): string {
+  return text.length > MAX_TOOL_RESULT_CONTENT_LEN ? text.slice(0, MAX_TOOL_RESULT_CONTENT_LEN) + '\u2026' : text;
+}
+
+/** Returns true for LLM messages endpoints that carry multi-turn request bodies. */
+function isLlmMessagesEndpoint(path: string): boolean {
+  const p = path.split('?')[0];
+  return p === '/v1/messages' || p === '/v1/chat/completions';
+}
+
+/**
+ * Extract tool_result blocks from a parsed Anthropic/OpenAI request body
+ * and push them as TokenStreamEvents to the bus.
+ *
+ * Anthropic format: messages[].role === 'user', content[].type === 'tool_result'
+ * OpenAI format: messages[].role === 'tool', with tool_call_id
+ *
+ * Only extracts from the trailing user/tool messages to avoid re-emitting
+ * historical tool results (the full conversation history is sent with every request).
+ */
+function extractTrailingToolMessages(messages: unknown[]): unknown[] {
+  // Walk backward from the end to find the contiguous block of
+  // user (with tool_result) and tool messages at the tail.
+  const trailing: unknown[] = [];
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (typeof msg !== 'object' || msg === null) break;
+    const role = (msg as Record<string, unknown>)['role'];
+    if (role === 'user' || role === 'tool') {
+      trailing.push(msg);
+    } else {
+      break;
+    }
+  }
+  trailing.reverse();
+  return trailing;
+}
+
+export function extractToolResults(
+  parsed: Record<string, unknown>,
+  bus: TokenStreamBus,
+  sessionId: import('../session/types.js').SessionId,
+): void {
+  const messages = parsed['messages'];
+  if (!Array.isArray(messages)) return;
+
+  const now = Date.now();
+
+  // Only extract from the LAST user/tool messages to avoid re-emitting
+  // historical tool results from earlier turns (the full conversation
+  // history is sent with every API request).
+  const lastMessages = extractTrailingToolMessages(messages);
+
+  for (const msg of lastMessages) {
+    if (typeof msg !== 'object' || msg === null) continue;
+    const record = msg as Record<string, unknown>;
+
+    // Anthropic format: role=user, content array with tool_result blocks
+    if (record['role'] === 'user') {
+      const content = record['content'];
+      if (!Array.isArray(content)) continue;
+
+      for (const block of content) {
+        if (typeof block !== 'object' || block === null) continue;
+        const b = block as Record<string, unknown>;
+        if (b['type'] !== 'tool_result') continue;
+
+        const toolUseId = typeof b['tool_use_id'] === 'string' ? b['tool_use_id'] : '';
+        const isError = b['is_error'] === true;
+        const rawContent = b['content'];
+        let text = '';
+        if (typeof rawContent === 'string') {
+          text = rawContent;
+        } else if (Array.isArray(rawContent)) {
+          // Content can be an array of {type: 'text', text: '...'} blocks
+          const parts: string[] = [];
+          for (const part of rawContent) {
+            if (typeof part === 'object' && part !== null && (part as Record<string, unknown>)['type'] === 'text') {
+              const t = (part as Record<string, unknown>)['text'];
+              if (typeof t === 'string') parts.push(t);
+            }
+          }
+          text = parts.join('\n');
+        }
+
+        text = truncateToolResult(text);
+
+        bus.push(sessionId, {
+          kind: 'tool_result',
+          toolUseId,
+          toolName: '',
+          content: text,
+          isError,
+          timestamp: now,
+        });
+      }
+      continue;
+    }
+
+    // OpenAI format: role=tool, content is a string
+    if (record['role'] === 'tool') {
+      const toolCallId = typeof record['tool_call_id'] === 'string' ? record['tool_call_id'] : '';
+      let text = typeof record['content'] === 'string' ? record['content'] : '';
+      const isError = false; // OpenAI doesn't have an is_error field
+
+      text = truncateToolResult(text);
+
+      bus.push(sessionId, {
+        kind: 'tool_result',
+        toolUseId: toolCallId,
+        toolName: '',
+        content: text,
+        isError,
+        timestamp: now,
+      });
+    }
+  }
+}
+
+/**
+ * Extract token stream events from a non-streaming JSON response body.
+ * Used when the upstream returns application/json instead of text/event-stream.
+ *
+ * Emits message_start (model), text_delta (content), and message_end (usage).
+ */
+export function extractFromJsonResponse(
+  body: Buffer,
+  bus: TokenStreamBus,
+  sessionId: import('../session/types.js').SessionId,
+): void {
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(body.toString()) as Record<string, unknown>;
+  } catch {
+    return; // Not valid JSON -- nothing to extract
+  }
+
+  const now = Date.now();
+
+  // Anthropic format: { model, content: [{type: 'text', text: '...'}], usage: {input_tokens, output_tokens}, stop_reason }
+  const model = typeof parsed['model'] === 'string' ? parsed['model'] : null;
+  if (model) {
+    bus.push(sessionId, { kind: 'message_start', model, timestamp: now });
+  }
+
+  // Extract text from content blocks (Anthropic) or choices (OpenAI)
+  const content = parsed['content'];
+  if (Array.isArray(content)) {
+    // Anthropic: content is an array of blocks
+    for (const block of content) {
+      if (typeof block === 'object' && block !== null) {
+        const b = block as Record<string, unknown>;
+        if (b['type'] === 'text' && typeof b['text'] === 'string') {
+          bus.push(sessionId, { kind: 'text_delta', text: b['text'], timestamp: now });
+        }
+      }
+    }
+  }
+
+  const choices = parsed['choices'];
+  if (Array.isArray(choices)) {
+    // OpenAI: choices[].message.content
+    for (const choice of choices) {
+      if (typeof choice === 'object' && choice !== null) {
+        const c = choice as Record<string, unknown>;
+        const message = c['message'];
+        if (typeof message === 'object' && message !== null) {
+          const m = message as Record<string, unknown>;
+          if (typeof m['content'] === 'string') {
+            bus.push(sessionId, { kind: 'text_delta', text: m['content'], timestamp: now });
+          }
+        }
+      }
+    }
+  }
+
+  // Usage and stop reason
+  const usage = parsed['usage'];
+  const stopReason = typeof parsed['stop_reason'] === 'string' ? parsed['stop_reason'] : 'stop';
+  let inputTokens = 0;
+  let outputTokens = 0;
+
+  if (typeof usage === 'object' && usage !== null) {
+    const u = usage as Record<string, unknown>;
+    // Anthropic: input_tokens/output_tokens; OpenAI: prompt_tokens/completion_tokens
+    inputTokens =
+      typeof u['input_tokens'] === 'number'
+        ? u['input_tokens']
+        : typeof u['prompt_tokens'] === 'number'
+          ? u['prompt_tokens']
+          : 0;
+    outputTokens =
+      typeof u['output_tokens'] === 'number'
+        ? u['output_tokens']
+        : typeof u['completion_tokens'] === 'number'
+          ? u['completion_tokens']
+          : 0;
+  }
+
+  bus.push(sessionId, {
+    kind: 'message_end',
+    stopReason,
+    inputTokens,
+    outputTokens,
+    timestamp: now,
+  });
+}
+
 export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
+  // Validate token stream options: both must be provided together
+  const hasBus = options.tokenStreamBus !== undefined;
+  const hasSessionId = options.sessionId !== undefined;
+  if (hasBus !== hasSessionId) {
+    throw new Error('tokenStreamBus and sessionId must be provided together');
+  }
+  const tokenBus = options.tokenStreamBus;
+  const tokenSessionId = options.sessionId;
+
   // Parse CA cert and key from PEM
   const caCert = forge.pki.certificateFromPem(options.ca.certPem);
   const caKey = forge.pki.privateKeyFromPem(options.ca.keyPem);
@@ -461,7 +776,44 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
           clientRes.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers);
           clientRes.flushHeaders();
           clientRes.socket?.setNoDelay(true);
-          upstreamRes.pipe(clientRes);
+
+          const contentType = upstreamRes.headers['content-type'] ?? '';
+          if (tokenBus && tokenSessionId && contentType.includes('text/event-stream')) {
+            const sseProvider = resolveSseProvider(targetHost);
+            const extractor = new SseExtractorTransform(sseProvider, (event) => {
+              tokenBus.push(tokenSessionId as import('../session/types.js').SessionId, event);
+            });
+            upstreamRes.pipe(extractor).pipe(clientRes);
+          } else if (
+            tokenBus &&
+            tokenSessionId &&
+            isLlmMessagesEndpoint(path as string) &&
+            contentType.includes('application/json')
+          ) {
+            // Non-streaming JSON response: buffer for extraction while piping to client.
+            // The passthrough stream always forwards the full response to the client.
+            // Capture is bounded at MAX_JSON_RESPONSE_CAPTURE_BYTES: once exceeded,
+            // we stop accumulating chunks (and skip extraction at end-of-stream),
+            // but the passthrough listener stays attached so the stream completes
+            // normally and the client still sees every byte.
+            const passthrough = new PassThrough();
+            const capture = createBoundedJsonResponseCapture();
+            passthrough.on('data', (chunk: Buffer) => capture.onData(chunk));
+            passthrough.on('end', () => {
+              capture.onEnd((body) => {
+                if (body === null) return; // overflowed -- skip extraction
+                try {
+                  extractFromJsonResponse(body, tokenBus, tokenSessionId as import('../session/types.js').SessionId);
+                } catch {
+                  // Extraction errors must never affect the forwarding path
+                }
+              });
+            });
+            upstreamRes.pipe(passthrough);
+            passthrough.pipe(clientRes);
+          } else {
+            upstreamRes.pipe(clientRes);
+          }
         },
       );
 
@@ -547,6 +899,18 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
         }
 
         let finalBody = rawBody;
+
+        // Extract tool_result events from the request body for token stream observation.
+        // Done before rewriting so we see the original messages array.
+        if (tokenBus && tokenSessionId && isLlmMessagesEndpoint(path as string)) {
+          try {
+            const bodyParsed = JSON.parse(rawBody.toString()) as Record<string, unknown>;
+            extractToolResults(bodyParsed, tokenBus, tokenSessionId as import('../session/types.js').SessionId);
+          } catch {
+            // Parse failure is fine -- the rewriter below will also attempt to parse
+          }
+        }
+
         if (needsRewrite) {
           const rewriter = provider.config.requestRewriter as RequestBodyRewriter;
           const reqMethod = method as string;

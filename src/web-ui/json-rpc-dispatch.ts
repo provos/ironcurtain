@@ -5,6 +5,8 @@
  * Shared types (DispatchContext, DTO builders) live in dispatch/types.ts.
  */
 
+import type { WebSocket as WsWebSocket } from 'ws';
+
 import type { MethodName } from './web-ui-types.js';
 import { MethodNotFoundError } from './web-ui-types.js';
 import { sessionDispatch } from './dispatch/session-dispatch.js';
@@ -26,9 +28,10 @@ export async function dispatch(
   ctx: WorkflowDispatchContext,
   method: MethodName,
   params: Record<string, unknown>,
+  client?: WsWebSocket,
 ): Promise<unknown> {
   if (method.startsWith('workflows.')) return workflowDispatch(ctx, method, params);
-  if (method.startsWith('sessions.')) return sessionDispatch(ctx, method, params);
+  if (method.startsWith('sessions.')) return sessionDispatch(ctx, method, params, client);
   if (method.startsWith('jobs.')) return jobDispatch(ctx, method, params);
   if (method.startsWith('escalations.')) return escalationDispatch(ctx, method, params);
 

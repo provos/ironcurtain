@@ -331,6 +331,17 @@ export function getDaemonSocketPath(): string {
   return resolve(getIronCurtainHome(), 'daemon.sock');
 }
 
+/**
+ * Returns the web UI state file path: {home}/web-ui.json
+ *
+ * The daemon writes connection info (port + auth token) here on startup
+ * so CLI commands (e.g., `observe`) can connect to the WebSocket server.
+ * The file is removed on daemon shutdown.
+ */
+export function getWebUiStatePath(): string {
+  return resolve(getIronCurtainHome(), 'web-ui.json');
+}
+
 // ---------------------------------------------------------------------------
 // Job paths (cron mode)
 // ---------------------------------------------------------------------------
