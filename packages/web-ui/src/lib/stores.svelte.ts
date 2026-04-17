@@ -35,6 +35,7 @@ export type ThemeId = 'iron' | 'daylight' | 'midnight';
 
 const MAX_OUTPUT_LINES = 2000;
 const THEME_KEY = 'ic-theme';
+const AUTH_TOKEN_KEY = 'ic-auth-token';
 
 const VALID_THEMES: ReadonlySet<string> = new Set<ThemeId>(['iron', 'daylight', 'midnight']);
 
@@ -57,7 +58,7 @@ class AppState {
    * status codes, so we rely on an HTTP preflight to `/ws/auth` and
    * surface the result here to drive UI state.
    */
-  authError: string | null = $state(null);
+  authError: 'invalid_token' | null = $state(null);
   daemonStatus: DaemonStatusDto | null = $state(null);
   sessions: Map<number, SessionDto> = $state(new Map());
   selectedSessionLabel: number | null = $state(null);
@@ -149,34 +150,23 @@ export function getWsClient(): WsClient {
 }
 
 /**
- * HTTP preflight against the daemon's `/ws/auth` endpoint.
- *
- * The browser WebSocket API collapses HTTP 401 rejections and network
- * errors into the same `onclose(1006)` event, leaving the client unable
- * to tell "bad token" from "daemon down". By probing over plain HTTP
- * first, we can surface a meaningful error to the user and stop the
- * reconnect loop when the token is known-bad.
- *
- * Status-to-result mapping:
- *   - 200 → 'ok': token accepted, open the WS
- *   - 401 → 'invalid': token rejected, clear it and stop retrying
- *   - anything else (502/503/504 from a reverse proxy, daemon restarting,
- *     fetch reject on network error) → 'offline': keep the stored token
- *     and let the reconnect loop keep probing. Treating transient 5xx as
- *     'invalid' would destructively purge a good token on a brief blip.
+ * HTTP preflight against the daemon's `/ws/auth` endpoint. The status is
+ * mapped to three outcomes:
+ *   - 200 → 'ok'
+ *   - 401 → 'invalid' (clear the token and stop retrying)
+ *   - anything else, including network errors → 'offline' (keep retrying;
+ *     a transient 5xx must not destructively purge a good token)
  *
  * Exported for testing.
  */
 export async function verifyAuthToken(token: string, fetchImpl: typeof fetch = fetch): Promise<PreflightResult> {
   try {
-    const protocol = window.location.protocol === 'https:' ? 'https:' : 'http:';
-    const url = `${protocol}//${window.location.host}/ws/auth?token=${encodeURIComponent(token)}`;
+    const url = buildDaemonUrl(`/ws/auth?token=${encodeURIComponent(token)}`, { ws: false });
     const res = await fetchImpl(url, { method: 'GET', cache: 'no-store' });
     if (res.status === 200) return 'ok';
     if (res.status === 401) return 'invalid';
     return 'offline';
   } catch {
-    // fetch throws on network failure, CORS issues, aborted requests, etc.
     return 'offline';
   }
 }
@@ -211,7 +201,7 @@ function wireEventHandlers(client: WsClient): void {
 
 /** Purge the bad token and flip the UI back to the token input. */
 function handleAuthError(): void {
-  sessionStorage.removeItem('ic-auth-token');
+  sessionStorage.removeItem(AUTH_TOKEN_KEY);
   appState.hasToken = false;
   appState.authError = 'invalid_token';
 }
@@ -312,9 +302,20 @@ function refreshJobs(client: WsClient): void {
   }, 300);
 }
 
+/**
+ * Build a daemon-relative URL. `ws: true` selects ws(s) for the WebSocket
+ * endpoint; otherwise http(s) is used for plain HTTP requests like the
+ * auth preflight. The scheme mirrors the page's own protocol so dev
+ * (http) and prod (https) Just Work.
+ */
+function buildDaemonUrl(path: string, opts: { ws: boolean }): string {
+  const isHttps = window.location.protocol === 'https:';
+  const protocol = opts.ws ? (isHttps ? 'wss:' : 'ws:') : isHttps ? 'https:' : 'http:';
+  return `${protocol}//${window.location.host}${path}`;
+}
+
 function buildWsUrl(): string {
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return `${protocol}//${window.location.host}/ws`;
+  return buildDaemonUrl('/ws', { ws: true });
 }
 
 /**
@@ -330,12 +331,12 @@ export async function initConnection(): Promise<void> {
   let token = params.get('token');
 
   if (token) {
-    sessionStorage.setItem('ic-auth-token', token);
+    sessionStorage.setItem(AUTH_TOKEN_KEY, token);
     const url = new URL(window.location.href);
     url.searchParams.delete('token');
     window.history.replaceState({}, '', url.toString());
   } else {
-    token = sessionStorage.getItem('ic-auth-token');
+    token = sessionStorage.getItem(AUTH_TOKEN_KEY);
   }
 
   if (!token) {
@@ -499,7 +500,7 @@ export async function compilePersonaPolicy(name: string): Promise<PersonaCompile
 }
 
 export async function connectWithToken(token: string): Promise<void> {
-  sessionStorage.setItem('ic-auth-token', token);
+  sessionStorage.setItem(AUTH_TOKEN_KEY, token);
   // Deliberately do NOT clear `authError` here. If the user re-pastes the
   // same bad token, clearing upfront blanks the banner for one tick and
   // then `handleAuthError()` sets it back — a visible flash. The banner
