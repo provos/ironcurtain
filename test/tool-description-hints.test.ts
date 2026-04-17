@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { applyToolDescriptionHints } from '../src/trusted-process/tool-description-hints.js';
-import type { ProxiedTool } from '../src/trusted-process/mcp-proxy-server.js';
+import type { ProxiedTool } from '../src/trusted-process/tool-call-pipeline.js';
 
 describe('applyToolDescriptionHints', () => {
   const tools: ProxiedTool[] = [

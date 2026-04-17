@@ -9,7 +9,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { ProxiedTool } from './mcp-proxy-server.js';
+import type { ProxiedTool } from './tool-call-pipeline.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 

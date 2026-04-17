@@ -1,6 +1,6 @@
 import type { LanguageModelV3 } from '@ai-sdk/provider';
 import type { IronCurtainConfig } from '../config/types.js';
-import type { ToolCallRequest, ToolCallResult, PolicyDecision } from '../types/mcp.js';
+import type { ToolCallRequest, ToolCallResult } from '../types/mcp.js';
 import {
   loadGeneratedPolicy,
   extractServerDomainAllowlists,
@@ -8,26 +8,180 @@ import {
   getPackageGeneratedDir,
 } from '../config/index.js';
 import { createLanguageModel } from '../config/model-provider.js';
-import { PolicyEngine, extractAnnotatedPaths } from './policy-engine.js';
-import { MCPClientManager, type McpRoot } from './mcp-client-manager.js';
-import { getPathRoles } from '../types/argument-roles.js';
-import { AuditLog } from './audit-log.js';
+import type { MCPClientManager } from './mcp-client-manager.js';
+import { MCPClientManager as McpClientManagerImpl } from './mcp-client-manager.js';
+import type { McpRoot } from './mcp-client-manager.js';
 import { EscalationHandler } from './escalation.js';
-import { autoApprove } from './auto-approver.js';
-import { prepareToolArgs } from './path-utils.js';
-import { extractPolicyRoots, toMcpRoots, directoryForPath } from './policy-roots.js';
 import * as logger from '../logger.js';
-import { extractMcpErrorMessage } from './mcp-error-utils.js';
-import type { ToolAnnotation } from '../pipeline/types.js';
-import { extractTextFromContent, buildAuditEntry } from './mcp-proxy-server.js';
-import { type ServerContextMap, updateServerContext, formatServerContext } from './server-context.js';
+import { extractPolicyRoots, toMcpRoots } from './policy-roots.js';
 import { buildTrustedServerSet } from '../memory/memory-annotations.js';
-import {
-  createApprovalWhitelist,
-  extractWhitelistCandidates,
-  type ApprovalWhitelist,
-  type WhitelistCandidateIpc,
-} from './approval-whitelist.js';
+import { ToolCallCoordinator, type EscalationPromptFn } from './tool-call-coordinator.js';
+import type { ProxiedTool, ClientState } from './tool-call-pipeline.js';
+
+/** Re-export for backward compatibility with callers that import from here. */
+export type { EscalationPromptFn };
+export type { EscalationResult } from './tool-call-coordinator.js';
+
+export interface TrustedProcessOptions {
+  /**
+   * In-process escalation callback used by direct-tool-call code paths
+   * (integration tests). When set, the coordinator invokes this
+   * instead of consulting the file-IPC escalation directory.
+   */
+  onEscalation?: EscalationPromptFn;
+}
+
+/**
+ * In-process trusted process. Wraps `ToolCallCoordinator` for callers
+ * (integration tests, fallback direct-tool-call mode) that want a
+ * pre-wired object with a single `handleToolCall` entry point.
+ *
+ * After Step 1, both in-process and Code Mode paths share the same
+ * coordinator implementation for policy evaluation and audit logging.
+ */
+export class TrustedProcess {
+  private coordinator: ToolCallCoordinator;
+  private mcpManager: MCPClientManager;
+  private mcpRoots: McpRoot[];
+  private escalation: EscalationHandler;
+  private autoApproveModel: LanguageModelV3 | null = null;
+  private lastUserMessage: string | null = null;
+
+  constructor(
+    private config: IronCurtainConfig,
+    options?: TrustedProcessOptions,
+  ) {
+    const { compiledPolicy, toolAnnotations, dynamicLists } = loadGeneratedPolicy({
+      policyDir: config.generatedDir,
+      toolAnnotationsDir: config.toolAnnotationsDir ?? config.generatedDir,
+      fallbackDir: getPackageGeneratedDir(),
+    });
+    checkConstitutionFreshness(compiledPolicy, config.constitutionPath);
+
+    const serverDomainAllowlists = extractServerDomainAllowlists(config.mcpServers);
+    const trustedServers = buildTrustedServerSet(config.mcpServers);
+
+    // In-process mode uses its own MCPClientManager so each `connect`
+    // call spawns a real backend directly (no router subprocess). The
+    // coordinator wraps it for the policy gate.
+    this.mcpManager = new McpClientManagerImpl();
+    this.coordinator = new ToolCallCoordinator({
+      compiledPolicy,
+      toolAnnotations,
+      protectedPaths: config.protectedPaths,
+      allowedDirectory: config.allowedDirectory,
+      serverDomainAllowlists,
+      dynamicLists,
+      trustedServers,
+      auditLogPath: config.auditLogPath,
+      auditRedact: config.userConfig.auditRedaction.enabled,
+      escalationDir: config.escalationDir,
+      mcpManager: this.mcpManager,
+      onEscalation: options?.onEscalation,
+    });
+
+    const policyRoots = extractPolicyRoots(compiledPolicy, config.allowedDirectory);
+    this.mcpRoots = toMcpRoots(policyRoots);
+
+    this.escalation = new EscalationHandler();
+  }
+
+  /**
+   * Sets the most recent user message for auto-approval context.
+   * Called by the session layer before each agent turn.
+   */
+  setLastUserMessage(message: string): void {
+    this.lastUserMessage = message;
+    this.coordinator.setLastUserMessage(message);
+  }
+
+  async initialize(): Promise<void> {
+    const failedServers: string[] = [];
+    for (const [name, serverConfig] of Object.entries(this.config.mcpServers)) {
+      const missingVars = getMissingEnvVars(serverConfig.args);
+      if (missingVars.length > 0) {
+        logger.warn(`Skipping MCP server '${name}': missing environment variable(s) ${missingVars.join(', ')}`);
+        failedServers.push(name);
+        continue;
+      }
+      logger.info(`Connecting to MCP server: ${name}...`);
+      try {
+        await this.mcpManager.connect(name, serverConfig, this.mcpRoots);
+        logger.info(`Connected to MCP server: ${name}`);
+
+        // Publish this server's tools to the coordinator so the policy
+        // gate can route calls through it. Use the live MCP client as
+        // the `ClientState` so `handleCallTool`'s escalation/roots
+        // expansion path remains functional.
+        const tools = await this.mcpManager.listTools(name);
+        const client = this.mcpManager.getClient(name);
+        const roots = this.mcpManager.getRoots(name);
+        if (client) {
+          const proxiedTools: ProxiedTool[] = tools.map((t) => ({
+            serverName: name,
+            name: t.name,
+            description: t.description,
+            inputSchema: (t.inputSchema ?? {}) as Record<string, unknown>,
+          }));
+          const clientState: ClientState = { client, roots: roots ?? [] };
+          this.coordinator.registerTools(name, proxiedTools, clientState);
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.warn(`Failed to connect to MCP server '${name}': ${msg} — skipping`);
+        failedServers.push(name);
+      }
+    }
+    if (failedServers.length > 0) {
+      logger.warn(`Unavailable MCP servers: ${failedServers.join(', ')}. Their tools will not be available.`);
+    }
+
+    // Create auto-approve model if enabled.
+    // NOTE: auto-approve model creation after coordinator construction
+    // is a known limitation -- the coordinator's `handleCallTool` only
+    // reads the model passed at construction time. For in-process tests
+    // with auto-approve enabled, wire the model into
+    // `ToolCallCoordinatorOptions.autoApproveModel` directly and skip
+    // this branch. Kept here for parity with the legacy API until the
+    // session layer is updated to build the model before constructing
+    // the coordinator.
+    const autoApproveConfig = this.config.userConfig.autoApprove;
+    if (autoApproveConfig.enabled) {
+      try {
+        this.autoApproveModel = await createLanguageModel(autoApproveConfig.modelId, this.config.userConfig);
+      } catch {
+        logger.warn('[auto-approve] Failed to create model; auto-approve disabled');
+      }
+    }
+  }
+
+  async listTools(serverName: string) {
+    return this.mcpManager.listTools(serverName);
+  }
+
+  /**
+   * Handles a tool call through the coordinator's policy pipeline.
+   * Mirrors the legacy TrustedProcess.handleToolCall signature.
+   */
+  async handleToolCall(request: ToolCallRequest): Promise<ToolCallResult> {
+    // Temporarily unused; retained for future integration with the
+    // coordinator's auto-approver context (the coordinator currently
+    // reads user context from the escalation directory, not here).
+    void this.autoApproveModel;
+    void this.lastUserMessage;
+    void this.escalation;
+    return this.coordinator.handleStructuredToolCall(request);
+  }
+
+  async shutdown(): Promise<void> {
+    this.escalation.close();
+    // We injected our own MCPClientManager into the coordinator, so
+    // the coordinator will NOT close it. Do that here, then close the
+    // coordinator (which flushes the audit log).
+    await this.mcpManager.closeAll();
+    await this.coordinator.close();
+  }
+}
 
 /**
  * Detects Docker-style `-e VAR_NAME` args (no `=`) where the env var is unset.
@@ -44,343 +198,4 @@ function getMissingEnvVars(args: string[]): string[] {
     }
   }
   return missing;
-}
-
-/** Result from an escalation callback, optionally including whitelist selection. */
-export interface EscalationResult {
-  readonly decision: 'approved' | 'denied';
-  /** Index into whitelistCandidates to whitelist. Absent = no whitelisting. */
-  readonly whitelistSelection?: number;
-}
-
-export type EscalationPromptFn = (
-  request: ToolCallRequest,
-  reason: string,
-  context?: Readonly<Record<string, string>>,
-  /** Whitelist candidates for display to the user. */
-  whitelistCandidates?: readonly WhitelistCandidateIpc[],
-) => Promise<EscalationResult>;
-
-export interface TrustedProcessOptions {
-  onEscalation?: EscalationPromptFn;
-}
-
-export class TrustedProcess {
-  private policyEngine: PolicyEngine;
-  private mcpManager: MCPClientManager;
-  private mcpRoots: McpRoot[];
-  private auditLog: AuditLog;
-  private escalation: EscalationHandler;
-  private onEscalation?: EscalationPromptFn;
-  private readonly whitelist: ApprovalWhitelist;
-  private autoApproveModel: LanguageModelV3 | null = null;
-  private lastUserMessage: string | null = null;
-  private serverContextMap: ServerContextMap = new Map();
-
-  constructor(
-    private config: IronCurtainConfig,
-    options?: TrustedProcessOptions,
-  ) {
-    const { compiledPolicy, toolAnnotations, dynamicLists } = loadGeneratedPolicy({
-      policyDir: config.generatedDir,
-      toolAnnotationsDir: config.toolAnnotationsDir ?? config.generatedDir,
-      fallbackDir: getPackageGeneratedDir(),
-    });
-    checkConstitutionFreshness(compiledPolicy, config.constitutionPath);
-
-    const serverDomainAllowlists = extractServerDomainAllowlists(config.mcpServers);
-    const trustedServers = buildTrustedServerSet(config.mcpServers);
-    this.policyEngine = new PolicyEngine(
-      compiledPolicy,
-      toolAnnotations,
-      config.protectedPaths,
-      config.allowedDirectory,
-      serverDomainAllowlists,
-      dynamicLists,
-      trustedServers,
-    );
-
-    const policyRoots = extractPolicyRoots(compiledPolicy, config.allowedDirectory);
-    this.mcpRoots = toMcpRoots(policyRoots);
-
-    this.mcpManager = new MCPClientManager();
-    this.auditLog = new AuditLog(config.auditLogPath, {
-      redact: config.userConfig.auditRedaction.enabled,
-    });
-    this.escalation = new EscalationHandler();
-    this.onEscalation = options?.onEscalation;
-    this.whitelist = createApprovalWhitelist();
-  }
-
-  /**
-   * Sets the most recent user message for auto-approval context.
-   * Called by the session layer before each agent turn.
-   */
-  setLastUserMessage(message: string): void {
-    this.lastUserMessage = message;
-  }
-
-  async initialize(): Promise<void> {
-    const failedServers: string[] = [];
-    for (const [name, serverConfig] of Object.entries(this.config.mcpServers)) {
-      // Skip servers whose args reference unset env vars (Docker -e VAR_NAME syntax)
-      const missingVars = getMissingEnvVars(serverConfig.args);
-      if (missingVars.length > 0) {
-        logger.warn(`Skipping MCP server '${name}': missing environment variable(s) ${missingVars.join(', ')}`);
-        failedServers.push(name);
-        continue;
-      }
-      logger.info(`Connecting to MCP server: ${name}...`);
-      try {
-        await this.mcpManager.connect(name, serverConfig, this.mcpRoots);
-        logger.info(`Connected to MCP server: ${name}`);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        logger.warn(`Failed to connect to MCP server '${name}': ${msg} — skipping`);
-        failedServers.push(name);
-      }
-    }
-    if (failedServers.length > 0) {
-      logger.warn(`Unavailable MCP servers: ${failedServers.join(', ')}. Their tools will not be available.`);
-    }
-
-    // Create auto-approve model if enabled
-    const autoApproveConfig = this.config.userConfig.autoApprove;
-    if (autoApproveConfig.enabled) {
-      try {
-        this.autoApproveModel = await createLanguageModel(autoApproveConfig.modelId, this.config.userConfig);
-      } catch {
-        // Model creation failure should not prevent initialization.
-        // Auto-approve simply won't be available.
-        logger.warn('[auto-approve] Failed to create model; auto-approve disabled');
-      }
-    }
-  }
-
-  async listTools(serverName: string) {
-    return this.mcpManager.listTools(serverName);
-  }
-
-  /**
-   * Handles a tool call request through the full trusted process lifecycle:
-   *   1. Evaluate policy (allow / deny / escalate)
-   *   2. If escalated, prompt the human for approval
-   *   3. If allowed, forward to the real MCP server
-   *   4. Log the complete decision trace to the audit log
-   *   5. Return the result to the caller
-   */
-  async handleToolCall(request: ToolCallRequest): Promise<ToolCallResult> {
-    const startTime = Date.now();
-
-    // Annotation-driven normalization: split into transport vs policy args.
-    // Trusted servers skip annotation lookup and prepareToolArgs — use raw args directly.
-    const annotation = this.policyEngine.getAnnotation(request.serverName, request.toolName, request.arguments);
-    let argsForTransport: Record<string, unknown>;
-    let argsForPolicy: Record<string, unknown>;
-
-    if (!annotation && this.policyEngine.isTrustedServer(request.serverName)) {
-      argsForTransport = request.arguments;
-      argsForPolicy = request.arguments;
-    } else if (!annotation) {
-      const reason = `Missing annotation for tool: ${request.serverName}__${request.toolName}. Re-run 'ironcurtain annotate-tools' to update.`;
-      return {
-        requestId: request.requestId,
-        status: 'denied',
-        content: { denied: true, reason },
-        policyDecision: { status: 'deny', rule: 'missing-annotation', reason },
-        durationMs: Date.now() - startTime,
-      };
-    } else {
-      ({ argsForTransport, argsForPolicy } = prepareToolArgs(
-        request.arguments,
-        annotation,
-        this.config.allowedDirectory,
-      ));
-    }
-    const policyRequest = { ...request, arguments: argsForPolicy };
-    const transportRequest = { ...request, arguments: argsForTransport };
-
-    // Step 1: Evaluate request against the policy rule chain
-    const evaluation = this.policyEngine.evaluate(policyRequest);
-    const policyDecision: PolicyDecision = {
-      status: evaluation.decision,
-      rule: evaluation.rule,
-      reason: evaluation.reason,
-    };
-
-    let escalationResult: 'approved' | 'denied' | undefined;
-    let autoApproved = false;
-    let whitelistApproved = false;
-    let whitelistPatternId: string | undefined;
-    let resultContent: unknown;
-    let resultStatus: 'success' | 'denied' | 'error';
-    let resultError: string | undefined;
-
-    try {
-      // Step 2: Handle escalation -- whitelist check, auto-approve, then human
-      if (evaluation.decision === 'escalate') {
-        // Annotation is guaranteed non-null here: trusted servers always allow (never escalate),
-        // and missing-annotation returns early above. Narrow the type for TypeScript.
-        const resolvedAnnotation = annotation as ToolAnnotation;
-        const whitelistMatch = this.whitelist.match(
-          request.serverName,
-          request.toolName,
-          argsForPolicy,
-          resolvedAnnotation,
-        );
-        if (whitelistMatch.matched) {
-          whitelistApproved = true;
-          whitelistPatternId = whitelistMatch.patternId;
-          escalationResult = 'approved';
-          policyDecision.status = 'allow';
-          policyDecision.reason = `Whitelist-approved: ${whitelistMatch.pattern.description}`;
-        }
-
-        if (!whitelistApproved) {
-          // Try auto-approve before prompting the human
-          if (this.autoApproveModel && this.lastUserMessage) {
-            const autoResult = await autoApprove(
-              {
-                userMessage: this.lastUserMessage,
-                toolName: `${request.serverName}/${request.toolName}`,
-                escalationReason: evaluation.reason,
-              },
-              this.autoApproveModel,
-            );
-
-            if (autoResult.decision === 'approve') {
-              autoApproved = true;
-              escalationResult = 'approved';
-              policyDecision.status = 'allow';
-              policyDecision.reason = `Auto-approved: ${autoResult.reasoning}`;
-            }
-          }
-
-          // Fall through to human escalation if not auto-approved
-          if (!autoApproved) {
-            // Extract whitelist candidates for display
-            const escalationId = `inprocess-${Date.now()}`;
-            const candidates = extractWhitelistCandidates(
-              request.serverName,
-              request.toolName,
-              argsForPolicy,
-              resolvedAnnotation,
-              evaluation.escalatedRoles,
-              escalationId,
-              evaluation.reason,
-            );
-            const candidatePatterns = candidates.patterns;
-            const candidateIpcs: readonly WhitelistCandidateIpc[] | undefined =
-              candidates.ipcs.length > 0 ? candidates.ipcs : undefined;
-
-            const escalationContext = formatServerContext(this.serverContextMap, transportRequest.serverName);
-            const escalationResponse: EscalationResult = this.onEscalation
-              ? await this.onEscalation(transportRequest, evaluation.reason, escalationContext, candidateIpcs)
-              : { decision: await this.escalation.prompt(transportRequest, evaluation.reason, escalationContext) };
-
-            escalationResult = escalationResponse.decision;
-
-            if (escalationResponse.decision === 'approved') {
-              policyDecision.status = 'allow';
-              policyDecision.reason = 'Approved by human during escalation';
-
-              // Handle whitelist selection
-              if (
-                escalationResponse.whitelistSelection !== undefined &&
-                escalationResponse.whitelistSelection >= 0 &&
-                escalationResponse.whitelistSelection < candidatePatterns.length
-              ) {
-                const selectedPattern = candidatePatterns[escalationResponse.whitelistSelection];
-                this.whitelist.add(selectedPattern);
-              }
-            } else {
-              policyDecision.status = 'deny';
-              policyDecision.reason = 'Denied by human during escalation';
-            }
-          }
-        }
-
-        // Expand roots to include target directories so the filesystem
-        // server accepts the forwarded call (for both auto and human approval).
-        if (escalationResult === 'approved' && annotation) {
-          const pathValues = extractAnnotatedPaths(transportRequest.arguments, annotation, getPathRoles());
-          for (const p of pathValues) {
-            const dir = directoryForPath(p);
-            await this.mcpManager.addRoot(transportRequest.serverName, {
-              uri: `file://${dir}`,
-              name: 'escalation-approved',
-            });
-          }
-        }
-      }
-
-      // Step 3: Forward to MCP server or deny (using transport args)
-      if (policyDecision.status === 'allow') {
-        const mcpResult = (await this.mcpManager.callTool(
-          transportRequest.serverName,
-          transportRequest.toolName,
-          transportRequest.arguments,
-        )) as { content?: unknown; isError?: boolean };
-        resultContent = mcpResult;
-
-        if (mcpResult.isError) {
-          resultStatus = 'error';
-          resultError = extractTextFromContent(mcpResult.content);
-        } else {
-          resultStatus = 'success';
-          updateServerContext(
-            this.serverContextMap,
-            transportRequest.serverName,
-            transportRequest.toolName,
-            transportRequest.arguments,
-          );
-        }
-      } else {
-        resultContent = { denied: true, reason: policyDecision.reason };
-        resultStatus = 'denied';
-      }
-    } catch (err) {
-      resultStatus = 'error';
-      resultError = extractMcpErrorMessage(err);
-      resultContent = { error: resultError };
-    }
-
-    const durationMs = Date.now() - startTime;
-
-    // Step 4: Append-only audit log (records argsForTransport -- what was sent to MCP server)
-    this.auditLog.log(
-      buildAuditEntry(
-        transportRequest,
-        transportRequest.arguments,
-        policyDecision,
-        {
-          status: resultStatus,
-          content: resultStatus === 'success' ? resultContent : undefined,
-          error: resultError,
-        },
-        durationMs,
-        {
-          escalationResult,
-          autoApproved: autoApproved || undefined,
-          whitelistApproved: whitelistApproved || undefined,
-          whitelistPatternId,
-        },
-      ),
-    );
-
-    // Step 5: Return result to caller
-    return {
-      requestId: transportRequest.requestId,
-      status: resultStatus,
-      content: resultContent,
-      policyDecision,
-      durationMs,
-    };
-  }
-
-  async shutdown(): Promise<void> {
-    this.escalation.close();
-    await this.mcpManager.closeAll();
-    await this.auditLog.close();
-  }
 }

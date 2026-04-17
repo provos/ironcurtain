@@ -107,6 +107,24 @@ export class MCPClientManager {
     await Promise.race([refreshed, timeout]);
   }
 
+  /**
+   * Returns the live MCP `Client` for a connected server, or undefined
+   * when the server is not connected. Exposed so the coordinator can
+   * wire an existing client through `ClientState` for
+   * `handleCallTool`'s escalation/roots-expansion paths.
+   *
+   * Callers must not mutate client internals; use the manager's public
+   * methods (`callTool`, `addRoot`) for all state-changing operations.
+   */
+  getClient(serverName: string): Client | undefined {
+    return this.servers.get(serverName)?.client;
+  }
+
+  /** Returns the root list tracked for a connected server, if any. */
+  getRoots(serverName: string): McpRoot[] | undefined {
+    return this.servers.get(serverName)?.roots;
+  }
+
   async listTools(serverName: string): Promise<{ name: string; description?: string; inputSchema: unknown }[]> {
     const server = this.servers.get(serverName);
     if (!server) {

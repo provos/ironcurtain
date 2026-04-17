@@ -485,7 +485,6 @@ describe('Proxy MCP Server Integration', { timeout: 30_000 }, () => {
       const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
       const { StdioClientTransport } = await import('@modelcontextprotocol/sdk/client/stdio.js');
 
-      const auditLogPath = join(tempDir, 'section6-audit.jsonl');
       const generatedDir = resolve(__dirname, '..', 'src', 'config', 'generated');
 
       transport = new StdioClientTransport({
@@ -496,7 +495,6 @@ describe('Proxy MCP Server Integration', { timeout: 30_000 }, () => {
           SERVER_FILTER: 'proxy',
           MCP_SERVERS_CONFIG: '{}',
           MITM_CONTROL_ADDR: `unix://${controlSocketPath}`,
-          AUDIT_LOG_PATH: auditLogPath,
           GENERATED_DIR: generatedDir,
           ALLOWED_DIRECTORY: tempDir,
           PROTECTED_PATHS: '[]',
@@ -566,16 +564,24 @@ describe('Proxy MCP Server Integration', { timeout: 30_000 }, () => {
       socket?.destroy();
     });
 
-    it('add_proxy_domain is escalated by the policy engine', async () => {
-      // No ESCALATION_DIR is set, so escalation auto-denies with an error message
+    it('add_proxy_domain passes through to the virtual proxy tool handler', async () => {
+      // The subprocess is a pure pass-through relay; policy evaluation is
+      // the coordinator's responsibility. The subprocess handles virtual
+      // proxy tools locally via handleVirtualProxyTool.
       const result = await mcpClient.callTool({
         name: 'add_proxy_domain',
         arguments: { domain: 'section6-add.example.com', justification: 'integration test' },
       });
-      expect(result.isError).toBe(true);
+      expect(result.isError).toBeFalsy();
       const content = result.content as Array<{ type: string; text: string }>;
-      expect(content[0].text).toContain('ESCALATION REQUIRED');
-      expect(content[0].text).toContain('no escalation handler');
+      const data = JSON.parse(content[0].text);
+      expect(data.status).toBe('added');
+      expect(data.domain).toBe('section6-add.example.com');
+
+      // Verify MITM proxy accepts CONNECT to the newly added domain
+      const { socket, statusCode } = await sendConnect(mitmSocketPath, 'section6-add.example.com', 443);
+      expect(statusCode).toBe(200);
+      socket?.destroy();
     });
   });
 });

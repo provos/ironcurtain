@@ -3,16 +3,18 @@ import { ROOTS_REFRESH_TIMEOUT_MS } from '../src/trusted-process/mcp-client-mana
 import {
   parseProxyEnvConfig,
   validateSandboxAvailability,
+  selectTransportConfig,
+} from '../src/trusted-process/mcp-proxy-server.js';
+import {
   buildToolMap,
   buildAuditEntry,
   handleCallTool,
   validateToolArguments,
-  selectTransportConfig,
   isUserContextTrusted,
   type ProxiedTool,
   type CallToolDeps,
   type ClientState,
-} from '../src/trusted-process/mcp-proxy-server.js';
+} from '../src/trusted-process/tool-call-pipeline.js';
 import { checkSandboxAvailability, type ResolvedSandboxConfig } from '../src/trusted-process/sandbox-integration.js';
 import { createApprovalWhitelist } from '../src/trusted-process/approval-whitelist.js';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
@@ -214,21 +216,17 @@ describe('parseProxyEnvConfig', () => {
     const servers = { filesystem: { command: 'node', args: ['server.js'] } };
     process.env.MCP_SERVERS_CONFIG = JSON.stringify(servers);
     process.env.GENERATED_DIR = '/tmp/generated';
-    process.env.AUDIT_LOG_PATH = '/tmp/audit.jsonl';
     process.env.PROTECTED_PATHS = JSON.stringify(['/etc/passwd']);
     process.env.SESSION_LOG_PATH = '/tmp/session.log';
     process.env.ALLOWED_DIRECTORY = '/tmp/sandbox';
-    process.env.ESCALATION_DIR = '/tmp/escalation';
     process.env.SANDBOX_POLICY = 'enforce';
 
     const config = parseProxyEnvConfig();
 
-    expect(config.auditLogPath).toBe('/tmp/audit.jsonl');
     expect(config.generatedDir).toBe('/tmp/generated');
     expect(config.protectedPaths).toEqual(['/etc/passwd']);
     expect(config.sessionLogPath).toBe('/tmp/session.log');
     expect(config.allowedDirectory).toBe('/tmp/sandbox');
-    expect(config.escalationDir).toBe('/tmp/escalation');
     expect(config.sandboxPolicy).toBe('enforce');
     expect(config.serversConfig).toEqual(servers);
   });
@@ -240,11 +238,9 @@ describe('parseProxyEnvConfig', () => {
 
     const config = parseProxyEnvConfig();
 
-    expect(config.auditLogPath).toBe('./audit.jsonl');
     expect(config.protectedPaths).toEqual([]);
     expect(config.sessionLogPath).toBeUndefined();
     expect(config.allowedDirectory).toBeUndefined();
-    expect(config.escalationDir).toBeUndefined();
     expect(config.sandboxPolicy).toBe('warn');
     expect(config.serverCredentials).toEqual({});
   });
