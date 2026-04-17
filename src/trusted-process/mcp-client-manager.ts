@@ -41,13 +41,10 @@ export class MCPClientManager {
       },
     );
 
-    // Mutable copy -- addRoot() pushes to this array.
     const mutableRoots = roots ? [...roots] : undefined;
     const managed: ManagedServer = { client, transport, roots: mutableRoots };
 
     // When the server asks for roots, return the current set.
-    // If a rootsRefreshed callback is registered (from addRoot),
-    // resolve it so the caller knows the server has the latest roots.
     if (mutableRoots) {
       client.setRequestHandler(ListRootsRequestSchema, () => {
         if (managed.rootsRefreshed) {
@@ -73,48 +70,13 @@ export class MCPClientManager {
   }
 
   /**
-   * Adds a root directory to a connected server and waits for the
-   * server to fetch the updated root list. This ensures the server's
-   * allowed directories include the new root before any tool call
-   * that depends on it is forwarded.
-   *
-   * No-op if the root URI is already present.
-   */
-  async addRoot(serverName: string, root: McpRoot): Promise<void> {
-    const server = this.servers.get(serverName);
-    if (!server?.roots) return;
-
-    // Deduplicate
-    if (server.roots.some((r) => r.uri === root.uri)) return;
-    server.roots.push(root);
-
-    // Wait for the server to call roots/list after we notify it.
-    let timer: ReturnType<typeof setTimeout>;
-    const refreshed = new Promise<void>((resolve) => {
-      server.rootsRefreshed = () => {
-        clearTimeout(timer);
-        resolve();
-      };
-    });
-    const timeout = new Promise<void>((resolve) => {
-      timer = setTimeout(() => {
-        server.rootsRefreshed = undefined;
-        resolve();
-      }, ROOTS_REFRESH_TIMEOUT_MS);
-      timer.unref();
-    });
-    await server.client.sendRootsListChanged();
-    await Promise.race([refreshed, timeout]);
-  }
-
-  /**
    * Returns the live MCP `Client` for a connected server, or undefined
    * when the server is not connected. Exposed so the coordinator can
    * wire an existing client through `ClientState` for
    * `handleCallTool`'s escalation/roots-expansion paths.
    *
    * Callers must not mutate client internals; use the manager's public
-   * methods (`callTool`, `addRoot`) for all state-changing operations.
+   * methods (`callTool`) for state-changing operations.
    */
   getClient(serverName: string): Client | undefined {
     return this.servers.get(serverName)?.client;

@@ -7,9 +7,6 @@
  * knows about, with the policy gate running in the same Node process as
  * the caller (no stdio, no subprocess hop).
  *
- * See the design at `docs/designs/workflow-container-lifecycle.md`
- * §2.1 "UTCP integration: direct in-process hook" for the full shape.
- *
  * The protocol is idempotent: `registerIronCurtainProtocol()` can be
  * called multiple times safely (subsequent calls are no-ops).
  */

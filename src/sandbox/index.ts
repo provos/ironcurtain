@@ -361,9 +361,7 @@ export class Sandbox {
 
   /**
    * Exposes the policy coordinator once the sandbox is initialized.
-   * Returns `null` before `initialize()` completes. Used by the workflow
-   * orchestrator (future §2.2) to attach a control socket to the
-   * coordinator.
+   * Returns `null` before `initialize()` completes.
    */
   getCoordinator(): ToolCallCoordinator | null {
     return this.coordinator;

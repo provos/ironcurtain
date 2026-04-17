@@ -5,10 +5,6 @@
  * annotation-driven normalization, policy evaluation, escalation
  * (file-IPC and in-process), auto-approval, circuit breaking,
  * whitelist matching, roots expansion, dispatch, and audit logging.
- *
- * Previously lived in `mcp-proxy-server.ts` alongside transport code.
- * Extracted so the coordinator (or any in-process caller) can invoke
- * the pipeline without coupling to the subprocess's MCP transport.
  */
 
 import { existsSync, readFileSync, unlinkSync } from 'node:fs';
@@ -35,9 +31,15 @@ import {
   extractWhitelistCandidates,
   type ApprovalWhitelist,
   type WhitelistCandidateIpc,
-  type WhitelistPattern,
 } from './approval-whitelist.js';
 import { handleVirtualProxyTool, type ControlApiClient } from '../docker/proxy-tools.js';
+import {
+  ERROR_PREFIX_DENIED,
+  ERROR_PREFIX_ESCALATION_REQUIRED,
+  ERROR_PREFIX_ESCALATION_DENIED,
+  ERROR_PREFIX_UNKNOWN_ARGS,
+  ERROR_PREFIX_MISSING_ANNOTATION,
+} from './error-prefixes.js';
 import { CompatibilityCallToolResultSchema } from '@modelcontextprotocol/sdk/types.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 
@@ -51,14 +53,6 @@ export interface ProxiedTool {
   description?: string;
   inputSchema: Record<string, unknown>;
 }
-
-/**
- * Pending whitelist candidates keyed by escalation ID.
- * Populated when a request file is written with candidates;
- * consumed when the response comes back with a selection.
- * Module-level state -- the pipeline is used within a single process.
- */
-const pendingWhitelistCandidates = new Map<string, Array<Omit<WhitelistPattern, 'id'>>>();
 
 interface EscalationFileRequest {
   escalationId: string;
@@ -183,7 +177,6 @@ function getEscalationTimeoutMs(): number {
   return DEFAULT_ESCALATION_TIMEOUT_SECONDS * 1000;
 }
 
-/** Silently removes a file. Ignores errors (e.g. file already gone). */
 function tryUnlink(path: string): void {
   try {
     unlinkSync(path);
@@ -294,7 +287,7 @@ export function validateToolArguments(
     .sort()
     .map((k) => `"${k}"`)
     .join(', ');
-  return `Unknown argument(s): ${unknownList}. Valid parameters are: ${validList}`;
+  return `${ERROR_PREFIX_UNKNOWN_ARGS} ${unknownList}. Valid parameters are: ${validList}`;
 }
 
 /** Builds a lookup map from tool name to ProxiedTool for routing. */
@@ -443,7 +436,7 @@ export async function handleCallTool(
   const isTrusted = !annotation && deps.policyEngine.isTrustedServer(toolInfo.serverName);
 
   if (!annotation && !isTrusted) {
-    const reason = `Missing annotation for tool: ${toolInfo.serverName}__${toolInfo.name}. Re-run 'ironcurtain annotate-tools' to update.`;
+    const reason = `${ERROR_PREFIX_MISSING_ANNOTATION} ${toolInfo.serverName}__${toolInfo.name}. Re-run 'ironcurtain annotate-tools' to update.`;
     return {
       content: [{ type: 'text', text: reason }],
       isError: true,
@@ -593,7 +586,7 @@ export async function handleCallTool(
           content: [
             {
               type: 'text',
-              text: `ESCALATION REQUIRED: ${evaluation.reason}. Action denied (no escalation handler).`,
+              text: `${ERROR_PREFIX_ESCALATION_REQUIRED} ${evaluation.reason}. Action denied (no escalation handler).`,
             },
           ],
           isError: true,
@@ -655,85 +648,71 @@ export async function handleCallTool(
           escalationId,
           evaluation.reason,
         );
-        if (candidatePatterns.length > 0 && deps.escalationDir) {
-          // Only file-IPC escalation needs the pending-candidates cache
-          // (the response file carries a numeric index). In-process
-          // callers receive the full patterns via the callback.
-          pendingWhitelistCandidates.set(escalationId, candidatePatterns);
-        }
-
         const escalationContext = formatServerContext(deps.serverContextMap, toolInfo.serverName);
 
-        try {
-          // One of these paths is guaranteed to be taken: we returned
-          // early above when both `onEscalation` and `escalationDir`
-          // were unset. Declare `response` with a default to satisfy
-          // TS's control-flow analysis without weakening runtime
-          // guarantees.
-          let response: { decision: 'approved' | 'denied'; whitelistSelection?: number } = {
-            decision: 'denied',
-          };
-          if (deps.onEscalation) {
-            // In-process path: invoke the caller's callback synchronously
-            // in async terms and use its return value directly.
-            response = await deps.onEscalation(
-              {
-                requestId: request.requestId,
-                serverName: request.serverName,
-                toolName: request.toolName,
-                arguments: argsForTransport,
-                timestamp: request.timestamp,
-              },
-              evaluation.reason,
-              escalationContext,
-              candidateIpcs.length > 0 ? candidateIpcs : undefined,
-            );
-          } else if (deps.escalationDir !== undefined) {
-            // File-IPC path (unchanged): the session on the other side
-            // of the escalation directory writes the response file.
-            response = await waitForEscalationDecision(deps.escalationDir, {
-              escalationId,
+        // One of these paths is guaranteed to be taken: we returned
+        // early above when both `onEscalation` and `escalationDir`
+        // were unset. Declare `response` with a default to satisfy
+        // TS's control-flow analysis without weakening runtime
+        // guarantees.
+        let response: { decision: 'approved' | 'denied'; whitelistSelection?: number } = {
+          decision: 'denied',
+        };
+        if (deps.onEscalation) {
+          // In-process path: invoke the caller's callback synchronously
+          // in async terms and use its return value directly.
+          response = await deps.onEscalation(
+            {
+              requestId: request.requestId,
               serverName: request.serverName,
               toolName: request.toolName,
               arguments: argsForTransport,
-              reason: evaluation.reason,
-              context: escalationContext,
-              whitelistCandidates: candidateIpcs.length > 0 ? candidateIpcs : undefined,
-            });
-          }
+              timestamp: request.timestamp,
+            },
+            evaluation.reason,
+            escalationContext,
+            candidateIpcs.length > 0 ? candidateIpcs : undefined,
+          );
+        } else if (deps.escalationDir !== undefined) {
+          // File-IPC path (unchanged): the session on the other side
+          // of the escalation directory writes the response file.
+          response = await waitForEscalationDecision(deps.escalationDir, {
+            escalationId,
+            serverName: request.serverName,
+            toolName: request.toolName,
+            arguments: argsForTransport,
+            reason: evaluation.reason,
+            context: escalationContext,
+            whitelistCandidates: candidateIpcs.length > 0 ? candidateIpcs : undefined,
+          });
+        }
 
-          if (response.decision === 'denied') {
-            const deniedDecision: PolicyDecision = {
-              status: 'deny',
-              rule: policyDecision.rule,
-              reason: 'Denied by human during escalation',
-            };
-            policyDecision.status = 'deny';
-            policyDecision.reason = 'Denied by human during escalation';
-            logAudit({ status: 'denied', error: evaluation.reason }, 0, 'denied');
-            return {
-              content: [{ type: 'text', text: `ESCALATION DENIED: ${evaluation.reason}` }],
-              isError: true,
-              _policyDecision: deniedDecision,
-            };
-          }
+        if (response.decision === 'denied') {
+          const deniedDecision: PolicyDecision = {
+            status: 'deny',
+            rule: policyDecision.rule,
+            reason: 'Denied by human during escalation',
+          };
+          logAudit({ status: 'denied', error: evaluation.reason }, 0, 'denied');
+          return {
+            content: [{ type: 'text', text: `${ERROR_PREFIX_ESCALATION_DENIED} ${evaluation.reason}` }],
+            isError: true,
+            _policyDecision: deniedDecision,
+          };
+        }
 
-          escalationResult = 'approved';
-          policyDecision.status = 'allow';
-          policyDecision.reason = 'Approved by human during escalation';
+        escalationResult = 'approved';
+        policyDecision.status = 'allow';
+        policyDecision.reason = 'Approved by human during escalation';
 
-          // Handle whitelist selection from the response. For in-process
-          // callers, the candidates are supplied directly; for file-IPC
-          // callers, they are looked up from the pending cache.
-          if (response.whitelistSelection !== undefined) {
-            if (response.whitelistSelection >= 0 && response.whitelistSelection < candidatePatterns.length) {
-              const selectedPattern = candidatePatterns[response.whitelistSelection];
-              deps.whitelist.add(selectedPattern);
-            }
+        // Handle whitelist selection from the response. For in-process
+        // callers, the candidates are supplied directly; for file-IPC
+        // callers, they are looked up from the pending cache.
+        if (response.whitelistSelection !== undefined) {
+          if (response.whitelistSelection >= 0 && response.whitelistSelection < candidatePatterns.length) {
+            const selectedPattern = candidatePatterns[response.whitelistSelection];
+            deps.whitelist.add(selectedPattern);
           }
-        } finally {
-          // Issue 12: ensure cleanup even if the handler throws.
-          pendingWhitelistCandidates.delete(escalationId);
         }
       }
     }
@@ -755,7 +734,7 @@ export async function handleCallTool(
   if (evaluation.decision === 'deny') {
     logAudit({ status: 'denied', error: evaluation.reason }, 0);
     return {
-      content: [{ type: 'text', text: `DENIED: ${evaluation.reason}` }],
+      content: [{ type: 'text', text: `${ERROR_PREFIX_DENIED} ${evaluation.reason}` }],
       isError: true,
       _policyDecision: { ...policyDecision },
     };

@@ -3,24 +3,17 @@
  *
  * Centralizes the full tool-call pipeline (validation, normalization,
  * policy evaluation, escalation, circuit breaking, dispatch, audit) into
- * a single process-local class. Replaces the per-subprocess copies of
- * PolicyEngine, AuditLog, CallCircuitBreaker, ApprovalWhitelist, and
- * ServerContextMap that used to live in each mcp-proxy-server.ts
- * subprocess.
+ * a single process-local class.
  *
  * The coordinator holds two mutexes:
  *   - tool-call mutex: serializes concurrent `handleToolCall` invocations
  *     so the three in-memory caches (approval whitelist, circuit breaker,
  *     server-context map) cannot race against each other.
- *   - policy mutex: reserved for future `loadPolicy` swaps (§2.2). Not
- *     currently wired into any mutator; present so upstream code can rely
- *     on its existence for Step 2.
+ *   - policy mutex: placeholder for policy hot-swap. Not currently wired
+ *     into any mutator.
  *
  * Subprocesses spawned by `MCPClientManager` are pure MCP relays that
  * forward calls to the real backend without any policy evaluation.
- *
- * See `docs/designs/workflow-container-lifecycle.md` §2.1 for the full
- * design.
  */
 
 import type { LanguageModelV3 } from '@ai-sdk/provider';
@@ -44,6 +37,14 @@ import {
   type ToolCallResponse,
 } from './tool-call-pipeline.js';
 import type { ResolvedSandboxConfig } from './sandbox-integration.js';
+import {
+  ERROR_PREFIX_DENIED,
+  ERROR_PREFIX_ESCALATION_REQUIRED,
+  ERROR_PREFIX_ESCALATION_DENIED,
+  ERROR_PREFIX_CIRCUIT_BREAKER,
+  ERROR_PREFIX_UNKNOWN_ARGS,
+  ERROR_PREFIX_MISSING_ANNOTATION,
+} from './error-prefixes.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -62,10 +63,6 @@ export interface EscalationResult {
 /**
  * Callback invoked by the coordinator when policy decides to escalate and
  * neither the whitelist nor the auto-approver resolved the request.
- *
- * Not used directly by `handleCallTool` in Step 1 (that path consumes the
- * file-IPC directory). Kept for parity with `TrustedProcess` and for
- * future wiring into in-process escalation hooks.
  */
 export type EscalationPromptFn = (
   request: ToolCallRequest,
@@ -149,8 +146,6 @@ export class ToolCallCoordinator {
 
   /** Tool registry keyed by tool name. */
   private readonly toolMap = new Map<string, CoordinatorTool>();
-  /** Tracks tools per backend server. */
-  private readonly toolsByServer = new Map<string, CoordinatorTool[]>();
   /** Client states used for roots expansion on escalation. */
   private readonly clientStates = new Map<string, ClientState>();
 
@@ -185,12 +180,10 @@ export class ToolCallCoordinator {
     }
   }
 
-  /** Exposes the internal `MCPClientManager` for wiring (subprocess setup). */
   getMcpManager(): MCPClientManager {
     return this.mcpManager;
   }
 
-  /** Exposes the internal `PolicyEngine` for read-only callers. */
   getPolicyEngine(): PolicyEngine {
     return this.policyEngine;
   }
@@ -204,18 +197,14 @@ export class ToolCallCoordinator {
    * for real subprocess clients).
    */
   registerTools(serverName: string, tools: CoordinatorTool[], clientState?: ClientState): void {
-    const list: CoordinatorTool[] = [];
     for (const tool of tools) {
       this.toolMap.set(tool.name, tool);
-      list.push(tool);
     }
-    this.toolsByServer.set(serverName, list);
     if (clientState) {
       this.clientStates.set(serverName, clientState);
     }
   }
 
-  /** Returns all registered tools (for catalog/help construction). */
   getRegisteredTools(): CoordinatorTool[] {
     return [...this.toolMap.values()];
   }
@@ -355,16 +344,14 @@ export class ToolCallCoordinator {
   }
 
   /**
-   * Swap the policy engine and rotate the audit log. Reserved for
-   * Step 2; currently a stub so upstream control-socket wiring can
-   * compile. The policy mutex is not acquired here because there is
-   * nothing to protect yet -- Step 2 will introduce the guarded swap.
+   * Swap the policy engine and rotate the audit log. Placeholder for
+   * policy hot-swap; not yet implemented. The policy mutex is not
+   * acquired here because there is nothing to protect yet.
    */
-  // eslint-disable-next-line @typescript-eslint/require-await -- Step 2 impl will be async; stub throws synchronously
+  // eslint-disable-next-line @typescript-eslint/require-await -- future impl will be async; stub throws synchronously
   async loadPolicy(req: { persona: string; version: number; policyDir: string; auditPath: string }): Promise<void> {
-    // Reference the arg so lint doesn't flag it; Step 2 will use it.
     void req;
-    throw new Error('ToolCallCoordinator.loadPolicy is not implemented in Step 1.');
+    throw new Error('ToolCallCoordinator.loadPolicy is not yet implemented.');
   }
 
   /** Releases all held resources (MCP subprocesses, audit stream). */
@@ -387,14 +374,14 @@ export class ToolCallCoordinator {
 function extractStatusFromErrorContent(content: unknown): 'denied' | 'error' {
   const text = extractTextFromContent(content) ?? '';
   if (
-    text.startsWith('DENIED:') ||
-    text.startsWith('ESCALATION REQUIRED:') ||
-    text.startsWith('ESCALATION DENIED:') ||
-    text.startsWith('CIRCUIT BREAKER:')
+    text.startsWith(ERROR_PREFIX_DENIED) ||
+    text.startsWith(ERROR_PREFIX_ESCALATION_REQUIRED) ||
+    text.startsWith(ERROR_PREFIX_ESCALATION_DENIED) ||
+    text.startsWith(ERROR_PREFIX_CIRCUIT_BREAKER)
   ) {
     return 'denied';
   }
-  if (text.startsWith('Unknown argument(s):') || text.startsWith('Missing annotation for tool:')) {
+  if (text.startsWith(ERROR_PREFIX_UNKNOWN_ARGS) || text.startsWith(ERROR_PREFIX_MISSING_ANNOTATION)) {
     return 'denied';
   }
   return 'error';

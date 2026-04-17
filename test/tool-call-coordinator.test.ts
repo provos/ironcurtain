@@ -424,8 +424,8 @@ describe('ToolCallCoordinator', () => {
     });
   });
 
-  describe('loadPolicy (Step 1 stub)', () => {
-    it('throws a descriptive error until Step 2 lands', async () => {
+  describe('loadPolicy (stub)', () => {
+    it('throws until policy hot-swap is implemented', async () => {
       const { coordinator } = makeCoordinator('load-policy');
       try {
         await expect(
@@ -435,7 +435,7 @@ describe('ToolCallCoordinator', () => {
             policyDir: '/tmp/dummy',
             auditPath: '/tmp/audit.jsonl',
           }),
-        ).rejects.toThrow(/not implemented in Step 1/);
+        ).rejects.toThrow(/not yet implemented/);
       } finally {
         await coordinator.close();
       }

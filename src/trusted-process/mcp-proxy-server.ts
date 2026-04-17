@@ -76,25 +76,6 @@ import {
   type ControlApiClient,
 } from '../docker/proxy-tools.js';
 
-// Re-export pipeline types for backward compatibility.
-// Consumers that previously imported these from mcp-proxy-server.ts
-// can continue to do so, but should migrate to tool-call-pipeline.ts.
-export {
-  type ProxiedTool,
-  type ClientState,
-  type CallToolDeps,
-  type ToolCallResponse,
-  type InProcessEscalation,
-  type InProcessEscalationFn,
-  extractTextFromContent,
-  validateToolArguments,
-  buildToolMap,
-  buildAuditEntry,
-  handleCallTool,
-  isUserContextTrusted,
-  ROOTS_RACE_RETRY_DELAY_MS,
-} from './tool-call-pipeline.js';
-
 import { type ProxiedTool, type ClientState, buildToolMap } from './tool-call-pipeline.js';
 
 // ---------------------------------------------------------------------------
