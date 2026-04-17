@@ -32,8 +32,8 @@ import type {
 } from '../session/types.js';
 import type { IronCurtainConfig } from '../config/types.js';
 import type { DockerInfrastructure } from './docker-infrastructure.js';
+import { destroyDockerInfrastructure } from './docker-infrastructure.js';
 import { AuditLogTailer } from './audit-log-tailer.js';
-import { cleanupContainers } from './container-lifecycle.js';
 import { SessionNotReadyError, SessionClosedError } from '../session/errors.js';
 import { createEscalationWatcher, atomicWriteJsonSync } from '../escalation/escalation-watcher.js';
 import type { EscalationWatcher } from '../escalation/escalation-watcher.js';
@@ -315,15 +315,7 @@ export class DockerAgentSession implements Session {
     this.escalationWatcher?.stop();
     this.auditTailer?.stop();
 
-    await cleanupContainers(this.infra.docker, {
-      containerId: this.infra.containerId,
-      sidecarContainerId: this.infra.sidecarContainerId ?? null,
-      networkName: this.infra.internalNetwork ?? null,
-    });
-
-    // Stop proxies
-    await this.infra.mitmProxy.stop();
-    await this.infra.proxy.stop();
+    await destroyDockerInfrastructure(this.infra);
   }
 
   // --- Private helpers ---

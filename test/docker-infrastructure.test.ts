@@ -3,7 +3,11 @@ import { mkdtempSync, mkdirSync, existsSync, readFileSync, writeFileSync, rmSync
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { DockerInfrastructure, PreContainerInfrastructure } from '../src/docker/docker-infrastructure.js';
-import { prepareConversationStateDir, createSessionContainers } from '../src/docker/docker-infrastructure.js';
+import {
+  prepareConversationStateDir,
+  createSessionContainers,
+  destroyDockerInfrastructure,
+} from '../src/docker/docker-infrastructure.js';
 import type { ConversationStateConfig, AgentAdapter, AgentId } from '../src/docker/agent-adapter.js';
 import type { DockerProxy } from '../src/docker/code-mode-proxy.js';
 import type { MitmProxy } from '../src/docker/mitm-proxy.js';
@@ -550,5 +554,230 @@ describe('createSessionContainers', () => {
     // The per-session internal network must also be cleaned up.
     const expectedNetworkName = getInternalNetworkName('test-session'.substring(0, 12));
     expect(removedNetworks).toContain(expectedNetworkName);
+  });
+});
+
+// --- destroyDockerInfrastructure tests ---
+//
+// These tests exercise the teardown counterpart to createDockerInfrastructure().
+// They drive a scripted DockerInfrastructure bundle with a mock DockerManager
+// and mock proxies to verify:
+//   - all teardown steps run, in the right order
+//   - UDS mode skips sidecar + network steps (those fields are undefined in
+//     the bundle, so cleanupContainers has nothing to clean)
+//   - TCP mode runs sidecar + network steps
+//   - a failure in one step does not prevent subsequent steps from running
+//     (error tolerance: callers in recovery paths depend on this function
+//     never throwing)
+
+/**
+ * Tracked proxy: records whether `stop()` was called and optionally throws.
+ * Used to assert ordering across proxy stops and to inject failures.
+ */
+interface TrackedProxy {
+  stop: () => Promise<void>;
+  stopped: boolean;
+}
+
+function makeTrackedMitmProxy(opts: { throwOnStop?: boolean } = {}): MitmProxy & TrackedProxy {
+  const tracked = {
+    stopped: false,
+    async start() {
+      return { socketPath: '/tmp/test-mitm-proxy.sock' };
+    },
+    async stop() {
+      tracked.stopped = true;
+      if (opts.throwOnStop) throw new Error('mitm-proxy stop failed');
+    },
+  } as unknown as MitmProxy & TrackedProxy;
+  return tracked;
+}
+
+function makeTrackedDockerProxy(opts: { throwOnStop?: boolean } = {}): DockerProxy & TrackedProxy {
+  const tracked = {
+    socketPath: '/tmp/test-proxy.sock',
+    port: undefined,
+    stopped: false,
+    async start() {},
+    getHelpData() {
+      return { serverDescriptions: {}, toolsByServer: {} };
+    },
+    async stop() {
+      tracked.stopped = true;
+      if (opts.throwOnStop) throw new Error('docker-proxy stop failed');
+    },
+  } as unknown as DockerProxy & TrackedProxy;
+  return tracked;
+}
+
+/**
+ * Builds a full DockerInfrastructure bundle for teardown tests. TCP-mode
+ * fields (sidecarContainerId, internalNetwork) are populated only when
+ * `useTcp` is true, matching what createSessionContainers() would produce.
+ */
+interface MakeBundleOptions {
+  readonly tempDir: string;
+  readonly useTcp: boolean;
+  readonly docker: DockerManager;
+  readonly mitmProxy: MitmProxy;
+  readonly proxy: DockerProxy;
+}
+
+function makeInfrastructureBundle(opts: MakeBundleOptions): DockerInfrastructure {
+  const core = makeMockCore({ tempDir: opts.tempDir, useTcp: opts.useTcp, docker: opts.docker });
+  // Overlay the tracked proxies onto the core (makeMockCore installs its own
+  // defaults, which we don't want for teardown assertions).
+  const coreWithProxies: PreContainerInfrastructure = {
+    ...core,
+    mitmProxy: opts.mitmProxy,
+    proxy: opts.proxy,
+  };
+  return {
+    ...coreWithProxies,
+    containerId: 'main-container-id',
+    containerName: 'ironcurtain-test-session',
+    ...(opts.useTcp
+      ? {
+          sidecarContainerId: 'sidecar-container-id',
+          internalNetwork: getInternalNetworkName('test-session'.substring(0, 12)),
+        }
+      : {}),
+  };
+}
+
+describe('destroyDockerInfrastructure', () => {
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), 'destroy-infra-'));
+  });
+
+  afterEach(() => {
+    if (existsSync(tempDir)) {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('runs all teardown steps in order (TCP mode: container, sidecar, network, mitmProxy, proxy)', async () => {
+    const { docker, stoppedContainers, removedContainers, removedNetworks } = makeMockDocker();
+    const mitmProxy = makeTrackedMitmProxy();
+    const proxy = makeTrackedDockerProxy();
+    const infra = makeInfrastructureBundle({ tempDir, useTcp: true, docker, mitmProxy, proxy });
+
+    await destroyDockerInfrastructure(infra);
+
+    // Main + sidecar containers both stopped + removed.
+    expect(stoppedContainers).toContain('main-container-id');
+    expect(stoppedContainers).toContain('sidecar-container-id');
+    expect(removedContainers).toContain('main-container-id');
+    expect(removedContainers).toContain('sidecar-container-id');
+
+    // Internal network removed.
+    expect(removedNetworks).toContain(infra.internalNetwork);
+
+    // Both proxies stopped.
+    expect(mitmProxy.stopped).toBe(true);
+    expect(proxy.stopped).toBe(true);
+  });
+
+  it('UDS mode skips sidecar + network steps (neither is present in the bundle)', async () => {
+    const { docker, stoppedContainers, removedContainers, removedNetworks } = makeMockDocker();
+    const mitmProxy = makeTrackedMitmProxy();
+    const proxy = makeTrackedDockerProxy();
+    const infra = makeInfrastructureBundle({ tempDir, useTcp: false, docker, mitmProxy, proxy });
+
+    // Sanity: UDS bundle has no sidecar or internal network.
+    expect(infra.sidecarContainerId).toBeUndefined();
+    expect(infra.internalNetwork).toBeUndefined();
+
+    await destroyDockerInfrastructure(infra);
+
+    // Only the main container is cleaned up.
+    expect(stoppedContainers).toEqual(['main-container-id']);
+    expect(removedContainers).toEqual(['main-container-id']);
+
+    // No network removal (networkName was null).
+    expect(removedNetworks).toEqual([]);
+
+    // Proxies still stopped.
+    expect(mitmProxy.stopped).toBe(true);
+    expect(proxy.stopped).toBe(true);
+  });
+
+  it('TCP mode removes the per-session internal network', async () => {
+    const { docker, removedNetworks } = makeMockDocker();
+    const mitmProxy = makeTrackedMitmProxy();
+    const proxy = makeTrackedDockerProxy();
+    const infra = makeInfrastructureBundle({ tempDir, useTcp: true, docker, mitmProxy, proxy });
+
+    await destroyDockerInfrastructure(infra);
+
+    const expectedNetworkName = getInternalNetworkName('test-session'.substring(0, 12));
+    expect(infra.internalNetwork).toBe(expectedNetworkName);
+    expect(removedNetworks).toEqual([expectedNetworkName]);
+  });
+
+  it('continues with remaining steps when the main container stop throws', async () => {
+    // Force docker.stop() to throw. cleanupContainers() catches per-resource
+    // failures internally, so downstream proxy stops should still run.
+    const stoppedContainers: string[] = [];
+    const removedContainers: string[] = [];
+    const docker: DockerManager = {
+      ...makeMockDocker().docker,
+      async stop(id: string) {
+        stoppedContainers.push(id);
+        if (id === 'main-container-id') {
+          throw new Error('docker stop failed');
+        }
+      },
+      async remove(id: string) {
+        removedContainers.push(id);
+      },
+    };
+    const mitmProxy = makeTrackedMitmProxy();
+    const proxy = makeTrackedDockerProxy();
+    const infra = makeInfrastructureBundle({ tempDir, useTcp: true, docker, mitmProxy, proxy });
+
+    // Must not throw -- error tolerance is the contract.
+    await expect(destroyDockerInfrastructure(infra)).resolves.toBeUndefined();
+
+    // Main container stop was attempted (then swallowed).
+    expect(stoppedContainers).toContain('main-container-id');
+    // Sidecar cleanup still ran despite the main-container failure.
+    expect(stoppedContainers).toContain('sidecar-container-id');
+    expect(removedContainers).toContain('sidecar-container-id');
+    // And the proxy steps still ran.
+    expect(mitmProxy.stopped).toBe(true);
+    expect(proxy.stopped).toBe(true);
+  });
+
+  it('continues with proxy.stop() when mitmProxy.stop() throws', async () => {
+    // Directly exercise the per-step isolation around the proxy stops:
+    // a throw from mitmProxy.stop() must not prevent proxy.stop().
+    const { docker } = makeMockDocker();
+    const mitmProxy = makeTrackedMitmProxy({ throwOnStop: true });
+    const proxy = makeTrackedDockerProxy();
+    const infra = makeInfrastructureBundle({ tempDir, useTcp: false, docker, mitmProxy, proxy });
+
+    await expect(destroyDockerInfrastructure(infra)).resolves.toBeUndefined();
+
+    expect(mitmProxy.stopped).toBe(true); // attempted
+    expect(proxy.stopped).toBe(true); // still ran
+  });
+
+  it('still resolves when proxy.stop() throws (last step, must not propagate)', async () => {
+    // Symmetric to the mitmProxy-throws test: proxy.stop() is the final step,
+    // so there's no "subsequent step still runs" to verify, but the error
+    // tolerance contract (never throws) still matters -- callers in recovery
+    // paths depend on it.
+    const { docker } = makeMockDocker();
+    const mitmProxy = makeTrackedMitmProxy();
+    const proxy = makeTrackedDockerProxy({ throwOnStop: true });
+    const infra = makeInfrastructureBundle({ tempDir, useTcp: false, docker, mitmProxy, proxy });
+
+    await expect(destroyDockerInfrastructure(infra)).resolves.toBeUndefined();
+
+    expect(mitmProxy.stopped).toBe(true);
+    expect(proxy.stopped).toBe(true); // attempted, error swallowed
   });
 });

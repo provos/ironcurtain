@@ -34,6 +34,7 @@ import type { TokenStreamBus } from './token-stream-bus.js';
 import { parseUpstreamBaseUrl, type ProviderConfig, type UpstreamTarget } from './provider-config.js';
 import { getInternalNetworkName } from './platform.js';
 import { cleanupContainers } from './container-lifecycle.js';
+import { errorMessage } from '../utils/error-message.js';
 import * as logger from '../logger.js';
 
 /**
@@ -386,6 +387,60 @@ export async function createDockerInfrastructure(
     await core.proxy.stop().catch(() => {});
     throw error;
   }
+}
+
+/**
+ * Tears down a fully-formed `DockerInfrastructure` bundle: main container,
+ * TCP-mode sidecar and internal network (if present), MITM proxy, and Code
+ * Mode proxy.
+ *
+ * Error-tolerant: each step is isolated in its own try/catch so a failure
+ * in one step does not prevent subsequent steps from running. Errors are
+ * logged via `logger.warn` and otherwise swallowed -- callers in
+ * error-recovery paths depend on this function never throwing.
+ *
+ * The companion to `createDockerInfrastructure()`: anything the former
+ * allocates, this function releases.
+ */
+export async function destroyDockerInfrastructure(infra: DockerInfrastructure): Promise<void> {
+  // Ordering: stop consumers (containers) before producers (proxies).
+  // Proxy connections from the container terminate cleanly when the
+  // container stops; inverting would leave the proxy with in-flight
+  // connections that get ECONNRESET during its own shutdown.
+
+  // Step 1-3: main container, sidecar container, and internal network.
+  // cleanupContainers() already swallows per-resource failures internally.
+  try {
+    await cleanupContainers(infra.docker, {
+      containerId: infra.containerId,
+      sidecarContainerId: infra.sidecarContainerId ?? null,
+      networkName: infra.internalNetwork ?? null,
+    });
+  } catch (err) {
+    logger.warn(`destroyDockerInfrastructure: container cleanup failed: ${errorMessage(err)}`);
+  }
+
+  // Step 4: MITM proxy.
+  try {
+    await infra.mitmProxy.stop();
+  } catch (err) {
+    logger.warn(`destroyDockerInfrastructure: mitmProxy.stop() failed: ${errorMessage(err)}`);
+  }
+
+  // Step 5: Code Mode proxy.
+  try {
+    await infra.proxy.stop();
+  } catch (err) {
+    logger.warn(`destroyDockerInfrastructure: proxy.stop() failed: ${errorMessage(err)}`);
+  }
+
+  // Steps 6 (CA) and 7 (fake keys) are intentionally absent: neither the
+  // CertificateAuthority nor the generated fake keys own any process-
+  // level resources. CA material is persisted in ~/.ironcurtain/ca/ and
+  // reused across sessions; fake keys are just strings in a Map that
+  // goes out of scope with the infrastructure bundle.
+
+  logger.info(`Destroyed Docker infrastructure (container=${infra.containerId.substring(0, 12)})`);
 }
 
 /** Container-level resources layered on top of the pre-container bundle. */
