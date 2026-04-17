@@ -10,6 +10,7 @@
  */
 
 import { computeHash } from '../hash.js';
+import { ERROR_PREFIX_CIRCUIT_BREAKER } from './error-prefixes.js';
 
 export interface CircuitBreakerConfig {
   windowMs: number;
@@ -60,7 +61,7 @@ export class CallCircuitBreaker {
       return {
         allowed: false,
         reason:
-          `CIRCUIT BREAKER: Tool '${toolName}' called ${this.config.threshold} times ` +
+          `${ERROR_PREFIX_CIRCUIT_BREAKER} Tool '${toolName}' called ${this.config.threshold} times ` +
           `with identical arguments within ${this.config.windowMs / 1000}s window. ` +
           'Try a different approach.',
       };

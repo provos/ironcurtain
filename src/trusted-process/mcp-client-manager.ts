@@ -13,11 +13,26 @@ export interface McpRoot {
   name: string;
 }
 
-interface ManagedServer {
+/**
+ * Per-server connection state exposed to callers that need to interact
+ * with the live MCP client (e.g. the coordinator's roots-expansion
+ * path). Owned and mutated by `MCPClientManager`; callers receive the
+ * live reference so their mutations (e.g. pushing new roots) and the
+ * manager's `roots/list` responses share a single array.
+ *
+ * `rootsRefreshed` is a one-shot callback set by `addRootToClient` in
+ * `tool-call-pipeline.ts`. The manager fires and clears it when the
+ * connected MCP server issues a `roots/list` request after receiving
+ * our `notifications/roots/list_changed` notification.
+ */
+export interface ClientState {
   client: Client;
-  transport: StdioClientTransport;
-  roots?: McpRoot[];
+  roots: McpRoot[];
   rootsRefreshed?: () => void;
+}
+
+interface ManagedServer extends ClientState {
+  transport: StdioClientTransport;
 }
 
 export class MCPClientManager {
@@ -33,30 +48,33 @@ export class MCPClientManager {
     // Permissive validator bypasses client-side outputSchema validation that
     // breaks on MCP servers returning non-conforming structuredContent on errors.
     // See permissive-output-validator.ts for full context and SDK issue link.
+    // Always advertise `roots.listChanged` so backend servers know to
+    // subscribe to updates. Escalation-time root expansion relies on
+    // this capability being present even when we connected with an
+    // empty initial roots list.
     const client = new Client(
       { name: 'ironcurtain', version: VERSION },
       {
-        ...(roots ? { capabilities: { roots: { listChanged: true } } } : {}),
+        capabilities: { roots: { listChanged: true } },
         jsonSchemaValidator: permissiveJsonSchemaValidator,
       },
     );
 
-    // Mutable copy -- addRoot() pushes to this array.
-    const mutableRoots = roots ? [...roots] : undefined;
+    // Always initialize a mutable roots array so `addRootToClient` can
+    // extend it at escalation time even when we started with none.
+    const mutableRoots: McpRoot[] = roots ? [...roots] : [];
     const managed: ManagedServer = { client, transport, roots: mutableRoots };
 
-    // When the server asks for roots, return the current set.
-    // If a rootsRefreshed callback is registered (from addRoot),
-    // resolve it so the caller knows the server has the latest roots.
-    if (mutableRoots) {
-      client.setRequestHandler(ListRootsRequestSchema, () => {
-        if (managed.rootsRefreshed) {
-          managed.rootsRefreshed();
-          managed.rootsRefreshed = undefined;
-        }
-        return { roots: mutableRoots };
-      });
-    }
+    // When the server asks for roots, return the current set. The
+    // handler is always registered so escalation-time root additions
+    // are observable even if we connected with an empty initial list.
+    client.setRequestHandler(ListRootsRequestSchema, () => {
+      if (managed.rootsRefreshed) {
+        managed.rootsRefreshed();
+        managed.rootsRefreshed = undefined;
+      }
+      return { roots: managed.roots };
+    });
 
     try {
       await client.connect(transport);
@@ -73,38 +91,32 @@ export class MCPClientManager {
   }
 
   /**
-   * Adds a root directory to a connected server and waits for the
-   * server to fetch the updated root list. This ensures the server's
-   * allowed directories include the new root before any tool call
-   * that depends on it is forwarded.
+   * Returns the live MCP `Client` for a connected server, or undefined
+   * when the server is not connected. Exposed so the coordinator can
+   * wire an existing client through `ClientState` for
+   * `handleCallTool`'s escalation/roots-expansion paths.
    *
-   * No-op if the root URI is already present.
+   * Callers must not mutate client internals; use the manager's public
+   * methods (`callTool`) for state-changing operations.
    */
-  async addRoot(serverName: string, root: McpRoot): Promise<void> {
-    const server = this.servers.get(serverName);
-    if (!server?.roots) return;
+  getClient(serverName: string): Client | undefined {
+    return this.servers.get(serverName)?.client;
+  }
 
-    // Deduplicate
-    if (server.roots.some((r) => r.uri === root.uri)) return;
-    server.roots.push(root);
+  /** Returns the root list tracked for a connected server, if any. */
+  getRoots(serverName: string): McpRoot[] | undefined {
+    return this.servers.get(serverName)?.roots;
+  }
 
-    // Wait for the server to call roots/list after we notify it.
-    let timer: ReturnType<typeof setTimeout>;
-    const refreshed = new Promise<void>((resolve) => {
-      server.rootsRefreshed = () => {
-        clearTimeout(timer);
-        resolve();
-      };
-    });
-    const timeout = new Promise<void>((resolve) => {
-      timer = setTimeout(() => {
-        server.rootsRefreshed = undefined;
-        resolve();
-      }, ROOTS_REFRESH_TIMEOUT_MS);
-      timer.unref();
-    });
-    await server.client.sendRootsListChanged();
-    await Promise.race([refreshed, timeout]);
+  /**
+   * Returns the live `ClientState` for a connected server. Callers use
+   * this to share the manager's mutable `roots` array and one-shot
+   * `rootsRefreshed` slot with the tool-call pipeline's
+   * `addRootToClient`, so a single mutation is both visible to the
+   * `roots/list` handler and observable as a refresh event.
+   */
+  getClientState(serverName: string): ClientState | undefined {
+    return this.servers.get(serverName);
   }
 
   async listTools(serverName: string): Promise<{ name: string; description?: string; inputSchema: unknown }[]> {

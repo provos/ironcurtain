@@ -23,7 +23,7 @@ An alternative session type that runs external coding agents (Claude Code, Goose
 
 ## Proxy tools & package registry
 
-- `proxy-tools.ts` - Hardcoded MCP tool definitions, annotations, and policy rules for the proxy server (domain management). Injected into the PolicyEngine at startup for normal policy evaluation and audit logging.
+- `proxy-tools.ts` - Hardcoded MCP tool definitions, annotations, and policy rules for domain management. Injected into the ToolCallCoordinator during construction for policy evaluation and audit logging.
 - `code-mode-proxy.ts` - MCP server exposing a single `execute_code` tool backed by the UTCP Code Mode sandbox. Docker agents send TypeScript via this tool, sharing the same V8 execution engine as builtin Code Mode sessions. Implements the `DockerProxy` interface.
 - `registry-proxy.ts` - URL parsing, metadata filtering, and tarball backstop for npm, PyPI, and Debian package registries. Built-in registry configs for each.
 - `package-types.ts` - Shared types for the package installation proxy (`RegistryConfig`, `PackageIdentity`, `PackageValidator`, etc.).
@@ -31,7 +31,7 @@ An alternative session type that runs external coding agents (Claude Code, Goose
 
 ## Proxy passthrough (domain management)
 
-The `proxy` virtual MCP server (`proxy-tools.ts`) exposes `add_proxy_domain`, `remove_proxy_domain`, and `list_proxy_domains`. These are hardcoded tool definitions (not LLM-generated) with hardcoded policy rules: `add` → escalate, `remove` → allow, `list` → allow. Injected into the PolicyEngine at startup alongside compiled rules.
+The `proxy` virtual MCP server (`proxy-tools.ts`) exposes `add_proxy_domain`, `remove_proxy_domain`, and `list_proxy_domains`. These are hardcoded tool definitions (not LLM-generated) with hardcoded policy rules: `add` → escalate, `remove` → allow, `list` → allow. Injected into the ToolCallCoordinator during construction alongside compiled rules.
 
 **Domain validation** (`validateDomain()` in `proxy-tools.ts`): Rejects IP addresses, `localhost`, `*.docker.internal`, names >253 chars, and invalid format. Runs before policy evaluation.
 

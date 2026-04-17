@@ -46,6 +46,23 @@ describe('CallCircuitBreaker', () => {
     expect(breaker.check('write_file', { path: '/tmp/a.txt' }).allowed).toBe(true);
   });
 
+  it('isolates buckets across servers when callers use server-qualified keys', () => {
+    // Companion check to the pipeline-level fix that switched the
+    // circuit-breaker key from `toolName` to `${server}__${toolName}`.
+    // Two servers exposing the same bare tool name must not share a
+    // rate-limit bucket.
+    const breaker = new CallCircuitBreaker({ threshold: 3, windowMs: 60_000 });
+
+    // Fill filesystem__read_file up to the threshold.
+    for (let i = 0; i < 3; i++) {
+      breaker.check('filesystem__read_file', { path: '/tmp/a.txt' });
+    }
+    expect(breaker.check('filesystem__read_file', { path: '/tmp/a.txt' }).allowed).toBe(false);
+
+    // Same bare tool name on a different server -- own bucket, still allowed.
+    expect(breaker.check('other-server__read_file', { path: '/tmp/a.txt' }).allowed).toBe(true);
+  });
+
   it('sliding window expiry allows calls after window passes', () => {
     const breaker = new CallCircuitBreaker({ threshold: 3, windowMs: 10_000 });
 

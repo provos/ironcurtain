@@ -302,6 +302,14 @@ When mocking `generateText` for session tests:
 - **Fallback**: CLI commands operate directly on filesystem when no daemon is running
 - **Tests**: `test/control-socket.test.ts` -- 17 tests
 
+## Tool Call Coordinator & Pipeline -- see tool-call-coordinator.md
+- `src/trusted-process/tool-call-pipeline.ts` -- core security pipeline: `handleCallTool`, types, helpers
+- `src/trusted-process/tool-call-coordinator.ts` owns PolicyEngine + AuditLog + CallCircuitBreaker + ApprovalWhitelist + ServerContextMap; wraps pipeline
+- `src/trusted-process/mcp-proxy-server.ts` -- thin subprocess: MCP transport + OAuth + pass-through only (no security kernel)
+- Custom UTCP protocol at `src/sandbox/ironcurtain-protocol.ts` (`call_template_type: 'ironcurtain'`)
+- **CRITICAL**: UTCP's `variableSubstitutor.substitute()` deep-clones class instances into plain objects. Use module-level `Map<manualName, instance>` for live references.
+- `_policyDecision?` field on `ToolCallResponse` carries engine decision; used by `handleStructuredToolCall` for in-process callers
+
 ## Subsystems (see subsystems.md for details)
 - **Session Logging**: `src/logger.ts` -- singleton with `setup()`/`teardown()`; test gotcha: must call `teardown()` in `afterEach`
 - **Execution Containment**: `src/trusted-process/sandbox-integration.ts` -- wraps MCP servers in `srt` processes

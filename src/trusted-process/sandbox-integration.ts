@@ -135,6 +135,30 @@ export function resolveSandboxConfig(
 }
 
 /**
+ * Resolves sandbox configs for every server in the given map without
+ * writing any settings files to disk.
+ *
+ * Used by the parent process (coordinator construction) to know which
+ * servers are sandboxed so audit entries can be stamped with
+ * `sandboxed=true` and `annotateSandboxViolation` can prefix EPERM/EACCES
+ * errors. The subprocess path still calls `resolveSandboxConfig` +
+ * `writeServerSettings` separately because it needs the on-disk files
+ * to invoke `srt`.
+ */
+export function resolveSandboxConfigsForAudit(
+  serversConfig: Record<string, MCPServerConfig>,
+  allowedDirectory: string | undefined,
+  sandboxAvailable: boolean,
+  policy: SandboxAvailabilityPolicy,
+): Map<string, ResolvedSandboxConfig> {
+  const result = new Map<string, ResolvedSandboxConfig>();
+  for (const [serverName, config] of Object.entries(serversConfig)) {
+    result.set(serverName, resolveSandboxConfig(config, allowedDirectory ?? '/tmp', sandboxAvailable, policy));
+  }
+  return result;
+}
+
+/**
  * Writes a per-server srt settings JSON file and creates a per-server
  * CWD directory for bwrap ghost dotfiles.
  *

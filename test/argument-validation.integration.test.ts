@@ -17,7 +17,7 @@ import {
   type CallToolDeps,
   type ClientState,
   type ProxiedTool,
-} from '../src/trusted-process/mcp-proxy-server.js';
+} from '../src/trusted-process/tool-call-pipeline.js';
 import type { CompiledPolicyFile, ToolAnnotationsFile } from '../src/pipeline/types.js';
 import type { McpRoot } from '../src/trusted-process/mcp-client-manager.js';
 

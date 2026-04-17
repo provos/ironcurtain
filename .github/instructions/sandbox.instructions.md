@@ -4,13 +4,15 @@ applyTo: "src/sandbox/**"
 
 # Sandbox Review Rules
 
-The sandbox registers MCP proxy servers with UTCP Code Mode. It is the integration point between the agent's V8 isolate and the security boundary.
+The sandbox registers a custom UTCP communication protocol (`ironcurtain-protocol.ts`) that routes tool calls in-process to the `ToolCallCoordinator`. It is the integration point between the agent's V8 isolate and the security boundary.
 
 ## Mandatory Checks
 
-- The sandbox MUST register the MCP proxy server (`mcp-proxy-server.ts`), never a real MCP server directly. Registering real servers bypasses the entire policy engine.
-- `PROXY_COMMAND` and `PROXY_ARGS` must resolve to `mcp-proxy-server.ts` (or its compiled `.js` equivalent). Verify no changes point to other server scripts.
-- Each backend MCP server must get its own proxy instance via `SERVER_FILTER` env var. This ensures credential isolation -- each proxy only receives its own server's credentials.
+- The sandbox MUST route tool calls through the `ToolCallCoordinator` via the custom IronCurtain UTCP protocol (`ironcurtain-protocol.ts`). Never register real MCP servers directly with UTCP — that bypasses the entire policy engine.
+- MCP proxy subprocesses (`mcp-proxy-server.ts`) are pure relay transports spawned by `MCPClientManager`. Security is enforced upstream in the coordinator, not in the proxy. `PROXY_COMMAND` and `PROXY_ARGS` still exist for starting relay subprocesses.
+- Each backend MCP server gets its own relay subprocess via `SERVER_FILTER` env var. This ensures credential isolation (OAuth tokens, sandbox-runtime wrapping).
+- The per-sandbox unique manual name (e.g., `tools_<uuid>`) in the UTCP registration prevents cross-sandbox collision when multiple sandboxes run in the same process (daemon mode). Never hardcode the manual name.
 - The `Protocol.request` timeout monkey-patch must execute before `CodeModeUtcpClient.create()`. Moving it later leaves client instances with the wrong timeout.
 - Tool functions inside the sandbox are synchronous. Do not add `await` to sandbox tool calls.
 - `@utcp/mcp` must be imported (side-effect import) to register the MCP call template type. Removing this import breaks MCP functionality.
+- **Strip internal fields at the sandbox boundary**: when returning coordinator responses to the V8 isolate (or any untrusted execution context), explicitly filter to the public contract (`{ content, isError }`). Do not rely on a specific transport's serialization behavior (e.g., the MCP SDK dropping unknown keys during stdio framing) to keep internal fields out — a new transport may not inherit that behavior. Internal-only fields like `_policyDecision` must never reach code running inside the isolate, where they leak policy-rule names and reasons to untrusted LLM-generated code.

@@ -156,10 +156,14 @@ describe.skipIf(!isIsolatedVmAvailable())('Docker Code Mode proxy integration', 
 
   it('execute_code with actual tool call reads a seeded file', async () => {
     await withClient(SOCKET_PATH, 'test-tool-call', async (client) => {
+      // Use the user-facing callable form (`<server>.<tool>`) created
+      // by the namespace-alias snippet. The previous UTCP-generated
+      // global (`tools.<server>_<tool>`) is no longer available because
+      // each Sandbox uses a unique per-instance manual name.
       const result = await client.callTool({
         name: 'execute_code',
         arguments: {
-          code: `const r = tools.filesystem_read_file({ path: "${SANDBOX_DIR}/test.txt" }); return r;`,
+          code: `const r = filesystem.read_file({ path: "${SANDBOX_DIR}/test.txt" }); return r;`,
         },
       });
       const text = (result.content as Array<{ type: string; text: string }>)[0].text;

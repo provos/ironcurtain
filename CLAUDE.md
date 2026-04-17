@@ -62,11 +62,11 @@ Uses Vercel AI SDK v6 (`ai` package) with Anthropic's Claude. The agent has a si
 
 ### Code Mode: Sandbox (`src/sandbox/`)
 
-UTCP Code Mode (`@utcp/code-mode`) provides a V8-isolated TypeScript execution environment. The LLM writes TypeScript that calls typed function stubs (e.g., `filesystem.read_file({path: '...'})`). These stubs produce MCP requests that exit the sandbox to the MCP proxy. Requires `@utcp/mcp` to be imported for the MCP call template type. Tool functions inside the sandbox are **synchronous** (no `await`).
+UTCP Code Mode (`@utcp/code-mode`) provides a V8-isolated TypeScript execution environment. The LLM writes TypeScript that calls typed function stubs (e.g., `filesystem.read_file({path: '...'})`). A custom UTCP `CommunicationProtocol` (`ironcurtain-protocol.ts`) routes tool calls in-process to the `ToolCallCoordinator` for policy evaluation before forwarding to backend MCP servers. Requires `@utcp/mcp` to be imported for the MCP call template type. Tool functions inside the sandbox are **synchronous** (no `await`).
 
 ### Trusted Process (`src/trusted-process/`)
 
-The security kernel - MCP proxy server, PolicyEngine (two-phase default-deny evaluation), AutoApprover, EscalationHandler, and AuditLog. See [`src/trusted-process/CLAUDE.md`](src/trusted-process/CLAUDE.md) for details.
+The security kernel. The `ToolCallCoordinator` (`tool-call-coordinator.ts`) centralizes PolicyEngine (two-phase default-deny evaluation), AuditLog, CallCircuitBreaker, ApprovalWhitelist, AutoApprover, and ServerContextMap as single instances in the Sandbox/CodeModeProxy layer. The security pipeline (`tool-call-pipeline.ts`) contains `handleCallTool` and all policy evaluation, escalation, audit, and argument normalization logic. MCP proxy server subprocesses (`mcp-proxy-server.ts`) are pure relay transports — they forward calls to backends without policy evaluation. See [`src/trusted-process/CLAUDE.md`](src/trusted-process/CLAUDE.md) for details.
 
 ### Policy Compilation Pipeline (`src/pipeline/`)
 
