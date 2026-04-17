@@ -249,6 +249,24 @@ Both use the same PolicyEngine with compiled artifacts.
 - Workflow definitions: JSON files with states/transitions/guards/parallel_key
 - 9-phase incremental implementation: types -> middleware -> machine -> checkpoint -> session -> mux -> gates -> worktrees -> scaffold
 
+## UTCP Custom Protocol Registration (spiked 2026-04-16)
+- See `utcp-custom-protocol.md` topic file
+- `CommunicationProtocol` is a public abstract class in `@utcp/sdk`
+- Custom protocols register via `communicationProtocols[type] = instance` static map
+- Enables direct in-process callTool hook (no stdio/subprocess needed)
+- Used by workflow-container-lifecycle v4 for UTCP → ToolCallCoordinator direct hook
+
+## Workflow Container Lifecycle v4 Design (designed 2026-04-16)
+- See `docs/designs/workflow-container-lifecycle.md`
+- UTCP spike: direct in-process `IronCurtainCommunicationProtocol.callTool` feasible
+- `ToolCallCoordinator` owns PolicyEngine, AuditLog, CircuitBreaker, Whitelist, ServerContextMap
+- Two mutexes: policy mutex (loadPolicy swap) + tool-call mutex (serializes handleToolCall)
+- `parallelKey` is a live codebase feature, not future; homogeneous-persona parallelism works under tool-call mutex
+- Parallel heterogeneous personas rejected: schema check + coordinator runtime guard
+- Control endpoint: `POST /__ironcurtain/policy/load` (MITM's `/__ironcurtain/domains/*` stays separate)
+- `validateToolArguments` moves to coordinator (coupled to `isTrustedServer` + synthesizes audit deny)
+- `MITM_CONTROL_ADDR` retained ONLY on virtual-proxy subprocess (`SERVER_FILTER=proxy`)
+
 ## Auto-Constitution Generation Design (designed 2026-03-05)
 - See `docs/designs/auto-constitution-generation.md`
 - LLM explores MCP servers via bridged tools (list-resolver pattern, NOT full Code Mode)
