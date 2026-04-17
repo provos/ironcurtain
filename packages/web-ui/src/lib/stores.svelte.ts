@@ -321,8 +321,9 @@ function buildWsUrl(): string {
 /**
  * Initialize the WebSocket connection. Extracts token from URL
  * or sessionStorage. `hasToken` is only flipped to `true` after the
- * HTTP preflight (in the ws client) succeeds or returns 'offline' — we
- * don't flip it here so a bad token doesn't flash the dashboard.
+ * store-level preflight inside `startConnectionWithToken()` succeeds or
+ * returns 'offline' — we don't flip it here so a bad token doesn't
+ * flash the dashboard.
  */
 export async function initConnection(): Promise<void> {
   const client = getWsClient();

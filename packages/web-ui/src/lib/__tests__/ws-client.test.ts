@@ -233,4 +233,25 @@ describe('WsClient', () => {
     expect(authErrorHandler).not.toHaveBeenCalled();
     expect(connectionHandler).toHaveBeenCalledWith(true);
   });
+
+  // 9. A rejected preflight must not kill the reconnect loop: treat as 'offline'.
+  it('treats a rejected preflight as "offline" and keeps retrying', async () => {
+    const preflight = vi
+      .fn<(token: string) => Promise<'ok' | 'invalid' | 'offline'>>()
+      .mockRejectedValueOnce(new Error('boom'))
+      .mockResolvedValueOnce('ok');
+    const client = createWsClient(preflight);
+    const authErrorHandler = vi.fn();
+    const connectionHandler = vi.fn();
+    client.onAuthError(authErrorHandler);
+    client.onConnectionChange(connectionHandler);
+
+    client.connect('ws://localhost:7400/ws', 'some-token');
+
+    await vi.runAllTimersAsync();
+
+    expect(preflight).toHaveBeenCalledTimes(2);
+    expect(authErrorHandler).not.toHaveBeenCalled();
+    expect(connectionHandler).toHaveBeenCalledWith(true);
+  });
 });

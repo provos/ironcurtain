@@ -72,8 +72,15 @@ export function createWsClient(preflight?: PreflightFn): WsClient {
     // Preflight before opening the WebSocket. The browser WebSocket API
     // hides HTTP 401s (they surface as a generic close 1006), so we use
     // an HTTP probe to distinguish "bad token" from "daemon unreachable".
+    // An unexpected rejection from the preflight is treated as 'offline'
+    // so an ill-behaved callback can't crash the reconnect loop.
     if (preflight) {
-      const result = await preflight(authToken);
+      let result: PreflightResult;
+      try {
+        result = await preflight(authToken);
+      } catch {
+        result = 'offline';
+      }
       if (closed) return;
       if (result === 'invalid') {
         closed = true;
