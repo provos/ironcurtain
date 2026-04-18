@@ -482,14 +482,25 @@ export class WorkflowOrchestrator implements WorkflowController {
   /**
    * Tears down the workflow-scoped Docker infrastructure bundle, if any.
    *
-   * Idempotent and error-tolerant: safe to call multiple times, and a
-   * failure in one step (bundle destroy, control socket unlink) does not
-   * prevent subsequent steps from running. Callers in recovery paths
-   * depend on this function never throwing.
+   * Callers in recovery paths depend on this function never throwing:
+   *   - Failures in `destroy(infra)` are logged to stderr and swallowed;
+   *     the socket-unlink step still runs.
+   *   - Failures in the socket unlink are logged and swallowed.
+   *
+   * **Not a retry point.** `instance.infra` is cleared synchronously
+   * before the async `destroy(infra)` so a second concurrent call (e.g.
+   * `shutdownAll` racing the fire-and-forget destroy in
+   * `handleWorkflowComplete`) sees `infra === undefined` and returns
+   * without re-entering `destroy`. This prevents double-destroy against
+   * the same Docker resources at the cost of giving up on in-process
+   * retry if the first destroy threw — recovery from a persistent
+   * destroy failure is the operator's responsibility (`docker ps -a`).
    */
   private async destroyWorkflowInfrastructure(instance: WorkflowInstance): Promise<void> {
     const infra = instance.infra;
     if (!infra) return;
+    // Clear BEFORE the await so a concurrent caller sees undefined and
+    // bails out. See JSDoc for the rationale.
     instance.infra = undefined;
 
     const destroy = this.deps.destroyWorkflowInfrastructure ?? (await this.loadDefaultInfrastructureTeardown());
