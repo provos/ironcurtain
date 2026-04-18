@@ -21,9 +21,10 @@ import {
 } from 'node:fs';
 import { arch, tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
+import { quote } from 'shell-quote';
 import type { IronCurtainConfig } from '../config/types.js';
 import type { SessionMode } from '../session/types.js';
-import type { AgentAdapter, ConversationStateConfig } from './agent-adapter.js';
+import { CONTAINER_WORKSPACE_DIR, type AgentAdapter, type ConversationStateConfig } from './agent-adapter.js';
 import type { DockerProxy } from './code-mode-proxy.js';
 import type { MitmProxy } from './mitm-proxy.js';
 import type { CertificateAuthority } from './ca.js';
@@ -31,10 +32,22 @@ import type { DockerManager } from './types.js';
 import type { ProviderKeyMapping } from './mitm-proxy.js';
 import type { TokenStreamBus } from './token-stream-bus.js';
 import { parseUpstreamBaseUrl, type ProviderConfig, type UpstreamTarget } from './provider-config.js';
+import { getInternalNetworkName } from './platform.js';
+import { cleanupContainers } from './container-lifecycle.js';
+import { errorMessage } from '../utils/error-message.js';
 import * as logger from '../logger.js';
 
-/** All the infrastructure created during Docker session setup. */
-export interface DockerInfrastructure {
+/**
+ * Shared infrastructure bundle produced by the pre-container setup phase.
+ *
+ * `prepareDockerInfrastructure()` returns this shape: proxies, CA, fake keys,
+ * orientation, image — everything the container needs, but not the container
+ * itself. PTY sessions use this because they build their own containers
+ * with TTY-specific settings. Standalone Docker sessions go through
+ * `createDockerInfrastructure()` instead, which extends this with a
+ * running container.
+ */
+export interface PreContainerInfrastructure {
   readonly sessionId: string;
   readonly sessionDir: string;
   readonly sandboxDir: string;
@@ -61,16 +74,44 @@ export interface DockerInfrastructure {
   readonly conversationStateConfig?: ConversationStateConfig;
 }
 
+/**
+ * Full Docker session infrastructure, including a running main container.
+ *
+ * Produced by `createDockerInfrastructure()` and consumed by
+ * `DockerAgentSession`. The container is already created and started with
+ * a `sleep infinity` entrypoint; the session drives it via `docker exec`.
+ * In TCP mode (macOS), `sidecarContainerId` and `internalNetwork` point to
+ * the socat sidecar and the per-session `--internal` bridge network.
+ */
+export interface DockerInfrastructure extends PreContainerInfrastructure {
+  /** Main agent container ID (created + started with `sleep infinity` entrypoint). */
+  readonly containerId: string;
+  /** Deterministic main container name (e.g., `ironcurtain-<shortId>`). */
+  readonly containerName: string;
+  /** Socat sidecar container ID (TCP mode only, macOS). */
+  readonly sidecarContainerId?: string;
+  /** Per-session `--internal` Docker network name (TCP mode only, macOS). */
+  readonly internalNetwork?: string;
+}
+
 /** Hosts that use Anthropic OAuth credentials when available. */
 const ANTHROPIC_HOSTS = new Set(['api.anthropic.com', 'platform.claude.com']);
 
+/** Prefix for container/sidecar names. Keep in sync with `docker ps` filters. */
+const CONTAINER_NAME_PREFIX = 'ironcurtain-';
+
+/** Host gateway alias used by Docker containers on macOS/Windows. */
+const DOCKER_HOST_GATEWAY = 'host.docker.internal';
+
 /**
- * Prepares all Docker infrastructure needed to run a session.
+ * Prepares the shared (non-container) parts of Docker session infrastructure.
  *
- * This is the shared setup logic used by both createDockerSession()
- * and runPtySession(). After calling this, the caller diverges:
- * - Standard mode: creates DockerAgentSession (sleep infinity + docker exec)
- * - PTY mode: attaches terminal directly via socat + Node.js PTY proxy
+ * Sets up proxies (Code Mode + MITM), CA, fake keys, orientation files, and
+ * ensures the agent image. Does NOT create the agent container — that step is
+ * specific to the session mode: standalone sessions go through
+ * `createDockerInfrastructure()` (which wraps this with `sleep infinity`
+ * container creation); PTY sessions call this directly and then create their
+ * own TTY-enabled container.
  */
 export async function prepareDockerInfrastructure(
   config: IronCurtainConfig,
@@ -81,7 +122,7 @@ export async function prepareDockerInfrastructure(
   auditLogPath: string,
   sessionId: string,
   tokenStreamBus?: TokenStreamBus,
-): Promise<DockerInfrastructure> {
+): Promise<PreContainerInfrastructure> {
   // Dynamic imports to avoid loading Docker dependencies for built-in sessions
   const { registerBuiltinAdapters, getAgent } = await import('./agent-registry.js');
   const { createCodeModeProxy } = await import('./code-mode-proxy.js');
@@ -266,7 +307,7 @@ export async function prepareDockerInfrastructure(
     }
     logger.info(`Available servers: ${serverListings.map((s) => s.name).join(', ')}`);
 
-    const proxyAddress = useTcp && proxy.port !== undefined ? `host.docker.internal:${proxy.port}` : undefined;
+    const proxyAddress = useTcp && proxy.port !== undefined ? `${DOCKER_HOST_GATEWAY}:${proxy.port}` : undefined;
     const { systemPrompt } = prepareSession(adapter, serverListings, sessionDir, config, sandboxDir, proxyAddress);
 
     // Ensure Docker image is built and up-to-date
@@ -308,6 +349,319 @@ export async function prepareDockerInfrastructure(
     await mitmProxy.stop().catch(() => {});
     await proxy.stop().catch(() => {});
     throw error;
+  }
+}
+
+/**
+ * Creates the full Docker session infrastructure, including a running
+ * `sleep infinity` agent container (and, on macOS TCP mode, the socat
+ * sidecar and per-session `--internal` network).
+ *
+ * Wraps `prepareDockerInfrastructure()` with container creation. On any
+ * failure after the proxies are started, all started resources are torn
+ * down before the error propagates.
+ */
+export async function createDockerInfrastructure(
+  config: IronCurtainConfig,
+  mode: SessionMode & { kind: 'docker' },
+  sessionDir: string,
+  sandboxDir: string,
+  escalationDir: string,
+  auditLogPath: string,
+  sessionId: string,
+  tokenStreamBus?: TokenStreamBus,
+): Promise<DockerInfrastructure> {
+  const core = await prepareDockerInfrastructure(
+    config,
+    mode,
+    sessionDir,
+    sandboxDir,
+    escalationDir,
+    auditLogPath,
+    sessionId,
+    tokenStreamBus,
+  );
+
+  try {
+    const containerResources = await createSessionContainers(core, config);
+    return { ...core, ...containerResources };
+  } catch (error) {
+    // Any partial container/sidecar/network cleanup happened inside
+    // createSessionContainers(). Here we just tear down the proxies that
+    // prepareDockerInfrastructure() started, to avoid leaking them.
+    await core.mitmProxy.stop().catch(() => {});
+    await core.proxy.stop().catch(() => {});
+    throw error;
+  }
+}
+
+/**
+ * Tears down a fully-formed `DockerInfrastructure` bundle: main container,
+ * TCP-mode sidecar and internal network (if present), MITM proxy, and Code
+ * Mode proxy.
+ *
+ * Error-tolerant: each step is isolated in its own try/catch so a failure
+ * in one step does not prevent subsequent steps from running. Errors are
+ * logged via `logger.warn` and otherwise swallowed -- callers in
+ * error-recovery paths depend on this function never throwing.
+ *
+ * The companion to `createDockerInfrastructure()`: anything the former
+ * allocates, this function releases.
+ */
+export async function destroyDockerInfrastructure(infra: DockerInfrastructure): Promise<void> {
+  // Ordering: stop consumers (containers) before producers (proxies).
+  // Proxy connections from the container terminate cleanly when the
+  // container stops; inverting would leave the proxy with in-flight
+  // connections that get ECONNRESET during its own shutdown.
+
+  // Containers + sidecar + internal network. cleanupContainers() swallows
+  // per-resource failures internally, so no outer try/catch is needed here.
+  await cleanupContainers(infra.docker, {
+    containerId: infra.containerId,
+    sidecarContainerId: infra.sidecarContainerId ?? null,
+    networkName: infra.internalNetwork ?? null,
+  });
+
+  // Proxies are independent producers -- stop them in parallel. Each
+  // per-promise catch logs so one failure doesn't mask the other, and
+  // allSettled ensures both complete even if one throws synchronously.
+  await Promise.allSettled([
+    infra.mitmProxy
+      .stop()
+      .catch((err: unknown) =>
+        logger.warn(`destroyDockerInfrastructure: mitmProxy.stop() failed: ${errorMessage(err)}`),
+      ),
+    infra.proxy
+      .stop()
+      .catch((err: unknown) => logger.warn(`destroyDockerInfrastructure: proxy.stop() failed: ${errorMessage(err)}`)),
+  ]);
+
+  // CA and fake keys are intentionally absent: neither owns any
+  // process-level resources. CA material is persisted in ~/.ironcurtain/ca/
+  // and reused across sessions; fake keys are just strings in a Map that
+  // goes out of scope with the infrastructure bundle.
+
+  logger.info(`Destroyed Docker infrastructure (container=${infra.containerId.substring(0, 12)})`);
+}
+
+/** Container-level resources layered on top of the pre-container bundle. */
+export interface ContainerResources {
+  readonly containerId: string;
+  readonly containerName: string;
+  readonly sidecarContainerId?: string;
+  readonly internalNetwork?: string;
+}
+
+/**
+ * Creates and starts the main agent container (plus TCP-mode sidecar and
+ * internal network on macOS). Cleans up any partially-created resources
+ * on failure so callers get all-or-nothing semantics.
+ *
+ * Exported for testability: tests exercise the mount/env configuration and
+ * the rollback-on-failure path by passing a mock `PreContainerInfrastructure`
+ * with a scripted `DockerManager`.
+ */
+export async function createSessionContainers(
+  core: PreContainerInfrastructure,
+  config: IronCurtainConfig,
+): Promise<ContainerResources> {
+  const shortId = core.sessionId.substring(0, 12);
+  const mainContainerName = `${CONTAINER_NAME_PREFIX}${shortId}`;
+
+  // Remove stale main container from a crashed previous session (same session
+  // ID means same deterministic name, which would conflict on docker create).
+  // Done before the TCP/UDS branch since the main container name is
+  // deterministic in both modes.
+  await core.docker.removeStaleContainer(mainContainerName);
+
+  let mainContainerId: string | undefined;
+  let sidecarContainerId: string | undefined;
+  let internalNetwork: string | undefined;
+
+  try {
+    // Base mounts shared by TCP and UDS modes: the sandbox as the
+    // workspace and the orientation dir. Mode-specific mounts (apt proxy
+    // config, sockets dir, conversation state) are appended below.
+    const mounts: { source: string; target: string; readonly: boolean }[] = [
+      { source: core.sandboxDir, target: CONTAINER_WORKSPACE_DIR, readonly: false },
+      { source: core.orientationDir, target: '/etc/ironcurtain', readonly: true },
+    ];
+    let env = {
+      ...core.adapter.buildEnv(config, core.fakeKeys),
+    };
+    let network: string | null;
+    let extraHosts: string[] | undefined;
+
+    if (core.useTcp && core.mitmAddr.port !== undefined && core.proxy.port !== undefined) {
+      // macOS TCP mode: internal bridge network blocks egress.
+      // A socat sidecar bridges the internal network to the host
+      // because Docker Desktop VMs don't forward gateway traffic.
+      const mcpPort = core.proxy.port;
+      const mitmPort = core.mitmAddr.port;
+      const proxyUrl = `http://${DOCKER_HOST_GATEWAY}:${mitmPort}`;
+
+      env = {
+        ...env,
+        HTTPS_PROXY: proxyUrl,
+        HTTP_PROXY: proxyUrl,
+      };
+
+      // Write apt proxy config so sudo apt-get routes through the MITM proxy
+      const aptProxyPath = resolve(core.orientationDir, 'apt-proxy.conf');
+      writeFileSync(aptProxyPath, `Acquire::http::Proxy "${proxyUrl}";\nAcquire::https::Proxy "${proxyUrl}";\n`);
+      mounts.push({ source: aptProxyPath, target: '/etc/apt/apt.conf.d/90-ironcurtain-proxy', readonly: true });
+
+      // Create a per-session --internal Docker network that blocks internet egress.
+      const networkName = getInternalNetworkName(shortId);
+      await core.docker.createNetwork(networkName, { internal: true });
+      internalNetwork = networkName;
+      network = networkName;
+
+      // Ensure the socat image is available
+      const socatImage = 'alpine/socat';
+      if (!(await core.docker.imageExists(socatImage))) {
+        logger.info(`Pulling ${socatImage}...`);
+        await core.docker.pullImage(socatImage);
+      }
+
+      // Create socat sidecar on the default bridge (can reach the host gateway)
+      const sidecarName = `${CONTAINER_NAME_PREFIX}sidecar-${shortId}`;
+
+      // Remove stale sidecar from a crashed previous session (TCP mode only).
+      await core.docker.removeStaleContainer(sidecarName);
+
+      sidecarContainerId = await core.docker.create({
+        image: socatImage,
+        name: sidecarName,
+        network: 'bridge',
+        mounts: [],
+        env: {},
+        entrypoint: '/bin/sh',
+        sessionLabel: core.sessionId,
+        command: [
+          '-c',
+          quote(['socat', `TCP-LISTEN:${mcpPort},fork,reuseaddr`, `TCP:${DOCKER_HOST_GATEWAY}:${mcpPort}`]) +
+            ' & ' +
+            quote(['socat', `TCP-LISTEN:${mitmPort},fork,reuseaddr`, `TCP:${DOCKER_HOST_GATEWAY}:${mitmPort}`]) +
+            ' & wait',
+        ],
+      });
+      await core.docker.start(sidecarContainerId);
+
+      // Connect sidecar to the internal network so the app container can reach it
+      await core.docker.connectNetwork(networkName, sidecarContainerId);
+      const sidecarIp = await core.docker.getContainerIp(sidecarContainerId, networkName);
+      extraHosts = [`${DOCKER_HOST_GATEWAY}:${sidecarIp}`];
+      logger.info(`Sidecar ${sidecarName} bridging ports ${mcpPort},${mitmPort} at ${sidecarIp}`);
+    } else {
+      // Linux UDS mode: --network=none, session dir with sockets mounted
+      const linuxProxyUrl = 'http://127.0.0.1:18080';
+      env = {
+        ...env,
+        HTTPS_PROXY: linuxProxyUrl,
+        HTTP_PROXY: linuxProxyUrl,
+      };
+      network = null;
+
+      // Write apt proxy config so sudo apt-get routes through the MITM proxy
+      const aptProxyPathLinux = resolve(core.orientationDir, 'apt-proxy.conf');
+      writeFileSync(
+        aptProxyPathLinux,
+        `Acquire::http::Proxy "${linuxProxyUrl}";\nAcquire::https::Proxy "${linuxProxyUrl}";\n`,
+      );
+      mounts.push({
+        source: aptProxyPathLinux,
+        target: '/etc/apt/apt.conf.d/90-ironcurtain-proxy',
+        readonly: true,
+      });
+
+      // Mount only the sockets subdirectory into the container -- not the full
+      // session dir. This prevents the container from accessing escalation files,
+      // audit logs, or other session data. proxy.sock and mitm-proxy.sock are
+      // created in this directory by the host-side proxy setup.
+      mounts.push({ source: core.socketsDir, target: '/run/ironcurtain', readonly: false });
+    }
+
+    // Mount conversation state directory for session resume (e.g., claude --continue)
+    if (core.conversationStateDir && core.conversationStateConfig) {
+      mounts.push({
+        source: core.conversationStateDir,
+        target: core.conversationStateConfig.containerMountPath,
+        readonly: false,
+      });
+    }
+
+    mainContainerId = await core.docker.create({
+      image: core.image,
+      name: mainContainerName,
+      network: network ?? 'none',
+      mounts,
+      env,
+      command: ['sleep', 'infinity'],
+      sessionLabel: core.sessionId,
+      resources: { memoryMb: 8192, cpus: 4 },
+      extraHosts,
+      capAdd: [
+        'SETUID', // sudo setuid
+        'SETGID', // sudo setgid
+        'CHOWN', // apt-get chown on installed files
+        'FOWNER', // apt-get set permissions on files it doesn't own
+        'DAC_OVERRIDE', // apt-get read/write files regardless of permissions during install
+        'AUDIT_WRITE', // sudo audit logging
+      ],
+    });
+
+    await core.docker.start(mainContainerId);
+    logger.info(`Container started: ${mainContainerId.substring(0, 12)}`);
+
+    // Connectivity check: verify the container can reach host proxies
+    // through the internal network. Abort if unreachable.
+    if (core.useTcp && internalNetwork !== undefined && core.proxy.port !== undefined) {
+      await checkInternalNetworkConnectivity(core.docker, mainContainerId, core.proxy.port);
+    }
+
+    return {
+      containerId: mainContainerId,
+      containerName: mainContainerName,
+      sidecarContainerId,
+      internalNetwork,
+    };
+  } catch (err) {
+    // Best-effort cleanup of any resources created before the failure.
+    // All three resources are assigned as soon as `docker.create()` returns
+    // (before any subsequent start or connectivity check), so failures at
+    // any point inside the try block clean up whatever was created.
+    await cleanupContainers(core.docker, {
+      containerId: mainContainerId ?? null,
+      sidecarContainerId: sidecarContainerId ?? null,
+      networkName: internalNetwork ?? null,
+    });
+    throw err;
+  }
+}
+
+/**
+ * Probes whether the container can reach host-side proxies via the socat
+ * sidecar on the internal Docker network. Throws a descriptive error if not.
+ */
+async function checkInternalNetworkConnectivity(
+  docker: DockerManager,
+  containerId: string,
+  mcpPort: number,
+): Promise<void> {
+  const result = await docker.exec(
+    containerId,
+    ['socat', '-u', '/dev/null', `TCP:${DOCKER_HOST_GATEWAY}:${mcpPort},connect-timeout=5`],
+    // Allow a small buffer above socat's 5s connect-timeout for docker exec/process startup overhead.
+    6_000,
+  );
+
+  if (result.exitCode !== 0) {
+    throw new Error(
+      `Internal network connectivity check failed (exit=${result.exitCode}). ` +
+        `The container cannot reach host-side proxies via the socat sidecar on the --internal Docker network. ` +
+        `Check that the sidecar container is running and connected to the internal network.`,
+    );
   }
 }
 
@@ -392,13 +746,12 @@ export function prepareConversationStateDir(sessionDir: string, config: Conversa
 }
 
 /**
- * Ensures the Docker image exists and is up-to-date, building it
- * (and the base image) if needed.
- *
- * Exported so DockerAgentSession can reuse this logic in its legacy
- * (non-preBuiltInfrastructure) initialization path.
+ * Ensures the agent Docker image exists and is up-to-date. Builds the base
+ * image first (with the IronCurtain CA cert baked in) and then the
+ * agent-specific image. Content-hash labels on each image drive staleness
+ * detection so repeated calls skip rebuilds when nothing has changed.
  */
-export async function ensureImage(image: string, docker: DockerManager, ca: CertificateAuthority): Promise<void> {
+async function ensureImage(image: string, docker: DockerManager, ca: CertificateAuthority): Promise<void> {
   const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
   const dockerDir = resolve(packageRoot, 'docker');
 
@@ -414,7 +767,7 @@ export async function ensureImage(image: string, docker: DockerManager, ca: Cert
   const baseRebuilt = await ensureBaseImage(baseImage, docker, ca, dockerDir, baseDockerfile, baseBuildHash);
 
   // Build the agent-specific image (if stale, missing, or base was rebuilt)
-  const agentName = image.replace('ironcurtain-', '').replace(':latest', '');
+  const agentName = image.replace(CONTAINER_NAME_PREFIX, '').replace(':latest', '');
   const dockerfile = `Dockerfile.${agentName}`;
   const agentDockerfilePath = resolve(dockerDir, dockerfile);
   if (!existsSync(agentDockerfilePath)) {

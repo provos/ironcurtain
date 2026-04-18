@@ -4,15 +4,21 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { AuditLogTailer } from '../src/docker/audit-log-tailer.js';
 import { DockerAgentSession, type DockerAgentSessionDeps } from '../src/docker/docker-agent-session.js';
+import type { DockerInfrastructure } from '../src/docker/docker-infrastructure.js';
 import type { DockerProxy } from '../src/docker/code-mode-proxy.js';
 import type { MitmProxy } from '../src/docker/mitm-proxy.js';
-import type { CertificateAuthority } from '../src/docker/ca.js';
-import type { AgentAdapter, AgentId, AgentResponse, ConversationStateConfig } from '../src/docker/agent-adapter.js';
-import type { ProviderConfig } from '../src/docker/provider-config.js';
-import type { DockerManager, DockerContainerConfig } from '../src/docker/types.js';
+import type { AgentAdapter, AgentResponse, ConversationStateConfig } from '../src/docker/agent-adapter.js';
+import type { DockerManager } from '../src/docker/types.js';
 import type { IronCurtainConfig } from '../src/config/types.js';
 import type { DiagnosticEvent, EscalationRequest } from '../src/session/types.js';
 import { getInternalNetworkName } from '../src/docker/platform.js';
+import {
+  createMockAdapter,
+  createMockCA,
+  createMockDocker,
+  createMockMitmProxy,
+  createMockProxy,
+} from './helpers/docker-mocks.js';
 
 // --- AuditLogTailer tests ---
 
@@ -139,134 +145,76 @@ describe('AuditLogTailer', () => {
 
 // --- DockerAgentSession tests ---
 
-const testProvider: ProviderConfig = {
-  host: 'api.test.com',
-  displayName: 'Test',
-  allowedEndpoints: [{ method: 'POST', path: '/v1/messages' }],
-  keyInjection: { type: 'header', headerName: 'x-api-key' },
-  fakeKeyPrefix: 'sk-test-',
-};
-
-function createMockAdapter(): AgentAdapter {
-  return {
-    id: 'test-agent' as AgentId,
-    displayName: 'Test Agent',
-    async getImage() {
-      return 'ironcurtain-claude-code:latest';
-    },
-    generateMcpConfig() {
-      return [{ path: 'test-config.json', content: '{}' }];
-    },
-    generateOrientationFiles() {
-      return [];
-    },
-    buildCommand(message: string, systemPrompt: string) {
-      return ['test-agent', '--prompt', systemPrompt, message];
-    },
-    buildSystemPrompt() {
-      return 'You are a test agent.';
-    },
-    getProviders() {
-      return [testProvider];
-    },
-    buildEnv() {
-      return { TEST_KEY: 'test-value' };
-    },
-    extractResponse(exitCode: number, stdout: string): AgentResponse {
-      if (exitCode !== 0) return { text: `Error: exit ${exitCode}` };
-      return { text: stdout.trim() };
-    },
-  };
+/** Options for overriding fields on the mock DockerInfrastructure bundle. */
+interface MockInfraOptions {
+  readonly sessionId?: string;
+  readonly sessionDir: string;
+  readonly sandboxDir: string;
+  readonly escalationDir: string;
+  readonly auditLogPath: string;
+  readonly tempDir: string;
+  readonly adapter?: AgentAdapter;
+  readonly docker?: DockerManager;
+  readonly proxy?: DockerProxy;
+  readonly mitmProxy?: MitmProxy;
+  readonly useTcp?: boolean;
+  readonly containerId?: string;
+  readonly containerName?: string;
+  readonly sidecarContainerId?: string;
+  readonly internalNetwork?: string;
+  readonly conversationStateDir?: string;
+  readonly conversationStateConfig?: ConversationStateConfig;
 }
 
-function createMockDocker(): DockerManager {
-  // Track the build-hash labels stamped during buildImage calls.
-  // getImageLabel returns the most recently stored hash for the image,
-  // which means the first ensureImage() call will build (no hash yet)
-  // and subsequent calls will skip (hash matches).
-  const labels = new Map<string, Record<string, string>>();
-
+/**
+ * Builds a mock DockerInfrastructure bundle suitable for DockerAgentSession
+ * tests. Representing a post-`createDockerInfrastructure()` state: the main
+ * container is already "created" and "started"; the session only drives it.
+ */
+function createMockInfra(opts: MockInfraOptions): DockerInfrastructure {
+  const sessionId = opts.sessionId ?? 'test-session-id';
+  const shortId = sessionId.substring(0, 12);
+  const useTcp = opts.useTcp ?? false;
+  const mitmProxy =
+    opts.mitmProxy ??
+    (useTcp
+      ? ({
+          async start() {
+            return { port: 8443 };
+          },
+          async stop() {},
+        } as MitmProxy)
+      : createMockMitmProxy());
+  const proxy = opts.proxy ?? createMockProxy(join(opts.sessionDir, 'proxy.sock'), useTcp ? 9123 : undefined);
+  const mitmAddr: DockerInfrastructure['mitmAddr'] = useTcp
+    ? { port: 8443 }
+    : { socketPath: '/tmp/test-mitm-proxy.sock' };
   return {
-    async preflight() {},
-    async create() {
-      return 'container-abc123';
-    },
-    async start() {},
-    async exec() {
-      return { exitCode: 0, stdout: 'Task completed successfully', stderr: '' };
-    },
-    async stop() {},
-    async remove() {},
-    async isRunning() {
-      return true;
-    },
-    async imageExists(image: string) {
-      // alpine/socat is always "available" (no build needed)
-      if (image === 'alpine/socat') return true;
-      // Other images "exist" once they have been built (have labels)
-      return labels.has(image);
-    },
-    async pullImage() {},
-    async buildImage(_tag: string, _df: string, _ctx: string, buildLabels?: Record<string, string>) {
-      if (buildLabels) {
-        labels.set(_tag, buildLabels);
-      }
-    },
-    async getImageLabel(image: string, label: string) {
-      return labels.get(image)?.[label];
-    },
-    async createNetwork() {},
-    async removeNetwork() {},
-    async connectNetwork() {},
-    async getContainerIp() {
-      return '172.30.0.3';
-    },
-    async containerExists() {
-      return false;
-    },
-    async getContainerLabel() {
-      return undefined;
-    },
-    async removeStaleContainer() {
-      return false;
-    },
+    sessionId,
+    sessionDir: opts.sessionDir,
+    sandboxDir: opts.sandboxDir,
+    escalationDir: opts.escalationDir,
+    auditLogPath: opts.auditLogPath,
+    proxy,
+    mitmProxy,
+    docker: opts.docker ?? createMockDocker(),
+    adapter: opts.adapter ?? createMockAdapter(),
+    ca: createMockCA(opts.tempDir),
+    fakeKeys: new Map([['api.test.com', 'sk-test-fake-key']]),
+    orientationDir: join(opts.sessionDir, 'orientation'),
+    systemPrompt: 'You are a test agent.',
+    image: 'ironcurtain-claude-code:latest',
+    useTcp,
+    socketsDir: join(opts.sessionDir, 'sockets'),
+    mitmAddr,
+    authKind: 'apikey',
+    conversationStateDir: opts.conversationStateDir,
+    conversationStateConfig: opts.conversationStateConfig,
+    containerId: opts.containerId ?? 'container-abc123',
+    containerName: opts.containerName ?? `ironcurtain-${shortId}`,
+    sidecarContainerId: opts.sidecarContainerId,
+    internalNetwork: opts.internalNetwork,
   };
-}
-
-function createMockProxy(socketPath: string, port?: number): DockerProxy {
-  return {
-    socketPath,
-    port,
-    async start() {},
-    getHelpData() {
-      return {
-        serverDescriptions: { filesystem: 'Read, write, and manage files' },
-        toolsByServer: {
-          filesystem: [{ callableName: 'filesystem.read_file', params: '{ path }' }],
-        },
-      };
-    },
-    async stop() {},
-  };
-}
-
-function createMockMitmProxy(): MitmProxy {
-  return {
-    async start() {
-      return { socketPath: '/tmp/test-mitm-proxy.sock' };
-    },
-    async stop() {},
-  };
-}
-
-function createMockCA(tempDir: string): CertificateAuthority {
-  const certPem = '-----BEGIN CERTIFICATE-----\nMOCK\n-----END CERTIFICATE-----';
-  const keyPem = '-----BEGIN RSA PRIVATE KEY-----\nMOCK\n-----END RSA PRIVATE KEY-----';
-  const certPath = join(tempDir, 'mock-ca-cert.pem');
-  const keyPath = join(tempDir, 'mock-ca-key.pem');
-  writeFileSync(certPath, certPem);
-  writeFileSync(keyPath, keyPem);
-  return { certPem, keyPem, certPath, keyPath };
 }
 
 function createTestDeps(tempDir: string): DockerAgentSessionDeps {
@@ -294,19 +242,19 @@ function createTestDeps(tempDir: string): DockerAgentSessionDeps {
     },
   } as unknown as IronCurtainConfig;
 
-  return {
-    config,
-    sessionId: 'test-session-id' as import('../src/session/types.js').SessionId,
-    adapter: createMockAdapter(),
-    docker: createMockDocker(),
-    proxy: createMockProxy(join(sessionDir, 'proxy.sock')),
-    mitmProxy: createMockMitmProxy(),
-    ca: createMockCA(tempDir),
-    fakeKeys: new Map([['api.test.com', 'sk-test-fake-key']]),
+  const infra = createMockInfra({
+    tempDir,
     sessionDir,
     sandboxDir,
     escalationDir,
     auditLogPath,
+  });
+
+  return {
+    config,
+    sessionId: 'test-session-id' as import('../src/session/types.js').SessionId,
+    infra,
+    ownsInfra: true,
   };
 }
 
@@ -388,7 +336,7 @@ describe('DockerAgentSession', () => {
       costUsd: 0.42,
     });
 
-    session = new DockerAgentSession({ ...deps, adapter: costAdapter });
+    session = new DockerAgentSession({ ...deps, infra: { ...deps.infra, adapter: costAdapter } });
     await session.initialize();
 
     await session.sendMessage('Do something');
@@ -433,6 +381,63 @@ describe('DockerAgentSession', () => {
     await session.close(); // Should not throw
   });
 
+  it('restores status to ready after sendMessage throws so subsequent turns can proceed', async () => {
+    // docker.exec failures (timeout, network glitch, etc.) must not
+    // leave the session permanently stuck in 'processing' — that would
+    // block all future turns with SessionNotReadyError.
+    const failingDocker = createMockDocker();
+    failingDocker.exec = async () => {
+      throw new Error('docker.exec failed');
+    };
+    const localDeps = {
+      ...deps,
+      infra: { ...deps.infra, docker: failingDocker },
+    };
+
+    session = new DockerAgentSession(localDeps);
+    await session.initialize();
+
+    await expect(session.sendMessage('Hello')).rejects.toThrow('docker.exec failed');
+    expect(session.getInfo().status).toBe('ready');
+
+    // A second call should go through the guard and re-attempt, not be
+    // blocked on a stale 'processing' state.
+    await expect(session.sendMessage('Hello again')).rejects.toThrow('docker.exec failed');
+    expect(session.getInfo().status).toBe('ready');
+  });
+
+  it('leaves status as closed when sendMessage races with close()', async () => {
+    // If close() sets status to 'closed' while sendMessage is mid-flight,
+    // the finally block must NOT clobber it back to 'ready'.
+    const slowDocker = createMockDocker();
+    let resolveExec: ((value: { exitCode: number; stdout: string; stderr: string }) => void) | null = null;
+    slowDocker.exec = () =>
+      new Promise((resolve) => {
+        resolveExec = resolve;
+      });
+
+    const localDeps = {
+      ...deps,
+      infra: { ...deps.infra, docker: slowDocker },
+    };
+
+    session = new DockerAgentSession(localDeps);
+    await session.initialize();
+
+    const sendPromise = session.sendMessage('Hello');
+    // Let the microtasks settle so sendMessage enters the try block.
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(session.getInfo().status).toBe('processing');
+
+    // Race: close() runs while sendMessage is awaiting docker.exec.
+    const closePromise = session.close();
+    // Release the exec so sendMessage's finally runs.
+    resolveExec?.({ exitCode: 0, stdout: JSON.stringify({ result: 'ok' }), stderr: '' });
+
+    await Promise.allSettled([sendPromise, closePromise]);
+    expect(session.getInfo().status).toBe('closed');
+  });
+
   it('handles non-zero exit codes via adapter.extractResponse', async () => {
     const customDocker = createMockDocker();
     customDocker.exec = async () => ({
@@ -441,7 +446,7 @@ describe('DockerAgentSession', () => {
       stderr: 'error details',
     });
 
-    session = new DockerAgentSession({ ...deps, docker: customDocker });
+    session = new DockerAgentSession({ ...deps, infra: { ...deps.infra, docker: customDocker } });
     await session.initialize();
 
     const response = await session.sendMessage('Do something');
@@ -463,7 +468,7 @@ describe('DockerAgentSession', () => {
       arguments: { path: '/test' },
       result: { status: 'allowed' },
     };
-    appendFileSync(deps.auditLogPath, JSON.stringify(entry) + '\n');
+    appendFileSync(deps.infra.auditLogPath, JSON.stringify(entry) + '\n');
     session.flushAuditLog();
 
     expect(events.length).toBeGreaterThanOrEqual(1);
@@ -484,7 +489,7 @@ describe('DockerAgentSession', () => {
       arguments: { path: '/etc/passwd' },
       reason: 'Protected path',
     };
-    writeFileSync(join(deps.escalationDir, `request-${escalationId}.json`), JSON.stringify(request));
+    writeFileSync(join(deps.infra.escalationDir, `request-${escalationId}.json`), JSON.stringify(request));
 
     // Advance fake timers to trigger the escalation watcher's polling interval (300ms default)
     vi.advanceTimersByTime(350);
@@ -497,7 +502,7 @@ describe('DockerAgentSession', () => {
     await session.resolveEscalation(escalationId, 'denied');
 
     // Response file should exist
-    const responsePath = join(deps.escalationDir, `response-${escalationId}.json`);
+    const responsePath = join(deps.infra.escalationDir, `response-${escalationId}.json`);
     expect(existsSync(responsePath)).toBe(true);
 
     // Pending should be cleared
@@ -530,7 +535,7 @@ describe('DockerAgentSession', () => {
       arguments: { path: '/important' },
       reason: 'Protected',
     };
-    writeFileSync(join(deps.escalationDir, 'request-esc-456.json'), JSON.stringify(request));
+    writeFileSync(join(deps.infra.escalationDir, 'request-esc-456.json'), JSON.stringify(request));
 
     vi.advanceTimersByTime(350);
 
@@ -560,13 +565,13 @@ describe('DockerAgentSession', () => {
       arguments: { url: 'http://evil.com' },
       reason: 'Unknown domain',
     };
-    writeFileSync(join(deps.escalationDir, 'request-esc-789.json'), JSON.stringify(request));
+    writeFileSync(join(deps.infra.escalationDir, 'request-esc-789.json'), JSON.stringify(request));
 
     vi.advanceTimersByTime(350);
     expect(session.getPendingEscalation()).toBeDefined();
 
     // Simulate proxy-side cleanup (both files removed = expired)
-    rmSync(join(deps.escalationDir, 'request-esc-789.json'));
+    rmSync(join(deps.infra.escalationDir, 'request-esc-789.json'));
 
     vi.advanceTimersByTime(350);
     expect(expired).toBe(true);
@@ -581,130 +586,12 @@ describe('DockerAgentSession', () => {
 
     await session.sendMessage('Please fix the CSS');
 
-    const contextPath = join(deps.escalationDir, 'user-context.json');
+    const contextPath = join(deps.infra.escalationDir, 'user-context.json');
     expect(existsSync(contextPath)).toBe(true);
   });
 
-  it('mounts only sockets subdirectory in UDS mode, not the full session dir', async () => {
-    const createCalls: DockerContainerConfig[] = [];
-    const docker: DockerManager = {
-      ...createMockDocker(),
-      async create(config: DockerContainerConfig) {
-        createCalls.push(config);
-        return 'container-uds-123';
-      },
-    };
-
-    session = new DockerAgentSession({ ...deps, docker, useTcp: false });
-    await session.initialize();
-
-    expect(createCalls).toHaveLength(1);
-    const config = createCalls[0];
-    const mounts = config.mounts;
-
-    // The /run/ironcurtain mount must point to the sockets/ subdirectory,
-    // not the full session directory (which contains escalation files, audit logs, etc.)
-    const ironcurtainMount = mounts.find((m) => m.target === '/run/ironcurtain');
-    expect(ironcurtainMount).toBeDefined();
-    expect(ironcurtainMount!.source).toBe(join(deps.sessionDir, 'sockets'));
-    expect(ironcurtainMount!.source).not.toBe(deps.sessionDir);
-
-    // The sockets directory should have been created on disk
-    expect(existsSync(join(deps.sessionDir, 'sockets'))).toBe(true);
-  });
-
-  it('mounts conversation state directory when configured (UDS mode)', async () => {
-    const createCalls: DockerContainerConfig[] = [];
-    const docker: DockerManager = {
-      ...createMockDocker(),
-      async create(config: DockerContainerConfig) {
-        createCalls.push(config);
-        return 'container-state-123';
-      },
-    };
-
-    const stateConfig: ConversationStateConfig = {
-      hostDirName: 'claude-state',
-      containerMountPath: '/home/codespace/.claude/',
-      seed: [],
-      resumeFlags: ['--continue'],
-    };
-    const conversationStateDir = join(deps.sessionDir, 'claude-state');
-    mkdirSync(conversationStateDir, { recursive: true });
-
-    session = new DockerAgentSession({
-      ...deps,
-      docker,
-      useTcp: false,
-      conversationStateDir,
-      conversationStateConfig: stateConfig,
-    });
-    await session.initialize();
-
-    expect(createCalls).toHaveLength(1);
-    const mounts = createCalls[0].mounts;
-
-    const stateMount = mounts.find((m) => m.target === '/home/codespace/.claude/');
-    expect(stateMount).toBeDefined();
-    expect(stateMount!.source).toBe(conversationStateDir);
-    expect(stateMount!.readonly).toBe(false);
-  });
-
-  it('mounts conversation state directory when configured (TCP mode)', async () => {
-    const createCalls: DockerContainerConfig[] = [];
-    const docker: DockerManager = {
-      ...createMockDocker(),
-      async create(config: DockerContainerConfig) {
-        createCalls.push(config);
-        return 'container-state-tcp-123';
-      },
-    };
-
-    const stateConfig: ConversationStateConfig = {
-      hostDirName: 'claude-state',
-      containerMountPath: '/home/codespace/.claude/',
-      seed: [],
-      resumeFlags: ['--continue'],
-    };
-    const conversationStateDir = join(deps.sessionDir, 'claude-state');
-    mkdirSync(conversationStateDir, { recursive: true });
-
-    session = new DockerAgentSession({
-      ...deps,
-      docker,
-      useTcp: true,
-      conversationStateDir,
-      conversationStateConfig: stateConfig,
-    });
-    await session.initialize();
-
-    expect(createCalls).toHaveLength(1);
-    const mounts = createCalls[0].mounts;
-
-    const stateMount = mounts.find((m) => m.target === '/home/codespace/.claude/');
-    expect(stateMount).toBeDefined();
-    expect(stateMount!.source).toBe(conversationStateDir);
-    expect(stateMount!.readonly).toBe(false);
-  });
-
-  it('does not mount conversation state directory when not configured', async () => {
-    const createCalls: DockerContainerConfig[] = [];
-    const docker: DockerManager = {
-      ...createMockDocker(),
-      async create(config: DockerContainerConfig) {
-        createCalls.push(config);
-        return 'container-nostate-123';
-      },
-    };
-
-    session = new DockerAgentSession({ ...deps, docker, useTcp: false });
-    await session.initialize();
-
-    expect(createCalls).toHaveLength(1);
-    const mounts = createCalls[0].mounts;
-
-    expect(mounts.some((m) => m.target === '/home/codespace/.claude/')).toBe(false);
-  });
+  // Mount configuration and TCP sidecar/network setup are the factory's
+  // responsibility; those assertions live in docker-infrastructure.test.ts.
 
   it('getDiagnosticLog returns accumulated events', async () => {
     session = new DockerAgentSession(deps);
@@ -715,133 +602,20 @@ describe('DockerAgentSession', () => {
   });
 
   describe('TCP mode with internal network', () => {
-    function createTcpDeps(tempDir: string): DockerAgentSessionDeps {
-      const baseDeps = createTestDeps(tempDir);
-      return {
-        ...baseDeps,
-        useTcp: true,
-        proxy: createMockProxy(join(tempDir, 'session', 'proxy.sock'), 9123),
-        mitmProxy: {
-          async start() {
-            return { port: 8443 };
-          },
-          async stop() {},
-        },
-      };
-    }
-
-    /**
-     * Creates a mock DockerManager for TCP mode tests.
-     * Returns the sidecar ID on the first `create()` call, and the app
-     * container ID on the second. Overrides can replace any method.
-     */
-    function createTcpMockDocker(
-      sidecarId: string,
-      appId: string,
-      overrides?: Partial<DockerManager>,
-    ): { docker: DockerManager; createCount: () => number } {
-      let createCount = 0;
-      const docker = {
-        ...createMockDocker(),
-        async createNetwork() {},
-        async connectNetwork() {},
-        async getContainerIp() {
-          return '172.30.0.3';
-        },
-        async create() {
-          createCount++;
-          return createCount === 1 ? sidecarId : appId;
-        },
-        async exec() {
-          return { exitCode: 0, stdout: '', stderr: '' };
-        },
-        ...overrides,
-      } as unknown as DockerManager;
-      return { docker, createCount: () => createCount };
-    }
-
-    it('creates sidecar and routes via sidecar IP in TCP mode', async () => {
-      const tcpDeps = createTcpDeps(tempDir);
-      const createNetworkCalls: Array<{ name: string; options?: Record<string, unknown> }> = [];
-      const createCalls: Array<Record<string, unknown>> = [];
-      const connectNetworkCalls: Array<{ network: string; container: string }> = [];
-
-      const { docker } = createTcpMockDocker('sidecar-123', 'container-tcp-123', {
-        async createNetwork(name: string, options?: { internal?: boolean; subnet?: string; gateway?: string }) {
-          createNetworkCalls.push({ name, options });
-        },
-        async create(config: Record<string, unknown>) {
-          createCalls.push(config);
-          return createCalls.length === 1 ? 'sidecar-123' : 'container-tcp-123';
-        },
-        async connectNetwork(network: string, container: string) {
-          connectNetworkCalls.push({ network, container });
-        },
-      } as unknown as Partial<DockerManager>);
-
-      session = new DockerAgentSession({ ...tcpDeps, docker });
-      await session.initialize();
-
-      // Verify per-session internal network was created (name derived from session ID)
-      const expectedNetworkName = getInternalNetworkName('test-session'.substring(0, 12));
-      expect(createNetworkCalls).toHaveLength(1);
-      expect(createNetworkCalls[0].name).toBe(expectedNetworkName);
-      expect(createNetworkCalls[0].options).toEqual({
-        internal: true,
-      });
-
-      // Verify two containers created: sidecar first, then app
-      expect(createCalls).toHaveLength(2);
-
-      // Sidecar: created on bridge network with socat command
-      const sidecarConfig = createCalls[0];
-      expect(sidecarConfig.image).toBe('alpine/socat');
-      expect(sidecarConfig.network).toBe('bridge');
-
-      // Sidecar connected to internal network
-      expect(connectNetworkCalls).toHaveLength(1);
-      expect(connectNetworkCalls[0].network).toBe(expectedNetworkName);
-      expect(connectNetworkCalls[0].container).toBe('sidecar-123');
-
-      // App container: created on internal network with sidecar IP as host
-      const appConfig = createCalls[1];
-      expect(appConfig.network).toBe(expectedNetworkName);
-      expect(appConfig.extraHosts).toEqual(['host.docker.internal:172.30.0.3']);
-    });
-
-    it('throws when connectivity check fails and cleans up sidecar', async () => {
-      const tcpDeps = createTcpDeps(tempDir);
-      const stoppedContainers: string[] = [];
-      const removedContainers: string[] = [];
-
-      const { docker } = createTcpMockDocker('sidecar-fail', 'container-fail', {
-        async start() {},
-        async stop(id: string) {
-          stoppedContainers.push(id);
-        },
-        async remove(id: string) {
-          removedContainers.push(id);
-        },
-        async exec() {
-          return { exitCode: 1, stdout: '', stderr: 'Connection refused' };
-        },
-      });
-
-      session = new DockerAgentSession({ ...tcpDeps, docker });
-      await expect(session.initialize()).rejects.toThrow('Internal network connectivity check failed');
-
-      // Sidecar should have been cleaned up on failure
-      expect(stoppedContainers).toContain('sidecar-fail');
-      expect(removedContainers).toContain('sidecar-fail');
-    });
+    // Sidecar/network creation and connectivity-check tests live in
+    // docker-infrastructure.test.ts. What remains here: verifying that
+    // `close()` tears down the sidecar, the main container, and the
+    // internal network that were handed to the session via the pre-built
+    // infrastructure bundle.
 
     it('removes sidecar and internal network on close', async () => {
-      const tcpDeps = createTcpDeps(tempDir);
+      const baseDeps = createTestDeps(tempDir);
       const removedNetworks: string[] = [];
       const stoppedContainers: string[] = [];
       const removedContainers: string[] = [];
 
-      const { docker } = createTcpMockDocker('sidecar-cleanup', 'container-cleanup', {
+      const docker: DockerManager = {
+        ...createMockDocker(),
         async stop(id: string) {
           stoppedContainers.push(id);
         },
@@ -851,9 +625,20 @@ describe('DockerAgentSession', () => {
         async removeNetwork(name: string) {
           removedNetworks.push(name);
         },
-      });
+      };
 
-      session = new DockerAgentSession({ ...tcpDeps, docker });
+      const expectedNetworkName = getInternalNetworkName('test-session'.substring(0, 12));
+      const infra: DockerInfrastructure = {
+        ...baseDeps.infra,
+        docker,
+        useTcp: true,
+        containerId: 'container-cleanup',
+        sidecarContainerId: 'sidecar-cleanup',
+        internalNetwork: expectedNetworkName,
+        mitmAddr: { port: 8443 },
+      };
+
+      session = new DockerAgentSession({ ...baseDeps, infra });
       await session.initialize();
       await session.close();
 
@@ -862,7 +647,173 @@ describe('DockerAgentSession', () => {
       expect(stoppedContainers).toContain('sidecar-cleanup');
       expect(removedContainers).toContain('container-cleanup');
       expect(removedContainers).toContain('sidecar-cleanup');
-      expect(removedNetworks).toContain(getInternalNetworkName('test-session'.substring(0, 12)));
+      expect(removedNetworks).toContain(expectedNetworkName);
+    });
+  });
+
+  describe('infrastructure ownership (ownsInfra flag)', () => {
+    // Counts calls to the underlying infra teardown primitives. When
+    // `ownsInfra=true`, these are invoked as part of close(); when
+    // `ownsInfra=false`, close() leaves them untouched for the external
+    // owner to invoke later via destroyDockerInfrastructure().
+    interface TeardownSpies {
+      readonly docker: DockerManager;
+      readonly mitmProxy: MitmProxy;
+      readonly proxy: DockerProxy;
+      readonly counts: {
+        containerStops: number;
+        containerRemoves: number;
+        mitmStops: number;
+        proxyStops: number;
+      };
+    }
+
+    function createTeardownSpies(sessionDir: string): TeardownSpies {
+      const counts = {
+        containerStops: 0,
+        containerRemoves: 0,
+        mitmStops: 0,
+        proxyStops: 0,
+      };
+
+      const docker: DockerManager = {
+        ...createMockDocker(),
+        async stop() {
+          counts.containerStops++;
+        },
+        async remove() {
+          counts.containerRemoves++;
+        },
+      };
+
+      const mitmProxy: MitmProxy = {
+        async start() {
+          return { socketPath: '/tmp/test-mitm-proxy.sock' };
+        },
+        async stop() {
+          counts.mitmStops++;
+        },
+      };
+
+      const proxy: DockerProxy = {
+        ...createMockProxy(join(sessionDir, 'proxy.sock')),
+        async stop() {
+          counts.proxyStops++;
+        },
+      };
+
+      return { docker, mitmProxy, proxy, counts };
+    }
+
+    it('close() DOES call destroyDockerInfrastructure when ownsInfra=true', async () => {
+      const spies = createTeardownSpies(deps.infra.sessionDir);
+      session = new DockerAgentSession({
+        ...deps,
+        ownsInfra: true,
+        infra: {
+          ...deps.infra,
+          docker: spies.docker,
+          mitmProxy: spies.mitmProxy,
+          proxy: spies.proxy,
+        },
+      });
+      await session.initialize();
+      await session.close();
+
+      // Each infra resource should have been released exactly once.
+      expect(spies.counts.containerStops).toBe(1);
+      expect(spies.counts.containerRemoves).toBe(1);
+      expect(spies.counts.mitmStops).toBe(1);
+      expect(spies.counts.proxyStops).toBe(1);
+    });
+
+    it('close() does NOT call destroyDockerInfrastructure when ownsInfra=false', async () => {
+      const spies = createTeardownSpies(deps.infra.sessionDir);
+      session = new DockerAgentSession({
+        ...deps,
+        ownsInfra: false,
+        infra: {
+          ...deps.infra,
+          docker: spies.docker,
+          mitmProxy: spies.mitmProxy,
+          proxy: spies.proxy,
+        },
+      });
+      await session.initialize();
+      await session.close();
+
+      // Borrowed infra stays alive; the external owner is responsible for
+      // calling destroyDockerInfrastructure() later.
+      expect(spies.counts.containerStops).toBe(0);
+      expect(spies.counts.containerRemoves).toBe(0);
+      expect(spies.counts.mitmStops).toBe(0);
+      expect(spies.counts.proxyStops).toBe(0);
+    });
+
+    it('close() stops escalation watcher and audit tailer regardless of ownsInfra value', async () => {
+      // Both ownsInfra branches must tear down the escalation watcher and
+      // audit tailer, since those lifecycles are session-owned (not
+      // infra-owned). Verified behaviorally via two post-close signals:
+      //   1. Dropping a fresh escalation request after close does not fire
+      //      the onEscalation callback (poll interval stopped).
+      //   2. The session rejects sendMessage with a "closed" error.
+      vi.useFakeTimers();
+
+      for (const ownsInfra of [true, false] as const) {
+        const localTempDir = mkdtempSync(join(tmpdir(), 'owns-infra-watchers-'));
+        try {
+          const localDeps = createTestDeps(localTempDir);
+          const escalations: EscalationRequest[] = [];
+          const local = new DockerAgentSession({
+            ...localDeps,
+            ownsInfra,
+            onEscalation: (req) => escalations.push(req),
+          });
+          await local.initialize();
+
+          // Sanity-check: the watcher was actively polling before close.
+          const warmupRequest: EscalationRequest = {
+            escalationId: 'owns-infra-warmup',
+            toolName: 'write_file',
+            serverName: 'filesystem',
+            arguments: { path: '/warmup' },
+            reason: 'Warmup',
+          };
+          writeFileSync(
+            join(localDeps.infra.escalationDir, 'request-owns-infra-warmup.json'),
+            JSON.stringify(warmupRequest),
+          );
+          vi.advanceTimersByTime(350);
+          expect(escalations).toHaveLength(1);
+
+          await local.close();
+          const callbacksBeforePostClose = escalations.length;
+
+          // Post-close: a fresh escalation request must NOT fire the
+          // onEscalation callback, because the poll interval was stopped.
+          const postCloseRequest: EscalationRequest = {
+            escalationId: 'owns-infra-post-close',
+            toolName: 'write_file',
+            serverName: 'filesystem',
+            arguments: { path: '/post' },
+            reason: 'Post-close',
+          };
+          writeFileSync(
+            join(localDeps.infra.escalationDir, 'request-owns-infra-post-close.json'),
+            JSON.stringify(postCloseRequest),
+          );
+          vi.advanceTimersByTime(1000);
+          expect(escalations.length).toBe(callbacksBeforePostClose);
+
+          // Post-close: the session refuses further work regardless of which
+          // ownership mode was used.
+          await expect(local.sendMessage('hi')).rejects.toThrow('closed');
+        } finally {
+          rmSync(localTempDir, { recursive: true, force: true });
+        }
+      }
+
+      vi.useRealTimers();
     });
   });
 });
