@@ -270,13 +270,64 @@ export function extractTextFromContent(content: unknown): string | undefined {
 }
 
 /**
- * Validates that all argument keys exist in the tool's `inputSchema`.
- * Returns `null` if valid, or an error message listing unknown and
- * valid keys.
+ * Returns the JSON-Schema primitive type name for a JavaScript value,
+ * or `undefined` for values that don't map to a single JSON-Schema
+ * primitive (e.g. functions, symbols). Distinguishes `array` and
+ * `null` from `object` the way JSON Schema does.
+ */
+function jsonSchemaTypeOf(value: unknown): string | undefined {
+  if (value === null) return 'null';
+  if (Array.isArray(value)) return 'array';
+  const t = typeof value;
+  if (t === 'string' || t === 'number' || t === 'boolean' || t === 'object') return t;
+  return undefined;
+}
+
+/**
+ * Returns `true` when `value` is compatible with the JSON-Schema
+ * primitive `expected`. Only single-level primitive matching -- we
+ * don't recurse into nested object/array shapes; that's the MCP
+ * server's job.
+ *
+ * `integer` accepts finite whole numbers; `number` accepts any finite
+ * number. All other expected types must match exactly.
+ */
+function matchesJsonSchemaType(value: unknown, expected: string): boolean {
+  switch (expected) {
+    case 'integer':
+      return typeof value === 'number' && Number.isInteger(value);
+    case 'number':
+      return typeof value === 'number' && Number.isFinite(value);
+    case 'string':
+    case 'boolean':
+    case 'null':
+    case 'array':
+    case 'object':
+      return jsonSchemaTypeOf(value) === expected;
+    default:
+      // Unknown or composite types (e.g., string-array in schema) are
+      // out of scope for this primitive type-check. Treat as pass so
+      // we don't reject calls whose schema uses richer constructs.
+      return true;
+  }
+}
+
+/**
+ * Validates tool call arguments against the tool's `inputSchema`.
+ * Returns `null` if valid, or an error message describing the first
+ * problem encountered.
+ *
+ * Checks performed (in order):
+ *   1. Unknown argument names — any key not declared in
+ *      `properties` fails with a listing of valid keys.
+ *   2. Primitive type mismatch — for each provided argument whose
+ *      schema has a `type` string, the JS value's JSON-Schema
+ *      primitive type must match. Does not recurse into object/array
+ *      element shapes.
  *
  * Skips validation in two cases:
- *   1. The schema has no `properties` object (nothing to check against).
- *   2. `additionalProperties` is truthy (explicit opt-out).
+ *   - The schema has no `properties` object (nothing to check against).
+ *   - `additionalProperties` is truthy (explicit opt-out).
  *
  * NOTE: This is stricter than plain JSON Schema, which treats a
  * missing `additionalProperties` as equivalent to `true`. Here we
@@ -293,16 +344,36 @@ export function validateToolArguments(
   if (!properties || typeof properties !== 'object') return null;
   if (inputSchema.additionalProperties) return null;
 
-  const validKeys = new Set(Object.keys(properties as Record<string, unknown>));
+  const props = properties as Record<string, unknown>;
+  const validKeys = new Set(Object.keys(props));
   const unknownKeys = Object.keys(args).filter((k) => !validKeys.has(k));
-  if (unknownKeys.length === 0) return null;
+  if (unknownKeys.length > 0) {
+    const unknownList = unknownKeys.map((k) => `"${k}"`).join(', ');
+    const validList = [...validKeys]
+      .sort()
+      .map((k) => `"${k}"`)
+      .join(', ');
+    return `${ERROR_PREFIX_UNKNOWN_ARGS} ${unknownList}. Valid parameters are: ${validList}`;
+  }
 
-  const unknownList = unknownKeys.map((k) => `"${k}"`).join(', ');
-  const validList = [...validKeys]
-    .sort()
-    .map((k) => `"${k}"`)
-    .join(', ');
-  return `${ERROR_PREFIX_UNKNOWN_ARGS} ${unknownList}. Valid parameters are: ${validList}`;
+  // Primitive type check: for each provided arg whose schema declares
+  // a primitive `type`, verify the argument's runtime type matches.
+  // This catches the "agent passed an object where a string was
+  // required" case before path normalization stringifies the object
+  // into a meaningless sandbox-escape message.
+  for (const key of Object.keys(args)) {
+    const propSchema = props[key];
+    if (!propSchema || typeof propSchema !== 'object') continue;
+    const expected = (propSchema as Record<string, unknown>).type;
+    if (typeof expected !== 'string') continue;
+    if (!matchesJsonSchemaType(args[key], expected)) {
+      const received = jsonSchemaTypeOf(args[key]) ?? typeof args[key];
+      const article = /^[aeiou]/i.test(expected) ? 'an' : 'a';
+      return `Argument "${key}" must be ${article} ${expected} (got ${received}).`;
+    }
+  }
+
+  return null;
 }
 
 /**
