@@ -162,6 +162,15 @@ async function createDockerSession(
   // error messages from the orchestrator and XState) silently goes to a log
   // file instead of the terminal.
   let session: InstanceType<typeof import('../docker/docker-agent-session.js').DockerAgentSession> | undefined;
+  // Track the infra bundle in outer scope so the catch path can clean
+  // up containers/proxies even if failure happens BEFORE the session
+  // instance exists (e.g., writeFileSync for CLAUDE.md throws, or the
+  // DockerAgentSession constructor throws). Without this, the session
+  // is undefined and `session?.close()` is a no-op — the container,
+  // sidecar, network, and proxies all leak.
+  let infra:
+    | Awaited<ReturnType<typeof import('../docker/docker-infrastructure.js').createDockerInfrastructure>>
+    | undefined;
   try {
     const { createDockerInfrastructure } = await import('../docker/docker-infrastructure.js');
     const { DockerAgentSession } = await import('../docker/docker-agent-session.js');
@@ -172,7 +181,7 @@ async function createDockerSession(
       memoryEnabled: config.userConfig.memory.enabled,
     });
 
-    const infra = await createDockerInfrastructure(
+    infra = await createDockerInfrastructure(
       sessionConfig.config,
       { kind: 'docker', agent: agentId },
       sessionConfig.sessionDir,
@@ -222,7 +231,16 @@ async function createDockerSession(
     await session.initialize();
     return session;
   } catch (error) {
-    await session?.close().catch(() => {});
+    // If the session exists, its close() path owns infra teardown
+    // (ownsInfra=true). If we failed before constructing the session,
+    // fall back to destroying the infra bundle directly so containers,
+    // sidecar, network, and proxies don't leak.
+    if (session) {
+      await session.close().catch(() => {});
+    } else if (infra) {
+      const { destroyDockerInfrastructure } = await import('../docker/docker-infrastructure.js');
+      await destroyDockerInfrastructure(infra).catch(() => {});
+    }
     if (!loggerWasActive) logger.teardown();
     throw error instanceof SessionError
       ? error
