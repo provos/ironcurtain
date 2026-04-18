@@ -8,7 +8,7 @@
 
 import { existsSync, mkdirSync, writeFileSync, unlinkSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import { loadConfig } from '../config/index.js';
+import { loadConfig, applyAllowedDirectoryToMcpArgs } from '../config/index.js';
 import {
   getSessionDir,
   getSessionSandboxDir,
@@ -468,7 +468,7 @@ export function buildSessionConfig(
   }
 
   // Patch MCP server args to use the session-specific sandbox directory
-  patchMcpServerAllowedDirectory(sessionConfig, sandboxDir);
+  applyAllowedDirectoryToMcpArgs(sessionConfig.mcpServers, sandboxDir);
 
   // Persist session settings so --resume can restore them.
   // Only write on initial creation (not when resuming).
@@ -491,26 +491,6 @@ export function buildSessionConfig(
     auditLogPath,
     systemPromptAugmentation,
   };
-}
-
-/**
- * Patches the filesystem MCP server's allowed directory argument
- * to use the session-specific sandbox directory, mirroring the
- * logic in loadConfig() that syncs ALLOWED_DIRECTORY.
- */
-export function patchMcpServerAllowedDirectory(
-  config: { mcpServers: Record<string, { args: string[] }> },
-  sandboxDir: string,
-): void {
-  const fsServer = config.mcpServers['filesystem'] as { args: string[] } | undefined;
-  if (!fsServer) return;
-
-  // Replace any existing allowed directory path in args.
-  // The config may have the original default or a previously patched value.
-  const lastArgIndex = fsServer.args.length - 1;
-  if (lastArgIndex >= 0) {
-    fsServer.args[lastArgIndex] = sandboxDir;
-  }
 }
 
 // Re-export types needed by callers

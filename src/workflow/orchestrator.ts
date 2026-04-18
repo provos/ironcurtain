@@ -541,7 +541,7 @@ export class WorkflowOrchestrator implements WorkflowController {
     (input: CreateWorkflowInfrastructureInput) => Promise<DockerInfrastructure>
   > {
     const { createDockerInfrastructure } = await import('../docker/docker-infrastructure.js');
-    const { loadConfig } = await import('../config/index.js');
+    const { loadConfig, applyAllowedDirectoryToMcpArgs } = await import('../config/index.js');
     const { getSessionDir, getSessionSandboxDir, getSessionEscalationDir } = await import('../config/paths.js');
 
     return async (input) => {
@@ -552,12 +552,20 @@ export class WorkflowOrchestrator implements WorkflowController {
       // workflow run, with per-entry persona tagging) instead of the
       // per-session audit file.
       const sessionDir = getSessionDir(input.workflowId);
+      const sandboxDir = getSessionSandboxDir(input.workflowId);
       mkdirSync(sessionDir, { recursive: true });
+      mkdirSync(sandboxDir, { recursive: true });
+      // Rewrite the allowed directory onto the loaded config so the
+      // filesystem MCP server spawns with the per-workflow sandbox
+      // instead of the default (which may not exist). Mirrors the
+      // single-session path in `buildSessionConfig`.
+      config.allowedDirectory = sandboxDir;
+      applyAllowedDirectoryToMcpArgs(config.mcpServers, sandboxDir);
       return createDockerInfrastructure(
         config,
         { kind: 'docker', agent: input.agentId },
         sessionDir,
-        getSessionSandboxDir(input.workflowId),
+        sandboxDir,
         getSessionEscalationDir(input.workflowId),
         getWorkflowAuditLogPath(input.workflowId),
         input.workflowId,
