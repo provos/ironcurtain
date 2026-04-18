@@ -1,17 +1,23 @@
 // src/logger.ts
 //
 // Module-level singleton: the process has one `console` object, so
-// hijacking it requires a single owner at a time. The lifecycle is
-// "rented resource" semantics — a session claims the singleton via
+// hijacking it requires a single claimant at a time. Lifecycle is
+// "rented resource" semantics — a caller claims the singleton via
 // `setup()`, releases it via `teardown()`.
 //
-// Concurrent sessions are NOT supported. In long-running contexts
-// (workflows with multiple per-state sessions), each session must
-// tear down before the next one calls `setup()`. As a defense
-// against missed teardown, `setup()` tolerates retargeting: if
-// called while another path is already active, it closes the
-// existing stream and redirects to the new path without dropping
-// the console hijack.
+// Typical claimants: a session (from `createDockerSession` /
+// `createBuiltinSession`) or a long-lived daemon process
+// (`ironcurtain daemon`). The daemon is a valid claimant because its
+// entrypoint is the outermost owner of the process; it hands off to
+// per-session claims when spawning work, then re-claims the
+// singleton afterwards.
+//
+// Concurrent claims are NOT supported. In workflows with multiple
+// per-state sessions, each session must tear down before the next
+// one calls `setup()`. As a defense against missed teardown,
+// `setup()` tolerates retargeting: called while another path is
+// active, it redirects subsequent writes to the new path without
+// dropping the console hijack.
 
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';

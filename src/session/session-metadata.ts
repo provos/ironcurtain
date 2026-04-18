@@ -5,7 +5,7 @@
  * the session continues with the same settings.
  */
 
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { getSessionMetadataPath } from '../config/paths.js';
 import type { SessionMetadata } from './types.js';
 
@@ -15,11 +15,15 @@ import type { SessionMetadata } from './types.js';
  * under `{home}/sessions/{sessionId}/`.
  *
  * No-ops if the file already exists (idempotent for retried session
- * creation).
+ * creation). Uses `wx` flag to atomically fail on existence rather than
+ * stat-then-write (TOCTOU-safe).
  */
 export function saveSessionMetadataTo(path: string, metadata: SessionMetadata): void {
-  if (existsSync(path)) return;
-  writeFileSync(path, JSON.stringify(metadata, null, 2) + '\n', 'utf-8');
+  try {
+    writeFileSync(path, JSON.stringify(metadata, null, 2) + '\n', { flag: 'wx', encoding: 'utf-8' });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+  }
 }
 
 /**

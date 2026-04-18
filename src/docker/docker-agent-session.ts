@@ -170,7 +170,10 @@ export class DockerAgentSession implements Session {
     mkdirSync(this.infra.sandboxDir, { recursive: true });
     mkdirSync(this.infra.escalationDir, { recursive: true });
 
-    // Write the effective system prompt for debugging
+    // Write the effective system prompt for debugging. In borrow mode
+    // this overwrites the same bundle-scoped file each state with the
+    // same content -- acceptable since the container's bind mount
+    // consumes this file.
     writeFileSync(resolve(this.infra.sessionDir, 'system-prompt.txt'), this.systemPrompt);
 
     logger.info(`Session attached to container: ${this.infra.containerId.substring(0, 12)}`);

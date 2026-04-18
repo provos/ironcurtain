@@ -17,6 +17,8 @@ import {
   getSessionLogPath,
   getSessionLlmLogPath,
   getSessionAutoApproveLlmLogPath,
+  SESSION_LOG_FILENAME,
+  SESSION_METADATA_FILENAME,
 } from '../config/paths.js';
 import { validatePolicyDir as sharedValidatePolicyDir } from '../config/validate-policy-dir.js';
 import type { IronCurtainConfig } from '../config/types.js';
@@ -382,40 +384,29 @@ export function buildSessionConfig(
   }
 
   // Paths differ by mode:
-  // - Borrow mode: per-state artifacts go under the workflow state dir
-  //   that the orchestrator already created (when `workflowStateDir` is
-  //   supplied). The Docker bundle owns the sandbox/escalation/audit
-  //   paths on `opts.workflowInfrastructure`. When the caller borrows
-  //   the bundle without supplying a per-state dir (legacy path, still
-  //   supported for factory-level tests), session artifacts fall back
-  //   to the bundle's sessionDir.
-  // - Standalone/CLI mode: everything lives under
-  //   `{home}/sessions/{effectiveSessionId}/`.
+  // - Borrow mode: per-state artifacts go under `workflowStateDir` when
+  //   the orchestrator supplied one; otherwise fall back to the bundle's
+  //   sessionDir (legacy path, still used by factory-level tests). The
+  //   bundle owns sandbox/escalation/audit on `workflowInfrastructure`.
+  // - Standalone/CLI: everything lives under `{home}/sessions/{id}/`.
   const borrowInfra = opts.workflowInfrastructure;
-  const sessionDir = borrowInfra
-    ? (opts.workflowStateDir ?? borrowInfra.sessionDir)
-    : getSessionDir(effectiveSessionId);
+  const artifactDir = borrowInfra ? (opts.workflowStateDir ?? borrowInfra.sessionDir) : undefined;
+  const sessionDir = artifactDir ?? getSessionDir(effectiveSessionId);
   const sandboxDir = workspacePath ?? getSessionSandboxDir(effectiveSessionId);
   const escalationDir = borrowInfra ? borrowInfra.escalationDir : getSessionEscalationDir(effectiveSessionId);
   const auditLogPath = borrowInfra ? borrowInfra.auditLogPath : getSessionAuditLogPath(effectiveSessionId);
 
-  if (borrowInfra) {
-    // The workflow orchestrator already mkdir'd `workflowStateDir` and
-    // owns the bundle's sandbox/escalation dirs. Do not create any
-    // `~/.ironcurtain/sessions/<uuid>/` tree here.
-  } else {
-    // Create the directory when not using an explicit --workspace flag.
-    // When persona is set, `workspacePath` was derived internally (not
-    // from the caller), so we still need to ensure it exists.
-    // Only skip creation for explicit user-provided workspace paths.
+  // Standalone mode creates its own session tree. Borrow mode relies on
+  // directories the orchestrator and bundle already own.
+  if (!borrowInfra) {
     if (!opts.workspacePath) {
       mkdirSync(sandboxDir, { recursive: true });
     }
     mkdirSync(escalationDir, { recursive: true });
   }
 
-  const sessionLogPath = borrowInfra
-    ? resolve(opts.workflowStateDir ?? borrowInfra.sessionDir, 'session.log')
+  const sessionLogPath = artifactDir
+    ? resolve(artifactDir, SESSION_LOG_FILENAME)
     : getSessionLogPath(effectiveSessionId);
   // llm-interactions / auto-approve-llm still live under the standalone
   // session dir even in borrow mode (per-turn LLM logs are not scoped to
@@ -520,9 +511,8 @@ export function buildSessionConfig(
       ...(!opts.persona && policyDir ? { policyDir } : {}),
       ...(opts.disableAutoApprove ? { disableAutoApprove: true } : {}),
     };
-    if (borrowInfra) {
-      const metadataDir = opts.workflowStateDir ?? borrowInfra.sessionDir;
-      saveSessionMetadataTo(resolve(metadataDir, 'session-metadata.json'), metadata);
+    if (artifactDir) {
+      saveSessionMetadataTo(resolve(artifactDir, SESSION_METADATA_FILENAME), metadata);
     } else {
       saveSessionMetadata(effectiveSessionId, metadata);
     }

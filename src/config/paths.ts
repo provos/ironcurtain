@@ -38,18 +38,23 @@ function assertPathSafeSlug(kind: string, value: string): void {
 }
 
 /**
- * Stricter variant of `PATH_SAFE_SLUG_RE` that permits dots as internal
- * separators (e.g., `fetch.1`, `plan.2`) but still rejects path
- * traversal (`..`), leading/trailing dots, and glob metacharacters.
- *
- * Used exclusively for workflow state slugs of the form
- * `{stateId}.{visitCount}`.
+ * Filenames shared across session-scoped and workflow-state-scoped
+ * layouts. Centralized so the "single source of truth" for how session
+ * artifacts are named does not drift between helpers and call sites.
  */
-const STATE_SLUG_RE = /^[a-zA-Z0-9_-]+(?:\.[a-zA-Z0-9_-]+)*$/;
+export const SESSION_LOG_FILENAME = 'session.log';
+export const SESSION_METADATA_FILENAME = 'session-metadata.json';
 
+/**
+ * Validates a workflow state slug of the form `{stateId}.{visitCount}`
+ * (e.g., `fetch.1`, `plan.2`). Accepts dot-separated segments where
+ * each segment satisfies `PATH_SAFE_SLUG_RE`. Empty segments — produced
+ * by `..`, leading or trailing dots — fail the per-segment check.
+ */
 function assertStateSlug(value: string): void {
-  if (!STATE_SLUG_RE.test(value)) {
-    throw new Error(`Invalid state slug: ${value}`);
+  if (value.length === 0) throw new Error(`Invalid state slug: ${value}`);
+  for (const segment of value.split('.')) {
+    assertPathSafeSlug('state slug segment', segment);
   }
 }
 
@@ -83,7 +88,7 @@ export function getSessionEscalationDir(sessionId: string): string {
  *   {home}/sessions/{sessionId}/session-metadata.json
  */
 export function getSessionMetadataPath(sessionId: string): string {
-  return resolve(getSessionDir(sessionId), 'session-metadata.json');
+  return resolve(getSessionDir(sessionId), SESSION_METADATA_FILENAME);
 }
 
 /**
@@ -107,7 +112,7 @@ export function getSessionInteractionLogPath(sessionId: string): string {
  *   {home}/sessions/{sessionId}/session.log
  */
 export function getSessionLogPath(sessionId: string): string {
-  return resolve(getSessionDir(sessionId), 'session.log');
+  return resolve(getSessionDir(sessionId), SESSION_LOG_FILENAME);
 }
 
 /**
@@ -502,7 +507,7 @@ export function getWorkflowStateDir(workflowId: string, stateSlug: string): stri
  *   {home}/workflow-runs/{workflowId}/states/{stateSlug}/session.log
  */
 export function getWorkflowStateLogPath(workflowId: string, stateSlug: string): string {
-  return resolve(getWorkflowStateDir(workflowId, stateSlug), 'session.log');
+  return resolve(getWorkflowStateDir(workflowId, stateSlug), SESSION_LOG_FILENAME);
 }
 
 /**
@@ -510,5 +515,5 @@ export function getWorkflowStateLogPath(workflowId: string, stateSlug: string): 
  *   {home}/workflow-runs/{workflowId}/states/{stateSlug}/session-metadata.json
  */
 export function getWorkflowStateMetadataPath(workflowId: string, stateSlug: string): string {
-  return resolve(getWorkflowStateDir(workflowId, stateSlug), 'session-metadata.json');
+  return resolve(getWorkflowStateDir(workflowId, stateSlug), SESSION_METADATA_FILENAME);
 }
