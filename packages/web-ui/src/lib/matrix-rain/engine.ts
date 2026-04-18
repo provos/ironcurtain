@@ -606,6 +606,12 @@ export function createRainEngine(layout: LayoutPlan, options: RainEngineOptions 
       // moves. Without this check, hold/ambient would keep emitting
       // stale coordinates and assembly drops would target stale cells.
       const lockedCellsChanged = !lockedCellsEqual(currentLayout.lockedCells, newLayout.lockedCells);
+      // `cols`/`rows` can shift without `cellSize` (e.g. viewport width
+      // changes by less than one cellSize step). Ambient drops in cols
+      // that no longer exist would otherwise keep occupying the cap
+      // while rendering off-canvas, reducing visible density.
+      const gridDimsChanged =
+        cellSizeChanged || newLayout.cols !== currentLayout.cols || newLayout.rows !== currentLayout.rows;
       currentLayout = newLayout;
       const partitioned = partitionCells(currentLayout.lockedCells);
       titleCells = partitioned.titleCells;
@@ -621,10 +627,10 @@ export function createRainEngine(layout: LayoutPlan, options: RainEngineOptions 
           lockedSnapshotBuf = allLockedCellsSnapshot(currentLayout);
         }
       }
-      // Only a true grid-dimension change (cellSize) invalidates the
-      // ambient drop population; a wordmark shift alone leaves the grid
-      // intact and ambient drops can keep falling uninterrupted.
-      if (cellSizeChanged) {
+      // Any change to the grid dimensions invalidates the ambient
+      // population; a pure wordmark re-centering (grid intact) leaves
+      // rain uninterrupted.
+      if (gridDimsChanged) {
         ambientDrops = [];
       }
       // Always resize the cooldown array to the new column count.

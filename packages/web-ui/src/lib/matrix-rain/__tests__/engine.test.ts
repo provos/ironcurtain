@@ -162,10 +162,16 @@ function snapshot(frame: FrameState): string {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Drive the engine forward by `tickCount` logical ticks. */
-function driveTicks(engine: ReturnType<typeof createRainEngine>, tickCount: number): void {
-  engine.step(0);
-  for (let i = 1; i <= tickCount; i++) engine.step(i * FRAME_MS);
+/**
+ * Drive the engine forward by `tickCount` logical ticks, starting at `startMs`.
+ * Returns the final timestamp so callers that need to continue driving
+ * the same engine across multiple phases can chain monotonic calls —
+ * feeding rewound timestamps would be silently ignored by `step()`.
+ */
+function driveTicks(engine: ReturnType<typeof createRainEngine>, tickCount: number, startMs: number = 0): number {
+  engine.step(startMs);
+  for (let i = 1; i <= tickCount; i++) engine.step(startMs + i * FRAME_MS);
+  return startMs + tickCount * FRAME_MS;
 }
 
 // ---------------------------------------------------------------------------
@@ -539,23 +545,28 @@ describe('createRainEngine -- resize', () => {
   it('rebuilds assembly drops when locked cells shift during assembly', () => {
     const layout = buildTwoPhaseLayout();
     const engine = createRainEngine(layout, { seed: 42 });
-    driveTicks(engine, 3);
+    const afterInitialTicks = driveTicks(engine, 3);
     expect(engine.phase).toBe('assembly');
 
     const shifted = shiftCellsRight(layout, 5);
     engine.resize(shifted);
 
     // Drive assembly to completion. If drops still targeted the old
-    // columns, the shifted title cells would never lock.
-    driveTicks(engine, MAX_ASSEMBLY_TICKS + SUBTITLE_REVEAL_TICKS + 2);
+    // columns, the shifted title cells would never lock. Continue from
+    // the timestamp the first driveTicks ended at — otherwise the engine
+    // would treat the new call's initial timestamps as rewound and skip
+    // advancing.
+    driveTicks(engine, MAX_ASSEMBLY_TICKS + SUBTITLE_REVEAL_TICKS + 2, afterInitialTicks + FRAME_MS);
+
+    // Compare full (col, row) pairs, not distinct columns — a future
+    // layout could have multiple title cells in one column (stacked
+    // glyphs), and the distinct-column count would spuriously pass then.
     const finalFrame = engine.getFrame();
-    const titleCount = shifted.lockedCells.filter((c) => c.group === 'title').length;
-    const lockedTitleCols = new Set(
-      finalFrame.lockedCells
-        .filter((c) => shifted.lockedCells.some((lc) => lc.group === 'title' && lc.col === c.col && lc.row === c.row))
-        .map((c) => c.col),
+    const shiftedTitleCells = shifted.lockedCells.filter((c) => c.group === 'title');
+    const lockedTitleCells = finalFrame.lockedCells.filter((c) =>
+      shiftedTitleCells.some((lc) => lc.col === c.col && lc.row === c.row),
     );
-    expect(lockedTitleCols.size).toBe(titleCount);
+    expect(lockedTitleCells).toHaveLength(shiftedTitleCells.length);
   });
 
   it('is a no-op when the new layout has identical lockedCells and cellSize', () => {
