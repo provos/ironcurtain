@@ -368,7 +368,8 @@ export function validateToolArguments(
     if (typeof expected !== 'string') continue;
     if (!matchesJsonSchemaType(args[key], expected)) {
       const received = jsonSchemaTypeOf(args[key]) ?? typeof args[key];
-      return `Argument "${key}" must be a ${expected} (got ${received}).`;
+      const article = /^[aeiou]/i.test(expected) ? 'an' : 'a';
+      return `Argument "${key}" must be ${article} ${expected} (got ${received}).`;
     }
   }
 
