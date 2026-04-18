@@ -201,75 +201,86 @@ export class DockerAgentSession implements Session {
     if (this.status !== 'ready') throw new SessionNotReadyError(this.status);
 
     this.status = 'processing';
+    try {
+      // Per-turn wall-clock timeout (matches builtin session semantics:
+      // maxSessionSeconds is a per-turn limit, idle time doesn't count).
+      // When not configured, docker.exec applies its own default timeout
+      // (currently 10 minutes) to prevent runaway processes.
+      const maxSeconds = this.config.userConfig.resourceBudget.maxSessionSeconds;
+      const execTimeout = maxSeconds != null ? maxSeconds * 1000 : undefined;
 
-    // Per-turn wall-clock timeout (matches builtin session semantics:
-    // maxSessionSeconds is a per-turn limit, idle time doesn't count).
-    // When not configured, docker.exec applies its own default timeout
-    // (currently 10 minutes) to prevent runaway processes.
-    const maxSeconds = this.config.userConfig.resourceBudget.maxSessionSeconds;
-    const execTimeout = maxSeconds != null ? maxSeconds * 1000 : undefined;
+      const turnStartMs = Date.now();
+      const turnStart = new Date(turnStartMs).toISOString();
 
-    const turnStartMs = Date.now();
-    const turnStart = new Date(turnStartMs).toISOString();
+      // Write user context for the auto-approver
+      this.writeUserContext(userMessage);
 
-    // Write user context for the auto-approver
-    this.writeUserContext(userMessage);
+      const command = this.infra.adapter.buildCommand(userMessage, this.systemPrompt, {
+        sessionId: this.sessionId,
+        firstTurn: !this.firstTurnComplete,
+        modelOverride: this.agentModelOverride,
+      });
+      logger.info(`[docker-agent] exec: ${formatCommand(command)}`);
 
-    const command = this.infra.adapter.buildCommand(userMessage, this.systemPrompt, {
-      sessionId: this.sessionId,
-      firstTurn: !this.firstTurnComplete,
-      modelOverride: this.agentModelOverride,
-    });
-    logger.info(`[docker-agent] exec: ${formatCommand(command)}`);
+      const execStartMs = Date.now();
+      const { exitCode, stdout, stderr } = await this.infra.docker.exec(this.infra.containerId, command, execTimeout);
+      const execDurationMs = Date.now() - execStartMs;
+      const timeoutLabel = execTimeout != null ? `${execTimeout}ms` : `${DEFAULT_EXEC_TIMEOUT_MS}ms (default)`;
+      logger.info(
+        `[docker-agent] exit=${exitCode} stdout=${stdout.length}B stderr=${stderr.length}B ` +
+          `duration=${execDurationMs}ms timeout=${timeoutLabel}`,
+      );
+      if (exitCode !== 0) {
+        logger.warn(`[docker-agent] non-zero exit code ${exitCode} after ${execDurationMs}ms`);
+      }
 
-    const execStartMs = Date.now();
-    const { exitCode, stdout, stderr } = await this.infra.docker.exec(this.infra.containerId, command, execTimeout);
-    const execDurationMs = Date.now() - execStartMs;
-    const timeoutLabel = execTimeout != null ? `${execTimeout}ms` : `${DEFAULT_EXEC_TIMEOUT_MS}ms (default)`;
-    logger.info(
-      `[docker-agent] exit=${exitCode} stdout=${stdout.length}B stderr=${stderr.length}B ` +
-        `duration=${execDurationMs}ms timeout=${timeoutLabel}`,
-    );
-    if (exitCode !== 0) {
-      logger.warn(`[docker-agent] non-zero exit code ${exitCode} after ${execDurationMs}ms`);
+      if (stderr) {
+        logger.info(`[docker-agent] stderr: ${stderr.substring(0, 500)}`);
+      }
+
+      this.cumulativeActiveMs += Date.now() - turnStartMs;
+
+      const response = this.infra.adapter.extractResponse(exitCode, stdout);
+
+      if (response.costUsd !== undefined) {
+        this.cumulativeCostUsd = response.costUsd;
+      }
+
+      const turn: ConversationTurn = {
+        turnNumber: this.turns.length + 1,
+        userMessage,
+        assistantResponse: response.text,
+        usage: {
+          promptTokens: 0,
+          completionTokens: 0,
+          totalTokens: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+        },
+        timestamp: turnStart,
+      };
+      this.turns.push(turn);
+
+      // Only mark the first turn as complete on success. On a failed turn
+      // (non-zero exit), the agent may not have created the session yet, so
+      // the next turn must still pin a fresh session id rather than resume.
+      if (exitCode === 0) {
+        this.firstTurnComplete = true;
+      }
+
+      return response.text;
+    } finally {
+      // Restore to 'ready' on both success and exception so a failed
+      // turn (docker.exec timeout, adapter parse error, etc.) doesn't
+      // leave the session permanently stuck in 'processing' and block
+      // further turns. Don't overwrite 'closed' if close() was called
+      // concurrently. Cast widens TS's narrowed 'processing' type —
+      // TS doesn't model concurrent mutation of a class member while
+      // we were awaiting.
+      if ((this.status as SessionStatus) !== 'closed') {
+        this.status = 'ready';
+      }
     }
-
-    if (stderr) {
-      logger.info(`[docker-agent] stderr: ${stderr.substring(0, 500)}`);
-    }
-
-    this.cumulativeActiveMs += Date.now() - turnStartMs;
-
-    const response = this.infra.adapter.extractResponse(exitCode, stdout);
-
-    if (response.costUsd !== undefined) {
-      this.cumulativeCostUsd = response.costUsd;
-    }
-
-    const turn: ConversationTurn = {
-      turnNumber: this.turns.length + 1,
-      userMessage,
-      assistantResponse: response.text,
-      usage: {
-        promptTokens: 0,
-        completionTokens: 0,
-        totalTokens: 0,
-        cacheReadTokens: 0,
-        cacheWriteTokens: 0,
-      },
-      timestamp: turnStart,
-    };
-    this.turns.push(turn);
-
-    // Only mark the first turn as complete on success. On a failed turn
-    // (non-zero exit), the agent may not have created the session yet, so
-    // the next turn must still pin a fresh session id rather than resume.
-    if (exitCode === 0) {
-      this.firstTurnComplete = true;
-    }
-
-    this.status = 'ready';
-    return response.text;
   }
 
   getHistory(): readonly ConversationTurn[] {

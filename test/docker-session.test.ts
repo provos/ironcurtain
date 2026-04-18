@@ -381,6 +381,63 @@ describe('DockerAgentSession', () => {
     await session.close(); // Should not throw
   });
 
+  it('restores status to ready after sendMessage throws so subsequent turns can proceed', async () => {
+    // docker.exec failures (timeout, network glitch, etc.) must not
+    // leave the session permanently stuck in 'processing' — that would
+    // block all future turns with SessionNotReadyError.
+    const failingDocker = createMockDocker();
+    failingDocker.exec = async () => {
+      throw new Error('docker.exec failed');
+    };
+    const localDeps = {
+      ...deps,
+      infra: { ...deps.infra, docker: failingDocker },
+    };
+
+    session = new DockerAgentSession(localDeps);
+    await session.initialize();
+
+    await expect(session.sendMessage('Hello')).rejects.toThrow('docker.exec failed');
+    expect(session.getInfo().status).toBe('ready');
+
+    // A second call should go through the guard and re-attempt, not be
+    // blocked on a stale 'processing' state.
+    await expect(session.sendMessage('Hello again')).rejects.toThrow('docker.exec failed');
+    expect(session.getInfo().status).toBe('ready');
+  });
+
+  it('leaves status as closed when sendMessage races with close()', async () => {
+    // If close() sets status to 'closed' while sendMessage is mid-flight,
+    // the finally block must NOT clobber it back to 'ready'.
+    const slowDocker = createMockDocker();
+    let resolveExec: ((value: { exitCode: number; stdout: string; stderr: string }) => void) | null = null;
+    slowDocker.exec = () =>
+      new Promise((resolve) => {
+        resolveExec = resolve;
+      });
+
+    const localDeps = {
+      ...deps,
+      infra: { ...deps.infra, docker: slowDocker },
+    };
+
+    session = new DockerAgentSession(localDeps);
+    await session.initialize();
+
+    const sendPromise = session.sendMessage('Hello');
+    // Let the microtasks settle so sendMessage enters the try block.
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(session.getInfo().status).toBe('processing');
+
+    // Race: close() runs while sendMessage is awaiting docker.exec.
+    const closePromise = session.close();
+    // Release the exec so sendMessage's finally runs.
+    resolveExec?.({ exitCode: 0, stdout: JSON.stringify({ result: 'ok' }), stderr: '' });
+
+    await Promise.allSettled([sendPromise, closePromise]);
+    expect(session.getInfo().status).toBe('closed');
+  });
+
   it('handles non-zero exit codes via adapter.extractResponse', async () => {
     const customDocker = createMockDocker();
     customDocker.exec = async () => ({
