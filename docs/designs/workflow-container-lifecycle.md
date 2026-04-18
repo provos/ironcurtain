@@ -1,5 +1,36 @@
 # Workflow-Scoped Docker Containers
 
+## Implementation status
+
+**Steps 1-5 shipped** on branch `feat/session-borrow-path` (PR: *"workflow shared-container mode"*). Steps 6-7 remain as follow-up work.
+
+| Step | §9 entry | Status |
+|------|----------|--------|
+| 1 | PolicyEngine + AuditLog centralization | shipped (master, `30e7510`) |
+| 2 | `DockerInfrastructure` bundle + `DockerAgentSession` ownership refactor | shipped (master, `be3bdce`) |
+| 3 | Audit rotation + policy reload plumbing in the coordinator | shipped (master, `2d961d4`) -- see deviation D1 (rotate API dropped) |
+| 4 | Session-side borrow path | shipped (branch, `963f793`) |
+| 5 | Engine-owned workflow infrastructure | shipped (branch, `d53b017` + `9918ad7` + follow-ups) |
+| 6 | Validation for `freshContainer` + `freshSession` | **pending** |
+| 7 | Resume reclamation | **pending** |
+
+Several concrete decisions diverged from this design during implementation. The most
+load-bearing ones (single `audit.jsonl` with a `persona` field; consolidated
+`workflow-runs/<id>/` layout; narrowed `PolicySwapTarget`; logger/audit retargeting
+semantics; `validatePolicyDir` hardening) are summarized in the new
+"Deviations from original design" section near the bottom of this document. The
+proposal prose below is preserved as written so that the "what was planned vs.
+what actually shipped" delta remains legible.
+
+For the current on-disk layout and the canonical implementation description,
+see `WORKFLOWS.md`, `src/trusted-process/CLAUDE.md`, and `src/docker/CLAUDE.md`.
+Key code files: `src/workflow/orchestrator.ts`, `src/docker/docker-infrastructure.ts`,
+`src/docker/docker-agent-session.ts`, `src/docker/code-mode-proxy.ts`,
+`src/trusted-process/tool-call-coordinator.ts`,
+`src/trusted-process/control-server.ts`, `src/config/paths.ts`,
+`src/types/audit.ts`. End-to-end coverage lives in
+`test/workflow-policy-cycling.integration.test.ts`.
+
 ## Overview
 
 Today the workflow engine creates a fresh Docker container for every agent state it
@@ -1813,7 +1844,7 @@ it to work.
 Suggested implementation sequence (each step is independently shippable and
 does not break prior behavior):
 
-1. **PolicyEngine + AuditLog centralization.** Lift the policy, audit,
+1. **PolicyEngine + AuditLog centralization.** *Status: shipped (`30e7510` feat: centralize PolicyEngine + AuditLog into ToolCallCoordinator).* Lift the policy, audit,
    circuit breaker, approval whitelist, auto-approver, and server-context
    primitives out of `mcp-proxy-server.ts` and into the new
    `ToolCallCoordinator` in the Sandbox / CodeModeProxy layer. The
@@ -1825,7 +1856,7 @@ does not break prior behavior):
    it first, soak it in regular single-session use for a release cycle
    before layering the workflow path on top.
 2. **`DockerInfrastructure` bundle + `DockerAgentSession` ownership
-   refactor.** Concrete, landing in one incremental series that does
+   refactor.** *Status: shipped (`be3bdce` refactor: introduce DockerInfrastructure bundle with explicit lifecycle).* Concrete, landing in one incremental series that does
    not break standalone mode at any point:
    1. Define the extended `DockerInfrastructure` interface in
       `src/docker/docker-infrastructure.ts` (add `containerId`,
@@ -1852,32 +1883,178 @@ does not break prior behavior):
    (create-then-own, destroy-on-close); no workflow caller exists yet.
    Validate by running the full interactive Docker test suite end to end
    before moving on.
-3. **Audit rotation + policy reload plumbing in the coordinator.** Add
+3. **Audit rotation + policy reload plumbing in the coordinator.** *Status: shipped (`2d961d4` feat: policy hot-swap via coordinator control socket). The `AuditLog.rotate()` API in the original proposal was dropped in favor of persona-tagged entries; see deviation D1.* Add
    `AuditLog.rotate()`, the coordinator control socket, and the
    `loadPolicy` endpoint. Ship with no caller exercising it; verify by
    unit test.
-4. **Session-side borrow path.** Extend `SessionOptions` with
+4. **Session-side borrow path.** *Status: shipped (`963f793` feat: session-side borrow path for workflow infrastructure).* Extend `SessionOptions` with
    `workflowInfrastructure?: DockerInfrastructure`. Route
    `createDockerSession()` through the "use caller-supplied bundle with
    `ownsInfra=false`" branch when set. Still no workflow caller; verify
    by unit test that a session wired to a manually-constructed bundle
    works end-to-end and leaves the bundle alive on `close()`.
-5. **Engine-owned workflow infrastructure.** Wire up
+5. **Engine-owned workflow infrastructure.** *Status: shipped (`d53b017` feat(workflow): engine-owned DockerInfrastructure (Step 5 Round 1), `9918ad7` feat(workflow): policy hot-swap via persona-tagged audit (Step 5 Round 2), plus follow-ups `ff3ed77`, `73acb70`, `8551045`, `479f998`, `2a0a3b6`, `11c1c4d`, `5cc617f`, `46d7f0b`).* Wire up
    `createWorkflowInfrastructure()` / `destroyWorkflowInfrastructure()`
    in the orchestrator, plumb `workflowInfrastructure` through
    `executeAgentState()`, and invoke `loadPolicy` at every state
    transition. This is the first user-visible behavior change; land it
    behind an opt-in flag (e.g., `settings.sharedContainer: true`) during
    the soak period if desired.
-6. **Validation for `freshContainer` + `freshSession`.** Land the
+6. **Validation for `freshContainer` + `freshSession`.** *Status: pending.* Land the
    validator check once at least one workflow wants to use
    `freshContainer`.
-7. **Resume reclamation.** Add container reclamation in `resume()`.
+7. **Resume reclamation.** *Status: pending.* Add container reclamation in `resume()`.
    Include the macOS TCP-mode stale-container cleanup described in §6.
    Ship last because it is the most failure-prone and benefits from
    exercising the happy path first.
 
-## 10. Revision history
+## 10. Deviations from original design
+
+The prose above (§§1-9) is preserved as written; this section records the
+concrete decisions that diverged during implementation so that future
+readers can reconcile the design-as-proposed with the design-as-shipped
+without reverse-engineering the code. Each deviation is load-bearing --
+the surrounding prose still reads as if it were true, but in practice
+the listed item is what actually lives in the tree today.
+
+### D1 -- Audit schema: single file with `persona` field; `rotate()` API dropped
+
+The design specified per-persona / per-version rotated audit files named
+`audit.{persona}.{version}.jsonl` (see §4 "Audit file naming" and the
+`AuditLog.rotate(newPath)` API proposed in §3 `src/trusted-process/audit-log.ts`).
+That rotate path was dropped. `AuditEntry` in `src/types/audit.ts` gained a
+`persona?: string` field, and each workflow run writes a single
+`audit.jsonl` file to which every entry is appended, tagged with the
+persona that installed the active policy at the time of the call.
+`ToolCallCoordinator` tracks a `currentPersona` field and stamps it onto
+every entry via the security pipeline. `getWorkflowAuditLogPath(workflowId)`
+(in `src/config/paths.ts`) now returns
+`{home}/workflow-runs/{workflowId}/audit.jsonl` -- no persona or version
+component in the filename. The `AuditLog` class has no `rotate()` method;
+the class-level JSDoc explicitly documents that policy hot-swap only
+updates `currentPersona` on the coordinator and all entries continue to
+land in the same file. Consumers reconstruct per-persona / per-re-entry
+slices by scanning and grouping on the `persona` field plus entry order.
+
+Consequence for §§4, 5, 9: the audit-writer concurrency discussion
+(§4 "Audit writer concurrency (single-process semantics)") no longer
+has a rotation window to worry about -- the policy mutex still
+serializes `loadPolicy` against `handleToolCall`, but the only state
+that changes across the swap is `currentPersona` (and the
+`PolicyEngine` reference). The ownership matrix row "AuditLog
+instance reference (rotated via `rotate()`)" in §5 is now a plain
+"AuditLog instance reference" (no rotate surface). The §9 backward-compat
+table is effectively simpler: non-workflow and workflow sessions both
+write one `audit.jsonl` per session/run, distinguished only by
+directory (`sessions/{id}/` vs. `workflow-runs/{id}/`).
+
+### D2 -- Layout: consolidated `workflow-runs/<id>/` tree, not a session-dir split
+
+The design implicitly assumed workflow artifacts would live under per-state
+session dirs (`~/.ironcurtain/sessions/{sessionId}/...`) plus a workflow
+parent (`~/.ironcurtain/workflow-runs/{workflowId}/`), with per-state UUID
+subdirectories for session-local output. The shipped layout consolidates
+*everything* for a workflow run under a single root:
+
+```
+~/.ironcurtain/workflow-runs/{workflowId}/
+├── audit.jsonl                         # single file (D1)
+├── messages.jsonl                      # workflow message log
+├── proxy-control.sock                  # coordinator control UDS
+├── bundle/                             # shared across all states
+│   ├── claude-state/
+│   ├── orientation/
+│   ├── sockets/
+│   ├── escalations/
+│   └── system-prompt.txt
+├── states/{stateId}.{visitCount}/      # per-invocation (incl. re-entries)
+│   ├── session.log
+│   └── session-metadata.json
+└── workspace/                          # workflow-scoped workspace
+```
+
+Path helpers in `src/config/paths.ts` encode this layout:
+`getWorkflowRunDir`, `getWorkflowAuditLogPath`, `getWorkflowBundleDir`,
+`getWorkflowStatesDir`, `getWorkflowStateDir`,
+`getWorkflowStateLogPath`, `getWorkflowStateMetadataPath`, and
+`getWorkflowProxyControlSocketPath`. There is no per-state UUID
+directory under `~/.ironcurtain/sessions/` for workflow runs; the
+`{stateId}.{visitCount}` slug keyed under `states/` plays that role and
+lives inside the workflow's own tree. This keeps every artifact
+discoverable from one root and makes `rm -rf workflow-runs/<id>/` a
+complete cleanup. Consequence: references in §3 and §9 to
+`~/.ironcurtain/sessions/{sessionId}/audit.jsonl` still apply to
+standalone / interactive sessions but not to workflow state sessions.
+
+### D3 -- `PolicySwapTarget`: narrowed seam, not full coordinator access
+
+§2.2 "Proxy" and the §3 `src/docker/code-mode-proxy.ts` entry implied that
+the orchestrator would reach a rich accessor (`getCoordinator()`, or a
+`start({ controlSocketPath })` growing on `CodeModeProxy`). The shipped
+seam is narrower. `DockerProxy.getPolicySwapTarget()` returns a
+`PolicySwapTarget` interface whose *only* method is
+`startControlServer(opts: ControlServerListenOptions): Promise<ControlServerAddress>`
+(see `src/docker/code-mode-proxy.ts`). The orchestrator cannot reach
+`PolicyEngine`, `AuditLog`, or the rest of the security kernel through
+this handle -- it only binds the control server. The interface returns
+`null` before `start()` completes, so single-session callers (CLI,
+daemon, cron) that never need to attach a control server simply ignore
+the accessor. This is "least authority" applied to the workflow plumbing:
+the policy hot-swap path does not widen the blast radius of the seam
+between the orchestrator and the in-process coordinator.
+
+### D4 -- Logger / control-socket lifecycle: session owns claim; setup retargets
+
+The design treated the coordinator control socket and per-state logger
+wiring as either "always on in workflow mode" (§2.2) or a simple
+accessor to be called once at workflow start (§3
+`createWorkflowInfrastructure` entry). In practice, per-state session
+artifacts (`session.log`, `session-metadata.json`) live under
+`states/{stateSlug}/` (D2), and the logger stream must be explicitly
+retargeted on each re-entry so a single workflow run produces
+per-invocation log files rather than one appended file. This
+responsibility is split: the session owns the *claim* on its state
+slug (and guarantees unique `{stateId}.{visitCount}` values), and the
+infrastructure setup in `docker-infrastructure.ts` retargets the
+appropriate log sinks when constructing the per-state session on top
+of the shared bundle. Teardown is the mirror of setup -- per-state
+logger teardown is explicit on session close, separate from the
+bundle-level `destroyDockerInfrastructure` that only runs when the
+workflow itself terminates. Commits `479f998`
+(consolidate session artifacts under `workflow-runs/`) and `8551045`
+(improve session handling for resumed conversations) carry the bulk
+of this work.
+
+### D5 -- Hardening: `validatePolicyDir` and related checks
+
+The design treated `policyDir` (and related paths reaching into the
+coordinator over the control socket) as trusted input from the
+orchestrator. Implementation review added a defense-in-depth layer:
+`validatePolicyDir()` (re-exported from `src/config/validate-policy-dir.js`
+and called on the session side) enforces that any policy directory
+handed to a session / coordinator lives under the IronCurtain home or
+the package config dir. This closes a path-confusion hole that would
+otherwise let a malformed workflow checkpoint or a compromised
+orchestrator state point the coordinator at arbitrary filesystem
+locations during `loadPolicy`. Commit `11c1c4d`
+(fix(trusted-process): hardening from PR review) is the canonical
+record. Related hardening in the same series tightened
+`destroyWorkflowInfrastructure` retry semantics (see §3's updated
+JSDoc at `src/workflow/orchestrator.ts` line ~522, and commit
+`5cc617f`) so that cleanup cannot double-destroy the same Docker
+resources under a race between the fire-and-forget destroy and
+`shutdownAll()`.
+
+### End-to-end test
+
+An integration test at `test/workflow-policy-cycling.integration.test.ts`
+exercises the Step 5 happy path end-to-end (workflow start →
+per-state policy swap → audit tagging → terminal teardown). It is the
+canonical executable spec for the shipped design; discrepancies
+between this document and that test should be resolved in favor of
+the test until this document is rewritten.
+
+## 11. Revision history
 
 ### v4 -- UTCP spike outcome, placement clarifications, tool-call mutex
 

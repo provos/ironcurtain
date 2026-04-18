@@ -241,7 +241,27 @@ IronCurtain stores configuration and session data in `~/.ironcurtain/`:
 │       ├── escalations/     # File-based IPC for human approval
 │       ├── audit.jsonl      # Per-session audit log
 │       └── session.log      # Diagnostics
+└── workflow-runs/           # Shared-container workflow runs (see below)
 ```
+
+Single-session runs (`ironcurtain start`, mux tabs, cron jobs) write under `sessions/`. Shared-container workflow runs write under `workflow-runs/` instead — see the next section.
+
+### Workflow run layout
+
+A workflow definition can opt in to a shared Docker container by setting `settings.sharedContainer: true` in its YAML. In that mode every agent state runs inside the same long-lived container and shares one policy engine instance; between states the orchestrator hot-swaps the active policy so each persona sees its own rules. All artifacts for the run land in a single tree:
+
+```
+~/.ironcurtain/workflow-runs/<workflowId>/
+├── audit.jsonl              # Persona-tagged append-only audit
+├── messages.jsonl           # Orchestrator message log
+├── workspace/               # Agent workspace (filesystem MCP root)
+├── bundle/                  # Shared container support (claude-state, orientation, sockets, escalations, system-prompt.txt)
+├── states/
+│   └── <stateId>.<visitCount>/   # session.log + session-metadata.json per invocation
+└── proxy-control.sock       # Coordinator UDS for policy hot-swap
+```
+
+No per-session entries are created under `~/.ironcurtain/sessions/` for a shared-container workflow run. User-visible commands (`ironcurtain workflow start|resume|inspect|list`) are unchanged. See [WORKFLOWS.md](WORKFLOWS.md) for authoring workflow definitions and the full lifecycle.
 
 Edit configuration interactively:
 
