@@ -200,7 +200,12 @@ export class ControlServer {
     try {
       body = await bufferRequestBody(req, MAX_BODY_BYTES);
     } catch (err) {
-      writeJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
+      // bufferRequestBody rejects on (a) oversized body — our controlled
+      // message — or (b) Node-level req 'error' events, whose messages
+      // may embed filesystem paths or other internals. Generic response
+      // either way; details go to the server log.
+      logger.warn(`ControlServer bufferRequestBody failed: ${formatErrorForLog(err)}`);
+      writeJson(res, 400, { error: 'Bad request' });
       return;
     }
 
