@@ -110,7 +110,7 @@ const builtinDefaultDef: WorkflowDefinition = {
 // Test suite
 // ---------------------------------------------------------------------------
 
-describe('WorkflowOrchestrator shared-container mode (Round 1)', () => {
+describe('WorkflowOrchestrator shared-container mode', () => {
   let tmpDir: string;
   let activeOrchestrator: WorkflowOrchestrator | undefined;
   let cleanupPersonas: (() => void) | undefined;

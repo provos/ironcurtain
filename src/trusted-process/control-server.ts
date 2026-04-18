@@ -35,15 +35,24 @@ import * as logger from '../logger.js';
 // ---------------------------------------------------------------------------
 
 /**
- * Request body for `POST /__ironcurtain/policy/load`.
+ * HTTP path for the policy hot-swap RPC. Exported so clients (the
+ * workflow orchestrator) can target it without stringly-typed paths.
+ */
+export const POLICY_LOAD_PATH = '/__ironcurtain/policy/load';
+
+/**
+ * Request body for `POST {POLICY_LOAD_PATH}`.
  * Matches `ToolCallCoordinator.loadPolicy`'s argument shape exactly so
  * the server is a thin HTTP adapter.
+ *
+ * Audit entries are written to the coordinator's single long-lived
+ * audit file (fixed at construction time); each entry carries a
+ * `persona` field so consumers can reconstruct per-persona slices
+ * without per-state file rotation.
  */
 export interface LoadPolicyRequest {
   readonly persona: string;
-  readonly version: number;
   readonly policyDir: string;
-  readonly auditPath: string;
 }
 
 /** Handler invoked when `POST /__ironcurtain/policy/load` arrives. */
@@ -128,20 +137,12 @@ function parseLoadPolicyBody(raw: unknown): LoadPolicyRequest | string {
   if (typeof obj.persona !== 'string' || obj.persona.length === 0) {
     return 'persona must be a non-empty string';
   }
-  if (typeof obj.version !== 'number' || !Number.isFinite(obj.version) || obj.version < 0) {
-    return 'version must be a finite non-negative number';
-  }
   if (typeof obj.policyDir !== 'string' || obj.policyDir.length === 0) {
     return 'policyDir must be a non-empty string';
   }
-  if (typeof obj.auditPath !== 'string' || obj.auditPath.length === 0) {
-    return 'auditPath must be a non-empty string';
-  }
   return {
     persona: obj.persona,
-    version: obj.version,
     policyDir: obj.policyDir,
-    auditPath: obj.auditPath,
   };
 }
 
@@ -179,7 +180,7 @@ export class ControlServer {
   private async route(req: http.IncomingMessage, res: http.ServerResponse, deps: ControlServerDeps): Promise<void> {
     const url = req.url ?? '';
 
-    if (url === '/__ironcurtain/policy/load' && req.method === 'POST') {
+    if (url === POLICY_LOAD_PATH && req.method === 'POST') {
       await this.handleLoadPolicy(req, res, deps.onLoadPolicy);
       return;
     }

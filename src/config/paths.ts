@@ -23,12 +23,17 @@ export function getSessionsDir(): string {
 }
 
 /**
- * Validates that a session ID contains only safe characters
- * (alphanumeric, hyphens, underscores) to prevent path traversal.
+ * Characters permitted in any identifier that gets embedded in a
+ * filesystem path by this module (session IDs, workflow IDs, persona
+ * slugs, daemon log names). Rejects path separators, glob
+ * metacharacters, NUL bytes, and everything else that could escape the
+ * target directory.
  */
-function validateSessionId(sessionId: string): void {
-  if (!/^[a-zA-Z0-9_-]+$/.test(sessionId)) {
-    throw new Error(`Invalid session ID: ${sessionId}`);
+const PATH_SAFE_SLUG_RE = /^[a-zA-Z0-9_-]+$/;
+
+function assertPathSafeSlug(kind: string, value: string): void {
+  if (!PATH_SAFE_SLUG_RE.test(value)) {
+    throw new Error(`Invalid ${kind}: ${value}`);
   }
 }
 
@@ -37,7 +42,7 @@ function validateSessionId(sessionId: string): void {
  *   {home}/sessions/{sessionId}/
  */
 export function getSessionDir(sessionId: string): string {
-  validateSessionId(sessionId);
+  assertPathSafeSlug('session ID', sessionId);
   return resolve(getSessionsDir(), sessionId);
 }
 
@@ -162,9 +167,7 @@ export function getLogsDir(): string {
  * E.g., getDaemonLogPath('signal-bot') → {home}/logs/signal-bot.log
  */
 export function getDaemonLogPath(name: string): string {
-  if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
-    throw new Error(`Invalid daemon log name: ${name}`);
-  }
+  assertPathSafeSlug('daemon log name', name);
   return resolve(getLogsDir(), `${name}.log`);
 }
 
@@ -401,16 +404,6 @@ export function getJobRunsDir(jobId: string): string {
 // ---------------------------------------------------------------------------
 
 /**
- * Validates that a workflow ID contains only safe characters
- * (alphanumeric, hyphens, underscores) to prevent path traversal.
- */
-function validateWorkflowId(workflowId: string): void {
-  if (!/^[a-zA-Z0-9_-]+$/.test(workflowId)) {
-    throw new Error(`Invalid workflow ID: ${workflowId}`);
-  }
-}
-
-/**
  * Returns the workflow runs base directory: {home}/workflow-runs/
  */
 export function getWorkflowRunsDir(): string {
@@ -422,7 +415,7 @@ export function getWorkflowRunsDir(): string {
  * {home}/workflow-runs/{workflowId}/
  */
 export function getWorkflowRunDir(workflowId: string): string {
-  validateWorkflowId(workflowId);
+  assertPathSafeSlug('workflow ID', workflowId);
   return resolve(getWorkflowRunsDir(), workflowId);
 }
 
@@ -437,4 +430,17 @@ export function getWorkflowRunDir(workflowId: string): string {
  */
 export function getWorkflowProxyControlSocketPath(workflowId: string): string {
   return resolve(getWorkflowRunDir(workflowId), 'proxy-control.sock');
+}
+
+/**
+ * Returns the single audit log path for a workflow run:
+ *   {home}/workflow-runs/{workflowId}/audit.jsonl
+ *
+ * One file per workflow run, regardless of how many persona swaps
+ * occur. Each entry is tagged with a `persona` field by the
+ * coordinator, and JSONL ordering lets consumers reconstruct
+ * per-persona / per-re-entry slices by scanning.
+ */
+export function getWorkflowAuditLogPath(workflowId: string): string {
+  return resolve(getWorkflowRunDir(workflowId), 'audit.jsonl');
 }
