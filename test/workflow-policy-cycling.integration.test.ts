@@ -256,6 +256,14 @@ describe.skipIf(!isIsolatedVmAvailable())('loadPolicy over control socket — en
   };
 
   beforeAll(async () => {
+    // Make POLICY_A_DIR / POLICY_B_DIR land under a trusted policyDir
+    // root. The coordinator's `loadPolicy` canonicalizes the incoming
+    // path and requires it to live under `$IRONCURTAIN_HOME` or the
+    // package config dir — pointing the home at the test's isolated
+    // TEST_ROOT satisfies the check without leaking into the user's
+    // real `~/.ironcurtain`.
+    process.env.IRONCURTAIN_HOME = TEST_ROOT;
+    mkdirSync(TEST_ROOT, { recursive: true });
     mkdirSync(SANDBOX_DIR, { recursive: true });
     mkdirSync(DIR_A, { recursive: true });
     mkdirSync(DIR_B, { recursive: true });
@@ -290,6 +298,7 @@ describe.skipIf(!isIsolatedVmAvailable())('loadPolicy over control socket — en
     rmSync(TEST_ROOT, { recursive: true, force: true });
     rmSync(MCP_SOCKET, { force: true });
     rmSync(CONTROL_SOCKET, { force: true });
+    delete process.env.IRONCURTAIN_HOME;
   });
 
   it('control server accepts loadPolicy and swaps the active policy', async () => {

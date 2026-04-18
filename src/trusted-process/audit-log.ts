@@ -21,23 +21,40 @@ export class AuditLog {
   private readonly stream: WriteStream;
   private readonly redact: boolean;
   private closed = false;
+  // Latched stream error. `createWriteStream` defers the actual `open(2)`
+  // until the event loop spins, so ENOSPC / EACCES / missing-parent-dir
+  // failures surface asynchronously as an `'error'` event. Without a
+  // listener, Node would crash the process; we latch the error instead
+  // and re-throw on the next `log()` so the caller sees a synchronous
+  // failure at the write site.
+  private streamError: Error | null = null;
 
   constructor(path: string, options?: AuditLogOptions) {
     this.stream = createWriteStream(path, { flags: 'a' });
+    this.stream.on('error', (err: Error) => {
+      this.streamError = err;
+    });
     this.redact = options?.redact ?? false;
   }
 
   /**
    * Appends a single audit entry to the current stream.
    *
-   * @throws if called after `close()`. Writing to an ended stream would
-   *   trigger Node's "write after end" error event asynchronously,
-   *   which is hard to surface to the caller. Throwing synchronously
-   *   here surfaces the misuse at the call site.
+   * A trusted process that cannot audit is a security violation: we fail
+   * loudly rather than silently drop entries. If the underlying stream
+   * has surfaced an `'error'` event (open failed, disk full, etc.) we
+   * throw here so the caller stops processing tool calls.
+   *
+   * @throws if called after `close()` (writes to an ended stream would
+   *   surface asynchronously as `'write after end'`).
+   * @throws if the stream has emitted an `'error'` event at any point.
    */
   log(entry: AuditEntry): void {
     if (this.closed) {
       throw new Error('AuditLog.log() called after close()');
+    }
+    if (this.streamError) {
+      throw new Error(`AuditLog stream error: ${this.streamError.message}`);
     }
     const toWrite = this.redact ? redactAuditEntry(entry) : entry;
     this.stream.write(JSON.stringify(toWrite) + '\n');
@@ -46,6 +63,10 @@ export class AuditLog {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+    // If the stream errored, `end()` may not settle cleanly (the stream
+    // may already be destroyed). Short-circuit the await so `close()`
+    // stays idempotent and never throws in teardown paths.
+    if (this.streamError) return;
     await endStream(this.stream);
   }
 }

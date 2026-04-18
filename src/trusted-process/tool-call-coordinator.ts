@@ -38,6 +38,7 @@ import {
 } from './tool-call-pipeline.js';
 import type { ResolvedSandboxConfig } from './sandbox-integration.js';
 import { loadPersonaPolicyArtifacts } from '../config/index.js';
+import { validatePolicyDir } from '../config/validate-policy-dir.js';
 import { proxyAnnotations, proxyPolicyRules } from '../docker/proxy-tools.js';
 import { ControlServer, type ControlServerAddress, type ControlServerListenOptions } from './control-server.js';
 
@@ -453,6 +454,14 @@ export class ToolCallCoordinator {
    * ordering to reconstruct per-persona / per-re-entry slices.
    */
   async loadPolicy(req: { persona: string; policyDir: string }): Promise<void> {
+    // Defense-in-depth: any process that can reach the control socket
+    // can invoke this RPC, so we must not trust `req.policyDir`.
+    // Canonicalize + range-check against trusted roots BEFORE acquiring
+    // any mutex. Rejecting early means a hostile request cannot even
+    // block tool-call dispatch. Throws `PolicyDirValidationError`, which
+    // the control server maps to a 500 via its generic error path.
+    validatePolicyDir(req.policyDir);
+
     // Wait for any in-flight tool call to drain, then serialize against
     // concurrent loadPolicy. The two mutexes are acquired in this order
     // (call, then policy) everywhere; deadlock is impossible because no

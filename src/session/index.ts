@@ -10,8 +10,6 @@ import { existsSync, mkdirSync, writeFileSync, unlinkSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { loadConfig } from '../config/index.js';
 import {
-  getIronCurtainHome,
-  getPackageConfigDir,
   getSessionDir,
   getSessionSandboxDir,
   getSessionEscalationDir,
@@ -20,9 +18,9 @@ import {
   getSessionLlmLogPath,
   getSessionAutoApproveLlmLogPath,
 } from '../config/paths.js';
+import { validatePolicyDir as sharedValidatePolicyDir } from '../config/validate-policy-dir.js';
 import type { IronCurtainConfig } from '../config/types.js';
 import * as logger from '../logger.js';
-import { resolveRealPath } from '../types/argument-roles.js';
 import { resolvePersona, applyServerAllowlist } from '../persona/resolve.js';
 import { buildPersonaSystemPromptAugmentation } from '../persona/persona-prompt.js';
 import { resolveMemoryDbPath } from '../memory/resolve-memory-path.js';
@@ -31,7 +29,6 @@ import { buildMemorySystemPrompt, adaptMemoryToolNames } from '../memory/memory-
 import { AgentSession } from './agent-session.js';
 import { SessionError } from './errors.js';
 import { saveSessionMetadata, loadSessionMetadata } from './session-metadata.js';
-import { isEqualOrInside } from './workspace-validation.js';
 import { createSessionId } from './types.js';
 import type { Session, SessionId, SessionOptions, SessionMode } from './types.js';
 
@@ -296,23 +293,19 @@ export interface SessionDirConfig {
  * IronCurtain home directory or the package config directory. Prevents
  * loading attacker-controlled policy files from arbitrary filesystem locations.
  *
- * The package config directory is allowed so that built-in policy variants
- * (e.g., the read-only policy for constitution generation) can be loaded
- * without copying files into the user home.
+ * Thin wrapper around the shared validator in `config/validate-policy-dir.ts`
+ * so failures surface as `SessionError` with our standard code — the
+ * shared helper throws `PolicyDirValidationError`, which other callers
+ * (e.g., the coordinator's `loadPolicy` RPC) surface in their own way.
  *
  * @throws {SessionError} if the path escapes all trusted directories.
  */
 function validatePolicyDir(policyDir: string): void {
-  const resolvedPolicy = resolveRealPath(policyDir);
-  const trustedDirs = [getIronCurtainHome(), getPackageConfigDir()].map(resolveRealPath);
-
-  if (!trustedDirs.some((dir) => isEqualOrInside(resolvedPolicy, dir))) {
-    throw new SessionError(
-      `policyDir must be under a trusted directory. ` +
-        `Received: ${resolvedPolicy}; ` +
-        `trusted: ${trustedDirs.join(', ')}`,
-      'SESSION_INIT_FAILED',
-    );
+  try {
+    sharedValidatePolicyDir(policyDir);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new SessionError(message, 'SESSION_INIT_FAILED');
   }
 }
 

@@ -136,6 +136,9 @@ function postRawUds(socketPath: string, path: string, body: string): Promise<Htt
 beforeEach(() => {
   mkdirSync(TEST_ROOT, { recursive: true });
   mkdirSync(TEST_SANDBOX_DIR, { recursive: true });
+  // Treat TEST_ROOT as this run's IronCurtain home so persona policy
+  // dirs written inside it pass the coordinator's containment check.
+  process.env.IRONCURTAIN_HOME = TEST_ROOT;
 });
 
 afterEach(() => {
@@ -144,6 +147,7 @@ afterEach(() => {
   } catch {
     // best-effort
   }
+  delete process.env.IRONCURTAIN_HOME;
 });
 
 // ---------------------------------------------------------------------------
@@ -190,6 +194,43 @@ describe('ToolCallCoordinator.loadPolicy (unit)', () => {
     expect(entries.length).toBe(2);
     expect(entries[0].persona).toBeUndefined();
     expect(entries[1].persona).toBe('reviewer');
+  });
+
+  it('rejects a policyDir outside the trusted roots without touching the live policy', async () => {
+    // Defense-in-depth: any process that can reach the control socket
+    // can invoke `loadPolicy`, so the coordinator must refuse paths
+    // outside `$IRONCURTAIN_HOME` / the package config dir before
+    // calling the policy loader.
+    const auditPath = join(TEST_ROOT, 'audit.untrusted.jsonl');
+    // A path that's definitely outside the test's IronCurtain home.
+    const evilDir = resolve(tmpdir(), `coord-evil-${process.pid}`);
+    mkdirSync(evilDir, { recursive: true });
+    // Populate it with a syntactically-valid policy so that if the
+    // validator is missing, the loader would otherwise succeed.
+    writePersonaPolicy(evilDir, { ...testCompiledPolicy, rules: [] });
+
+    const coordinator = new ToolCallCoordinator({
+      compiledPolicy: testCompiledPolicy,
+      toolAnnotations: testToolAnnotations,
+      protectedPaths: TEST_PROTECTED_PATHS,
+      allowedDirectory: TEST_SANDBOX_DIR,
+      auditLogPath: auditPath,
+    });
+    const oldEngine = coordinator.getPolicyEngine();
+    registerFilesystemTools(coordinator, mockSuccessClient());
+
+    try {
+      await expect(coordinator.loadPolicy({ persona: 'reviewer', policyDir: evilDir })).rejects.toThrow(
+        /policyDir must be under a trusted directory/,
+      );
+
+      // Engine reference is unchanged -- the attempted load was
+      // rejected before touching anything.
+      expect(coordinator.getPolicyEngine()).toBe(oldEngine);
+    } finally {
+      await coordinator.close();
+      rmSync(evilDir, { recursive: true, force: true });
+    }
   });
 
   it('leaves the old engine active when the new policy dir is missing', async () => {

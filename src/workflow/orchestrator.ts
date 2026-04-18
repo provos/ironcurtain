@@ -2,6 +2,7 @@ import {
   readFileSync,
   existsSync,
   mkdirSync,
+  chmodSync,
   writeFileSync,
   appendFileSync,
   readdirSync,
@@ -423,7 +424,13 @@ export class WorkflowOrchestrator implements WorkflowController {
     // bind its UDS there. `getWorkflowRunDir` is lazily materialized; if
     // the first thing the orchestrator does is ask the coordinator to
     // listen on a path whose parent directory is missing, bind fails.
-    mkdirSync(dirname(controlSocketPath), { recursive: true, mode: 0o700 });
+    const runDir = dirname(controlSocketPath);
+    mkdirSync(runDir, { recursive: true, mode: 0o700 });
+    // `mkdirSync`'s `mode` only applies on creation; if the run dir
+    // pre-exists (stale from a prior run or manually created) the mode
+    // is a no-op. The coordinator's control socket relies on 0o700 to
+    // gate access — enforce permissions unconditionally.
+    chmodSync(runDir, 0o700);
 
     const factory = this.deps.createWorkflowInfrastructure ?? (await this.loadDefaultInfrastructureFactory());
     const infra = await factory({
