@@ -395,3 +395,46 @@ export function getJobWorkspaceDir(jobId: string): string {
 export function getJobRunsDir(jobId: string): string {
   return resolve(getJobDir(jobId), 'runs');
 }
+
+// ---------------------------------------------------------------------------
+// Workflow run paths
+// ---------------------------------------------------------------------------
+
+/**
+ * Validates that a workflow ID contains only safe characters
+ * (alphanumeric, hyphens, underscores) to prevent path traversal.
+ */
+function validateWorkflowId(workflowId: string): void {
+  if (!/^[a-zA-Z0-9_-]+$/.test(workflowId)) {
+    throw new Error(`Invalid workflow ID: ${workflowId}`);
+  }
+}
+
+/**
+ * Returns the workflow runs base directory: {home}/workflow-runs/
+ */
+export function getWorkflowRunsDir(): string {
+  return resolve(getIronCurtainHome(), 'workflow-runs');
+}
+
+/**
+ * Returns the directory for a specific workflow run:
+ * {home}/workflow-runs/{workflowId}/
+ */
+export function getWorkflowRunDir(workflowId: string): string {
+  validateWorkflowId(workflowId);
+  return resolve(getWorkflowRunsDir(), workflowId);
+}
+
+/**
+ * Returns the coordinator control socket path for a workflow run:
+ *   {home}/workflow-runs/{workflowId}/proxy-control.sock
+ *
+ * The coordinator listens on this UDS to accept policy hot-swap
+ * requests from the workflow orchestrator. The socket sits inside
+ * the workflow run's private directory (mode `0o700`) so no
+ * additional auth is needed -- filesystem permissions gate access.
+ */
+export function getWorkflowProxyControlSocketPath(workflowId: string): string {
+  return resolve(getWorkflowRunDir(workflowId), 'proxy-control.sock');
+}

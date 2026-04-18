@@ -37,6 +37,9 @@ import {
   type ToolCallResponse,
 } from './tool-call-pipeline.js';
 import type { ResolvedSandboxConfig } from './sandbox-integration.js';
+import { loadPersonaPolicyArtifacts } from '../config/index.js';
+import { proxyAnnotations, proxyPolicyRules } from '../docker/proxy-tools.js';
+import { ControlServer, type ControlServerAddress, type ControlServerListenOptions } from './control-server.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -103,6 +106,18 @@ export interface ToolCallCoordinatorOptions {
    * Optional; coordinator supplies an empty map when absent.
    */
   readonly resolvedSandboxConfigs?: Map<string, ResolvedSandboxConfig>;
+  /**
+   * Optional HTTP control server endpoint. When supplied, `start()`
+   * binds a small JSON API that the workflow orchestrator uses to
+   * hot-swap policy between state transitions (§4 of the
+   * workflow-container-lifecycle design). When omitted, no server is
+   * started -- standalone sessions (CLI, daemon, cron) do not use this
+   * channel and must not pay for it.
+   *
+   * Exactly one of `socketPath` / `port` may be set (same contract as
+   * `ControlServer.start`).
+   */
+  readonly controlServerListen?: ControlServerListenOptions;
 }
 
 // ---------------------------------------------------------------------------
@@ -117,7 +132,7 @@ export class ToolCallCoordinator {
   private readonly callMutex = new AsyncMutex();
 
   private policyEngine: PolicyEngine;
-  private readonly auditLog: AuditLog;
+  private auditLog: AuditLog;
   private readonly circuitBreaker: CallCircuitBreaker;
   private readonly whitelist: ApprovalWhitelist;
   private readonly serverContextMap: ServerContextMap = new Map();
@@ -129,6 +144,29 @@ export class ToolCallCoordinator {
   private readonly onEscalation?: EscalationPromptFn;
   private readonly controlApiClient: ControlApiClient | null;
   private readonly allowedDirectory?: string;
+  // Retained so `loadPolicy` can reconstruct the policy engine with the
+  // same per-session invariants (these do not change between personas).
+  private readonly protectedPaths: string[];
+  private readonly serverDomainAllowlists: ReadonlyMap<string, readonly string[]>;
+  private readonly trustedServers: ReadonlySet<string>;
+  private readonly auditRedact: boolean;
+  /**
+   * Tool annotations retained for policy hot-swap. Persona policy
+   * directories only ship `compiled-policy.json` (+ optional
+   * `dynamic-lists.json`); annotations are globally scoped and do not
+   * change when the persona swaps. `loadPolicy` reuses this object
+   * verbatim when constructing the replacement `PolicyEngine`.
+   *
+   * This field already has proxy annotations merged in (if the caller
+   * did so at construction time); `loadPolicy` therefore does not need
+   * to re-merge them.
+   */
+  private readonly toolAnnotations: StoredToolAnnotationsFile;
+
+  /** Control server (workflow mode only). */
+  private readonly controlServer: ControlServer | null;
+  private readonly controlServerListen?: ControlServerListenOptions;
+  private controlServerAddress: ControlServerAddress | null = null;
   /**
    * Most recent user message. Set by `setLastUserMessage` and threaded
    * into the auto-approver when set. Mutable so callers can update it
@@ -170,6 +208,24 @@ export class ToolCallCoordinator {
       this.mcpManager = new MCPClientManager();
       this.ownedMcpManager = true;
     }
+
+    // Retain per-session invariants so `loadPolicy` can reconstruct the
+    // PolicyEngine with the same arguments it was first built with --
+    // only the compiled rules / dynamic lists change. Annotations are
+    // globally scoped (not shipped in per-persona policy dirs); retain
+    // them here so `loadPolicy` does not attempt to re-read them.
+    this.protectedPaths = options.protectedPaths;
+    this.serverDomainAllowlists = options.serverDomainAllowlists ?? new Map();
+    this.trustedServers = options.trustedServers ?? new Set();
+    this.auditRedact = options.auditRedact === true;
+    this.toolAnnotations = options.toolAnnotations;
+
+    this.controlServerListen = options.controlServerListen;
+    this.controlServer = this.controlServerListen
+      ? new ControlServer({
+          onLoadPolicy: (req) => this.loadPolicy(req),
+        })
+      : null;
   }
 
   getMcpManager(): MCPClientManager {
@@ -358,28 +414,154 @@ export class ToolCallCoordinator {
   }
 
   /**
-   * Swap the policy engine and rotate the audit log. Placeholder for
-   * policy hot-swap; not yet implemented. The policy mutex is not
-   * acquired here because there is nothing to protect yet.
+   * Hot-swap the policy engine and rotate the audit log.
    *
-   * TODO(Round 2): when this method rotates the audit log via
-   * `this.auditLog.rotate(req.auditPath)`, any existing `AuditLogTailer`
-   * attached to the old path must be re-pointed at the new path (or torn
-   * down and reconstructed). Audit tailers bind to an inode at
-   * construction time; they will silently stop receiving new entries once
-   * the log rotates. Deferred out of Round 1.
+   * Invariants (from §2.1 and §4 "Audit writer concurrency"):
+   *
+   *   1. Acquire the call mutex first so every in-flight `handleToolCall`
+   *      finishes under the old policy before we swap. New callers queue
+   *      up on the mutex and start under the new policy.
+   *   2. Acquire the policy mutex next to serialize against overlapping
+   *      `loadPolicy` calls.
+   *   3. Load + construct the new engine BEFORE rotating the audit log.
+   *      If the new policy dir is missing or malformed, we abort with the
+   *      old engine and old audit stream still fully intact -- callers
+   *      can keep running under the previous persona's policy until they
+   *      decide to tear down.
+   *   4. Only after the new engine is ready do we rotate audit and swap
+   *      the engine reference. The order is: rotate audit, then swap
+   *      engine. The rotate-first ordering guarantees that the first
+   *      log entry written under the new engine lands in the new file.
+   *   5. On any failure in steps 3-4, propagate the error without
+   *      touching the old engine or old audit stream.
+   *
+   * Note on the `AuditLogTailer`: session-scoped tailers attached to the
+   * previous persona's audit file do not need to be re-pointed here.
+   * `DockerAgentSession` creates a fresh tailer per state pointing at
+   * whatever audit path was configured for that state, and stops the
+   * previous tailer in `close()` before the next state starts. By the
+   * time `loadPolicy` runs in a workflow, the old session's tailer is
+   * already stopped.
    */
-  // eslint-disable-next-line @typescript-eslint/require-await -- future impl will be async; stub throws synchronously
   async loadPolicy(req: { persona: string; version: number; policyDir: string; auditPath: string }): Promise<void> {
-    void req;
-    throw new Error('ToolCallCoordinator.loadPolicy is not yet implemented.');
+    // Wait for any in-flight tool call to drain, then serialize against
+    // concurrent loadPolicy. The two mutexes are acquired in this order
+    // (call, then policy) everywhere; deadlock is impossible because no
+    // other code path acquires them in reverse.
+    await this.callMutex.withLock(async () => {
+      await this.policyMutex.withLock(async () => {
+        // Step 1: load only the per-persona artifacts (compiled policy
+        // + optional dynamic lists). Annotations are globally scoped
+        // and were retained at construction time -- persona dirs do
+        // not ship `tool-annotations.json`. If any required file is
+        // missing, the loader throws and we surface that to the caller
+        // without touching the live engine.
+        const { compiledPolicy, dynamicLists } = loadPersonaPolicyArtifacts(req.policyDir);
+
+        // Step 2: re-merge the virtual proxy tool annotations and
+        // rules. The sandbox does this at construction time
+        // (src/sandbox/index.ts:581-585); a persona-swapped policy
+        // must re-apply the same merge or the new engine will treat
+        // `add_proxy_domain` / `remove_proxy_domain` /
+        // `list_proxy_domains` as unknown tools.
+        //
+        // The merge is idempotent: `proxy` is a reserved server name
+        // (RESERVED_SERVER_NAMES) so overwriting it on each load is
+        // always correct, even if the caller already merged at
+        // construction time.
+        const mergedAnnotations = mergeProxyAnnotations(this.toolAnnotations);
+        compiledPolicy.rules = [...proxyPolicyRules, ...compiledPolicy.rules];
+
+        // Step 3: build the replacement engine using the retained +
+        // proxy-merged annotations. A synchronous construction failure
+        // (malformed policy) propagates out below without touching
+        // `this.policyEngine` or `this.auditLog`.
+        const nextEngine = new PolicyEngine(
+          compiledPolicy,
+          mergedAnnotations,
+          this.protectedPaths,
+          this.allowedDirectory,
+          this.serverDomainAllowlists,
+          dynamicLists,
+          this.trustedServers,
+        );
+
+        // Step 4: rotate audit. `AuditLog.rotate` constructs the new
+        // stream FIRST so a synchronous failure here leaves the old
+        // stream intact. If rotate throws, the old engine reference is
+        // untouched (we have not yet swapped) and the old audit stream
+        // is still usable -- callers can keep running under the
+        // previous persona's policy. Its contract is that the caller
+        // serializes `log/rotate/close`, which we do by holding the
+        // policy mutex.
+        await this.auditLog.rotate(req.auditPath);
+
+        // Step 5: swap the engine reference. All subsequent calls --
+        // queued behind the call mutex, or started after we release --
+        // evaluate under the new engine.
+        this.policyEngine = nextEngine;
+      });
+    });
   }
 
-  /** Releases all held resources (MCP subprocesses, audit stream). */
+  /**
+   * Starts the HTTP control server if one was configured via
+   * `controlServerListen`. Safe to call when no server is configured
+   * (becomes a no-op). Idempotent: calling twice on a configured
+   * coordinator is an error.
+   */
+  async start(): Promise<ControlServerAddress | null> {
+    if (!this.controlServer || !this.controlServerListen) return null;
+    if (this.controlServerAddress) {
+      throw new Error('ToolCallCoordinator.start() called twice');
+    }
+    this.controlServerAddress = await this.controlServer.start(this.controlServerListen);
+    return this.controlServerAddress;
+  }
+
+  /** Returns the bound control server address, or null if not started. */
+  getControlServerAddress(): ControlServerAddress | null {
+    return this.controlServerAddress;
+  }
+
+  /** Releases all held resources (MCP subprocesses, audit stream, control server). */
   async close(): Promise<void> {
+    // Stop the control server first so no new loadPolicy requests can
+    // arrive while we're tearing down the underlying components.
+    if (this.controlServer && this.controlServerAddress) {
+      await this.controlServer.stop();
+      this.controlServerAddress = null;
+    }
     if (this.ownedMcpManager) {
       await this.mcpManager.closeAll();
     }
     await this.auditLog.close();
   }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns a shallow-cloned annotations file with the virtual `proxy`
+ * server entry overwritten. Mirrors the merge the sandbox performs at
+ * construction time so hot-swapped persona policies can evaluate the
+ * virtual proxy tools without the caller re-merging.
+ *
+ * The clone is shallow (copy the `servers` map, keep per-server tool
+ * arrays by reference): we only need to replace the `proxy` slot, and
+ * the engine does not mutate any other server's tool arrays.
+ */
+function mergeProxyAnnotations(src: StoredToolAnnotationsFile): StoredToolAnnotationsFile {
+  return {
+    ...src,
+    servers: {
+      ...src.servers,
+      proxy: {
+        inputHash: 'hardcoded',
+        tools: proxyAnnotations,
+      },
+    },
+  };
 }

@@ -326,6 +326,24 @@ export function loadGeneratedPolicy(options: PolicyLoadOptions): {
 }
 
 /**
+ * Loads only the per-persona / per-policy artifacts (compiled-policy.json
+ * and optional dynamic-lists.json). Tool annotations are deliberately not
+ * read here because they are globally-scoped: a persona directory only
+ * ships policy + lists, not annotations.
+ *
+ * Used by `ToolCallCoordinator.loadPolicy` during a hot-swap to pick up
+ * the new policy without touching the retained annotations.
+ */
+export function loadPersonaPolicyArtifacts(policyDir: string): {
+  compiledPolicy: CompiledPolicyFile;
+  dynamicLists: DynamicListsFile | undefined;
+} {
+  const compiledPolicy = JSON.parse(readGeneratedFile(policyDir, 'compiled-policy.json')) as CompiledPolicyFile;
+  const dynamicLists = loadOptionalGeneratedFile(policyDir, 'dynamic-lists.json');
+  return { compiledPolicy, dynamicLists };
+}
+
+/**
  * Loads an optional generated artifact file. Returns undefined if not found.
  */
 function loadOptionalGeneratedFile(
