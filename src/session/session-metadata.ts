@@ -10,13 +10,24 @@ import { getSessionMetadataPath } from '../config/paths.js';
 import type { SessionMetadata } from './types.js';
 
 /**
- * Writes session metadata to disk. No-ops if the file already exists
- * (idempotent for edge cases like retried session creation).
+ * Writes session metadata to an explicit path. Primary API used by
+ * borrow-mode callers (e.g., workflow per-state dirs) that don't live
+ * under `{home}/sessions/{sessionId}/`.
+ *
+ * No-ops if the file already exists (idempotent for retried session
+ * creation).
  */
-export function saveSessionMetadata(sessionId: string, metadata: SessionMetadata): void {
-  const path = getSessionMetadataPath(sessionId);
+export function saveSessionMetadataTo(path: string, metadata: SessionMetadata): void {
   if (existsSync(path)) return;
   writeFileSync(path, JSON.stringify(metadata, null, 2) + '\n', 'utf-8');
+}
+
+/**
+ * Writes session metadata for a session ID. Thin wrapper around
+ * `saveSessionMetadataTo` that derives the path from the session ID.
+ */
+export function saveSessionMetadata(sessionId: string, metadata: SessionMetadata): void {
+  saveSessionMetadataTo(getSessionMetadataPath(sessionId), metadata);
 }
 
 /**

@@ -33,7 +33,12 @@ import type {
   AgentOutput,
 } from './types.js';
 import { createWorkflowId, WORKFLOW_ARTIFACT_DIR, GLOBAL_PERSONA } from './types.js';
-import { getWorkflowAuditLogPath, getWorkflowProxyControlSocketPath } from '../config/paths.js';
+import {
+  getWorkflowAuditLogPath,
+  getWorkflowProxyControlSocketPath,
+  getWorkflowBundleDir,
+  getWorkflowStateDir,
+} from '../config/paths.js';
 import { POLICY_LOAD_PATH } from '../trusted-process/control-server.js';
 import { loadConfig } from '../config/index.js';
 import { getPersonaDefinitionPath, resolvePersona } from '../persona/resolve.js';
@@ -553,22 +558,25 @@ export class WorkflowOrchestrator implements WorkflowController {
   > {
     const { createDockerInfrastructure } = await import('../docker/docker-infrastructure.js');
     const { loadConfig, applyAllowedDirectoryToMcpArgs } = await import('../config/index.js');
-    const { getSessionDir, getSessionEscalationDir } = await import('../config/paths.js');
 
     return async (input) => {
       const config = loadConfig();
-      // Reuse the session-dir layout keyed by workflowId so bundle
-      // paths are deterministic and colocated with the workflow run.
+      // Bundle dir holds the workflow's shared Docker artifacts
+      // (orientation, sockets, claude-state, escalations, system
+      // prompt). It's colocated under the workflow run directory so
+      // every workflow-scoped file lives under a single tree.
       // Audit entries go to the workflow-scoped file (one file per
       // workflow run, with per-entry persona tagging) instead of the
       // per-session audit file.
-      const sessionDir = getSessionDir(input.workflowId);
+      const bundleDir = getWorkflowBundleDir(input.workflowId);
+      const bundleEscalationDir = resolve(bundleDir, 'escalations');
       // All sessions in a workflow share the workflow's workspace dir
       // as their allowed directory. Do NOT use a session-scoped sandbox
       // here: the orchestrator's artifact checks look inside the
       // workspace, so artifacts the agent writes must land in the same
       // tree.
-      mkdirSync(sessionDir, { recursive: true });
+      mkdirSync(bundleDir, { recursive: true });
+      mkdirSync(bundleEscalationDir, { recursive: true });
       mkdirSync(input.workspacePath, { recursive: true });
       // Rewrite the allowed directory and audit path onto the loaded
       // config. `config.allowedDirectory` drives the filesystem MCP
@@ -582,9 +590,9 @@ export class WorkflowOrchestrator implements WorkflowController {
       return createDockerInfrastructure(
         config,
         { kind: 'docker', agent: input.agentId },
-        sessionDir,
+        bundleDir,
         input.workspacePath,
-        getSessionEscalationDir(input.workflowId),
+        bundleEscalationDir,
         input.workflowId,
       );
     };
@@ -1169,6 +1177,20 @@ export class WorkflowOrchestrator implements WorkflowController {
     // workspacePath ensures the agent writes to the artifact directory,
     // so files created by the agent are visible to the orchestrator.
     const previousSessionId = stateConfig.freshSession === false ? context.sessionsByState[stateId] : undefined;
+
+    // In borrow mode, route this invocation's per-state artifacts
+    // (session.log, session-metadata.json) under a slug-keyed directory
+    // inside the workflow run. The XState machine's `incrementVisitCount`
+    // entry action runs before `invoke`, so `context.visitCounts[stateId]`
+    // is already incremented by the time this factory runs (1 on first
+    // entry, 2 on re-entry, etc.).
+    const visitCountForSlug = context.visitCounts[stateId];
+    const stateSlug = `${stateId}.${visitCountForSlug}`;
+    const workflowStateDir = instance.infra ? getWorkflowStateDir(instance.id, stateSlug) : undefined;
+    if (workflowStateDir) {
+      mkdirSync(workflowStateDir, { recursive: true });
+    }
+
     let session: Session;
     try {
       session = await this.deps.createSession({
@@ -1185,6 +1207,10 @@ export class WorkflowOrchestrator implements WorkflowController {
         // not rebuild proxies / containers per state. Unset for builtin
         // or opt-out workflows.
         ...(instance.infra ? { workflowInfrastructure: instance.infra } : {}),
+        // Per-state artifact dir is only meaningful in borrow mode —
+        // `buildSessionConfig` throws if `workflowStateDir` is supplied
+        // without a bundle.
+        ...(workflowStateDir ? { workflowStateDir, stateSlug } : {}),
       });
     } catch (err) {
       const errMsg = toErrorMessage(err);

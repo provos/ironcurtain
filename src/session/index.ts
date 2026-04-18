@@ -28,7 +28,7 @@ import { buildMemoryServerConfig, MEMORY_SERVER_NAME } from '../memory/memory-an
 import { buildMemorySystemPrompt, adaptMemoryToolNames } from '../memory/memory-prompt.js';
 import { AgentSession } from './agent-session.js';
 import { SessionError } from './errors.js';
-import { saveSessionMetadata, loadSessionMetadata } from './session-metadata.js';
+import { saveSessionMetadata, saveSessionMetadataTo, loadSessionMetadata } from './session-metadata.js';
 import { createSessionId } from './types.js';
 import type { Session, SessionId, SessionOptions, SessionMode } from './types.js';
 
@@ -334,11 +334,23 @@ export function buildSessionConfig(
     | 'systemPromptAugmentation'
     | 'jobId'
     | 'resourceBudgetOverrides'
+    | 'workflowInfrastructure'
+    | 'workflowStateDir'
+    | 'stateSlug'
   > = {},
 ): SessionDirConfig {
   let { workspacePath, policyDir, systemPromptAugmentation } = opts;
   const { resumeSessionId, disableAutoApprove } = opts;
   let serverAllowlist: readonly string[] | undefined;
+
+  // Borrow mode is gated on `workflowInfrastructure`. The per-state dir
+  // is only meaningful alongside the bundle; passing it alone is a bug.
+  if (opts.workflowStateDir && !opts.workflowInfrastructure) {
+    throw new SessionError(
+      'workflowStateDir requires workflowInfrastructure; borrow-mode artifacts have no owner without a bundle',
+      'SESSION_INIT_FAILED',
+    );
+  }
 
   // Resolve persona early -- derives policyDir, workspace, server filter,
   // and system prompt augmentation from the persona definition.
@@ -369,27 +381,55 @@ export function buildSessionConfig(
     validatePolicyDir(policyDir);
   }
 
-  const sessionDir = getSessionDir(effectiveSessionId);
+  // Paths differ by mode:
+  // - Borrow mode: per-state artifacts go under the workflow state dir
+  //   that the orchestrator already created (when `workflowStateDir` is
+  //   supplied). The Docker bundle owns the sandbox/escalation/audit
+  //   paths on `opts.workflowInfrastructure`. When the caller borrows
+  //   the bundle without supplying a per-state dir (legacy path, still
+  //   supported for factory-level tests), session artifacts fall back
+  //   to the bundle's sessionDir.
+  // - Standalone/CLI mode: everything lives under
+  //   `{home}/sessions/{effectiveSessionId}/`.
+  const borrowInfra = opts.workflowInfrastructure;
+  const sessionDir = borrowInfra
+    ? (opts.workflowStateDir ?? borrowInfra.sessionDir)
+    : getSessionDir(effectiveSessionId);
   const sandboxDir = workspacePath ?? getSessionSandboxDir(effectiveSessionId);
-  const escalationDir = getSessionEscalationDir(effectiveSessionId);
-  const auditLogPath = getSessionAuditLogPath(effectiveSessionId);
+  const escalationDir = borrowInfra ? borrowInfra.escalationDir : getSessionEscalationDir(effectiveSessionId);
+  const auditLogPath = borrowInfra ? borrowInfra.auditLogPath : getSessionAuditLogPath(effectiveSessionId);
 
-  // Create the directory when not using an explicit --workspace flag.
-  // When persona is set, `workspacePath` was derived internally (not
-  // from the caller), so we still need to ensure it exists.
-  // Only skip creation for explicit user-provided workspace paths.
-  if (!opts.workspacePath) {
-    mkdirSync(sandboxDir, { recursive: true });
+  if (borrowInfra) {
+    // The workflow orchestrator already mkdir'd `workflowStateDir` and
+    // owns the bundle's sandbox/escalation dirs. Do not create any
+    // `~/.ironcurtain/sessions/<uuid>/` tree here.
+  } else {
+    // Create the directory when not using an explicit --workspace flag.
+    // When persona is set, `workspacePath` was derived internally (not
+    // from the caller), so we still need to ensure it exists.
+    // Only skip creation for explicit user-provided workspace paths.
+    if (!opts.workspacePath) {
+      mkdirSync(sandboxDir, { recursive: true });
+    }
+    mkdirSync(escalationDir, { recursive: true });
   }
-  mkdirSync(escalationDir, { recursive: true });
 
-  const sessionLogPath = getSessionLogPath(effectiveSessionId);
+  const sessionLogPath = borrowInfra
+    ? resolve(opts.workflowStateDir ?? borrowInfra.sessionDir, 'session.log')
+    : getSessionLogPath(effectiveSessionId);
+  // llm-interactions / auto-approve-llm still live under the standalone
+  // session dir even in borrow mode (per-turn LLM logs are not scoped to
+  // the workflow state artifact dir; config.llmLogPath is only read when
+  // the builtin agent is active, and borrow-mode sessions are Docker).
   const llmLogPath = getSessionLlmLogPath(effectiveSessionId);
   const autoApproveLlmLogPath = getSessionAutoApproveLlmLogPath(effectiveSessionId);
 
-  // Set up session logging -- captures all console output to file
+  // Set up session logging -- captures all console output to file.
+  // In borrow mode, setup() retargets the singleton to the new state's
+  // log file; a prior state's teardown in session.close() releases the
+  // console hijack first.
   logger.setup({ logFilePath: sessionLogPath });
-  logger.info(`Session ${sessionId} created`);
+  logger.info(`Session ${sessionId} created${opts.stateSlug ? ` (state=${opts.stateSlug})` : ''}`);
   logger.info(`${workspacePath ? 'Workspace' : 'Sandbox'}: ${sandboxDir}`);
   logger.info(`Escalation dir: ${escalationDir}`);
   logger.info(`Audit log: ${auditLogPath}`);
@@ -472,14 +512,20 @@ export function buildSessionConfig(
   // Persist session settings so --resume can restore them.
   // Only write on initial creation (not when resuming).
   if (!resumeSessionId) {
-    saveSessionMetadata(effectiveSessionId, {
+    const metadata = {
       createdAt: new Date().toISOString(),
       ...(opts.persona ? { persona: opts.persona } : {}),
       ...(opts.workspacePath ? { workspacePath: opts.workspacePath } : {}),
       // Only store policyDir when no persona is set (persona derives its own)
       ...(!opts.persona && policyDir ? { policyDir } : {}),
       ...(opts.disableAutoApprove ? { disableAutoApprove: true } : {}),
-    });
+    };
+    if (borrowInfra) {
+      const metadataDir = opts.workflowStateDir ?? borrowInfra.sessionDir;
+      saveSessionMetadataTo(resolve(metadataDir, 'session-metadata.json'), metadata);
+    } else {
+      saveSessionMetadata(effectiveSessionId, metadata);
+    }
   }
 
   return {

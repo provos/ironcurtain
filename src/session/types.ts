@@ -313,6 +313,29 @@ export interface SessionOptions {
    * Ignored for builtin sessions (no Docker infrastructure).
    */
   readonly workflowInfrastructure?: DockerInfrastructure;
+
+  /**
+   * Per-state artifact directory for borrow-mode (shared-container)
+   * workflow sessions. When set, the session writes `session.log` and
+   * `session-metadata.json` to this directory instead of
+   * `{home}/sessions/{sessionId}/`. The directory is created by the
+   * caller (orchestrator) before session creation.
+   *
+   * Only valid in combination with `workflowInfrastructure`. Passing
+   * `workflowStateDir` without `workflowInfrastructure` is a caller
+   * bug and throws.
+   *
+   * Ignored for builtin sessions.
+   */
+  readonly workflowStateDir?: string;
+
+  /**
+   * Human-readable slug identifying this state invocation — used
+   * only for logging/diagnostics (e.g., "fetch.1", "plan.2"). Paired
+   * with `workflowStateDir` so log messages identify which state
+   * produced them.
+   */
+  readonly stateSlug?: string;
 }
 
 /**

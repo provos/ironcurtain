@@ -12,9 +12,10 @@
  * without requiring a real Docker daemon.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdirSync, writeFileSync, rmSync, existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as logger from '../src/logger.js';
+import { getSessionsDir } from '../src/config/paths.js';
 
 // --- Module mocks (hoisted) ---
 
@@ -239,6 +240,57 @@ describe('createDockerSession borrow path', () => {
     } finally {
       await session.close();
     }
+  });
+
+  it('borrow with workflowStateDir: creates zero entries under sessions/', async () => {
+    // When the orchestrator passes a per-state artifact dir alongside
+    // the bundle, the factory must route session.log and metadata into
+    // that dir instead of under ~/.ironcurtain/sessions/<uuid>/. This
+    // is the core invariant of the workflow-scoped artifact plan.
+    const infra = createMockInfra(tempDir, 'state-dir');
+    const workflowStateDir = join(tempDir, 'workflow-state', 'fetch.1');
+    mkdirSync(workflowStateDir, { recursive: true });
+
+    // Sanity: sessions dir is empty at test start.
+    const sessionsDir = getSessionsDir();
+    const pre = existsSync(sessionsDir) ? readdirSync(sessionsDir) : [];
+
+    const session = await createSession({
+      config: createTestConfig(),
+      mode: { kind: 'docker', agent: 'claude-code' as never },
+      workflowInfrastructure: infra,
+      workflowStateDir,
+      stateSlug: 'fetch.1',
+    });
+
+    try {
+      // No new entries under ~/.ironcurtain/sessions/
+      const post = existsSync(sessionsDir) ? readdirSync(sessionsDir) : [];
+      expect(post).toEqual(pre);
+
+      // session.log + session-metadata.json landed in the state dir.
+      expect(existsSync(join(workflowStateDir, 'session.log'))).toBe(true);
+      expect(existsSync(join(workflowStateDir, 'session-metadata.json'))).toBe(true);
+      const meta = JSON.parse(readFileSync(join(workflowStateDir, 'session-metadata.json'), 'utf-8'));
+      expect(meta.createdAt).toBeDefined();
+    } finally {
+      await session.close();
+    }
+  });
+
+  it('workflowStateDir without workflowInfrastructure is rejected', async () => {
+    const workflowStateDir = join(tempDir, 'orphan-state');
+    mkdirSync(workflowStateDir, { recursive: true });
+
+    await expect(
+      createSession({
+        config: createTestConfig(),
+        mode: { kind: 'docker', agent: 'claude-code' as never },
+        // Deliberately omit workflowInfrastructure.
+        workflowStateDir,
+        stateSlug: 'orphan.1',
+      }),
+    ).rejects.toThrow(/workflowStateDir requires workflowInfrastructure/);
   });
 
   it('close preserves bundle: destroyDockerInfrastructure is NOT invoked', async () => {

@@ -355,6 +355,15 @@ export class DockerAgentSession implements Session {
     if (this.ownsInfra) {
       await destroyDockerInfrastructure(this.infra);
     }
+
+    // Release the logger singleton so the next session (borrow-mode
+    // workflow state transition, or a cron job kicked off after the
+    // current one closes) can claim it with its own log path. Without
+    // this, setup() retargets via the tolerant path rather than a
+    // clean re-init, and console writes made between sessions fall
+    // into the previous state's log file. See `src/logger.ts` for the
+    // singleton invariant.
+    logger.teardown();
   }
 
   // --- Private helpers ---

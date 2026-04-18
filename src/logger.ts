@@ -1,4 +1,17 @@
 // src/logger.ts
+//
+// Module-level singleton: the process has one `console` object, so
+// hijacking it requires a single owner at a time. The lifecycle is
+// "rented resource" semantics — a session claims the singleton via
+// `setup()`, releases it via `teardown()`.
+//
+// Concurrent sessions are NOT supported. In long-running contexts
+// (workflows with multiple per-state sessions), each session must
+// tear down before the next one calls `setup()`. As a defense
+// against missed teardown, `setup()` tolerates retargeting: if
+// called while another path is already active, it closes the
+// existing stream and redirects to the new path without dropping
+// the console hijack.
 
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -24,7 +37,17 @@ let originalConsole: {
 // --- Lifecycle ---
 
 export function setup(options: LoggerOptions): void {
-  if (logFilePath !== null) return; // Already active — idempotent
+  // Retargeting: if already active with a different path, redirect
+  // subsequent writes to the new file but keep the existing console
+  // hijack in place (no re-patching needed; writeEntry reads
+  // logFilePath at call time). Same-path calls are a no-op.
+  if (logFilePath !== null) {
+    if (logFilePath === options.logFilePath) return;
+    logFilePath = options.logFilePath;
+    mkdirSync(dirname(logFilePath), { recursive: true });
+    writeEntry('info', 'Logger retargeted');
+    return;
+  }
 
   logFilePath = options.logFilePath;
 
