@@ -17,7 +17,19 @@ export class AuditLog {
     this.redact = options?.redact ?? false;
   }
 
+  /**
+   * Appends a single audit entry to the current stream.
+   *
+   * @throws if called after `close()`. Writing to an ended stream would
+   *   trigger Node's "write after end" error event asynchronously,
+   *   which is hard to surface to the caller. Throwing synchronously
+   *   here matches `rotate()`'s post-close behavior and surfaces the
+   *   misuse at the call site.
+   */
   log(entry: AuditEntry): void {
+    if (this.closed) {
+      throw new Error('AuditLog.log() called after close()');
+    }
     const toWrite = this.redact ? redactAuditEntry(entry) : entry;
     this.stream.write(JSON.stringify(toWrite) + '\n');
   }

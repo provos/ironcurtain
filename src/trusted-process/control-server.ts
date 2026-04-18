@@ -28,6 +28,7 @@
 
 import { existsSync, unlinkSync } from 'node:fs';
 import * as http from 'node:http';
+import * as logger from '../logger.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -104,6 +105,20 @@ function writeJson(res: http.ServerResponse, status: number, body: unknown): voi
 }
 
 /**
+ * Formats an unknown thrown value for server-side logging. Includes the
+ * stack trace when available -- this is server-side only, so full
+ * internals are appropriate. Never pass this output to an HTTP response:
+ * error messages in Node commonly embed filesystem paths and other
+ * internal details that should not cross the trust boundary.
+ */
+function formatErrorForLog(err: unknown): string {
+  if (err instanceof Error) {
+    return err.stack ?? `${err.name}: ${err.message}`;
+  }
+  return String(err);
+}
+
+/**
  * Validates the decoded body of a load-policy request. Returns the
  * validated shape or a string describing the first validation failure.
  */
@@ -145,9 +160,13 @@ export class ControlServer {
       this.route(req, res, deps).catch((err: unknown) => {
         // The per-handler try/catch should absorb all errors; this is
         // a belt-and-braces guard against a handler that leaks a
-        // rejection. Report as a 500 so callers see something useful.
+        // rejection. Log the full error server-side (including stack)
+        // and return an opaque 500 to the client -- raw error text
+        // from Node commonly embeds absolute paths and internal
+        // details that should not cross the trust boundary.
+        logger.warn(`[control-server] unhandled handler error: ${formatErrorForLog(err)}`);
         if (!res.headersSent) {
-          writeJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
+          writeJson(res, 500, { error: 'Internal error' });
         } else {
           res.end();
         }
@@ -188,8 +207,12 @@ export class ControlServer {
     let parsed: unknown;
     try {
       parsed = JSON.parse(body.toString('utf-8'));
-    } catch (err) {
-      writeJson(res, 400, { error: `Invalid JSON: ${err instanceof Error ? err.message : String(err)}` });
+    } catch {
+      // JSON.parse's error text embeds parser internals (byte offsets
+      // and the surrounding characters of the input). The caller knows
+      // what they sent; a generic message is sufficient and avoids
+      // echoing any fragment of the request back.
+      writeJson(res, 400, { error: 'Invalid JSON' });
       return;
     }
 
@@ -202,7 +225,12 @@ export class ControlServer {
     try {
       await onLoadPolicy(validated);
     } catch (err) {
-      writeJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
+      // `loadPolicy` failures commonly originate from filesystem
+      // operations (missing policy dir, unreadable audit path) whose
+      // error messages embed absolute paths. Log the full error
+      // server-side and return a generic message to the client.
+      logger.warn(`[control-server] loadPolicy failed: ${formatErrorForLog(err)}`);
+      writeJson(res, 500, { error: 'Internal error' });
       return;
     }
 
@@ -214,6 +242,10 @@ export class ControlServer {
    * rejects with the server's `'error'` event on bind failure.
    */
   async start(options: ControlServerListenOptions): Promise<ControlServerAddress> {
+    if (this.boundAddress !== null) {
+      throw new Error(`ControlServer.start() called twice (already listening at ${JSON.stringify(this.boundAddress)})`);
+    }
+
     const { socketPath, port } = options;
     const hasSocket = socketPath !== undefined;
     const hasPort = port !== undefined;
@@ -265,6 +297,11 @@ export class ControlServer {
         // best-effort cleanup
       }
     }
+
+    // Clear the bound address so `getAddress()` correctly reports the
+    // listener as gone. The server object itself is not re-startable
+    // (lifecycle contract), but callers may still query getAddress().
+    this.boundAddress = null;
   }
 }
 

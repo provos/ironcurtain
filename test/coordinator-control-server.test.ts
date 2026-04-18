@@ -370,7 +370,12 @@ describe('ToolCallCoordinator control endpoint (UDS)', () => {
       const res = await postRawUds(socketPath, '/__ironcurtain/policy/load', '{not-json');
       expect(res.status).toBe(400);
       const parsed = JSON.parse(res.body) as { error: string };
-      expect(parsed.error).toMatch(/Invalid JSON/i);
+      // Exact-match: the server returns a generic message so that
+      // JSON.parse's byte-offset internals never cross the trust
+      // boundary. The input fragment 'not-json' must not appear in
+      // the response.
+      expect(parsed.error).toBe('Invalid JSON');
+      expect(parsed.error).not.toContain('not-json');
     } finally {
       await coordinator.close();
     }
@@ -488,8 +493,13 @@ describe('ToolCallCoordinator control endpoint (UDS)', () => {
       );
       expect(res.status).toBe(500);
       const parsed = JSON.parse(res.body) as { error: string };
-      expect(typeof parsed.error).toBe('string');
-      expect(parsed.error.length).toBeGreaterThan(0);
+      // The server must return a generic message -- raw error text
+      // from filesystem failures commonly embeds absolute paths, so
+      // we assert both the generic body AND that the attempted path
+      // is NOT echoed back (information-exposure regression guard).
+      expect(parsed.error).toBe('Internal error');
+      expect(parsed.error).not.toContain('does-not-exist');
+      expect(parsed.error).not.toContain(TEST_ROOT);
 
       // Engine reference is unchanged; old policy still active.
       expect(coordinator.getPolicyEngine()).toBe(oldEngine);
@@ -573,6 +583,28 @@ describe('ControlServer (TCP fallback)', () => {
     const server = new ControlServer({ onLoadPolicy: async () => undefined });
     await expect(server.start({ socketPath: join(TEST_ROOT, 'x.sock'), port: 9999 })).rejects.toThrow(/exactly one/);
   });
+
+  it('rejects a second start() call with a descriptive error', async () => {
+    // Guards against the cryptic "already listening" error Node emits
+    // when http.Server.listen is called on an already-bound server.
+    // The coordinator-level wrapper performs the same check; this
+    // asserts the lower-level contract directly.
+    const server = new ControlServer({ onLoadPolicy: async () => undefined });
+    await server.start({ port: 0 });
+    try {
+      await expect(server.start({ port: 0 })).rejects.toThrow(/called twice/);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it('clears the bound address on stop() so getAddress() no longer reports a listener', async () => {
+    const server = new ControlServer({ onLoadPolicy: async () => undefined });
+    const addr = await server.start({ port: 0 });
+    expect(server.getAddress()).toEqual(addr);
+    await server.stop();
+    expect(server.getAddress()).toBeNull();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -580,27 +612,45 @@ describe('ControlServer (TCP fallback)', () => {
 // ---------------------------------------------------------------------------
 
 describe('ToolCallCoordinator loadPolicy concurrency', () => {
-  it('does not start loadPolicy until a slow in-flight handleToolCall finishes', async () => {
+  it('blocks loadPolicy from entering its critical section while a tool call is in flight', async () => {
+    // Why this shape: recording a "loadPolicy finished" timestamp only
+    // proves completion ordering, which is trivially true because the
+    // mutex releases on tool-call completion. To actually prove the
+    // call mutex GATES loadPolicy's body, we observe a side-effect
+    // that happens INSIDE loadPolicy's critical section -- the new
+    // audit file being created via `AuditLog.rotate`'s internal
+    // `createWriteStream`. While the tool call is gated, that file
+    // must not yet exist.
     const auditOldPath = join(TEST_ROOT, 'audit.concurrency.jsonl');
+    const newAuditPath = join(TEST_ROOT, 'audit.new.concurrency.jsonl');
     const newPolicyDir = mkdir(join(TEST_ROOT, 'policy-concurrent'));
     writePersonaPolicy(newPolicyDir, { ...testCompiledPolicy, rules: [] });
 
-    // Event-ordering markers: record the timestamp at which each side
-    // of the race finishes or starts, then assert on their relative
-    // order rather than on wall-clock.
-    let callFinishedAt = -1;
-    let loadStartedAt = -1;
+    // Defensive: make sure the target audit file is absent before we start
+    // so the existence check below is meaningful.
+    rmSync(newAuditPath, { force: true });
 
-    // Hold the tool call in flight until we've kicked off loadPolicy.
-    let releaseCall: () => void = () => undefined;
-    const callGate = new Promise<void>((resolve) => {
-      releaseCall = resolve;
+    // Two explicit barriers:
+    //   - callStarted: resolves the moment the mock `callTool` enters
+    //     its body. Gives the test a deterministic signal that the
+    //     call has entered the coordinator's critical section and is
+    //     holding the call mutex.
+    //   - callGate: blocks the call at that point until the test
+    //     explicitly releases it, so we can race loadPolicy against
+    //     a known-in-flight call without timing heuristics.
+    let resolveCallStarted: (() => void) | null = null;
+    const callStarted = new Promise<void>((r) => {
+      resolveCallStarted = r;
+    });
+    let releaseCall: (() => void) | null = null;
+    const callGate = new Promise<void>((r) => {
+      releaseCall = r;
     });
 
     const client: Client = {
       callTool: async () => {
+        resolveCallStarted?.();
         await callGate;
-        callFinishedAt = Date.now();
         return { content: [{ type: 'text', text: 'ok' }], isError: false };
       },
       sendRootsListChanged: async () => undefined,
@@ -614,39 +664,54 @@ describe('ToolCallCoordinator loadPolicy concurrency', () => {
       auditLogPath: auditOldPath,
     });
     registerFilesystemTools(coordinator, client);
+    const oldEngine = coordinator.getPolicyEngine();
 
     try {
       // 1. Kick off the slow tool call. It blocks on `callGate`.
       const callPromise = coordinator.handleStructuredToolCall(makeRequest());
 
-      // Let the call reach `await callGate` before we race against it.
+      // 2. Wait deterministically until the call has entered its body
+      //    (and therefore is holding the call mutex). No setTimeout
+      //    fence needed: the barrier resolves exactly when the mock
+      //    enters `callTool`.
+      await callStarted;
+
+      // 3. Start loadPolicy. If the mutex works, it MUST NOT enter its
+      //    body -- it will queue behind the call mutex until the tool
+      //    call returns.
+      const loadPromise = coordinator.loadPolicy({
+        persona: 'reviewer',
+        version: 1,
+        policyDir: newPolicyDir,
+        auditPath: newAuditPath,
+      });
+
+      // 4. Loose belt-and-braces fence: give any incorrect
+      //    implementation a chance to observe the race. The KEY
+      //    assertion is the next one -- this sleep is defensive, not
+      //    load-bearing.
       await new Promise((r) => setTimeout(r, 20));
 
-      // 2. Start loadPolicy. If the mutex were missing, it could swap the
-      //    engine mid-tool-call. Record when the handler's first
-      //    observable side-effect happens.
-      const loadPromise = coordinator
-        .loadPolicy({
-          persona: 'reviewer',
-          version: 1,
-          policyDir: newPolicyDir,
-          auditPath: join(TEST_ROOT, 'audit.new.concurrency.jsonl'),
-        })
-        .then(() => {
-          loadStartedAt = Date.now();
-        });
+      // 5. KEY assertion: while the tool call is gated, loadPolicy's
+      //    body cannot have run, so the new audit file -- which is
+      //    created INSIDE `AuditLog.rotate`'s critical section -- must
+      //    not yet exist. If the mutex were missing, loadPolicy would
+      //    have raced ahead and opened the file already.
+      expect(existsSync(newAuditPath)).toBe(false);
 
-      // 3. Release the tool call. Its completion must precede loadPolicy's.
-      await new Promise((r) => setTimeout(r, 20));
-      releaseCall();
+      // 6. Release the tool call. loadPolicy can now proceed into its
+      //    body, rotate the audit log, and swap the engine.
+      releaseCall?.();
 
+      // Both promises must settle. The tool call returns successfully
+      // (it ran under the old engine); loadPolicy returns once the
+      // engine has been swapped. If the mutex were broken, loadPolicy
+      // would have thrown or produced inconsistent state by now.
       await Promise.all([callPromise, loadPromise]);
 
-      expect(callFinishedAt).toBeGreaterThan(0);
-      expect(loadStartedAt).toBeGreaterThan(0);
-      // Invariant: loadPolicy finishes after the tool call finishes.
-      // The mutex only lets it proceed once the in-flight call returns.
-      expect(loadStartedAt).toBeGreaterThanOrEqual(callFinishedAt);
+      // Confirm the swap actually happened -- post-condition check
+      // complementing the mutex-ordering assertion above.
+      expect(coordinator.getPolicyEngine()).not.toBe(oldEngine);
     } finally {
       await coordinator.close();
     }

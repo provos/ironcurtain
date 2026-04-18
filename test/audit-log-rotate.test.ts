@@ -182,6 +182,20 @@ describe('AuditLog.rotate()', () => {
     expect(existsSync(pathB)).toBe(false);
   });
 
+  it('log() after close() throws — consistent with rotate()', async () => {
+    // A write after close() previously emitted an async 'write after end'
+    // error on the stream that was impossible to surface back to the
+    // caller. The synchronous `closed` guard makes misuse visible at
+    // the call site and matches rotate()'s post-close behavior.
+    log.log(makeEntry({ requestId: 'A' }));
+    await log.close();
+    expect(() => log.log(makeEntry({ requestId: 'after-close' }))).toThrow(/after close/);
+
+    // Nothing was appended beyond the pre-close entry.
+    const entries = readJsonl(pathA);
+    expect(entries.map((e) => e.requestId)).toEqual(['A']);
+  });
+
   it('preserves redaction across rotation — both old and new file are redacted', async () => {
     // Use the same sensitive payloads that audit-redactor.test.ts exercises:
     // a valid-Luhn Visa and a real-format SSN. Constructed at runtime to

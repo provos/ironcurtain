@@ -149,7 +149,6 @@ export class ToolCallCoordinator {
   private readonly protectedPaths: string[];
   private readonly serverDomainAllowlists: ReadonlyMap<string, readonly string[]>;
   private readonly trustedServers: ReadonlySet<string>;
-  private readonly auditRedact: boolean;
   /**
    * Tool annotations retained for policy hot-swap. Persona policy
    * directories only ship `compiled-policy.json` (+ optional
@@ -217,7 +216,6 @@ export class ToolCallCoordinator {
     this.protectedPaths = options.protectedPaths;
     this.serverDomainAllowlists = options.serverDomainAllowlists ?? new Map();
     this.trustedServers = options.trustedServers ?? new Set();
-    this.auditRedact = options.auditRedact === true;
     this.toolAnnotations = options.toolAnnotations;
 
     this.controlServerListen = options.controlServerListen;
