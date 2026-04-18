@@ -1014,8 +1014,8 @@ describe('WorkflowOrchestrator', () => {
     const orchestrator = new WorkflowOrchestrator(deps);
     activeOrchestrator = orchestrator;
 
-    expect(() => orchestrator.start(defPath, 'test task')).toThrow(/nonexistent-persona/);
-    expect(() => orchestrator.start(defPath, 'test task')).toThrow(/do not exist/);
+    await expect(orchestrator.start(defPath, 'test task')).rejects.toThrow(/nonexistent-persona/);
+    await expect(orchestrator.start(defPath, 'test task')).rejects.toThrow(/do not exist/);
   });
 
   // -----------------------------------------------------------------------

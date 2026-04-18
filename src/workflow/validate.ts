@@ -76,6 +76,7 @@ const workflowSettingsSchema = z
     maxSessionSeconds: z.number().positive().optional(),
     unversionedArtifacts: z.array(z.string()).optional(),
     model: qualifiedModelId.optional(),
+    sharedContainer: z.boolean().optional(),
   })
   .optional();
 

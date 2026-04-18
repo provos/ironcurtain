@@ -1,4 +1,13 @@
-import { readFileSync, existsSync, mkdirSync, writeFileSync, appendFileSync, readdirSync, statSync } from 'node:fs';
+import {
+  readFileSync,
+  existsSync,
+  mkdirSync,
+  writeFileSync,
+  appendFileSync,
+  readdirSync,
+  statSync,
+  unlinkSync,
+} from 'node:fs';
 import { resolve } from 'node:path';
 import { MessageLog } from './message-log.js';
 import { createHash, type Hash } from 'node:crypto';
@@ -22,10 +31,12 @@ import type {
   AgentOutput,
 } from './types.js';
 import { createWorkflowId, WORKFLOW_ARTIFACT_DIR, GLOBAL_PERSONA } from './types.js';
+import { getWorkflowProxyControlSocketPath } from '../config/paths.js';
 import { getPersonaDefinitionPath } from '../persona/resolve.js';
 import { createPersonaName } from '../persona/types.js';
 import type { Session, SessionOptions, SessionMode } from '../session/types.js';
 import type { AgentId } from '../docker/agent-adapter.js';
+import type { DockerInfrastructure } from '../docker/docker-infrastructure.js';
 import {
   buildWorkflowMachine,
   type AgentInvokeInput,
@@ -115,6 +126,23 @@ export interface WorkflowTabHandle {
   close(): void;
 }
 
+/**
+ * Inputs for creating a workflow-scoped Docker infrastructure bundle.
+ * Supplied by the orchestrator when `settings.sharedContainer === true`
+ * and the workflow uses a Docker agent.
+ */
+export interface CreateWorkflowInfrastructureInput {
+  readonly workflowId: WorkflowId;
+  readonly agentId: AgentId;
+  /**
+   * Path to the workflow's coordinator control socket. Reserved for
+   * Round 2 wiring — `createDockerInfrastructure` does not yet accept
+   * this hint. The bundle can exist without a control socket; the
+   * control server is started separately.
+   */
+  readonly controlSocketPath: string;
+}
+
 /** Dependencies injected into the orchestrator. */
 export interface WorkflowOrchestratorDeps {
   /** Factory for creating agent sessions. */
@@ -134,6 +162,24 @@ export interface WorkflowOrchestratorDeps {
 
   /** Persistent checkpoint store for workflow resume. */
   readonly checkpointStore: CheckpointStore;
+
+  /**
+   * Factory for creating a workflow-scoped Docker infrastructure bundle.
+   * Called at workflow start when `settings.sharedContainer === true`
+   * and the workflow uses a Docker agent. When omitted, the orchestrator
+   * loads the default implementation lazily from `src/docker/docker-infrastructure.ts`.
+   * Tests override this to avoid spinning up real Docker resources.
+   */
+  readonly createWorkflowInfrastructure?: (input: CreateWorkflowInfrastructureInput) => Promise<DockerInfrastructure>;
+
+  /**
+   * Teardown counterpart for `createWorkflowInfrastructure`. Called on
+   * workflow terminal states, abort, and shutdownAll. When omitted, the
+   * orchestrator loads the default implementation lazily from
+   * `src/docker/docker-infrastructure.ts`. Tests override this to avoid
+   * touching real Docker resources.
+   */
+  readonly destroyWorkflowInfrastructure?: (infra: DockerInfrastructure) => Promise<void>;
 }
 
 /** Lifecycle events emitted by the orchestrator. */
@@ -225,6 +271,20 @@ interface WorkflowInstance {
   stateEnteredAt?: number;
   /** Append-only JSONL message log for debugging. */
   readonly messageLog: MessageLog;
+  /**
+   * Docker infrastructure shared across workflow states. Set by
+   * createWorkflowInfrastructure at workflow start; destroyed at
+   * workflow terminal. Undefined for builtin workflows or when
+   * settings.sharedContainer is false.
+   */
+  infra?: DockerInfrastructure;
+  /**
+   * Per-persona policy version counter. Incremented by cyclePolicy
+   * (Round 2) at every state entry. Drives audit filename:
+   * audit.{persona}.{version}.jsonl. Reset per-workflow; does NOT
+   * persist across resume.
+   */
+  readonly policyVersionsByPersona: Map<string, number>;
 }
 
 // ---------------------------------------------------------------------------
@@ -281,10 +341,131 @@ export class WorkflowOrchestrator implements WorkflowController {
   }
 
   // -----------------------------------------------------------------------
+  // Workflow-scoped Docker infrastructure lifecycle
+  // -----------------------------------------------------------------------
+
+  /**
+   * Determines whether a workflow should run in shared-container mode.
+   * Requires both an explicit opt-in via `settings.sharedContainer` and
+   * a Docker-backed agent. Builtin workflows ignore the flag entirely.
+   */
+  private shouldUseSharedContainer(definition: WorkflowDefinition): boolean {
+    const settings = definition.settings ?? {};
+    if (settings.sharedContainer !== true) return false;
+    if (settings.mode === 'builtin') return false;
+    return true;
+  }
+
+  /**
+   * Creates the workflow-scoped Docker infrastructure bundle and stashes
+   * it on `instance.infra`. Called once at workflow start and on resume
+   * when shared-container mode is enabled.
+   *
+   * Only invoked when `shouldUseSharedContainer(definition)` returns true;
+   * callers must gate on that check.
+   *
+   * Errors propagate: if bundle creation fails, the workflow cannot
+   * proceed, and the caller is responsible for cleaning up any partial
+   * state it has already allocated.
+   */
+  private async createWorkflowInfrastructure(instance: WorkflowInstance): Promise<void> {
+    const settings = instance.definition.settings ?? {};
+    const agentId = (settings.dockerAgent ?? 'claude-code') as AgentId;
+    // TODO(Round 2): pass `controlSocketPath` into `createDockerInfrastructure`
+    // once it accepts a control-socket hint. For Round 1, the bundle is created
+    // without a control socket; the coordinator control server is started
+    // separately and does not block bundle creation.
+    const controlSocketPath = getWorkflowProxyControlSocketPath(instance.id);
+
+    const factory = this.deps.createWorkflowInfrastructure ?? (await this.loadDefaultInfrastructureFactory());
+    const infra = await factory({
+      workflowId: instance.id,
+      agentId,
+      controlSocketPath,
+    });
+    instance.infra = infra;
+  }
+
+  /**
+   * Tears down the workflow-scoped Docker infrastructure bundle, if any.
+   *
+   * Idempotent and error-tolerant: safe to call multiple times, and a
+   * failure in one step (bundle destroy, control socket unlink) does not
+   * prevent subsequent steps from running. Callers in recovery paths
+   * depend on this function never throwing.
+   */
+  private async destroyWorkflowInfrastructure(instance: WorkflowInstance): Promise<void> {
+    const infra = instance.infra;
+    if (!infra) return;
+    instance.infra = undefined;
+
+    const destroy = this.deps.destroyWorkflowInfrastructure ?? (await this.loadDefaultInfrastructureTeardown());
+    try {
+      await destroy(infra);
+    } catch (err) {
+      writeStderr(`[workflow] destroyDockerInfrastructure failed for ${instance.id}: ${toErrorMessage(err)}`);
+    }
+
+    // Best-effort: unlink the coordinator control socket. Swallow ENOENT
+    // because the socket may never have been bound (Round 1 does not
+    // start the control server yet).
+    try {
+      unlinkSync(getWorkflowProxyControlSocketPath(instance.id));
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT') {
+        writeStderr(`[workflow] Failed to unlink control socket for ${instance.id}: ${toErrorMessage(err)}`);
+      }
+    }
+  }
+
+  /**
+   * Lazy-loads the default `createDockerInfrastructure` wrapper. The real
+   * helper requires Docker dependencies and the session config, so we
+   * construct them here rather than eagerly at orchestrator construction
+   * time (which would pay the import cost for every workflow run,
+   * including builtin ones that don't need Docker).
+   */
+  private async loadDefaultInfrastructureFactory(): Promise<
+    (input: CreateWorkflowInfrastructureInput) => Promise<DockerInfrastructure>
+  > {
+    const { createDockerInfrastructure } = await import('../docker/docker-infrastructure.js');
+    const { loadConfig } = await import('../config/index.js');
+    const { getSessionDir, getSessionSandboxDir, getSessionEscalationDir, getSessionAuditLogPath } =
+      await import('../config/paths.js');
+
+    return async (input) => {
+      const config = loadConfig();
+      // Round 1: reuse the session-dir layout keyed by workflowId so the
+      // bundle's paths are deterministic and colocated with the workflow
+      // run. Round 2 will replace this with workflow-specific paths via
+      // `getWorkflowRunDir()` once the session-side borrow path accepts
+      // a non-session directory layout.
+      const sessionDir = getSessionDir(input.workflowId);
+      mkdirSync(sessionDir, { recursive: true });
+      return createDockerInfrastructure(
+        config,
+        { kind: 'docker', agent: input.agentId },
+        sessionDir,
+        getSessionSandboxDir(input.workflowId),
+        getSessionEscalationDir(input.workflowId),
+        getSessionAuditLogPath(input.workflowId),
+        input.workflowId,
+      );
+    };
+  }
+
+  /** Lazy-loads the default `destroyDockerInfrastructure` helper. */
+  private async loadDefaultInfrastructureTeardown(): Promise<(infra: DockerInfrastructure) => Promise<void>> {
+    const { destroyDockerInfrastructure } = await import('../docker/docker-infrastructure.js');
+    return destroyDockerInfrastructure;
+  }
+
+  // -----------------------------------------------------------------------
   // WorkflowController implementation
   // -----------------------------------------------------------------------
 
-  start(definitionPath: string, taskDescription: string, workspacePath?: string): Promise<WorkflowId> {
+  async start(definitionPath: string, taskDescription: string, workspacePath?: string): Promise<WorkflowId> {
     const raw = parseDefinitionFile(definitionPath);
     const definition = validateDefinition(raw);
     this.validatePersonas(definition);
@@ -336,13 +517,27 @@ export class WorkflowOrchestrator implements WorkflowController {
       currentState: definition.initial,
       stateEnteredAt: Date.now(),
       messageLog,
+      policyVersionsByPersona: new Map(),
     };
+
+    // Create workflow-scoped Docker infrastructure BEFORE starting the actor
+    // so the first state's session invocation can borrow it. If infra creation
+    // fails, fail fast without registering the workflow or starting the actor.
+    if (this.shouldUseSharedContainer(definition)) {
+      try {
+        await this.createWorkflowInfrastructure(instance);
+      } catch (err) {
+        tab.write(`[error] Failed to create workflow infrastructure: ${toErrorMessage(err)}`);
+        tab.close();
+        throw err;
+      }
+    }
 
     this.workflows.set(workflowId, instance);
     this.emitLifecycleEvent({ kind: 'started', workflowId, name: definition.name, taskDescription });
     this.subscribeToActor(instance);
     actor.start();
-    return Promise.resolve(workflowId);
+    return workflowId;
   }
 
   async resume(workflowId: WorkflowId): Promise<void> {
@@ -394,7 +589,26 @@ export class WorkflowOrchestrator implements WorkflowController {
       currentState: String(checkpoint.machineState),
       stateEnteredAt: Date.now(),
       messageLog,
+      policyVersionsByPersona: new Map(),
     };
+
+    // Create workflow-scoped Docker infrastructure before starting the actor.
+    // Round 1 does NOT reclaim containers across resume -- any dependencies
+    // previously installed in the old container are lost. Reclamation is
+    // Step 7 per docs/designs/workflow-container-lifecycle.md §6.
+    if (this.shouldUseSharedContainer(definition)) {
+      writeStderr(
+        `[workflow] Resuming ${workflowId} in shared-container mode: creating a fresh Docker infrastructure bundle. ` +
+          `Any dependencies installed in the pre-resume container are lost.`,
+      );
+      try {
+        await this.createWorkflowInfrastructure(instance);
+      } catch (err) {
+        tab.write(`[error] Failed to create workflow infrastructure on resume: ${toErrorMessage(err)}`);
+        tab.close();
+        throw err;
+      }
+    }
 
     this.workflows.set(workflowId, instance);
     this.emitLifecycleEvent({
@@ -577,6 +791,10 @@ export class WorkflowOrchestrator implements WorkflowController {
       reason: 'Workflow aborted by user',
     };
 
+    // Tear down workflow-scoped Docker infrastructure after all sessions
+    // are closed. Error-tolerant (see destroyWorkflowInfrastructure).
+    await this.destroyWorkflowInfrastructure(instance);
+
     try {
       this.deps.checkpointStore.remove(id);
     } catch (err) {
@@ -599,7 +817,19 @@ export class WorkflowOrchestrator implements WorkflowController {
 
   async shutdownAll(): Promise<void> {
     const ids = [...this.workflows.keys()];
+    // Abort runs full teardown (including destroyWorkflowInfrastructure) for
+    // workflows not yet in a terminal state. For already-terminal workflows,
+    // abort() early-returns — so we follow up with an explicit destroy pass
+    // to defend against any case where a terminal transition skipped infra
+    // teardown (e.g., tests forcing finalStatus directly). The destroy call
+    // is idempotent when instance.infra is undefined.
     await Promise.allSettled(ids.map((id) => this.abort(id)));
+    await Promise.allSettled(
+      ids.map((id) => {
+        const instance = this.workflows.get(id);
+        return instance ? this.destroyWorkflowInfrastructure(instance) : Promise.resolve();
+      }),
+    );
   }
 
   // -----------------------------------------------------------------------
@@ -1077,6 +1307,14 @@ export class WorkflowOrchestrator implements WorkflowController {
     const instance = this.workflows.get(workflowId);
     if (!instance) return;
 
+    // Guard against XState emitting a terminal transition multiple times.
+    // `finalStatus` being set is the canonical "already completed" signal;
+    // if it's set, skip re-entering terminal handling so we don't call
+    // destroyWorkflowInfrastructure twice (the teardown itself is idempotent,
+    // but duplicate tab.close() / checkpoint.remove() / lifecycle events
+    // are noisy).
+    if (instance.finalStatus) return;
+
     // Check if this is a normal completion or an aborted terminal
     const stateValue = instance.currentState;
     if (stateValue === 'aborted' || stateValue.includes('abort')) {
@@ -1100,6 +1338,16 @@ export class WorkflowOrchestrator implements WorkflowController {
 
     instance.tab.write(`[done] ${instance.finalStatus.phase}`);
     instance.tab.close();
+
+    // Tear down workflow-scoped Docker infrastructure. Runs asynchronously
+    // because the actor subscription is sync; destroyWorkflowInfrastructure
+    // is error-tolerant so unhandled rejections should not occur, but we
+    // still catch defensively for a belt-and-suspenders guarantee.
+    void this.destroyWorkflowInfrastructure(instance).catch((err: unknown) => {
+      writeStderr(
+        `[workflow] destroyWorkflowInfrastructure unexpectedly threw for ${workflowId}: ${toErrorMessage(err)}`,
+      );
+    });
 
     this.emitLifecycleEvent({
       kind: 'completed',
