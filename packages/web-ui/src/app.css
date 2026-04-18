@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@700&display=swap');
+@import '@fontsource/orbitron/700.css';
 
 @tailwind base;
 @tailwind components;

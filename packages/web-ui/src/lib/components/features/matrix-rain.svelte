@@ -57,18 +57,24 @@
       return;
     }
 
-    // Attempt to load Orbitron; fall back gracefully on failure.
+    // Guard against writes after unmount: if the component is destroyed
+    // before document.fonts.load() resolves, the promise handler would
+    // otherwise assign to already-disposed state.
+    let cancelled = false;
     const fontSpec = `${WORDMARK_FONT_WEIGHT} 48px ${WORDMARK_FONT_FAMILY}`;
     document.fonts
       .load(fontSpec)
       .then(() => {
-        fontReady = true;
+        if (!cancelled) fontReady = true;
       })
       .catch(() => {
         // Font failed to load -- fall back to system font. Layout will
         // still work since computeLayout accepts any renderable font.
-        fontReady = true;
+        if (!cancelled) fontReady = true;
       });
+    return () => {
+      cancelled = true;
+    };
   });
 
   // Main render effect. Re-runs on canvas mount, word change, font readiness,
