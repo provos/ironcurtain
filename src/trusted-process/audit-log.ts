@@ -39,9 +39,21 @@ export class AuditLog {
    * `flags: 'a'` — the same options the constructor uses — *before* ending
    * the current one, so that a synchronous failure constructing the new
    * stream (e.g. bad path arg) leaves the original stream intact and the
-   * `AuditLog` still usable. Only once the new stream is successfully
-   * constructed do we flush and close the old one, awaiting its `end()`
-   * callback so kernel-buffered writes hit disk.
+   * `AuditLog` still usable.
+   *
+   * `createWriteStream` is lazy: the underlying file descriptor is not
+   * opened until the first write, so late-binding errors (missing parent
+   * directory, EACCES, ENOSPC) surface asynchronously as `'error'` events
+   * on the stream rather than as synchronous throws. If we swapped the
+   * stream reference before those errors fired, the next `log()` call
+   * would trigger an unhandled 'error' event and crash the process. To
+   * close that hole, we race `'open'` (success) against `'error'`
+   * (failure) before committing the swap. On failure we destroy the
+   * half-opened stream and propagate the error, leaving the old stream
+   * untouched and usable.
+   *
+   * Once the new stream is ready we flush and close the old one, awaiting
+   * its `end()` callback so kernel-buffered writes hit disk.
    *
    * Rotating to the same path the log is already open on is safe: for a
    * brief window both streams are open in append mode on the same inode.
@@ -60,10 +72,16 @@ export class AuditLog {
    * crash-resilience against power loss.
    *
    * Parent directory of `newPath` must already exist — mirrors constructor
-   * behavior (the constructor does not create parents, and neither does this).
+   * behavior (the constructor does not create parents, and neither does
+   * this). Note that the constructor itself does NOT await stream
+   * readiness, so an async open failure there still surfaces as an
+   * unhandled 'error' event; fixing that is a separate, pre-existing
+   * concern outside the scope of `rotate()`'s contract.
    *
    * @throws if called after `close()`. An `AuditLog` that has been closed
    *   cannot be rotated back open; construct a new instance instead.
+   * @throws the stream's `'error'` event payload when the new stream
+   *   fails to open (EACCES, ENOENT on parent dir, etc.).
    */
   async rotate(newPath: string): Promise<void> {
     if (this.closed) {
@@ -73,6 +91,18 @@ export class AuditLog {
     // synchronously (e.g. invalid path), `this.stream` still points at the
     // original, usable stream — callers can keep logging or close cleanly.
     const next = createWriteStream(newPath, { flags: 'a' });
+    // Wait for the new stream to actually open before swapping. Without
+    // this gate, an async open failure would fire as an 'error' event on
+    // the stream AFTER we had already replaced `this.stream`, turning
+    // the next `log()` into an unhandled error crash. On failure, destroy
+    // the half-opened stream and leave `this.stream` pointing at the
+    // original, still-usable stream.
+    try {
+      await waitForStreamReady(next);
+    } catch (err) {
+      next.destroy();
+      throw err;
+    }
     await endStream(this.stream);
     this.stream = next;
   }
@@ -90,6 +120,24 @@ function endStream(stream: WriteStream): Promise<void> {
       if (err) reject(err);
       else resolve();
     });
+  });
+}
+
+/**
+ * Waits for a newly-constructed `WriteStream` to reach a known state:
+ * either `'open'` (the underlying fd was successfully opened) or
+ * `'error'` (open failed — missing parent dir, EACCES, etc.).
+ *
+ * `createWriteStream` is lazy — the fd is not opened until the first
+ * write — so late-binding errors surface asynchronously as stream
+ * `'error'` events rather than synchronous throws. Callers that need to
+ * commit to a new stream only if it is usable must race these two events
+ * before committing.
+ */
+function waitForStreamReady(stream: WriteStream): Promise<void> {
+  return new Promise((resolve, reject) => {
+    stream.once('open', () => resolve());
+    stream.once('error', (err) => reject(err));
   });
 }
 

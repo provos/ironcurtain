@@ -148,8 +148,9 @@ function parseLoadPolicyBody(raw: unknown): LoadPolicyRequest | string {
 /**
  * HTTP server that routes control requests to the coordinator.
  *
- * Lifecycle: `start(options)` once, `stop()` once. Re-starting after
- * `stop()` is not supported -- construct a new instance instead.
+ * Lifecycle: call `start(options)` to bind the server and `stop()` to
+ * unbind it. After `stop()` completes, the same instance may be started
+ * again with new listen options.
  */
 export class ControlServer {
   private readonly server: http.Server;
@@ -304,8 +305,8 @@ export class ControlServer {
     }
 
     // Clear the bound address so `getAddress()` correctly reports the
-    // listener as gone. The server object itself is not re-startable
-    // (lifecycle contract), but callers may still query getAddress().
+    // listener as gone and a subsequent `start()` is permitted (the
+    // double-start guard in `start()` keys off `boundAddress`).
     this.boundAddress = null;
   }
 }

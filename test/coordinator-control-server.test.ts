@@ -716,4 +716,90 @@ describe('ToolCallCoordinator loadPolicy concurrency', () => {
       await coordinator.close();
     }
   });
+
+  it('close() drains an in-flight tool call before closing the audit log', async () => {
+    // Regression for Fix 4: `close()` must wait for any in-flight
+    // `handleToolCall` (which holds the call mutex while writing to the
+    // audit log) to finish before calling `auditLog.close()`. Without
+    // this drain, `close()` would race the in-flight handler: the
+    // handler could be mid-write when we end the stream, producing an
+    // async "write after end" event on the process, or an in-flight
+    // `loadPolicy` could try to rotate an already-closed log.
+    //
+    // We use a gated tool call as the proxy for "in-flight handler
+    // holding the call mutex" because it exercises the same mutex
+    // `loadPolicy` acquires. The assertion is that `close()` does NOT
+    // resolve before the gated call releases, and that no write-after-
+    // end or rotate-after-close errors fire in the process.
+    const auditPath = join(TEST_ROOT, 'audit.close-drain.jsonl');
+
+    let resolveCallStarted: (() => void) | null = null;
+    const callStarted = new Promise<void>((r) => {
+      resolveCallStarted = r;
+    });
+    let releaseCall: (() => void) | null = null;
+    const callGate = new Promise<void>((r) => {
+      releaseCall = r;
+    });
+
+    const client: Client = {
+      callTool: async () => {
+        resolveCallStarted?.();
+        await callGate;
+        return { content: [{ type: 'text', text: 'ok' }], isError: false };
+      },
+      sendRootsListChanged: async () => undefined,
+    } as unknown as Client;
+
+    const coordinator = new ToolCallCoordinator({
+      compiledPolicy: testCompiledPolicy,
+      toolAnnotations: testToolAnnotations,
+      protectedPaths: TEST_PROTECTED_PATHS,
+      allowedDirectory: TEST_SANDBOX_DIR,
+      auditLogPath: auditPath,
+    });
+    registerFilesystemTools(coordinator, client);
+
+    // 1. Kick off the slow tool call. It parks on `callGate` while
+    //    holding the call mutex.
+    const callPromise = coordinator.handleStructuredToolCall(makeRequest());
+    await callStarted;
+
+    // 2. Trigger close() concurrently. It must NOT complete while the
+    //    gated call is still in flight -- the drain step acquires the
+    //    same call mutex and therefore queues behind the call.
+    let closeResolved = false;
+    const closePromise = coordinator.close().then(
+      () => {
+        closeResolved = true;
+      },
+      (err: unknown) => {
+        closeResolved = true;
+        throw err;
+      },
+    );
+
+    // 3. Give the close() path a generous slice to observe the race.
+    //    If the mutex drain is missing, close() would race ahead and
+    //    resolve before the gated tool call releases.
+    await new Promise((r) => setTimeout(r, 50));
+    expect(closeResolved).toBe(false);
+
+    // 4. Release the tool call. close() can now acquire the mutex and
+    //    proceed with its teardown.
+    releaseCall?.();
+
+    // Both promises settle without throwing. A 'write after end' or
+    // similar async stream error from a missed drain would surface here
+    // as an unhandled rejection or a rejected close promise.
+    const callResult = await callPromise;
+    await closePromise;
+
+    expect(callResult.status).toBe('success');
+
+    // The pre-close tool call's audit entry must be present -- proves
+    // the drain completed the in-flight write before the log closed.
+    const entries = readAudit(auditPath);
+    expect(entries.length).toBe(1);
+  });
 });

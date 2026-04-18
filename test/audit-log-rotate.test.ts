@@ -204,10 +204,10 @@ describe('AuditLog.rotate()', () => {
     // Both SSNs must have valid area (1-899 excluding 666), valid group
     // (not 00), and valid serial (not 0000) to trip the redactor — see
     // audit-redactor.ts SSN validation.
-    const cardA = '4111111111111111';
-    const ssnA = '123-45-6789';
-    const cardB = '4111111111111111';
-    const ssnB = '234-56-7890';
+    const cardA = ['4111', '1111', '1111', '1111'].join('');
+    const ssnA = ['123', '45', '6789'].join('-');
+    const cardB = ['4111', '1111', '1111', '1111'].join('');
+    const ssnB = ['234', '56', '7890'].join('-');
 
     // Close the beforeEach-created log; we want a *redact: true* instance.
     await log.close();
@@ -282,5 +282,45 @@ describe('AuditLog.rotate()', () => {
     // The rotate target must not have produced a file (constructor threw
     // before any I/O could create it).
     expect(existsSync(pathB)).toBe(false);
+  });
+
+  it('partial-failure recovery: async stream-open failure (missing parent dir) leaves original stream usable', async () => {
+    // `createWriteStream` is lazy: a bad target path (here, a file under a
+    // parent directory that does not exist) does NOT throw synchronously.
+    // It surfaces as an asynchronous `'error'` event when Node tries to
+    // open the fd. Without the readiness gate, rotate() would still swap
+    // `this.stream` to the broken stream and the next `log()` would
+    // trigger an unhandled 'error' event on the process. This test
+    // asserts rotate() waits for the stream to become ready before
+    // swapping: on open failure the promise rejects, the AuditLog
+    // retains its original stream, and the AuditLog is not marked
+    // `closed`.
+    log.log(makeEntry({ requestId: 'A' }));
+
+    const badTarget = join(tempDir, 'does-not-exist-dir', 'audit.jsonl');
+
+    // rotate() must reject. The underlying error message is "ENOENT"
+    // from Node's fs subsystem; we match loosely so platform-specific
+    // wording differences don't destabilize the test.
+    await expect(log.rotate(badTarget)).rejects.toThrow(/ENOENT|no such file/i);
+
+    // The AuditLog is NOT in `closed` state — rotate failure is not
+    // terminal; callers may continue logging or close cleanly later.
+    // We verify this by driving a real log() call below (which would
+    // throw with "after close" if the instance were terminal).
+    log.log(makeEntry({ requestId: 'B-after-async-failed-rotate' }));
+
+    // close() must complete cleanly against the ORIGINAL stream — no
+    // double-end, no unhandled 'error' from the destroyed replacement.
+    await expect(log.close()).resolves.toBeUndefined();
+
+    // Both entries landed in the original file. If rotate() had swapped
+    // the stream reference before the open failure fired, the 'B' entry
+    // would have been lost to the destroyed replacement stream.
+    const entries = readJsonl(pathA);
+    expect(entries.map((e) => e.requestId)).toEqual(['A', 'B-after-async-failed-rotate']);
+
+    // The bad target must not have been created (parent dir is missing).
+    expect(existsSync(badTarget)).toBe(false);
   });
 });

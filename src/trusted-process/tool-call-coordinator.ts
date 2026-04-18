@@ -530,6 +530,22 @@ export class ToolCallCoordinator {
       await this.controlServer.stop();
       this.controlServerAddress = null;
     }
+
+    // Drain any in-flight tool call or `loadPolicy` handler before we
+    // close the audit log. Stopping the control server above only
+    // prevents NEW control requests -- a handler already inside
+    // `loadPolicy` (mid-rotate) or a tool call already inside
+    // `handleCallTool` (writing to audit) continues to run against the
+    // coordinator's state. Acquiring both mutexes in the same order
+    // used elsewhere (call, then policy) guarantees those handlers
+    // complete before we tear the audit log out from under them; no
+    // deadlock risk because no code path takes these in reverse.
+    await this.callMutex.withLock(async () => {
+      await this.policyMutex.withLock(async () => {
+        // Mutexes held — no loadPolicy/handleCallTool can be in flight.
+      });
+    });
+
     if (this.ownedMcpManager) {
       await this.mcpManager.closeAll();
     }
