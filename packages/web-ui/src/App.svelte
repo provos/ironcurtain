@@ -125,14 +125,17 @@
   onMount(() => {
     currentTheme = getTheme();
     document.documentElement.setAttribute('data-theme', currentTheme);
-    initConnection();
+    // Fire-and-forget: initConnection is async because of the HTTP
+    // preflight, but onMount doesn't need (and Svelte discourages)
+    // awaiting it here. Errors surface through appState.authError.
+    void initConnection();
   });
 
   function handleTokenSubmit(e: Event): void {
     e.preventDefault();
-    if (tokenInput.trim()) {
-      connectWithToken(tokenInput.trim());
-    }
+    const trimmed = tokenInput.trim();
+    if (!trimmed) return;
+    void connectWithToken(trimmed);
   }
 
   function switchTheme(theme: ThemeId): void {
@@ -172,6 +175,15 @@
         style="animation-delay: {cardDelayMs}ms; animation-fill-mode: both; opacity: 0;"
       >
         <div class="bg-card/75 backdrop-blur-md border border-border/50 rounded-xl p-6 shadow-2xl shadow-black/40">
+          {#if appState.authError === 'invalid_token'}
+            <div
+              data-testid="auth-error"
+              role="alert"
+              class="mb-4 rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+            >
+              That token was rejected. Copy a fresh one from the daemon's output.
+            </div>
+          {/if}
           <p class="text-sm text-muted-foreground mb-5">Paste the auth token from the daemon output to connect.</p>
           <form onsubmit={handleTokenSubmit}>
             <Input type="text" bind:value={tokenInput} placeholder="Auth token..." class="font-mono" />

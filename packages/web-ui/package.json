@@ -36,6 +36,7 @@
   },
   "dependencies": {
     "@dagrejs/dagre": "^3.0.0",
+    "@fontsource/orbitron": "^5.2.8",
     "@types/dompurify": "^3.0.5",
     "clsx": "^2.1.1",
     "dompurify": "^3.3.3",

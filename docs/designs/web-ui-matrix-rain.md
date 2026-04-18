@@ -83,92 +83,101 @@ content. Neither side knows about the other.
 
 ## 3. Engine API
 
+> **Canonical source:** `packages/web-ui/src/lib/matrix-rain/types.ts` is authoritative. The block
+> below summarizes the shape as shipped; consult the types file for the current in-tree signatures.
+
+Key shape (paraphrased, not compilable):
+
 ```typescript
-// matrix-rain/types.ts
+// matrix-rain/types.ts (summary)
 
-/** Visible lifecycle phases for the animation. */
 export type RainPhase = 'assembly' | 'hold' | 'ambient';
+export type DropColorKind = 'head' | 'near' | 'far';
 
-/** Internal dimensions are expressed in logical CSS pixels. DPR is applied by the Svelte wrapper. */
-export interface EngineOptions {
-  /** Pre-computed layout. Never null here — the wrapper has already validated viewport fits. */
-  readonly layout: LayoutPlan;
-  /** The word to assemble. Default: "IronCurtain". */
-  readonly word?: string;
-  /** Seed for deterministic tests. Default: Math.random-based. */
-  readonly rng?: () => number;
-  /** If true, skip assembly; emit FrameState with locked wordmark only, no ambient drops. */
-  readonly reducedMotion?: boolean;
-  /**
-   * Color palette. Default: phosphor green matching mux-splash.ts:
-   *   head: '#B4FFB4', near: '#00FF46', far: '#007800', locked: '#00C800'.
-   */
-  readonly palette?: Readonly<RainPalette>;
+/** Pre-computed layout. The engine treats this as read-only. */
+export interface LayoutPlan {
+  readonly cellSize: number;
+  readonly cols: number;
+  readonly rows: number;
+  readonly originX: number;
+  readonly originY: number;
+  readonly viewportWidth: number;
+  readonly viewportHeight: number;
+  readonly lockedCells: ReadonlyArray<LockedCellCoord>;
+  // Pre-rendered wordmark image that the renderer reveals a cell at a time.
+  readonly wordmarkImage: HTMLCanvasElement | OffscreenCanvas | null;
+  readonly wordmarkDrawX: number;
+  readonly wordmarkDrawY: number;
 }
 
-export interface RainPalette {
-  readonly head: string; // bright head character
-  readonly near: string; // 1-2 chars behind head
-  readonly far: string; // tail
-  readonly locked: string; // wordmark cells after assembly
+export interface LockedCellCoord {
+  readonly col: number;
+  readonly row: number;
+  readonly group?: 'title' | 'subtitle';
 }
 
-/** Plain-data snapshot of what to draw this frame. Produced by the engine, consumed by the renderer. */
+/** Plain-data snapshot produced by the engine, consumed by the renderer. */
 export interface FrameState {
   readonly phase: RainPhase;
-  /** Global alpha for the entire frame. Renderer applies once, resets at end. */
   readonly globalAlpha: number;
-  /** Locked wordmark cells. Drawn LAST so they occlude overlapping drops. */
   readonly lockedCells: ReadonlyArray<LockedCellSnapshot>;
-  /** Active falling drops (assembly unlocked drops + ambient drops). Empty during hold. */
   readonly drops: ReadonlyArray<DropSnapshot>;
 }
 
+/** Color is NOT on the snapshot — locked cells reveal the pre-rendered
+ *  wordmark image via `drawImage` clipping, not a text fill. */
 export interface LockedCellSnapshot {
-  readonly col: number; // cell-coordinate column (wordmark-relative is OK; renderer offsets by layout.originX/Y)
+  readonly col: number;
   readonly row: number;
-  readonly color: string; // hex; typically palette.locked, but the engine may progressively reveal during assembly
-  /**
-   * 0.0..1.0. For the assembly phase the engine MAY emit partially-revealed locked cells (e.g. as drops
-   * land). For hold/ambient this is 1.0; the frame-level globalAlpha handles the dim.
-   */
   readonly alpha: number;
 }
 
 export interface DropSnapshot {
   readonly col: number;
-  readonly headRow: number; // may be fractional for ambient drops
-  /** Trail characters from head (index 0) to tail. Renderer draws each with its color. */
-  readonly trail: ReadonlyArray<{ readonly row: number; readonly char: string; readonly color: string }>;
+  readonly row: number; // fractional for ambient drops
+  readonly char: string;
+  readonly colorKind: DropColorKind;
+  readonly trail: ReadonlyArray<DropTrailSnapshot>;
+}
+
+export interface DropTrailSnapshot {
+  readonly col: number;
+  readonly row: number;
+  readonly char: string;
+  readonly colorKind: DropColorKind;
+}
+
+/** Options to `createRainEngine(layout, options?)`. Palette and word are
+ *  not configurable — palette lives in `palette.ts`, the word is baked
+ *  into the layout plan via `computeLayout(word, ...)`. */
+export interface RainEngineOptions {
+  readonly reducedMotion?: boolean;
+  readonly rng?: RainRng;
+  readonly seed?: number;
 }
 
 export interface RainEngine {
-  /**
-   * Advance internal state toward `nowMs`. Time semantics:
-   *   - Calling step() with monotonically increasing timestamps converges the engine's state.
-   *   - Calling step() with the same nowMs twice in a row is a no-op (no state advance).
-   *   - If (nowMs - lastTick) exceeds MAX_CATCH_UP_TICKS * FRAME_MS (see §3.1 below), the engine
-   *     performs exactly ONE tick of progress and resets lastTick = nowMs. This prevents the
-   *     "background tab freeze" failure mode where a suspended RAF resumes with a multi-minute delta
-   *     and tries to synchronously run thousands of ticks.
-   */
   step(nowMs: number): void;
-
-  /** Produce a plain-data snapshot of the current drawable state. No side effects. */
   getFrame(): FrameState;
-
-  /** Update with a new layout. Engine re-seeds drops if cellSize changed; otherwise reuses state. */
   resize(newLayout: LayoutPlan): void;
-
-  /** Current phase (read-only). */
   readonly phase: RainPhase;
-
-  /** True after assembly has finished (phase !== 'assembly'). */
   readonly wordmarkReady: boolean;
 }
 
-export function createRainEngine(options: EngineOptions): RainEngine;
+/** Note the positional layout parameter — the layout is required and
+ *  comes in before the options bag. */
+export function createRainEngine(layout: LayoutPlan, options?: RainEngineOptions): RainEngine;
 ```
+
+Behavior not expressed in the types:
+
+- `getFrame()` is side-effect free; characters for the in-flight drops are advanced in `step()` so
+  the snapshot doesn't consume the RNG stream.
+- `resize()` rebuilds the locked-cell snapshot whenever `cellSize` or the contents of `lockedCells`
+  changed, so a viewport-width change that shifts wordmark centering is honored even when cell size
+  stays constant. Ambient drops are only cleared on a `cellSize` change.
+- The palette is controlled by `palette.ts`, not by options; the renderer maps `DropColorKind` →
+  hex at paint time.
 
 ### 3.1 Tick semantics and catch-up cap
 

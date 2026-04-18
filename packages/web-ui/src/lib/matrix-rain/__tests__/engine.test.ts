@@ -162,10 +162,16 @@ function snapshot(frame: FrameState): string {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Drive the engine forward by `tickCount` logical ticks. */
-function driveTicks(engine: ReturnType<typeof createRainEngine>, tickCount: number): void {
-  engine.step(0);
-  for (let i = 1; i <= tickCount; i++) engine.step(i * FRAME_MS);
+/**
+ * Drive the engine forward by `tickCount` logical ticks, starting at `startMs`.
+ * Returns the final timestamp so callers that need to continue driving
+ * the same engine across multiple phases can chain monotonic calls —
+ * feeding rewound timestamps would be silently ignored by `step()`.
+ */
+function driveTicks(engine: ReturnType<typeof createRainEngine>, tickCount: number, startMs: number = 0): number {
+  engine.step(startMs);
+  for (let i = 1; i <= tickCount; i++) engine.step(startMs + i * FRAME_MS);
+  return startMs + tickCount * FRAME_MS;
 }
 
 // ---------------------------------------------------------------------------
@@ -502,6 +508,78 @@ describe('createRainEngine -- background rain during assembly', () => {
     const engine = createRainEngine(buildLayout(), { seed: 42, reducedMotion: true });
     driveTicks(engine, 30);
     expect(engine.getFrame().drops).toHaveLength(0);
+  });
+});
+
+describe('createRainEngine -- resize', () => {
+  /** Shift every locked cell one column to the right -- simulates the
+   *  wordmark re-centering on a viewport width change without a
+   *  cellSize change. */
+  function shiftCellsRight(layout: LayoutPlan, delta: number): LayoutPlan {
+    return {
+      ...layout,
+      lockedCells: layout.lockedCells.map((c) => ({ ...c, col: c.col + delta })),
+    };
+  }
+
+  it('updates locked-cell snapshot when geometry shifts at the same cellSize (hold/ambient)', () => {
+    const layout = buildTwoPhaseLayout();
+    const engine = createRainEngine(layout, { seed: 42 });
+    // Drive into ambient so the snapshot is locked in.
+    driveTicks(engine, MAX_ASSEMBLY_TICKS + HOLD_TICKS + 5);
+    expect(engine.phase).toBe('ambient');
+
+    const shifted = shiftCellsRight(layout, 3);
+    engine.resize(shifted);
+
+    const frame = engine.getFrame();
+    // Every locked cell in the frame must match the shifted layout, not
+    // the original. This is the regression test for the stale-snapshot bug.
+    for (const cell of frame.lockedCells) {
+      const match = shifted.lockedCells.find((c) => c.col === cell.col && c.row === cell.row);
+      expect(match).toBeDefined();
+    }
+    expect(frame.lockedCells).toHaveLength(shifted.lockedCells.length);
+  });
+
+  it('rebuilds assembly drops when locked cells shift during assembly', () => {
+    const layout = buildTwoPhaseLayout();
+    const engine = createRainEngine(layout, { seed: 42 });
+    const afterInitialTicks = driveTicks(engine, 3);
+    expect(engine.phase).toBe('assembly');
+
+    const shifted = shiftCellsRight(layout, 5);
+    engine.resize(shifted);
+
+    // Drive assembly to completion. If drops still targeted the old
+    // columns, the shifted title cells would never lock. Continue from
+    // the timestamp the first driveTicks ended at — otherwise the engine
+    // would treat the new call's initial timestamps as rewound and skip
+    // advancing.
+    driveTicks(engine, MAX_ASSEMBLY_TICKS + SUBTITLE_REVEAL_TICKS + 2, afterInitialTicks + FRAME_MS);
+
+    // Compare full (col, row) pairs, not distinct columns — a future
+    // layout could have multiple title cells in one column (stacked
+    // glyphs), and the distinct-column count would spuriously pass then.
+    const finalFrame = engine.getFrame();
+    const shiftedTitleCells = shifted.lockedCells.filter((c) => c.group === 'title');
+    const lockedTitleCells = finalFrame.lockedCells.filter((c) =>
+      shiftedTitleCells.some((lc) => lc.col === c.col && lc.row === c.row),
+    );
+    expect(lockedTitleCells).toHaveLength(shiftedTitleCells.length);
+  });
+
+  it('is a no-op when the new layout has identical lockedCells and cellSize', () => {
+    const layout = buildTwoPhaseLayout();
+    const engine = createRainEngine(layout, { seed: 42 });
+    driveTicks(engine, MAX_ASSEMBLY_TICKS + HOLD_TICKS + 5);
+    const before = snapshot(engine.getFrame());
+
+    // Same content, different array identity — must not tear down state.
+    engine.resize({ ...layout, lockedCells: layout.lockedCells.map((c) => ({ ...c })) });
+
+    const after = snapshot(engine.getFrame());
+    expect(after).toBe(before);
   });
 });
 

@@ -168,4 +168,90 @@ describe('WsClient', () => {
     expect(connectionHandler).toHaveBeenCalledTimes(3); // true, false, true
     expect(connectionHandler).toHaveBeenLastCalledWith(true);
   });
+
+  // ---------------------------------------------------------------------
+  // Preflight — gate the WS upgrade on an HTTP probe so a bad token is
+  // detectable (the browser WebSocket API hides 401s from JS).
+  // ---------------------------------------------------------------------
+
+  // 6. Preflight "invalid" stops reconnects and fires onAuthError
+  it('fires onAuthError and does not open a WS when preflight returns "invalid"', async () => {
+    const preflight = vi.fn().mockResolvedValue('invalid' as const);
+    const client = createWsClient(preflight);
+    const authErrorHandler = vi.fn();
+    const connectionHandler = vi.fn();
+    client.onAuthError(authErrorHandler);
+    client.onConnectionChange(connectionHandler);
+
+    client.connect('ws://localhost:7400/ws', 'bad-token');
+
+    // Flush the preflight microtask and any scheduled timers.
+    await vi.runAllTimersAsync();
+
+    expect(preflight).toHaveBeenCalledWith('bad-token');
+    expect(authErrorHandler).toHaveBeenCalledOnce();
+    expect(connectionHandler).not.toHaveBeenCalledWith(true);
+    // No WS should have been constructed; mockWs from earlier tests
+    // leaks across describe blocks, but re-opening here would have
+    // reset it — we assert on the absence of a "true" connection event.
+  });
+
+  // 7. Preflight "ok" proceeds with the WS upgrade
+  it('opens the WS when preflight returns "ok"', async () => {
+    const preflight = vi.fn().mockResolvedValue('ok' as const);
+    const client = createWsClient(preflight);
+    const connectionHandler = vi.fn();
+    client.onConnectionChange(connectionHandler);
+
+    client.connect('ws://localhost:7400/ws', 'good-token');
+
+    await vi.runAllTimersAsync();
+
+    expect(preflight).toHaveBeenCalledWith('good-token');
+    expect(connectionHandler).toHaveBeenCalledWith(true);
+  });
+
+  // 8. Preflight "offline" reschedules without firing authError
+  it('schedules a reconnect (but does not flip authError) when preflight returns "offline"', async () => {
+    // First call: offline (daemon down). Second call: ok (daemon came back).
+    const preflight = vi
+      .fn<(token: string) => Promise<'ok' | 'invalid' | 'offline'>>()
+      .mockResolvedValueOnce('offline')
+      .mockResolvedValueOnce('ok');
+    const client = createWsClient(preflight);
+    const authErrorHandler = vi.fn();
+    const connectionHandler = vi.fn();
+    client.onAuthError(authErrorHandler);
+    client.onConnectionChange(connectionHandler);
+
+    client.connect('ws://localhost:7400/ws', 'some-token');
+
+    // Let the first preflight resolve and the reconnect timer schedule.
+    await vi.runAllTimersAsync();
+
+    expect(preflight).toHaveBeenCalledTimes(2);
+    expect(authErrorHandler).not.toHaveBeenCalled();
+    expect(connectionHandler).toHaveBeenCalledWith(true);
+  });
+
+  // 9. A rejected preflight must not kill the reconnect loop: treat as 'offline'.
+  it('treats a rejected preflight as "offline" and keeps retrying', async () => {
+    const preflight = vi
+      .fn<(token: string) => Promise<'ok' | 'invalid' | 'offline'>>()
+      .mockRejectedValueOnce(new Error('boom'))
+      .mockResolvedValueOnce('ok');
+    const client = createWsClient(preflight);
+    const authErrorHandler = vi.fn();
+    const connectionHandler = vi.fn();
+    client.onAuthError(authErrorHandler);
+    client.onConnectionChange(connectionHandler);
+
+    client.connect('ws://localhost:7400/ws', 'some-token');
+
+    await vi.runAllTimersAsync();
+
+    expect(preflight).toHaveBeenCalledTimes(2);
+    expect(authErrorHandler).not.toHaveBeenCalled();
+    expect(connectionHandler).toHaveBeenCalledWith(true);
+  });
 });

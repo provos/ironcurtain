@@ -60,7 +60,7 @@
     "config": "tsx src/cli.ts config",
     "setup": "tsx src/cli.ts setup",
     "prepublishOnly": "npm run build",
-    "test": "vitest run && npm test -w packages/web-ui",
+    "test": "bash scripts/test.sh",
     "test:web-ui": "npm test -w packages/web-ui",
     "test:watch": "vitest",
     "lint": "eslint src/ test/",

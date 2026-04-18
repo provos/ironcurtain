@@ -20,9 +20,14 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
+      // Matches both GET /ws/auth (preflight) and the WS upgrade at /ws.
+      // http-proxy with `ws: true` handles both HTTP and WS over the
+      // same target; the http:// scheme works for both paths because
+      // the proxy inspects the Upgrade header to decide which to use.
       '/ws': {
-        target: 'ws://127.0.0.1:7400',
+        target: 'http://127.0.0.1:7400',
         ws: true,
+        changeOrigin: true,
       },
     },
   },
