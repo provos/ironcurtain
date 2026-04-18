@@ -138,11 +138,20 @@ async function createBuiltinSession(options: SessionOptions): Promise<Session> {
 /**
  * Creates a DockerAgentSession that runs an external agent in a container.
  *
- * Calls `createDockerInfrastructure()` to stand up the full infrastructure
- * bundle (proxies, orientation, image, running agent container, sidecar and
- * internal network for TCP mode). The session is then constructed with that
- * bundle and only needs to wire up session-local state (escalation watcher,
- * audit tailer).
+ * Two paths:
+ * - Standalone (default): calls `createDockerInfrastructure()` to stand up
+ *   the full infrastructure bundle (proxies, orientation, image, running
+ *   agent container, sidecar and internal network for TCP mode). The
+ *   session is constructed with `ownsInfra=true`, so `close()` tears down
+ *   the bundle.
+ * - Borrow (`options.workflowInfrastructure` set): uses the caller-supplied
+ *   bundle as-is and constructs the session with `ownsInfra=false`. The
+ *   caller retains full responsibility for the bundle's lifetime; the
+ *   session's `close()` only tears down session-local state.
+ *
+ * In both paths the session wires up escalation watcher and audit tailer
+ * and writes any per-session files (CLAUDE.md, effective system prompt)
+ * using fields on the bundle.
  */
 async function createDockerSession(
   agentId: import('../docker/agent-adapter.js').AgentId,
@@ -171,26 +180,39 @@ async function createDockerSession(
   let infra:
     | Awaited<ReturnType<typeof import('../docker/docker-infrastructure.js').createDockerInfrastructure>>
     | undefined;
+  // Tracks whether THIS factory allocated the infra bundle. When true and
+  // the session never reaches a constructed state, the catch path tears
+  // down the bundle directly. When false (borrow path), the caller owns
+  // the bundle and the factory must NEVER destroy it, even on error.
+  let builtInfra = false;
   try {
-    const { createDockerInfrastructure } = await import('../docker/docker-infrastructure.js');
     const { DockerAgentSession } = await import('../docker/docker-agent-session.js');
     const { buildDockerClaudeMd } = await import('../docker/claude-md-seed.js');
+
+    if (options.workflowInfrastructure) {
+      // Borrow path: the orchestrator owns the bundle's lifetime. We do
+      // not call createDockerInfrastructure(); we do not destroy on close.
+      infra = options.workflowInfrastructure;
+    } else {
+      // Standalone path: factory creates and owns the bundle.
+      const { createDockerInfrastructure } = await import('../docker/docker-infrastructure.js');
+      infra = await createDockerInfrastructure(
+        sessionConfig.config,
+        { kind: 'docker', agent: agentId },
+        sessionConfig.sessionDir,
+        sessionConfig.sandboxDir,
+        sessionConfig.escalationDir,
+        sessionConfig.auditLogPath,
+        sessionId,
+        options.tokenStreamBus,
+      );
+      builtInfra = true;
+    }
 
     const claudeMdContent = buildDockerClaudeMd({
       personaName: options.persona,
       memoryEnabled: config.userConfig.memory.enabled,
     });
-
-    infra = await createDockerInfrastructure(
-      sessionConfig.config,
-      { kind: 'docker', agent: agentId },
-      sessionConfig.sessionDir,
-      sessionConfig.sandboxDir,
-      sessionConfig.escalationDir,
-      sessionConfig.auditLogPath,
-      sessionId,
-      options.tokenStreamBus,
-    );
 
     // Write CLAUDE.md into conversation state dir (unconditionally, even on
     // resume, since persona/memory config may change between sessions).
@@ -216,10 +238,10 @@ async function createDockerSession(
       config: sessionConfig.config,
       sessionId,
       infra,
-      // Standalone `createDockerSession` is the sole creator of this
-      // infrastructure bundle, so the session owns it and tears it down
-      // on close.
-      ownsInfra: true,
+      // Ownership mirrors who allocated the bundle: standalone path owns
+      // and tears down on close; borrow path leaves the bundle alive for
+      // the external orchestrator.
+      ownsInfra: builtInfra,
       agentModelOverride: options.agentModelOverride,
       onEscalation: options.onEscalation,
       onEscalationExpired: options.onEscalationExpired,
@@ -231,13 +253,20 @@ async function createDockerSession(
     await session.initialize();
     return session;
   } catch (error) {
-    // If the session exists, its close() path owns infra teardown
-    // (ownsInfra=true). If we failed before constructing the session,
-    // fall back to destroying the infra bundle directly so containers,
-    // sidecar, network, and proxies don't leak.
+    // If the session was constructed, its close() respects the ownsInfra
+    // flag we passed in: standalone sessions (ownsInfra=true) destroy the
+    // bundle they own; borrow-mode sessions (ownsInfra=false) leave the
+    // caller's bundle intact. We need only invoke close() -- no
+    // conditional cleanup here.
+    //
+    // Otherwise, if we allocated the bundle ourselves but failed before
+    // the session was constructed (e.g., the DockerAgentSession
+    // constructor threw, or the CLAUDE.md write threw), destroy it
+    // directly. NEVER destroy a caller-supplied bundle on this branch --
+    // `builtInfra` is false in borrow mode, so the guard below skips it.
     if (session) {
       await session.close().catch(() => {});
-    } else if (infra) {
+    } else if (builtInfra && infra) {
       const { destroyDockerInfrastructure } = await import('../docker/docker-infrastructure.js');
       await destroyDockerInfrastructure(infra).catch(() => {});
     }
