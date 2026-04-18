@@ -4,8 +4,8 @@ An alternative session type that runs external coding agents (Claude Code, Goose
 
 ## Core session files
 
-- `docker-agent-session.ts` - Session implementation. Manages container lifecycle, starts proxies, handles escalations. `ensureImage()` uses content-hash labels for staleness detection.
-- `docker-infrastructure.ts` - Shared `prepareDockerInfrastructure()` helper used by both `createDockerSession()` and `runPtySession()`. Sets up proxies, orientation, CA, fake keys, and image resolution.
+- `docker-agent-session.ts` - Session implementation. Manages container lifecycle, starts proxies, handles escalations. `ensureImage()` uses content-hash labels for staleness detection. Construction takes an `ownsInfra: boolean` flag that gates teardown: standalone sessions own the bundle and destroy it on `close()`; workflow shared-container sessions borrow a caller-supplied bundle (`ownsInfra: false`) and leave it alive.
+- `docker-infrastructure.ts` - Shared `DockerInfrastructure` bundle used by single-session (`createDockerSession()`, `runPtySession()`) and workflow shared-container runs. The bundle holds proxies, orientation, CA, fake keys, and image resolution. In workflow mode the orchestrator builds one bundle per run via `createWorkflowInfrastructure` / `destroyWorkflowInfrastructure` (see `src/workflow/orchestrator.ts`) and hands it to every state's session via `SessionOptions.workflowInfrastructure`.
 - `docker-manager.ts` - Docker CLI wrapper. `getImageLabel()` reads labels for staleness detection. `buildImage()` accepts optional labels.
 - `types.ts` - Type definitions for Docker container lifecycle (`DockerContainerConfig`, `DockerMount`, etc.).
 - `platform.ts` - Platform detection for transport selection. macOS uses TCP (VirtioFS doesn't support UDS); Linux uses UDS.
@@ -24,7 +24,7 @@ An alternative session type that runs external coding agents (Claude Code, Goose
 ## Proxy tools & package registry
 
 - `proxy-tools.ts` - Hardcoded MCP tool definitions, annotations, and policy rules for domain management. Injected into the ToolCallCoordinator during construction for policy evaluation and audit logging.
-- `code-mode-proxy.ts` - MCP server exposing a single `execute_code` tool backed by the UTCP Code Mode sandbox. Docker agents send TypeScript via this tool, sharing the same V8 execution engine as builtin Code Mode sessions. Implements the `DockerProxy` interface.
+- `code-mode-proxy.ts` - MCP server exposing a single `execute_code` tool backed by the UTCP Code Mode sandbox. Docker agents send TypeScript via this tool, sharing the same V8 execution engine as builtin Code Mode sessions. Implements the `DockerProxy` interface. `DockerProxy.getPolicySwapTarget()` returns a narrow `PolicySwapTarget` handle (only `startControlServer`) that the workflow orchestrator uses to attach a control server to the live coordinator; single-session callers never use it.
 - `registry-proxy.ts` - URL parsing, metadata filtering, and tarball backstop for npm, PyPI, and Debian package registries. Built-in registry configs for each.
 - `package-types.ts` - Shared types for the package installation proxy (`RegistryConfig`, `PackageIdentity`, `PackageValidator`, etc.).
 - `package-validator.ts` - Package validation against allowlist/denylist/age-gate rules. First-match semantics: denylist > allowlist > age gate > default allow.
@@ -36,6 +36,7 @@ The `proxy` virtual MCP server (`proxy-tools.ts`) exposes `add_proxy_domain`, `r
 **Domain validation** (`validateDomain()` in `proxy-tools.ts`): Rejects IP addresses, `localhost`, `*.docker.internal`, names >253 chars, and invalid format. Runs before policy evaluation.
 
 **Two connection modes in `mitm-proxy.ts`:**
+
 - **Provider/registry CONNECT** → TLS-terminating MITM (credential swap, endpoint filtering, request rewriting). Used for LLM API providers and package registries.
 - **Passthrough CONNECT** → Raw TCP tunnel via `net.connect()`. No TLS termination, no content inspection. Supports HTTP, HTTPS, and WebSocket. Used for dynamically added domains.
 
