@@ -53,15 +53,12 @@ import { DEFAULT_EXEC_TIMEOUT_MS } from './docker-manager.js';
 export interface DockerAgentSessionDeps {
   readonly config: IronCurtainConfig;
   readonly sessionId: SessionId;
-  readonly sessionDir: string;
-  readonly sandboxDir: string;
-  readonly escalationDir: string;
-  readonly auditLogPath: string;
   /**
    * Fully-formed infrastructure bundle produced by
    * `createDockerInfrastructure()`. The main agent container is already
    * created and running; the session drives it via `docker exec`. All of
    * `docker`, `proxy`, `mitmProxy`, `adapter`, `fakeKeys`, `useTcp`,
+   * `sessionDir`, `sandboxDir`, `escalationDir`, `auditLogPath`,
    * `conversationStateDir`, `conversationStateConfig`, `systemPrompt`,
    * `containerId`, `sidecarContainerId`, and `internalNetwork` live on
    * this bundle.
@@ -101,10 +98,6 @@ export class DockerAgentSession implements Session {
   private readonly config: IronCurtainConfig;
   private readonly infra: DockerInfrastructure;
   private readonly ownsInfra: boolean;
-  private readonly sessionDir: string;
-  private readonly sandboxDir: string;
-  private readonly escalationDir: string;
-  private readonly auditLogPath: string;
   private readonly agentModelOverride?: string;
   private readonly systemPrompt: string;
 
@@ -139,10 +132,6 @@ export class DockerAgentSession implements Session {
     this.config = deps.config;
     this.infra = deps.infra;
     this.ownsInfra = deps.ownsInfra;
-    this.sessionDir = deps.sessionDir;
-    this.sandboxDir = deps.sandboxDir;
-    this.escalationDir = deps.escalationDir;
-    this.auditLogPath = deps.auditLogPath;
     this.agentModelOverride = deps.agentModelOverride;
     this.systemPrompt = deps.systemPromptOverride ?? deps.infra.systemPrompt;
     this.onEscalation = deps.onEscalation;
@@ -172,27 +161,27 @@ export class DockerAgentSession implements Session {
    */
   // eslint-disable-next-line @typescript-eslint/require-await -- must be async to satisfy Session interface
   async initialize(): Promise<void> {
-    mkdirSync(this.sandboxDir, { recursive: true });
-    mkdirSync(this.escalationDir, { recursive: true });
+    mkdirSync(this.infra.sandboxDir, { recursive: true });
+    mkdirSync(this.infra.escalationDir, { recursive: true });
 
     // Write the effective system prompt for debugging
-    writeFileSync(resolve(this.sessionDir, 'system-prompt.txt'), this.systemPrompt);
+    writeFileSync(resolve(this.infra.sessionDir, 'system-prompt.txt'), this.systemPrompt);
 
     logger.info(`Session attached to container: ${this.infra.containerId.substring(0, 12)}`);
 
-    this.escalationWatcher = createEscalationWatcher(this.escalationDir, {
+    this.escalationWatcher = createEscalationWatcher(this.infra.escalationDir, {
       onEscalation: (request) => this.onEscalation?.(request),
       onEscalationExpired: () => this.onEscalationExpired?.(),
       onEscalationResolved: (id, decision) => this.onEscalationResolved?.(id, decision),
     });
     this.escalationWatcher.start();
 
-    // Create the audit log file so fs.watch() can attach to it.
-    // The proxy process appends entries; we create the empty file upfront.
-    if (!existsSync(this.auditLogPath)) {
-      writeFileSync(this.auditLogPath, '');
-    }
-    this.auditTailer = new AuditLogTailer(this.auditLogPath, (event) => this.emitDiagnostic(event));
+    // AuditLogTailer handles missing files: openSync catches ENOENT, and
+    // watchFile polls regardless of existence. Don't create the file here --
+    // it would race the proxy subprocess, which appends audit entries
+    // concurrently, and the default `writeFileSync` 'w' flag could truncate
+    // an entry the proxy just wrote.
+    this.auditTailer = new AuditLogTailer(this.infra.auditLogPath, (event) => this.emitDiagnostic(event));
     this.auditTailer.start();
 
     this.status = 'ready';
@@ -360,7 +349,7 @@ export class DockerAgentSession implements Session {
 
   private writeUserContext(userMessage: string): void {
     try {
-      const contextPath = resolve(this.escalationDir, 'user-context.json');
+      const contextPath = resolve(this.infra.escalationDir, 'user-context.json');
       atomicWriteJsonSync(contextPath, { userMessage });
     } catch {
       // Ignore write failures

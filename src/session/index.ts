@@ -209,12 +209,8 @@ async function createDockerSession(
       infra,
       // Standalone `createDockerSession` is the sole creator of this
       // infrastructure bundle, so the session owns it and tears it down
-      // on close. Workflow-mode callers (Round 5) will pass `false`.
+      // on close.
       ownsInfra: true,
-      sessionDir: sessionConfig.sessionDir,
-      sandboxDir: sessionConfig.sandboxDir,
-      escalationDir: sessionConfig.escalationDir,
-      auditLogPath: sessionConfig.auditLogPath,
       agentModelOverride: options.agentModelOverride,
       onEscalation: options.onEscalation,
       onEscalationExpired: options.onEscalationExpired,

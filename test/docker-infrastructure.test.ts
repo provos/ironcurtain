@@ -8,13 +8,20 @@ import {
   createSessionContainers,
   destroyDockerInfrastructure,
 } from '../src/docker/docker-infrastructure.js';
-import type { ConversationStateConfig, AgentAdapter, AgentId } from '../src/docker/agent-adapter.js';
+import type { AgentAdapter, ConversationStateConfig } from '../src/docker/agent-adapter.js';
 import type { DockerProxy } from '../src/docker/code-mode-proxy.js';
 import type { MitmProxy } from '../src/docker/mitm-proxy.js';
-import type { CertificateAuthority } from '../src/docker/ca.js';
-import type { DockerContainerConfig, DockerExecResult, DockerManager } from '../src/docker/types.js';
+import type { DockerManager } from '../src/docker/types.js';
 import type { IronCurtainConfig } from '../src/config/types.js';
 import { getInternalNetworkName } from '../src/docker/platform.js';
+import {
+  createDockerCallTracker,
+  createMockAdapter,
+  createMockCA,
+  createMockDocker,
+  type CreateMockDockerOptions,
+  type DockerCallTracker,
+} from './helpers/docker-mocks.js';
 
 /**
  * Type-level tests for the DockerInfrastructure interface.
@@ -244,168 +251,38 @@ describe('prepareConversationStateDir', () => {
 //   - rollback semantics when a downstream step (connectivity check) fails
 //     after the main container has already been created and started
 
-/** Overrides for the scripted DockerManager returned by makeMockDocker. */
-interface MockDockerOverrides {
-  /** Script behavior of `docker.exec` (used for connectivity check). */
-  readonly exec?: (container: string, cmd: readonly string[]) => Promise<DockerExecResult>;
-  /** Intercept `docker.create` calls after they have been captured. */
-  readonly create?: (config: DockerContainerConfig) => Promise<string>;
-}
+/** Overrides accepted by the test-local makeMockDocker wrapper. */
+type MockDockerOverrides = Pick<CreateMockDockerOptions, 'exec' | 'create'>;
 
 /**
- * Builds a DockerManager mock that records every docker.create/start/stop/...
- * call so tests can assert on the exact container configuration and on which
- * resources were cleaned up.
+ * Thin wrapper around the shared createMockDocker that bundles a
+ * DockerCallTracker for test assertions. The shared helper returns just
+ * the DockerManager; this wrapper flattens the tracker into the same
+ * return shape the tests already use.
  */
-function makeMockDocker(overrides: MockDockerOverrides = {}): {
-  docker: DockerManager;
-  createCalls: DockerContainerConfig[];
-  startCalls: string[];
-  stoppedContainers: string[];
-  removedContainers: string[];
-  removedNetworks: string[];
-  createdNetworks: Array<{ name: string; options?: Record<string, unknown> }>;
-} {
-  const createCalls: DockerContainerConfig[] = [];
-  const startCalls: string[] = [];
-  const stoppedContainers: string[] = [];
-  const removedContainers: string[] = [];
-  const removedNetworks: string[] = [];
-  const createdNetworks: Array<{ name: string; options?: Record<string, unknown> }> = [];
-
-  let createSeq = 0;
-
-  const docker: DockerManager = {
-    async preflight() {},
-    async create(config: DockerContainerConfig) {
-      createCalls.push(config);
-      if (overrides.create) return overrides.create(config);
-      createSeq++;
-      // Sidecar is always created first in TCP mode; app container second.
-      // In UDS mode only the app container is created.
-      return `container-${createSeq}`;
-    },
-    async start(id: string) {
-      startCalls.push(id);
-    },
-    async exec(container: string, cmd: readonly string[]) {
-      if (overrides.exec) return overrides.exec(container, cmd);
-      return { exitCode: 0, stdout: '', stderr: '' };
-    },
-    async stop(id: string) {
-      stoppedContainers.push(id);
-    },
-    async remove(id: string) {
-      removedContainers.push(id);
-    },
-    async isRunning() {
-      return true;
-    },
-    async imageExists() {
-      // All images "exist" so the ensureImage()/pullImage() path doesn't fire
-      // during createSessionContainers tests. Image builds are exercised
-      // elsewhere (ensureImage tests live in docker-session tests).
-      return true;
-    },
-    async pullImage() {},
-    async buildImage() {},
-    async getImageLabel() {
-      return undefined;
-    },
-    async createNetwork(name: string, options?: { internal?: boolean; subnet?: string; gateway?: string }) {
-      createdNetworks.push({ name, options });
-    },
-    async removeNetwork(name: string) {
-      removedNetworks.push(name);
-    },
-    async connectNetwork() {},
-    async getContainerIp() {
-      return '172.30.0.3';
-    },
-    async containerExists() {
-      return false;
-    },
-    async getContainerLabel() {
-      return undefined;
-    },
-    async getImageId() {
-      return undefined;
-    },
-    async removeStaleContainer() {
-      return false;
-    },
-  };
-
-  return {
-    docker,
-    createCalls,
-    startCalls,
-    stoppedContainers,
-    removedContainers,
-    removedNetworks,
-    createdNetworks,
-  };
+function makeMockDocker(overrides: MockDockerOverrides = {}): { docker: DockerManager } & DockerCallTracker {
+  const tracker = createDockerCallTracker();
+  const docker = createMockDocker({ tracker, ...overrides });
+  return { docker, ...tracker };
 }
 
-function makeMockAdapter(): AgentAdapter {
-  return {
-    id: 'test-agent' as AgentId,
-    displayName: 'Test Agent',
-    async getImage() {
-      return 'ironcurtain-claude-code:latest';
-    },
-    generateMcpConfig() {
-      return [];
-    },
-    generateOrientationFiles() {
-      return [];
-    },
-    buildCommand() {
-      return ['test-agent'];
-    },
-    buildSystemPrompt() {
-      return 'You are a test agent.';
-    },
-    getProviders() {
-      return [];
-    },
-    buildEnv() {
-      return { TEST_KEY: 'test-value' };
-    },
-    extractResponse(exitCode: number, stdout: string) {
-      return exitCode === 0 ? { text: stdout } : { text: `Error: exit ${exitCode}` };
-    },
-  };
-}
+/** Local alias kept so existing call sites read the same. */
+const makeMockProxy = (socketPath: string, port?: number): DockerProxy => ({
+  socketPath,
+  port,
+  async start() {},
+  getHelpData() {
+    return { serverDescriptions: {}, toolsByServer: {} };
+  },
+  async stop() {},
+});
 
-function makeMockProxy(socketPath: string, port?: number): DockerProxy {
-  return {
-    socketPath,
-    port,
-    async start() {},
-    getHelpData() {
-      return { serverDescriptions: {}, toolsByServer: {} };
-    },
-    async stop() {},
-  };
-}
-
-function makeMockMitmProxy(): MitmProxy {
-  return {
-    async start() {
-      return { socketPath: '/tmp/test-mitm-proxy.sock' };
-    },
-    async stop() {},
-  };
-}
-
-function makeMockCA(tempDir: string): CertificateAuthority {
-  const certPath = join(tempDir, 'ca-cert.pem');
-  const keyPath = join(tempDir, 'ca-key.pem');
-  writeFileSync(certPath, 'MOCK-CERT');
-  writeFileSync(keyPath, 'MOCK-KEY');
-  return { certPem: 'MOCK-CERT', keyPem: 'MOCK-KEY', certPath, keyPath };
-}
+const makeMockMitmProxy = (): MitmProxy => ({
+  async start() {
+    return { socketPath: '/tmp/test-mitm-proxy.sock' };
+  },
+  async stop() {},
+});
 
 /** Minimal config accepted by createSessionContainers. */
 function makeMockConfig(): IronCurtainConfig {
@@ -468,8 +345,8 @@ function makeMockCore(opts: MockCoreOptions): PreContainerInfrastructure {
     proxy: makeMockProxy(join(socketsDir, 'proxy.sock'), proxyPort),
     mitmProxy: makeMockMitmProxy(),
     docker: opts.docker,
-    adapter: opts.adapter ?? makeMockAdapter(),
-    ca: makeMockCA(opts.tempDir),
+    adapter: opts.adapter ?? createMockAdapter(),
+    ca: createMockCA(opts.tempDir),
     fakeKeys: new Map([['api.test.com', 'sk-test-fake-key']]),
     orientationDir,
     systemPrompt: 'You are a test agent.',
@@ -658,7 +535,10 @@ describe('destroyDockerInfrastructure', () => {
     }
   });
 
-  it('runs all teardown steps in order (TCP mode: container, sidecar, network, mitmProxy, proxy)', async () => {
+  it('runs all teardown steps (TCP mode: container, sidecar, network, both proxies)', async () => {
+    // Containers tear down before proxies (stop consumers before producers);
+    // the two proxy stops run in parallel, so their relative order is not
+    // part of the contract -- only that both were called.
     const { docker, stoppedContainers, removedContainers, removedNetworks } = makeMockDocker();
     const mitmProxy = makeTrackedMitmProxy();
     const proxy = makeTrackedDockerProxy();
@@ -675,7 +555,7 @@ describe('destroyDockerInfrastructure', () => {
     // Internal network removed.
     expect(removedNetworks).toContain(infra.internalNetwork);
 
-    // Both proxies stopped.
+    // Both proxies stopped (parallel; order not asserted).
     expect(mitmProxy.stopped).toBe(true);
     expect(proxy.stopped).toBe(true);
   });
