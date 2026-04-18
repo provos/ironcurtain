@@ -199,7 +199,6 @@ async function createDockerSession(
         sessionConfig.sessionDir,
         sessionConfig.sandboxDir,
         sessionConfig.escalationDir,
-        sessionConfig.auditLogPath,
         sessionId,
         options.tokenStreamBus,
       );

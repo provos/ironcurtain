@@ -52,6 +52,12 @@ export interface PreContainerInfrastructure {
   readonly sessionDir: string;
   readonly sandboxDir: string;
   readonly escalationDir: string;
+  /**
+   * Audit log path, populated by `prepareDockerInfrastructure()` from
+   * `config.auditLogPath`. Kept on the bundle so consumers like
+   * `AuditLogTailer` can read it without chasing the config reference;
+   * the single source of truth remains `config.auditLogPath`.
+   */
   readonly auditLogPath: string;
   readonly proxy: DockerProxy;
   readonly mitmProxy: MitmProxy;
@@ -119,10 +125,14 @@ export async function prepareDockerInfrastructure(
   sessionDir: string,
   sandboxDir: string,
   escalationDir: string,
-  auditLogPath: string,
   sessionId: string,
   tokenStreamBus?: TokenStreamBus,
 ): Promise<PreContainerInfrastructure> {
+  // The audit log path is read from config so the bundle is
+  // self-describing: downstream consumers (AuditLogTailer, sandbox
+  // coordinator) can take it from either `config.auditLogPath` or
+  // `infra.auditLogPath` without chasing references.
+  const auditLogPath = config.auditLogPath;
   // Dynamic imports to avoid loading Docker dependencies for built-in sessions
   const { registerBuiltinAdapters, getAgent } = await import('./agent-registry.js');
   const { createCodeModeProxy } = await import('./code-mode-proxy.js');
@@ -367,7 +377,6 @@ export async function createDockerInfrastructure(
   sessionDir: string,
   sandboxDir: string,
   escalationDir: string,
-  auditLogPath: string,
   sessionId: string,
   tokenStreamBus?: TokenStreamBus,
 ): Promise<DockerInfrastructure> {
@@ -377,7 +386,6 @@ export async function createDockerInfrastructure(
     sessionDir,
     sandboxDir,
     escalationDir,
-    auditLogPath,
     sessionId,
     tokenStreamBus,
   );

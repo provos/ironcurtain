@@ -154,6 +154,16 @@ export interface CreateWorkflowInfrastructureInput {
    * containing directory or use it for labelling.
    */
   readonly controlSocketPath: string;
+  /**
+   * Workspace directory for this workflow run. Used as the allowed
+   * directory for the filesystem MCP server and all sessions that run
+   * in the shared container. Either a user-supplied `--workspace <path>`
+   * or the default `<baseDir>/<workflowId>/workspace/`.
+   *
+   * All sessions in a workflow mount the workflow's workspace directory;
+   * no session-scoped sandbox is ever used under shared-container mode.
+   */
+  readonly workspacePath: string;
 }
 
 /** Inputs for starting the coordinator's HTTP control server on a workflow bundle. */
@@ -437,6 +447,7 @@ export class WorkflowOrchestrator implements WorkflowController {
       workflowId: instance.id,
       agentId,
       controlSocketPath,
+      workspacePath: instance.workspacePath,
     });
 
     // Attach the control server. On failure, tear down the bundle so
@@ -542,7 +553,7 @@ export class WorkflowOrchestrator implements WorkflowController {
   > {
     const { createDockerInfrastructure } = await import('../docker/docker-infrastructure.js');
     const { loadConfig, applyAllowedDirectoryToMcpArgs } = await import('../config/index.js');
-    const { getSessionDir, getSessionSandboxDir, getSessionEscalationDir } = await import('../config/paths.js');
+    const { getSessionDir, getSessionEscalationDir } = await import('../config/paths.js');
 
     return async (input) => {
       const config = loadConfig();
@@ -552,22 +563,28 @@ export class WorkflowOrchestrator implements WorkflowController {
       // workflow run, with per-entry persona tagging) instead of the
       // per-session audit file.
       const sessionDir = getSessionDir(input.workflowId);
-      const sandboxDir = getSessionSandboxDir(input.workflowId);
+      // All sessions in a workflow share the workflow's workspace dir
+      // as their allowed directory. Do NOT use a session-scoped sandbox
+      // here: the orchestrator's artifact checks look inside the
+      // workspace, so artifacts the agent writes must land in the same
+      // tree.
       mkdirSync(sessionDir, { recursive: true });
-      mkdirSync(sandboxDir, { recursive: true });
-      // Rewrite the allowed directory onto the loaded config so the
-      // filesystem MCP server spawns with the per-workflow sandbox
-      // instead of the default (which may not exist). Mirrors the
-      // single-session path in `buildSessionConfig`.
-      config.allowedDirectory = sandboxDir;
-      applyAllowedDirectoryToMcpArgs(config.mcpServers, sandboxDir);
+      mkdirSync(input.workspacePath, { recursive: true });
+      // Rewrite the allowed directory and audit path onto the loaded
+      // config. `config.allowedDirectory` drives the filesystem MCP
+      // server's --allowed-directory; `config.auditLogPath` is what the
+      // ToolCallCoordinator (via Sandbox) reads when creating the
+      // AuditLog. Without the audit rewrite, audit entries fall through
+      // to the default `./audit.jsonl` against process.cwd().
+      config.allowedDirectory = input.workspacePath;
+      config.auditLogPath = getWorkflowAuditLogPath(input.workflowId);
+      applyAllowedDirectoryToMcpArgs(config.mcpServers, input.workspacePath);
       return createDockerInfrastructure(
         config,
         { kind: 'docker', agent: input.agentId },
         sessionDir,
-        sandboxDir,
+        input.workspacePath,
         getSessionEscalationDir(input.workflowId),
-        getWorkflowAuditLogPath(input.workflowId),
         input.workflowId,
       );
     };
