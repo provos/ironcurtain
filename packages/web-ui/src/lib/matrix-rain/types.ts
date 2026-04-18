@@ -7,6 +7,8 @@
  * for the full design.
  */
 
+import type { WordDropSnapshot } from './word-drop-types.js';
+
 // ---------------------------------------------------------------------------
 // Phase
 // ---------------------------------------------------------------------------
@@ -83,8 +85,9 @@ export interface LockedCellCoord {
 /**
  * Plain-data snapshot of what to draw this frame. Produced by `engine.getFrame()`
  * and consumed by the renderer. All arrays are `ReadonlyArray` references to
- * internal engine buffers that the engine may mutate on the next tick — the
- * renderer MUST read-only and MUST NOT retain references across frames.
+ * internal engine buffers that the engine may mutate on the next `step()` or
+ * `getFrame()` call — the renderer MUST read-only and MUST NOT retain
+ * references across frames.
  */
 export interface FrameState {
   readonly phase: RainPhase;
@@ -104,7 +107,20 @@ export interface FrameState {
    * free-falling population.
    */
   readonly drops: ReadonlyArray<DropSnapshot>;
+  /**
+   * Held TF-IDF word drops pinned at fixed grid cells. The login engine
+   * always returns a shared frozen empty array (`EMPTY_WORD_DROPS`) — only
+   * the stream engine ever populates this.
+   */
+  readonly wordDrops: ReadonlyArray<WordDropSnapshot>;
 }
+
+/**
+ * Frozen empty word-drop array. Shared by engines that never emit word drops
+ * (the login engine) so every `FrameState` can satisfy the contract without a
+ * per-frame allocation. Consumers MUST treat it as read-only.
+ */
+export const EMPTY_WORD_DROPS: ReadonlyArray<WordDropSnapshot> = Object.freeze([]);
 
 /**
  * A locked wordmark cell in the current frame.
@@ -149,9 +165,11 @@ export interface DropTrailSnapshot {
 
 /**
  * Drop color tier — maps 1:1 to a palette slot in the renderer.
- * `head` is brightest, `far` is dimmest.
+ * `head` is brightest, `far` is dimmest. `word-hold` is a stream-engine-only
+ * variant tagging cells belonging to held word drops so the stream renderer
+ * can tint them per their source kind; the login engine never emits it.
  */
-export type DropColorKind = 'head' | 'near' | 'far';
+export type DropColorKind = 'head' | 'near' | 'far' | 'word-hold';
 
 // ---------------------------------------------------------------------------
 // RNG

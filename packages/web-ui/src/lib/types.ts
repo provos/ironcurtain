@@ -3,6 +3,61 @@
  * Kept in sync manually -- a shared package could be added later.
  */
 
+// ---------------------------------------------------------------------------
+// Token stream events
+// ---------------------------------------------------------------------------
+
+/**
+ * Frontend mirror of the daemon's TokenStreamEvent
+ * (src/docker/token-stream-types.ts). Any change on the backend must be
+ * reflected here; any change here must be reflected on the backend. The
+ * wire payload is `{ label: number, events: TokenStreamEvent[] }`, emitted
+ * as the `session.token_stream` WebSocket event.
+ */
+export type TokenStreamEvent =
+  | {
+      readonly kind: 'text_delta';
+      readonly text: string;
+      readonly timestamp: number;
+    }
+  | {
+      readonly kind: 'tool_use';
+      readonly toolName: string;
+      readonly inputDelta: string;
+      readonly timestamp: number;
+    }
+  | {
+      readonly kind: 'message_start';
+      readonly model: string;
+      readonly timestamp: number;
+    }
+  | {
+      readonly kind: 'message_end';
+      readonly stopReason: string;
+      readonly inputTokens: number;
+      readonly outputTokens: number;
+      readonly timestamp: number;
+    }
+  | {
+      readonly kind: 'error';
+      readonly message: string;
+      readonly timestamp: number;
+    }
+  | {
+      readonly kind: 'tool_result';
+      readonly toolUseId: string;
+      readonly toolName: string;
+      readonly content: string;
+      readonly isError: boolean;
+      readonly timestamp: number;
+    }
+  | {
+      readonly kind: 'raw';
+      readonly eventType: string;
+      readonly data: string;
+      readonly timestamp: number;
+    };
+
 export interface SessionSource {
   readonly kind: 'signal' | 'cron' | 'web';
   readonly jobId?: string;

@@ -1,0 +1,67 @@
+{
+  "description": "Short run ending in workflow.state_failed. Fixture for v1.1 glitch FX; lands in v1 so the scaffold is ready.",
+  "tokenProfile": {
+    "corpus": "default",
+    "baseTokenRate": 30,
+    "burstiness": 0.5,
+    "toolCallRatePerMin": 3
+  },
+  "timeline": [
+    {
+      "at": 0,
+      "event": "workflow.started",
+      "payload": {
+        "workflowId": "wf-scenario-error",
+        "name": "vuln-discovery",
+        "taskDescription": "Short run that fails mid-way"
+      }
+    },
+    {
+      "at": 200,
+      "event": "workflow.state_entered",
+      "payload": { "workflowId": "wf-scenario-error", "state": "analyze" }
+    },
+    {
+      "at": 400,
+      "event": "workflow.agent_started",
+      "payload": { "workflowId": "wf-scenario-error", "stateId": "analyze", "persona": "analyst" }
+    },
+    {
+      "at": 20000,
+      "event": "workflow.agent_completed",
+      "payload": {
+        "workflowId": "wf-scenario-error",
+        "stateId": "analyze",
+        "verdict": "harness_build",
+        "notes": "initial analysis complete; attempting to build harness"
+      }
+    },
+    {
+      "at": 20200,
+      "event": "workflow.state_entered",
+      "payload": { "workflowId": "wf-scenario-error", "state": "harness_build" }
+    },
+    {
+      "at": 20400,
+      "event": "workflow.agent_started",
+      "payload": { "workflowId": "wf-scenario-error", "stateId": "harness_build", "persona": "coder" }
+    },
+    {
+      "at": 30000,
+      "event": "workflow.state_failed",
+      "payload": {
+        "workflowId": "wf-scenario-error",
+        "state": "harness_build",
+        "error": "Linker error: undefined reference to __stack_chk_guard. Required linker flags were missing from the default build profile."
+      }
+    },
+    {
+      "at": 30100,
+      "event": "workflow.failed",
+      "payload": {
+        "workflowId": "wf-scenario-error",
+        "error": "harness_build state failed; workflow aborted"
+      }
+    }
+  ]
+}

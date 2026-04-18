@@ -226,6 +226,7 @@ describe('workflow event handling', () => {
         workflowId: 'wf-1',
         stateId: 'plan',
         verdict: 'success',
+        notes: 'planning complete',
       });
       expect(r2).toBe(true);
     });

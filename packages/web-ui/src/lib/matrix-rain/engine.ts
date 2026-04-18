@@ -18,6 +18,7 @@
 
 import { RAIN_CHARS } from './font.js';
 import { ALPHA_AMBIENT, ALPHA_ASSEMBLY, ALPHA_HOLD_END, ALPHA_HOLD_START } from './palette.js';
+import { EMPTY_WORD_DROPS } from './types.js';
 import type {
   DropColorKind,
   DropSnapshot,
@@ -458,6 +459,7 @@ export function createRainEngine(layout: LayoutPlan, options: RainEngineOptions 
       globalAlpha,
       lockedCells: phase === 'assembly' ? lockedSnapshotFromAssembly() : lockedSnapshotBuf,
       drops,
+      wordDrops: EMPTY_WORD_DROPS,
     };
   }
 

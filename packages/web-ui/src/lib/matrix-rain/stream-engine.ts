@@ -1,0 +1,514 @@
+/**
+ * Live-stream Matrix rain engine.
+ *
+ * Sibling to `createRainEngine` in `engine.ts` — shares the timing discipline
+ * and drop-character machinery but drops the wordmark/assembly state machine
+ * in favor of density-biased ambient rain plus TF-IDF word drops. See §A.2
+ * of docs/designs/web-ui-workflow-visualization.md.
+ *
+ * The fork-interface contract: `step(nowMs)/getFrame()/resize()` matches the
+ * login engine so the stream renderer can reuse `drawRainFrame`. Extras
+ * (`enqueueWord`, `setDensityField`, `setIntensity`) live on the stream
+ * engine only and the login engine is never re-exported with them.
+ */
+
+import { FRAME_MS, MAX_CATCH_UP_TICKS, createSeededRng } from './engine.js';
+import { RAIN_CHARS } from './font.js';
+import type { DropColorKind, DropSnapshot, DropTrailSnapshot, FrameState, LayoutPlan, RainRng } from './types.js';
+import type { WordDropSnapshot, WordDropSource } from './word-drop-types.js';
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/** Base ambient-drop population target (before intensity scaling). */
+const AMBIENT_TARGET_MAX = 60;
+/** Base per-tick spawn budget (before intensity scaling). */
+const AMBIENT_SPAWN_PER_TICK = 1;
+const AMBIENT_MIN_TRAIL = 4;
+const AMBIENT_MAX_TRAIL = 7;
+const AMBIENT_MIN_SPEED = 1.0;
+const AMBIENT_MAX_SPEED = 2.0;
+const AMBIENT_COLUMN_COOLDOWN = 6;
+
+/** Max concurrent held word drops (§G Q6). */
+export const WORD_DROP_FIFO_CAP = 24;
+
+// Word-drop alpha envelope in ticks (at FRAME_MS ~= 33ms).
+// Fade in 200ms -> hold 2500ms -> fade out 400ms == ~3.1s total.
+const WORD_FADE_IN_TICKS = Math.round(200 / FRAME_MS);
+const WORD_HOLD_TICKS = Math.round(2500 / FRAME_MS);
+const WORD_FADE_OUT_TICKS = Math.round(400 / FRAME_MS);
+const WORD_TOTAL_TICKS = WORD_FADE_IN_TICKS + WORD_HOLD_TICKS + WORD_FADE_OUT_TICKS;
+
+/** Word drops land in the top third so they don't collide with rain heads. */
+const WORD_ROW_FRACTION = 1 / 3;
+
+const INTENSITY_MIN = 0.3;
+const INTENSITY_MAX = 2.0;
+
+const STREAM_PHASE = 'stream' as const;
+
+// ---------------------------------------------------------------------------
+// Public types
+// ---------------------------------------------------------------------------
+
+export interface StreamRainEngineOptions {
+  readonly rng?: RainRng;
+  readonly seed?: number;
+  readonly reducedMotion?: boolean;
+}
+
+export interface EnqueueWordOptions {
+  readonly priority: number;
+  readonly colorKind: WordDropSource;
+}
+
+export interface StreamRainEngine {
+  step(nowMs: number): void;
+  getFrame(): FrameState;
+  resize(newLayout: LayoutPlan): void;
+  enqueueWord(word: string, opts: EnqueueWordOptions): void;
+  /** Swap in per-column weights. Pass `null` to reset to uniform spawning. */
+  setDensityField(field: Float32Array | null): void;
+  /** Scale ambient population/spawn budget. Clamped to [0.3, 2.0]. */
+  setIntensity(multiplier: number): void;
+  readonly phase: 'stream';
+}
+
+// ---------------------------------------------------------------------------
+// Internal records
+// ---------------------------------------------------------------------------
+
+interface AmbientDrop {
+  col: number;
+  headRow: number;
+  speed: number;
+  speedAccum: number;
+  trailLen: number;
+  chars: string[];
+  headIdx: number;
+  alive: boolean;
+}
+
+interface HeldWordDrop {
+  col: number;
+  row: number;
+  word: string;
+  source: WordDropSource;
+  priority: number;
+  /** Ticks since enqueue. Drives the fade envelope. */
+  age: number;
+}
+
+// ---------------------------------------------------------------------------
+// Default seed
+// ---------------------------------------------------------------------------
+
+/**
+ * Default seed when no RNG is injected. Chosen arbitrarily; stream engines
+ * want determinism off the shelf so tests never accidentally depend on
+ * `Math.random()`.
+ */
+const DEFAULT_STREAM_SEED = 1729;
+
+// ---------------------------------------------------------------------------
+// Factory
+// ---------------------------------------------------------------------------
+
+export function createStreamRainEngine(layout: LayoutPlan, options: StreamRainEngineOptions = {}): StreamRainEngine {
+  const rng: RainRng =
+    options.rng ?? (options.seed !== undefined ? createSeededRng(options.seed) : createSeededRng(DEFAULT_STREAM_SEED));
+  const reducedMotion = options.reducedMotion === true;
+
+  let currentLayout: LayoutPlan = layout;
+  let ambientDrops: AmbientDrop[] = [];
+  let ambientCooldowns: number[] = new Array<number>(currentLayout.cols).fill(0);
+  const heldWords: HeldWordDrop[] = [];
+
+  // CDF cache for the weighted picker. `null` means uniform sampling (no
+  // field set). Rebuilt lazily when setDensityField() is called.
+  let densityField: Float32Array | null = null;
+  let cdf: Float32Array | null = null;
+  let cdfSum = 0;
+
+  let intensity = 1.0;
+
+  // Time bookkeeping mirrors the login engine's step() semantics.
+  let lastTick = 0;
+  let hasPrimedLastTick = false;
+
+  // Snapshot buffers reused across frames to avoid per-frame allocations.
+  const dropSnapshotBuf: DropSnapshot[] = [];
+  const wordDropSnapshotBuf: WordDropSnapshot[] = [];
+
+  // -----------------------------------------------------------------------
+  // CDF (weighted column picker)
+  // -----------------------------------------------------------------------
+
+  function rebuildCdfIfNeeded(): void {
+    if (cdf !== null) return;
+    if (densityField === null) return;
+    const cols = currentLayout.cols;
+    const field = densityField;
+    const out = new Float32Array(cols);
+    let acc = 0;
+    // Clamp negatives to 0 so a theater passing weird data can't flip sign.
+    for (let c = 0; c < cols; c++) {
+      const w = field[c];
+      if (w > 0) acc += w;
+      out[c] = acc;
+    }
+    cdf = out;
+    cdfSum = acc;
+  }
+
+  function pickWeightedColumn(): number {
+    const cols = currentLayout.cols;
+    if (cols <= 0) return -1;
+    rebuildCdfIfNeeded();
+
+    // Uniform fallback: no density field, or the field is identically zero
+    // (theater hasn't resolved yet, or all sources have amplitude 0).
+    if (cdf === null || cdfSum <= 0) {
+      for (let attempt = 0; attempt < 6; attempt++) {
+        const col = Math.floor(rng.random() * cols);
+        if (ambientCooldowns[col] === 0) return col;
+      }
+      return -1;
+    }
+
+    // Inverse-CDF draw with cooldown rejection — cheap: a handful of retries
+    // keeps the common case O(log cols) + a few retries, and falls back to
+    // -1 (skip this spawn) if every attempt hits a cooldown.
+    for (let attempt = 0; attempt < 6; attempt++) {
+      const r = rng.random() * cdfSum;
+      const col = binarySearchCdf(cdf, r);
+      if (col >= 0 && col < cols && ambientCooldowns[col] === 0) return col;
+    }
+    return -1;
+  }
+
+  /** Pure pick: ignores cooldowns (used for word drops, which don't care). */
+  function pickWeightedColumnIgnoringCooldown(): number {
+    const cols = currentLayout.cols;
+    if (cols <= 0) return -1;
+    rebuildCdfIfNeeded();
+    if (cdf === null || cdfSum <= 0) {
+      return Math.floor(rng.random() * cols);
+    }
+    const r = rng.random() * cdfSum;
+    const col = binarySearchCdf(cdf, r);
+    return col >= 0 && col < cols ? col : cols - 1;
+  }
+
+  // -----------------------------------------------------------------------
+  // Tick
+  // -----------------------------------------------------------------------
+
+  function advanceOneLogicalTick(): void {
+    if (reducedMotion) {
+      ageHeldWords();
+      return;
+    }
+    advanceAmbientDrops();
+    decrementAmbientCooldowns();
+    spawnAmbientDrops();
+    ageHeldWords();
+  }
+
+  function advanceAmbientDrops(): void {
+    const rows = currentLayout.rows;
+    for (const drop of ambientDrops) {
+      if (!drop.alive) continue;
+      drop.speedAccum += drop.speed;
+      const steps = Math.floor(drop.speedAccum);
+      drop.speedAccum -= steps;
+      for (let s = 0; s < steps; s++) {
+        drop.headRow += 1;
+        drop.chars[drop.headIdx] = pickRandomChar();
+        drop.headIdx = (drop.headIdx + 1) % drop.chars.length;
+      }
+      if (drop.headRow - drop.trailLen >= rows) drop.alive = false;
+    }
+    // Compact in place.
+    let w = 0;
+    for (let i = 0; i < ambientDrops.length; i++) {
+      if (ambientDrops[i].alive) ambientDrops[w++] = ambientDrops[i];
+    }
+    ambientDrops.length = w;
+  }
+
+  function decrementAmbientCooldowns(): void {
+    for (let c = 0; c < ambientCooldowns.length; c++) {
+      if (ambientCooldowns[c] > 0) ambientCooldowns[c]--;
+    }
+  }
+
+  function spawnAmbientDrops(): void {
+    const mult = Math.max(INTENSITY_MIN, Math.min(INTENSITY_MAX, intensity));
+    const cap = Math.max(1, Math.floor(AMBIENT_TARGET_MAX * mult));
+    if (ambientDrops.length >= cap) return;
+
+    const spawnsThisTick = AMBIENT_SPAWN_PER_TICK * mult;
+    const guaranteed = Math.floor(spawnsThisTick);
+    const fractional = spawnsThisTick - guaranteed;
+    const totalSpawns = guaranteed + (rng.random() < fractional ? 1 : 0);
+
+    for (let i = 0; i < totalSpawns; i++) {
+      const col = pickWeightedColumn();
+      if (col < 0) return;
+      ambientDrops.push(createAmbientDrop(col));
+      ambientCooldowns[col] = AMBIENT_COLUMN_COOLDOWN;
+    }
+  }
+
+  function createAmbientDrop(col: number): AmbientDrop {
+    const trailLen = randInt(AMBIENT_MIN_TRAIL, AMBIENT_MAX_TRAIL);
+    const speed = AMBIENT_MIN_SPEED + rng.random() * (AMBIENT_MAX_SPEED - AMBIENT_MIN_SPEED);
+    const ringSize = trailLen + 1;
+    const chars = new Array<string>(ringSize);
+    const initialChar = pickRandomChar();
+    for (let i = 0; i < ringSize; i++) chars[i] = initialChar;
+    return {
+      col,
+      headRow: -1,
+      speed,
+      speedAccum: 0,
+      trailLen,
+      chars,
+      headIdx: 1 % ringSize,
+      alive: true,
+    };
+  }
+
+  // -----------------------------------------------------------------------
+  // Word drops
+  // -----------------------------------------------------------------------
+
+  function ageHeldWords(): void {
+    if (heldWords.length === 0) return;
+    let w = 0;
+    for (let i = 0; i < heldWords.length; i++) {
+      const h = heldWords[i];
+      h.age++;
+      if (h.age < WORD_TOTAL_TICKS) {
+        heldWords[w++] = h;
+      }
+    }
+    heldWords.length = w;
+  }
+
+  function alphaForAge(age: number): number {
+    if (age < WORD_FADE_IN_TICKS) {
+      return age / WORD_FADE_IN_TICKS;
+    }
+    const afterFadeIn = age - WORD_FADE_IN_TICKS;
+    if (afterFadeIn < WORD_HOLD_TICKS) {
+      return 1.0;
+    }
+    const fadeOutAge = afterFadeIn - WORD_HOLD_TICKS;
+    if (fadeOutAge < WORD_FADE_OUT_TICKS) {
+      return 1.0 - fadeOutAge / WORD_FADE_OUT_TICKS;
+    }
+    return 0;
+  }
+
+  // -----------------------------------------------------------------------
+  // Snapshots (pure — no state mutation)
+  // -----------------------------------------------------------------------
+
+  function buildFrame(): FrameState {
+    dropSnapshotBuf.length = 0;
+    for (const drop of ambientDrops) {
+      dropSnapshotBuf.push(buildAmbientDropSnapshot(drop));
+    }
+
+    wordDropSnapshotBuf.length = 0;
+    for (const held of heldWords) {
+      wordDropSnapshotBuf.push({
+        col: held.col,
+        row: held.row,
+        word: held.word,
+        source: held.source,
+        priority: held.priority,
+        alpha: alphaForAge(held.age),
+      });
+    }
+
+    return {
+      phase: 'ambient',
+      globalAlpha: 1.0,
+      lockedCells: [],
+      drops: dropSnapshotBuf,
+      wordDrops: wordDropSnapshotBuf,
+    };
+  }
+
+  function buildAmbientDropSnapshot(drop: AmbientDrop): DropSnapshot {
+    const headRowFloor = Math.floor(drop.headRow);
+    const ringLen = drop.chars.length;
+    const headCharIdx = (drop.headIdx - 1 + ringLen) % ringLen;
+    const trail: DropTrailSnapshot[] = [];
+    for (let d = 1; d <= drop.trailLen; d++) {
+      const row = headRowFloor - d;
+      if (row < 0) break;
+      const idx = (drop.headIdx - 1 - d + ringLen * (drop.trailLen + 2)) % ringLen;
+      trail.push({
+        col: drop.col,
+        row,
+        char: drop.chars[idx],
+        colorKind: trailColorKind(d),
+      });
+    }
+    return {
+      col: drop.col,
+      row: drop.headRow,
+      char: drop.chars[headCharIdx],
+      colorKind: 'head',
+      trail,
+    };
+  }
+
+  // -----------------------------------------------------------------------
+  // Small helpers
+  // -----------------------------------------------------------------------
+
+  function pickRandomChar(): string {
+    return RAIN_CHARS[Math.floor(rng.random() * RAIN_CHARS.length)];
+  }
+
+  function randInt(min: number, max: number): number {
+    return min + Math.floor(rng.random() * (max - min + 1));
+  }
+
+  function wordDropRow(): number {
+    const rows = currentLayout.rows;
+    if (rows <= 1) return 0;
+    const maxRow = Math.max(1, Math.floor(rows * WORD_ROW_FRACTION));
+    return Math.floor(rng.random() * maxRow);
+  }
+
+  // -----------------------------------------------------------------------
+  // Public API
+  // -----------------------------------------------------------------------
+
+  return {
+    step(nowMs: number): void {
+      if (!hasPrimedLastTick) {
+        lastTick = nowMs;
+        hasPrimedLastTick = true;
+        return;
+      }
+      const delta = nowMs - lastTick;
+      if (delta <= 0) return;
+
+      if (delta > MAX_CATCH_UP_TICKS * FRAME_MS) {
+        advanceOneLogicalTick();
+        lastTick = nowMs;
+        return;
+      }
+
+      while (nowMs - lastTick >= FRAME_MS) {
+        lastTick += FRAME_MS;
+        advanceOneLogicalTick();
+      }
+    },
+
+    getFrame(): FrameState {
+      return buildFrame();
+    },
+
+    resize(newLayout: LayoutPlan): void {
+      const gridChanged = newLayout.cols !== currentLayout.cols || newLayout.rows !== currentLayout.rows;
+      currentLayout = newLayout;
+
+      if (gridChanged) {
+        // Invalidate the CDF — cols may have shifted, so stored weights are stale.
+        cdf = null;
+        cdfSum = 0;
+        densityField = null;
+        ambientDrops = [];
+        if (ambientCooldowns.length !== currentLayout.cols) {
+          ambientCooldowns = new Array<number>(currentLayout.cols).fill(0);
+        }
+        // Drop any held words that now fall outside the grid.
+        let w = 0;
+        for (let i = 0; i < heldWords.length; i++) {
+          const h = heldWords[i];
+          if (h.col < currentLayout.cols && h.row < currentLayout.rows) {
+            heldWords[w++] = h;
+          }
+        }
+        heldWords.length = w;
+      }
+    },
+
+    enqueueWord(word: string, opts: EnqueueWordOptions): void {
+      if (word.length === 0) return;
+      if (currentLayout.cols <= 0 || currentLayout.rows <= 0) return;
+      const col = pickWeightedColumnIgnoringCooldown();
+      if (col < 0) return;
+      const row = wordDropRow();
+      heldWords.push({
+        col,
+        row,
+        word,
+        source: opts.colorKind,
+        priority: opts.priority,
+        age: 0,
+      });
+      // FIFO eviction: drop the oldest once we exceed the cap. Priority is a
+      // tuning knob for future policy (see scope note in §G Q6) — today we
+      // keep the contract simple and pure-FIFO so behavior is predictable.
+      while (heldWords.length > WORD_DROP_FIFO_CAP) {
+        heldWords.shift();
+      }
+    },
+
+    setDensityField(field: Float32Array | null): void {
+      densityField = field;
+      cdf = null;
+      cdfSum = 0;
+    },
+
+    setIntensity(multiplier: number): void {
+      if (!Number.isFinite(multiplier)) return;
+      intensity = Math.max(INTENSITY_MIN, Math.min(INTENSITY_MAX, multiplier));
+    },
+
+    get phase(): 'stream' {
+      return STREAM_PHASE;
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Pure helpers
+// ---------------------------------------------------------------------------
+
+function trailColorKind(distFromHead: number): DropColorKind {
+  if (distFromHead === 0) return 'head';
+  if (distFromHead <= 2) return 'near';
+  return 'far';
+}
+
+/**
+ * Locate the first index `i` with `cdf[i] >= target`. Assumes `cdf` is a
+ * non-decreasing prefix-sum array. Returns -1 if empty.
+ */
+function binarySearchCdf(cdf: Float32Array, target: number): number {
+  const n = cdf.length;
+  if (n === 0) return -1;
+  let lo = 0;
+  let hi = n - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (cdf[mid] < target) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
+    }
+  }
+  return lo;
+}

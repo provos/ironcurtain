@@ -1,0 +1,52 @@
+{
+  "description": "E2E test scenario: targets wf-mock-001 (design-and-code) with tight agent_started/completed pairs and a steady token stream. Used by the Playwright AC2 transition-FX test.",
+  "tokenProfile": {
+    "corpus": "default",
+    "baseTokenRate": 30,
+    "burstiness": 0.3,
+    "toolCallRatePerMin": 3
+  },
+  "timeline": [
+    {
+      "at": 100,
+      "event": "workflow.agent_started",
+      "payload": { "workflowId": "wf-mock-001", "stateId": "implement", "persona": "coder" }
+    },
+    {
+      "at": 2000,
+      "event": "workflow.agent_completed",
+      "payload": {
+        "workflowId": "wf-mock-001",
+        "stateId": "implement",
+        "verdict": "review",
+        "notes": "implementation drafted; ready for review"
+      }
+    },
+    { "at": 2200, "event": "workflow.state_entered", "payload": { "workflowId": "wf-mock-001", "state": "review" } },
+    {
+      "at": 2400,
+      "event": "workflow.agent_started",
+      "payload": { "workflowId": "wf-mock-001", "stateId": "review", "persona": "critic" }
+    },
+    {
+      "at": 4500,
+      "event": "workflow.agent_completed",
+      "payload": {
+        "workflowId": "wf-mock-001",
+        "stateId": "review",
+        "verdict": "design_review",
+        "notes": "code matches spec; approved for design review"
+      }
+    },
+    {
+      "at": 4700,
+      "event": "workflow.state_entered",
+      "payload": { "workflowId": "wf-mock-001", "state": "design_review" }
+    },
+    {
+      "at": 4900,
+      "event": "workflow.agent_started",
+      "payload": { "workflowId": "wf-mock-001", "stateId": "design_review", "persona": "reviewer" }
+    }
+  ]
+}

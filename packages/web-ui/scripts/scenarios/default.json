@@ -1,0 +1,80 @@
+{
+  "description": "Baseline: ~3 minutes, three states, moderate token rate. Shown when --scenario is unset.",
+  "tokenProfile": {
+    "corpus": "default",
+    "baseTokenRate": 35,
+    "burstiness": 0.4,
+    "toolCallRatePerMin": 3
+  },
+  "timeline": [
+    {
+      "at": 0,
+      "event": "workflow.started",
+      "payload": {
+        "workflowId": "wf-scenario-default",
+        "name": "vuln-discovery",
+        "taskDescription": "Locate an off-by-one in the binary parser and build a reproducer"
+      }
+    },
+    {
+      "at": 200,
+      "event": "workflow.state_entered",
+      "payload": { "workflowId": "wf-scenario-default", "state": "analyze" }
+    },
+    {
+      "at": 400,
+      "event": "workflow.agent_started",
+      "payload": { "workflowId": "wf-scenario-default", "stateId": "analyze", "persona": "analyst" }
+    },
+    {
+      "at": 60000,
+      "event": "workflow.agent_completed",
+      "payload": {
+        "workflowId": "wf-scenario-default",
+        "stateId": "analyze",
+        "verdict": "discover",
+        "notes": "hypothesis: off-by-one in bounds check at parse.c:412 when length exceeds allocator alignment"
+      }
+    },
+    {
+      "at": 60300,
+      "event": "workflow.state_entered",
+      "payload": { "workflowId": "wf-scenario-default", "state": "discover" }
+    },
+    {
+      "at": 60600,
+      "event": "workflow.agent_started",
+      "payload": { "workflowId": "wf-scenario-default", "stateId": "discover", "persona": "discoverer" }
+    },
+    {
+      "at": 120000,
+      "event": "workflow.agent_completed",
+      "payload": {
+        "workflowId": "wf-scenario-default",
+        "stateId": "discover",
+        "verdict": "harness_design",
+        "notes": "confirmed via differential test across versions 2.1 and 2.2; crafted input attached"
+      }
+    },
+    {
+      "at": 120300,
+      "event": "workflow.state_entered",
+      "payload": { "workflowId": "wf-scenario-default", "state": "harness_design" }
+    },
+    {
+      "at": 120600,
+      "event": "workflow.agent_started",
+      "payload": { "workflowId": "wf-scenario-default", "stateId": "harness_design", "persona": "harness-designer" }
+    },
+    {
+      "at": 180000,
+      "event": "workflow.agent_completed",
+      "payload": {
+        "workflowId": "wf-scenario-default",
+        "stateId": "harness_design",
+        "verdict": "completed",
+        "notes": "semantic harness drafted; three allocator callbacks stubbed; ready to build"
+      }
+    }
+  ]
+}

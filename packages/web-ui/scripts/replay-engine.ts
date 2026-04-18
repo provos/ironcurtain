@@ -25,6 +25,7 @@ interface JournalEntry {
   readonly message?: string;
   readonly verdict?: string;
   readonly confidence?: string;
+  readonly notes?: string | null;
   readonly from?: string;
   readonly event?: string;
   readonly acceptedEvents?: readonly string[];
@@ -288,6 +289,9 @@ export function translateEntry(entry: JournalEntry, definition: WorkflowDefiniti
           stateId: entry.state,
           verdict: entry.verdict,
           confidence: entry.confidence,
+          // Default at the source: older JSONL files predate the `notes` field,
+          // and consumers rely on `notes` always being a string.
+          notes: entry.notes ?? '',
         },
       });
       break;

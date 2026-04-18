@@ -161,6 +161,7 @@ export type WorkflowLifecycleEvent =
       readonly state: string;
       readonly persona: string;
       readonly verdict: string;
+      readonly notes: string;
     };
 
 /** Extended workflow detail for the web UI. */
@@ -825,6 +826,7 @@ export class WorkflowOrchestrator implements WorkflowController {
           verdict: output?.verdict ?? null,
           // eslint-disable-next-line @typescript-eslint/no-deprecated -- logged for diagnostics
           confidence: output?.confidence ?? null,
+          notes: output?.notes ?? null,
         });
       };
 
@@ -956,6 +958,10 @@ export class WorkflowOrchestrator implements WorkflowController {
         state: stateId,
         persona: stateConfig.persona,
         verdict: agentOutput.verdict,
+        // YAML parser returns null when the agent omits notes; default to empty
+        // string at the source so downstream consumers can trust the field is
+        // always present (per web-ui visualization design §F.2).
+        notes: agentOutput.notes ?? '',
       });
 
       return {

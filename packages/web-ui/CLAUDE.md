@@ -153,7 +153,9 @@ Open `http://localhost:5173?token=mock-token-for-dev` in your browser. The mock 
 - **Escalations**: Send a message containing the word "escalate" to trigger an escalation
 - **Jobs**: Three canned jobs with working enable/disable/remove actions
 - **Personas**: Three canned personas in the session creation picker
-- **Dashboard**: Live status updates every 10 seconds
+- **Dashboard**: Live status updates every 5 seconds
+
+**Workflow visualization scenarios.** When a client subscribes via `sessions.subscribeAllTokenStreams` the mock server streams synthetic `session.token_stream` and `workflow.*` events from a declarative JSON fixture in `scripts/scenarios/`. Select a scenario with `npm run mock-server -- --scenario <name>` (defaults to `default`). Per-client overrides are available as query params: `?scenario=rapid-transitions`, `?speed=4`, `?loop=true`. E2E tests never subscribe, so they continue to see the existing canned workflow behavior.
 
 ## Testing
 

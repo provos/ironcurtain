@@ -23,6 +23,7 @@ export interface AgentReceivedEntry extends BaseEntry {
   readonly message: string;
   readonly verdict: string | null;
   readonly confidence: string | null;
+  readonly notes: string | null;
 }
 
 export interface AgentRetryEntry extends BaseEntry {

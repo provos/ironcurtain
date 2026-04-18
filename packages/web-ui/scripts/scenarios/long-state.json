@@ -1,0 +1,30 @@
+{
+  "description": "10 minutes in one state, bursty 40 tok/s baseline with occasional tool-call bursts. Stress test for word-drop backpressure and intensity EMA.",
+  "tokenProfile": {
+    "corpus": "default",
+    "baseTokenRate": 40,
+    "burstiness": 0.9,
+    "toolCallRatePerMin": 6
+  },
+  "timeline": [
+    {
+      "at": 0,
+      "event": "workflow.started",
+      "payload": {
+        "workflowId": "wf-scenario-long",
+        "name": "vuln-discovery",
+        "taskDescription": "Long deep-analysis run with rare but dense tool-call bursts"
+      }
+    },
+    {
+      "at": 0,
+      "event": "workflow.state_entered",
+      "payload": { "workflowId": "wf-scenario-long", "state": "discover" }
+    },
+    {
+      "at": 0,
+      "event": "workflow.agent_started",
+      "payload": { "workflowId": "wf-scenario-long", "stateId": "discover", "persona": "discoverer" }
+    }
+  ]
+}

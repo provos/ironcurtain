@@ -8,6 +8,10 @@
     getWorkflowFileTree,
     getWorkflowFileContent,
     getWorkflowArtifacts,
+    subscribeAllTokenStreams,
+    unsubscribeAllTokenStreams,
+    subscribeWorkflowAgentEvents,
+    type WorkflowAgentEvent,
   } from '$lib/stores.svelte.js';
   import { phaseBadgeVariant } from '$lib/utils.js';
   import { Badge } from '$lib/components/ui/badge/index.js';
@@ -16,6 +20,7 @@
   import { Alert } from '$lib/components/ui/alert/index.js';
   import { Spinner } from '$lib/components/ui/spinner/index.js';
   import StateMachineGraph from '$lib/components/features/state-machine-graph.svelte';
+  import WorkflowTheater, { type AgentTransitionTrigger } from '$lib/components/features/workflow-theater.svelte';
   import GateReviewPanel from '$lib/components/features/gate-review-panel.svelte';
   import WorkspaceBrowser from '$lib/components/features/workspace-browser.svelte';
   import { renderMarkdown } from '$lib/markdown.js';
@@ -38,6 +43,68 @@
   let resolveError = $state('');
   let workspaceExpanded = $state(false);
   let expandedMessages = $state(new Set<number>());
+
+  // ── Viz mode (Chunk 10) ───────────────────────────────────────────
+  // Persist across reloads so a developer working on the theater doesn't
+  // have to flip the toggle every time. Storage is per-origin; the key is
+  // shared across workflows intentionally — the viewer's preference is
+  // about *how they want to look at workflows*, not about any one workflow.
+  const VIZ_MODE_STORAGE_KEY = 'ic-workflow-viz-mode';
+  type VizMode = 'classic' | 'theater';
+
+  function readVizModePreference(): VizMode {
+    if (typeof localStorage === 'undefined') return 'classic';
+    const raw = localStorage.getItem(VIZ_MODE_STORAGE_KEY);
+    return raw === 'theater' ? 'theater' : 'classic';
+  }
+
+  let vizMode = $state<VizMode>(readVizModePreference());
+
+  function toggleVizMode(): void {
+    vizMode = vizMode === 'theater' ? 'classic' : 'theater';
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(VIZ_MODE_STORAGE_KEY, vizMode);
+    }
+  }
+
+  // Monotonic counter used to disambiguate successive triggers — see
+  // state-machine-graph.svelte's id-based dedup. Each agent event becomes
+  // a new `AgentTransitionTrigger` object with a fresh id.
+  let agentEventCounter = 0;
+  let agentEvent = $state<AgentTransitionTrigger | null>(null);
+
+  // Previous active state, used to fill `peerStateId` for `started` triggers
+  // (which need to know where the handoff came from; the event payload itself
+  // doesn't carry that info). Captured from `detail.currentState` snapshots
+  // since the currentState prop updates slightly lag the WS agent event.
+  let lastKnownState: string | null = null;
+
+  function handleAgentEvent(evt: WorkflowAgentEvent): void {
+    const id = ++agentEventCounter;
+    if (evt.kind === 'started') {
+      // peer = where we just came from; fall back to the event's own state
+      // so the graph's id lookup always resolves (peerStateId missing
+      // would cause the trigger to silently no-op).
+      const peer = lastKnownState && lastKnownState !== evt.stateId ? lastKnownState : evt.stateId;
+      agentEvent = { id, kind: 'started', stateId: evt.stateId, peerStateId: peer };
+    } else {
+      // `completed` hands off to the next state. We don't know the peer yet
+      // (the subsequent `state_entered` will tell us) but the graph
+      // component uses the peer as the arrival target, so we fall back to
+      // the current state; the next `started` event will correct it.
+      const peer = summary.currentState && summary.currentState !== evt.stateId ? summary.currentState : evt.stateId;
+      agentEvent = { id, kind: 'completed', stateId: evt.stateId, peerStateId: peer, notes: evt.notes };
+    }
+    lastKnownState = evt.stateId;
+  }
+
+  // Subscribe to agent events only while the theater is mounted — no point
+  // paying for the event-filter closure when the classic view is up.
+  $effect(() => {
+    if (vizMode !== 'theater') return;
+    const unsub = subscribeWorkflowAgentEvents(workflowId, handleAgentEvent);
+    return () => unsub();
+  });
 
   function toggleMessage(index: number): void {
     const next = new Set(expandedMessages);
@@ -98,6 +165,21 @@
 
   const visitCounts = $derived(detail?.context?.visitCounts ?? {});
 
+  // Theater consumes a ReadonlyMap rather than Record<string, number>.
+  const visitCountsMap = $derived.by(() => {
+    const m = new Map<string, number>();
+    for (const [k, v] of Object.entries(visitCounts)) m.set(k, v);
+    return m;
+  });
+
+  // Connection status for the HUD. The store exposes a boolean; the HUD
+  // understands a three-state label but v1 only distinguishes connected /
+  // disconnected — "reconnecting" will land once the ws-client exposes the
+  // transient state signal (currently internal).
+  const hudConnectionStatus = $derived<'connected' | 'reconnecting' | 'disconnected'>(
+    appState.connected ? 'connected' : 'disconnected',
+  );
+
   const gateStateDescription = $derived(
     gate && detail?.stateGraph ? detail.stateGraph.states.find((s) => s.id === gate.stateName)?.description : undefined,
   );
@@ -131,6 +213,18 @@
     <span class="text-sm text-muted-foreground ml-auto">
       State: <span class="font-mono">{summary.currentState}</span>
     </span>
+    <!-- Viz-mode toggle — text button rather than icon so the control
+         auto-describes what it does. localStorage under ic-workflow-viz-mode
+         persists the preference per-origin. -->
+    <Button
+      variant="outline"
+      size="sm"
+      onclick={toggleVizMode}
+      aria-pressed={vizMode === 'theater'}
+      data-testid="viz-mode-toggle"
+    >
+      {vizMode === 'theater' ? 'Classic' : 'Viz'}
+    </Button>
   </div>
 
   {#if resolveError}
@@ -157,20 +251,49 @@
       />
     {/if}
 
-    <Card>
-      <CardHeader>
-        <CardTitle>State Machine</CardTitle>
-      </CardHeader>
-      <CardContent>
-        <StateMachineGraph
+    {#if vizMode === 'theater'}
+      <!-- Theater viz mode (Chunk 10). The theater is its own full-bleed
+           frame — we give it a fixed aspect-friendly height so it sits inside
+           the scrollable route container without hijacking the whole viewport.
+           The classic state machine card stays intact under the toggle so
+           switching back is one click. -->
+      <div class="workflow-theater-frame" data-testid="workflow-theater-frame">
+        <WorkflowTheater
+          {workflowId}
           graph={detail.stateGraph}
           currentState={summary.currentState}
           {completedStates}
           {failedState}
-          {visitCounts}
+          visitCounts={visitCountsMap}
+          {agentEvent}
+          workflowName={summary.name}
+          currentRound={detail.context?.round}
+          totalRounds={detail.context?.maxRounds}
+          connectionStatus={hudConnectionStatus}
+          onSubscribe={async () => {
+            await subscribeAllTokenStreams();
+          }}
+          onUnsubscribe={async () => {
+            await unsubscribeAllTokenStreams();
+          }}
         />
-      </CardContent>
-    </Card>
+      </div>
+    {:else}
+      <Card>
+        <CardHeader>
+          <CardTitle>State Machine</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <StateMachineGraph
+            graph={detail.stateGraph}
+            currentState={summary.currentState}
+            {completedStates}
+            {failedState}
+            {visitCounts}
+          />
+        </CardContent>
+      </Card>
+    {/if}
 
     {#if detail.context}
       <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
@@ -262,3 +385,19 @@
     {/if}
   {/if}
 </div>
+
+<style>
+  /* Theater frame — clamp the theater's height inside the scrolling route
+     layout. The theater itself is position:relative + full-width/height so
+     this frame is what actually establishes the box. 60vh mirrors the
+     classic StateMachineGraph's max-height, so switching modes doesn't
+     make the surrounding cards jump. */
+  .workflow-theater-frame {
+    position: relative;
+    height: 60vh;
+    min-height: 320px;
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid hsl(var(--border));
+  }
+</style>

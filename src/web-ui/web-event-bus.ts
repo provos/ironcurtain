@@ -50,7 +50,19 @@ export interface WebEventMap {
   'workflow.gate_raised': { workflowId: string; gate: HumanGateRequestDto };
   'workflow.gate_dismissed': { workflowId: string; gateId: string };
   'workflow.agent_started': { workflowId: string; stateId: string; persona: string };
-  'workflow.agent_completed': { workflowId: string; stateId: string; verdict?: string; confidence?: string };
+  // `notes` is required (not optional) because the workflow visualization's
+  // payload-handoff tile displays it on every agent_completed transition; a
+  // missing-notes codepath would silently produce blank tiles. Agents are
+  // required to emit `notes` in their status block, and the orchestrator
+  // defaults to the empty string if the parsed value is null — so consumers
+  // can trust the field always exists on the wire.
+  'workflow.agent_completed': {
+    workflowId: string;
+    stateId: string;
+    verdict?: string;
+    confidence?: string;
+    notes: string;
+  };
 
   // Token stream events (targeted delivery via bridge, not broadcast)
   'session.token_stream': { label: number; events: readonly TokenStreamEvent[] };

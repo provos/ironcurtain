@@ -1,4 +1,18 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+// IMPORTANT: vi.mock is hoisted to the top of the file, so any local
+// captured into the factory must itself be declared via vi.hoisted().
+// We use a mocked singleton so the token-stream dispatch test can verify
+// the fanout call without needing the real store's EMA state.
+const { mockPublish } = vi.hoisted(() => ({ mockPublish: vi.fn() }));
+vi.mock('../token-stream-store-singleton.js', () => ({
+  tokenStreamStore: {
+    publish: mockPublish,
+    subscribeToStream: () => () => {},
+    intensity: { current: () => 0.3 },
+  },
+}));
+
 import { handleEvent, type AppStateLike, type EventSideEffects } from '../event-handler.js';
 import type { SessionDto, EscalationDto, BudgetSummaryDto, OutputLine, PendingEscalation } from '../types.js';
 
@@ -816,8 +830,36 @@ describe('handleEvent', () => {
         workflowId: 'wf-1',
         stateId: 'plan',
         verdict: 'approved',
+        notes: 'plan looks good',
       });
       expect(handled2).toBe(true);
+    });
+  });
+
+  describe('session.token_stream', () => {
+    beforeEach(() => {
+      mockPublish.mockClear();
+    });
+
+    it('forwards to the token-stream store without mutating state', () => {
+      const state = createMockState();
+      const effects = createMockEffects();
+      const events = [
+        { kind: 'text_delta', text: 'hello', timestamp: 1 },
+        { kind: 'tool_use', toolName: 'Read', inputDelta: '{}', timestamp: 2 },
+      ];
+
+      const handled = handleEvent(state, effects, 'session.token_stream', {
+        label: 7,
+        events,
+      });
+
+      expect(handled).toBe(true);
+      expect(mockPublish).toHaveBeenCalledTimes(1);
+      expect(mockPublish).toHaveBeenCalledWith(7, events);
+      // The event deliberately bypasses the reactive graph.
+      expect(state.sessions.size).toBe(0);
+      expect(state.outputs.size).toBe(0);
     });
   });
 });

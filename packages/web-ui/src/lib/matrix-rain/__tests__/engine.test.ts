@@ -583,6 +583,21 @@ describe('createRainEngine -- resize', () => {
   });
 });
 
+describe('createRainEngine -- FrameState.wordDrops', () => {
+  it('always returns the shared frozen empty array (no per-frame allocation)', () => {
+    const engine = createRainEngine(buildLayout(), { seed: 42 });
+    engine.step(0);
+    const a = engine.getFrame().wordDrops;
+    driveTicks(engine, 5, FRAME_MS);
+    const b = engine.getFrame().wordDrops;
+    // Same identity across frames — the login engine never populates this,
+    // so it reuses a module-level frozen empty array.
+    expect(a).toBe(b);
+    expect(a).toHaveLength(0);
+    expect(Object.isFrozen(a)).toBe(true);
+  });
+});
+
 describe('createSeededRng', () => {
   it('produces a deterministic sequence for a given seed', () => {
     const a = createSeededRng(99);

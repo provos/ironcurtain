@@ -199,6 +199,7 @@ describe('translateEntry', () => {
       message: 'Plan complete',
       verdict: 'approved',
       confidence: 'high',
+      notes: 'identified 3 subtasks',
     };
 
     const events = translateEntry(entry, definition, state);
@@ -209,9 +210,28 @@ describe('translateEntry', () => {
       stateId: 'plan',
       verdict: 'approved',
       confidence: 'high',
+      notes: 'identified 3 subtasks',
     });
     // Should store last agent message
     expect(state.lastAgentMessage).toBe('Plan complete');
+  });
+
+  it('defaults notes to empty string when agent_received omits the field', () => {
+    const state = makeReplayState();
+    const entry = {
+      ts: '2026-04-07T19:05:36.540Z',
+      workflowId: WORKFLOW_ID,
+      state: 'plan',
+      type: 'agent_received' as const,
+      message: 'Plan complete',
+      verdict: 'approved',
+      confidence: 'high',
+    };
+
+    const events = translateEntry(entry, definition, state);
+    expect(events).toHaveLength(1);
+    expect(events[0].event).toBe('workflow.agent_completed');
+    expect(events[0].payload).toMatchObject({ notes: '' });
   });
 
   it('translates state_transition to workflow.state_entered', () => {
