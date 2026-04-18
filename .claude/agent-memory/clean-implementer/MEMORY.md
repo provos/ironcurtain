@@ -314,3 +314,6 @@ When mocking `generateText` for session tests:
 - **Session Logging**: `src/logger.ts` -- singleton with `setup()`/`teardown()`; test gotcha: must call `teardown()` in `afterEach`
 - **Execution Containment**: `src/trusted-process/sandbox-integration.ts` -- wraps MCP servers in `srt` processes
 - **Auto-Approver**: `src/trusted-process/auto-approver.ts` -- `autoApprove()` with LLM; `autoApprove` field required in `ResolvedUserConfig`
+
+## Testing Gotchas
+- **createWriteStream sync vs async errors** (see `createWriteStream-sync-vs-async.md`) -- missing-parent paths emit async `'error'` events, NOT sync throws. To test ordering-sensitive invariants, use `vi.mock('node:fs', ...)` with a path-scoped toggle.

@@ -361,6 +361,13 @@ export class ToolCallCoordinator {
    * Swap the policy engine and rotate the audit log. Placeholder for
    * policy hot-swap; not yet implemented. The policy mutex is not
    * acquired here because there is nothing to protect yet.
+   *
+   * TODO(Round 2): when this method rotates the audit log via
+   * `this.auditLog.rotate(req.auditPath)`, any existing `AuditLogTailer`
+   * attached to the old path must be re-pointed at the new path (or torn
+   * down and reconstructed). Audit tailers bind to an inode at
+   * construction time; they will silently stop receiving new entries once
+   * the log rotates. Deferred out of Round 1.
    */
   // eslint-disable-next-line @typescript-eslint/require-await -- future impl will be async; stub throws synchronously
   async loadPolicy(req: { persona: string; version: number; policyDir: string; auditPath: string }): Promise<void> {
