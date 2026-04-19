@@ -8,6 +8,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { getOAuthDir } from '../config/paths.js';
+import { isPlainObject } from '../utils/is-plain-object.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -122,9 +123,4 @@ function extractClientCredentials(parsed: unknown, filePath: string): OAuthClien
   }
 
   return { clientId, clientSecret };
-}
-
-/** Type guard for non-null, non-array objects. */
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

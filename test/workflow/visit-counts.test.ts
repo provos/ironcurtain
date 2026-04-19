@@ -9,55 +9,10 @@
 
 import { describe, it, expect } from 'vitest';
 import { createActor, fromPromise } from 'xstate';
-import {
-  buildWorkflowMachine,
-  type AgentInvokeInput,
-  type AgentInvokeResult,
-} from '../../src/workflow/machine-builder.js';
+import { buildWorkflowMachine, type AgentInvokeInput } from '../../src/workflow/machine-builder.js';
 import { buildAgentCommand } from '../../src/workflow/prompt-builder.js';
 import type { AgentStateDefinition, WorkflowDefinition } from '../../src/workflow/types.js';
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function makeAgentResult(overrides: Partial<AgentInvokeResult> = {}): AgentInvokeResult {
-  return {
-    output: {
-      completed: true,
-      verdict: 'approved',
-      confidence: 'high',
-      escalation: null,
-      testCount: null,
-      notes: null,
-    },
-    sessionId: 'test-session',
-    artifacts: {},
-    outputHash: 'hash-1',
-    responseText: 'Agent response text',
-    ...overrides,
-  };
-}
-
-function makeRejectedResult(responseText = 'Needs improvement'): AgentInvokeResult {
-  return makeAgentResult({
-    output: {
-      completed: true,
-      verdict: 'rejected',
-      confidence: 'high',
-      escalation: null,
-      testCount: null,
-      notes: 'needs work',
-    },
-    outputHash: 'rejected-hash',
-    responseText,
-  });
-}
-
-/** Wait for the machine to settle after async transitions. */
-function settle(ms = 50): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
-}
+import { makeAgentResult, makeRejectedResult, settle } from './machine-test-helpers.js';
 
 // ---------------------------------------------------------------------------
 // Workflow definition: implement -> review -> implement (loop) -> done
@@ -121,7 +76,7 @@ describe('visitCounts prompt selection', () => {
           // Second review: approve to end the workflow.
           if (input.stateId === 'review') {
             if (invocationCount <= 2) {
-              return makeRejectedResult('Found bugs in the code');
+              return makeRejectedResult({ responseText: 'Found bugs in the code' });
             }
             return makeAgentResult({ responseText: 'Looks good now' });
           }
@@ -258,7 +213,7 @@ describe('visitCounts prompt selection', () => {
 
           if (input.stateId === 'review') {
             if (invocationCount <= 2) {
-              return makeRejectedResult('Found bugs in the code');
+              return makeRejectedResult({ responseText: 'Found bugs in the code' });
             }
             return makeAgentResult({ responseText: 'Looks good now' });
           }
@@ -303,7 +258,7 @@ describe('visitCounts prompt selection', () => {
 
           if (input.stateId === 'review') {
             if (invocationCount <= 2) {
-              return makeRejectedResult('Found bugs in the code');
+              return makeRejectedResult({ responseText: 'Found bugs in the code' });
             }
             return makeAgentResult({ responseText: 'Looks good now' });
           }
@@ -356,7 +311,7 @@ describe('visitCounts prompt selection', () => {
 
           if (input.stateId === 'review') {
             if (invocationCount <= 2) {
-              return makeRejectedResult('Found bugs');
+              return makeRejectedResult({ responseText: 'Found bugs' });
             }
             return makeAgentResult();
           }

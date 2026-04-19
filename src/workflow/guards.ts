@@ -25,11 +25,11 @@ const isRoundLimitReached: GuardFunction = ({ context }) => {
   return maxVisits >= context.maxRounds;
 };
 
-// Stall detection is handled by the machine builder's guard adapter
-// (machine-builder.ts), which has access to outputHash and stateId from
-// the invoke result. This stub exists so 'isStalled' passes definition
-// validation via REGISTERED_GUARDS.
+// Stubs for guards whose real logic lives in machine-builder.ts (they need
+// closure over per-state config or invoke-result data). These exist so the
+// names pass REGISTERED_GUARDS validation.
 const isStalled: GuardFunction = () => false;
+const isStateVisitLimitReached: GuardFunction = () => false;
 
 const isPassed: GuardFunction = ({ event }) => {
   return event.type === 'VALIDATION_PASSED';
@@ -42,6 +42,7 @@ const isPassed: GuardFunction = ({ event }) => {
 export const guardImplementations: Readonly<Record<string, GuardFunction>> = {
   isRoundLimitReached,
   isStalled,
+  isStateVisitLimitReached,
   isPassed,
 };
 
