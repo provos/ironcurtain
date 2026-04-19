@@ -299,11 +299,16 @@ export interface SessionDirConfig {
  * shared helper throws `PolicyDirValidationError`, which other callers
  * (e.g., the coordinator's `loadPolicy` RPC) surface in their own way.
  *
+ * Returns the realpath-canonicalized path. Callers must use the return
+ * value for all subsequent reads: feeding the original (possibly-symlinked)
+ * path to downstream artifact loaders would reopen the symlink-swap TOCTOU
+ * window the validator was introduced to close.
+ *
  * @throws {SessionError} if the path escapes all trusted directories.
  */
-function validatePolicyDir(policyDir: string): void {
+function validatePolicyDir(policyDir: string): string {
   try {
-    sharedValidatePolicyDir(policyDir);
+    return sharedValidatePolicyDir(policyDir);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     throw new SessionError(message, 'SESSION_INIT_FAILED');
@@ -380,7 +385,13 @@ export function buildSessionConfig(
   }
 
   if (policyDir) {
-    validatePolicyDir(policyDir);
+    // Use the validator's realpath-canonicalized return value. Passing
+    // the original (possibly-symlinked) path through to `generatedDir`
+    // would reopen the symlink-swap TOCTOU window the validator was
+    // introduced to close: downstream artifact reads (compiled policy,
+    // dynamic lists) must happen against the same canonical path the
+    // containment check approved.
+    policyDir = validatePolicyDir(policyDir);
   }
 
   // Paths differ by mode:

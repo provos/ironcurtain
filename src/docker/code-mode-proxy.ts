@@ -28,6 +28,16 @@ import { VERSION } from '../version.js';
  * server to the sandbox's live coordinator. Intentionally exposes only
  * the bind operation so callers cannot reach the rest of the security
  * kernel (PolicyEngine, AuditLog, etc.) through this seam.
+ *
+ * This narrowing is a **type-level seam for API hygiene, not a runtime
+ * capability boundary**. Our threat model treats the host process as
+ * trusted: LLM-generated code runs in the V8 isolate (sandboxed) and
+ * untrusted MCP servers run under `srt` containment. A caller casting
+ * `DockerProxy` back to the full `ToolCallCoordinator` would be a
+ * malicious module already executing inside our own process, at which
+ * point capability wrappers offer no defense. The seam exists to keep
+ * orchestrator code from accidentally reaching into unrelated
+ * coordinator surface area, not to constrain an adversary.
  */
 export interface PolicySwapTarget {
   startControlServer(opts: ControlServerListenOptions): Promise<ControlServerAddress>;

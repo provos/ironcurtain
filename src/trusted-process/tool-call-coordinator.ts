@@ -460,7 +460,14 @@ export class ToolCallCoordinator {
     // any mutex. Rejecting early means a hostile request cannot even
     // block tool-call dispatch. Throws `PolicyDirValidationError`, which
     // the control server maps to a 500 via its generic error path.
-    validatePolicyDir(req.policyDir);
+    //
+    // Use the validator's realpath-canonicalized return value for every
+    // subsequent read. Passing `req.policyDir` through unmodified would
+    // reopen the symlink-swap TOCTOU window the validator was introduced
+    // to close: an attacker could swap the symlink target between the
+    // validate() call and loadPersonaPolicyArtifacts(), pointing the
+    // load at attacker-controlled files outside the trusted roots.
+    const canonicalPolicyDir = validatePolicyDir(req.policyDir);
 
     // Wait for any in-flight tool call to drain, then serialize against
     // concurrent loadPolicy. The two mutexes are acquired in this order
@@ -479,7 +486,7 @@ export class ToolCallCoordinator {
         // not ship `tool-annotations.json`. If any required file is
         // missing, the loader throws and we surface that to the caller
         // without touching the live engine.
-        const { compiledPolicy, dynamicLists } = loadPersonaPolicyArtifacts(req.policyDir);
+        const { compiledPolicy, dynamicLists } = loadPersonaPolicyArtifacts(canonicalPolicyDir);
 
         // Step 2: re-merge the virtual proxy tool annotations and
         // rules. The sandbox does this at construction time

@@ -64,9 +64,15 @@ export class AuditLog {
     if (this.closed) return;
     this.closed = true;
     // If the stream errored, `end()` may not settle cleanly (the stream
-    // may already be destroyed). Short-circuit the await so `close()`
-    // stays idempotent and never throws in teardown paths.
-    if (this.streamError) return;
+    // may already be destroyed, or its `'close'` may never fire cleanly).
+    // Best-effort destroy the underlying fd so we don't leak it. Calling
+    // `destroy()` on an already-destroyed stream is a safe no-op, and we
+    // intentionally do NOT await -- an errored stream may have already
+    // emitted `'close'` or may never settle cleanly again.
+    if (this.streamError) {
+      this.stream.destroy();
+      return;
+    }
     await endStream(this.stream);
   }
 }

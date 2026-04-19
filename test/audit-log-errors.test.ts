@@ -25,7 +25,7 @@ function makeEntry(): AuditEntry {
     serverName: 'filesystem',
     toolName: 'read_file',
     arguments: { path: '/tmp/x' },
-    policyDecision: { decision: 'allow', reason: 'test' },
+    policyDecision: { status: 'allow', rule: 'test-rule', reason: 'test' },
     result: { status: 'success' },
     durationMs: 1,
   };
