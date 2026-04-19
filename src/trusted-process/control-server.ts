@@ -29,6 +29,7 @@
 import { existsSync, unlinkSync } from 'node:fs';
 import * as http from 'node:http';
 import * as logger from '../logger.js';
+import { PolicyDirValidationError } from '../config/validate-policy-dir.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -232,10 +233,18 @@ export class ControlServer {
     try {
       await onLoadPolicy(validated);
     } catch (err) {
-      // `loadPolicy` failures commonly originate from filesystem
-      // operations (missing policy dir, unreadable audit path) whose
-      // error messages embed absolute paths. Log the full error
-      // server-side and return a generic message to the client.
+      // PolicyDirValidationError is a caller-fault case (the RPC
+      // supplied a policyDir that escapes the trusted roots). Its
+      // message is built by our own code and references only paths
+      // the caller already knows, so surfacing it as 400 helps the
+      // orchestrator log the real cause instead of a blind "Internal
+      // error". Any other throw is an unexpected server-side failure
+      // whose error text may embed filesystem internals; log it
+      // server-side and return a generic 500.
+      if (err instanceof PolicyDirValidationError) {
+        writeJson(res, 400, { error: err.message });
+        return;
+      }
       logger.warn(`[control-server] loadPolicy failed: ${formatErrorForLog(err)}`);
       writeJson(res, 500, { error: 'Internal error' });
       return;

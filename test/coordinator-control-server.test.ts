@@ -519,6 +519,42 @@ describe('ToolCallCoordinator control endpoint (UDS)', () => {
     }
   });
 
+  it('returns 400 (not 500) when policyDir is outside the trusted roots', async () => {
+    // Surfacing validation failures as 4xx lets the orchestrator log
+    // the real cause instead of a blind "Internal error". The message
+    // is built by our own validator so echoing it is safe.
+    const socketPath = join(TEST_ROOT, 'control-untrusted.sock');
+    const evilDir = resolve(tmpdir(), `coord-http-evil-${process.pid}`);
+    mkdirSync(evilDir, { recursive: true });
+    writePersonaPolicy(evilDir, { ...testCompiledPolicy, rules: [] });
+
+    const coordinator = new ToolCallCoordinator({
+      compiledPolicy: testCompiledPolicy,
+      toolAnnotations: testToolAnnotations,
+      protectedPaths: TEST_PROTECTED_PATHS,
+      allowedDirectory: TEST_SANDBOX_DIR,
+      auditLogPath: join(TEST_ROOT, 'audit.untrusted-http.jsonl'),
+      controlServerListen: { socketPath },
+    });
+    const oldEngine = coordinator.getPolicyEngine();
+
+    try {
+      await coordinator.start();
+      const res = await postJsonUds(
+        socketPath,
+        '/__ironcurtain/policy/load',
+        JSON.stringify({ persona: 'reviewer', policyDir: evilDir }),
+      );
+      expect(res.status).toBe(400);
+      const parsed = JSON.parse(res.body) as { error: string };
+      expect(parsed.error).toMatch(/policyDir must be under a trusted directory/);
+      expect(coordinator.getPolicyEngine()).toBe(oldEngine);
+    } finally {
+      await coordinator.close();
+      rmSync(evilDir, { recursive: true, force: true });
+    }
+  });
+
   it('returns 404 for unknown routes', async () => {
     const socketPath = join(TEST_ROOT, 'control-404.sock');
     const coordinator = new ToolCallCoordinator({
