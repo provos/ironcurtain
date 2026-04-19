@@ -400,6 +400,24 @@ describe('WorkflowTheater', () => {
       expect(svg.closest('.theater-graph')).not.toBeNull();
     });
 
+    // Fix #4 — the CRT scan-line overlay has silently disappeared in the past
+    // (mix-blend-mode + 0.15 alpha over #000 produced no visible output). Pin
+    // the structural contract: a ::after overlay exists on .workflow-theater
+    // with a repeating-linear-gradient stripe pattern. jsdom can't introspect
+    // Svelte scoped CSS, so read the source file like the centering test does.
+    it('declares a CRT scan-line overlay on the theater (Fix #4)', async () => {
+      const fs = await import('node:fs');
+      const path = await import('node:path');
+      const src = fs.readFileSync(
+        path.resolve(process.cwd(), 'src/lib/components/features/workflow-theater.svelte'),
+        'utf-8',
+      );
+      expect(src).toMatch(/\.workflow-theater::after[^{]*\{[\s\S]*?repeating-linear-gradient/);
+      // Drift animation must still be declared and gated on prefers-reduced-motion.
+      expect(src).toMatch(/@keyframes\s+theater-crt-drift/);
+      expect(src).toMatch(/@media\s*\(prefers-reduced-motion:\s*reduce\)[\s\S]*?\.workflow-theater::after/);
+    });
+
     it('declares flex centering rules in the theater style block', async () => {
       // The regression the fix targets was a dropped centering rule on the
       // `.theater-graph` wrapper. Guard against a future refactor that

@@ -155,19 +155,26 @@ describe('TransitionFxSubsystem — tile position', () => {
     }
   });
 
-  it('decays scale and alpha linearly through the absorb window', () => {
+  it('holds scale at 1 and fades alpha linearly through the absorb window (Fix #3)', () => {
+    // The absorb phase used to scale down alongside fading alpha, but that
+    // collapsed the tile from full-size to zero in 200ms, leaving the notes
+    // unreadable for most of the absorb window. The contract is now:
+    // scale stays at 1.0 for the whole absorb; alpha decays 1 -> 0 linearly.
     const fx = createTransitionFxSubsystem();
     fx.trigger(makeTrigger(), 0);
     fx.step(TRAVEL_MS);
     const start = fx.getFrame();
-    expect(start?.tileScale).toBeCloseTo(1, 4);
+    expect(start?.tileScale).toBe(1);
+    expect(start?.tileAlpha).toBeCloseTo(1, 4);
     fx.step(TRAVEL_MS + ABSORB_MS / 2);
     const mid = fx.getFrame();
-    expect(mid?.tileScale).toBeCloseTo(0.5, 2);
+    expect(mid?.tileScale).toBe(1);
     expect(mid?.tileAlpha).toBeCloseTo(0.5, 2);
     fx.step(TRAVEL_MS + ABSORB_MS);
     const end = fx.getFrame();
-    expect(end?.tileScale).toBeCloseTo(0, 4);
+    // At the boundary phase flips to scan-line which zeros both.
+    expect(end?.tileScale).toBe(0);
+    expect(end?.tileAlpha).toBe(0);
   });
 
   it('reports scale=0 and alpha=0 during the scan-line tail', () => {
@@ -178,6 +185,13 @@ describe('TransitionFxSubsystem — tile position', () => {
     expect(f?.phase).toBe('scan-line');
     expect(f?.tileScale).toBe(0);
     expect(f?.tileAlpha).toBe(0);
+  });
+
+  it('preserves the 1000ms cycle budget after the legibility fix (Fix #3)', () => {
+    // Guard against unintended growth of the total cycle length: if Fix #3 ever
+    // migrates to "hold visible then fade" by extending ABSORB_MS, this assert
+    // fires and forces a conscious decision.
+    expect(TRAVEL_MS + ABSORB_MS + SCANLINE_MS).toBe(1000);
   });
 });
 

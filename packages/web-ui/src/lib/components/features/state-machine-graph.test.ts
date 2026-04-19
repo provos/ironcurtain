@@ -179,6 +179,73 @@ describe('StateMachineGraph', () => {
     });
   });
 
+  // Fix #1 — node shape variety. The foreignObject refactor collapsed four
+  // distinct shapes into border-radius variants; clip-path on a nested shape
+  // element restores the visual distinction. These tests lock the structural
+  // contract (per-kind class + shape child + CSS clip-path rules) since
+  // rendered clip-path values are not reliably introspectable under jsdom.
+  describe('node shape variety (Fix #1)', () => {
+    it('emits a per-kind class on every node body', () => {
+      const graph: StateGraphDto = {
+        states: [
+          makeNode('a1', { type: 'agent' }),
+          makeNode('h1', { type: 'human_gate' }),
+          makeNode('d1', { type: 'deterministic' }),
+          makeNode('t1', { type: 'terminal' }),
+        ],
+        transitions: [],
+      };
+      const { container } = render(StateMachineGraph, { props: makeProps({ graph }) });
+      const bodies = nodeBodies(container);
+      expect(bodies.get('a1')?.classList.contains('smg-node--agent')).toBe(true);
+      expect(bodies.get('h1')?.classList.contains('smg-node--human_gate')).toBe(true);
+      expect(bodies.get('d1')?.classList.contains('smg-node--deterministic')).toBe(true);
+      expect(bodies.get('t1')?.classList.contains('smg-node--terminal')).toBe(true);
+    });
+
+    it('renders a dedicated shape chrome element beneath each node body', () => {
+      const { container } = render(StateMachineGraph, { props: makeProps() });
+      const bodies = nodeBodies(container);
+      for (const body of bodies.values()) {
+        const shape = body.querySelector(':scope > .smg-node__shape');
+        expect(shape).not.toBeNull();
+      }
+    });
+
+    it('warns once when currentState does not match any rendered node id (Fix #2)', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      render(StateMachineGraph, { props: makeProps({ currentState: 'ghost' }) });
+      expect(warn).toHaveBeenCalledTimes(1);
+      const msg = warn.mock.calls[0][0] as string;
+      expect(msg).toContain('currentState "ghost"');
+      expect(msg).toContain('Active-node highlight');
+      warn.mockRestore();
+    });
+
+    it('does not warn when currentState matches a node id', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      render(StateMachineGraph, { props: makeProps({ currentState: 'a' }) });
+      expect(warn).not.toHaveBeenCalled();
+      warn.mockRestore();
+    });
+
+    it('declares a clip-path rule per non-agent kind so silhouettes are distinct', async () => {
+      // jsdom doesn't apply Svelte's scoped CSS, so read the source file and
+      // assert the shape rules exist. Mirrors the `theater-graph` assertion
+      // pattern the visual-centering regression test uses.
+      const fs = await import('node:fs');
+      const path = await import('node:path');
+      const src = fs.readFileSync(
+        path.resolve(process.cwd(), 'src/lib/components/features/state-machine-graph.svelte'),
+        'utf-8',
+      );
+      expect(src).toMatch(/\.smg-node--human_gate \.smg-node__shape[^{]*\{[^}]*clip-path:\s*polygon\(/);
+      expect(src).toMatch(/\.smg-node--deterministic \.smg-node__shape[^{]*\{[^}]*clip-path:\s*polygon\(/);
+      // Terminal uses a stacked inset box-shadow to read as a double border.
+      expect(src).toMatch(/\.smg-node--terminal \.smg-node__shape[^{]*\{[^}]*box-shadow:[\s\S]*inset/);
+    });
+  });
+
   describe('onnodepositions callback', () => {
     it('fires with a map of every rendered node', () => {
       const cb = vi.fn<(positions: ReadonlyMap<string, { x: number; y: number }>) => void>();

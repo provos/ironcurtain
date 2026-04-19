@@ -487,15 +487,28 @@
      pointer-events:none so the graph remains interactive. The 1px/sec
      vertical drift keeps the effect from feeling static without drawing
      the eye. prefers-reduced-motion disables the drift but holds the
-     stripes so the terminal aesthetic survives. */
+     stripes so the terminal aesthetic survives.
+
+     Fix #4: prior 0.15 alpha black stripes combined with `mix-blend-mode:
+     multiply` were invisible over the theater's `#000` background (black
+     times anything is black) and barely survived JPEG compression on the
+     ~15% of pixels that actually carry content. Switched to explicit 2px
+     stripe + 2px gap at 0.28 alpha with no blend mode so the stripes land
+     directly on top of whatever's below. The 0.28 value was chosen to
+     stay readable but not crush contrast on the phosphor-green rain. */
   .workflow-theater::after {
     content: '';
     position: absolute;
     inset: 0;
     z-index: 40;
     pointer-events: none;
-    background-image: repeating-linear-gradient(0deg, transparent 0, transparent 2px, rgba(0, 0, 0, 0.15) 3px);
-    mix-blend-mode: multiply;
+    background-image: repeating-linear-gradient(
+      0deg,
+      rgba(0, 0, 0, 0.28) 0,
+      rgba(0, 0, 0, 0.28) 1px,
+      transparent 1px,
+      transparent 3px
+    );
     animation: theater-crt-drift 3s linear infinite;
   }
 

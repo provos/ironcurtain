@@ -174,12 +174,16 @@ export function createTransitionFxSubsystem(): TransitionFxSubsystem {
     const x = lerp(active.fromPos.x, active.toPos.x, eased);
     const y = lerp(active.fromPos.y, active.toPos.y, eased);
 
-    // During absorb, scale/alpha decay linearly from 1 to 0.
+    // During absorb, hold the tile at full size and fade alpha 1 -> 0.
+    // Previous behaviour lerped scale alongside alpha, which shrank the tile
+    // from 180x44 down to 0 in 200ms; the notes text stopped being legible
+    // after ~100ms of absorb. Keeping scale=1 and fading alpha preserves
+    // readability across the entire 1s travel+absorb window without growing
+    // the cycle budget. TOTAL_MS stays at 1000ms.
     let scale = 1;
     let alpha = 1;
     if (phase === 'absorbing') {
       const t = clamp01((elapsedMs - TRAVEL_MS) / ABSORB_MS);
-      scale = 1 - t;
       alpha = 1 - t;
     } else if (phase === 'scan-line') {
       scale = 0;

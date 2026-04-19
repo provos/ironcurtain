@@ -162,6 +162,25 @@
     return text.slice(0, max - 1) + '…';
   }
 
+  // Dev-time warn when currentState doesn't resolve to any rendered node. Real
+  // workflows drive currentState from the state machine so these always match
+  // (see src/web-ui/dispatch/workflow-dispatch.ts:getCurrentState); mock or
+  // fixture divergence has silently cost us the active-node highlight in the
+  // past, so fail loudly in the console instead of failing silently on screen.
+  // Warn once per distinct missing id to avoid flooding.
+  const warnedMissingStates = new Set<string>();
+  $effect(() => {
+    if (!currentState) return;
+    if (layoutNodes.length === 0) return;
+    const knownIds = new Set(layoutNodes.map((ln) => ln.id));
+    if (knownIds.has(currentState)) return;
+    if (warnedMissingStates.has(currentState)) return;
+    warnedMissingStates.add(currentState);
+    console.warn(
+      `[state-machine-graph] currentState "${currentState}" has no matching node id (known: ${[...knownIds].join(', ')}). Active-node highlight will not render.`,
+    );
+  });
+
   function computeLayout(
     g: StateGraphDto,
     dir: 'LR' | 'TB',
@@ -351,10 +370,17 @@
           role="figure"
           aria-label={ln.node.label}
         >
-          <div class="smg-node__title">{ln.node.label}</div>
-          {#if ln.node.persona && !compact}
-            <div class="smg-node__persona">{ln.node.persona}</div>
-          {/if}
+          <!-- Shape chrome sits in its own DOM node so `clip-path` can sculpt
+               the border+background without clipping the label content that
+               sits on top, and without clipping the outer pulse box-shadow
+               (the pulse lives on .smg-node). -->
+          <div class="smg-node__shape" aria-hidden="true"></div>
+          <div class="smg-node__content">
+            <div class="smg-node__title">{ln.node.label}</div>
+            {#if ln.node.persona && !compact}
+              <div class="smg-node__persona">{ln.node.persona}</div>
+            {/if}
+          </div>
 
           {#if vc && vc > 1 && !compact}
             <div class="smg-node__badge">{vc}x</div>
@@ -398,43 +424,81 @@
   }
 
   /* Node HTML body. The foreignObject establishes the SVG-space bounding box;
-     this div fills it with CSS-rendered content so typography and effects are
-     under the normal CSS pipeline. */
+     this div fills it with a stack of (shape chrome) + (content). The chrome
+     is a sibling pseudo-layer that can carry a clip-path per node kind without
+     clipping the label or the outer pulse box-shadow. */
   .smg-node {
     width: 100%;
     height: 100%;
     box-sizing: border-box;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
     position: relative;
-    border-radius: 8px;
     padding: 4px 8px;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-feature-settings: 'tnum' 1; /* tabular numerics for visit count */
     text-align: center;
-    overflow: hidden;
     color: hsl(var(--foreground));
-    background: hsl(var(--muted) / 0.5);
-    border: 1px solid hsl(var(--border));
+    /* overflow:hidden clips child content (the arrival-sweep ::after pseudo
+       uses translateX(-100% -> 100%) and would otherwise bleed outside the
+       node). Does NOT clip box-shadow on this element, so the active-node
+       pulse halo still extends beyond the node. */
+    overflow: hidden;
     transition:
       opacity 200ms ease,
-      border-color 200ms ease,
       box-shadow 200ms ease;
   }
 
-  .smg-node--human_gate {
-    /* Rounded corners clipped into a soft-lozenge approximation — SVG diamond
-       primitive was visually louder than the active-state FX warranted. */
-    border-radius: 14px;
+  /* Shape chrome — carries border + background + per-kind clip-path. Sits
+     behind the content so labels remain fully readable even when the shape
+     clips pixels at the edges (e.g. diamond corners). The border uses
+     box-shadow inset rather than border: the clip-path cuts the element's
+     rendered area and a real border would get clipped along with it; an inset
+     shadow hugs the clipped edge cleanly. */
+  .smg-node__shape {
+    position: absolute;
+    inset: 0;
+    background: hsl(var(--muted) / 0.5);
+    box-shadow: inset 0 0 0 1px hsl(var(--border));
+    border-radius: 8px;
+    transition:
+      background 200ms ease,
+      box-shadow 200ms ease;
   }
-  .smg-node--terminal {
-    border-radius: 12px;
-    box-shadow: inset 0 0 0 1px hsl(var(--border) / 0.6);
+
+  /* Content sits above the shape so clip-path can sculpt chrome without
+     eating the label. Full height so flex-centering still works. */
+  .smg-node__content {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    z-index: 1;
   }
-  .smg-node--deterministic {
-    border-radius: 2px;
+
+  /* Human gate: classic diamond. The content stays rectangular on top, so
+     the diamond's narrow inscribed rect does not restrict the label width. */
+  .smg-node--human_gate .smg-node__shape {
+    clip-path: polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%);
+    border-radius: 0;
+  }
+  /* Deterministic: flat-top hexagon — the "decision node" silhouette. */
+  .smg-node--deterministic .smg-node__shape {
+    clip-path: polygon(25% 0%, 75% 0%, 100% 50%, 75% 100%, 25% 100%, 0% 50%);
+    border-radius: 0;
+  }
+  /* Terminal: double border. An additional inset box-shadow ring sitting 3px
+     inside the outer edge reads as "this is the end node" without needing a
+     dedicated clip-path. Pulse / failed states stack with this and still win
+     because they re-declare box-shadow at higher specificity. */
+  .smg-node--terminal .smg-node__shape {
+    border-radius: 10px;
+    box-shadow:
+      inset 0 0 0 1px hsl(var(--border)),
+      inset 0 0 0 3px hsl(var(--background)),
+      inset 0 0 0 4px hsl(var(--border) / 0.7);
   }
 
   .smg-node__title {
@@ -467,9 +531,11 @@
     font-weight: 700;
     line-height: 14px;
     text-align: center;
+    z-index: 2;
   }
   .smg-node__check {
     position: absolute;
+    z-index: 2;
     top: 1px;
     right: 4px;
     color: hsl(var(--success));
@@ -479,20 +545,25 @@
 
   /* Active: breathing pulse. 1.8s sine cycle, 0.4 -> 1.0 on the glow so it's
      clearly alive without being fidgety across the minutes a state runs.
-     Background layers a primary tint over an opaque-ish backdrop so the
+     Pulse box-shadow stays on the outer .smg-node so clip-path on the inner
+     shape never clips the glow.
+     Background/border layer a primary tint over an opaque-ish backdrop so the
      pulse + label read cleanly against the rain instead of letting
-     characters flicker through the interior. */
+     characters flicker through the interior — these move to the shape layer
+     so the terminal's double-ring is overridden rather than stacked. */
   .smg-node--active {
     /* --smg-active-color parameterizes the active-node affordance so the
        theater scope can override it (cyan in documentary viz, amber in
        classic). Keyframes below reference this variable; they resolve
        per-element, so an override on the element takes effect immediately. */
     --smg-active-color: var(--primary);
-    border: 2px solid hsl(var(--smg-active-color));
+    animation: smg-node-pulse 1.8s ease-in-out infinite;
+  }
+  .smg-node--active .smg-node__shape {
     background:
       linear-gradient(hsl(var(--smg-active-color) / 0.18), hsl(var(--smg-active-color) / 0.18)),
       hsl(var(--background) / 0.7);
-    animation: smg-node-pulse 1.8s ease-in-out infinite;
+    box-shadow: inset 0 0 0 2px hsl(var(--smg-active-color));
   }
   /* Phosphor bloom on the active-node label (§E.5). Same drop-shadow idiom
      the login page's matrix-rain uses for its wordmark — applied to the
@@ -505,16 +576,12 @@
   }
   .smg-node--active.smg-node--human_gate {
     --smg-active-color: var(--warning);
-    border-color: hsl(var(--smg-active-color));
-    background:
-      linear-gradient(hsl(var(--smg-active-color) / 0.18), hsl(var(--smg-active-color) / 0.18)),
-      hsl(var(--background) / 0.7);
     animation-name: smg-node-pulse-warn;
   }
 
-  /* Scan-line overlay on the active node. Absolute-positioned ::before gives
-     us a no-layout-shift interior stripe that reads as "live terminal". */
-  .smg-node--active::before {
+  /* Scan-line overlay on the active node. Lives on the shape so it inherits
+     the clip-path and stays inside the kind-specific silhouette. */
+  .smg-node--active .smg-node__shape::after {
     content: '';
     position: absolute;
     inset: 0;
@@ -552,35 +619,42 @@
      tint preserves the "done" affordance the old 0.15 success fill gave us. */
   .smg-node--completed {
     opacity: 0.4;
-    border: 1px solid hsl(var(--success) / 0.5);
+  }
+  .smg-node--completed .smg-node__shape {
     background: linear-gradient(hsl(var(--success) / 0.12), hsl(var(--success) / 0.12)), hsl(var(--background) / 0.6);
+    box-shadow: inset 0 0 0 1px hsl(var(--success) / 0.5);
   }
 
   /* Failed: constant crimson glow, no pulse -- dead things don't breathe.
      Stays at full opacity so the failure affordance is never missed. The
      destructive tint layers over an opaque-ish backdrop so the crimson
-     chrome reads cleanly against the rain behind the theater. */
+     chrome reads cleanly against the rain behind the theater. Outer glow
+     stays on .smg-node so clip-path doesn't cut off the drop-shadow halo. */
   .smg-node--failed {
-    border: 2px solid hsl(var(--destructive));
+    box-shadow: 0 0 16px hsl(var(--destructive) / 0.7);
+  }
+  .smg-node--failed .smg-node__shape {
     background:
       linear-gradient(hsl(var(--destructive) / 0.2), hsl(var(--destructive) / 0.2)), hsl(var(--background) / 0.7);
-    box-shadow: 0 0 16px hsl(var(--destructive) / 0.7);
+    box-shadow: inset 0 0 0 2px hsl(var(--destructive));
   }
 
   .smg-node--pending {
     opacity: 0.85;
-    border-style: dashed;
   }
   /* Unvisited pending nodes (not currently active, not completed, not failed):
      raised from the original 0.2/dashed/no-background to 0.7/solid/opaque
      backdrop. At 0.2 over the rain the nodes effectively disappeared; the
      graph's shape has to read clearly even when the active node is hidden,
      which is the Fix #2 forcing function. Solid border beats dashed here
-     because dashed reads as noise against the flickering rain. */
+     because dashed reads as noise against the flickering rain. Applies on
+     the shape layer so per-kind clip-paths still sculpt the silhouette. */
   .smg-node--pending:not(.smg-node--active):not(.smg-node--completed):not(.smg-node--failed) {
     opacity: 0.7;
-    border-style: solid;
+  }
+  .smg-node--pending:not(.smg-node--active):not(.smg-node--completed):not(.smg-node--failed) .smg-node__shape {
     background: hsl(var(--background) / 0.6);
+    box-shadow: inset 0 0 0 1px hsl(var(--border));
   }
 
   /* Accessibility: respect the user's motion preferences. The active-node pulse

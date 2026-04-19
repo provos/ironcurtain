@@ -592,7 +592,10 @@ const CANNED_WORKFLOWS: MockWorkflow[] = [
     workflowId: 'wf-mock-002',
     name: 'code-review',
     phase: 'waiting_human',
-    currentState: 'plan_review',
+    // Must match a node id in CODE_REVIEW_GRAPH (`analyze`, `report_review`,
+    // `completed`); using a design-and-code state here left the mock workflow
+    // with no active node highlight and was the forcing function for Fix #2.
+    currentState: 'report_review',
     startedAt: new Date(Date.now() - 300_000).toISOString(),
   },
 ];
@@ -625,15 +628,16 @@ function initWorkflows(): void {
   for (const wf of structuredClone(CANNED_WORKFLOWS)) {
     workflows.set(wf.workflowId, wf);
   }
-  // Add a gate for the waiting workflow
-  const gateId = 'wf-mock-002-plan_review';
+  // Add a gate for the waiting workflow. stateName matches the CODE_REVIEW_GRAPH
+  // human_gate node so the graph's active-node highlight resolves correctly.
+  const gateId = 'wf-mock-002-report_review';
   workflowGates.set(gateId, {
     gateId,
     workflowId: 'wf-mock-002',
-    stateName: 'plan_review',
-    acceptedEvents: ['APPROVE', 'FORCE_REVISION', 'REPLAN', 'ABORT'],
-    presentedArtifacts: ['plan'],
-    summary: 'Waiting for human review at plan_review',
+    stateName: 'report_review',
+    acceptedEvents: ['APPROVE', 'FORCE_REVISION', 'ABORT'],
+    presentedArtifacts: ['report'],
+    summary: 'Waiting for human review at report_review',
   });
 }
 initWorkflows();
@@ -1251,15 +1255,51 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
         resolveWf.currentState = 'aborted';
         broadcast('workflow.failed', { workflowId: resolveWfId, error: 'Workflow aborted by user' });
       } else {
-        const nextState = resolveEvent === 'FORCE_REVISION' ? 'plan' : 'implement';
+        // Graph-aware next-state lookup so both wf-mock-001 (design-and-code)
+        // and wf-mock-002 (code-review) transition into valid node ids.
+        // Prior behaviour hardcoded `plan`/`implement`, which broke the
+        // code-review graph's active-node highlight after a gate resolve.
+        const isDesign = resolveWf.name.includes('design');
+        let nextState: string;
+        let nextPersona: string;
+        let followupState: string | null = null;
+        let completionNotes = '';
+        if (isDesign) {
+          nextState = resolveEvent === 'FORCE_REVISION' ? 'plan' : 'implement';
+          nextPersona = nextState === 'plan' ? 'planner' : 'coder';
+          completionNotes =
+            nextState === 'plan'
+              ? 'revised plan incorporating reviewer feedback on error handling'
+              : 'implemented all modules with full test coverage';
+          if (nextState === 'implement') {
+            followupState = 'review';
+          }
+        } else {
+          // code-review: APPROVE → completed terminal; FORCE_REVISION → re-run analyze.
+          nextState = resolveEvent === 'FORCE_REVISION' ? 'analyze' : 'completed';
+          nextPersona = 'reviewer';
+          completionNotes =
+            nextState === 'analyze'
+              ? 're-analyzed the codebase incorporating reviewer feedback'
+              : 'code review completed successfully';
+        }
         resolveWf.phase = 'running';
         resolveWf.currentState = nextState;
-        broadcast('workflow.agent_started', {
-          workflowId: resolveWfId,
-          stateId: nextState,
-          persona: nextState === 'plan' ? 'planner' : 'coder',
-        });
+        // Terminal nodes (e.g. `completed`) emit state_entered but no agent_started,
+        // since no persona runs in a terminal.
+        if (nextState !== 'completed' && nextState !== 'aborted') {
+          broadcast('workflow.agent_started', {
+            workflowId: resolveWfId,
+            stateId: nextState,
+            persona: nextPersona,
+          });
+        }
         broadcast('workflow.state_entered', { workflowId: resolveWfId, state: nextState });
+
+        if (nextState === 'completed') {
+          resolveWf.phase = 'completed';
+          return undefined;
+        }
 
         trackTimer(
           resolveWfId,
@@ -1270,14 +1310,11 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
                 workflowId: resolveWfId,
                 stateId: nextState,
                 verdict: 'success',
-                notes:
-                  nextState === 'plan'
-                    ? 'revised plan incorporating reviewer feedback on error handling'
-                    : 'implemented all modules with full test coverage',
+                notes: completionNotes,
               });
-              if (nextState === 'implement') {
-                wf.currentState = 'review';
-                broadcast('workflow.state_entered', { workflowId: resolveWfId, state: 'review' });
+              if (followupState) {
+                wf.currentState = followupState;
+                broadcast('workflow.state_entered', { workflowId: resolveWfId, state: followupState });
               }
             }
           }, 3000),
