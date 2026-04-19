@@ -401,11 +401,12 @@ states:
       - to: harness_build
         when:
           verdict: approved
+      # Ordered before the rejection transition so the cap wins on the Nth visit.
+      - to: harness_review
+        guard: isStateVisitLimitReached
       - to: harness_design
         when:
           verdict: rejected
-      - to: harness_review
-        guard: isStateVisitLimitReached
 
   harness_review:
     type: human_gate
@@ -495,14 +496,15 @@ states:
       - to: orchestrator
         when:
           verdict: approved
+      # Ordered before the rejection transitions so the cap wins on the Nth visit.
+      - to: harness_review
+        guard: isStateVisitLimitReached
       - to: harness_build
         when:
           verdict: rejected_build
       - to: harness_design
         when:
           verdict: rejected_design
-      - to: harness_review
-        guard: isStateVisitLimitReached
 
   discover:
     type: agent

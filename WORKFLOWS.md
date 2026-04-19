@@ -193,17 +193,16 @@ Exit codes:
 
 #### Check catalog
 
-| Code    | Severity | Catches                                                                                              |
-| ------- | -------- | ---------------------------------------------------------------------------------------------------- |
-| `WF001` | error    | State cannot reach any terminal — workflow would loop forever if it enters                           |
-| `WF002` | warning  | `settings.unversionedArtifacts` entry not produced by any state (silently versioned)                 |
-| `WF003` | warning  | Terminal `outputs:` entry not produced by any reachable state                                        |
-| `WF004` | error    | Human-gate `present:` entry not produced (human would approve blind)                                 |
-| `WF005` | error    | State uses `parallelKey` + `worktree: true` but `settings.gitRepoPath` is not set                    |
-| `WF006` | warning  | `settings.maxRounds` set but no transition uses `isRoundLimitReached` guard (limit silently ignored) |
-| `WF007` | warning  | Agent state references a persona not installed locally (runtime failure)                             |
-| `WF008` | error    | `maxVisits` declared on a non-agent state (only agent states support per-state visit caps)           |
-| `WF009` | error    | State ID does not match `^[A-Za-z_][A-Za-z0-9_]*$` (empty, leading digit, or contains `.`/space/`-`) |
+| Code    | Severity | Catches                                                                                                 |
+| ------- | -------- | ------------------------------------------------------------------------------------------------------- |
+| `WF001` | error    | State cannot reach any terminal — workflow would loop forever if it enters                              |
+| `WF002` | warning  | `settings.unversionedArtifacts` entry not produced by any state (silently versioned)                    |
+| `WF003` | warning  | Terminal `outputs:` entry not produced by any reachable state                                           |
+| `WF004` | error    | Human-gate `present:` entry not produced (human would approve blind)                                    |
+| `WF005` | error    | State uses `parallelKey` + `worktree: true` but `settings.gitRepoPath` is not set                       |
+| `WF006` | warning  | `settings.maxRounds` set but no transition uses `isRoundLimitReached` guard (limit silently ignored)    |
+| `WF007` | warning  | Agent state references a persona not installed locally (runtime failure)                                |
+| `WF008` | error    | `maxVisits` state has a cap-guarded transition positioned after a non-approval `when` (cap never fires) |
 
 Example:
 
@@ -213,6 +212,13 @@ ironcurtain workflow lint ./my-workflow.yaml --strict
 ```
 
 When a workflow is started via the daemon/web UI, error-severity diagnostics abort with a `LINT_FAILED` JSON-RPC error carrying the full diagnostic list so the UI can render it inline.
+
+#### Definition-level validation errors
+
+The following checks are enforced during workflow validation before lint runs, so they are reported as `WorkflowValidationError` issues rather than `WF` lint diagnostics:
+
+- `maxVisits` declared on a non-agent state (only agent states support per-state visit caps)
+- State ID does not match `^[A-Za-z_][A-Za-z0-9_]*$` (empty, leading digit, or contains `.`/space/`-`)
 
 ## Human gates
 
@@ -418,12 +424,12 @@ The `verdict` field accepts any string value, enabling custom verdicts for direc
 
 **`guard` -- code-based conditions (for context-based checks):**
 
-| Guard                       | Checks                                                                                                       |
-| --------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| `isRoundLimitReached`       | Max visit count across all states >= `settings.maxRounds` (workflow-wide cap)                                |
-| `isStateVisitLimitReached`  | Fires on the Nth `onDone` when the state carries `maxVisits: N` (see [`maxVisits`](#agent-states)). Inert on states without `maxVisits`. |
-| `isStalled`                 | Agent produced identical output artifacts as previous round                                                  |
-| `isPassed`                  | Deterministic state commands all passed                                                                      |
+| Guard                      | Checks                                                                                                                                   |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `isRoundLimitReached`      | Max visit count across all states >= `settings.maxRounds` (workflow-wide cap)                                                            |
+| `isStateVisitLimitReached` | Fires on the Nth `onDone` when the state carries `maxVisits: N` (see [`maxVisits`](#agent-states)). Inert on states without `maxVisits`. |
+| `isStalled`                | Agent produced identical output artifacts as previous round                                                                              |
+| `isPassed`                 | Deterministic state commands all passed                                                                                                  |
 
 Use `guard` for conditions that depend on workflow context (round limits, stall detection) or for deterministic state transitions (`isPassed`). For verdict-based routing, use `when` clauses -- e.g., `when: { verdict: "approved" }` supports any verdict string for direct routing.
 
@@ -442,9 +448,9 @@ transitions:
         stateIds: [review_state, build_state]
 ```
 
-| Action type         | Params                     | Effect                                                                                                   |
-| ------------------- | -------------------------- | -------------------------------------------------------------------------------------------------------- |
-| `resetVisitCounts`  | `stateIds: [string, ...]`  | Zeroes the visit counter for each listed state. All listed IDs must reference existing states.           |
+| Action type        | Params                    | Effect                                                                                         |
+| ------------------ | ------------------------- | ---------------------------------------------------------------------------------------------- |
+| `resetVisitCounts` | `stateIds: [string, ...]` | Zeroes the visit counter for each listed state. All listed IDs must reference existing states. |
 
 Actions run in the order listed. The orchestrator's default context-update action always runs first.
 

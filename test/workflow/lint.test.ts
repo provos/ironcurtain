@@ -427,6 +427,176 @@ describe('WF007 — persona not installed', () => {
 });
 
 // ---------------------------------------------------------------------------
+// WF008 — visit-cap guard must precede loop-continuing transitions
+// ---------------------------------------------------------------------------
+
+describe('WF008 — visit-cap transition ordering', () => {
+  /**
+   * Sentinel sharing the `| undefined` slot so a test can opt out of
+   * `maxVisits` entirely. Default parameters in JS collapse an explicit
+   * `undefined` into the default value, which would hide the "no
+   * maxVisits" case.
+   */
+  const OMIT_MAX_VISITS = Symbol('omit-maxVisits');
+
+  /**
+   * Helper: builds a 3-state workflow where `review` is a bounded-loop
+   * state whose transitions are supplied by the caller. Includes escalate
+   * + approval terminals keyed off common transition targets so
+   * reachability/terminal checks pass regardless of which transitions the
+   * test supplies.
+   */
+  function withReviewTransitions(
+    transitions: readonly unknown[],
+    maxVisits: number | typeof OMIT_MAX_VISITS = 3,
+  ): WorkflowDefinition {
+    const reviewBase: Record<string, unknown> = {
+      type: 'agent',
+      description: 'review',
+      persona: 'global',
+      prompt: 'p',
+      inputs: ['plan'],
+      outputs: ['review'],
+      transitions,
+    };
+    if (maxVisits !== OMIT_MAX_VISITS) reviewBase.maxVisits = maxVisits;
+
+    return validateDefinition({
+      name: 't',
+      description: 'd',
+      initial: 'plan',
+      states: {
+        // `plan` dispatches to `review` and also to `escalate_gate` so the
+        // gate remains reachable even in tests where the review state has
+        // no cap-guarded transition going there.
+        plan: {
+          type: 'agent',
+          description: 'plan',
+          persona: 'global',
+          prompt: 'p',
+          inputs: [],
+          outputs: ['plan'],
+          transitions: [{ to: 'escalate_gate', when: { verdict: 'escalate' } }, { to: 'review' }],
+        },
+        review: reviewBase,
+        escalate_gate: {
+          type: 'human_gate',
+          description: 'escalate',
+          acceptedEvents: ['APPROVE', 'ABORT'],
+          transitions: [
+            { to: 'done', event: 'APPROVE' },
+            { to: 'aborted', event: 'ABORT' },
+          ],
+        },
+        done: { type: 'terminal', description: 'd' },
+        aborted: { type: 'terminal', description: 'a' },
+      },
+    });
+  }
+
+  it('errors when a non-approval when clause precedes the cap guard', () => {
+    const def = withReviewTransitions([
+      { to: 'done', when: { verdict: 'approved' } },
+      { to: 'plan', when: { verdict: 'rejected' } },
+      { to: 'escalate_gate', guard: 'isStateVisitLimitReached' },
+    ]);
+
+    const result = lintWorkflow(def, stubCtx);
+    expect(codes(result)).toContain('WF008');
+    const d = result.find((x) => x.code === 'WF008');
+    expect(d?.stateId).toBe('review');
+    expect(d?.severity).toBe('error');
+    expect(d?.message).toContain('position 3');
+    expect(d?.message).toContain('position 2');
+    expect(d?.message).toContain('rejected');
+  });
+
+  it('passes when the cap guard precedes all loop-continuing transitions', () => {
+    const def = withReviewTransitions([
+      { to: 'done', when: { verdict: 'approved' } },
+      { to: 'escalate_gate', guard: 'isStateVisitLimitReached' },
+      { to: 'plan', when: { verdict: 'rejected' } },
+    ]);
+    expect(codes(lintWorkflow(def, stubCtx))).not.toContain('WF008');
+  });
+
+  it('passes when maxVisits is set but no cap-guarded transition is present', () => {
+    // Without the guard, the cap is inert anyway — this rule is only
+    // concerned with ordering, not with whether the cap is wired up.
+    const def = withReviewTransitions([
+      { to: 'done', when: { verdict: 'approved' } },
+      { to: 'plan', when: { verdict: 'rejected' } },
+    ]);
+    expect(codes(lintWorkflow(def, stubCtx))).not.toContain('WF008');
+  });
+
+  it('passes when the cap-guarded transition exists but maxVisits is absent', () => {
+    // The guard on a state without maxVisits is inert — not WF008's concern.
+    const def = withReviewTransitions(
+      [
+        { to: 'done', when: { verdict: 'approved' } },
+        { to: 'plan', when: { verdict: 'rejected' } },
+        { to: 'escalate_gate', guard: 'isStateVisitLimitReached' },
+      ],
+      OMIT_MAX_VISITS,
+    );
+    expect(codes(lintWorkflow(def, stubCtx))).not.toContain('WF008');
+  });
+
+  it('flags an unconditional transition preceding the cap guard', () => {
+    // An unconditional `to:` transition matches every time, so it
+    // short-circuits the cap just like a non-approval when clause.
+    const def = withReviewTransitions([
+      { to: 'done', when: { verdict: 'approved' } },
+      { to: 'plan' }, // unconditional — always matches
+      { to: 'escalate_gate', guard: 'isStateVisitLimitReached' },
+    ]);
+    const result = lintWorkflow(def, stubCtx);
+    expect(codes(result)).toContain('WF008');
+    const d = result.find((x) => x.code === 'WF008');
+    expect(d?.message).toContain('unconditional');
+  });
+
+  it('accepts all approval-style exit verdicts before the cap', () => {
+    // All five approval verdicts can legitimately precede the cap: on
+    // the cap visit, if the agent emits an approval verdict we take the
+    // success exit rather than escalating.
+    const approvalVerdicts = ['approved', 'complete', 'done', 'success', 'passed'];
+    const transitions = [
+      ...approvalVerdicts.map((v) => ({ to: 'done', when: { verdict: v } })),
+      { to: 'escalate_gate', guard: 'isStateVisitLimitReached' },
+      { to: 'plan', when: { verdict: 'rejected' } },
+    ];
+    const def = withReviewTransitions(transitions);
+    expect(codes(lintWorkflow(def, stubCtx))).not.toContain('WF008');
+  });
+
+  // Note on `when` clauses with non-`verdict` keys: validateDefinition
+  // already rejects those (only `verdict` is supported for when-clause
+  // routing), so they cannot reach lint in practice. The rule's
+  // `isApprovalExitTransition` still treats them as loop-continuing for
+  // defense-in-depth when multi-field `when` becomes a supported feature.
+
+  it('flags the vuln-discovery workflow (regression sample)', () => {
+    // Targeted check: the two bugs reported by the Copilot reviewer both
+    // fire and report the right states. Kept separate from the "bundled
+    // workflows lint clean" regression so that the intent of this check
+    // is discoverable by greppers.
+    const raw = parseYaml(
+      readFileSync(resolve(__dirname, '..', '..', 'src', 'workflow', 'workflows', 'vuln-discovery.yaml'), 'utf-8'),
+      { maxAliasCount: 0 },
+    );
+    const def = validateDefinition(raw);
+    const diagnostics = lintWorkflow(def, stubCtx);
+    const wf008 = diagnostics.filter((d) => d.code === 'WF008').map((d) => d.stateId);
+    // After Step 3 reorders the YAML this list is empty; WF008 no longer
+    // fires. (The bundled-workflows regression below asserts the same
+    // thing more broadly.)
+    expect(wf008).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Regression — bundled workflows must lint clean (zero errors)
 // ---------------------------------------------------------------------------
 
