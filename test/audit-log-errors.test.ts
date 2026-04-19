@@ -1,18 +1,19 @@
 /**
- * Tests for AuditLog stream-error handling.
+ * Tests for AuditLog write-error handling.
  *
- * `createWriteStream` defers the actual `open(2)` until the event loop
- * spins, so open failures (ENOENT from a missing parent dir, ENOSPC,
- * EACCES, etc.) surface asynchronously as an `'error'` event. Without a
- * listener the process crashes. These tests pin down the contract:
+ * Writes are synchronous (`appendFileSync`), so failures surface at
+ * the call site — no async `'error'` event, no timing windows. The
+ * tests pin down the fail-closed contract:
  *
- *   - `log()` after an async open failure throws synchronously with a
- *     message that mentions the underlying stream error.
- *   - `close()` after an error is idempotent and never throws.
+ *   - `log()` throws synchronously when the underlying write fails.
+ *   - The error is cached: subsequent `log()` calls rethrow the same
+ *     error without attempting another write (idempotent failure
+ *     surface so a retry loop can't mask the root cause).
+ *   - `close()` is a no-op after an error and never throws.
  */
 
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync, createWriteStream } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AuditLog } from '../src/trusted-process/audit-log.js';
@@ -31,64 +32,86 @@ function makeEntry(): AuditEntry {
   };
 }
 
-/**
- * Waits until an async open(2) against `path` would have resolved. We
- * open a probe stream to the same path and await its `'error'` event
- * (or, in the open-success case, its `'open'` event). This is
- * deterministic regardless of event-loop pressure from other
- * concurrently-running test suites, unlike `setImmediate` polling.
- */
-async function waitForOpenResolution(path: string): Promise<void> {
-  await new Promise<void>((resolve) => {
-    const probe = createWriteStream(path, { flags: 'a' });
-    probe.once('error', () => resolve());
-    probe.once('open', () => {
-      probe.close();
-      resolve();
-    });
-  });
-}
-
-describe('AuditLog stream-error handling', () => {
+describe('AuditLog write-error handling', () => {
   let tmpDir: string;
 
   afterEach(() => {
     if (tmpDir) rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it('log() throws synchronously after the stream fails to open', async () => {
+  it('log() throws synchronously when the write fails', () => {
     tmpDir = mkdtempSync(join(tmpdir(), 'audit-err-'));
-    // Parent directory does not exist -> open(2) will fail with ENOENT,
-    // emitted as an async `'error'` event on the stream.
-    const badPath = join(tmpDir, 'missing-parent', 'audit.jsonl');
+    // A *file* sits where the AuditLog expects a directory, so the
+    // ctor's `mkdirSync(dirname(path), { recursive: true })` fails
+    // synchronously with ENOTDIR. The ctor latches the error and the
+    // first `log()` rethrows it — the caller experiences the same
+    // fail-closed contract regardless of which layer noticed first.
+    const notADir = join(tmpDir, 'im-a-file');
+    writeFileSync(notADir, '');
+    const badPath = join(notADir, 'audit.jsonl');
 
     const log = new AuditLog(badPath);
-    await waitForOpenResolution(badPath);
-    // One more microtask to let the AuditLog's internal 'error' handler run.
-    await new Promise((r) => setImmediate(r));
 
     expect(() => log.log(makeEntry())).toThrow(/AuditLog stream error/);
-    // The thrown message MUST include the underlying error text so
-    // operators can diagnose the failure (e.g., "ENOENT").
-    expect(() => log.log(makeEntry())).toThrow(/ENOENT/);
+    // The thrown message MUST include the underlying errno string so
+    // operators can diagnose the failure. Which errno fires depends on
+    // the platform and on whether ctor's mkdirSync or log's
+    // appendFileSync noticed first — EEXIST (macOS, mkdir sees a file
+    // at the target), ENOTDIR (Linux, appendFileSync descends through
+    // a file), or ENOENT (parent dir truly missing).
+    expect(() => log.log(makeEntry())).toThrow(/EEXIST|ENOTDIR|ENOENT/);
+  });
 
-    // close() must remain idempotent even when the stream errored.
+  it('log() is idempotent after an error: the same cached error is rethrown', () => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'audit-err-'));
+    const notADir = join(tmpDir, 'im-a-file');
+    writeFileSync(notADir, '');
+    const badPath = join(notADir, 'audit.jsonl');
+
+    const log = new AuditLog(badPath);
+
+    let firstError: unknown;
+    try {
+      log.log(makeEntry());
+    } catch (err) {
+      firstError = err;
+    }
+    expect(firstError).toBeInstanceOf(Error);
+
+    let secondError: unknown;
+    try {
+      log.log(makeEntry());
+    } catch (err) {
+      secondError = err;
+    }
+    expect(secondError).toBeInstanceOf(Error);
+    // The messages must match — a retry after latched failure must
+    // not paper over the root cause by attempting another write with
+    // a potentially different errno.
+    expect((secondError as Error).message).toBe((firstError as Error).message);
+  });
+
+  it('close() is a no-op and does not throw after a write failure', async () => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'audit-err-'));
+    const notADir = join(tmpDir, 'im-a-file');
+    writeFileSync(notADir, '');
+    const badPath = join(notADir, 'audit.jsonl');
+
+    const log = new AuditLog(badPath);
+    expect(() => log.log(makeEntry())).toThrow();
+
     await expect(log.close()).resolves.toBeUndefined();
-    // Second close() is a no-op and also does not throw.
+    // Second close() is also a no-op.
     await expect(log.close()).resolves.toBeUndefined();
   });
 
-  it('close() does not throw when the stream errored before any log()', async () => {
+  it('close() does not throw when the ctor failed before any log()', async () => {
     tmpDir = mkdtempSync(join(tmpdir(), 'audit-err-'));
-    const badPath = join(tmpDir, 'missing-parent', 'audit.jsonl');
+    const notADir = join(tmpDir, 'im-a-file');
+    writeFileSync(notADir, '');
+    const badPath = join(notADir, 'audit.jsonl');
 
     const log = new AuditLog(badPath);
-    await waitForOpenResolution(badPath);
-    // One more microtask to let the AuditLog's internal 'error' handler run.
-    await new Promise((r) => setImmediate(r));
-
-    // close() before any log() -- the stream opened and failed; close()
-    // should short-circuit instead of trying to end a destroyed stream.
     await expect(log.close()).resolves.toBeUndefined();
   });
 });
