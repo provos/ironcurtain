@@ -5,47 +5,15 @@ import {
   createInitialContext,
   truncateAgentOutput,
   type AgentInvokeInput,
-  type AgentInvokeResult,
   type DeterministicInvokeInput,
   type DeterministicInvokeResult,
 } from '../../src/workflow/machine-builder.js';
 import type { WorkflowDefinition } from '../../src/workflow/types.js';
+import { makeAgentResult, makeRejectedResult, settle } from './machine-test-helpers.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function makeAgentResult(overrides: Partial<AgentInvokeResult> = {}): AgentInvokeResult {
-  return {
-    output: {
-      completed: true,
-      verdict: 'approved',
-      confidence: 'high',
-      escalation: null,
-      testCount: null,
-      notes: null,
-    },
-    sessionId: 'test-session',
-    artifacts: {},
-    outputHash: 'hash-1',
-    responseText: 'Agent response text',
-    ...overrides,
-  };
-}
-
-function makeRejectedResult(notes = 'needs work'): AgentInvokeResult {
-  return makeAgentResult({
-    output: {
-      completed: true,
-      verdict: 'rejected',
-      confidence: 'high',
-      escalation: null,
-      testCount: null,
-      notes,
-    },
-    outputHash: 'rejected-hash',
-  });
-}
 
 function makeDeterministicResult(overrides: Partial<DeterministicInvokeResult> = {}): DeterministicInvokeResult {
   return {
@@ -53,11 +21,6 @@ function makeDeterministicResult(overrides: Partial<DeterministicInvokeResult> =
     testCount: 10,
     ...overrides,
   };
-}
-
-/** Wait for the machine to settle after an async transition. */
-function settle(ms = 50): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
 }
 
 /** Collects state values visited by an actor. */
@@ -373,7 +336,6 @@ describe('buildWorkflowMachine', () => {
       expect(ctx.parallelResults).toEqual({});
       expect(ctx.worktreeBranches).toEqual([]);
       expect(ctx.totalTokens).toBe(0);
-      expect(ctx.flaggedForReview).toBe(false);
       expect(ctx.lastError).toBeNull();
       expect(ctx.sessionsByState).toEqual({});
       expect(ctx.previousAgentOutput).toBeNull();
@@ -607,7 +569,7 @@ describe('buildWorkflowMachine', () => {
             if (input.stateId === 'review') {
               reviewCount++;
               // Always reject to exhaust rounds
-              return makeRejectedResult(`rejection ${reviewCount}`);
+              return makeRejectedResult({ notes: `rejection ${reviewCount}` });
             }
             return makeAgentResult();
           }),
@@ -776,7 +738,7 @@ describe('buildWorkflowMachine', () => {
           agentService: fromPromise(async ({ input }: { input: AgentInvokeInput }) => {
             if (input.stateId === 'review') {
               reviewCount++;
-              if (reviewCount === 1) return makeRejectedResult('issue found');
+              if (reviewCount === 1) return makeRejectedResult({ notes: 'issue found' });
               return makeAgentResult(); // approve second time
             }
             return makeAgentResult();
@@ -866,7 +828,7 @@ describe('buildWorkflowMachine', () => {
           agentService: fromPromise(async ({ input }: { input: AgentInvokeInput }) => {
             if (input.stateId === 'review') {
               reviewCount++;
-              if (reviewCount === 1) return makeRejectedResult('needs work');
+              if (reviewCount === 1) return makeRejectedResult({ notes: 'needs work' });
               return makeAgentResult(); // approve second time
             }
             return makeAgentResult();
@@ -1283,7 +1245,7 @@ describe('buildWorkflowMachine', () => {
             if (input.stateId === 'review') {
               reviewCount++;
               // Always reject to exhaust rounds
-              return makeRejectedResult(`rejection ${reviewCount}`);
+              return makeRejectedResult({ notes: `rejection ${reviewCount}` });
             }
             return makeAgentResult();
           }),
@@ -1297,40 +1259,6 @@ describe('buildWorkflowMachine', () => {
 
       // With maxRounds=3, the guard isRoundLimitReached fires
       expect(actor.getSnapshot().matches('escalate_gate')).toBe(true);
-    });
-
-    it('when preserves flag behavior', async () => {
-      const flagDef: WorkflowDefinition = {
-        name: 'flag-when-test',
-        description: 'Test flag with when',
-        initial: 'review',
-        states: {
-          review: {
-            type: 'agent',
-            description: 'Reviews code',
-            persona: 'critic',
-            prompt: 'Review.',
-            inputs: [],
-            outputs: ['review'],
-            transitions: [{ to: 'done', when: { verdict: 'approved' }, flag: 'low confidence approval' }],
-          },
-          done: { type: 'terminal', description: 'Done' },
-        },
-      };
-
-      const result = buildWorkflowMachine(flagDef, 'task');
-      const testMachine = result.machine.provide({
-        actors: {
-          agentService: fromPromise(async () => makeAgentResult()),
-        },
-      });
-
-      const actor = createActor(testMachine);
-      actor.start();
-      await settle();
-
-      expect(actor.getSnapshot().context.flaggedForReview).toBe(true);
-      expect(actor.getSnapshot().status).toBe('done');
     });
 
     it('when: { verdict: "retry" } uses strict equality (does not match prefix)', async () => {

@@ -20,7 +20,6 @@ function makeCheckpoint(overrides?: Partial<WorkflowCheckpoint>): WorkflowCheckp
       parallelResults: {},
       worktreeBranches: [],
       totalTokens: 500,
-      flaggedForReview: false,
       lastError: null,
       sessionsByState: {},
       previousAgentOutput: null,

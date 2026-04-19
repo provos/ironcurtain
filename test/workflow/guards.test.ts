@@ -19,7 +19,6 @@ function baseContext(overrides: Partial<WorkflowContext> = {}): WorkflowContext 
     parallelResults: {},
     worktreeBranches: [],
     totalTokens: 0,
-    flaggedForReview: false,
     lastError: null,
     sessionsByState: {},
     previousAgentOutput: null,
@@ -56,6 +55,7 @@ describe('REGISTERED_GUARDS', () => {
   it('contains all guard names', () => {
     expect(REGISTERED_GUARDS).toContain('isRoundLimitReached');
     expect(REGISTERED_GUARDS).toContain('isStalled');
+    expect(REGISTERED_GUARDS).toContain('isStateVisitLimitReached');
     expect(REGISTERED_GUARDS).toContain('isPassed');
   });
 

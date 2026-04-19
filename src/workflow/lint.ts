@@ -7,7 +7,12 @@
  * See `docs/designs/workflow-semantic-linter-v2.md` for each check's
  * rationale.
  */
-import type { WorkflowDefinition, WorkflowStateDefinition, AgentStateDefinition } from './types.js';
+import type {
+  WorkflowDefinition,
+  WorkflowStateDefinition,
+  AgentStateDefinition,
+  AgentTransitionDefinition,
+} from './types.js';
 import { GLOBAL_PERSONA } from './types.js';
 import { findReachableStates, parseArtifactRef } from './validate.js';
 
@@ -15,7 +20,17 @@ import { findReachableStates, parseArtifactRef } from './validate.js';
 // Public types
 // ---------------------------------------------------------------------------
 
-export type DiagnosticCode = 'WF001' | 'WF002' | 'WF003' | 'WF004' | 'WF005' | 'WF006' | 'WF007';
+/**
+ * Diagnostic codes.
+ *
+ * WF008 occupies the slot previously used for a raw-YAML check that
+ * `maxVisits` is only declared on agent states. That check now throws
+ * `WorkflowValidationError` before lint runs, so it never emits a WF code;
+ * the slot is reclaimed here for the visit-cap transition-ordering rule.
+ * WF009 is retired for the same reason (state-ID regex is a validation
+ * error) and must not be reused.
+ */
+export type DiagnosticCode = 'WF001' | 'WF002' | 'WF003' | 'WF004' | 'WF005' | 'WF006' | 'WF007' | 'WF008';
 export type DiagnosticSeverity = 'error' | 'warning';
 
 export interface Diagnostic {
@@ -59,6 +74,7 @@ export function lintWorkflow(def: WorkflowDefinition, ctx: LintContext): LintRes
     ...checkWorktreeNeedsGitRepo(def),
     ...checkMaxRoundsHasGuard(def),
     ...checkPersonaExists(def, ctx),
+    ...checkVisitCapTransitionOrder(def),
   ];
 }
 
@@ -295,4 +311,92 @@ function checkPersonaExists(def: WorkflowDefinition, ctx: LintContext): Diagnost
     });
   }
   return diagnostics;
+}
+
+// ---------------------------------------------------------------------------
+// WF008 — visit-cap guard must precede loop-continuing transitions
+// ---------------------------------------------------------------------------
+
+/**
+ * Verdict values that indicate an approval-style exit from a bounded loop.
+ * Transitions taken on these verdicts represent the success path out of the
+ * loop, so a visit-cap guard is legitimately ordered AFTER them (on the cap
+ * visit, if the agent still emits `approved`, we take the approval exit
+ * rather than escalating).
+ *
+ * Any other `when` verdict (rejected, rejected_build, blocked, or any
+ * workflow-specific loop-continuation verdict) must NOT precede the cap
+ * guard: if it did, the cap would never fire and the loop is effectively
+ * unbounded except for the workflow-wide `maxRounds`.
+ */
+const VISIT_CAP_GUARD = 'isStateVisitLimitReached';
+const APPROVAL_EXIT_VERDICTS: ReadonlySet<string> = new Set(['approved', 'complete', 'done', 'success', 'passed']);
+
+/**
+ * Returns true if `t.when` represents an approval-style exit. Approval
+ * exits are allowed to precede the visit-cap guard. Everything else is
+ * considered loop-continuing for the purposes of WF008 — including:
+ *   - no `when` clause at all (always matches)
+ *   - empty `when: {}` (always matches; flagged separately by validation)
+ *   - a verdict not in the approval allowlist
+ *   - a `when` clause that sets fields other than `verdict` (future-
+ *     proofing: those match something other than the approval verdict)
+ */
+function isApprovalExitTransition(t: AgentTransitionDefinition): boolean {
+  if (!t.when) return false;
+  const keys = Object.keys(t.when);
+  if (keys.length === 0) return false;
+  if (keys.length !== 1 || keys[0] !== 'verdict') return false;
+  const verdict = t.when.verdict;
+  return typeof verdict === 'string' && APPROVAL_EXIT_VERDICTS.has(verdict);
+}
+
+function checkVisitCapTransitionOrder(def: WorkflowDefinition): Diagnostic[] {
+  const diagnostics: Diagnostic[] = [];
+
+  for (const [stateId, state] of Object.entries(def.states)) {
+    if (!isAgentState(state)) continue;
+    if (state.maxVisits === undefined) continue;
+
+    const transitions = state.transitions;
+    const capIndex = transitions.findIndex((t) => t.guard === VISIT_CAP_GUARD);
+    if (capIndex === -1) continue;
+
+    // Find the first loop-continuing transition that precedes the cap.
+    for (let i = 0; i < capIndex; i++) {
+      const t = transitions[i];
+      if (isApprovalExitTransition(t)) continue;
+
+      // `t` is either unconditional, a non-approval `when`, or a different
+      // guard — all of which can match before the cap guard is evaluated.
+      const descriptor = describeTransition(t);
+      diagnostics.push({
+        code: 'WF008',
+        severity: 'error',
+        stateId,
+        message:
+          `State "${stateId}" has maxVisits=${state.maxVisits} with an "${VISIT_CAP_GUARD}" ` +
+          `transition at position ${capIndex + 1}, but a loop-continuing transition (${descriptor}) ` +
+          `at position ${i + 1} will match first on every iteration, so the visit cap is never ` +
+          `reached and the loop is effectively unbounded except by settings.maxRounds.`,
+        hint:
+          `Move the "${VISIT_CAP_GUARD}" transition above any non-approval "when" clause ` +
+          `(only ${Array.from(APPROVAL_EXIT_VERDICTS).join('/')} verdicts may precede the cap).`,
+      });
+      // One diagnostic per state is sufficient; multiple preceding loop-
+      // continuing transitions all share the same fix.
+      break;
+    }
+  }
+
+  return diagnostics;
+}
+
+function describeTransition(t: AgentTransitionDefinition): string {
+  if (t.guard) return `guard: ${t.guard} -> ${t.to}`;
+  if (t.when) {
+    const parts = Object.entries(t.when).map(([k, v]) => `${k}: ${JSON.stringify(v)}`);
+    return `when { ${parts.join(', ')} } -> ${t.to}`;
+  }
+  return `unconditional -> ${t.to}`;
 }

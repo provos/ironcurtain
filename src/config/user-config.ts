@@ -12,6 +12,7 @@ import { dirname, resolve } from 'node:path';
 import { z } from 'zod';
 import { getUserConfigPath } from './paths.js';
 import { parseModelId } from './model-provider.js';
+import { isPlainObject } from '../utils/is-plain-object.js';
 
 export const USER_CONFIG_DEFAULTS = {
   agentModelId: 'anthropic:claude-sonnet-4-6',
@@ -325,11 +326,6 @@ const CONFIG_FILE_MODE = 0o600;
 function writeConfigFile(path: string, content: string): void {
   writeFileSync(path, content, { mode: CONFIG_FILE_MODE });
   chmodSync(path, CONFIG_FILE_MODE);
-}
-
-/** Type guard for non-null, non-array objects. */
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 /** Default config file content (anthropicApiKey intentionally omitted). */
