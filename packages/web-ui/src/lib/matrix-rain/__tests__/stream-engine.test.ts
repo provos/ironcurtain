@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 
 import { FRAME_MS } from '../engine.js';
-import { WORD_DROP_FIFO_CAP, createStreamRainEngine } from '../stream-engine.js';
+import { WORD_DROP_FIFO_CAP, WORD_PLACEMENT_MAX_ATTEMPTS, createStreamRainEngine } from '../stream-engine.js';
 import type { FrameState, LayoutPlan } from '../types.js';
 
 // ---------------------------------------------------------------------------
@@ -425,5 +425,225 @@ describe('createStreamRainEngine -- step time semantics parity', () => {
     engine.step(500); // rewound
     const after = snapshot(engine.getFrame());
     expect(before).toBe(after);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Avoid regions (Fix #1): theater declares rectangles where graph nodes live;
+// the engine must stop spawning ambient drops and word drops inside them, and
+// existing drop heads that enter a region must retire cleanly.
+// ---------------------------------------------------------------------------
+
+describe('createStreamRainEngine -- avoid regions', () => {
+  it('rain spawns above/around avoid regions; heads never render inside one', () => {
+    const cols = 40;
+    const cellSize = 12;
+    const layout = buildLayout(cols, 60);
+    const engine = createStreamRainEngine(layout, { seed: 31 });
+    // Region covers the middle band: cols 10..19, rows 20..39. Rain should still
+    // fall *above* cols 10..19 (rows < 20), proving the spawn isn't blocked
+    // wholesale — and no head ever renders inside the region itself.
+    const regionX = 10 * cellSize;
+    const regionY = 20 * cellSize;
+    const regionW = 10 * cellSize;
+    const regionH = 20 * cellSize;
+    engine.setAvoidRegions([{ x: regionX, y: regionY, w: regionW, h: regionH }]);
+
+    let sawAboveInsideCols = 0;
+    engine.step(0);
+    for (let i = 1; i <= 400; i++) {
+      engine.step(i * FRAME_MS);
+      for (const d of engine.getFrame().drops) {
+        const cellX = d.col * cellSize;
+        const cellY = Math.floor(d.row) * cellSize;
+        const inRegion = cellX >= regionX && cellX < regionX + regionW && cellY >= regionY && cellY < regionY + regionH;
+        expect(inRegion).toBe(false);
+        if (d.col >= 10 && d.col < 20) sawAboveInsideCols++;
+      }
+    }
+    // Sanity: drops must appear in cols 10..19 above row 20, otherwise the
+    // cell-level retirement is accidentally acting like column-level blocking.
+    expect(sawAboveInsideCols).toBeGreaterThan(0);
+  });
+
+  it('density-biased spawns still retire inside avoid regions', () => {
+    const cols = 40;
+    const cellSize = 12;
+    const layout = buildLayout(cols, 60);
+    const engine = createStreamRainEngine(layout, { seed: 32 });
+    // Heavy density at col 15, which sits inside the avoid region's column span.
+    const field = new Float32Array(cols);
+    field[15] = 100;
+    engine.setDensityField(field);
+    // Region at rows 20..39 in cols 10..19.
+    const regionY = 20 * cellSize;
+    const regionH = 20 * cellSize;
+    engine.setAvoidRegions([{ x: 10 * cellSize, y: regionY, w: 10 * cellSize, h: regionH }]);
+
+    engine.step(0);
+    for (let i = 1; i <= 400; i++) {
+      engine.step(i * FRAME_MS);
+      // Invariant: no head ever renders inside the region, regardless of
+      // the density bias.
+      for (const d of engine.getFrame().drops) {
+        if (d.col >= 10 && d.col < 20) {
+          const cellY = Math.floor(d.row) * cellSize;
+          expect(cellY >= regionY && cellY < regionY + regionH).toBe(false);
+        }
+      }
+    }
+  });
+
+  it('retires existing drop heads that enter an avoid region mid-fall', () => {
+    const cellSize = 12;
+    const layout = buildLayout(40, 60);
+    const engine = createStreamRainEngine(layout, { seed: 33 });
+    // Let ambient drops spawn freely for a while (no avoid regions yet).
+    driveTicks(engine, 80);
+    const beforeCount = engine.getFrame().drops.length;
+    expect(beforeCount).toBeGreaterThan(0);
+
+    // Now declare a region covering the vertical middle of every column.
+    // Every drop's head will eventually cross rows 20..39 and retire.
+    engine.setAvoidRegions([{ x: 0, y: 20 * cellSize, w: 40 * cellSize, h: 20 * cellSize }]);
+    // Drive long enough that every previously-alive drop's head reaches
+    // row 20 (even the slowest drop at speed 1.0 makes it in 20 ticks).
+    // New spawns may replace them, but those new spawns would also retire
+    // on entering the band, so the live population collapses.
+    let anyDropCrossed = false;
+    for (let i = 81; i < 200; i++) {
+      engine.step(i * FRAME_MS);
+      for (const d of engine.getFrame().drops) {
+        if (Math.floor(d.row) >= 20 && Math.floor(d.row) < 40) {
+          anyDropCrossed = true;
+        }
+      }
+    }
+    // If a drop head had ever sat inside the region without being retired,
+    // this flag would flip true. The retirement must happen in the same
+    // frame the head enters, so no frame should contain a head in-range.
+    expect(anyDropCrossed).toBe(false);
+  });
+
+  it('refuses enqueueWord placements that fall inside an avoid region', () => {
+    const cols = 20;
+    const cellSize = 12;
+    const layout = buildLayout(cols, 30);
+    const engine = createStreamRainEngine(layout, { seed: 34 });
+    engine.step(0);
+    // Covers the entire top-third drop row band, so every candidate placement
+    // is invalid. Word drops land in the top third (rows 0..9); the region
+    // covers all of them.
+    engine.setAvoidRegions([{ x: 0, y: 0, w: cols * cellSize, h: 10 * cellSize }]);
+
+    engine.enqueueWord('hello', { priority: 1, colorKind: 'text' });
+    expect(engine.getFrame().wordDrops).toHaveLength(0);
+  });
+
+  it('succeeds on retry when part of the layout is free', () => {
+    const cols = 20;
+    const cellSize = 12;
+    const layout = buildLayout(cols, 30);
+    const engine = createStreamRainEngine(layout, { seed: 35 });
+    engine.step(0);
+    // Block only half of the columns. Placement must eventually land in the
+    // unblocked half via the retry loop (WORD_PLACEMENT_MAX_ATTEMPTS tries).
+    engine.setAvoidRegions([{ x: 0, y: 0, w: 10 * cellSize, h: 10 * cellSize }]);
+
+    for (let i = 0; i < 20; i++) {
+      engine.enqueueWord(`w${i}`, { priority: 1, colorKind: 'text' });
+    }
+    const drops = engine.getFrame().wordDrops;
+    expect(drops.length).toBeGreaterThan(0);
+    for (const drop of drops) {
+      // All accepted drops must have landed outside the avoid region.
+      expect(drop.col).toBeGreaterThanOrEqual(10);
+    }
+  });
+
+  it('exposes WORD_PLACEMENT_MAX_ATTEMPTS as an integer > 1', () => {
+    // Guardrail: prevents accidental regression to a single-attempt placement
+    // policy, which would be indistinguishable from the pre-fix behavior.
+    expect(Number.isInteger(WORD_PLACEMENT_MAX_ATTEMPTS)).toBe(true);
+    expect(WORD_PLACEMENT_MAX_ATTEMPTS).toBeGreaterThan(1);
+  });
+
+  it('setAvoidRegions([]) clears the previously-declared regions', () => {
+    const cellSize = 12;
+    const cols = 20;
+    const rows = 30;
+    const engine = createStreamRainEngine(buildLayout(cols, rows), { seed: 36 });
+    // Declare a region at rows 10..19 — drops should retire when they enter it.
+    engine.setAvoidRegions([{ x: 0, y: 10 * cellSize, w: cols * cellSize, h: 10 * cellSize }]);
+    engine.step(0);
+    for (let i = 1; i <= 100; i++) {
+      engine.step(i * FRAME_MS);
+      for (const d of engine.getFrame().drops) {
+        const cellY = Math.floor(d.row) * cellSize;
+        expect(cellY < 10 * cellSize || cellY >= 20 * cellSize).toBe(true);
+      }
+    }
+
+    // Clear the regions; drops may now occupy the previously-blocked rows.
+    engine.setAvoidRegions([]);
+    let sawDropInClearedRegion = false;
+    for (let i = 101; i <= 400; i++) {
+      engine.step(i * FRAME_MS);
+      for (const d of engine.getFrame().drops) {
+        const cellY = Math.floor(d.row) * cellSize;
+        if (cellY >= 10 * cellSize && cellY < 20 * cellSize) sawDropInClearedRegion = true;
+      }
+    }
+    expect(sawDropInClearedRegion).toBe(true);
+  });
+
+  it('resize clears avoid regions (theater will re-publish)', () => {
+    const cellSize = 12;
+    const cols = 20;
+    const rows = 30;
+    const engine = createStreamRainEngine(buildLayout(cols, rows), { seed: 37 });
+    // Declare a region at rows 10..19 and confirm heads retire there.
+    engine.setAvoidRegions([{ x: 0, y: 10 * cellSize, w: cols * cellSize, h: 10 * cellSize }]);
+    engine.step(0);
+    for (let i = 1; i <= 100; i++) {
+      engine.step(i * FRAME_MS);
+      for (const d of engine.getFrame().drops) {
+        const cellY = Math.floor(d.row) * cellSize;
+        expect(cellY < 10 * cellSize || cellY >= 20 * cellSize).toBe(true);
+      }
+    }
+
+    // Resize to a new grid — regions must clear because they're pixel-space
+    // and the theater will re-measure. Without this behavior, stale regions
+    // could silently suppress rendering in the old coords forever.
+    engine.resize(buildLayout(30, 40));
+    let sawDropInPreviouslyBlockedRows = false;
+    for (let i = 101; i <= 400; i++) {
+      engine.step(i * FRAME_MS);
+      for (const d of engine.getFrame().drops) {
+        const cellY = Math.floor(d.row) * cellSize;
+        if (cellY >= 10 * cellSize && cellY < 20 * cellSize) sawDropInPreviouslyBlockedRows = true;
+      }
+    }
+    expect(sawDropInPreviouslyBlockedRows).toBe(true);
+  });
+
+  it('filters degenerate rects (zero / negative area)', () => {
+    const cols = 20;
+    const engine = createStreamRainEngine(buildLayout(cols, 30), { seed: 38 });
+    // All four should be filtered as invalid — the rectangle with zero width
+    // or height matches no cells anyway, but the defensive filter keeps the
+    // per-cell predicate loop tight regardless.
+    engine.setAvoidRegions([
+      { x: 0, y: 0, w: 0, h: 100 },
+      { x: 0, y: 0, w: 100, h: 0 },
+      { x: 0, y: 0, w: -10, h: 100 },
+      { x: 0, y: 0, w: 100, h: -10 },
+    ]);
+    engine.step(0);
+    for (let i = 1; i <= 200; i++) engine.step(i * FRAME_MS);
+    // Degenerate rects must not suppress spawning; behavior should match an
+    // engine that never had regions set.
+    expect(engine.getFrame().drops.length).toBeGreaterThan(0);
   });
 });

@@ -410,6 +410,30 @@ describe('VisualizationDirector — transition-fx', () => {
     const lastField = setField.mock.calls[setField.mock.calls.length - 1][0];
     expect(lastField).not.toBeNull();
   });
+
+  it('forwards setAvoidRegions to the engine under safeStep', () => {
+    const engine = createStreamRainEngine(makeLayout());
+    const setAvoid = vi.spyOn(engine, 'setAvoidRegions');
+    const d = createVisualizationDirector(makeDeps({ engine }));
+    d.setAvoidRegions([{ x: 10, y: 20, w: 100, h: 50 }]);
+    expect(setAvoid).toHaveBeenCalledTimes(1);
+    const passed = setAvoid.mock.calls[0][0];
+    expect(passed).toEqual([{ x: 10, y: 20, w: 100, h: 50 }]);
+  });
+
+  it('isolates errors in setAvoidRegions without crashing the director', () => {
+    const engine = createStreamRainEngine(makeLayout());
+    engine.setAvoidRegions = vi.fn(() => {
+      throw new Error('avoid boom');
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const d = createVisualizationDirector(makeDeps({ engine }));
+    expect(() => d.setAvoidRegions([{ x: 0, y: 0, w: 10, h: 10 }])).not.toThrow();
+    // safeStep logs once and skips the subsystem thereafter; the director
+    // itself must remain usable (setActiveNode / resize etc.).
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
 });
 
 // Minimal check that the director type export is public.

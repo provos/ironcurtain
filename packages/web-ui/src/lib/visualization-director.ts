@@ -26,7 +26,7 @@ import { drawStreamFrame } from './matrix-rain/stream-renderer.js';
 import { FONT_SIZE_TUNING } from './matrix-rain/renderer.js';
 import { computeColumnWeights, type DensitySource } from './matrix-rain/density-field.js';
 import type { LayoutPlan } from './matrix-rain/types.js';
-import type { StreamRainEngine } from './matrix-rain/stream-engine.js';
+import type { AvoidRect, StreamRainEngine } from './matrix-rain/stream-engine.js';
 import { projectSvgToGrid, type SvgPoint } from './project-svg-to-grid.js';
 import type { TokenStreamStore } from './token-stream-store.svelte.js';
 import {
@@ -102,6 +102,12 @@ export interface VisualizationDirector {
   setNodePositions(positions: ReadonlyMap<string, SvgPoint>): void;
   /** Update the active node. Rebuilds the density field with cached positions. */
   setActiveNode(id: string | null): void;
+  /**
+   * Forward avoid regions (CSS pixel rects of node chrome) to the engine so
+   * rain doesn't bleed through opaque node interiors. The theater computes
+   * these from foreignObject bounding rects after each layout.
+   */
+  setAvoidRegions(rects: ReadonlyArray<AvoidRect>): void;
   /** Push a token stream event through the scorer -> engine pipeline. */
   handleStreamEvent(event: TokenStreamEvent): void;
   /** Kick the Chunk 9 transition-FX subsystem. Dropped with a warn-once if a
@@ -253,6 +259,13 @@ export function createVisualizationDirector(deps: DirectorDeps): VisualizationDi
     if (latestPositions.size > 0) rebuildDensityField();
   }
 
+  function setAvoidRegions(rects: ReadonlyArray<AvoidRect>): void {
+    // Thin forward — the engine owns the filtering/defensive-copy logic so
+    // every caller path stays consistent. Isolated via safeStep so a
+    // corrupted rect doesn't take the loop down.
+    safeStep('avoid-regions', () => engine.setAvoidRegions(rects));
+  }
+
   function rebuildDensityField(): void {
     if (layout.cols <= 0 || layout.rows <= 0 || latestPositions.size === 0) {
       engine.setDensityField(null);
@@ -325,6 +338,7 @@ export function createVisualizationDirector(deps: DirectorDeps): VisualizationDi
     resize,
     setNodePositions,
     setActiveNode,
+    setAvoidRegions,
     handleStreamEvent: handleStreamEventImpl,
     triggerTransition,
     getTransitionFxFrame: () => transitionFx.getFrame(),

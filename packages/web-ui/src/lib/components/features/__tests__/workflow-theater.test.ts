@@ -320,4 +320,104 @@ describe('WorkflowTheater', () => {
       expect(container.querySelector('.transition-fx-host')).not.toBeNull();
     });
   });
+
+  // Fix #1 — the theater measures rendered node bounding rects on each
+  // onnodepositions callback and forwards them to the director as avoid
+  // regions. Verify the measurement flow runs end-to-end by overriding
+  // Element.prototype.getBoundingClientRect and watching for foreignObject
+  // invocations while the $effect chain runs on mount.
+  describe('avoid-regions wiring', () => {
+    it('measures node rects after layout fires', async () => {
+      const foCalls: string[] = [];
+      // Swap Element.prototype getBCR so every descendant measurement is
+      // observable, then restore on teardown. Per-element spies don't work
+      // here because the spy needs to be in place *before* the theater's
+      // $effect chain runs — and that runs during render, before the test
+      // body gets control to install spies.
+      const priorDescriptor = Object.getOwnPropertyDescriptor(Element.prototype, 'getBoundingClientRect');
+      const priorFn = Element.prototype.getBoundingClientRect;
+      Element.prototype.getBoundingClientRect = function (this: Element): DOMRect {
+        const tag = this.tagName?.toLowerCase();
+        if (tag === 'foreignobject') {
+          const id = this.getAttribute('data-state-id');
+          if (id) foCalls.push(id);
+          return {
+            x: 50,
+            y: 50,
+            top: 50,
+            left: 50,
+            bottom: 100,
+            right: 130,
+            width: 80,
+            height: 50,
+            toJSON: () => ({}),
+          } as DOMRect;
+        }
+        return priorFn.call(this) as DOMRect;
+      };
+
+      try {
+        render(WorkflowTheater, { props: makeProps() });
+        await flushMicrotasks();
+        // Drain one rAF so the director's loop has had a tick; some of the
+        // measurement flow may defer to the next frame on certain Svelte
+        // versions.
+        drainRaf();
+        await flushMicrotasks();
+        // Three nodes → measure should have run against all three.
+        expect(new Set(foCalls)).toEqual(new Set(['a', 'b', 'c']));
+      } finally {
+        if (priorDescriptor) {
+          Object.defineProperty(Element.prototype, 'getBoundingClientRect', priorDescriptor);
+        } else {
+          Element.prototype.getBoundingClientRect = priorFn;
+        }
+      }
+    });
+  });
+
+  // Fix #3 — the theater-graph wrapper must center its child SVG so the
+  // dagre-laid-out graph sits in the middle of the theater rather than
+  // pinned to the top-left. jsdom doesn't process Svelte scoped CSS
+  // robustly enough to measure computed flex styles, so we assert the
+  // structural contract: the SVG carries the xMidYMid meet hint and lives
+  // inside the expected wrapper. Rendered-layout centering is covered by
+  // the Playwright e2e suite.
+  describe('graph centering in theater mode', () => {
+    it('renders the graph SVG centered within its wrapper', async () => {
+      const { container } = render(WorkflowTheater, { props: makeProps() });
+      await flushMicrotasks();
+      const svg = container.querySelector<SVGSVGElement>('svg.smg-svg');
+      expect(svg).not.toBeNull();
+      if (!svg) return;
+      // With preserveAspectRatio="xMidYMid meet" + width/height:100% the SVG
+      // content is guaranteed to center as long as the wrapper has flex
+      // centering (enforced via CSS). Assert the structural contract: the
+      // SVG lives inside a `.theater-graph` wrapper and carries the
+      // xMidYMid meet hint. If a future refactor drops either, centering
+      // regresses silently — the e2e suite catches the visual failure.
+      expect(svg.getAttribute('preserveAspectRatio')).toBe('xMidYMid meet');
+      expect(svg.closest('.theater-graph')).not.toBeNull();
+    });
+
+    it('declares flex centering rules in the theater style block', async () => {
+      // The regression the fix targets was a dropped centering rule on the
+      // `.theater-graph` wrapper. Guard against a future refactor that
+      // deletes the flex/center rules by scanning the component source. We
+      // can't use document.styleSheets here because @testing-library/svelte
+      // under jsdom doesn't inject Svelte's scoped CSS — the style tags
+      // never reach the document. Reading the source file gives the same
+      // guarantee without relying on jsdom CSS.
+      const fs = await import('node:fs');
+      const path = await import('node:path');
+      const src = fs.readFileSync(
+        path.resolve(process.cwd(), 'src/lib/components/features/workflow-theater.svelte'),
+        'utf-8',
+      );
+      // A theater-graph rule must declare `justify-content: center` and
+      // `align-items: center` — otherwise the SVG pins to a corner.
+      expect(src).toMatch(/\.theater-graph[^{]*\{[^}]*justify-content:\s*center/);
+      expect(src).toMatch(/\.theater-graph[^{]*\{[^}]*align-items:\s*center/);
+    });
+  });
 });

@@ -64,6 +64,21 @@ export interface EnqueueWordOptions {
   readonly colorKind: WordDropSource;
 }
 
+/**
+ * Rectangle in CSS pixel space that the engine must not spawn drops or word
+ * drops inside. The theater declares these when graph nodes mount so rain
+ * "parts" around opaque node chrome rather than bleeding through.
+ */
+export interface AvoidRect {
+  readonly x: number;
+  readonly y: number;
+  readonly w: number;
+  readonly h: number;
+}
+
+/** How many times `enqueueWord` retries picking a non-avoided cell before giving up. */
+export const WORD_PLACEMENT_MAX_ATTEMPTS = 10;
+
 export interface StreamRainEngine {
   step(nowMs: number): void;
   getFrame(): FrameState;
@@ -73,6 +88,13 @@ export interface StreamRainEngine {
   setDensityField(field: Float32Array | null): void;
   /** Scale ambient population/spawn budget. Clamped to [0.3, 2.0]. */
   setIntensity(multiplier: number): void;
+  /**
+   * Declare rectangular regions (in CSS pixel space) where drops must not
+   * spawn and word drops must not land. Existing drops whose head enters an
+   * avoid region are retired so rain "parts" around them. Pass an empty array
+   * (or call with no regions after resize) to clear.
+   */
+  setAvoidRegions(rects: ReadonlyArray<AvoidRect>): void;
   readonly phase: 'stream';
 }
 
@@ -134,6 +156,9 @@ export function createStreamRainEngine(layout: LayoutPlan, options: StreamRainEn
 
   let intensity = 1.0;
 
+  /** Avoid regions in CSS pixel space. Empty = no regions. */
+  let avoidRegions: ReadonlyArray<AvoidRect> = [];
+
   // Time bookkeeping mirrors the login engine's step() semantics.
   let lastTick = 0;
   let hasPrimedLastTick = false;
@@ -180,7 +205,11 @@ export function createStreamRainEngine(layout: LayoutPlan, options: StreamRainEn
 
     // Inverse-CDF draw with cooldown rejection — cheap: a handful of retries
     // keeps the common case O(log cols) + a few retries, and falls back to
-    // -1 (skip this spawn) if every attempt hits a cooldown.
+    // -1 (skip this spawn) if every attempt hits a cooldown. Avoid regions are
+    // not consulted at spawn time — drops start at row -1 (off-grid), and
+    // `advanceAmbientDrops` retires them when their head enters a region.
+    // That preserves full-density rain *above* each node instead of leaving
+    // empty vertical stripes through every column a node spans.
     for (let attempt = 0; attempt < 6; attempt++) {
       const r = rng.random() * cdfSum;
       const col = binarySearchCdf(cdf, r);
@@ -200,6 +229,27 @@ export function createStreamRainEngine(layout: LayoutPlan, options: StreamRainEn
     const r = rng.random() * cdfSum;
     const col = binarySearchCdf(cdf, r);
     return col >= 0 && col < cols ? col : cols - 1;
+  }
+
+  // -----------------------------------------------------------------------
+  // Avoid regions
+  // -----------------------------------------------------------------------
+
+  /**
+   * True when a specific (col, row) cell falls inside any declared region.
+   * Used to retire drops whose heads entered a region after the theater
+   * published new node positions, and to gate word-drop placement.
+   */
+  function isCellInAvoidRegion(col: number, row: number): boolean {
+    if (avoidRegions.length === 0) return false;
+    const cellSize = currentLayout.cellSize;
+    const cellX = col * cellSize;
+    const cellY = row * cellSize;
+    for (let i = 0; i < avoidRegions.length; i++) {
+      const r = avoidRegions[i];
+      if (cellX >= r.x && cellX < r.x + r.w && cellY >= r.y && cellY < r.y + r.h) return true;
+    }
+    return false;
   }
 
   // -----------------------------------------------------------------------
@@ -230,6 +280,12 @@ export function createStreamRainEngine(layout: LayoutPlan, options: StreamRainEn
         drop.headIdx = (drop.headIdx + 1) % drop.chars.length;
       }
       if (drop.headRow - drop.trailLen >= rows) drop.alive = false;
+      // Retire once the head enters a declared avoid region. "Retire" (rather
+      // than "stop moving") lets the trail continue to decay naturally on the
+      // next frames so rain parts around nodes instead of clipping abruptly.
+      if (drop.alive && isCellInAvoidRegion(drop.col, Math.floor(drop.headRow))) {
+        drop.alive = false;
+      }
     }
     // Compact in place.
     let w = 0;
@@ -441,15 +497,34 @@ export function createStreamRainEngine(layout: LayoutPlan, options: StreamRainEn
           }
         }
         heldWords.length = w;
+        // Avoid regions are in CSS pixel space; after a viewport resize the
+        // theater will re-measure node bounding rects and re-publish. Clear
+        // the stale set rather than keeping rects that may now point off-grid.
+        avoidRegions = [];
       }
     },
 
     enqueueWord(word: string, opts: EnqueueWordOptions): void {
       if (word.length === 0) return;
       if (currentLayout.cols <= 0 || currentLayout.rows <= 0) return;
-      const col = pickWeightedColumnIgnoringCooldown();
-      if (col < 0) return;
-      const row = wordDropRow();
+      // Retry placement up to WORD_PLACEMENT_MAX_ATTEMPTS times when avoid
+      // regions are declared — a word that would land on a node is dropped
+      // rather than "sliding out" to a permitted cell, since sliding would
+      // bias placement toward region edges in ways the density field can't
+      // correct.
+      let col = -1;
+      let row = -1;
+      for (let attempt = 0; attempt < WORD_PLACEMENT_MAX_ATTEMPTS; attempt++) {
+        const candidateCol = pickWeightedColumnIgnoringCooldown();
+        if (candidateCol < 0) return;
+        const candidateRow = wordDropRow();
+        if (!isCellInAvoidRegion(candidateCol, candidateRow)) {
+          col = candidateCol;
+          row = candidateRow;
+          break;
+        }
+      }
+      if (col < 0 || row < 0) return;
       heldWords.push({
         col,
         row,
@@ -475,6 +550,17 @@ export function createStreamRainEngine(layout: LayoutPlan, options: StreamRainEn
     setIntensity(multiplier: number): void {
       if (!Number.isFinite(multiplier)) return;
       intensity = Math.max(INTENSITY_MIN, Math.min(INTENSITY_MAX, multiplier));
+    },
+
+    setAvoidRegions(rects: ReadonlyArray<AvoidRect>): void {
+      // Defensive copy so callers can mutate their list without tearing the
+      // engine's state. Filter out degenerate rects (zero/negative area) —
+      // they match nothing and just add cost to every per-cell predicate.
+      const filtered: AvoidRect[] = [];
+      for (const r of rects) {
+        if (r.w > 0 && r.h > 0) filtered.push({ x: r.x, y: r.y, w: r.w, h: r.h });
+      }
+      avoidRegions = filtered;
     },
 
     get phase(): 'stream' {

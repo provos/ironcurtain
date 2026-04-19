@@ -31,6 +31,7 @@
 
   import { onMount, untrack } from 'svelte';
   import { createStreamRainEngine } from '$lib/matrix-rain/stream-engine.js';
+  import type { AvoidRect } from '$lib/matrix-rain/stream-engine.js';
   import type { LayoutPlan } from '$lib/matrix-rain/types.js';
   import { tokenStreamStore } from '$lib/token-stream-store-singleton.js';
   import { createVisualizationDirector, type VisualizationDirector } from '$lib/visualization-director.js';
@@ -149,6 +150,16 @@
     // re-creating the director mid-cycle and losing any in-flight FX. The
     // dedicated effect below tracks currentState for the setActiveNode call.
     d.setActiveNode(untrack(() => currentState));
+    // Flush any node positions that were reported by the graph before the
+    // director finished initializing. Svelte 5 runs child $effects ahead of
+    // parent $effects, so handleNodePositions typically fires once with a
+    // null director on mount — catch that up now so the density field and
+    // avoid regions are live on the first rendered frame.
+    if (pendingPositions !== null) {
+      d.setNodePositions(pendingPositions);
+      d.setAvoidRegions(measureNodeAvoidRegions());
+      pendingPositions = null;
+    }
 
     // Only start if the tab is visible. If hidden, we wait for the first
     // visible event before kicking the loop — matches AC4.
@@ -291,6 +302,11 @@
         const newLayout = buildLayout(w, h);
         sizeCanvas(canvas, ctx, newLayout.viewportWidth, newLayout.viewportHeight);
         d.resize(newLayout);
+        // `engine.resize()` clears avoid regions on a grid change; re-publish
+        // from the theater's current DOM measurements so the rain keeps
+        // parting around nodes. Even without a grid change, node rects shift
+        // in CSS pixels when the viewport resizes, so a re-publish is correct.
+        d.setAvoidRegions(measureNodeAvoidRegions());
       });
     });
     ro.observe(container);
@@ -301,8 +317,57 @@
   // Graph callbacks — forward to the director
   // ---------------------------------------------------------------------------
 
+  /**
+   * Latest positions reported by the graph. Cached so the setup $effect can
+   * forward them to the director on the first tick — Svelte 5 runs child
+   * $effects before parent $effects, so `handleNodePositions` frequently
+   * fires before `director` is initialized. Without this buffer the initial
+   * density field + avoid regions would be dropped until the next layout.
+   */
+  let pendingPositions: ReadonlyMap<string, SvgPoint> | null = null;
+
   function handleNodePositions(positions: ReadonlyMap<string, SvgPoint>): void {
-    director?.setNodePositions(positions);
+    pendingPositions = positions;
+    if (director) {
+      director.setNodePositions(positions);
+      director.setAvoidRegions(measureNodeAvoidRegions());
+    }
+  }
+
+  /**
+   * Measure the CSS-pixel bounding rect of each rendered node (keyed by
+   * `data-state-id` on the foreignObject) relative to the theater's own
+   * container, then publish the list to the director. The stream engine
+   * uses these rects to avoid spawning drops inside opaque node chrome so
+   * rain "parts" around nodes cleanly.
+   *
+   * Called from the graph's `onnodepositions` callback (after each layout
+   * pass), which is the precise moment the foreignObject elements have been
+   * placed in the DOM at the positions we're about to measure. Reading
+   * getBoundingClientRect() here is one paint of forced layout per node —
+   * acceptable because the graph only re-lays-out on resize or graph
+   * changes, not per frame.
+   */
+  function measureNodeAvoidRegions(): AvoidRect[] {
+    if (!graphEl || !containerEl) return [];
+    const containerRect = containerEl.getBoundingClientRect();
+    const foreignObjects = graphEl.querySelectorAll('foreignObject[data-state-id]');
+    const rects: AvoidRect[] = [];
+    for (const fo of foreignObjects) {
+      // foreignObject is an SVGGraphicsElement; getBoundingClientRect() reports
+      // the element's CSS-pixel bbox in viewport coords. Subtract the theater's
+      // own origin so the rect lives in the same coordinate space as the
+      // canvas the stream engine paints into.
+      const r = (fo as SVGGraphicsElement).getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0) continue;
+      rects.push({
+        x: r.left - containerRect.left,
+        y: r.top - containerRect.top,
+        w: r.width,
+        h: r.height,
+      });
+    }
+    return rects;
   }
 
   function handleTransition(evt: TransitionEvent): void {
@@ -463,14 +528,32 @@
     z-index: 10;
     pointer-events: auto;
     /* The graph component wraps itself in a scroll container capped at 60vh.
-       Inside the theater we want it to fill the container, not the viewport. */
+       Inside the theater we want it to fill the container, not the viewport.
+       center + center lets the SVG's xMidYMid meet preserveAspectRatio kick
+       in symmetrically — stretch + stretch left the SVG pinned top-left in
+       browsers that honored intrinsic SVG aspect. */
     display: flex;
-    align-items: stretch;
-    justify-content: stretch;
+    align-items: center;
+    justify-content: center;
   }
   .theater-graph :global(> div) {
     width: 100%;
     height: 100%;
     max-height: none;
+    /* The inner wrapper is the dagre layout's scrolling box. Center its
+       SVG child so a short/wide graph viewBox sits in the middle of the
+       theater instead of hugging the top-left. */
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  /* Force the SVG to fill both axes of its wrapper; preserveAspectRatio
+     handles the centering of the actual graph content within. Without an
+     explicit height the SVG defaults to intrinsic (viewBox) height which
+     broke centering when the theater wrapped the graph in a full-height
+     container. */
+  .theater-graph :global(svg.smg-svg) {
+    width: 100%;
+    height: 100%;
   }
 </style>

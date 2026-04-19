@@ -478,10 +478,13 @@
   }
 
   /* Active: breathing pulse. 1.8s sine cycle, 0.4 -> 1.0 on the glow so it's
-     clearly alive without being fidgety across the minutes a state runs. */
+     clearly alive without being fidgety across the minutes a state runs.
+     Background layers a primary tint over an opaque-ish backdrop so the
+     pulse + label read cleanly against the rain instead of letting
+     characters flicker through the interior. */
   .smg-node--active {
     border: 2px solid hsl(var(--primary));
-    background: hsl(var(--primary) / 0.18);
+    background: linear-gradient(hsl(var(--primary) / 0.18), hsl(var(--primary) / 0.18)), hsl(var(--background) / 0.7);
     animation: smg-node-pulse 1.8s ease-in-out infinite;
   }
   /* Phosphor bloom on the active-node label (§E.5). Same drop-shadow idiom
@@ -495,7 +498,7 @@
   }
   .smg-node--active.smg-node--human_gate {
     border-color: hsl(var(--warning));
-    background: hsl(var(--warning) / 0.18);
+    background: linear-gradient(hsl(var(--warning) / 0.18), hsl(var(--warning) / 0.18)), hsl(var(--background) / 0.7);
     animation-name: smg-node-pulse-warn;
   }
 
@@ -534,16 +537,23 @@
     }
   }
 
+  /* Completed: faded but still readable. Opaque-ish background keeps the
+     check glyph and label legible against the rain backdrop; a light success
+     tint preserves the "done" affordance the old 0.15 success fill gave us. */
   .smg-node--completed {
     opacity: 0.4;
     border: 1px solid hsl(var(--success) / 0.5);
-    background: hsl(var(--success) / 0.15);
+    background: linear-gradient(hsl(var(--success) / 0.12), hsl(var(--success) / 0.12)), hsl(var(--background) / 0.6);
   }
 
-  /* Failed: constant crimson glow, no pulse -- dead things don't breathe. */
+  /* Failed: constant crimson glow, no pulse -- dead things don't breathe.
+     Stays at full opacity so the failure affordance is never missed. The
+     destructive tint layers over an opaque-ish backdrop so the crimson
+     chrome reads cleanly against the rain behind the theater. */
   .smg-node--failed {
     border: 2px solid hsl(var(--destructive));
-    background: hsl(var(--destructive) / 0.2);
+    background:
+      linear-gradient(hsl(var(--destructive) / 0.2), hsl(var(--destructive) / 0.2)), hsl(var(--background) / 0.7);
     box-shadow: 0 0 16px hsl(var(--destructive) / 0.7);
   }
 
@@ -552,9 +562,15 @@
     border-style: dashed;
   }
   /* Unvisited pending nodes (not currently active, not completed, not failed):
-     dim them hard so the active pulse reads as the focal point. */
+     raised from the original 0.2/dashed/no-background to 0.7/solid/opaque
+     backdrop. At 0.2 over the rain the nodes effectively disappeared; the
+     graph's shape has to read clearly even when the active node is hidden,
+     which is the Fix #2 forcing function. Solid border beats dashed here
+     because dashed reads as noise against the flickering rain. */
   .smg-node--pending:not(.smg-node--active):not(.smg-node--completed):not(.smg-node--failed) {
-    opacity: 0.2;
+    opacity: 0.7;
+    border-style: solid;
+    background: hsl(var(--background) / 0.6);
   }
 
   /* Accessibility: respect the user's motion preferences. The active-node pulse
