@@ -140,10 +140,16 @@ export class DockerAgentSession implements Session {
     this.onDiagnostic = deps.onDiagnostic;
     this.createdAt = new Date().toISOString();
 
-    // If the conversation state dir already has real content (beyond the
-    // empty `projects/` seed), treat this as a resumed session -- the next
-    // turn should use `--resume <uuid>` rather than pin a fresh session id.
-    if (this.infra.conversationStateDir && hasConversationStateContent(this.infra.conversationStateDir)) {
+    // If Claude CLI has a prior conversation for THIS session id, treat
+    // the first turn as "already done" so buildCommand emits
+    // `--resume <uuid>` instead of `--session-id <uuid>`. Matching on
+    // the specific sessionId matters in shared-container workflow mode:
+    // each borrowing state constructs a new DockerAgentSession with a
+    // fresh UUID but a conversationStateDir that already contains the
+    // prior state's `.jsonl`. Resuming that UUID would fail with "No
+    // conversation found" because Claude never created a session with
+    // the fresh id.
+    if (this.infra.conversationStateDir && hasConversationForSession(this.infra.conversationStateDir, this.sessionId)) {
       this.firstTurnComplete = true;
     }
   }
@@ -164,7 +170,10 @@ export class DockerAgentSession implements Session {
     mkdirSync(this.infra.sandboxDir, { recursive: true });
     mkdirSync(this.infra.escalationDir, { recursive: true });
 
-    // Write the effective system prompt for debugging
+    // Write the effective system prompt for debugging. In borrow mode
+    // this overwrites the same bundle-scoped file each state with the
+    // same content -- acceptable since the container's bind mount
+    // consumes this file.
     writeFileSync(resolve(this.infra.sessionDir, 'system-prompt.txt'), this.systemPrompt);
 
     logger.info(`Session attached to container: ${this.infra.containerId.substring(0, 12)}`);
@@ -349,6 +358,15 @@ export class DockerAgentSession implements Session {
     if (this.ownsInfra) {
       await destroyDockerInfrastructure(this.infra);
     }
+
+    // Release the logger singleton so the next session (borrow-mode
+    // workflow state transition, or a cron job kicked off after the
+    // current one closes) can claim it with its own log path. Without
+    // this, setup() retargets via the tolerant path rather than a
+    // clean re-init, and console writes made between sessions fall
+    // into the previous state's log file. See `src/logger.ts` for the
+    // singleton invariant.
+    logger.teardown();
   }
 
   // --- Private helpers ---
@@ -375,16 +393,17 @@ export class DockerAgentSession implements Session {
  * On fresh sessions, `prepareConversationStateDir()` seeds an empty
  * `projects/` directory. Claude Code writes transcripts as `.jsonl` files
  * under `projects/<cwd-hash>/`, so we must look inside that tree to detect
- * whether the agent has populated any per-project session files. Seed files
- * (hook scripts, configs) are not considered; only actual conversation
- * history counts as prior content.
+ * whether Claude CLI has a conversation file for the given sessionId.
+ * Claude stores each session as `projects/<encoded-path>/<sessionId>.jsonl`,
+ * so we match on the filename alone. Seed/config files are ignored.
  */
-function hasConversationStateContent(stateDir: string): boolean {
+function hasConversationForSession(stateDir: string, sessionId: string): boolean {
   try {
     const projectsDir = resolve(stateDir, 'projects');
     if (!existsSync(projectsDir)) return false;
+    const target = `${sessionId}.jsonl`;
     for (const entry of readdirSync(projectsDir, { withFileTypes: true, recursive: true })) {
-      if (entry.isFile() && entry.name.endsWith('.jsonl')) return true;
+      if (entry.isFile() && entry.name === target) return true;
     }
     return false;
   } catch {

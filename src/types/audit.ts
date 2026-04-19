@@ -34,4 +34,14 @@ export interface AuditEntry {
    * original escalation approval. Only present when whitelistApproved is true.
    */
   whitelistPatternId?: string;
+
+  /**
+   * Persona under which the tool call was evaluated. Set by the
+   * `ToolCallCoordinator` from its `currentPersona` field (updated
+   * inside `loadPolicy`). Absent for single-session modes (CLI, daemon,
+   * cron) that never call `loadPolicy`. In workflow runs every audit
+   * entry carries a persona because `loadPolicy` is invoked before the
+   * first tool call of each agent-state entry.
+   */
+  persona?: string;
 }

@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Features
+
+- **Workflow shared-container mode** — opt in via `settings.sharedContainer: true` in a workflow YAML. One Docker container and one `ToolCallCoordinator` serve every agent state in the run; the orchestrator hot-swaps the active `PolicyEngine` between states via `POST /__ironcurtain/policy/load` over a per-run Unix domain control socket, and the coordinator swaps under `callMutex → policyMutex`. Audit entries are tagged with `persona` and written to a single `audit.jsonl` per run (the `AuditLog.rotate` API is gone). Run artifacts consolidate under `~/.ironcurtain/workflow-runs/<id>/` with `bundle/`, `states/<stateId>.<visitCount>/`, `audit.jsonl`, and `messages.jsonl`; nothing lands under `~/.ironcurtain/sessions/` for a workflow run. Implements Steps 4-5 of `docs/designs/workflow-container-lifecycle.md`.
+- **Session-side infrastructure borrow path** — `SessionOptions.workflowInfrastructure?: DockerInfrastructure` lets a caller hand a pre-built bundle to `createDockerSession`; the resulting session is constructed with `ownsInfra: false` so `close()` leaves the bundle alive. `DockerProxy.getPolicySwapTarget()` returns a narrow `PolicySwapTarget` (`startControlServer` only) that the orchestrator uses to wire the coordinator to the workflow control socket.
+
+### Fixes
+
+- **Shared `validatePolicyDir` helper** — `src/config/validate-policy-dir.ts` realpath-resolves candidate policy directories and enforces containment under the IronCurtain home or the package config dir; CLI flags, the `loadPolicy` RPC, and session creation all funnel through it.
+- **Shared `applyAllowedDirectoryToMcpArgs` helper** — single source of truth in `src/config/index.ts` for keeping `mcpServers.filesystem.args` in sync with the active `allowedDirectory`; fixes stale paths in shared-container workflow runs.
+- **Audit stream errors latch** — `AuditLog` now remembers stream errors and surfaces them synchronously on the next `log()` instead of silently dropping entries.
+- **Workflow run directory hardened at 0o700** — `chmodSync` enforces the mode so the control socket and audit log are protected by filesystem permissions.
+
 ## [0.10.0] - 2026-04-01
 
 ### Features

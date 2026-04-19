@@ -2,8 +2,8 @@
  * Tests for the coordinator's HTTP control server and real `loadPolicy`.
  *
  * Covers:
- *   - Unit: `coordinator.loadPolicy(...)` swaps engine + audit on success,
- *     and leaves the old engine/audit intact on failure.
+ *   - Unit: `coordinator.loadPolicy(...)` swaps engine + persona stamp
+ *     on success, and leaves the old engine intact on failure.
  *   - HTTP: the control endpoint validates input, dispatches to
  *     `loadPolicy`, and surfaces 200/400/500 correctly.
  *   - Concurrency: a slow in-flight tool call delays `loadPolicy` until
@@ -136,6 +136,9 @@ function postRawUds(socketPath: string, path: string, body: string): Promise<Htt
 beforeEach(() => {
   mkdirSync(TEST_ROOT, { recursive: true });
   mkdirSync(TEST_SANDBOX_DIR, { recursive: true });
+  // Treat TEST_ROOT as this run's IronCurtain home so persona policy
+  // dirs written inside it pass the coordinator's containment check.
+  process.env.IRONCURTAIN_HOME = TEST_ROOT;
 });
 
 afterEach(() => {
@@ -144,6 +147,7 @@ afterEach(() => {
   } catch {
     // best-effort
   }
+  delete process.env.IRONCURTAIN_HOME;
 });
 
 // ---------------------------------------------------------------------------
@@ -151,9 +155,8 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('ToolCallCoordinator.loadPolicy (unit)', () => {
-  it('swaps the policy engine and rotates the audit log on success', async () => {
-    const auditOldPath = join(TEST_ROOT, 'audit.old.jsonl');
-    const auditNewPath = join(TEST_ROOT, 'audit.new.jsonl');
+  it('swaps the policy engine and stamps the new persona on subsequent audit entries', async () => {
+    const auditPath = join(TEST_ROOT, 'audit.single.jsonl');
     const newPolicyDir = mkdir(join(TEST_ROOT, 'new-policy'));
     // A minimal but valid policy with zero rules.
     writePersonaPolicy(newPolicyDir, {
@@ -166,36 +169,68 @@ describe('ToolCallCoordinator.loadPolicy (unit)', () => {
       toolAnnotations: testToolAnnotations,
       protectedPaths: TEST_PROTECTED_PATHS,
       allowedDirectory: TEST_SANDBOX_DIR,
-      auditLogPath: auditOldPath,
+      auditLogPath: auditPath,
     });
     const oldEngine = coordinator.getPolicyEngine();
     registerFilesystemTools(coordinator, mockSuccessClient());
 
     try {
-      // Drop one entry in the old audit so we can verify rotation
-      // didn't touch the old file.
+      // Pre-swap: no persona active, so entries omit the field.
       await coordinator.handleStructuredToolCall(makeRequest());
 
-      await coordinator.loadPolicy({
-        persona: 'reviewer',
-        version: 1,
-        policyDir: newPolicyDir,
-        auditPath: auditNewPath,
-      });
+      await coordinator.loadPolicy({ persona: 'reviewer', policyDir: newPolicyDir });
 
       const newEngine = coordinator.getPolicyEngine();
       expect(newEngine).not.toBe(oldEngine);
 
-      // Entries logged after rotate land in the new file.
+      // Post-swap: the coordinator stamps `persona: 'reviewer'` on
+      // every subsequent audit entry. Same single file as before.
       await coordinator.handleStructuredToolCall(makeRequest());
     } finally {
       await coordinator.close();
     }
 
-    const oldEntries = readAudit(auditOldPath);
-    const newEntries = readAudit(auditNewPath);
-    expect(oldEntries.length).toBe(1);
-    expect(newEntries.length).toBe(1);
+    const entries = readAudit(auditPath);
+    expect(entries.length).toBe(2);
+    expect(entries[0].persona).toBeUndefined();
+    expect(entries[1].persona).toBe('reviewer');
+  });
+
+  it('rejects a policyDir outside the trusted roots without touching the live policy', async () => {
+    // Defense-in-depth: any process that can reach the control socket
+    // can invoke `loadPolicy`, so the coordinator must refuse paths
+    // outside `$IRONCURTAIN_HOME` / the package config dir before
+    // calling the policy loader.
+    const auditPath = join(TEST_ROOT, 'audit.untrusted.jsonl');
+    // A path that's definitely outside the test's IronCurtain home.
+    const evilDir = resolve(tmpdir(), `coord-evil-${process.pid}`);
+    mkdirSync(evilDir, { recursive: true });
+    // Populate it with a syntactically-valid policy so that if the
+    // validator is missing, the loader would otherwise succeed.
+    writePersonaPolicy(evilDir, { ...testCompiledPolicy, rules: [] });
+
+    const coordinator = new ToolCallCoordinator({
+      compiledPolicy: testCompiledPolicy,
+      toolAnnotations: testToolAnnotations,
+      protectedPaths: TEST_PROTECTED_PATHS,
+      allowedDirectory: TEST_SANDBOX_DIR,
+      auditLogPath: auditPath,
+    });
+    const oldEngine = coordinator.getPolicyEngine();
+    registerFilesystemTools(coordinator, mockSuccessClient());
+
+    try {
+      await expect(coordinator.loadPolicy({ persona: 'reviewer', policyDir: evilDir })).rejects.toThrow(
+        /policyDir must be under a trusted directory/,
+      );
+
+      // Engine reference is unchanged -- the attempted load was
+      // rejected before touching anything.
+      expect(coordinator.getPolicyEngine()).toBe(oldEngine);
+    } finally {
+      await coordinator.close();
+      rmSync(evilDir, { recursive: true, force: true });
+    }
   });
 
   it('leaves the old engine active when the new policy dir is missing', async () => {
@@ -213,19 +248,13 @@ describe('ToolCallCoordinator.loadPolicy (unit)', () => {
     registerFilesystemTools(coordinator, mockSuccessClient());
 
     try {
-      await expect(
-        coordinator.loadPolicy({
-          persona: 'reviewer',
-          version: 1,
-          policyDir: missingDir,
-          auditPath: join(TEST_ROOT, 'audit.never-opened.jsonl'),
-        }),
-      ).rejects.toThrow();
+      await expect(coordinator.loadPolicy({ persona: 'reviewer', policyDir: missingDir })).rejects.toThrow();
 
       // Engine reference is unchanged.
       expect(coordinator.getPolicyEngine()).toBe(oldEngine);
 
-      // Old audit stream is still usable.
+      // Audit stream is still usable; since persona swap never
+      // completed, the entry must not carry a persona.
       await coordinator.handleStructuredToolCall(makeRequest());
     } finally {
       await coordinator.close();
@@ -233,69 +262,7 @@ describe('ToolCallCoordinator.loadPolicy (unit)', () => {
 
     const entries = readAudit(auditPath);
     expect(entries.length).toBe(1);
-    // The new audit file should NOT have been created.
-    expect(existsSync(join(TEST_ROOT, 'audit.never-opened.jsonl'))).toBe(false);
-  });
-
-  it('leaves the old engine active when audit rotate fails after a successful policy build', async () => {
-    // Symmetric of the "missing policy dir" test: this time the
-    // policy loads fine but the audit rotation throws. The engine
-    // reference must NOT swap and the old audit stream must still be
-    // writable.
-    const auditPath = join(TEST_ROOT, 'audit.rotate-fails.jsonl');
-    const newPolicyDir = mkdir(join(TEST_ROOT, 'policy-ok-but-audit-fails'));
-    writePersonaPolicy(newPolicyDir, { ...testCompiledPolicy, rules: [] });
-
-    const coordinator = new ToolCallCoordinator({
-      compiledPolicy: testCompiledPolicy,
-      toolAnnotations: testToolAnnotations,
-      protectedPaths: TEST_PROTECTED_PATHS,
-      allowedDirectory: TEST_SANDBOX_DIR,
-      auditLogPath: auditPath,
-    });
-    const oldEngine = coordinator.getPolicyEngine();
-    registerFilesystemTools(coordinator, mockSuccessClient());
-
-    // Monkey-patch the internal `auditLog.rotate` to throw, simulating
-    // e.g. ENOSPC / EACCES on the new stream. Accessing via `unknown`
-    // is deliberate: this is a white-box test of the ordering invariant
-    // in `loadPolicy` (build engine, then rotate audit, then swap).
-    const internals = coordinator as unknown as {
-      auditLog: { rotate: (path: string) => Promise<void> };
-    };
-    const originalRotate = internals.auditLog.rotate.bind(internals.auditLog);
-    internals.auditLog.rotate = async () => {
-      throw new Error('simulated rotate failure');
-    };
-
-    try {
-      await expect(
-        coordinator.loadPolicy({
-          persona: 'reviewer',
-          version: 1,
-          policyDir: newPolicyDir,
-          auditPath: join(TEST_ROOT, 'audit.never-rotated.jsonl'),
-        }),
-      ).rejects.toThrow(/simulated rotate failure/);
-
-      // Engine reference is unchanged -- the swap happens AFTER rotate
-      // in `loadPolicy`, so a rotate failure must leave the old engine
-      // active.
-      expect(coordinator.getPolicyEngine()).toBe(oldEngine);
-
-      // Restore the real rotate so `close()` and subsequent log writes
-      // behave normally; then verify the old audit stream is still
-      // writable by driving a tool call through it.
-      internals.auditLog.rotate = originalRotate;
-      await coordinator.handleStructuredToolCall(makeRequest());
-    } finally {
-      await coordinator.close();
-    }
-
-    const entries = readAudit(auditPath);
-    expect(entries.length).toBe(1);
-    // The new audit file should NOT have been created.
-    expect(existsSync(join(TEST_ROOT, 'audit.never-rotated.jsonl'))).toBe(false);
+    expect(entries[0].persona).toBeUndefined();
   });
 });
 
@@ -305,8 +272,7 @@ describe('ToolCallCoordinator.loadPolicy (unit)', () => {
 
 describe('ToolCallCoordinator control endpoint (UDS)', () => {
   it('accepts a valid load request, returns 200, and swaps the engine', async () => {
-    const auditOldPath = join(TEST_ROOT, 'audit.old.jsonl');
-    const auditNewPath = join(TEST_ROOT, 'audit.new.jsonl');
+    const auditPath = join(TEST_ROOT, 'audit.http-success.jsonl');
     const socketPath = join(TEST_ROOT, 'control-success.sock');
     const newPolicyDir = mkdir(join(TEST_ROOT, 'policy-success'));
     writePersonaPolicy(newPolicyDir, { ...testCompiledPolicy, rules: [] });
@@ -316,7 +282,7 @@ describe('ToolCallCoordinator control endpoint (UDS)', () => {
       toolAnnotations: testToolAnnotations,
       protectedPaths: TEST_PROTECTED_PATHS,
       allowedDirectory: TEST_SANDBOX_DIR,
-      auditLogPath: auditOldPath,
+      auditLogPath: auditPath,
       controlServerListen: { socketPath },
     });
     registerFilesystemTools(coordinator, mockSuccessClient());
@@ -328,9 +294,7 @@ describe('ToolCallCoordinator control endpoint (UDS)', () => {
 
       const body = JSON.stringify({
         persona: 'reviewer',
-        version: 2,
         policyDir: newPolicyDir,
-        auditPath: auditNewPath,
       });
       const res = await postJsonUds(socketPath, '/__ironcurtain/policy/load', body);
       expect(res.status).toBe(200);
@@ -343,7 +307,8 @@ describe('ToolCallCoordinator control endpoint (UDS)', () => {
 
       expect(coordinator.getPolicyEngine()).not.toBe(oldEngine);
 
-      // A subsequent tool call writes to the new audit file.
+      // A subsequent tool call is stamped with the new persona and
+      // lands in the same (single) audit file.
       await coordinator.handleStructuredToolCall(makeRequest());
     } finally {
       await coordinator.close();
@@ -351,7 +316,9 @@ describe('ToolCallCoordinator control endpoint (UDS)', () => {
 
     // Socket file removed on close.
     expect(existsSync(socketPath)).toBe(false);
-    expect(readAudit(auditNewPath).length).toBeGreaterThanOrEqual(1);
+    const entries = readAudit(auditPath);
+    expect(entries.length).toBeGreaterThanOrEqual(1);
+    expect(entries.at(-1)?.persona).toBe('reviewer');
   });
 
   it('returns 400 for malformed JSON', async () => {
@@ -409,9 +376,7 @@ describe('ToolCallCoordinator control endpoint (UDS)', () => {
       const filler = 'x'.repeat(8192);
       const body = JSON.stringify({
         persona: 'reviewer',
-        version: 1,
         policyDir: '/tmp/unused',
-        auditPath: '/tmp/unused.jsonl',
         filler,
       });
       expect(Buffer.byteLength(body)).toBeGreaterThan(4096);
@@ -441,14 +406,36 @@ describe('ToolCallCoordinator control endpoint (UDS)', () => {
     }
   });
 
-  it('returns 400 when required fields are missing', async () => {
-    const socketPath = join(TEST_ROOT, 'control-missing.sock');
+  it('returns 400 when policyDir is missing', async () => {
+    const socketPath = join(TEST_ROOT, 'control-missing-dir.sock');
     const coordinator = new ToolCallCoordinator({
       compiledPolicy: testCompiledPolicy,
       toolAnnotations: testToolAnnotations,
       protectedPaths: TEST_PROTECTED_PATHS,
       allowedDirectory: TEST_SANDBOX_DIR,
-      auditLogPath: join(TEST_ROOT, 'audit.missing.jsonl'),
+      auditLogPath: join(TEST_ROOT, 'audit.missing-dir.jsonl'),
+      controlServerListen: { socketPath },
+    });
+
+    try {
+      await coordinator.start();
+      const res = await postJsonUds(socketPath, '/__ironcurtain/policy/load', JSON.stringify({ persona: 'reviewer' }));
+      expect(res.status).toBe(400);
+      const parsed = JSON.parse(res.body) as { error: string };
+      expect(parsed.error).toMatch(/policyDir/);
+    } finally {
+      await coordinator.close();
+    }
+  });
+
+  it('returns 400 when persona is missing', async () => {
+    const socketPath = join(TEST_ROOT, 'control-missing-persona.sock');
+    const coordinator = new ToolCallCoordinator({
+      compiledPolicy: testCompiledPolicy,
+      toolAnnotations: testToolAnnotations,
+      protectedPaths: TEST_PROTECTED_PATHS,
+      allowedDirectory: TEST_SANDBOX_DIR,
+      auditLogPath: join(TEST_ROOT, 'audit.missing-persona.jsonl'),
       controlServerListen: { socketPath },
     });
 
@@ -457,11 +444,37 @@ describe('ToolCallCoordinator control endpoint (UDS)', () => {
       const res = await postJsonUds(
         socketPath,
         '/__ironcurtain/policy/load',
-        JSON.stringify({ persona: 'reviewer', version: 1 }),
+        JSON.stringify({ policyDir: '/tmp/some-dir' }),
       );
       expect(res.status).toBe(400);
       const parsed = JSON.parse(res.body) as { error: string };
-      expect(parsed.error).toMatch(/policyDir/);
+      expect(parsed.error).toMatch(/persona/);
+    } finally {
+      await coordinator.close();
+    }
+  });
+
+  it('returns 400 when persona is not a string', async () => {
+    const socketPath = join(TEST_ROOT, 'control-persona-type.sock');
+    const coordinator = new ToolCallCoordinator({
+      compiledPolicy: testCompiledPolicy,
+      toolAnnotations: testToolAnnotations,
+      protectedPaths: TEST_PROTECTED_PATHS,
+      allowedDirectory: TEST_SANDBOX_DIR,
+      auditLogPath: join(TEST_ROOT, 'audit.persona-type.jsonl'),
+      controlServerListen: { socketPath },
+    });
+
+    try {
+      await coordinator.start();
+      const res = await postJsonUds(
+        socketPath,
+        '/__ironcurtain/policy/load',
+        JSON.stringify({ persona: 42, policyDir: '/tmp/some-dir' }),
+      );
+      expect(res.status).toBe(400);
+      const parsed = JSON.parse(res.body) as { error: string };
+      expect(parsed.error).toMatch(/persona/);
     } finally {
       await coordinator.close();
     }
@@ -486,9 +499,7 @@ describe('ToolCallCoordinator control endpoint (UDS)', () => {
         '/__ironcurtain/policy/load',
         JSON.stringify({
           persona: 'reviewer',
-          version: 1,
           policyDir: join(TEST_ROOT, 'does-not-exist'),
-          auditPath: join(TEST_ROOT, 'audit.never.jsonl'),
         }),
       );
       expect(res.status).toBe(500);
@@ -505,6 +516,42 @@ describe('ToolCallCoordinator control endpoint (UDS)', () => {
       expect(coordinator.getPolicyEngine()).toBe(oldEngine);
     } finally {
       await coordinator.close();
+    }
+  });
+
+  it('returns 400 (not 500) when policyDir is outside the trusted roots', async () => {
+    // Surfacing validation failures as 4xx lets the orchestrator log
+    // the real cause instead of a blind "Internal error". The message
+    // is built by our own validator so echoing it is safe.
+    const socketPath = join(TEST_ROOT, 'control-untrusted.sock');
+    const evilDir = resolve(tmpdir(), `coord-http-evil-${process.pid}`);
+    mkdirSync(evilDir, { recursive: true });
+    writePersonaPolicy(evilDir, { ...testCompiledPolicy, rules: [] });
+
+    const coordinator = new ToolCallCoordinator({
+      compiledPolicy: testCompiledPolicy,
+      toolAnnotations: testToolAnnotations,
+      protectedPaths: TEST_PROTECTED_PATHS,
+      allowedDirectory: TEST_SANDBOX_DIR,
+      auditLogPath: join(TEST_ROOT, 'audit.untrusted-http.jsonl'),
+      controlServerListen: { socketPath },
+    });
+    const oldEngine = coordinator.getPolicyEngine();
+
+    try {
+      await coordinator.start();
+      const res = await postJsonUds(
+        socketPath,
+        '/__ironcurtain/policy/load',
+        JSON.stringify({ persona: 'reviewer', policyDir: evilDir }),
+      );
+      expect(res.status).toBe(400);
+      const parsed = JSON.parse(res.body) as { error: string };
+      expect(parsed.error).toMatch(/policyDir must be under a trusted directory/);
+      expect(coordinator.getPolicyEngine()).toBe(oldEngine);
+    } finally {
+      await coordinator.close();
+      rmSync(evilDir, { recursive: true, force: true });
     }
   });
 
@@ -543,9 +590,7 @@ describe('ControlServer (TCP fallback)', () => {
     try {
       const body = JSON.stringify({
         persona: 'reviewer',
-        version: 1,
         policyDir: '/tmp/anywhere',
-        auditPath: '/tmp/anywhere/audit.jsonl',
       });
       const res = await new Promise<HttpResponse>((resolve, reject) => {
         const req = httpRequest(
@@ -613,22 +658,13 @@ describe('ControlServer (TCP fallback)', () => {
 
 describe('ToolCallCoordinator loadPolicy concurrency', () => {
   it('blocks loadPolicy from entering its critical section while a tool call is in flight', async () => {
-    // Why this shape: recording a "loadPolicy finished" timestamp only
-    // proves completion ordering, which is trivially true because the
-    // mutex releases on tool-call completion. To actually prove the
-    // call mutex GATES loadPolicy's body, we observe a side-effect
-    // that happens INSIDE loadPolicy's critical section -- the new
-    // audit file being created via `AuditLog.rotate`'s internal
-    // `createWriteStream`. While the tool call is gated, that file
-    // must not yet exist.
-    const auditOldPath = join(TEST_ROOT, 'audit.concurrency.jsonl');
-    const newAuditPath = join(TEST_ROOT, 'audit.new.concurrency.jsonl');
+    // To prove the call mutex GATES loadPolicy's body, we observe a
+    // side-effect that happens INSIDE loadPolicy's critical section --
+    // the PolicyEngine reference swap. While the tool call is gated,
+    // `getPolicyEngine()` must still return the old engine.
+    const auditPath = join(TEST_ROOT, 'audit.concurrency.jsonl');
     const newPolicyDir = mkdir(join(TEST_ROOT, 'policy-concurrent'));
     writePersonaPolicy(newPolicyDir, { ...testCompiledPolicy, rules: [] });
-
-    // Defensive: make sure the target audit file is absent before we start
-    // so the existence check below is meaningful.
-    rmSync(newAuditPath, { force: true });
 
     // Two explicit barriers:
     //   - callStarted: resolves the moment the mock `callTool` enters
@@ -661,7 +697,7 @@ describe('ToolCallCoordinator loadPolicy concurrency', () => {
       toolAnnotations: testToolAnnotations,
       protectedPaths: TEST_PROTECTED_PATHS,
       allowedDirectory: TEST_SANDBOX_DIR,
-      auditLogPath: auditOldPath,
+      auditLogPath: auditPath,
     });
     registerFilesystemTools(coordinator, client);
     const oldEngine = coordinator.getPolicyEngine();
@@ -681,9 +717,7 @@ describe('ToolCallCoordinator loadPolicy concurrency', () => {
       //    call returns.
       const loadPromise = coordinator.loadPolicy({
         persona: 'reviewer',
-        version: 1,
         policyDir: newPolicyDir,
-        auditPath: newAuditPath,
       });
 
       // 4. Loose belt-and-braces fence: give any incorrect
@@ -694,13 +728,14 @@ describe('ToolCallCoordinator loadPolicy concurrency', () => {
 
       // 5. KEY assertion: while the tool call is gated, loadPolicy's
       //    body cannot have run, so the new audit file -- which is
-      //    created INSIDE `AuditLog.rotate`'s critical section -- must
-      //    not yet exist. If the mutex were missing, loadPolicy would
-      //    have raced ahead and opened the file already.
-      expect(existsSync(newAuditPath)).toBe(false);
+      //    engine-swap step -- which is the last observable thing in
+      //    loadPolicy's critical section -- must not have happened yet.
+      //    If the mutex were missing, loadPolicy would have raced ahead
+      //    and replaced the engine reference already.
+      expect(coordinator.getPolicyEngine()).toBe(oldEngine);
 
       // 6. Release the tool call. loadPolicy can now proceed into its
-      //    body, rotate the audit log, and swap the engine.
+      //    body and swap the engine.
       releaseCall?.();
 
       // Both promises must settle. The tool call returns successfully
@@ -718,19 +753,18 @@ describe('ToolCallCoordinator loadPolicy concurrency', () => {
   });
 
   it('close() drains an in-flight tool call before closing the audit log', async () => {
-    // Regression for Fix 4: `close()` must wait for any in-flight
-    // `handleToolCall` (which holds the call mutex while writing to the
-    // audit log) to finish before calling `auditLog.close()`. Without
-    // this drain, `close()` would race the in-flight handler: the
-    // handler could be mid-write when we end the stream, producing an
-    // async "write after end" event on the process, or an in-flight
-    // `loadPolicy` could try to rotate an already-closed log.
+    // `close()` must wait for any in-flight `handleToolCall` (which
+    // holds the call mutex while writing to the audit log) to finish
+    // before calling `auditLog.close()`. Without this drain, `close()`
+    // would race the in-flight handler: the handler could be mid-write
+    // when we end the stream, producing an async "write after end"
+    // event on the process.
     //
     // We use a gated tool call as the proxy for "in-flight handler
     // holding the call mutex" because it exercises the same mutex
     // `loadPolicy` acquires. The assertion is that `close()` does NOT
     // resolve before the gated call releases, and that no write-after-
-    // end or rotate-after-close errors fire in the process.
+    // end errors fire in the process.
     const auditPath = join(TEST_ROOT, 'audit.close-drain.jsonl');
 
     let resolveCallStarted: (() => void) | null = null;

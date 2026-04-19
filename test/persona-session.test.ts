@@ -52,7 +52,12 @@ const mockGenerateText = generateText as unknown as MockInstance;
 
 // --- Test helpers ---
 
-const TEST_HOME = `/tmp/ironcurtain-persona-session-test-${process.pid}`;
+// Use REAL_TMP (realpath-canonicalized /tmp) so test expectations match
+// `validatePolicyDir`'s canonicalized return. On macOS `/tmp` is a symlink
+// to `/private/tmp`; without this, assertions comparing the pre-validation
+// policyDir to the session's `generatedDir` would diverge after the
+// validator canonicalizes.
+const TEST_HOME = `${REAL_TMP}/ironcurtain-persona-session-test-${process.pid}`;
 
 function createTestConfig(): IronCurtainConfig {
   return {

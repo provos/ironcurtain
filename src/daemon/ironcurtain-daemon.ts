@@ -292,6 +292,8 @@ export class IronCurtainDaemon {
       if (sessionId) this.tokenStreamBus.endSession(sessionId);
       this.tokenStreamBridge?.closeSession(activeLabel);
       this.activeJobRuns.delete(jobId);
+      // The ended session tore down the logger; re-claim for daemon logs.
+      logger.setup({ logFilePath: getDaemonLogPath('daemon') });
     }
 
     this.scheduler.unschedule(jobId);
@@ -592,6 +594,11 @@ export class IronCurtainDaemon {
     await this.sessionManager.end(label);
     this.tokenStreamBus.endSession(sessionId);
     this.tokenStreamBridge?.closeSession(label);
+
+    // Session.close() tears down the logger singleton (the session
+    // claimed it for the job's duration). Re-claim it for the daemon
+    // so subsequent daemon logs still reach the daemon log file.
+    logger.setup({ logFilePath: getDaemonLogPath('daemon') });
 
     logger.info(`[Daemon] Job ${job.id} completed: ${outcome.kind}`);
     return record;

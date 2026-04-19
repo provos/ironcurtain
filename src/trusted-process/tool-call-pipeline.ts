@@ -448,6 +448,7 @@ export function buildAuditEntry(
     autoApproved?: boolean;
     whitelistApproved?: boolean;
     whitelistPatternId?: string;
+    persona?: string;
   },
 ): AuditEntry {
   return {
@@ -464,6 +465,7 @@ export function buildAuditEntry(
     autoApproved: options.autoApproved || undefined,
     whitelistApproved: options.whitelistApproved || undefined,
     whitelistPatternId: options.whitelistPatternId,
+    persona: options.persona,
   };
 }
 
@@ -535,6 +537,13 @@ export interface CallToolDeps {
    * in-process caller knows the user's last message.
    */
   autoApproveUserMessage?: string;
+  /**
+   * Persona to stamp onto every audit entry emitted by this call.
+   * Supplied by the coordinator from its `currentPersona` field (set by
+   * `loadPolicy`). `undefined` for single-session modes that never call
+   * `loadPolicy`.
+   */
+  persona?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -596,6 +605,7 @@ export async function handleCallTool(
       policyDecision: { status: 'deny', rule: 'unknown-tool', reason },
       result: { status: 'denied', error: reason },
       durationMs: 0,
+      persona: deps.persona,
     });
     return {
       content: [{ type: 'text', text: reason }],
@@ -621,6 +631,7 @@ export async function handleCallTool(
       policyDecision: { status: 'deny', rule: 'missing-annotation', reason },
       result: { status: 'denied', error: reason },
       durationMs: 0,
+      persona: deps.persona,
     });
     return {
       content: [{ type: 'text', text: reason }],
@@ -643,6 +654,7 @@ export async function handleCallTool(
         policyDecision: { status: 'deny', rule: 'invalid-arguments', reason: validationError },
         result: { status: 'denied', error: validationError },
         durationMs: 0,
+        persona: deps.persona,
       });
       return {
         content: [{ type: 'text', text: validationError }],
@@ -689,7 +701,7 @@ export async function handleCallTool(
             { status: 'deny', rule: 'git-path-enrichment-failed', reason: errorMsg },
             { status: 'denied', error: errorMsg },
             0,
-            {},
+            { persona: deps.persona },
           ),
         );
         return {
@@ -744,6 +756,7 @@ export async function handleCallTool(
       autoApproved,
       whitelistApproved: whitelistApproved || undefined,
       whitelistPatternId,
+      persona: deps.persona,
     });
     deps.auditLog.log(entry);
   }

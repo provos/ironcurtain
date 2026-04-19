@@ -138,6 +138,28 @@ function resolveInternalServerPaths(config: MCPServerConfig, packageRoot: string
 }
 
 /**
+ * Rewrites the filesystem MCP server's allowed-directory arg to match
+ * `allowedDirectory`. Must be called whenever `allowedDirectory` changes
+ * (e.g. during session/workflow setup), otherwise the filesystem server
+ * spawns with a stale path and fails with ENOENT.
+ *
+ * The filesystem server's args are `["-y", "<pkg>", "<path>"]`, so the
+ * path is always the last argument. We replace it unconditionally to
+ * cover both the initial load (args contain the sentinel) and subsequent
+ * re-patches (args already contain a previous allowed directory).
+ */
+export function applyAllowedDirectoryToMcpArgs(
+  mcpServers: Record<string, { args: string[] }>,
+  allowedDirectory: string,
+): void {
+  const fsServer = mcpServers['filesystem'];
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- defensive: key may not exist in external JSON
+  if (!fsServer) return;
+  if (fsServer.args.length === 0) return;
+  fsServer.args[fsServer.args.length - 1] = allowedDirectory;
+}
+
+/**
  * Translates the typed webSearch config into flat env vars for the fetch server.
  */
 function computeWebSearchCredentials(webSearch: ResolvedWebSearchConfig): Record<string, string> {
@@ -187,15 +209,7 @@ export function loadConfig(): IronCurtainConfig {
   // Sync the filesystem server's allowed directory with the configured value.
   // The mcp-servers.json ships with a default path that may differ from
   // the ALLOWED_DIRECTORY environment variable.
-  const fsServer = mcpServers['filesystem'];
-  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- defensive: key may not exist in external JSON
-  if (fsServer) {
-    const defaultDir = '/tmp/ironcurtain-sandbox';
-    const dirIndex = fsServer.args.indexOf(defaultDir);
-    if (dirIndex !== -1) {
-      fsServer.args[dirIndex] = allowedDirectory;
-    }
-  }
+  applyAllowedDirectoryToMcpArgs(mcpServers, allowedDirectory);
 
   // Resolve all relative paths (node_modules/ and ./src/) to absolute paths.
   resolveMcpServerPaths(mcpServers);

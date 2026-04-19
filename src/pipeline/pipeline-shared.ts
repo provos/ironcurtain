@@ -16,7 +16,7 @@ import { wrapLanguageModel } from 'ai';
 import chalk from 'chalk';
 import type pLimit from 'p-limit';
 import ora, { type Ora } from 'ora';
-import { computeProtectedPaths, resolveMcpServerPaths } from '../config/index.js';
+import { applyAllowedDirectoryToMcpArgs, computeProtectedPaths, resolveMcpServerPaths } from '../config/index.js';
 import { createLanguageModel } from '../config/model-provider.js';
 
 type LimitFunction = ReturnType<typeof pLimit>;
@@ -72,15 +72,7 @@ export function loadPipelineConfig(overrides: PipelineConfigOverrides = {}): Pip
   const allowedDirectory = process.env.ALLOWED_DIRECTORY ?? defaultAllowedDir;
 
   // Sync the filesystem server's allowed directory with the configured value
-  const fsServer = mcpServers['filesystem'];
-  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- key may not exist at runtime
-  if (fsServer) {
-    const defaultDir = '/tmp/ironcurtain-sandbox';
-    const dirIndex = fsServer.args.indexOf(defaultDir);
-    if (dirIndex !== -1) {
-      fsServer.args[dirIndex] = allowedDirectory;
-    }
-  }
+  applyAllowedDirectoryToMcpArgs(mcpServers, allowedDirectory);
 
   // Output directory: use CLI override if provided, otherwise user generated dir.
   const generatedDir = overrides.outputDir ?? getUserGeneratedDir();

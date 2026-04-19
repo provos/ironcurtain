@@ -241,6 +241,11 @@ export function createDeps(
     dismissGate: vi.fn(),
     baseDir: tmpDir,
     checkpointStore: createCheckpointStore(tmpDir),
+    // Default no-op control-plane stubs so shared-container tests that
+    // don't assert on these calls can omit them. Tests that do assert
+    // (see orchestrator-policy-cycling.test.ts) override with `vi.fn(...)`.
+    startWorkflowControlServer: async () => {},
+    loadPolicyRpc: async () => {},
     ...overrides,
   };
 }

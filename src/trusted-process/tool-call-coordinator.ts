@@ -38,6 +38,7 @@ import {
 } from './tool-call-pipeline.js';
 import type { ResolvedSandboxConfig } from './sandbox-integration.js';
 import { loadPersonaPolicyArtifacts } from '../config/index.js';
+import { validatePolicyDir } from '../config/validate-policy-dir.js';
 import { proxyAnnotations, proxyPolicyRules } from '../docker/proxy-tools.js';
 import { ControlServer, type ControlServerAddress, type ControlServerListenOptions } from './control-server.js';
 
@@ -162,8 +163,12 @@ export class ToolCallCoordinator {
    */
   private readonly toolAnnotations: StoredToolAnnotationsFile;
 
-  /** Control server (workflow mode only). */
-  private readonly controlServer: ControlServer | null;
+  /**
+   * Control server handle. Inert until `start()` (eager, using
+   * `controlServerListen` from the ctor) or `startControlServer(opts)`
+   * (dynamic, used by the workflow orchestrator) binds it.
+   */
+  private readonly controlServer: ControlServer;
   private readonly controlServerListen?: ControlServerListenOptions;
   private controlServerAddress: ControlServerAddress | null = null;
   /**
@@ -172,6 +177,18 @@ export class ToolCallCoordinator {
    * across turns without reconstructing the coordinator.
    */
   private lastUserMessage: string | null = null;
+  /**
+   * Persona currently active for policy evaluation. Updated ONLY inside
+   * `loadPolicy` under the policy mutex; read during `buildCallToolDeps`
+   * under the call mutex and stamped onto every audit entry.
+   *
+   * `undefined` until the first successful `loadPolicy` call. Single-
+   * session modes (CLI, daemon, cron) never call `loadPolicy`, so their
+   * audit entries omit the `persona` field. Workflow runs call
+   * `loadPolicy` before the first tool call of each agent state, so
+   * every workflow-run audit entry carries a persona.
+   */
+  private currentPersona: string | undefined = undefined;
 
   /** Tool registry keyed by tool name. */
   private readonly toolMap = new Map<string, CoordinatorTool>();
@@ -219,11 +236,9 @@ export class ToolCallCoordinator {
     this.toolAnnotations = options.toolAnnotations;
 
     this.controlServerListen = options.controlServerListen;
-    this.controlServer = this.controlServerListen
-      ? new ControlServer({
-          onLoadPolicy: (req) => this.loadPolicy(req),
-        })
-      : null;
+    this.controlServer = new ControlServer({
+      onLoadPolicy: (req) => this.loadPolicy(req),
+    });
   }
 
   getMcpManager(): MCPClientManager {
@@ -399,6 +414,7 @@ export class ToolCallCoordinator {
       controlApiClient: this.controlApiClient,
       onEscalation,
       autoApproveUserMessage: this.lastUserMessage ?? undefined,
+      persona: this.currentPersona,
     };
   }
 
@@ -412,41 +428,57 @@ export class ToolCallCoordinator {
   }
 
   /**
-   * Hot-swap the policy engine and rotate the audit log.
+   * Hot-swap the policy engine and update the active persona stamp.
    *
-   * Invariants (from §2.1 and §4 "Audit writer concurrency"):
+   * Invariants:
    *
    *   1. Acquire the call mutex first so every in-flight `handleToolCall`
    *      finishes under the old policy before we swap. New callers queue
    *      up on the mutex and start under the new policy.
    *   2. Acquire the policy mutex next to serialize against overlapping
    *      `loadPolicy` calls.
-   *   3. Load + construct the new engine BEFORE rotating the audit log.
-   *      If the new policy dir is missing or malformed, we abort with the
-   *      old engine and old audit stream still fully intact -- callers
-   *      can keep running under the previous persona's policy until they
-   *      decide to tear down.
-   *   4. Only after the new engine is ready do we rotate audit and swap
-   *      the engine reference. The order is: rotate audit, then swap
-   *      engine. The rotate-first ordering guarantees that the first
-   *      log entry written under the new engine lands in the new file.
-   *   5. On any failure in steps 3-4, propagate the error without
-   *      touching the old engine or old audit stream.
+   *   3. Load + construct the new engine. If the policy dir is missing
+   *      or malformed, we abort with the old engine still intact --
+   *      callers can keep running under the previous persona's policy
+   *      until they decide to tear down.
+   *   4. Swap the engine reference AND update `currentPersona` in the
+   *      same critical section. Subsequent tool calls (queued behind the
+   *      call mutex, or started after we release) evaluate under the new
+   *      engine and stamp audit entries with the new persona.
+   *   5. On failure in step 3, propagate the error without touching the
+   *      old engine or `currentPersona`.
    *
-   * Note on the `AuditLogTailer`: session-scoped tailers attached to the
-   * previous persona's audit file do not need to be re-pointed here.
-   * `DockerAgentSession` creates a fresh tailer per state pointing at
-   * whatever audit path was configured for that state, and stops the
-   * previous tailer in `close()` before the next state starts. By the
-   * time `loadPolicy` runs in a workflow, the old session's tailer is
-   * already stopped.
+   * Audit-file contract: the coordinator writes every entry to the
+   * single `auditLogPath` supplied at construction time. Workflow runs
+   * rely on the `persona` field on each entry (set here) plus JSONL
+   * ordering to reconstruct per-persona / per-re-entry slices.
    */
-  async loadPolicy(req: { persona: string; version: number; policyDir: string; auditPath: string }): Promise<void> {
+  async loadPolicy(req: { persona: string; policyDir: string }): Promise<void> {
+    // Defense-in-depth: any process that can reach the control socket
+    // can invoke this RPC, so we must not trust `req.policyDir`.
+    // Canonicalize + range-check against trusted roots BEFORE acquiring
+    // any mutex. Rejecting early means a hostile request cannot even
+    // block tool-call dispatch. Throws `PolicyDirValidationError`, which
+    // the control server maps to a 500 via its generic error path.
+    //
+    // Use the validator's realpath-canonicalized return value for every
+    // subsequent read. Passing `req.policyDir` through unmodified would
+    // reopen the symlink-swap TOCTOU window the validator was introduced
+    // to close: an attacker could swap the symlink target between the
+    // validate() call and loadPersonaPolicyArtifacts(), pointing the
+    // load at attacker-controlled files outside the trusted roots.
+    const canonicalPolicyDir = validatePolicyDir(req.policyDir);
+
     // Wait for any in-flight tool call to drain, then serialize against
     // concurrent loadPolicy. The two mutexes are acquired in this order
     // (call, then policy) everywhere; deadlock is impossible because no
     // other code path acquires them in reverse.
     await this.callMutex.withLock(async () => {
+      // The inner critical section is fully synchronous (policy load,
+      // engine construction, reference swap); `async` is kept only so
+      // the function matches `AsyncMutex.withLock`'s `() => Promise<T>`
+      // signature.
+      // eslint-disable-next-line @typescript-eslint/require-await
       await this.policyMutex.withLock(async () => {
         // Step 1: load only the per-persona artifacts (compiled policy
         // + optional dynamic lists). Annotations are globally scoped
@@ -454,7 +486,7 @@ export class ToolCallCoordinator {
         // not ship `tool-annotations.json`. If any required file is
         // missing, the loader throws and we surface that to the caller
         // without touching the live engine.
-        const { compiledPolicy, dynamicLists } = loadPersonaPolicyArtifacts(req.policyDir);
+        const { compiledPolicy, dynamicLists } = loadPersonaPolicyArtifacts(canonicalPolicyDir);
 
         // Step 2: re-merge the virtual proxy tool annotations and
         // rules. The sandbox does this at construction time
@@ -473,7 +505,7 @@ export class ToolCallCoordinator {
         // Step 3: build the replacement engine using the retained +
         // proxy-merged annotations. A synchronous construction failure
         // (malformed policy) propagates out below without touching
-        // `this.policyEngine` or `this.auditLog`.
+        // `this.policyEngine` or `this.currentPersona`.
         const nextEngine = new PolicyEngine(
           compiledPolicy,
           mergedAnnotations,
@@ -484,36 +516,41 @@ export class ToolCallCoordinator {
           this.trustedServers,
         );
 
-        // Step 4: rotate audit. `AuditLog.rotate` constructs the new
-        // stream FIRST so a synchronous failure here leaves the old
-        // stream intact. If rotate throws, the old engine reference is
-        // untouched (we have not yet swapped) and the old audit stream
-        // is still usable -- callers can keep running under the
-        // previous persona's policy. Its contract is that the caller
-        // serializes `log/rotate/close`, which we do by holding the
-        // policy mutex.
-        await this.auditLog.rotate(req.auditPath);
-
-        // Step 5: swap the engine reference. All subsequent calls --
-        // queued behind the call mutex, or started after we release --
-        // evaluate under the new engine.
+        // Step 4: swap the engine reference and update the persona
+        // stamp together. Both fields are read by handlers that queue
+        // on the call mutex we are holding, so they cannot observe a
+        // partial swap.
         this.policyEngine = nextEngine;
+        this.currentPersona = req.persona;
       });
     });
   }
 
   /**
    * Starts the HTTP control server if one was configured via
-   * `controlServerListen`. Safe to call when no server is configured
-   * (becomes a no-op). Idempotent: calling twice on a configured
-   * coordinator is an error.
+   * `controlServerListen`. No-op when no server is configured.
+   * Calling twice on a configured coordinator is an error.
    */
   async start(): Promise<ControlServerAddress | null> {
-    if (!this.controlServer || !this.controlServerListen) return null;
+    if (!this.controlServerListen) return null;
+    return this.startControlServer(this.controlServerListen);
+  }
+
+  /**
+   * Starts the HTTP control server at runtime with the supplied listen
+   * options. Used by the workflow orchestrator to attach a control
+   * server on a workflow-scoped UDS after the coordinator was built by
+   * the generic session path.
+   *
+   * A second call throws so accidental double-starts surface loudly
+   * instead of silently leaking a socket. The server is cleaned up by
+   * `close()`.
+   */
+  async startControlServer(options: ControlServerListenOptions): Promise<ControlServerAddress> {
     if (this.controlServerAddress) {
-      throw new Error('ToolCallCoordinator.start() called twice');
+      throw new Error('ToolCallCoordinator control server already running');
     }
-    this.controlServerAddress = await this.controlServer.start(this.controlServerListen);
+    this.controlServerAddress = await this.controlServer.start(options);
     return this.controlServerAddress;
   }
 
@@ -526,7 +563,7 @@ export class ToolCallCoordinator {
   async close(): Promise<void> {
     // Stop the control server first so no new loadPolicy requests can
     // arrive while we're tearing down the underlying components.
-    if (this.controlServer && this.controlServerAddress) {
+    if (this.controlServerAddress) {
       await this.controlServer.stop();
       this.controlServerAddress = null;
     }

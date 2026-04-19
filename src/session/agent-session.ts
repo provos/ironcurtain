@@ -304,6 +304,10 @@ export class AgentSession implements Session {
       await this.sandbox.shutdown();
       this.sandbox = null;
     }
+    // Release the logger singleton so a subsequent session can claim
+    // it with a fresh log path. See `src/logger.ts` for the singleton
+    // invariant.
+    logger.teardown();
   }
 
   // --- Private helpers ---

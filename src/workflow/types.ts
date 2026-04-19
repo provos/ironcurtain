@@ -82,6 +82,18 @@ export interface WorkflowSettings {
    * overridden by the `--model` CLI flag.
    */
   readonly model?: string;
+  /**
+   * When true, the workflow runs in shared-container mode: the engine
+   * creates one DockerInfrastructure bundle at workflow start and
+   * reuses it across all states. When false (default), each state
+   * gets a fresh container (today's behavior).
+   *
+   * Shared-container mode is the prerequisite for policy hot-swap at
+   * state transitions. See docs/designs/workflow-container-lifecycle.md.
+   *
+   * Ignored for builtin workflows (no Docker infrastructure to share).
+   */
+  readonly sharedContainer?: boolean;
 }
 
 /**

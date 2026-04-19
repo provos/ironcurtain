@@ -180,7 +180,7 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
 
   // Layer PTY-specific fields on top of the shared config.
   const sessionConfig = { ...dirConfig.config, isPtySession: true };
-  const { sandboxDir, escalationDir, auditLogPath, systemPromptAugmentation } = dirConfig;
+  const { sandboxDir, escalationDir, systemPromptAugmentation } = dirConfig;
 
   const socketsDir = resolve(sessionDir, 'sockets');
   mkdirSync(socketsDir, { recursive: true, mode: 0o700 });
@@ -248,7 +248,6 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
       sessionDir,
       sandboxDir,
       escalationDir,
-      auditLogPath,
       effectiveSessionId,
     );
 

@@ -29,21 +29,31 @@
 import { existsSync, unlinkSync } from 'node:fs';
 import * as http from 'node:http';
 import * as logger from '../logger.js';
+import { PolicyDirValidationError } from '../config/validate-policy-dir.js';
 
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
 
 /**
- * Request body for `POST /__ironcurtain/policy/load`.
+ * HTTP path for the policy hot-swap RPC. Exported so clients (the
+ * workflow orchestrator) can target it without stringly-typed paths.
+ */
+export const POLICY_LOAD_PATH = '/__ironcurtain/policy/load';
+
+/**
+ * Request body for `POST {POLICY_LOAD_PATH}`.
  * Matches `ToolCallCoordinator.loadPolicy`'s argument shape exactly so
  * the server is a thin HTTP adapter.
+ *
+ * Audit entries are written to the coordinator's single long-lived
+ * audit file (fixed at construction time); each entry carries a
+ * `persona` field so consumers can reconstruct per-persona slices
+ * without per-state file rotation.
  */
 export interface LoadPolicyRequest {
   readonly persona: string;
-  readonly version: number;
   readonly policyDir: string;
-  readonly auditPath: string;
 }
 
 /** Handler invoked when `POST /__ironcurtain/policy/load` arrives. */
@@ -128,20 +138,12 @@ function parseLoadPolicyBody(raw: unknown): LoadPolicyRequest | string {
   if (typeof obj.persona !== 'string' || obj.persona.length === 0) {
     return 'persona must be a non-empty string';
   }
-  if (typeof obj.version !== 'number' || !Number.isFinite(obj.version) || obj.version < 0) {
-    return 'version must be a finite non-negative number';
-  }
   if (typeof obj.policyDir !== 'string' || obj.policyDir.length === 0) {
     return 'policyDir must be a non-empty string';
   }
-  if (typeof obj.auditPath !== 'string' || obj.auditPath.length === 0) {
-    return 'auditPath must be a non-empty string';
-  }
   return {
     persona: obj.persona,
-    version: obj.version,
     policyDir: obj.policyDir,
-    auditPath: obj.auditPath,
   };
 }
 
@@ -179,7 +181,7 @@ export class ControlServer {
   private async route(req: http.IncomingMessage, res: http.ServerResponse, deps: ControlServerDeps): Promise<void> {
     const url = req.url ?? '';
 
-    if (url === '/__ironcurtain/policy/load' && req.method === 'POST') {
+    if (url === POLICY_LOAD_PATH && req.method === 'POST') {
       await this.handleLoadPolicy(req, res, deps.onLoadPolicy);
       return;
     }
@@ -231,10 +233,18 @@ export class ControlServer {
     try {
       await onLoadPolicy(validated);
     } catch (err) {
-      // `loadPolicy` failures commonly originate from filesystem
-      // operations (missing policy dir, unreadable audit path) whose
-      // error messages embed absolute paths. Log the full error
-      // server-side and return a generic message to the client.
+      // PolicyDirValidationError is a caller-fault case (the RPC
+      // supplied a policyDir that escapes the trusted roots). Its
+      // message is built by our own code and references only paths
+      // the caller already knows, so surfacing it as 400 helps the
+      // orchestrator log the real cause instead of a blind "Internal
+      // error". Any other throw is an unexpected server-side failure
+      // whose error text may embed filesystem internals; log it
+      // server-side and return a generic 500.
+      if (err instanceof PolicyDirValidationError) {
+        writeJson(res, 400, { error: err.message });
+        return;
+      }
       logger.warn(`[control-server] loadPolicy failed: ${formatErrorForLog(err)}`);
       writeJson(res, 500, { error: 'Internal error' });
       return;

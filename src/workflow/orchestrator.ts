@@ -1,9 +1,20 @@
-import { readFileSync, existsSync, mkdirSync, writeFileSync, appendFileSync, readdirSync, statSync } from 'node:fs';
-import { resolve } from 'node:path';
+import {
+  readFileSync,
+  existsSync,
+  mkdirSync,
+  chmodSync,
+  writeFileSync,
+  appendFileSync,
+  readdirSync,
+  statSync,
+  unlinkSync,
+} from 'node:fs';
+import { dirname, resolve } from 'node:path';
 import { MessageLog } from './message-log.js';
 import { createHash, type Hash } from 'node:crypto';
 import { execFile as execFileCb } from 'node:child_process';
 import { promisify } from 'node:util';
+import * as http from 'node:http';
 import { createActor, fromPromise, type AnyActorRef, type Snapshot } from 'xstate';
 import type {
   WorkflowId,
@@ -22,10 +33,19 @@ import type {
   AgentOutput,
 } from './types.js';
 import { createWorkflowId, WORKFLOW_ARTIFACT_DIR, GLOBAL_PERSONA } from './types.js';
-import { getPersonaDefinitionPath } from '../persona/resolve.js';
+import {
+  getWorkflowAuditLogPath,
+  getWorkflowProxyControlSocketPath,
+  getWorkflowBundleDir,
+  getWorkflowStateDir,
+} from '../config/paths.js';
+import { POLICY_LOAD_PATH } from '../trusted-process/control-server.js';
+import { loadConfig } from '../config/index.js';
+import { getPersonaDefinitionPath, resolvePersona } from '../persona/resolve.js';
 import { createPersonaName } from '../persona/types.js';
 import type { Session, SessionOptions, SessionMode } from '../session/types.js';
 import type { AgentId } from '../docker/agent-adapter.js';
+import type { DockerInfrastructure } from '../docker/docker-infrastructure.js';
 import {
   buildWorkflowMachine,
   type AgentInvokeInput,
@@ -54,6 +74,14 @@ const execFileAsync = promisify(execFileCb);
 
 const MAX_TRANSITION_MESSAGE_BYTES = 4096;
 const TRANSITION_TRUNCATION_NOTICE = '\n\n[... truncated]';
+
+/**
+ * Default timeout for a `loadPolicy` RPC to the workflow coordinator.
+ * Generous because the coordinator's mutex may be held briefly by an
+ * in-flight tool call; tight because "control socket unreachable" must
+ * surface fast rather than wedge the workflow.
+ */
+const LOAD_POLICY_RPC_TIMEOUT_MS = 10_000;
 
 function truncateForTransition(text: string | null | undefined): string | undefined {
   if (!text) return undefined;
@@ -115,6 +143,49 @@ export interface WorkflowTabHandle {
   close(): void;
 }
 
+/**
+ * Inputs for creating a workflow-scoped Docker infrastructure bundle.
+ * Supplied by the orchestrator when `settings.sharedContainer === true`
+ * and the workflow uses a Docker agent.
+ */
+export interface CreateWorkflowInfrastructureInput {
+  readonly workflowId: WorkflowId;
+  readonly agentId: AgentId;
+  /**
+   * Path to the workflow's coordinator control socket. The orchestrator
+   * starts the coordinator's HTTP control server at this path after the
+   * bundle is created (see `startWorkflowControlServer` dep). The path
+   * is included here so the factory may optionally pre-create the
+   * containing directory or use it for labelling.
+   */
+  readonly controlSocketPath: string;
+  /**
+   * Workspace directory for this workflow run. Used as the allowed
+   * directory for the filesystem MCP server and all sessions that run
+   * in the shared container. Either a user-supplied `--workspace <path>`
+   * or the default `<baseDir>/<workflowId>/workspace/`.
+   *
+   * All sessions in a workflow mount the workflow's workspace directory;
+   * no session-scoped sandbox is ever used under shared-container mode.
+   */
+  readonly workspacePath: string;
+}
+
+/** Inputs for starting the coordinator's HTTP control server on a workflow bundle. */
+export interface StartWorkflowControlServerInput {
+  readonly infra: DockerInfrastructure;
+  readonly socketPath: string;
+}
+
+/** Inputs for the `loadPolicy` RPC dispatched at each agent state entry. */
+export interface LoadPolicyRpcInput {
+  readonly socketPath: string;
+  readonly persona: string;
+  readonly policyDir: string;
+  /** Hard timeout in milliseconds; the call aborts if the coordinator does not ack in time. */
+  readonly timeoutMs?: number;
+}
+
 /** Dependencies injected into the orchestrator. */
 export interface WorkflowOrchestratorDeps {
   /** Factory for creating agent sessions. */
@@ -134,6 +205,44 @@ export interface WorkflowOrchestratorDeps {
 
   /** Persistent checkpoint store for workflow resume. */
   readonly checkpointStore: CheckpointStore;
+
+  /**
+   * Factory for creating a workflow-scoped Docker infrastructure bundle.
+   * Called at workflow start when `settings.sharedContainer === true`
+   * and the workflow uses a Docker agent. When omitted, the orchestrator
+   * loads the default implementation lazily from `src/docker/docker-infrastructure.ts`.
+   * Tests override this to avoid spinning up real Docker resources.
+   */
+  readonly createWorkflowInfrastructure?: (input: CreateWorkflowInfrastructureInput) => Promise<DockerInfrastructure>;
+
+  /**
+   * Teardown counterpart for `createWorkflowInfrastructure`. Called on
+   * workflow terminal states, abort, and shutdownAll. When omitted, the
+   * orchestrator loads the default implementation lazily from
+   * `src/docker/docker-infrastructure.ts`. Tests override this to avoid
+   * touching real Docker resources.
+   */
+  readonly destroyWorkflowInfrastructure?: (infra: DockerInfrastructure) => Promise<void>;
+
+  /**
+   * Attaches the coordinator's HTTP control server to the workflow
+   * bundle. Called once at workflow start (after the bundle is created)
+   * whenever `settings.sharedContainer === true`. The default
+   * implementation reaches through `infra.proxy.getPolicySwapTarget()` and
+   * calls `startControlServer({ socketPath })`. Tests override this to
+   * intercept the control-server wiring entirely.
+   */
+  readonly startWorkflowControlServer?: (input: StartWorkflowControlServerInput) => Promise<void>;
+
+  /**
+   * Dispatches a `POST /__ironcurtain/policy/load` request to the
+   * workflow's coordinator control socket. Called before each agent
+   * state invocation to rotate the audit stream and swap the active
+   * policy. The default implementation speaks HTTP/1.1 over a Unix
+   * domain socket (no extra dependency). Tests inject a fake handler
+   * to assert on the RPC shape without standing up a real socket.
+   */
+  readonly loadPolicyRpc?: (input: LoadPolicyRpcInput) => Promise<void>;
 }
 
 /** Lifecycle events emitted by the orchestrator. */
@@ -225,6 +334,19 @@ interface WorkflowInstance {
   stateEnteredAt?: number;
   /** Append-only JSONL message log for debugging. */
   readonly messageLog: MessageLog;
+  /**
+   * Docker infrastructure shared across workflow states. Set by
+   * createWorkflowInfrastructure at workflow start; destroyed at
+   * workflow terminal. Undefined for builtin workflows or when
+   * settings.sharedContainer is false.
+   */
+  infra?: DockerInfrastructure;
+  /**
+   * Memoized compiled-policy directory per persona. Populated on first
+   * use by `cyclePolicy` to avoid re-reading `persona.json` / running
+   * `loadConfig()` on every state transition.
+   */
+  readonly policyDirByPersona: Map<string, string>;
 }
 
 // ---------------------------------------------------------------------------
@@ -281,10 +403,212 @@ export class WorkflowOrchestrator implements WorkflowController {
   }
 
   // -----------------------------------------------------------------------
+  // Workflow-scoped Docker infrastructure lifecycle
+  // -----------------------------------------------------------------------
+
+  /**
+   * Determines whether a workflow should run in shared-container mode.
+   * Requires both an explicit opt-in via `settings.sharedContainer` and
+   * a Docker-backed agent. Builtin workflows ignore the flag entirely.
+   */
+  private shouldUseSharedContainer(definition: WorkflowDefinition): boolean {
+    const settings = definition.settings ?? {};
+    if (settings.sharedContainer !== true) return false;
+    if (settings.mode === 'builtin') return false;
+    return true;
+  }
+
+  /**
+   * Creates the workflow-scoped Docker infrastructure bundle and stashes
+   * it on `instance.infra`. Called once at workflow start and on resume
+   * when shared-container mode is enabled.
+   *
+   * Only invoked when `shouldUseSharedContainer(definition)` returns true;
+   * callers must gate on that check.
+   *
+   * After the bundle is created, attaches the coordinator's HTTP control
+   * server at the workflow-scoped UDS path. If the control-server attach
+   * fails, the bundle is torn down before the error propagates so we do
+   * not leak Docker resources on partial initialization.
+   */
+  private async createWorkflowInfrastructure(instance: WorkflowInstance): Promise<void> {
+    const settings = instance.definition.settings ?? {};
+    const agentId = (settings.dockerAgent ?? 'claude-code') as AgentId;
+    const controlSocketPath = getWorkflowProxyControlSocketPath(instance.id);
+    // Ensure the workflow run dir exists BEFORE the coordinator tries to
+    // bind its UDS there. `getWorkflowRunDir` is lazily materialized; if
+    // the first thing the orchestrator does is ask the coordinator to
+    // listen on a path whose parent directory is missing, bind fails.
+    const runDir = dirname(controlSocketPath);
+    mkdirSync(runDir, { recursive: true, mode: 0o700 });
+    // `mkdirSync`'s `mode` only applies on creation; if the run dir
+    // pre-exists (stale from a prior run or manually created) the mode
+    // is a no-op. The coordinator's control socket relies on 0o700 to
+    // gate access — enforce permissions unconditionally.
+    chmodSync(runDir, 0o700);
+
+    const factory = this.deps.createWorkflowInfrastructure ?? (await this.loadDefaultInfrastructureFactory());
+    const infra = await factory({
+      workflowId: instance.id,
+      agentId,
+      controlSocketPath,
+      workspacePath: instance.workspacePath,
+    });
+
+    // Attach the control server. On failure, tear down the bundle so
+    // we don't leak containers/proxies; the error propagates to the
+    // caller so `start()` can reject.
+    try {
+      const startServer = this.deps.startWorkflowControlServer ?? defaultStartWorkflowControlServer;
+      await startServer({ infra, socketPath: controlSocketPath });
+    } catch (err) {
+      const destroy = this.deps.destroyWorkflowInfrastructure ?? (await this.loadDefaultInfrastructureTeardown());
+      await destroy(infra).catch((teardownErr: unknown) => {
+        writeStderr(
+          `[workflow] destroyDockerInfrastructure during control-server recovery for ${instance.id}: ${toErrorMessage(teardownErr)}`,
+        );
+      });
+      throw err;
+    }
+
+    instance.infra = infra;
+  }
+
+  /**
+   * Reloads the coordinator's policy for the given persona. Called once
+   * per agent state invocation (including re-entries) when
+   * `instance.infra` is set. The coordinator stamps `persona` onto every
+   * subsequent audit entry, so consumers can reconstruct per-persona /
+   * per-re-entry slices from the single `audit.jsonl` file.
+   *
+   * On failure (control socket unreachable, coordinator reports a load
+   * error) this throws — the workflow must not proceed under the
+   * previous persona's policy.
+   */
+  private async cyclePolicy(instance: WorkflowInstance, persona: string): Promise<void> {
+    let policyDir = instance.policyDirByPersona.get(persona);
+    if (policyDir === undefined) {
+      policyDir = resolvePersonaPolicyDir(persona);
+      instance.policyDirByPersona.set(persona, policyDir);
+    }
+    const socketPath = getWorkflowProxyControlSocketPath(instance.id);
+
+    const loadPolicy = this.deps.loadPolicyRpc ?? defaultLoadPolicyRpc;
+    await loadPolicy({
+      socketPath,
+      persona,
+      policyDir,
+      timeoutMs: LOAD_POLICY_RPC_TIMEOUT_MS,
+    });
+  }
+
+  /**
+   * Tears down the workflow-scoped Docker infrastructure bundle, if any.
+   *
+   * Callers in recovery paths depend on this function never throwing:
+   *   - Failures in `destroy(infra)` are logged to stderr and swallowed;
+   *     the socket-unlink step still runs.
+   *   - Failures in the socket unlink are logged and swallowed.
+   *
+   * **Not a retry point.** `instance.infra` is cleared synchronously
+   * before the async `destroy(infra)` so a second concurrent call (e.g.
+   * `shutdownAll` racing the fire-and-forget destroy in
+   * `handleWorkflowComplete`) sees `infra === undefined` and returns
+   * without re-entering `destroy`. This prevents double-destroy against
+   * the same Docker resources at the cost of giving up on in-process
+   * retry if the first destroy threw — recovery from a persistent
+   * destroy failure is the operator's responsibility (`docker ps -a`).
+   */
+  private async destroyWorkflowInfrastructure(instance: WorkflowInstance): Promise<void> {
+    const infra = instance.infra;
+    if (!infra) return;
+    // Clear BEFORE the await so a concurrent caller sees undefined and
+    // bails out. See JSDoc for the rationale.
+    instance.infra = undefined;
+
+    const destroy = this.deps.destroyWorkflowInfrastructure ?? (await this.loadDefaultInfrastructureTeardown());
+    try {
+      await destroy(infra);
+    } catch (err) {
+      writeStderr(`[workflow] destroyDockerInfrastructure failed for ${instance.id}: ${toErrorMessage(err)}`);
+    }
+
+    // Best-effort: unlink the coordinator control socket. Swallow
+    // ENOENT because the socket may never have been bound (e.g., when
+    // destroy runs after a failure before control-server attach).
+    try {
+      unlinkSync(getWorkflowProxyControlSocketPath(instance.id));
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT') {
+        writeStderr(`[workflow] Failed to unlink control socket for ${instance.id}: ${toErrorMessage(err)}`);
+      }
+    }
+  }
+
+  /**
+   * Lazy-loads the default `createDockerInfrastructure` wrapper. The real
+   * helper requires Docker dependencies and the session config, so we
+   * construct them here rather than eagerly at orchestrator construction
+   * time (which would pay the import cost for every workflow run,
+   * including builtin ones that don't need Docker).
+   */
+  private async loadDefaultInfrastructureFactory(): Promise<
+    (input: CreateWorkflowInfrastructureInput) => Promise<DockerInfrastructure>
+  > {
+    const { createDockerInfrastructure } = await import('../docker/docker-infrastructure.js');
+    const { loadConfig, applyAllowedDirectoryToMcpArgs } = await import('../config/index.js');
+
+    return async (input) => {
+      const config = loadConfig();
+      // Bundle dir holds the workflow's shared Docker artifacts
+      // (orientation, sockets, claude-state, escalations, system
+      // prompt). It's colocated under the workflow run directory so
+      // every workflow-scoped file lives under a single tree.
+      // Audit entries go to the workflow-scoped file (one file per
+      // workflow run, with per-entry persona tagging) instead of the
+      // per-session audit file.
+      const bundleDir = getWorkflowBundleDir(input.workflowId);
+      const bundleEscalationDir = resolve(bundleDir, 'escalations');
+      // All sessions in a workflow share the workflow's workspace dir
+      // as their allowed directory. Do NOT use a session-scoped sandbox
+      // here: the orchestrator's artifact checks look inside the
+      // workspace, so artifacts the agent writes must land in the same
+      // tree.
+      mkdirSync(bundleDir, { recursive: true });
+      mkdirSync(bundleEscalationDir, { recursive: true });
+      mkdirSync(input.workspacePath, { recursive: true });
+      // Rewrite the allowed directory and audit path onto the loaded
+      // config. `config.allowedDirectory` drives the filesystem MCP
+      // server's --allowed-directory; `config.auditLogPath` is what the
+      // ToolCallCoordinator (via Sandbox) reads when creating the
+      // AuditLog. Without the audit rewrite, audit entries fall through
+      // to the default `./audit.jsonl` against process.cwd().
+      config.allowedDirectory = input.workspacePath;
+      config.auditLogPath = getWorkflowAuditLogPath(input.workflowId);
+      applyAllowedDirectoryToMcpArgs(config.mcpServers, input.workspacePath);
+      return createDockerInfrastructure(
+        config,
+        { kind: 'docker', agent: input.agentId },
+        bundleDir,
+        input.workspacePath,
+        bundleEscalationDir,
+        input.workflowId,
+      );
+    };
+  }
+
+  /** Lazy-loads the default `destroyDockerInfrastructure` helper. */
+  private async loadDefaultInfrastructureTeardown(): Promise<(infra: DockerInfrastructure) => Promise<void>> {
+    const { destroyDockerInfrastructure } = await import('../docker/docker-infrastructure.js');
+    return destroyDockerInfrastructure;
+  }
+
+  // -----------------------------------------------------------------------
   // WorkflowController implementation
   // -----------------------------------------------------------------------
 
-  start(definitionPath: string, taskDescription: string, workspacePath?: string): Promise<WorkflowId> {
+  async start(definitionPath: string, taskDescription: string, workspacePath?: string): Promise<WorkflowId> {
     const raw = parseDefinitionFile(definitionPath);
     const definition = validateDefinition(raw);
     this.validatePersonas(definition);
@@ -336,13 +660,27 @@ export class WorkflowOrchestrator implements WorkflowController {
       currentState: definition.initial,
       stateEnteredAt: Date.now(),
       messageLog,
+      policyDirByPersona: new Map(),
     };
+
+    // Create workflow-scoped Docker infrastructure BEFORE starting the actor
+    // so the first state's session invocation can borrow it. If infra creation
+    // fails, fail fast without registering the workflow or starting the actor.
+    if (this.shouldUseSharedContainer(definition)) {
+      try {
+        await this.createWorkflowInfrastructure(instance);
+      } catch (err) {
+        tab.write(`[error] Failed to create workflow infrastructure: ${toErrorMessage(err)}`);
+        tab.close();
+        throw err;
+      }
+    }
 
     this.workflows.set(workflowId, instance);
     this.emitLifecycleEvent({ kind: 'started', workflowId, name: definition.name, taskDescription });
     this.subscribeToActor(instance);
     actor.start();
-    return Promise.resolve(workflowId);
+    return workflowId;
   }
 
   async resume(workflowId: WorkflowId): Promise<void> {
@@ -394,7 +732,27 @@ export class WorkflowOrchestrator implements WorkflowController {
       currentState: String(checkpoint.machineState),
       stateEnteredAt: Date.now(),
       messageLog,
+      policyDirByPersona: new Map(),
     };
+
+    // Create workflow-scoped Docker infrastructure before starting the
+    // actor. Resume does NOT reclaim the original container — any
+    // dependencies installed in the previous run are lost. Reclamation
+    // is tracked as a follow-up in the workflow container lifecycle
+    // design (§6).
+    if (this.shouldUseSharedContainer(definition)) {
+      writeStderr(
+        `[workflow] Resuming ${workflowId} in shared-container mode: creating a fresh Docker infrastructure bundle. ` +
+          `Any dependencies installed in the pre-resume container are lost.`,
+      );
+      try {
+        await this.createWorkflowInfrastructure(instance);
+      } catch (err) {
+        tab.write(`[error] Failed to create workflow infrastructure on resume: ${toErrorMessage(err)}`);
+        tab.close();
+        throw err;
+      }
+    }
 
     this.workflows.set(workflowId, instance);
     this.emitLifecycleEvent({
@@ -577,6 +935,10 @@ export class WorkflowOrchestrator implements WorkflowController {
       reason: 'Workflow aborted by user',
     };
 
+    // Tear down workflow-scoped Docker infrastructure after all sessions
+    // are closed. Error-tolerant (see destroyWorkflowInfrastructure).
+    await this.destroyWorkflowInfrastructure(instance);
+
     try {
       this.deps.checkpointStore.remove(id);
     } catch (err) {
@@ -599,7 +961,19 @@ export class WorkflowOrchestrator implements WorkflowController {
 
   async shutdownAll(): Promise<void> {
     const ids = [...this.workflows.keys()];
+    // Abort runs full teardown (including destroyWorkflowInfrastructure) for
+    // workflows not yet in a terminal state. For already-terminal workflows,
+    // abort() early-returns — so we follow up with an explicit destroy pass
+    // to defend against any case where a terminal transition skipped infra
+    // teardown (e.g., tests forcing finalStatus directly). The destroy call
+    // is idempotent when instance.infra is undefined.
     await Promise.allSettled(ids.map((id) => this.abort(id)));
+    await Promise.allSettled(
+      ids.map((id) => {
+        const instance = this.workflows.get(id);
+        return instance ? this.destroyWorkflowInfrastructure(instance) : Promise.resolve();
+      }),
+    );
   }
 
   // -----------------------------------------------------------------------
@@ -777,11 +1151,46 @@ export class WorkflowOrchestrator implements WorkflowController {
 
     const effectiveModel = stateConfig.model ?? settings.model;
 
+    // Shared-container mode only: rotate the coordinator's audit stream
+    // and swap policy before constructing the borrowing session. In
+    // per-state-container mode the new session builds its own
+    // coordinator, so there is nothing to cycle.
+    if (instance.infra) {
+      try {
+        await this.cyclePolicy(instance, stateConfig.persona);
+      } catch (err) {
+        const errMsg = toErrorMessage(err);
+        writeStderr(`[workflow] cyclePolicy failed for "${stateId}": ${errMsg}`);
+        instance.tab.write(`[error] Policy cycle failed for "${stateId}": ${errMsg}`);
+        instance.messageLog.append({
+          ...this.logBase(instance),
+          type: 'error',
+          error: errMsg,
+          context: `cyclePolicy for "${stateId}" (persona: ${stateConfig.persona})`,
+        });
+        throw err;
+      }
+    }
+
     // Create session with resumeSessionId for same-role continuity.
     // sessionsByState is keyed by stateId (set by updateContextFromAgentResult).
     // workspacePath ensures the agent writes to the artifact directory,
     // so files created by the agent are visible to the orchestrator.
     const previousSessionId = stateConfig.freshSession === false ? context.sessionsByState[stateId] : undefined;
+
+    // In borrow mode, route this invocation's per-state artifacts
+    // (session.log, session-metadata.json) under a slug-keyed directory
+    // inside the workflow run. The XState machine's `incrementVisitCount`
+    // entry action runs before `invoke`, so `context.visitCounts[stateId]`
+    // is already incremented by the time this factory runs (1 on first
+    // entry, 2 on re-entry, etc.).
+    const visitCountForSlug = context.visitCounts[stateId];
+    const stateSlug = `${stateId}.${visitCountForSlug}`;
+    const workflowStateDir = instance.infra ? getWorkflowStateDir(instance.id, stateSlug) : undefined;
+    if (workflowStateDir) {
+      mkdirSync(workflowStateDir, { recursive: true });
+    }
+
     let session: Session;
     try {
       session = await this.deps.createSession({
@@ -794,6 +1203,14 @@ export class WorkflowOrchestrator implements WorkflowController {
         ...(settings.maxSessionSeconds != null
           ? { resourceBudgetOverrides: { maxSessionSeconds: settings.maxSessionSeconds } }
           : {}),
+        // Borrow the workflow-scoped Docker bundle so the session does
+        // not rebuild proxies / containers per state. Unset for builtin
+        // or opt-out workflows.
+        ...(instance.infra ? { workflowInfrastructure: instance.infra } : {}),
+        // Per-state artifact dir is only meaningful in borrow mode —
+        // `buildSessionConfig` throws if `workflowStateDir` is supplied
+        // without a bundle.
+        ...(workflowStateDir ? { workflowStateDir, stateSlug } : {}),
       });
     } catch (err) {
       const errMsg = toErrorMessage(err);
@@ -1077,6 +1494,14 @@ export class WorkflowOrchestrator implements WorkflowController {
     const instance = this.workflows.get(workflowId);
     if (!instance) return;
 
+    // Guard against XState emitting a terminal transition multiple times.
+    // `finalStatus` being set is the canonical "already completed" signal;
+    // if it's set, skip re-entering terminal handling so we don't call
+    // destroyWorkflowInfrastructure twice (the teardown itself is idempotent,
+    // but duplicate tab.close() / checkpoint.remove() / lifecycle events
+    // are noisy).
+    if (instance.finalStatus) return;
+
     // Check if this is a normal completion or an aborted terminal
     const stateValue = instance.currentState;
     if (stateValue === 'aborted' || stateValue.includes('abort')) {
@@ -1100,6 +1525,16 @@ export class WorkflowOrchestrator implements WorkflowController {
 
     instance.tab.write(`[done] ${instance.finalStatus.phase}`);
     instance.tab.close();
+
+    // Tear down workflow-scoped Docker infrastructure. Runs asynchronously
+    // because the actor subscription is sync; destroyWorkflowInfrastructure
+    // is error-tolerant so unhandled rejections should not occur, but we
+    // still catch defensively for a belt-and-suspenders guarantee.
+    void this.destroyWorkflowInfrastructure(instance).catch((err: unknown) => {
+      writeStderr(
+        `[workflow] destroyWorkflowInfrastructure unexpectedly threw for ${workflowId}: ${toErrorMessage(err)}`,
+      );
+    });
 
     this.emitLifecycleEvent({
       kind: 'completed',
@@ -1141,6 +1576,105 @@ export class WorkflowOrchestrator implements WorkflowController {
 // ---------------------------------------------------------------------------
 // Standalone helpers (exported for testing)
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Policy cycling helpers (workflow shared-container mode)
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolves the compiled-policy directory for the given persona name.
+ *
+ * The reserved sentinel `GLOBAL_PERSONA` maps to the package-bundled
+ * generated dir (same one `loadConfig().generatedDir` resolves to for
+ * CLI runs). All other values go through `resolvePersona()`, which
+ * validates the persona exists and has a compiled policy.
+ */
+function resolvePersonaPolicyDir(persona: string): string {
+  if (persona === GLOBAL_PERSONA) {
+    return loadConfig().generatedDir;
+  }
+  return resolvePersona(persona).policyDir;
+}
+
+/**
+ * Default `startWorkflowControlServer`: reaches through the infra
+ * bundle's proxy for its policy-swap target and binds a control server
+ * at the workflow-scoped UDS path.
+ */
+async function defaultStartWorkflowControlServer(input: StartWorkflowControlServerInput): Promise<void> {
+  const target = input.infra.proxy.getPolicySwapTarget();
+  if (!target) {
+    throw new Error(
+      'Cannot attach workflow control server: the proxy is not yet started. ' +
+        'Call proxy.start() before attaching a control server.',
+    );
+  }
+  await target.startControlServer({ socketPath: input.socketPath });
+}
+
+/**
+ * Default `loadPolicyRpc`: speaks HTTP/1.1 over the supplied UDS using
+ * Node's built-in client. Resolves on a 2xx response; rejects on any
+ * non-2xx status, request timeout, or socket error. The coordinator's
+ * reply body is read only on the error path (to surface the error
+ * text) — 2xx bodies are discarded with `res.resume()`.
+ *
+ * Exported so integration tests can drive the wire format without
+ * standing up a full `WorkflowOrchestrator`. Keeping the HTTP request
+ * construction in one place guarantees tests exercise the same bytes
+ * production emits.
+ */
+export async function defaultLoadPolicyRpc(input: LoadPolicyRpcInput): Promise<void> {
+  const body = JSON.stringify({
+    persona: input.persona,
+    policyDir: input.policyDir,
+  });
+  const timeoutMs = input.timeoutMs ?? LOAD_POLICY_RPC_TIMEOUT_MS;
+
+  return new Promise((resolveFn, rejectFn) => {
+    let settled = false;
+    const settle = (err?: Error): void => {
+      if (settled) return;
+      settled = true;
+      if (err) rejectFn(err);
+      else resolveFn();
+    };
+
+    const req = http.request(
+      {
+        socketPath: input.socketPath,
+        method: 'POST',
+        path: POLICY_LOAD_PATH,
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(body, 'utf-8'),
+        },
+        timeout: timeoutMs,
+      },
+      (res) => {
+        const status = res.statusCode ?? 0;
+        if (status >= 200 && status < 300) {
+          res.resume();
+          res.on('end', () => settle());
+          res.on('error', settle);
+          return;
+        }
+        const chunks: Buffer[] = [];
+        res.on('data', (chunk: Buffer) => chunks.push(chunk));
+        res.on('end', () => {
+          const text = Buffer.concat(chunks).toString('utf-8');
+          settle(new Error(`loadPolicy RPC failed (status ${status}): ${text.slice(0, 200)}`));
+        });
+        res.on('error', settle);
+      },
+    );
+    req.on('timeout', () => {
+      req.destroy(new Error(`loadPolicy RPC timed out after ${timeoutMs}ms`));
+    });
+    req.on('error', settle);
+    req.end(body);
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Workspace root hashing (file listing + mtime, no content reads)

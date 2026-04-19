@@ -72,6 +72,61 @@ describe('Logger', () => {
     expect(content).toContain('after double setup');
   });
 
+  it('retargets to a new path when setup() is called with a different path', () => {
+    // Simulates workflow state transitions: state A sets up, forgets to
+    // teardown, state B calls setup() with its own path. setup() must
+    // redirect writes to state B's file without losing the console
+    // hijack or requiring a full re-init.
+    const logFileA = resolve(logDir, 'state-a.log');
+    const logFileB = resolve(logDir, 'state-b.log');
+
+    logger.setup({ logFilePath: logFileA });
+    logger.info('goes to A');
+
+    // Retarget without teardown
+    logger.setup({ logFilePath: logFileB });
+    logger.info('goes to B');
+    logger.teardown();
+
+    const contentA = readFileSync(logFileA, 'utf-8');
+    const contentB = readFileSync(logFileB, 'utf-8');
+
+    // State A's file has only state A's write (plus the init line).
+    expect(contentA).toContain('goes to A');
+    expect(contentA).not.toContain('goes to B');
+
+    // State B's file has only state B's write (plus the retarget line).
+    expect(contentB).toContain('goes to B');
+    expect(contentB).not.toContain('goes to A');
+    expect(contentB).toContain('Logger retargeted');
+  });
+
+  it('session-like handoff: teardown + re-setup routes writes to the new log', () => {
+    // Session A claims logger, writes, tears down. Session B claims
+    // logger with a new path, writes, tears down. Writes must not
+    // co-mingle. This is the regression guard for the workflow
+    // per-state log bug: previously state B's setup was a no-op
+    // because the singleton was still marked active from state A.
+    const logFileA = resolve(logDir, 'session-a.log');
+    const logFileB = resolve(logDir, 'session-b.log');
+
+    logger.setup({ logFilePath: logFileA });
+    logger.info('from A');
+    logger.teardown();
+
+    logger.setup({ logFilePath: logFileB });
+    logger.info('from B');
+    logger.teardown();
+
+    const contentA = readFileSync(logFileA, 'utf-8');
+    const contentB = readFileSync(logFileB, 'utf-8');
+
+    expect(contentA).toContain('from A');
+    expect(contentA).not.toContain('from B');
+    expect(contentB).toContain('from B');
+    expect(contentB).not.toContain('from A');
+  });
+
   it('teardown() is idempotent', () => {
     logger.setup({ logFilePath: logFile });
     logger.teardown();
