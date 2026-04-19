@@ -483,8 +483,15 @@
      pulse + label read cleanly against the rain instead of letting
      characters flicker through the interior. */
   .smg-node--active {
-    border: 2px solid hsl(var(--primary));
-    background: linear-gradient(hsl(var(--primary) / 0.18), hsl(var(--primary) / 0.18)), hsl(var(--background) / 0.7);
+    /* --smg-active-color parameterizes the active-node affordance so the
+       theater scope can override it (cyan in documentary viz, amber in
+       classic). Keyframes below reference this variable; they resolve
+       per-element, so an override on the element takes effect immediately. */
+    --smg-active-color: var(--primary);
+    border: 2px solid hsl(var(--smg-active-color));
+    background:
+      linear-gradient(hsl(var(--smg-active-color) / 0.18), hsl(var(--smg-active-color) / 0.18)),
+      hsl(var(--background) / 0.7);
     animation: smg-node-pulse 1.8s ease-in-out infinite;
   }
   /* Phosphor bloom on the active-node label (§E.5). Same drop-shadow idiom
@@ -493,12 +500,15 @@
      "glowing phosphor glyph" rather than "glowing button." */
   .smg-node--active .smg-node__title {
     text-shadow:
-      0 0 4px hsl(var(--primary) / 0.9),
-      0 0 10px hsl(var(--primary) / 0.5);
+      0 0 4px hsl(var(--smg-active-color) / 0.9),
+      0 0 10px hsl(var(--smg-active-color) / 0.5);
   }
   .smg-node--active.smg-node--human_gate {
-    border-color: hsl(var(--warning));
-    background: linear-gradient(hsl(var(--warning) / 0.18), hsl(var(--warning) / 0.18)), hsl(var(--background) / 0.7);
+    --smg-active-color: var(--warning);
+    border-color: hsl(var(--smg-active-color));
+    background:
+      linear-gradient(hsl(var(--smg-active-color) / 0.18), hsl(var(--smg-active-color) / 0.18)),
+      hsl(var(--background) / 0.7);
     animation-name: smg-node-pulse-warn;
   }
 
@@ -512,8 +522,8 @@
       0deg,
       transparent 0,
       transparent 3px,
-      hsl(var(--primary) / 0.08) 3px,
-      hsl(var(--primary) / 0.08) 4px
+      hsl(var(--smg-active-color) / 0.08) 3px,
+      hsl(var(--smg-active-color) / 0.08) 4px
     );
     pointer-events: none;
   }
@@ -521,10 +531,10 @@
   @keyframes smg-node-pulse {
     0%,
     100% {
-      box-shadow: 0 0 8px hsl(var(--primary) / 0.4);
+      box-shadow: 0 0 8px hsl(var(--smg-active-color) / 0.4);
     }
     50% {
-      box-shadow: 0 0 24px hsl(var(--primary) / 1);
+      box-shadow: 0 0 24px hsl(var(--smg-active-color) / 1);
     }
   }
   @keyframes smg-node-pulse-warn {

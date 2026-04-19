@@ -33,6 +33,10 @@
     --muted-foreground: 215 12% 52%;
     --accent: 220 12% 14%;
     --accent-foreground: 210 20% 92%;
+    /* Cyberpunk accent used by the workflow theater (task #54). Scoped via
+       `.workflow-theater` overrides below so classic WorkflowDetail keeps its
+       amber `--primary` aesthetic. */
+    --accent-cyan: 180 80% 55%;
     --success: 142 72% 42%;
     --warning: 38 92% 55%;
     --warning-foreground: 220 14% 8%;
@@ -55,6 +59,10 @@
     --muted-foreground: 220 10% 46%;
     --accent: 220 10% 92%;
     --accent-foreground: 220 20% 12%;
+    /* Deeper cyan tuned for legibility on the warm-white background — a 55%
+       lightness token (matching the iron variant) washes out against light
+       surfaces. See `.workflow-theater` overrides below. */
+    --accent-cyan: 185 70% 40%;
     --success: 142 72% 36%;
     --warning: 38 92% 50%;
     --warning-foreground: 220 14% 8%;
@@ -77,6 +85,10 @@
     --muted-foreground: 220 14% 50%;
     --accent: 228 18% 14%;
     --accent-foreground: 215 20% 90%;
+    /* Bright cyan against the deep-navy background. Midnight's `--primary` is
+       already a cool blue, so the theater override must shift visibly cooler
+       to read as a distinct accent. */
+    --accent-cyan: 185 90% 60%;
     --success: 142 72% 42%;
     --warning: 45 93% 58%;
     --warning-foreground: 228 24% 8%;

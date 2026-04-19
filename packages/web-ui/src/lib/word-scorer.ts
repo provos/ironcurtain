@@ -724,6 +724,17 @@ export function processEventForWords(
       }
       break;
     }
+
+    case 'error': {
+      // Error messages get the same TF-IDF treatment as text deltas so
+      // meaningful tokens (e.g., the failing tool / domain) surface, but
+      // tagged with the `error` source so the renderer paints them crimson.
+      const words = extractWordsFromText(event.message);
+      if (words.length > 0) {
+        addScoredWords(words, 'error');
+      }
+      break;
+    }
   }
 
   return candidates;

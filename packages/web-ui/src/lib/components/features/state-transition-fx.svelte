@@ -169,9 +169,10 @@
     ctx.save();
     ctx.globalAlpha = f.tileAlpha;
 
-    // Phosphor glow — matches the rest of the viz. Tile border uses --primary
-    // at 80% per §D.2 (no `--accent-cyan` token exists yet, Task #54).
-    const border = 'hsl(var(--primary))';
+    // Phosphor glow — matches the rest of the viz. Tile border uses
+    // --accent-cyan per §D.2; the theater is the only mount site for this FX
+    // so there is no need to gate on a parent selector.
+    const border = 'hsl(var(--accent-cyan))';
     const bg = 'hsl(var(--background) / 0.9)';
 
     ctx.shadowColor = border;

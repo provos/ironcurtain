@@ -78,15 +78,16 @@ const LAYOUT: LayoutPlan = {
 const OPTIONS: DrawOptions = { fontFamily: '"Fira Code", monospace' };
 
 function wordDrop(partial: Partial<WordDropSnapshot>): WordDropSnapshot {
-  return {
+  const defaults: WordDropSnapshot = {
     col: 0,
     row: 0,
     word: 'x',
     source: 'text',
     priority: 1,
-    alpha: 1,
-    ...partial,
+    phase: 'hold',
+    revealedChars: partial.word?.length ?? 1,
   };
+  return { ...defaults, ...partial };
 }
 
 function makeFrame(wordDrops: WordDropSnapshot[]): FrameState {
@@ -110,11 +111,11 @@ describe('drawStreamFrame', () => {
     expect(fillTexts).toHaveLength(0);
   });
 
-  it('draws each wordDrop as one fillText at layout-anchored coordinates', () => {
+  it('draws each fully-held wordDrop as one fillText at layout-anchored coordinates', () => {
     const { ctx, calls } = createMockCtx();
     const drops = [
-      wordDrop({ col: 3, row: 4, word: 'alpha', source: 'text', alpha: 1 }),
-      wordDrop({ col: 7, row: 2, word: 'beta', source: 'tool', alpha: 0.5 }),
+      wordDrop({ col: 3, row: 4, word: 'alpha', source: 'text', phase: 'hold', revealedChars: 5 }),
+      wordDrop({ col: 7, row: 2, word: 'beta', source: 'tool', phase: 'hold', revealedChars: 4 }),
     ];
     drawStreamFrame(ctx, makeFrame(drops), LAYOUT, 480, 360, OPTIONS);
     const texts = calls.filter((c): c is Extract<Call, { kind: 'fillText' }> => c.kind === 'fillText');
@@ -125,26 +126,33 @@ describe('drawStreamFrame', () => {
     if (a) {
       expect(a.x).toBe(3 * LAYOUT.cellSize + LAYOUT.originX);
       expect(a.y).toBe(4 * LAYOUT.cellSize + LAYOUT.originY);
+      // Hold phase always renders at full opacity — the fade-in envelope is
+      // replaced by per-char materialization.
       expect(a.globalAlpha).toBe(1);
     }
     const b = texts.find((t) => t.text === 'beta');
     expect(b).toBeDefined();
     if (b) {
-      expect(b.globalAlpha).toBe(0.5);
+      expect(b.globalAlpha).toBe(1);
     }
   });
 
-  it('skips drops with alpha <= 0', () => {
+  it('draws only the revealed prefix during materialize', () => {
     const { ctx, calls } = createMockCtx();
-    const drops = [
-      wordDrop({ word: 'visible', alpha: 1 }),
-      wordDrop({ word: 'hidden', alpha: 0 }),
-      wordDrop({ word: 'negative', alpha: -0.5 }),
-    ];
+    const drops = [wordDrop({ col: 0, row: 0, word: 'crystal', phase: 'materialize', revealedChars: 3 })];
     drawStreamFrame(ctx, makeFrame(drops), LAYOUT, 480, 360, OPTIONS);
     const texts = calls.filter((c): c is Extract<Call, { kind: 'fillText' }> => c.kind === 'fillText');
+    // Only one fillText call (one word per drop), with the partial prefix.
     expect(texts).toHaveLength(1);
-    expect(texts[0].text).toBe('visible');
+    expect(texts[0].text).toBe('cry');
+  });
+
+  it('skips materializing drops that have not revealed any characters yet', () => {
+    const { ctx, calls } = createMockCtx();
+    const drops = [wordDrop({ word: 'pending', phase: 'materialize', revealedChars: 0 })];
+    drawStreamFrame(ctx, makeFrame(drops), LAYOUT, 480, 360, OPTIONS);
+    const texts = calls.filter((c): c is Extract<Call, { kind: 'fillText' }> => c.kind === 'fillText');
+    expect(texts).toHaveLength(0);
   });
 
   it('tints by source kind', () => {
@@ -160,5 +168,50 @@ describe('drawStreamFrame', () => {
     const styles = new Set(texts.map((t) => t.fillStyle));
     // Four distinct colors.
     expect(styles.size).toBe(4);
+  });
+
+  it('uses per-source hex colors matching the palette spec (§E)', () => {
+    const { ctx, calls } = createMockCtx();
+    const drops = [
+      wordDrop({ col: 0, row: 0, word: 'a', source: 'text' }),
+      wordDrop({ col: 1, row: 0, word: 'b', source: 'tool' }),
+      wordDrop({ col: 2, row: 0, word: 'c', source: 'model' }),
+      wordDrop({ col: 3, row: 0, word: 'd', source: 'error' }),
+    ];
+    drawStreamFrame(ctx, makeFrame(drops), LAYOUT, 480, 360, OPTIONS);
+    const texts = calls.filter((c): c is Extract<Call, { kind: 'fillText' }> => c.kind === 'fillText');
+    const byText = (t: string) => texts.find((c) => c.text === t)!.fillStyle;
+    // The palette is documented in stream-renderer.ts — these assertions pin
+    // the mapping so a regression (e.g., tool green-washed) would trip here.
+    expect(byText('a')).toBe('#00FF46');
+    expect(byText('b')).toBe('#00E5FF');
+    expect(byText('c')).toBe('#FFB84D');
+    expect(byText('d')).toBe('#FF4D4D');
+  });
+
+  it('paints tinted drops (dissolve shards) with the word-drop palette instead of green', () => {
+    const { ctx, calls } = createMockCtx();
+    // A single tinted drop simulating a dissolve shard from a `tool` word drop.
+    const frame: FrameState = {
+      phase: 'ambient',
+      globalAlpha: 1,
+      lockedCells: [],
+      drops: [
+        {
+          col: 5,
+          row: 6,
+          char: 'x',
+          colorKind: 'head',
+          trail: [],
+          tint: 'tool',
+        },
+      ],
+      wordDrops: [],
+    };
+    drawStreamFrame(ctx, frame, LAYOUT, 480, 360, OPTIONS);
+    const texts = calls.filter((c): c is Extract<Call, { kind: 'fillText' }> => c.kind === 'fillText');
+    expect(texts).toHaveLength(1);
+    // Tool cyan — not the ambient COLOR_HEAD green (#B4FFB4).
+    expect(texts[0].fillStyle).toBe('#00E5FF');
   });
 });

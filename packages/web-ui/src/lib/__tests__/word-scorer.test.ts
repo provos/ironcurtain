@@ -695,4 +695,87 @@ describe('processEventForWords', () => {
 
     expect(candidates).toEqual([]);
   });
+
+  // --- Per-event-kind source tagging (Fix #2 -- task #56) -----------------
+  // The visualization director forwards `candidate.source` directly to the
+  // renderer as the word-drop tint. These tests pin each event kind to the
+  // source it should emit so a regression (e.g., a tool call showing up in
+  // phosphor green) would trip here rather than in a visual review.
+
+  it('tags text_delta candidates with source "text"', () => {
+    const wordState = createSessionWordState();
+    const scorer = createWordScorer();
+    const longText =
+      'The kubernetes deployment configuration involves several important architectural decisions ' +
+      'about container orchestration and service mesh integration with distributed tracing observability ' +
+      'and comprehensive monitoring dashboards for production workloads';
+    const candidates = processEventForWords(
+      { kind: 'text_delta', text: longText, timestamp: Date.now() },
+      wordState,
+      scorer,
+      1000,
+    );
+    expect(candidates.length).toBeGreaterThan(0);
+    expect(candidates.every((c) => c.source === 'text')).toBe(true);
+  });
+
+  it('tags tool_use candidates with source "tool"', () => {
+    const wordState = createSessionWordState();
+    const scorer = createWordScorer();
+    const candidates = processEventForWords(
+      {
+        kind: 'tool_use',
+        toolName: 'mcp__ironcurtain__execute_code',
+        inputDelta: '',
+        timestamp: Date.now(),
+      },
+      wordState,
+      scorer,
+      1000,
+    );
+    expect(candidates.length).toBeGreaterThan(0);
+    expect(candidates.every((c) => c.source === 'tool')).toBe(true);
+  });
+
+  it('tags message_start candidates with source "model"', () => {
+    const wordState = createSessionWordState();
+    const scorer = createWordScorer();
+    const candidates = processEventForWords(
+      { kind: 'message_start', model: 'claude-sonnet-4-20250514', timestamp: Date.now() },
+      wordState,
+      scorer,
+      1000,
+    );
+    expect(candidates.length).toBeGreaterThan(0);
+    expect(candidates.every((c) => c.source === 'model')).toBe(true);
+  });
+
+  it('tags error event candidates with source "error"', () => {
+    const wordState = createSessionWordState();
+    const scorer = createWordScorer();
+    const candidates = processEventForWords(
+      {
+        kind: 'error',
+        message: 'kubernetes deployment validation failed: container image manifest invalid',
+        timestamp: Date.now(),
+      },
+      wordState,
+      scorer,
+      1000,
+    );
+    expect(candidates.length).toBeGreaterThan(0);
+    expect(candidates.every((c) => c.source === 'error')).toBe(true);
+  });
+
+  it('produces no candidates for empty error messages', () => {
+    const wordState = createSessionWordState();
+    const scorer = createWordScorer();
+    const candidates = processEventForWords(
+      { kind: 'error', message: '', timestamp: Date.now() },
+      wordState,
+      scorer,
+      1000,
+    );
+    expect(candidates).toEqual([]);
+  });
 });

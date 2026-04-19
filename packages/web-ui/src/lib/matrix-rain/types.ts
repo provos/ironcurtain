@@ -7,7 +7,7 @@
  * for the full design.
  */
 
-import type { WordDropSnapshot } from './word-drop-types.js';
+import type { WordDropSnapshot, WordDropSource } from './word-drop-types.js';
 
 // ---------------------------------------------------------------------------
 // Phase
@@ -154,6 +154,15 @@ export interface DropSnapshot {
    * `colorKind` / `row` above.
    */
   readonly trail: ReadonlyArray<DropTrailSnapshot>;
+  /**
+   * Optional source tint. Set by the stream engine when a word drop dissolves
+   * into falling shards so the shards inherit the word's color. The login
+   * engine never sets this; when absent the renderer falls back to the
+   * head/near/far phosphor palette. Kept as the semantic `WordDropSource`
+   * rather than a raw hex so the renderer stays the single owner of concrete
+   * colors.
+   */
+  readonly tint?: WordDropSource;
 }
 
 export interface DropTrailSnapshot {
@@ -161,6 +170,8 @@ export interface DropTrailSnapshot {
   readonly row: number;
   readonly char: string;
   readonly colorKind: DropColorKind;
+  /** Same semantics as `DropSnapshot.tint` — see above. */
+  readonly tint?: WordDropSource;
 }
 
 /**

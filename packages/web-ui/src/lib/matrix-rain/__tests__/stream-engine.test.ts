@@ -35,6 +35,7 @@ function snapshot(frame: FrameState): string {
       row: d.row,
       char: d.char,
       colorKind: d.colorKind,
+      tint: d.tint ?? null,
       trail: d.trail.map((t) => ({ col: t.col, row: t.row, char: t.char, colorKind: t.colorKind })),
     })),
     wordDrops: frame.wordDrops.map((w) => ({
@@ -43,7 +44,8 @@ function snapshot(frame: FrameState): string {
       word: w.word,
       source: w.source,
       priority: w.priority,
-      alpha: w.alpha,
+      phase: w.phase,
+      revealedChars: w.revealedChars,
     })),
   });
 }
@@ -106,11 +108,11 @@ describe('createStreamRainEngine -- getFrame() purity', () => {
     const engine = createStreamRainEngine(buildLayout(), { seed: 42 });
     driveTicks(engine, 1);
     engine.enqueueWord('hello', { priority: 1, colorKind: 'text' });
-    const alpha1 = engine.getFrame().wordDrops[0].alpha;
-    const alpha2 = engine.getFrame().wordDrops[0].alpha;
-    const alpha3 = engine.getFrame().wordDrops[0].alpha;
-    expect(alpha1).toBe(alpha2);
-    expect(alpha2).toBe(alpha3);
+    const r1 = engine.getFrame().wordDrops[0].revealedChars;
+    const r2 = engine.getFrame().wordDrops[0].revealedChars;
+    const r3 = engine.getFrame().wordDrops[0].revealedChars;
+    expect(r1).toBe(r2);
+    expect(r2).toBe(r3);
   });
 });
 
@@ -321,20 +323,22 @@ describe('createStreamRainEngine -- word drops FIFO', () => {
   });
 });
 
-describe('createStreamRainEngine -- word drop aging', () => {
-  it('runs the alpha envelope: 0 -> 1 (fade in) -> 1 (hold) -> 0 (fade out) -> removed', () => {
+describe('createStreamRainEngine -- word drop lifecycle', () => {
+  it('materializes characters one at a time, then holds, then removes on dissolve', () => {
     const engine = createStreamRainEngine(buildLayout(), { seed: 17 });
     engine.step(0);
     engine.enqueueWord('aging', { priority: 1, colorKind: 'text' });
 
-    // Freshly enqueued: age=0 -> alpha=0 (fade-in hasn't advanced).
-    expect(engine.getFrame().wordDrops[0].alpha).toBe(0);
+    // Freshly enqueued: phase=materialize, zero chars revealed yet — the
+    // first tick's ageHeldWords() call is what reveals char #1.
+    const initial = engine.getFrame().wordDrops[0];
+    expect(initial.phase).toBe('materialize');
+    expect(initial.revealedChars).toBe(0);
 
-    // Advance a few ticks into fade-in. Alpha should be strictly between
-    // 0 and 1 at least once.
-    let sawRising = false;
-    let sawOne = false;
-    let sawFalling = false;
+    // Drive the full lifecycle: materialize (~5 ticks for a 5-char word) ->
+    // hold (~75 ticks) -> dissolve (word removed from wordDrops).
+    let sawMaterialize = false;
+    let sawHoldFull = false;
     let finalCount = -1;
 
     for (let i = 1; i <= 120; i++) {
@@ -344,16 +348,115 @@ describe('createStreamRainEngine -- word drop aging', () => {
         finalCount = 0;
         break;
       }
-      const a = drops[0].alpha;
-      if (a > 0 && a < 1) sawRising = true;
-      if (a === 1) sawOne = true;
-      if (sawOne && a < 1 && a > 0) sawFalling = true;
+      const d = drops[0];
+      if (d.phase === 'materialize' && d.revealedChars > 0 && d.revealedChars < 5) {
+        sawMaterialize = true;
+      }
+      if (d.phase === 'hold' && d.revealedChars === d.word.length) {
+        sawHoldFull = true;
+      }
     }
 
-    expect(sawRising).toBe(true);
-    expect(sawOne).toBe(true);
-    expect(sawFalling).toBe(true);
+    expect(sawMaterialize).toBe(true);
+    expect(sawHoldFull).toBe(true);
     expect(finalCount).toBe(0);
+  });
+
+  it('reveals characters one per tick while in materialize', () => {
+    const engine = createStreamRainEngine(buildLayout(), { seed: 41 });
+    engine.step(0);
+    engine.enqueueWord('crystal', { priority: 1, colorKind: 'text' });
+    // First tick: one char revealed. Second: two. Third: three. Up to word length.
+    const reveals: number[] = [];
+    for (let i = 1; i <= 8; i++) {
+      engine.step(i * FRAME_MS);
+      reveals.push(engine.getFrame().wordDrops[0].revealedChars);
+    }
+    // Strictly monotone up to 7 (word length), then it stays at 7 or flips to hold.
+    expect(reveals[0]).toBe(1);
+    expect(reveals[1]).toBe(2);
+    expect(reveals[6]).toBe(7);
+    // Subsequent ticks cap at word.length.
+    expect(reveals[7]).toBe(7);
+  });
+
+  it('spawns one falling drop per character on dissolve, tagged with source tint', () => {
+    const engine = createStreamRainEngine(buildLayout(), { seed: 42 });
+    engine.step(0);
+    engine.enqueueWord('shatter', { priority: 1, colorKind: 'tool' });
+
+    // Drive through materialize + hold until the word is removed. Count how
+    // many tinted drops appear on the dissolve tick.
+    let dissolveTint: string | undefined;
+    let tintedCountOnDissolve = 0;
+    for (let i = 1; i <= 200; i++) {
+      engine.step(i * FRAME_MS);
+      const frame = engine.getFrame();
+      if (frame.wordDrops.length === 0) {
+        // First frame with no word drops: the dissolve tick. Count tinted drops.
+        const tinted = frame.drops.filter((d) => d.tint !== undefined);
+        tintedCountOnDissolve = tinted.length;
+        if (tinted.length > 0) dissolveTint = tinted[0].tint;
+        break;
+      }
+    }
+    expect(tintedCountOnDissolve).toBe('shatter'.length);
+    expect(dissolveTint).toBe('tool');
+  });
+
+  it('dissolve shards retain source color across the first few ticks', () => {
+    const engine = createStreamRainEngine(buildLayout(), { seed: 43 });
+    engine.step(0);
+    engine.enqueueWord('fade', { priority: 1, colorKind: 'error' });
+
+    // Walk until dissolve fires, then keep ticking and confirm the error tint
+    // stays on the drops (they are regular rain, just carrying a tint tag).
+    let dissolveTick = -1;
+    for (let i = 1; i <= 200; i++) {
+      engine.step(i * FRAME_MS);
+      if (engine.getFrame().wordDrops.length === 0) {
+        dissolveTick = i;
+        break;
+      }
+    }
+    expect(dissolveTick).toBeGreaterThan(0);
+
+    // A few ticks after dissolve, the drops list should still have at least
+    // one tinted drop (shards are slow, trailLen 3, so they survive a bit).
+    for (let i = dissolveTick + 1; i <= dissolveTick + 3; i++) {
+      engine.step(i * FRAME_MS);
+      const tinted = engine.getFrame().drops.filter((d) => d.tint === 'error');
+      expect(tinted.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('FIFO slot frees when a held word dissolves', () => {
+    const engine = createStreamRainEngine(buildLayout(), { seed: 44 });
+    engine.step(0);
+
+    // Saturate the FIFO cap.
+    for (let i = 0; i < WORD_DROP_FIFO_CAP; i++) {
+      engine.enqueueWord(`w${i}`, { priority: 1, colorKind: 'text' });
+    }
+    expect(engine.getFrame().wordDrops.length).toBe(WORD_DROP_FIFO_CAP);
+
+    // Drive past the full lifetime (materialize + hold). Once the first
+    // word dissolves its slot must be free — enqueueing a fresh word after
+    // dissolve should not evict one that's still in materialize/hold.
+    // A short word enqueued first reaches hold soonest; drive long enough
+    // that at least the earliest drops have dissolved.
+    for (let i = 1; i <= 200; i++) {
+      engine.step(i * FRAME_MS);
+    }
+    const afterAllGone = engine.getFrame().wordDrops.length;
+    expect(afterAllGone).toBe(0);
+
+    // Prove the FIFO freed: re-saturate, then confirm the cap counts only
+    // currently-held words. Dissolve shards don't occupy the word cap.
+    for (let i = 0; i < WORD_DROP_FIFO_CAP; i++) {
+      engine.enqueueWord(`r${i}`, { priority: 1, colorKind: 'text' });
+    }
+    expect(engine.getFrame().wordDrops.length).toBe(WORD_DROP_FIFO_CAP);
   });
 });
 

@@ -15,7 +15,7 @@
 import { FRAME_MS, MAX_CATCH_UP_TICKS, createSeededRng } from './engine.js';
 import { RAIN_CHARS } from './font.js';
 import type { DropColorKind, DropSnapshot, DropTrailSnapshot, FrameState, LayoutPlan, RainRng } from './types.js';
-import type { WordDropSnapshot, WordDropSource } from './word-drop-types.js';
+import type { WordDropPhase, WordDropSnapshot, WordDropSource } from './word-drop-types.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -31,15 +31,28 @@ const AMBIENT_MIN_SPEED = 1.0;
 const AMBIENT_MAX_SPEED = 2.0;
 const AMBIENT_COLUMN_COOLDOWN = 6;
 
-/** Max concurrent held word drops (§G Q6). */
+/** Max concurrent held word drops (§G Q6). FIFO slot frees when the word
+ *  enters the dissolve phase — dissolved shards no longer count. */
 export const WORD_DROP_FIFO_CAP = 24;
 
-// Word-drop alpha envelope in ticks (at FRAME_MS ~= 33ms).
-// Fade in 200ms -> hold 2500ms -> fade out 400ms == ~3.1s total.
-const WORD_FADE_IN_TICKS = Math.round(200 / FRAME_MS);
+// Word-drop lifecycle in logical ticks (FRAME_MS ~= 33ms).
+// Materialize: 1 char per tick so a 10-char word takes ~330ms — close to the
+// spec's ~40ms/char target without a sub-tick accumulator. Hold: ~2500ms at
+// full opacity (matches the original envelope hold). Dissolve is not a
+// held-drop phase; chars are spawned into the ambient drops list and decay
+// through the normal rain pipeline.
+const MATERIALIZE_CHARS_PER_TICK = 1;
 const WORD_HOLD_TICKS = Math.round(2500 / FRAME_MS);
-const WORD_FADE_OUT_TICKS = Math.round(400 / FRAME_MS);
-const WORD_TOTAL_TICKS = WORD_FADE_IN_TICKS + WORD_HOLD_TICKS + WORD_FADE_OUT_TICKS;
+
+/**
+ * Trail length for dissolve shards. Shorter than ambient trails so the
+ * shatter reads as "char arrives then fades" rather than a new full-blown
+ * rain stream emerging from mid-screen. Each shard's trail is built below
+ * the head row, matching the ambient snapshot convention.
+ */
+const DISSOLVE_SHARD_TRAIL = 3;
+/** Per-frame speed for dissolve shards — matches ambient min speed. */
+const DISSOLVE_SHARD_SPEED = 1.0;
 
 /** Word drops land in the top third so they don't collide with rain heads. */
 const WORD_ROW_FRACTION = 1 / 3;
@@ -111,6 +124,13 @@ interface AmbientDrop {
   chars: string[];
   headIdx: number;
   alive: boolean;
+  /**
+   * Optional source tint for this drop. Set only on dissolve shards produced
+   * from a word drop — the renderer uses it to pick a word-drop color palette
+   * instead of the standard head/near/far phosphor greens. Omitted (undefined)
+   * for normal ambient rain so those drops render in the usual green.
+   */
+  tint?: WordDropSource;
 }
 
 interface HeldWordDrop {
@@ -119,8 +139,12 @@ interface HeldWordDrop {
   word: string;
   source: WordDropSource;
   priority: number;
-  /** Ticks since enqueue. Drives the fade envelope. */
-  age: number;
+  phase: WordDropPhase;
+  /** How many leading chars of `word` are currently revealed. Grows during
+   *  materialize; stays at `word.length` during hold. */
+  revealedChars: number;
+  /** Ticks spent in the current phase — used to time the hold timeout. */
+  phaseTicks: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -338,36 +362,82 @@ export function createStreamRainEngine(layout: LayoutPlan, options: StreamRainEn
     };
   }
 
+  /**
+   * Build a tinted falling drop that starts at the word's (col, row) with the
+   * word's own character as the head. The shard uses a short trail and a
+   * fixed slow speed so the dissolve reads as "this glyph sinks back into
+   * the rain" rather than "a new column of rain appeared mid-screen."
+   */
+  function createDissolveShard(col: number, row: number, char: string, tint: WordDropSource): AmbientDrop {
+    const trailLen = DISSOLVE_SHARD_TRAIL;
+    const ringSize = trailLen + 1;
+    const chars = new Array<string>(ringSize);
+    // Seed the full ring with the word's glyph so the trail shows the same
+    // character a couple of rows behind before the ring starts rotating in
+    // random rain chars — softens the moment the word becomes rain.
+    for (let i = 0; i < ringSize; i++) chars[i] = char;
+    return {
+      col,
+      headRow: row,
+      speed: DISSOLVE_SHARD_SPEED,
+      speedAccum: 0,
+      trailLen,
+      chars,
+      headIdx: 1 % ringSize,
+      alive: true,
+      tint,
+    };
+  }
+
   // -----------------------------------------------------------------------
   // Word drops
   // -----------------------------------------------------------------------
 
+  /**
+   * Advance the materialize -> hold -> dissolve state machine for every
+   * held word. On dissolve, the word is removed from `heldWords` and one
+   * falling shard is pushed onto `ambientDrops` per character so the
+   * shatter is visible through the normal rain pipeline.
+   */
   function ageHeldWords(): void {
     if (heldWords.length === 0) return;
     let w = 0;
     for (let i = 0; i < heldWords.length; i++) {
       const h = heldWords[i];
-      h.age++;
-      if (h.age < WORD_TOTAL_TICKS) {
+      h.phaseTicks++;
+
+      if (h.phase === 'materialize') {
+        h.revealedChars = Math.min(h.word.length, h.revealedChars + MATERIALIZE_CHARS_PER_TICK);
+        if (h.revealedChars >= h.word.length) {
+          h.phase = 'hold';
+          h.phaseTicks = 0;
+        }
         heldWords[w++] = h;
+        continue;
       }
+
+      // hold: wait out the read-time, then dissolve into rain shards.
+      if (h.phaseTicks >= WORD_HOLD_TICKS) {
+        dissolveWord(h);
+        continue;
+      }
+      heldWords[w++] = h;
     }
     heldWords.length = w;
   }
 
-  function alphaForAge(age: number): number {
-    if (age < WORD_FADE_IN_TICKS) {
-      return age / WORD_FADE_IN_TICKS;
+  /**
+   * Spawn one falling rain shard per character of the word and drop the
+   * held record. Each shard inherits the word's source so the renderer
+   * can tint the fall — preserving the color semantics of the original
+   * word through the dissolve.
+   */
+  function dissolveWord(h: HeldWordDrop): void {
+    for (let ci = 0; ci < h.word.length; ci++) {
+      const col = h.col + ci;
+      if (col < 0 || col >= currentLayout.cols) continue;
+      ambientDrops.push(createDissolveShard(col, h.row, h.word[ci], h.source));
     }
-    const afterFadeIn = age - WORD_FADE_IN_TICKS;
-    if (afterFadeIn < WORD_HOLD_TICKS) {
-      return 1.0;
-    }
-    const fadeOutAge = afterFadeIn - WORD_HOLD_TICKS;
-    if (fadeOutAge < WORD_FADE_OUT_TICKS) {
-      return 1.0 - fadeOutAge / WORD_FADE_OUT_TICKS;
-    }
-    return 0;
   }
 
   // -----------------------------------------------------------------------
@@ -388,7 +458,8 @@ export function createStreamRainEngine(layout: LayoutPlan, options: StreamRainEn
         word: held.word,
         source: held.source,
         priority: held.priority,
-        alpha: alphaForAge(held.age),
+        phase: held.phase,
+        revealedChars: held.revealedChars,
       });
     }
 
@@ -410,20 +481,28 @@ export function createStreamRainEngine(layout: LayoutPlan, options: StreamRainEn
       const row = headRowFloor - d;
       if (row < 0) break;
       const idx = (drop.headIdx - 1 - d + ringLen * (drop.trailLen + 2)) % ringLen;
-      trail.push({
-        col: drop.col,
-        row,
-        char: drop.chars[idx],
-        colorKind: trailColorKind(d),
-      });
+      const trailCell: DropTrailSnapshot = drop.tint
+        ? { col: drop.col, row, char: drop.chars[idx], colorKind: trailColorKind(d), tint: drop.tint }
+        : { col: drop.col, row, char: drop.chars[idx], colorKind: trailColorKind(d) };
+      trail.push(trailCell);
     }
-    return {
-      col: drop.col,
-      row: drop.headRow,
-      char: drop.chars[headCharIdx],
-      colorKind: 'head',
-      trail,
-    };
+    const head: DropSnapshot = drop.tint
+      ? {
+          col: drop.col,
+          row: drop.headRow,
+          char: drop.chars[headCharIdx],
+          colorKind: 'head',
+          trail,
+          tint: drop.tint,
+        }
+      : {
+          col: drop.col,
+          row: drop.headRow,
+          char: drop.chars[headCharIdx],
+          colorKind: 'head',
+          trail,
+        };
+    return head;
   }
 
   // -----------------------------------------------------------------------
@@ -531,7 +610,12 @@ export function createStreamRainEngine(layout: LayoutPlan, options: StreamRainEn
         word,
         source: opts.colorKind,
         priority: opts.priority,
-        age: 0,
+        phase: 'materialize',
+        // Start at zero revealed — the first tick's ageHeldWords() call
+        // reveals char #1. Keeps the transition visually crisp: enqueue on
+        // tick N, see char 1 on tick N+1, which the snapshot contract matches.
+        revealedChars: 0,
+        phaseTicks: 0,
       });
       // FIFO eviction: drop the oldest once we exceed the cap. Priority is a
       // tuning knob for future policy (see scope note in §G Q6) — today we

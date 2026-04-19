@@ -556,4 +556,43 @@
     width: 100%;
     height: 100%;
   }
+
+  /* Theater-scoped color token migration: the design doc (§C.4, §C.5, §D.2,
+     §D.4, §E.3) repeatedly calls for `--accent-cyan` on the dormant edges,
+     the active-node chrome, and the payload-handoff tile. Classic
+     WorkflowDetail renders the same graph component in a non-cyberpunk
+     context, so we can't migrate `--primary` wholesale inside
+     state-machine-graph.svelte; instead we swap the tint here and let
+     classic mode keep its amber aesthetic. `:global(.smg-*)` reaches into
+     the child component's scoped selectors — the same idiom the theater
+     already uses for `.theater-graph :global(svg.smg-svg)`. */
+  .workflow-theater :global(.smg-edge) {
+    stroke: hsl(var(--accent-cyan));
+  }
+  .workflow-theater :global(.smg-edge[data-active='true']) {
+    filter: drop-shadow(0 0 4px hsl(var(--accent-cyan) / 0.6));
+  }
+  /* The graph defines `--smg-active-color` on `.smg-node--active` that its
+     border, background, phosphor bloom, scan-line tint, and pulse keyframe
+     all resolve against. Overriding the variable from theater scope flips
+     the entire active-node affordance from amber to cyan in one shot —
+     including the animated pulse, which (being `var()`-driven) resolves
+     per-element at animation time. The human_gate variant sets its own
+     override at higher specificity and keeps its warning amber. */
+  .workflow-theater :global(.smg-node--active:not(.smg-node--human_gate)) {
+    --smg-active-color: var(--accent-cyan);
+  }
+  /* Arrival scan-line + flash-badge on the receiving node (§D.2, §D.4).
+     The child defines these under a `:global` block keyed on
+     `data-arrival`; override their primary references here so the sweep
+     and badge read as cyan in the theater. The selector path includes
+     the foreignObject to match the child's specificity and beat its
+     declaration. */
+  .workflow-theater :global(foreignObject[data-arrival='true'] .smg-node::after) {
+    background-image: linear-gradient(90deg, transparent 0%, hsl(var(--accent-cyan) / 0.6) 50%, transparent 100%);
+  }
+  .workflow-theater :global(foreignObject[data-arrival='true'] .smg-node::before) {
+    background: hsl(var(--accent-cyan) / 0.95);
+    color: hsl(var(--background));
+  }
 </style>
