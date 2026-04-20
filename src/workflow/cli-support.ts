@@ -436,7 +436,6 @@ export function synthesizeCheckpoint(
     parallelResults: {},
     worktreeBranches: [],
     totalTokens: 0,
-    flaggedForReview: false,
     lastError: null,
     sessionsByState: {},
     previousAgentOutput: null,

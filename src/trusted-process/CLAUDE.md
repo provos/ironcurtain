@@ -4,7 +4,7 @@
 
 The security kernel of IronCurtain. Every tool call from the agent passes through this layer for policy evaluation, audit logging, and routing to real MCP servers.
 
-**`ToolCallCoordinator`** (`tool-call-coordinator.ts`) — centralizes all security-kernel components as single instances: PolicyEngine, AuditLog, CallCircuitBreaker, ApprovalWhitelist, AutoApprover, and ServerContextMap. Instantiated once per session in the Sandbox/CodeModeProxy layer. Two mutexes serialize concurrent access: a call mutex (protects RMW caches during `handleToolCall`) and a policy mutex (reserved for future `loadPolicy` hot-swap).
+**`ToolCallCoordinator`** (`tool-call-coordinator.ts`) — centralizes all security-kernel components as single instances: PolicyEngine, AuditLog, CallCircuitBreaker, ApprovalWhitelist, AutoApprover, and ServerContextMap. Instantiated once per session in the Sandbox/CodeModeProxy layer. Two mutexes serialize concurrent access: a call mutex (protects RMW caches during `handleToolCall`) and a policy mutex (taken by `loadPolicy` to swap the active `PolicyEngine` between workflow states). A `currentPersona` field tracks the persona that installed the active policy; the security pipeline stamps it onto every `AuditEntry`.
 
 **`tool-call-pipeline.ts`** — the security pipeline. Contains `handleCallTool` and all helpers: argument validation, `prepareToolArgs` normalization, git enrichment, policy evaluation, escalation flow, audit write, circuit breaker check, and `ServerContext` post-success update.
 
@@ -12,15 +12,19 @@ The security kernel of IronCurtain. Every tool call from the agent passes throug
 
 **`TrustedProcess`** (`index.ts`) — thin wrapper around `ToolCallCoordinator` used by integration tests and the direct-tool-call fallback.
 
+**`ControlServer`** (`control-server.ts`) — small HTTP server bound to a Unix domain socket (or loopback TCP) that exposes `POST /__ironcurtain/policy/load`. The workflow orchestrator hits this endpoint between agent states to hot-swap the coordinator's active `PolicyEngine` and `currentPersona` via `ToolCallCoordinator.loadPolicy({persona, policyDir})`. The control server only runs in workflow shared-container mode; `DockerProxy.getPolicySwapTarget()` is the narrow seam that exposes `startControlServer(opts)` without leaking the rest of the coordinator. Single-session CLI / daemon / cron paths never construct it. See [`docs/designs/workflow-container-lifecycle.md`](../../docs/designs/workflow-container-lifecycle.md).
+
 ## Policy Engine
 
 **PolicyEngine** (`policy-engine.ts`) - two-phase evaluation with default-deny:
+
 - **Structural invariants** (hardcoded): protected paths, unknown tool denial, per-role sandbox containment, and domain allowlist checks for URL-role args.
 - **Compiled rules**: declarative rules from `compiled-policy.json` (allow/escalate only; deny is the default when no rule matches). Each role is evaluated independently; the most restrictive result across roles wins (deny > escalate > allow).
 
 The annotation map stores `StoredToolAnnotation` (may contain conditional role specs for multi-mode tools). `resolveStoredAnnotation()` resolves conditionals against call arguments, producing a plain `ToolAnnotation`. `getAnnotation(server, tool, callArgs)` returns the resolved annotation; `getStoredAnnotation()` provides raw access for pipeline tools.
 
 **Supporting modules:**
+
 - `policy-types.ts` - `EvaluationResult` type with `escalatedRoles` for whitelist candidate extraction.
 - `policy-roots.ts` - `extractPolicyRoots()` derives MCP Roots from `allow`/`escalate` rules with `paths.within` conditions.
 - `domain-utils.ts` - domain matching (`domainMatchesAllowlist`, `isIpAddress`), URL normalization, git remote resolution. Shared by the engine and dynamic list type registry.
@@ -45,6 +49,7 @@ The annotation map stores `StoredToolAnnotation` (may contain conditional role s
 **CallCircuitBreaker** (`call-circuit-breaker.ts`) - centralized rate limiter managed by the ToolCallCoordinator. Denies repeated identical (tool, argsHash) calls exceeding a sliding-window threshold (default: 20 calls per 60s). Runs after policy evaluation so every call is audited.
 
 **Transport layers** for Docker Agent Mode:
+
 - `uds-server-transport.ts` - Unix domain socket transport (Linux containers with bind mounts).
 - `tcp-server-transport.ts` - TCP transport (macOS Docker Desktop where VirtioFS does not support UDS in bind mounts).
 
@@ -54,7 +59,7 @@ The annotation map stores `StoredToolAnnotation` (may contain conditional role s
 
 ## Audit
 
-**AuditLog** (`audit-log.ts`) - append-only JSONL logging with PII/credential redaction enabled by default (`audit-redactor.ts`). Masks credit cards (Luhn-validated), SSNs, and API keys. Disable with `auditRedaction.enabled: false`.
+**AuditLog** (`audit-log.ts`) - append-only JSONL logging with PII/credential redaction enabled by default (`audit-redactor.ts`). Masks credit cards (Luhn-validated), SSNs, and API keys. Disable with `auditRedaction.enabled: false`. The audit file is fixed at coordinator construction; workflows produce a single `audit.jsonl` per run and `loadPolicy` does not rotate it — each `AuditEntry` carries a `persona` field instead, so per-persona slices are reconstructed by scanning. Stream errors latch and surface synchronously on the next `log()` call.
 
 ## Sandbox & Credentials
 

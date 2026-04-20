@@ -23,12 +23,38 @@ export function getSessionsDir(): string {
 }
 
 /**
- * Validates that a session ID contains only safe characters
- * (alphanumeric, hyphens, underscores) to prevent path traversal.
+ * Characters permitted in any identifier that gets embedded in a
+ * filesystem path by this module (session IDs, workflow IDs, persona
+ * slugs, daemon log names). Rejects path separators, glob
+ * metacharacters, NUL bytes, and everything else that could escape the
+ * target directory.
  */
-function validateSessionId(sessionId: string): void {
-  if (!/^[a-zA-Z0-9_-]+$/.test(sessionId)) {
-    throw new Error(`Invalid session ID: ${sessionId}`);
+const PATH_SAFE_SLUG_RE = /^[a-zA-Z0-9_-]+$/;
+
+function assertPathSafeSlug(kind: string, value: string): void {
+  if (!PATH_SAFE_SLUG_RE.test(value)) {
+    throw new Error(`Invalid ${kind}: ${value}`);
+  }
+}
+
+/**
+ * Filenames shared across session-scoped and workflow-state-scoped
+ * layouts. Centralized so the "single source of truth" for how session
+ * artifacts are named does not drift between helpers and call sites.
+ */
+export const SESSION_LOG_FILENAME = 'session.log';
+export const SESSION_METADATA_FILENAME = 'session-metadata.json';
+
+/**
+ * Validates a workflow state slug of the form `{stateId}.{visitCount}`
+ * (e.g., `fetch.1`, `plan.2`). Accepts dot-separated segments where
+ * each segment satisfies `PATH_SAFE_SLUG_RE`. Empty segments — produced
+ * by `..`, leading or trailing dots — fail the per-segment check.
+ */
+function assertStateSlug(value: string): void {
+  if (value.length === 0) throw new Error(`Invalid state slug: ${value}`);
+  for (const segment of value.split('.')) {
+    assertPathSafeSlug('state slug segment', segment);
   }
 }
 
@@ -37,7 +63,7 @@ function validateSessionId(sessionId: string): void {
  *   {home}/sessions/{sessionId}/
  */
 export function getSessionDir(sessionId: string): string {
-  validateSessionId(sessionId);
+  assertPathSafeSlug('session ID', sessionId);
   return resolve(getSessionsDir(), sessionId);
 }
 
@@ -62,7 +88,7 @@ export function getSessionEscalationDir(sessionId: string): string {
  *   {home}/sessions/{sessionId}/session-metadata.json
  */
 export function getSessionMetadataPath(sessionId: string): string {
-  return resolve(getSessionDir(sessionId), 'session-metadata.json');
+  return resolve(getSessionDir(sessionId), SESSION_METADATA_FILENAME);
 }
 
 /**
@@ -86,7 +112,7 @@ export function getSessionInteractionLogPath(sessionId: string): string {
  *   {home}/sessions/{sessionId}/session.log
  */
 export function getSessionLogPath(sessionId: string): string {
-  return resolve(getSessionDir(sessionId), 'session.log');
+  return resolve(getSessionDir(sessionId), SESSION_LOG_FILENAME);
 }
 
 /**
@@ -162,9 +188,7 @@ export function getLogsDir(): string {
  * E.g., getDaemonLogPath('signal-bot') → {home}/logs/signal-bot.log
  */
 export function getDaemonLogPath(name: string): string {
-  if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
-    throw new Error(`Invalid daemon log name: ${name}`);
-  }
+  assertPathSafeSlug('daemon log name', name);
   return resolve(getLogsDir(), `${name}.log`);
 }
 
@@ -394,4 +418,102 @@ export function getJobWorkspaceDir(jobId: string): string {
  */
 export function getJobRunsDir(jobId: string): string {
   return resolve(getJobDir(jobId), 'runs');
+}
+
+// ---------------------------------------------------------------------------
+// Workflow run paths
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns the workflow runs base directory: {home}/workflow-runs/
+ */
+export function getWorkflowRunsDir(): string {
+  return resolve(getIronCurtainHome(), 'workflow-runs');
+}
+
+/**
+ * Returns the directory for a specific workflow run:
+ * {home}/workflow-runs/{workflowId}/
+ */
+export function getWorkflowRunDir(workflowId: string): string {
+  assertPathSafeSlug('workflow ID', workflowId);
+  return resolve(getWorkflowRunsDir(), workflowId);
+}
+
+/**
+ * Returns the coordinator control socket path for a workflow run:
+ *   {home}/workflow-runs/{workflowId}/proxy-control.sock
+ *
+ * The coordinator listens on this UDS to accept policy hot-swap
+ * requests from the workflow orchestrator. The socket sits inside
+ * the workflow run's private directory (mode `0o700`) so no
+ * additional auth is needed -- filesystem permissions gate access.
+ */
+export function getWorkflowProxyControlSocketPath(workflowId: string): string {
+  return resolve(getWorkflowRunDir(workflowId), 'proxy-control.sock');
+}
+
+/**
+ * Returns the single audit log path for a workflow run:
+ *   {home}/workflow-runs/{workflowId}/audit.jsonl
+ *
+ * One file per workflow run, regardless of how many persona swaps
+ * occur. Each entry is tagged with a `persona` field by the
+ * coordinator, and JSONL ordering lets consumers reconstruct
+ * per-persona / per-re-entry slices by scanning.
+ */
+export function getWorkflowAuditLogPath(workflowId: string): string {
+  return resolve(getWorkflowRunDir(workflowId), 'audit.jsonl');
+}
+
+/**
+ * Returns the shared Docker infrastructure bundle directory for a
+ * workflow run:
+ *   {home}/workflow-runs/{workflowId}/bundle/
+ *
+ * Holds artifacts that live for the whole workflow (shared across all
+ * states): `claude-state/`, `orientation/`, `sockets/`, `escalations/`,
+ * and `system-prompt.txt`. Per-state artifacts go under `states/`.
+ */
+export function getWorkflowBundleDir(workflowId: string): string {
+  return resolve(getWorkflowRunDir(workflowId), 'bundle');
+}
+
+/**
+ * Returns the per-state artifacts root for a workflow run:
+ *   {home}/workflow-runs/{workflowId}/states/
+ *
+ * Each agent state invocation (including re-entries) gets its own
+ * subdirectory keyed by `{stateId}.{visitCount}`.
+ */
+export function getWorkflowStatesDir(workflowId: string): string {
+  return resolve(getWorkflowRunDir(workflowId), 'states');
+}
+
+/**
+ * Returns the per-invocation artifact directory for a single state:
+ *   {home}/workflow-runs/{workflowId}/states/{stateSlug}/
+ *
+ * Holds this invocation's `session.log` and `session-metadata.json`.
+ * `stateSlug` is `{stateId}.{visitCount}` (e.g., `fetch.1`, `plan.2`).
+ */
+export function getWorkflowStateDir(workflowId: string, stateSlug: string): string {
+  assertStateSlug(stateSlug);
+  return resolve(getWorkflowStatesDir(workflowId), stateSlug);
+}
+
+/**
+ * Returns the session log path for a single state invocation:
+ *   {home}/workflow-runs/{workflowId}/states/{stateSlug}/session.log
+ */
+export function getWorkflowStateLogPath(workflowId: string, stateSlug: string): string {
+  return resolve(getWorkflowStateDir(workflowId, stateSlug), SESSION_LOG_FILENAME);
+}
+
+/**
+ * Returns the session metadata path for a single state invocation:
+ *   {home}/workflow-runs/{workflowId}/states/{stateSlug}/session-metadata.json
+ */
+export function getWorkflowStateMetadataPath(workflowId: string, stateSlug: string): string {
+  return resolve(getWorkflowStateDir(workflowId, stateSlug), SESSION_METADATA_FILENAME);
 }

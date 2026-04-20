@@ -34,7 +34,7 @@ import { BudgetExhaustedError } from '../session/errors.js';
 import { validateWorkspacePath } from '../session/workspace-validation.js';
 import * as logger from '../logger.js';
 import { getDaemonLogPath } from '../config/paths.js';
-import { createTokenStreamBus, type TokenStreamBus } from '../docker/token-stream-bus.js';
+import { getTokenStreamBus } from '../docker/token-stream-bus.js';
 import { ControlSocketServer, type ControlRequestHandler, type DaemonStatus } from './control-socket.js';
 
 export type { SessionSource, ManagedSession } from '../session/session-manager.js';
@@ -78,9 +78,6 @@ export class IronCurtainDaemon {
   private readonly noSignal: boolean;
   private readonly sessionManager = new SessionManager();
   private readonly scheduler: CronScheduler;
-
-  /** Shared token stream bus for real-time LLM output observation. */
-  private readonly tokenStreamBus: TokenStreamBus = createTokenStreamBus();
 
   /** Time the daemon was started (for uptime calculation). */
   private startTime: Date | null = null;
@@ -229,7 +226,7 @@ export class IronCurtainDaemon {
         } catch (err: unknown) {
           logger.warn(`[Daemon] Error ending session #${s.label}: ${String(err)}`);
         }
-        this.tokenStreamBus.endSession(sessionId);
+        getTokenStreamBus().endSession(sessionId);
         this.tokenStreamBridge?.closeSession(s.label);
       }),
     );
@@ -289,9 +286,11 @@ export class IronCurtainDaemon {
       const managed = this.sessionManager.get(activeLabel);
       const sessionId = managed?.session.getInfo().id;
       await this.sessionManager.end(activeLabel);
-      if (sessionId) this.tokenStreamBus.endSession(sessionId);
+      if (sessionId) getTokenStreamBus().endSession(sessionId);
       this.tokenStreamBridge?.closeSession(activeLabel);
       this.activeJobRuns.delete(jobId);
+      // The ended session tore down the logger; re-claim for daemon logs.
+      logger.setup({ logFilePath: getDaemonLogPath('daemon') });
     }
 
     this.scheduler.unschedule(jobId);
@@ -503,7 +502,6 @@ export class IronCurtainDaemon {
       jobId: job.id,
       systemPromptAugmentation: augmentation,
       disableAutoApprove: true,
-      tokenStreamBus: this.tokenStreamBus,
       onEscalation: (request) => {
         escalationsEncountered++;
         this.handleCronEscalation(request, job);
@@ -590,8 +588,13 @@ export class IronCurtainDaemon {
     this.activeJobRuns.delete(job.id);
     const sessionId = session.getInfo().id;
     await this.sessionManager.end(label);
-    this.tokenStreamBus.endSession(sessionId);
+    getTokenStreamBus().endSession(sessionId);
     this.tokenStreamBridge?.closeSession(label);
+
+    // Session.close() tears down the logger singleton (the session
+    // claimed it for the job's duration). Re-claim it for the daemon
+    // so subsequent daemon logs still reach the daemon log file.
+    logger.setup({ logFilePath: getDaemonLogPath('daemon') });
 
     logger.info(`[Daemon] Job ${job.id} completed: ${outcome.kind}`);
     return record;
@@ -716,12 +719,10 @@ export class IronCurtainDaemon {
       mode: this.mode,
       maxConcurrentWebSessions: 5,
       devMode: this.webUiOptions?.devMode,
-      tokenStreamBus: this.tokenStreamBus,
     });
     server.setWorkflowManager(new WorkflowManager({ eventBus: server.getEventBus() }));
 
-    // Wire token stream bridge for per-client subscription delivery
-    const bridge = new TokenStreamBridge(server, this.tokenStreamBus);
+    const bridge = new TokenStreamBridge(server);
     server.setTokenStreamBridge(bridge);
     this.tokenStreamBridge = bridge;
 

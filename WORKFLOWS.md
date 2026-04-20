@@ -43,6 +43,29 @@ Within a state that runs multiple rounds (e.g., the coder running again after cr
 
 Different states always get separate sessions — the planner, architect, coder, and critic each have their own conversation history and cannot see each other's internal reasoning. They communicate only through the shared workspace and the response text passed by the orchestrator.
 
+### Shared-container mode (`sharedContainer: true`)
+
+Opt in by setting `settings.sharedContainer: true` in the workflow definition. Instead of each agent state spinning up its own Docker container, proxy, and `ToolCallCoordinator`, the orchestrator builds **one** Docker infrastructure bundle at workflow start and every state borrows it. State sessions are constructed with `ownsInfra: false` so `close()` tears down only per-state resources; the bundle is destroyed once when the workflow reaches a terminal state. See [`docs/designs/workflow-container-lifecycle.md`](docs/designs/workflow-container-lifecycle.md) for the full design.
+
+Before each agent state runs, the orchestrator hot-swaps the coordinator's active `PolicyEngine` to match the incoming state's `persona`. The swap is a `POST /__ironcurtain/policy/load` over the workflow's Unix domain control socket; the coordinator reloads `compiled-policy.json` / `tool-annotations.json` / `dynamic-lists.json` from the persona's policy directory under `callMutex` then `policyMutex`, so in-flight tool calls finish against the old engine and new calls use the new engine. The audit log is a single `audit.jsonl` for the whole run; each entry carries a `persona` field so per-state slices can be reconstructed by scanning.
+
+### Workflow run layout
+
+Workflow runs live under `~/.ironcurtain/workflow-runs/<workflowId>/`:
+
+```
+~/.ironcurtain/workflow-runs/<workflowId>/
+  audit.jsonl                  # single coordinator audit log, persona-tagged entries
+  messages.jsonl               # orchestrator message log
+  workspace/                   # agent workspace (filesystem MCP root)
+  proxy-control.sock           # coordinator control UDS (policy hot-swap endpoint)
+  bundle/                      # shared Docker bundle: claude-state/, orientation/, sockets/, escalations/, system-prompt.txt
+  states/
+    <stateId>.<visitCount>/    # per-invocation session.log and session-metadata.json
+```
+
+Nothing lands in `~/.ironcurtain/sessions/` for a workflow run. Single-session CLI (`ironcurtain start`, `mux`, PTY) continues to use `~/.ironcurtain/sessions/<sessionId>/` unchanged.
+
 ## The design-and-code workflow
 
 The built-in `design-and-code` workflow follows this flow:
@@ -73,17 +96,16 @@ The coder and critic loop until the critic approves or the round limit is reache
 
 ```
 your-workspace/                  # Workspace root (new or existing repo)
-  .workflow/                     # Workflow artifacts (gitignored automatically)
+  .workflow/                     # Agent-visible artifacts (gitignored automatically)
     plan/plan.md                 # Planner output
     spec/spec.md                 # Architect output
     reviews/review.md            # Critic output
-    messages.jsonl               # Full message log
   src/                           # Code written by the coder
   package.json                   # (or whatever the project needs)
   ...
 ```
 
-When you provide `--workspace`, the agents work in your existing directory. Workflow artifacts go into `.workflow/` which is automatically added to `.gitignore`. Code changes happen at the workspace root alongside your existing files.
+When you provide `--workspace`, the agents work in your existing directory. Workflow artifacts visible to the agents go into `.workflow/` inside the workspace and are automatically added to `.gitignore`. Code changes happen at the workspace root alongside your existing files. Run-level bookkeeping (`messages.jsonl`, `audit.jsonl`, per-state session logs, and — under `sharedContainer: true` — the shared Docker bundle) lives under `~/.ironcurtain/workflow-runs/<workflowId>/`; see "Workflow run layout" above.
 
 When you don't provide `--workspace`, the orchestrator creates a fresh directory.
 
@@ -171,15 +193,16 @@ Exit codes:
 
 #### Check catalog
 
-| Code | Severity | Catches |
-|------|----------|---------|
-| `WF001` | error | State cannot reach any terminal — workflow would loop forever if it enters |
-| `WF002` | warning | `settings.unversionedArtifacts` entry not produced by any state (silently versioned) |
-| `WF003` | warning | Terminal `outputs:` entry not produced by any reachable state |
-| `WF004` | error | Human-gate `present:` entry not produced (human would approve blind) |
-| `WF005` | error | State uses `parallelKey` + `worktree: true` but `settings.gitRepoPath` is not set |
-| `WF006` | warning | `settings.maxRounds` set but no transition uses `isRoundLimitReached` guard (limit silently ignored) |
-| `WF007` | warning | Agent state references a persona not installed locally (runtime failure) |
+| Code    | Severity | Catches                                                                                                 |
+| ------- | -------- | ------------------------------------------------------------------------------------------------------- |
+| `WF001` | error    | State cannot reach any terminal — workflow would loop forever if it enters                              |
+| `WF002` | warning  | `settings.unversionedArtifacts` entry not produced by any state (silently versioned)                    |
+| `WF003` | warning  | Terminal `outputs:` entry not produced by any reachable state                                           |
+| `WF004` | error    | Human-gate `present:` entry not produced (human would approve blind)                                    |
+| `WF005` | error    | State uses `parallelKey` + `worktree: true` but `settings.gitRepoPath` is not set                       |
+| `WF006` | warning  | `settings.maxRounds` set but no transition uses `isRoundLimitReached` guard (limit silently ignored)    |
+| `WF007` | warning  | Agent state references a persona not installed locally (runtime failure)                                |
+| `WF008` | error    | `maxVisits` state has a cap-guarded transition positioned after a non-approval `when` (cap never fires) |
 
 Example:
 
@@ -189,6 +212,13 @@ ironcurtain workflow lint ./my-workflow.yaml --strict
 ```
 
 When a workflow is started via the daemon/web UI, error-severity diagnostics abort with a `LINT_FAILED` JSON-RPC error carrying the full diagnostic list so the UI can render it inline.
+
+#### Definition-level validation errors
+
+The following checks are enforced during workflow validation before lint runs, so they are reported as `WorkflowValidationError` issues rather than `WF` lint diagnostics:
+
+- `maxVisits` declared on a non-agent state (only agent states support per-state visit caps)
+- State ID does not match `^[A-Za-z_][A-Za-z0-9_]*$` (empty, leading digit, or contains `.`/space/`-`)
 
 ## Human gates
 
@@ -215,6 +245,7 @@ settings:
   dockerAgent: claude-code
   maxRounds: 3
   systemPrompt: Optional persistent context for all agents
+  sharedContainer: true # optional; see "Shared-container mode" above
 
 states:
   first_state:
@@ -256,6 +287,7 @@ my_state:
 - **`outputs`** -- Artifact directories the agent must create (under `.workflow/`). Use `[]` for code-only states where the agent writes to the workspace root.
 - **`transitions`** -- Where to go next, using `when` for declarative conditions or `guard` for context-based checks
 - **`freshSession`** -- When `false`, re-invocations of this state resume the previous agent session via `--continue`, receiving an abbreviated re-visit prompt. Use this for iterative refinement loops where the agent benefits from retaining its prior reasoning (e.g., a coder receiving critic feedback). Default: `true` (each invocation starts a fresh session, bootstrapping from artifacts on disk).
+- **`maxVisits`** -- Optional positive integer. Caps how many times this specific state can be entered. Pairs with the `isStateVisitLimitReached` guard, which fires on the Nth visit's `onDone` (i.e., after the Nth invocation completes). Independent of `settings.maxRounds`. Only valid on `agent` states; placing it on other state types is a validation error. See "Transition actions" for the pairing with `resetVisitCounts`.
 
 ### Model selection
 
@@ -392,13 +424,91 @@ The `verdict` field accepts any string value, enabling custom verdicts for direc
 
 **`guard` -- code-based conditions (for context-based checks):**
 
-| Guard                 | Checks                                                      |
-| --------------------- | ----------------------------------------------------------- |
-| `isRoundLimitReached` | Per-state visit count >= maxRounds                          |
-| `isStalled`           | Agent produced identical output artifacts as previous round |
-| `isPassed`            | Deterministic state commands all passed                     |
+| Guard                      | Checks                                                                                                                                   |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `isRoundLimitReached`      | Max visit count across all states >= `settings.maxRounds` (workflow-wide cap)                                                            |
+| `isStateVisitLimitReached` | Fires on the Nth `onDone` when the state carries `maxVisits: N` (see [`maxVisits`](#agent-states)). Inert on states without `maxVisits`. |
+| `isStalled`                | Agent produced identical output artifacts as previous round                                                                              |
+| `isPassed`                 | Deterministic state commands all passed                                                                                                  |
 
 Use `guard` for conditions that depend on workflow context (round limits, stall detection) or for deterministic state transitions (`isPassed`). For verdict-based routing, use `when` clauses -- e.g., `when: { verdict: "approved" }` supports any verdict string for direct routing.
+
+`isRoundLimitReached` applies a single workflow-wide cap across every state; `isStateVisitLimitReached` scopes the cap to one state via that state's `maxVisits`. Use the per-state guard for narrowly bounded loops (e.g., a review step that should escalate after N iterations without halting the whole workflow).
+
+### Transition actions
+
+A transition may declare an ordered list of side-effects via `actions:`, in addition to the default context update performed on every transition. Each entry is an object discriminated on `type`:
+
+```yaml
+transitions:
+  - to: next_state
+    when: { verdict: approved }
+    actions:
+      - type: resetVisitCounts
+        stateIds: [review_state, build_state]
+```
+
+| Action type        | Params                    | Effect                                                                                         |
+| ------------------ | ------------------------- | ---------------------------------------------------------------------------------------------- |
+| `resetVisitCounts` | `stateIds: [string, ...]` | Zeroes the visit counter for each listed state. All listed IDs must reference existing states. |
+
+Actions run in the order listed. The orchestrator's default context-update action always runs first.
+
+**Bounded-loop pattern.** `maxVisits` + `isStateVisitLimitReached` + `resetVisitCounts` compose to bound a review/rework loop and reset the cap when the loop is re-entered from outside:
+
+```yaml
+states:
+  plan:
+    type: agent
+    persona: planner
+    description: Produce a plan
+    prompt: 'Plan the task. Emit verdict: ready.'
+    inputs: []
+    outputs: [plan]
+    transitions:
+      - to: review
+        when: { verdict: ready }
+        # Fresh entry into the review loop -- clear any prior cap.
+        actions:
+          - type: resetVisitCounts
+            stateIds: [review]
+
+  review:
+    type: agent
+    persona: reviewer
+    description: Review the plan; loop until approved or cap reached
+    prompt: 'Review the plan. Emit verdict: approved or rejected.'
+    inputs: [plan]
+    outputs: [reviews]
+    maxVisits: 3
+    transitions:
+      - to: done
+        when: { verdict: approved }
+      # Ordered before the rejection transition so the cap wins on visit 3.
+      - to: escalate_gate
+        guard: isStateVisitLimitReached
+      - to: plan
+        when: { verdict: rejected }
+
+  escalate_gate:
+    type: human_gate
+    description: Review loop exhausted
+    acceptedEvents: [APPROVE, ABORT]
+    transitions:
+      - to: done
+        event: APPROVE
+      - to: aborted
+        event: ABORT
+
+  done:
+    type: terminal
+    description: Done
+  aborted:
+    type: terminal
+    description: Aborted
+```
+
+On the third `review` visit the cap fires before the rejection `when` clause is evaluated, routing to `escalate_gate`. Re-entering `review` via `plan` clears the counter so the loop starts fresh.
 
 ### Stall detection
 
@@ -447,7 +557,7 @@ The `prompt` field in your workflow definition should include instructions about
 
 ## Message log
 
-Every workflow produces a `messages.jsonl` file in `.workflow/` containing all agent exchanges. Use `ironcurtain workflow inspect` to view it, or read it directly for debugging.
+Every workflow produces a `messages.jsonl` file at `~/.ironcurtain/workflow-runs/<workflowId>/messages.jsonl` containing all agent exchanges. Use `ironcurtain workflow inspect` to view it, or read it directly for debugging.
 
 ## Checkpointing and resume
 

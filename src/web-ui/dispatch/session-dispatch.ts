@@ -22,6 +22,7 @@ import { loadConfig } from '../../config/index.js';
 import { createSession } from '../../session/index.js';
 import { shouldAutoSaveMemory } from '../../memory/auto-save.js';
 import { BudgetExhaustedError } from '../../session/errors.js';
+import { getTokenStreamBus } from '../../docker/token-stream-bus.js';
 import * as logger from '../../logger.js';
 
 // ---------------------------------------------------------------------------
@@ -65,7 +66,7 @@ export async function sessionDispatch(
       const endManaged = ctx.sessionManager.get(label);
       const endSessionId = endManaged?.session.getInfo().id;
       await ctx.sessionManager.end(label);
-      if (endSessionId) ctx.tokenStreamBus?.endSession(endSessionId);
+      if (endSessionId) getTokenStreamBus().endSession(endSessionId);
       cleanupSessionQueue(ctx, label);
       ctx.eventBus.emit('session.ended', { label, reason: 'user_ended' });
       return;
@@ -138,7 +139,6 @@ async function createWebSession(ctx: DispatchContext, persona?: string): Promise
     config,
     mode: ctx.mode,
     persona,
-    tokenStreamBus: ctx.tokenStreamBus,
     onEscalation: transport.createEscalationHandler(),
     onEscalationExpired: transport.createEscalationExpiredHandler(),
     onEscalationResolved: transport.createEscalationResolvedHandler(),
@@ -163,7 +163,7 @@ async function createWebSession(ctx: DispatchContext, persona?: string): Promise
           logger.error(`[WebUI] Failed to clean up session #${label}: ${String(err)}`);
         });
       }
-      ctx.tokenStreamBus?.endSession(sessionId);
+      getTokenStreamBus().endSession(sessionId);
     })
     .catch((err: unknown) => {
       logger.error(`[WebUI] Transport #${label} error: ${String(err)}`);
@@ -211,7 +211,7 @@ function sendToSession(ctx: DispatchContext, label: number, text: string): { acc
         const budgetSessionId = managed.session.getInfo().id;
         ctx.eventBus.emit('session.ended', { label, reason: `Budget exhausted: ${err.message}` });
         await ctx.sessionManager.end(label);
-        ctx.tokenStreamBus?.endSession(budgetSessionId);
+        getTokenStreamBus().endSession(budgetSessionId);
         cleanupSessionQueue(ctx, label);
       } else {
         const message = err instanceof Error ? err.message : String(err);

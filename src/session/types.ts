@@ -4,6 +4,7 @@ import type { Sandbox } from '../sandbox/index.js';
 import type { ResolvedResourceBudgetConfig } from '../config/user-config.js';
 import type { CumulativeBudgetSnapshot } from './resource-budget-tracker.js';
 import type { AgentId } from '../docker/agent-adapter.js';
+import type { DockerInfrastructure } from '../docker/docker-infrastructure.js';
 import type { WhitelistCandidateIpc } from '../trusted-process/approval-whitelist.js';
 
 /**
@@ -267,15 +268,6 @@ export interface SessionOptions {
   jobId?: string;
 
   /**
-   * Shared daemon-level token stream bus. When provided for Docker
-   * sessions, the MITM proxy taps SSE responses and pushes parsed
-   * token events into this bus for real-time observation.
-   *
-   * Ignored for builtin sessions (no MITM proxy to tap).
-   */
-  tokenStreamBus?: import('../docker/token-stream-bus.js').TokenStreamBus;
-
-  /**
    * Partial overrides for the resolved resource budget config.
    * Applied on top of the global defaults and user config.
    * Used by workflows to set longer per-turn timeouts.
@@ -289,6 +281,52 @@ export interface SessionOptions {
    * Takes precedence over `config.agentModelId` when set.
    */
   agentModelOverride?: string;
+
+  /**
+   * Pre-built Docker infrastructure bundle. When set, the session
+   * factory borrows this bundle instead of creating its own, and the
+   * resulting session is constructed with `ownsInfra: false` so
+   * `close()` does NOT destroy the bundle. The caller retains full
+   * responsibility for destroying it via `destroyDockerInfrastructure`.
+   *
+   * Intended for workflow mode (Step 5+): the orchestrator creates one
+   * bundle per workflow run and hands it to every state's session.
+   *
+   * Standalone callers leave this unset; the factory calls
+   * `createDockerInfrastructure` and constructs the session with
+   * `ownsInfra: true` (today's behavior).
+   *
+   * The caller's bundle MUST outlive the session: the session records
+   * references into the bundle (MCP clients, file paths, etc.) and
+   * expects them to remain valid for its lifetime. Do not destroy the
+   * bundle while any session is still holding it.
+   *
+   * Ignored for builtin sessions (no Docker infrastructure).
+   */
+  readonly workflowInfrastructure?: DockerInfrastructure;
+
+  /**
+   * Per-state artifact directory for borrow-mode (shared-container)
+   * workflow sessions. When set, the session writes `session.log` and
+   * `session-metadata.json` to this directory instead of
+   * `{home}/sessions/{sessionId}/`. The directory is created by the
+   * caller (orchestrator) before session creation.
+   *
+   * Only valid in combination with `workflowInfrastructure`. Passing
+   * `workflowStateDir` without `workflowInfrastructure` is a caller
+   * bug and throws.
+   *
+   * Ignored for builtin sessions.
+   */
+  readonly workflowStateDir?: string;
+
+  /**
+   * Human-readable slug identifying this state invocation — used
+   * only for logging/diagnostics (e.g., "fetch.1", "plan.2"). Paired
+   * with `workflowStateDir` so log messages identify which state
+   * produced them.
+   */
+  readonly stateSlug?: string;
 }
 
 /**

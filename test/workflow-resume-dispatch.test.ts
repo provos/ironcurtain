@@ -60,7 +60,6 @@ function makeContext(taskDescription: string): WorkflowContext {
     parallelResults: {},
     worktreeBranches: [],
     totalTokens: 1000,
-    flaggedForReview: false,
     lastError: null,
     sessionsByState: {},
     previousAgentOutput: null,

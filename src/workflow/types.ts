@@ -82,6 +82,18 @@ export interface WorkflowSettings {
    * overridden by the `--model` CLI flag.
    */
   readonly model?: string;
+  /**
+   * When true, the workflow runs in shared-container mode: the engine
+   * creates one DockerInfrastructure bundle at workflow start and
+   * reuses it across all states. When false (default), each state
+   * gets a fresh container (today's behavior).
+   *
+   * Shared-container mode is the prerequisite for policy hot-swap at
+   * state transitions. See docs/designs/workflow-container-lifecycle.md.
+   *
+   * Ignored for builtin workflows (no Docker infrastructure to share).
+   */
+  readonly sharedContainer?: boolean;
 }
 
 /**
@@ -138,6 +150,18 @@ export interface AgentStateDefinition {
    * Overridden only by the `--model` CLI flag.
    */
   readonly model?: string;
+  /**
+   * Per-state visit cap. When set, the `isStateVisitLimitReached` guard
+   * returns true once `context.visitCounts[stateId] >= maxVisits`. Use
+   * this to bound an iterative loop (e.g., harness_design_review) and
+   * route to a human gate once the cap is reached. Independent of the
+   * workflow-level `maxRounds` setting.
+   *
+   * Because visit counts are incremented on state entry (before
+   * `invoke`), the guard fires on the onDone transitions of the Nth
+   * visit — i.e., after the Nth invocation completes.
+   */
+  readonly maxVisits?: number;
 }
 
 export interface HumanGateStateDefinition {
@@ -190,13 +214,28 @@ export type WhenValue = string | number | boolean | null;
  */
 export type WhenClause = { readonly [K in keyof AgentOutput]?: AgentOutput[K] };
 
+/**
+ * Action executed on a transition, in addition to the default context
+ * update actions (updateContextFromAgentResult / ...). Discriminated on
+ * `type`. Implementations live in `machine-builder.ts` — this is a
+ * closed set, not an open extension point.
+ *
+ * Today there is only a single variant, but the discriminated-union
+ * shape is retained so new action types can be added without changing
+ * the surrounding shape of transition definitions.
+ */
+export type WorkflowTransitionAction = {
+  readonly type: 'resetVisitCounts';
+  readonly stateIds: readonly string[];
+};
+
 export interface AgentTransitionDefinition {
   readonly to: string;
   /**
    * Guard name matching a registered XState guard. No translation
-   * layer -- use names directly: isRoundLimitReached, isStalled, isPassed.
-   * For verdict-based routing, prefer `when` clauses instead.
-   * Mutually exclusive with `when`.
+   * layer -- use names directly: isRoundLimitReached, isStalled, isPassed,
+   * isStateVisitLimitReached. For verdict-based routing, prefer `when`
+   * clauses instead. Mutually exclusive with `when`.
    */
   readonly guard?: string;
   /**
@@ -207,8 +246,12 @@ export interface AgentTransitionDefinition {
    * Mutually exclusive with `guard`.
    */
   readonly when?: WhenClause;
-  /** If truthy, sets flaggedForReview in context. */
-  readonly flag?: string;
+  /**
+   * Optional ordered list of actions to run on this transition, in
+   * addition to the default context-update action. Actions execute
+   * in the order listed.
+   */
+  readonly actions?: readonly WorkflowTransitionAction[];
 }
 
 export interface HumanGateTransitionDefinition {
@@ -299,7 +342,6 @@ export interface WorkflowContext {
   readonly parallelResults: Record<string, ParallelSlotResult>;
   readonly worktreeBranches: readonly string[];
   readonly totalTokens: number;
-  readonly flaggedForReview: boolean;
   readonly lastError: string | null;
   readonly sessionsByState: Record<string, string>;
   /**

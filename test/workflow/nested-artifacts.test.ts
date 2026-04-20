@@ -99,7 +99,6 @@ function makeContext(overrides: Partial<WorkflowContext> = {}): WorkflowContext 
     parallelResults: {},
     worktreeBranches: [],
     totalTokens: 0,
-    flaggedForReview: false,
     lastError: null,
     sessionsByState: {},
     previousAgentOutput: null,

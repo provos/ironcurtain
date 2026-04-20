@@ -20,13 +20,41 @@ import { UdsServerTransport } from '../trusted-process/uds-server-transport.js';
 import { TcpServerTransport } from '../trusted-process/tcp-server-transport.js';
 import { Sandbox, type HelpData } from '../sandbox/index.js';
 import type { IronCurtainConfig } from '../config/types.js';
+import type { ControlServerAddress, ControlServerListenOptions } from '../trusted-process/control-server.js';
 import { VERSION } from '../version.js';
+
+/**
+ * Narrow handle the workflow orchestrator uses to attach a control
+ * server to the sandbox's live coordinator. Intentionally exposes only
+ * the bind operation so callers cannot reach the rest of the security
+ * kernel (PolicyEngine, AuditLog, etc.) through this seam.
+ *
+ * This narrowing is a **type-level seam for API hygiene, not a runtime
+ * capability boundary**. Our threat model treats the host process as
+ * trusted: LLM-generated code runs in the V8 isolate (sandboxed) and
+ * untrusted MCP servers run under `srt` containment. A caller casting
+ * `DockerProxy` back to the full `ToolCallCoordinator` would be a
+ * malicious module already executing inside our own process, at which
+ * point capability wrappers offer no defense. The seam exists to keep
+ * orchestrator code from accidentally reaching into unrelated
+ * coordinator surface area, not to constrain an adversary.
+ */
+export interface PolicySwapTarget {
+  startControlServer(opts: ControlServerListenOptions): Promise<ControlServerAddress>;
+}
 
 /** Public interface for the Docker session's proxy. */
 export interface DockerProxy {
   start(): Promise<void>;
   getHelpData(): HelpData;
   stop(): Promise<void>;
+  /**
+   * Returns the proxy's policy-swap target once `start()` has completed,
+   * or `null` before the sandbox is initialized. Used by the workflow
+   * orchestrator to attach a control server on a workflow-scoped UDS;
+   * single-session callers (CLI, daemon, cron) never use this.
+   */
+  getPolicySwapTarget(): PolicySwapTarget | null;
   readonly socketPath: string;
   readonly port: number | undefined;
 }
@@ -156,6 +184,10 @@ export function createCodeModeProxy(options: CodeModeProxyOptions): DockerProxy 
 
     getHelpData(): HelpData {
       return sandbox.getHelpData();
+    },
+
+    getPolicySwapTarget(): PolicySwapTarget | null {
+      return sandbox.getCoordinator();
     },
 
     async stop(): Promise<void> {

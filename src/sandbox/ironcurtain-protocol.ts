@@ -21,6 +21,7 @@ import {
   type RegisterManualResult,
 } from '@utcp/sdk';
 import type { ToolCallCoordinator } from '../trusted-process/tool-call-coordinator.js';
+import { extractTextFromContent } from '../trusted-process/tool-call-pipeline.js';
 
 /**
  * The `call_template_type` identifier used for coordinator-backed manuals.
@@ -138,19 +139,23 @@ class IronCurtainCommunicationProtocol extends CommunicationProtocol {
     const stripped = toolName.startsWith(prefix) ? toolName.slice(prefix.length) : toolName;
     const dotIdx = stripped.indexOf('.');
     if (dotIdx < 0) {
-      return {
-        content: [{ type: 'text', text: `Malformed tool name (missing server segment): ${toolName}` }],
-        isError: true,
-      };
+      throw new Error(`Malformed tool name (missing server segment): ${toolName}`);
     }
     const serverName = stripped.slice(0, dotIdx);
     const backendToolName = stripped.slice(dotIdx + 1);
 
     const response = await coordinator.handleToolCall(serverName, backendToolName, toolArgs);
-    // Strip internal fields (e.g. `_policyDecision`) at the sandbox
-    // boundary. The V8 isolate runs untrusted LLM-generated code and
-    // must not be able to fingerprint policy rule names/reasons.
-    return { content: response.content, isError: response.isError };
+    // Throw on backend / policy errors so the UTCP Code Mode isolate
+    // surfaces them as exceptions the LLM-generated snippet can catch.
+    // Only use the user-facing text from `response.content`; internal
+    // fields like `_policyDecision` must never cross the sandbox
+    // boundary (the V8 isolate runs untrusted LLM-generated code and
+    // must not be able to fingerprint policy rule names/reasons).
+    if (response.isError) {
+      const text = extractTextFromContent(response.content);
+      throw new Error(text || 'Tool call returned an error');
+    }
+    return { content: response.content };
   }
 
   async *callToolStreaming(

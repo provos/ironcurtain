@@ -1,8 +1,15 @@
 import { z } from 'zod';
-import type { WorkflowDefinition, WorkflowStateDefinition, HumanGateStateDefinition, AgentOutput } from './types.js';
+import type {
+  WorkflowDefinition,
+  WorkflowStateDefinition,
+  HumanGateStateDefinition,
+  AgentOutput,
+  AgentTransitionDefinition,
+} from './types.js';
 import { AGENT_OUTPUT_FIELDS, CONFIDENCE_VALUES } from './types.js';
 import { REGISTERED_GUARDS } from './guards.js';
 import { qualifiedModelId } from '../config/user-config.js';
+import { isPlainObject } from '../utils/is-plain-object.js';
 
 // ---------------------------------------------------------------------------
 // Zod schemas
@@ -10,11 +17,19 @@ import { qualifiedModelId } from '../config/user-config.js';
 
 const whenValueSchema = z.union([z.string(), z.number(), z.boolean(), z.null()]);
 
+// See WorkflowTransitionAction in types.ts for the scaffold rationale.
+const transitionActionSchema = z.discriminatedUnion('type', [
+  z.object({
+    type: z.literal('resetVisitCounts'),
+    stateIds: z.array(z.string()).min(1),
+  }),
+]);
+
 const agentTransitionSchema = z.object({
   to: z.string(),
   guard: z.string().optional(),
   when: z.record(z.string(), whenValueSchema).optional(),
-  flag: z.string().optional(),
+  actions: z.array(transitionActionSchema).optional(),
 });
 
 const humanGateTransitionSchema = z.object({
@@ -34,6 +49,7 @@ const agentStateSchema = z.object({
   worktree: z.boolean().optional(),
   freshSession: z.boolean().optional(),
   model: qualifiedModelId.optional(),
+  maxVisits: z.number().int().positive().optional(),
 });
 
 const humanGateStateSchema = z.object({
@@ -76,6 +92,7 @@ const workflowSettingsSchema = z
     maxSessionSeconds: z.number().positive().optional(),
     unversionedArtifacts: z.array(z.string()).optional(),
     model: qualifiedModelId.optional(),
+    sharedContainer: z.boolean().optional(),
   })
   .optional();
 
@@ -86,6 +103,56 @@ const workflowDefinitionSchema = z.object({
   states: z.record(z.string(), stateDefinitionSchema),
   settings: workflowSettingsSchema,
 });
+
+// ---------------------------------------------------------------------------
+// Raw-input checks (run before Zod so they catch fields Zod would strip)
+// ---------------------------------------------------------------------------
+
+/** State IDs must be valid identifiers so they don't collide with XState's
+ * dotted-path state-node semantics (e.g., `xstate.done.actor.<stateId>`). */
+const STATE_ID_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+const AGENT_ONLY_STATE_FIELDS = ['maxVisits'] as const;
+
+/**
+ * Validates raw-level invariants that would otherwise be lost by Zod's default
+ * `strip()` behavior or produce less helpful errors inside a discriminated-union
+ * parse failure. Accumulates issues rather than throwing on the first one so
+ * users see all problems at once.
+ *
+ * Note: this runs before Zod parsing, so `raw` is of unknown shape. We only
+ * inspect fields we recognize; anything malformed is left for Zod to catch
+ * with its own error messages.
+ */
+function validateRawInput(raw: unknown): string[] {
+  const issues: string[] = [];
+  if (!isPlainObject(raw)) return issues;
+  if (!isPlainObject(raw.states)) return issues;
+
+  for (const [stateId, stateValue] of Object.entries(raw.states)) {
+    if (!STATE_ID_PATTERN.test(stateId)) {
+      issues.push(
+        `State ID "${stateId}" is not a valid identifier — must match ${STATE_ID_PATTERN.source} ` +
+          `(letters, digits, and underscores only; cannot start with a digit). ` +
+          `Dots, spaces, and hyphens can collide with XState's nested-state path semantics.`,
+      );
+    }
+
+    if (!isPlainObject(stateValue)) continue;
+    const stateType = stateValue.type;
+    if (typeof stateType !== 'string' || stateType === 'agent') continue;
+
+    for (const field of AGENT_ONLY_STATE_FIELDS) {
+      if (field in stateValue) {
+        issues.push(
+          `State "${stateId}" (type: ${stateType}) has "${field}" but that field is only valid on agent states.`,
+        );
+      }
+    }
+  }
+
+  return issues;
+}
 
 // ---------------------------------------------------------------------------
 // Validation error
@@ -188,6 +255,37 @@ function describeRuntimeType(value: unknown): string {
   return typeof value;
 }
 
+function collectTransitionsWithActions(state: WorkflowStateDefinition): readonly AgentTransitionDefinition[] {
+  if (state.type === 'agent' || state.type === 'deterministic') {
+    return state.transitions;
+  }
+  return [];
+}
+
+function validateTransitionActions(
+  stateId: string,
+  state: WorkflowStateDefinition,
+  stateNames: ReadonlySet<string>,
+  issues: string[],
+): void {
+  // Per-action semantic checks. Today only `resetVisitCounts` needs one
+  // (its `stateIds` must reference existing states). When a new action
+  // type is added to the discriminated union, TS will flag the accesses
+  // below as soon as `action.stateIds` is no longer unconditionally present.
+  for (const t of collectTransitionsWithActions(state)) {
+    if (!t.actions) continue;
+    for (const action of t.actions) {
+      for (const targetId of action.stateIds) {
+        if (!stateNames.has(targetId)) {
+          issues.push(
+            `State "${stateId}" transition to "${t.to}" has resetVisitCounts referencing unknown state "${targetId}"`,
+          );
+        }
+      }
+    }
+  }
+}
+
 function validateWhenClauses(stateId: string, state: WorkflowStateDefinition, issues: string[]): void {
   if (state.type === 'terminal' || state.type === 'human_gate') return;
 
@@ -284,6 +382,10 @@ function validateSemantics(definition: WorkflowDefinition): void {
       }
     }
 
+    // Transition action validation (currently: resetVisitCounts.stateIds
+    // must reference existing states).
+    validateTransitionActions(stateId, state, stateNames, issues);
+
     // When clause validation (mutual exclusivity, agent-only, keys, values, empty)
     validateWhenClauses(stateId, state, issues);
 
@@ -354,6 +456,14 @@ function validateArtifactInputs(definition: WorkflowDefinition, issues: string[]
  * @throws {WorkflowValidationError} with structured list of issues
  */
 export function validateDefinition(raw: unknown): WorkflowDefinition {
+  // Raw-level checks run first so that fields Zod would strip (e.g.,
+  // `maxVisits` on non-agent states) and malformed state IDs produce
+  // clear, targeted errors instead of being silently dropped.
+  const rawIssues = validateRawInput(raw);
+  if (rawIssues.length > 0) {
+    throw new WorkflowValidationError(rawIssues);
+  }
+
   let parsed: WorkflowDefinition;
   try {
     parsed = workflowDefinitionSchema.parse(raw) as WorkflowDefinition;

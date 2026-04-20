@@ -424,18 +424,21 @@ describe('ToolCallCoordinator', () => {
     });
   });
 
-  describe('loadPolicy (stub)', () => {
-    it('throws until policy hot-swap is implemented', async () => {
-      const { coordinator } = makeCoordinator('load-policy');
+  describe('loadPolicy (missing policyDir)', () => {
+    it('rejects with a filesystem error when the policy dir does not exist', async () => {
+      // Covered in depth by `coordinator-control-server.test.ts`; this
+      // spot check exercises the same code path from the coordinator's
+      // public surface to guard against regression.
+      const { coordinator } = makeCoordinator('load-policy-missing');
       try {
         await expect(
           coordinator.loadPolicy({
             persona: 'global',
             version: 1,
-            policyDir: '/tmp/dummy',
-            auditPath: '/tmp/audit.jsonl',
+            policyDir: `/tmp/does-not-exist-${process.pid}-${Date.now()}`,
+            auditPath: `${TEST_ROOT}/audit.unused.jsonl`,
           }),
-        ).rejects.toThrow(/not yet implemented/);
+        ).rejects.toThrow();
       } finally {
         await coordinator.close();
       }

@@ -9,6 +9,7 @@ import type {
   AgentOutput,
   AgentTransitionDefinition,
   WhenValue,
+  WorkflowTransitionAction,
 } from './types.js';
 import { guardImplementations } from './guards.js';
 import { stripStatusBlock } from './status-parser.js';
@@ -121,7 +122,6 @@ export function createInitialContext(definition: WorkflowDefinition): Omit<Workf
     parallelResults: {},
     worktreeBranches: [],
     totalTokens: 0,
-    flaggedForReview: false,
     lastError: null,
     sessionsByState: {},
     previousAgentOutput: null,
@@ -167,6 +167,35 @@ function findErrorTarget(
   throw new Error('No valid error target found');
 }
 
+/**
+ * XState-level action entry. Either a bare action name (for parameter-less
+ * actions) or an object with `type` + `params` for parameterized actions.
+ */
+type XStateActionEntry = string | { readonly type: string; readonly params: Record<string, unknown> };
+
+/**
+ * Collects all transition actions for a given transition definition into
+ * XState action entries, preserving order:
+ *   1. the default context-update action (caller-provided),
+ *   2. each entry from `actions[]` translated to XState form.
+ */
+function collectTransitionActions(
+  t: AgentTransitionDefinition,
+  defaultContextAction: string,
+): readonly XStateActionEntry[] {
+  const entries: XStateActionEntry[] = [defaultContextAction];
+  for (const action of t.actions ?? []) {
+    entries.push(compileAction(action));
+  }
+  return entries;
+}
+
+// Adding a new variant to WorkflowTransitionAction will make
+// `action.stateIds` a compile error, forcing a switch here.
+function compileAction(action: WorkflowTransitionAction): XStateActionEntry {
+  return { type: 'resetVisitCounts', params: { stateIds: action.stateIds } };
+}
+
 function buildAgentOnDoneTransitions(transitions: readonly AgentTransitionDefinition[]): readonly object[] {
   return transitions.map((t) => {
     let guard: string | { type: string; params: { when: Readonly<Record<string, WhenValue>> } } | undefined;
@@ -179,7 +208,7 @@ function buildAgentOnDoneTransitions(transitions: readonly AgentTransitionDefini
     return {
       target: t.to,
       ...(guard ? { guard } : {}),
-      actions: ['updateContextFromAgentResult', ...(t.flag ? ['setFlag'] : [])],
+      actions: collectTransitionActions(t, 'updateContextFromAgentResult'),
     };
   });
 }
@@ -212,7 +241,7 @@ function buildDeterministicState(
   const onDoneTransitions = config.transitions.map((t) => ({
     target: t.to,
     ...(t.guard ? { guard: t.guard } : {}),
-    actions: ['updateContextFromDeterministicResult', ...(t.flag ? ['setFlag'] : [])],
+    actions: collectTransitionActions(t, 'updateContextFromDeterministicResult'),
   }));
 
   return {
@@ -267,10 +296,19 @@ export function buildWorkflowMachine(definition: WorkflowDefinition, taskDescrip
   const gateStateNames = new Set<string>();
   const terminalStateNames = new Set<string>();
 
+  // Per-state maxVisits map, built at machine-construction time and
+  // closed over by the `isStateVisitLimitReached` guard below. Only
+  // agent states can declare `maxVisits`; states without it are absent
+  // from the map and the guard returns false for them.
+  const maxVisitsByState = new Map<string, number>();
+
   for (const [stateId, stateDef] of Object.entries(definition.states)) {
     switch (stateDef.type) {
       case 'agent':
         states[stateId] = buildAgentState(stateId, stateDef, definition);
+        if (typeof stateDef.maxVisits === 'number') {
+          maxVisitsByState.set(stateId, stateDef.maxVisits);
+        }
         break;
       case 'deterministic':
         states[stateId] = buildDeterministicState(stateId, stateDef, definition);
@@ -312,6 +350,16 @@ export function buildWorkflowMachine(definition: WorkflowDefinition, taskDescrip
             const stateId = doneEvent.type.replace('xstate.done.actor.', '');
             const prevHash = context.previousOutputHashes[stateId];
             return !!prevHash && result.outputHash === prevHash;
+          }
+          // Special case: isStateVisitLimitReached consults the per-state
+          // maxVisits map (closed over from the definition) and compares it
+          // to the visit count for the state that just completed.
+          if (name === 'isStateVisitLimitReached') {
+            const stateId = doneEvent.type.replace('xstate.done.actor.', '');
+            const cap = maxVisitsByState.get(stateId);
+            if (cap === undefined) return false;
+            const visits = context.visitCounts[stateId] ?? 0;
+            return visits >= cap;
           }
           // Agent service result -> AGENT_COMPLETED event
           workflowEvent = { type: 'AGENT_COMPLETED', output: result.output };
@@ -444,15 +492,23 @@ export function buildWorkflowMachine(definition: WorkflowDefinition, taskDescrip
         process.stderr.write(`[workflow] storeError action: ${message}\n`);
         return { lastError: message };
       }),
-      setFlag: assign(() => ({
-        flaggedForReview: true,
-      })),
       incrementVisitCount: assign(({ context }, params: { stateId: string }) => ({
         visitCounts: {
           ...context.visitCounts,
           [params.stateId]: (context.visitCounts[params.stateId] ?? 0) + 1,
         },
       })),
+      resetVisitCounts: assign(({ context }, params: { stateIds: readonly string[] }) => {
+        // Clear only the named keys; leave all other visit counts intact.
+        // Used on transitions that re-enter a bounded loop (e.g., when the
+        // orchestrator sends a fresh hypothesis) to reset the cap without
+        // losing counts for unrelated states.
+        const next: Record<string, number> = { ...context.visitCounts };
+        for (const stateId of params.stateIds) {
+          next[stateId] = 0;
+        }
+        return { visitCounts: next };
+      }),
     },
   }).createMachine({
     id: definition.name,

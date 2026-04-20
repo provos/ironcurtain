@@ -8,10 +8,8 @@
 
 import { existsSync, mkdirSync, writeFileSync, unlinkSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import { loadConfig } from '../config/index.js';
+import { loadConfig, applyAllowedDirectoryToMcpArgs } from '../config/index.js';
 import {
-  getIronCurtainHome,
-  getPackageConfigDir,
   getSessionDir,
   getSessionSandboxDir,
   getSessionEscalationDir,
@@ -19,10 +17,12 @@ import {
   getSessionLogPath,
   getSessionLlmLogPath,
   getSessionAutoApproveLlmLogPath,
+  SESSION_LOG_FILENAME,
+  SESSION_METADATA_FILENAME,
 } from '../config/paths.js';
+import { validatePolicyDir as sharedValidatePolicyDir } from '../config/validate-policy-dir.js';
 import type { IronCurtainConfig } from '../config/types.js';
 import * as logger from '../logger.js';
-import { resolveRealPath } from '../types/argument-roles.js';
 import { resolvePersona, applyServerAllowlist } from '../persona/resolve.js';
 import { buildPersonaSystemPromptAugmentation } from '../persona/persona-prompt.js';
 import { resolveMemoryDbPath } from '../memory/resolve-memory-path.js';
@@ -30,8 +30,7 @@ import { buildMemoryServerConfig, MEMORY_SERVER_NAME } from '../memory/memory-an
 import { buildMemorySystemPrompt, adaptMemoryToolNames } from '../memory/memory-prompt.js';
 import { AgentSession } from './agent-session.js';
 import { SessionError } from './errors.js';
-import { saveSessionMetadata, loadSessionMetadata } from './session-metadata.js';
-import { isEqualOrInside } from './workspace-validation.js';
+import { saveSessionMetadata, saveSessionMetadataTo, loadSessionMetadata } from './session-metadata.js';
 import { createSessionId } from './types.js';
 import type { Session, SessionId, SessionOptions, SessionMode } from './types.js';
 
@@ -138,9 +137,20 @@ async function createBuiltinSession(options: SessionOptions): Promise<Session> {
 /**
  * Creates a DockerAgentSession that runs an external agent in a container.
  *
- * Uses prepareDockerInfrastructure() for shared Docker setup (proxies,
- * orientation, image resolution), then creates the session with pre-built
- * infrastructure so initialize() only does container creation + watchers.
+ * Two paths:
+ * - Standalone (default): calls `createDockerInfrastructure()` to stand up
+ *   the full infrastructure bundle (proxies, orientation, image, running
+ *   agent container, sidecar and internal network for TCP mode). The
+ *   session is constructed with `ownsInfra=true`, so `close()` tears down
+ *   the bundle.
+ * - Borrow (`options.workflowInfrastructure` set): uses the caller-supplied
+ *   bundle as-is and constructs the session with `ownsInfra=false`. The
+ *   caller retains full responsibility for the bundle's lifetime; the
+ *   session's `close()` only tears down session-local state.
+ *
+ * In both paths the session wires up escalation watcher and audit tailer
+ * and writes any per-session files (CLAUDE.md, effective system prompt)
+ * using fields on the bundle.
  */
 async function createDockerSession(
   agentId: import('../docker/agent-adapter.js').AgentId,
@@ -160,26 +170,46 @@ async function createDockerSession(
   // error messages from the orchestrator and XState) silently goes to a log
   // file instead of the terminal.
   let session: InstanceType<typeof import('../docker/docker-agent-session.js').DockerAgentSession> | undefined;
+  // Track the infra bundle in outer scope so the catch path can clean
+  // up containers/proxies even if failure happens BEFORE the session
+  // instance exists (e.g., writeFileSync for CLAUDE.md throws, or the
+  // DockerAgentSession constructor throws). Without this, the session
+  // is undefined and `session?.close()` is a no-op — the container,
+  // sidecar, network, and proxies all leak.
+  let infra:
+    | Awaited<ReturnType<typeof import('../docker/docker-infrastructure.js').createDockerInfrastructure>>
+    | undefined;
+  // Tracks whether THIS factory allocated the infra bundle. When true and
+  // the session never reaches a constructed state, the catch path tears
+  // down the bundle directly. When false (borrow path), the caller owns
+  // the bundle and the factory must NEVER destroy it, even on error.
+  let builtInfra = false;
   try {
-    const { prepareDockerInfrastructure } = await import('../docker/docker-infrastructure.js');
     const { DockerAgentSession } = await import('../docker/docker-agent-session.js');
     const { buildDockerClaudeMd } = await import('../docker/claude-md-seed.js');
+
+    if (options.workflowInfrastructure) {
+      // Borrow path: the orchestrator owns the bundle's lifetime. We do
+      // not call createDockerInfrastructure(); we do not destroy on close.
+      infra = options.workflowInfrastructure;
+    } else {
+      // Standalone path: factory creates and owns the bundle.
+      const { createDockerInfrastructure } = await import('../docker/docker-infrastructure.js');
+      infra = await createDockerInfrastructure(
+        sessionConfig.config,
+        { kind: 'docker', agent: agentId },
+        sessionConfig.sessionDir,
+        sessionConfig.sandboxDir,
+        sessionConfig.escalationDir,
+        sessionId,
+      );
+      builtInfra = true;
+    }
 
     const claudeMdContent = buildDockerClaudeMd({
       personaName: options.persona,
       memoryEnabled: config.userConfig.memory.enabled,
     });
-
-    const infra = await prepareDockerInfrastructure(
-      sessionConfig.config,
-      { kind: 'docker', agent: agentId },
-      sessionConfig.sessionDir,
-      sessionConfig.sandboxDir,
-      sessionConfig.escalationDir,
-      sessionConfig.auditLogPath,
-      sessionId,
-      options.tokenStreamBus,
-    );
 
     // Write CLAUDE.md into conversation state dir (unconditionally, even on
     // resume, since persona/memory config may change between sessions).
@@ -197,40 +227,46 @@ async function createDockerSession(
       }
     }
 
+    const systemPromptOverride = sessionConfig.systemPromptAugmentation
+      ? `${infra.systemPrompt}\n\n${sessionConfig.systemPromptAugmentation}`
+      : undefined;
+
     session = new DockerAgentSession({
       config: sessionConfig.config,
       sessionId,
-      adapter: infra.adapter,
-      docker: infra.docker,
-      proxy: infra.proxy,
-      mitmProxy: infra.mitmProxy,
-      ca: infra.ca,
-      fakeKeys: infra.fakeKeys,
-      sessionDir: sessionConfig.sessionDir,
-      sandboxDir: sessionConfig.sandboxDir,
-      escalationDir: sessionConfig.escalationDir,
-      auditLogPath: sessionConfig.auditLogPath,
-      useTcp: infra.useTcp,
-      conversationStateDir: infra.conversationStateDir,
-      conversationStateConfig: infra.conversationStateConfig,
+      infra,
+      // Ownership mirrors who allocated the bundle: standalone path owns
+      // and tears down on close; borrow path leaves the bundle alive for
+      // the external orchestrator.
+      ownsInfra: builtInfra,
       agentModelOverride: options.agentModelOverride,
       onEscalation: options.onEscalation,
       onEscalationExpired: options.onEscalationExpired,
       onEscalationResolved: options.onEscalationResolved,
       onDiagnostic: options.onDiagnostic,
-      preBuiltInfrastructure: {
-        systemPrompt: sessionConfig.systemPromptAugmentation
-          ? `${infra.systemPrompt}\n\n${sessionConfig.systemPromptAugmentation}`
-          : infra.systemPrompt,
-        image: infra.image,
-        mitmAddr: infra.mitmAddr,
-      },
+      systemPromptOverride,
     });
 
     await session.initialize();
     return session;
   } catch (error) {
-    await session?.close().catch(() => {});
+    // If the session was constructed, its close() respects the ownsInfra
+    // flag we passed in: standalone sessions (ownsInfra=true) destroy the
+    // bundle they own; borrow-mode sessions (ownsInfra=false) leave the
+    // caller's bundle intact. We need only invoke close() -- no
+    // conditional cleanup here.
+    //
+    // Otherwise, if we allocated the bundle ourselves but failed before
+    // the session was constructed (e.g., the DockerAgentSession
+    // constructor threw, or the CLAUDE.md write threw), destroy it
+    // directly. NEVER destroy a caller-supplied bundle on this branch --
+    // `builtInfra` is false in borrow mode, so the guard below skips it.
+    if (session) {
+      await session.close().catch(() => {});
+    } else if (builtInfra && infra) {
+      const { destroyDockerInfrastructure } = await import('../docker/docker-infrastructure.js');
+      await destroyDockerInfrastructure(infra).catch(() => {});
+    }
     if (!loggerWasActive) logger.teardown();
     throw error instanceof SessionError
       ? error
@@ -257,23 +293,24 @@ export interface SessionDirConfig {
  * IronCurtain home directory or the package config directory. Prevents
  * loading attacker-controlled policy files from arbitrary filesystem locations.
  *
- * The package config directory is allowed so that built-in policy variants
- * (e.g., the read-only policy for constitution generation) can be loaded
- * without copying files into the user home.
+ * Thin wrapper around the shared validator in `config/validate-policy-dir.ts`
+ * so failures surface as `SessionError` with our standard code — the
+ * shared helper throws `PolicyDirValidationError`, which other callers
+ * (e.g., the coordinator's `loadPolicy` RPC) surface in their own way.
+ *
+ * Returns the realpath-canonicalized path. Callers must use the return
+ * value for all subsequent reads: feeding the original (possibly-symlinked)
+ * path to downstream artifact loaders would reopen the symlink-swap TOCTOU
+ * window the validator was introduced to close.
  *
  * @throws {SessionError} if the path escapes all trusted directories.
  */
-function validatePolicyDir(policyDir: string): void {
-  const resolvedPolicy = resolveRealPath(policyDir);
-  const trustedDirs = [getIronCurtainHome(), getPackageConfigDir()].map(resolveRealPath);
-
-  if (!trustedDirs.some((dir) => isEqualOrInside(resolvedPolicy, dir))) {
-    throw new SessionError(
-      `policyDir must be under a trusted directory. ` +
-        `Received: ${resolvedPolicy}; ` +
-        `trusted: ${trustedDirs.join(', ')}`,
-      'SESSION_INIT_FAILED',
-    );
+function validatePolicyDir(policyDir: string): string {
+  try {
+    return sharedValidatePolicyDir(policyDir);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new SessionError(message, 'SESSION_INIT_FAILED');
   }
 }
 
@@ -303,11 +340,23 @@ export function buildSessionConfig(
     | 'systemPromptAugmentation'
     | 'jobId'
     | 'resourceBudgetOverrides'
+    | 'workflowInfrastructure'
+    | 'workflowStateDir'
+    | 'stateSlug'
   > = {},
 ): SessionDirConfig {
   let { workspacePath, policyDir, systemPromptAugmentation } = opts;
   const { resumeSessionId, disableAutoApprove } = opts;
   let serverAllowlist: readonly string[] | undefined;
+
+  // Borrow mode is gated on `workflowInfrastructure`. The per-state dir
+  // is only meaningful alongside the bundle; passing it alone is a bug.
+  if (opts.workflowStateDir && !opts.workflowInfrastructure) {
+    throw new SessionError(
+      'workflowStateDir requires workflowInfrastructure; borrow-mode artifacts have no owner without a bundle',
+      'SESSION_INIT_FAILED',
+    );
+  }
 
   // Resolve persona early -- derives policyDir, workspace, server filter,
   // and system prompt augmentation from the persona definition.
@@ -335,30 +384,53 @@ export function buildSessionConfig(
   }
 
   if (policyDir) {
-    validatePolicyDir(policyDir);
+    // Use the validator's realpath-canonicalized return value. Passing
+    // the original (possibly-symlinked) path through to `generatedDir`
+    // would reopen the symlink-swap TOCTOU window the validator was
+    // introduced to close: downstream artifact reads (compiled policy,
+    // dynamic lists) must happen against the same canonical path the
+    // containment check approved.
+    policyDir = validatePolicyDir(policyDir);
   }
 
-  const sessionDir = getSessionDir(effectiveSessionId);
+  // Paths differ by mode:
+  // - Borrow mode: per-state artifacts go under `workflowStateDir` when
+  //   the orchestrator supplied one; otherwise fall back to the bundle's
+  //   sessionDir (legacy path, still used by factory-level tests). The
+  //   bundle owns sandbox/escalation/audit on `workflowInfrastructure`.
+  // - Standalone/CLI: everything lives under `{home}/sessions/{id}/`.
+  const borrowInfra = opts.workflowInfrastructure;
+  const artifactDir = borrowInfra ? (opts.workflowStateDir ?? borrowInfra.sessionDir) : undefined;
+  const sessionDir = artifactDir ?? getSessionDir(effectiveSessionId);
   const sandboxDir = workspacePath ?? getSessionSandboxDir(effectiveSessionId);
-  const escalationDir = getSessionEscalationDir(effectiveSessionId);
-  const auditLogPath = getSessionAuditLogPath(effectiveSessionId);
+  const escalationDir = borrowInfra ? borrowInfra.escalationDir : getSessionEscalationDir(effectiveSessionId);
+  const auditLogPath = borrowInfra ? borrowInfra.auditLogPath : getSessionAuditLogPath(effectiveSessionId);
 
-  // Create the directory when not using an explicit --workspace flag.
-  // When persona is set, `workspacePath` was derived internally (not
-  // from the caller), so we still need to ensure it exists.
-  // Only skip creation for explicit user-provided workspace paths.
-  if (!opts.workspacePath) {
-    mkdirSync(sandboxDir, { recursive: true });
+  // Standalone mode creates its own session tree. Borrow mode relies on
+  // directories the orchestrator and bundle already own.
+  if (!borrowInfra) {
+    if (!opts.workspacePath) {
+      mkdirSync(sandboxDir, { recursive: true });
+    }
+    mkdirSync(escalationDir, { recursive: true });
   }
-  mkdirSync(escalationDir, { recursive: true });
 
-  const sessionLogPath = getSessionLogPath(effectiveSessionId);
+  const sessionLogPath = artifactDir
+    ? resolve(artifactDir, SESSION_LOG_FILENAME)
+    : getSessionLogPath(effectiveSessionId);
+  // llm-interactions / auto-approve-llm still live under the standalone
+  // session dir even in borrow mode (per-turn LLM logs are not scoped to
+  // the workflow state artifact dir; config.llmLogPath is only read when
+  // the builtin agent is active, and borrow-mode sessions are Docker).
   const llmLogPath = getSessionLlmLogPath(effectiveSessionId);
   const autoApproveLlmLogPath = getSessionAutoApproveLlmLogPath(effectiveSessionId);
 
-  // Set up session logging -- captures all console output to file
+  // Set up session logging -- captures all console output to file.
+  // In borrow mode, setup() retargets the singleton to the new state's
+  // log file; a prior state's teardown in session.close() releases the
+  // console hijack first.
   logger.setup({ logFilePath: sessionLogPath });
-  logger.info(`Session ${sessionId} created`);
+  logger.info(`Session ${sessionId} created${opts.stateSlug ? ` (state=${opts.stateSlug})` : ''}`);
   logger.info(`${workspacePath ? 'Workspace' : 'Sandbox'}: ${sandboxDir}`);
   logger.info(`Escalation dir: ${escalationDir}`);
   logger.info(`Audit log: ${auditLogPath}`);
@@ -436,19 +508,24 @@ export function buildSessionConfig(
   }
 
   // Patch MCP server args to use the session-specific sandbox directory
-  patchMcpServerAllowedDirectory(sessionConfig, sandboxDir);
+  applyAllowedDirectoryToMcpArgs(sessionConfig.mcpServers, sandboxDir);
 
   // Persist session settings so --resume can restore them.
   // Only write on initial creation (not when resuming).
   if (!resumeSessionId) {
-    saveSessionMetadata(effectiveSessionId, {
+    const metadata = {
       createdAt: new Date().toISOString(),
       ...(opts.persona ? { persona: opts.persona } : {}),
       ...(opts.workspacePath ? { workspacePath: opts.workspacePath } : {}),
       // Only store policyDir when no persona is set (persona derives its own)
       ...(!opts.persona && policyDir ? { policyDir } : {}),
       ...(opts.disableAutoApprove ? { disableAutoApprove: true } : {}),
-    });
+    };
+    if (artifactDir) {
+      saveSessionMetadataTo(resolve(artifactDir, SESSION_METADATA_FILENAME), metadata);
+    } else {
+      saveSessionMetadata(effectiveSessionId, metadata);
+    }
   }
 
   return {
@@ -459,26 +536,6 @@ export function buildSessionConfig(
     auditLogPath,
     systemPromptAugmentation,
   };
-}
-
-/**
- * Patches the filesystem MCP server's allowed directory argument
- * to use the session-specific sandbox directory, mirroring the
- * logic in loadConfig() that syncs ALLOWED_DIRECTORY.
- */
-export function patchMcpServerAllowedDirectory(
-  config: { mcpServers: Record<string, { args: string[] }> },
-  sandboxDir: string,
-): void {
-  const fsServer = config.mcpServers['filesystem'] as { args: string[] } | undefined;
-  if (!fsServer) return;
-
-  // Replace any existing allowed directory path in args.
-  // The config may have the original default or a previously patched value.
-  const lastArgIndex = fsServer.args.length - 1;
-  if (lastArgIndex >= 0) {
-    fsServer.args[lastArgIndex] = sandboxDir;
-  }
 }
 
 // Re-export types needed by callers

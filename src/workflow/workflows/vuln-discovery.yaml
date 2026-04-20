@@ -87,7 +87,7 @@ states:
 
       ## Cold start
 
-      If the journal at `.workflow/journal/journal.md` does not exist, this is a cold start. Create the journal with the initial header and set verdict to `reanalyze` to dispatch the analyze agent. Do not attempt any other routing on cold start.
+      If the journal at `.workflow/journal/journal.md` does not exist, this is a cold start: create the journal with the initial header and set verdict to `reanalyze`. Your directive to analyze should be minimal — just name the target code from the task description. Don't re-specify what analysis to do; analyze's prompt covers that.
 
       ## Output format
 
@@ -95,7 +95,7 @@ states:
 
       1. **Directive for next agent** (FIRST in your output, REQUIRED): A clear, actionable instruction for whichever agent you are dispatching to. This section is what scopes the next agent's round — it is forwarded verbatim into the next agent's prompt as the authoritative "Directive" subsection. Be specific: tell it exactly what target to examine, what hypothesis to test, what tier to build at, and WHY. Aim for 1,500–4,000 characters of concrete scoping, not a one-liner.
 
-         **The directive is REQUIRED.** If you cannot write a concrete, specific directive — if the best you can produce is "continue investigating" or "pick something reasonable" — the investigation is stalled. Do NOT route to the next agent with a weak directive. Set verdict to `escalate` instead (see the stall/escalate rule below).
+         **The directive is REQUIRED.** If you cannot write a concrete, specific directive — if the best you can produce is "continue investigating" or "pick something reasonable" — the investigation is stalled. Set verdict to `escalate` and in the escalation describe what's unclear: hypothesis space feels exhausted, prior evidence is contradictory, need the human to pick a direction. Do NOT route to the next agent with a weak directive.
 
       2. **Journal update** (SECOND): Your reasoning about the investigation state. This provides context but the directive above is what matters to the next agent.
 
@@ -136,7 +136,7 @@ states:
       Directive: [what the next agent should focus on]
       ```
 
-      **What to capture in Evidence.** You are a router — you don't read source code. But you DO read the output files written by other agents. When filling in "Key findings," extract the specific details from those files: which function was tested, what input values were tried, what coverage showed, what mitigations were cited and at what source locations, what error messages appeared. A good evidence section lets someone reconstruct WHY the agent reached its verdict without re-reading the full artifact. A bad one says "the agent found it was mitigated."
+      **What to capture in Evidence.** You don't read source code, but you DO read the output files written by other agents. When filling in "Key findings," extract the specific details from those files: which function was tested, what input values were tried, what coverage showed, what mitigations were cited and at what source locations, what error messages appeared. A good evidence section lets someone reconstruct WHY the agent reached its verdict without re-reading the full artifact. A bad one says "the agent found it was mitigated."
 
       On each invocation: update the status header in-place, then APPEND a new round section at the end. Never edit or delete previous round sections — they are the investigation's permanent record.
 
@@ -169,8 +169,6 @@ states:
       | triage | Independent reproduction, severity, exploitability, duplicate checking | Nothing extra — reads findings |
       | conclude | Writing the final report from artifacts | Nothing extra — reads all artifacts |
 
-      **Cold-start rule (analyze on first invocation).** On cold start, your directive to analyze is minimal: specify the target code as given in the task description. Do NOT re-specify what kinds of analysis to do — analyze's prompt covers that. Example minimal directive: "Perform structural analysis on the target code per your prompt and the task description."
-
       **Feedback-driven directives.** When human feedback or prior-round evidence changes the focus, your directive should point the next agent AT the specific thing to investigate, not prescribe how to investigate it. Example shape: "Re-analyze focusing on the interaction between [function A] and [data structure B] — prior round missed [the specific case]." Let the agent's prompt drive HOW.
 
       ## Tiered harness strategy
@@ -189,12 +187,11 @@ states:
       - Hypothesis requires real initialization, protocol framing, or global state → Tier 3
       Never use Tier 1 for a cross-component hypothesis. If in doubt, go higher.
 
-      **Tier escalation on "mitigated".** When harness_design reports "mitigated":
-      - If the tier was lower than the hypothesis scope warrants (e.g., Tier 1 for a cross-component bug), the verdict is unreliable. Re-route to harness_design at the next tier. This is automatic — do not judge the test quality, just compare the tier to the hypothesis scope.
-      - If the tier already matched the scope (Tier 2+ for a multi-component hypothesis), accept the "mitigated" verdict and close the hypothesis.
-      - A "confirmed" verdict at any tier → route to discover or triage depending on evidence strength.
+      **Accepting a "mitigated" verdict.** A downstream agent's "mitigated" is only authoritative if two conditions both hold:
+      - The tier matched the hypothesis scope (Tier 2+ for cross-component, etc.). If the tier was too low, re-route to harness_design at the next tier — don't judge the test, just compare tier to scope.
+      - The evidence shows execution: coverage of the mitigation code AND a completed input sweep over the hypothesis's value range (fuzzing for value-dependent claims, bounded enumeration for discrete claims). Textual reasoning about why the code looks safe is NOT sufficient evidence. If the evidence is text-only, re-route to discover with a directive to exercise the mitigation, or to harness_design if the harness cannot exercise it.
 
-      **After human feedback, skip to Tier 2 or higher.** When you receive human feedback from report_review, the human is telling you that previous analysis was wrong or incomplete. Do NOT re-run the same tier that produced the disputed result. Escalate at least one tier. If the human describes a cross-component interaction, go directly to Tier 2 or 3.
+      A "confirmed" verdict at any tier → discover or triage depending on evidence strength.
 
       **The orchestrator scopes, harness_design designs.** When routing to harness_design, specify the hypothesis, the tier, the component scope, and WHY this tier was chosen. Do NOT prescribe specific test cases, fixed input values, or enumerated scenarios (T1, T2, T3...) — that is harness_design's job. The designer is instructed to fuzz the input space; your prescriptive test list would defeat that. Trust the downstream agent to pick the right sweep strategy given the hypothesis you describe.
 
@@ -207,7 +204,7 @@ states:
 
       IMPORTANT: Always update `.workflow/journal/journal.md` before setting your verdict. The journal is the persistent memory of this investigation — your conversation history may be long but the journal is the structured summary.
 
-      **Human feedback overrides agent verdicts.** When you receive human feedback from report_review that contradicts an agent's "mitigated" or "ruled_out" verdict, the human's assessment takes precedence. Route to harness_design at a higher tier. Do NOT re-route to the same tier — the human is telling you that tier's test was wrong.
+      **Human feedback overrides agent verdicts.** When report_review feedback contradicts an agent's "mitigated" or "ruled_out" verdict, the human's assessment takes precedence. Route to harness_design at a higher tier — never re-run the tier the human disputed. If the human describes a cross-component interaction, go to Tier 2 or 3.
 
       **Completing the investigation.** When the evidence chain is conclusive — either a
       vulnerability is confirmed and fully documented, or all viable hypotheses from the
@@ -216,8 +213,6 @@ states:
       exploitable vulnerability found" is a valid and valuable outcome.
 
       If you detect stall patterns (same state visited 3+ times without progress, contradictory results between layers, or your own uncertainty about strategy), set verdict to escalate rather than continuing to burn rounds.
-
-      **Underspecified directive → escalate.** If you cannot write a concrete, specific `## Directive for next agent` — if the best you can produce is "continue investigating," "pick something reasonable," or bare notes without scoping — the investigation is stalled even if you can't articulate why. Set verdict to `escalate` and describe in the escalation what's unclear: the hypothesis space feels exhausted, prior evidence is contradictory, or you need the human to pick a direction. Do NOT route to the next agent with a weak directive hoping it will figure out the scoping itself — that feedback loop does not work.
     inputs:
       - analysis?
       - harness_design?
@@ -232,6 +227,9 @@ states:
       - to: harness_design
         when:
           verdict: harness_design
+        actions:
+          - type: resetVisitCounts
+            stateIds: [harness_design, harness_design_review, harness_build, harness_validate]
       - to: discover
         when:
           verdict: discover
@@ -359,11 +357,60 @@ states:
     outputs:
       - harness_design
     transitions:
+      - to: harness_design_review
+
+  harness_design_review:
+    type: agent
+    description: LLM review of harness design before implementation
+    persona: global
+    maxVisits: 3
+    prompt: |
+      You are a harness design reviewer. Read the design in `.workflow/harness_design/design.md`, the analysis in `.workflow/analysis/analysis.md`, and the investigation journal at `.workflow/journal/journal.md`.
+
+      Your job: pre-screen the design for concrete errors before the build agent invests effort. Be strict — each item below either passes or fails. Rubber-stamping a design that fails a checklist item wastes downstream rounds.
+
+      ## Checklist
+
+      1. **Tier matches hypothesis scope.** Single-function hypothesis → Tier 1. Cross-function or cross-component hypothesis → Tier 2+. Hypothesis requiring real initialization, protocol framing, or global state → Tier 3. Tier 1 for a cross-component bug is an automatic fail.
+
+      2. **Hypothesis is stated precisely.** One sentence naming specific functions, specific values, and the expected violation. "There may be memory corruption here" is a fail; "the length field at ff_h264.c:1234 is stored in a uint16_t but the source can reach 2^17" is a pass.
+
+      3. **Input sweep range is concrete.** Named input variables, explicit ranges, specified search strategy (exhaustive / boundary-dense+random / libFuzzer / AFL / bounded enumeration). "Test a few values" is a fail.
+
+      4. **Observables and positive-finding condition are specific.** The design must name what the harness records at each input and what pattern indicates the hypothesis is confirmed. "A crash happens" is a fail; "the comparison at line 2344 evaluates to equal when the neighbor MB was not actually part of the current slice" is a pass.
+
+      5. **Coverage targets the right code.** The design must specify coverage instrumentation AND name the target function (or mitigation code, if the hypothesis claims a mitigation) whose execution coverage must demonstrate. Without this, a downstream "mitigated" verdict cannot be verified.
+
+      6. **Existing fuzzer used when appropriate.** For large or structured input spaces, the design should specify libFuzzer / AFL / Honggfuzz rather than a hand-rolled loop. For small discrete spaces, bounded enumeration is fine — but the design must state the choice and why.
+
+      7. **Design stays within scope.** A design is a specification, not an implementation — no full source code, no compile commands with full flag lists, no pre-computed "expected outcomes." If the design has drifted into implementation, that's a fail.
+
+      ## Verdicts
+
+      - **approved**: All applicable checklist items pass. Write a brief note to `.workflow/harness_design_review/review.md` listing what you verified.
+      - **rejected**: One or more items fail. Write `.workflow/harness_design_review/review.md` listing each failure by checklist number, the specific problem, and what the designer must change. Be concrete — "item 3 fails: input range for slice_num is not specified; design must specify the sweep (e.g., 0..65535 covering the uint16_t boundary)" beats "item 3: needs more detail."
+
+      Do NOT modify the design document yourself. The designer iterates on their own output.
+    inputs:
+      - analysis
+      - harness_design
+      - journal
+    outputs:
+      - harness_design_review
+    transitions:
+      - to: harness_build
+        when:
+          verdict: approved
+      # Ordered before the rejection transition so the cap wins on the Nth visit.
       - to: harness_review
+        guard: isStateVisitLimitReached
+      - to: harness_design
+        when:
+          verdict: rejected
 
   harness_review:
     type: human_gate
-    description: Human review of harness design before implementation
+    description: Human escalation when the design-review or validate loops hit their cap
     acceptedEvents:
       - APPROVE
       - FORCE_REVISION
@@ -371,11 +418,13 @@ states:
     present:
       - analysis
       - harness_design
+      - harness_design_review?
+      - harness_validate?
       - journal
     transitions:
       - to: harness_build
         event: APPROVE
-      - to: harness_design
+      - to: orchestrator
         event: FORCE_REVISION
       - to: aborted
         event: ABORT
@@ -411,10 +460,11 @@ states:
 
   harness_validate:
     type: agent
-    description: Verifies the harness actually runs and produces coverage
+    description: Verifies the harness runs and produces coverage; classifies failures by cause
     persona: global
+    maxVisits: 4
     prompt: |
-      You are a harness validation engineer. Your job is to verify the harness ACTUALLY WORKS by running it.
+      You are a harness validation engineer. Your job is to verify the harness ACTUALLY WORKS by running it, and if it doesn't, classify the cause so the workflow routes to the right fix.
 
       Read the build/run instructions in `.workflow/harness_build/README.md` and the design in `.workflow/harness_design/design.md`.
 
@@ -426,7 +476,15 @@ states:
       4. If the harness supports interactive/stateful sessions, run a short multi-step session and verify state persists between steps.
       5. Verify branch-level coverage data is present, not just line coverage.
 
-      CRITICAL: If ANY step fails — whether from missing dependencies, infrastructure issues, permission errors, or the target function not appearing in coverage — you MUST report verdict rejected with the specific failure. Do NOT report approved with caveats. A harness that cannot demonstrate coverage of the target function is not validated.
+      If any step fails, set a specific failure verdict. Do NOT report `approved` with caveats. A harness that cannot demonstrate coverage of the target function is not validated.
+
+      ## Verdicts
+
+      - **approved**: All five steps passed.
+      - **rejected_build**: Implementation bugs — compile errors, driver defects, session reset broken, coverage extraction not wired up correctly, missing files the build step should have produced. The design is sound; the code needs fixing. Route: back to harness_build.
+      - **rejected_design**: Design flaws — wrong call chain (the target function is not reached through the designed entry point even when the code builds and runs), wrong tooling choice (missing dependencies that cannot be installed, wrong sanitizer for the bug class), tier insufficient for the hypothesis (e.g., Tier 1 stubs that can't reproduce a cross-component interaction). The code may build and run, but the design cannot produce the evidence the hypothesis needs. Route: back to harness_design.
+
+      The distinction matters: `rejected_build` means "retry with the same design"; `rejected_design` means "the approach itself is wrong." Be specific in your report — naming a failure in one category while routing to the other wastes a round.
 
       Write validation results to `.workflow/harness_validate/validation.md`.
     inputs:
@@ -438,48 +496,15 @@ states:
       - to: orchestrator
         when:
           verdict: approved
-      - to: harness_critique
-        when:
-          verdict: rejected
-
-  harness_critique:
-    type: agent
-    description: Diagnoses harness validation failures
-    persona: global
-    prompt: |
-      You are a security tooling reviewer. The harness failed validation.
-
-      Read the validation results in `.workflow/harness_validate/validation.md`, the design in `.workflow/harness_design/design.md`, the analysis in `.workflow/analysis/analysis.md`, and the investigation journal at `.workflow/journal/journal.md`.
-
-      Diagnose the failure:
-
-      1. Does the harness build without errors?
-      2. Does the driver reach the target through the correct entry points?
-      3. Does coverage show the target file was reached?
-      4. Does session reset work?
-      5. Are required dependencies available in this environment?
-
-      Determine whether the failure is:
-      - **Implementation bug** (design is sound, code has errors) → set verdict to rejected (back to harness_build)
-      - **Design flaw** (wrong call chain, wrong tooling, missing dependencies that cannot be installed) → set verdict to approved (back to harness_design for redesign)
-
-      Write diagnosis to `.workflow/harness_critique/critique.md`.
-    inputs:
-      - analysis
-      - harness_design
-      - harness_build
-      - harness_validate
-    outputs:
-      - harness_critique
-    transitions:
-      - to: orchestrator
-        guard: isRoundLimitReached
+      # Ordered before the rejection transitions so the cap wins on the Nth visit.
+      - to: harness_review
+        guard: isStateVisitLimitReached
       - to: harness_build
         when:
-          verdict: rejected
+          verdict: rejected_build
       - to: harness_design
         when:
-          verdict: approved
+          verdict: rejected_design
 
   discover:
     type: agent
@@ -512,9 +537,9 @@ states:
 
       ## Verdicts
 
-      - **approved**: Found an exploitable condition. Document the vulnerability, reproduction steps, and severity assessment.
-      - **rejected**: The harness is insufficient (can't reach the target, missing protocol feature, broken infrastructure).
-      - **blocked**: Exhausted hypotheses without findings, or the validated trigger values don't produce the expected result in the live system.
+      - **approved**: An exploitable condition fired — sanitizer error, controlled crash, invariant violation, or direct evidence the hypothesized bug triggered. Document the reproduction input, coverage proof, and severity.
+      - **rejected**: The harness is insufficient — can't reach the target, missing protocol feature, broken infrastructure.
+      - **blocked**: Hypothesis did not fire despite a completed search. You may only return `blocked` if (a) coverage shows the target code was executed, AND (b) you swept the input range relevant to the hypothesis — fuzzing for value-dependent claims (sizes, offsets, indices, counters), bounded enumeration for discrete claims (protocol states, flag combinations, auth paths). "I read the code and it looks mitigated" is not `blocked` — it's `rejected` with a request to redesign the harness. If neither fuzzing nor enumeration applies to this hypothesis, name the reason explicitly in your findings doc.
 
       Write findings to `.workflow/discoveries/findings.md`.
     inputs:
@@ -566,6 +591,8 @@ states:
     persona: global
     prompt: |
       You are a senior vulnerability triager. Read the findings in `.workflow/discoveries/findings.md` and the investigation journal at `.workflow/journal/journal.md`.
+
+      **Verdict posture.** "Confirmed" requires execution evidence: reproduce through the harness, observe the violation. **"Mitigated" requires execution evidence too** — coverage showing the mitigation code ran, plus a sweep over the hypothesis's input range showing the mitigation held. If validating severity leads you to downgrade a finding to mitigated, that downgrade itself must be executed, not reasoned about. LLMs mis-read constants and mis-compose bounds. A paper-only mitigation analysis is a hypothesis the harness still has to test — not a verdict.
 
       **First action**: read the "Scoping from the previous agent" section at the top of this message. The orchestrator's Directive may call out specific findings to prioritize, duplicates to check, or severity questions to resolve. If the scoping section is absent, default to triaging every finding in `.workflow/discoveries/findings.md`; if it is present but vague on what to triage, STOP and report back with an `escalate`-style agent_status.
 
