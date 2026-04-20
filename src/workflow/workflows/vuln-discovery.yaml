@@ -5,7 +5,8 @@ initial: orchestrator
 settings:
   mode: docker
   dockerAgent: claude-code
-  model: anthropic:claude-opus-4-6
+  sharedContainer: true
+  model: anthropic:claude-opus-4-7
   maxRounds: 12
   maxSessionSeconds: 10800
   unversionedArtifacts:
