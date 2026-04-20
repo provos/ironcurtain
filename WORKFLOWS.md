@@ -437,7 +437,7 @@ Use `guard` for conditions that depend on workflow context (round limits, stall 
 
 ### Transition actions
 
-A transition may declare an ordered list of side-effects via `actions:`, in addition to the default context update performed on every transition. Each entry is an object discriminated on `type`:
+A transition may declare an ordered list of side-effects via `actions:`, in addition to the default context update performed on every transition. This is valid on agent, deterministic, and human gate transitions alike. Each entry is an object discriminated on `type`:
 
 ```yaml
 transitions:
@@ -452,7 +452,23 @@ transitions:
 | ------------------ | ------------------------- | ---------------------------------------------------------------------------------------------- |
 | `resetVisitCounts` | `stateIds: [string, ...]` | Zeroes the visit counter for each listed state. All listed IDs must reference existing states. |
 
-Actions run in the order listed. The orchestrator's default context-update action always runs first.
+Actions run in the order listed. The default action always runs first: the context-update action for agent/deterministic transitions, or `storeHumanPrompt` + `clearError` for human gate transitions.
+
+**Human gate reset pattern.** When a bounded loop escalates to a human gate on cap-reached, the gate's APPROVE transition typically routes back into the loop. Without a reset action, the visit counter is still at the cap and the next `isStateVisitLimitReached` check fires immediately, re-escalating to the gate. Declare `resetVisitCounts` on the APPROVE transition so the human's approval actually restarts the loop:
+
+```yaml
+escalate_gate:
+  type: human_gate
+  acceptedEvents: [APPROVE, ABORT]
+  transitions:
+    - to: build_state
+      event: APPROVE
+      actions:
+        - type: resetVisitCounts
+          stateIds: [review_state, build_state]
+    - to: aborted
+      event: ABORT
+```
 
 **Bounded-loop pattern.** `maxVisits` + `isStateVisitLimitReached` + `resetVisitCounts` compose to bound a review/rework loop and reset the cap when the loop is re-entered from outside:
 

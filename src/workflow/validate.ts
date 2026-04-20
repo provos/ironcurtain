@@ -5,6 +5,7 @@ import type {
   HumanGateStateDefinition,
   AgentOutput,
   AgentTransitionDefinition,
+  HumanGateTransitionDefinition,
 } from './types.js';
 import { AGENT_OUTPUT_FIELDS, CONFIDENCE_VALUES } from './types.js';
 import { REGISTERED_GUARDS } from './guards.js';
@@ -35,6 +36,7 @@ const agentTransitionSchema = z.object({
 const humanGateTransitionSchema = z.object({
   to: z.string(),
   event: z.enum(['APPROVE', 'FORCE_REVISION', 'REPLAN', 'ABORT']),
+  actions: z.array(transitionActionSchema).optional(),
 });
 
 const agentStateSchema = z.object({
@@ -255,8 +257,19 @@ function describeRuntimeType(value: unknown): string {
   return typeof value;
 }
 
-function collectTransitionsWithActions(state: WorkflowStateDefinition): readonly AgentTransitionDefinition[] {
+/**
+ * Returns all transitions on a state that may carry an `actions` array,
+ * regardless of transition type. The validator only reads `to` and
+ * `actions`, so narrowing the element type to the common fields lets us
+ * treat agent, deterministic, and human-gate transitions uniformly.
+ */
+function collectTransitionsWithActions(
+  state: WorkflowStateDefinition,
+): readonly (AgentTransitionDefinition | HumanGateTransitionDefinition)[] {
   if (state.type === 'agent' || state.type === 'deterministic') {
+    return state.transitions;
+  }
+  if (state.type === 'human_gate') {
     return state.transitions;
   }
   return [];

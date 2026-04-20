@@ -258,6 +258,12 @@ export interface HumanGateTransitionDefinition {
   readonly to: string;
   /** The accepted event type that triggers this transition. */
   readonly event: HumanGateEventType;
+  /**
+   * Optional ordered list of actions to run on this transition, in
+   * addition to the default gate context-update actions (storeHumanPrompt,
+   * clearError). Actions execute in the order listed.
+   */
+  readonly actions?: readonly WorkflowTransitionAction[];
 }
 
 export type HumanGateEventType = 'APPROVE' | 'FORCE_REVISION' | 'REPLAN' | 'ABORT';
