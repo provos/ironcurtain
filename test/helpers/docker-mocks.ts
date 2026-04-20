@@ -192,6 +192,12 @@ export function createMockMitmProxy(): MitmProxy {
       return { socketPath: '/tmp/test-mitm-proxy.sock' };
     },
     async stop() {},
+    hosts: {
+      addHost: () => true,
+      removeHost: () => true,
+      listHosts: () => ({ providers: [], dynamic: [] }),
+    },
+    setTokenSessionId: () => {},
   };
 }
 

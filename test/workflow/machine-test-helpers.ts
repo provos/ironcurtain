@@ -19,6 +19,7 @@ export function makeAgentResult(overrides: Partial<AgentInvokeResult> = {}): Age
     artifacts: {},
     outputHash: 'hash-1',
     responseText: 'Agent response text',
+    totalTokens: 0,
     ...overrides,
   };
 }

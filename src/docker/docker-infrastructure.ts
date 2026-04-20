@@ -77,6 +77,17 @@ export interface PreContainerInfrastructure {
   readonly conversationStateDir?: string;
   /** Conversation state config from the adapter, if resume is supported. */
   readonly conversationStateConfig?: ConversationStateConfig;
+  /**
+   * Routes token-stream events from the MITM proxy's LLM API tap under the
+   * given session ID, or disables routing when `undefined`.
+   *
+   * Required because a single long-lived infrastructure bundle (shared
+   * across workflow agent states) must label extracted events with the
+   * *active* per-state session ID rather than a static ID baked in at
+   * construction time. Callers flip this around each agent run; thin
+   * wrapper over `MitmProxy.setTokenSessionId()`.
+   */
+  setTokenSessionId(id: import('../session/types.js').SessionId | undefined): void;
 }
 
 /**
@@ -249,7 +260,6 @@ export async function prepareDockerInfrastructure(
         registries,
         packageValidation,
         controlPort: 0,
-        sessionId,
       })
     : createMitmProxy({
         socketPath: resolve(socketsDir, 'mitm-proxy.sock'),
@@ -258,7 +268,6 @@ export async function prepareDockerInfrastructure(
         registries,
         packageValidation,
         controlSocketPath: resolve(sessionDir, 'mitm-control.sock'),
-        sessionId,
       });
 
   const docker = createDockerManager();
@@ -349,6 +358,9 @@ export async function prepareDockerInfrastructure(
       authKind,
       conversationStateDir,
       conversationStateConfig,
+      setTokenSessionId: (id) => {
+        mitmProxy.setTokenSessionId(id);
+      },
     };
   } catch (error) {
     // Best-effort cleanup of proxies started above

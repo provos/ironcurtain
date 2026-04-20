@@ -250,6 +250,9 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
       escalationDir,
       effectiveSessionId,
     );
+    // PTY sessions are standalone: pin the MITM proxy's token-stream
+    // routing ID to this session's ID for the session's lifetime.
+    infra.setTokenSessionId(effectiveSessionId as import('../session/types.js').SessionId);
 
     ({ docker, proxy, mitmProxy, useTcp } = infra);
     const {

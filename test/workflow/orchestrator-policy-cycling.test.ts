@@ -37,7 +37,7 @@ import {
  * identity (was this specific bundle the one borrowed / torn down).
  */
 function makeStubInfrastructure(workflowId: string): DockerInfrastructure {
-  return { __stub: true, workflowId } as unknown as DockerInfrastructure;
+  return { __stub: true, workflowId, setTokenSessionId: () => {} } as unknown as DockerInfrastructure;
 }
 
 /**

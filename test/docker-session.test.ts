@@ -183,6 +183,12 @@ function createMockInfra(opts: MockInfraOptions): DockerInfrastructure {
             return { port: 8443 };
           },
           async stop() {},
+          hosts: {
+            addHost: () => true,
+            removeHost: () => true,
+            listHosts: () => ({ providers: [], dynamic: [] }),
+          },
+          setTokenSessionId: () => {},
         } as MitmProxy)
       : createMockMitmProxy());
   const proxy = opts.proxy ?? createMockProxy(join(opts.sessionDir, 'proxy.sock'), useTcp ? 9123 : undefined);
@@ -214,6 +220,7 @@ function createMockInfra(opts: MockInfraOptions): DockerInfrastructure {
     containerName: opts.containerName ?? `ironcurtain-${shortId}`,
     sidecarContainerId: opts.sidecarContainerId,
     internalNetwork: opts.internalNetwork,
+    setTokenSessionId: () => {},
   };
 }
 

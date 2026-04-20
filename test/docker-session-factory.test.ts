@@ -177,6 +177,7 @@ function createMockInfra(rootDir: string, idSuffix = 'borrow'): DockerInfrastruc
     containerName: 'ironcurtain-borrowed',
     sidecarContainerId: undefined,
     internalNetwork: undefined,
+    setTokenSessionId: () => {},
   };
 }
 

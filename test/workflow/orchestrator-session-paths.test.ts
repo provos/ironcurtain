@@ -34,7 +34,7 @@ import {
 
 /** Stub DockerInfrastructure: orchestrator only tracks identity. */
 function makeStubInfrastructure(workflowId: string): DockerInfrastructure {
-  return { __stub: true, workflowId } as unknown as DockerInfrastructure;
+  return { __stub: true, workflowId, setTokenSessionId: () => {} } as unknown as DockerInfrastructure;
 }
 
 const twoStateDef: WorkflowDefinition = {

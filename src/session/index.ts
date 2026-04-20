@@ -191,6 +191,9 @@ async function createDockerSession(
     if (options.workflowInfrastructure) {
       // Borrow path: the orchestrator owns the bundle's lifetime. We do
       // not call createDockerInfrastructure(); we do not destroy on close.
+      // The orchestrator is also responsible for `setTokenSessionId`: it
+      // flips the MITM proxy's routing target to the active agent's session
+      // ID before each run and clears it on session end.
       infra = options.workflowInfrastructure;
     } else {
       // Standalone path: factory creates and owns the bundle.
@@ -203,6 +206,11 @@ async function createDockerSession(
         sessionConfig.escalationDir,
         sessionId,
       );
+      // Standalone sessions use their bundle for the session's entire
+      // lifetime; pin the token-stream routing ID to this session's ID.
+      // Clearing on close is unnecessary because the bundle itself is
+      // destroyed by `session.close()` (ownsInfra=true).
+      infra.setTokenSessionId(sessionId);
       builtInfra = true;
     }
 
