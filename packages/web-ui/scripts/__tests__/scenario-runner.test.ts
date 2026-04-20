@@ -161,6 +161,49 @@ describe('createScenarioRunner: timeline', () => {
     runner.stop();
   });
 
+  it('injects sessionId into agent_started and emits a paired agent_session_ended', () => {
+    const scenario = buildScenario({
+      timeline: [
+        {
+          at: 100,
+          event: 'workflow.agent_started',
+          payload: { workflowId: 'wf-x', stateId: 'analyze', persona: 'analyst' },
+        },
+        {
+          at: 1000,
+          event: 'workflow.agent_completed',
+          payload: { workflowId: 'wf-x', stateId: 'analyze', verdict: 'ok', notes: 'done' },
+        },
+      ],
+    });
+    const emitted: { event: string; payload: Record<string, unknown> }[] = [];
+    const runner = createScenarioRunner(scenario, SIMPLE_CORPUS, { seed: 1 });
+    runner.start((event, payload) => emitted.push({ event, payload: payload as Record<string, unknown> }));
+
+    vi.advanceTimersByTime(2000);
+
+    const started = emitted.find((e) => e.event === 'workflow.agent_started');
+    expect(started).toBeDefined();
+    expect(typeof started!.payload.sessionId).toBe('string');
+    const sid = started!.payload.sessionId;
+
+    const ended = emitted.find((e) => e.event === 'workflow.agent_session_ended');
+    expect(ended).toBeDefined();
+    expect(ended!.payload.sessionId).toBe(sid);
+    expect(ended!.payload.workflowId).toBe('wf-x');
+    expect(ended!.payload.stateId).toBe('analyze');
+
+    // Ordering: started -> completed -> session_ended
+    const order = emitted.map((e) => e.event).filter((e) => e.startsWith('workflow.'));
+    const i1 = order.indexOf('workflow.agent_started');
+    const i2 = order.indexOf('workflow.agent_completed');
+    const i3 = order.indexOf('workflow.agent_session_ended');
+    expect(i1).toBeLessThan(i2);
+    expect(i2).toBeLessThan(i3);
+
+    runner.stop();
+  });
+
   it('compresses timeline under speedMultiplier=2', () => {
     const scenario = buildScenario();
     const emitted: string[] = [];

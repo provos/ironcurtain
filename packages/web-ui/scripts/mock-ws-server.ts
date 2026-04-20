@@ -1164,7 +1164,13 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
         name: newWf.name,
         taskDescription: String(params.taskDescription ?? ''),
       });
-      broadcast('workflow.agent_started', { workflowId: newId, stateId: 'plan', persona: 'planner' });
+      const planSessionId = `${newId}-plan-${Date.now()}`;
+      broadcast('workflow.agent_started', {
+        workflowId: newId,
+        stateId: 'plan',
+        persona: 'planner',
+        sessionId: planSessionId,
+      });
       broadcast('workflow.state_entered', { workflowId: newId, state: 'plan' });
 
       trackTimer(
@@ -1177,6 +1183,11 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
               stateId: 'plan',
               verdict: 'success',
               notes: 'drafted a 4-step implementation plan covering data model, API, UI, and tests',
+            });
+            broadcast('workflow.agent_session_ended', {
+              workflowId: newId,
+              stateId: 'plan',
+              sessionId: planSessionId,
             });
             wf.currentState = 'plan_review';
             wf.phase = 'waiting_human';
@@ -1287,11 +1298,14 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
         resolveWf.currentState = nextState;
         // Terminal nodes (e.g. `completed`) emit state_entered but no agent_started,
         // since no persona runs in a terminal.
-        if (nextState !== 'completed' && nextState !== 'aborted') {
+        const nextSessionId =
+          nextState !== 'completed' && nextState !== 'aborted' ? `${resolveWfId}-${nextState}-${Date.now()}` : null;
+        if (nextSessionId !== null) {
           broadcast('workflow.agent_started', {
             workflowId: resolveWfId,
             stateId: nextState,
             persona: nextPersona,
+            sessionId: nextSessionId,
           });
         }
         broadcast('workflow.state_entered', { workflowId: resolveWfId, state: nextState });
@@ -1312,6 +1326,13 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
                 verdict: 'success',
                 notes: completionNotes,
               });
+              if (nextSessionId !== null) {
+                broadcast('workflow.agent_session_ended', {
+                  workflowId: resolveWfId,
+                  stateId: nextState,
+                  sessionId: nextSessionId,
+                });
+              }
               if (followupState) {
                 wf.currentState = followupState;
                 broadcast('workflow.state_entered', { workflowId: resolveWfId, state: followupState });

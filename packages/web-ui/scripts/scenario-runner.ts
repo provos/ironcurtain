@@ -301,11 +301,46 @@ export function createScenarioRunner(
 
   function scheduleTimeline(): void {
     const maxAt = scenario.timeline.reduce((max, entry) => Math.max(max, entry.at), 0);
+    // Track synthetic sessionIds per (workflowId, stateId) so we can inject
+    // them into agent_started payloads and emit a paired agent_session_ended
+    // on the matching agent_completed or state_failed. Mirrors the daemon's
+    // "finally" emission pattern so the mock is protocol-faithful.
+    const activeSessions = new Map<string, string>();
+    const sessionKey = (workflowId: string, stateId: string): string => `${workflowId}::${stateId}`;
+
     for (const entry of scenario.timeline) {
       const delayMs = entry.at / speed;
       const handle = scheduler.setTimeout(() => {
         if (!running || !emit) return;
+
+        if (entry.event === 'workflow.agent_started') {
+          const p = (entry.payload ?? {}) as { workflowId?: string; stateId?: string };
+          if (p.workflowId && p.stateId) {
+            const sid = `${p.workflowId}-${p.stateId}-${iterationCounter}-${scheduler.now()}`;
+            activeSessions.set(sessionKey(p.workflowId, p.stateId), sid);
+            emit(entry.event, { ...p, sessionId: sid });
+            return;
+          }
+        }
+
         emit(entry.event, entry.payload);
+
+        if (entry.event === 'workflow.agent_completed' || entry.event === 'workflow.state_failed') {
+          const p = (entry.payload ?? {}) as { workflowId?: string; stateId?: string; state?: string };
+          const stateId = p.stateId ?? p.state;
+          if (p.workflowId && stateId) {
+            const key = sessionKey(p.workflowId, stateId);
+            const sid = activeSessions.get(key);
+            if (sid !== undefined) {
+              activeSessions.delete(key);
+              emit('workflow.agent_session_ended', {
+                workflowId: p.workflowId,
+                stateId,
+                sessionId: sid,
+              });
+            }
+          }
+        }
       }, delayMs);
       timeouts.push(handle);
     }
