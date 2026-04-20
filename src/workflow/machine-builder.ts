@@ -267,9 +267,17 @@ function buildHumanGateState(_stateId: string, config: HumanGateStateDefinition)
 
   for (const t of config.transitions) {
     const eventName = `HUMAN_${t.event}`;
+    // Order: the hardcoded gate actions (storeHumanPrompt, clearError) run
+    // first so they set up context (prompt, error state) before any
+    // user-declared actions observe or modify it. User-declared actions
+    // (e.g., resetVisitCounts) run afterward.
+    const actions: XStateActionEntry[] = ['storeHumanPrompt', 'clearError'];
+    for (const action of t.actions ?? []) {
+      actions.push(compileAction(action));
+    }
     on[eventName] = {
       target: t.to,
-      actions: ['storeHumanPrompt', 'clearError'],
+      actions,
     };
   }
 

@@ -424,6 +424,12 @@ states:
     transitions:
       - to: harness_build
         event: APPROVE
+        # The human's approval resets the harness loop counters so
+        # harness_validate (which reached its cap and escalated here)
+        # does not immediately re-escalate on the next pass.
+        actions:
+          - type: resetVisitCounts
+            stateIds: [harness_design, harness_design_review, harness_build, harness_validate]
       - to: orchestrator
         event: FORCE_REVISION
       - to: aborted

@@ -410,6 +410,133 @@ describe('transition actions: resetVisitCounts', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Feature 3: transition actions on human gate transitions
+// ---------------------------------------------------------------------------
+
+describe('human gate transition actions: resetVisitCounts', () => {
+  /**
+   * Mirrors the vuln-discovery shape: a bounded agent loop escalates to
+   * a human gate on cap-reached; APPROVE routes back into the loop and
+   * carries a resetVisitCounts action so the loop does not immediately
+   * re-escalate. Also asserts the hardcoded gate actions (storeHumanPrompt,
+   * clearError) still run alongside the user-declared action.
+   */
+  const gateResetDef: WorkflowDefinition = {
+    name: 'gate-reset-test',
+    description: 'Human gate APPROVE resets loop counters',
+    initial: 'build',
+    settings: { maxRounds: 99 },
+    states: {
+      build: {
+        type: 'agent',
+        description: 'Builds',
+        persona: 'builder',
+        prompt: 'Build.',
+        inputs: [],
+        outputs: ['build'],
+        transitions: [{ to: 'validate' }],
+      },
+      validate: {
+        type: 'agent',
+        description: 'Validates',
+        persona: 'validator',
+        prompt: 'Validate.',
+        inputs: ['build'],
+        outputs: ['validate'],
+        maxVisits: 2,
+        transitions: [
+          { to: 'done', when: { verdict: 'approved' } },
+          { to: 'review_gate', guard: 'isStateVisitLimitReached' },
+          { to: 'build', when: { verdict: 'rejected' } },
+        ],
+      },
+      review_gate: {
+        type: 'human_gate',
+        description: 'Human review after cap',
+        acceptedEvents: ['APPROVE', 'ABORT'],
+        transitions: [
+          {
+            to: 'build',
+            event: 'APPROVE',
+            actions: [{ type: 'resetVisitCounts', stateIds: ['build', 'validate'] }],
+          },
+          { to: 'aborted', event: 'ABORT' },
+        ],
+      },
+      done: { type: 'terminal', description: 'Done' },
+      aborted: { type: 'terminal', description: 'Aborted' },
+    },
+  };
+
+  it('clears named visit counts on HUMAN_APPROVE while preserving hardcoded gate actions', async () => {
+    const { machine } = buildWorkflowMachine(gateResetDef, 'task');
+
+    // A gate holds a promise we control so we can assert the context
+    // immediately after the HUMAN_APPROVE transition fires — before the
+    // next agent invocation runs and overwrites humanPrompt via
+    // updateContextFromAgentResult.
+    let resolveBuild: (v: ReturnType<typeof makeAgentResult>) => void = () => {};
+    const buildGate = new Promise<ReturnType<typeof makeAgentResult>>((resolve) => {
+      resolveBuild = resolve;
+    });
+
+    let buildCalls = 0;
+    const testMachine = machine.provide({
+      actors: {
+        agentService: fromPromise(async ({ input }: { input: AgentInvokeInput }) => {
+          if (input.stateId === 'build') {
+            buildCalls++;
+            // First two build calls resolve normally (feed the loop into the
+            // gate). The third (post-APPROVE) waits on the gate so the test
+            // can assert the context right after the APPROVE transition.
+            if (buildCalls < 3) return makeAgentResult();
+            return buildGate;
+          }
+          if (input.stateId === 'validate') {
+            // Always reject on the first pass to hit the cap; after the
+            // reset, approve so the run ends cleanly.
+            return buildCalls <= 2 ? makeRejectedResult() : makeAgentResult();
+          }
+          return makeAgentResult();
+        }),
+      },
+    });
+
+    const actor = createActor(testMachine);
+    actor.start();
+    await settle(200);
+
+    expect(actor.getSnapshot().matches('review_gate')).toBe(true);
+    expect(actor.getSnapshot().context.visitCounts['validate']).toBe(2);
+    expect(actor.getSnapshot().context.visitCounts['build']).toBe(2);
+
+    actor.send({ type: 'HUMAN_APPROVE', prompt: 'Reset and continue' });
+    // Let the transition fire and the third `build` invocation start, but
+    // it's now pending on `buildGate` — so updateContextFromAgentResult
+    // hasn't fired yet and we can see the gate's action side-effects.
+    await settle(50);
+
+    const gateCtx = actor.getSnapshot().context;
+    // Hardcoded gate action storeHumanPrompt still ran.
+    expect(gateCtx.humanPrompt).toBe('Reset and continue');
+    // Hardcoded clearError ran (observable as null).
+    expect(gateCtx.lastError).toBeNull();
+    // User-declared resetVisitCounts cleared the two named states BEFORE
+    // the third build entry incremented build's counter.
+    expect(gateCtx.visitCounts['validate']).toBe(0);
+    // build was re-entered once on the post-reset pass.
+    expect(gateCtx.visitCounts['build']).toBe(1);
+
+    // Let the workflow finish.
+    resolveBuild(makeAgentResult());
+    await settle(200);
+
+    expect(actor.getSnapshot().status).toBe('done');
+    expect(String(actor.getSnapshot().value)).toBe('done');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Validation tests for the new fields
 // ---------------------------------------------------------------------------
 
@@ -506,6 +633,73 @@ describe('validateDefinition: maxVisits and actions', () => {
     states.a.maxVisits = 2;
     states.a.transitions = [{ to: 'done', guard: 'isStateVisitLimitReached' }, { to: 'done' }];
     expect(() => validateDefinition(def)).not.toThrow();
+  });
+
+  // ---- human gate transition actions ---------------------------------------
+
+  function baseWithHumanGate(): Record<string, unknown> {
+    return {
+      name: 'gate-base',
+      description: 'gate-base',
+      initial: 'a',
+      states: {
+        a: {
+          type: 'agent',
+          description: 'A',
+          persona: 'a',
+          prompt: 'A.',
+          inputs: [],
+          outputs: ['a'],
+          transitions: [{ to: 'gate' }],
+        },
+        gate: {
+          type: 'human_gate',
+          description: 'Gate',
+          acceptedEvents: ['APPROVE'],
+          transitions: [{ to: 'done', event: 'APPROVE' }],
+        },
+        done: { type: 'terminal', description: 'Done' },
+      },
+    };
+  }
+
+  it('accepts actions on a human gate transition', () => {
+    const def = baseWithHumanGate();
+    const states = def.states as Record<string, Record<string, unknown>>;
+    (states.gate.transitions as Array<Record<string, unknown>>)[0].actions = [
+      { type: 'resetVisitCounts', stateIds: ['a'] },
+    ];
+    expect(() => validateDefinition(def)).not.toThrow();
+  });
+
+  it('rejects an unknown action type on a human gate transition', () => {
+    const def = baseWithHumanGate();
+    const states = def.states as Record<string, Record<string, unknown>>;
+    (states.gate.transitions as Array<Record<string, unknown>>)[0].actions = [{ type: 'nukeWorld' }];
+    try {
+      validateDefinition(def);
+      expect.fail('should have thrown');
+    } catch (e) {
+      const err = e as WorkflowValidationError;
+      // Zod's discriminated-union error names the offending type.
+      expect(err.issues.join('\n')).toMatch(/type|discriminat|invalid/i);
+    }
+  });
+
+  it('rejects resetVisitCounts referencing an unknown state on a human gate transition', () => {
+    const def = baseWithHumanGate();
+    const states = def.states as Record<string, Record<string, unknown>>;
+    (states.gate.transitions as Array<Record<string, unknown>>)[0].actions = [
+      { type: 'resetVisitCounts', stateIds: ['ghost'] },
+    ];
+    try {
+      validateDefinition(def);
+      expect.fail('should have thrown');
+    } catch (e) {
+      const err = e as WorkflowValidationError;
+      expect(err.issues).toEqual(expect.arrayContaining([expect.stringContaining('ghost')]));
+      expect(err.issues).toEqual(expect.arrayContaining([expect.stringContaining('resetVisitCounts')]));
+    }
   });
 
   // ---- Fix 1: maxVisits is rejected on non-agent states ---------------------
