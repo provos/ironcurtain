@@ -49,8 +49,33 @@ export interface WebEventMap {
   'workflow.failed': { workflowId: string; error: string };
   'workflow.gate_raised': { workflowId: string; gate: HumanGateRequestDto };
   'workflow.gate_dismissed': { workflowId: string; gateId: string };
-  'workflow.agent_started': { workflowId: string; stateId: string; persona: string };
+  'workflow.agent_started': {
+    workflowId: string;
+    stateId: string;
+    persona: string;
+    /**
+     * Session ID of the agent session. The daemon's bridge wiring
+     * registers this mapping so token events produced by the
+     * workflow-owned session reach `observe --all` subscribers. Also
+     * reaches frontend clients via the WS broadcast path — frontend
+     * types currently omit it so it's silently dropped at parse time;
+     * harmless until a future consumer wants per-session attribution.
+     */
+    sessionId: string;
+  };
   'workflow.agent_completed': { workflowId: string; stateId: string; verdict?: string; confidence?: string };
+  /**
+   * Fires unconditionally in the orchestrator's agent-state finally
+   * block, pairing 1:1 with 'workflow.agent_started'. The daemon's
+   * bridge wiring uses this to tear down the per-session token-stream
+   * mapping on both success and failure paths.
+   */
+  'workflow.agent_session_ended': {
+    workflowId: string;
+    stateId: string;
+    persona: string;
+    sessionId: string;
+  };
 
   // Token stream events (targeted delivery via bridge, not broadcast)
   'session.token_stream': { label: number; events: readonly TokenStreamEvent[] };

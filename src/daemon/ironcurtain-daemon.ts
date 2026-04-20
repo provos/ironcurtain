@@ -20,7 +20,7 @@ import { loadConfig } from '../config/index.js';
 import { loadUserConfig, type ResolvedUserConfig } from '../config/user-config.js';
 import { getJobWorkspaceDir, getJobGeneratedDir, getJobDir, getWebUiStatePath } from '../config/paths.js';
 import type { IronCurtainConfig } from '../config/types.js';
-import type { SessionMode, EscalationRequest } from '../session/types.js';
+import type { SessionMode, SessionId, EscalationRequest } from '../session/types.js';
 import { SessionManager, type SessionSource } from '../session/session-manager.js';
 import { HeadlessTransport } from '../cron/headless-transport.js';
 import { shouldAutoSaveMemory } from '../memory/auto-save.js';
@@ -102,6 +102,19 @@ export class IronCurtainDaemon {
 
   /** Control request handler (saved for web UI reuse). */
   private controlRequestHandler: ControlRequestHandler | null = null;
+
+  /**
+   * Tracks bridge labels allocated for workflow-owned agent sessions.
+   * Workflow sessions don't go through SessionManager (they have no
+   * Transport), so they need their own SessionId -> label map. Labels
+   * are drawn from SessionManager.reserveLabel() to keep the label
+   * space unified.
+   *
+   * Keyed by SessionId so session reuse (resumeSessionId across state
+   * re-entries) maps to the same bridge label -- the viz's subscription
+   * stays correlated across agent transitions without churn.
+   */
+  private readonly workflowAgentLabels = new Map<SessionId, number>();
 
   /** Resolve to exit the daemon. */
   private exitResolve: (() => void) | null = null;
@@ -740,6 +753,33 @@ export class IronCurtainDaemon {
         }
       } else if (event === 'session.ended') {
         bridge.closeSession((payload as { label: number }).label);
+      } else if (event === 'workflow.agent_started') {
+        // Workflow-owned agent sessions are not registered in
+        // SessionManager (they run without a Transport). Map them
+        // into the bridge here so token events produced by the
+        // session reach `observe --all` subscribers. Reuses the
+        // existing label if the same SessionId reappears (happens
+        // when `freshSession: false` replays history through a new
+        // Session instance with the same ID).
+        const { sessionId } = payload as { sessionId: string };
+        const sid = sessionId as SessionId;
+        let label = this.workflowAgentLabels.get(sid);
+        if (label === undefined) {
+          label = this.sessionManager.reserveLabel();
+          this.workflowAgentLabels.set(sid, label);
+        }
+        bridge.registerSession(label, sid);
+      } else if (event === 'workflow.agent_session_ended') {
+        // Fires unconditionally (success or failure) in the
+        // orchestrator's finally block, so cleanup is symmetric
+        // with registration above.
+        const { sessionId } = payload as { sessionId: string };
+        const sid = sessionId as SessionId;
+        const label = this.workflowAgentLabels.get(sid);
+        if (label !== undefined) {
+          this.workflowAgentLabels.delete(sid);
+          bridge.closeSession(label);
+        }
       }
     });
 

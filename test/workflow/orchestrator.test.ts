@@ -1071,4 +1071,93 @@ describe('WorkflowOrchestrator', () => {
       expect(msg).toContain('ironcurtain persona create');
     }
   });
+
+  // -----------------------------------------------------------------------
+  // Agent-session lifecycle events (for token-stream bridge wiring)
+  // -----------------------------------------------------------------------
+  //
+  // These tests pin the contract that the daemon's bridge wiring depends
+  // on. Regressing the sessionId field or the `finally` emission of
+  // `agent_session_ended` silently breaks workflow token streaming.
+
+  it('emits agent_started and agent_session_ended with sessionId (success path)', async () => {
+    const defPath = writeDefinitionFile(tmpDir, simpleAgentDef);
+
+    const sessionFactory = vi.fn(async () => {
+      return createArtifactAwareSession(
+        [{ text: approvedResponse('done'), artifacts: ['code'] }],
+        tmpDir,
+        'coder-session-42',
+      );
+    });
+
+    const deps = createDeps(tmpDir, { createSession: sessionFactory });
+    const orchestrator = new WorkflowOrchestrator(deps);
+    activeOrchestrator = orchestrator;
+    const lifecycleEvents: WorkflowLifecycleEvent[] = [];
+    orchestrator.onEvent((e) => lifecycleEvents.push(e));
+
+    const workflowId = await orchestrator.start(defPath, 'code task');
+    await waitForCompletion(orchestrator, workflowId);
+
+    const started = lifecycleEvents.find((e) => e.kind === 'agent_started');
+    const completed = lifecycleEvents.find((e) => e.kind === 'agent_completed');
+    const ended = lifecycleEvents.find((e) => e.kind === 'agent_session_ended');
+
+    expect(started).toBeDefined();
+    expect(completed).toBeDefined();
+    expect(ended).toBeDefined();
+
+    // `agent_started` carries the real sessionId -- the bridge wiring
+    // relies on this to register the mapping.
+    expect((started as { sessionId: string }).sessionId).toBe('coder-session-42');
+
+    // `agent_session_ended` also carries the sessionId so cleanup can
+    // find the mapping.
+    expect((ended as { sessionId: string }).sessionId).toBe('coder-session-42');
+
+    // Ordering: started -> completed -> ended. The finally fires after
+    // the success-path agent_completed emission.
+    const startedIdx = lifecycleEvents.findIndex((e) => e.kind === 'agent_started');
+    const completedIdx = lifecycleEvents.findIndex((e) => e.kind === 'agent_completed');
+    const endedIdx = lifecycleEvents.findIndex((e) => e.kind === 'agent_session_ended');
+    expect(startedIdx).toBeLessThan(completedIdx);
+    expect(completedIdx).toBeLessThan(endedIdx);
+  });
+
+  it('emits agent_session_ended on failure path (no agent_completed)', async () => {
+    // Agent never produces a status block -> two sendMessage calls both
+    // fail parse -> executeAgentState throws. The `finally` block must
+    // still fire `agent_session_ended` so bridge entries are cleaned up.
+    const defPath = writeDefinitionFile(tmpDir, simpleAgentDef);
+
+    const sessionFactory = vi.fn(async () => {
+      simulateArtifacts(findWorkflowDir(tmpDir), ['code']);
+      return new MockSession({
+        sessionId: 'failing-coder-session',
+        responses: [noStatusResponse(), noStatusResponse()],
+      });
+    });
+
+    const deps = createDeps(tmpDir, { createSession: sessionFactory });
+    const orchestrator = new WorkflowOrchestrator(deps);
+    activeOrchestrator = orchestrator;
+    const lifecycleEvents: WorkflowLifecycleEvent[] = [];
+    orchestrator.onEvent((e) => lifecycleEvents.push(e));
+
+    const workflowId = await orchestrator.start(defPath, 'write code');
+    await waitForCompletion(orchestrator, workflowId);
+
+    const started = lifecycleEvents.find((e) => e.kind === 'agent_started');
+    const completed = lifecycleEvents.find((e) => e.kind === 'agent_completed');
+    const ended = lifecycleEvents.find((e) => e.kind === 'agent_session_ended');
+
+    // Started and ended fire regardless of verdict parsing; completed
+    // only fires on success.
+    expect(started).toBeDefined();
+    expect(completed).toBeUndefined();
+    expect(ended).toBeDefined();
+    expect((started as { sessionId: string }).sessionId).toBe('failing-coder-session');
+    expect((ended as { sessionId: string }).sessionId).toBe('failing-coder-session');
+  });
 });

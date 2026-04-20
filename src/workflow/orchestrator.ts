@@ -50,6 +50,7 @@ import type {
   AgentTurnResult,
   BundleId,
   Session,
+  SessionId,
   SessionOptions,
   SessionMode,
 } from '../session/types.js';
@@ -300,6 +301,13 @@ export type WorkflowLifecycleEvent =
       readonly workflowId: WorkflowId;
       readonly state: string;
       readonly persona: string;
+      /**
+       * Session ID of the agent session. Consumers (e.g. the daemon's
+       * token-stream bridge wiring) use this to register the session
+       * so token events produced by this agent are routable to
+       * `observe --all` subscribers.
+       */
+      readonly sessionId: SessionId;
     }
   | {
       readonly kind: 'agent_completed';
@@ -307,6 +315,23 @@ export type WorkflowLifecycleEvent =
       readonly state: string;
       readonly persona: string;
       readonly verdict: string;
+    }
+  /**
+   * Emitted unconditionally in the `executeAgentState` finally block --
+   * both on success (after `agent_completed`) and on failure (when the
+   * agent state threw or the verdict retry failed). Pairs 1:1 with
+   * `agent_started` and signals that the session has been closed.
+   *
+   * Consumers that registered per-agent resources (e.g. token-stream
+   * bridge entries) must clean up in response to this event so no
+   * state leaks across rapid state transitions.
+   */
+  | {
+      readonly kind: 'agent_session_ended';
+      readonly workflowId: WorkflowId;
+      readonly state: string;
+      readonly persona: string;
+      readonly sessionId: SessionId;
     };
 
 /** Extended workflow detail for the web UI. */
@@ -1672,6 +1697,7 @@ export class WorkflowOrchestrator implements WorkflowController {
         workflowId,
         state: stateId,
         persona: stateConfig.persona,
+        sessionId: session.getInfo().id,
       });
 
       // Two-phase retry: (1) hard-failure retries re-send the ORIGINAL
@@ -1832,8 +1858,19 @@ export class WorkflowOrchestrator implements WorkflowController {
       throw new AgentInvocationError({ stateId, agentConversationId: currentConversationId, cause: err });
     } finally {
       instance.activeSessions.delete(session);
+      const endedSessionId = session.getInfo().id;
       await session.close().catch((closeErr: unknown) => {
         writeStderr(`[workflow] session.close() failed for "${stateId}": ${toErrorMessage(closeErr)}`);
+      });
+      // Emit regardless of success / failure so consumers (e.g. the
+      // daemon's bridge wiring) can release per-agent resources. Pairs
+      // 1:1 with `agent_started`.
+      this.emitLifecycleEvent({
+        kind: 'agent_session_ended',
+        workflowId,
+        state: stateId,
+        persona: stateConfig.persona,
+        sessionId: endedSessionId,
       });
     }
   }
