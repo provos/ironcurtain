@@ -794,11 +794,8 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
           clientRes.socket?.setNoDelay(true);
 
           const contentType = upstreamRes.headers['content-type'] ?? '';
-          // Snapshot the active token session ID at response-attach time.
-          // `tokenSessionId` is mutable across agents; capturing it here
-          // ensures events from this specific response are routed under
-          // the ID that was active when the upstream started responding,
-          // even if the orchestrator flips the ID mid-flight.
+          // Pin this response's events to the id active when it started,
+          // so an orchestrator mid-flight flip can't split one stream.
           const sidAtAttach = tokenSessionId;
           if (sidAtAttach && contentType.includes('text/event-stream')) {
             const tokenBus = getTokenStreamBus();
@@ -919,9 +916,8 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
         let finalBody = rawBody;
 
         // Extract tool_result events from the request body for token stream observation.
-        // Done before rewriting so we see the original messages array.
-        // Snapshot the session ID here so a concurrent `setTokenSessionId`
-        // call does not split a single request's events across two IDs.
+        // Snapshot here (before rewrite) so a concurrent setTokenSessionId
+        // flip can't split this request's events across two ids.
         const sidForToolResults = tokenSessionId;
         if (sidForToolResults && isLlmMessagesEndpoint(path as string)) {
           try {

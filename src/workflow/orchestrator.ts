@@ -459,33 +459,17 @@ interface WorkflowInstance {
    */
   quotaExhausted?: { readonly resetAt?: Date; readonly rawMessage: string };
   /**
-   * Workflow-scoped cumulative output-token counter. Accumulates the
-   * `outputTokens` field of every `message_end` event observed on the
-   * token-stream bus for sessions known to belong to this workflow
-   * (see `tokenSessionIds`). The next `executeAgentState` invocation
-   * snapshots this into `AgentInvokeResult.totalTokens`, which the
-   * XState `updateContextFromAgentResult` action copies onto
-   * `context.totalTokens`. Kept on the instance so survives across
-   * state transitions within a single workflow run.
+   * Three coordinated pieces of token-stream accounting state, grouped
+   * so lifecycle (setup/teardown) operates on one value. `outputTokens`
+   * accumulates `message_end.outputTokens` for any event whose session
+   * id is in `sessionIds`. `unsubscribe` is set at `setupTokenSubscription`
+   * and cleared on teardown; presence indicates "subscribed."
    */
-  outputTokens: number;
-  /**
-   * Session IDs the orchestrator has opened during this workflow run.
-   * Populated before `agent_started` emission, pruned in the
-   * executeAgentState `finally` block. Events on the bus for session IDs
-   * not in this set (e.g. other workflows sharing the global bus) are
-   * ignored by the token-counter subscriber — the workflow's counter is
-   * a workflow-local sum, not a global one.
-   */
-  readonly tokenSessionIds: Set<SessionId>;
-  /**
-   * Unsubscribe handle for the token-stream bus subscription installed
-   * at workflow start. Cleared by `teardownTokenSubscription()` on
-   * completion, abort, or shutdown. `undefined` until subscription is
-   * installed (e.g. resume before first `agent_started`, or never for
-   * workflows that never reach an agent state).
-   */
-  tokenUnsubscribe?: () => void;
+  tokens: {
+    outputTokens: number;
+    readonly sessionIds: Set<SessionId>;
+    unsubscribe?: () => void;
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -940,8 +924,8 @@ export class WorkflowOrchestrator implements WorkflowController {
 
   /**
    * Subscribes the workflow to the global token-stream bus. Accumulates
-   * `message_end.outputTokens` into `instance.outputTokens` for any event
-   * whose session ID is in `instance.tokenSessionIds`. The set is managed
+   * `message_end.outputTokens` into `instance.tokens.outputTokens` for any
+   * event whose session ID is in `instance.tokens.sessionIds`. The set is managed
    * by `executeAgentState` (added before `agent_started`, removed in the
    * `finally` block after `agent_session_ended`).
    *
@@ -950,11 +934,11 @@ export class WorkflowOrchestrator implements WorkflowController {
    */
   private setupTokenSubscription(instance: WorkflowInstance): void {
     // Defensive: re-entry by resume-after-crash should not double-subscribe.
-    if (instance.tokenUnsubscribe) return;
-    instance.tokenUnsubscribe = getTokenStreamBus().subscribeAll((sessionId, event) => {
+    if (instance.tokens.unsubscribe) return;
+    instance.tokens.unsubscribe = getTokenStreamBus().subscribeAll((sessionId, event) => {
       if (event.kind !== 'message_end') return;
-      if (!instance.tokenSessionIds.has(sessionId)) return;
-      instance.outputTokens += event.outputTokens;
+      if (!instance.tokens.sessionIds.has(sessionId)) return;
+      instance.tokens.outputTokens += event.outputTokens;
     });
   }
 
@@ -963,16 +947,16 @@ export class WorkflowOrchestrator implements WorkflowController {
    * call from both normal completion and abort paths.
    */
   private teardownTokenSubscription(instance: WorkflowInstance): void {
-    if (instance.tokenUnsubscribe) {
+    if (instance.tokens.unsubscribe) {
       try {
-        instance.tokenUnsubscribe();
+        instance.tokens.unsubscribe();
       } catch {
         // Unsubscribe is best-effort; errors here should never prevent
         // workflow teardown from completing.
       }
-      instance.tokenUnsubscribe = undefined;
+      instance.tokens.unsubscribe = undefined;
     }
-    instance.tokenSessionIds.clear();
+    instance.tokens.sessionIds.clear();
   }
 
   // -----------------------------------------------------------------------
@@ -1041,8 +1025,10 @@ export class WorkflowOrchestrator implements WorkflowController {
       currentPersonaByBundle: new Map(),
       mintedServersByBundle: new Map(),
       aborted: false,
-      outputTokens: 0,
-      tokenSessionIds: new Set(),
+      tokens: {
+        outputTokens: 0,
+        sessionIds: new Set(),
+      },
     };
 
     // Under `sharedContainer: true`, bundles are minted lazily by
@@ -1115,11 +1101,13 @@ export class WorkflowOrchestrator implements WorkflowController {
       currentPersonaByBundle: new Map(),
       mintedServersByBundle: new Map(),
       aborted: false,
-      // Resume picks up the checkpointed totalTokens as the accumulator's
-      // starting point so post-resume message_end events keep adding to
-      // the running total instead of resetting it.
-      outputTokens: checkpoint.context.totalTokens,
-      tokenSessionIds: new Set(),
+      tokens: {
+        // Resume picks up the checkpointed totalTokens as the accumulator's
+        // starting point so post-resume message_end events keep adding to
+        // the running total instead of resetting it.
+        outputTokens: checkpoint.context.totalTokens,
+        sessionIds: new Set(),
+      },
     };
 
     // Resume does NOT reclaim the original containers — any
@@ -1787,24 +1775,13 @@ export class WorkflowOrchestrator implements WorkflowController {
         message: command,
       });
 
-      // Route MITM-extracted token-stream events under this agent's
-      // session ID so the daemon's `TokenStreamBridge` (which registered
-      // on `agent_started` below) receives them. In shared-container mode
-      // the MITM proxy is long-lived and shared across agents; without
-      // this flip, events route under whatever ID the previous agent
-      // (or the initial `createDockerInfrastructure` call) left behind
-      // and silently miss the bridge.
-      //
-      // No-op when `infra` is unset (builtin workflows, per-state-container
-      // mode) — the session has its own MITM whose routing is pinned by
-      // `createDockerSession`.
+      // Shared-container mode: the MITM is long-lived across agents. Flip
+      // its routing id so this agent's events land under its own session id
+      // (matching what the bridge registers below). Optional-chain because
+      // builtin/per-state-container workflows have no shared `infra`.
       const agentSessionId = session.getInfo().id;
       bundle?.setTokenSessionId(agentSessionId);
-
-      // Register this session for the workflow's token accumulator.
-      // `setupTokenSubscription`'s listener filters by this set, so events
-      // from sessions outside the workflow never bleed into the counter.
-      instance.tokenSessionIds.add(agentSessionId);
+      instance.tokens.sessionIds.add(agentSessionId);
 
       this.emitLifecycleEvent({
         kind: 'agent_started',
@@ -1958,7 +1935,7 @@ export class WorkflowOrchestrator implements WorkflowController {
         // value to update ctx.totalTokens; it reflects every `message_end`
         // the bus subscriber has seen so far, including all earlier
         // agents in the workflow.
-        totalTokens: instance.outputTokens,
+        totalTokens: instance.tokens.outputTokens,
       };
     } catch (err) {
       // Quota exhaustion already produced its own structured
@@ -1982,25 +1959,14 @@ export class WorkflowOrchestrator implements WorkflowController {
       await session.close().catch((closeErr: unknown) => {
         writeStderr(`[workflow] session.close() failed for "${stateId}": ${toErrorMessage(closeErr)}`);
       });
-      // Clear the MITM proxy's token-stream routing ID BEFORE emitting
-      // `agent_session_ended`. Ordering matters:
-      //   - `session.close()` has already returned, so no further
-      //     `sendMessage` calls against this session are possible and any
-      //     in-flight Anthropic API streams have drained (the agent's
-      //     final response is what `sendMessage` awaited).
-      //   - Clearing before the bridge teardown prevents any residual
-      //     events from pushing under this (now stale) session ID.
-      //   - The next `agent_started` flip is what installs the next
-      //     agent's ID, so leaving this cleared between agents is safe.
+      // Order: close session (drains in-flight LLM stream) → clear MITM
+      // routing → drop from accumulator filter → emit agent_session_ended.
+      // Clearing the MITM id before the bridge teardown means any stray
+      // late event cannot push under an about-to-be-unregistered label.
       bundle?.setTokenSessionId(undefined);
-      // Drop the session from the token-accumulator filter set so late
-      // bus events (typically shouldn't happen post-close, but belt-and-
-      // suspenders) are ignored. The cumulative counter stays intact —
-      // earlier events for this session have already been added.
-      instance.tokenSessionIds.delete(endedSessionId);
-      // Emit regardless of success / failure so consumers (e.g. the
-      // daemon's bridge wiring) can release per-agent resources. Pairs
-      // 1:1 with `agent_started`.
+      instance.tokens.sessionIds.delete(endedSessionId);
+      // Pairs 1:1 with agent_started; emitted unconditionally in finally
+      // so success, failure, and abort paths all clean up the bridge.
       this.emitLifecycleEvent({
         kind: 'agent_session_ended',
         workflowId,
