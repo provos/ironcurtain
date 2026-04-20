@@ -106,7 +106,7 @@ const sampleConfig: DockerContainerConfig = {
     HTTPS_PROXY: 'http://host.docker.internal:9999',
   },
   command: ['sleep', 'infinity'],
-  sessionLabel: 'abc-session-id',
+  bundleLabel: 'abc-bundle-id',
   resources: { memoryMb: 4096, cpus: 2 },
 };
 
@@ -142,10 +142,28 @@ describe('DockerManager', () => {
       expect(envArgs).toContain('HTTPS_PROXY=http://host.docker.internal:9999');
 
       const labelArgs = args.filter((_, i) => i > 0 && args[i - 1] === '--label');
-      expect(labelArgs).toContain('ironcurtain.session=abc-session-id');
+      expect(labelArgs).toContain('ironcurtain.bundle=abc-bundle-id');
+      // Workflow/scope labels are absent when workflowLabel/scopeLabel are unset.
+      expect(labelArgs.some((l) => l.startsWith('ironcurtain.workflow='))).toBe(false);
+      expect(labelArgs.some((l) => l.startsWith('ironcurtain.scope='))).toBe(false);
 
       expect(args).toContain('ironcurtain-claude-code:latest');
       expect(args.slice(-2)).toEqual(['sleep', 'infinity']);
+    });
+
+    it('emits bundle, workflow, and scope labels in workflow mode', () => {
+      const config: DockerContainerConfig = {
+        ...sampleConfig,
+        bundleLabel: 'bundle-xyz',
+        workflowLabel: 'workflow-42',
+        scopeLabel: 'state-foo',
+      };
+      const args = buildCreateArgs(config);
+
+      const labelArgs = args.filter((_, i) => i > 0 && args[i - 1] === '--label');
+      expect(labelArgs).toContain('ironcurtain.bundle=bundle-xyz');
+      expect(labelArgs).toContain('ironcurtain.workflow=workflow-42');
+      expect(labelArgs).toContain('ironcurtain.scope=state-foo');
     });
 
     it('uses extraHosts instead of default host-gateway when provided', () => {
@@ -485,7 +503,7 @@ describe('DockerManager', () => {
       expect(mock.calls[0].args).toEqual(['inspect', 'ironcurtain-sidecar-abc']);
     });
 
-    it('skips removal when container lacks ironcurtain.session label', async () => {
+    it('skips removal when container lacks ironcurtain.bundle label', async () => {
       mock.setSequence([
         { stdout: '[{"Id":"abc"}]' }, // inspect → exists
         { stdout: '<no value>\n' }, // label inspect → no label
@@ -497,7 +515,7 @@ describe('DockerManager', () => {
       expect(mock.calls).toHaveLength(2);
     });
 
-    it('stops and removes when container exists with session label', async () => {
+    it('stops and removes when container exists with bundle label', async () => {
       mock.setSequence([
         { stdout: '[{"Id":"abc"}]' }, // inspect → exists
         { stdout: 'session-123\n' }, // label inspect → has label

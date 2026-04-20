@@ -4,6 +4,34 @@ import { homedir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SESSION_STATE_FILENAME } from '../docker/pty-types.js';
+import type { BundleId } from '../session/types.js';
+
+/**
+ * Short slug length used in file/directory names that must fit under
+ * `sockaddr_un.sun_path` (macOS ~104 bytes, Linux ~108 bytes). 12 hex
+ * chars give 16^12 ≈ 2.8e14 combinations, so collisions in the
+ * host-wide `~/.ironcurtain/run/<slug>/` namespace are astronomical —
+ * important because bundle teardown runs `rmSync(runtimeRoot)` and a
+ * collision would wipe another live bundle's sockets. The full UUID
+ * remains the authoritative identity in Docker labels and directory
+ * paths; only socket-adjacent names use the short form. The new
+ * `~/.ironcurtain/run/<12chars>/sockets/<name>.sock` layout has ample
+ * sun_path budget for the longer slug on both macOS (104) and Linux
+ * (108).
+ */
+const BUNDLE_SLUG_LEN = 12;
+
+/**
+ * Derives the short slug from a `BundleId`. Strips hyphens first so the
+ * resulting `BUNDLE_SLUG_LEN` characters are all hex — a raw
+ * `substring(0, 12)` on a canonical UUID would include the hyphen at
+ * position 8 and yield only 11 hex digits of entropy (16^11 ≈ 1.8e13).
+ * 12 hex digits give 16^12 ≈ 2.8e14, matching the collision-space math
+ * the layout depends on.
+ */
+function toBundleSlug(bundleId: BundleId | string): string {
+  return bundleId.replace(/-/g, '').substring(0, BUNDLE_SLUG_LEN);
+}
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -441,79 +469,189 @@ export function getWorkflowRunDir(workflowId: string): string {
 }
 
 /**
- * Returns the coordinator control socket path for a workflow run:
- *   {home}/workflow-runs/{workflowId}/proxy-control.sock
+ * Returns the containers root for a workflow run:
+ *   {home}/workflow-runs/{workflowId}/containers/
  *
- * The coordinator listens on this UDS to accept policy hot-swap
- * requests from the workflow orchestrator. The socket sits inside
- * the workflow run's private directory (mode `0o700`) so no
- * additional auth is needed -- filesystem permissions gate access.
+ * Each bundle (one Docker container + its MITM/Code-Mode proxies, CA,
+ * fake keys, audit log, and per-state artifacts) lives under
+ * `containers/<bundleId>/`. A single-scope workflow has one entry; a
+ * bifurcated workflow with distinct `containerScope` values has one
+ * entry per distinct scope.
  */
-export function getWorkflowProxyControlSocketPath(workflowId: string): string {
-  return resolve(getWorkflowRunDir(workflowId), 'proxy-control.sock');
+export function getWorkflowContainersDir(workflowId: string): string {
+  return resolve(getWorkflowRunDir(workflowId), 'containers');
 }
 
 /**
- * Returns the single audit log path for a workflow run:
- *   {home}/workflow-runs/{workflowId}/audit.jsonl
+ * Returns the outer directory for a single bundle within a workflow run:
+ *   {home}/workflow-runs/{workflowId}/containers/{bundleId}/
  *
- * One file per workflow run, regardless of how many persona swaps
- * occur. Each entry is tagged with a `persona` field by the
- * coordinator, and JSONL ordering lets consumers reconstruct
- * per-persona / per-re-entry slices by scanning.
+ * Contains the bundle's audit log, its inner `bundle/` directory with
+ * sockets/CA/fake keys/orientation, and the per-state `states/` tree.
  */
-export function getWorkflowAuditLogPath(workflowId: string): string {
-  return resolve(getWorkflowRunDir(workflowId), 'audit.jsonl');
+export function getBundleDir(workflowId: string, bundleId: BundleId): string {
+  assertPathSafeSlug('bundle ID', bundleId);
+  return resolve(getWorkflowContainersDir(workflowId), bundleId);
 }
 
 /**
- * Returns the shared Docker infrastructure bundle directory for a
- * workflow run:
- *   {home}/workflow-runs/{workflowId}/bundle/
+ * Returns the inner bundle artifact directory:
+ *   {home}/workflow-runs/{workflowId}/containers/{bundleId}/bundle/
  *
- * Holds artifacts that live for the whole workflow (shared across all
- * states): `claude-state/`, `orientation/`, `sockets/`, `escalations/`,
- * and `system-prompt.txt`. Per-state artifacts go under `states/`.
+ * Holds the bundle-scoped files that `DockerInfrastructure` manages:
+ * MCP/MITM sockets, CA cert, fake keys, orientation scripts, and the
+ * effective system prompt. Bind-mounted into the Docker container for
+ * the UDS endpoints.
  */
-export function getWorkflowBundleDir(workflowId: string): string {
-  return resolve(getWorkflowRunDir(workflowId), 'bundle');
+export function getBundleBundleDir(workflowId: string, bundleId: BundleId): string {
+  return resolve(getBundleDir(workflowId, bundleId), 'bundle');
 }
 
 /**
- * Returns the per-state artifacts root for a workflow run:
- *   {home}/workflow-runs/{workflowId}/states/
+ * Returns the per-bundle audit log path:
+ *   {home}/workflow-runs/{workflowId}/containers/{bundleId}/audit.jsonl
  *
- * Each agent state invocation (including re-entries) gets its own
- * subdirectory keyed by `{stateId}.{visitCount}`.
+ * One audit file per bundle (coordinator). Each entry is tagged with
+ * the active `persona` so consumers can reconstruct per-persona /
+ * per-re-entry slices by scanning.
  */
-export function getWorkflowStatesDir(workflowId: string): string {
-  return resolve(getWorkflowRunDir(workflowId), 'states');
+export function getBundleAuditLogPath(workflowId: string, bundleId: BundleId): string {
+  return resolve(getBundleDir(workflowId, bundleId), 'audit.jsonl');
+}
+
+/**
+ * Returns the per-bundle states root:
+ *   {home}/workflow-runs/{workflowId}/containers/{bundleId}/states/
+ *
+ * Each agent state invocation (including re-entries) that borrows this
+ * bundle gets its own subdirectory keyed by `{stateId}.{visitCount}`.
+ */
+export function getBundleStatesDir(workflowId: string, bundleId: BundleId): string {
+  return resolve(getBundleDir(workflowId, bundleId), 'states');
 }
 
 /**
  * Returns the per-invocation artifact directory for a single state:
- *   {home}/workflow-runs/{workflowId}/states/{stateSlug}/
+ *   {home}/workflow-runs/{workflowId}/containers/{bundleId}/states/{stateSlug}/
  *
  * Holds this invocation's `session.log` and `session-metadata.json`.
  * `stateSlug` is `{stateId}.{visitCount}` (e.g., `fetch.1`, `plan.2`).
  */
-export function getWorkflowStateDir(workflowId: string, stateSlug: string): string {
+export function getInvocationDir(workflowId: string, bundleId: BundleId, stateSlug: string): string {
   assertStateSlug(stateSlug);
-  return resolve(getWorkflowStatesDir(workflowId), stateSlug);
+  return resolve(getBundleStatesDir(workflowId, bundleId), stateSlug);
 }
 
 /**
- * Returns the session log path for a single state invocation:
- *   {home}/workflow-runs/{workflowId}/states/{stateSlug}/session.log
+ * Returns the coordinator control socket path for a bundle:
+ *   {home}/run/{bundleId[0:12]}/ctrl.sock
+ *
+ * The coordinator listens on this UDS to accept policy hot-swap
+ * requests from the orchestrator. The socket sits under the bundle's
+ * per-bundle runtime root (mode `0o700`) so filesystem permissions
+ * gate access.
+ *
+ * The directory slug is truncated to 12 chars of `bundleId` so the
+ * assembled path fits under macOS `sockaddr_un.sun_path` (104 chars).
+ * 16^12 ≈ 2.8e14 combinations — collisions in the host-wide
+ * `run/<slug>/` namespace are astronomical.
  */
-export function getWorkflowStateLogPath(workflowId: string, stateSlug: string): string {
-  return resolve(getWorkflowStateDir(workflowId, stateSlug), SESSION_LOG_FILENAME);
+export function getBundleControlSocketPath(bundleId: BundleId): string {
+  return resolve(getBundleRuntimeRoot(bundleId), 'ctrl.sock');
+}
+
+// ---------------------------------------------------------------------------
+// Per-bundle UDS endpoints (MCP proxy, MITM proxy, MITM control, coordinator)
+// ---------------------------------------------------------------------------
+//
+// Every UDS file owned by a bundle lives under a single per-bundle root
+// at `~/.ironcurtain/run/<bundleId[0:12]>/`. The directory is created
+// with `0o700` (see `docker-infrastructure.ts`), inheriting the same
+// security posture as the rest of the IronCurtain home. Worst-case
+// assembled path (with a 20-char username) is about 76 bytes —
+// comfortably under macOS 104 and Linux 108 `sockaddr_un.sun_path` caps.
+//
+// Three locations per bundle:
+//   run/<bid12>/ctrl.sock             → coordinator control socket
+//   run/<bid12>/sockets/              → bind-mounted as /run/ironcurtain/
+//   run/<bid12>/host/                 → host-local only (MITM control)
+// The `sockets/` vs `host/` split keeps the bind-mounted endpoints
+// separate from host-only endpoints so `isEndpointAllowed` is not the
+// only thing standing between the container and the MITM control API.
+
+/**
+ * Returns the per-bundle runtime root directory:
+ *   {home}/run/{bundleId[0:12]}/
+ *
+ * Holds the coordinator control socket plus two subdirectories
+ * (`sockets/` and `host/`) so the bind-mounted UDS files can be
+ * co-located without exposing host-only sockets to the container.
+ */
+export function getBundleRuntimeRoot(bundleId: BundleId): string {
+  assertPathSafeSlug('bundle ID', bundleId);
+  return resolve(getIronCurtainHome(), 'run', toBundleSlug(bundleId));
 }
 
 /**
- * Returns the session metadata path for a single state invocation:
- *   {home}/workflow-runs/{workflowId}/states/{stateSlug}/session-metadata.json
+ * Returns the per-bundle container-visible sockets directory:
+ *   {home}/run/{bundleId[0:12]}/sockets/
+ *
+ * Two UDS files live here:
+ *  - `proxy.sock`      (Code Mode proxy — bind-mounted into container)
+ *  - `mitm-proxy.sock` (MITM proxy      — bind-mounted into container)
+ *
+ * This directory is what `prepareDockerInfrastructure()` bind-mounts as
+ * `/run/ironcurtain/` inside the container (read-write). Only these two
+ * socket files live here — no audit logs, escalation files, or other
+ * session artifacts.
  */
-export function getWorkflowStateMetadataPath(workflowId: string, stateSlug: string): string {
-  return resolve(getWorkflowStateDir(workflowId, stateSlug), SESSION_METADATA_FILENAME);
+export function getBundleSocketsDir(bundleId: BundleId): string {
+  return resolve(getBundleRuntimeRoot(bundleId), 'sockets');
+}
+
+/**
+ * Returns the per-bundle host-only directory:
+ *   {home}/run/{bundleId[0:12]}/host/
+ *
+ * Holds UDS files that must NOT be visible to the container
+ * (currently just the MITM control socket).
+ */
+export function getBundleHostOnlyDir(bundleId: BundleId): string {
+  return resolve(getBundleRuntimeRoot(bundleId), 'host');
+}
+
+/**
+ * Code Mode proxy UDS path for a bundle:
+ *   {home}/run/{bundleId[0:12]}/sockets/proxy.sock
+ *
+ * Bound by the host-side Code Mode proxy; reachable inside the
+ * container as `/run/ironcurtain/proxy.sock` via the bind mount on
+ * `getBundleSocketsDir()`.
+ */
+export function getBundleProxySocketPath(bundleId: BundleId): string {
+  return resolve(getBundleSocketsDir(bundleId), 'proxy.sock');
+}
+
+/**
+ * MITM proxy UDS path for a bundle:
+ *   {home}/run/{bundleId[0:12]}/sockets/mitm-proxy.sock
+ *
+ * Bound by the host-side MITM proxy; reachable inside the container as
+ * `/run/ironcurtain/mitm-proxy.sock` via the bind mount on
+ * `getBundleSocketsDir()`.
+ */
+export function getBundleMitmProxySocketPath(bundleId: BundleId): string {
+  return resolve(getBundleSocketsDir(bundleId), 'mitm-proxy.sock');
+}
+
+/**
+ * MITM control UDS path for a bundle:
+ *   {home}/run/{bundleId[0:12]}/host/mitm-control.sock
+ *
+ * Host-local only — lives under `host/` rather than `sockets/` so the
+ * bind mount that exposes `sockets/` at `/run/ironcurtain/` does not
+ * expose this socket to the container.
+ */
+export function getBundleMitmControlSocketPath(bundleId: BundleId): string {
+  return resolve(getBundleHostOnlyDir(bundleId), 'mitm-control.sock');
 }

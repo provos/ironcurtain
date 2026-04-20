@@ -671,4 +671,116 @@ describe('validateDefinition', () => {
       expect(() => validateDefinition(def)).not.toThrow();
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // containerScope validation
+  // ---------------------------------------------------------------------------
+
+  describe('containerScope', () => {
+    function sharedContainerDef(overrides: {
+      stateContainerScopes?: Partial<Record<string, string>>;
+      personas?: Partial<Record<string, string>>;
+    }): Record<string, unknown> {
+      const { stateContainerScopes = {}, personas = {} } = overrides;
+      return {
+        name: 'scoped',
+        description: 'Scoped workflow',
+        initial: 'plan',
+        settings: { mode: 'docker', dockerAgent: 'claude-code', sharedContainer: true },
+        states: {
+          plan: {
+            type: 'agent',
+            description: 'Plan',
+            persona: personas.plan ?? 'global',
+            prompt: 'Plan.',
+            inputs: [],
+            outputs: ['plan'],
+            transitions: [{ to: 'review' }],
+            ...(stateContainerScopes.plan !== undefined ? { containerScope: stateContainerScopes.plan } : {}),
+          },
+          review: {
+            type: 'agent',
+            description: 'Review',
+            persona: personas.review ?? 'global',
+            prompt: 'Review.',
+            inputs: ['plan'],
+            outputs: ['review'],
+            transitions: [{ to: 'done' }],
+            ...(stateContainerScopes.review !== undefined ? { containerScope: stateContainerScopes.review } : {}),
+          },
+          done: { type: 'terminal', description: 'Done' },
+        },
+      };
+    }
+
+    it('rejects containerScope when sharedContainer is not true', () => {
+      const def = sharedContainerDef({ stateContainerScopes: { plan: 'env-a' } });
+      // Override settings to remove sharedContainer.
+      (def.settings as Record<string, unknown>) = { mode: 'docker', dockerAgent: 'claude-code' };
+      expect(() => validateDefinition(def)).toThrow(WorkflowValidationError);
+      try {
+        validateDefinition(def);
+      } catch (err) {
+        if (!(err instanceof WorkflowValidationError)) throw err;
+        expect(err.issues.some((i) => /containerScope.*sharedContainer/.test(i))).toBe(true);
+      }
+    });
+
+    it('rejects containerScope values that violate the charset', () => {
+      const def = sharedContainerDef({ stateContainerScopes: { plan: 'env a' } });
+      expect(() => validateDefinition(def)).toThrow(WorkflowValidationError);
+    });
+
+    it('accepts legacy workflows (no containerScope, sharedContainer: true) with homogeneous persona', () => {
+      const def = sharedContainerDef({});
+      expect(() => validateDefinition(def)).not.toThrow();
+    });
+
+    it('accepts two states with different personas on the same scope', () => {
+      // Scope governs container lifecycle; persona governs the active
+      // policy. cyclePolicy hot-swaps the policy at each state entry,
+      // so mixing personas on one bundle is fine.
+      const def = sharedContainerDef({
+        personas: { plan: 'global', review: 'reviewer' },
+      });
+      expect(() => validateDefinition(def)).not.toThrow();
+    });
+
+    it('accepts distinct scopes with different personas', () => {
+      const def = sharedContainerDef({
+        stateContainerScopes: { review: 'reviewer-scope' },
+        personas: { plan: 'global', review: 'reviewer' },
+      });
+      expect(() => validateDefinition(def)).not.toThrow();
+    });
+
+    it('rejects containerScope on non-agent states via the raw-input check', () => {
+      // The raw-input validator catches `containerScope` on non-agent
+      // states (same mechanism as `maxVisits`) and throws before Zod
+      // would silently strip the field.
+      const def = {
+        name: 'non-agent-scope',
+        description: 'Bad scope placement',
+        initial: 'plan',
+        settings: { mode: 'docker', dockerAgent: 'claude-code', sharedContainer: true },
+        states: {
+          plan: {
+            type: 'agent',
+            description: 'Plan',
+            persona: 'global',
+            prompt: 'Plan.',
+            inputs: [],
+            outputs: ['plan'],
+            transitions: [{ to: 'done' }],
+          },
+          done: {
+            type: 'terminal',
+            description: 'Done',
+            containerScope: 'not-allowed-here',
+          },
+        },
+      };
+      expect(() => validateDefinition(def)).toThrow(WorkflowValidationError);
+    });
+  });
 });

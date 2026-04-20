@@ -20,7 +20,7 @@ function baseContext(overrides: Partial<WorkflowContext> = {}): WorkflowContext 
     worktreeBranches: [],
     totalTokens: 0,
     lastError: null,
-    sessionsByState: {},
+    agentConversationsByState: {},
     previousAgentOutput: null,
     previousAgentNotes: null,
     previousStateName: null,

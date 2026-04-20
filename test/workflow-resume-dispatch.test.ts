@@ -61,7 +61,7 @@ function makeContext(taskDescription: string): WorkflowContext {
     worktreeBranches: [],
     totalTokens: 1000,
     lastError: null,
-    sessionsByState: {},
+    agentConversationsByState: {},
     previousAgentOutput: null,
     previousAgentNotes: null,
     previousStateName: null,

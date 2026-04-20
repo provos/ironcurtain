@@ -2054,6 +2054,41 @@ canonical executable spec for the shipped design; discrepancies
 between this document and that test should be resolved in favor of
 the test until this document is rewritten.
 
+### D-parallelKey -- `parallelKey` field and parallel-state scaffolding removed
+
+§§2.1 ("Parallel workflow states are **not a future feature**"), 7
+("parallel-homogeneous-persona check"), 8 ("Parallel states"), and
+10-B3 ("Parallel-states concurrency (tool-call mutex)") all treat
+`parallelKey` as a live codebase feature. In practice it never had a
+runtime consumer: no XState machine in `src/workflow/machine-builder.ts`
+read `stateConfig.parallelKey`, no fan-out path ever existed, and the
+orchestrator always invoked agent states serially. The field was pure
+schema scaffolding for future work that was never built.
+
+Concretely removed:
+* `AgentStateDefinition.parallelKey?: string` field in
+  `src/workflow/types.ts`.
+* `AgentSlot.parallelKey?: string` on the public `WorkflowStatus` type
+  (the `activeAgents` array was always empty anyway).
+* Zod schema field and the vacuous "parallelKey only on agent states"
+  semantic check in `src/workflow/validate.ts`.
+* Lint rule WF005 ("parallelKey + worktree without gitRepoPath") in
+  `src/workflow/lint.ts` and its test, along with the corresponding
+  entry in `DiagnosticCode` (WF005 is retired and must not be reused).
+
+As a direct consequence, the earlier homogeneous-persona-per-scope
+check in `validateContainerScopes` was also removed: its only
+justification was concurrent tool calls from parallel same-scope
+states, which cannot occur under serial-only execution. States sharing
+a `containerScope` may now use different personas freely —
+`cyclePolicy(instance, persona, bundle)` hot-swaps the coordinator's
+active policy on each agent-state entry, so scope (container
+lifecycle) and persona (active policy) are orthogonal.
+
+`WorktreeInfo.parallelKey` in `src/workflow/worktree.ts` is unrelated
+and unchanged: it is an internal worktree-slot identifier (the git
+branch name), not the removed `AgentStateDefinition.parallelKey`.
+
 ## 11. Revision history
 
 ### v4 -- UTCP spike outcome, placement clarifications, tool-call mutex

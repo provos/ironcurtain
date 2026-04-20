@@ -21,7 +21,7 @@ function makeCheckpoint(overrides?: Partial<WorkflowCheckpoint>): WorkflowCheckp
       worktreeBranches: [],
       totalTokens: 500,
       lastError: null,
-      sessionsByState: {},
+      agentConversationsByState: {},
       previousAgentOutput: null,
       previousAgentNotes: null,
       previousStateName: null,

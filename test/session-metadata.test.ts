@@ -127,4 +127,24 @@ describe('loadSessionMetadata', () => {
     expect(loaded?.policyDir).toBe('/home/user/.ironcurtain/jobs/daily/generated');
     expect(loaded?.persona).toBeUndefined();
   });
+
+  it('round-trips agentConversationId so --resume can continue the Claude conversation', async () => {
+    // Regression guard for the resume-the-Claude-conversation fix: if the
+    // field isn't persisted, `ironcurtain --resume <id>` mints a fresh
+    // AgentConversationId and the adapter starts a new conversation
+    // instead of continuing the stored one.
+    const { createAgentConversationId } = await import('../src/session/types.js');
+    const convoId = createAgentConversationId();
+
+    const metadata: SessionMetadata = {
+      createdAt: '2026-03-08T12:00:00.000Z',
+      persona: 'exec-assistant',
+      agentConversationId: convoId,
+    };
+
+    saveSessionMetadata(TEST_SESSION_ID, metadata);
+    const loaded = loadSessionMetadata(TEST_SESSION_ID);
+
+    expect(loaded?.agentConversationId).toBe(convoId);
+  });
 });

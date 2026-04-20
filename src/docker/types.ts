@@ -29,8 +29,29 @@ export interface DockerContainerConfig {
    */
   readonly entrypoint?: string;
 
-  /** IronCurtain session label for stale container detection. */
-  readonly sessionLabel?: string;
+  /**
+   * Bundle identity label — emitted as `ironcurtain.bundle=<value>`.
+   * Always set for IronCurtain-owned containers; used as the primary
+   * key for stale-container detection and for Docker queries. See
+   * `docs/designs/workflow-session-identity.md` §7.
+   */
+  readonly bundleLabel?: string;
+
+  /**
+   * Workflow identity label — emitted as `ironcurtain.workflow=<value>`.
+   * Set on workflow-mode containers; absent on standalone CLI / PTY
+   * sessions. Enables `docker ps --filter label=ironcurtain.workflow=<id>`
+   * for resume reclamation and orphan sweeps.
+   */
+  readonly workflowLabel?: string;
+
+  /**
+   * Container scope label — emitted as `ironcurtain.scope=<value>`.
+   * Set on workflow-mode containers with the resolved scope value from
+   * `AgentStateDefinition.containerScope` (default `"primary"`); absent
+   * on standalone CLI / PTY sessions (which have no scope concept).
+   */
+  readonly scopeLabel?: string;
 
   /** Extra --add-host entries (e.g. ["host.docker.internal:172.30.0.3"]). When set, suppresses the default host-gateway mapping. */
   readonly extraHosts?: readonly string[];

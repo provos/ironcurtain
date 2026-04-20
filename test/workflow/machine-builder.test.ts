@@ -259,40 +259,6 @@ const coderCriticDefinition: WorkflowDefinition = {
   },
 };
 
-/** Agent state with parallelKey */
-const parallelDefinition: WorkflowDefinition = {
-  name: 'parallel-test',
-  description: 'Workflow with parallel key',
-  initial: 'plan',
-  states: {
-    plan: {
-      type: 'agent',
-      description: 'Creates a plan',
-      persona: 'planner',
-      prompt: 'You are a planner.',
-      inputs: [],
-      outputs: ['spec'],
-      transitions: [{ to: 'implement' }],
-    },
-    implement: {
-      type: 'agent',
-      description: 'Writes code',
-      persona: 'coder',
-      prompt: 'You are a coder.',
-      inputs: ['spec'],
-      outputs: ['code'],
-      transitions: [{ to: 'done' }],
-      parallelKey: 'spec.modules',
-      worktree: true,
-    },
-    done: {
-      type: 'terminal',
-      description: 'Done',
-      outputs: ['spec', 'code'],
-    },
-  },
-};
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -337,7 +303,7 @@ describe('buildWorkflowMachine', () => {
       expect(ctx.worktreeBranches).toEqual([]);
       expect(ctx.totalTokens).toBe(0);
       expect(ctx.lastError).toBeNull();
-      expect(ctx.sessionsByState).toEqual({});
+      expect(ctx.agentConversationsByState).toEqual({});
       expect(ctx.previousAgentOutput).toBeNull();
       expect(ctx.previousStateName).toBeNull();
       expect(ctx.visitCounts).toEqual({});
@@ -754,7 +720,7 @@ describe('buildWorkflowMachine', () => {
       expect(actor.getSnapshot().context.reviewHistory).toContain('issue found');
     });
 
-    it('tracks sessionsByState from agent results', async () => {
+    it('tracks agentConversationsByState from agent results', async () => {
       const result = buildWorkflowMachine(linearDefinition, 'task');
       let sessionCounter = 0;
 
@@ -762,7 +728,9 @@ describe('buildWorkflowMachine', () => {
         actors: {
           agentService: fromPromise(async () => {
             sessionCounter++;
-            return makeAgentResult({ sessionId: `session-${sessionCounter}` });
+            return makeAgentResult({
+              agentConversationId: `conv-${sessionCounter}` as import('../../src/session/types.js').AgentConversationId,
+            });
           }),
         },
       });
@@ -773,8 +741,8 @@ describe('buildWorkflowMachine', () => {
       await settle();
 
       const ctx = actor.getSnapshot().context;
-      expect(ctx.sessionsByState['plan']).toBe('session-1');
-      expect(ctx.sessionsByState['design']).toBe('session-2');
+      expect(ctx.agentConversationsByState['plan']).toBe('conv-1');
+      expect(ctx.agentConversationsByState['design']).toBe('conv-2');
     });
 
     it('updates previousTestCount from deterministic results', async () => {
@@ -925,33 +893,6 @@ describe('buildWorkflowMachine', () => {
       expect(result.terminalStateNames.has('done')).toBe(true);
       expect(result.terminalStateNames.has('aborted')).toBe(true);
       expect(result.terminalStateNames.has('plan')).toBe(false);
-    });
-  });
-
-  describe('parallel key states', () => {
-    it('passes parallelKey config to agent service input', async () => {
-      const result = buildWorkflowMachine(parallelDefinition, 'task');
-      let capturedInput: AgentInvokeInput | undefined;
-
-      const testMachine = result.machine.provide({
-        actors: {
-          agentService: fromPromise(async ({ input }: { input: AgentInvokeInput }) => {
-            if (input.stateId === 'implement') {
-              capturedInput = input;
-            }
-            return makeAgentResult();
-          }),
-        },
-      });
-
-      const actor = createActor(testMachine);
-      actor.start();
-
-      await settle();
-
-      expect(capturedInput).toBeDefined();
-      expect(capturedInput!.stateConfig.parallelKey).toBe('spec.modules');
-      expect(capturedInput!.stateConfig.worktree).toBe(true);
     });
   });
 

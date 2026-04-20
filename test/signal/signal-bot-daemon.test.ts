@@ -272,13 +272,17 @@ function createMockSession() {
 // Each call returns a distinct mock session tracked in createdMockSessions.
 // Also captures the onEscalation callback so tests can simulate escalations
 // through the real callback chain.
-vi.mock('../../src/session/index.js', () => ({
-  createSession: vi.fn().mockImplementation((options?: { onEscalation?: MockSessionRecord['onEscalation'] }) => {
+vi.mock('../../src/session/index.js', () => {
+  const impl = (options?: { onEscalation?: MockSessionRecord['onEscalation'] }) => {
     const session = createMockSession();
     createdMockSessions.push({ session, onEscalation: options?.onEscalation });
     return Promise.resolve(session);
-  }),
-}));
+  };
+  return {
+    createSession: vi.fn().mockImplementation(impl),
+    createStandaloneSession: vi.fn().mockImplementation(impl),
+  };
+});
 
 vi.mock('../../src/config/index.js', () => ({
   loadConfig: vi.fn().mockReturnValue({
@@ -462,7 +466,7 @@ describe('SignalBotDaemon', () => {
     createdMockSessions.length = 0;
 
     // Restore default createSession mock in case a test overrode it
-    const { createSession } = await import('../../src/session/index.js');
+    const { createStandaloneSession: createSession } = await import('../../src/session/index.js');
     vi.mocked(createSession).mockImplementation((options?: { onEscalation?: MockSessionRecord['onEscalation'] }) => {
       const session = createMockSession();
       createdMockSessions.push({ session, onEscalation: options?.onEscalation });
@@ -517,7 +521,7 @@ describe('SignalBotDaemon', () => {
 
   it('sends fallback message when agent returns empty response', async () => {
     // Override createSession so sendMessage returns an empty string
-    const { createSession } = await import('../../src/session/index.js');
+    const { createStandaloneSession: createSession } = await import('../../src/session/index.js');
     vi.mocked(createSession).mockImplementation((options?: { onEscalation?: MockSessionRecord['onEscalation'] }) => {
       const session = createMockSession();
       vi.mocked(session.sendMessage).mockResolvedValue('');
@@ -1103,7 +1107,7 @@ describe('SignalBotDaemon', () => {
     // 6. Banner should say [#2], not [#1]
 
     // Make session #1's sendMessage trigger an escalation via callback, then resolve
-    const { createSession } = await import('../../src/session/index.js');
+    const { createStandaloneSession: createSession } = await import('../../src/session/index.js');
     const mockCreateSession = vi.mocked(createSession);
 
     let callCount = 0;
@@ -1233,7 +1237,7 @@ describe('SignalBotDaemon', () => {
     // End-to-end test for the reported bug: escalation banner should
     // show [#2] when the message was routed to session #2 after /new.
 
-    const { createSession } = await import('../../src/session/index.js');
+    const { createStandaloneSession: createSession } = await import('../../src/session/index.js');
     const mockCreateSession = vi.mocked(createSession);
 
     let callCount = 0;
@@ -1300,7 +1304,7 @@ describe('SignalBotDaemon', () => {
     // - User sends message → goes to session #2
     // - Session #2 escalates → banner should say [#2]
 
-    const { createSession } = await import('../../src/session/index.js');
+    const { createStandaloneSession: createSession } = await import('../../src/session/index.js');
     const mockCreateSession = vi.mocked(createSession);
 
     // Controls for session #1's long-running message
