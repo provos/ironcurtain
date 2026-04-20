@@ -12,6 +12,7 @@
  * density (§A.3).
  */
 
+import { clamp } from './math-utils.js';
 import type { TokenStreamEvent } from './types.js';
 
 export type TokenStreamListener = (label: number, events: ReadonlyArray<TokenStreamEvent>) => void;
@@ -54,10 +55,6 @@ const MIN_MULTIPLIER = 0.3;
 const MAX_MULTIPLIER = 2.0;
 /** Half-life of the EMA in milliseconds. */
 const HALF_LIFE_MS = 500;
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, value));
-}
 
 /**
  * Count tokens in a batch for intensity purposes.

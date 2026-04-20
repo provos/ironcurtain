@@ -40,6 +40,7 @@
 <script lang="ts">
   import dagre from '@dagrejs/dagre';
   import type { StateGraphDto, StateNodeDto, TransitionEdgeDto } from '$lib/types.js';
+  import { truncateNotes } from '$lib/transition-fx.js';
 
   let {
     graph,
@@ -152,15 +153,9 @@
       to: toId,
       fromPos,
       toPos,
-      handoffLabel: truncateHandoff(agentEvent.notes ?? ''),
+      handoffLabel: truncateNotes(agentEvent.notes ?? ''),
     });
   });
-
-  function truncateHandoff(text: string): string {
-    const max = 80;
-    if (text.length <= max) return text;
-    return text.slice(0, max - 1) + '…';
-  }
 
   // Dev-time warn when currentState doesn't resolve to any rendered node. Real
   // workflows drive currentState from the state machine so these always match
@@ -324,8 +319,8 @@
       </marker>
     </defs>
 
-    <!-- Edges: dormant by default. The transition-FX overlay (Chunk 9) brightens
-         them during payload handoff by toggling the data-active attribute. -->
+    <!-- Edges: dormant by default. The transition-FX overlay brightens them
+         during payload handoff by toggling the data-active attribute. -->
     {#each layoutEdges as le (le.from + '->' + le.to)}
       {@const isBackEdge = le.edges.some(
         (e) => e.guard?.toLowerCase().includes('reject') || e.guard?.toLowerCase().includes('revision'),
@@ -395,8 +390,8 @@
 
 <style>
   /* Dormant edges — thin dashed 20% opacity. The transition-FX overlay toggles
-     data-active to brighten them during payload handoff (Chunk 9). Muting the
-     arrowhead here keeps the "path exists, not in use" affordance consistent. */
+     data-active to brighten them during payload handoff. Muting the arrowhead
+     here keeps the "path exists, not in use" affordance consistent. */
   .smg-edge {
     stroke: hsl(var(--primary));
     stroke-opacity: 0.2;
@@ -409,9 +404,9 @@
   .smg-edge--back {
     stroke-dasharray: 6 4;
   }
-  /* Chunk 9's transition FX toggles data-active via direct DOM manipulation, so
-     the concrete value is never set by this template. :global keeps the rule
-     in the output without Svelte pruning it as "unused". */
+  /* The transition-FX overlay toggles data-active via direct DOM manipulation,
+     so the concrete value is never set by this template. :global keeps the
+     rule in the output without Svelte pruning it as "unused". */
   .smg-edge:global([data-active='true']) {
     stroke-opacity: 0.8;
     stroke-width: 2;
@@ -673,7 +668,7 @@
     }
   }
 
-  /* ---------- Chunk 9: arrival scan-line + flash badge (§D.2, §D.4) ----------
+  /* ---------- Arrival scan-line + flash badge (§D.2, §D.4) ----------
      Set by the transition-FX component via `data-arrival='true'` on the
      foreignObject. Both the scan-line sweep and the notes flash are driven
      off the same attribute so the graph owns the visual language; the FX

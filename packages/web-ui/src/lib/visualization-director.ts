@@ -80,7 +80,7 @@ export interface DirectorDeps {
   readonly wordState?: SessionWordState;
   /** Cell size used for SVG -> grid projection. */
   readonly cellSize: number;
-  /** Chunk 9 subsystem, injectable for tests. Defaults to a fresh instance. */
+  /** Transition-FX subsystem, injectable for tests. Defaults to a fresh instance. */
   readonly transitionFx?: TransitionFxSubsystem;
   /** Called on every tick with the current FX frame (or null when idle). The
    *  theater component draws onto its own FX canvas from this callback so the
@@ -110,8 +110,8 @@ export interface VisualizationDirector {
   setAvoidRegions(rects: ReadonlyArray<AvoidRect>): void;
   /** Push a token stream event through the scorer -> engine pipeline. */
   handleStreamEvent(event: TokenStreamEvent): void;
-  /** Kick the Chunk 9 transition-FX subsystem. Dropped with a warn-once if a
-   *  cycle is already active. */
+  /** Kick the transition-FX subsystem. Dropped with a warn-once if a cycle
+   *  is already active. */
   triggerTransition(evt: TransitionTriggerLike, nowMs?: number): void;
   /** Read the FX subsystem's current frame. Null when idle. */
   getTransitionFxFrame(): TransitionFxFrame | null;
@@ -309,7 +309,7 @@ export function createVisualizationDirector(deps: DirectorDeps): VisualizationDi
     try {
       const candidates = processEventForWords(event, wordState, scorer);
       for (const c of candidates) {
-        engine.enqueueWord(c.word, { priority: 1, colorKind: c.source });
+        engine.enqueueWord(c.word, { colorKind: c.source });
       }
     } catch (err) {
       if (!warned.has('word-scorer')) {

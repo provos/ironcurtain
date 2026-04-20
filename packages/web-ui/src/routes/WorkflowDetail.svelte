@@ -44,7 +44,7 @@
   let workspaceExpanded = $state(false);
   let expandedMessages = $state(new Set<number>());
 
-  // ── Viz mode (Chunk 10) ───────────────────────────────────────────
+  // ── Viz mode ──────────────────────────────────────────────────────
   // Persist across reloads so a developer working on the theater doesn't
   // have to flip the toggle every time. Storage is per-origin; the key is
   // shared across workflows intentionally — the viewer's preference is
@@ -252,7 +252,7 @@
     {/if}
 
     {#if vizMode === 'theater'}
-      <!-- Theater viz mode (Chunk 10). The theater is its own full-bleed
+      <!-- Theater viz mode. The theater is its own full-bleed
            frame — we give it a fixed aspect-friendly height so it sits inside
            the scrollable route container without hijacking the whole viewport.
            The classic state machine card stays intact under the toggle so

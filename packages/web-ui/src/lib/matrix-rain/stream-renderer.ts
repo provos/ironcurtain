@@ -18,29 +18,16 @@
  *   continue as tinted drops in frame.drops until they fall off-grid).
  */
 
-import { COLOR_FAR, COLOR_HEAD, COLOR_NEAR } from './palette.js';
+import { COLOR_FAR, COLOR_HEAD, COLOR_NEAR, COLOR_WORD_ERROR, COLOR_WORD_MODEL, COLOR_WORD_TOOL } from './palette.js';
 import { drawRainFrame, type DrawOptions, FONT_SIZE_TUNING } from './renderer.js';
 import type { DropColorKind, DropSnapshot, FrameState, LayoutPlan } from './types.js';
 import type { WordDropSnapshot, WordDropSource } from './word-drop-types.js';
 
-// ---------------------------------------------------------------------------
-// Palette for held word drops + dissolve shards
-// ---------------------------------------------------------------------------
-
-/** text_delta — ambient narration. Matches COLOR_NEAR from the login palette. */
-const WORD_COLOR_TEXT = '#00FF46';
-/** tool — tool invocations. Distinct cyan so calls pop out of the green rain. */
-const WORD_COLOR_TOOL = '#00E5FF';
-/** model — model identity blips (e.g., swap to a new model). Amber accent. */
-const WORD_COLOR_MODEL = '#FFB84D';
-/** error — failures, surfaced in crimson. */
-const WORD_COLOR_ERROR = '#FF4D4D';
-
 function wordColor(source: WordDropSource): string {
-  if (source === 'tool') return WORD_COLOR_TOOL;
-  if (source === 'model') return WORD_COLOR_MODEL;
-  if (source === 'error') return WORD_COLOR_ERROR;
-  return WORD_COLOR_TEXT;
+  if (source === 'tool') return COLOR_WORD_TOOL;
+  if (source === 'model') return COLOR_WORD_MODEL;
+  if (source === 'error') return COLOR_WORD_ERROR;
+  return COLOR_NEAR;
 }
 
 /**

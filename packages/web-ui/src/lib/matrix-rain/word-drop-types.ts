@@ -38,9 +38,6 @@ export interface WordDropSnapshot {
   readonly word: string;
   /** Used by renderer to choose tint. */
   readonly source: WordDropSource;
-  /** Scorer priority. Reserved for future policy; stream engine's current
-   *  eviction is strict FIFO per §G Q6. */
-  readonly priority: number;
   /** Current lifecycle phase. */
   readonly phase: WordDropPhase;
   /**

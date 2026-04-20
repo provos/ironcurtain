@@ -18,6 +18,7 @@
 
 import type { RainRng } from '../src/lib/matrix-rain/engine.js';
 import { createSeededRng } from '../src/lib/matrix-rain/engine.js';
+import type { TokenStreamEvent as FrontendTokenStreamEvent } from '../src/lib/types.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -42,20 +43,9 @@ export interface Scenario {
   readonly timeline: readonly TimelineEntry[];
 }
 
-/** Subset of the frontend's TokenStreamEvent union — only the three event kinds
- *  this runner emits. See packages/web-ui/src/lib/types.ts for the full 7-variant
- *  union; if that union changes shape, update these three to match. */
-export type TokenStreamEvent =
-  | { readonly kind: 'text_delta'; readonly text: string; readonly timestamp: number }
-  | { readonly kind: 'tool_use'; readonly toolName: string; readonly inputDelta: string; readonly timestamp: number }
-  | {
-      readonly kind: 'tool_result';
-      readonly toolUseId: string;
-      readonly toolName: string;
-      readonly content: string;
-      readonly isError: boolean;
-      readonly timestamp: number;
-    };
+/** The three TokenStreamEvent variants this runner emits. Narrowed from the
+ *  canonical union so contract changes surface here at compile time. */
+export type TokenStreamEvent = Extract<FrontendTokenStreamEvent, { kind: 'text_delta' | 'tool_use' | 'tool_result' }>;
 
 export type EmitFn = (event: string, payload: unknown) => void;
 

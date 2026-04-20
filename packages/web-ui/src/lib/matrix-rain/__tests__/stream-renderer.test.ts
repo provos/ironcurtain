@@ -83,7 +83,6 @@ function wordDrop(partial: Partial<WordDropSnapshot>): WordDropSnapshot {
     row: 0,
     word: 'x',
     source: 'text',
-    priority: 1,
     phase: 'hold',
     revealedChars: partial.word?.length ?? 1,
   };

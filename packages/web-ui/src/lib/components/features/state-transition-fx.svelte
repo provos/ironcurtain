@@ -1,6 +1,6 @@
 <script lang="ts">
   /**
-   * Transition-FX overlay (Chunk 9, §D.1-§D.6).
+   * Transition-FX overlay (see design doc §D.1–§D.6).
    *
    * Renders the payload handoff tile on a canvas stacked between the graph
    * (z-10) and the HUD (z-30). The tile is the one "discrete punctuation" event

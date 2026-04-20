@@ -14,6 +14,7 @@
 
 import { FRAME_MS, MAX_CATCH_UP_TICKS, createSeededRng } from './engine.js';
 import { RAIN_CHARS } from './font.js';
+import { clamp } from '../math-utils.js';
 import type { DropColorKind, DropSnapshot, DropTrailSnapshot, FrameState, LayoutPlan, RainRng } from './types.js';
 import type { WordDropPhase, WordDropSnapshot, WordDropSource } from './word-drop-types.js';
 
@@ -73,7 +74,6 @@ export interface StreamRainEngineOptions {
 }
 
 export interface EnqueueWordOptions {
-  readonly priority: number;
   readonly colorKind: WordDropSource;
 }
 
@@ -138,7 +138,6 @@ interface HeldWordDrop {
   row: number;
   word: string;
   source: WordDropSource;
-  priority: number;
   phase: WordDropPhase;
   /** How many leading chars of `word` are currently revealed. Grows during
    *  materialize; stays at `word.length` during hold. */
@@ -326,7 +325,7 @@ export function createStreamRainEngine(layout: LayoutPlan, options: StreamRainEn
   }
 
   function spawnAmbientDrops(): void {
-    const mult = Math.max(INTENSITY_MIN, Math.min(INTENSITY_MAX, intensity));
+    const mult = clamp(intensity, INTENSITY_MIN, INTENSITY_MAX);
     const cap = Math.max(1, Math.floor(AMBIENT_TARGET_MAX * mult));
     if (ambientDrops.length >= cap) return;
 
@@ -457,7 +456,6 @@ export function createStreamRainEngine(layout: LayoutPlan, options: StreamRainEn
         row: held.row,
         word: held.word,
         source: held.source,
-        priority: held.priority,
         phase: held.phase,
         revealedChars: held.revealedChars,
       });
@@ -609,7 +607,6 @@ export function createStreamRainEngine(layout: LayoutPlan, options: StreamRainEn
         row,
         word,
         source: opts.colorKind,
-        priority: opts.priority,
         phase: 'materialize',
         // Start at zero revealed — the first tick's ageHeldWords() call
         // reveals char #1. Keeps the transition visually crisp: enqueue on
@@ -633,7 +630,7 @@ export function createStreamRainEngine(layout: LayoutPlan, options: StreamRainEn
 
     setIntensity(multiplier: number): void {
       if (!Number.isFinite(multiplier)) return;
-      intensity = Math.max(INTENSITY_MIN, Math.min(INTENSITY_MAX, multiplier));
+      intensity = clamp(multiplier, INTENSITY_MIN, INTENSITY_MAX);
     },
 
     setAvoidRegions(rects: ReadonlyArray<AvoidRect>): void {

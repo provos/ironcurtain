@@ -43,7 +43,6 @@ function snapshot(frame: FrameState): string {
       row: w.row,
       word: w.word,
       source: w.source,
-      priority: w.priority,
       phase: w.phase,
       revealedChars: w.revealedChars,
     })),
@@ -107,7 +106,7 @@ describe('createStreamRainEngine -- getFrame() purity', () => {
   it('getFrame() does not age word drops', () => {
     const engine = createStreamRainEngine(buildLayout(), { seed: 42 });
     driveTicks(engine, 1);
-    engine.enqueueWord('hello', { priority: 1, colorKind: 'text' });
+    engine.enqueueWord('hello', { colorKind: 'text' });
     const r1 = engine.getFrame().wordDrops[0].revealedChars;
     const r2 = engine.getFrame().wordDrops[0].revealedChars;
     const r3 = engine.getFrame().wordDrops[0].revealedChars;
@@ -271,7 +270,7 @@ describe('createStreamRainEngine -- word drops FIFO', () => {
     driveTicks(engine, 1); // prime step
 
     for (let i = 0; i < WORD_DROP_FIFO_CAP + 6; i++) {
-      engine.enqueueWord(`w${i}`, { priority: 1, colorKind: 'text' });
+      engine.enqueueWord(`w${i}`, { colorKind: 'text' });
     }
 
     const frame = engine.getFrame();
@@ -284,7 +283,7 @@ describe('createStreamRainEngine -- word drops FIFO', () => {
 
     const total = WORD_DROP_FIFO_CAP + 6;
     for (let i = 0; i < total; i++) {
-      engine.enqueueWord(`word-${i}`, { priority: 1, colorKind: 'text' });
+      engine.enqueueWord(`word-${i}`, { colorKind: 'text' });
     }
 
     const words = engine.getFrame().wordDrops.map((w) => w.word);
@@ -301,7 +300,7 @@ describe('createStreamRainEngine -- word drops FIFO', () => {
     driveTicks(engine, 1);
 
     for (let i = 0; i < WORD_DROP_FIFO_CAP; i++) {
-      engine.enqueueWord(`old-${i}`, { priority: 1, colorKind: 'text' });
+      engine.enqueueWord(`old-${i}`, { colorKind: 'text' });
     }
     expect(engine.getFrame().wordDrops.length).toBe(WORD_DROP_FIFO_CAP);
 
@@ -309,7 +308,7 @@ describe('createStreamRainEngine -- word drops FIFO', () => {
     driveTicks(engine, 110, 2 * FRAME_MS);
     expect(engine.getFrame().wordDrops.length).toBe(0);
 
-    engine.enqueueWord('fresh', { priority: 1, colorKind: 'text' });
+    engine.enqueueWord('fresh', { colorKind: 'text' });
     const fresh = engine.getFrame().wordDrops;
     expect(fresh).toHaveLength(1);
     expect(fresh[0].word).toBe('fresh');
@@ -318,7 +317,7 @@ describe('createStreamRainEngine -- word drops FIFO', () => {
   it('ignores empty words', () => {
     const engine = createStreamRainEngine(buildLayout(), { seed: 15 });
     driveTicks(engine, 1);
-    engine.enqueueWord('', { priority: 1, colorKind: 'text' });
+    engine.enqueueWord('', { colorKind: 'text' });
     expect(engine.getFrame().wordDrops).toHaveLength(0);
   });
 });
@@ -327,7 +326,7 @@ describe('createStreamRainEngine -- word drop lifecycle', () => {
   it('materializes characters one at a time, then holds, then removes on dissolve', () => {
     const engine = createStreamRainEngine(buildLayout(), { seed: 17 });
     engine.step(0);
-    engine.enqueueWord('aging', { priority: 1, colorKind: 'text' });
+    engine.enqueueWord('aging', { colorKind: 'text' });
 
     // Freshly enqueued: phase=materialize, zero chars revealed yet — the
     // first tick's ageHeldWords() call is what reveals char #1.
@@ -365,7 +364,7 @@ describe('createStreamRainEngine -- word drop lifecycle', () => {
   it('reveals characters one per tick while in materialize', () => {
     const engine = createStreamRainEngine(buildLayout(), { seed: 41 });
     engine.step(0);
-    engine.enqueueWord('crystal', { priority: 1, colorKind: 'text' });
+    engine.enqueueWord('crystal', { colorKind: 'text' });
     // First tick: one char revealed. Second: two. Third: three. Up to word length.
     const reveals: number[] = [];
     for (let i = 1; i <= 8; i++) {
@@ -383,7 +382,7 @@ describe('createStreamRainEngine -- word drop lifecycle', () => {
   it('spawns one falling drop per character on dissolve, tagged with source tint', () => {
     const engine = createStreamRainEngine(buildLayout(), { seed: 42 });
     engine.step(0);
-    engine.enqueueWord('shatter', { priority: 1, colorKind: 'tool' });
+    engine.enqueueWord('shatter', { colorKind: 'tool' });
 
     // Drive through materialize + hold until the word is removed. Count how
     // many tinted drops appear on the dissolve tick.
@@ -407,7 +406,7 @@ describe('createStreamRainEngine -- word drop lifecycle', () => {
   it('dissolve shards retain source color across the first few ticks', () => {
     const engine = createStreamRainEngine(buildLayout(), { seed: 43 });
     engine.step(0);
-    engine.enqueueWord('fade', { priority: 1, colorKind: 'error' });
+    engine.enqueueWord('fade', { colorKind: 'error' });
 
     // Walk until dissolve fires, then keep ticking and confirm the error tint
     // stays on the drops (they are regular rain, just carrying a tint tag).
@@ -436,7 +435,7 @@ describe('createStreamRainEngine -- word drop lifecycle', () => {
 
     // Saturate the FIFO cap.
     for (let i = 0; i < WORD_DROP_FIFO_CAP; i++) {
-      engine.enqueueWord(`w${i}`, { priority: 1, colorKind: 'text' });
+      engine.enqueueWord(`w${i}`, { colorKind: 'text' });
     }
     expect(engine.getFrame().wordDrops.length).toBe(WORD_DROP_FIFO_CAP);
 
@@ -454,7 +453,7 @@ describe('createStreamRainEngine -- word drop lifecycle', () => {
     // Prove the FIFO freed: re-saturate, then confirm the cap counts only
     // currently-held words. Dissolve shards don't occupy the word cap.
     for (let i = 0; i < WORD_DROP_FIFO_CAP; i++) {
-      engine.enqueueWord(`r${i}`, { priority: 1, colorKind: 'text' });
+      engine.enqueueWord(`r${i}`, { colorKind: 'text' });
     }
     expect(engine.getFrame().wordDrops.length).toBe(WORD_DROP_FIFO_CAP);
   });
@@ -477,7 +476,7 @@ describe('createStreamRainEngine -- resize', () => {
     engine.step(0);
 
     for (let i = 0; i < 20; i++) {
-      engine.enqueueWord(`w${i}`, { priority: 1, colorKind: 'text' });
+      engine.enqueueWord(`w${i}`, { colorKind: 'text' });
     }
     // Snapshot `before` to stable shape — FrameState reuses buffers.
     const before = engine.getFrame().wordDrops.map((w) => ({ col: w.col, word: w.word }));
@@ -505,7 +504,7 @@ describe('createStreamRainEngine -- reducedMotion', () => {
   it('still ages and retires word drops', () => {
     const engine = createStreamRainEngine(buildLayout(), { seed: 22, reducedMotion: true });
     engine.step(0);
-    engine.enqueueWord('still-ages', { priority: 1, colorKind: 'text' });
+    engine.enqueueWord('still-ages', { colorKind: 'text' });
     expect(engine.getFrame().wordDrops).toHaveLength(1);
     driveTicks(engine, 110, FRAME_MS);
     expect(engine.getFrame().wordDrops).toHaveLength(0);
@@ -639,7 +638,7 @@ describe('createStreamRainEngine -- avoid regions', () => {
     // covers all of them.
     engine.setAvoidRegions([{ x: 0, y: 0, w: cols * cellSize, h: 10 * cellSize }]);
 
-    engine.enqueueWord('hello', { priority: 1, colorKind: 'text' });
+    engine.enqueueWord('hello', { colorKind: 'text' });
     expect(engine.getFrame().wordDrops).toHaveLength(0);
   });
 
@@ -654,7 +653,7 @@ describe('createStreamRainEngine -- avoid regions', () => {
     engine.setAvoidRegions([{ x: 0, y: 0, w: 10 * cellSize, h: 10 * cellSize }]);
 
     for (let i = 0; i < 20; i++) {
-      engine.enqueueWord(`w${i}`, { priority: 1, colorKind: 'text' });
+      engine.enqueueWord(`w${i}`, { colorKind: 'text' });
     }
     const drops = engine.getFrame().wordDrops;
     expect(drops.length).toBeGreaterThan(0);

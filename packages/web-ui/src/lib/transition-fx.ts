@@ -1,5 +1,5 @@
 /**
- * Transition-FX state machine (Chunk 9, §D.1–§D.6).
+ * Transition-FX state machine (see design doc §D.1–§D.6).
  *
  * Headless subsystem driven by the visualization director's rAF loop. Each
  * {@link TransitionEvent} kicks off a 1000ms punctuation cycle:
@@ -14,6 +14,7 @@
  * cost of glitching a half-played FX to chase a new one outweighs the cost of
  * skipping the new one's punctuation.
  */
+import { clamp01, easeOutCubic, lerp } from './math-utils.js';
 import type { SvgPoint } from './project-svg-to-grid.js';
 import { projectSvgToGrid } from './project-svg-to-grid.js';
 import type { DensitySource } from './matrix-rain/density-field.js';
@@ -68,24 +69,6 @@ export interface TransitionFxDensity {
   readonly gridCol: number;
   readonly gridRow: number;
   readonly amplitude: number;
-}
-
-// ---------------------------------------------------------------------------
-// Easing
-// ---------------------------------------------------------------------------
-
-/** Ease-out cubic. Fast start, gentle stop — §D.2. */
-function easeOutCubic(t: number): number {
-  const c = 1 - t;
-  return 1 - c * c * c;
-}
-
-function lerp(a: number, b: number, t: number): number {
-  return a + (b - a) * t;
-}
-
-function clamp01(t: number): number {
-  return t < 0 ? 0 : t > 1 ? 1 : t;
 }
 
 /** §D.2: truncate to NOTES_CHAR_CAP with a trailing ellipsis. */

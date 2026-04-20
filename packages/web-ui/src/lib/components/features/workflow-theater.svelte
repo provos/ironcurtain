@@ -6,27 +6,26 @@
 
 <script lang="ts">
   /**
-   * Workflow theater — the cinematic viz container (Chunk 8).
+   * Workflow theater — the cinematic viz container.
    *
    * Full-bleed stack:
    *   z-0   stream-rain canvas       (decorative, ambient tableau)
    *   z-10  state-machine-graph      (the Dagre-rendered FSM; interactive)
-   *   z-20  transition-FX overlay    (Chunk 9, mounted only while active)
-   *   z-30  ambient HUD              (Chunk 10, deferred)
+   *   z-20  transition-FX overlay    (mounted only while a transition is active)
+   *   z-30  ambient HUD              (two-corner telemetry)
    *
    * The heavy lifting — rAF loop, density-field updates, word scorer, intensity
-   * sampling, error isolation — lives in `VisualizationDirector` (§A.1 size
-   * trigger hit; this component crossed 400 LOC before extraction). The
-   * component is now true glue: bind the canvas, own the visibility + resize
+   * sampling, error isolation — lives in `VisualizationDirector`. This
+   * component is true glue: bind the canvas, own the visibility + resize
    * handlers that only make sense here, forward lifecycle calls to the director.
    *
    * Token-stream participation is delegated via `onSubscribe` / `onUnsubscribe`
    * props — the route owns WS actions, the theater just gets the lifecycle
    * hooks. `tokenStreamStore` (the singleton imperative fanout) is imported
    * directly because it's presentation-agnostic and doesn't talk to the WS.
-   * See CLAUDE.md "features/ components MUST NOT import from stores.svelte.ts"
-   * — this split keeps RPC calls route-side while still letting the theater
-   * subscribe to the fanout.
+   * See packages/web-ui/CLAUDE.md "features/ components MUST NOT import from
+   * stores.svelte.ts" — this split keeps RPC calls route-side while still
+   * letting the theater subscribe to the fanout.
    */
 
   import { onMount, untrack } from 'svelte';
@@ -55,7 +54,7 @@
     onSubscribe?: () => Promise<void> | void;
     /** Route-owned RPC hook. Called once on unmount. Fire-and-forget. */
     onUnsubscribe?: () => Promise<void> | void;
-    // ── HUD inputs (Chunk 10) ──────────────────────────────────────────
+    // ── HUD inputs ─────────────────────────────────────────────────────
     /** Displayed in the top-left HUD panel. Falls back to the workflow id. */
     workflowName?: string;
     currentRound?: number;
@@ -89,7 +88,7 @@
    *  internal component surface. */
   let graphEl: HTMLDivElement | undefined = $state();
 
-  /** Captured from the graph's `ontransition` callback. Drives the Chunk 9
+  /** Captured from the graph's `ontransition` callback. Drives the
    *  payload-handoff tile via {@link handleTransition}. */
   let lastTransition = $state<TransitionEvent | null>(null);
 
@@ -99,7 +98,7 @@
   let fxFrame = $state<TransitionFxFrame | null>(null);
   let fxActive = $state<TransitionTriggerLike | null>(null);
 
-  // ── HUD state (Chunk 10) ────────────────────────────────────────────
+  // ── HUD state ───────────────────────────────────────────────────────
   // Sampled from tokenStreamStore.intensity.current() at the same cadence
   // the director uses to drive rain intensity (~10 Hz). One more $state
   // per 100ms is noise the reactive graph can absorb without thrashing.
@@ -232,7 +231,7 @@
   });
 
   // ---------------------------------------------------------------------------
-  // HUD wiring (Chunk 10)
+  // HUD wiring
   // ---------------------------------------------------------------------------
 
   /**
@@ -240,26 +239,39 @@
    * and poll the intensity EMA at ~10 Hz for tokens/sec display. Both feeds
    * land in local $state so the `AmbientHud` prop surface stays pure.
    *
-   * Sampling is on a setInterval rather than piggybacking on rAF because the
-   * HUD's text cadence (~10 Hz) is independent of the canvas's frame rate,
-   * and running the interval even when the rAF loop is paused (e.g. tab
-   * hidden) is fine — the timer will just tick and update hidden DOM.
+   * Compare-before-assign guards both writes: idle streams publish identical
+   * rates and repeated `message_start`s carry the same model, and firing a
+   * $state assignment with an unchanged value still re-runs downstream
+   * $deriveds.
    */
   function wireHud(): () => void {
     const stopListener = tokenStreamStore.subscribeToStream((_label, events) => {
       for (const event of events as ReadonlyArray<TokenStreamEvent>) {
         if (event.kind === 'message_start') {
-          modelName = shortenModelName(event.model);
+          const next = shortenModelName(event.model);
+          if (next !== modelName) modelName = next;
         }
       }
     });
     // 100ms matches the director's INTENSITY_SAMPLE_PERIOD_MS. Read the raw
     // EMA (pre-clamp) for display; the rain's density multiplier is separately
     // clamped inside `intensity.current()`.
-    hudSampleHandle = setInterval(() => {
-      tokensPerSec = tokenStreamStore.ratePerSecond();
-    }, 100);
+    startHudSampling();
     return stopListener;
+  }
+
+  function startHudSampling(): void {
+    if (hudSampleHandle !== null) return;
+    hudSampleHandle = setInterval(() => {
+      const next = Math.round(tokenStreamStore.ratePerSecond());
+      if (next !== tokensPerSec) tokensPerSec = next;
+    }, 100);
+  }
+
+  function stopHudSampling(): void {
+    if (hudSampleHandle === null) return;
+    clearInterval(hudSampleHandle);
+    hudSampleHandle = null;
   }
 
   // ---------------------------------------------------------------------------
@@ -271,8 +283,10 @@
     const handler = (): void => {
       if (document.visibilityState === 'hidden') {
         d.stop();
+        stopHudSampling();
       } else {
         d.start();
+        startHudSampling();
       }
     };
     document.addEventListener('visibilitychange', handler);
@@ -431,9 +445,9 @@
 </script>
 
 <!-- `data-workflow-id` + `data-last-transition` are genuine attachment points:
-     Chunk 9's transition-FX overlay reads the transition id from DOM to drive
-     its SVG edge brightening, and the HUD needs the workflow id for display.
-     They also make the public props surface observable from E2E probes. -->
+     the transition-FX overlay reads the transition id from DOM to drive its
+     SVG edge brightening, and the HUD needs the workflow id for display. They
+     also make the public props surface observable from E2E probes. -->
 <div
   bind:this={containerEl}
   class="workflow-theater"
@@ -455,13 +469,13 @@
     />
   </div>
 
-  <!-- z-20: transition-FX overlay (Chunk 9). Mounted only while the cycle is
-       active so the canvas + paint effect are idle-free between transitions. -->
-  {#if fxFrame || fxActive}
+  <!-- z-20: transition-FX overlay. Mounted only while the cycle is active so
+       the canvas + paint effect are idle-free between transitions. -->
+  {#if fxFrame}
     <StateTransitionFx frame={fxFrame} active={fxActive} graphRoot={graphEl ?? null} />
   {/if}
 
-  <!-- z-30: ambient HUD (Chunk 10). Two corners only (§E.3, §F.3). -->
+  <!-- z-30: ambient HUD. Two corners only (§E.3, §F.3). -->
   <AmbientHud
     workflowName={hudWorkflowName}
     {currentRound}
