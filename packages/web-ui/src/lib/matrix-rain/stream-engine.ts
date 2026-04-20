@@ -33,16 +33,19 @@ const AMBIENT_MAX_SPEED = 2.0;
 const AMBIENT_COLUMN_COOLDOWN = 6;
 
 /** Max concurrent held word drops (§G Q6). FIFO slot frees when the word
- *  enters the dissolve phase — dissolved shards no longer count. */
+ *  enters the dissolve phase — dissolving words still occupy `heldWords`
+ *  while their chars shatter one-by-one but do not count against the cap. */
 export const WORD_DROP_FIFO_CAP = 24;
 
 // Word-drop lifecycle in logical ticks (FRAME_MS ~= 33ms).
-// Materialize: 1 char per tick so a 10-char word takes ~330ms — close to the
-// spec's ~40ms/char target without a sub-tick accumulator. Hold: ~2500ms at
-// full opacity (matches the original envelope hold). Dissolve is not a
-// held-drop phase; chars are spawned into the ambient drops list and decay
-// through the normal rain pipeline.
-const MATERIALIZE_CHARS_PER_TICK = 1;
+// Materialize: chars flip on a per-char random schedule over
+// MATERIALIZE_WINDOW_TICKS so the word coalesces organically rather than
+// typing left-to-right like a teletype. Hold: ~2500ms at full opacity once
+// every char is revealed. Dissolve: chars flip off on another per-char
+// random schedule over DISSOLVE_WINDOW_TICKS, each flip spawning a tinted
+// rain shard so the word shatters rather than wiping.
+const MATERIALIZE_WINDOW_TICKS = 6;
+const DISSOLVE_WINDOW_TICKS = 8;
 const WORD_HOLD_TICKS = Math.round(2500 / FRAME_MS);
 
 /**
@@ -139,10 +142,22 @@ interface HeldWordDrop {
   word: string;
   source: WordDropSource;
   phase: WordDropPhase;
-  /** How many leading chars of `word` are currently revealed. Grows during
-   *  materialize; stays at `word.length` during hold. */
-  revealedChars: number;
-  /** Ticks spent in the current phase — used to time the hold timeout. */
+  /**
+   * Per-character visibility bitmap, length === word.length. Source of truth
+   * for what the renderer draws. Mutated in place as chars flip during
+   * materialize/dissolve.
+   */
+  revealedMask: boolean[];
+  /**
+   * Tick offset (relative to the phase start) at which each char flips. Used
+   * by materialize to know when to turn a bit from false->true, and by
+   * dissolve to know when to turn it from true->false + spawn a shard.
+   * Allocated once per phase (at enqueue for materialize, at hold->dissolve
+   * transition for dissolve) so the hot path never allocates.
+   */
+  materializeSchedule: number[];
+  dissolveSchedule: number[] | null;
+  /** Ticks spent in the current phase — hold timeout + schedule clock. */
   phaseTicks: number;
 }
 
@@ -394,9 +409,12 @@ export function createStreamRainEngine(layout: LayoutPlan, options: StreamRainEn
 
   /**
    * Advance the materialize -> hold -> dissolve state machine for every
-   * held word. On dissolve, the word is removed from `heldWords` and one
-   * falling shard is pushed onto `ambientDrops` per character so the
-   * shatter is visible through the normal rain pipeline.
+   * held word. During materialize, flip mask bits to true as each char's
+   * scheduled offset is reached. Hold waits out the read-time. Dissolve
+   * flips bits back to false on its own per-char schedule; each false flip
+   * spawns a tinted rain shard so the shatter is visible through the
+   * normal rain pipeline. The held record is retired only after every
+   * char has dissolved.
    */
   function ageHeldWords(): void {
     if (heldWords.length === 0) return;
@@ -406,37 +424,106 @@ export function createStreamRainEngine(layout: LayoutPlan, options: StreamRainEn
       h.phaseTicks++;
 
       if (h.phase === 'materialize') {
-        h.revealedChars = Math.min(h.word.length, h.revealedChars + MATERIALIZE_CHARS_PER_TICK);
-        if (h.revealedChars >= h.word.length) {
-          h.phase = 'hold';
-          h.phaseTicks = 0;
+        advanceMaterialize(h);
+        heldWords[w++] = h;
+        continue;
+      }
+
+      if (h.phase === 'hold') {
+        if (h.phaseTicks >= WORD_HOLD_TICKS) {
+          beginDissolve(h);
         }
         heldWords[w++] = h;
         continue;
       }
 
-      // hold: wait out the read-time, then dissolve into rain shards.
-      if (h.phaseTicks >= WORD_HOLD_TICKS) {
-        dissolveWord(h);
-        continue;
+      // dissolve: flip chars off as their schedule offsets arrive; retire
+      // the held record only when every char has shattered into the rain.
+      advanceDissolve(h);
+      if (!isFullyDissolved(h)) {
+        heldWords[w++] = h;
       }
-      heldWords[w++] = h;
     }
     heldWords.length = w;
   }
 
-  /**
-   * Spawn one falling rain shard per character of the word and drop the
-   * held record. Each shard inherits the word's source so the renderer
-   * can tint the fall — preserving the color semantics of the original
-   * word through the dissolve.
-   */
-  function dissolveWord(h: HeldWordDrop): void {
+  function advanceMaterialize(h: HeldWordDrop): void {
+    const t = h.phaseTicks;
+    let allRevealed = true;
     for (let ci = 0; ci < h.word.length; ci++) {
+      if (!h.revealedMask[ci] && t >= h.materializeSchedule[ci]) {
+        h.revealedMask[ci] = true;
+      }
+      if (!h.revealedMask[ci]) allRevealed = false;
+    }
+    if (allRevealed) {
+      h.phase = 'hold';
+      h.phaseTicks = 0;
+    }
+  }
+
+  function beginDissolve(h: HeldWordDrop): void {
+    h.phase = 'dissolve';
+    h.phaseTicks = 0;
+    h.dissolveSchedule = buildStaggerSchedule(h.word.length, DISSOLVE_WINDOW_TICKS);
+  }
+
+  /**
+   * Walk the dissolve schedule for this tick: for every char whose offset
+   * has arrived and whose mask bit is still true, flip it off and spawn a
+   * matching tinted shard. Bounds-check against the current layout so a
+   * resize-driven truncation doesn't produce out-of-range shards.
+   */
+  function advanceDissolve(h: HeldWordDrop): void {
+    const schedule = h.dissolveSchedule;
+    if (schedule === null) return;
+    const t = h.phaseTicks;
+    for (let ci = 0; ci < h.word.length; ci++) {
+      if (!h.revealedMask[ci]) continue;
+      if (t < schedule[ci]) continue;
+      h.revealedMask[ci] = false;
       const col = h.col + ci;
       if (col < 0 || col >= currentLayout.cols) continue;
       ambientDrops.push(createDissolveShard(col, h.row, h.word[ci], h.source));
     }
+  }
+
+  function isFullyDissolved(h: HeldWordDrop): boolean {
+    for (let ci = 0; ci < h.word.length; ci++) {
+      if (h.revealedMask[ci]) return false;
+    }
+    return true;
+  }
+
+  function countNonDissolving(): number {
+    let n = 0;
+    for (let i = 0; i < heldWords.length; i++) {
+      if (heldWords[i].phase !== 'dissolve') n++;
+    }
+    return n;
+  }
+
+  function findOldestNonDissolving(): number {
+    // heldWords is insertion-ordered; the first non-dissolving entry is the
+    // oldest materialize/hold record.
+    for (let i = 0; i < heldWords.length; i++) {
+      if (heldWords[i].phase !== 'dissolve') return i;
+    }
+    return -1;
+  }
+
+  /**
+   * Produce an array of per-char tick offsets in [0, windowTicks) using the
+   * seeded RNG. Each char gets an independent uniform draw so the stagger
+   * is deterministic for a given seed but visually scattered — neither
+   * left-to-right nor in any fixed ordering.
+   */
+  function buildStaggerSchedule(length: number, windowTicks: number): number[] {
+    const out = new Array<number>(length);
+    for (let i = 0; i < length; i++) {
+      out[i] = Math.floor(rng.random() * windowTicks);
+    }
+    return out;
   }
 
   // -----------------------------------------------------------------------
@@ -457,7 +544,7 @@ export function createStreamRainEngine(layout: LayoutPlan, options: StreamRainEn
         word: held.word,
         source: held.source,
         phase: held.phase,
-        revealedChars: held.revealedChars,
+        revealedMask: held.revealedMask,
       });
     }
 
@@ -602,23 +689,30 @@ export function createStreamRainEngine(layout: LayoutPlan, options: StreamRainEn
         }
       }
       if (col < 0 || row < 0) return;
+      const revealedMask = new Array<boolean>(word.length).fill(false);
+      // Allocate the materialize schedule once per word at enqueue so the
+      // per-tick advance never allocates on the hot path. Dissolve schedule
+      // is allocated lazily at the hold->dissolve transition.
+      const materializeSchedule = buildStaggerSchedule(word.length, MATERIALIZE_WINDOW_TICKS);
       heldWords.push({
         col,
         row,
         word,
         source: opts.colorKind,
         phase: 'materialize',
-        // Start at zero revealed — the first tick's ageHeldWords() call
-        // reveals char #1. Keeps the transition visually crisp: enqueue on
-        // tick N, see char 1 on tick N+1, which the snapshot contract matches.
-        revealedChars: 0,
+        revealedMask,
+        materializeSchedule,
+        dissolveSchedule: null,
         phaseTicks: 0,
       });
-      // FIFO eviction: drop the oldest once we exceed the cap. Priority is a
-      // tuning knob for future policy (see scope note in §G Q6) — today we
-      // keep the contract simple and pure-FIFO so behavior is predictable.
-      while (heldWords.length > WORD_DROP_FIFO_CAP) {
-        heldWords.shift();
+      // FIFO eviction: only materialize/hold words count against the cap —
+      // a dissolving word has already "freed" its slot per the lifecycle
+      // spec, so its lingering record doesn't block new enqueues. Evict the
+      // oldest non-dissolving entry when we overflow.
+      while (countNonDissolving() > WORD_DROP_FIFO_CAP) {
+        const idx = findOldestNonDissolving();
+        if (idx < 0) break;
+        heldWords.splice(idx, 1);
       }
     },
 

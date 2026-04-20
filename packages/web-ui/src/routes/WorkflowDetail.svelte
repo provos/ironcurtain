@@ -49,13 +49,15 @@
   // have to flip the toggle every time. Storage is per-origin; the key is
   // shared across workflows intentionally — the viewer's preference is
   // about *how they want to look at workflows*, not about any one workflow.
+  // Default is theater so first-time viewers land in the richer view;
+  // flipping to classic is one click and the choice sticks.
   const VIZ_MODE_STORAGE_KEY = 'ic-workflow-viz-mode';
   type VizMode = 'classic' | 'theater';
 
   function readVizModePreference(): VizMode {
-    if (typeof localStorage === 'undefined') return 'classic';
+    if (typeof localStorage === 'undefined') return 'theater';
     const raw = localStorage.getItem(VIZ_MODE_STORAGE_KEY);
-    return raw === 'theater' ? 'theater' : 'classic';
+    return raw === 'classic' ? 'classic' : 'theater';
   }
 
   let vizMode = $state<VizMode>(readVizModePreference());

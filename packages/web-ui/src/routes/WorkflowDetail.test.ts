@@ -182,6 +182,12 @@ describe('WorkflowDetail', () => {
     // WorkspaceBrowser's FileTree calls fetchFileTree on mount
     mockGetWorkflowFileTree.mockResolvedValue({ entries: [] });
     mockGetWorkflowFileContent.mockResolvedValue({ content: '' });
+    // Most tests in this file validate classic-mode UI (metrics cards,
+    // workspace toggle, transition history, gate panel). Theater mode also
+    // surfaces some of the same metrics in its HUD, which makes getByText
+    // ambiguous. Pin classic as the per-test default — the viz-mode describe
+    // block below clears it so its own default-mode assertions work.
+    localStorage.setItem('ic-workflow-viz-mode', 'classic');
   });
 
   /** Render with a gate in the waiting_human phase. */
@@ -707,79 +713,7 @@ describe('WorkflowDetail', () => {
       localStorage.removeItem('ic-workflow-viz-mode');
     });
 
-    it('renders in classic mode by default (no persisted preference)', async () => {
-      const { queryByTestId, getByText } = render(WorkflowDetail, { props: makeProps() });
-
-      await vi.waitFor(() => {
-        expect(getByText('State Machine')).toBeTruthy();
-      });
-
-      expect(queryByTestId('workflow-theater-frame')).toBeNull();
-    });
-
-    it('shows a toggle button labelled "Viz" when in classic mode', async () => {
-      const { getByTestId } = render(WorkflowDetail, { props: makeProps() });
-
-      await vi.waitFor(() => {
-        expect(getByTestId('viz-mode-toggle')).toBeTruthy();
-      });
-
-      expect(getByTestId('viz-mode-toggle').textContent?.trim()).toBe('Viz');
-    });
-
-    it('switches to theater mode when the toggle is clicked', async () => {
-      const { getByTestId, queryByText, queryByTestId } = render(WorkflowDetail, { props: makeProps() });
-
-      await vi.waitFor(() => {
-        expect(getByTestId('viz-mode-toggle')).toBeTruthy();
-      });
-
-      await fireEvent.click(getByTestId('viz-mode-toggle'));
-
-      await vi.waitFor(() => {
-        expect(queryByTestId('workflow-theater-frame')).not.toBeNull();
-      });
-
-      // Classic card should be gone
-      expect(queryByText('State Machine')).toBeNull();
-      // Button label flips to "Classic" so the viewer knows how to go back
-      expect(getByTestId('viz-mode-toggle').textContent?.trim()).toBe('Classic');
-    });
-
-    it('switches back to classic mode on second click', async () => {
-      const { getByTestId, queryByText, queryByTestId } = render(WorkflowDetail, { props: makeProps() });
-
-      await vi.waitFor(() => {
-        expect(getByTestId('viz-mode-toggle')).toBeTruthy();
-      });
-
-      await fireEvent.click(getByTestId('viz-mode-toggle'));
-      await vi.waitFor(() => {
-        expect(queryByTestId('workflow-theater-frame')).not.toBeNull();
-      });
-
-      await fireEvent.click(getByTestId('viz-mode-toggle'));
-      await vi.waitFor(() => {
-        expect(queryByText('State Machine')).toBeTruthy();
-      });
-      expect(queryByTestId('workflow-theater-frame')).toBeNull();
-    });
-
-    it('persists the theater preference to localStorage', async () => {
-      const { getByTestId } = render(WorkflowDetail, { props: makeProps() });
-
-      await vi.waitFor(() => {
-        expect(getByTestId('viz-mode-toggle')).toBeTruthy();
-      });
-
-      await fireEvent.click(getByTestId('viz-mode-toggle'));
-
-      expect(localStorage.getItem('ic-workflow-viz-mode')).toBe('theater');
-    });
-
-    it('reads the persisted preference on mount (theater)', async () => {
-      localStorage.setItem('ic-workflow-viz-mode', 'theater');
-
+    it('renders in theater mode by default (no persisted preference)', async () => {
       const { queryByTestId, queryByText } = render(WorkflowDetail, { props: makeProps() });
 
       await vi.waitFor(() => {
@@ -787,6 +721,78 @@ describe('WorkflowDetail', () => {
       });
 
       expect(queryByText('State Machine')).toBeNull();
+    });
+
+    it('shows a toggle button labelled "Classic" when in theater mode', async () => {
+      const { getByTestId } = render(WorkflowDetail, { props: makeProps() });
+
+      await vi.waitFor(() => {
+        expect(getByTestId('viz-mode-toggle')).toBeTruthy();
+      });
+
+      expect(getByTestId('viz-mode-toggle').textContent?.trim()).toBe('Classic');
+    });
+
+    it('switches to classic mode when the toggle is clicked', async () => {
+      const { getByTestId, queryByText, queryByTestId } = render(WorkflowDetail, { props: makeProps() });
+
+      await vi.waitFor(() => {
+        expect(getByTestId('viz-mode-toggle')).toBeTruthy();
+      });
+
+      await fireEvent.click(getByTestId('viz-mode-toggle'));
+
+      await vi.waitFor(() => {
+        expect(queryByText('State Machine')).toBeTruthy();
+      });
+
+      // Theater frame should be gone
+      expect(queryByTestId('workflow-theater-frame')).toBeNull();
+      // Button label flips to "Viz" so the viewer knows how to go back
+      expect(getByTestId('viz-mode-toggle').textContent?.trim()).toBe('Viz');
+    });
+
+    it('switches back to theater mode on second click', async () => {
+      const { getByTestId, queryByText, queryByTestId } = render(WorkflowDetail, { props: makeProps() });
+
+      await vi.waitFor(() => {
+        expect(getByTestId('viz-mode-toggle')).toBeTruthy();
+      });
+
+      await fireEvent.click(getByTestId('viz-mode-toggle'));
+      await vi.waitFor(() => {
+        expect(queryByText('State Machine')).toBeTruthy();
+      });
+
+      await fireEvent.click(getByTestId('viz-mode-toggle'));
+      await vi.waitFor(() => {
+        expect(queryByTestId('workflow-theater-frame')).not.toBeNull();
+      });
+      expect(queryByText('State Machine')).toBeNull();
+    });
+
+    it('persists the classic preference to localStorage', async () => {
+      const { getByTestId } = render(WorkflowDetail, { props: makeProps() });
+
+      await vi.waitFor(() => {
+        expect(getByTestId('viz-mode-toggle')).toBeTruthy();
+      });
+
+      await fireEvent.click(getByTestId('viz-mode-toggle'));
+
+      expect(localStorage.getItem('ic-workflow-viz-mode')).toBe('classic');
+    });
+
+    it('reads the persisted preference on mount (classic)', async () => {
+      localStorage.setItem('ic-workflow-viz-mode', 'classic');
+
+      const { getByText, queryByTestId } = render(WorkflowDetail, { props: makeProps() });
+
+      await vi.waitFor(() => {
+        expect(getByText('State Machine')).toBeTruthy();
+      });
+
+      expect(queryByTestId('workflow-theater-frame')).toBeNull();
     });
   });
 

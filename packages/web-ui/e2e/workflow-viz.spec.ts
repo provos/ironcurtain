@@ -293,7 +293,11 @@ test.describe('Workflow visualization — viz-mode persistence', () => {
     await connectWithToken(page);
   });
 
-  test('theater mode survives a full page reload', async ({ page }) => {
+  test('viz-mode preference survives a full page reload', async ({ page }) => {
+    // Pin to classic first so we exercise "persisted user choice" rather
+    // than "default landed in theater anyway." The default now IS theater,
+    // so the persistence test has to flip AWAY from it to be meaningful.
+    await page.evaluate(() => localStorage.setItem('ic-workflow-viz-mode', 'classic'));
     await navigateTo(page, 'Workflows');
     await dismissAutoSelectedGate(page);
     await page.locator('tr', { hasText: 'design-and-code' }).click();

@@ -8,26 +8,32 @@
  * Lifecycle (see §E.1 of docs/designs/web-ui-workflow-visualization.md and
  * the reference TUI in src/observe/observe-tui-rain.ts):
  *
- *   materialize -> hold -> dissolve (word removed; chars continue as rain)
+ *   materialize -> hold -> dissolve (word record stays alive while chars
+ *   drop off one-by-one into the rain; record is retired once every char
+ *   has left).
  *
- * The `dissolve` phase is not representable as a `WordDropSnapshot` — once
- * dissolve begins the stream engine deletes the held record and spawns
- * synthetic falling drops (with `tint` set to the word's source) that decay
- * through the normal rain pipeline. The renderer therefore only ever sees
- * `materialize` or `hold` on snapshots.
+ * The renderer sees all three phases. During `materialize` and `dissolve`,
+ * individual characters toggle in/out of the drawn glyph set via
+ * `revealedMask` — chars appear/disappear in lockstep looks mechanical, so
+ * the per-char mask lets the engine stagger reveals and dissolves across a
+ * short window for an organic coalesce/shatter feel.
  */
 
 export type WordDropSource = 'text' | 'tool' | 'model' | 'error';
 
 /**
  * Lifecycle phase visible to the renderer.
- * - `materialize`: characters are being revealed left-to-right; only the
- *   first `revealedChars` of `word` should be drawn, the rest stay invisible.
- *   Mirrors the TUI's forming phase (a word crystallizing out of the rain).
+ * - `materialize`: characters are flipping from unrevealed to revealed over
+ *   a short staggered window. Draw chars whose mask bit is true; leave the
+ *   rest blank. Mirrors the TUI's forming phase.
  * - `hold`: every character revealed, full `word` drawn. This is the
- *   "reading" phase the viewer sees for ~2.5s.
+ *   "reading" phase the viewer sees for ~2.5s. All mask bits are true.
+ * - `dissolve`: characters are flipping from revealed back to unrevealed
+ *   over a short staggered window, with each removed char spawning a
+ *   tinted falling rain shard on the same tick it disappears. Draw chars
+ *   whose mask bit is still true; the rest have already shattered.
  */
-export type WordDropPhase = 'materialize' | 'hold';
+export type WordDropPhase = 'materialize' | 'hold' | 'dissolve';
 
 export interface WordDropSnapshot {
   /** Column at which the word is pinned. */
@@ -41,11 +47,16 @@ export interface WordDropSnapshot {
   /** Current lifecycle phase. */
   readonly phase: WordDropPhase;
   /**
-   * Number of leading characters that should be drawn this frame.
-   * - During `materialize`: increases by 1 per tick (0..word.length).
-   * - During `hold`: always equals `word.length`.
-   * The renderer draws exactly `word.slice(0, revealedChars)`; no alpha
-   * interpolation — per-character reveal replaces the old alpha envelope.
+   * Per-character visibility. `revealedMask[i]` is true when character
+   * `word[i]` should be drawn this frame, false otherwise. Length always
+   * equals `word.length`.
+   * - `materialize`: starts all-false, bits flip to true on a per-char
+   *   schedule over ~4-8 ticks.
+   * - `hold`: all bits true.
+   * - `dissolve`: starts all-true, bits flip to false on a per-char
+   *   schedule over ~6-10 ticks. Each flip spawns a matching rain shard.
+   * Renderer iterates the mask and draws only the revealed positions at
+   * their original offset from the word's start column.
    */
-  readonly revealedChars: number;
+  readonly revealedMask: readonly boolean[];
 }

@@ -78,15 +78,23 @@ const LAYOUT: LayoutPlan = {
 const OPTIONS: DrawOptions = { fontFamily: '"Fira Code", monospace' };
 
 function wordDrop(partial: Partial<WordDropSnapshot>): WordDropSnapshot {
+  const word = partial.word ?? 'x';
+  // Default to fully-revealed so `phase: 'hold'` drops draw the whole word —
+  // individual tests that want a partial reveal pass `revealedMask` explicitly.
   const defaults: WordDropSnapshot = {
     col: 0,
     row: 0,
-    word: 'x',
+    word,
     source: 'text',
     phase: 'hold',
-    revealedChars: partial.word?.length ?? 1,
+    revealedMask: new Array<boolean>(word.length).fill(true),
   };
   return { ...defaults, ...partial };
+}
+
+/** Build a boolean mask from a string like "TTT..F" where T=true, F=false, .=false. */
+function maskFromPattern(pattern: string): boolean[] {
+  return pattern.split('').map((c) => c === 'T' || c === 't');
 }
 
 function makeFrame(wordDrops: WordDropSnapshot[]): FrameState {
@@ -110,45 +118,80 @@ describe('drawStreamFrame', () => {
     expect(fillTexts).toHaveLength(0);
   });
 
-  it('draws each fully-held wordDrop as one fillText at layout-anchored coordinates', () => {
+  it('draws one fillText per revealed char at layout-anchored coordinates', () => {
     const { ctx, calls } = createMockCtx();
     const drops = [
-      wordDrop({ col: 3, row: 4, word: 'alpha', source: 'text', phase: 'hold', revealedChars: 5 }),
-      wordDrop({ col: 7, row: 2, word: 'beta', source: 'tool', phase: 'hold', revealedChars: 4 }),
+      wordDrop({ col: 3, row: 4, word: 'alpha', source: 'text', phase: 'hold' }),
+      wordDrop({ col: 7, row: 2, word: 'beta', source: 'tool', phase: 'hold' }),
     ];
     drawStreamFrame(ctx, makeFrame(drops), LAYOUT, 480, 360, OPTIONS);
     const texts = calls.filter((c): c is Extract<Call, { kind: 'fillText' }> => c.kind === 'fillText');
-    expect(texts).toHaveLength(2);
+    // Each revealed char becomes its own fillText so mid-word gaps render
+    // correctly during dissolve. "alpha" + "beta" = 9 chars total.
+    expect(texts).toHaveLength(9);
 
-    const a = texts.find((t) => t.text === 'alpha');
-    expect(a).toBeDefined();
-    if (a) {
-      expect(a.x).toBe(3 * LAYOUT.cellSize + LAYOUT.originX);
-      expect(a.y).toBe(4 * LAYOUT.cellSize + LAYOUT.originY);
-      // Hold phase always renders at full opacity — the fade-in envelope is
-      // replaced by per-char materialization.
-      expect(a.globalAlpha).toBe(1);
+    // First char of "alpha" anchors at (col * cellSize + originX, row * cellSize + originY).
+    const aFirst = texts.find((t) => t.text === 'a' && t.x === 3 * LAYOUT.cellSize + LAYOUT.originX);
+    expect(aFirst).toBeDefined();
+    if (aFirst) {
+      expect(aFirst.y).toBe(4 * LAYOUT.cellSize + LAYOUT.originY);
+      expect(aFirst.globalAlpha).toBe(1);
     }
-    const b = texts.find((t) => t.text === 'beta');
-    expect(b).toBeDefined();
-    if (b) {
-      expect(b.globalAlpha).toBe(1);
-    }
+
+    // Second char of "alpha" is at +1 cellSize horizontally.
+    const aSecond = texts.find((t) => t.text === 'l' && t.x === 3 * LAYOUT.cellSize + LAYOUT.originX + LAYOUT.cellSize);
+    expect(aSecond).toBeDefined();
   });
 
-  it('draws only the revealed prefix during materialize', () => {
+  it('draws only the revealed positions during materialize', () => {
     const { ctx, calls } = createMockCtx();
-    const drops = [wordDrop({ col: 0, row: 0, word: 'crystal', phase: 'materialize', revealedChars: 3 })];
+    const drops = [
+      wordDrop({
+        col: 0,
+        row: 0,
+        word: 'crystal',
+        phase: 'materialize',
+        revealedMask: maskFromPattern('TTT....'),
+      }),
+    ];
     drawStreamFrame(ctx, makeFrame(drops), LAYOUT, 480, 360, OPTIONS);
     const texts = calls.filter((c): c is Extract<Call, { kind: 'fillText' }> => c.kind === 'fillText');
-    // Only one fillText call (one word per drop), with the partial prefix.
-    expect(texts).toHaveLength(1);
-    expect(texts[0].text).toBe('cry');
+    expect(texts).toHaveLength(3);
+    expect(texts.map((t) => t.text).sort()).toEqual(['c', 'r', 'y']);
   });
 
-  it('skips materializing drops that have not revealed any characters yet', () => {
+  it('preserves original column offsets when middle chars are not revealed (e.g. during dissolve)', () => {
+    // "shatter" with only indices 0, 3, 6 revealed — the middle-char gap is
+    // what separates the new mask-based draw from the old slice-based one.
     const { ctx, calls } = createMockCtx();
-    const drops = [wordDrop({ word: 'pending', phase: 'materialize', revealedChars: 0 })];
+    const drops = [
+      wordDrop({
+        col: 5,
+        row: 3,
+        word: 'shatter',
+        phase: 'dissolve',
+        revealedMask: maskFromPattern('T..T..T'),
+      }),
+    ];
+    drawStreamFrame(ctx, makeFrame(drops), LAYOUT, 480, 360, OPTIONS);
+    const texts = calls.filter((c): c is Extract<Call, { kind: 'fillText' }> => c.kind === 'fillText');
+    expect(texts).toHaveLength(3);
+    // Each char sits at col + original-index * cellSize — not packed tight.
+    const byChar = Object.fromEntries(texts.map((t) => [t.text, t.x]));
+    expect(byChar.s).toBe(5 * LAYOUT.cellSize + LAYOUT.originX);
+    expect(byChar.t).toBe(5 * LAYOUT.cellSize + LAYOUT.originX + 3 * LAYOUT.cellSize);
+    expect(byChar.r).toBe(5 * LAYOUT.cellSize + LAYOUT.originX + 6 * LAYOUT.cellSize);
+  });
+
+  it('skips materializing drops with an all-false mask', () => {
+    const { ctx, calls } = createMockCtx();
+    const drops = [
+      wordDrop({
+        word: 'pending',
+        phase: 'materialize',
+        revealedMask: maskFromPattern('.......'),
+      }),
+    ];
     drawStreamFrame(ctx, makeFrame(drops), LAYOUT, 480, 360, OPTIONS);
     const texts = calls.filter((c): c is Extract<Call, { kind: 'fillText' }> => c.kind === 'fillText');
     expect(texts).toHaveLength(0);

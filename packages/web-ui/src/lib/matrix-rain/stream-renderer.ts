@@ -169,17 +169,24 @@ function drawWordDrops(
 }
 
 /**
- * Draw a single held word drop. Materialize renders the first `revealedChars`
- * glyphs only — the unrevealed tail is not drawn this frame. Hold renders the
- * full word. Alpha is flat at 1.0; the fade-in envelope is replaced by the
- * per-character reveal (see word-drop-types.ts).
+ * Draw a single held word drop. The `revealedMask` is the source of truth:
+ * each true bit means draw that character at its original offset, each
+ * false bit means skip it. Materialize and dissolve both toggle bits over
+ * a staggered window so the word coalesces and shatters organically rather
+ * than wiping in lockstep (see word-drop-types.ts). Alpha is flat at 1.0 —
+ * the fade-in envelope is replaced by the per-character mask transitions.
+ *
+ * Each revealed char is drawn as its own fillText so that when a bit in the
+ * middle of the word is false (e.g., mid-dissolve), the surrounding chars
+ * stay pinned to their original columns rather than closing the gap.
  */
 function drawWordDrop(ctx: CanvasRenderingContext2D, drop: WordDropSnapshot, layout: LayoutPlan): void {
-  const visible = drop.phase === 'materialize' ? drop.word.slice(0, drop.revealedChars) : drop.word;
-  if (visible.length === 0) return;
   ctx.globalAlpha = 1.0;
   ctx.fillStyle = wordColor(drop.source);
-  const x = drop.col * layout.cellSize + layout.originX;
+  const originX = drop.col * layout.cellSize + layout.originX;
   const y = drop.row * layout.cellSize + layout.originY;
-  ctx.fillText(visible, x, y);
+  for (let i = 0; i < drop.word.length; i++) {
+    if (!drop.revealedMask[i]) continue;
+    ctx.fillText(drop.word[i], originX + i * layout.cellSize, y);
+  }
 }
