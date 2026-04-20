@@ -377,7 +377,7 @@ describe('MitmProxy token stream integration', () => {
         ca,
         providers: [provider],
         dnsLookup: localhostDnsLookup,
-        // No sessionId (bus is always fetched from singleton when sessionId is set)
+        // No sessionId — extractor is skipped
       });
       await proxy.start();
 

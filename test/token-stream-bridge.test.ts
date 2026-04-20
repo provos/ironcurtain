@@ -66,7 +66,7 @@ describe('TokenStreamBridge', () => {
 
   describe('per-session subscription', () => {
     it('delivers batched events to subscribed clients', () => {
-      const bridge = new TokenStreamBridge(sender, 50);
+      const bridge = new TokenStreamBridge(sender);
       const ws1 = mockWs();
       const sid = sessionId('sess-1');
 
@@ -93,7 +93,7 @@ describe('TokenStreamBridge', () => {
     });
 
     it('delivers events to multiple clients subscribed to the same session', () => {
-      const bridge = new TokenStreamBridge(sender, 50);
+      const bridge = new TokenStreamBridge(sender);
       const ws1 = mockWs();
       const ws2 = mockWs();
       const sid = sessionId('sess-1');
@@ -110,7 +110,7 @@ describe('TokenStreamBridge', () => {
     });
 
     it('only creates one bus subscription per label', () => {
-      const bridge = new TokenStreamBridge(sender, 50);
+      const bridge = new TokenStreamBridge(sender);
       const ws1 = mockWs();
       const ws2 = mockWs();
       const sid = sessionId('sess-1');
@@ -129,7 +129,7 @@ describe('TokenStreamBridge', () => {
     });
 
     it('removing one client keeps the other receiving events', () => {
-      const bridge = new TokenStreamBridge(sender, 50);
+      const bridge = new TokenStreamBridge(sender);
       const ws1 = mockWs();
       const ws2 = mockWs();
       const sid = sessionId('sess-1');
@@ -147,7 +147,7 @@ describe('TokenStreamBridge', () => {
     });
 
     it('removing last client unsubscribes from bus', () => {
-      const bridge = new TokenStreamBridge(sender, 50);
+      const bridge = new TokenStreamBridge(sender);
       const ws1 = mockWs();
       const sid = sessionId('sess-1');
 
@@ -162,7 +162,7 @@ describe('TokenStreamBridge', () => {
     });
 
     it('hasSubscription reflects current state', () => {
-      const bridge = new TokenStreamBridge(sender, 50);
+      const bridge = new TokenStreamBridge(sender);
       const ws1 = mockWs();
       const sid = sessionId('sess-1');
 
@@ -180,7 +180,7 @@ describe('TokenStreamBridge', () => {
 
   describe('global subscription', () => {
     it('delivers events from any session with a registered label', () => {
-      const bridge = new TokenStreamBridge(sender, 50);
+      const bridge = new TokenStreamBridge(sender);
       const ws1 = mockWs();
       const sid1 = sessionId('sess-1');
       const sid2 = sessionId('sess-2');
@@ -201,7 +201,7 @@ describe('TokenStreamBridge', () => {
     });
 
     it('ignores events from sessions without a registered label', () => {
-      const bridge = new TokenStreamBridge(sender, 50);
+      const bridge = new TokenStreamBridge(sender);
       const ws1 = mockWs();
 
       bridge.addGlobalClient(ws1);
@@ -214,7 +214,7 @@ describe('TokenStreamBridge', () => {
     });
 
     it('hasGlobalSubscription reflects current state', () => {
-      const bridge = new TokenStreamBridge(sender, 50);
+      const bridge = new TokenStreamBridge(sender);
       const ws1 = mockWs();
 
       expect(bridge.hasGlobalSubscription(ws1)).toBe(false);
@@ -225,7 +225,7 @@ describe('TokenStreamBridge', () => {
     });
 
     it('removing last global client unsubscribes from bus', () => {
-      const bridge = new TokenStreamBridge(sender, 50);
+      const bridge = new TokenStreamBridge(sender);
       const ws1 = mockWs();
       const sid = sessionId('sess-1');
 
@@ -240,7 +240,7 @@ describe('TokenStreamBridge', () => {
     });
 
     it('global and per-session clients both receive events without duplication', () => {
-      const bridge = new TokenStreamBridge(sender, 50);
+      const bridge = new TokenStreamBridge(sender);
       const wsGlobal = mockWs();
       const wsSession = mockWs();
       const sid = sessionId('sess-1');
@@ -261,7 +261,7 @@ describe('TokenStreamBridge', () => {
     });
 
     it('same client subscribed globally and per-session appears once in recipients', () => {
-      const bridge = new TokenStreamBridge(sender, 50);
+      const bridge = new TokenStreamBridge(sender);
       const ws1 = mockWs();
       const sid = sessionId('sess-1');
 
@@ -277,7 +277,7 @@ describe('TokenStreamBridge', () => {
     });
 
     it('delivers events for sessions registered after global subscribe', () => {
-      const bridge = new TokenStreamBridge(sender, 50);
+      const bridge = new TokenStreamBridge(sender);
       const ws1 = mockWs();
       const sid = sessionId('late-session');
 
@@ -306,7 +306,7 @@ describe('TokenStreamBridge', () => {
 
   describe('closeSession', () => {
     it('cancels pending timer and discards buffered events', () => {
-      const bridge = new TokenStreamBridge(sender, 50);
+      const bridge = new TokenStreamBridge(sender);
       const ws1 = mockWs();
       const sid = sessionId('sess-1');
 
@@ -322,7 +322,7 @@ describe('TokenStreamBridge', () => {
     });
 
     it('unsubscribes from bus so future events are not received', () => {
-      const bridge = new TokenStreamBridge(sender, 50);
+      const bridge = new TokenStreamBridge(sender);
       const ws1 = mockWs();
       const sid = sessionId('sess-1');
 
@@ -336,7 +336,7 @@ describe('TokenStreamBridge', () => {
     });
 
     it('cleans up per-client tracking', () => {
-      const bridge = new TokenStreamBridge(sender, 50);
+      const bridge = new TokenStreamBridge(sender);
       const ws1 = mockWs();
       const sid = sessionId('sess-1');
 
@@ -347,7 +347,7 @@ describe('TokenStreamBridge', () => {
     });
 
     it('cleans up register-only sessions (no per-session subscription)', () => {
-      const bridge = new TokenStreamBridge(sender, 50);
+      const bridge = new TokenStreamBridge(sender);
       const wsGlobal = mockWs();
       const sid = sessionId('sess-1');
 
@@ -378,7 +378,7 @@ describe('TokenStreamBridge', () => {
 
   describe('per-session teardown preserves global routing', () => {
     it('global subscribers still receive events after the last per-session client unsubscribes', () => {
-      const bridge = new TokenStreamBridge(sender, 50);
+      const bridge = new TokenStreamBridge(sender);
       const wsSession = mockWs();
       const wsGlobal = mockWs();
       const sid = sessionId('sess-1');
@@ -404,7 +404,7 @@ describe('TokenStreamBridge', () => {
     });
 
     it('closeSession still severs global routing for that session', () => {
-      const bridge = new TokenStreamBridge(sender, 50);
+      const bridge = new TokenStreamBridge(sender);
       const wsSession = mockWs();
       const wsGlobal = mockWs();
       const sid = sessionId('sess-1');
@@ -433,7 +433,7 @@ describe('TokenStreamBridge', () => {
 
   describe('removeAllForClient', () => {
     it('removes all per-session subscriptions for a client', () => {
-      const bridge = new TokenStreamBridge(sender, 50);
+      const bridge = new TokenStreamBridge(sender);
       const ws1 = mockWs();
       const sid1 = sessionId('sess-1');
       const sid2 = sessionId('sess-2');
@@ -450,7 +450,7 @@ describe('TokenStreamBridge', () => {
     });
 
     it('removes global subscription for a client', () => {
-      const bridge = new TokenStreamBridge(sender, 50);
+      const bridge = new TokenStreamBridge(sender);
       const ws1 = mockWs();
       const sid = sessionId('sess-1');
 
@@ -466,7 +466,7 @@ describe('TokenStreamBridge', () => {
     });
 
     it('does not affect other clients on the same session', () => {
-      const bridge = new TokenStreamBridge(sender, 50);
+      const bridge = new TokenStreamBridge(sender);
       const ws1 = mockWs();
       const ws2 = mockWs();
       const sid = sessionId('sess-1');
@@ -484,7 +484,7 @@ describe('TokenStreamBridge', () => {
     });
 
     it('is safe to call for an unknown client', () => {
-      const bridge = new TokenStreamBridge(sender, 50);
+      const bridge = new TokenStreamBridge(sender);
       const ws1 = mockWs();
 
       // Should not throw
@@ -518,7 +518,7 @@ describe('TokenStreamBridge', () => {
     });
 
     it('schedules a new timer for events arriving after flush', () => {
-      const bridge = new TokenStreamBridge(sender, 50);
+      const bridge = new TokenStreamBridge(sender);
       const ws1 = mockWs();
       const sid = sessionId('sess-1');
 
@@ -534,7 +534,7 @@ describe('TokenStreamBridge', () => {
     });
 
     it('does not send empty batches', () => {
-      const bridge = new TokenStreamBridge(sender, 50);
+      const bridge = new TokenStreamBridge(sender);
       const ws1 = mockWs();
       const sid = sessionId('sess-1');
 
@@ -552,7 +552,7 @@ describe('TokenStreamBridge', () => {
 
   describe('close', () => {
     it('cleans up all subscriptions and timers', () => {
-      const bridge = new TokenStreamBridge(sender, 50);
+      const bridge = new TokenStreamBridge(sender);
       const ws1 = mockWs();
       const ws2 = mockWs();
       const sid1 = sessionId('sess-1');
@@ -600,7 +600,7 @@ describe('TokenStreamBridge', () => {
      * - The test asserts the event traverses the full chain to the sender.
      */
     it('delivers MITM-produced events to observe --all via the bridge', () => {
-      const bridge = new TokenStreamBridge(sender, 50);
+      const bridge = new TokenStreamBridge(sender);
       const observeClient = mockWs();
       const sid = sessionId('workflow-session-42');
 

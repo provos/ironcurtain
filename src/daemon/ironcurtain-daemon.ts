@@ -722,9 +722,6 @@ export class IronCurtainDaemon {
     });
     server.setWorkflowManager(new WorkflowManager({ eventBus: server.getEventBus() }));
 
-    // Wire token stream bridge for per-client subscription delivery.
-    // The bridge fetches `getTokenStreamBus()` internally at subscription
-    // time, so no bus reference is threaded through here.
     const bridge = new TokenStreamBridge(server);
     server.setTokenStreamBridge(bridge);
     this.tokenStreamBridge = bridge;

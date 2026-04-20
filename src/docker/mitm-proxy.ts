@@ -770,8 +770,6 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
 
           const contentType = upstreamRes.headers['content-type'] ?? '';
           if (tokenSessionId && contentType.includes('text/event-stream')) {
-            // Fetch the singleton bus lazily so `resetTokenStreamBus()`
-            // between tests is honored.
             const tokenBus = getTokenStreamBus();
             const sid = tokenSessionId as import('../session/types.js').SessionId;
             const sseProvider = resolveSseProvider(targetHost);

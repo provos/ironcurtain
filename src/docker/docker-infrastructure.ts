@@ -241,11 +241,6 @@ export async function prepareDockerInfrastructure(
     packageValidation = { validator, auditLogPath: packageAuditLogPath };
   }
 
-  // The MITM proxy reads the TokenStreamBus singleton internally via
-  // `getTokenStreamBus()`; the bus is no longer threaded through this
-  // module. Passing `sessionId` unconditionally means SSE responses are
-  // always tapped and pushed to the singleton — consumers that don't
-  // care simply never subscribe.
   const mitmProxy = useTcp
     ? createMitmProxy({
         listenPort: 0,

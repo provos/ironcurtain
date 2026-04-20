@@ -106,7 +106,7 @@ describe('tokenStreamDispatch', () => {
   beforeEach(() => {
     resetTokenStreamBus();
     const sender = { sendToSubscribers: vi.fn() };
-    bridge = new TokenStreamBridge(sender, 50);
+    bridge = new TokenStreamBridge(sender);
     ctx = makeCtx(bridge);
   });
 

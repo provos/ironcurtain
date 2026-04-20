@@ -1,10 +1,10 @@
 /**
  * Stateless pub/sub dispatcher for LLM token stream events.
  *
- * A single instance is created at daemon startup and shared across
- * all MITM proxies and consumers. The bus has no internal buffering --
- * events are delivered synchronously to current listeners and discarded
- * if none exist.
+ * A module-scoped singleton (see `getTokenStreamBus()`) is shared
+ * across all publishers and subscribers in-process. No buffering --
+ * events are delivered synchronously to current listeners and
+ * discarded if none exist.
  */
 
 import type { SessionId } from '../session/types.js';
