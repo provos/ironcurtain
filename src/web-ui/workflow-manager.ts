@@ -211,6 +211,7 @@ export class WorkflowManager {
           workflowId: event.workflowId,
           stateId: event.state,
           persona: event.persona,
+          sessionId: event.sessionId,
         });
         break;
       case 'agent_completed':
@@ -219,6 +220,14 @@ export class WorkflowManager {
           stateId: event.state,
           verdict: event.verdict,
           notes: event.notes,
+        });
+        break;
+      case 'agent_session_ended':
+        this.eventBus.emit('workflow.agent_session_ended', {
+          workflowId: event.workflowId,
+          stateId: event.state,
+          persona: event.persona,
+          sessionId: event.sessionId,
         });
         break;
     }

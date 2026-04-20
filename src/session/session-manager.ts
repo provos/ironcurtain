@@ -104,6 +104,17 @@ export class SessionManager {
   currentLabel: number | null = null;
 
   /**
+   * Reserves a fresh label without registering a session. Exists so
+   * that non-managed sessions (workflow-owned agent sessions, which
+   * run without a Transport) can share the same label space as
+   * managed sessions. A single label authority avoids collisions in
+   * the TokenStreamBridge, which keys per-session state by label.
+   */
+  reserveLabel(): number {
+    return this.nextLabel++;
+  }
+
+  /**
    * Registers a new session and returns its assigned label.
    *
    * For Signal sessions: sets currentLabel to the new session.
