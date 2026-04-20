@@ -17,7 +17,6 @@ import { WebSocketServer, WebSocket as WsWebSocket } from 'ws';
 import type { SessionManager } from '../session/session-manager.js';
 import type { ControlRequestHandler } from '../daemon/control-socket.js';
 import type { SessionMode } from '../session/types.js';
-import type { TokenStreamBus } from '../docker/token-stream-bus.js';
 import type { TokenStreamBridge } from './token-stream-bridge.js';
 import { WebEventBus } from './web-event-bus.js';
 import { type RequestFrame, type ResponseFrame, type EventFrame, RpcError } from './web-ui-types.js';
@@ -57,8 +56,6 @@ export interface WebUiServerOptions {
   readonly devMode?: boolean;
   /** Optional WorkflowManager for workflow RPC methods. */
   readonly workflowManager?: WorkflowManager;
-  /** Shared token stream bus for real-time LLM output observation. */
-  readonly tokenStreamBus?: TokenStreamBus;
 }
 
 export class WebUiServer {
@@ -98,7 +95,6 @@ export class WebUiServer {
       maxConcurrentWebSessions: options.maxConcurrentWebSessions,
       sessionQueues: new Map(),
       workflowManager: options.workflowManager,
-      tokenStreamBus: options.tokenStreamBus,
     };
 
     // Subscribe to own event bus and broadcast to WS clients

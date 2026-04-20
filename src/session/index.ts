@@ -202,7 +202,6 @@ async function createDockerSession(
         sessionConfig.sandboxDir,
         sessionConfig.escalationDir,
         sessionId,
-        options.tokenStreamBus,
       );
       builtInfra = true;
     }

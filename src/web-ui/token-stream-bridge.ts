@@ -10,7 +10,7 @@
 import type { WebSocket as WsWebSocket } from 'ws';
 
 import type { SessionId } from '../session/types.js';
-import type { TokenStreamBus } from '../docker/token-stream-bus.js';
+import { getTokenStreamBus } from '../docker/token-stream-bus.js';
 import type { TokenStreamEvent } from '../docker/token-stream-types.js';
 
 // ---------------------------------------------------------------------------
@@ -57,7 +57,6 @@ export class TokenStreamBridge {
 
   constructor(
     private readonly sender: TokenStreamSender,
-    private readonly bus: TokenStreamBus,
     private readonly flushIntervalMs = 50,
   ) {}
 
@@ -72,7 +71,10 @@ export class TokenStreamBridge {
 
     let sub = this.subscriptions.get(label);
     if (!sub) {
-      const unsubscribe = this.bus.subscribe(sessionId, (_sid, event) => {
+      // Resolve the bus lazily via the module-scoped singleton so that
+      // `resetTokenStreamBus()` (in test `beforeEach`) takes effect for
+      // bridges constructed after the reset.
+      const unsubscribe = getTokenStreamBus().subscribe(sessionId, (_sid, event) => {
         this.enqueue(label, event);
       });
       sub = { sessionId, unsubscribe, clients: new Set() };
@@ -118,7 +120,9 @@ export class TokenStreamBridge {
     labels.add(GLOBAL_LABEL);
 
     if (!this.globalUnsubscribe) {
-      this.globalUnsubscribe = this.bus.subscribeAll((sessionId, event) => {
+      // Resolve the bus lazily via the singleton so `resetTokenStreamBus()`
+      // between tests is honored.
+      this.globalUnsubscribe = getTokenStreamBus().subscribeAll((sessionId, event) => {
         const label = this.sessionToLabel.get(sessionId);
         if (label === undefined) return;
         this.enqueueGlobal(label, event);

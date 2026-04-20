@@ -32,7 +32,7 @@ import type { RegistryConfig, PackageValidator, AllowedVersionCache } from './pa
 import { DENY_ALL_VALIDATOR } from './package-validator.js';
 import { validateDomain, type DomainListing } from './proxy-tools.js';
 import { PassThrough } from 'node:stream';
-import type { TokenStreamBus } from './token-stream-bus.js';
+import { getTokenStreamBus } from './token-stream-bus.js';
 import type { SseProvider } from './token-stream-types.js';
 import { SseExtractorTransform } from './sse-extractor.js';
 import * as logger from '../logger.js';
@@ -133,17 +133,10 @@ export interface MitmProxyOptions {
    */
   readonly dnsLookup?: http.RequestOptions['lookup'];
   /**
-   * Shared daemon-level token stream bus. When provided together with
-   * `sessionId`, the proxy taps SSE responses from LLM API endpoints
-   * and pushes parsed token events into the bus.
-   *
-   * Both `tokenStreamBus` and `sessionId` must be provided together.
-   * If one is set without the other, `createMitmProxy()` throws.
-   */
-  readonly tokenStreamBus?: TokenStreamBus;
-  /**
-   * Session ID for token stream routing. Required when `tokenStreamBus`
-   * is provided. Used to key events pushed into the bus.
+   * Session ID for token stream routing. When provided, the proxy taps
+   * SSE/JSON responses from LLM API endpoints and pushes parsed token
+   * events into the module-scoped singleton bus (see `getTokenStreamBus`).
+   * When absent, extractor installation is skipped entirely.
    */
   readonly sessionId?: string;
 }
@@ -309,12 +302,14 @@ function extractTrailingToolMessages(messages: unknown[]): unknown[] {
 
 export function extractToolResults(
   parsed: Record<string, unknown>,
-  bus: TokenStreamBus,
   sessionId: import('../session/types.js').SessionId,
 ): void {
   const messages = parsed['messages'];
   if (!Array.isArray(messages)) return;
 
+  // Fetch the singleton bus lazily so `resetTokenStreamBus()` between tests
+  // is honored at call time (not import time).
+  const bus = getTokenStreamBus();
   const now = Date.now();
 
   // Only extract from the LAST user/tool messages to avoid re-emitting
@@ -394,11 +389,7 @@ export function extractToolResults(
  *
  * Emits message_start (model), text_delta (content), and message_end (usage).
  */
-export function extractFromJsonResponse(
-  body: Buffer,
-  bus: TokenStreamBus,
-  sessionId: import('../session/types.js').SessionId,
-): void {
+export function extractFromJsonResponse(body: Buffer, sessionId: import('../session/types.js').SessionId): void {
   let parsed: Record<string, unknown>;
   try {
     parsed = JSON.parse(body.toString()) as Record<string, unknown>;
@@ -406,6 +397,9 @@ export function extractFromJsonResponse(
     return; // Not valid JSON -- nothing to extract
   }
 
+  // Fetch the singleton bus lazily so `resetTokenStreamBus()` between tests
+  // is honored at call time (not import time).
+  const bus = getTokenStreamBus();
   const now = Date.now();
 
   // Anthropic format: { model, content: [{type: 'text', text: '...'}], usage: {input_tokens, output_tokens}, stop_reason }
@@ -478,13 +472,10 @@ export function extractFromJsonResponse(
 }
 
 export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
-  // Validate token stream options: both must be provided together
-  const hasBus = options.tokenStreamBus !== undefined;
-  const hasSessionId = options.sessionId !== undefined;
-  if (hasBus !== hasSessionId) {
-    throw new Error('tokenStreamBus and sessionId must be provided together');
-  }
-  const tokenBus = options.tokenStreamBus;
+  // Token stream extractor installation is gated on `sessionId` alone.
+  // When present, the module-scoped singleton bus is fetched lazily at
+  // each extractor-install point (see below) so `resetTokenStreamBus()`
+  // between tests is honored.
   const tokenSessionId = options.sessionId;
 
   // Parse CA cert and key from PEM
@@ -778,14 +769,17 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
           clientRes.socket?.setNoDelay(true);
 
           const contentType = upstreamRes.headers['content-type'] ?? '';
-          if (tokenBus && tokenSessionId && contentType.includes('text/event-stream')) {
+          if (tokenSessionId && contentType.includes('text/event-stream')) {
+            // Fetch the singleton bus lazily so `resetTokenStreamBus()`
+            // between tests is honored.
+            const tokenBus = getTokenStreamBus();
+            const sid = tokenSessionId as import('../session/types.js').SessionId;
             const sseProvider = resolveSseProvider(targetHost);
             const extractor = new SseExtractorTransform(sseProvider, (event) => {
-              tokenBus.push(tokenSessionId as import('../session/types.js').SessionId, event);
+              tokenBus.push(sid, event);
             });
             upstreamRes.pipe(extractor).pipe(clientRes);
           } else if (
-            tokenBus &&
             tokenSessionId &&
             isLlmMessagesEndpoint(path as string) &&
             contentType.includes('application/json')
@@ -796,6 +790,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
             // we stop accumulating chunks (and skip extraction at end-of-stream),
             // but the passthrough listener stays attached so the stream completes
             // normally and the client still sees every byte.
+            const sid = tokenSessionId as import('../session/types.js').SessionId;
             const passthrough = new PassThrough();
             const capture = createBoundedJsonResponseCapture();
             passthrough.on('data', (chunk: Buffer) => capture.onData(chunk));
@@ -803,7 +798,7 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
               capture.onEnd((body) => {
                 if (body === null) return; // overflowed -- skip extraction
                 try {
-                  extractFromJsonResponse(body, tokenBus, tokenSessionId as import('../session/types.js').SessionId);
+                  extractFromJsonResponse(body, sid);
                 } catch {
                   // Extraction errors must never affect the forwarding path
                 }
@@ -902,10 +897,10 @@ export function createMitmProxy(options: MitmProxyOptions): MitmProxy {
 
         // Extract tool_result events from the request body for token stream observation.
         // Done before rewriting so we see the original messages array.
-        if (tokenBus && tokenSessionId && isLlmMessagesEndpoint(path as string)) {
+        if (tokenSessionId && isLlmMessagesEndpoint(path as string)) {
           try {
             const bodyParsed = JSON.parse(rawBody.toString()) as Record<string, unknown>;
-            extractToolResults(bodyParsed, tokenBus, tokenSessionId as import('../session/types.js').SessionId);
+            extractToolResults(bodyParsed, tokenSessionId as import('../session/types.js').SessionId);
           } catch {
             // Parse failure is fine -- the rewriter below will also attempt to parse
           }

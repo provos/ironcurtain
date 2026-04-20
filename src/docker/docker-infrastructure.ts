@@ -30,7 +30,6 @@ import type { MitmProxy } from './mitm-proxy.js';
 import type { CertificateAuthority } from './ca.js';
 import type { DockerManager } from './types.js';
 import type { ProviderKeyMapping } from './mitm-proxy.js';
-import type { TokenStreamBus } from './token-stream-bus.js';
 import { parseUpstreamBaseUrl, type ProviderConfig, type UpstreamTarget } from './provider-config.js';
 import { getInternalNetworkName } from './platform.js';
 import { cleanupContainers } from './container-lifecycle.js';
@@ -126,7 +125,6 @@ export async function prepareDockerInfrastructure(
   sandboxDir: string,
   escalationDir: string,
   sessionId: string,
-  tokenStreamBus?: TokenStreamBus,
 ): Promise<PreContainerInfrastructure> {
   // The audit log path is read from config so the bundle is
   // self-describing: downstream consumers (AuditLogTailer, sandbox
@@ -243,6 +241,11 @@ export async function prepareDockerInfrastructure(
     packageValidation = { validator, auditLogPath: packageAuditLogPath };
   }
 
+  // The MITM proxy reads the TokenStreamBus singleton internally via
+  // `getTokenStreamBus()`; the bus is no longer threaded through this
+  // module. Passing `sessionId` unconditionally means SSE responses are
+  // always tapped and pushed to the singleton — consumers that don't
+  // care simply never subscribe.
   const mitmProxy = useTcp
     ? createMitmProxy({
         listenPort: 0,
@@ -251,8 +254,7 @@ export async function prepareDockerInfrastructure(
         registries,
         packageValidation,
         controlPort: 0,
-        tokenStreamBus,
-        sessionId: tokenStreamBus ? sessionId : undefined,
+        sessionId,
       })
     : createMitmProxy({
         socketPath: resolve(socketsDir, 'mitm-proxy.sock'),
@@ -261,8 +263,7 @@ export async function prepareDockerInfrastructure(
         registries,
         packageValidation,
         controlSocketPath: resolve(sessionDir, 'mitm-control.sock'),
-        tokenStreamBus,
-        sessionId: tokenStreamBus ? sessionId : undefined,
+        sessionId,
       });
 
   const docker = createDockerManager();
@@ -378,17 +379,8 @@ export async function createDockerInfrastructure(
   sandboxDir: string,
   escalationDir: string,
   sessionId: string,
-  tokenStreamBus?: TokenStreamBus,
 ): Promise<DockerInfrastructure> {
-  const core = await prepareDockerInfrastructure(
-    config,
-    mode,
-    sessionDir,
-    sandboxDir,
-    escalationDir,
-    sessionId,
-    tokenStreamBus,
-  );
+  const core = await prepareDockerInfrastructure(config, mode, sessionDir, sandboxDir, escalationDir, sessionId);
 
   try {
     const containerResources = await createSessionContainers(core, config);
