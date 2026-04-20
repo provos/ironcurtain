@@ -45,6 +45,15 @@ export interface AgentInvokeResult {
   readonly outputHash: string;
   /** Raw response text from session.sendMessage(). */
   readonly responseText: string;
+  /**
+   * Cumulative workflow-level output-token count at the moment this
+   * agent finished. Copied onto `ctx.totalTokens` by the XState
+   * `updateContextFromAgentResult` assign action. Sourced from the
+   * orchestrator's token-stream bus subscription, which sums every
+   * `message_end.outputTokens` seen for sessions belonging to this
+   * workflow run.
+   */
+  readonly totalTokens: number;
 }
 
 /** Input provided to each invoked deterministic service. */
@@ -482,7 +491,12 @@ export function buildWorkflowMachine(definition: WorkflowDefinition, taskDescrip
             ...context.agentConversationsByState,
             [stateId]: result.agentConversationId,
           },
-          totalTokens: context.totalTokens,
+          // Sourced from `instance.outputTokens` in the orchestrator,
+          // which subscribes to the token-stream bus and accumulates
+          // `message_end.outputTokens` across every session this workflow
+          // has spawned. The orchestrator always supplies a numeric
+          // cumulative value — the field is required on AgentInvokeResult.
+          totalTokens: result.totalTokens,
           previousAgentOutput: truncateAgentOutput(stripStatusBlock(result.responseText)),
           previousAgentNotes: output.notes ? truncateAgentOutput(output.notes) : null,
           previousStateName: stateId,
