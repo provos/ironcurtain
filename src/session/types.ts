@@ -268,15 +268,6 @@ export interface SessionOptions {
   jobId?: string;
 
   /**
-   * Shared daemon-level token stream bus. When provided for Docker
-   * sessions, the MITM proxy taps SSE responses and pushes parsed
-   * token events into this bus for real-time observation.
-   *
-   * Ignored for builtin sessions (no MITM proxy to tap).
-   */
-  tokenStreamBus?: import('../docker/token-stream-bus.js').TokenStreamBus;
-
-  /**
    * Partial overrides for the resolved resource budget config.
    * Applied on top of the global defaults and user config.
    * Used by workflows to set longer per-turn timeouts.

@@ -1,5 +1,17 @@
 # Token Stream Extraction from MITM Proxy
 
+> **Status note (post-ship):** The bus is now a module-level singleton accessed
+> via `getTokenStreamBus()` — see `docs/designs/token-stream-bus-ownership.md`
+> for the ownership change. This doc's original text described threading the
+> bus through `MitmProxyOptions`, `prepareDockerInfrastructure()`, and
+> `SessionOptions`. The extractor placement, SSE parser design, bridge
+> batching, and JSON-RPC surface are all unchanged. In the shipped code the
+> MITM proxy and `TokenStreamBridge` read the singleton internally; no caller
+> threads the bus anymore. References to `MitmProxyOptions.tokenStreamBus`,
+> `DockerInfrastructure.tokenStreamBus`, `SessionOptions.tokenStreamBus`, and
+> the `tokenStreamBus` parameter on `prepareDockerInfrastructure()` below are
+> historical — none of those fields exist today.
+
 ## 1. Overview
 
 This design extracts the live LLM token stream from the MITM TLS proxy during Docker agent sessions and makes it available to multiple consumers through a single shared bus. The primary consumers are: (1) a future `ironcurtain observe <sessionId>` CLI command that tails a session's token output, (2) workflow-level observation that aggregates token streams from all sessions belonging to a workflow, and (3) the existing WebSocket-based web UI for the cinematic Matrix rain visualization described in the brainstorm doc.

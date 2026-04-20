@@ -12,7 +12,7 @@ import {
   type MitmProxyOptions,
 } from '../src/docker/mitm-proxy.js';
 import type { ProviderConfig } from '../src/docker/provider-config.js';
-import { createTokenStreamBus } from '../src/docker/token-stream-bus.js';
+import { getTokenStreamBus, resetTokenStreamBus } from '../src/docker/token-stream-bus.js';
 import type { TokenStreamEvent } from '../src/docker/token-stream-types.js';
 import type { SessionId } from '../src/session/types.js';
 
@@ -173,6 +173,7 @@ describe('MitmProxy token stream integration', () => {
   let socketPath: string;
 
   beforeEach(() => {
+    resetTokenStreamBus();
     tempDir = mkdtempSync(join(tmpdir(), 'mitm-token-stream-test-'));
     ca = loadOrCreateCA(join(tempDir, 'ca'));
     socketPath = join(tempDir, 'mitm-proxy.sock');
@@ -213,19 +214,7 @@ describe('MitmProxy token stream integration', () => {
     };
   }
 
-  it('throws when tokenStreamBus is provided without sessionId', () => {
-    const bus = createTokenStreamBus();
-    expect(() =>
-      createMitmProxy({
-        socketPath,
-        ca,
-        providers: [],
-        tokenStreamBus: bus,
-      }),
-    ).toThrow('tokenStreamBus and sessionId must be provided together');
-  });
-
-  it('throws when sessionId is provided without tokenStreamBus', () => {
+  it('does not throw when sessionId is provided (bus is fetched from singleton)', () => {
     expect(() =>
       createMitmProxy({
         socketPath,
@@ -233,23 +222,10 @@ describe('MitmProxy token stream integration', () => {
         providers: [],
         sessionId: 'test-session',
       }),
-    ).toThrow('tokenStreamBus and sessionId must be provided together');
-  });
-
-  it('does not throw when both tokenStreamBus and sessionId are provided', () => {
-    const bus = createTokenStreamBus();
-    expect(() =>
-      createMitmProxy({
-        socketPath,
-        ca,
-        providers: [],
-        tokenStreamBus: bus,
-        sessionId: 'test-session',
-      }),
     ).not.toThrow();
   });
 
-  it('does not throw when neither tokenStreamBus nor sessionId are provided', () => {
+  it('does not throw when sessionId is omitted (extractor is skipped)', () => {
     expect(() =>
       createMitmProxy({
         socketPath,
@@ -257,6 +233,58 @@ describe('MitmProxy token stream integration', () => {
         providers: [],
       }),
     ).not.toThrow();
+  });
+
+  it('publishes into the singleton bus when sessionId is provided', async () => {
+    // End-to-end singleton-wiring check: proxy receives only sessionId
+    // (no bus parameter exists), yet subscribers on getTokenStreamBus()
+    // still observe events from the proxy's SSE tap.
+    const ssePayload = [
+      'event: content_block_delta',
+      'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Singleton"}}',
+      '',
+    ].join('\n');
+
+    const { server: upstream, port: upstreamPort } = await createSseUpstream(ssePayload);
+
+    try {
+      const sessionId = 'test-session-singleton' as SessionId;
+      const events: TokenStreamEvent[] = [];
+      getTokenStreamBus().subscribe(sessionId, (_sid, event) => {
+        events.push(event);
+      });
+
+      const provider = makeTestProvider(upstreamPort);
+      proxy = createMitmProxy({
+        socketPath,
+        ca,
+        providers: [provider],
+        dnsLookup: localhostDnsLookup,
+        sessionId: sessionId as string,
+      });
+      await proxy.start();
+
+      const { socket } = await sendConnect(socketPath, 'api.anthropic.com', 443);
+      expect(socket).not.toBeNull();
+
+      await makeHttpsRequest(socket!, ca, 'api.anthropic.com', {
+        method: 'POST',
+        path: '/v1/messages',
+        headers: {
+          'x-api-key': provider.fakeKey,
+          'content-type': 'application/json',
+        },
+        body: '{"model":"claude-sonnet-4-20250514","messages":[{"role":"user","content":"hi"}]}',
+      });
+
+      const textDelta = events.find((e) => e.kind === 'text_delta');
+      expect(textDelta).toBeDefined();
+      if (textDelta?.kind === 'text_delta') {
+        expect(textDelta.text).toBe('Singleton');
+      }
+    } finally {
+      upstream.close();
+    }
   });
 
   it('taps SSE responses and pushes events to the bus', async () => {
@@ -275,10 +303,11 @@ describe('MitmProxy token stream integration', () => {
     const { server: upstream, port: upstreamPort } = await createSseUpstream(ssePayload);
 
     try {
-      const bus = createTokenStreamBus();
       const sessionId = 'test-session-sse' as SessionId;
       const events: TokenStreamEvent[] = [];
-      bus.subscribe(sessionId, (_sid, event) => {
+      // Subscribe via the singleton bus — this is the same instance the
+      // proxy will publish into.
+      getTokenStreamBus().subscribe(sessionId, (_sid, event) => {
         events.push(event);
       });
 
@@ -288,7 +317,6 @@ describe('MitmProxy token stream integration', () => {
         ca,
         providers: [provider],
         dnsLookup: localhostDnsLookup,
-        tokenStreamBus: bus,
         sessionId: sessionId as string,
       });
       await proxy.start();
@@ -333,7 +361,7 @@ describe('MitmProxy token stream integration', () => {
     }
   });
 
-  it('does not tap when tokenStreamBus is not provided', async () => {
+  it('does not tap when sessionId is not provided', async () => {
     const ssePayload = [
       'event: content_block_delta',
       'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}',
@@ -349,7 +377,7 @@ describe('MitmProxy token stream integration', () => {
         ca,
         providers: [provider],
         dnsLookup: localhostDnsLookup,
-        // No tokenStreamBus or sessionId
+        // No sessionId — extractor is skipped
       });
       await proxy.start();
 
@@ -397,10 +425,9 @@ describe('MitmProxy token stream integration', () => {
     });
 
     try {
-      const bus = createTokenStreamBus();
       const sessionId = 'test-session-json' as SessionId;
       const events: TokenStreamEvent[] = [];
-      bus.subscribe(sessionId, (_sid, event) => {
+      getTokenStreamBus().subscribe(sessionId, (_sid, event) => {
         events.push(event);
       });
 
@@ -410,7 +437,6 @@ describe('MitmProxy token stream integration', () => {
         ca,
         providers: [provider],
         dnsLookup: localhostDnsLookup,
-        tokenStreamBus: bus,
         sessionId: sessionId as string,
       });
       await proxy.start();
@@ -461,10 +487,9 @@ describe('MitmProxy token stream integration', () => {
     const { server: upstream, port: upstreamPort } = await createSseUpstream(ssePayload);
 
     try {
-      const bus = createTokenStreamBus();
       const sessionId = 'test-session-global' as SessionId;
       const globalEvents: Array<{ sessionId: SessionId; event: TokenStreamEvent }> = [];
-      bus.subscribeAll((sid, event) => {
+      getTokenStreamBus().subscribeAll((sid, event) => {
         globalEvents.push({ sessionId: sid, event });
       });
 
@@ -474,7 +499,6 @@ describe('MitmProxy token stream integration', () => {
         ca,
         providers: [provider],
         dnsLookup: localhostDnsLookup,
-        tokenStreamBus: bus,
         sessionId: sessionId as string,
       });
       await proxy.start();

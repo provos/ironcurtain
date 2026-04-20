@@ -6,7 +6,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { tokenStreamDispatch } from '../src/web-ui/dispatch/token-stream-dispatch.js';
 import { TokenStreamBridge } from '../src/web-ui/token-stream-bridge.js';
-import { createTokenStreamBus } from '../src/docker/token-stream-bus.js';
+import { resetTokenStreamBus } from '../src/docker/token-stream-bus.js';
 import { SessionManager } from '../src/session/session-manager.js';
 import { WebEventBus } from '../src/web-ui/web-event-bus.js';
 import type { DispatchContext } from '../src/web-ui/dispatch/types.js';
@@ -100,14 +100,13 @@ function makeCtx(bridge: TokenStreamBridge): DispatchContext {
 // ---------------------------------------------------------------------------
 
 describe('tokenStreamDispatch', () => {
-  let bus: ReturnType<typeof createTokenStreamBus>;
   let bridge: TokenStreamBridge;
   let ctx: DispatchContext;
 
   beforeEach(() => {
-    bus = createTokenStreamBus();
+    resetTokenStreamBus();
     const sender = { sendToSubscribers: vi.fn() };
-    bridge = new TokenStreamBridge(sender, bus, 50);
+    bridge = new TokenStreamBridge(sender);
     ctx = makeCtx(bridge);
   });
 

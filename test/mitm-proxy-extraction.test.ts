@@ -2,8 +2,8 @@
  * Tests for extractToolResults and extractFromJsonResponse in mitm-proxy.ts.
  */
 
-import { describe, it, expect, vi } from 'vitest';
-import { createTokenStreamBus } from '../src/docker/token-stream-bus.js';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { getTokenStreamBus, resetTokenStreamBus } from '../src/docker/token-stream-bus.js';
 import type { TokenStreamEvent } from '../src/docker/token-stream-types.js';
 import type { SessionId } from '../src/session/types.js';
 import {
@@ -19,15 +19,18 @@ import {
 
 const SESSION_ID = 'test-session' as SessionId;
 
-/** Collect all events pushed to a bus for a given session. */
+/**
+ * Collect events from the singleton bus for the given session.
+ * Requires `resetTokenStreamBus()` to have been called in `beforeEach` so
+ * each test sees a fresh bus. Subscribing after the reset means the listener
+ * is attached to the same singleton instance extractor calls publish into.
+ */
 function collectEvents(sessionId: SessionId): {
   events: TokenStreamEvent[];
-  bus: ReturnType<typeof createTokenStreamBus>;
 } {
-  const bus = createTokenStreamBus();
   const events: TokenStreamEvent[] = [];
-  bus.subscribe(sessionId, (_sid, event) => events.push(event));
-  return { events, bus };
+  getTokenStreamBus().subscribe(sessionId, (_sid, event) => events.push(event));
+  return { events };
 }
 
 /** Type-safe event filter that narrows the union. */
@@ -43,8 +46,12 @@ function eventsOfKind<K extends TokenStreamEvent['kind']>(
 // ---------------------------------------------------------------------------
 
 describe('extractToolResults', () => {
+  beforeEach(() => {
+    resetTokenStreamBus();
+  });
+
   it('extracts Anthropic tool_result blocks from request body', () => {
-    const { events, bus } = collectEvents(SESSION_ID);
+    const { events } = collectEvents(SESSION_ID);
     const parsed = {
       messages: [
         {
@@ -60,7 +67,7 @@ describe('extractToolResults', () => {
       ],
     };
 
-    extractToolResults(parsed, bus, SESSION_ID);
+    extractToolResults(parsed, SESSION_ID);
 
     expect(events).toHaveLength(1);
     expect(events[0].kind).toBe('tool_result');
@@ -72,7 +79,7 @@ describe('extractToolResults', () => {
   });
 
   it('handles is_error flag', () => {
-    const { events, bus } = collectEvents(SESSION_ID);
+    const { events } = collectEvents(SESSION_ID);
     const parsed = {
       messages: [
         {
@@ -89,7 +96,7 @@ describe('extractToolResults', () => {
       ],
     };
 
-    extractToolResults(parsed, bus, SESSION_ID);
+    extractToolResults(parsed, SESSION_ID);
 
     expect(events).toHaveLength(1);
     if (events[0].kind === 'tool_result') {
@@ -99,7 +106,7 @@ describe('extractToolResults', () => {
   });
 
   it('handles array content blocks (Anthropic format)', () => {
-    const { events, bus } = collectEvents(SESSION_ID);
+    const { events } = collectEvents(SESSION_ID);
     const parsed = {
       messages: [
         {
@@ -118,7 +125,7 @@ describe('extractToolResults', () => {
       ],
     };
 
-    extractToolResults(parsed, bus, SESSION_ID);
+    extractToolResults(parsed, SESSION_ID);
 
     expect(events).toHaveLength(1);
     if (events[0].kind === 'tool_result') {
@@ -127,7 +134,7 @@ describe('extractToolResults', () => {
   });
 
   it('truncates very long content', () => {
-    const { events, bus } = collectEvents(SESSION_ID);
+    const { events } = collectEvents(SESSION_ID);
     const longContent = 'x'.repeat(1000);
     const parsed = {
       messages: [
@@ -144,7 +151,7 @@ describe('extractToolResults', () => {
       ],
     };
 
-    extractToolResults(parsed, bus, SESSION_ID);
+    extractToolResults(parsed, SESSION_ID);
 
     expect(events).toHaveLength(1);
     if (events[0].kind === 'tool_result') {
@@ -154,7 +161,7 @@ describe('extractToolResults', () => {
   });
 
   it('extracts multiple tool_results from a single message', () => {
-    const { events, bus } = collectEvents(SESSION_ID);
+    const { events } = collectEvents(SESSION_ID);
     const parsed = {
       messages: [
         {
@@ -167,7 +174,7 @@ describe('extractToolResults', () => {
       ],
     };
 
-    extractToolResults(parsed, bus, SESSION_ID);
+    extractToolResults(parsed, SESSION_ID);
 
     expect(events).toHaveLength(2);
     if (events[0].kind === 'tool_result' && events[1].kind === 'tool_result') {
@@ -177,7 +184,7 @@ describe('extractToolResults', () => {
   });
 
   it('extracts OpenAI tool role messages', () => {
-    const { events, bus } = collectEvents(SESSION_ID);
+    const { events } = collectEvents(SESSION_ID);
     const parsed = {
       messages: [
         {
@@ -188,7 +195,7 @@ describe('extractToolResults', () => {
       ],
     };
 
-    extractToolResults(parsed, bus, SESSION_ID);
+    extractToolResults(parsed, SESSION_ID);
 
     expect(events).toHaveLength(1);
     if (events[0].kind === 'tool_result') {
@@ -199,7 +206,7 @@ describe('extractToolResults', () => {
   });
 
   it('ignores non-user/non-tool messages', () => {
-    const { events, bus } = collectEvents(SESSION_ID);
+    const { events } = collectEvents(SESSION_ID);
     const parsed = {
       messages: [
         { role: 'assistant', content: 'Some text' },
@@ -207,19 +214,19 @@ describe('extractToolResults', () => {
       ],
     };
 
-    extractToolResults(parsed, bus, SESSION_ID);
+    extractToolResults(parsed, SESSION_ID);
 
     expect(events).toHaveLength(0);
   });
 
   it('handles missing messages array gracefully', () => {
-    const { events, bus } = collectEvents(SESSION_ID);
-    extractToolResults({}, bus, SESSION_ID);
+    const { events } = collectEvents(SESSION_ID);
+    extractToolResults({}, SESSION_ID);
     expect(events).toHaveLength(0);
   });
 
   it('ignores non-tool_result content blocks', () => {
-    const { events, bus } = collectEvents(SESSION_ID);
+    const { events } = collectEvents(SESSION_ID);
     const parsed = {
       messages: [
         {
@@ -232,7 +239,7 @@ describe('extractToolResults', () => {
       ],
     };
 
-    extractToolResults(parsed, bus, SESSION_ID);
+    extractToolResults(parsed, SESSION_ID);
 
     expect(events).toHaveLength(1);
     if (events[0].kind === 'tool_result') {
@@ -246,8 +253,12 @@ describe('extractToolResults', () => {
 // ---------------------------------------------------------------------------
 
 describe('extractFromJsonResponse', () => {
+  beforeEach(() => {
+    resetTokenStreamBus();
+  });
+
   it('extracts Anthropic JSON response (model + text + usage)', () => {
-    const { events, bus } = collectEvents(SESSION_ID);
+    const { events } = collectEvents(SESSION_ID);
     const body = Buffer.from(
       JSON.stringify({
         model: 'claude-sonnet-4-20250514',
@@ -257,7 +268,7 @@ describe('extractFromJsonResponse', () => {
       }),
     );
 
-    extractFromJsonResponse(body, bus, SESSION_ID);
+    extractFromJsonResponse(body, SESSION_ID);
 
     expect(events).toHaveLength(3);
 
@@ -277,7 +288,7 @@ describe('extractFromJsonResponse', () => {
   });
 
   it('extracts OpenAI JSON response format', () => {
-    const { events, bus } = collectEvents(SESSION_ID);
+    const { events } = collectEvents(SESSION_ID);
     const body = Buffer.from(
       JSON.stringify({
         model: 'gpt-4',
@@ -286,7 +297,7 @@ describe('extractFromJsonResponse', () => {
       }),
     );
 
-    extractFromJsonResponse(body, bus, SESSION_ID);
+    extractFromJsonResponse(body, SESSION_ID);
 
     const starts = eventsOfKind(events, 'message_start');
     expect(starts).toHaveLength(1);
@@ -303,13 +314,13 @@ describe('extractFromJsonResponse', () => {
   });
 
   it('handles invalid JSON gracefully', () => {
-    const { events, bus } = collectEvents(SESSION_ID);
-    extractFromJsonResponse(Buffer.from('not json'), bus, SESSION_ID);
+    const { events } = collectEvents(SESSION_ID);
+    extractFromJsonResponse(Buffer.from('not json'), SESSION_ID);
     expect(events).toHaveLength(0);
   });
 
   it('handles response without model', () => {
-    const { events, bus } = collectEvents(SESSION_ID);
+    const { events } = collectEvents(SESSION_ID);
     const body = Buffer.from(
       JSON.stringify({
         content: [{ type: 'text', text: 'no model' }],
@@ -317,7 +328,7 @@ describe('extractFromJsonResponse', () => {
       }),
     );
 
-    extractFromJsonResponse(body, bus, SESSION_ID);
+    extractFromJsonResponse(body, SESSION_ID);
 
     // No message_start since no model
     expect(eventsOfKind(events, 'message_start')).toHaveLength(0);
@@ -328,7 +339,7 @@ describe('extractFromJsonResponse', () => {
   });
 
   it('handles response without usage', () => {
-    const { events, bus } = collectEvents(SESSION_ID);
+    const { events } = collectEvents(SESSION_ID);
     const body = Buffer.from(
       JSON.stringify({
         model: 'claude-sonnet-4-20250514',
@@ -336,7 +347,7 @@ describe('extractFromJsonResponse', () => {
       }),
     );
 
-    extractFromJsonResponse(body, bus, SESSION_ID);
+    extractFromJsonResponse(body, SESSION_ID);
 
     const ends = eventsOfKind(events, 'message_end');
     expect(ends).toHaveLength(1);
@@ -345,7 +356,7 @@ describe('extractFromJsonResponse', () => {
   });
 
   it('extracts multiple content blocks', () => {
-    const { events, bus } = collectEvents(SESSION_ID);
+    const { events } = collectEvents(SESSION_ID);
     const body = Buffer.from(
       JSON.stringify({
         model: 'claude-sonnet-4-20250514',
@@ -357,7 +368,7 @@ describe('extractFromJsonResponse', () => {
       }),
     );
 
-    extractFromJsonResponse(body, bus, SESSION_ID);
+    extractFromJsonResponse(body, SESSION_ID);
 
     const deltas = eventsOfKind(events, 'text_delta');
     expect(deltas).toHaveLength(2);
@@ -366,7 +377,7 @@ describe('extractFromJsonResponse', () => {
   });
 
   it('defaults stop_reason to "stop" when missing', () => {
-    const { events, bus } = collectEvents(SESSION_ID);
+    const { events } = collectEvents(SESSION_ID);
     const body = Buffer.from(
       JSON.stringify({
         content: [],
@@ -374,7 +385,7 @@ describe('extractFromJsonResponse', () => {
       }),
     );
 
-    extractFromJsonResponse(body, bus, SESSION_ID);
+    extractFromJsonResponse(body, SESSION_ID);
 
     const ends = eventsOfKind(events, 'message_end');
     expect(ends).toHaveLength(1);

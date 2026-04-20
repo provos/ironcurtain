@@ -1,10 +1,10 @@
 /**
  * Stateless pub/sub dispatcher for LLM token stream events.
  *
- * A single instance is created at daemon startup and shared across
- * all MITM proxies and consumers. The bus has no internal buffering --
- * events are delivered synchronously to current listeners and discarded
- * if none exist.
+ * A module-scoped singleton (see `getTokenStreamBus()`) is shared
+ * across all publishers and subscribers in-process. No buffering --
+ * events are delivered synchronously to current listeners and
+ * discarded if none exist.
  */
 
 import type { SessionId } from '../session/types.js';
@@ -112,4 +112,44 @@ export function createTokenStreamBus(): TokenStreamBus {
       sessions.delete(sessionId);
     },
   };
+}
+
+/**
+ * Module-scoped singleton instance. Lazily created on first call to
+ * `getTokenStreamBus()`. Cleared by `resetTokenStreamBus()` for tests.
+ */
+let singleton: TokenStreamBus | undefined;
+
+/**
+ * Returns the module-scoped singleton TokenStreamBus, creating it on
+ * first access. Subsequent calls return the same instance.
+ *
+ * Use this from daemon-level producers/consumers (MITM proxy, web UI
+ * bridge, observe CLI) that all need to share a single bus. Tests that
+ * want isolated, stack-local instances should call `createTokenStreamBus()`
+ * directly.
+ */
+export function getTokenStreamBus(): TokenStreamBus {
+  if (!singleton) {
+    singleton = createTokenStreamBus();
+  }
+  return singleton;
+}
+
+/**
+ * Clears the module-scoped singleton so the next `getTokenStreamBus()`
+ * call returns a fresh instance. Intended for test `beforeEach` hooks.
+ *
+ * INVARIANT: do NOT call this while any `TokenStreamBridge` instance has
+ * active subscriptions. The bridge caches bus unsubscribe handles in
+ * `this.subscriptions` / `this.globalUnsubscribe` that are bound to the
+ * old bus; after reset, subsequent `addClient`/`addGlobalClient` calls
+ * will subscribe on the NEW bus, but events pushed on behalf of old
+ * subscriptions still target the stale bus and never reach the new one.
+ * The safe pattern is: construct a fresh `TokenStreamBridge` after every
+ * reset (i.e. build both in the same `beforeEach`). Daemon production
+ * code never resets.
+ */
+export function resetTokenStreamBus(): void {
+  singleton = undefined;
 }
