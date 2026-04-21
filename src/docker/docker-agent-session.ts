@@ -31,6 +31,7 @@
 import { mkdirSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type {
+  AgentConversationId,
   Session,
   SessionId,
   SessionInfo,
@@ -54,11 +55,29 @@ export interface DockerAgentSessionDeps {
   readonly config: IronCurtainConfig;
   readonly sessionId: SessionId;
   /**
+   * Agent CLI conversation id threaded through to the adapter's CLI-arg
+   * construction (e.g., `--session-id <id>` / `--resume <id>` for Claude
+   * Code). Distinct from `sessionId`: the session id identifies an
+   * IronCurtain session and its on-disk session tree; the conversation
+   * id identifies the external agent's conversation history file
+   * (`projects/<cwd-hash>/<id>.jsonl`) and is the value the agent CLI
+   * picks up on turn-to-turn resume.
+   *
+   * Required: callers (the session factory or workflow orchestrator)
+   * mint one via `createAgentConversationId()` per Docker session.
+   * Under `sharedContainer: true` workflow mode, re-entering a state
+   * with `freshSession: false` reuses the prior visit's id so the agent
+   * CLI can `--resume` the existing conversation.
+   *
+   * See `docs/designs/workflow-session-identity.md` §2.2 / §8.5.
+   */
+  readonly agentConversationId: AgentConversationId;
+  /**
    * Fully-formed infrastructure bundle produced by
    * `createDockerInfrastructure()`. The main agent container is already
    * created and running; the session drives it via `docker exec`. All of
    * `docker`, `proxy`, `mitmProxy`, `adapter`, `fakeKeys`, `useTcp`,
-   * `sessionDir`, `sandboxDir`, `escalationDir`, `auditLogPath`,
+   * `bundleDir`, `workspaceDir`, `escalationDir`, `auditLogPath`,
    * `conversationStateDir`, `conversationStateConfig`, `systemPrompt`,
    * `containerId`, `sidecarContainerId`, and `internalNetwork` live on
    * this bundle.
@@ -95,6 +114,7 @@ export interface DockerAgentSessionDeps {
 
 export class DockerAgentSession implements Session {
   private readonly sessionId: SessionId;
+  private readonly agentConversationId: AgentConversationId;
   private readonly config: IronCurtainConfig;
   private readonly infra: DockerInfrastructure;
   private readonly ownsInfra: boolean;
@@ -129,6 +149,7 @@ export class DockerAgentSession implements Session {
 
   constructor(deps: DockerAgentSessionDeps) {
     this.sessionId = deps.sessionId;
+    this.agentConversationId = deps.agentConversationId;
     this.config = deps.config;
     this.infra = deps.infra;
     this.ownsInfra = deps.ownsInfra;
@@ -140,16 +161,19 @@ export class DockerAgentSession implements Session {
     this.onDiagnostic = deps.onDiagnostic;
     this.createdAt = new Date().toISOString();
 
-    // If Claude CLI has a prior conversation for THIS session id, treat
-    // the first turn as "already done" so buildCommand emits
-    // `--resume <uuid>` instead of `--session-id <uuid>`. Matching on
-    // the specific sessionId matters in shared-container workflow mode:
-    // each borrowing state constructs a new DockerAgentSession with a
-    // fresh UUID but a conversationStateDir that already contains the
-    // prior state's `.jsonl`. Resuming that UUID would fail with "No
-    // conversation found" because Claude never created a session with
-    // the fresh id.
-    if (this.infra.conversationStateDir && hasConversationForSession(this.infra.conversationStateDir, this.sessionId)) {
+    // If the agent CLI has a prior conversation transcript for THIS
+    // conversation id, treat the first turn as "already done" so
+    // buildCommand emits `--resume <id>` instead of `--session-id <id>`.
+    // Matching on `agentConversationId` (not `sessionId`) matters under
+    // shared-container workflow mode: each state invocation gets a fresh
+    // IronCurtain session but may reuse the prior visit's conversation id
+    // (`freshSession: false`), and the probe's file presence is what tells
+    // us whether the agent CLI already knows that id. See §8.5 in
+    // docs/designs/workflow-session-identity.md.
+    if (
+      this.infra.conversationStateDir &&
+      hasStoredConversation(this.infra.conversationStateDir, this.agentConversationId)
+    ) {
       this.firstTurnComplete = true;
     }
   }
@@ -167,14 +191,14 @@ export class DockerAgentSession implements Session {
    */
   // eslint-disable-next-line @typescript-eslint/require-await -- must be async to satisfy Session interface
   async initialize(): Promise<void> {
-    mkdirSync(this.infra.sandboxDir, { recursive: true });
+    mkdirSync(this.infra.workspaceDir, { recursive: true });
     mkdirSync(this.infra.escalationDir, { recursive: true });
 
     // Write the effective system prompt for debugging. In borrow mode
     // this overwrites the same bundle-scoped file each state with the
     // same content -- acceptable since the container's bind mount
     // consumes this file.
-    writeFileSync(resolve(this.infra.sessionDir, 'system-prompt.txt'), this.systemPrompt);
+    writeFileSync(resolve(this.infra.bundleDir, 'system-prompt.txt'), this.systemPrompt);
 
     logger.info(`Session attached to container: ${this.infra.containerId.substring(0, 12)}`);
 
@@ -225,7 +249,10 @@ export class DockerAgentSession implements Session {
       this.writeUserContext(userMessage);
 
       const command = this.infra.adapter.buildCommand(userMessage, this.systemPrompt, {
-        sessionId: this.sessionId,
+        // The adapter consumes this as the agent-CLI conversation id
+        // (`--session-id <id>` / `--resume <id>`). It is NOT the IronCurtain
+        // session id — see §8.5 in docs/designs/workflow-session-identity.md.
+        sessionId: this.agentConversationId,
         firstTurn: !this.firstTurnComplete,
         modelOverride: this.agentModelOverride,
       });
@@ -387,21 +414,27 @@ export class DockerAgentSession implements Session {
 }
 
 /**
- * Returns true if the conversation state dir contains prior Claude Code
- * conversation history beyond the empty seed.
+ * Returns true if the conversation state dir already contains an agent-CLI
+ * transcript for `agentConversationId`.
  *
  * On fresh sessions, `prepareConversationStateDir()` seeds an empty
  * `projects/` directory. Claude Code writes transcripts as `.jsonl` files
- * under `projects/<cwd-hash>/`, so we must look inside that tree to detect
- * whether Claude CLI has a conversation file for the given sessionId.
- * Claude stores each session as `projects/<encoded-path>/<sessionId>.jsonl`,
- * so we match on the filename alone. Seed/config files are ignored.
+ * under `projects/<cwd-hash>/<conversationId>.jsonl`, so the probe matches
+ * on the filename alone (cwd-hash subdir is irrelevant).
+ *
+ * Keyed on `agentConversationId` rather than the IronCurtain session id:
+ * under shared-container workflow mode a single bundle's
+ * `conversationStateDir` accumulates one `.jsonl` per state invocation, each
+ * named by the state's `agentConversationId`. Matching on the session id
+ * would miss reused conversations (`freshSession: false` re-entry) because
+ * every DockerAgentSession gets a fresh session id. See §8.5 in
+ * docs/designs/workflow-session-identity.md.
  */
-function hasConversationForSession(stateDir: string, sessionId: string): boolean {
+function hasStoredConversation(stateDir: string, agentConversationId: string): boolean {
   try {
     const projectsDir = resolve(stateDir, 'projects');
     if (!existsSync(projectsDir)) return false;
-    const target = `${sessionId}.jsonl`;
+    const target = `${agentConversationId}.jsonl`;
     for (const entry of readdirSync(projectsDir, { withFileTypes: true, recursive: true })) {
       if (entry.isFile() && entry.name === target) return true;
     }

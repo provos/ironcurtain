@@ -4,6 +4,7 @@
  */
 
 import type { AgentInvokeResult } from '../../src/workflow/machine-builder.js';
+import type { AgentConversationId } from '../../src/session/types.js';
 
 export function makeAgentResult(overrides: Partial<AgentInvokeResult> = {}): AgentInvokeResult {
   return {
@@ -15,7 +16,7 @@ export function makeAgentResult(overrides: Partial<AgentInvokeResult> = {}): Age
       testCount: null,
       notes: null,
     },
-    sessionId: 'test-session',
+    agentConversationId: 'test-conversation' as AgentConversationId,
     artifacts: {},
     outputHash: 'hash-1',
     responseText: 'Agent response text',

@@ -21,8 +21,7 @@ import chalk from 'chalk';
 import ora from 'ora';
 
 import type { IronCurtainConfig } from '../config/types.js';
-import type { SessionMode } from '../session/types.js';
-import { createSessionId } from '../session/types.js';
+import { createSessionId, getBundleShortId, type BundleId, type SessionMode } from '../session/types.js';
 import { buildSessionConfig } from '../session/index.js';
 import { validateWorkspacePath } from '../session/workspace-validation.js';
 import { CONTAINER_WORKSPACE_DIR } from './agent-adapter.js';
@@ -242,13 +241,19 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
   });
 
   try {
+    // Single-session CLI invariant: bundleId === sessionId (§2.1 of the
+    // workflow-session-identity design). The PTY mode mints one UUID via
+    // createSessionId() and reuses the same string as the BundleId here;
+    // this keeps the deterministic `ironcurtain-pty-<id[0:12]>` container
+    // name that prior-crash recovery depends on.
+    const bundleId = effectiveSessionId as BundleId;
     const infra = await prepareDockerInfrastructure(
       sessionConfig,
       options.mode,
       sessionDir,
       sandboxDir,
       escalationDir,
-      effectiveSessionId,
+      bundleId,
     );
 
     ({ docker, proxy, mitmProxy, useTcp } = infra);
@@ -307,7 +312,7 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
     const ptyCommand = adapter.buildPtyCommand(systemPrompt, ptySockPath, ptyPort);
 
     // Build container configuration
-    const shortId = effectiveSessionId.substring(0, 12);
+    const shortId = getBundleShortId(bundleId);
     const { quote } = await import('shell-quote');
     const internalNetworkName = getInternalNetworkName(shortId);
     let env: Record<string, string>;
@@ -371,7 +376,9 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
         mounts: [],
         env: {},
         entrypoint: '/bin/sh',
-        sessionLabel: effectiveSessionId,
+        // PTY sessions are standalone (no workflow/scope), so only the
+        // bundle label is emitted. See docs/designs/workflow-session-identity.md §7.
+        bundleLabel: bundleId,
         ports: [`127.0.0.1:${hostPtyPort}:${containerPtyPort}`],
         command: [
           '-c',
@@ -457,7 +464,9 @@ export async function runPtySession(options: PtySessionOptions): Promise<void> {
       mounts,
       env,
       command: ptyCommand,
-      sessionLabel: effectiveSessionId,
+      // PTY sessions are standalone (no workflow/scope), so only the
+      // bundle label is emitted. See docs/designs/workflow-session-identity.md §7.
+      bundleLabel: bundleId,
       resources: { memoryMb: 8192, cpus: 4 },
       extraHosts,
       capAdd: [

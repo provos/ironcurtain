@@ -351,10 +351,12 @@ describe('WorkflowOrchestrator', () => {
     expect(orchestrator.getStatus(workflowId)?.phase).toBe('completed');
     expect(allSessions.every((s) => s.closed)).toBe(true);
 
-    // Second coder invocation received resumeSessionId from first coder session
+    // Second coder invocation reuses the first coder's agentConversationId
+    // (freshSession:false re-entry) so the agent CLI can --resume.
+    const firstCoderCall = sessionFactory.mock.calls[0][0];
     const secondCoderCall = sessionFactory.mock.calls[2][0];
     expect(secondCoderCall.persona).toBe('coder');
-    expect(secondCoderCall.resumeSessionId).toBe('coder-session-1');
+    expect(secondCoderCall.agentConversationId).toBe(firstCoderCall.agentConversationId);
 
     // Second coder's prompt includes reviewer's output (status block stripped)
     const secondCoderSession = allSessions[2];
@@ -429,9 +431,11 @@ describe('WorkflowOrchestrator', () => {
     const secondPlannerSession = allSessions[1];
     expect(secondPlannerSession.sentMessages[0]).toContain('Focus more on error handling and retry logic');
 
-    // Verify resumeSessionId was passed for same-role continuity
+    // Verify agentConversationId was reused for same-role continuity
+    // (identity carrier replaces resumeSessionId under the new model).
+    const firstPlannerOpts = sessionFactory.mock.calls[0][0];
     const secondPlannerOpts = sessionFactory.mock.calls[1][0];
-    expect(secondPlannerOpts.resumeSessionId).toBe('planner-session-1');
+    expect(secondPlannerOpts.agentConversationId).toBe(firstPlannerOpts.agentConversationId);
 
     // dismissGate called for the first gate
     expect(dismissGate).toHaveBeenCalledTimes(1);
@@ -861,20 +865,21 @@ describe('WorkflowOrchestrator', () => {
     expect(sessionFactory).toHaveBeenCalledTimes(6);
     expect(orchestrator.getStatus(workflowId)?.phase).toBe('completed');
 
-    // Round 1 coder: no resumeSessionId (first invocation)
+    // Identity is now carried by agentConversationId (minted by the orchestrator
+    // per state), not resumeSessionId. Under freshSession:false, re-entries
+    // reuse the prior visit's id so the agent CLI can --resume. Assert the
+    // coder's id is stable across its three invocations.
     const call1 = sessionFactory.mock.calls[0][0];
     expect(call1.persona).toBe('coder');
-    expect(call1.resumeSessionId).toBeUndefined();
+    expect(call1.agentConversationId).toBeDefined();
 
-    // Round 2 coder: resumeSessionId is the original coder session
     const call3 = sessionFactory.mock.calls[2][0];
     expect(call3.persona).toBe('coder');
-    expect(call3.resumeSessionId).toBe('coder-session-1');
+    expect(call3.agentConversationId).toBe(call1.agentConversationId);
 
-    // Round 3 coder: resumeSessionId is STILL the original coder session (not coder-session-2)
     const call5 = sessionFactory.mock.calls[4][0];
     expect(call5.persona).toBe('coder');
-    expect(call5.resumeSessionId).toBe('coder-session-1');
+    expect(call5.agentConversationId).toBe(call1.agentConversationId);
   });
 
   // -----------------------------------------------------------------------
@@ -925,25 +930,25 @@ describe('WorkflowOrchestrator', () => {
     // 4 sessions: coder1, reviewer1(reject), coder2, reviewer2(approve)
     expect(sessionFactory).toHaveBeenCalledTimes(4);
 
-    // Coder round 1: no resumeSessionId
+    // Each role's agentConversationId is minted on first visit and reused on
+    // non-fresh re-entries; the two roles get distinct ids so the agent CLI
+    // can --resume their respective conversations independently.
     const coderCall1 = sessionFactory.mock.calls[0][0];
     expect(coderCall1.persona).toBe('coder');
-    expect(coderCall1.resumeSessionId).toBeUndefined();
+    expect(coderCall1.agentConversationId).toBeDefined();
 
-    // Reviewer round 1: no resumeSessionId (different role, first invocation)
     const reviewerCall1 = sessionFactory.mock.calls[1][0];
     expect(reviewerCall1.persona).toBe('reviewer');
-    expect(reviewerCall1.resumeSessionId).toBeUndefined();
+    expect(reviewerCall1.agentConversationId).toBeDefined();
+    expect(reviewerCall1.agentConversationId).not.toBe(coderCall1.agentConversationId);
 
-    // Coder round 2: gets coder's original session ID (not reviewer's)
     const coderCall2 = sessionFactory.mock.calls[2][0];
     expect(coderCall2.persona).toBe('coder');
-    expect(coderCall2.resumeSessionId).toBe('coder-session-1');
+    expect(coderCall2.agentConversationId).toBe(coderCall1.agentConversationId);
 
-    // Reviewer round 2: gets reviewer's original session ID (not coder's)
     const reviewerCall2 = sessionFactory.mock.calls[3][0];
     expect(reviewerCall2.persona).toBe('reviewer');
-    expect(reviewerCall2.resumeSessionId).toBe('reviewer-session-1');
+    expect(reviewerCall2.agentConversationId).toBe(reviewerCall1.agentConversationId);
   });
 
   // -----------------------------------------------------------------------

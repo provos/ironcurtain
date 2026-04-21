@@ -39,6 +39,14 @@ const humanGateTransitionSchema = z.object({
   actions: z.array(transitionActionSchema).optional(),
 });
 
+/**
+ * Charset for `containerScope` values. Path-safe identifier shape —
+ * scope strings never appear in filesystem paths today, but keeping the
+ * charset narrow rules out accidental injection into Docker labels,
+ * diagnostics, or future path composition.
+ */
+const CONTAINER_SCOPE_PATTERN = /^[a-zA-Z0-9_-]+$/;
+
 const agentStateSchema = z.object({
   type: z.literal('agent'),
   description: z.string().min(1),
@@ -47,11 +55,11 @@ const agentStateSchema = z.object({
   inputs: z.array(z.string()),
   outputs: z.array(z.string()),
   transitions: z.array(agentTransitionSchema).min(1),
-  parallelKey: z.string().optional(),
   worktree: z.boolean().optional(),
   freshSession: z.boolean().optional(),
   model: qualifiedModelId.optional(),
   maxVisits: z.number().int().positive().optional(),
+  containerScope: z.string().regex(CONTAINER_SCOPE_PATTERN).optional(),
 });
 
 const humanGateStateSchema = z.object({
@@ -114,7 +122,7 @@ const workflowDefinitionSchema = z.object({
  * dotted-path state-node semantics (e.g., `xstate.done.actor.<stateId>`). */
 const STATE_ID_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
-const AGENT_ONLY_STATE_FIELDS = ['maxVisits'] as const;
+const AGENT_ONLY_STATE_FIELDS = ['maxVisits', 'containerScope'] as const;
 
 /**
  * Validates raw-level invariants that would otherwise be lost by Zod's default
@@ -406,11 +414,6 @@ function validateSemantics(definition: WorkflowDefinition): void {
     if (state.type === 'human_gate') {
       validateHumanGate(stateId, state, issues);
     }
-
-    // parallelKey only on agent states
-    if (state.type !== 'agent' && 'parallelKey' in state) {
-      issues.push(`State "${stateId}" has parallelKey but is not an agent state`);
-    }
   }
 
   // Unreachable states
@@ -424,8 +427,40 @@ function validateSemantics(definition: WorkflowDefinition): void {
   // Artifact input references
   validateArtifactInputs(definition, issues);
 
+  // containerScope usage: gated on sharedContainer + charset.
+  validateContainerScopes(definition, issues);
+
   if (issues.length > 0) {
     throw new WorkflowValidationError(issues);
+  }
+}
+
+/**
+ * Validates `containerScope` usage across a workflow definition.
+ *
+ * `containerScope` is meaningful only under `sharedContainer: true`.
+ * If the flag is absent or false, any state declaring a scope is a
+ * hard error (silent no-ops are footguns). The charset check runs at
+ * the Zod layer (see `CONTAINER_SCOPE_PATTERN`).
+ *
+ * Note: scope governs container lifecycle (which bundle a state runs
+ * in); persona governs the active policy. They are orthogonal —
+ * `cyclePolicy` hot-swaps the coordinator's active policy on each
+ * agent-state entry, so states sharing a scope may use different
+ * personas without issue.
+ */
+function validateContainerScopes(definition: WorkflowDefinition, issues: string[]): void {
+  const sharedContainer = definition.settings?.sharedContainer === true;
+
+  for (const [stateId, state] of Object.entries(definition.states)) {
+    if (state.type !== 'agent') continue;
+
+    if (state.containerScope !== undefined && !sharedContainer) {
+      issues.push(
+        `State "${stateId}" declares containerScope "${state.containerScope}" but the workflow does not have sharedContainer: true. ` +
+          `containerScope is only valid when sharedContainer is true.`,
+      );
+    }
   }
 }
 

@@ -22,6 +22,8 @@ import type { CompiledPolicyFile, ToolAnnotationsFile } from '../src/pipeline/ty
 import type { AuditEntry } from '../src/types/audit.js';
 import { defaultLoadPolicyRpc } from '../src/workflow/orchestrator.js';
 import { POLICY_LOAD_PATH } from '../src/trusted-process/control-server.js';
+import { getBundleAuditLogPath, getBundleControlSocketPath, getBundleRuntimeRoot } from '../src/config/paths.js';
+import type { BundleId } from '../src/session/types.js';
 import { testCompiledPolicy, testToolAnnotations, REAL_TMP } from './fixtures/test-policy.js';
 import { UdsClientTransport } from './helpers/uds-client-transport.js';
 import { isIsolatedVmAvailable } from './helpers/isolated-vm-available.js';
@@ -44,12 +46,16 @@ const FILE_A = `${DIR_A}/file.txt`;
 const FILE_B = `${DIR_B}/file.txt`;
 const POLICY_A_DIR = `${TEST_ROOT}/policy-a`;
 const POLICY_B_DIR = `${TEST_ROOT}/policy-b`;
-// Single audit file for the entire run: entries are tagged with
-// `persona` so we can slice pre- vs post-swap entries by that field.
-const AUDIT_PATH = `${TEST_ROOT}/audit.jsonl`;
 const GENERATED_DIR = `${TEST_ROOT}/generated`;
 const MCP_SOCKET = `${REAL_TMP}/ironcurtain-wf-policy-mcp-${process.pid}.sock`;
-const CONTROL_SOCKET = `${REAL_TMP}/ironcurtain-wf-policy-ctrl-${process.pid}.sock`;
+// Synthetic workflow/bundle identifiers pin the audit log and control
+// socket under the new per-bundle layout
+// (`workflow-runs/<wfId>/containers/<bundleId>/audit.jsonl` and
+// `~/.ironcurtain/run/<bundleId[0:12]>/ctrl.sock`). The test sets
+// `IRONCURTAIN_HOME = TEST_ROOT` in beforeAll so the helpers resolve
+// inside the test tree.
+const WORKFLOW_ID = `wf-${process.pid}`;
+const BUNDLE_ID = `bundle-${process.pid}` as unknown as BundleId;
 
 /**
  * Writes a compiled-policy.json into `dir`. Tool annotations are not
@@ -205,12 +211,20 @@ function rawPolicyLoadPost(socketPath: string, body: string): Promise<{ status: 
 
 describe.skipIf(!isIsolatedVmAvailable())('loadPolicy over control socket — end-to-end policy swap', () => {
   let proxy: DockerProxy;
+  // Computed lazily in beforeAll so the path helpers pick up
+  // `IRONCURTAIN_HOME = TEST_ROOT` (set in the same hook). Resolving at
+  // module-eval time would bind to the user's real ~/.ironcurtain.
+  let auditPath: string;
+  let controlSocket: string;
 
   const policyA = buildPolicyAllowingReadsWithin(DIR_A);
   const policyB = buildPolicyAllowingReadsWithin(DIR_B);
 
+  // Audit log path is rebound in beforeAll once `IRONCURTAIN_HOME` is
+  // overridden. We prefill a placeholder here so the const object shape
+  // is stable; the actual path is written in via `config.auditLogPath = auditPath`.
   const config: IronCurtainConfig = {
-    auditLogPath: AUDIT_PATH,
+    auditLogPath: '',
     allowedDirectory: SANDBOX_DIR,
     mcpServers: {
       filesystem: {
@@ -270,6 +284,16 @@ describe.skipIf(!isIsolatedVmAvailable())('loadPolicy over control socket — en
     writeFileSync(FILE_A, 'contents-of-file-a');
     writeFileSync(FILE_B, 'contents-of-file-b');
 
+    // Resolve the per-bundle audit + control-socket paths under the
+    // new workflow-run layout. The bundle directory must exist before
+    // the coordinator opens the audit log, and the sockets directory
+    // must exist before `bind(2)` is called on the control socket.
+    auditPath = getBundleAuditLogPath(WORKFLOW_ID, BUNDLE_ID);
+    controlSocket = getBundleControlSocketPath(BUNDLE_ID);
+    mkdirSync(dirname(auditPath), { recursive: true, mode: 0o700 });
+    mkdirSync(getBundleRuntimeRoot(BUNDLE_ID), { recursive: true, mode: 0o700 });
+    config.auditLogPath = auditPath;
+
     // The proxy's initial policy is policyA. Write both the compiled
     // policy and annotations into the generated dir; the hot-swap path
     // only reads compiled-policy.json per-persona, but start-up uses
@@ -290,14 +314,14 @@ describe.skipIf(!isIsolatedVmAvailable())('loadPolicy over control socket — en
     const swapTarget = proxy.getPolicySwapTarget();
     expect(swapTarget).not.toBeNull();
     if (!swapTarget) throw new Error('policy swap target unexpectedly null');
-    await swapTarget.startControlServer({ socketPath: CONTROL_SOCKET });
+    await swapTarget.startControlServer({ socketPath: controlSocket });
   }, 30_000);
 
   afterAll(async () => {
     await proxy.stop();
     rmSync(TEST_ROOT, { recursive: true, force: true });
     rmSync(MCP_SOCKET, { force: true });
-    rmSync(CONTROL_SOCKET, { force: true });
+    rmSync(controlSocket, { force: true });
     delete process.env.IRONCURTAIN_HOME;
   });
 
@@ -316,7 +340,7 @@ describe.skipIf(!isIsolatedVmAvailable())('loadPolicy over control socket — en
     // persona "policy-a" first; every entry under test therefore
     // carries a persona tag we can filter on.
     await defaultLoadPolicyRpc({
-      socketPath: CONTROL_SOCKET,
+      socketPath: controlSocket,
       persona: 'policy-a',
       policyDir: POLICY_A_DIR,
     });
@@ -334,7 +358,7 @@ describe.skipIf(!isIsolatedVmAvailable())('loadPolicy over control socket — en
       });
     });
 
-    const preSwapEntries = readAuditLines(AUDIT_PATH).filter((e) => e.persona === 'policy-a');
+    const preSwapEntries = readAuditLines(auditPath).filter((e) => e.persona === 'policy-a');
     const preA = findAudit(preSwapEntries, FILE_A);
     const preB = findAudit(preSwapEntries, FILE_B);
     // When no escalation handler is wired, the pipeline auto-denies
@@ -348,7 +372,7 @@ describe.skipIf(!isIsolatedVmAvailable())('loadPolicy over control socket — en
     // helper. This guarantees we exercise the exact wire format
     // production uses.
     await defaultLoadPolicyRpc({
-      socketPath: CONTROL_SOCKET,
+      socketPath: controlSocket,
       persona: 'policy-b',
       policyDir: POLICY_B_DIR,
     });
@@ -367,8 +391,8 @@ describe.skipIf(!isIsolatedVmAvailable())('loadPolicy over control socket — en
 
     // Single audit file for the whole run. The flipped decisions on
     // persona-tagged entries prove the engine was actually swapped.
-    expect(existsSync(AUDIT_PATH)).toBe(true);
-    const allEntries = readAuditLines(AUDIT_PATH);
+    expect(existsSync(auditPath)).toBe(true);
+    const allEntries = readAuditLines(auditPath);
     const postEntries = allEntries.filter((e) => e.persona === 'policy-b');
     const postA = findAudit(postEntries, FILE_A);
     const postB = findAudit(postEntries, FILE_B);
@@ -383,11 +407,11 @@ describe.skipIf(!isIsolatedVmAvailable())('loadPolicy over control socket — en
 
   it('malformed loadPolicy request returns 400 without disturbing the running policy', async () => {
     // Missing policyDir -> 400. The server must not touch the live engine.
-    const bad = await rawPolicyLoadPost(CONTROL_SOCKET, JSON.stringify({ persona: 'global' }));
+    const bad = await rawPolicyLoadPost(controlSocket, JSON.stringify({ persona: 'global' }));
     expect(bad.status).toBe(400);
 
     // Missing persona -> 400 as well.
-    const bad2 = await rawPolicyLoadPost(CONTROL_SOCKET, JSON.stringify({ policyDir: POLICY_A_DIR }));
+    const bad2 = await rawPolicyLoadPost(controlSocket, JSON.stringify({ policyDir: POLICY_A_DIR }));
     expect(bad2.status).toBe(400);
 
     // Confirm policyB is still the active policy: FILE_A still escalates,
@@ -403,7 +427,7 @@ describe.skipIf(!isIsolatedVmAvailable())('loadPolicy over control socket — en
       });
     });
 
-    const audit = readAuditLines(AUDIT_PATH);
+    const audit = readAuditLines(auditPath);
     // Take the last two entries — those are the calls we just made.
     const lastTwo = audit.slice(-2);
     const lastA = lastTwo.find((e) => fileFromArgs(e) === FILE_A);

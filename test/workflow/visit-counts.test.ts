@@ -297,16 +297,19 @@ describe('visitCounts prompt selection', () => {
     };
 
     const { machine } = buildWorkflowMachine(freshDef, 'Build a widget');
-    const capturedInputs: Array<{ stateId: string; previousSessionId: string | undefined }> = [];
+    const capturedInputs: Array<{ stateId: string; priorConversationId: string | undefined }> = [];
     let invocationCount = 0;
 
     const testMachine = machine.provide({
       actors: {
         agentService: fromPromise(async ({ input }: { input: AgentInvokeInput }) => {
-          // Track the previousSessionId that would be used by the orchestrator
-          const previousSessionId =
-            input.stateConfig.freshSession === false ? input.context.sessionsByState[input.stateId] : undefined;
-          capturedInputs.push({ stateId: input.stateId, previousSessionId });
+          // Track what the orchestrator would select when deciding whether
+          // to reuse a prior agent-CLI conversation id.
+          const priorConversationId =
+            input.stateConfig.freshSession === false
+              ? input.context.agentConversationsByState[input.stateId]
+              : undefined;
+          capturedInputs.push({ stateId: input.stateId, priorConversationId });
           invocationCount++;
 
           if (input.stateId === 'review') {
@@ -315,7 +318,10 @@ describe('visitCounts prompt selection', () => {
             }
             return makeAgentResult();
           }
-          return makeAgentResult({ sessionId: `session-${input.stateId}-${invocationCount}` });
+          return makeAgentResult({
+            agentConversationId:
+              `conv-${input.stateId}-${invocationCount}` as import('../../src/session/types.js').AgentConversationId,
+          });
         }),
       },
     });
@@ -327,18 +333,18 @@ describe('visitCounts prompt selection', () => {
     expect(actor.getSnapshot().status).toBe('done');
     expect(capturedInputs).toHaveLength(4);
 
-    // implement first entry: no previous session exists
+    // implement first entry: no previous conversation exists
     expect(capturedInputs[0].stateId).toBe('implement');
-    expect(capturedInputs[0].previousSessionId).toBeUndefined();
+    expect(capturedInputs[0].priorConversationId).toBeUndefined();
 
-    // implement second entry: freshSession=true -> previousSessionId is undefined
-    // even though sessionsByState has a session ID from the first invocation
+    // implement second entry: freshSession=true -> priorConversationId is undefined
+    // even though agentConversationsByState has an id from the first invocation
     expect(capturedInputs[2].stateId).toBe('implement');
-    expect(capturedInputs[2].previousSessionId).toBeUndefined();
+    expect(capturedInputs[2].priorConversationId).toBeUndefined();
 
-    // review (non-fresh) second entry: should have the previous session ID
+    // review (non-fresh) second entry: should have the previous conversation id
     expect(capturedInputs[3].stateId).toBe('review');
-    expect(capturedInputs[3].previousSessionId).toBeDefined();
+    expect(capturedInputs[3].priorConversationId).toBeDefined();
   });
 
   it('isRoundLimitReached fires correctly with entry-based counts', async () => {

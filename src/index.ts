@@ -9,7 +9,7 @@ import { getUserConfigPath } from './config/paths.js';
 import { checkHelp, type CommandSpec } from './cli-help.js';
 import * as logger from './logger.js';
 import { CliTransport } from './session/cli-transport.js';
-import { createSession } from './session/index.js';
+import { createStandaloneSession } from './session/index.js';
 import { resolveSessionMode } from './session/preflight.js';
 import { validateWorkspacePath } from './session/workspace-validation.js';
 import { shouldAutoSaveMemory } from './memory/auto-save.js';
@@ -171,9 +171,9 @@ export async function main(args?: string[]): Promise<void> {
     discardStdin: false,
   }).start();
 
-  let session: Awaited<ReturnType<typeof createSession>>;
+  let session: Awaited<ReturnType<typeof createStandaloneSession>>;
   try {
-    session = await createSession({
+    session = await createStandaloneSession({
       config,
       mode,
       resumeSessionId,

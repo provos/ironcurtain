@@ -190,9 +190,10 @@ function createMockInfra(opts: MockInfraOptions): DockerInfrastructure {
     ? { port: 8443 }
     : { socketPath: '/tmp/test-mitm-proxy.sock' };
   return {
-    sessionId,
-    sessionDir: opts.sessionDir,
-    sandboxDir: opts.sandboxDir,
+    // Single-session invariant: bundleId reuses the sessionId value.
+    bundleId: sessionId as import('../src/session/types.js').BundleId,
+    bundleDir: opts.sessionDir,
+    workspaceDir: opts.sandboxDir,
     escalationDir: opts.escalationDir,
     auditLogPath: opts.auditLogPath,
     proxy,
@@ -706,7 +707,7 @@ describe('DockerAgentSession', () => {
     }
 
     it('close() DOES call destroyDockerInfrastructure when ownsInfra=true', async () => {
-      const spies = createTeardownSpies(deps.infra.sessionDir);
+      const spies = createTeardownSpies(deps.infra.bundleDir);
       session = new DockerAgentSession({
         ...deps,
         ownsInfra: true,
@@ -728,7 +729,7 @@ describe('DockerAgentSession', () => {
     });
 
     it('close() does NOT call destroyDockerInfrastructure when ownsInfra=false', async () => {
-      const spies = createTeardownSpies(deps.infra.sessionDir);
+      const spies = createTeardownSpies(deps.infra.bundleDir);
       session = new DockerAgentSession({
         ...deps,
         ownsInfra: false,

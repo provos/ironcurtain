@@ -528,7 +528,7 @@ describe('WorkflowOrchestrator checkpoint + resume', () => {
           worktreeBranches: [],
           totalTokens: 0,
           lastError: null,
-          sessionsByState: {},
+          agentConversationsByState: {},
           previousAgentOutput: null,
           previousAgentNotes: null,
           previousStateName: null,
@@ -640,7 +640,7 @@ describe('WorkflowOrchestrator checkpoint + resume', () => {
         worktreeBranches: [],
         totalTokens: 0,
         lastError: 'crash',
-        sessionsByState: {},
+        agentConversationsByState: {},
         previousAgentOutput: null,
         previousAgentNotes: null,
         previousStateName: null,
@@ -713,7 +713,7 @@ describe('WorkflowOrchestrator checkpoint + resume', () => {
         worktreeBranches: [],
         totalTokens: 0,
         lastError: null,
-        sessionsByState: {},
+        agentConversationsByState: {},
         previousAgentOutput: null,
         previousAgentNotes: null,
         previousStateName: null,
@@ -803,7 +803,7 @@ describe('WorkflowOrchestrator checkpoint + resume', () => {
         worktreeBranches: [],
         totalTokens: 0,
         lastError: null,
-        sessionsByState: {},
+        agentConversationsByState: {},
         previousAgentOutput: null,
         previousAgentNotes: null,
         previousStateName: null,
@@ -885,11 +885,17 @@ describe('WorkflowOrchestrator checkpoint + resume', () => {
     // Flow: implement(coder) -> review(reject) -> error_gate
     await waitForGate(raiseGate1, 1);
 
-    // Verify checkpoint has the coder's session ID stored
+    // Verify checkpoint captured the coder's agentConversationId so a
+    // post-resume coder invocation can reuse it.
     const checkpoint = checkpointStore.load(workflowId);
     expect(checkpoint).toBeDefined();
     expect(checkpoint!.machineState).toBe('error_gate');
-    expect(checkpoint!.context.sessionsByState['implement']).toBe('coder-session-1');
+    const coderConversationId = checkpoint!.context.agentConversationsByState['implement'];
+    expect(coderConversationId).toBeDefined();
+    // Confirm the orchestrator passed the same id on the first coder turn.
+    const coderCall1 = sessionFactory1.mock.calls.find((c) => c[0].persona === 'coder');
+    expect(coderCall1).toBeDefined();
+    expect(coderCall1![0].agentConversationId).toBe(coderConversationId);
 
     // Simulate crash: save checkpoint, shutdown (which removes it), re-save
     const savedCheckpoint = { ...checkpoint! };
@@ -932,10 +938,11 @@ describe('WorkflowOrchestrator checkpoint + resume', () => {
 
     expect(orchestrator2.getStatus(workflowId)?.phase).toBe('completed');
 
-    // The resumed coder session should have received the original coder session ID
+    // The resumed coder session should have received the original coder
+    // agentConversationId captured in the pre-resume checkpoint.
     expect(sessionFactory2).toHaveBeenCalled();
     const coderCall = sessionFactory2.mock.calls.find((c) => c[0].persona === 'coder');
     expect(coderCall).toBeDefined();
-    expect(coderCall![0].resumeSessionId).toBe('coder-session-1');
+    expect(coderCall![0].agentConversationId).toBe(coderConversationId);
   });
 });

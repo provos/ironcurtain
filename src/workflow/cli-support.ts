@@ -97,7 +97,21 @@ export function createWorkflowSessionFactory(modelOverride?: string): (opts: Ses
       : { ...opts, config: baseConfig, persona: personaStripped };
 
     try {
-      return await createSession(effectiveOpts);
+      // Narrow the options union for the typed overloads: the orchestrator
+      // supplies `agentConversationId` for every Docker invocation (see
+      // `executeAgentState` in orchestrator.ts), so the Docker branch is
+      // safe. Builtin mode ignores the field whether set or not.
+      if (effectiveOpts.mode?.kind === 'docker') {
+        if (!effectiveOpts.agentConversationId) {
+          throw new Error('workflow orchestrator must supply agentConversationId for docker sessions');
+        }
+        return await createSession({
+          ...effectiveOpts,
+          mode: effectiveOpts.mode,
+          agentConversationId: effectiveOpts.agentConversationId,
+        });
+      }
+      return await createSession({ ...effectiveOpts, mode: effectiveOpts.mode });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       writeStderr(`${RED}${BOLD}[session-factory] Failed to create session for "${persona ?? 'unknown'}":${RESET}`);
@@ -437,7 +451,7 @@ export function synthesizeCheckpoint(
     worktreeBranches: [],
     totalTokens: 0,
     lastError: null,
-    sessionsByState: {},
+    agentConversationsByState: {},
     previousAgentOutput: null,
     previousAgentNotes: null,
     previousStateName: null,

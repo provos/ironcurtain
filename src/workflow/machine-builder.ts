@@ -11,6 +11,7 @@ import type {
   WhenValue,
   WorkflowTransitionAction,
 } from './types.js';
+import type { AgentConversationId } from '../session/types.js';
 import { guardImplementations } from './guards.js';
 import { stripStatusBlock } from './status-parser.js';
 
@@ -28,7 +29,16 @@ export interface AgentInvokeInput {
 /** Result returned by an agent service promise. */
 export interface AgentInvokeResult {
   readonly output: AgentOutput;
-  readonly sessionId: string;
+  /**
+   * Agent CLI conversation id used for this invocation. Minted or reused
+   * by the orchestrator before session construction (see
+   * `executeAgentState` and `docs/designs/workflow-session-identity.md`
+   * §3). Threaded through the result only so the
+   * `updateContextFromAgentResult` XState action can write it into
+   * `agentConversationsByState[stateId]`; not a read-back from the
+   * session.
+   */
+  readonly agentConversationId: AgentConversationId;
   readonly artifacts: Record<string, string>;
   /** SHA-256 of output artifacts, computed by the orchestrator. */
   readonly outputHash: string;
@@ -123,7 +133,7 @@ export function createInitialContext(definition: WorkflowDefinition): Omit<Workf
     worktreeBranches: [],
     totalTokens: 0,
     lastError: null,
-    sessionsByState: {},
+    agentConversationsByState: {},
     previousAgentOutput: null,
     previousAgentNotes: null,
     previousStateName: null,
@@ -455,9 +465,9 @@ export function buildWorkflowMachine(definition: WorkflowDefinition, taskDescrip
           round: context.round + 1,
           reviewHistory:
             output.verdict === 'rejected' ? [...context.reviewHistory, output.notes ?? ''] : context.reviewHistory,
-          sessionsByState: {
-            ...context.sessionsByState,
-            [stateId]: result.sessionId,
+          agentConversationsByState: {
+            ...context.agentConversationsByState,
+            [stateId]: result.agentConversationId,
           },
           totalTokens: context.totalTokens,
           previousAgentOutput: truncateAgentOutput(stripStatusBlock(result.responseText)),

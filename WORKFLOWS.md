@@ -199,7 +199,6 @@ Exit codes:
 | `WF002` | warning  | `settings.unversionedArtifacts` entry not produced by any state (silently versioned)                    |
 | `WF003` | warning  | Terminal `outputs:` entry not produced by any reachable state                                           |
 | `WF004` | error    | Human-gate `present:` entry not produced (human would approve blind)                                    |
-| `WF005` | error    | State uses `parallelKey` + `worktree: true` but `settings.gitRepoPath` is not set                       |
 | `WF006` | warning  | `settings.maxRounds` set but no transition uses `isRoundLimitReached` guard (limit silently ignored)    |
 | `WF007` | warning  | Agent state references a persona not installed locally (runtime failure)                                |
 | `WF008` | error    | `maxVisits` state has a cap-guarded transition positioned after a non-approval `when` (cap never fires) |
