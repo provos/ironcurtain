@@ -9,7 +9,7 @@ import type {
 } from './types.js';
 import { AGENT_OUTPUT_FIELDS, CONFIDENCE_VALUES } from './types.js';
 import { REGISTERED_GUARDS } from './guards.js';
-import { qualifiedModelId } from '../config/user-config.js';
+import { looseModelId } from '../config/user-config.js';
 import { isPlainObject } from '../utils/is-plain-object.js';
 
 // ---------------------------------------------------------------------------
@@ -57,7 +57,7 @@ const agentStateSchema = z.object({
   transitions: z.array(agentTransitionSchema).min(1),
   worktree: z.boolean().optional(),
   freshSession: z.boolean().optional(),
-  model: qualifiedModelId.optional(),
+  model: looseModelId.optional(),
   maxVisits: z.number().int().positive().optional(),
   containerScope: z.string().regex(CONTAINER_SCOPE_PATTERN).optional(),
 });
@@ -101,7 +101,7 @@ const workflowSettingsSchema = z
     systemPrompt: z.string().optional(),
     maxSessionSeconds: z.number().positive().optional(),
     unversionedArtifacts: z.array(z.string()).optional(),
-    model: qualifiedModelId.optional(),
+    model: looseModelId.optional(),
     sharedContainer: z.boolean().optional(),
   })
   .optional();

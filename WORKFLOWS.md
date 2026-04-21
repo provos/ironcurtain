@@ -290,7 +290,7 @@ my_state:
 
 ### Model selection
 
-Workflows can pin a specific LLM at two levels. Both use a qualified model ID (`provider:model-name`). A bare model name with no prefix defaults to Anthropic.
+Workflows can pin a specific LLM at two levels. Both use a qualified model ID (`provider:model-name`). A bare model name with no prefix defaults to Anthropic. Ollama-style `name:tag` identifiers (e.g. `glm-5.1:cloud`, `qwen3.5-uncensored:35b`) are also accepted and passed through opaquely — the leading segment is not a known provider, so the whole string is forwarded verbatim.
 
 Valid IDs depend on which agent is running the workflow:
 
