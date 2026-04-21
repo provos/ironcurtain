@@ -1381,6 +1381,12 @@ export class WorkflowOrchestrator implements WorkflowController {
     const priorConversationId =
       stateConfig.freshSession === false ? context.agentConversationsByState[stateId] : undefined;
     const agentConversationId: AgentConversationId = priorConversationId ?? createAgentConversationId();
+    // Mutable tracker updated by the hard-failure retry loop when the
+    // session rotates its conversation id. The final value is what lands
+    // in the invocation result / error and hence in the checkpoint's
+    // `agentConversationsByState`, so a later `freshSession: false` visit
+    // resumes the id whose transcript actually exists on disk.
+    let currentConversationId: AgentConversationId = agentConversationId;
 
     // In borrow mode, route this invocation's per-state artifacts
     // (session.log, session-metadata.json) under a slug-keyed directory
@@ -1426,7 +1432,7 @@ export class WorkflowOrchestrator implements WorkflowController {
         error: errMsg,
         context: `session creation for "${stateId}"`,
       });
-      throw new AgentInvocationError({ stateId, agentConversationId, cause: err });
+      throw new AgentInvocationError({ stateId, agentConversationId: currentConversationId, cause: err });
     }
 
     instance.activeSessions.add(session);
@@ -1487,7 +1493,13 @@ export class WorkflowOrchestrator implements WorkflowController {
       const MAX_HARD_RETRIES = 2;
       let responseText = '';
       for (let attempt = 0; attempt <= MAX_HARD_RETRIES; attempt++) {
-        const result = await session.sendMessageDetailed(command);
+        // `sendMessageDetailed` is optional on the Session interface.
+        // Sessions that can't produce hard failures (e.g., built-in
+        // in-process sessions) don't implement it — fall back to
+        // `sendMessage` and surface `hardFailure: false`.
+        const result = session.sendMessageDetailed
+          ? await session.sendMessageDetailed(command)
+          : { text: await session.sendMessage(command), hardFailure: false };
         responseText = result.text;
         if (!result.hardFailure) break;
 
@@ -1501,7 +1513,8 @@ export class WorkflowOrchestrator implements WorkflowController {
         if (attempt === MAX_HARD_RETRIES) {
           throw new Error(`Agent failed to produce output after ${MAX_HARD_RETRIES + 1} attempts (upstream stall)`);
         }
-        session.rotateAgentConversationId?.();
+        const rotated = session.rotateAgentConversationId?.();
+        if (rotated) currentConversationId = rotated;
       }
 
       let parseResult = tryParseAgentStatus(responseText);
@@ -1608,7 +1621,7 @@ export class WorkflowOrchestrator implements WorkflowController {
 
       return {
         output: agentOutput,
-        agentConversationId,
+        agentConversationId: currentConversationId,
         artifacts,
         outputHash,
         responseText,
@@ -1620,7 +1633,7 @@ export class WorkflowOrchestrator implements WorkflowController {
         error: toErrorMessage(err),
         context: `agent "${stateId}" (persona: ${stateConfig.persona})`,
       });
-      throw new AgentInvocationError({ stateId, agentConversationId, cause: err });
+      throw new AgentInvocationError({ stateId, agentConversationId: currentConversationId, cause: err });
     } finally {
       instance.activeSessions.delete(session);
       await session.close().catch((closeErr: unknown) => {

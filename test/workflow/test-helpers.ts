@@ -9,6 +9,7 @@ import { vi } from 'vitest';
 import { mkdirSync, writeFileSync, readdirSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type {
+  AgentConversationId,
   AgentTurnResult,
   SessionInfo,
   SessionId,
@@ -18,6 +19,7 @@ import type {
   EscalationRequest,
 } from '../../src/session/types.js';
 import type { Session } from '../../src/session/types.js';
+import { createAgentConversationId } from '../../src/session/types.js';
 import { GLOBAL_PERSONA, type WorkflowId, type HumanGateRequest } from '../../src/workflow/types.js';
 import {
   WorkflowOrchestrator,
@@ -36,6 +38,7 @@ export type ResponseFn = (msg: string) => MockResponse | Promise<MockResponse>;
 export class MockSession implements Session {
   readonly sentMessages: string[] = [];
   readonly rotateCalls: number[] = [];
+  readonly rotatedIds: AgentConversationId[] = [];
   closed = false;
   private readonly sessionId: string;
   private readonly responseFn: ResponseFn;
@@ -75,10 +78,11 @@ export class MockSession implements Session {
     return result;
   }
 
-  rotateAgentConversationId(): void {
-    // Record the call count before rotation so tests can assert that
-    // rotation happened at a specific point in the message sequence.
+  rotateAgentConversationId(): AgentConversationId {
     this.rotateCalls.push(this.sentMessages.length);
+    const id = createAgentConversationId();
+    this.rotatedIds.push(id);
+    return id;
   }
 
   getHistory(): readonly ConversationTurn[] {

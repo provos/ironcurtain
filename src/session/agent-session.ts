@@ -34,7 +34,6 @@ import { ResourceBudgetTracker } from './resource-budget-tracker.js';
 import { StepLoopDetector } from './step-loop-detector.js';
 import { truncateResult, getResultSizeLimit, formatKB } from './truncate-result.js';
 import type {
-  AgentTurnResult,
   Session,
   SessionId,
   SessionStatus,
@@ -263,14 +262,6 @@ export class AgentSession implements Session {
       if (abortTimeout !== null) clearTimeout(abortTimeout);
       this.budgetTracker.endTurn();
     }
-  }
-
-  // In-process LLM calls surface upstream errors as thrown exceptions
-  // from `generateText()`, not as silent empty output — so hardFailure
-  // does not apply here and is always false.
-  async sendMessageDetailed(userMessage: string): Promise<AgentTurnResult> {
-    const text = await this.sendMessage(userMessage);
-    return { text, hardFailure: false };
   }
 
   getHistory(): readonly ConversationTurn[] {

@@ -342,7 +342,7 @@ export class DockerAgentSession implements Session {
    * `ironcurtain --resume` into a stalled-mid-stream state is not a
    * supported path (see design plan §4).
    */
-  rotateAgentConversationId(): void {
+  rotateAgentConversationId(): AgentConversationId {
     const previousId = this.agentConversationId;
     this.agentConversationId = createAgentConversationId();
     this.firstTurnComplete = false;
@@ -350,6 +350,7 @@ export class DockerAgentSession implements Session {
       `[docker-agent] rotated agentConversationId from ${previousId} to ${this.agentConversationId} ` +
         `(previous id consumed by hard-failed turn)`,
     );
+    return this.agentConversationId;
   }
 
   getHistory(): readonly ConversationTurn[] {

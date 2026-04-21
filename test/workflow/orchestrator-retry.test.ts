@@ -28,7 +28,9 @@ import {
   findWorkflowDir,
   writeDefinitionFile,
   createDeps,
+  createCheckpointStore,
   waitForCompletion,
+  waitForGate,
   stubPersonasForTest,
 } from './test-helpers.js';
 
@@ -51,6 +53,39 @@ const simpleAgentDef: WorkflowDefinition = {
   },
 };
 
+// Used by the checkpoint-id regression test: a gate after the agent
+// state pauses the workflow so the checkpoint survives for inspection
+// (the orchestrator removes checkpoints on terminal completion).
+const agentThenGateDef: WorkflowDefinition = {
+  name: 'agent-then-gate',
+  description: 'Agent followed by human gate',
+  initial: 'implement',
+  settings: { mode: 'builtin' },
+  states: {
+    implement: {
+      type: 'agent',
+      description: 'Writes code',
+      persona: 'coder',
+      prompt: 'You are a coder.',
+      inputs: [],
+      outputs: ['code'],
+      transitions: [{ to: 'review_gate' }],
+    },
+    review_gate: {
+      type: 'human_gate',
+      description: 'Human review',
+      acceptedEvents: ['APPROVE', 'ABORT'],
+      present: ['code'],
+      transitions: [
+        { to: 'done', event: 'APPROVE' },
+        { to: 'aborted', event: 'ABORT' },
+      ],
+    },
+    done: { type: 'terminal', description: 'Done' },
+    aborted: { type: 'terminal', description: 'Aborted' },
+  },
+};
+
 const HARD_FAILURE_TEXT = 'Agent exited with code 143.\n\nOutput:\n';
 
 describe('WorkflowOrchestrator retry loop', () => {
@@ -61,7 +96,7 @@ describe('WorkflowOrchestrator retry loop', () => {
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), 'orchestrator-retry-test-'));
     activeOrchestrator = undefined;
-    cleanupPersonas = stubPersonasForTest(tmpDir, simpleAgentDef);
+    cleanupPersonas = stubPersonasForTest(tmpDir, simpleAgentDef, agentThenGateDef);
   });
 
   afterEach(async () => {
@@ -247,5 +282,51 @@ describe('WorkflowOrchestrator retry loop', () => {
     expect(session.sentMessages[2]).toContain('agent_status');
     // Exactly one rotation: between attempt 1 (hard fail) and attempt 2.
     expect(session.rotateCalls).toEqual([1]);
+  });
+
+  it('stamps the ROTATED conversation id into the checkpoint (not the stale pre-rotation id)', async () => {
+    // Regression guard: after a hard-failure rotation + success, the
+    // transcript on disk is under the NEW id. If the orchestrator wrote
+    // the old id into agentConversationsByState, a later freshSession:false
+    // visit would try to resume a transcript that doesn't exist.
+    //
+    // Uses agentThenGateDef so the workflow pauses at a gate after the
+    // agent state — the orchestrator removes checkpoints on terminal
+    // completion, so we need a non-terminal resting point to inspect.
+    const defPath = writeDefinitionFile(tmpDir, agentThenGateDef);
+    const checkpointStore = createCheckpointStore(tmpDir);
+    const allSessions: MockSession[] = [];
+
+    const sessionFactory = vi.fn(async () => {
+      let callCount = 0;
+      const session = new MockSession({
+        responses: () => {
+          callCount++;
+          if (callCount === 1) {
+            return { text: HARD_FAILURE_TEXT, hardFailure: true };
+          }
+          simulateArtifacts(findWorkflowDir(tmpDir), ['code']);
+          return approvedResponse('recovered');
+        },
+      });
+      allSessions.push(session);
+      return session;
+    });
+
+    const raiseGate = vi.fn();
+    const deps = createDeps(tmpDir, { createSession: sessionFactory, checkpointStore, raiseGate });
+    const orchestrator = new WorkflowOrchestrator(deps);
+    activeOrchestrator = orchestrator;
+
+    const workflowId = await orchestrator.start(defPath, 'write code');
+    await waitForGate(raiseGate, 1);
+
+    const session = allSessions[0];
+    expect(session.rotatedIds).toHaveLength(1);
+    const rotatedId = session.rotatedIds[0];
+
+    const checkpoint = checkpointStore.load(workflowId);
+    expect(checkpoint).toBeDefined();
+    expect(checkpoint!.context.agentConversationsByState['implement']).toBe(rotatedId);
   });
 });

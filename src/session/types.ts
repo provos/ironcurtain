@@ -472,8 +472,8 @@ export interface Session {
    * the agent's text.
    *
    * For callers that need turn diagnostics (e.g., to detect upstream
-   * stalls and retry with a fresh conversation id), use
-   * `sendMessageDetailed()` instead.
+   * stalls and retry with a fresh conversation id), call
+   * `sendMessageDetailed()` when it exists.
    *
    * @throws {SessionNotReadyError} if status is not 'ready'
    * @throws {SessionClosedError} if session has been closed
@@ -486,13 +486,21 @@ export interface Session {
    * `hardFailure` for callers (e.g., the workflow orchestrator's retry
    * loop) that must react to upstream stalls.
    *
+   * Optional because only external-agent sessions (e.g., Claude Code in
+   * Docker) can produce hard failures. Consumers that care about the
+   * diagnostic should fall back to `sendMessage()` with
+   * `hardFailure: false` when this is absent — see
+   * `sendMessageWithDiagnostics()` in the orchestrator for the canonical
+   * shape.
+   *
    * @throws {SessionNotReadyError} if status is not 'ready'
    * @throws {SessionClosedError} if session has been closed
    */
-  sendMessageDetailed(userMessage: string): Promise<AgentTurnResult>;
+  sendMessageDetailed?(userMessage: string): Promise<AgentTurnResult>;
 
   /**
-   * Rotates the agent-CLI conversation id to a freshly-minted one.
+   * Rotates the agent-CLI conversation id to a freshly-minted one and
+   * returns the new id.
    *
    * Intended for use after a hard failure (see `AgentTurnResult.hardFailure`):
    * when the agent CLI was killed mid-stream, the prior id has been
@@ -500,11 +508,16 @@ export interface Session {
    * so a retry with the same id is rejected. Rotating mints a new id
    * the next turn will pin with `--session-id` (or equivalent).
    *
+   * Callers must observe the returned id and propagate it into any
+   * subsequent `AgentInvokeResult` / checkpoint persistence — otherwise
+   * a later `freshSession: false` visit will try to resume a stale id
+   * whose transcript never existed on disk.
+   *
    * Optional because only external-agent sessions (e.g., Claude Code
    * in Docker) have a durable conversation id. Built-in sessions that
    * hold all state in-memory do not implement this.
    */
-  rotateAgentConversationId?(): void;
+  rotateAgentConversationId?(): AgentConversationId;
 
   /**
    * Returns the conversation history as turn summaries.

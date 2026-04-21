@@ -6,7 +6,7 @@
  * `docker.exec` seam so no Claude Code binary or Docker daemon is needed.
  *
  * Paired with the workflow orchestrator retry tests in
- * `test/workflow-orchestrator-retry.test.ts`; those drive the full two-
+ * `test/workflow/orchestrator-retry.test.ts`; those drive the full two-
  * phase retry loop through the orchestrator. These tests cover the
  * session/adapter plumbing in isolation.
  */

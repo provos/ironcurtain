@@ -113,7 +113,6 @@ function createMockSession(overrides?: { info?: Partial<SessionInfo>; budgetStat
         { kind: 'tool_call', toolName: 'read_file', preview: '/tmp/test.txt' },
       ] satisfies DiagnosticEvent[]),
     sendMessage: vi.fn().mockResolvedValue('response'),
-    sendMessageDetailed: vi.fn().mockResolvedValue({ text: 'response', hardFailure: false }),
     resolveEscalation: vi.fn().mockResolvedValue(undefined),
     getPendingEscalation: vi.fn().mockReturnValue(undefined),
     close: vi.fn().mockResolvedValue(undefined),
