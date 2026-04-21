@@ -16,7 +16,7 @@ import type { LanguageModelV3 } from '@ai-sdk/provider';
 import type { LanguageModel, SystemModelMessage } from 'ai';
 import chalk from 'chalk';
 import pLimit from 'p-limit';
-import { extractServerDomainAllowlists, findAnnotationServerDrift } from '../config/index.js';
+import { extractServerDomainAllowlists, findAnnotationServerDrift, safeForDisplay } from '../config/index.js';
 import { createLanguageModel } from '../config/model-provider.js';
 import type { MCPServerConfig } from '../config/types.js';
 import { loadUserConfig } from '../config/user-config.js';
@@ -243,14 +243,16 @@ function warnOnCompileAnnotationGaps(
 
   console.error(
     chalk.yellow(
-      `Warning: ${missing.length} configured MCP server(s) have no tool annotations: ${missing.join(', ')}.`,
+      `Warning: ${missing.length} configured MCP server(s) have no tool annotations: ${missing.map(safeForDisplay).join(', ')}.`,
     ),
   );
   console.error(
     chalk.yellow('  The compiled policy will have no rules for these servers and their tools will be denied.'),
   );
   for (const name of missing) {
-    console.error(chalk.yellow(`  Run \`ironcurtain annotate-tools --server ${name}\` to annotate this server.`));
+    console.error(
+      chalk.yellow(`  Run \`ironcurtain annotate-tools --server ${safeForDisplay(name)}\` to annotate this server.`),
+    );
   }
   console.error('');
 }

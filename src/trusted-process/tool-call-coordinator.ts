@@ -37,7 +37,7 @@ import {
   type ToolCallResponse,
 } from './tool-call-pipeline.js';
 import type { ResolvedSandboxConfig } from './sandbox-integration.js';
-import { loadPersonaPolicyArtifacts } from '../config/index.js';
+import { loadPersonaPolicyArtifacts, safeForDisplay } from '../config/index.js';
 import { validatePolicyDir } from '../config/validate-policy-dir.js';
 import { proxyAnnotations, proxyPolicyRules } from '../docker/proxy-tools.js';
 import { ControlServer, type ControlServerAddress, type ControlServerListenOptions } from './control-server.js';
@@ -651,15 +651,15 @@ function warnOnToolAnnotationDrift(
 
   if (missing.length > 0) {
     process.stderr.write(
-      `Warning: MCP server '${serverName}' exposes ${missing.length} tool(s) not present in tool-annotations.json: ` +
-        `${missing.join(', ')}. These calls will be denied by the policy engine.\n` +
-        `  Run \`ironcurtain annotate-tools --server ${serverName}\` to refresh annotations for this server.\n`,
+      `Warning: MCP server ${safeForDisplay(serverName)} exposes ${missing.length} tool(s) not present in tool-annotations.json: ` +
+        `${missing.map(safeForDisplay).join(', ')}. These calls will be denied by the policy engine.\n` +
+        `  Run \`ironcurtain annotate-tools --server ${safeForDisplay(serverName)}\` to refresh annotations for this server.\n`,
     );
   }
   if (stale.length > 0) {
     process.stderr.write(
-      `Note: tool-annotations.json for '${serverName}' contains ${stale.length} tool(s) no longer exposed by the server: ` +
-        `${stale.join(', ')}.\n`,
+      `Note: tool-annotations.json for ${safeForDisplay(serverName)} contains ${stale.length} tool(s) no longer exposed by the server: ` +
+        `${stale.map(safeForDisplay).join(', ')}.\n`,
     );
   }
 }

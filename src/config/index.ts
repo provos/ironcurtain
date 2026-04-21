@@ -355,19 +355,32 @@ export function checkAnnotationFreshness(
 
   if (missing.length > 0) {
     process.stderr.write(
-      `Warning: ${missing.length} configured MCP server(s) have no tool annotations: ${missing.join(', ')}. ` +
+      `Warning: ${missing.length} configured MCP server(s) have no tool annotations: ${missing.map(safeForDisplay).join(', ')}. ` +
         `Tools from these servers will be denied by the policy engine until annotated.\n`,
     );
     for (const name of missing) {
-      process.stderr.write(`  Run \`ironcurtain annotate-tools --server ${name}\` to annotate this server.\n`);
+      process.stderr.write(
+        `  Run \`ironcurtain annotate-tools --server ${safeForDisplay(name)}\` to annotate this server.\n`,
+      );
     }
   }
 
   if (orphaned.length > 0) {
     process.stderr.write(
-      `Note: tool-annotations.json contains server(s) no longer in mcp-servers.json: ${orphaned.join(', ')}.\n`,
+      `Note: tool-annotations.json contains server(s) no longer in mcp-servers.json: ${orphaned.map(safeForDisplay).join(', ')}.\n`,
     );
   }
+}
+
+/**
+ * Quotes a user-supplied identifier for inclusion in a stderr message or a
+ * copy-paste shell command. Escapes control characters, quotes, and
+ * backslashes via JSON string semantics, and wraps the result in double
+ * quotes. The output is both safe to print (no terminal injection) and
+ * safe to paste into bash (`--server "name"`).
+ */
+export function safeForDisplay(identifier: string): string {
+  return JSON.stringify(identifier);
 }
 
 /**
