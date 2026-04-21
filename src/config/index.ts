@@ -311,6 +311,59 @@ export function checkConstitutionFreshness(compiledPolicy: CompiledPolicyFile, c
 }
 
 /**
+ * Pure diff between the configured MCP servers and the servers covered by
+ * `tool-annotations.json`. Used by both the runtime freshness check and
+ * the compile-time preventive check, which format the same drift data
+ * differently.
+ *
+ *   - `missing`: configured servers with no annotations entry (these will
+ *     silently default-deny every call via the policy engine's
+ *     structural-unknown-tool fallback).
+ *   - `orphaned`: annotated servers no longer configured (informational).
+ */
+export function findAnnotationServerDrift(
+  toolAnnotations: StoredToolAnnotationsFile,
+  mcpServers: Record<string, MCPServerConfig>,
+): { missing: string[]; orphaned: string[] } {
+  const configuredNames = new Set(Object.keys(mcpServers));
+  const annotatedNames = new Set(Object.keys(toolAnnotations.servers));
+  return {
+    missing: [...configuredNames].filter((name) => !annotatedNames.has(name)).sort(),
+    orphaned: [...annotatedNames].filter((name) => !configuredNames.has(name)).sort(),
+  };
+}
+
+/**
+ * Runtime freshness check: emits stderr warnings when the on-disk
+ * tool-annotations.json no longer matches the configured MCP servers.
+ *
+ * The warning suggests re-running annotations for each specific server,
+ * not `--all`, so the user only re-classifies what actually changed.
+ */
+export function checkAnnotationFreshness(
+  toolAnnotations: StoredToolAnnotationsFile,
+  mcpServers: Record<string, MCPServerConfig>,
+): void {
+  const { missing, orphaned } = findAnnotationServerDrift(toolAnnotations, mcpServers);
+
+  if (missing.length > 0) {
+    process.stderr.write(
+      `Warning: ${missing.length} configured MCP server(s) have no tool annotations: ${missing.join(', ')}. ` +
+        `Tools from these servers will be denied by the policy engine until annotated.\n`,
+    );
+    for (const name of missing) {
+      process.stderr.write(`  Run \`ironcurtain annotate-tools --server ${name}\` to annotate this server.\n`);
+    }
+  }
+
+  if (orphaned.length > 0) {
+    process.stderr.write(
+      `Note: tool-annotations.json contains server(s) no longer in mcp-servers.json: ${orphaned.join(', ')}.\n`,
+    );
+  }
+}
+
+/**
  * Options for loading generated policy artifacts with split directories.
  * Allows policy files and tool annotations to come from different dirs.
  */
