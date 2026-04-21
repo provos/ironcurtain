@@ -88,6 +88,13 @@
       taskDescription = '';
       workspacePath = '';
       await refreshWorkflows();
+      // Navigate straight to the detail view for the workflow we just launched.
+      // `refreshWorkflows()` has landed the real summary in the Map by now, so
+      // the detail view will render with the real name/phase rather than the
+      // placeholder. Mirrors selectWorkflow() — clear the gate-dismissal
+      // snapshot so the auto-select $effect remains free to act.
+      dismissedGateIds = null;
+      appState.selectedWorkflowId = result.workflowId;
     } catch (err) {
       actionError = `Failed to start workflow: ${err instanceof Error ? err.message : String(err)}`;
     } finally {
@@ -292,7 +299,7 @@
             <Input id="ws-path" bind:value={workspacePath} placeholder="/path/to/workspace" />
           </div>
           <Button onclick={handleStart} loading={starting} disabled={!effectivePath || !taskDescription.trim()}>
-            Start Workflow
+            {starting ? 'Starting…' : 'Start Workflow'}
           </Button>
         </div>
       </CardContent>

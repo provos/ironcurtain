@@ -43,7 +43,7 @@ test.describe('Start Workflow', () => {
     await navigateTo(page, 'Workflows');
   });
 
-  test('starts a new workflow via the form', async ({ page }) => {
+  test('starts a new workflow via the form and auto-navigates to its detail view', async ({ page }) => {
     // Select the custom path option to reveal the definition file path input
     await page.getByLabel('Workflow definition').selectOption('__custom__');
     // Fill in the start form
@@ -55,8 +55,12 @@ test.describe('Start Workflow', () => {
     await expect(startButton).toBeEnabled();
     await startButton.click();
 
-    // A new workflow should appear in the list (the mock derives the name from the file path)
-    await expect(page.getByText('design-and-code').first()).toBeVisible({ timeout: 5_000 });
+    // After clicking, the UI should auto-navigate to the newly-started workflow's
+    // detail view (the same view the user would see by clicking the row).
+    // The detail view renders a Back button and the workflow name as a heading
+    // (the mock derives the name from the file path).
+    await expect(page.getByRole('button', { name: /Back/ })).toBeVisible({ timeout: 5_000 });
+    await expect(page.getByRole('heading', { name: 'design-and-code' })).toBeVisible({ timeout: 5_000 });
   });
 
   test('new workflow transitions to waiting_human after lifecycle simulation', async ({ page }) => {
@@ -66,12 +70,11 @@ test.describe('Start Workflow', () => {
 
     await page.getByRole('button', { name: 'Start Workflow' }).click();
 
-    // The mock server simulates: plan -> plan_review (gate) after 4 seconds.
-    // When the gate is raised, the auto-select $effect opens the detail view for
-    // my-workflow, which shows the gate review panel. Wait for that panel to appear.
+    // On click, the UI auto-navigates to the new workflow's detail view.
+    // The mock server then simulates plan -> plan_review (gate) after 4 seconds;
+    // since we're already on the detail view, the gate review panel appears inline.
+    await expect(page.getByRole('heading', { name: 'my-workflow' })).toBeVisible({ timeout: 5_000 });
     await expect(page.getByText('Review Required')).toBeVisible({ timeout: 10_000 });
-    // Verify we are looking at the correct workflow
-    await expect(page.getByRole('heading', { name: 'my-workflow' })).toBeVisible();
   });
 
   test('start button is disabled when required fields are empty', async ({ page }) => {
