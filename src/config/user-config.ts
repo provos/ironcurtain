@@ -66,6 +66,9 @@ function createModelIdSchema(options: { readonly strict: boolean; readonly messa
     .min(1)
     .refine(
       (val) => {
+        // Reject malformed colon shapes ":tag" and "name:" — these otherwise
+        // slip through parseModelId's unknown-prefix fallthrough as opaque IDs.
+        if (val.startsWith(':') || val.endsWith(':')) return false;
         try {
           const { modelId } = parseModelId(val);
           if (options.strict && val.includes(':') && val === modelId) return false;
