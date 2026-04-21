@@ -29,6 +29,11 @@ export const DEFAULT_EXEC_TIMEOUT_MS = 600_000;
 /** Grace period for docker stop before SIGKILL. */
 const STOP_TIMEOUT_SECONDS = 10;
 
+/** Docker label keys emitted on every IronCurtain-owned container. */
+export const IRONCURTAIN_LABEL_BUNDLE = 'ironcurtain.bundle';
+export const IRONCURTAIN_LABEL_WORKFLOW = 'ironcurtain.workflow';
+export const IRONCURTAIN_LABEL_SCOPE = 'ironcurtain.scope';
+
 /**
  * Builds the `docker create` argument list from a container config.
  * Exported for testing.
@@ -65,8 +70,20 @@ export function buildCreateArgs(config: DockerContainerConfig): string[] {
     args.push('--restart', config.restartPolicy);
   }
 
-  if (config.sessionLabel) {
-    args.push('--label', `ironcurtain.session=${config.sessionLabel}`);
+  // Emit IronCurtain label scheme. See docs/designs/workflow-session-identity.md §7:
+  //   - `ironcurtain.bundle` is always present on IronCurtain-owned containers.
+  //   - `ironcurtain.workflow` + `ironcurtain.scope` are only set in workflow mode.
+  // Each label is emitted only when its value is defined (present-or-absent contract)
+  // so we never produce `--label ironcurtain.workflow=undefined` for standalone
+  // sessions. An explicitly set empty string still emits, matching the type contract.
+  if (config.bundleLabel !== undefined) {
+    args.push('--label', `${IRONCURTAIN_LABEL_BUNDLE}=${config.bundleLabel}`);
+  }
+  if (config.workflowLabel !== undefined) {
+    args.push('--label', `${IRONCURTAIN_LABEL_WORKFLOW}=${config.workflowLabel}`);
+  }
+  if (config.scopeLabel !== undefined) {
+    args.push('--label', `${IRONCURTAIN_LABEL_SCOPE}=${config.scopeLabel}`);
   }
 
   if (config.resources?.memoryMb) {
@@ -327,7 +344,7 @@ export function createDockerManager(execFileFn?: ExecFileFn): DockerManager {
 
     /**
      * Remove a stale container left behind by a crashed session.
-     * Only removes containers labeled with `ironcurtain.session` to avoid
+     * Only removes containers labeled with `ironcurtain.bundle` to avoid
      * accidentally removing unrelated containers that share the name.
      * Returns true if a stale container was found and removed.
      */
@@ -335,10 +352,15 @@ export function createDockerManager(execFileFn?: ExecFileFn): DockerManager {
       const exists = await this.containerExists(name);
       if (!exists) return false;
 
-      // Verify the container belongs to IronCurtain before removing it
-      const label = await this.getContainerLabel(name, 'ironcurtain.session');
+      // Verify the container belongs to IronCurtain before removing it.
+      // We query by `ironcurtain.bundle`. Containers from before this refactor
+      // carry `ironcurtain.session` and will NOT be matched -- upgrade-in-place
+      // is not supported; operators wipe `~/.ironcurtain/workflow-runs/` per the
+      // migration notes in docs/designs/workflow-container-lifecycle.md §10 and
+      // docs/designs/workflow-session-identity.md.
+      const label = await this.getContainerLabel(name, IRONCURTAIN_LABEL_BUNDLE);
       if (!label) {
-        logger.warn(`Container "${name}" exists but lacks ironcurtain.session label; skipping removal`);
+        logger.warn(`Container "${name}" exists but lacks ${IRONCURTAIN_LABEL_BUNDLE} label; skipping removal`);
         return false;
       }
 

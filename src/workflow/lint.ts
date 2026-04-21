@@ -29,8 +29,12 @@ import { findReachableStates, parseArtifactRef } from './validate.js';
  * the slot is reclaimed here for the visit-cap transition-ordering rule.
  * WF009 is retired for the same reason (state-ID regex is a validation
  * error) and must not be reused.
+ *
+ * WF005 (parallelKey + worktree needs gitRepoPath) is retired: the
+ * `parallelKey` schema field was removed as unused, so the trigger
+ * condition can no longer fire. Must not be reused.
  */
-export type DiagnosticCode = 'WF001' | 'WF002' | 'WF003' | 'WF004' | 'WF005' | 'WF006' | 'WF007' | 'WF008';
+export type DiagnosticCode = 'WF001' | 'WF002' | 'WF003' | 'WF004' | 'WF006' | 'WF007' | 'WF008';
 export type DiagnosticSeverity = 'error' | 'warning';
 
 export interface Diagnostic {
@@ -71,7 +75,6 @@ export function lintWorkflow(def: WorkflowDefinition, ctx: LintContext): LintRes
     ...checkUnversionedArtifacts(def, reachableAgentOutputs),
     ...checkTerminalOutputs(def, reachable, reachableAgentOutputs),
     ...checkHumanGatePresent(def, reachable, reachableAgentOutputs),
-    ...checkWorktreeNeedsGitRepo(def),
     ...checkMaxRoundsHasGuard(def),
     ...checkPersonaExists(def, ctx),
     ...checkVisitCapTransitionOrder(def),
@@ -229,29 +232,6 @@ function checkHumanGatePresent(
     }
   }
 
-  return diagnostics;
-}
-
-// ---------------------------------------------------------------------------
-// WF005 — parallelKey + worktree without settings.gitRepoPath
-// ---------------------------------------------------------------------------
-
-function checkWorktreeNeedsGitRepo(def: WorkflowDefinition): Diagnostic[] {
-  if (def.settings?.gitRepoPath) return [];
-
-  const diagnostics: Diagnostic[] = [];
-  for (const [stateId, state] of Object.entries(def.states)) {
-    if (!isAgentState(state)) continue;
-    if (state.parallelKey && state.worktree === true) {
-      diagnostics.push({
-        code: 'WF005',
-        severity: 'error',
-        stateId,
-        message: `State "${stateId}" uses parallelKey + worktree:true but settings.gitRepoPath is not set — worktree creation will fail at runtime.`,
-        hint: 'Set settings.gitRepoPath to the repository root, or drop worktree:true.',
-      });
-    }
-  }
   return diagnostics;
 }
 

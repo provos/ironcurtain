@@ -2,14 +2,13 @@ import {
   readFileSync,
   existsSync,
   mkdirSync,
-  chmodSync,
   writeFileSync,
   appendFileSync,
   readdirSync,
   statSync,
   unlinkSync,
 } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { MessageLog } from './message-log.js';
 import { createHash, type Hash } from 'node:crypto';
 import { execFile as execFileCb } from 'node:child_process';
@@ -32,21 +31,30 @@ import type {
   DeterministicStateDefinition,
   AgentOutput,
 } from './types.js';
-import { createWorkflowId, WORKFLOW_ARTIFACT_DIR, GLOBAL_PERSONA } from './types.js';
+import { createWorkflowId, WORKFLOW_ARTIFACT_DIR, GLOBAL_PERSONA, DEFAULT_CONTAINER_SCOPE } from './types.js';
 import {
-  getWorkflowAuditLogPath,
-  getWorkflowProxyControlSocketPath,
-  getWorkflowBundleDir,
-  getWorkflowStateDir,
+  getBundleAuditLogPath,
+  getBundleBundleDir,
+  getBundleControlSocketPath,
+  getBundleRuntimeRoot,
+  getInvocationDir,
 } from '../config/paths.js';
 import { POLICY_LOAD_PATH } from '../trusted-process/control-server.js';
 import { loadConfig } from '../config/index.js';
 import { getTokenStreamBus } from '../docker/token-stream-bus.js';
 import { getPersonaDefinitionPath, resolvePersona } from '../persona/resolve.js';
 import { createPersonaName } from '../persona/types.js';
-import type { Session, SessionId, SessionOptions, SessionMode } from '../session/types.js';
+import type {
+  AgentConversationId,
+  BundleId,
+  Session,
+  SessionId,
+  SessionOptions,
+  SessionMode,
+} from '../session/types.js';
+import { createAgentConversationId, createBundleId } from '../session/types.js';
 import type { AgentId } from '../docker/agent-adapter.js';
-import type { DockerInfrastructure } from '../docker/docker-infrastructure.js';
+import { ensureSecureBundleDir, type DockerInfrastructure } from '../docker/docker-infrastructure.js';
 import {
   buildWorkflowMachine,
   type AgentInvokeInput,
@@ -147,13 +155,23 @@ export interface WorkflowTabHandle {
 /**
  * Inputs for creating a workflow-scoped Docker infrastructure bundle.
  * Supplied by the orchestrator when `settings.sharedContainer === true`
- * and the workflow uses a Docker agent.
+ * and the workflow uses a Docker agent. One input produces one bundle;
+ * bifurcated workflows invoke the factory once per distinct
+ * `containerScope` their agent states declare.
  */
 export interface CreateWorkflowInfrastructureInput {
   readonly workflowId: WorkflowId;
+  /**
+   * Stable key for this bundle. Minted by the orchestrator via
+   * `createBundleId()` before the factory is invoked so both the
+   * coordinator's control-socket path and the bundle's on-disk
+   * directory share the same identifier. Each unique `scope` under a
+   * workflow gets its own fresh `BundleId`.
+   */
+  readonly bundleId: BundleId;
   readonly agentId: AgentId;
   /**
-   * Path to the workflow's coordinator control socket. The orchestrator
+   * Path to the bundle's coordinator control socket. The orchestrator
    * starts the coordinator's HTTP control server at this path after the
    * bundle is created (see `startWorkflowControlServer` dep). The path
    * is included here so the factory may optionally pre-create the
@@ -168,8 +186,20 @@ export interface CreateWorkflowInfrastructureInput {
    *
    * All sessions in a workflow mount the workflow's workspace directory;
    * no session-scoped sandbox is ever used under shared-container mode.
+   * Scoped bundles share this workspace — isolation happens at the
+   * coordinator/policy level, not the filesystem.
    */
   readonly workspacePath: string;
+  /**
+   * Scope label this bundle was minted for. Emitted directly as the
+   * `ironcurtain.scope=<scope>` Docker label on the container and its
+   * sidecar. The orchestrator resolves
+   * `stateConfig.containerScope ?? DEFAULT_CONTAINER_SCOPE` before calling
+   * the factory, so this is always a concrete string.
+   *
+   * See `docs/designs/workflow-session-identity.md` §2.5.
+   */
+  readonly scope: string;
 }
 
 /** Inputs for starting the coordinator's HTTP control server on a workflow bundle. */
@@ -361,12 +391,25 @@ interface WorkflowInstance {
   /** Append-only JSONL message log for debugging. */
   readonly messageLog: MessageLog;
   /**
-   * Docker infrastructure shared across workflow states. Set by
-   * createWorkflowInfrastructure at workflow start; destroyed at
-   * workflow terminal. Undefined for builtin workflows or when
-   * settings.sharedContainer is false.
+   * Docker infrastructure bundles, keyed on the `containerScope` string
+   * that minted them. Populated lazily: on the first `executeAgentState`
+   * for a scope not yet present, the orchestrator mints a fresh
+   * `BundleId`, builds the `DockerInfrastructure`, and inserts the
+   * result under the scope key. Subsequent states with the same scope
+   * borrow the existing entry.
+   *
+   * Empty for builtin workflows and for Docker workflows running
+   * without `sharedContainer: true` (each state owns its own bundle in
+   * that mode). Under `sharedContainer: true`, the default-scope entry
+   * (`DEFAULT_CONTAINER_SCOPE` / `"primary"`) is what older code called
+   * "the primary bundle" — now it is simply one entry among the rest.
+   *
+   * Lifecycle: entries are created on first use, destroyed only at
+   * workflow terminal via `destroyWorkflowInfrastructure`.
+   *
+   * See `docs/designs/workflow-session-identity.md` §2.4.
    */
-  infra?: DockerInfrastructure;
+  readonly bundlesByScope: Map<string, DockerInfrastructure>;
   /**
    * Memoized compiled-policy directory per persona. Populated on first
    * use by `cyclePolicy` to avoid re-reading `persona.json` / running
@@ -385,6 +428,22 @@ interface WorkflowInstance {
     readonly sessionIds: Set<SessionId>;
     unsubscribe?: () => void;
   };
+  /**
+   * Last persona loaded into each bundle's coordinator, keyed by
+   * `BundleId`. `cyclePolicy` consults this and skips the `loadPolicy`
+   * RPC when a re-entry would install the same persona that is already
+   * active — the coordinator's audit stream is already tagged with the
+   * right persona and the policy engine is already correct.
+   */
+  readonly currentPersonaByBundle: Map<string, string>;
+  /**
+   * Set once `destroyWorkflowInfrastructure` begins teardown. An
+   * `ensureBundleForScope` call that suspended at `await factory(...)`
+   * must observe this flag before publishing into `bundlesByScope` —
+   * otherwise a container minted mid-abort would leak past the
+   * post-teardown leak assertion.
+   */
+  aborted: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -457,45 +516,87 @@ export class WorkflowOrchestrator implements WorkflowController {
   }
 
   /**
-   * Creates the workflow-scoped Docker infrastructure bundle and stashes
-   * it on `instance.infra`. Called once at workflow start and on resume
-   * when shared-container mode is enabled.
+   * Returns the bundle for `scope`, minting a new one on first use.
    *
-   * Only invoked when `shouldUseSharedContainer(definition)` returns true;
-   * callers must gate on that check.
+   * Each unique `containerScope` used across the workflow's states gets
+   * exactly one bundle: the first `executeAgentState` call under a given
+   * scope creates the bundle, attaches its coordinator control server,
+   * and inserts the result into `instance.bundlesByScope`. Later states
+   * with the same scope borrow the existing entry (no factory call).
    *
-   * After the bundle is created, attaches the coordinator's HTTP control
-   * server at the workflow-scoped UDS path. If the control-server attach
-   * fails, the bundle is torn down before the error propagates so we do
-   * not leak Docker resources on partial initialization.
+   * Replaces the pre-Step-6 eager workflow-start mint. Only invoked when
+   * `shouldUseSharedContainer(definition)` returns true; callers must
+   * gate on that check.
+   *
+   * On control-server attach failure, the just-created bundle is torn
+   * down before the error propagates so we do not leak Docker resources
+   * on partial initialization. The map is **not** populated in that case
+   * — the scope entry remains absent so a later state can retry.
+   *
+   * Concurrency: relies on serial XState invocations — there is no
+   * parallel agent-state fan-out today. If that ever lands, add an
+   * in-flight-promise guard to prevent concurrent lazy-mint races for
+   * the same scope.
+   *
+   * Abort race: if `destroyWorkflowInfrastructure` begins while a mint
+   * is suspended at either `await factory(...)` or `await startServer(...)`,
+   * the mint completes but must not publish into `bundlesByScope` —
+   * destroy already snapshot-cleared the map and would miss the late
+   * insertion. `instance.aborted` is the barrier, consulted at both
+   * `await` points; on observed abort we tear down the just-built
+   * bundle and throw without updating the map.
    */
-  private async createWorkflowInfrastructure(instance: WorkflowInstance): Promise<void> {
+  private async ensureBundleForScope(instance: WorkflowInstance, scope: string): Promise<DockerInfrastructure> {
+    if (instance.aborted) {
+      throw new Error(`Workflow ${instance.id} is aborting; cannot mint bundle for scope "${scope}"`);
+    }
+    const existing = instance.bundlesByScope.get(scope);
+    if (existing) return existing;
+
     const settings = instance.definition.settings ?? {};
     const agentId = (settings.dockerAgent ?? 'claude-code') as AgentId;
-    const controlSocketPath = getWorkflowProxyControlSocketPath(instance.id);
-    // Ensure the workflow run dir exists BEFORE the coordinator tries to
-    // bind its UDS there. `getWorkflowRunDir` is lazily materialized; if
-    // the first thing the orchestrator does is ask the coordinator to
-    // listen on a path whose parent directory is missing, bind fails.
-    const runDir = dirname(controlSocketPath);
-    mkdirSync(runDir, { recursive: true, mode: 0o700 });
-    // `mkdirSync`'s `mode` only applies on creation; if the run dir
-    // pre-exists (stale from a prior run or manually created) the mode
-    // is a no-op. The coordinator's control socket relies on 0o700 to
-    // gate access — enforce permissions unconditionally.
-    chmodSync(runDir, 0o700);
+    // Mint a fresh UUID per scope: each bundle needs its own on-disk
+    // directory tree, coordinator control socket, and Docker container
+    // name. Unlike single-session CLI (`bundleId === sessionId`),
+    // workflow scopes produce genuine standalone `BundleId`s.
+    const bundleId = createBundleId();
+    const controlSocketPath = getBundleControlSocketPath(bundleId);
+    // Ensure the per-bundle runtime root exists BEFORE the coordinator
+    // tries to bind its UDS there. Routes through `ensureSecureBundleDir`
+    // so the same symlink-rejection + 0o700-enforcement hardening that
+    // guards `sockets/` and `host/` (in `prepareDockerInfrastructure`)
+    // also guards the root the coordinator's `ctrl.sock` binds into.
+    ensureSecureBundleDir(getBundleRuntimeRoot(bundleId));
 
     const factory = this.deps.createWorkflowInfrastructure ?? (await this.loadDefaultInfrastructureFactory());
     const infra = await factory({
       workflowId: instance.id,
+      bundleId,
       agentId,
       controlSocketPath,
       workspacePath: instance.workspacePath,
+      scope,
     });
 
+    // Abort may have landed while `factory()` was suspended. Publishing
+    // into `bundlesByScope` now would leak past the destroy's leak
+    // assertion; destroy the orphan inline and throw. ESLint cannot see
+    // that `instance.aborted` is mutated by the concurrent
+    // `destroyWorkflowInfrastructure` call between the two reads.
+    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+    if (instance.aborted) {
+      const destroy = this.deps.destroyWorkflowInfrastructure ?? (await this.loadDefaultInfrastructureTeardown());
+      await destroy(infra).catch((teardownErr: unknown) => {
+        writeStderr(
+          `[workflow] destroyDockerInfrastructure during abort recovery for ${instance.id} (bundle ${bundleId}): ${toErrorMessage(teardownErr)}`,
+        );
+      });
+      throw new Error(`Workflow ${instance.id} was aborted during bundle mint for scope "${scope}"`);
+    }
+
     // Attach the control server. On failure, tear down the bundle so
-    // we don't leak containers/proxies; the error propagates to the
-    // caller so `start()` can reject.
+    // we don't leak containers/proxies; the error propagates so the
+    // caller (executeAgentState) can fail the state invoke.
     try {
       const startServer = this.deps.startWorkflowControlServer ?? defaultStartWorkflowControlServer;
       await startServer({ infra, socketPath: controlSocketPath });
@@ -509,27 +610,68 @@ export class WorkflowOrchestrator implements WorkflowController {
       throw err;
     }
 
-    instance.infra = infra;
+    // Abort check #2: abort may have landed while `startServer()` was
+    // suspended. Publishing into `bundlesByScope` now would leak past
+    // the destroy's leak assertion; tear down the just-built bundle
+    // and throw. ESLint cannot see that `instance.aborted` is mutated
+    // by the concurrent `destroyWorkflowInfrastructure` call between
+    // the two reads.
+    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+    if (instance.aborted) {
+      const destroy = this.deps.destroyWorkflowInfrastructure ?? (await this.loadDefaultInfrastructureTeardown());
+      await destroy(infra).catch((teardownErr: unknown) => {
+        writeStderr(
+          `[workflow] destroyDockerInfrastructure during abort recovery (post-startServer) for ${instance.id} (bundle ${bundleId}): ${toErrorMessage(teardownErr)}`,
+        );
+      });
+      throw new Error(`Workflow ${instance.id} was aborted during control-server attach for scope "${scope}"`);
+    }
+
+    instance.bundlesByScope.set(scope, infra);
+    return infra;
   }
 
   /**
-   * Reloads the coordinator's policy for the given persona. Called once
-   * per agent state invocation (including re-entries) when
-   * `instance.infra` is set. The coordinator stamps `persona` onto every
+   * Reloads the coordinator's policy for the given persona on the given
+   * bundle. Called once per agent state invocation (including re-entries)
+   * in shared-container mode. The coordinator stamps `persona` onto every
    * subsequent audit entry, so consumers can reconstruct per-persona /
-   * per-re-entry slices from the single `audit.jsonl` file.
+   * per-re-entry slices from the bundle's `audit.jsonl` file.
+   *
+   * Each scope owns its own bundle, coordinator, and control socket, so
+   * the bundle is passed explicitly — cycle the scope the state is
+   * about to enter, not some other scope's bundle.
    *
    * On failure (control socket unreachable, coordinator reports a load
    * error) this throws — the workflow must not proceed under the
    * previous persona's policy.
    */
-  private async cyclePolicy(instance: WorkflowInstance, persona: string): Promise<void> {
+  private async cyclePolicy(instance: WorkflowInstance, persona: string, bundle: DockerInfrastructure): Promise<void> {
+    // Skip the RPC when the bundle's coordinator already has this
+    // persona loaded. Consecutive states on the same scope+persona
+    // would otherwise re-send an identical `loadPolicy` — a no-op on
+    // the coordinator that still costs a UDS round-trip and a policy
+    // engine rebuild.
+    if (instance.currentPersonaByBundle.get(bundle.bundleId) === persona) return;
+
     let policyDir = instance.policyDirByPersona.get(persona);
     if (policyDir === undefined) {
       policyDir = resolvePersonaPolicyDir(persona);
       instance.policyDirByPersona.set(persona, policyDir);
     }
-    const socketPath = getWorkflowProxyControlSocketPath(instance.id);
+    // Target this bundle's coordinator. Under bifurcated workflows every
+    // bundle has its own socket, so the bundle argument fully determines
+    // the route.
+    const socketPath = getBundleControlSocketPath(bundle.bundleId);
+
+    // Invalidate the cache entry BEFORE the RPC. If `loadPolicy` fails
+    // after the coordinator already applied the new policy (e.g., the
+    // RPC times out during the response), leaving the cache pointed at
+    // the previous persona would silently skip the next cycle and run
+    // a subsequent state under the wrong policy. Clear-then-rewrite
+    // ensures the cache is never stale relative to the coordinator's
+    // actual state — at worst we re-send an identical `loadPolicy`.
+    instance.currentPersonaByBundle.delete(bundle.bundleId);
 
     const loadPolicy = this.deps.loadPolicyRpc ?? defaultLoadPolicyRpc;
     await loadPolicy({
@@ -538,49 +680,83 @@ export class WorkflowOrchestrator implements WorkflowController {
       policyDir,
       timeoutMs: LOAD_POLICY_RPC_TIMEOUT_MS,
     });
+    instance.currentPersonaByBundle.set(bundle.bundleId, persona);
   }
 
   /**
-   * Tears down the workflow-scoped Docker infrastructure bundle, if any.
-   *
-   * Callers in recovery paths depend on this function never throwing:
-   *   - Failures in `destroy(infra)` are logged to stderr and swallowed;
-   *     the socket-unlink step still runs.
-   *   - Failures in the socket unlink are logged and swallowed.
-   *
-   * **Not a retry point.** `instance.infra` is cleared synchronously
-   * before the async `destroy(infra)` so a second concurrent call (e.g.
+   * Tears down every bundle this workflow owns. Walks
+   * `instance.bundlesByScope.values()` in parallel via `Promise.allSettled`
+   * so failures in one bundle's teardown do not block the others. The
+   * map is drained before the awaits so a second concurrent caller (e.g.
    * `shutdownAll` racing the fire-and-forget destroy in
-   * `handleWorkflowComplete`) sees `infra === undefined` and returns
-   * without re-entering `destroy`. This prevents double-destroy against
-   * the same Docker resources at the cost of giving up on in-process
-   * retry if the first destroy threw — recovery from a persistent
-   * destroy failure is the operator's responsibility (`docker ps -a`).
+   * `handleWorkflowComplete`) sees an empty map and returns without
+   * re-entering `destroy`.
+   *
+   * Callers in recovery paths rely on **expected** failure modes being
+   * swallowed so abort/shutdown flows can complete:
+   *   - Failures in `destroy(infra)` are logged to stderr and swallowed.
+   *   - Failures in socket unlinks are logged and swallowed.
+   *
+   * **One exception — intentional throw on internal invariant violation.**
+   * After teardown the helper asserts `bundlesByScope.size === 0`. A
+   * non-empty map at that point is a bug: something added an entry back
+   * while teardown was in flight. The invariant is enforced by the
+   * abort-guard in `ensureBundleForScope` (post-`factory` flag check);
+   * reaching this throw means the guard has a hole and we want it to
+   * surface loudly rather than silently strand a bundle. Callers are
+   * `abort()`, `shutdownAll()`, and the fire-and-forget `.catch()` in
+   * `handleWorkflowComplete` — in the expected invariant-holds case
+   * none of them see an exception. A thrown leak assertion in
+   * `abort()` / `shutdownAll()` will propagate to their own caller (the
+   * test or CLI layer), which is the intended signal.
    */
   private async destroyWorkflowInfrastructure(instance: WorkflowInstance): Promise<void> {
-    const infra = instance.infra;
-    if (!infra) return;
-    // Clear BEFORE the await so a concurrent caller sees undefined and
-    // bails out. See JSDoc for the rationale.
-    instance.infra = undefined;
+    // Set BEFORE any short-circuit: an in-flight `ensureBundleForScope`
+    // that resumes from its `await factory(...)` must observe this flag
+    // and tear down its own orphan rather than publishing into the map.
+    instance.aborted = true;
+    if (instance.bundlesByScope.size === 0) return;
+
+    // Snapshot and clear BEFORE the awaits so a concurrent caller sees
+    // an empty map and bails out. See JSDoc for the rationale.
+    const bundles = [...instance.bundlesByScope.values()];
+    instance.bundlesByScope.clear();
 
     const destroy = this.deps.destroyWorkflowInfrastructure ?? (await this.loadDefaultInfrastructureTeardown());
-    try {
-      await destroy(infra);
-    } catch (err) {
-      writeStderr(`[workflow] destroyDockerInfrastructure failed for ${instance.id}: ${toErrorMessage(err)}`);
-    }
 
-    // Best-effort: unlink the coordinator control socket. Swallow
-    // ENOENT because the socket may never have been bound (e.g., when
-    // destroy runs after a failure before control-server attach).
-    try {
-      unlinkSync(getWorkflowProxyControlSocketPath(instance.id));
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code;
-      if (code !== 'ENOENT') {
-        writeStderr(`[workflow] Failed to unlink control socket for ${instance.id}: ${toErrorMessage(err)}`);
-      }
+    await Promise.allSettled(
+      bundles.map(async (infra) => {
+        try {
+          await destroy(infra);
+        } catch (err) {
+          writeStderr(
+            `[workflow] destroyDockerInfrastructure failed for ${instance.id} (bundle ${infra.bundleId}): ${toErrorMessage(err)}`,
+          );
+        }
+
+        // Best-effort: unlink the coordinator control socket. Swallow
+        // ENOENT because the socket may never have been bound (e.g.,
+        // when destroy runs after a failure before control-server attach).
+        try {
+          unlinkSync(getBundleControlSocketPath(infra.bundleId));
+        } catch (err) {
+          const code = (err as NodeJS.ErrnoException).code;
+          if (code !== 'ENOENT') {
+            writeStderr(
+              `[workflow] Failed to unlink control socket for ${instance.id} (bundle ${infra.bundleId}): ${toErrorMessage(err)}`,
+            );
+          }
+        }
+      }),
+    );
+
+    // Leak assertion: after snapshot-and-clear + parallel destroy, the
+    // map MUST be empty. A non-empty map means a destroy path silently
+    // added an entry back after teardown began — a real bug we surface
+    // as a synchronous error so it cannot be swallowed.
+    if (instance.bundlesByScope.size !== 0) {
+      const leaked = [...instance.bundlesByScope.keys()];
+      throw new Error(`Leaked workflow bundle scopes after teardown: ${JSON.stringify(leaked)}`);
     }
   }
 
@@ -599,14 +775,14 @@ export class WorkflowOrchestrator implements WorkflowController {
 
     return async (input) => {
       const config = loadConfig();
-      // Bundle dir holds the workflow's shared Docker artifacts
+      // Bundle dir holds the bundle's shared Docker artifacts
       // (orientation, sockets, claude-state, escalations, system
-      // prompt). It's colocated under the workflow run directory so
-      // every workflow-scoped file lives under a single tree.
-      // Audit entries go to the workflow-scoped file (one file per
-      // workflow run, with per-entry persona tagging) instead of the
-      // per-session audit file.
-      const bundleDir = getWorkflowBundleDir(input.workflowId);
+      // prompt). It lives under the bundle's per-bundleId subtree so
+      // bifurcated workflows can host multiple bundles side by side
+      // without key collisions.
+      // Audit entries go to the per-bundle audit file (one file per
+      // bundle, with per-entry persona tagging).
+      const bundleDir = getBundleBundleDir(input.workflowId, input.bundleId);
       const bundleEscalationDir = resolve(bundleDir, 'escalations');
       // All sessions in a workflow share the workflow's workspace dir
       // as their allowed directory. Do NOT use a session-scoped sandbox
@@ -623,7 +799,7 @@ export class WorkflowOrchestrator implements WorkflowController {
       // AuditLog. Without the audit rewrite, audit entries fall through
       // to the default `./audit.jsonl` against process.cwd().
       config.allowedDirectory = input.workspacePath;
-      config.auditLogPath = getWorkflowAuditLogPath(input.workflowId);
+      config.auditLogPath = getBundleAuditLogPath(input.workflowId, input.bundleId);
       applyAllowedDirectoryToMcpArgs(config.mcpServers, input.workspacePath);
       return createDockerInfrastructure(
         config,
@@ -631,7 +807,12 @@ export class WorkflowOrchestrator implements WorkflowController {
         bundleDir,
         input.workspacePath,
         bundleEscalationDir,
+        input.bundleId,
+        // Threading the workflowId + scope here drives the
+        // `ironcurtain.workflow` and `ironcurtain.scope` Docker labels
+        // emitted by `createSessionContainers()` via `buildBundleLabels`.
         input.workflowId,
+        input.scope,
       );
     };
   }
@@ -699,6 +880,11 @@ export class WorkflowOrchestrator implements WorkflowController {
   // WorkflowController implementation
   // -----------------------------------------------------------------------
 
+  // Keeps the `async` signature even though the body no longer awaits:
+  // (a) preserves the `WorkflowController.start()` contract (Promise<WorkflowId>),
+  // (b) leaves a hook for future async bootstrap work without another
+  // interface change.
+  // eslint-disable-next-line @typescript-eslint/require-await
   async start(definitionPath: string, taskDescription: string, workspacePath?: string): Promise<WorkflowId> {
     const raw = parseDefinitionFile(definitionPath);
     const definition = validateDefinition(raw);
@@ -751,25 +937,23 @@ export class WorkflowOrchestrator implements WorkflowController {
       currentState: definition.initial,
       stateEnteredAt: Date.now(),
       messageLog,
+      bundlesByScope: new Map(),
       policyDirByPersona: new Map(),
       tokens: {
         outputTokens: 0,
         sessionIds: new Set(),
       },
+      currentPersonaByBundle: new Map(),
+      aborted: false,
     };
 
-    // Create workflow-scoped Docker infrastructure BEFORE starting the actor
-    // so the first state's session invocation can borrow it. If infra creation
-    // fails, fail fast without registering the workflow or starting the actor.
-    if (this.shouldUseSharedContainer(definition)) {
-      try {
-        await this.createWorkflowInfrastructure(instance);
-      } catch (err) {
-        tab.write(`[error] Failed to create workflow infrastructure: ${toErrorMessage(err)}`);
-        tab.close();
-        throw err;
-      }
-    }
+    // Under `sharedContainer: true`, bundles are minted lazily by
+    // `ensureBundleForScope` on the first `executeAgentState` call for
+    // each scope. There is no eager workflow-start mint — the first
+    // state pays the cost of spinning up the bundle it needs. This also
+    // removes a latent "Docker not available" failure mode at workflow
+    // registration time: the workflow enters the actor's first state
+    // before any Docker resource is touched.
 
     this.workflows.set(workflowId, instance);
     this.setupTokenSubscription(instance);
@@ -828,6 +1012,7 @@ export class WorkflowOrchestrator implements WorkflowController {
       currentState: String(checkpoint.machineState),
       stateEnteredAt: Date.now(),
       messageLog,
+      bundlesByScope: new Map(),
       policyDirByPersona: new Map(),
       tokens: {
         // Resume picks up the checkpointed totalTokens as the accumulator's
@@ -836,25 +1021,21 @@ export class WorkflowOrchestrator implements WorkflowController {
         outputTokens: checkpoint.context.totalTokens,
         sessionIds: new Set(),
       },
+      currentPersonaByBundle: new Map(),
+      aborted: false,
     };
 
-    // Create workflow-scoped Docker infrastructure before starting the
-    // actor. Resume does NOT reclaim the original container — any
-    // dependencies installed in the previous run are lost. Reclamation
-    // is tracked as a follow-up in the workflow container lifecycle
-    // design (§6).
+    // Resume does NOT reclaim the original containers — any
+    // dependencies installed in the previous run are lost. Under the
+    // lazy-mint model there is nothing to do at resume time:
+    // `bundlesByScope` starts empty and the first state to execute
+    // mints its bundle afresh. Container reclamation across resume is
+    // tracked as a follow-up.
     if (this.shouldUseSharedContainer(definition)) {
       writeStderr(
-        `[workflow] Resuming ${workflowId} in shared-container mode: creating a fresh Docker infrastructure bundle. ` +
-          `Any dependencies installed in the pre-resume container are lost.`,
+        `[workflow] Resuming ${workflowId} in shared-container mode: bundles will be re-created lazily per scope. ` +
+          `Any dependencies installed in pre-resume containers are lost.`,
       );
-      try {
-        await this.createWorkflowInfrastructure(instance);
-      } catch (err) {
-        tab.write(`[error] Failed to create workflow infrastructure on resume: ${toErrorMessage(err)}`);
-        tab.close();
-        throw err;
-      }
     }
 
     this.workflows.set(workflowId, instance);
@@ -1074,7 +1255,7 @@ export class WorkflowOrchestrator implements WorkflowController {
     // abort() early-returns — so we follow up with an explicit destroy pass
     // to defend against any case where a terminal transition skipped infra
     // teardown (e.g., tests forcing finalStatus directly). The destroy call
-    // is idempotent when instance.infra is undefined.
+    // is idempotent when instance.bundlesByScope is empty.
     await Promise.allSettled(ids.map((id) => this.abort(id)));
     await Promise.allSettled(
       ids.map((id) => {
@@ -1259,13 +1440,37 @@ export class WorkflowOrchestrator implements WorkflowController {
 
     const effectiveModel = stateConfig.model ?? settings.model;
 
-    // Shared-container mode only: rotate the coordinator's audit stream
-    // and swap policy before constructing the borrowing session. In
+    // Shared-container mode only: resolve (or lazily mint) the bundle
+    // for this state's scope, rotate the coordinator's audit stream, and
+    // swap policy before constructing the borrowing session. In
     // per-state-container mode the new session builds its own
     // coordinator, so there is nothing to cycle.
-    if (instance.infra) {
+    //
+    // Scope lookup algorithm (docs/designs/workflow-session-identity.md §3):
+    //   1. scope := stateConfig.containerScope ?? "primary"
+    //   2. bundle := instance.bundlesByScope.get(scope)
+    //   3. if absent: lazy-mint via ensureBundleForScope(instance, scope)
+    //   4. borrow bundle via SessionOptions.workflowInfrastructure
+    let bundle: DockerInfrastructure | undefined;
+    if (this.shouldUseSharedContainer(definition)) {
+      const scope = stateConfig.containerScope ?? DEFAULT_CONTAINER_SCOPE;
       try {
-        await this.cyclePolicy(instance, stateConfig.persona);
+        bundle = await this.ensureBundleForScope(instance, scope);
+      } catch (err) {
+        const errMsg = toErrorMessage(err);
+        writeStderr(`[workflow] ensureBundleForScope failed for "${stateId}" (scope=${scope}): ${errMsg}`);
+        instance.tab.write(`[error] Infrastructure setup failed for "${stateId}": ${errMsg}`);
+        instance.messageLog.append({
+          ...this.logBase(instance),
+          type: 'error',
+          error: errMsg,
+          context: `ensureBundleForScope "${stateId}" (scope: ${scope})`,
+        });
+        throw err;
+      }
+
+      try {
+        await this.cyclePolicy(instance, stateConfig.persona, bundle);
       } catch (err) {
         const errMsg = toErrorMessage(err);
         writeStderr(`[workflow] cyclePolicy failed for "${stateId}": ${errMsg}`);
@@ -1280,11 +1485,16 @@ export class WorkflowOrchestrator implements WorkflowController {
       }
     }
 
-    // Create session with resumeSessionId for same-role continuity.
-    // sessionsByState is keyed by stateId (set by updateContextFromAgentResult).
-    // workspacePath ensures the agent writes to the artifact directory,
-    // so files created by the agent are visible to the orchestrator.
-    const previousSessionId = stateConfig.freshSession === false ? context.sessionsByState[stateId] : undefined;
+    // Agent-CLI conversation identity for this invocation. Decision table
+    // (docs/designs/workflow-session-identity.md §3):
+    //   - freshSession:false AND prior entry in agentConversationsByState -> reuse
+    //   - otherwise -> mint fresh via createAgentConversationId()
+    // The Docker adapter decides --session-id vs --resume by probing
+    // conversationStateDir for `<agentConversationId>.jsonl`; a minted-fresh
+    // id has no prior file, a reused one does.
+    const priorConversationId =
+      stateConfig.freshSession === false ? context.agentConversationsByState[stateId] : undefined;
+    const agentConversationId: AgentConversationId = priorConversationId ?? createAgentConversationId();
 
     // In borrow mode, route this invocation's per-state artifacts
     // (session.log, session-metadata.json) under a slug-keyed directory
@@ -1294,7 +1504,7 @@ export class WorkflowOrchestrator implements WorkflowController {
     // entry, 2 on re-entry, etc.).
     const visitCountForSlug = context.visitCounts[stateId];
     const stateSlug = `${stateId}.${visitCountForSlug}`;
-    const workflowStateDir = instance.infra ? getWorkflowStateDir(instance.id, stateSlug) : undefined;
+    const workflowStateDir = bundle ? getInvocationDir(instance.id, bundle.bundleId, stateSlug) : undefined;
     if (workflowStateDir) {
       mkdirSync(workflowStateDir, { recursive: true });
     }
@@ -1304,7 +1514,7 @@ export class WorkflowOrchestrator implements WorkflowController {
       session = await this.deps.createSession({
         persona: stateConfig.persona,
         mode,
-        resumeSessionId: previousSessionId,
+        agentConversationId,
         workspacePath: instance.workspacePath,
         systemPromptAugmentation: definition.settings?.systemPrompt,
         ...(effectiveModel != null ? { agentModelOverride: effectiveModel } : {}),
@@ -1314,7 +1524,7 @@ export class WorkflowOrchestrator implements WorkflowController {
         // Borrow the workflow-scoped Docker bundle so the session does
         // not rebuild proxies / containers per state. Unset for builtin
         // or opt-out workflows.
-        ...(instance.infra ? { workflowInfrastructure: instance.infra } : {}),
+        ...(bundle ? { workflowInfrastructure: bundle } : {}),
         // Per-state artifact dir is only meaningful in borrow mode —
         // `buildSessionConfig` throws if `workflowStateDir` is supplied
         // without a bundle.
@@ -1364,9 +1574,9 @@ export class WorkflowOrchestrator implements WorkflowController {
       // Shared-container mode: the MITM is long-lived across agents. Flip
       // its routing id so this agent's events land under its own session id
       // (matching what the bridge registers below). Optional-chain because
-      // builtin/per-state-container workflows have no shared `infra`.
+      // builtin/per-state-container workflows have no shared bundle.
       const agentSessionId = session.getInfo().id;
-      instance.infra?.setTokenSessionId(agentSessionId);
+      bundle?.setTokenSessionId(agentSessionId);
       instance.tokens.sessionIds.add(agentSessionId);
 
       this.emitLifecycleEvent({
@@ -1499,7 +1709,7 @@ export class WorkflowOrchestrator implements WorkflowController {
 
       return {
         output: agentOutput,
-        sessionId: previousSessionId || session.getInfo().id,
+        agentConversationId,
         artifacts,
         outputHash,
         responseText,
@@ -1528,7 +1738,7 @@ export class WorkflowOrchestrator implements WorkflowController {
       // routing → drop from accumulator filter → emit agent_session_ended.
       // Clearing the MITM id before the bridge teardown means any stray
       // late event cannot push under an about-to-be-unregistered label.
-      instance.infra?.setTokenSessionId(undefined);
+      bundle?.setTokenSessionId(undefined);
       instance.tokens.sessionIds.delete(endedSessionId);
       // Pairs 1:1 with agent_started; emitted unconditionally in finally
       // so success, failure, and abort paths all clean up the bridge.

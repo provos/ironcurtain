@@ -31,8 +31,17 @@ import { buildMemorySystemPrompt, adaptMemoryToolNames } from '../memory/memory-
 import { AgentSession } from './agent-session.js';
 import { SessionError } from './errors.js';
 import { saveSessionMetadata, saveSessionMetadataTo, loadSessionMetadata } from './session-metadata.js';
-import { createSessionId } from './types.js';
-import type { Session, SessionId, SessionOptions, SessionMode } from './types.js';
+import { createAgentConversationId, createSessionId } from './types.js';
+import type {
+  AgentConversationId,
+  BuiltinSessionOptions,
+  BundleId,
+  DockerSessionOptions,
+  Session,
+  SessionId,
+  SessionOptions,
+  SessionMode,
+} from './types.js';
 
 /**
  * Creates and initializes a new session.
@@ -48,6 +57,8 @@ import type { Session, SessionId, SessionOptions, SessionMode } from './types.js
  * @throws {SessionError} with code SESSION_INIT_FAILED if
  *   sandbox or MCP connection setup fails.
  */
+export async function createSession(options: DockerSessionOptions): Promise<Session>;
+export async function createSession(options?: BuiltinSessionOptions): Promise<Session>;
 export async function createSession(options: SessionOptions = {}): Promise<Session> {
   // When resuming, restore persisted session settings (persona, workspace, etc.)
   const effectiveOptions = applyResumeMetadata(options);
@@ -58,6 +69,40 @@ export async function createSession(options: SessionOptions = {}): Promise<Sessi
   }
 
   return createBuiltinSession(effectiveOptions);
+}
+
+/**
+ * Entry point for callers outside the workflow orchestrator — CLI,
+ * daemon, signal bot, web UI. For Docker mode: resumes the persisted
+ * `AgentConversationId` when `resumeSessionId` is set (so
+ * `ironcurtain --resume <id>` continues the prior Claude conversation
+ * via `--resume <conv-id>` on the adapter), otherwise mints fresh.
+ * Builtin mode ignores the field.
+ *
+ * Legacy-session fallback: sessions created before
+ * `agentConversationId` was persisted in metadata will have no stored
+ * id. Those resumes mint fresh, and the agent CLI starts a new
+ * conversation — the prior transcript is unreachable but nothing is
+ * corrupted. New sessions created post-refactor always persist the id,
+ * so subsequent resumes recover the conversation.
+ *
+ * Workflow callers must not use this: they must thread
+ * `agentConversationId` from `context.agentConversationsByState` via
+ * `createSession()` directly so `freshSession: false` states resume
+ * the prior conversation.
+ */
+export async function createStandaloneSession(options: Omit<SessionOptions, 'agentConversationId'>): Promise<Session> {
+  if (options.mode?.kind === 'docker') {
+    const persistedId = options.resumeSessionId
+      ? loadSessionMetadata(options.resumeSessionId)?.agentConversationId
+      : undefined;
+    return createSession({
+      ...options,
+      mode: options.mode,
+      agentConversationId: persistedId ?? createAgentConversationId(),
+    });
+  }
+  return createSession({ ...options, mode: options.mode });
 }
 
 /**
@@ -77,6 +122,14 @@ function applyResumeMetadata(options: SessionOptions): SessionOptions {
     ...(metadata.workspacePath !== undefined ? { workspacePath: metadata.workspacePath } : {}),
     ...(metadata.policyDir !== undefined ? { policyDir: metadata.policyDir } : {}),
     ...(metadata.disableAutoApprove !== undefined ? { disableAutoApprove: metadata.disableAutoApprove } : {}),
+    // Caller-supplied `agentConversationId` wins over the persisted
+    // one (workflow orchestrator always passes its own explicitly).
+    // Only the CLI / daemon `createStandaloneSession` path leaves the
+    // field unset, and that's exactly the path we want to restore from
+    // metadata so `--resume` continues the prior Claude conversation.
+    ...(options.agentConversationId === undefined && metadata.agentConversationId !== undefined
+      ? { agentConversationId: metadata.agentConversationId }
+      : {}),
   };
 }
 
@@ -160,6 +213,22 @@ async function createDockerSession(
   const sessionId = createSessionId();
   const effectiveSessionId = options.resumeSessionId ?? sessionId;
 
+  // Agent-CLI conversation id must be minted by the caller. Docker-mode
+  // callers pass `DockerSessionOptions`, which makes this field required
+  // at the type level. The runtime guard catches callers that widen to
+  // the base `SessionOptions` type and forget to supply it — the factory
+  // will not mint on their behalf because the single-conversation model
+  // makes the minting site load-bearing (workflow orchestrator reuses
+  // per state; each CLI run mints fresh). See §11 step 4 and §3
+  // "Identity flow" in docs/designs/workflow-session-identity.md.
+  if (!options.agentConversationId) {
+    throw new SessionError(
+      'agentConversationId is required for Docker sessions: mint via createAgentConversationId() at the call site',
+      'SESSION_INIT_FAILED',
+    );
+  }
+  const agentConversationId: AgentConversationId = options.agentConversationId;
+
   const loggerWasActive = logger.isActive();
   const sessionConfig = buildSessionConfig(config, effectiveSessionId, sessionId, options);
 
@@ -197,6 +266,11 @@ async function createDockerSession(
       infra = options.workflowInfrastructure;
     } else {
       // Standalone path: factory creates and owns the bundle.
+      // Single-session invariant (§2.1 of workflow-session-identity): the
+      // SessionId value doubles as the BundleId. Casting at this boundary
+      // preserves the deterministic `ironcurtain-<sessionId[0:12]>`
+      // container name for prior-crash recovery.
+      const bundleId = sessionId as unknown as BundleId;
       const { createDockerInfrastructure } = await import('../docker/docker-infrastructure.js');
       infra = await createDockerInfrastructure(
         sessionConfig.config,
@@ -204,7 +278,7 @@ async function createDockerSession(
         sessionConfig.sessionDir,
         sessionConfig.sandboxDir,
         sessionConfig.escalationDir,
-        sessionId,
+        bundleId,
       );
       // Standalone sessions use their bundle for the session's entire
       // lifetime; pin the token-stream routing ID to this session's ID.
@@ -242,6 +316,7 @@ async function createDockerSession(
     session = new DockerAgentSession({
       config: sessionConfig.config,
       sessionId,
+      agentConversationId,
       infra,
       // Ownership mirrors who allocated the bundle: standalone path owns
       // and tears down on close; borrow path leaves the bundle alive for
@@ -351,6 +426,7 @@ export function buildSessionConfig(
     | 'workflowInfrastructure'
     | 'workflowStateDir'
     | 'stateSlug'
+    | 'agentConversationId'
   > = {},
 ): SessionDirConfig {
   let { workspacePath, policyDir, systemPromptAugmentation } = opts;
@@ -404,11 +480,11 @@ export function buildSessionConfig(
   // Paths differ by mode:
   // - Borrow mode: per-state artifacts go under `workflowStateDir` when
   //   the orchestrator supplied one; otherwise fall back to the bundle's
-  //   sessionDir (legacy path, still used by factory-level tests). The
-  //   bundle owns sandbox/escalation/audit on `workflowInfrastructure`.
+  //   bundleDir (legacy path, still used by factory-level tests). The
+  //   bundle owns workspace/escalation/audit on `workflowInfrastructure`.
   // - Standalone/CLI: everything lives under `{home}/sessions/{id}/`.
   const borrowInfra = opts.workflowInfrastructure;
-  const artifactDir = borrowInfra ? (opts.workflowStateDir ?? borrowInfra.sessionDir) : undefined;
+  const artifactDir = borrowInfra ? (opts.workflowStateDir ?? borrowInfra.bundleDir) : undefined;
   const sessionDir = artifactDir ?? getSessionDir(effectiveSessionId);
   const sandboxDir = workspacePath ?? getSessionSandboxDir(effectiveSessionId);
   const escalationDir = borrowInfra ? borrowInfra.escalationDir : getSessionEscalationDir(effectiveSessionId);
@@ -528,6 +604,10 @@ export function buildSessionConfig(
       // Only store policyDir when no persona is set (persona derives its own)
       ...(!opts.persona && policyDir ? { policyDir } : {}),
       ...(opts.disableAutoApprove ? { disableAutoApprove: true } : {}),
+      // Persist the agent-CLI conversation id so `ironcurtain --resume`
+      // can continue the same Claude conversation rather than starting
+      // fresh. Docker-mode sessions only; builtin has no agent CLI.
+      ...(opts.agentConversationId ? { agentConversationId: opts.agentConversationId } : {}),
     };
     if (artifactDir) {
       saveSessionMetadataTo(resolve(artifactDir, SESSION_METADATA_FILENAME), metadata);

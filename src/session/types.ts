@@ -13,9 +13,67 @@ import type { WhitelistCandidateIpc } from '../trusted-process/approval-whitelis
  */
 export type SessionId = string & { readonly __brand: 'SessionId' };
 
-/** Creates a new unique SessionId. */
+/** Creates a new unique SessionId (v4 UUID). */
 export function createSessionId(): SessionId {
   return randomUUID() as SessionId;
+}
+
+/**
+ * Unique key for a Docker infrastructure bundle: one container + its
+ * MITM proxy, Code Mode proxy, CA, fake keys, and sockets tree. A
+ * single-session CLI run has one `BundleId` (equal to the session's
+ * `SessionId` at the value level, though the brands remain distinct at
+ * the type level). A shared-container workflow has one `BundleId` per
+ * distinct `containerScope` used across its states.
+ *
+ * Used to key the on-disk directory tree
+ * (`workflow-runs/<wfId>/containers/<bundleId>/`), the Docker container
+ * name suffix (`ironcurtain-<bundleId[0:12]>`), the
+ * `ironcurtain.bundle` Docker label, and the coordinator control socket
+ * path.
+ *
+ * See `docs/designs/workflow-session-identity.md` §2.1.
+ */
+export type BundleId = string & { readonly __brand: 'BundleId' };
+
+/** Creates a new unique BundleId (v4 UUID). */
+export function createBundleId(): BundleId {
+  return randomUUID() as BundleId;
+}
+
+/**
+ * Length of the deterministic short slug derived from a `BundleId` for
+ * Docker container names (`ironcurtain-<shortId>`). Matches Docker's
+ * conventional short-form container-id truncation.
+ */
+const BUNDLE_SHORT_ID_LEN = 12;
+
+/**
+ * Deterministic short slug of a `BundleId` for use in Docker container
+ * names. Always the first `BUNDLE_SHORT_ID_LEN` chars of the UUID.
+ */
+export function getBundleShortId(bundleId: BundleId): string {
+  return bundleId.substring(0, BUNDLE_SHORT_ID_LEN);
+}
+
+/**
+ * UUID the external agent CLI (e.g., Claude Code) uses for conversation
+ * continuity. Passed as `--session-id <id>` on first turn and
+ * `--resume <id>` on subsequent turns. Shape is dictated by the external
+ * agent: Claude Code writes `projects/<cwd-hash>/<id>.jsonl`, so the
+ * UUID must be preserved across turns for the agent to find its own
+ * history.
+ *
+ * This identity does NOT correspond to any IronCurtain-owned directory;
+ * its entire purpose is to be handed back to the agent CLI on re-entry.
+ *
+ * See `docs/designs/workflow-session-identity.md` §2.1.
+ */
+export type AgentConversationId = string & { readonly __brand: 'AgentConversationId' };
+
+/** Creates a new unique AgentConversationId (v4 UUID). */
+export function createAgentConversationId(): AgentConversationId {
+  return randomUUID() as AgentConversationId;
 }
 
 /**
@@ -30,6 +88,15 @@ export interface SessionMetadata {
   readonly workspacePath?: string;
   readonly policyDir?: string;
   readonly disableAutoApprove?: boolean;
+  /**
+   * Agent-CLI conversation id assigned when this session was first
+   * created. Persisted so `ironcurtain --resume <sessionId>` can reuse
+   * the same id and continue the Claude conversation where it left
+   * off. Absent on sessions created before this field was introduced;
+   * `createStandaloneSession` falls through to a fresh mint in that
+   * case (legacy-session fallback).
+   */
+  readonly agentConversationId?: AgentConversationId;
 }
 
 /**
@@ -289,8 +356,9 @@ export interface SessionOptions {
    * `close()` does NOT destroy the bundle. The caller retains full
    * responsibility for destroying it via `destroyDockerInfrastructure`.
    *
-   * Intended for workflow mode (Step 5+): the orchestrator creates one
-   * bundle per workflow run and hands it to every state's session.
+   * Used by the workflow orchestrator: one bundle per workflow run (or
+   * per `containerScope` in a bifurcated workflow) is handed to every
+   * borrowing state's session.
    *
    * Standalone callers leave this unset; the factory calls
    * `createDockerInfrastructure` and constructs the session with
@@ -327,7 +395,42 @@ export interface SessionOptions {
    * produced them.
    */
   readonly stateSlug?: string;
+
+  /**
+   * The agent-CLI conversation id. Used as `--session-id` on first turn
+   * or `--resume` on subsequent turns. Required for Docker sessions
+   * (the factory will not mint on behalf of callers); ignored for builtin
+   * sessions — resume semantics there are keyed on IronCurtain session
+   * directories, not agent-CLI conversation ids.
+   *
+   * The required-for-Docker contract is enforced at the type level by
+   * `DockerSessionOptions` / `BuiltinSessionOptions` below — callers of
+   * `createSession()` that pass `mode.kind === 'docker'` must supply this
+   * field.
+   *
+   * See `docs/designs/workflow-session-identity.md` §2.2 / §3 / §8.5.
+   */
+  readonly agentConversationId?: AgentConversationId;
 }
+
+/**
+ * Docker-mode options: `agentConversationId` is required because every
+ * Docker turn passes it to the agent CLI as `--session-id <id>` /
+ * `--resume <id>`. See `SessionOptions.agentConversationId`.
+ */
+export type DockerSessionOptions = SessionOptions & {
+  readonly mode: { readonly kind: 'docker'; readonly agent: AgentId; readonly authKind?: 'oauth' | 'apikey' };
+  readonly agentConversationId: AgentConversationId;
+};
+
+/**
+ * Builtin-mode options: `agentConversationId` is ignored (builtin resume
+ * is keyed on the IronCurtain session directory). `mode` may be omitted
+ * (defaults to builtin).
+ */
+export type BuiltinSessionOptions = SessionOptions & {
+  readonly mode?: { readonly kind: 'builtin' };
+};
 
 /**
  * The core session contract. A session is a stateful conversation

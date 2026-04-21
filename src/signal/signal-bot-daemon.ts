@@ -15,7 +15,7 @@
  * message parsing, and command dispatch.
  */
 
-import { createSession } from '../session/index.js';
+import { createStandaloneSession } from '../session/index.js';
 import { loadConfig } from '../config/index.js';
 import { loadUserConfig } from '../config/user-config.js';
 import { resolveSignalConfig, type ResolvedSignalConfig } from './signal-config.js';
@@ -496,7 +496,7 @@ export class SignalBotDaemon {
       dockerMode: this.mode.kind === 'docker',
     });
 
-    const session = await createSession({
+    const session = await createStandaloneSession({
       config,
       mode: this.mode,
       persona,

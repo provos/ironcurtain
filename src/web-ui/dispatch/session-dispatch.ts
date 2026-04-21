@@ -19,7 +19,7 @@ import {
 import { tokenStreamDispatch } from './token-stream-dispatch.js';
 import { WebSessionTransport } from '../web-session-transport.js';
 import { loadConfig } from '../../config/index.js';
-import { createSession } from '../../session/index.js';
+import { createStandaloneSession } from '../../session/index.js';
 import { shouldAutoSaveMemory } from '../../memory/auto-save.js';
 import { BudgetExhaustedError } from '../../session/errors.js';
 import { getTokenStreamBus } from '../../docker/token-stream-bus.js';
@@ -135,7 +135,7 @@ async function createWebSession(ctx: DispatchContext, persona?: string): Promise
     dockerMode: ctx.mode.kind === 'docker',
   });
 
-  const session = await createSession({
+  const session = await createStandaloneSession({
     config,
     mode: ctx.mode,
     persona,

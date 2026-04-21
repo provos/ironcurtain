@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import type { AgentConversationId } from '../session/types.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -20,6 +21,19 @@ export const WORKFLOW_ARTIFACT_DIR = '.workflow';
  * which resolves it to a per-persona policy, memory, and prompt.
  */
 export const GLOBAL_PERSONA = 'global';
+
+/**
+ * Default `containerScope` value assigned to agent states that do not
+ * declare one explicitly. Every such state shares the workflow's primary
+ * bundle. The orchestrator's scope-lookup path resolves
+ * `stateConfig.containerScope ?? DEFAULT_CONTAINER_SCOPE` before dispatch.
+ *
+ * Scope strings are opaque Map lookup keys — they are never embedded in
+ * filesystem paths (bundle directory names use the UUID `bundleId`).
+ *
+ * See `docs/designs/workflow-session-identity.md` §2.4 / §6.
+ */
+export const DEFAULT_CONTAINER_SCOPE = 'primary';
 
 // ---------------------------------------------------------------------------
 // Branded identifiers
@@ -126,11 +140,6 @@ export interface AgentStateDefinition {
   readonly outputs: readonly string[];
   /** Transitions evaluated in order; first match wins. */
   readonly transitions: readonly AgentTransitionDefinition[];
-  /**
-   * Key path into an artifact for parallel instantiation.
-   * E.g., "spec.modules" reads the modules array from the spec artifact.
-   */
-  readonly parallelKey?: string;
   /** When true, each parallel instance gets a dedicated git worktree. */
   readonly worktree?: boolean;
   /**
@@ -162,6 +171,25 @@ export interface AgentStateDefinition {
    * visit — i.e., after the Nth invocation completes.
    */
   readonly maxVisits?: number;
+  /**
+   * Container scope label. States sharing a scope share a bundle (one
+   * container, one coordinator, one audit log, one control socket);
+   * states with different scopes live in different bundles. When unset,
+   * defaults to `"primary"`, so every state lands on the workflow's
+   * primary bundle by default.
+   *
+   * Meaningful only under `sharedContainer: true`. Under
+   * `sharedContainer: false` (legacy default, one container per state)
+   * declaring a `containerScope` is a validation error — silent no-ops
+   * are footguns; we reject at validate.ts.
+   *
+   * Charset: `/^[a-zA-Z0-9_-]+$/`. Scope strings are opaque Map lookup
+   * keys — they are NEVER embedded in filesystem paths; the on-disk
+   * bundle directory name is the UUID `bundleId`, not the scope.
+   *
+   * See `docs/designs/workflow-session-identity.md` §2.4.
+   */
+  readonly containerScope?: string;
 }
 
 export interface HumanGateStateDefinition {
@@ -258,6 +286,12 @@ export interface HumanGateTransitionDefinition {
   readonly to: string;
   /** The accepted event type that triggers this transition. */
   readonly event: HumanGateEventType;
+  /**
+   * Optional ordered list of actions to run on this transition, in
+   * addition to the default gate context-update actions (storeHumanPrompt,
+   * clearError). Actions execute in the order listed.
+   */
+  readonly actions?: readonly WorkflowTransitionAction[];
 }
 
 export type HumanGateEventType = 'APPROVE' | 'FORCE_REVISION' | 'REPLAN' | 'ABORT';
@@ -343,7 +377,14 @@ export interface WorkflowContext {
   readonly worktreeBranches: readonly string[];
   readonly totalTokens: number;
   readonly lastError: string | null;
-  readonly sessionsByState: Record<string, string>;
+  /**
+   * Maps a stateId to the agent-CLI conversation id assigned on the last
+   * successful invocation of that state. Consumed by `freshSession: false`
+   * re-entries so the CLI can `--resume` the prior conversation.
+   *
+   * See `docs/designs/workflow-session-identity.md` §2.4.
+   */
+  readonly agentConversationsByState: Record<string, AgentConversationId>;
   /**
    * Response text from the last completed agent state, with the trailing
    * `agent_status` YAML block stripped. Truncated at 32KB. Used as the
@@ -389,7 +430,6 @@ export type WorkflowStatus =
 export interface AgentSlot {
   readonly stateId: string;
   readonly persona: string;
-  readonly parallelKey?: string;
 }
 
 export interface WorkflowResult {

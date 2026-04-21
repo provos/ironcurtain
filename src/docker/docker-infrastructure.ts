@@ -16,6 +16,8 @@ import {
   mkdtempSync,
   rmSync,
   mkdirSync,
+  chmodSync,
+  lstatSync,
   writeFileSync,
   unlinkSync,
 } from 'node:fs';
@@ -23,7 +25,9 @@ import { arch, tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { quote } from 'shell-quote';
 import type { IronCurtainConfig } from '../config/types.js';
-import type { SessionMode } from '../session/types.js';
+import { getBundleRuntimeRoot } from '../config/paths.js';
+import { getBundleShortId, type BundleId, type SessionMode } from '../session/types.js';
+import { DEFAULT_CONTAINER_SCOPE, type WorkflowId } from '../workflow/types.js';
 import { CONTAINER_WORKSPACE_DIR, type AgentAdapter, type ConversationStateConfig } from './agent-adapter.js';
 import type { DockerProxy } from './code-mode-proxy.js';
 import type { MitmProxy } from './mitm-proxy.js';
@@ -37,6 +41,34 @@ import { errorMessage } from '../utils/error-message.js';
 import * as logger from '../logger.js';
 
 /**
+ * Create a bundle-owned directory and enforce 0o700 permissions even if
+ * it already exists. `mkdirSync`'s `mode` only applies on creation, so a
+ * stale dir (crashed prior run, manual creation) could otherwise leave
+ * the UDS endpoints reachable by other local users.
+ *
+ * Rejects symlinks at the bundle path itself: even though these dirs
+ * now live under `~/.ironcurtain/run/` (not `/tmp/`), we don't want to
+ * silently follow a pre-existing symlink in the user's own tree.
+ *
+ * Ancestor components (`~/.ironcurtain/run/`, `~/.ironcurtain/`, `~/`)
+ * are NOT walked — the user's home tree is our trust boundary, and an
+ * attacker who can rewrite `~/.ironcurtain/` already controls the CA
+ * and the OAuth credentials we store there. Defending against that
+ * within this helper would be theater.
+ */
+export function ensureSecureBundleDir(path: string): void {
+  mkdirSync(path, { recursive: true, mode: 0o700 });
+  const stats = lstatSync(path);
+  if (stats.isSymbolicLink()) {
+    throw new Error(`Refusing to use symlink at bundle path ${path}`);
+  }
+  if (!stats.isDirectory()) {
+    throw new Error(`Bundle path ${path} exists but is not a directory`);
+  }
+  chmodSync(path, 0o700);
+}
+
+/**
  * Shared infrastructure bundle produced by the pre-container setup phase.
  *
  * `prepareDockerInfrastructure()` returns this shape: proxies, CA, fake keys,
@@ -47,9 +79,53 @@ import * as logger from '../logger.js';
  * running container.
  */
 export interface PreContainerInfrastructure {
-  readonly sessionId: string;
-  readonly sessionDir: string;
-  readonly sandboxDir: string;
+  /**
+   * Stable key for this bundle. Used by:
+   *  - Docker container name: `ironcurtain-<bundleId[0:12]>`
+   *  - `ironcurtain.bundle=<bundleId>` label
+   *  - Per-bundle directory layout under `workflow-runs/<wfId>/containers/<bundleId>/`
+   *  - Coordinator control socket path
+   *
+   * Minted by `createDockerInfrastructure()`; never changes for a bundle's
+   * lifetime. In single-session CLI mode the underlying value equals the
+   * `SessionId` (the session factory casts at the boundary); in workflow
+   * mode the orchestrator mints a dedicated `BundleId`.
+   *
+   * See `docs/designs/workflow-session-identity.md` §2.1 / §2.3.
+   */
+  readonly bundleId: BundleId;
+  /**
+   * Workflow id this bundle belongs to, if any. Present only when the
+   * bundle was created under a workflow run; drives the
+   * `ironcurtain.workflow` and `ironcurtain.scope` Docker labels in
+   * `createSessionContainers()`. Standalone CLI / PTY bundles leave
+   * this undefined so no workflow/scope labels are emitted.
+   *
+   * See `docs/designs/workflow-session-identity.md` §7.
+   */
+  readonly workflowId?: WorkflowId;
+  /**
+   * Scope this bundle was minted for, if any. Present only on
+   * workflow-mode bundles (alongside `workflowId`). Emitted directly as
+   * the `ironcurtain.scope=<scope>` Docker label so resume / orphan
+   * reclamation can reconstruct `bundlesByScope` from the live container
+   * set. Standalone CLI / PTY bundles leave this undefined.
+   *
+   * See `docs/designs/workflow-session-identity.md` §2.5 / §7.
+   */
+  readonly scope?: string;
+  /**
+   * Host directory holding bundle-scoped artifacts (sockets, escalations,
+   * orientation, CA, fake keys, system-prompt). Outlives any single session
+   * invocation.
+   */
+  readonly bundleDir: string;
+  /**
+   * Host directory bind-mounted as the agent's workspace. Under workflow
+   * mode a single workspace is shared across bundles; single-session
+   * callers pass a per-session sandbox here.
+   */
+  readonly workspaceDir: string;
   readonly escalationDir: string;
   /**
    * Audit log path, populated by `prepareDockerInfrastructure()` from
@@ -128,14 +204,22 @@ const DOCKER_HOST_GATEWAY = 'host.docker.internal';
  * `createDockerInfrastructure()` (which wraps this with `sleep infinity`
  * container creation); PTY sessions call this directly and then create their
  * own TTY-enabled container.
+ *
+ * `workflowId` drives Docker labelling: when set, the main container (and
+ * any sidecar created during `createSessionContainers`) carries
+ * `ironcurtain.workflow=<workflowId>` + `ironcurtain.scope=<scope>`
+ * alongside the always-present `ironcurtain.bundle=<bundleId>`. When
+ * unset, only `ironcurtain.bundle` is emitted (standalone CLI / PTY).
  */
 export async function prepareDockerInfrastructure(
   config: IronCurtainConfig,
   mode: SessionMode & { kind: 'docker' },
-  sessionDir: string,
-  sandboxDir: string,
+  bundleDir: string,
+  workspaceDir: string,
   escalationDir: string,
-  sessionId: string,
+  bundleId: BundleId,
+  workflowId?: WorkflowId,
+  scope?: string,
 ): Promise<PreContainerInfrastructure> {
   // The audit log path is read from config so the bundle is
   // self-describing: downstream consumers (AuditLogTailer, sandbox
@@ -155,6 +239,13 @@ export async function prepareDockerInfrastructure(
 
   const { detectAuthMethod, writeToKeychain } = await import('./oauth-credentials.js');
   const { OAuthTokenManager } = await import('./oauth-token-manager.js');
+  const {
+    getBundleSocketsDir,
+    getBundleHostOnlyDir,
+    getBundleProxySocketPath,
+    getBundleMitmProxySocketPath,
+    getBundleMitmControlSocketPath,
+  } = await import('../config/paths.js');
 
   await registerBuiltinAdapters(config.userConfig);
   const adapter = getAgent(mode.agent);
@@ -177,13 +268,28 @@ export async function prepareDockerInfrastructure(
   // Safe to mutate: callers always pass a session-specific copy.
   config.dockerAuth = { kind: authKind };
 
-  // Derive socketsDir from the passed sessionDir rather than sessionId so
-  // that resumed sessions (where sessionDir is based on effectiveSessionId)
-  // place sockets in the correct directory.
-  const socketsDir = resolve(sessionDir, 'sockets');
-  mkdirSync(socketsDir, { recursive: true, mode: 0o700 });
+  // Host-side UDS endpoints must fit under `sockaddr_un.sun_path`
+  // (macOS ~104 / Linux ~108 bytes). The historical layout
+  // (`<bundleDir>/sockets/proxy.sock` etc.) overflows that budget on
+  // Linux for any realistic `$HOME` because `<bundleDir>` itself is
+  // `~/.ironcurtain/workflow-runs/<36-char wfId>/containers/<36-char
+  // bundleId>/bundle/` — ~95 chars before any filename. Route through
+  // `getBundleSocketsDir(bundleId)` / `getBundleHostOnlyDir(bundleId)`
+  // (both under `~/.ironcurtain/run/<bid12>/`) so every assembled path
+  // stays well under the cap even with a 20-char username.
+  // Harden the runtime root FIRST: `ensureSecureBundleDir` rejects a
+  // pre-existing symlink at that path. If we only checked the children
+  // (`sockets/`, `host/`) an attacker who planted a symlink at the
+  // runtime root would silently redirect them. The root's ancestors
+  // (`~/.ironcurtain/run/`, `~/.ironcurtain/`) are the user's trust
+  // boundary and intentionally not walked.
+  ensureSecureBundleDir(getBundleRuntimeRoot(bundleId));
+  const socketsDir = getBundleSocketsDir(bundleId);
+  const hostOnlyDir = getBundleHostOnlyDir(bundleId);
+  ensureSecureBundleDir(socketsDir);
+  ensureSecureBundleDir(hostOnlyDir);
 
-  const socketPath = resolve(socketsDir, 'proxy.sock');
+  const socketPath = getBundleProxySocketPath(bundleId);
 
   const proxy = createCodeModeProxy({
     socketPath,
@@ -248,10 +354,15 @@ export async function prepareDockerInfrastructure(
       deniedPackages: pkgConfig.deniedPackages,
       quarantineDays: pkgConfig.quarantineDays,
     });
-    const packageAuditLogPath = resolve(sessionDir, 'package-audit.jsonl');
+    const packageAuditLogPath = resolve(bundleDir, 'package-audit.jsonl');
     packageValidation = { validator, auditLogPath: packageAuditLogPath };
   }
 
+  // MITM proxy uses its `sessionId` option as a token-stream routing key
+  // (see MitmProxyOptions.sessionId). The routing key must match what
+  // token-stream subscribers use; today bundleId is the right value in
+  // both single-session and workflow modes. Name kept inside MitmProxy for
+  // historical reasons; the value is a bundle-scoped routing token.
   const mitmProxy = useTcp
     ? createMitmProxy({
         listenPort: 0,
@@ -260,14 +371,16 @@ export async function prepareDockerInfrastructure(
         registries,
         packageValidation,
         controlPort: 0,
+        sessionId: bundleId,
       })
     : createMitmProxy({
-        socketPath: resolve(socketsDir, 'mitm-proxy.sock'),
+        socketPath: getBundleMitmProxySocketPath(bundleId),
         ca,
         providers: providerMappings,
         registries,
         packageValidation,
-        controlSocketPath: resolve(sessionDir, 'mitm-control.sock'),
+        controlSocketPath: getBundleMitmControlSocketPath(bundleId),
+        sessionId: bundleId,
       });
 
   const docker = createDockerManager();
@@ -323,24 +436,26 @@ export async function prepareDockerInfrastructure(
     logger.info(`Available servers: ${serverListings.map((s) => s.name).join(', ')}`);
 
     const proxyAddress = useTcp && proxy.port !== undefined ? `${DOCKER_HOST_GATEWAY}:${proxy.port}` : undefined;
-    const { systemPrompt } = prepareSession(adapter, serverListings, sessionDir, config, sandboxDir, proxyAddress);
+    const { systemPrompt } = prepareSession(adapter, serverListings, bundleDir, config, workspaceDir, proxyAddress);
 
     // Ensure Docker image is built and up-to-date
     const image = await adapter.getImage();
     await ensureImage(image, docker, ca);
 
-    const orientationDir = resolve(sessionDir, 'orientation');
+    const orientationDir = resolve(bundleDir, 'orientation');
 
     // Set up conversation state directory if the adapter supports resume
     const conversationStateConfig = adapter.getConversationStateConfig?.();
     const conversationStateDir = conversationStateConfig
-      ? prepareConversationStateDir(sessionDir, conversationStateConfig)
+      ? prepareConversationStateDir(bundleDir, conversationStateConfig)
       : undefined;
 
     return {
-      sessionId,
-      sessionDir,
-      sandboxDir,
+      bundleId,
+      workflowId,
+      scope,
+      bundleDir,
+      workspaceDir,
       escalationDir,
       auditLogPath,
       proxy,
@@ -382,12 +497,23 @@ export async function prepareDockerInfrastructure(
 export async function createDockerInfrastructure(
   config: IronCurtainConfig,
   mode: SessionMode & { kind: 'docker' },
-  sessionDir: string,
-  sandboxDir: string,
+  bundleDir: string,
+  workspaceDir: string,
   escalationDir: string,
-  sessionId: string,
+  bundleId: BundleId,
+  workflowId?: WorkflowId,
+  scope?: string,
 ): Promise<DockerInfrastructure> {
-  const core = await prepareDockerInfrastructure(config, mode, sessionDir, sandboxDir, escalationDir, sessionId);
+  const core = await prepareDockerInfrastructure(
+    config,
+    mode,
+    bundleDir,
+    workspaceDir,
+    escalationDir,
+    bundleId,
+    workflowId,
+    scope,
+  );
 
   try {
     const containerResources = await createSessionContainers(core, config);
@@ -448,7 +574,48 @@ export async function destroyDockerInfrastructure(infra: DockerInfrastructure): 
   // and reused across sessions; fake keys are just strings in a Map that
   // goes out of scope with the infrastructure bundle.
 
+  // Remove the per-bundle `~/.ironcurtain/run/<bid12>/` tree. The
+  // proxies already unlink their own socket files during `stop()`, and
+  // the coordinator unlinks `ctrl.sock` from its control-server shutdown,
+  // but the subdirectories (`sockets/` + `host/`) remain. Best-effort
+  // only: a stale dir from a crashed run gets cleaned up on the next
+  // bundle startup via `mkdirSync({recursive})`, and the contents
+  // (empty once sockets are unlinked) carry no sensitive data.
+  const runtimeRoot = getBundleRuntimeRoot(infra.bundleId);
+  try {
+    rmSync(runtimeRoot, { recursive: true, force: true });
+  } catch (err) {
+    logger.warn(`destroyDockerInfrastructure: rmSync(${runtimeRoot}) failed: ${errorMessage(err)}`);
+  }
+
   logger.info(`Destroyed Docker infrastructure (container=${infra.containerId.substring(0, 12)})`);
+}
+
+/**
+ * Returns the Docker label fields
+ * (`bundleLabel` / `workflowLabel` / `scopeLabel`) for containers owned by
+ * the given bundle. Workflow-mode bundles emit all three; standalone
+ * bundles emit only `bundleLabel`. Each field is left `undefined` when
+ * absent so `buildCreateArgs` skips the corresponding `--label` flag.
+ *
+ * See `docs/designs/workflow-session-identity.md` §7.
+ */
+export function buildBundleLabels(core: Pick<PreContainerInfrastructure, 'bundleId' | 'workflowId' | 'scope'>): {
+  bundleLabel: string;
+  workflowLabel?: string;
+  scopeLabel?: string;
+} {
+  if (core.workflowId !== undefined) {
+    return {
+      bundleLabel: core.bundleId,
+      workflowLabel: core.workflowId,
+      // Resolved scope is set by the orchestrator on every workflow
+      // bundle; default-fall back to DEFAULT_CONTAINER_SCOPE so that a
+      // workflow bundle always carries a scope label.
+      scopeLabel: core.scope ?? DEFAULT_CONTAINER_SCOPE,
+    };
+  }
+  return { bundleLabel: core.bundleId };
 }
 
 /** Container-level resources layered on top of the pre-container bundle. */
@@ -472,8 +639,13 @@ export async function createSessionContainers(
   core: PreContainerInfrastructure,
   config: IronCurtainConfig,
 ): Promise<ContainerResources> {
-  const shortId = core.sessionId.substring(0, 12);
+  const shortId = getBundleShortId(core.bundleId);
   const mainContainerName = `${CONTAINER_NAME_PREFIX}${shortId}`;
+  // Labels applied to every IronCurtain-owned container (main + sidecar).
+  // Workflow-mode bundles carry workflow + scope labels alongside the
+  // always-present bundle label; standalone bundles carry only bundle.
+  // See `docs/designs/workflow-session-identity.md` §7.
+  const bundleLabels = buildBundleLabels(core);
 
   // Remove stale main container from a crashed previous session (same session
   // ID means same deterministic name, which would conflict on docker create).
@@ -490,7 +662,7 @@ export async function createSessionContainers(
     // workspace and the orientation dir. Mode-specific mounts (apt proxy
     // config, sockets dir, conversation state) are appended below.
     const mounts: { source: string; target: string; readonly: boolean }[] = [
-      { source: core.sandboxDir, target: CONTAINER_WORKSPACE_DIR, readonly: false },
+      { source: core.workspaceDir, target: CONTAINER_WORKSPACE_DIR, readonly: false },
       { source: core.orientationDir, target: '/etc/ironcurtain', readonly: true },
     ];
     let env = {
@@ -544,7 +716,7 @@ export async function createSessionContainers(
         mounts: [],
         env: {},
         entrypoint: '/bin/sh',
-        sessionLabel: core.sessionId,
+        ...bundleLabels,
         command: [
           '-c',
           quote(['socat', `TCP-LISTEN:${mcpPort},fork,reuseaddr`, `TCP:${DOCKER_HOST_GATEWAY}:${mcpPort}`]) +
@@ -582,10 +754,13 @@ export async function createSessionContainers(
         readonly: true,
       });
 
-      // Mount only the sockets subdirectory into the container -- not the full
-      // session dir. This prevents the container from accessing escalation files,
-      // audit logs, or other session data. proxy.sock and mitm-proxy.sock are
-      // created in this directory by the host-side proxy setup.
+      // Mount ONLY the per-bundle `sockets/` directory into the
+      // container. The sockets dir lives under a short
+      // `~/.ironcurtain/run/<bid12>/` path (see `getBundleSocketsDir`)
+      // so the host path stays under `sockaddr_un.sun_path` on both
+      // macOS and Linux. The host-only MITM control socket lives in a
+      // sibling `host/` dir, NOT under this mount, so it is not
+      // visible to the container.
       mounts.push({ source: core.socketsDir, target: '/run/ironcurtain', readonly: false });
     }
 
@@ -605,7 +780,7 @@ export async function createSessionContainers(
       mounts,
       env,
       command: ['sleep', 'infinity'],
-      sessionLabel: core.sessionId,
+      ...bundleLabels,
       resources: { memoryMb: 8192, cpus: 4 },
       extraHosts,
       capAdd: [

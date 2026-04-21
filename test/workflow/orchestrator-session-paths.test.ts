@@ -14,11 +14,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import type { SessionOptions } from '../../src/session/types.js';
+import type { BundleId, SessionOptions } from '../../src/session/types.js';
 import type { WorkflowDefinition } from '../../src/workflow/types.js';
 import type { DockerInfrastructure } from '../../src/docker/docker-infrastructure.js';
 import { WorkflowOrchestrator, type CreateWorkflowInfrastructureInput } from '../../src/workflow/orchestrator.js';
-import { getWorkflowStateDir, getSessionsDir } from '../../src/config/paths.js';
+import { getInvocationDir, getSessionsDir } from '../../src/config/paths.js';
 import {
   MockSession,
   approvedResponse,
@@ -32,9 +32,20 @@ import {
   stubPersonasForTest,
 } from './test-helpers.js';
 
-/** Stub DockerInfrastructure: orchestrator only tracks identity. */
-function makeStubInfrastructure(workflowId: string): DockerInfrastructure {
-  return { __stub: true, workflowId, setTokenSessionId: () => {} } as unknown as DockerInfrastructure;
+/** Stub DockerInfrastructure: orchestrator tracks identity and reads
+ *  `bundleId` to key per-bundle paths (audit log, control socket,
+ *  invocation dirs). Under Step 6's lazy-mint model, the orchestrator
+ *  mints a fresh `BundleId` per scope via `createBundleId()` and passes
+ *  it into the factory as `input.bundleId`; the stub echoes that value
+ *  back so path assertions can reconstruct the expected paths.
+ */
+function makeStubInfrastructure(workflowId: string, bundleId: BundleId): DockerInfrastructure {
+  return {
+    __stub: true,
+    workflowId,
+    bundleId,
+    setTokenSessionId: () => {},
+  } as unknown as DockerInfrastructure;
 }
 
 const twoStateDef: WorkflowDefinition = {
@@ -131,7 +142,7 @@ describe('WorkflowOrchestrator per-state session paths (borrow mode)', () => {
     const defPath = writeDefinitionFile(tmpDir, twoStateDef);
 
     const createInfra = vi.fn(async (input: CreateWorkflowInfrastructureInput) =>
-      makeStubInfrastructure(input.workflowId),
+      makeStubInfrastructure(input.workflowId, input.bundleId),
     );
     const destroyInfra = vi.fn(async () => {});
 
@@ -157,14 +168,19 @@ describe('WorkflowOrchestrator per-state session paths (borrow mode)', () => {
 
     expect(capturedOptions).toHaveLength(2);
 
+    // The orchestrator lazy-mints a BundleId on first scope use; read
+    // it from the factory call so the path assertions can reconstruct
+    // the expected directory.
+    const mintedBundleId = createInfra.mock.calls[0][0].bundleId;
+
     // State 1: fetch, visit 1 -> fetch.1
     expect(capturedOptions[0].stateSlug).toBe('fetch.1');
-    expect(capturedOptions[0].workflowStateDir).toBe(getWorkflowStateDir(workflowId, 'fetch.1'));
+    expect(capturedOptions[0].workflowStateDir).toBe(getInvocationDir(workflowId, mintedBundleId, 'fetch.1'));
     expect(existsSync(capturedOptions[0].workflowStateDir as string)).toBe(true);
 
     // State 2: summarize, visit 1 -> summarize.1
     expect(capturedOptions[1].stateSlug).toBe('summarize.1');
-    expect(capturedOptions[1].workflowStateDir).toBe(getWorkflowStateDir(workflowId, 'summarize.1'));
+    expect(capturedOptions[1].workflowStateDir).toBe(getInvocationDir(workflowId, mintedBundleId, 'summarize.1'));
     expect(existsSync(capturedOptions[1].workflowStateDir as string)).toBe(true);
 
     // Each invocation carries the same borrowed bundle.
@@ -175,7 +191,7 @@ describe('WorkflowOrchestrator per-state session paths (borrow mode)', () => {
     const defPath = writeDefinitionFile(tmpDir, looping);
 
     const createInfra = vi.fn(async (input: CreateWorkflowInfrastructureInput) =>
-      makeStubInfrastructure(input.workflowId),
+      makeStubInfrastructure(input.workflowId, input.bundleId),
     );
     const destroyInfra = vi.fn(async () => {});
 
@@ -223,9 +239,10 @@ describe('WorkflowOrchestrator per-state session paths (borrow mode)', () => {
     expect(slugs).toEqual(['plan.1', 'code.1', 'review.1', 'plan.2', 'code.2', 'review.2']);
 
     // Second visit to plan lives under plan.2, not plan.1.
+    const mintedBundleId = createInfra.mock.calls[0][0].bundleId;
     const plan2 = capturedOptions[3];
     expect(plan2.stateSlug).toBe('plan.2');
-    expect(plan2.workflowStateDir).toBe(getWorkflowStateDir(workflowId, 'plan.2'));
+    expect(plan2.workflowStateDir).toBe(getInvocationDir(workflowId, mintedBundleId, 'plan.2'));
   });
 
   it('non-shared-container workflows do NOT receive workflowStateDir', async () => {
@@ -279,7 +296,7 @@ describe('WorkflowOrchestrator per-state session paths (borrow mode)', () => {
     try {
       const defPath = writeDefinitionFile(tmpDir, twoStateDef);
       const createInfra = vi.fn(async (input: CreateWorkflowInfrastructureInput) =>
-        makeStubInfrastructure(input.workflowId),
+        makeStubInfrastructure(input.workflowId, input.bundleId),
       );
       const sessionFactory = vi.fn(async () =>
         createArtifactAwareSession([{ text: approvedResponse('done'), artifacts: ['data', 'summary'] }], tmpDir),

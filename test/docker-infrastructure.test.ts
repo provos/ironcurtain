@@ -37,9 +37,9 @@ describe('DockerInfrastructure interface', () => {
     // Compile-time type assertion: this object satisfies DockerInfrastructure.
     // If a field is missing or has the wrong type, TypeScript will error.
     const infra: DockerInfrastructure = {
-      sessionId: 'test-session-id',
-      sessionDir: '/tmp/test/sessions/test-session-id',
-      sandboxDir: '/tmp/test/sessions/test-session-id/sandbox',
+      bundleId: 'test-session-id' as import('../src/session/types.js').BundleId,
+      bundleDir: '/tmp/test/sessions/test-session-id',
+      workspaceDir: '/tmp/test/sessions/test-session-id/sandbox',
       escalationDir: '/tmp/test/sessions/test-session-id/escalations',
       auditLogPath: '/tmp/test/sessions/test-session-id/audit.jsonl',
       proxy: {
@@ -111,7 +111,7 @@ describe('DockerInfrastructure interface', () => {
     };
 
     // Verify key fields are accessible at runtime
-    expect(infra.sessionId).toBe('test-session-id');
+    expect(infra.bundleId).toBe('test-session-id');
     expect(infra.useTcp).toBe(false);
     expect(infra.fakeKeys).toBeInstanceOf(Map);
     expect(infra.mitmAddr.socketPath).toBe('/tmp/mitm.sock');
@@ -330,16 +330,16 @@ interface MockCoreOptions {
  * actually works.
  */
 function makeMockCore(opts: MockCoreOptions): PreContainerInfrastructure {
-  const sessionId = 'test-session-id';
-  const sessionDir = join(opts.tempDir, 'session');
-  const sandboxDir = join(opts.tempDir, 'sandbox');
+  const bundleId = 'test-session-id' as import('../src/session/types.js').BundleId;
+  const bundleDir = join(opts.tempDir, 'session');
+  const workspaceDir = join(opts.tempDir, 'sandbox');
   const escalationDir = join(opts.tempDir, 'escalations');
-  const orientationDir = join(sessionDir, 'orientation');
-  const socketsDir = join(sessionDir, 'sockets');
+  const orientationDir = join(bundleDir, 'orientation');
+  const socketsDir = join(bundleDir, 'sockets');
   const auditLogPath = join(opts.tempDir, 'audit.jsonl');
 
-  mkdirSync(sessionDir, { recursive: true });
-  mkdirSync(sandboxDir, { recursive: true });
+  mkdirSync(bundleDir, { recursive: true });
+  mkdirSync(workspaceDir, { recursive: true });
   mkdirSync(escalationDir, { recursive: true });
   mkdirSync(orientationDir, { recursive: true });
   mkdirSync(socketsDir, { recursive: true });
@@ -350,9 +350,9 @@ function makeMockCore(opts: MockCoreOptions): PreContainerInfrastructure {
     : { socketPath: '/tmp/test-mitm-proxy.sock' };
 
   return {
-    sessionId,
-    sessionDir,
-    sandboxDir,
+    bundleId,
+    bundleDir,
+    workspaceDir,
     escalationDir,
     auditLogPath,
     proxy: makeMockProxy(join(socketsDir, 'proxy.sock'), proxyPort),
@@ -405,10 +405,10 @@ describe('createSessionContainers', () => {
     const runMount = mounts.find((m) => m.target === '/run/ironcurtain');
     expect(runMount).toBeDefined();
     expect(runMount!.source).toBe(core.socketsDir);
-    expect(runMount!.source).not.toBe(core.sessionDir);
+    expect(runMount!.source).not.toBe(core.bundleDir);
 
-    // Symmetric sanity check: the session dir itself is never mounted anywhere.
-    expect(mounts.some((m) => m.source === core.sessionDir)).toBe(false);
+    // Symmetric sanity check: the bundle dir itself is never mounted anywhere.
+    expect(mounts.some((m) => m.source === core.bundleDir)).toBe(false);
     // And neither is the escalation dir or audit log.
     expect(mounts.some((m) => m.source === core.escalationDir)).toBe(false);
     expect(mounts.some((m) => m.source === core.auditLogPath)).toBe(false);

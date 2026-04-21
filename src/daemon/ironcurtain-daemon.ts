@@ -15,7 +15,7 @@
 import { mkdirSync, readFileSync, writeFileSync, unlinkSync, existsSync } from 'node:fs';
 import { syncGitRepo } from '../cron/git-sync.js';
 import { resolve } from 'node:path';
-import { createSession } from '../session/index.js';
+import { createStandaloneSession } from '../session/index.js';
 import { loadConfig } from '../config/index.js';
 import { loadUserConfig, type ResolvedUserConfig } from '../config/user-config.js';
 import { getJobWorkspaceDir, getJobGeneratedDir, getJobDir, getWebUiStatePath } from '../config/paths.js';
@@ -507,19 +507,19 @@ export class IronCurtainDaemon {
     // context, so intent-matching against a user message is meaningless.
     // When job.persona is set, use the persona's compiled policy instead
     // of the job-specific generated dir.
-    const session = await createSession({
-      mode: this.mode,
+    const session = await createStandaloneSession({
       config: patchedConfig,
+      mode: this.mode,
       workspacePath: workspace,
       ...(job.persona ? { persona: job.persona } : { policyDir: jobGeneratedDir }),
       jobId: job.id,
       systemPromptAugmentation: augmentation,
       disableAutoApprove: true,
-      onEscalation: (request) => {
+      onEscalation: (request: EscalationRequest) => {
         escalationsEncountered++;
         this.handleCronEscalation(request, job);
       },
-      onEscalationResolved: (_id, decision) => {
+      onEscalationResolved: (_id: string, decision: 'approved' | 'denied') => {
         if (decision === 'approved') escalationsApproved++;
         const label = this.activeJobRuns.get(job.id);
         if (label !== undefined) {

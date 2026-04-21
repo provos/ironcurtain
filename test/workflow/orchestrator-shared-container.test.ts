@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import type { SessionOptions } from '../../src/session/types.js';
 import type { WorkflowDefinition } from '../../src/workflow/types.js';
 import type { DockerInfrastructure } from '../../src/docker/docker-infrastructure.js';
+import type { BundleId } from '../../src/session/types.js';
 import { WorkflowOrchestrator, type CreateWorkflowInfrastructureInput } from '../../src/workflow/orchestrator.js';
 import {
   approvedResponse,
@@ -22,16 +23,23 @@ import {
 /**
  * Builds a minimal stub DockerInfrastructure bundle. Tests never exercise
  * the bundle's fields directly — they only track identity (was this
- * bundle handed out, was it passed to destroy, etc.).
+ * bundle handed out, was it passed to destroy, etc.) and use `bundleId`
+ * to key per-bundle paths (audit log, control socket, invocation dirs).
+ *
+ * Under Step 6's lazy-mint model the orchestrator mints a fresh
+ * `BundleId` per scope and passes it into the factory as `input.bundleId`;
+ * the stub echoes that value back so identity comparisons work across
+ * subsequent calls.
  *
  * `setTokenSessionId` is a no-op so the orchestrator's per-agent
  * rerouting calls don't crash. Tests that care about the routing calls
  * should override it with a `vi.fn()`.
  */
-function makeStubInfrastructure(workflowId: string): DockerInfrastructure {
+function makeStubInfrastructure(workflowId: string, bundleId: BundleId): DockerInfrastructure {
   const bundle = {
     __stub: true,
     workflowId,
+    bundleId,
     setTokenSessionId: () => {},
   } as unknown as DockerInfrastructure;
   return bundle;
@@ -151,7 +159,7 @@ describe('WorkflowOrchestrator shared-container mode', () => {
     const defPath = writeDefinitionFile(tmpDir, optedOutDockerDef);
 
     const createInfra = vi.fn(async (input: CreateWorkflowInfrastructureInput) =>
-      makeStubInfrastructure(input.workflowId),
+      makeStubInfrastructure(input.workflowId, input.bundleId),
     );
     const destroyInfra = vi.fn(async () => {});
 
@@ -179,14 +187,14 @@ describe('WorkflowOrchestrator shared-container mode', () => {
   });
 
   // -------------------------------------------------------------------------
-  // Test 2: Opt-in creates infra at workflow start
+  // Test 2: Opt-in lazy-mints the primary bundle on first state entry
   // -------------------------------------------------------------------------
 
-  it('creates infra at start for Docker workflows with sharedContainer=true', async () => {
+  it('lazy-mints the primary bundle on first agent-state entry under sharedContainer=true', async () => {
     const defPath = writeDefinitionFile(tmpDir, dockerWorkflowDef);
 
     const createInfra = vi.fn(async (input: CreateWorkflowInfrastructureInput) =>
-      makeStubInfrastructure(input.workflowId),
+      makeStubInfrastructure(input.workflowId, input.bundleId),
     );
     const destroyInfra = vi.fn(async () => {});
 
@@ -204,16 +212,24 @@ describe('WorkflowOrchestrator shared-container mode', () => {
     activeOrchestrator = orchestrator;
 
     const workflowId = await orchestrator.start(defPath, 'task');
+    await waitForCompletion(orchestrator, workflowId);
 
-    // Infra created exactly once at start, before any session is invoked.
+    // With a single-scope workflow, exactly one bundle is minted.
+    // Under lazy-mint, the factory is NOT called until the first
+    // `executeAgentState` — not at `start()` — but for a single-state
+    // workflow we just observe the end state: exactly one call total.
     expect(createInfra).toHaveBeenCalledTimes(1);
     expect(createInfra.mock.calls[0][0]).toMatchObject({
       workflowId,
       agentId: 'claude-code',
+      scope: 'primary',
     });
-    expect(createInfra.mock.calls[0][0].controlSocketPath).toContain(workflowId);
-
-    await waitForCompletion(orchestrator, workflowId);
+    // Control socket lives under `~/.ironcurtain/run/<bundleId[0:12]>/`
+    // — the workflow id is no longer part of the path. Match on the
+    // minted bundle's short slug instead.
+    // Slug is derived with hyphens stripped; see `toBundleSlug` in paths.ts.
+    const mintedBundleId = createInfra.mock.calls[0][0].bundleId;
+    expect(createInfra.mock.calls[0][0].controlSocketPath).toContain(mintedBundleId.replace(/-/g, '').substring(0, 12));
   });
 
   // -------------------------------------------------------------------------
@@ -225,7 +241,7 @@ describe('WorkflowOrchestrator shared-container mode', () => {
 
     let createdBundle: DockerInfrastructure | undefined;
     const createInfra = vi.fn(async (input: CreateWorkflowInfrastructureInput) => {
-      createdBundle = makeStubInfrastructure(input.workflowId);
+      createdBundle = makeStubInfrastructure(input.workflowId, input.bundleId);
       return createdBundle;
     });
     const destroyInfra = vi.fn(async () => {});
@@ -300,7 +316,7 @@ describe('WorkflowOrchestrator shared-container mode', () => {
 
       let createdBundle: DockerInfrastructure | undefined;
       const createInfra = vi.fn(async (input: CreateWorkflowInfrastructureInput) => {
-        createdBundle = makeStubInfrastructure(input.workflowId);
+        createdBundle = makeStubInfrastructure(input.workflowId, input.bundleId);
         return createdBundle;
       });
       const destroyInfra = vi.fn(async () => {});
@@ -346,7 +362,7 @@ describe('WorkflowOrchestrator shared-container mode', () => {
     const defPath = writeDefinitionFile(tmpDir, dockerWorkflowDef);
 
     const createInfra = vi.fn(async (input: CreateWorkflowInfrastructureInput) =>
-      makeStubInfrastructure(input.workflowId),
+      makeStubInfrastructure(input.workflowId, input.bundleId),
     );
     const destroyInfra = vi.fn(async () => {});
 
@@ -393,7 +409,7 @@ describe('WorkflowOrchestrator shared-container mode', () => {
     const defPath = writeDefinitionFile(tmpDir, dockerWorkflowDef);
 
     const createInfra = vi.fn(async (input: CreateWorkflowInfrastructureInput) =>
-      makeStubInfrastructure(input.workflowId),
+      makeStubInfrastructure(input.workflowId, input.bundleId),
     );
     const destroyInfra = vi.fn(async () => {});
 
@@ -435,7 +451,7 @@ describe('WorkflowOrchestrator shared-container mode', () => {
     const defPath = writeDefinitionFile(tmpDir, builtinSharedDef);
 
     const createInfra = vi.fn(async (input: CreateWorkflowInfrastructureInput) =>
-      makeStubInfrastructure(input.workflowId),
+      makeStubInfrastructure(input.workflowId, input.bundleId),
     );
     const destroyInfra = vi.fn(async () => {});
 
@@ -467,7 +483,7 @@ describe('WorkflowOrchestrator shared-container mode', () => {
     const defPath = writeDefinitionFile(tmpDir, builtinDefaultDef);
 
     const createInfra = vi.fn(async (input: CreateWorkflowInfrastructureInput) =>
-      makeStubInfrastructure(input.workflowId),
+      makeStubInfrastructure(input.workflowId, input.bundleId),
     );
     const destroyInfra = vi.fn(async () => {});
 
@@ -553,6 +569,7 @@ describe('WorkflowOrchestrator shared-container mode', () => {
         const bundle = {
           __stub: true,
           workflowId: input.workflowId,
+          bundleId: input.bundleId,
           setTokenSessionId: (id: string | undefined) => {
             tokenSessionIdCalls.push(id);
           },
@@ -632,6 +649,7 @@ describe('WorkflowOrchestrator shared-container mode', () => {
         return {
           __stub: true,
           workflowId: input.workflowId,
+          bundleId: input.bundleId,
           setTokenSessionId: (id: string | undefined) => {
             tokenSessionIdCalls.push(id);
           },
@@ -721,7 +739,7 @@ describe('WorkflowOrchestrator shared-container mode', () => {
       const defPath = writeDefinitionFile(tmpDir, twoAgentDef);
 
       const createInfra = vi.fn(async (input: CreateWorkflowInfrastructureInput) =>
-        makeStubInfrastructure(input.workflowId),
+        makeStubInfrastructure(input.workflowId, input.bundleId),
       );
       const destroyInfra = vi.fn(async () => {});
 
@@ -782,7 +800,7 @@ describe('WorkflowOrchestrator shared-container mode', () => {
     const defPath = writeDefinitionFile(tmpDir, dockerWorkflowDef);
 
     const createInfra = vi.fn(async (input: CreateWorkflowInfrastructureInput) =>
-      makeStubInfrastructure(input.workflowId),
+      makeStubInfrastructure(input.workflowId, input.bundleId),
     );
     const destroyInfra = vi.fn(async () => {});
 
