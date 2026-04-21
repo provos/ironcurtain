@@ -55,35 +55,53 @@ const resourceBudgetSchema = z
   .optional();
 
 /**
- * Validates a qualified model ID string for config files: either a bare model
- * name (no colons) or "provider:model-name" where provider is a known provider.
- *
- * Stricter than parseModelId() which also accepts Ollama-style "name:tag" via
- * the --model CLI flag. Config values should use explicit provider prefixes
- * when colons are present to avoid ambiguity.
+ * Shared scaffold for the two model-ID validators below. Both accept strings
+ * that `parseModelId()` handles. Strict mode additionally rejects values where
+ * a colon is present but the prefix is not a known provider — that catches
+ * typos like "anthropc:claude-sonnet" in `~/.ironcurtain/config.json`.
  */
-export const qualifiedModelId = z
-  .string()
-  .min(1)
-  .refine(
-    (val) => {
-      try {
-        const { provider, modelId } = parseModelId(val);
-        // If the original value contains a colon, it must have resolved to
-        // a known provider prefix (not fallen through to the default).
-        // This catches ambiguous strings like "unknown:model" in config files.
-        if (val.includes(':') && val === modelId) return false;
-        return !!provider;
-      } catch {
-        return false;
-      }
-    },
-    {
-      message:
-        'Model ID must be "model-name" or "provider:model-name" ' +
-        'where provider is one of: anthropic, google, openai',
-    },
-  );
+function createModelIdSchema(options: { readonly strict: boolean; readonly message: string }): z.ZodType<string> {
+  return z
+    .string()
+    .min(1)
+    .refine(
+      (val) => {
+        // Reject malformed colon shapes ":tag" and "name:" — these otherwise
+        // slip through parseModelId's unknown-prefix fallthrough as opaque IDs.
+        if (val.startsWith(':') || val.endsWith(':')) return false;
+        try {
+          const { modelId } = parseModelId(val);
+          if (options.strict && val.includes(':') && val === modelId) return false;
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      { message: options.message },
+    );
+}
+
+/**
+ * Strict model ID validator for `~/.ironcurtain/config.json`. A colon-prefixed
+ * value must name a known provider; bare names are accepted.
+ */
+export const qualifiedModelId = createModelIdSchema({
+  strict: true,
+  message:
+    'Model ID must be "model-name" or "provider:model-name" ' + 'where provider is one of: anthropic, google, openai',
+});
+
+/**
+ * Looser model ID validator for workflow YAML. Additionally accepts
+ * Ollama-style "name:tag" identifiers (e.g. `glm-5.1:cloud`) reached via
+ * an upstream gateway like ANTHROPIC_BASE_URL.
+ */
+export const looseModelId = createModelIdSchema({
+  strict: false,
+  message:
+    'Model ID must be "model-name", "provider:model-name" ' +
+    '(provider: anthropic, google, openai), or an Ollama-style "name:tag" bare model ID',
+});
 
 const autoCompactSchema = z
   .object({
