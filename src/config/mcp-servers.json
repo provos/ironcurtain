@@ -44,10 +44,10 @@
     "args": ["-y", "@alanse/mcp-server-google-workspace@1.0.2"],
     "env": {},
     "_comment": "npm registry domains are needed for the initial npx -y install. To remove them, vendor the package as a local dependency instead.",
+    "_comment2": "On Linux, the @anthropic-ai/sandbox-runtime apply-seccomp binary is executed from node_modules inside the sandbox. Denying ~ blocks access to this binary if the project is in the home directory. We deny specific sensitive directories instead. TODO: separate development and production into different sandbox configs.",
     "sandbox": {
       "filesystem": {
-        "denyRead": ["~"],
-        "allowRead": ["/usr", "/lib", "/etc"]
+        "denyRead": ["~/.gnupg", "~/.aws", "~/.ssh"]
       },
       "network": {
         "allowedDomains": [
