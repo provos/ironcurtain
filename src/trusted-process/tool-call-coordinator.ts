@@ -256,6 +256,13 @@ export class ToolCallCoordinator {
    * Optionally associates a `ClientState` with the server so escalation
    * root expansion can reach the MCP client (used by the Sandbox wiring
    * for real subprocess clients).
+   *
+   * Emits a stderr drift warning when the registered tool list does not
+   * match `tool-annotations.json` (e.g. an MCP server added or renamed
+   * a tool since the last `annotate-tools` run). Without this, mismatched
+   * tools surface as silent default-denies via the policy engine's
+   * structural-unknown-tool fallback. This is the chokepoint for both the
+   * Code Mode sandbox and Docker `CodeModeProxy` paths.
    */
   registerTools(serverName: string, tools: CoordinatorTool[], clientState?: ClientState): void {
     for (const tool of tools) {
@@ -264,6 +271,7 @@ export class ToolCallCoordinator {
     if (clientState) {
       this.clientStates.set(serverName, clientState);
     }
+    warnOnToolAnnotationDrift(serverName, tools, this.toolAnnotations);
   }
 
   getRegisteredTools(): CoordinatorTool[] {
@@ -615,4 +623,43 @@ function mergeProxyAnnotations(src: StoredToolAnnotationsFile): StoredToolAnnota
       },
     },
   };
+}
+
+/**
+ * Diffs the tools a backend server actually exposes against the tools
+ * recorded for it in `tool-annotations.json`. Emits a stderr warning when
+ * the live server has tools the annotations are missing (these calls will
+ * default-deny at runtime via the policy engine's structural-unknown-tool
+ * fallback). Surfaces stale annotated tools no longer exposed by the
+ * server as a quieter informational note.
+ *
+ * Server-level drift (entire server not annotated) is already surfaced by
+ * `checkAnnotationFreshness` at policy-load time; this helper only fires
+ * when the server has an annotations entry and its tool set diverges.
+ */
+function warnOnToolAnnotationDrift(
+  serverName: string,
+  liveTools: ReadonlyArray<{ name: string }>,
+  toolAnnotations: StoredToolAnnotationsFile,
+): void {
+  if (!Object.hasOwn(toolAnnotations.servers, serverName)) return;
+  const annotated = toolAnnotations.servers[serverName];
+  const liveNames = new Set(liveTools.map((t) => t.name));
+  const annotatedNames = new Set(annotated.tools.map((t) => t.toolName));
+  const missing = [...liveNames].filter((n) => !annotatedNames.has(n)).sort();
+  const stale = [...annotatedNames].filter((n) => !liveNames.has(n)).sort();
+
+  if (missing.length > 0) {
+    process.stderr.write(
+      `Warning: MCP server '${serverName}' exposes ${missing.length} tool(s) not present in tool-annotations.json: ` +
+        `${missing.join(', ')}. These calls will be denied by the policy engine.\n` +
+        `  Run \`ironcurtain annotate-tools --server ${serverName}\` to refresh annotations for this server.\n`,
+    );
+  }
+  if (stale.length > 0) {
+    process.stderr.write(
+      `Note: tool-annotations.json for '${serverName}' contains ${stale.length} tool(s) no longer exposed by the server: ` +
+        `${stale.join(', ')}.\n`,
+    );
+  }
 }

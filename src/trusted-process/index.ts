@@ -1,6 +1,5 @@
 import type { IronCurtainConfig } from '../config/types.js';
 import type { ToolCallRequest, ToolCallResult } from '../types/mcp.js';
-import type { StoredToolAnnotationsFile } from '../pipeline/types.js';
 import {
   loadGeneratedPolicy,
   extractServerDomainAllowlists,
@@ -127,7 +126,7 @@ export class TrustedProcess {
     const policyRoots = extractPolicyRoots(compiledPolicy, this.config.allowedDirectory);
     this.mcpRoots = toMcpRoots(policyRoots);
 
-    await this.connectMcpServers(toolAnnotations);
+    await this.connectMcpServers();
   }
 
   /**
@@ -150,7 +149,7 @@ export class TrustedProcess {
    * Connects to every configured MCP server and registers its tools
    * with the coordinator. Unavailable servers are logged and skipped.
    */
-  private async connectMcpServers(toolAnnotations: StoredToolAnnotationsFile): Promise<void> {
+  private async connectMcpServers(): Promise<void> {
     const coordinator = this.requireCoordinator();
     const failedServers: string[] = [];
     for (const [name, serverConfig] of Object.entries(this.config.mcpServers)) {
@@ -170,7 +169,6 @@ export class TrustedProcess {
         // `ClientState` so `addRootToClient` mutates the same roots
         // array the manager returns from its `roots/list` handler.
         const tools = await this.mcpManager.listTools(name);
-        warnOnToolAnnotationDrift(name, tools, toolAnnotations);
         const clientState = this.mcpManager.getClientState(name);
         if (clientState) {
           const proxiedTools: ProxiedTool[] = tools.map((t) => ({
@@ -213,48 +211,6 @@ export class TrustedProcess {
     if (this.coordinator) {
       await this.coordinator.close();
     }
-  }
-}
-
-/**
- * Diffs the live tools returned by an MCP server against the tools recorded
- * in `tool-annotations.json`. Emits a stderr warning per server with tools
- * the live server exposes but the annotations are missing (these will
- * default-deny at runtime via the policy engine's structural-unknown-tool
- * fallback). Extra annotated tools that no longer exist on the server are
- * surfaced as a quieter informational line.
- *
- * Called only after a successful `mcpManager.connect`, so optional servers
- * that fail to start (e.g. github when Docker is down) do not false-positive.
- */
-function warnOnToolAnnotationDrift(
-  serverName: string,
-  liveTools: ReadonlyArray<{ name: string }>,
-  toolAnnotations: StoredToolAnnotationsFile,
-): void {
-  if (!Object.hasOwn(toolAnnotations.servers, serverName)) {
-    // Missing-server case is already surfaced by `checkAnnotationFreshness`
-    // at policy-load time; no need to repeat it per-connect.
-    return;
-  }
-  const annotated = toolAnnotations.servers[serverName];
-  const liveNames = new Set(liveTools.map((t) => t.name));
-  const annotatedNames = new Set(annotated.tools.map((t) => t.toolName));
-  const missing = [...liveNames].filter((n) => !annotatedNames.has(n)).sort();
-  const stale = [...annotatedNames].filter((n) => !liveNames.has(n)).sort();
-
-  if (missing.length > 0) {
-    process.stderr.write(
-      `Warning: MCP server '${serverName}' exposes ${missing.length} tool(s) not present in tool-annotations.json: ` +
-        `${missing.join(', ')}. These calls will be denied by the policy engine.\n` +
-        `  Run \`ironcurtain annotate-tools --server ${serverName}\` to refresh annotations for this server.\n`,
-    );
-  }
-  if (stale.length > 0) {
-    process.stderr.write(
-      `Note: tool-annotations.json for '${serverName}' contains ${stale.length} tool(s) no longer exposed by the server: ` +
-        `${stale.join(', ')}.\n`,
-    );
   }
 }
 
