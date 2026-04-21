@@ -442,21 +442,69 @@ export type BuiltinSessionOptions = SessionOptions & {
  * - After close(), no methods except getInfo() are valid
  * - The session ID is unique and immutable for the session's lifetime
  */
+/**
+ * Outcome of a single agent turn, as returned by
+ * `Session.sendMessageDetailed()`. Extends the bare response text
+ * with diagnostics the caller may need to decide on retry behavior.
+ */
+export interface AgentTurnResult {
+  /** The agent's text response. Empty string when the process produced no output. */
+  readonly text: string;
+  /**
+   * Set when the agent process was killed or crashed before producing
+   * any output (e.g., upstream provider closed the stream mid-generation).
+   * Callers that care about distinguishing "upstream stall — retry with a
+   * fresh session" from "agent replied but formatted the answer wrong"
+   * should consult this flag rather than parsing `text`.
+   */
+  readonly hardFailure: boolean;
+}
+
 export interface Session {
   /** Returns a read-only snapshot of session state. */
   getInfo(): SessionInfo;
 
   /**
-   * Sends a user message and returns the agent's response.
+   * Sends a user message and returns the agent's response text.
    *
    * Appends the user message to conversation history, calls the LLM
    * with the full history, appends the response messages, and returns
    * the agent's text.
    *
+   * For callers that need turn diagnostics (e.g., to detect upstream
+   * stalls and retry with a fresh conversation id), use
+   * `sendMessageDetailed()` instead.
+   *
    * @throws {SessionNotReadyError} if status is not 'ready'
    * @throws {SessionClosedError} if session has been closed
    */
   sendMessage(userMessage: string): Promise<string>;
+
+  /**
+   * Sends a user message and returns the response text plus turn
+   * diagnostics. Semantically equivalent to `sendMessage()` but surfaces
+   * `hardFailure` for callers (e.g., the workflow orchestrator's retry
+   * loop) that must react to upstream stalls.
+   *
+   * @throws {SessionNotReadyError} if status is not 'ready'
+   * @throws {SessionClosedError} if session has been closed
+   */
+  sendMessageDetailed(userMessage: string): Promise<AgentTurnResult>;
+
+  /**
+   * Rotates the agent-CLI conversation id to a freshly-minted one.
+   *
+   * Intended for use after a hard failure (see `AgentTurnResult.hardFailure`):
+   * when the agent CLI was killed mid-stream, the prior id has been
+   * consumed by the CLI even though no resumable transcript exists,
+   * so a retry with the same id is rejected. Rotating mints a new id
+   * the next turn will pin with `--session-id` (or equivalent).
+   *
+   * Optional because only external-agent sessions (e.g., Claude Code
+   * in Docker) have a durable conversation id. Built-in sessions that
+   * hold all state in-memory do not implement this.
+   */
+  rotateAgentConversationId?(): void;
 
   /**
    * Returns the conversation history as turn summaries.

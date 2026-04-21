@@ -9,6 +9,7 @@ import { vi } from 'vitest';
 import { mkdirSync, writeFileSync, readdirSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type {
+  AgentTurnResult,
   SessionInfo,
   SessionId,
   BudgetStatus,
@@ -29,15 +30,17 @@ import { FileCheckpointStore } from '../../src/workflow/checkpoint.js';
 // MockSession
 // ---------------------------------------------------------------------------
 
-export type ResponseFn = (msg: string) => string | Promise<string>;
+export type MockResponse = string | AgentTurnResult;
+export type ResponseFn = (msg: string) => MockResponse | Promise<MockResponse>;
 
 export class MockSession implements Session {
   readonly sentMessages: string[] = [];
+  readonly rotateCalls: number[] = [];
   closed = false;
   private readonly sessionId: string;
   private readonly responseFn: ResponseFn;
 
-  constructor(opts: { sessionId?: string; responses: ResponseFn | string[] }) {
+  constructor(opts: { sessionId?: string; responses: ResponseFn | MockResponse[] }) {
     this.sessionId = opts.sessionId ?? `mock-${Math.random().toString(36).slice(2, 8)}`;
     if (Array.isArray(opts.responses)) {
       let idx = 0;
@@ -61,8 +64,21 @@ export class MockSession implements Session {
   }
 
   async sendMessage(msg: string): Promise<string> {
+    const { text } = await this.sendMessageDetailed(msg);
+    return text;
+  }
+
+  async sendMessageDetailed(msg: string): Promise<AgentTurnResult> {
     this.sentMessages.push(msg);
-    return this.responseFn(msg);
+    const result = await this.responseFn(msg);
+    if (typeof result === 'string') return { text: result, hardFailure: false };
+    return result;
+  }
+
+  rotateAgentConversationId(): void {
+    // Record the call count before rotation so tests can assert that
+    // rotation happened at a specific point in the message sequence.
+    this.rotateCalls.push(this.sentMessages.length);
   }
 
   getHistory(): readonly ConversationTurn[] {

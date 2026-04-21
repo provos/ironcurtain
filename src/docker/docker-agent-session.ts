@@ -32,6 +32,7 @@ import { mkdirSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type {
   AgentConversationId,
+  AgentTurnResult,
   Session,
   SessionId,
   SessionInfo,
@@ -41,6 +42,7 @@ import type {
   EscalationRequest,
   BudgetStatus,
 } from '../session/types.js';
+import { createAgentConversationId } from '../session/types.js';
 import type { IronCurtainConfig } from '../config/types.js';
 import type { DockerInfrastructure } from './docker-infrastructure.js';
 import { destroyDockerInfrastructure } from './docker-infrastructure.js';
@@ -114,7 +116,7 @@ export interface DockerAgentSessionDeps {
 
 export class DockerAgentSession implements Session {
   private readonly sessionId: SessionId;
-  private readonly agentConversationId: AgentConversationId;
+  private agentConversationId: AgentConversationId;
   private readonly config: IronCurtainConfig;
   private readonly infra: DockerInfrastructure;
   private readonly ownsInfra: boolean;
@@ -230,6 +232,11 @@ export class DockerAgentSession implements Session {
   }
 
   async sendMessage(userMessage: string): Promise<string> {
+    const { text } = await this.sendMessageDetailed(userMessage);
+    return text;
+  }
+
+  async sendMessageDetailed(userMessage: string): Promise<AgentTurnResult> {
     if (this.status === 'closed') throw new SessionClosedError();
     if (this.status !== 'ready') throw new SessionNotReadyError(this.status);
 
@@ -304,7 +311,7 @@ export class DockerAgentSession implements Session {
         this.firstTurnComplete = true;
       }
 
-      return response.text;
+      return { text: response.text, hardFailure: response.hardFailure ?? false };
     } finally {
       // Restore to 'ready' on both success and exception so a failed
       // turn (docker.exec timeout, adapter parse error, etc.) doesn't
@@ -317,6 +324,32 @@ export class DockerAgentSession implements Session {
         this.status = 'ready';
       }
     }
+  }
+
+  /**
+   * Rotates `agentConversationId` to a freshly-minted UUID and resets
+   * `firstTurnComplete` so the next turn pins the new id with
+   * `--session-id` (vs. `--resume`).
+   *
+   * Called by the workflow orchestrator after a hard failure (the agent
+   * CLI process was killed mid-stream without producing output). The
+   * previous id has been consumed by the CLI — a retry against it would
+   * be rejected with "Session ID is already in use" — but no resumable
+   * transcript exists either, so rotation is lossless.
+   *
+   * The session metadata file on disk is deliberately NOT rewritten: the
+   * stale id still points to a non-existent transcript, and
+   * `ironcurtain --resume` into a stalled-mid-stream state is not a
+   * supported path (see design plan §4).
+   */
+  rotateAgentConversationId(): void {
+    const previousId = this.agentConversationId;
+    this.agentConversationId = createAgentConversationId();
+    this.firstTurnComplete = false;
+    logger.info(
+      `[docker-agent] rotated agentConversationId from ${previousId} to ${this.agentConversationId} ` +
+        `(previous id consumed by hard-failed turn)`,
+    );
   }
 
   getHistory(): readonly ConversationTurn[] {

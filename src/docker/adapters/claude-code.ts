@@ -245,7 +245,13 @@ exit $STATUS
 
     extractResponse(exitCode: number, stdout: string): AgentResponse {
       if (exitCode !== 0) {
-        return { text: `Agent exited with code ${exitCode}.\n\nOutput:\n${stdout}` };
+        // Zero output on non-zero exit indicates the claude process was
+        // killed (SIGTERM) or crashed before producing any assistant text —
+        // typically an upstream provider stall. The session id has been
+        // consumed by the failed attempt, so the caller must rotate it
+        // before retrying.
+        const hardFailure = stdout.trim().length === 0;
+        return { text: `Agent exited with code ${exitCode}.\n\nOutput:\n${stdout}`, hardFailure };
       }
       return parseClaudeCodeJson(stdout);
     },

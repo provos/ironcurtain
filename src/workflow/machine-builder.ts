@@ -14,6 +14,7 @@ import type {
 import type { AgentConversationId } from '../session/types.js';
 import { guardImplementations } from './guards.js';
 import { stripStatusBlock } from './status-parser.js';
+import { isAgentInvocationError } from './errors.js';
 
 // ---------------------------------------------------------------------------
 // Invoke input/result types
@@ -237,7 +238,7 @@ function buildAgentState(stateId: string, config: AgentStateDefinition, definiti
       onDone: buildAgentOnDoneTransitions(config.transitions),
       onError: {
         target: findErrorTarget(config, definition),
-        actions: ['storeError'],
+        actions: ['storeError', 'updateContextFromAgentInvocationError'],
       },
     },
   };
@@ -509,6 +510,28 @@ export function buildWorkflowMachine(definition: WorkflowDefinition, taskDescrip
         // (logger.setup() redirects console.error to a log file).
         process.stderr.write(`[workflow] storeError action: ${message}\n`);
         return { lastError: message };
+      }),
+      /**
+       * Mirrors `updateContextFromAgentResult` for the error path: when
+       * the agent service rejects, recover the `agentConversationId` that
+       * was minted for the invocation (wrapped in `AgentInvocationError`)
+       * and persist it into `context.agentConversationsByState[stateId]`.
+       *
+       * Without this, `onError` drops the conversation id on the floor —
+       * `onDone` stamps the id into context, but `onError` used to record
+       * only `lastError`, which silently broke `freshSession: false`
+       * resume on the next visit to an errored state.
+       */
+      updateContextFromAgentInvocationError: assign(({ context, event }) => {
+        const errorEvent = event as { error?: unknown };
+        const err = errorEvent.error;
+        if (!isAgentInvocationError(err)) return {};
+        return {
+          agentConversationsByState: {
+            ...context.agentConversationsByState,
+            [err.stateId]: err.agentConversationId,
+          },
+        };
       }),
       incrementVisitCount: assign(({ context }, params: { stateId: string }) => ({
         visitCounts: {

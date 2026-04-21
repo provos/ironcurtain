@@ -134,6 +134,34 @@ export function createMockDocker(options: CreateMockDockerOptions = {}): DockerM
   };
 }
 
+/**
+ * Builds a scripted `exec` function for `createMockDocker`. Each call
+ * to `exec` returns the next `DockerExecResult` from `results`; once the
+ * list is exhausted, the last result is repeated (so long-running tests
+ * don't have to pre-compute an exact call count).
+ *
+ * Also records every invocation's command array in `calls`, enabling
+ * assertions on flag rotation (e.g., that a retry uses `--session-id`
+ * with a DIFFERENT UUID than the initial attempt).
+ */
+export function scriptedExec(results: readonly DockerExecResult[]): {
+  readonly exec: (container: string, cmd: readonly string[]) => Promise<DockerExecResult>;
+  readonly calls: readonly string[][];
+} {
+  if (results.length === 0) throw new Error('scriptedExec requires at least one result');
+  const calls: string[][] = [];
+  let i = 0;
+  return {
+    exec: async (_container, cmd) => {
+      calls.push([...cmd]);
+      const result = results[Math.min(i, results.length - 1)];
+      i++;
+      return result;
+    },
+    calls,
+  };
+}
+
 /** Minimal AgentAdapter mock with deterministic, assertable outputs. */
 export function createMockAdapter(): AgentAdapter {
   return {
