@@ -20,12 +20,17 @@ const __dirname = dirname(__filename);
 const isCompiled = __filename.endsWith('.js');
 
 /**
- * Returns the user-local generated dir if it contains compiled-policy.json,
- * otherwise falls back to the package-bundled generated dir.
+ * Returns the user-local generated dir if it contains the given artifact,
+ * otherwise falls back to the package-bundled dir. Used independently for
+ * `compiled-policy.json` and `tool-annotations.json` so a user who drops
+ * an updated annotations file into `~/.ironcurtain/generated/` has it
+ * picked up even without a corresponding compiled policy there (tool
+ * annotations are globally scoped — see sandbox/index.ts comment on
+ * `toolAnnotationsDir`).
  */
-function resolveGeneratedDir(packageGeneratedDir: string): string {
+function resolveArtifactDir(filename: string, packageGeneratedDir: string): string {
   const userDir = getUserGeneratedDir();
-  if (existsSync(resolve(userDir, 'compiled-policy.json'))) {
+  if (existsSync(resolve(userDir, filename))) {
     return userDir;
   }
   return packageGeneratedDir;
@@ -216,7 +221,8 @@ export function loadConfig(): IronCurtainConfig {
 
   const constitutionPath = resolve(__dirname, 'constitution.md');
   const packageGeneratedDir = resolve(__dirname, 'generated');
-  const generatedDir = resolveGeneratedDir(packageGeneratedDir);
+  const generatedDir = resolveArtifactDir('compiled-policy.json', packageGeneratedDir);
+  const toolAnnotationsDir = resolveArtifactDir('tool-annotations.json', packageGeneratedDir);
 
   const protectedPaths = computeProtectedPaths({
     constitutionPath,
@@ -258,6 +264,7 @@ export function loadConfig(): IronCurtainConfig {
     mcpServers,
     protectedPaths,
     generatedDir,
+    toolAnnotationsDir,
     constitutionPath,
     agentModelId: finalUserConfig.agentModelId,
     escalationTimeoutSeconds: finalUserConfig.escalationTimeoutSeconds,
