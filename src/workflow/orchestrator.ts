@@ -1637,7 +1637,7 @@ export class WorkflowOrchestrator implements WorkflowController {
     } finally {
       instance.activeSessions.delete(session);
       await session.close().catch((closeErr: unknown) => {
-        console.error(`[workflow] session.close() failed for "${stateId}": ${toErrorMessage(closeErr)}`);
+        writeStderr(`[workflow] session.close() failed for "${stateId}": ${toErrorMessage(closeErr)}`);
       });
     }
   }
