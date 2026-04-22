@@ -9,7 +9,7 @@ import {
   unlinkSync,
 } from 'node:fs';
 import { resolve } from 'node:path';
-import { MessageLog } from './message-log.js';
+import { MessageLog, type AgentRetryReason } from './message-log.js';
 import { createHash, type Hash } from 'node:crypto';
 import { execFile as execFileCb } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -66,6 +66,7 @@ import { buildAgentCommand, buildArtifactReprompt, buildStatusInstructions } fro
 import { collectFilesRecursive, hasAnyFiles, snapshotArtifacts } from './artifacts.js';
 import { validateDefinition } from './validate.js';
 import { parseDefinitionFile } from './discovery.js';
+import { AgentInvocationError } from './errors.js';
 
 const execFileAsync = promisify(execFileCb);
 
@@ -1380,6 +1381,12 @@ export class WorkflowOrchestrator implements WorkflowController {
     const priorConversationId =
       stateConfig.freshSession === false ? context.agentConversationsByState[stateId] : undefined;
     const agentConversationId: AgentConversationId = priorConversationId ?? createAgentConversationId();
+    // Mutable tracker updated by the hard-failure retry loop when the
+    // session rotates its conversation id. The final value is what lands
+    // in the invocation result / error and hence in the checkpoint's
+    // `agentConversationsByState`, so a later `freshSession: false` visit
+    // resumes the id whose transcript actually exists on disk.
+    let currentConversationId: AgentConversationId = agentConversationId;
 
     // In borrow mode, route this invocation's per-state artifacts
     // (session.log, session-metadata.json) under a slug-keyed directory
@@ -1425,7 +1432,7 @@ export class WorkflowOrchestrator implements WorkflowController {
         error: errMsg,
         context: `session creation for "${stateId}"`,
       });
-      throw err;
+      throw new AgentInvocationError({ stateId, agentConversationId: currentConversationId, cause: err });
     }
 
     instance.activeSessions.add(session);
@@ -1448,6 +1455,17 @@ export class WorkflowOrchestrator implements WorkflowController {
         });
       };
 
+      const logAgentRetry = (reason: AgentRetryReason, details: string, retryMessage: string) => {
+        messageLog.append({
+          ...this.logBase(instance),
+          type: 'agent_retry',
+          role: stateConfig.persona,
+          reason,
+          details,
+          retryMessage,
+        });
+      };
+
       messageLog.append({
         ...this.logBase(instance),
         type: 'agent_sent',
@@ -1462,7 +1480,43 @@ export class WorkflowOrchestrator implements WorkflowController {
         persona: stateConfig.persona,
       });
 
-      let responseText = await session.sendMessage(command);
+      // Two-phase retry: (1) hard-failure retries re-send the ORIGINAL
+      // command with a rotated conversation id, (2) soft-failure reprompt
+      // asks the agent to fix a missing/malformed agent_status block.
+      //
+      // Hard failures (exitCode != 0 with empty output, e.g., upstream
+      // provider stall that kills the CLI mid-stream) leave the agent's
+      // session id consumed but no resumable transcript on disk — a retry
+      // with the same id is rejected by the CLI. Rotating and resending the
+      // original prompt is the correct recovery path; a missing-status-block
+      // reprompt into a dead session cannot possibly succeed.
+      const MAX_HARD_RETRIES = 2;
+      let responseText = '';
+      for (let attempt = 0; attempt <= MAX_HARD_RETRIES; attempt++) {
+        // `sendMessageDetailed` is optional on the Session interface.
+        // Sessions that can't produce hard failures (e.g., built-in
+        // in-process sessions) don't implement it — fall back to
+        // `sendMessage` and surface `hardFailure: false`.
+        const result = session.sendMessageDetailed
+          ? await session.sendMessageDetailed(command)
+          : { text: await session.sendMessage(command), hardFailure: false };
+        responseText = result.text;
+        if (!result.hardFailure) break;
+
+        logReceived(responseText, undefined);
+        logAgentRetry(
+          'upstream_stall',
+          `Agent exited without producing output (attempt ${attempt + 1}/${MAX_HARD_RETRIES + 1})`,
+          command,
+        );
+
+        if (attempt === MAX_HARD_RETRIES) {
+          throw new Error(`Agent failed to produce output after ${MAX_HARD_RETRIES + 1} attempts (upstream stall)`);
+        }
+        const rotated = session.rotateAgentConversationId?.();
+        if (rotated) currentConversationId = rotated;
+      }
+
       let parseResult = tryParseAgentStatus(responseText);
       logReceived(responseText, parseResult.kind === 'ok' ? parseResult.output : undefined);
 
@@ -1472,16 +1526,13 @@ export class WorkflowOrchestrator implements WorkflowController {
       } else {
         const malformed = parseResult.kind === 'malformed' ? parseResult.error : undefined;
         const retryMsg = buildStatusBlockReprompt(statusInstructions, malformed);
-        messageLog.append({
-          ...this.logBase(instance),
-          type: 'agent_retry',
-          role: stateConfig.persona,
-          reason: malformed ? 'malformed_status_block' : 'missing_status_block',
-          details: malformed
+        logAgentRetry(
+          malformed ? 'malformed_status_block' : 'missing_status_block',
+          malformed
             ? `Malformed agent_status block: ${malformed.message}`
             : 'Response did not contain an agent_status block',
-          retryMessage: retryMsg,
-        });
+          retryMsg,
+        );
 
         responseText = await session.sendMessage(retryMsg);
         parseResult = tryParseAgentStatus(responseText);
@@ -1503,14 +1554,11 @@ export class WorkflowOrchestrator implements WorkflowController {
       const validVerdicts = getValidVerdicts(stateConfig.transitions);
       if (validVerdicts && !validVerdicts.has(agentOutput.verdict)) {
         const retryMsg = buildInvalidVerdictReprompt(agentOutput.verdict, stateConfig.transitions);
-        messageLog.append({
-          ...this.logBase(instance),
-          type: 'agent_retry',
-          role: stateConfig.persona,
-          reason: 'invalid_verdict',
-          details: `Verdict "${agentOutput.verdict}" not in valid set: ${[...validVerdicts].join(', ')}`,
-          retryMessage: retryMsg,
-        });
+        logAgentRetry(
+          'invalid_verdict',
+          `Verdict "${agentOutput.verdict}" not in valid set: ${[...validVerdicts].join(', ')}`,
+          retryMsg,
+        );
 
         responseText = await session.sendMessage(retryMsg);
         const retryParse = tryParseAgentStatus(responseText);
@@ -1540,14 +1588,7 @@ export class WorkflowOrchestrator implements WorkflowController {
       const missingArtifacts = this.findMissingArtifacts(stateConfig, instance.artifactDir);
       if (missingArtifacts.length > 0) {
         const artifactRetryMsg = buildArtifactReprompt(missingArtifacts, stateConfig.transitions);
-        messageLog.append({
-          ...this.logBase(instance),
-          type: 'agent_retry',
-          role: stateConfig.persona,
-          reason: 'missing_artifacts',
-          details: `Missing: ${missingArtifacts.join(', ')}`,
-          retryMessage: artifactRetryMsg,
-        });
+        logAgentRetry('missing_artifacts', `Missing: ${missingArtifacts.join(', ')}`, artifactRetryMsg);
 
         const retryResponse = await session.sendMessage(artifactRetryMsg);
         const retryParse = tryParseAgentStatus(retryResponse);
@@ -1580,7 +1621,7 @@ export class WorkflowOrchestrator implements WorkflowController {
 
       return {
         output: agentOutput,
-        agentConversationId,
+        agentConversationId: currentConversationId,
         artifacts,
         outputHash,
         responseText,
@@ -1592,7 +1633,7 @@ export class WorkflowOrchestrator implements WorkflowController {
         error: toErrorMessage(err),
         context: `agent "${stateId}" (persona: ${stateConfig.persona})`,
       });
-      throw err;
+      throw new AgentInvocationError({ stateId, agentConversationId: currentConversationId, cause: err });
     } finally {
       instance.activeSessions.delete(session);
       await session.close().catch((closeErr: unknown) => {

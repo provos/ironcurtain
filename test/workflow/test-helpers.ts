@@ -9,6 +9,8 @@ import { vi } from 'vitest';
 import { mkdirSync, writeFileSync, readdirSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type {
+  AgentConversationId,
+  AgentTurnResult,
   SessionInfo,
   SessionId,
   BudgetStatus,
@@ -17,6 +19,7 @@ import type {
   EscalationRequest,
 } from '../../src/session/types.js';
 import type { Session } from '../../src/session/types.js';
+import { createAgentConversationId } from '../../src/session/types.js';
 import { GLOBAL_PERSONA, type WorkflowId, type HumanGateRequest } from '../../src/workflow/types.js';
 import {
   WorkflowOrchestrator,
@@ -29,15 +32,18 @@ import { FileCheckpointStore } from '../../src/workflow/checkpoint.js';
 // MockSession
 // ---------------------------------------------------------------------------
 
-export type ResponseFn = (msg: string) => string | Promise<string>;
+export type MockResponse = string | AgentTurnResult;
+export type ResponseFn = (msg: string) => MockResponse | Promise<MockResponse>;
 
 export class MockSession implements Session {
   readonly sentMessages: string[] = [];
+  readonly rotateCalls: number[] = [];
+  readonly rotatedIds: AgentConversationId[] = [];
   closed = false;
   private readonly sessionId: string;
   private readonly responseFn: ResponseFn;
 
-  constructor(opts: { sessionId?: string; responses: ResponseFn | string[] }) {
+  constructor(opts: { sessionId?: string; responses: ResponseFn | MockResponse[] }) {
     this.sessionId = opts.sessionId ?? `mock-${Math.random().toString(36).slice(2, 8)}`;
     if (Array.isArray(opts.responses)) {
       let idx = 0;
@@ -61,8 +67,22 @@ export class MockSession implements Session {
   }
 
   async sendMessage(msg: string): Promise<string> {
+    const { text } = await this.sendMessageDetailed(msg);
+    return text;
+  }
+
+  async sendMessageDetailed(msg: string): Promise<AgentTurnResult> {
     this.sentMessages.push(msg);
-    return this.responseFn(msg);
+    const result = await this.responseFn(msg);
+    if (typeof result === 'string') return { text: result, hardFailure: false };
+    return result;
+  }
+
+  rotateAgentConversationId(): AgentConversationId {
+    this.rotateCalls.push(this.sentMessages.length);
+    const id = createAgentConversationId();
+    this.rotatedIds.push(id);
+    return id;
   }
 
   getHistory(): readonly ConversationTurn[] {

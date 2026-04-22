@@ -27,6 +27,14 @@ export interface AgentResponse {
   readonly text: string;
   /** Cumulative session cost in USD, if reported by the agent. */
   readonly costUsd?: number;
+  /**
+   * Set when the agent process was killed or crashed before producing
+   * any output (e.g., upstream provider closed the stream mid-generation).
+   * Signals to callers that a retry with a fresh conversation id is
+   * appropriate; a reprompt against the same id will fail because the
+   * agent CLI considers the id consumed.
+   */
+  readonly hardFailure?: boolean;
 }
 
 /**
