@@ -50,10 +50,19 @@ const BUNDLE_SHORT_ID_LEN = 12;
 
 /**
  * Deterministic short slug of a `BundleId` for use in Docker container
- * names. Always the first `BUNDLE_SHORT_ID_LEN` chars of the UUID.
+ * names. Hyphens are stripped first so the result preserves
+ * `BUNDLE_SHORT_ID_LEN` hex chars of entropy (16^12 ≈ 2.8e14). A raw
+ * `substring(0, 12)` on a canonical UUID would include the hyphen at
+ * index 8 and yield only 11 hex digits.
+ *
+ * Mirrors `toBundleSlug` in `config/paths.ts`: both must produce the
+ * same 12-hex-char slug so that `ironcurtain.bundle` labels,
+ * `ironcurtain-<shortId>` container names, and the
+ * `~/.ironcurtain/run/<slug>/` runtime tree share a single
+ * bundle-identity convention.
  */
 export function getBundleShortId(bundleId: BundleId): string {
-  return bundleId.substring(0, BUNDLE_SHORT_ID_LEN);
+  return bundleId.replace(/-/g, '').substring(0, BUNDLE_SHORT_ID_LEN);
 }
 
 /**

@@ -14,6 +14,10 @@ import type { MitmProxy } from '../src/docker/mitm-proxy.js';
 import type { DockerManager } from '../src/docker/types.js';
 import type { IronCurtainConfig } from '../src/config/types.js';
 import { getInternalNetworkName } from '../src/docker/platform.js';
+import { getBundleShortId, type BundleId } from '../src/session/types.js';
+
+const TEST_BUNDLE_ID = 'test-session-id' as BundleId;
+const TEST_SHORT_ID = getBundleShortId(TEST_BUNDLE_ID);
 import {
   createDockerCallTracker,
   createMockAdapter,
@@ -317,7 +321,7 @@ interface MockCoreOptions {
  * actually works.
  */
 function makeMockCore(opts: MockCoreOptions): PreContainerInfrastructure {
-  const bundleId = 'test-session-id' as import('../src/session/types.js').BundleId;
+  const bundleId = TEST_BUNDLE_ID;
   const bundleDir = join(opts.tempDir, 'session');
   const workspaceDir = join(opts.tempDir, 'sandbox');
   const escalationDir = join(opts.tempDir, 'escalations');
@@ -429,7 +433,7 @@ describe('createSessionContainers', () => {
     expect(removedContainers).toContain('container-2');
 
     // The per-session internal network must also be cleaned up.
-    const expectedNetworkName = getInternalNetworkName('test-session'.substring(0, 12));
+    const expectedNetworkName = getInternalNetworkName(TEST_SHORT_ID);
     expect(removedNetworks).toContain(expectedNetworkName);
   });
 });
@@ -516,7 +520,7 @@ function makeInfrastructureBundle(opts: MakeBundleOptions): DockerInfrastructure
     ...(opts.useTcp
       ? {
           sidecarContainerId: 'sidecar-container-id',
-          internalNetwork: getInternalNetworkName('test-session'.substring(0, 12)),
+          internalNetwork: getInternalNetworkName(TEST_SHORT_ID),
         }
       : {}),
   };
@@ -592,7 +596,7 @@ describe('destroyDockerInfrastructure', () => {
 
     await destroyDockerInfrastructure(infra);
 
-    const expectedNetworkName = getInternalNetworkName('test-session'.substring(0, 12));
+    const expectedNetworkName = getInternalNetworkName(TEST_SHORT_ID);
     expect(infra.internalNetwork).toBe(expectedNetworkName);
     expect(removedNetworks).toEqual([expectedNetworkName]);
   });
