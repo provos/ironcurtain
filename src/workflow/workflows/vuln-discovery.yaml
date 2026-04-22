@@ -403,15 +403,15 @@ states:
         when:
           verdict: approved
       # Ordered before the rejection transition so the cap wins on the Nth visit.
-      - to: harness_review
+      - to: harness_design_escalation
         guard: isStateVisitLimitReached
       - to: harness_design
         when:
           verdict: rejected
 
-  harness_review:
+  harness_design_escalation:
     type: human_gate
-    description: Human escalation when the design-review or validate loops hit their cap
+    description: Human escalation when the design-review loop hits its cap — human decides whether the design is good enough to build
     acceptedEvents:
       - APPROVE
       - FORCE_REVISION
@@ -420,14 +420,40 @@ states:
       - analysis
       - harness_design
       - harness_design_review?
-      - harness_validate?
       - journal
     transitions:
       - to: harness_build
         event: APPROVE
-        # The human's approval resets the harness loop counters so
-        # harness_validate (which reached its cap and escalated here)
-        # does not immediately re-escalate on the next pass.
+        # The human accepted the design despite the reviewer's objections.
+        # Reset the harness loop counters so the build/validate cycle starts fresh.
+        actions:
+          - type: resetVisitCounts
+            stateIds: [harness_design, harness_design_review, harness_build, harness_validate]
+      - to: orchestrator
+        event: FORCE_REVISION
+      - to: aborted
+        event: ABORT
+
+  harness_validate_escalation:
+    type: human_gate
+    description: Human escalation when the validate loop hits its cap — human decides whether the built harness is usable despite validation failures
+    acceptedEvents:
+      - APPROVE
+      - FORCE_REVISION
+      - ABORT
+    present:
+      - analysis
+      - harness_design
+      - harness_build?
+      - harness_validate
+      - journal
+    transitions:
+      - to: orchestrator
+        event: APPROVE
+        # The human accepted the harness despite validation failures and is
+        # telling the orchestrator to proceed. Reset the harness loop counters
+        # so a future orchestrator-driven re-entry into the harness cycle
+        # starts with fresh counters.
         actions:
           - type: resetVisitCounts
             stateIds: [harness_design, harness_design_review, harness_build, harness_validate]
@@ -504,7 +530,7 @@ states:
         when:
           verdict: approved
       # Ordered before the rejection transitions so the cap wins on the Nth visit.
-      - to: harness_review
+      - to: harness_validate_escalation
         guard: isStateVisitLimitReached
       - to: harness_build
         when:
