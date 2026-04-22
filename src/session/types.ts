@@ -488,10 +488,9 @@ export interface Session {
    *
    * Optional because only external-agent sessions (e.g., Claude Code in
    * Docker) can produce hard failures. Consumers that care about the
-   * diagnostic should fall back to `sendMessage()` with
-   * `hardFailure: false` when this is absent — see
-   * `sendMessageWithDiagnostics()` in the orchestrator for the canonical
-   * shape.
+   * diagnostic should fall back to `sendMessage()` and treat the result
+   * as the same response text with `hardFailure: false` when this method
+   * is absent.
    *
    * @throws {SessionNotReadyError} if status is not 'ready'
    * @throws {SessionClosedError} if session has been closed
