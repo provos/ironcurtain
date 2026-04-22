@@ -271,6 +271,8 @@ ironcurtain config
 
 Key configuration areas: models and API keys, resource budgets (token/step/time/cost limits), auto-approve escalations, web search provider, audit redaction, and memory server LLM settings. See [CONFIG.md](CONFIG.md) for the full reference.
 
+To route LLM traffic through a gateway like LiteLLM or OpenRouter (in both Code Mode and Docker Agent Mode), see [MODEL_ROUTING.md](MODEL_ROUTING.md).
+
 ## Built-in Capabilities
 
 IronCurtain ships with six pre-configured MCP servers. All tool calls (except memory) are governed by your compiled policy.
