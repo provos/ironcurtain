@@ -151,9 +151,18 @@ function wait(ms: number): Promise<void> {
 
 /**
  * Polls a predicate every 5ms and resolves as soon as it returns true.
- * Falls back to a timeout (default 5s) to avoid hanging forever.
+ * Falls back to a timeout to avoid hanging forever.
+ *
+ * The default is 15s — NOT a time budget for expected behavior, but a
+ * safety net against a truly wedged bot. Ubuntu/Node CI runners
+ * occasionally stall for hundreds of ms on GC or scheduler contention
+ * between `simulateIncomingMessage` and the bot's POST response, and
+ * the original 5s default flaked on those runs. Individual vitest
+ * `it(...)` tests still have their own 30s timeout, so a real
+ * correctness bug (bot never sends the awaited message) still fails
+ * loudly within the test runner, not within this poll loop.
  */
-async function waitFor(predicate: () => boolean, timeoutMs = 5000): Promise<void> {
+async function waitFor(predicate: () => boolean, timeoutMs = 15_000): Promise<void> {
   const start = Date.now();
   while (!predicate()) {
     if (Date.now() - start > timeoutMs) {
@@ -164,17 +173,21 @@ async function waitFor(predicate: () => boolean, timeoutMs = 5000): Promise<void
 }
 
 /** Waits until mockApi.sentMessages has at least `count` entries. */
-function waitForMessages(mockApi: MockSignalApi, count: number, timeoutMs = 5000): Promise<void> {
+function waitForMessages(mockApi: MockSignalApi, count: number, timeoutMs = 15_000): Promise<void> {
   return waitFor(() => mockApi.sentMessages.length >= count, timeoutMs);
 }
 
 /** Waits until mockApi.messageTexts contains a message matching the predicate. */
-function waitForMessage(mockApi: MockSignalApi, predicate: (text: string) => boolean, timeoutMs = 5000): Promise<void> {
+function waitForMessage(
+  mockApi: MockSignalApi,
+  predicate: (text: string) => boolean,
+  timeoutMs = 15_000,
+): Promise<void> {
   return waitFor(() => mockApi.messageTexts.some(predicate), timeoutMs);
 }
 
 /** Waits until the given mock function has been called at least `count` times. */
-function waitForCalls(fn: ReturnType<typeof vi.fn>, count: number, timeoutMs = 5000): Promise<void> {
+function waitForCalls(fn: ReturnType<typeof vi.fn>, count: number, timeoutMs = 15_000): Promise<void> {
   return waitFor(() => fn.mock.calls.length >= count, timeoutMs);
 }
 
