@@ -467,6 +467,19 @@ export interface AgentTurnResult {
    * should consult this flag rather than parsing `text`.
    */
   readonly hardFailure: boolean;
+  /**
+   * Set when the adapter detected upstream quota exhaustion. When
+   * present, the caller MUST NOT retry the turn — the provider's
+   * rate-limit window is the bottleneck, not the agent. Workflow
+   * callers halt the run and surface `resetAt` (if any) to the user;
+   * interactive callers print and exit. See `AgentResponse.quotaExhausted`
+   * in `src/docker/agent-adapter.ts` for the adapter-side contract this
+   * field is populated from.
+   */
+  readonly quotaExhausted?: {
+    readonly resetAt?: Date;
+    readonly rawMessage: string;
+  };
 }
 
 export interface Session {

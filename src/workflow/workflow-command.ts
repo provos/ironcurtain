@@ -40,6 +40,7 @@ import {
   DIM,
   MAGENTA,
   CYAN,
+  YELLOW,
   RESET,
 } from './cli-support.js';
 
@@ -520,6 +521,11 @@ function runInspect(args: string[]): void {
             break;
           case 'error':
             writeStdout(`${prefix} ${RED}[error]${RESET} ${entry.error}`);
+            break;
+          case 'quota_exhausted':
+            writeStdout(
+              `${prefix} ${YELLOW}[quota/${entry.role}]${RESET} resets=${entry.resetAt ?? 'unknown'} — ${truncate(entry.rawMessage, 80)}`,
+            );
             break;
           case 'state_transition': {
             const toDesc = stateDescriptions?.get(entry.event);

@@ -63,6 +63,21 @@ export interface StateTransitionEntry extends BaseEntry {
   readonly event: string;
 }
 
+/**
+ * Emitted when the adapter detected upstream quota exhaustion and the
+ * orchestrator halted the run instead of retrying. `resetAt` is the
+ * ISO-formatted provider-advertised reset time when the adapter could
+ * parse one; absent when the provider did not supply a machine-readable
+ * timestamp. `rawMessage` preserves the original provider/CLI text for
+ * humans inspecting the log.
+ */
+export interface QuotaExhaustedEntry extends BaseEntry {
+  readonly type: 'quota_exhausted';
+  readonly role: string;
+  readonly resetAt?: string;
+  readonly rawMessage: string;
+}
+
 /** Discriminated union of all log entry types. */
 export type MessageLogEntry =
   | AgentSentEntry
@@ -71,7 +86,8 @@ export type MessageLogEntry =
   | GateRaisedEntry
   | GateResolvedEntry
   | ErrorEntry
-  | StateTransitionEntry;
+  | StateTransitionEntry
+  | QuotaExhaustedEntry;
 
 // ---------------------------------------------------------------------------
 // MessageLog

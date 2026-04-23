@@ -43,7 +43,14 @@ import { POLICY_LOAD_PATH } from '../trusted-process/control-server.js';
 import { loadConfig } from '../config/index.js';
 import { getPersonaDefinitionPath, resolvePersona } from '../persona/resolve.js';
 import { createPersonaName } from '../persona/types.js';
-import type { AgentConversationId, BundleId, Session, SessionOptions, SessionMode } from '../session/types.js';
+import type {
+  AgentConversationId,
+  AgentTurnResult,
+  BundleId,
+  Session,
+  SessionOptions,
+  SessionMode,
+} from '../session/types.js';
 import { createAgentConversationId, createBundleId } from '../session/types.js';
 import type { AgentId } from '../docker/agent-adapter.js';
 import { ensureSecureBundleDir, type DockerInfrastructure } from '../docker/docker-infrastructure.js';
@@ -66,7 +73,7 @@ import { buildAgentCommand, buildArtifactReprompt, buildStatusInstructions } fro
 import { collectFilesRecursive, hasAnyFiles, snapshotArtifacts } from './artifacts.js';
 import { validateDefinition } from './validate.js';
 import { parseDefinitionFile } from './discovery.js';
-import { AgentInvocationError } from './errors.js';
+import { AgentInvocationError, WorkflowQuotaExhaustedError, isWorkflowQuotaExhaustedError } from './errors.js';
 
 const execFileAsync = promisify(execFileCb);
 
@@ -400,6 +407,16 @@ interface WorkflowInstance {
    * post-teardown leak assertion.
    */
   aborted: boolean;
+  /**
+   * Stamped by `throwIfQuotaExhausted` when an agent turn reports
+   * upstream quota exhaustion. `handleWorkflowComplete` consults this
+   * to force an abort-like terminal phase and preserve the checkpoint,
+   * regardless of which state the error target resolved to — so resume
+   * still works for workflow definitions whose error target happens to
+   * be a normal terminal (e.g. `done`) rather than `aborted`/`failed`.
+   * Survives only in-process; the checkpoint itself does not record it.
+   */
+  quotaExhausted?: { readonly resetAt?: Date; readonly rawMessage: string };
 }
 
 // ---------------------------------------------------------------------------
@@ -1114,11 +1131,9 @@ export class WorkflowOrchestrator implements WorkflowController {
     // are closed. Error-tolerant (see destroyWorkflowInfrastructure).
     await this.destroyWorkflowInfrastructure(instance);
 
-    try {
-      this.deps.checkpointStore.remove(id);
-    } catch (err) {
-      writeStderr(`[workflow] Failed to remove checkpoint on abort for ${id}: ${toErrorMessage(err)}`);
-    }
+    // Intentionally leave the checkpoint in place: a user-triggered abort
+    // should remain resumable via `workflow resume`. The checkpoint is only
+    // removed on successful completion (see handleWorkflowComplete).
 
     instance.tab.write('[aborted]');
     instance.tab.close();
@@ -1222,7 +1237,14 @@ export class WorkflowOrchestrator implements WorkflowController {
           agentMessage,
         });
         instance.stateEnteredAt = now;
-        this.saveCheckpoint(instance, snapshot);
+
+        // Skip checkpointing transitions into terminal states. On successful
+        // completion `handleWorkflowComplete` removes the checkpoint anyway;
+        // on abort we want the surviving checkpoint to point at the last
+        // non-terminal state so `resume()` can restart the run meaningfully.
+        if (!this.isTerminalStateValue(definition, stateValue)) {
+          this.saveCheckpoint(instance, snapshot);
+        }
 
         instance.messageLog.append({
           ...this.logBase(instance),
@@ -1277,6 +1299,17 @@ export class WorkflowOrchestrator implements WorkflowController {
   // Checkpointing
   // -----------------------------------------------------------------------
 
+  /**
+   * Returns true if `stateValue` names a terminal state in the workflow
+   * definition. Used to skip checkpointing on the final transition so the
+   * last on-disk checkpoint points at the last non-terminal state (important
+   * for resume-after-abort, which would otherwise reload an `aborted`
+   * snapshot and immediately re-terminate).
+   */
+  private isTerminalStateValue(definition: WorkflowDefinition, stateValue: string): boolean {
+    return definition.states[stateValue].type === 'terminal';
+  }
+
   private saveCheckpoint(instance: WorkflowInstance, snapshot: { value: unknown; context: unknown }): void {
     const checkpoint: WorkflowCheckpoint = {
       machineState: snapshot.value,
@@ -1297,6 +1330,24 @@ export class WorkflowOrchestrator implements WorkflowController {
   // Agent state execution
   // -----------------------------------------------------------------------
 
+  // TODO(refactor): this method is ~230 lines and carries three
+  // invocation-scoped closures (`logReceived`, `logAgentRetry`,
+  // `sendAgentTurn`) that all capture the same bundle of state —
+  // `session`, `instance`, `stateConfig`, `stateId`, `messageLog`, and
+  // `this`. The closure pattern is idiomatic here only because every
+  // alternative (methods, helpers) would propagate that bundle through
+  // 5–6 parameters per site.
+  //
+  // The right fix is to extract the whole turn-handling pipeline
+  // (send/parse/retry/reprompt + the three log helpers) into a
+  // dedicated class — e.g. `AgentTurnRunner` — constructed once per
+  // invocation with the shared state injected. That shrinks this
+  // method from ~230 lines to ~80, and makes turn handling
+  // unit-testable in isolation (today it is reachable only through
+  // end-to-end workflow tests). Pair the extraction with a review of
+  // `AgentInvocationError` wrapping so the conversation-id recovery
+  // semantics survive the move. Worth doing as its own PR; do NOT
+  // fold it into a feature change.
   private async executeAgentState(
     workflowId: WorkflowId,
     input: AgentInvokeInput,
@@ -1466,6 +1517,43 @@ export class WorkflowOrchestrator implements WorkflowController {
         });
       };
 
+      // Uniform agent-turn entrypoint: every prompt and reprompt must flow
+      // through here so the quota-exhaustion short-circuit applies to ALL
+      // of them. Retrying or reprompting a turn whose adapter reported
+      // quota exhaustion would only burn more of the already-exhausted
+      // budget — instead we log a `quota_exhausted` event once and throw
+      // a dedicated error so higher layers can distinguish "paused by
+      // provider" from "aborted by bug" (today both abort; M4 turns this
+      // into a `paused` terminal phase without touching here).
+      //
+      // Sessions without `sendMessageDetailed` (e.g., built-in in-process
+      // sessions) degrade cleanly to `sendMessage`, which cannot produce
+      // a quota signal — the short-circuit simply never fires for them.
+      const sendAgentTurn = async (msg: string): Promise<AgentTurnResult> => {
+        const result = session.sendMessageDetailed
+          ? await session.sendMessageDetailed(msg)
+          : { text: await session.sendMessage(msg), hardFailure: false };
+        if (result.quotaExhausted) {
+          const { resetAt, rawMessage } = result.quotaExhausted;
+          logReceived(result.text, undefined);
+          messageLog.append({
+            ...this.logBase(instance),
+            type: 'quota_exhausted',
+            role: stateConfig.persona,
+            resetAt: resetAt?.toISOString(),
+            rawMessage,
+          });
+          // Stamp the instance before throwing so `handleWorkflowComplete`
+          // can force an abort-preserving terminal regardless of which
+          // state the onError target resolves to — protects checkpoint
+          // retention for workflow definitions whose error target happens
+          // to be a normal terminal (e.g. `done`).
+          instance.quotaExhausted = { resetAt, rawMessage };
+          throw new WorkflowQuotaExhaustedError({ stateId, resetAt, rawMessage });
+        }
+        return result;
+      };
+
       messageLog.append({
         ...this.logBase(instance),
         type: 'agent_sent',
@@ -1493,13 +1581,7 @@ export class WorkflowOrchestrator implements WorkflowController {
       const MAX_HARD_RETRIES = 2;
       let responseText = '';
       for (let attempt = 0; attempt <= MAX_HARD_RETRIES; attempt++) {
-        // `sendMessageDetailed` is optional on the Session interface.
-        // Sessions that can't produce hard failures (e.g., built-in
-        // in-process sessions) don't implement it — fall back to
-        // `sendMessage` and surface `hardFailure: false`.
-        const result = session.sendMessageDetailed
-          ? await session.sendMessageDetailed(command)
-          : { text: await session.sendMessage(command), hardFailure: false };
+        const result = await sendAgentTurn(command);
         responseText = result.text;
         if (!result.hardFailure) break;
 
@@ -1534,7 +1616,7 @@ export class WorkflowOrchestrator implements WorkflowController {
           retryMsg,
         );
 
-        responseText = await session.sendMessage(retryMsg);
+        responseText = (await sendAgentTurn(retryMsg)).text;
         parseResult = tryParseAgentStatus(responseText);
         logReceived(responseText, parseResult.kind === 'ok' ? parseResult.output : undefined);
 
@@ -1560,7 +1642,7 @@ export class WorkflowOrchestrator implements WorkflowController {
           retryMsg,
         );
 
-        responseText = await session.sendMessage(retryMsg);
+        responseText = (await sendAgentTurn(retryMsg)).text;
         const retryParse = tryParseAgentStatus(responseText);
         logReceived(responseText, retryParse.kind === 'ok' ? retryParse.output : undefined);
 
@@ -1590,7 +1672,7 @@ export class WorkflowOrchestrator implements WorkflowController {
         const artifactRetryMsg = buildArtifactReprompt(missingArtifacts, stateConfig.transitions);
         logAgentRetry('missing_artifacts', `Missing: ${missingArtifacts.join(', ')}`, artifactRetryMsg);
 
-        const retryResponse = await session.sendMessage(artifactRetryMsg);
+        const retryResponse = (await sendAgentTurn(artifactRetryMsg)).text;
         const retryParse = tryParseAgentStatus(retryResponse);
         if (retryParse.kind === 'ok') {
           logReceived(retryResponse, retryParse.output);
@@ -1627,12 +1709,20 @@ export class WorkflowOrchestrator implements WorkflowController {
         responseText,
       };
     } catch (err) {
-      instance.messageLog.append({
-        ...this.logBase(instance),
-        type: 'error',
-        error: toErrorMessage(err),
-        context: `agent "${stateId}" (persona: ${stateConfig.persona})`,
-      });
+      // Quota exhaustion already produced its own structured
+      // `quota_exhausted` log entry inside `sendAgentTurn`; appending a
+      // generic `error` entry here would double-log the same event and
+      // make `workflow inspect` surface both a yellow quota line and a
+      // red error line for the same failure. Suppress the generic entry
+      // when the cause is a `WorkflowQuotaExhaustedError`.
+      if (!isWorkflowQuotaExhaustedError(err)) {
+        instance.messageLog.append({
+          ...this.logBase(instance),
+          type: 'error',
+          error: toErrorMessage(err),
+          context: `agent "${stateId}" (persona: ${stateConfig.persona})`,
+        });
+      }
       throw new AgentInvocationError({ stateId, agentConversationId: currentConversationId, cause: err });
     } finally {
       instance.activeSessions.delete(session);
@@ -1746,9 +1836,23 @@ export class WorkflowOrchestrator implements WorkflowController {
     // are noisy).
     if (instance.finalStatus) return;
 
-    // Check if this is a normal completion or an aborted terminal
+    // Check if this is a normal completion or an aborted terminal.
+    // Quota exhaustion takes precedence: the error target may have
+    // resolved to any terminal (including `done`-like ones), but a run
+    // that died on upstream quota MUST be treated as aborted so the
+    // checkpoint is preserved and the user can resume once the provider
+    // window reopens. (M4 will upgrade this to a dedicated `paused`
+    // phase; for now `aborted` gives us the same checkpoint retention.)
     const stateValue = instance.currentState;
-    if (stateValue === 'aborted' || stateValue.includes('abort')) {
+    if (instance.quotaExhausted) {
+      const resetHint = instance.quotaExhausted.resetAt
+        ? ` (resets at ${instance.quotaExhausted.resetAt.toISOString()})`
+        : '';
+      instance.finalStatus = {
+        phase: 'aborted',
+        reason: `Upstream quota exhausted${resetHint}`,
+      };
+    } else if (stateValue === 'aborted' || stateValue.includes('abort')) {
       instance.finalStatus = {
         phase: 'aborted',
         reason: 'Workflow reached aborted state',
@@ -1761,10 +1865,15 @@ export class WorkflowOrchestrator implements WorkflowController {
       };
     }
 
-    try {
-      this.deps.checkpointStore.remove(workflowId);
-    } catch (err) {
-      writeStderr(`[workflow] Failed to remove checkpoint for ${workflowId}: ${toErrorMessage(err)}`);
+    // Only remove the checkpoint when the workflow completes successfully.
+    // Aborted runs keep their checkpoint on disk so `workflow resume` can
+    // restart them from the last saved state.
+    if (instance.finalStatus.phase === 'completed') {
+      try {
+        this.deps.checkpointStore.remove(workflowId);
+      } catch (err) {
+        writeStderr(`[workflow] Failed to remove checkpoint for ${workflowId}: ${toErrorMessage(err)}`);
+      }
     }
 
     instance.tab.write(`[done] ${instance.finalStatus.phase}`);

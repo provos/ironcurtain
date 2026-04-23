@@ -34,3 +34,37 @@ export class AgentInvocationError extends Error {
 export function isAgentInvocationError(err: unknown): err is AgentInvocationError {
   return err instanceof AgentInvocationError;
 }
+
+/**
+ * Thrown when the agent adapter reports upstream quota exhaustion for a
+ * state's turn. Distinct from a generic `Error` so M4's paused-phase
+ * handling (follow-up work) can intercept it cleanly and drive a
+ * `paused` terminal instead of the current `aborted` terminal.
+ *
+ * `resetAt` is the provider-advertised reset time when the adapter
+ * could parse one; `rawMessage` is the original provider/CLI text.
+ */
+export interface WorkflowQuotaExhaustedOptions {
+  readonly stateId: string;
+  readonly resetAt?: Date;
+  readonly rawMessage: string;
+}
+
+export class WorkflowQuotaExhaustedError extends Error {
+  readonly stateId: string;
+  readonly resetAt?: Date;
+  readonly rawMessage: string;
+
+  constructor(options: WorkflowQuotaExhaustedOptions) {
+    const resetHint = options.resetAt ? ` (resets at ${options.resetAt.toISOString()})` : '';
+    super(`Agent turn aborted: upstream quota exhausted${resetHint}`);
+    this.name = 'WorkflowQuotaExhaustedError';
+    this.stateId = options.stateId;
+    this.resetAt = options.resetAt;
+    this.rawMessage = options.rawMessage;
+  }
+}
+
+export function isWorkflowQuotaExhaustedError(err: unknown): err is WorkflowQuotaExhaustedError {
+  return err instanceof WorkflowQuotaExhaustedError;
+}

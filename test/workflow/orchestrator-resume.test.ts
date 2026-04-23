@@ -304,6 +304,79 @@ describe('WorkflowOrchestrator checkpoint + resume', () => {
   });
 
   // -----------------------------------------------------------------------
+  // Test 2b: Aborted workflows keep their checkpoint so resume can restart them
+  // -----------------------------------------------------------------------
+
+  it('preserves checkpoint on user-invoked abort so resume can restart it', async () => {
+    const defPath = writeDefinitionFile(tmpDir, linearWorkflowDef);
+    const checkpointStore = createCheckpointStore(tmpDir);
+
+    const sessionFactory = vi.fn(async () => {
+      return createArtifactAwareSession([{ text: approvedResponse('plan done'), artifacts: ['plan'] }], tmpDir);
+    });
+
+    const raiseGate = vi.fn();
+    const deps = createDeps(tmpDir, {
+      createSession: sessionFactory,
+      raiseGate,
+      checkpointStore,
+    });
+
+    const orchestrator = trackOrchestrator(new WorkflowOrchestrator(deps));
+    const workflowId = await orchestrator.start(defPath, 'build a thing');
+
+    // Wait for plan_gate so a checkpoint is persisted.
+    await waitForGate(raiseGate, 1);
+    expect(checkpointStore.load(workflowId)).toBeDefined();
+
+    // User-invoked abort: should leave the checkpoint on disk.
+    await orchestrator.abort(workflowId);
+
+    expect(orchestrator.getStatus(workflowId)?.phase).toBe('aborted');
+    const surviving = checkpointStore.load(workflowId);
+    expect(surviving).toBeDefined();
+    expect(surviving!.machineState).toBe('plan_gate');
+  });
+
+  it('preserves checkpoint when workflow reaches aborted state via ABORT event', async () => {
+    const defPath = writeDefinitionFile(tmpDir, linearWorkflowDef);
+    const checkpointStore = createCheckpointStore(tmpDir);
+
+    const sessionFactory = vi.fn(async () => {
+      return createArtifactAwareSession([{ text: approvedResponse('plan done'), artifacts: ['plan'] }], tmpDir);
+    });
+
+    const raiseGate = vi.fn();
+    const deps = createDeps(tmpDir, {
+      createSession: sessionFactory,
+      raiseGate,
+      checkpointStore,
+    });
+
+    const orchestrator = trackOrchestrator(new WorkflowOrchestrator(deps));
+    const workflowId = await orchestrator.start(defPath, 'build a thing');
+
+    // Wait for plan_gate so a checkpoint is persisted.
+    await waitForGate(raiseGate, 1);
+    expect(checkpointStore.load(workflowId)).toBeDefined();
+
+    // Resolve the gate with ABORT, which drives the machine into the
+    // `aborted` terminal state via handleWorkflowComplete.
+    orchestrator.resolveGate(workflowId, { type: 'ABORT' });
+    await waitForCompletion(orchestrator, workflowId);
+
+    expect(orchestrator.getStatus(workflowId)?.phase).toBe('aborted');
+    // handleWorkflowComplete must not remove the checkpoint on abort, and
+    // the transition into the terminal `aborted` state must not overwrite
+    // the last checkpoint. The surviving checkpoint should therefore point
+    // at the pre-abort state (`plan_gate`) so `resume()` can restart the
+    // run meaningfully instead of reloading the terminal state.
+    const surviving = checkpointStore.load(workflowId);
+    expect(surviving).toBeDefined();
+    expect(surviving!.machineState).toBe('plan_gate');
+  });
+
+  // -----------------------------------------------------------------------
   // Test 3: Resume a failed workflow from checkpoint
   // -----------------------------------------------------------------------
 
@@ -340,12 +413,13 @@ describe('WorkflowOrchestrator checkpoint + resume', () => {
     expect(checkpoint).toBeDefined();
     expect(checkpoint!.machineState).toBe('error_gate');
 
-    // Simulate orchestrator crash by shutting down (which removes checkpoint via abort)
-    // Save checkpoint state before shutdown
+    // Simulate an orchestrator crash by shutting down. Clean abort now
+    // preserves the checkpoint, but we still re-save the snapshot to be
+    // explicit about the state under test (a real crash where the process
+    // died without even running the abort path).
     const savedCheckpoint = { ...checkpoint! };
     await orchestrator1.shutdownAll();
 
-    // Re-save checkpoint to simulate a real crash (process died, no clean abort)
     checkpointStore.save(workflowId, savedCheckpoint);
 
     // Resume with a new orchestrator that has working sessions

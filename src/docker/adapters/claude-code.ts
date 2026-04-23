@@ -245,6 +245,15 @@ exit $STATUS
 
     extractResponse(exitCode: number, stdout: string): AgentResponse {
       if (exitCode !== 0) {
+        // Before falling back to the generic "exited non-zero" wrapper,
+        // look inside Claude Code's JSON envelope for a structured
+        // quota-exhaustion signal. Claude Code exits non-zero on 429
+        // but still prints its result envelope on stdout — we would
+        // otherwise throw that signal away.
+        const quotaExhausted = extractClaudeCodeQuotaSignal(stdout);
+        if (quotaExhausted) {
+          return { text: quotaExhausted.rawMessage, quotaExhausted };
+        }
         // Zero output on non-zero exit indicates the claude process was
         // killed (SIGTERM) or crashed before producing any assistant text —
         // typically an upstream provider stall. The session id has been
@@ -283,6 +292,50 @@ exit $STATUS
       };
     },
   };
+}
+
+/**
+ * Matches the human-readable reset timestamp that litellm / Anthropic
+ * surface in the 429 error `result` string, e.g.
+ *   "Usage limit reached for 5 hour. Your limit will reset at 2026-04-22 18:27:36"
+ * The timestamp has no timezone suffix in practice; we treat it as UTC.
+ */
+const QUOTA_RESET_REGEX = /Your limit will reset at (\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})/;
+
+/**
+ * Extracts a quota-exhaustion signal from Claude Code's JSON error
+ * envelope. Returns undefined when the envelope is missing, malformed,
+ * or carries a different error class. When present, `rawMessage` is
+ * always set (from the envelope's `result` string or a stringified
+ * fallback) and `resetAt` is populated only when the human-readable
+ * reset timestamp can be parsed.
+ *
+ * Contract: this helper populates `AgentResponse.quotaExhausted`,
+ * which the workflow orchestrator treats as a terminal "pause and
+ * resume later" signal — do not fold unrelated errors into this path.
+ */
+function extractClaudeCodeQuotaSignal(stdout: string): AgentResponse['quotaExhausted'] | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== 'object') return undefined;
+  const obj = parsed as Record<string, unknown>;
+  if (obj.api_error_status !== 429) return undefined;
+
+  const resultText = typeof obj.result === 'string' ? obj.result : undefined;
+  const rawMessage = resultText ?? stdout.trim();
+  const match = resultText ? QUOTA_RESET_REGEX.exec(resultText) : null;
+  if (match) {
+    const [, date, time] = match;
+    const resetAt = new Date(`${date}T${time}Z`);
+    if (!Number.isNaN(resetAt.getTime())) {
+      return { resetAt, rawMessage };
+    }
+  }
+  return { rawMessage };
 }
 
 /**
