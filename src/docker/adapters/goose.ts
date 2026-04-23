@@ -286,6 +286,24 @@ export function createGooseAdapter(userConfig?: ResolvedUserConfig): AgentAdapte
       return env;
     },
 
+    /**
+     * NOTE: this adapter does NOT currently populate
+     * `AgentResponse.quotaExhausted`. Goose runs without a JSON output
+     * mode (see the module header above), so on quota exhaustion its
+     * stdout is unstructured provider text with no machine-readable
+     * `api_error_status` field to key off of. A workflow run that hits
+     * a 429 under Goose will therefore take the generic abort path
+     * instead of pausing cleanly.
+     *
+     * Closing this gap requires either (a) adopting a Goose structured
+     * output mode when one becomes available, or (b) a fragile stderr
+     * regex against known provider messages ("Usage limit reached",
+     * "429", "rate_limit_exceeded"); (b) is deliberately not attempted
+     * without broader testing across providers. See the Claude Code
+     * adapter (`adapters/claude-code.ts`) for the target contract and
+     * `AgentResponse.quotaExhausted` in `../agent-adapter.ts` for the
+     * interface-level requirement on adapters.
+     */
     extractResponse(exitCode: number, stdout: string): AgentResponse {
       const clean = stripAnsi(stdout);
 

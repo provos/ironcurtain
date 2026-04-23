@@ -197,6 +197,57 @@ describe('Claude Code Adapter', () => {
     expect(response.costUsd).toBeUndefined();
   });
 
+  it('surfaces quotaExhausted with resetAt from Claude Code 429 envelope', () => {
+    // Mirrors the envelope observed in the failed workflow run
+    // e82b98ea-3195-412c-a6f7-669004f059ff that motivated this code path.
+    const envelope = JSON.stringify({
+      type: 'result',
+      subtype: 'success',
+      is_error: true,
+      api_error_status: 429,
+      result:
+        'API Error: Server is temporarily limiting requests (not your usage limit) · ' +
+        '{"error":{"code":"1308","message":"Usage limit reached for 5 hour. Your limit will reset at 2026-04-22 18:27:36"}}',
+    });
+    const response = claudeCodeAdapter.extractResponse(1, envelope);
+    expect(response.quotaExhausted).toBeDefined();
+    expect(response.quotaExhausted!.rawMessage).toContain('Usage limit reached');
+    expect(response.quotaExhausted!.resetAt).toEqual(new Date('2026-04-22T18:27:36Z'));
+    // The turn's `text` surfaces the raw message so CLI output stays readable.
+    expect(response.text).toContain('Usage limit reached');
+    // Quota exhaustion must NOT route through the hardFailure retry path.
+    expect(response.hardFailure).toBeUndefined();
+  });
+
+  it('surfaces quotaExhausted without resetAt when timestamp is unparseable', () => {
+    const envelope = JSON.stringify({
+      is_error: true,
+      api_error_status: 429,
+      result: 'Rate limit exceeded. Try again later.',
+    });
+    const response = claudeCodeAdapter.extractResponse(1, envelope);
+    expect(response.quotaExhausted).toBeDefined();
+    expect(response.quotaExhausted!.rawMessage).toBe('Rate limit exceeded. Try again later.');
+    expect(response.quotaExhausted!.resetAt).toBeUndefined();
+  });
+
+  it('does not flag quotaExhausted when is_error is set without api_error_status 429', () => {
+    // Guards against false positives: other error classes (500s, auth
+    // failures) must NOT route to the quota-pause path.
+    const envelope = JSON.stringify({
+      is_error: true,
+      api_error_status: 500,
+      result: 'Internal error',
+    });
+    const response = claudeCodeAdapter.extractResponse(1, envelope);
+    expect(response.quotaExhausted).toBeUndefined();
+  });
+
+  it('does not flag quotaExhausted when non-zero exit stdout is not JSON', () => {
+    const response = claudeCodeAdapter.extractResponse(1, 'plain text crash output');
+    expect(response.quotaExhausted).toBeUndefined();
+  });
+
   it('returns conversation state config for session resume', () => {
     const config = claudeCodeAdapter.getConversationStateConfig!();
     expect(config.hostDirName).toBe('claude-state');

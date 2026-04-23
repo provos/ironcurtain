@@ -43,7 +43,14 @@ import { POLICY_LOAD_PATH } from '../trusted-process/control-server.js';
 import { loadConfig } from '../config/index.js';
 import { getPersonaDefinitionPath, resolvePersona } from '../persona/resolve.js';
 import { createPersonaName } from '../persona/types.js';
-import type { AgentConversationId, BundleId, Session, SessionOptions, SessionMode } from '../session/types.js';
+import type {
+  AgentConversationId,
+  AgentTurnResult,
+  BundleId,
+  Session,
+  SessionOptions,
+  SessionMode,
+} from '../session/types.js';
 import { createAgentConversationId, createBundleId } from '../session/types.js';
 import type { AgentId } from '../docker/agent-adapter.js';
 import { ensureSecureBundleDir, type DockerInfrastructure } from '../docker/docker-infrastructure.js';
@@ -66,7 +73,7 @@ import { buildAgentCommand, buildArtifactReprompt, buildStatusInstructions } fro
 import { collectFilesRecursive, hasAnyFiles, snapshotArtifacts } from './artifacts.js';
 import { validateDefinition } from './validate.js';
 import { parseDefinitionFile } from './discovery.js';
-import { AgentInvocationError } from './errors.js';
+import { AgentInvocationError, WorkflowQuotaExhaustedError } from './errors.js';
 
 const execFileAsync = promisify(execFileCb);
 
@@ -1313,6 +1320,24 @@ export class WorkflowOrchestrator implements WorkflowController {
   // Agent state execution
   // -----------------------------------------------------------------------
 
+  // TODO(refactor): this method is ~230 lines and carries three
+  // invocation-scoped closures (`logReceived`, `logAgentRetry`,
+  // `sendAgentTurn`) that all capture the same bundle of state —
+  // `session`, `instance`, `stateConfig`, `stateId`, `messageLog`, and
+  // `this`. The closure pattern is idiomatic here only because every
+  // alternative (methods, helpers) would propagate that bundle through
+  // 5–6 parameters per site.
+  //
+  // The right fix is to extract the whole turn-handling pipeline
+  // (send/parse/retry/reprompt + the three log helpers) into a
+  // dedicated class — e.g. `AgentTurnRunner` — constructed once per
+  // invocation with the shared state injected. That shrinks this
+  // method from ~230 lines to ~80, and makes turn handling
+  // unit-testable in isolation (today it is reachable only through
+  // end-to-end workflow tests). Pair the extraction with a review of
+  // `AgentInvocationError` wrapping so the conversation-id recovery
+  // semantics survive the move. Worth doing as its own PR; do NOT
+  // fold it into a feature change.
   private async executeAgentState(
     workflowId: WorkflowId,
     input: AgentInvokeInput,
@@ -1482,6 +1507,37 @@ export class WorkflowOrchestrator implements WorkflowController {
         });
       };
 
+      // Uniform agent-turn entrypoint: every prompt and reprompt must flow
+      // through here so the quota-exhaustion short-circuit applies to ALL
+      // of them. Retrying or reprompting a turn whose adapter reported
+      // quota exhaustion would only burn more of the already-exhausted
+      // budget — instead we log a `quota_exhausted` event once and throw
+      // a dedicated error so higher layers can distinguish "paused by
+      // provider" from "aborted by bug" (today both abort; M4 turns this
+      // into a `paused` terminal phase without touching here).
+      //
+      // Sessions without `sendMessageDetailed` (e.g., built-in in-process
+      // sessions) degrade cleanly to `sendMessage`, which cannot produce
+      // a quota signal — the short-circuit simply never fires for them.
+      const sendAgentTurn = async (msg: string): Promise<AgentTurnResult> => {
+        const result = session.sendMessageDetailed
+          ? await session.sendMessageDetailed(msg)
+          : { text: await session.sendMessage(msg), hardFailure: false };
+        if (result.quotaExhausted) {
+          const { resetAt, rawMessage } = result.quotaExhausted;
+          logReceived(result.text, undefined);
+          messageLog.append({
+            ...this.logBase(instance),
+            type: 'quota_exhausted',
+            role: stateConfig.persona,
+            resetAt: resetAt?.toISOString(),
+            rawMessage,
+          });
+          throw new WorkflowQuotaExhaustedError({ stateId, resetAt, rawMessage });
+        }
+        return result;
+      };
+
       messageLog.append({
         ...this.logBase(instance),
         type: 'agent_sent',
@@ -1509,13 +1565,7 @@ export class WorkflowOrchestrator implements WorkflowController {
       const MAX_HARD_RETRIES = 2;
       let responseText = '';
       for (let attempt = 0; attempt <= MAX_HARD_RETRIES; attempt++) {
-        // `sendMessageDetailed` is optional on the Session interface.
-        // Sessions that can't produce hard failures (e.g., built-in
-        // in-process sessions) don't implement it — fall back to
-        // `sendMessage` and surface `hardFailure: false`.
-        const result = session.sendMessageDetailed
-          ? await session.sendMessageDetailed(command)
-          : { text: await session.sendMessage(command), hardFailure: false };
+        const result = await sendAgentTurn(command);
         responseText = result.text;
         if (!result.hardFailure) break;
 
@@ -1550,7 +1600,7 @@ export class WorkflowOrchestrator implements WorkflowController {
           retryMsg,
         );
 
-        responseText = await session.sendMessage(retryMsg);
+        responseText = (await sendAgentTurn(retryMsg)).text;
         parseResult = tryParseAgentStatus(responseText);
         logReceived(responseText, parseResult.kind === 'ok' ? parseResult.output : undefined);
 
@@ -1576,7 +1626,7 @@ export class WorkflowOrchestrator implements WorkflowController {
           retryMsg,
         );
 
-        responseText = await session.sendMessage(retryMsg);
+        responseText = (await sendAgentTurn(retryMsg)).text;
         const retryParse = tryParseAgentStatus(responseText);
         logReceived(responseText, retryParse.kind === 'ok' ? retryParse.output : undefined);
 
@@ -1606,7 +1656,7 @@ export class WorkflowOrchestrator implements WorkflowController {
         const artifactRetryMsg = buildArtifactReprompt(missingArtifacts, stateConfig.transitions);
         logAgentRetry('missing_artifacts', `Missing: ${missingArtifacts.join(', ')}`, artifactRetryMsg);
 
-        const retryResponse = await session.sendMessage(artifactRetryMsg);
+        const retryResponse = (await sendAgentTurn(artifactRetryMsg)).text;
         const retryParse = tryParseAgentStatus(retryResponse);
         if (retryParse.kind === 'ok') {
           logReceived(retryResponse, retryParse.output);

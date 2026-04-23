@@ -311,7 +311,11 @@ export class DockerAgentSession implements Session {
         this.firstTurnComplete = true;
       }
 
-      return { text: response.text, hardFailure: response.hardFailure ?? false };
+      return {
+        text: response.text,
+        hardFailure: response.hardFailure ?? false,
+        quotaExhausted: response.quotaExhausted,
+      };
     } finally {
       // Restore to 'ready' on both success and exception so a failed
       // turn (docker.exec timeout, adapter parse error, etc.) doesn't
