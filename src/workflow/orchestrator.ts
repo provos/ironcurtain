@@ -1114,11 +1114,9 @@ export class WorkflowOrchestrator implements WorkflowController {
     // are closed. Error-tolerant (see destroyWorkflowInfrastructure).
     await this.destroyWorkflowInfrastructure(instance);
 
-    try {
-      this.deps.checkpointStore.remove(id);
-    } catch (err) {
-      writeStderr(`[workflow] Failed to remove checkpoint on abort for ${id}: ${toErrorMessage(err)}`);
-    }
+    // Intentionally leave the checkpoint in place: a user-triggered abort
+    // should remain resumable via `workflow resume`. The checkpoint is only
+    // removed on successful completion (see handleWorkflowComplete).
 
     instance.tab.write('[aborted]');
     instance.tab.close();
@@ -1222,7 +1220,14 @@ export class WorkflowOrchestrator implements WorkflowController {
           agentMessage,
         });
         instance.stateEnteredAt = now;
-        this.saveCheckpoint(instance, snapshot);
+
+        // Skip checkpointing transitions into terminal states. On successful
+        // completion `handleWorkflowComplete` removes the checkpoint anyway;
+        // on abort we want the surviving checkpoint to point at the last
+        // non-terminal state so `resume()` can restart the run meaningfully.
+        if (!this.isTerminalStateValue(definition, stateValue)) {
+          this.saveCheckpoint(instance, snapshot);
+        }
 
         instance.messageLog.append({
           ...this.logBase(instance),
@@ -1276,6 +1281,17 @@ export class WorkflowOrchestrator implements WorkflowController {
   // -----------------------------------------------------------------------
   // Checkpointing
   // -----------------------------------------------------------------------
+
+  /**
+   * Returns true if `stateValue` names a terminal state in the workflow
+   * definition. Used to skip checkpointing on the final transition so the
+   * last on-disk checkpoint points at the last non-terminal state (important
+   * for resume-after-abort, which would otherwise reload an `aborted`
+   * snapshot and immediately re-terminate).
+   */
+  private isTerminalStateValue(definition: WorkflowDefinition, stateValue: string): boolean {
+    return definition.states[stateValue].type === 'terminal';
+  }
 
   private saveCheckpoint(instance: WorkflowInstance, snapshot: { value: unknown; context: unknown }): void {
     const checkpoint: WorkflowCheckpoint = {
@@ -1761,10 +1777,15 @@ export class WorkflowOrchestrator implements WorkflowController {
       };
     }
 
-    try {
-      this.deps.checkpointStore.remove(workflowId);
-    } catch (err) {
-      writeStderr(`[workflow] Failed to remove checkpoint for ${workflowId}: ${toErrorMessage(err)}`);
+    // Only remove the checkpoint when the workflow completes successfully.
+    // Aborted runs keep their checkpoint on disk so `workflow resume` can
+    // restart them from the last saved state.
+    if (instance.finalStatus.phase === 'completed') {
+      try {
+        this.deps.checkpointStore.remove(workflowId);
+      } catch (err) {
+        writeStderr(`[workflow] Failed to remove checkpoint for ${workflowId}: ${toErrorMessage(err)}`);
+      }
     }
 
     instance.tab.write(`[done] ${instance.finalStatus.phase}`);
