@@ -2,10 +2,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import type { SessionOptions } from '../../src/session/types.js';
+import type { SessionId, SessionOptions } from '../../src/session/types.js';
 import type { WorkflowDefinition } from '../../src/workflow/types.js';
 import type { DockerInfrastructure } from '../../src/docker/docker-infrastructure.js';
 import type { BundleId } from '../../src/session/types.js';
+import type { TokenStreamBus } from '../../src/docker/token-stream-bus.js';
 import { WorkflowOrchestrator, type CreateWorkflowInfrastructureInput } from '../../src/workflow/orchestrator.js';
 import {
   approvedResponse,
@@ -13,7 +14,11 @@ import {
   writeDefinitionFile,
   createDeps,
   waitForCompletion,
+  waitForGate,
   stubPersonasForTest,
+  MockSession,
+  simulateArtifacts,
+  findWorkflowDir,
 } from './test-helpers.js';
 
 // ---------------------------------------------------------------------------
@@ -43,6 +48,70 @@ function makeStubInfrastructure(workflowId: string, bundleId: BundleId): DockerI
     setTokenSessionId: () => {},
   } as unknown as DockerInfrastructure;
   return bundle;
+}
+
+/**
+ * Builds a `createWorkflowInfrastructure` stub that records every
+ * `setTokenSessionId(id)` call into a shared array. Used by the
+ * `setTokenSessionId` regression tests that need to assert the exact
+ * sequence of session-id flips driven by the orchestrator around each
+ * agent run.
+ *
+ * Returns `{ createInfra, tokenSessionIdCalls }` so the caller can
+ * install the factory into `createDeps` and then assert against the
+ * recorded call log.
+ */
+function createRecordingInfra(): {
+  createInfra: ReturnType<typeof vi.fn>;
+  tokenSessionIdCalls: Array<string | undefined>;
+} {
+  const tokenSessionIdCalls: Array<string | undefined> = [];
+  const createInfra = vi.fn(async (input: CreateWorkflowInfrastructureInput) => {
+    return {
+      __stub: true,
+      workflowId: input.workflowId,
+      bundleId: input.bundleId,
+      setTokenSessionId: (id: string | undefined) => {
+        tokenSessionIdCalls.push(id);
+      },
+    } as unknown as DockerInfrastructure;
+  });
+  return { createInfra, tokenSessionIdCalls };
+}
+
+/**
+ * Builds a MockSession that simulates the MITM proxy's SSE tap firing
+ * during `sendMessage`: pushes a `message_end` event onto the provided
+ * bus under `opts.sessionId` with `opts.outputTokens`, simulates the
+ * listed `artifacts` in the workflow dir, and returns a status-approved
+ * response (with optional `responseNotes`).
+ *
+ * Used by the `ctx.totalTokens` accumulation tests, which need the
+ * orchestrator's bus subscriber to observe a token event keyed on the
+ * per-agent session id so the total lands in the workflow instance.
+ */
+function makeTokenEmittingSession(opts: {
+  sessionId: string;
+  outputTokens: number;
+  artifacts: readonly string[];
+  tmpDir: string;
+  bus: TokenStreamBus;
+  responseNotes?: string;
+}): MockSession {
+  return new MockSession({
+    sessionId: opts.sessionId,
+    responses: () => {
+      opts.bus.push(opts.sessionId as unknown as SessionId, {
+        kind: 'message_end',
+        stopReason: 'end_turn',
+        inputTokens: 0,
+        outputTokens: opts.outputTokens,
+        timestamp: Date.now(),
+      });
+      simulateArtifacts(findWorkflowDir(opts.tmpDir), [...opts.artifacts]);
+      return approvedResponse(opts.responseNotes ?? 'done');
+    },
+  });
 }
 
 const dockerWorkflowDef: WorkflowDefinition = {
@@ -564,18 +633,7 @@ describe('WorkflowOrchestrator shared-container mode', () => {
       const defPath = writeDefinitionFile(tmpDir, twoAgentDef);
 
       // Record every setTokenSessionId call on the shared bundle.
-      const tokenSessionIdCalls: Array<string | undefined> = [];
-      const createInfra = vi.fn(async (input: CreateWorkflowInfrastructureInput) => {
-        const bundle = {
-          __stub: true,
-          workflowId: input.workflowId,
-          bundleId: input.bundleId,
-          setTokenSessionId: (id: string | undefined) => {
-            tokenSessionIdCalls.push(id);
-          },
-        } as unknown as DockerInfrastructure;
-        return bundle;
-      });
+      const { createInfra, tokenSessionIdCalls } = createRecordingInfra();
       const destroyInfra = vi.fn(async () => {});
 
       // Each invocation returns a distinct session ID so the test can
@@ -644,22 +702,12 @@ describe('WorkflowOrchestrator shared-container mode', () => {
     try {
       const defPath = writeDefinitionFile(tmpDir, failingAgentDef);
 
-      const tokenSessionIdCalls: Array<string | undefined> = [];
-      const createInfra = vi.fn(async (input: CreateWorkflowInfrastructureInput) => {
-        return {
-          __stub: true,
-          workflowId: input.workflowId,
-          bundleId: input.bundleId,
-          setTokenSessionId: (id: string | undefined) => {
-            tokenSessionIdCalls.push(id);
-          },
-        } as unknown as DockerInfrastructure;
-      });
+      const { createInfra, tokenSessionIdCalls } = createRecordingInfra();
       const destroyInfra = vi.fn(async () => {});
 
       // Import inline to avoid leaking this helper import into every test
       // above.
-      const { MockSession, noStatusResponse, simulateArtifacts, findWorkflowDir } = await import('./test-helpers.js');
+      const { noStatusResponse } = await import('./test-helpers.js');
 
       const sessionFactory = vi.fn(async () => {
         simulateArtifacts(findWorkflowDir(tmpDir), ['result']);
@@ -743,32 +791,20 @@ describe('WorkflowOrchestrator shared-container mode', () => {
       );
       const destroyInfra = vi.fn(async () => {});
 
-      const { MockSession, approvedResponse, simulateArtifacts, findWorkflowDir } = await import('./test-helpers.js');
-
+      // `makeTokenEmittingSession` simulates the MITM proxy's SSE tap firing
+      // during `sendMessage`: before returning the agent's response, it pushes
+      // a `message_end` event onto the bus under the agent's session ID. The
+      // orchestrator's bus subscriber accumulates `outputTokens` into
+      // `instance.outputTokens`.
       let sessionCounter = 0;
       const sessionFactory = vi.fn(async () => {
         sessionCounter++;
-        const sessionId = `agent-session-${sessionCounter}`;
-        const artifacts = [sessionCounter === 1 ? 'a' : 'b'];
-        const outputTokensForSession = sessionCounter === 1 ? 100 : 50;
-        // Simulate the MITM proxy's SSE tap firing during `sendMessage`:
-        // before returning the agent's response, push a `message_end`
-        // event onto the bus under this session's ID. The orchestrator's
-        // bus subscriber should accumulate the `outputTokens` into
-        // `instance.outputTokens`.
-        return new MockSession({
-          sessionId,
-          responses: () => {
-            bus.push(sessionId as unknown as import('../../src/session/types.js').SessionId, {
-              kind: 'message_end',
-              stopReason: 'end_turn',
-              inputTokens: 0,
-              outputTokens: outputTokensForSession,
-              timestamp: Date.now(),
-            });
-            simulateArtifacts(findWorkflowDir(tmpDir), artifacts);
-            return approvedResponse('done');
-          },
+        return makeTokenEmittingSession({
+          sessionId: `agent-session-${sessionCounter}`,
+          outputTokens: sessionCounter === 1 ? 100 : 50,
+          artifacts: [sessionCounter === 1 ? 'a' : 'b'],
+          tmpDir,
+          bus,
         });
       });
 
@@ -823,5 +859,265 @@ describe('WorkflowOrchestrator shared-container mode', () => {
     const detail = orchestrator.getDetail(workflowId);
     expect(detail).toBeDefined();
     expect(detail!.context.totalTokens).toBe(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // Regression: resume carries checkpointed totalTokens into the new instance
+  // -------------------------------------------------------------------------
+  //
+  // `orchestrator.ts:1020-1021` seeds `instance.tokens.outputTokens` from
+  // `checkpoint.context.totalTokens` on resume so post-resume token events
+  // accumulate on top of the pre-crash total rather than starting from zero.
+  // Lock that wiring end-to-end: pre-checkpoint agent contributes N tokens,
+  // post-resume agent contributes M, and `ctx.totalTokens` ends at N+M.
+
+  it('carries checkpointed totalTokens through resume into the next agents ctx', async () => {
+    const { resetTokenStreamBus, getTokenStreamBus } = await import('../../src/docker/token-stream-bus.js');
+    const { createCheckpointStore } = await import('./test-helpers.js');
+    resetTokenStreamBus();
+    const bus = getTokenStreamBus();
+
+    // Two agents separated by a human gate so the workflow parks at the
+    // gate after agent 1, writing a checkpoint with totalTokens=100. We
+    // shut down, re-save the checkpoint (abort removes it on shutdown),
+    // resume, approve the gate, and let agent 2 add 50 more.
+    const resumeAcrossGateDef: WorkflowDefinition = {
+      name: 'docker-resume-token-accum',
+      description: 'Two agents with a gate between them for resume testing',
+      initial: 'first',
+      settings: { mode: 'docker', dockerAgent: 'claude-code', sharedContainer: true },
+      states: {
+        first: {
+          type: 'agent',
+          description: 'First agent',
+          persona: 'global',
+          prompt: 'You are the first agent.',
+          inputs: [],
+          outputs: ['a'],
+          transitions: [{ to: 'gate' }],
+        },
+        gate: {
+          type: 'human_gate',
+          description: 'Human review between agents',
+          acceptedEvents: ['APPROVE', 'ABORT'],
+          present: ['a'],
+          transitions: [
+            { to: 'second', event: 'APPROVE' },
+            { to: 'aborted', event: 'ABORT' },
+          ],
+        },
+        second: {
+          type: 'agent',
+          description: 'Second agent',
+          persona: 'global',
+          prompt: 'You are the second agent.',
+          inputs: ['a'],
+          outputs: ['b'],
+          transitions: [{ to: 'done' }],
+        },
+        done: { type: 'terminal', description: 'Done' },
+        aborted: { type: 'terminal', description: 'Aborted' },
+      },
+    };
+
+    const stubCleanup = stubPersonasForTest(tmpDir, resumeAcrossGateDef);
+    try {
+      const defPath = writeDefinitionFile(tmpDir, resumeAcrossGateDef);
+      const checkpointStore = createCheckpointStore(tmpDir);
+
+      // ---- Orchestrator 1: run agent 1, stall at the gate ----
+
+      const createInfra1 = vi.fn(async (input: CreateWorkflowInfrastructureInput) =>
+        makeStubInfrastructure(input.workflowId, input.bundleId),
+      );
+      const destroyInfra1 = vi.fn(async () => {});
+
+      const raiseGate1 = vi.fn();
+      // Emit 100 tokens under agent 1's session id before returning.
+      const sessionFactory1 = vi.fn(async () =>
+        makeTokenEmittingSession({
+          sessionId: 'agent-session-1',
+          outputTokens: 100,
+          artifacts: ['a'],
+          tmpDir,
+          bus,
+          responseNotes: 'first done',
+        }),
+      );
+
+      const orchestrator1 = new WorkflowOrchestrator(
+        createDeps(tmpDir, {
+          createSession: sessionFactory1,
+          createWorkflowInfrastructure: createInfra1,
+          destroyWorkflowInfrastructure: destroyInfra1,
+          raiseGate: raiseGate1,
+          checkpointStore,
+        }),
+      );
+      activeOrchestrator = orchestrator1;
+
+      const workflowId = await orchestrator1.start(defPath, 'task');
+      // Wait until the machine parks at the gate. By this point agent 1 has
+      // finished and its outputTokens=100 has landed on ctx.totalTokens.
+      await waitForGate(raiseGate1, 1);
+
+      const checkpointAtGate = checkpointStore.load(workflowId);
+      expect(checkpointAtGate).toBeDefined();
+      expect(checkpointAtGate!.machineState).toBe('gate');
+      expect(checkpointAtGate!.context.totalTokens).toBe(100);
+
+      // shutdownAll triggers abort, which removes the checkpoint. Snapshot
+      // it first so we can re-save and simulate a fresh process.
+      const savedCheckpoint = { ...checkpointAtGate! };
+      await orchestrator1.shutdownAll();
+      activeOrchestrator = undefined;
+      checkpointStore.save(workflowId, savedCheckpoint);
+
+      // ---- Orchestrator 2: resume, approve the gate, run agent 2 ----
+
+      const createInfra2 = vi.fn(async (input: CreateWorkflowInfrastructureInput) =>
+        makeStubInfrastructure(input.workflowId, input.bundleId),
+      );
+      const destroyInfra2 = vi.fn(async () => {});
+
+      const raiseGate2 = vi.fn();
+      // Emit 50 tokens under agent 2's session id. If resume failed to seed
+      // outputTokens from the checkpoint, the final ctx.totalTokens would be
+      // 50; the test's 150 assertion is what locks that path.
+      const sessionFactory2 = vi.fn(async () =>
+        makeTokenEmittingSession({
+          sessionId: 'agent-session-2',
+          outputTokens: 50,
+          artifacts: ['b'],
+          tmpDir,
+          bus,
+          responseNotes: 'second done',
+        }),
+      );
+
+      const orchestrator2 = new WorkflowOrchestrator(
+        createDeps(tmpDir, {
+          createSession: sessionFactory2,
+          createWorkflowInfrastructure: createInfra2,
+          destroyWorkflowInfrastructure: destroyInfra2,
+          raiseGate: raiseGate2,
+          checkpointStore,
+        }),
+      );
+      activeOrchestrator = orchestrator2;
+
+      await orchestrator2.resume(workflowId);
+
+      // resume() re-raises the gate; approve it so agent 2 runs.
+      await waitForGate(raiseGate2, 1);
+      orchestrator2.resolveGate(workflowId, { type: 'APPROVE' });
+      await waitForCompletion(orchestrator2, workflowId);
+
+      const detail = orchestrator2.getDetail(workflowId);
+      expect(detail).toBeDefined();
+      // 100 (pre-checkpoint) + 50 (post-resume) = 150.
+      expect(detail!.context.totalTokens).toBe(150);
+    } finally {
+      stubCleanup();
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // Regression: abort mid-agent must clear MITM token routing
+  // -------------------------------------------------------------------------
+  //
+  // If the user aborts while the agent is mid-`sendMessage`, the
+  // `executeAgentState` finally block still needs to fire so
+  // `setTokenSessionId(undefined)` clears the shared MITM routing. Otherwise
+  // a subsequent workflow restarted against the same infrastructure bundle
+  // (or a late event emerging after teardown) would land under a stale
+  // session id. We simulate the abort path with a session whose
+  // `sendMessage` rejects on `close()` — that's the observable contract the
+  // real Session implementations (DockerAgentSession etc.) expose: pending
+  // messages fail once the session is torn down.
+
+  it('clears setTokenSessionId from the finally block when aborted mid-agent', async () => {
+    const stubCleanup = stubPersonasForTest(tmpDir, dockerWorkflowDef);
+    try {
+      const defPath = writeDefinitionFile(tmpDir, dockerWorkflowDef);
+
+      const { createInfra, tokenSessionIdCalls } = createRecordingInfra();
+      const destroyInfra = vi.fn(async () => {});
+
+      // Hanging session: sendMessage returns a promise that only rejects
+      // when close() fires. Mirrors real Session behavior under abort.
+      // `closeCount` tracks every close() call so we can assert the
+      // abort + agent-finally double-close path stays idempotent.
+      let closeCount = 0;
+      let rejectPending: ((err: Error) => void) | null = null;
+      const hangingSession = new MockSession({
+        sessionId: 'hanging-session-xyz',
+        responses: () =>
+          new Promise<string>((_resolve, reject) => {
+            rejectPending = reject;
+          }),
+      });
+      // Replace close() with a version that rejects the in-flight sendMessage
+      // and increments the counter. MockSession.close is otherwise safe to
+      // call repeatedly (idempotent), but we wrap to observe the count.
+      const originalClose = hangingSession.close.bind(hangingSession);
+      hangingSession.close = async () => {
+        closeCount++;
+        if (rejectPending) {
+          const reject = rejectPending;
+          rejectPending = null;
+          reject(new Error('session closed'));
+        }
+        await originalClose();
+      };
+
+      const sessionFactory = vi.fn(async () => hangingSession);
+
+      const orchestrator = new WorkflowOrchestrator(
+        createDeps(tmpDir, {
+          createSession: sessionFactory,
+          createWorkflowInfrastructure: createInfra,
+          destroyWorkflowInfrastructure: destroyInfra,
+        }),
+      );
+      activeOrchestrator = orchestrator;
+
+      const workflowId = await orchestrator.start(defPath, 'task');
+
+      // Wait until the orchestrator has entered `sendMessage` (i.e. the
+      // bundle has been flipped to this session's id). Without this spin
+      // the abort could race ahead of agent_started.
+      const spinStart = Date.now();
+      while (tokenSessionIdCalls.length === 0 && Date.now() - spinStart < 2000) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      expect(tokenSessionIdCalls).toEqual(['hanging-session-xyz']);
+
+      await orchestrator.abort(workflowId);
+
+      // The agent's finally block runs when the rejected sendMessage unwinds;
+      // that may happen after abort()'s own await chain completes. Spin until
+      // the undefined clear lands (bounded) or fail the assertion.
+      const finallyStart = Date.now();
+      while (tokenSessionIdCalls.length < 2 && Date.now() - finallyStart < 2000) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+
+      // Finally cleared the MITM routing even though sendMessage never
+      // produced a response. Sequence: set('hanging-session-xyz') before
+      // agent_started, set(undefined) in the finally after close rejection.
+      expect(tokenSessionIdCalls).toEqual(['hanging-session-xyz', undefined]);
+
+      // close() is called exactly twice under the orchestrator's current
+      // teardown: once from `abort()` iterating `activeSessions` (which
+      // rejects the pending `sendMessage`), and once from the agent's
+      // `finally` block as the rejected promise unwinds. Both paths are
+      // deterministic; if either silently stops firing the assertion
+      // surfaces the regression instead of tolerating it.
+      expect(closeCount).toBe(2);
+      expect(hangingSession.closed).toBe(true);
+    } finally {
+      stubCleanup();
+    }
   });
 });

@@ -111,6 +111,13 @@ export interface StreamRainEngine {
    * (or call with no regions after resize) to clear.
    */
   setAvoidRegions(rects: ReadonlyArray<AvoidRect>): void;
+  /**
+   * Toggle reduced-motion at runtime. When enabled, ambient spawning and
+   * advancement are skipped; held word drops still age so they don't freeze
+   * on screen. Allows the theater to react to a mid-session
+   * `prefers-reduced-motion` system toggle without tearing down the engine.
+   */
+  setReducedMotion(flag: boolean): void;
   readonly phase: 'stream';
 }
 
@@ -179,7 +186,10 @@ const DEFAULT_STREAM_SEED = 1729;
 export function createStreamRainEngine(layout: LayoutPlan, options: StreamRainEngineOptions = {}): StreamRainEngine {
   const rng: RainRng =
     options.rng ?? (options.seed !== undefined ? createSeededRng(options.seed) : createSeededRng(DEFAULT_STREAM_SEED));
-  const reducedMotion = options.reducedMotion === true;
+  // Mutable so the theater can propagate a `prefers-reduced-motion` toggle at
+  // runtime without recreating the engine. Gated-reads inside advance/spawn
+  // pick up the new value on the next tick.
+  let reducedMotion = options.reducedMotion === true;
 
   let currentLayout: LayoutPlan = layout;
   let ambientDrops: AmbientDrop[] = [];
@@ -736,6 +746,10 @@ export function createStreamRainEngine(layout: LayoutPlan, options: StreamRainEn
         if (r.w > 0 && r.h > 0) filtered.push({ x: r.x, y: r.y, w: r.w, h: r.h });
       }
       avoidRegions = filtered;
+    },
+
+    setReducedMotion(flag: boolean): void {
+      reducedMotion = flag === true;
     },
 
     get phase(): 'stream' {

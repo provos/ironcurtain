@@ -108,6 +108,12 @@ export interface VisualizationDirector {
    * these from foreignObject bounding rects after each layout.
    */
   setAvoidRegions(rects: ReadonlyArray<AvoidRect>): void;
+  /**
+   * Propagate a `prefers-reduced-motion` toggle to the underlying engine.
+   * The theater subscribes to the media-query and calls this on `change`
+   * events so the rain adapts mid-session.
+   */
+  setReducedMotion(flag: boolean): void;
   /** Push a token stream event through the scorer -> engine pipeline. */
   handleStreamEvent(event: TokenStreamEvent): void;
   /** Kick the transition-FX subsystem. Dropped with a warn-once if a cycle
@@ -339,6 +345,12 @@ export function createVisualizationDirector(deps: DirectorDeps): VisualizationDi
     setNodePositions,
     setActiveNode,
     setAvoidRegions,
+    setReducedMotion(flag: boolean): void {
+      // Thin forward — the engine owns the semantics (ambient spawn gating,
+      // word-drop aging still running). Wrapped in safeStep so a misbehaving
+      // engine impl can't take the director down.
+      safeStep('set-reduced-motion', () => engine.setReducedMotion(flag));
+    },
     handleStreamEvent: handleStreamEventImpl,
     triggerTransition,
     getTransitionFxFrame: () => transitionFx.getFrame(),

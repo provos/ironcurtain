@@ -114,6 +114,10 @@
   let resizeRafHandle: number | null = null;
   let hudUnsubscribeStream: (() => void) | null = null;
   let hudSampleHandle: ReturnType<typeof setInterval> | null = null;
+  /** Cleanup for the `prefers-reduced-motion` media-query subscription. Null
+   *  when we're running in a non-browser environment (SSR, tests without
+   *  matchMedia) where the flag can't meaningfully change. */
+  let reducedMotionCleanup: (() => void) | null = null;
 
   // ---------------------------------------------------------------------------
   // Setup effect — mounts when canvas + container are both bound.
@@ -130,7 +134,7 @@
     const layout = buildLayout(Math.max(1, rect.width), Math.max(1, rect.height));
     sizeCanvas(canvas, ctx, layout.viewportWidth, layout.viewportHeight);
 
-    const engine = createStreamRainEngine(layout);
+    const engine = createStreamRainEngine(layout, { reducedMotion: readReducedMotionPreference() });
     const d = createVisualizationDirector({
       ctx,
       engine,
@@ -167,6 +171,11 @@
 
     visibilityHandler = wireVisibility(d);
     resizeObserver = wireResize(canvas, container, ctx, d);
+    // Live-subscribe to `prefers-reduced-motion` so a mid-session system
+    // toggle propagates to the engine without a remount. Captured initial
+    // value was passed to createStreamRainEngine above; the subscription
+    // covers subsequent changes.
+    reducedMotionCleanup = wireReducedMotion(d);
     // HUD wiring is part of the mount lifecycle, not the director — the HUD
     // consumes the same stream but presents a different projection (tok/s +
     // model name), and keeping it outside the director avoids growing the
@@ -186,6 +195,10 @@
       if (visibilityHandler && typeof document !== 'undefined') {
         document.removeEventListener('visibilitychange', visibilityHandler);
         visibilityHandler = null;
+      }
+      if (reducedMotionCleanup) {
+        reducedMotionCleanup();
+        reducedMotionCleanup = null;
       }
       if (hudUnsubscribeStream) {
         hudUnsubscribeStream();
@@ -291,6 +304,47 @@
     };
     document.addEventListener('visibilitychange', handler);
     return handler;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Reduced motion — live-subscribe to the OS preference
+  // ---------------------------------------------------------------------------
+
+  const REDUCED_MOTION_QUERY = '(prefers-reduced-motion: reduce)';
+
+  /** One-shot read of the preference for engine construction. Returns `false`
+   *  when window/matchMedia is unavailable (SSR, older jsdom). */
+  function readReducedMotionPreference(): boolean {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return false;
+    try {
+      return window.matchMedia(REDUCED_MOTION_QUERY).matches;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Subscribe to `prefers-reduced-motion` change events and forward the new
+   * value to the director so the engine can re-gate ambient spawning without
+   * a remount. Returns a cleanup that removes the listener; or `null` when
+   * the environment doesn't support matchMedia (non-browser/SSR).
+   */
+  function wireReducedMotion(d: VisualizationDirector): (() => void) | null {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return null;
+    let mql: MediaQueryList;
+    try {
+      mql = window.matchMedia(REDUCED_MOTION_QUERY);
+    } catch {
+      return null;
+    }
+    const handler = (ev: MediaQueryListEvent): void => {
+      d.setReducedMotion(ev.matches);
+    };
+    // Older Safari exposes only addListener/removeListener (deprecated) — we
+    // prefer the standard addEventListener('change') and skip the fallback
+    // since every currently-supported target has it.
+    mql.addEventListener('change', handler);
+    return () => mql.removeEventListener('change', handler);
   }
 
   // ---------------------------------------------------------------------------
@@ -420,13 +474,24 @@
   }
 
   function sizeCanvas(el: HTMLCanvasElement, ctx: CanvasRenderingContext2D, w: number, h: number): void {
+    // Re-read DPR every call: the user may have dragged the window between
+    // displays with different pixel densities, in which case the backing store
+    // needs to be rescaled even if CSS size is unchanged. The ResizeObserver +
+    // debounce path already triggers this on any client-rect change; the rare
+    // multi-monitor display-swap-without-size-change edge case is accepted.
     const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
     const cssW = Math.max(0, Math.floor(w));
     const cssH = Math.max(0, Math.floor(h));
+    const targetW = Math.floor(cssW * dpr);
+    const targetH = Math.floor(cssH * dpr);
+    // Skip the (expensive) backing-store reallocation and transform reset when
+    // neither CSS size nor DPR have changed — both are captured by the target
+    // backing-store dimensions, so one equality check covers both axes.
+    if (el.width === targetW && el.height === targetH) return;
     el.style.width = `${cssW}px`;
     el.style.height = `${cssH}px`;
-    el.width = Math.floor(cssW * dpr);
-    el.height = Math.floor(cssH * dpr);
+    el.width = targetW;
+    el.height = targetH;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
 
