@@ -34,6 +34,7 @@ import {
   findWorkflowDir,
   writeDefinitionFile,
   createDeps,
+  createCheckpointStore,
   waitForCompletion,
   stubPersonasForTest,
 } from './test-helpers.js';
@@ -89,7 +90,7 @@ describe('WorkflowOrchestrator quota-exhaustion short-circuit', () => {
     rmSync(ckptDir, { recursive: true, force: true });
   });
 
-  it('halts immediately when the primary turn reports quotaExhausted', async () => {
+  it('halts immediately when the primary turn reports quotaExhausted, preserves checkpoint, and does not double-log', async () => {
     const defPath = writeDefinitionFile(tmpDir, simpleAgentDef);
     const allSessions: MockSession[] = [];
 
@@ -107,16 +108,33 @@ describe('WorkflowOrchestrator quota-exhaustion short-circuit', () => {
       return session;
     });
 
-    const deps = createDeps(tmpDir, { createSession: sessionFactory });
+    // Share the checkpoint store with the orchestrator so we can verify
+    // it was NOT cleared after quota exhaustion.
+    const checkpointStore = createCheckpointStore(tmpDir);
+    const deps = createDeps(tmpDir, { createSession: sessionFactory, checkpointStore });
     const orchestrator = new WorkflowOrchestrator(deps);
     activeOrchestrator = orchestrator;
 
     const workflowId = await orchestrator.start(defPath, 'write code');
     await waitForCompletion(orchestrator, workflowId);
 
-    // The workflow routes to onError's fallback terminal (see
-    // orchestrator-retry.test.ts for why this lands on 'completed').
-    expect(orchestrator.getStatus(workflowId)?.phase).toBe('completed');
+    // Quota exhaustion must force an abort-like phase regardless of which
+    // terminal the state's `onError` target resolved to. This simple
+    // workflow has no `aborted`/`failed` terminal, so `findErrorTarget`
+    // would otherwise route to `done` and `handleWorkflowComplete` would
+    // mark the run as `completed` and delete the checkpoint — breaking
+    // resume. The `instance.quotaExhausted` check in
+    // `handleWorkflowComplete` is what keeps this from happening.
+    const status = orchestrator.getStatus(workflowId);
+    expect(status?.phase).toBe('aborted');
+    if (status?.phase === 'aborted') {
+      expect(status.reason).toContain('quota');
+      expect(status.reason).toContain(RESET_AT.toISOString());
+    }
+
+    // Checkpoint MUST be preserved so `workflow resume` works once the
+    // provider window reopens.
+    expect(checkpointStore.load(workflowId)).not.toBeNull();
 
     // Exactly ONE turn — no hard-retry rotation, no missing-status-block
     // reprompt. Any further sends would burn the exhausted budget.
@@ -131,6 +149,13 @@ describe('WorkflowOrchestrator quota-exhaustion short-circuit', () => {
     expect(quotaEntries[0].role).toBe('coder');
     expect(quotaEntries[0].rawMessage).toBe(RAW_MESSAGE);
     expect(quotaEntries[0].resetAt).toBe(RESET_AT.toISOString());
+
+    // Concern #2 regression guard: no generic `error` entry should be
+    // appended alongside the quota_exhausted entry. `workflow inspect`
+    // must show a single structured quota line, not a duplicate red
+    // error line for the same event.
+    const errorEntries = log.filter((e) => e.type === 'error');
+    expect(errorEntries).toHaveLength(0);
   });
 
   it('prefers the quota short-circuit over the hard-retry loop when both signals are set', async () => {
@@ -161,7 +186,7 @@ describe('WorkflowOrchestrator quota-exhaustion short-circuit', () => {
     const workflowId = await orchestrator.start(defPath, 'write code');
     await waitForCompletion(orchestrator, workflowId);
 
-    expect(orchestrator.getStatus(workflowId)?.phase).toBe('completed');
+    expect(orchestrator.getStatus(workflowId)?.phase).toBe('aborted');
 
     const session = allSessions[0];
     // The quota check runs BEFORE the hard-retry loop, so only one turn
@@ -216,7 +241,7 @@ describe('WorkflowOrchestrator quota-exhaustion short-circuit', () => {
     const workflowId = await orchestrator.start(defPath, 'write code');
     await waitForCompletion(orchestrator, workflowId);
 
-    expect(orchestrator.getStatus(workflowId)?.phase).toBe('completed');
+    expect(orchestrator.getStatus(workflowId)?.phase).toBe('aborted');
 
     const session = allSessions[0];
     // Exactly two turns: the primary + the reprompt that quota-exhausted.
@@ -255,7 +280,7 @@ describe('WorkflowOrchestrator quota-exhaustion short-circuit', () => {
     const workflowId = await orchestrator.start(defPath, 'write code');
     await waitForCompletion(orchestrator, workflowId);
 
-    expect(orchestrator.getStatus(workflowId)?.phase).toBe('completed');
+    expect(orchestrator.getStatus(workflowId)?.phase).toBe('aborted');
 
     const log = readMessageLog(tmpDir);
     const quotaEntries = log.filter((e): e is QuotaExhaustedEntry => e.type === 'quota_exhausted');

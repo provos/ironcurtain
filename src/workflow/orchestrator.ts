@@ -73,7 +73,7 @@ import { buildAgentCommand, buildArtifactReprompt, buildStatusInstructions } fro
 import { collectFilesRecursive, hasAnyFiles, snapshotArtifacts } from './artifacts.js';
 import { validateDefinition } from './validate.js';
 import { parseDefinitionFile } from './discovery.js';
-import { AgentInvocationError, WorkflowQuotaExhaustedError } from './errors.js';
+import { AgentInvocationError, WorkflowQuotaExhaustedError, isWorkflowQuotaExhaustedError } from './errors.js';
 
 const execFileAsync = promisify(execFileCb);
 
@@ -407,6 +407,16 @@ interface WorkflowInstance {
    * post-teardown leak assertion.
    */
   aborted: boolean;
+  /**
+   * Stamped by `throwIfQuotaExhausted` when an agent turn reports
+   * upstream quota exhaustion. `handleWorkflowComplete` consults this
+   * to force an abort-like terminal phase and preserve the checkpoint,
+   * regardless of which state the error target resolved to — so resume
+   * still works for workflow definitions whose error target happens to
+   * be a normal terminal (e.g. `done`) rather than `aborted`/`failed`.
+   * Survives only in-process; the checkpoint itself does not record it.
+   */
+  quotaExhausted?: { readonly resetAt?: Date; readonly rawMessage: string };
 }
 
 // ---------------------------------------------------------------------------
@@ -1533,6 +1543,12 @@ export class WorkflowOrchestrator implements WorkflowController {
             resetAt: resetAt?.toISOString(),
             rawMessage,
           });
+          // Stamp the instance before throwing so `handleWorkflowComplete`
+          // can force an abort-preserving terminal regardless of which
+          // state the onError target resolves to — protects checkpoint
+          // retention for workflow definitions whose error target happens
+          // to be a normal terminal (e.g. `done`).
+          instance.quotaExhausted = { resetAt, rawMessage };
           throw new WorkflowQuotaExhaustedError({ stateId, resetAt, rawMessage });
         }
         return result;
@@ -1693,12 +1709,20 @@ export class WorkflowOrchestrator implements WorkflowController {
         responseText,
       };
     } catch (err) {
-      instance.messageLog.append({
-        ...this.logBase(instance),
-        type: 'error',
-        error: toErrorMessage(err),
-        context: `agent "${stateId}" (persona: ${stateConfig.persona})`,
-      });
+      // Quota exhaustion already produced its own structured
+      // `quota_exhausted` log entry inside `sendAgentTurn`; appending a
+      // generic `error` entry here would double-log the same event and
+      // make `workflow inspect` surface both a yellow quota line and a
+      // red error line for the same failure. Suppress the generic entry
+      // when the cause is a `WorkflowQuotaExhaustedError`.
+      if (!isWorkflowQuotaExhaustedError(err)) {
+        instance.messageLog.append({
+          ...this.logBase(instance),
+          type: 'error',
+          error: toErrorMessage(err),
+          context: `agent "${stateId}" (persona: ${stateConfig.persona})`,
+        });
+      }
       throw new AgentInvocationError({ stateId, agentConversationId: currentConversationId, cause: err });
     } finally {
       instance.activeSessions.delete(session);
@@ -1812,9 +1836,23 @@ export class WorkflowOrchestrator implements WorkflowController {
     // are noisy).
     if (instance.finalStatus) return;
 
-    // Check if this is a normal completion or an aborted terminal
+    // Check if this is a normal completion or an aborted terminal.
+    // Quota exhaustion takes precedence: the error target may have
+    // resolved to any terminal (including `done`-like ones), but a run
+    // that died on upstream quota MUST be treated as aborted so the
+    // checkpoint is preserved and the user can resume once the provider
+    // window reopens. (M4 will upgrade this to a dedicated `paused`
+    // phase; for now `aborted` gives us the same checkpoint retention.)
     const stateValue = instance.currentState;
-    if (stateValue === 'aborted' || stateValue.includes('abort')) {
+    if (instance.quotaExhausted) {
+      const resetHint = instance.quotaExhausted.resetAt
+        ? ` (resets at ${instance.quotaExhausted.resetAt.toISOString()})`
+        : '';
+      instance.finalStatus = {
+        phase: 'aborted',
+        reason: `Upstream quota exhausted${resetHint}`,
+      };
+    } else if (stateValue === 'aborted' || stateValue.includes('abort')) {
       instance.finalStatus = {
         phase: 'aborted',
         reason: 'Workflow reached aborted state',
