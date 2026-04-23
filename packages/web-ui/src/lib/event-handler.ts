@@ -84,9 +84,12 @@ export type WebEvent =
     }
   | {
       event: 'workflow.agent_started';
-      // `sessionId` is the daemon's bridge-registration key; frontend doesn't
-      // use it today but mirrors the contract in src/web-ui/web-event-bus.ts.
-      payload: { workflowId: string; stateId: string; persona: string; sessionId?: string };
+      // `sessionId` is the daemon's bridge-registration key and is always
+      // emitted by the orchestrator (see src/workflow/orchestrator.ts
+      // `emitLifecycleEvent({ kind: 'agent_started', ... })`). Frontend
+      // consumers may not read it today, but the field is required on the
+      // wire so future per-session attribution doesn't require a type churn.
+      payload: { workflowId: string; stateId: string; persona: string; sessionId: string };
     }
   | {
       event: 'workflow.agent_completed';
@@ -97,9 +100,12 @@ export type WebEvent =
     }
   | {
       // Fires in the orchestrator's `finally` so success, failure, and abort
-      // paths all clean up the bridge mapping. Mirror of the daemon contract.
+      // paths all clean up the bridge mapping. Mirror of the daemon contract
+      // in src/web-ui/web-event-bus.ts; `persona` is emitted for symmetry
+      // with `agent_started` so consumers can correlate end-of-session
+      // events without looking back at the matching start event.
       event: 'workflow.agent_session_ended';
-      payload: { workflowId: string; stateId: string; sessionId: string };
+      payload: { workflowId: string; stateId: string; persona: string; sessionId: string };
     }
   | { event: 'workflow.completed'; payload: { workflowId: string } }
   | { event: 'workflow.failed'; payload: { workflowId: string; error: string } }
@@ -157,7 +163,7 @@ export function parseEvent(event: string, payload: unknown): WebEvent | undefine
     case 'workflow.agent_started':
       return {
         event,
-        payload: data as { workflowId: string; stateId: string; persona: string; sessionId?: string },
+        payload: data as { workflowId: string; stateId: string; persona: string; sessionId: string },
       };
     case 'workflow.agent_completed':
       return {
@@ -173,7 +179,7 @@ export function parseEvent(event: string, payload: unknown): WebEvent | undefine
     case 'workflow.agent_session_ended':
       return {
         event,
-        payload: data as { workflowId: string; stateId: string; sessionId: string },
+        payload: data as { workflowId: string; stateId: string; persona: string; sessionId: string },
       };
     case 'workflow.completed':
       return { event, payload: data as { workflowId: string } };

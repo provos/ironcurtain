@@ -835,9 +835,6 @@ export class WorkflowOrchestrator implements WorkflowController {
   // cheaper (one bus listener, one unsubscribe on completion) than
   // subscribing and unsubscribing on every `agent_started` /
   // `agent_session_ended` pair.
-  //
-  // Dynamic import so the workflow module can stay usable in pure-Code-Mode
-  // contexts where the docker bundle isn't pulled in.
 
   /**
    * Subscribes the workflow to the global token-stream bus. Accumulates
@@ -1732,7 +1729,7 @@ export class WorkflowOrchestrator implements WorkflowController {
       instance.activeSessions.delete(session);
       const endedSessionId = session.getInfo().id;
       await session.close().catch((closeErr: unknown) => {
-        console.error(`[workflow] session.close() failed for "${stateId}": ${toErrorMessage(closeErr)}`);
+        writeStderr(`[workflow] session.close() failed for "${stateId}": ${toErrorMessage(closeErr)}`);
       });
       // Order: close session (drains in-flight LLM stream) → clear MITM
       // routing → drop from accumulator filter → emit agent_session_ended.
