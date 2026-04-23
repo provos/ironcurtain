@@ -156,7 +156,7 @@ states:
 
       - **When:** Build or upgrade a harness. Directive MUST specify the tier (see Tiered harness strategy below).
       - **Directive must supply:** Hypothesis, tier, component scope, WHY this tier. Do NOT prescribe specific test cases, fixed input values, or enumerated scenarios (T1, T2, T3...) — that is `harness_design`'s job. Trust the downstream agent to pick the sweep strategy given the hypothesis you describe.
-      - **Audit on return** (after `harness_validate` approves and control comes back to the orchestrator): confirm validation showed (a) the target function reached with non-zero coverage, AND (b) the fuzzer's self-reported feedback metric (e.g., libFuzzer `cov:` / AFL++ edge count / the stack's equivalent) recorded in `validation.md` passed the threshold from step 4 of `harness_validate`. If (b) is absent from the report — rather than present and passing — treat validation as incomplete and route back to `harness_validate`.
+      - **Audit on return** (after `harness_validate` approves and control comes back to the orchestrator): confirm validation showed (a) the target function reached with non-zero coverage, AND (b) the fuzzer's self-reported feedback metric (e.g., libFuzzer `cov:` / AFL++ edge count / the stack's equivalent) recorded in `validation.md` passed the threshold from step 4 of `harness_validate`. If (b) is absent from an `approved` validation report, that is a prompt-conformance failure in `harness_validate` itself — do NOT bounce back to it (the state's own prompt forbids approval without (b), so repeat invocations are unlikely to self-correct and `maxVisits` only decrements on non-approved verdicts, creating a loop risk). Instead, set verdict `escalate` and route to `human_escalation` so a human can diagnose whether the issue is a tool-output-parsing edge case, a model quirk, or a missing field in the design that validate glossed over.
 
       ### `discover` — verdict: `discover`
 
@@ -359,7 +359,7 @@ states:
 
       Fuzzing requires two distinct instrumentation decisions that are easy to confuse. The design MUST address both:
 
-      1. **Fuzzer-feedback coverage** — instrumentation the fuzzer consumes at runtime to guide mutation. Mechanism is tool-specific and falls into three categories: compile-time sanitizer flags (e.g., libFuzzer's `-fsanitize-coverage=edge,trace-pc-guard,trace-cmp,trace-div`), compile wrappers (e.g., AFL++'s `afl-clang-fast` / `afl-clang-lto`), or runtime agents for managed stacks (e.g., Jazzer's Java agent, atheris's import rewriter). Name the exact mechanism.
+      1. **Fuzzer-feedback coverage** — instrumentation the fuzzer consumes at runtime to guide mutation. Mechanism is tool-specific and falls into three categories: compile-time sanitizer flags (e.g., libFuzzer's `-fsanitize-coverage=edge,trace-pc-guard,trace-cmp,trace-div`), compile wrappers (e.g., AFL++'s `afl-clang-fast` / `afl-clang-lto`), or runtime agents for managed stacks (e.g., Jazzer's Java agent, atheris's import rewriter). Name the exact mechanism AND the exact metric field name the validator will read from the fuzzer's status output (e.g., libFuzzer's `cov` counter, AFL++'s `edges_found`, Go's `new interesting` total) — without this, `harness_validate` cannot gate on it.
 
       2. **Audit coverage** — post-run reporting of which lines executed (`llvm-cov`, `gcov`, or the stack's equivalent). This is an audit tool, NOT a feedback signal. A harness can have (2) without (1) — which is the forgot-to-instrument-the-target pitfall.
 
@@ -409,7 +409,7 @@ states:
 
       4. **Observables and positive-finding condition are specific.** The design must name what the harness records at each input and what pattern indicates the hypothesis is confirmed. "A crash happens" is a fail; "the comparison at line 2344 evaluates to equal when the neighbor MB was not actually part of the current slice" is a pass.
 
-      5. **Coverage targets the right code — both kinds.** The design must separately name (a) the fuzzer-feedback mechanism (e.g., libFuzzer's `-fsanitize-coverage=...`, AFL++'s `afl-clang-fast`, or a runtime agent for managed stacks) and (b) the audit-coverage tool. It must name which units of code receive (a) — specifically the target code, not just the harness wrapper. A design that names only audit-coverage tooling, or names feedback instrumentation only on the wrapper, is a fail. A design missing a fallback path on a *different* instrumentation mechanism is also a fail.
+      5. **Coverage targets the right code — both kinds.** The design must separately name (a) the fuzzer-feedback mechanism (e.g., libFuzzer's `-fsanitize-coverage=...`, AFL++'s `afl-clang-fast`, or a runtime agent for managed stacks), (b) the audit-coverage tool, and (c) the exact metric field name the validator will read from the fuzzer's status output (e.g., libFuzzer `cov`, AFL++ `edges_found`). It must name which units of code receive (a) — specifically the target code, not just the harness wrapper. A design that names only audit-coverage tooling, names feedback instrumentation only on the wrapper, or omits (c) is a fail. A design missing a fallback path on a *different* instrumentation mechanism is also a fail.
 
       6. **Existing fuzzer used when appropriate.** For large or structured input spaces, the design should specify libFuzzer / AFL++ / stack-appropriate equivalent rather than a hand-rolled loop. For small discrete spaces, bounded enumeration is fine — but the design must state the choice and why.
 
@@ -551,7 +551,7 @@ states:
       4. **Fuzzer-feedback reach (load-bearing).** Run a short representative fuzz burst (30–60s) from the seed corpus. Capture the fuzzer's own reported coverage metric:
          - libFuzzer (also the tools that wrap its output: jazzer.js, atheris, cargo-fuzz, Jazzer): stderr prints `#N ... cov: C ft: F`. Record `C`.
          - AFL++: `afl-fuzz` reports `map density` / `edges found`; `afl-showmap` on a sample prints non-zero map entries. Record the edge count.
-         - For any other tool, the equivalent is the fuzzer's own self-reported coverage-growth indicator — NOT an audit-coverage report. The design names the field.
+         - For any other tool, the design must name the exact metric field (see harness_design coverage-instrumentation rules). If the design does not name it, that is a design defect — route `rejected_design` with a directive "design.md must specify the fuzzer-feedback metric field name for the chosen tool."
          Fail approval unless BOTH:
          (a) Target-code fuzzer-feedback count ≥ **1000** (default; configurable via directive). A count in the tens is the signature of wrapper-only instrumentation. For tools reporting in different units, interpret the threshold as "several orders of magnitude larger than a thin wrapper's footprint" and state the equivalent number used.
          (b) Audit-coverage line coverage of the target source file ≥ **20%** (default; configurable via directive) after the burst.
@@ -568,7 +568,11 @@ states:
       - **rejected_build**: Implementation bugs the build agent can fix without changing the design — compile errors, driver defects, session reset broken, coverage extraction not wired up, fuzzer-feedback flags in the design but missing from the actual compile invocation. Route: back to `harness_build`.
       - **rejected_design**: Design flaws the build agent cannot fix — wrong call chain, wrong tooling, tier insufficient, target linked as a prebuilt artifact that cannot be rebuilt with instrumentation, seed corpus too narrow. Route: back to `harness_design`.
 
-      When step 4(a) fails, name the likely cause: "target code built without fuzzer-feedback instrumentation flags" (typically `rejected_build`); "target linked as a prebuilt artifact — switch to a tool that handles full-binary instrumentation, or rebuild from source" (typically `rejected_design`); "project build system resists whole-target rebuild — reconsider tool choice" (`rejected_design` with a directive to pick the design's named fallback).
+      When step 4(a) fails, classify by cross-referencing `design.md` — the same observed symptom (wrapper-only instrumentation) can be either build or design depending on what the design asked for:
+      - Design specified rebuilding the target with feedback flags AND the build's compile invocation actually did that, but flags didn't land (e.g., wrong `CFLAGS` scope) → `rejected_build` (implementation gap).
+      - Design specified the flags correctly and the build's compile invocation omits them → `rejected_build`.
+      - Design accepted a prebuilt target / system library / vendored archive as the attack surface and provided no rebuild step → `rejected_design`, switch to a tool that handles full-binary instrumentation or rebuild from source.
+      - Project build system resists whole-target rebuild AND the design named no fallback on a different mechanism → `rejected_design`, reconsider tool choice and pick the design's fallback (or add one if missing).
 
       Write validation results — including the recorded fuzzer-feedback metric values — to `.workflow/harness_validate/validation.md`.
     inputs:
