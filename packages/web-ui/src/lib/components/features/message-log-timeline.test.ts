@@ -347,6 +347,30 @@ describe('MessageLogTimeline', () => {
   // collapsed the user's selections. Keying by `entry.ts` only keeps each
   // selection bound to its message regardless of where it lands in the list.
 
+  // ── Composite key disambiguates same-`ts` entries of different `type` ──
+  //
+  // The orchestrator can write pairs like `state_transition` + `gate_raised`
+  // at the same millisecond. Keying the each-block on `entry.ts` alone
+  // caused Svelte 5 to throw `each_key_duplicate` (fatal), silently failing
+  // the timeline render. The composite `ts:type` key keeps both entries
+  // distinct.
+
+  it('renders two entries sharing the same ts but different type without throwing', () => {
+    const sharedTs = '2026-04-23T12:00:00.000Z';
+    const entries: MessageLogEntry[] = [
+      stateTransition({ ts: sharedTs, from: 'planner', state: 'plan_review', event: 'NEEDS_REVIEW' }),
+      gateRaised({ ts: sharedTs, state: 'plan_review', acceptedEvents: ['APPROVE', 'ABORT'] }),
+    ];
+
+    expect(() => render(MessageLogTimeline, { props: { entries, hasMore: false } })).not.toThrow();
+
+    const items = screen.getAllByTestId('message-log-entry');
+    expect(items).toHaveLength(2);
+    const types = items.map((el) => el.getAttribute('data-entry-type'));
+    expect(types).toContain('state_transition');
+    expect(types).toContain('gate_raised');
+  });
+
   it('preserves expanded state when older entries are appended (pagination)', async () => {
     const newMsg = agentSent({
       ts: '2026-04-23T12:00:10.000Z',

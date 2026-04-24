@@ -11,6 +11,57 @@ import { PHASE } from '$lib/types.js';
 const TERMINAL_LIVE_PHASES = new Set<LiveWorkflowPhase>([PHASE.COMPLETED, PHASE.FAILED, PHASE.ABORTED]);
 
 /**
+ * Build a `WorkflowSummaryDto` placeholder by merging caller-supplied fields
+ * over zero-defaults. Used to seed `appState.workflows` on `start`/`resume`
+ * before events arrive, and to synthesize summaries for past runs that aren't
+ * in the live Map. `WorkflowDetail` re-fetches via `getWorkflowDetail(id)`
+ * on mount, so only fields read at first paint must be populated correctly.
+ */
+export function buildSummaryPlaceholder(
+  partial: Partial<WorkflowSummaryDto> & { workflowId: string },
+): WorkflowSummaryDto {
+  return {
+    name: partial.workflowId,
+    phase: 'running',
+    currentState: '',
+    startedAt: new Date().toISOString(),
+    taskDescription: '',
+    round: 0,
+    maxRounds: 0,
+    totalTokens: 0,
+    ...partial,
+  };
+}
+
+/**
+ * Synthesize a `WorkflowSummaryDto` for a past-run row that isn't in the live
+ * `appState.workflows` Map. The narrower `LiveWorkflowPhase` excludes
+ * `'interrupted'`; coerce it to `'failed'` for the badge so the placeholder
+ * type stays narrow until the real phase is re-fetched.
+ */
+export function synthesizeSummaryFromPastRun(row: PastRunDto): WorkflowSummaryDto {
+  const livePhase: LiveWorkflowPhase = row.phase === 'interrupted' ? 'failed' : row.phase;
+  return buildSummaryPlaceholder({
+    workflowId: row.workflowId,
+    name: row.name,
+    phase: livePhase,
+    currentState: row.lastState,
+    startedAt: row.timestamp,
+    taskDescription: row.taskDescription,
+    round: row.round,
+    maxRounds: row.maxRounds,
+    totalTokens: row.totalTokens,
+    latestVerdict: row.latestVerdict,
+    error: row.error,
+  });
+}
+
+/** Bare-id placeholder for past runs not present in either source (deep-link). */
+export function synthesizeSummaryFromId(workflowId: string): WorkflowSummaryDto {
+  return buildSummaryPlaceholder({ workflowId, phase: 'completed' });
+}
+
+/**
  * Project an in-memory `WorkflowSummaryDto` (terminal phase) onto the
  * `PastRunDto` shape so it can be merged into the past-runs table.
  *

@@ -8,7 +8,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync } from 'node:fs';
 import { resolve, isAbsolute } from 'node:path';
 import { tmpdir } from 'node:os';
-import { discoverWorkflowRuns } from '../src/workflow/workflow-discovery.js';
+import { discoverWorkflowRuns, discoverWorkspacePathFromContainers } from '../src/workflow/workflow-discovery.js';
 import type { WorkflowId } from '../src/workflow/types.js';
 
 // ---------------------------------------------------------------------------
@@ -160,5 +160,106 @@ describe('discoverWorkflowRuns', () => {
       expect(isAbsolute(run.directoryPath)).toBe(true);
       expect(run.directoryPath).toBe(resolve(tempDir, run.workflowId));
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// discoverWorkspacePathFromContainers
+//
+// Recovery helper for checkpoint-less past runs: walks
+// `<runDir>/containers/*/states/*/session-metadata.json` and returns the
+// `workspacePath` from the entry with the latest `createdAt`.
+// ---------------------------------------------------------------------------
+
+interface SessionMetadata {
+  readonly createdAt: string;
+  readonly workspacePath?: string;
+  readonly agentConversationId?: string;
+}
+
+function writeSessionMetadata(
+  runDir: string,
+  containerId: string,
+  stateName: string,
+  metadata: SessionMetadata | string,
+): string {
+  const dir = resolve(runDir, 'containers', containerId, 'states', stateName);
+  mkdirSync(dir, { recursive: true });
+  const path = resolve(dir, 'session-metadata.json');
+  const content = typeof metadata === 'string' ? metadata : JSON.stringify(metadata);
+  writeFileSync(path, content, 'utf-8');
+  return path;
+}
+
+describe('discoverWorkspacePathFromContainers', () => {
+  it('returns undefined when the runDir has no containers/ subdir', () => {
+    const runDir = resolve(tempDir, 'no-containers');
+    mkdirSync(runDir, { recursive: true });
+    expect(discoverWorkspacePathFromContainers(runDir)).toBeUndefined();
+  });
+
+  it('returns undefined when the runDir itself does not exist', () => {
+    const runDir = resolve(tempDir, 'missing-run');
+    expect(discoverWorkspacePathFromContainers(runDir)).toBeUndefined();
+  });
+
+  it('returns the workspacePath for a single-state, single-container run', () => {
+    const runDir = resolve(tempDir, 'wf-1');
+    writeSessionMetadata(runDir, 'container-a', 'planner', {
+      createdAt: '2026-04-23T20:40:44.055Z',
+      workspacePath: '/home/user/src/repo',
+      agentConversationId: 'conv-1',
+    });
+    expect(discoverWorkspacePathFromContainers(runDir)).toBe('/home/user/src/repo');
+  });
+
+  it('returns the workspacePath of the entry with the newest createdAt across multiple states/containers', () => {
+    const runDir = resolve(tempDir, 'wf-multi');
+    writeSessionMetadata(runDir, 'container-a', 'planner', {
+      createdAt: '2026-04-23T19:00:00.000Z',
+      workspacePath: '/old/path',
+    });
+    writeSessionMetadata(runDir, 'container-a', 'reviewer', {
+      createdAt: '2026-04-23T21:30:00.000Z',
+      workspacePath: '/newest/path',
+    });
+    writeSessionMetadata(runDir, 'container-b', 'planner', {
+      createdAt: '2026-04-23T20:15:00.000Z',
+      workspacePath: '/middle/path',
+    });
+    expect(discoverWorkspacePathFromContainers(runDir)).toBe('/newest/path');
+  });
+
+  it('silently skips malformed JSON files and returns the next-best workspacePath', () => {
+    const runDir = resolve(tempDir, 'wf-bad-json');
+    writeSessionMetadata(runDir, 'container-a', 'planner', '{ this is not json');
+    writeSessionMetadata(runDir, 'container-a', 'reviewer', {
+      createdAt: '2026-04-23T20:00:00.000Z',
+      workspacePath: '/recovered/path',
+    });
+    expect(discoverWorkspacePathFromContainers(runDir)).toBe('/recovered/path');
+  });
+
+  it('silently skips files missing workspacePath and returns the next-best entry', () => {
+    const runDir = resolve(tempDir, 'wf-missing-ws');
+    writeSessionMetadata(runDir, 'container-a', 'planner', {
+      createdAt: '2026-04-23T22:00:00.000Z',
+      // workspacePath omitted entirely
+    });
+    writeSessionMetadata(runDir, 'container-a', 'reviewer', {
+      createdAt: '2026-04-23T20:00:00.000Z',
+      workspacePath: '/fallback/path',
+    });
+    expect(discoverWorkspacePathFromContainers(runDir)).toBe('/fallback/path');
+  });
+
+  it('returns undefined when every metadata file is unreadable or missing workspacePath', () => {
+    const runDir = resolve(tempDir, 'wf-all-bad');
+    writeSessionMetadata(runDir, 'container-a', 'planner', '{ broken');
+    writeSessionMetadata(runDir, 'container-a', 'reviewer', {
+      createdAt: '2026-04-23T20:00:00.000Z',
+      // no workspacePath
+    });
+    expect(discoverWorkspacePathFromContainers(runDir)).toBeUndefined();
   });
 });

@@ -31,7 +31,12 @@ import type { PastRunLoadSuccess, WorkflowManager } from '../workflow-manager.js
 import type { WorkflowId, WorkflowStatus, WorkflowCheckpoint, WorkflowDefinition } from '../../workflow/types.js';
 import type { WorkflowDetail } from '../../workflow/orchestrator.js';
 import { MessageLog, type MessageLogEntry, type StateTransitionEntry } from '../../workflow/message-log.js';
-import { discoverWorkflowRuns, summaryForId, type WorkflowRunSummary } from '../../workflow/workflow-discovery.js';
+import {
+  discoverWorkflowRuns,
+  discoverWorkspacePathFromContainers,
+  summaryForId,
+  type WorkflowRunSummary,
+} from '../../workflow/workflow-discovery.js';
 import { extractStateGraph } from '../state-graph.js';
 import type { StateGraphDto } from '../web-ui-types.js';
 import { isWithinDirectory } from '../../types/argument-roles.js';
@@ -347,21 +352,21 @@ export async function workflowDispatch(
 
     case 'workflows.fileTree': {
       const { workflowId, path: relPath } = validateParams(workflowFileTreeSchema, params);
-      const workspacePath = getWorkspacePath(controller, workflowId as WorkflowId);
+      const workspacePath = getWorkspacePath(controller, manager, workflowId as WorkflowId);
       const targetDir = resolveAndContain(workspacePath, relPath ?? '');
       return listDirectory(targetDir);
     }
 
     case 'workflows.fileContent': {
       const { workflowId, path: relPath } = validateParams(workflowFileContentSchema, params);
-      const workspacePath = getWorkspacePath(controller, workflowId as WorkflowId);
+      const workspacePath = getWorkspacePath(controller, manager, workflowId as WorkflowId);
       const targetFile = resolveAndContain(workspacePath, relPath);
       return readWorkspaceFile(targetFile);
     }
 
     case 'workflows.artifacts': {
       const { workflowId, artifactName } = validateParams(workflowArtifactSchema, params);
-      const workspacePath = getWorkspacePath(controller, workflowId as WorkflowId);
+      const workspacePath = getWorkspacePath(controller, manager, workflowId as WorkflowId);
       return readArtifact(workspacePath, artifactName);
     }
 
@@ -632,6 +637,7 @@ export function buildDetailFromPastRun(
   const currentState = deriveLastStateFromEntries(entries, definition);
   const taskDescription = definition.description;
   const startedAt = summary.mtime.toISOString();
+  const recoveredWorkspace = discoverWorkspacePathFromContainers(summary.directoryPath) ?? '';
 
   return {
     workflowId: id,
@@ -652,7 +658,7 @@ export function buildDetailFromPastRun(
     transitionHistory: [],
     context: { taskDescription, round: 0, maxRounds: 0, totalTokens: 0, visitCounts: {} },
     gate: undefined,
-    workspacePath: '',
+    workspacePath: recoveredWorkspace,
   };
 }
 
@@ -700,12 +706,32 @@ export function inferLanguage(filePath: string): string {
   return LANG_MAP[ext] ?? 'text';
 }
 
-function getWorkspacePath(controller: ReturnType<WorkflowManager['getOrchestrator']>, id: WorkflowId): string {
-  const detail = controller.getDetail(id);
-  if (!detail) {
+/**
+ * Resolves a workflow's workspace path: live detail → past-run checkpoint →
+ * recovered from container session-metadata. Throws `WORKFLOW_NOT_FOUND`
+ * when all three sources are empty. The returned path is not guaranteed to
+ * exist on disk (ephemeral workspaces may be torn down post-completion);
+ * `listDirectory` handles ENOENT gracefully.
+ */
+function getWorkspacePath(
+  controller: ReturnType<WorkflowManager['getOrchestrator']>,
+  manager: WorkflowManager,
+  id: WorkflowId,
+): string {
+  const liveDetail = controller.getDetail(id);
+  if (liveDetail) return liveDetail.workspacePath;
+
+  const result = manager.loadPastRun(id);
+  if ('error' in result) {
     throw new RpcError('WORKFLOW_NOT_FOUND', `Workflow ${id} not found`);
   }
-  return detail.workspacePath;
+  const pastWorkspace = result.checkpoint?.workspacePath;
+  if (pastWorkspace) return pastWorkspace;
+
+  const recovered = discoverWorkspacePathFromContainers(resolve(manager.getBaseDir(), id));
+  if (recovered) return recovered;
+
+  throw new RpcError('WORKFLOW_NOT_FOUND', `Workflow ${id} has no recorded workspace`);
 }
 
 /**

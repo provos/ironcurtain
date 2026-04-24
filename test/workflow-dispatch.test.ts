@@ -1847,3 +1847,190 @@ describe('workflows.messageLog', () => {
     expect(res.entries).toHaveLength(2);
   });
 });
+
+// ---------------------------------------------------------------------------
+// workflows.fileTree -- workspace path resolution (live + disk fallback)
+//
+// `workflows.fileTree`, `.fileContent`, and `.artifacts` all share the same
+// `getWorkspacePath()` helper, so testing one RPC end-to-end covers the
+// resolution branch for all three.
+// ---------------------------------------------------------------------------
+
+describe('workflows.fileTree -- workspace path resolution', () => {
+  let baseDir: string;
+  let workspaceDir: string;
+
+  beforeEach(() => {
+    baseDir = mkdtempSync(resolve(tmpdir(), 'ironcurtain-ws-test-'));
+    workspaceDir = mkdtempSync(resolve(tmpdir(), 'ironcurtain-ws-content-'));
+    // Seed a couple of files so listDirectory has non-empty output.
+    writeFileSync(resolve(workspaceDir, 'README.md'), '# hi\n', 'utf-8');
+    mkdirSync(resolve(workspaceDir, 'src'), { recursive: true });
+    writeFileSync(resolve(workspaceDir, 'src', 'index.ts'), 'export {};\n', 'utf-8');
+  });
+
+  afterEach(() => {
+    rmSync(baseDir, { recursive: true, force: true });
+    rmSync(workspaceDir, { recursive: true, force: true });
+  });
+
+  it('uses the live controller detail when the workflow is active', async () => {
+    const id = 'wf-live' as WorkflowId;
+    // If the live path is honoured, loadPastRun should not be consulted.
+    const loadPastRun = vi.fn();
+    const ctx = createContext({
+      baseDir,
+      controller: {
+        getDetail: vi.fn().mockReturnValue(makeDetail({ workspacePath: workspaceDir })),
+      },
+      loadPastRun,
+    });
+
+    const res = (await workflowDispatch(ctx, 'workflows.fileTree', {
+      workflowId: id,
+    })) as { entries: { name: string; type: string }[] };
+
+    expect(loadPastRun).not.toHaveBeenCalled();
+    const names = res.entries.map((e) => e.name).sort();
+    expect(names).toContain('README.md');
+    expect(names).toContain('src');
+  });
+
+  it('falls back to the past-run checkpoint workspacePath for non-live workflows', async () => {
+    const id = 'wf-past' as WorkflowId;
+    const cp = makeCheckpoint({ workspacePath: workspaceDir });
+    const ctx = createContext({
+      baseDir,
+      controller: {
+        // No live detail -> forces the disk fallback branch.
+        getDetail: vi.fn().mockReturnValue(undefined),
+      },
+      loadPastRun: () => makeLoad({ checkpoint: cp, definition: makeDefinition() }),
+    });
+
+    const res = (await workflowDispatch(ctx, 'workflows.fileTree', {
+      workflowId: id,
+    })) as { entries: { name: string; type: string }[] };
+
+    const names = res.entries.map((e) => e.name).sort();
+    expect(names).toContain('README.md');
+    expect(names).toContain('src');
+  });
+
+  it('throws WORKFLOW_NOT_FOUND when neither live nor disk has the workflow', async () => {
+    const id = 'wf-missing' as WorkflowId;
+    const ctx = createContext({
+      baseDir,
+      controller: { getDetail: vi.fn().mockReturnValue(undefined) },
+      loadPastRun: () => ({ error: 'not_found' }),
+    });
+
+    let caught: unknown;
+    try {
+      await workflowDispatch(ctx, 'workflows.fileTree', { workflowId: id });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(RpcError);
+    expect((caught as RpcError).code).toBe('WORKFLOW_NOT_FOUND');
+  });
+
+  it('throws WORKFLOW_NOT_FOUND when the past-run load succeeds but has no checkpoint', async () => {
+    const id = 'wf-no-cp' as WorkflowId;
+    const ctx = createContext({
+      baseDir,
+      controller: { getDetail: vi.fn().mockReturnValue(undefined) },
+      // checkpoint:undefined is a valid PastRunLoadSuccess shape (message-log-only dir).
+      loadPastRun: () => makeLoad({ checkpoint: undefined, definition: makeDefinition() }),
+    });
+
+    let caught: unknown;
+    try {
+      await workflowDispatch(ctx, 'workflows.fileTree', { workflowId: id });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(RpcError);
+    expect((caught as RpcError).code).toBe('WORKFLOW_NOT_FOUND');
+  });
+
+  it('throws WORKFLOW_NOT_FOUND when the checkpoint has no workspacePath', async () => {
+    const id = 'wf-no-ws' as WorkflowId;
+    // Pre-checkpoint-retention checkpoints can lack workspacePath.
+    const cp = makeCheckpoint({ workspacePath: undefined as unknown as string });
+    const ctx = createContext({
+      baseDir,
+      controller: { getDetail: vi.fn().mockReturnValue(undefined) },
+      loadPastRun: () => makeLoad({ checkpoint: cp, definition: makeDefinition() }),
+    });
+
+    let caught: unknown;
+    try {
+      await workflowDispatch(ctx, 'workflows.fileTree', { workflowId: id });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(RpcError);
+    expect((caught as RpcError).code).toBe('WORKFLOW_NOT_FOUND');
+  });
+
+  // ── Container-metadata recovery for checkpoint-less runs ─────────────
+  //
+  // When a past run has no checkpoint but session-metadata.json files
+  // remain on disk under `<baseDir>/<id>/containers/*/states/*/`, the
+  // helper recovers a workspacePath from the newest entry. Verifies the
+  // fallback chain: checkpoint → container metadata → WORKFLOW_NOT_FOUND.
+
+  it('recovers workspacePath from container session metadata for a checkpoint-less past run', async () => {
+    const id = 'wf-recovered' as WorkflowId;
+    // Seed `<baseDir>/<id>/containers/<container>/states/<state>/session-metadata.json`
+    // pointing at the real workspaceDir so listDirectory can read it.
+    const stateDir = resolve(baseDir, id, 'containers', 'container-a', 'states', 'planner');
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(
+      resolve(stateDir, 'session-metadata.json'),
+      JSON.stringify({
+        createdAt: '2026-04-23T20:40:44.055Z',
+        workspacePath: workspaceDir,
+        agentConversationId: 'conv-1',
+      }),
+      'utf-8',
+    );
+
+    const ctx = createContext({
+      baseDir,
+      controller: { getDetail: vi.fn().mockReturnValue(undefined) },
+      // checkpoint:undefined exercises the recovery branch.
+      loadPastRun: () => makeLoad({ checkpoint: undefined, definition: makeDefinition() }),
+    });
+
+    const res = (await workflowDispatch(ctx, 'workflows.fileTree', {
+      workflowId: id,
+    })) as { entries: { name: string; type: string }[] };
+
+    const names = res.entries.map((e) => e.name).sort();
+    expect(names).toContain('README.md');
+    expect(names).toContain('src');
+  });
+
+  it('throws WORKFLOW_NOT_FOUND when neither checkpoint nor container metadata yields a workspacePath', async () => {
+    const id = 'wf-no-recovery' as WorkflowId;
+    // Container directory exists but session-metadata.json is missing.
+    mkdirSync(resolve(baseDir, id, 'containers', 'container-a', 'states', 'planner'), { recursive: true });
+
+    const ctx = createContext({
+      baseDir,
+      controller: { getDetail: vi.fn().mockReturnValue(undefined) },
+      loadPastRun: () => makeLoad({ checkpoint: undefined, definition: makeDefinition() }),
+    });
+
+    let caught: unknown;
+    try {
+      await workflowDispatch(ctx, 'workflows.fileTree', { workflowId: id });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(RpcError);
+    expect((caught as RpcError).code).toBe('WORKFLOW_NOT_FOUND');
+  });
+});

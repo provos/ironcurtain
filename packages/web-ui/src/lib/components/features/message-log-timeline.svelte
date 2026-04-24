@@ -54,14 +54,14 @@
     agent_retry: { label: 'Retry', badgeVariant: 'warning' },
   };
 
-  // ------------------------------------------------------------------
-  // Expansion state for agent_sent / agent_received entries.
-  // Keyed by `entry.ts` only — using the array index as part of the key
-  // would invalidate selections every time "Load older" prepends/appends
-  // entries and shifts indices. The orchestrator writes timestamps with
-  // millisecond precision, so collisions on the same log are unlikely;
-  // when they do occur both entries expand together — acceptable.
-  // ------------------------------------------------------------------
+  // Composite `ts:type` key — the orchestrator can write pairs of distinct
+  // entries at the same millisecond (e.g. state_transition + gate_raised) and
+  // Svelte 5 throws on duplicate keys. Index isn't an option: pagination
+  // prepends would shift selections.
+  function entryKey(entry: MessageLogEntry): string {
+    return entry.ts + ':' + entry.type;
+  }
+
   let expanded = $state<Set<string>>(new Set());
 
   function toggleExpanded(key: string): void {
@@ -141,9 +141,9 @@
       </div>
     {/if}
 
-    {#each entries as entry (entry.ts)}
+    {#each entries as entry (entryKey(entry))}
       {@const meta = VARIANT_META[entry.type]}
-      {@const key = entry.ts}
+      {@const key = entryKey(entry)}
       <Card data-testid="message-log-entry" data-entry-type={entry.type} class="px-3 py-2">
         <div class="flex items-baseline gap-2 text-xs text-muted-foreground mb-1">
           <Badge variant={meta.badgeVariant} class="font-mono shrink-0">{meta.label}</Badge>

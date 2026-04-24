@@ -241,6 +241,55 @@ describe('Workflows route', () => {
       expect(mockAppState.selectedWorkflowId).toBe('p-done');
     });
 
+    it('renders WorkflowDetail for a past run that is NOT in the live map (Investigate path)', async () => {
+      // Past-only run: present in listResumableWorkflows() but absent from
+      // appState.workflows. Before the fix, the gate `selectedWorkflow &&
+      // selectedWorkflowId` blocked WorkflowDetail from mounting in this case
+      // (the live-Map lookup returned null, the conjunction was false).
+      // The plain-object mock for appState doesn't fire Svelte rune reactivity
+      // on post-render mutations, so we pre-set selectedWorkflowId so the
+      // detail-view branch is reached on mount and exercises the placeholder
+      // synthesis path.
+      mockAppState.selectedWorkflowId = 'p-only-disk';
+      mockListResumable.mockResolvedValue([
+        makePastRun({
+          workflowId: 'p-only-disk',
+          phase: 'completed',
+          taskDescription: 'a finished run on disk',
+          lastState: 'done',
+        }),
+      ]);
+      // Crucially: do NOT seed appState.workflows for this id.
+      render(Workflows);
+
+      // The stub renders <div data-testid="test-stub" data-prop-count="N">.
+      // Its presence proves WorkflowDetail mounted with the synthesized summary.
+      const stub = await screen.findByTestId('test-stub');
+      expect(stub).toBeTruthy();
+      // Sanity: the stub forwards all props, so prop-count is non-zero
+      // (workflowId, summary, gate, onback at minimum).
+      expect(Number(stub.getAttribute('data-prop-count'))).toBeGreaterThan(0);
+    });
+
+    it('Investigate button click sets selectedWorkflowId for past runs not in the live map', async () => {
+      // Companion to the test above: verifies the click handler does flip the
+      // selection state. Reactivity-driven re-render is covered by the
+      // pre-set test; this one isolates the click side-effect.
+      mockListResumable.mockResolvedValue([
+        makePastRun({
+          workflowId: 'p-disk-click',
+          phase: 'completed',
+          taskDescription: 'another disk-only run',
+        }),
+      ]);
+      render(Workflows);
+
+      const investigate = (await screen.findByTestId('investigate-p-disk-click')) as HTMLButtonElement;
+      expect(investigate.disabled).toBe(false);
+      await fireEvent.click(investigate);
+      expect(mockAppState.selectedWorkflowId).toBe('p-disk-click');
+    });
+
     // ── B4: in-row taskDescription expand ─────────────────────────────
     it('clicking the task button toggles between truncated and full text', async () => {
       const longTask =

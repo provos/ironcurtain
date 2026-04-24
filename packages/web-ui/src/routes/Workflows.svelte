@@ -21,23 +21,11 @@
     countByPhase,
     formatConfidence,
     formatDurationMs,
+    buildSummaryPlaceholder,
+    synthesizeSummaryFromPastRun,
+    synthesizeSummaryFromId,
     type PastRunFilter,
   } from './workflows-helpers.js';
-
-  function createWorkflowPlaceholder(workflowId: string, currentState: string): WorkflowSummaryDto {
-    // F1 stub: card fields populated by F2 from real event/RPC payloads.
-    return {
-      workflowId,
-      name: workflowId,
-      phase: 'running',
-      currentState,
-      startedAt: new Date().toISOString(),
-      taskDescription: '',
-      round: 0,
-      maxRounds: 0,
-      totalTokens: 0,
-    };
-  }
   import { Button } from '$lib/components/ui/button/index.js';
   import { Badge } from '$lib/components/ui/badge/index.js';
   import { Card, CardHeader, CardTitle, CardContent } from '$lib/components/ui/card/index.js';
@@ -118,7 +106,7 @@
       if (!appState.workflows.has(result.workflowId)) {
         appState.workflows = new Map(appState.workflows).set(
           result.workflowId,
-          createWorkflowPlaceholder(result.workflowId, 'starting...'),
+          buildSummaryPlaceholder({ workflowId: result.workflowId, currentState: 'starting...' }),
         );
       }
       selectedDefinition = '';
@@ -141,7 +129,7 @@
     if (!appState.workflows.has(workflowId)) {
       appState.workflows = new Map(appState.workflows).set(
         workflowId,
-        createWorkflowPlaceholder(workflowId, 'resuming...'),
+        buildSummaryPlaceholder({ workflowId: workflowId, currentState: 'resuming...' }),
       );
     }
     try {
@@ -171,7 +159,7 @@
       if (!appState.workflows.has(workflowId)) {
         appState.workflows = new Map(appState.workflows).set(
           workflowId,
-          createWorkflowPlaceholder(workflowId, 'resuming...'),
+          buildSummaryPlaceholder({ workflowId: workflowId, currentState: 'resuming...' }),
         );
       }
       await rpcResumeWorkflow(workflowId);
@@ -230,6 +218,22 @@
     appState.selectedWorkflowId ? (appState.workflows.get(appState.selectedWorkflowId) ?? null) : null,
   );
 
+  /**
+   * Resolved summary for the detail view. Falls back through:
+   *   1. Live in-memory entry (`appState.workflows`).
+   *   2. Past-run row from the merged `pastRuns` list.
+   *   3. Synthesized placeholder from just the workflowId (for deep links).
+   * `WorkflowDetail` calls `getWorkflowDetail(id)` on mount, which populates
+   * the rest of the fields from disk.
+   */
+  const detailSummary = $derived.by((): WorkflowSummaryDto | null => {
+    if (!appState.selectedWorkflowId) return null;
+    if (selectedWorkflow) return selectedWorkflow;
+    const pastRow = pastRuns.find((r) => r.workflowId === appState.selectedWorkflowId);
+    if (pastRow) return synthesizeSummaryFromPastRun(pastRow);
+    return synthesizeSummaryFromId(appState.selectedWorkflowId);
+  });
+
   const selectedGate = $derived.by(() => {
     if (!appState.selectedWorkflowId) return undefined;
     for (const gate of appState.pendingGates.values()) {
@@ -262,10 +266,10 @@
   const userDefs = $derived(definitions.filter((d) => d.source === 'user'));
 </script>
 
-{#if selectedWorkflow && appState.selectedWorkflowId}
+{#if appState.selectedWorkflowId && detailSummary}
   <WorkflowDetail
     workflowId={appState.selectedWorkflowId}
-    summary={selectedWorkflow}
+    summary={detailSummary}
     gate={selectedGate}
     onback={deselectWorkflow}
   />
