@@ -73,6 +73,8 @@ import { buildAgentCommand, buildArtifactReprompt, buildStatusInstructions } fro
 import { collectFilesRecursive, hasAnyFiles, snapshotArtifacts } from './artifacts.js';
 import { validateDefinition } from './validate.js';
 import { parseDefinitionFile } from './discovery.js';
+import { discoverWorkflowRuns } from './workflow-discovery.js';
+import { isCheckpointResumable } from './cli-support.js';
 import { AgentInvocationError, WorkflowQuotaExhaustedError, isWorkflowQuotaExhaustedError } from './errors.js';
 
 const execFileAsync = promisify(execFileCb);
@@ -1005,9 +1007,15 @@ export class WorkflowOrchestrator implements WorkflowController {
   }
 
   listResumable(): WorkflowId[] {
-    const allCheckpointed = this.deps.checkpointStore.listAll();
+    const runs = discoverWorkflowRuns(this.deps.baseDir);
     const activeIds = new Set(this.listActive());
-    return allCheckpointed.filter((id) => !activeIds.has(id));
+    return runs
+      .filter((r) => r.hasCheckpoint && !activeIds.has(r.workflowId))
+      .filter((r) => {
+        const cp = this.deps.checkpointStore.load(r.workflowId);
+        return cp !== undefined && isCheckpointResumable(cp);
+      })
+      .map((r) => r.workflowId);
   }
 
   getStatus(id: WorkflowId): WorkflowStatus | undefined {
@@ -1310,15 +1318,35 @@ export class WorkflowOrchestrator implements WorkflowController {
     return definition.states[stateValue].type === 'terminal';
   }
 
-  private saveCheckpoint(instance: WorkflowInstance, snapshot: { value: unknown; context: unknown }): void {
-    const checkpoint: WorkflowCheckpoint = {
+  /**
+   * Build a `WorkflowCheckpoint` from an instance + snapshot, with an optional
+   * `finalStatus`. Used at both the on-transition save site (no `finalStatus`)
+   * and the terminal-completion save site (with `finalStatus` populated).
+   *
+   * Note: `finalStatus` is typed as `WorkflowStatus | undefined`. Callers in
+   * `handleWorkflowComplete` never pass a `waiting_human` status — the three
+   * terminal branches only assign `completed` or `aborted`. A future refactor
+   * that routes a `waiting_human` status through here would need to handle
+   * `gate.presentedArtifacts` (a `ReadonlyMap`) not surviving `JSON.stringify`.
+   */
+  private buildCheckpoint(
+    instance: WorkflowInstance,
+    snapshot: { value: unknown; context: unknown },
+    finalStatus?: WorkflowStatus,
+  ): WorkflowCheckpoint {
+    return {
       machineState: snapshot.value,
       context: snapshot.context as WorkflowContext,
       timestamp: new Date().toISOString(),
       transitionHistory: [...instance.transitionHistory],
       definitionPath: instance.definitionPath,
       workspacePath: instance.workspacePath,
+      ...(finalStatus !== undefined ? { finalStatus } : {}),
     };
+  }
+
+  private saveCheckpoint(instance: WorkflowInstance, snapshot: { value: unknown; context: unknown }): void {
+    const checkpoint = this.buildCheckpoint(instance, snapshot);
     try {
       this.deps.checkpointStore.save(instance.id, checkpoint);
     } catch (err) {
@@ -1865,15 +1893,18 @@ export class WorkflowOrchestrator implements WorkflowController {
       };
     }
 
-    // Only remove the checkpoint when the workflow completes successfully.
-    // Aborted runs keep their checkpoint on disk so `workflow resume` can
-    // restart them from the last saved state.
-    if (instance.finalStatus.phase === 'completed') {
-      try {
-        this.deps.checkpointStore.remove(workflowId);
-      } catch (err) {
-        writeStderr(`[workflow] Failed to remove checkpoint for ${workflowId}: ${toErrorMessage(err)}`);
-      }
+    // All terminal runs retain their checkpoint with `finalStatus` populated,
+    // so the past-runs UI and `workflow inspect` can surface the canonical
+    // phase without state-name heuristics, and `listResumable` can correctly
+    // exclude completed runs via isCheckpointResumable() (cli-support.ts).
+    try {
+      const snapshot = instance.actor.getSnapshot() as { value: unknown; context: unknown };
+      const checkpoint = this.buildCheckpoint(instance, snapshot, instance.finalStatus);
+      this.deps.checkpointStore.save(workflowId, checkpoint);
+    } catch (err) {
+      // A failed terminal save leaves the in-memory `finalStatus` set (so the
+      // rest of the lifecycle behaves correctly); we don't crash the workflow.
+      writeStderr(`[workflow] Failed to save terminal checkpoint for ${workflowId}: ${toErrorMessage(err)}`);
     }
 
     instance.tab.write(`[done] ${instance.finalStatus.phase}`);

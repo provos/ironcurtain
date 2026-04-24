@@ -17,8 +17,9 @@ import {
   type WorkflowController,
 } from '../workflow/orchestrator.js';
 import { FileCheckpointStore } from '../workflow/checkpoint.js';
-import { createWorkflowSessionFactory } from '../workflow/cli-support.js';
+import { createWorkflowSessionFactory, isCheckpointResumable } from '../workflow/cli-support.js';
 import { parseDefinitionFile } from '../workflow/discovery.js';
+import { discoverWorkflowRuns } from '../workflow/workflow-discovery.js';
 import { validateDefinition, WorkflowValidationError } from '../workflow/validate.js';
 import type { WebEventBus } from './web-event-bus.js';
 import { type HumanGateRequestDto, toHumanGateRequestDto } from './web-ui-types.js';
@@ -29,15 +30,36 @@ import type { WorkflowId, WorkflowCheckpoint, WorkflowDefinition } from '../work
 // loadPastRun result types
 // ---------------------------------------------------------------------------
 
-/** Successful past-run load: domain objects only, no DTO mapping. */
+/**
+ * Successful past-run load: domain objects only, no DTO mapping.
+ *
+ * `checkpoint` is optional because a directory may hold a `definition.json`
+ * (and optionally a `messages.jsonl`) without a `checkpoint.json` -- this
+ * happens for runs that completed before checkpoint retention was introduced
+ * and for runs where the checkpoint is missing for any other reason. The
+ * dispatch layer synthesizes missing fields from the message log or the
+ * definition when `checkpoint` is `undefined`.
+ *
+ * `messageLogPath` is always returned (never checked for existence here);
+ * callers read it via `MessageLog.readAll()`, which returns `[]` when the
+ * file does not yet exist.
+ */
 export interface PastRunLoadSuccess {
-  readonly checkpoint: WorkflowCheckpoint;
+  readonly checkpoint: WorkflowCheckpoint | undefined;
   readonly definition: WorkflowDefinition;
+  /** Absolute path to the per-run `messages.jsonl`. Not guaranteed to exist on disk. */
+  readonly messageLogPath: string;
   /** True iff `workflowId` is present in `controller.listActive()` at call time. */
   readonly isLive: boolean;
 }
 
-/** Failed past-run load. `not_found` = no checkpoint on disk; `corrupted` = parse/schema failure. */
+/**
+ * Failed past-run load.
+ * - `not_found`: directory doesn't exist OR has no loadable definition (so
+ *   there's nothing to render).
+ * - `corrupted`: a present file (checkpoint or definition) failed to parse
+ *   or validate.
+ */
 export interface PastRunLoadError {
   readonly error: 'not_found' | 'corrupted';
   readonly message?: string;
@@ -112,16 +134,21 @@ export class WorkflowManager {
     if (workflowId) {
       targetId = workflowId as WorkflowId;
     } else {
-      // Pick the most recent checkpoint
-      const allIds = externalStore.listAll();
-      if (allIds.length === 0) {
+      // Pick the most recent resumable checkpoint. Enumeration goes through
+      // the shared `discoverWorkflowRuns` utility so every directory-scan
+      // site in the codebase uses the same definition of "exists"; and the
+      // `isCheckpointResumable` predicate filters out completed runs — a
+      // finished workflow cannot meaningfully be "resumed."
+      const runs = discoverWorkflowRuns(externalBaseDir);
+      const candidateIds = runs.filter((r) => r.hasCheckpoint).map((r) => r.workflowId);
+      if (candidateIds.length === 0) {
         throw new Error(`No checkpoints found in ${externalBaseDir}`);
       }
       let latestId: WorkflowId | undefined;
       let latestTimestamp = '';
-      for (const id of allIds) {
+      for (const id of candidateIds) {
         const cp = externalStore.load(id);
-        if (cp && cp.timestamp > latestTimestamp) {
+        if (cp && isCheckpointResumable(cp) && cp.timestamp > latestTimestamp) {
           latestId = id;
           latestTimestamp = cp.timestamp;
         }
@@ -153,8 +180,8 @@ export class WorkflowManager {
   }
 
   /**
-   * Loads a past workflow run from disk: the raw checkpoint plus the parsed
-   * `WorkflowDefinition` that was active when it was checkpointed.
+   * Loads a past workflow run from disk: the raw checkpoint (if present) plus
+   * the parsed `WorkflowDefinition` that was active when it ran.
    *
    * Returns domain objects only — no DTO mapping (per design decision D2: the
    * orchestrator/manager layer must not depend on web-UI DTO types). Callers
@@ -163,18 +190,25 @@ export class WorkflowManager {
    * Synchronous because `FileCheckpointStore.load()` is synchronous.
    *
    * Behavior:
-   * - `not_found`: no `checkpoint.json` exists for `workflowId` on disk.
-   * - `corrupted`: checkpoint or definition file is present but fails to
-   *   parse (JSON syntax error, schema validation failure, missing fields).
-   *   Never throws on a corrupted file — always returns the error object.
-   * - On success, `isLive` is true iff `workflowId` is in
-   *   `controller.listActive()`. The dispatch layer uses this to synthesize
-   *   the `interrupted` phase (D1).
+   * - `not_found`: the workflow directory has neither a loadable checkpoint
+   *   nor a loadable definition — nothing worth rendering.
+   * - `corrupted`: checkpoint or definition file is present on disk but fails
+   *   to parse (JSON syntax error, schema validation failure, missing
+   *   fields). Never throws on a corrupted file — always returns the error
+   *   object.
+   * - On success, `checkpoint` may be `undefined` (completed pre-retention
+   *   runs and other checkpoint-less directories), `definition` is always
+   *   defined, `messageLogPath` is always returned (unchecked for existence),
+   *   and `isLive` is true iff `workflowId` is in `controller.listActive()`.
    */
   loadPastRun(workflowId: WorkflowId): PastRunLoadResult {
     // Use the existing per-manager checkpoint store. `getCheckpointStore()`
     // ensures the orchestrator (and therefore the store) exists.
     const store = this.getCheckpointStore();
+
+    // Always computed — cheap (single path.resolve) and consumers handle
+    // "no log" via MessageLog.readAll() returning [].
+    const messageLogPath = resolve(this.getBaseDir(), workflowId, 'messages.jsonl');
 
     let checkpoint: WorkflowCheckpoint | undefined;
     try {
@@ -188,20 +222,16 @@ export class WorkflowManager {
       };
     }
 
-    if (!checkpoint) {
-      return { error: 'not_found' };
-    }
-
-    // Resolve the definition. Prefer the JSON copy in baseDir (written by
-    // `start()`/`importExternalCheckpoint()`); fall back to the original path
-    // recorded on the checkpoint, mirroring the orchestrator's `resume()` logic.
+    // `checkpoint === undefined` is no longer a terminal error — the
+    // directory may still carry a definition and/or message log that the
+    // dispatch layer can render.
     const definitionResult = this.loadDefinitionForCheckpoint(workflowId, checkpoint);
     if ('error' in definitionResult) {
       return definitionResult;
     }
 
     const isLive = this.getOrchestrator().listActive().includes(workflowId);
-    return { checkpoint, definition: definitionResult.definition, isLive };
+    return { checkpoint, definition: definitionResult.definition, messageLogPath, isLive };
   }
 
   /** Returns the stable base directory for workflow data. */
@@ -228,26 +258,45 @@ export class WorkflowManager {
   private _checkpointStore: FileCheckpointStore | null = null;
 
   /**
-   * Resolves and parses the WorkflowDefinition associated with a checkpoint.
-   * Prefers the JSON copy at `{baseDir}/{workflowId}/definition.json` written
-   * at workflow-start; falls back to the original `checkpoint.definitionPath`.
-   * On any parse/validation failure, returns a `corrupted` error.
+   * Resolves and parses the WorkflowDefinition associated with a workflow run.
+   *
+   * Preference order:
+   *  1. Local JSON copy at `{baseDir}/{workflowId}/definition.json` (written
+   *     at workflow-start / import). Tried regardless of whether a checkpoint
+   *     is available.
+   *  2. The original `checkpoint.definitionPath`, iff `checkpoint` is defined.
+   *
+   * When `checkpoint` is `undefined` we have nothing beyond the local copy to
+   * try — a directory with no checkpoint and no `definition.json` has no
+   * content worth surfacing and is reported as `not_found` (distinct from
+   * `corrupted`, which is reserved for present-but-malformed files).
+   *
+   * Any parse or schema-validation failure of a present file is surfaced as
+   * `corrupted`.
    */
   private loadDefinitionForCheckpoint(
     workflowId: WorkflowId,
-    checkpoint: WorkflowCheckpoint,
+    checkpoint: WorkflowCheckpoint | undefined,
   ): { definition: WorkflowDefinition } | PastRunLoadError {
     const definitionCopyPath = resolve(this.getBaseDir(), workflowId, 'definition.json');
-    const usingCopy = existsSync(definitionCopyPath);
-    const definitionPath = usingCopy ? definitionCopyPath : checkpoint.definitionPath;
+    const hasCopy = existsSync(definitionCopyPath);
 
-    // If neither location holds a file, the definition is missing. This is
-    // distinct from a malformed file but the dispatch layer treats both as
-    // unrecoverable — surface as `corrupted` so the user gets a useful message.
-    if (!existsSync(definitionPath)) {
+    let definitionPath: string | undefined;
+    if (hasCopy) {
+      definitionPath = definitionCopyPath;
+    } else if (checkpoint && existsSync(checkpoint.definitionPath)) {
+      definitionPath = checkpoint.definitionPath;
+    }
+
+    if (!definitionPath) {
+      // Nothing to load: no local copy, and either no checkpoint at all or
+      // the checkpoint's original `definitionPath` is gone. The directory
+      // has no renderable content — report `not_found` rather than
+      // `corrupted` (corrupted is reserved for present-but-malformed files).
+      const fallbackDetail = checkpoint ? ` and ${checkpoint.definitionPath}` : '';
       return {
-        error: 'corrupted',
-        message: `Definition file missing for ${workflowId} (looked in ${definitionCopyPath} and ${checkpoint.definitionPath})`,
+        error: 'not_found',
+        message: `Definition file missing for ${workflowId} (looked in ${definitionCopyPath}${fallbackDetail})`,
       };
     }
 

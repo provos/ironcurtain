@@ -8,7 +8,7 @@
  * with cursor-based pagination semantics.
  */
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 
@@ -17,12 +17,14 @@ import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import {
   workflowDispatch,
   computePastRunPhase,
+  synthesizePhaseFromMessageLog,
   buildDetailFromPastRun,
   buildPastRunDto,
   type WorkflowDispatchContext,
 } from '../src/web-ui/dispatch/workflow-dispatch.js';
 import { RpcError, type PastRunDto, type MessageLogResponseDto } from '../src/web-ui/web-ui-types.js';
 import type { MessageLogEntry } from '../src/workflow/message-log.js';
+import type { WorkflowRunSummary } from '../src/workflow/workflow-discovery.js';
 import * as logger from '../src/logger.js';
 import { WebEventBus } from '../src/web-ui/web-event-bus.js';
 import { SessionManager } from '../src/session/session-manager.js';
@@ -35,7 +37,7 @@ import type {
   WorkflowDefinition,
 } from '../src/workflow/types.js';
 import type { ControlRequestHandler } from '../src/daemon/control-socket.js';
-import type { WorkflowManager, PastRunLoadResult } from '../src/web-ui/workflow-manager.js';
+import type { PastRunLoadSuccess, WorkflowManager, PastRunLoadResult } from '../src/web-ui/workflow-manager.js';
 import type { FileCheckpointStore } from '../src/workflow/checkpoint.js';
 
 // ---------------------------------------------------------------------------
@@ -124,6 +126,74 @@ function makeDetail(overrides: Partial<WorkflowDetail> = {}): WorkflowDetail {
     },
     ...overrides,
   };
+}
+
+/** Builds a successful past-run load fixture with the new shape (B4+B5). */
+function makeLoad(opts: {
+  checkpoint?: WorkflowCheckpoint | undefined;
+  definition?: WorkflowDefinition;
+  messageLogPath?: string;
+  isLive?: boolean;
+}): PastRunLoadSuccess {
+  return {
+    checkpoint: 'checkpoint' in opts ? opts.checkpoint : makeCheckpoint(),
+    definition: opts.definition ?? makeDefinition(),
+    messageLogPath: opts.messageLogPath ?? '/tmp/nonexistent-messages.jsonl',
+    isLive: opts.isLive ?? false,
+  };
+}
+
+/** Builds a `WorkflowRunSummary` fixture for B6/B7/B8 callers. */
+function makeSummary(opts: {
+  workflowId: WorkflowId;
+  baseDir?: string;
+  mtime?: Date;
+  hasCheckpoint?: boolean;
+  hasDefinition?: boolean;
+  hasMessageLog?: boolean;
+}): WorkflowRunSummary {
+  const baseDir = opts.baseDir ?? '/tmp';
+  return {
+    workflowId: opts.workflowId,
+    directoryPath: resolve(baseDir, opts.workflowId),
+    hasCheckpoint: opts.hasCheckpoint ?? true,
+    hasDefinition: opts.hasDefinition ?? true,
+    hasMessageLog: opts.hasMessageLog ?? false,
+    mtime: opts.mtime ?? new Date('2026-04-23T10:00:00.000Z'),
+  };
+}
+
+/** Writes a JSONL message log at `{baseDir}/{workflowId}/messages.jsonl`. */
+function writeMessageLogFile(baseDir: string, workflowId: string, entries: readonly MessageLogEntry[]): string {
+  const dir = resolve(baseDir, workflowId);
+  mkdirSync(dir, { recursive: true });
+  const path = resolve(dir, 'messages.jsonl');
+  const content = entries.map((e) => JSON.stringify(e)).join('\n') + (entries.length > 0 ? '\n' : '');
+  writeFileSync(path, content, 'utf-8');
+  return path;
+}
+
+/** Writes a `definition.json` and a `checkpoint.json`/`messages.jsonl` per-flag. */
+function seedRunDirectory(
+  baseDir: string,
+  workflowId: string,
+  opts: {
+    definition?: WorkflowDefinition;
+    checkpoint?: WorkflowCheckpoint | undefined;
+    messages?: readonly MessageLogEntry[];
+  },
+): void {
+  const dir = resolve(baseDir, workflowId);
+  mkdirSync(dir, { recursive: true });
+  if (opts.definition) {
+    writeFileSync(resolve(dir, 'definition.json'), JSON.stringify(opts.definition), 'utf-8');
+  }
+  if (opts.checkpoint) {
+    writeFileSync(resolve(dir, 'checkpoint.json'), JSON.stringify(opts.checkpoint), 'utf-8');
+  }
+  if (opts.messages) {
+    writeMessageLogFile(baseDir, workflowId, opts.messages);
+  }
 }
 
 /**
@@ -275,6 +345,383 @@ describe('computePastRunPhase', () => {
     const def = makeDefinition();
     expect(computePastRunPhase(cp, def, false)).toBe('interrupted');
   });
+
+  it('short-circuits via finalStatus.phase when present (B3b post-B)', () => {
+    const cp = makeCheckpoint({
+      machineState: 'plan', // heuristic would say 'interrupted'
+      finalStatus: { phase: 'completed', result: { finalArtifacts: {} } },
+    });
+    const def = makeDefinition();
+    // Short-circuit wins over the state-name heuristic.
+    expect(computePastRunPhase(cp, def, false)).toBe('completed');
+  });
+
+  it('falls through to state-name heuristic when finalStatus is absent (legacy pre-B3b)', () => {
+    const cp = makeCheckpoint({ machineState: 'done', finalStatus: undefined });
+    const def = makeDefinition({
+      initial: 'plan',
+      states: {
+        plan: {
+          type: 'agent',
+          description: 'p',
+          persona: 'global',
+          prompt: 'p',
+          inputs: [],
+          outputs: ['plan'],
+          transitions: [{ to: 'done' }],
+        },
+        done: { type: 'terminal', description: 'finished' },
+      },
+    });
+    expect(computePastRunPhase(cp, def, false)).toBe('completed');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// synthesizePhaseFromMessageLog
+// ---------------------------------------------------------------------------
+
+describe('synthesizePhaseFromMessageLog', () => {
+  const workflowId = 'wf-synth' as const;
+
+  /**
+   * Helper to build a `state_transition` entry. The orchestrator stores the
+   * destination state name in the `event` field (see orchestrator.ts line
+   * 1257-1262); `from` carries the previous state.
+   */
+  function transitionTo(to: string, from: string, ts: string): MessageLogEntry {
+    return {
+      type: 'state_transition',
+      ts,
+      workflowId,
+      state: from,
+      from,
+      event: to,
+    };
+  }
+
+  function defWithStates(states: WorkflowDefinition['states'], initial = 'start'): WorkflowDefinition {
+    return {
+      name: 'synth-test',
+      description: 'synth-test description',
+      initial,
+      states,
+    };
+  }
+
+  it('returns "interrupted" for empty entries (case 1)', () => {
+    const def = defWithStates({
+      start: {
+        type: 'agent',
+        description: 's',
+        persona: 'global',
+        prompt: 'p',
+        inputs: [],
+        outputs: [],
+        transitions: [],
+      },
+    });
+    expect(synthesizePhaseFromMessageLog([], def)).toBe('interrupted');
+  });
+
+  it('returns "aborted" when last transition lands on a terminal state named "aborted" (case 2)', () => {
+    const def = defWithStates({
+      start: {
+        type: 'agent',
+        description: 's',
+        persona: 'global',
+        prompt: 'p',
+        inputs: [],
+        outputs: [],
+        transitions: [{ to: 'aborted' }],
+      },
+      aborted: { type: 'terminal', description: 'terminated' },
+    });
+    const entries: MessageLogEntry[] = [transitionTo('aborted', 'start', '2026-04-23T10:00:00.000Z')];
+    expect(synthesizePhaseFromMessageLog(entries, def)).toBe('aborted');
+  });
+
+  it('returns "completed" when last transition lands on a terminal state named "done" (case 3)', () => {
+    const def = defWithStates({
+      start: {
+        type: 'agent',
+        description: 's',
+        persona: 'global',
+        prompt: 'p',
+        inputs: [],
+        outputs: [],
+        transitions: [{ to: 'done' }],
+      },
+      done: { type: 'terminal', description: 'finished' },
+    });
+    const entries: MessageLogEntry[] = [transitionTo('done', 'start', '2026-04-23T10:00:00.000Z')];
+    expect(synthesizePhaseFromMessageLog(entries, def)).toBe('completed');
+  });
+
+  it('returns "waiting_human" when last transition lands on a human_gate state (case 4)', () => {
+    const def = defWithStates({
+      start: {
+        type: 'agent',
+        description: 's',
+        persona: 'global',
+        prompt: 'p',
+        inputs: [],
+        outputs: [],
+        transitions: [{ to: 'review' }],
+      },
+      review: {
+        type: 'human_gate',
+        description: 'review gate',
+        acceptedEvents: ['APPROVE', 'ABORT'],
+        transitions: [
+          { to: 'done', event: 'APPROVE' },
+          { to: 'done', event: 'ABORT' },
+        ],
+      },
+      done: { type: 'terminal', description: 'd' },
+    });
+    const entries: MessageLogEntry[] = [transitionTo('review', 'start', '2026-04-23T10:00:00.000Z')];
+    expect(synthesizePhaseFromMessageLog(entries, def)).toBe('waiting_human');
+  });
+
+  it('returns "interrupted" when entries exist but none are state_transition (case 5)', () => {
+    const def = defWithStates({
+      start: {
+        type: 'agent',
+        description: 's',
+        persona: 'global',
+        prompt: 'p',
+        inputs: [],
+        outputs: [],
+        transitions: [],
+      },
+    });
+    const entries: MessageLogEntry[] = [
+      {
+        type: 'agent_sent',
+        ts: '2026-04-23T10:00:00.000Z',
+        workflowId,
+        state: 'start',
+        role: 'planner',
+        message: 'hello',
+      },
+      {
+        type: 'agent_received',
+        ts: '2026-04-23T10:00:01.000Z',
+        workflowId,
+        state: 'start',
+        role: 'planner',
+        message: 'ok',
+        verdict: null,
+        confidence: null,
+      },
+    ];
+    expect(synthesizePhaseFromMessageLog(entries, def)).toBe('interrupted');
+  });
+
+  it('returns "aborted" when last state is non-terminal and a quota_exhausted follows (case 6)', () => {
+    const def = defWithStates({
+      start: {
+        type: 'agent',
+        description: 's',
+        persona: 'global',
+        prompt: 'p',
+        inputs: [],
+        outputs: [],
+        transitions: [{ to: 'plan' }],
+      },
+      plan: {
+        type: 'agent',
+        description: 'p',
+        persona: 'global',
+        prompt: 'p',
+        inputs: [],
+        outputs: [],
+        transitions: [],
+      },
+    });
+    const entries: MessageLogEntry[] = [
+      transitionTo('plan', 'start', '2026-04-23T10:00:00.000Z'),
+      {
+        type: 'quota_exhausted',
+        ts: '2026-04-23T10:05:00.000Z',
+        workflowId,
+        state: 'plan',
+        role: 'planner',
+        rawMessage: 'rate limit hit',
+      },
+    ];
+    expect(synthesizePhaseFromMessageLog(entries, def)).toBe('aborted');
+  });
+
+  it('returns "failed" when last state is non-terminal and an error follows with no quota (case 7)', () => {
+    const def = defWithStates({
+      start: {
+        type: 'agent',
+        description: 's',
+        persona: 'global',
+        prompt: 'p',
+        inputs: [],
+        outputs: [],
+        transitions: [{ to: 'plan' }],
+      },
+      plan: {
+        type: 'agent',
+        description: 'p',
+        persona: 'global',
+        prompt: 'p',
+        inputs: [],
+        outputs: [],
+        transitions: [],
+      },
+    });
+    const entries: MessageLogEntry[] = [
+      transitionTo('plan', 'start', '2026-04-23T10:00:00.000Z'),
+      {
+        type: 'error',
+        ts: '2026-04-23T10:05:00.000Z',
+        workflowId,
+        state: 'plan',
+        error: 'agent crashed',
+      },
+    ];
+    expect(synthesizePhaseFromMessageLog(entries, def)).toBe('failed');
+  });
+
+  it('returns "interrupted" when last state is non-terminal and no post-transition events exist (case 8)', () => {
+    const def = defWithStates({
+      start: {
+        type: 'agent',
+        description: 's',
+        persona: 'global',
+        prompt: 'p',
+        inputs: [],
+        outputs: [],
+        transitions: [{ to: 'plan' }],
+      },
+      plan: {
+        type: 'agent',
+        description: 'p',
+        persona: 'global',
+        prompt: 'p',
+        inputs: [],
+        outputs: [],
+        transitions: [],
+      },
+    });
+    const entries: MessageLogEntry[] = [transitionTo('plan', 'start', '2026-04-23T10:00:00.000Z')];
+    expect(synthesizePhaseFromMessageLog(entries, def)).toBe('interrupted');
+  });
+
+  it('picks the latest transition by ts, not by array index', () => {
+    // Out-of-order array: a newer transition appears before an older one.
+    // The helper uses ts comparison, so the terminal "done" (ts=11:00) wins.
+    const def = defWithStates({
+      start: {
+        type: 'agent',
+        description: 's',
+        persona: 'global',
+        prompt: 'p',
+        inputs: [],
+        outputs: [],
+        transitions: [{ to: 'plan' }, { to: 'done' }],
+      },
+      plan: {
+        type: 'agent',
+        description: 'p',
+        persona: 'global',
+        prompt: 'p',
+        inputs: [],
+        outputs: [],
+        transitions: [{ to: 'done' }],
+      },
+      done: { type: 'terminal', description: 'finished' },
+    });
+    const entries: MessageLogEntry[] = [
+      transitionTo('done', 'plan', '2026-04-23T11:00:00.000Z'), // latest ts, but first in array
+      transitionTo('plan', 'start', '2026-04-23T10:00:00.000Z'),
+    ];
+    expect(synthesizePhaseFromMessageLog(entries, def)).toBe('completed');
+  });
+
+  it('prefers "aborted" over "failed" when both quota_exhausted and error follow the last transition', () => {
+    const def = defWithStates({
+      start: {
+        type: 'agent',
+        description: 's',
+        persona: 'global',
+        prompt: 'p',
+        inputs: [],
+        outputs: [],
+        transitions: [{ to: 'plan' }],
+      },
+      plan: {
+        type: 'agent',
+        description: 'p',
+        persona: 'global',
+        prompt: 'p',
+        inputs: [],
+        outputs: [],
+        transitions: [],
+      },
+    });
+    const entries: MessageLogEntry[] = [
+      transitionTo('plan', 'start', '2026-04-23T10:00:00.000Z'),
+      {
+        type: 'error',
+        ts: '2026-04-23T10:05:00.000Z',
+        workflowId,
+        state: 'plan',
+        error: 'agent crashed',
+      },
+      {
+        type: 'quota_exhausted',
+        ts: '2026-04-23T10:06:00.000Z',
+        workflowId,
+        state: 'plan',
+        role: 'planner',
+        rawMessage: 'rate limit hit',
+      },
+    ];
+    expect(synthesizePhaseFromMessageLog(entries, def)).toBe('aborted');
+  });
+
+  it('ignores events that occurred BEFORE the last transition', () => {
+    // quota_exhausted at ts=09:00 predates the transition at ts=10:00; ignored.
+    const def = defWithStates({
+      start: {
+        type: 'agent',
+        description: 's',
+        persona: 'global',
+        prompt: 'p',
+        inputs: [],
+        outputs: [],
+        transitions: [{ to: 'plan' }],
+      },
+      plan: {
+        type: 'agent',
+        description: 'p',
+        persona: 'global',
+        prompt: 'p',
+        inputs: [],
+        outputs: [],
+        transitions: [],
+      },
+    });
+    const entries: MessageLogEntry[] = [
+      {
+        type: 'quota_exhausted',
+        ts: '2026-04-23T09:00:00.000Z',
+        workflowId,
+        state: 'start',
+        role: 'planner',
+        rawMessage: 'earlier quota issue',
+      },
+      transitionTo('plan', 'start', '2026-04-23T10:00:00.000Z'),
+    ];
+    // No events after the last transition → interrupted.
+    expect(synthesizePhaseFromMessageLog(entries, def)).toBe('interrupted');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -287,7 +734,11 @@ describe('buildDetailFromPastRun', () => {
     const cp = makeCheckpoint({ machineState: 'plan' });
     const def = makeDefinition();
 
-    const dto = buildDetailFromPastRun(id, cp, def, false);
+    const dto = buildDetailFromPastRun(
+      id,
+      makeLoad({ checkpoint: cp, definition: def }),
+      makeSummary({ workflowId: id }),
+    );
 
     expect(dto.workflowId).toBe(id);
     expect(dto.name).toBe('test-flow');
@@ -311,7 +762,11 @@ describe('buildDetailFromPastRun', () => {
     });
     const def = makeDefinition();
 
-    const dto = buildDetailFromPastRun(id, cp, def, false);
+    const dto = buildDetailFromPastRun(
+      id,
+      makeLoad({ checkpoint: cp, definition: def }),
+      makeSummary({ workflowId: id }),
+    );
     expect(dto.phase).toBe('interrupted');
     expect(dto.error).toBe('agent crashed');
   });
@@ -324,7 +779,11 @@ describe('buildDetailFromPastRun', () => {
     });
     const def = makeDefinition();
 
-    const dto = buildDetailFromPastRun(id, cp, def, false);
+    const dto = buildDetailFromPastRun(
+      id,
+      makeLoad({ checkpoint: cp, definition: def }),
+      makeSummary({ workflowId: id }),
+    );
     expect(dto.phase).toBe('completed');
     expect(dto.error).toBeUndefined();
   });
@@ -334,7 +793,11 @@ describe('buildDetailFromPastRun', () => {
     const cp = makeCheckpoint({ workspacePath: undefined });
     const def = makeDefinition();
 
-    const dto = buildDetailFromPastRun(id, cp, def, false);
+    const dto = buildDetailFromPastRun(
+      id,
+      makeLoad({ checkpoint: cp, definition: def }),
+      makeSummary({ workflowId: id }),
+    );
     expect(dto.workspacePath).toBe('');
   });
 
@@ -343,8 +806,97 @@ describe('buildDetailFromPastRun', () => {
     const cp = makeCheckpoint();
     const def = makeDefinition();
 
-    const dto = buildDetailFromPastRun(id, cp, def, false);
+    const dto = buildDetailFromPastRun(
+      id,
+      makeLoad({ checkpoint: cp, definition: def }),
+      makeSummary({ workflowId: id }),
+    );
     expect(dto.stateGraph.states.length).toBeGreaterThan(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // Checkpoint-less branch (B8 / D7)
+  // -------------------------------------------------------------------------
+
+  describe('without checkpoint', () => {
+    let baseDir: string;
+
+    beforeEach(() => {
+      baseDir = mkdtempSync(resolve(tmpdir(), 'ironcurtain-detail-nocp-'));
+    });
+
+    afterEach(() => {
+      rmSync(baseDir, { recursive: true, force: true });
+    });
+
+    it('synthesizes phase from message log for a terminal-state transition', () => {
+      const id = 'wf-no-cp-1' as WorkflowId;
+      const def = makeDefinition({
+        initial: 'plan',
+        states: {
+          plan: {
+            type: 'agent',
+            description: 'p',
+            persona: 'global',
+            prompt: 'p',
+            inputs: [],
+            outputs: ['plan'],
+            transitions: [{ to: 'aborted' }],
+          },
+          aborted: { type: 'terminal', description: 'a' },
+        },
+      });
+      const messages: MessageLogEntry[] = [
+        {
+          type: 'state_transition',
+          ts: '2026-04-23T11:00:00.000Z',
+          workflowId: id,
+          state: 'plan',
+          from: 'plan',
+          event: 'aborted',
+        },
+      ];
+      const messageLogPath = writeMessageLogFile(baseDir, id, messages);
+      const summaryMtime = new Date('2026-04-23T11:30:00.000Z');
+
+      const dto = buildDetailFromPastRun(
+        id,
+        makeLoad({ checkpoint: undefined, definition: def, messageLogPath }),
+        makeSummary({ workflowId: id, baseDir, mtime: summaryMtime }),
+      );
+
+      expect(dto.phase).toBe('aborted');
+      expect(dto.currentState).toBe('aborted');
+      expect(dto.startedAt).toBe(summaryMtime.toISOString());
+      expect(dto.taskDescription).toBe(def.description);
+      expect(dto.description).toBe(def.description);
+      expect(dto.round).toBe(0);
+      expect(dto.maxRounds).toBe(0);
+      expect(dto.totalTokens).toBe(0);
+      expect(dto.latestVerdict).toBeUndefined();
+      expect(dto.error).toBeUndefined();
+      expect(dto.workspacePath).toBe('');
+      expect(dto.gate).toBeUndefined();
+      // No persisted history on disk; live log entries are surfaced via
+      // workflows.messageLog and must not be double-rendered here.
+      expect(dto.transitionHistory).toEqual([]);
+      // State graph still rendered from the definition.
+      expect(dto.stateGraph.states.length).toBeGreaterThan(0);
+    });
+
+    it('falls back to definition.initial when no state_transition entries exist', () => {
+      const id = 'wf-no-cp-2' as WorkflowId;
+      const def = makeDefinition();
+      const messageLogPath = writeMessageLogFile(baseDir, id, []);
+      const dto = buildDetailFromPastRun(
+        id,
+        makeLoad({ checkpoint: undefined, definition: def, messageLogPath }),
+        makeSummary({ workflowId: id, baseDir }),
+      );
+      expect(dto.currentState).toBe(def.initial);
+      // Empty log → 'interrupted' per synthesizePhaseFromMessageLog case 1.
+      expect(dto.phase).toBe('interrupted');
+    });
   });
 });
 
@@ -425,7 +977,7 @@ describe('workflows.get -- disk fallback', () => {
     const cp = makeCheckpoint({ machineState: 'plan' });
     const def = makeDefinition();
     const ctx = createContext({
-      loadPastRun: () => ({ checkpoint: cp, definition: def, isLive: false }),
+      loadPastRun: () => makeLoad({ checkpoint: cp, definition: def }),
     });
 
     const result = (await workflowDispatch(ctx, 'workflows.get', { workflowId: id })) as {
@@ -449,7 +1001,7 @@ describe('workflows.get -- disk fallback', () => {
     const cp = makeCheckpoint({ machineState: 'done' });
     const def = makeDefinition();
     const ctx = createContext({
-      loadPastRun: () => ({ checkpoint: cp, definition: def, isLive: false }),
+      loadPastRun: () => makeLoad({ checkpoint: cp, definition: def }),
     });
 
     const result = (await workflowDispatch(ctx, 'workflows.get', { workflowId: id })) as {
@@ -526,7 +1078,7 @@ describe('buildPastRunDto', () => {
     const cp = makeCheckpoint({ machineState: 'plan' });
     const def = makeDefinition();
 
-    const dto = buildPastRunDto(id, cp, def, false);
+    const dto = buildPastRunDto(id, makeLoad({ checkpoint: cp, definition: def }), makeSummary({ workflowId: id }));
 
     expect(dto.workflowId).toBe(id);
     expect(dto.name).toBe('test-flow');
@@ -548,7 +1100,7 @@ describe('buildPastRunDto', () => {
     const cp = makeCheckpoint({ machineState: 'done' });
     const def = makeDefinition();
 
-    const dto = buildPastRunDto(id, cp, def, false);
+    const dto = buildPastRunDto(id, makeLoad({ checkpoint: cp, definition: def }), makeSummary({ workflowId: id }));
     expect(dto.phase).toBe('completed');
     expect(dto.currentState).toBe('done');
     expect(dto.lastState).toBe('done');
@@ -560,7 +1112,7 @@ describe('buildPastRunDto', () => {
       machineState: 'plan',
       context: makeContext({ lastError: 'boom' }),
     });
-    const dto = buildPastRunDto(id, cp, makeDefinition(), false);
+    const dto = buildPastRunDto(id, makeLoad({ checkpoint: cp }), makeSummary({ workflowId: id }));
     expect(dto.error).toBe('boom');
   });
 
@@ -570,7 +1122,7 @@ describe('buildPastRunDto', () => {
       machineState: 'done',
       context: makeContext({ lastError: 'stale residual error' }),
     });
-    const dto = buildPastRunDto(id, cp, makeDefinition(), false);
+    const dto = buildPastRunDto(id, makeLoad({ checkpoint: cp }), makeSummary({ workflowId: id }));
     expect(dto.phase).toBe('completed');
     expect(dto.error).toBeUndefined();
   });
@@ -580,22 +1132,103 @@ describe('buildPastRunDto', () => {
     const cp = makeCheckpoint({ machineState: 'plan' });
     // computePastRunPhase returns 'running' when isLive=true; PastRunDto.phase
     // excludes 'running', so buildPastRunDto must coerce.
-    const dto = buildPastRunDto(id, cp, makeDefinition(), true);
+    const dto = buildPastRunDto(id, makeLoad({ checkpoint: cp, isLive: true }), makeSummary({ workflowId: id }));
     expect(dto.phase).toBe('interrupted');
   });
 
   it('leaves durationMs undefined because checkpoints do not persist start/end timestamps', () => {
     const id = 'wf-105' as WorkflowId;
     const cp = makeCheckpoint();
-    const dto = buildPastRunDto(id, cp, makeDefinition(), false);
+    const dto = buildPastRunDto(id, makeLoad({ checkpoint: cp }), makeSummary({ workflowId: id }));
     expect(dto.durationMs).toBeUndefined();
   });
 
   it('leaves workspacePath undefined when checkpoint has none', () => {
     const id = 'wf-106' as WorkflowId;
     const cp = makeCheckpoint({ workspacePath: undefined });
-    const dto = buildPastRunDto(id, cp, makeDefinition(), false);
+    const dto = buildPastRunDto(id, makeLoad({ checkpoint: cp }), makeSummary({ workflowId: id }));
     expect(dto.workspacePath).toBeUndefined();
+  });
+
+  // -------------------------------------------------------------------------
+  // Checkpoint-less branch (B7 / D7)
+  // -------------------------------------------------------------------------
+
+  describe('without checkpoint', () => {
+    let baseDir: string;
+
+    beforeEach(() => {
+      baseDir = mkdtempSync(resolve(tmpdir(), 'ironcurtain-pastrun-nocp-'));
+    });
+
+    afterEach(() => {
+      rmSync(baseDir, { recursive: true, force: true });
+    });
+
+    it('synthesizes phase + state from message log; timestamp from summary mtime', () => {
+      const id = 'wf-no-cp-pr-1' as WorkflowId;
+      const def = makeDefinition({
+        initial: 'plan',
+        states: {
+          plan: {
+            type: 'agent',
+            description: 'p',
+            persona: 'global',
+            prompt: 'p',
+            inputs: [],
+            outputs: ['plan'],
+            transitions: [{ to: 'aborted' }],
+          },
+          aborted: { type: 'terminal', description: 'a' },
+        },
+      });
+      const messages: MessageLogEntry[] = [
+        {
+          type: 'state_transition',
+          ts: '2026-04-23T11:00:00.000Z',
+          workflowId: id,
+          state: 'plan',
+          from: 'plan',
+          event: 'aborted',
+        },
+      ];
+      const messageLogPath = writeMessageLogFile(baseDir, id, messages);
+      const summaryMtime = new Date('2026-04-23T11:30:00.000Z');
+
+      const dto = buildPastRunDto(
+        id,
+        makeLoad({ checkpoint: undefined, definition: def, messageLogPath }),
+        makeSummary({ workflowId: id, baseDir, mtime: summaryMtime }),
+      );
+
+      expect(dto.phase).toBe('aborted');
+      expect(dto.currentState).toBe('aborted');
+      expect(dto.lastState).toBe('aborted');
+      expect(dto.timestamp).toBe(summaryMtime.toISOString());
+      expect(dto.taskDescription).toBe(def.description);
+      expect(dto.round).toBe(0);
+      expect(dto.maxRounds).toBe(0);
+      expect(dto.totalTokens).toBe(0);
+      expect(dto.latestVerdict).toBeUndefined();
+      expect(dto.error).toBeUndefined();
+      expect(dto.workspacePath).toBeUndefined();
+      expect(dto.durationMs).toBeUndefined();
+      expect(dto.name).toBe(def.name);
+    });
+
+    it('falls back to definition.initial when no state_transition entries exist', () => {
+      const id = 'wf-no-cp-pr-2' as WorkflowId;
+      const def = makeDefinition();
+      const messageLogPath = writeMessageLogFile(baseDir, id, []);
+      const dto = buildPastRunDto(
+        id,
+        makeLoad({ checkpoint: undefined, definition: def, messageLogPath }),
+        makeSummary({ workflowId: id, baseDir }),
+      );
+      expect(dto.currentState).toBe(def.initial);
+      expect(dto.lastState).toBe(def.initial);
+      expect(dto.phase).toBe('interrupted');
+    });
   });
 });
 
@@ -604,21 +1237,31 @@ describe('buildPastRunDto', () => {
 // ---------------------------------------------------------------------------
 
 describe('workflows.listResumable', () => {
-  it('returns widened PastRunDto rows for every checkpoint enumerated', async () => {
+  let baseDir: string;
+
+  beforeEach(() => {
+    baseDir = mkdtempSync(resolve(tmpdir(), 'ironcurtain-listres-'));
+  });
+
+  afterEach(() => {
+    rmSync(baseDir, { recursive: true, force: true });
+  });
+
+  it('returns widened PastRunDto rows for every directory enumerated under baseDir', async () => {
     const idA = 'wf-A' as WorkflowId;
     const idB = 'wf-B' as WorkflowId;
     const cpA = makeCheckpoint({ machineState: 'plan', timestamp: '2026-04-22T09:00:00.000Z' });
     const cpB = makeCheckpoint({ machineState: 'done', timestamp: '2026-04-23T11:00:00.000Z' });
     const def = makeDefinition();
+    seedRunDirectory(baseDir, idA, { definition: def, checkpoint: cpA });
+    seedRunDirectory(baseDir, idB, { definition: def, checkpoint: cpB });
 
     const ctx = createContext({
-      controller: {
-        listResumable: vi.fn().mockReturnValue([idA, idB]),
-        listActive: vi.fn().mockReturnValue([]),
-      },
+      baseDir,
+      controller: { listActive: vi.fn().mockReturnValue([]) },
       loadPastRun: (id) => {
-        if (id === idA) return { checkpoint: cpA, definition: def, isLive: false };
-        if (id === idB) return { checkpoint: cpB, definition: def, isLive: false };
+        if (id === idA) return makeLoad({ checkpoint: cpA, definition: def });
+        if (id === idB) return makeLoad({ checkpoint: cpB, definition: def });
         return { error: 'not_found' };
       },
     });
@@ -645,15 +1288,15 @@ describe('workflows.listResumable', () => {
     const idGood = 'wf-good' as WorkflowId;
     const idBad = 'wf-bad' as WorkflowId;
     const cp = makeCheckpoint({ machineState: 'plan' });
+    seedRunDirectory(baseDir, idGood, { definition: makeDefinition(), checkpoint: cp });
+    seedRunDirectory(baseDir, idBad, { definition: makeDefinition(), checkpoint: cp });
     const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
 
     const ctx = createContext({
-      controller: {
-        listResumable: vi.fn().mockReturnValue([idGood, idBad]),
-        listActive: vi.fn().mockReturnValue([]),
-      },
+      baseDir,
+      controller: { listActive: vi.fn().mockReturnValue([]) },
       loadPastRun: (id) => {
-        if (id === idGood) return { checkpoint: cp, definition: makeDefinition(), isLive: false };
+        if (id === idGood) return makeLoad({ checkpoint: cp, definition: makeDefinition() });
         return { error: 'corrupted', message: 'bad JSON at line 3' };
       },
     });
@@ -668,15 +1311,14 @@ describe('workflows.listResumable', () => {
     warnSpy.mockRestore();
   });
 
-  it('skips a not_found row silently (deletion race) without warning', async () => {
+  it('skips a not_found row silently (e.g. directory with no loadable definition)', async () => {
     const idMissing = 'wf-missing' as WorkflowId;
+    seedRunDirectory(baseDir, idMissing, { messages: [] });
     const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
 
     const ctx = createContext({
-      controller: {
-        listResumable: vi.fn().mockReturnValue([idMissing]),
-        listActive: vi.fn().mockReturnValue([]),
-      },
+      baseDir,
+      controller: { listActive: vi.fn().mockReturnValue([]) },
       loadPastRun: () => ({ error: 'not_found' }),
     });
 
@@ -690,12 +1332,11 @@ describe('workflows.listResumable', () => {
   it('synthesizes phase "interrupted" for a non-terminal row that is not active', async () => {
     const id = 'wf-int' as WorkflowId;
     const cp = makeCheckpoint({ machineState: 'plan' });
+    seedRunDirectory(baseDir, id, { definition: makeDefinition(), checkpoint: cp });
     const ctx = createContext({
-      controller: {
-        listResumable: vi.fn().mockReturnValue([id]),
-        listActive: vi.fn().mockReturnValue([]),
-      },
-      loadPastRun: () => ({ checkpoint: cp, definition: makeDefinition(), isLive: false }),
+      baseDir,
+      controller: { listActive: vi.fn().mockReturnValue([]) },
+      loadPastRun: () => makeLoad({ checkpoint: cp, definition: makeDefinition() }),
     });
 
     const dtos = (await workflowDispatch(ctx, 'workflows.listResumable', {})) as PastRunDto[];
@@ -733,31 +1374,38 @@ describe('workflows.listResumable', () => {
         aborted: { type: 'terminal', description: 'a' },
       },
     });
+    seedRunDirectory(baseDir, idDone, {
+      definition: def,
+      checkpoint: makeCheckpoint({ machineState: 'done', timestamp: '2026-04-23T03:00:00.000Z' }),
+    });
+    seedRunDirectory(baseDir, idAbort, {
+      definition: def,
+      checkpoint: makeCheckpoint({ machineState: 'aborted', timestamp: '2026-04-23T02:00:00.000Z' }),
+    });
+    seedRunDirectory(baseDir, idGate, {
+      definition: def,
+      checkpoint: makeCheckpoint({ machineState: 'review', timestamp: '2026-04-23T01:00:00.000Z' }),
+    });
     const ctx = createContext({
-      controller: {
-        listResumable: vi.fn().mockReturnValue([idDone, idAbort, idGate]),
-        listActive: vi.fn().mockReturnValue([]),
-      },
+      baseDir,
+      controller: { listActive: vi.fn().mockReturnValue([]) },
       loadPastRun: (id) => {
         if (id === idDone) {
-          return {
+          return makeLoad({
             checkpoint: makeCheckpoint({ machineState: 'done', timestamp: '2026-04-23T03:00:00.000Z' }),
             definition: def,
-            isLive: false,
-          };
+          });
         }
         if (id === idAbort) {
-          return {
+          return makeLoad({
             checkpoint: makeCheckpoint({ machineState: 'aborted', timestamp: '2026-04-23T02:00:00.000Z' }),
             definition: def,
-            isLive: false,
-          };
+          });
         }
-        return {
+        return makeLoad({
           checkpoint: makeCheckpoint({ machineState: 'review', timestamp: '2026-04-23T01:00:00.000Z' }),
           definition: def,
-          isLive: false,
-        };
+        });
       },
     });
 
@@ -772,56 +1420,153 @@ describe('workflows.listResumable', () => {
 
   it('leaves durationMs undefined for every row (checkpoint schema gap)', async () => {
     const id = 'wf-dur' as WorkflowId;
+    seedRunDirectory(baseDir, id, {
+      definition: makeDefinition(),
+      checkpoint: makeCheckpoint({ machineState: 'done' }),
+    });
     const ctx = createContext({
-      controller: {
-        listResumable: vi.fn().mockReturnValue([id]),
-        listActive: vi.fn().mockReturnValue([]),
-      },
-      loadPastRun: () => ({
-        checkpoint: makeCheckpoint({ machineState: 'done' }),
-        definition: makeDefinition(),
-        isLive: false,
-      }),
+      baseDir,
+      controller: { listActive: vi.fn().mockReturnValue([]) },
+      loadPastRun: () =>
+        makeLoad({ checkpoint: makeCheckpoint({ machineState: 'done' }), definition: makeDefinition() }),
     });
 
     const dtos = (await workflowDispatch(ctx, 'workflows.listResumable', {})) as PastRunDto[];
     expect(dtos[0].durationMs).toBeUndefined();
   });
 
-  it('calls controller.listActive() exactly once regardless of row count', async () => {
-    const ids = ['a', 'b', 'c', 'd', 'e'].map((s) => `wf-${s}` as WorkflowId);
-    const listActive = vi.fn().mockReturnValue([]);
+  it('skips a row currently active in controller.listActive() (belongs to workflows.list)', async () => {
+    const idLive = 'wf-live' as WorkflowId;
+    const idPast = 'wf-past' as WorkflowId;
     const cp = makeCheckpoint({ machineState: 'plan' });
-    const ctx = createContext({
-      controller: {
-        listResumable: vi.fn().mockReturnValue(ids),
-        listActive,
-      },
-      loadPastRun: () => ({ checkpoint: cp, definition: makeDefinition(), isLive: false }),
-    });
+    seedRunDirectory(baseDir, idLive, { definition: makeDefinition(), checkpoint: cp });
+    seedRunDirectory(baseDir, idPast, { definition: makeDefinition(), checkpoint: cp });
 
-    await workflowDispatch(ctx, 'workflows.listResumable', {});
-    expect(listActive).toHaveBeenCalledTimes(1);
-  });
-
-  it('treats a row in controller.listActive() as live and coerces phase to "interrupted" for the resumable list', async () => {
-    const id = 'wf-race' as WorkflowId;
-    const cp = makeCheckpoint({ machineState: 'plan' });
     const ctx = createContext({
-      controller: {
-        // listResumable normally excludes active ids, but a race could include one.
-        listResumable: vi.fn().mockReturnValue([id]),
-        listActive: vi.fn().mockReturnValue([id]),
+      baseDir,
+      controller: { listActive: vi.fn().mockReturnValue([idLive]) },
+      loadPastRun: (id) => {
+        if (id === idPast) return makeLoad({ checkpoint: cp, definition: makeDefinition() });
+        return { error: 'not_found' };
       },
-      // The manager's loadPastRun would set isLive=true; the dispatch layer
-      // computes its own from the once-sampled active set, so the input here
-      // doesn't matter for the assertion -- we just need a successful load.
-      loadPastRun: () => ({ checkpoint: cp, definition: makeDefinition(), isLive: true }),
     });
 
     const dtos = (await workflowDispatch(ctx, 'workflows.listResumable', {})) as PastRunDto[];
     expect(dtos).toHaveLength(1);
-    expect(dtos[0].phase).toBe('interrupted');
+    expect(dtos[0].workflowId).toBe(idPast);
+  });
+
+  it('end-to-end: mixes live, completed, checkpoint-less, corrupted, and empty rows', async () => {
+    const idLive = 'wf-mix-live' as WorkflowId;
+    const idCompleted = 'wf-mix-completed' as WorkflowId;
+    const idNoCp = 'wf-mix-nocp' as WorkflowId;
+    const idCorrupt = 'wf-mix-corrupt' as WorkflowId;
+    const idEmpty = 'wf-mix-empty' as WorkflowId;
+
+    const def = makeDefinition({
+      initial: 'plan',
+      states: {
+        plan: {
+          type: 'agent',
+          description: 'p',
+          persona: 'global',
+          prompt: 'p',
+          inputs: [],
+          outputs: ['plan'],
+          transitions: [{ to: 'done' }],
+        },
+        done: { type: 'terminal', description: 'finished' },
+      },
+    });
+
+    // (a) live row — has a checkpoint, but listActive() includes it; should be skipped.
+    seedRunDirectory(baseDir, idLive, {
+      definition: def,
+      checkpoint: makeCheckpoint({ machineState: 'plan', timestamp: '2026-04-23T20:00:00.000Z' }),
+    });
+    // (b) completed checkpoint with finalStatus.
+    const cpCompleted = makeCheckpoint({
+      machineState: 'done',
+      timestamp: '2026-04-23T15:00:00.000Z',
+      finalStatus: { phase: 'completed', result: { finalArtifacts: {} } },
+    });
+    seedRunDirectory(baseDir, idCompleted, { definition: def, checkpoint: cpCompleted });
+    // (c) directory with only definition.json + messages.jsonl (synth phase).
+    const synthMessages: MessageLogEntry[] = [
+      {
+        type: 'state_transition',
+        ts: '2026-04-23T12:00:00.000Z',
+        workflowId: idNoCp,
+        state: 'plan',
+        from: 'plan',
+        event: 'done',
+      },
+    ];
+    seedRunDirectory(baseDir, idNoCp, { definition: def, messages: synthMessages });
+    // (d) corrupted directory — has a checkpoint but the loader will report 'corrupted'.
+    seedRunDirectory(baseDir, idCorrupt, { definition: def, checkpoint: makeCheckpoint() });
+    // (e) directory with nothing — loader returns 'not_found' silently.
+    mkdirSync(resolve(baseDir, idEmpty), { recursive: true });
+
+    // Snapshot mtime after seeding so the assertion can predict the sort.
+    const noCpMtime = new Date(statSync(resolve(baseDir, idNoCp)).mtime).toISOString();
+
+    const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+
+    const ctx = createContext({
+      baseDir,
+      controller: { listActive: vi.fn().mockReturnValue([idLive]) },
+      loadPastRun: (id) => {
+        if (id === idCompleted) return makeLoad({ checkpoint: cpCompleted, definition: def });
+        if (id === idNoCp) {
+          return makeLoad({
+            checkpoint: undefined,
+            definition: def,
+            messageLogPath: resolve(baseDir, idNoCp, 'messages.jsonl'),
+          });
+        }
+        if (id === idCorrupt) return { error: 'corrupted', message: 'simulated corruption' };
+        // idEmpty (and any other id) → not_found silently.
+        return { error: 'not_found' };
+      },
+    });
+
+    const dtos = (await workflowDispatch(ctx, 'workflows.listResumable', {})) as PastRunDto[];
+
+    // Live row skipped; corrupted/empty rows skipped (corrupted with a warn).
+    const ids = dtos.map((d) => d.workflowId);
+    expect(ids).toContain(idCompleted);
+    expect(ids).toContain(idNoCp);
+    expect(ids).not.toContain(idLive);
+    expect(ids).not.toContain(idCorrupt);
+    expect(ids).not.toContain(idEmpty);
+    expect(dtos).toHaveLength(2);
+
+    // Sorted newest-first by `timestamp`. Completed row uses checkpoint.timestamp
+    // (2026-04-23T15:00); checkpoint-less row uses summary.mtime (now-ish, set
+    // when seedRunDirectory wrote the directory). The mtime is the larger one.
+    expect(dtos[0].timestamp >= dtos[1].timestamp).toBe(true);
+
+    // Checkpoint-less row is the synthesized one; assert its synthesized fields.
+    const noCpDto = dtos.find((d) => d.workflowId === idNoCp);
+    expect(noCpDto).toBeDefined();
+    if (noCpDto) {
+      expect(noCpDto.phase).toBe('completed');
+      expect(noCpDto.currentState).toBe('done');
+      expect(noCpDto.timestamp).toBe(noCpMtime);
+      expect(noCpDto.round).toBe(0);
+      expect(noCpDto.maxRounds).toBe(0);
+      expect(noCpDto.totalTokens).toBe(0);
+      expect(noCpDto.workspacePath).toBeUndefined();
+    }
+
+    const completedDto = dtos.find((d) => d.workflowId === idCompleted);
+    expect(completedDto?.phase).toBe('completed');
+
+    // Corrupted row produced a logger.warn; empty (not_found) row did not.
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy.mock.calls[0][0]).toContain(idCorrupt);
+    warnSpy.mockRestore();
   });
 });
 
@@ -868,10 +1613,9 @@ describe('workflows.messageLog', () => {
   /** Stub a present checkpoint so existence validation passes. */
   function presentLoadPastRun(): () => PastRunLoadResult {
     return () =>
-      ({
+      makeLoad({
         checkpoint: makeCheckpoint(),
         definition: makeDefinition(),
-        isLive: false,
       }) as PastRunLoadResult;
   }
 

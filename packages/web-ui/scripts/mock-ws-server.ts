@@ -734,6 +734,38 @@ function buildPastRunFixtures(): MockPastRun[] {
       timestamp: new Date(Date.now() - 172800_000).toISOString(),
       workspacePath: '/home/user/projects/jsonrpc-fuzz',
     },
+    // Legacy / pre-B3b completed run: checkpoint.json was deleted on completion,
+    // so the discovery scan synthesizes the row from messages.jsonl + the workflow
+    // definition. No round/verdict/workspace metadata survives.
+    {
+      workflowId: 'wf-past-completed-legacy',
+      name: 'design-and-code',
+      phase: 'completed',
+      currentState: 'completed',
+      lastState: 'completed',
+      taskDescription: 'Add a /healthz endpoint to the orchestrator HTTP server',
+      round: 0,
+      maxRounds: 0,
+      totalTokens: 0,
+      timestamp: new Date(Date.now() - 5 * 86400_000).toISOString(),
+    },
+    // Post-B3b completed run: checkpoint retained on disk with full finalStatus
+    // metadata, so every numeric/verdict/workspace field is populated.
+    {
+      workflowId: 'wf-past-completed-checkpointed',
+      name: 'design-and-code',
+      phase: 'completed',
+      currentState: 'completed',
+      lastState: 'completed',
+      taskDescription: 'Wire the checkpoint retention path through the past-runs UI',
+      round: 3,
+      maxRounds: 4,
+      totalTokens: 56_300,
+      latestVerdict: { stateId: 'design_review', verdict: 'approved', confidence: 0.97 },
+      timestamp: new Date(Date.now() - 1800_000).toISOString(),
+      durationMs: 540_000,
+      workspacePath: '/home/user/projects/checkpoint-retention',
+    },
   ];
 }
 

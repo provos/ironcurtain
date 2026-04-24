@@ -54,8 +54,9 @@ const simpleAgentDef: WorkflowDefinition = {
 };
 
 // Used by the checkpoint-id regression test: a gate after the agent
-// state pauses the workflow so the checkpoint survives for inspection
-// (the orchestrator removes checkpoints on terminal completion).
+// state pauses the workflow so the checkpoint carries the pre-terminal
+// machineState for inspection (a terminal-state save would overwrite it
+// with `finalStatus` populated but the terminal state as `machineState`).
 const agentThenGateDef: WorkflowDefinition = {
   name: 'agent-then-gate',
   description: 'Agent followed by human gate',
@@ -291,8 +292,9 @@ describe('WorkflowOrchestrator retry loop', () => {
     // visit would try to resume a transcript that doesn't exist.
     //
     // Uses agentThenGateDef so the workflow pauses at a gate after the
-    // agent state — the orchestrator removes checkpoints on terminal
-    // completion, so we need a non-terminal resting point to inspect.
+    // agent state — we need a non-terminal resting point so the checkpoint's
+    // `machineState` reflects the pre-terminal state (a terminal completion
+    // would save a checkpoint with terminal `machineState` and `finalStatus`).
     const defPath = writeDefinitionFile(tmpDir, agentThenGateDef);
     const checkpointStore = createCheckpointStore(tmpDir);
     const allSessions: MockSession[] = [];

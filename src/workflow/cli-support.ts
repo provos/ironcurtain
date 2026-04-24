@@ -26,6 +26,24 @@ import {
 } from './types.js';
 import type { WorkflowOrchestrator, WorkflowLifecycleEvent, WorkflowTabHandle } from './orchestrator.js';
 import { FileCheckpointStore } from './checkpoint.js';
+import { discoverWorkflowRuns } from './workflow-discovery.js';
+
+// ---------------------------------------------------------------------------
+// Checkpoint-resumability predicate
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns true when a checkpoint represents a run that can still be resumed.
+ *
+ * Four checkpoint generations covered:
+ *  - Mid-run (finalStatus undefined) → true
+ *  - Terminal completed (finalStatus.phase === 'completed') → false
+ *  - Terminal non-completed (finalStatus.phase is 'aborted' | 'failed' | 'waiting_human') → true
+ *  - Legacy retained checkpoint with no finalStatus (pre-B3b, aborted/failed) → true
+ */
+export function isCheckpointResumable(cp: WorkflowCheckpoint): boolean {
+  return cp.finalStatus?.phase !== 'completed';
+}
 
 // ---------------------------------------------------------------------------
 // ANSI colors
@@ -355,35 +373,38 @@ export function printResumeInfo(baseDir: string, workflowId: WorkflowId, checkpo
 
 /**
  * Picks the most-recent resumable workflow from a checkpoint store.
+ *
+ * Enumerates workflow-run directories via the shared
+ * {@link discoverWorkflowRuns} utility (rather than
+ * `checkpointStore.listAll()`) so that directory discovery goes through
+ * the single source of truth used by both the CLI and the daemon. Filters
+ * candidates with {@link isCheckpointResumable} so completed runs are
+ * excluded post-B3b (completed runs now retain their checkpoint).
+ *
  * Exits with code 1 if no resumable workflows are found.
  */
-export function selectResumableWorkflow(checkpointStore: FileCheckpointStore): {
-  workflowId: WorkflowId;
-  checkpoint: WorkflowCheckpoint;
-} {
-  const resumable = checkpointStore.listAll();
+export function selectResumableWorkflow(
+  checkpointStore: FileCheckpointStore,
+  baseDir: string,
+): { workflowId: WorkflowId; checkpoint: WorkflowCheckpoint } {
+  const candidates = discoverWorkflowRuns(baseDir)
+    .filter((r) => r.hasCheckpoint)
+    .map((r) => ({ id: r.workflowId, checkpoint: checkpointStore.load(r.workflowId) }))
+    .filter(
+      (c): c is { id: WorkflowId; checkpoint: WorkflowCheckpoint } =>
+        c.checkpoint !== undefined && isCheckpointResumable(c.checkpoint),
+    )
+    .sort((a, b) => new Date(b.checkpoint.timestamp).getTime() - new Date(a.checkpoint.timestamp).getTime());
 
-  if (resumable.length === 0) {
+  if (candidates.length === 0) {
     writeStderr(`${RED}No resumable workflows found in this directory.${RESET}`);
     writeStderr(`${DIM}Expected checkpoint files at: <baseDir>/<workflowId>/checkpoint.json${RESET}`);
     process.exit(1);
   }
 
-  if (resumable.length === 1) {
-    const workflowId = resumable[0];
-    const checkpoint = checkpointStore.load(workflowId);
-    if (!checkpoint) {
-      writeStderr(`${RED}Checkpoint not found for workflow ${workflowId}${RESET}`);
-      process.exit(1);
-    }
-    return { workflowId, checkpoint };
+  if (candidates.length === 1) {
+    return { workflowId: candidates[0].id, checkpoint: candidates[0].checkpoint };
   }
-
-  // Multiple: pick the most recently saved
-  const candidates = resumable
-    .map((id) => ({ id, checkpoint: checkpointStore.load(id) }))
-    .filter((c): c is { id: WorkflowId; checkpoint: WorkflowCheckpoint } => c.checkpoint !== undefined)
-    .sort((a, b) => new Date(b.checkpoint.timestamp).getTime() - new Date(a.checkpoint.timestamp).getTime());
 
   writeStdout(`${YELLOW}Found ${candidates.length} resumable workflows. Using most recent:${RESET}`);
   for (const { id, checkpoint } of candidates) {

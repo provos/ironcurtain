@@ -21,6 +21,7 @@ import { createInterface } from 'node:readline/promises';
 import type { WorkflowId, WorkflowCheckpoint } from '../src/workflow/types.js';
 import { WorkflowOrchestrator, type WorkflowOrchestratorDeps } from '../src/workflow/orchestrator.js';
 import { FileCheckpointStore } from '../src/workflow/checkpoint.js';
+import { discoverWorkflowRuns } from '../src/workflow/workflow-discovery.js';
 import {
   createWorkflowSessionFactory,
   createConsoleTab,
@@ -172,11 +173,11 @@ async function main(): Promise<void> {
     if (cliArgs.mode === 'resume') {
       let selected: { workflowId: WorkflowId; checkpoint: WorkflowCheckpoint };
 
-      const hasCheckpoints = checkpointStore.listAll().length > 0;
+      const hasCheckpoints = discoverWorkflowRuns(baseDir).some((r) => r.hasCheckpoint);
       if (cliArgs.overrideState && !hasCheckpoints) {
         selected = synthesizeCheckpoint(baseDir, cliArgs.overrideState, definitionPath, checkpointStore);
       } else {
-        selected = selectResumableWorkflow(checkpointStore);
+        selected = selectResumableWorkflow(checkpointStore, baseDir);
       }
       workflowId = selected.workflowId;
 

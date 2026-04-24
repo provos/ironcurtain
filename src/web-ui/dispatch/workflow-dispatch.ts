@@ -27,10 +27,11 @@ import {
   MethodNotFoundError,
   toHumanGateRequestDto,
 } from '../web-ui-types.js';
-import type { WorkflowManager } from '../workflow-manager.js';
+import type { PastRunLoadSuccess, WorkflowManager } from '../workflow-manager.js';
 import type { WorkflowId, WorkflowStatus, WorkflowCheckpoint, WorkflowDefinition } from '../../workflow/types.js';
 import type { WorkflowDetail } from '../../workflow/orchestrator.js';
-import { MessageLog, type MessageLogEntry } from '../../workflow/message-log.js';
+import { MessageLog, type MessageLogEntry, type StateTransitionEntry } from '../../workflow/message-log.js';
+import { discoverWorkflowRuns, summaryForId, type WorkflowRunSummary } from '../../workflow/workflow-discovery.js';
 import { extractStateGraph } from '../state-graph.js';
 import type { StateGraphDto } from '../web-ui-types.js';
 import { isWithinDirectory } from '../../types/argument-roles.js';
@@ -208,7 +209,13 @@ export async function workflowDispatch(
         // 'corrupted' -- preserve the loader's diagnostic message for the UI.
         throw new RpcError('WORKFLOW_CORRUPTED', result.message ?? `Workflow ${workflowId} checkpoint is corrupted`);
       }
-      return buildDetailFromPastRun(id, result.checkpoint, result.definition, result.isLive);
+      // Summary is required for checkpoint-less rows (mtime becomes the
+      // timestamp). Fall back to a synthesized summary when the directory was
+      // removed between the load and this lookup — `buildDetailFromPastRun`
+      // only consults `summary.mtime` in the checkpoint-less branch, so a
+      // present checkpoint makes the fallback irrelevant.
+      const summary = summaryForId(manager.getBaseDir(), id) ?? synthesizeSummaryFallback(id, manager.getBaseDir());
+      return buildDetailFromPastRun(id, result, summary);
     }
 
     case 'workflows.start': {
@@ -408,21 +415,26 @@ function buildDetailDto(id: WorkflowId, status: WorkflowStatus, detail?: Workflo
 // ---------------------------------------------------------------------------
 
 /**
- * Synthesizes a phase value for a checkpoint loaded from disk per design
- * decision D1.
+ * Synthesizes a phase value for a checkpoint loaded from disk.
  *
- * - If the workflow is currently running in the orchestrator (`isLive`), the
- *   live status would have answered the request — but we still derive a phase
- *   here for completeness, returning `'running'`.
- * - If the on-disk machine state is a terminal state in the definition, infer
- *   `aborted` from the conventional name pattern (`'aborted'` or contains
- *   `'abort'`); otherwise `completed`. Matches `handleWorkflowComplete` in
- *   the orchestrator.
- * - If the on-disk machine state is a human gate, the run was paused awaiting
- *   human input — `waiting_human`.
- * - Otherwise (mid-run state with no live instance): `interrupted`. This is
- *   the "checkpoint exists, no live orchestrator, no `finalStatus`" case
- *   typical of a daemon crash.
+ * Requires a defined `WorkflowCheckpoint`. For checkpoint-less past-run rows
+ * (i.e. directories where `checkpoint.json` is absent — e.g. runs completed
+ * before B3b persisted `finalStatus`), callers must use
+ * `synthesizePhaseFromMessageLog` instead.
+ *
+ * Resolution order:
+ * - If `isLive` is true, returns `'running'`.
+ * - Post-B3b checkpoints carry a canonical `finalStatus.phase`. When present
+ *   and valid (matches a `PastRunPhase` value), return it directly —
+ *   this short-circuits the legacy state-name heuristic.
+ * - Legacy pre-B3b checkpoints fall through to the state-name heuristic:
+ *   - Terminal state in the definition: infer `'aborted'` from the
+ *     conventional name pattern (`'aborted'` or contains `'abort'`);
+ *     otherwise `'completed'`. Matches `handleWorkflowComplete` in the
+ *     orchestrator.
+ *   - Human-gate state: `'waiting_human'`.
+ *   - Otherwise: `'interrupted'` (mid-run state with no live instance —
+ *     typical of a daemon crash).
  */
 export function computePastRunPhase(
   checkpoint: WorkflowCheckpoint,
@@ -430,6 +442,18 @@ export function computePastRunPhase(
   isLive: boolean,
 ): LiveWorkflowPhase | PastRunPhase {
   if (isLive) return 'running';
+  // B3b short-circuit: post-B3b checkpoints carry `finalStatus.phase` as the
+  // canonical phase. Only fall through to the state-name heuristic for legacy
+  // pre-B3b checkpoints that never persisted `finalStatus`.
+  const finalPhase = checkpoint.finalStatus?.phase;
+  if (
+    finalPhase === 'completed' ||
+    finalPhase === 'aborted' ||
+    finalPhase === 'failed' ||
+    finalPhase === 'waiting_human'
+  ) {
+    return finalPhase;
+  }
   const stateName = extractLastState(checkpoint.machineState);
   // Defensive lookup: the checkpoint's machineState may name a state no longer
   // present in the definition (renamed, removed). Treat that as "interrupted"
@@ -446,6 +470,76 @@ export function computePastRunPhase(
   if (stateDef && stateDef.type === 'human_gate') {
     return 'waiting_human';
   }
+  return 'interrupted';
+}
+
+/**
+ * Synthesize a `PastRunPhase` from a message-log history when no checkpoint is
+ * available (e.g., a completed run from before B3b persisted `finalStatus`).
+ *
+ * Entries are expected in chronological (oldest-first) order — this matches
+ * `MessageLog.readAll()`, the log file's native on-disk order. Internally the
+ * helper uses `ts` comparison (not array index) to locate "events after the
+ * last transition," so minor out-of-order writes do not mislead it.
+ *
+ * Logic (per plan D6):
+ * - Find the last `state_transition` entry. Its destination state is the
+ *   most-recently entered state. On-disk, the orchestrator stores this in
+ *   `event` (the "to" value); `from` carries the previous state
+ *   (see `orchestrator.ts` line 1257-1262).
+ * - If `definition.states[to].type === 'terminal'`: return `'aborted'` when
+ *   the name matches `/abort/i`, else `'completed'` (mirrors
+ *   `computePastRunPhase`'s name heuristic).
+ * - If `definition.states[to].type === 'human_gate'`: return `'waiting_human'`.
+ * - If there are no `state_transition` entries at all: return `'interrupted'`.
+ * - Otherwise (last state is non-terminal, non-gate), look at entries AFTER
+ *   the last state_transition:
+ *   - `quota_exhausted` → `'aborted'` (quota is a deterministic abort).
+ *   - `error` → `'failed'` (agent erred without a terminal transition).
+ *   - none of the above → `'interrupted'` (daemon crashed mid-run).
+ */
+export function synthesizePhaseFromMessageLog(
+  entries: readonly MessageLogEntry[],
+  definition: WorkflowDefinition,
+): PastRunPhase {
+  // Single pass: find the last state_transition by timestamp.
+  let lastTransition: StateTransitionEntry | undefined;
+  for (const entry of entries) {
+    if (entry.type !== 'state_transition') continue;
+    if (lastTransition === undefined || entry.ts > lastTransition.ts) {
+      lastTransition = entry;
+    }
+  }
+  if (lastTransition === undefined) {
+    // Either entries is empty or no state_transition records at all.
+    return 'interrupted';
+  }
+  // Destination state of the last transition. The orchestrator stores this
+  // in `event` (see message-log.ts / orchestrator.ts handleTransition).
+  const toState = lastTransition.event;
+  const stateDef: WorkflowDefinition['states'][string] | undefined = Object.prototype.hasOwnProperty.call(
+    definition.states,
+    toState,
+  )
+    ? definition.states[toState]
+    : undefined;
+  if (stateDef && stateDef.type === 'terminal') {
+    return toState === 'aborted' || toState.toLowerCase().includes('abort') ? 'aborted' : 'completed';
+  }
+  if (stateDef && stateDef.type === 'human_gate') {
+    return 'waiting_human';
+  }
+  // Mid-run state: inspect events after the last transition (by ts comparison).
+  const transitionTs = lastTransition.ts;
+  let sawQuotaExhausted = false;
+  let sawError = false;
+  for (const entry of entries) {
+    if (entry.ts <= transitionTs) continue;
+    if (entry.type === 'quota_exhausted') sawQuotaExhausted = true;
+    else if (entry.type === 'error') sawError = true;
+  }
+  if (sawQuotaExhausted) return 'aborted';
+  if (sawError) return 'failed';
   return 'interrupted';
 }
 
@@ -521,58 +615,145 @@ function mapTransitionRecords(
 }
 
 /**
+ * Derives the "last-entered state" from a message-log entry sequence when no
+ * checkpoint is available. Scans for the latest `state_transition` by `ts`
+ * and returns its `event` field (the destination state); falls back to
+ * `definition.initial` when no transitions exist.
+ *
+ * Shared between the checkpoint-less branches of {@link buildPastRunDto} and
+ * {@link buildDetailFromPastRun}.
+ */
+function deriveLastStateFromEntries(entries: readonly MessageLogEntry[], definition: WorkflowDefinition): string {
+  let lastTransition: StateTransitionEntry | undefined;
+  for (const entry of entries) {
+    if (entry.type !== 'state_transition') continue;
+    if (lastTransition === undefined || entry.ts > lastTransition.ts) {
+      lastTransition = entry;
+    }
+  }
+  return lastTransition ? lastTransition.event : definition.initial;
+}
+
+/**
+ * Synthesizes a `WorkflowRunSummary` when the canonical `summaryForId` probe
+ * fails (the run directory was removed between `loadPastRun` returning success
+ * and the summary lookup — a narrow deletion race). Only the `mtime` field is
+ * consulted downstream; the probe booleans are set to `false` so a caller
+ * that strays beyond `mtime` sees conservative defaults.
+ */
+function synthesizeSummaryFallback(workflowId: WorkflowId, baseDir: string): WorkflowRunSummary {
+  return {
+    workflowId,
+    directoryPath: resolve(baseDir, workflowId),
+    hasCheckpoint: false,
+    hasDefinition: false,
+    hasMessageLog: false,
+    mtime: new Date(),
+  };
+}
+
+/**
  * Assembles a `WorkflowDetailDto` from on-disk past-run domain objects.
  *
  * Mirrors the live-path `buildDetailDto` so the frontend sees a single shape
- * regardless of which path served the request. Phase is synthesized via
- * {@link computePastRunPhase}; error and `latestVerdict` are extracted from
- * the checkpoint's context where available.
+ * regardless of which path served the request. Handles two branches:
  *
- * `startedAt` is set to the checkpoint's last-saved timestamp because the
- * checkpoint does not persist the original workflow-start time. This is a
- * reasonable best-effort: it represents "last activity" rather than "start"
- * but is the only timestamp available from disk.
+ * - **Checkpoint present:** phase is synthesized via
+ *   {@link computePastRunPhase}; error and `latestVerdict` are extracted from
+ *   the checkpoint's context where available. `startedAt` is set to the
+ *   checkpoint's last-saved timestamp because the checkpoint does not persist
+ *   the original workflow-start time.
+ * - **Checkpoint absent:** per D7, the row is reconstructed from the message
+ *   log plus the on-disk directory summary. `startedAt`/`timestamp` come from
+ *   the directory `mtime` (D8); `transitionHistory` is empty (the live
+ *   `state_transition` log entries are surfaced separately via
+ *   `workflows.messageLog` and must not be double-rendered); numeric context
+ *   fields fall back to zero; optional fields (`latestVerdict`, `error`,
+ *   `workspacePath`, `gate`) default to `undefined`.
  */
 export function buildDetailFromPastRun(
   id: WorkflowId,
-  checkpoint: WorkflowCheckpoint,
-  definition: WorkflowDefinition,
-  isLive: boolean,
+  load: PastRunLoadSuccess,
+  summary: WorkflowRunSummary,
 ): WorkflowDetailDto {
-  const phase = computePastRunPhase(checkpoint, definition, isLive);
+  const { checkpoint, definition, isLive } = load;
   const stateGraph = getCachedStateGraph(id, definition);
-  const transitionHistory = mapTransitionRecords(checkpoint.transitionHistory);
-  const error = extractPastRunError(checkpoint, phase);
-  const latestVerdict = extractLatestVerdictFromTransitions(checkpoint.transitionHistory);
-  const currentState = extractLastState(checkpoint.machineState);
 
-  return {
-    workflowId: id,
-    name: definition.name,
-    phase,
-    currentState,
-    // Checkpoint pre-dates startedAt persistence; use the last-checkpoint time as a best-effort stand-in.
-    startedAt: checkpoint.timestamp,
-    taskDescription: checkpoint.context.taskDescription,
-    round: checkpoint.context.round,
-    maxRounds: checkpoint.context.maxRounds,
-    totalTokens: checkpoint.context.totalTokens,
-    latestVerdict,
-    error,
-    description: checkpoint.context.taskDescription,
-    stateGraph,
-    transitionHistory,
-    context: {
+  if (checkpoint) {
+    const phase = computePastRunPhase(checkpoint, definition, isLive);
+    const transitionHistory = mapTransitionRecords(checkpoint.transitionHistory);
+    const error = extractPastRunError(checkpoint, phase);
+    const latestVerdict = extractLatestVerdictFromTransitions(checkpoint.transitionHistory);
+    const currentState = extractLastState(checkpoint.machineState);
+
+    return {
+      workflowId: id,
+      name: definition.name,
+      phase,
+      currentState,
+      // Checkpoint pre-dates startedAt persistence; use the last-checkpoint time as a best-effort stand-in.
+      startedAt: checkpoint.timestamp,
       taskDescription: checkpoint.context.taskDescription,
       round: checkpoint.context.round,
       maxRounds: checkpoint.context.maxRounds,
       totalTokens: checkpoint.context.totalTokens,
-      visitCounts: { ...checkpoint.context.visitCounts },
+      latestVerdict,
+      error,
+      description: checkpoint.context.taskDescription,
+      stateGraph,
+      transitionHistory,
+      context: {
+        taskDescription: checkpoint.context.taskDescription,
+        round: checkpoint.context.round,
+        maxRounds: checkpoint.context.maxRounds,
+        totalTokens: checkpoint.context.totalTokens,
+        visitCounts: { ...checkpoint.context.visitCounts },
+      },
+      // No live gate object available from disk; the frontend can re-fetch the
+      // gate via `workflows.get` once the orchestrator re-loads the workflow.
+      gate: undefined,
+      workspacePath: checkpoint.workspacePath ?? '',
+    };
+  }
+
+  // Checkpoint-less branch (D7): synthesize from the message log.
+  const entries = new MessageLog(load.messageLogPath).readAll();
+  const widePhase: LiveWorkflowPhase | PastRunPhase = isLive
+    ? 'running'
+    : synthesizePhaseFromMessageLog(entries, definition);
+  const currentState = deriveLastStateFromEntries(entries, definition);
+  // `WorkflowDefinition.description` is a required string field; the schema
+  // ensures it's defined. We surface it directly as the task description.
+  const taskDescription = definition.description;
+  const startedAt = summary.mtime.toISOString();
+
+  return {
+    workflowId: id,
+    name: definition.name,
+    phase: widePhase,
+    currentState,
+    startedAt,
+    taskDescription,
+    round: 0,
+    maxRounds: 0,
+    totalTokens: 0,
+    latestVerdict: undefined,
+    error: undefined,
+    description: taskDescription,
+    stateGraph,
+    // No persisted transition history without a checkpoint. The live
+    // `state_transition` entries from the message log are surfaced separately
+    // via `workflows.messageLog`, so we avoid double-rendering them here.
+    transitionHistory: [],
+    context: {
+      taskDescription,
+      round: 0,
+      maxRounds: 0,
+      totalTokens: 0,
+      visitCounts: {},
     },
-    // No live gate object available from disk; the frontend can re-fetch the
-    // gate via `workflows.get` once the orchestrator re-loads the workflow.
     gate: undefined,
-    workspacePath: checkpoint.workspacePath ?? '',
+    workspacePath: '',
   };
 }
 
@@ -756,6 +937,12 @@ function readArtifact(workspacePath: string, artifactName: string): ArtifactCont
  * every past run on disk (terminal, gate-paused, and `interrupted`), not just
  * runs that a user could literally resume. The frontend filters/labels them.
  *
+ * Directory enumeration routes through the shared
+ * {@link discoverWorkflowRuns} utility (per plan B6), so the CLI and the
+ * daemon converge on a single definition of "what past-run directories
+ * exist?". Rows for workflows currently live in the orchestrator are skipped
+ * here because they belong to `workflows.list` instead.
+ *
  * Per-row enrichment is delegated to `manager.loadPastRun(id)` so that the
  * detail and list paths assemble DTOs from the same domain objects.
  *
@@ -764,29 +951,29 @@ function readArtifact(workspacePath: string, artifactName: string): ArtifactCont
  * keeps the UI usable; the operator still has the warning to investigate.
  * Rows that vanish between enumeration and load (`not_found`) are skipped
  * silently — that case is a benign race with deletion.
- *
- * `controller.listActive()` is sampled once outside the loop so the per-row
- * `isLive` lookup is O(1) and any in-flight state changes can't produce a
- * non-monotonic snapshot mid-list.
  */
 function buildResumableList(manager: WorkflowManager): PastRunDto[] {
   const controller = manager.getOrchestrator();
-  const resumableIds = controller.listResumable();
+  const baseDir = manager.getBaseDir();
+  const runs = discoverWorkflowRuns(baseDir);
   const activeIds = new Set<WorkflowId>(controller.listActive());
   const dtos: PastRunDto[] = [];
 
-  for (const id of resumableIds) {
-    const result = manager.loadPastRun(id);
+  for (const run of runs) {
+    // Live rows belong to `workflows.list`, not the past-runs feed.
+    if (activeIds.has(run.workflowId)) continue;
+    const result = manager.loadPastRun(run.workflowId);
     if ('error' in result) {
       if (result.error === 'corrupted') {
         // Garbage on disk shouldn't poison the whole list; surface to operator.
-        logger.warn(`[workflow-dispatch] skipping corrupted checkpoint ${id}: ${result.message ?? 'unknown'}`);
+        logger.warn(
+          `[workflow-dispatch] skipping corrupted checkpoint ${run.workflowId}: ${result.message ?? 'unknown'}`,
+        );
       }
       // 'not_found' = race with deletion; skip silently.
       continue;
     }
-    const isLive = activeIds.has(id);
-    dtos.push(buildPastRunDto(id, result.checkpoint, result.definition, isLive));
+    dtos.push(buildPastRunDto(run.workflowId, result, run));
   }
 
   // Sort by timestamp descending (most recent first)
@@ -798,53 +985,80 @@ function buildResumableList(manager: WorkflowManager): PastRunDto[] {
  * Assembles a `PastRunDto` from on-disk past-run domain objects.
  *
  * Mirrors {@link buildDetailFromPastRun}'s field derivation so that the list
- * card and the detail view show consistent values for the same workflow.
+ * card and the detail view show consistent values for the same workflow. Two
+ * branches:
  *
- * Phase narrowing: `computePastRunPhase` returns the wide
- * `LiveWorkflowPhase | PastRunPhase` union (it can return `'running'` if the
- * caller passes `isLive=true`). For the resumable list the `isLive` slot is
- * almost always `false` -- `controller.listResumable()` already excludes
- * active ids -- but in the rare race-with-start case where a row is now live,
- * the synthesized `'running'` value is coerced to `'interrupted'` so the DTO's
- * narrower `phase: PastRunPhase` slot stays well-typed. The list path is for
- * past runs; live runs belong on `workflows.list` and the user can re-fetch.
+ * - **Checkpoint present:** all fields come from the checkpoint (timestamp,
+ *   context, workspace path). Phase comes from {@link computePastRunPhase}.
+ *   In the rare race where the row is now live, `'running'` is coerced to
+ *   `'interrupted'` so the narrower `PastRunDto.phase` slot stays
+ *   well-typed — past-run rows shouldn't carry the live phase.
+ * - **Checkpoint absent (per D7):** the row is reconstructed from the message
+ *   log plus the on-disk directory summary. Phase comes from
+ *   {@link synthesizePhaseFromMessageLog}; `currentState`/`lastState` come
+ *   from the latest `state_transition.event` (or `definition.initial`);
+ *   `timestamp` comes from `summary.mtime`; numerics fall to zero;
+ *   optionals (`latestVerdict`, `error`, `workspacePath`, `durationMs`)
+ *   default to `undefined`.
  */
-export function buildPastRunDto(
-  id: WorkflowId,
-  checkpoint: WorkflowCheckpoint,
-  definition: WorkflowDefinition,
-  isLive: boolean,
-): PastRunDto {
-  const widePhase = computePastRunPhase(checkpoint, definition, isLive);
-  // `PastRunDto.phase` excludes 'running' by type. Map the race case to
-  // 'interrupted' so the DTO is narrowly typed and the consumer sees a
-  // non-active row (which is what the resumable list represents).
-  const phase: PastRunPhase = widePhase === 'running' ? 'interrupted' : widePhase;
-  const lastState = extractLastState(checkpoint.machineState);
-  const error = extractPastRunError(checkpoint, phase);
-  const latestVerdict = extractLatestVerdictFromTransitions(checkpoint.transitionHistory);
+export function buildPastRunDto(id: WorkflowId, load: PastRunLoadSuccess, summary: WorkflowRunSummary): PastRunDto {
+  const { checkpoint, definition, isLive } = load;
+
+  if (checkpoint) {
+    const widePhase = computePastRunPhase(checkpoint, definition, isLive);
+    // `PastRunDto.phase` excludes 'running' by type. Map the race case to
+    // 'interrupted' so the DTO is narrowly typed and the consumer sees a
+    // non-active row (which is what the resumable list represents).
+    const phase: PastRunPhase = widePhase === 'running' ? 'interrupted' : widePhase;
+    const lastState = extractLastState(checkpoint.machineState);
+    const error = extractPastRunError(checkpoint, phase);
+    const latestVerdict = extractLatestVerdictFromTransitions(checkpoint.transitionHistory);
+
+    return {
+      workflowId: id,
+      name: definition.name,
+      phase,
+      // `currentState` and `lastState` are the same value here: the checkpoint
+      // captures only the most recently entered state, not a separate "previous".
+      currentState: lastState,
+      lastState,
+      taskDescription: checkpoint.context.taskDescription,
+      round: checkpoint.context.round,
+      maxRounds: checkpoint.context.maxRounds,
+      totalTokens: checkpoint.context.totalTokens,
+      latestVerdict,
+      error,
+      timestamp: checkpoint.timestamp,
+      // Checkpoints don't persist `startedAt`/`completedAt`, so the duration
+      // between workflow start and end is unrecoverable from disk. Leave
+      // `durationMs` undefined; surface this gap as a checkpoint-schema
+      // limitation rather than fabricating a number.
+      durationMs: undefined,
+      workspacePath: checkpoint.workspacePath,
+    };
+  }
+
+  // Checkpoint-less branch (D7): synthesize from the message log + summary.
+  const entries = new MessageLog(load.messageLogPath).readAll();
+  const phase = synthesizePhaseFromMessageLog(entries, definition);
+  const lastState = deriveLastStateFromEntries(entries, definition);
 
   return {
     workflowId: id,
     name: definition.name,
     phase,
-    // `currentState` and `lastState` are the same value here: the checkpoint
-    // captures only the most recently entered state, not a separate "previous".
     currentState: lastState,
     lastState,
-    taskDescription: checkpoint.context.taskDescription,
-    round: checkpoint.context.round,
-    maxRounds: checkpoint.context.maxRounds,
-    totalTokens: checkpoint.context.totalTokens,
-    latestVerdict,
-    error,
-    timestamp: checkpoint.timestamp,
-    // Checkpoints don't persist `startedAt`/`completedAt`, so the duration
-    // between workflow start and end is unrecoverable from disk. Leave
-    // `durationMs` undefined; surface this gap as a checkpoint-schema
-    // limitation rather than fabricating a number.
+    // `WorkflowDefinition.description` is a required string per the schema.
+    taskDescription: definition.description,
+    round: 0,
+    maxRounds: 0,
+    totalTokens: 0,
+    latestVerdict: undefined,
+    error: undefined,
+    timestamp: summary.mtime.toISOString(),
     durationMs: undefined,
-    workspacePath: checkpoint.workspacePath,
+    workspacePath: undefined,
   };
 }
 

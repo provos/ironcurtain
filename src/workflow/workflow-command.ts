@@ -15,6 +15,7 @@ import { getIronCurtainHome } from '../config/paths.js';
 import { formatHelp, type CommandSpec } from '../cli-help.js';
 import { FileCheckpointStore } from './checkpoint.js';
 import { discoverWorkflows, resolveWorkflowPath, parseDefinitionFile } from './discovery.js';
+import { discoverWorkflowRuns } from './workflow-discovery.js';
 import { WorkflowManager } from '../web-ui/workflow-manager.js';
 import { WebEventBus } from '../web-ui/web-event-bus.js';
 import { personaExists } from '../persona/resolve.js';
@@ -318,13 +319,13 @@ async function runResume(args: string[]): Promise<void> {
 
   let selected: { workflowId: WorkflowId; checkpoint: WorkflowCheckpoint };
 
-  const hasCheckpoints = checkpointStore.listAll().length > 0;
+  const hasCheckpoints = discoverWorkflowRuns(baseDir).some((r) => r.hasCheckpoint);
   if (overrideState && !hasCheckpoints) {
     // Find a definition path from the workflow directory
     const definitionPath = findDefinitionPath(baseDir);
     selected = synthesizeCheckpoint(baseDir, overrideState, definitionPath, checkpointStore);
   } else {
-    selected = selectResumableWorkflow(checkpointStore);
+    selected = selectResumableWorkflow(checkpointStore, baseDir);
   }
 
   // Pre-flight lint before orchestrator.resume(). The checkpoint carries
@@ -409,13 +410,9 @@ function runInspect(args: string[]): void {
   }
 
   const showAll = values.all === true;
-  const checkpointStore = new FileCheckpointStore(baseDir);
-  const workflowIds = checkpointStore.listAll();
+  const runs = discoverWorkflowRuns(baseDir);
 
-  // Find workflow directories (may exist even without checkpoints)
-  const workflowDirs = findWorkflowDirs(baseDir);
-
-  if (workflowDirs.length === 0 && workflowIds.length === 0) {
+  if (runs.length === 0) {
     writeStdout(`${DIM}No workflows found in ${baseDir}${RESET}`);
     return;
   }
@@ -428,9 +425,9 @@ function runInspect(args: string[]): void {
   // never used to spawn sessions.
   const manager = new WorkflowManager({ eventBus: new WebEventBus(), baseDirOverride: baseDir });
 
-  for (const dirName of workflowDirs) {
-    const workflowId = dirName as WorkflowId;
-    const workflowDir = resolve(baseDir, dirName);
+  for (const run of runs) {
+    const workflowId = run.workflowId;
+    const workflowDir = run.directoryPath;
 
     const result = manager.loadPastRun(workflowId);
 
@@ -595,19 +592,16 @@ function computeExitCode(orchestrator: WorkflowOrchestrator, workflowId: Workflo
   return 1;
 }
 
-function findWorkflowDirs(baseDir: string): string[] {
-  if (!existsSync(baseDir)) return [];
-  return readdirSync(baseDir, { withFileTypes: true })
-    .filter((e) => e.isDirectory())
-    .map((e) => e.name);
-}
-
 /**
  * Finds the definition.json path for a workflow in a base directory.
  * Looks inside the first workflow subdirectory.
  */
 function findDefinitionPath(baseDir: string): string {
-  const dirs = findWorkflowDirs(baseDir);
+  const dirs = existsSync(baseDir)
+    ? readdirSync(baseDir, { withFileTypes: true })
+        .filter((e) => e.isDirectory())
+        .map((e) => e.name)
+    : [];
   for (const dir of dirs) {
     const defPath = resolve(baseDir, dir, 'definition.json');
     if (existsSync(defPath)) return defPath;
