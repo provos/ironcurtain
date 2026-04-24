@@ -592,20 +592,10 @@ function computeExitCode(orchestrator: WorkflowOrchestrator, workflowId: Workflo
   return 1;
 }
 
-/**
- * Finds the definition.json path for a workflow in a base directory.
- * Looks inside the first workflow subdirectory.
- */
+/** Finds the first definition.json path under a base directory's workflow runs. */
 function findDefinitionPath(baseDir: string): string {
-  const dirs = existsSync(baseDir)
-    ? readdirSync(baseDir, { withFileTypes: true })
-        .filter((e) => e.isDirectory())
-        .map((e) => e.name)
-    : [];
-  for (const dir of dirs) {
-    const defPath = resolve(baseDir, dir, 'definition.json');
-    if (existsSync(defPath)) return defPath;
-  }
+  const run = discoverWorkflowRuns(baseDir).find((r) => r.hasDefinition);
+  if (run) return resolve(run.directoryPath, 'definition.json');
   writeStderr(`${RED}No definition.json found in ${baseDir}${RESET}`);
   process.exit(1);
 }

@@ -357,6 +357,41 @@
       <Alert variant="default" dismissible ondismiss={() => (resumeMessage = '')}>{resumeMessage}</Alert>
     {/if}
 
+    {#snippet taskCell(workflowId: string, taskDescription: string | undefined, maxLen: number)}
+      {@const isOpen = expandedTasks.has(workflowId)}
+      {#if taskDescription}
+        <button
+          type="button"
+          class="text-left text-inherit hover:text-foreground p-0 m-0 bg-transparent border-0 cursor-pointer {isOpen
+            ? 'whitespace-normal break-words'
+            : 'truncate block max-w-full'}"
+          title={taskDescription}
+          aria-expanded={isOpen}
+          data-testid={`task-toggle-${workflowId}`}
+          onclick={(e: MouseEvent) => {
+            e.stopPropagation();
+            toggleTaskExpansion(workflowId);
+          }}
+        >
+          {isOpen ? taskDescription : truncate(taskDescription, maxLen)}
+        </button>
+      {:else}
+        <span class="text-muted-foreground">--</span>
+      {/if}
+    {/snippet}
+
+    {#snippet verdictBadge(latestVerdict: { verdict: string; confidence?: number } | undefined)}
+      {#if latestVerdict}
+        <Badge variant="outline" title={latestVerdict.verdict}>
+          {truncate(latestVerdict.verdict, 30)}{#if latestVerdict.confidence !== undefined}
+            &nbsp;({formatConfidence(latestVerdict.confidence)})
+          {/if}
+        </Badge>
+      {:else}
+        <span class="text-muted-foreground text-sm">--</span>
+      {/if}
+    {/snippet}
+
     <!-- Active Workflows section -->
     <section class="space-y-2" data-testid="active-workflows-section">
       <h3 class="text-sm font-semibold text-muted-foreground uppercase tracking-wide">Active workflows</h3>
@@ -392,42 +427,12 @@
                 </TableCell>
                 <TableCell class="font-mono text-xs">{wf.currentState}</TableCell>
                 <TableCell class="text-sm max-w-[28ch]">
-                  {@const isOpen = expandedTasks.has(wf.workflowId)}
-                  {#if wf.taskDescription}
-                    <button
-                      type="button"
-                      class="text-left text-inherit hover:text-foreground p-0 m-0 bg-transparent border-0 cursor-pointer {isOpen
-                        ? 'whitespace-normal break-words'
-                        : 'truncate block max-w-full'}"
-                      title={wf.taskDescription}
-                      aria-expanded={isOpen}
-                      data-testid={`task-toggle-${wf.workflowId}`}
-                      onclick={(e: MouseEvent) => {
-                        e.stopPropagation();
-                        toggleTaskExpansion(wf.workflowId);
-                      }}
-                    >
-                      {isOpen ? wf.taskDescription : truncate(wf.taskDescription, 40)}
-                    </button>
-                  {:else}
-                    <span class="text-muted-foreground">--</span>
-                  {/if}
+                  {@render taskCell(wf.workflowId, wf.taskDescription, 40)}
                 </TableCell>
                 <TableCell class="text-sm tabular-nums">
                   {wf.maxRounds > 0 ? `${wf.round}/${wf.maxRounds}` : '--'}
                 </TableCell>
-                <TableCell>
-                  {#if wf.latestVerdict}
-                    {@const verdictText = truncate(wf.latestVerdict.verdict, 30)}
-                    <Badge variant="outline" title={wf.latestVerdict.verdict}>
-                      {verdictText}{#if wf.latestVerdict.confidence !== undefined}
-                        &nbsp;({formatConfidence(wf.latestVerdict.confidence)})
-                      {/if}
-                    </Badge>
-                  {:else}
-                    <span class="text-muted-foreground text-sm">--</span>
-                  {/if}
-                </TableCell>
+                <TableCell>{@render verdictBadge(wf.latestVerdict)}</TableCell>
                 <TableCell class="text-muted-foreground text-sm">
                   {new Date(wf.startedAt).toLocaleTimeString()}
                 </TableCell>
@@ -504,43 +509,13 @@
                       </span>
                     </TableCell>
                     <TableCell class="text-sm max-w-[36ch]">
-                      {@const isOpen = expandedTasks.has(row.workflowId)}
-                      {#if row.taskDescription}
-                        <button
-                          type="button"
-                          class="text-left text-inherit hover:text-foreground p-0 m-0 bg-transparent border-0 cursor-pointer {isOpen
-                            ? 'whitespace-normal break-words'
-                            : 'truncate block max-w-full'}"
-                          title={row.taskDescription}
-                          aria-expanded={isOpen}
-                          data-testid={`task-toggle-${row.workflowId}`}
-                          onclick={(e: MouseEvent) => {
-                            e.stopPropagation();
-                            toggleTaskExpansion(row.workflowId);
-                          }}
-                        >
-                          {isOpen ? row.taskDescription : truncate(row.taskDescription, 80)}
-                        </button>
-                      {:else}
-                        <span class="text-muted-foreground">--</span>
-                      {/if}
+                      {@render taskCell(row.workflowId, row.taskDescription, 80)}
                     </TableCell>
                     <TableCell class="font-mono text-xs">{row.lastState || '--'}</TableCell>
                     <TableCell class="text-sm tabular-nums">
                       {row.maxRounds > 0 ? `${row.round}/${row.maxRounds}` : '--'}
                     </TableCell>
-                    <TableCell>
-                      {#if row.latestVerdict}
-                        {@const verdictText = truncate(row.latestVerdict.verdict, 30)}
-                        <Badge variant="outline" title={row.latestVerdict.verdict}>
-                          {verdictText}{#if row.latestVerdict.confidence !== undefined}
-                            &nbsp;({formatConfidence(row.latestVerdict.confidence)})
-                          {/if}
-                        </Badge>
-                      {:else}
-                        <span class="text-muted-foreground text-sm">--</span>
-                      {/if}
-                    </TableCell>
+                    <TableCell>{@render verdictBadge(row.latestVerdict)}</TableCell>
                     <TableCell class="text-muted-foreground text-sm">
                       {formatDurationMs(row.durationMs) || '--'}
                     </TableCell>

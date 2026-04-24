@@ -1009,13 +1009,15 @@ export class WorkflowOrchestrator implements WorkflowController {
   listResumable(): WorkflowId[] {
     const runs = discoverWorkflowRuns(this.deps.baseDir);
     const activeIds = new Set(this.listActive());
-    return runs
-      .filter((r) => r.hasCheckpoint && !activeIds.has(r.workflowId))
-      .filter((r) => {
-        const cp = this.deps.checkpointStore.load(r.workflowId);
-        return cp !== undefined && isCheckpointResumable(cp);
-      })
-      .map((r) => r.workflowId);
+    const resumable: WorkflowId[] = [];
+    for (const run of runs) {
+      if (!run.hasCheckpoint || activeIds.has(run.workflowId)) continue;
+      const cp = this.deps.checkpointStore.load(run.workflowId);
+      if (cp !== undefined && isCheckpointResumable(cp)) {
+        resumable.push(run.workflowId);
+      }
+    }
+    return resumable;
   }
 
   getStatus(id: WorkflowId): WorkflowStatus | undefined {
@@ -1318,17 +1320,9 @@ export class WorkflowOrchestrator implements WorkflowController {
     return definition.states[stateValue].type === 'terminal';
   }
 
-  /**
-   * Build a `WorkflowCheckpoint` from an instance + snapshot, with an optional
-   * `finalStatus`. Used at both the on-transition save site (no `finalStatus`)
-   * and the terminal-completion save site (with `finalStatus` populated).
-   *
-   * Note: `finalStatus` is typed as `WorkflowStatus | undefined`. Callers in
-   * `handleWorkflowComplete` never pass a `waiting_human` status — the three
-   * terminal branches only assign `completed` or `aborted`. A future refactor
-   * that routes a `waiting_human` status through here would need to handle
-   * `gate.presentedArtifacts` (a `ReadonlyMap`) not surviving `JSON.stringify`.
-   */
+  // `waiting_human` would smuggle a ReadonlyMap (gate.presentedArtifacts) into
+  // JSON.stringify, which silently emits `{}`. handleWorkflowComplete only
+  // assigns `completed` or `aborted`, so the cycle is safe today.
   private buildCheckpoint(
     instance: WorkflowInstance,
     snapshot: { value: unknown; context: unknown },
@@ -1893,17 +1887,13 @@ export class WorkflowOrchestrator implements WorkflowController {
       };
     }
 
-    // All terminal runs retain their checkpoint with `finalStatus` populated,
-    // so the past-runs UI and `workflow inspect` can surface the canonical
-    // phase without state-name heuristics, and `listResumable` can correctly
-    // exclude completed runs via isCheckpointResumable() (cli-support.ts).
+    // Persist finalStatus so isCheckpointResumable can later distinguish
+    // completed (excluded) from aborted/failed (still resumable).
     try {
       const snapshot = instance.actor.getSnapshot() as { value: unknown; context: unknown };
       const checkpoint = this.buildCheckpoint(instance, snapshot, instance.finalStatus);
       this.deps.checkpointStore.save(workflowId, checkpoint);
     } catch (err) {
-      // A failed terminal save leaves the in-memory `finalStatus` set (so the
-      // rest of the lifecycle behaves correctly); we don't crash the workflow.
       writeStderr(`[workflow] Failed to save terminal checkpoint for ${workflowId}: ${toErrorMessage(err)}`);
     }
 

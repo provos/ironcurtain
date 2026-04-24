@@ -33,13 +33,8 @@ import { discoverWorkflowRuns } from './workflow-discovery.js';
 // ---------------------------------------------------------------------------
 
 /**
- * Returns true when a checkpoint represents a run that can still be resumed.
- *
- * Four checkpoint generations covered:
- *  - Mid-run (finalStatus undefined) → true
- *  - Terminal completed (finalStatus.phase === 'completed') → false
- *  - Terminal non-completed (finalStatus.phase is 'aborted' | 'failed' | 'waiting_human') → true
- *  - Legacy retained checkpoint with no finalStatus (pre-B3b, aborted/failed) → true
+ * Resumable iff not completed. `finalStatus` is undefined for mid-run and
+ * pre-B3b legacy checkpoints — both correctly resolve to `true`.
  */
 export function isCheckpointResumable(cp: WorkflowCheckpoint): boolean {
   return cp.finalStatus?.phase !== 'completed';

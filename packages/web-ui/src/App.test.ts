@@ -52,14 +52,14 @@ vi.mock('./lib/stores.svelte.js', () => ({
 // Stub routed views and feature components -- their internals pull in WS/store
 // wiring we don't need for chrome-level assertions. Each one resolves to a
 // trivial Svelte component.
-vi.mock('./routes/Dashboard.svelte', async () => await import('./__test_stubs__/RouteStub.svelte'));
-vi.mock('./routes/Sessions.svelte', async () => await import('./__test_stubs__/RouteStub.svelte'));
-vi.mock('./routes/Escalations.svelte', async () => await import('./__test_stubs__/RouteStub.svelte'));
-vi.mock('./routes/Jobs.svelte', async () => await import('./__test_stubs__/RouteStub.svelte'));
-vi.mock('./routes/Workflows.svelte', async () => await import('./__test_stubs__/RouteStub.svelte'));
-vi.mock('./routes/Personas.svelte', async () => await import('./__test_stubs__/RouteStub.svelte'));
-vi.mock('$lib/components/features/escalation-modal.svelte', async () => await import('./__test_stubs__/Empty.svelte'));
-vi.mock('$lib/components/features/matrix-rain.svelte', async () => await import('./__test_stubs__/Empty.svelte'));
+vi.mock('./routes/Dashboard.svelte', async () => await import('./__test_stubs__/Stub.svelte'));
+vi.mock('./routes/Sessions.svelte', async () => await import('./__test_stubs__/Stub.svelte'));
+vi.mock('./routes/Escalations.svelte', async () => await import('./__test_stubs__/Stub.svelte'));
+vi.mock('./routes/Jobs.svelte', async () => await import('./__test_stubs__/Stub.svelte'));
+vi.mock('./routes/Workflows.svelte', async () => await import('./__test_stubs__/Stub.svelte'));
+vi.mock('./routes/Personas.svelte', async () => await import('./__test_stubs__/Stub.svelte'));
+vi.mock('$lib/components/features/escalation-modal.svelte', async () => await import('./__test_stubs__/Stub.svelte'));
+vi.mock('$lib/components/features/matrix-rain.svelte', async () => await import('./__test_stubs__/Stub.svelte'));
 vi.mock('$lib/flash-title.js', () => ({ startFlashTitle: () => () => undefined }));
 
 import App from './App.svelte';

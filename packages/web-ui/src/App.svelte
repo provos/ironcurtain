@@ -56,16 +56,9 @@
     drawerOpen = false;
   }
 
-  // Close the mobile drawer on Escape so keyboard users can dismiss it without
-  // hunting for the backdrop or close button.
-  $effect(() => {
-    if (!drawerOpen) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') drawerOpen = false;
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  });
+  function onWindowKeydown(e: KeyboardEvent): void {
+    if (drawerOpen && e.key === 'Escape') drawerOpen = false;
+  }
 
   // Reduced-motion detection for Matrix rain login splash.
   // Initialized synchronously so the first paint (including the card's
@@ -177,6 +170,8 @@
     { id: 'personas', label: 'Personas', icon: UserCircle },
   ] as const;
 </script>
+
+<svelte:window onkeydown={onWindowKeydown} />
 
 {#if !appState.connected && !appState.hasToken}
   <div class="relative min-h-screen overflow-hidden bg-black">
