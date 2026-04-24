@@ -240,5 +240,27 @@ describe('Workflows route', () => {
       await fireEvent.click(investigate);
       expect(mockAppState.selectedWorkflowId).toBe('p-done');
     });
+
+    // ── B4: in-row taskDescription expand ─────────────────────────────
+    it('clicking the task button toggles between truncated and full text', async () => {
+      const longTask =
+        'This is an unusually long task description that easily exceeds the eighty-character past-runs truncation cap so the toggle has something to reveal.';
+      mockListResumable.mockResolvedValue([
+        makePastRun({ workflowId: 'p-long', phase: 'completed', taskDescription: longTask }),
+      ]);
+      render(Workflows);
+
+      const toggle = (await screen.findByTestId('task-toggle-p-long')) as HTMLButtonElement;
+      // Collapsed: shows ellipsis-truncated text and aria-expanded="false".
+      expect(toggle.textContent).toMatch(/…$/);
+      expect(toggle.getAttribute('aria-expanded')).toBe('false');
+      expect(toggle.textContent).not.toContain('something to reveal');
+
+      await fireEvent.click(toggle);
+
+      // Expanded: full text, aria-expanded="true".
+      expect(toggle.getAttribute('aria-expanded')).toBe('true');
+      expect(toggle.textContent).toContain('something to reveal');
+    });
   });
 });

@@ -79,7 +79,7 @@
 
 {#if selectedName}
   <!-- Detail view -->
-  <div class="p-6 space-y-5 animate-fade-in overflow-y-auto h-full">
+  <div class="p-6 space-y-5 animate-fade-in">
     <div class="flex items-center gap-3">
       <Button variant="ghost" size="sm" onclick={deselectPersona}>&larr; Back</Button>
       <h2 class="text-xl font-semibold tracking-tight">{selectedName}</h2>

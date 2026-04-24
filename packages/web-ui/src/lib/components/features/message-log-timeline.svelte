@@ -18,11 +18,18 @@
     loading = false,
     hasMore,
     onLoadOlder,
+    maxHeight = '60vh',
   }: {
     entries: readonly MessageLogEntry[];
     loading?: boolean;
     hasMore: boolean;
     onLoadOlder?: () => void;
+    /**
+     * Cap the timeline scroll viewport. Defaults to `60vh` so a long log does
+     * not push the surrounding page off-screen. Pass an empty string or a
+     * larger value (e.g. `'100vh'`) to opt out.
+     */
+    maxHeight?: string;
   } = $props();
 
   // ------------------------------------------------------------------
@@ -49,8 +56,11 @@
 
   // ------------------------------------------------------------------
   // Expansion state for agent_sent / agent_received entries.
-  // Keyed by `ts` (entries should have unique timestamps within a log;
-  // collisions just mean both expand together — acceptable).
+  // Keyed by `entry.ts` only — using the array index as part of the key
+  // would invalidate selections every time "Load older" prepends/appends
+  // entries and shifts indices. The orchestrator writes timestamps with
+  // millisecond precision, so collisions on the same log are unlikely;
+  // when they do occur both entries expand together — acceptable.
   // ------------------------------------------------------------------
   let expanded = $state<Set<string>>(new Set());
 
@@ -120,91 +130,97 @@
 </script>
 
 <div data-testid="message-log-timeline" class="space-y-2">
-  {#if entries.length === 0 && !loading}
-    <div data-testid="message-log-empty" class="text-sm text-muted-foreground italic px-2 py-6 text-center">
-      No message-log entries yet.
-    </div>
-  {/if}
-
-  {#each entries as entry, idx (entry.ts + ':' + idx)}
-    {@const meta = VARIANT_META[entry.type]}
-    {@const key = entry.ts + ':' + idx}
-    <Card data-testid="message-log-entry" data-entry-type={entry.type} class="px-3 py-2">
-      <div class="flex items-baseline gap-2 text-xs text-muted-foreground mb-1">
-        <Badge variant={meta.badgeVariant} class="font-mono shrink-0">{meta.label}</Badge>
-        <span class="font-mono text-foreground/70">{entry.state}</span>
-        <span class="ml-auto" title={formatAbsoluteTime(entry.ts)}>{formatRelativeTime(entry.ts)}</span>
+  <div
+    data-testid="message-log-scroll"
+    class={maxHeight ? 'overflow-y-auto space-y-2 pr-1' : 'space-y-2'}
+    style={maxHeight ? `max-height: ${maxHeight}` : undefined}
+  >
+    {#if entries.length === 0 && !loading}
+      <div data-testid="message-log-empty" class="text-sm text-muted-foreground italic px-2 py-6 text-center">
+        No message-log entries yet.
       </div>
+    {/if}
 
-      {#if isAgentMessage(entry)}
-        {@const isOpen = isExpanded(key)}
-        <button
-          type="button"
-          class="w-full text-left text-sm text-foreground/90 hover:text-foreground transition-colors"
-          onclick={() => toggleExpanded(key)}
-          data-testid="agent-toggle"
-          aria-expanded={isOpen}
-        >
-          {#if isOpen}
-            <div class="prose-markdown" data-testid="agent-full">{@html renderMarkdown(entry.message)}</div>
-          {:else}
-            <div class="truncate" data-testid="agent-preview">
-              <span class="text-[10px] uppercase tracking-wider text-muted-foreground/70 mr-2">{entry.role}</span>
-              {previewOf(entry.message)}
+    {#each entries as entry (entry.ts)}
+      {@const meta = VARIANT_META[entry.type]}
+      {@const key = entry.ts}
+      <Card data-testid="message-log-entry" data-entry-type={entry.type} class="px-3 py-2">
+        <div class="flex items-baseline gap-2 text-xs text-muted-foreground mb-1">
+          <Badge variant={meta.badgeVariant} class="font-mono shrink-0">{meta.label}</Badge>
+          <span class="font-mono text-foreground/70">{entry.state}</span>
+          <span class="ml-auto" title={formatAbsoluteTime(entry.ts)}>{formatRelativeTime(entry.ts)}</span>
+        </div>
+
+        {#if isAgentMessage(entry)}
+          {@const isOpen = isExpanded(key)}
+          <button
+            type="button"
+            class="w-full text-left text-sm text-foreground/90 hover:text-foreground transition-colors"
+            onclick={() => toggleExpanded(key)}
+            data-testid="agent-toggle"
+            aria-expanded={isOpen}
+          >
+            {#if isOpen}
+              <div class="prose-markdown" data-testid="agent-full">{@html renderMarkdown(entry.message)}</div>
+            {:else}
+              <div class="truncate" data-testid="agent-preview">
+                <span class="text-[10px] uppercase tracking-wider text-muted-foreground/70 mr-2">{entry.role}</span>
+                {previewOf(entry.message)}
+              </div>
+            {/if}
+          </button>
+          {#if entry.type === 'agent_received' && entry.verdict}
+            <div class="mt-1 text-xs text-muted-foreground">
+              verdict: <span class="font-mono text-foreground/80">{entry.verdict}</span>
+              {#if entry.confidence}
+                · confidence: <span class="font-mono text-foreground/80">{entry.confidence}</span>
+              {/if}
             </div>
           {/if}
-        </button>
-        {#if entry.type === 'agent_received' && entry.verdict}
-          <div class="mt-1 text-xs text-muted-foreground">
-            verdict: <span class="font-mono text-foreground/80">{entry.verdict}</span>
-            {#if entry.confidence}
-              · confidence: <span class="font-mono text-foreground/80">{entry.confidence}</span>
+        {:else if entry.type === 'state_transition'}
+          <div class="text-sm font-mono text-foreground/90">
+            <span class="text-muted-foreground">{entry.from}</span>
+            <span class="mx-1.5 text-muted-foreground">→</span>
+            <span>{entry.state}</span>
+            <span class="mx-2 text-muted-foreground">/</span>
+            <span class="text-foreground/70">{entry.event}</span>
+          </div>
+        {:else if entry.type === 'gate_raised'}
+          <div class="text-sm text-foreground/90">
+            <span class="text-muted-foreground">accepted events:</span>
+            <span class="font-mono text-foreground/80">{entry.acceptedEvents.join(', ') || '—'}</span>
+          </div>
+        {:else if entry.type === 'gate_resolved'}
+          <div class="text-sm text-foreground/90">
+            <span class="text-muted-foreground">resolved with</span>
+            <span class="font-mono text-foreground/80">{entry.event}</span>
+            {#if entry.prompt}
+              <div class="mt-1 text-xs text-muted-foreground italic">{entry.prompt}</div>
             {/if}
           </div>
-        {/if}
-      {:else if entry.type === 'state_transition'}
-        <div class="text-sm font-mono text-foreground/90">
-          <span class="text-muted-foreground">{entry.from}</span>
-          <span class="mx-1.5 text-muted-foreground">→</span>
-          <span>{entry.state}</span>
-          <span class="mx-2 text-muted-foreground">/</span>
-          <span class="text-foreground/70">{entry.event}</span>
-        </div>
-      {:else if entry.type === 'gate_raised'}
-        <div class="text-sm text-foreground/90">
-          <span class="text-muted-foreground">accepted events:</span>
-          <span class="font-mono text-foreground/80">{entry.acceptedEvents.join(', ') || '—'}</span>
-        </div>
-      {:else if entry.type === 'gate_resolved'}
-        <div class="text-sm text-foreground/90">
-          <span class="text-muted-foreground">resolved with</span>
-          <span class="font-mono text-foreground/80">{entry.event}</span>
-          {#if entry.prompt}
-            <div class="mt-1 text-xs text-muted-foreground italic">{entry.prompt}</div>
+        {:else if entry.type === 'error'}
+          <div class="text-sm text-destructive whitespace-pre-wrap">{entry.error}</div>
+          {#if entry.context}
+            <div class="mt-1 text-xs text-muted-foreground whitespace-pre-wrap">{entry.context}</div>
           {/if}
-        </div>
-      {:else if entry.type === 'error'}
-        <div class="text-sm text-destructive whitespace-pre-wrap">{entry.error}</div>
-        {#if entry.context}
-          <div class="mt-1 text-xs text-muted-foreground whitespace-pre-wrap">{entry.context}</div>
+        {:else if entry.type === 'quota_exhausted'}
+          <div class="text-sm text-destructive">
+            <span class="text-[10px] uppercase tracking-wider mr-2">{entry.role}</span>
+            <span class="whitespace-pre-wrap">{entry.rawMessage}</span>
+          </div>
+          {#if entry.resetAt}
+            <div class="mt-1 text-xs text-muted-foreground">resets at {formatAbsoluteTime(entry.resetAt)}</div>
+          {/if}
+        {:else if entry.type === 'agent_retry'}
+          <div class="text-sm text-warning">
+            <span class="text-[10px] uppercase tracking-wider mr-2">{entry.role}</span>
+            <span class="font-mono">{entry.reason}</span>
+          </div>
+          <div class="mt-1 text-xs text-muted-foreground whitespace-pre-wrap">{entry.details}</div>
         {/if}
-      {:else if entry.type === 'quota_exhausted'}
-        <div class="text-sm text-destructive">
-          <span class="text-[10px] uppercase tracking-wider mr-2">{entry.role}</span>
-          <span class="whitespace-pre-wrap">{entry.rawMessage}</span>
-        </div>
-        {#if entry.resetAt}
-          <div class="mt-1 text-xs text-muted-foreground">resets at {formatAbsoluteTime(entry.resetAt)}</div>
-        {/if}
-      {:else if entry.type === 'agent_retry'}
-        <div class="text-sm text-warning">
-          <span class="text-[10px] uppercase tracking-wider mr-2">{entry.role}</span>
-          <span class="font-mono">{entry.reason}</span>
-        </div>
-        <div class="mt-1 text-xs text-muted-foreground whitespace-pre-wrap">{entry.details}</div>
-      {/if}
-    </Card>
-  {/each}
+      </Card>
+    {/each}
+  </div>
 
   {#if loading}
     <div

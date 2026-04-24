@@ -339,4 +339,42 @@ describe('MessageLogTimeline', () => {
     expect(screen.queryByTestId('agent-full')).toBeNull();
     expect(screen.getByTestId('agent-preview')).toBeTruthy();
   });
+
+  // ── B3: expanded-state survives pagination append ───────────────────
+  //
+  // Before the fix the expansion key included the array index; appending
+  // older entries via "Load older" shifted every prior index by N and
+  // collapsed the user's selections. Keying by `entry.ts` only keeps each
+  // selection bound to its message regardless of where it lands in the list.
+
+  it('preserves expanded state when older entries are appended (pagination)', async () => {
+    const newMsg = agentSent({
+      ts: '2026-04-23T12:00:10.000Z',
+      message: 'Newer message body',
+    });
+    const { rerender } = render(MessageLogTimeline, {
+      props: { entries: [newMsg], hasMore: true, onLoadOlder: vi.fn() },
+    });
+
+    // Expand the only entry currently in view.
+    await fireEvent.click(screen.getByTestId('agent-toggle'));
+    expect(screen.getByTestId('agent-full')).toBeTruthy();
+    expect(screen.queryByTestId('agent-preview')).toBeNull();
+
+    // Simulate "Load older" appending a second, older entry. After the
+    // append, the originally-clicked entry still expands (its key survived
+    // even though its index moved within the list).
+    const olderMsg = agentSent({
+      ts: '2026-04-23T11:00:00.000Z',
+      message: 'Older message body',
+    });
+    await rerender({ entries: [newMsg, olderMsg], hasMore: false });
+
+    const fulls = screen.getAllByTestId('agent-full');
+    const previews = screen.queryAllByTestId('agent-preview');
+    expect(fulls).toHaveLength(1);
+    expect(previews).toHaveLength(1);
+    expect(fulls[0].textContent).toContain('Newer message body');
+    expect(previews[0].textContent).toContain('Older message body');
+  });
 });

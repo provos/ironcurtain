@@ -67,6 +67,20 @@
   let importing = $state(false);
   let resumeMessage = $state('');
   let pastRunFilter: PastRunFilter = $state('all');
+  // Per-row expansion of the truncated taskDescription cell. Keyed by
+  // workflowId so selections survive re-renders. Toggles between the 40-char
+  // truncation and the full text in the same cell.
+  let expandedTasks = $state<Set<string>>(new Set());
+
+  function toggleTaskExpansion(id: string): void {
+    const next = new Set(expandedTasks);
+    if (next.has(id)) {
+      next.delete(id);
+    } else {
+      next.add(id);
+    }
+    expandedTasks = next;
+  }
 
   const isCustomPath = $derived(selectedDefinition === CUSTOM_PATH_SENTINEL);
   const effectivePath = $derived(isCustomPath ? customPath.trim() : selectedDefinition);
@@ -270,7 +284,15 @@
     </div>
 
     {#if actionError}
-      <Alert variant="destructive" dismissible ondismiss={() => (actionError = '')}>{actionError}</Alert>
+      <!--
+        Sticky so the alert stays visible while the user scrolls past it. The
+        outer scroll container is <main> from App.svelte; z-10 keeps the alert
+        above sibling cards but below the drawer (z-50 from Fix-pack A).
+        bg-background prevents body content showing through as it scrolls under.
+      -->
+      <div class="sticky top-0 z-10 -mx-6 px-6 py-2 bg-background/95 backdrop-blur" data-testid="action-error-sticky">
+        <Alert variant="destructive" dismissible ondismiss={() => (actionError = '')}>{actionError}</Alert>
+      </div>
     {/if}
 
     <Card>
@@ -370,15 +392,35 @@
                 </TableCell>
                 <TableCell class="font-mono text-xs">{wf.currentState}</TableCell>
                 <TableCell class="text-sm max-w-[28ch]">
-                  <span title={wf.taskDescription}>{truncate(wf.taskDescription, 40) || '--'}</span>
+                  {@const isOpen = expandedTasks.has(wf.workflowId)}
+                  {#if wf.taskDescription}
+                    <button
+                      type="button"
+                      class="text-left text-inherit hover:text-foreground p-0 m-0 bg-transparent border-0 cursor-pointer {isOpen
+                        ? 'whitespace-normal break-words'
+                        : 'truncate block max-w-full'}"
+                      title={wf.taskDescription}
+                      aria-expanded={isOpen}
+                      data-testid={`task-toggle-${wf.workflowId}`}
+                      onclick={(e: MouseEvent) => {
+                        e.stopPropagation();
+                        toggleTaskExpansion(wf.workflowId);
+                      }}
+                    >
+                      {isOpen ? wf.taskDescription : truncate(wf.taskDescription, 40)}
+                    </button>
+                  {:else}
+                    <span class="text-muted-foreground">--</span>
+                  {/if}
                 </TableCell>
                 <TableCell class="text-sm tabular-nums">
                   {wf.maxRounds > 0 ? `${wf.round}/${wf.maxRounds}` : '--'}
                 </TableCell>
                 <TableCell>
                   {#if wf.latestVerdict}
-                    <Badge variant="outline" title={wf.latestVerdict.stateId}>
-                      {wf.latestVerdict.verdict}{#if wf.latestVerdict.confidence !== undefined}
+                    {@const verdictText = truncate(wf.latestVerdict.verdict, 30)}
+                    <Badge variant="outline" title={wf.latestVerdict.verdict}>
+                      {verdictText}{#if wf.latestVerdict.confidence !== undefined}
                         &nbsp;({formatConfidence(wf.latestVerdict.confidence)})
                       {/if}
                     </Badge>
@@ -462,7 +504,26 @@
                       </span>
                     </TableCell>
                     <TableCell class="text-sm max-w-[36ch]">
-                      <span title={row.taskDescription}>{truncate(row.taskDescription, 80) || '--'}</span>
+                      {@const isOpen = expandedTasks.has(row.workflowId)}
+                      {#if row.taskDescription}
+                        <button
+                          type="button"
+                          class="text-left text-inherit hover:text-foreground p-0 m-0 bg-transparent border-0 cursor-pointer {isOpen
+                            ? 'whitespace-normal break-words'
+                            : 'truncate block max-w-full'}"
+                          title={row.taskDescription}
+                          aria-expanded={isOpen}
+                          data-testid={`task-toggle-${row.workflowId}`}
+                          onclick={(e: MouseEvent) => {
+                            e.stopPropagation();
+                            toggleTaskExpansion(row.workflowId);
+                          }}
+                        >
+                          {isOpen ? row.taskDescription : truncate(row.taskDescription, 80)}
+                        </button>
+                      {:else}
+                        <span class="text-muted-foreground">--</span>
+                      {/if}
                     </TableCell>
                     <TableCell class="font-mono text-xs">{row.lastState || '--'}</TableCell>
                     <TableCell class="text-sm tabular-nums">
@@ -470,8 +531,9 @@
                     </TableCell>
                     <TableCell>
                       {#if row.latestVerdict}
-                        <Badge variant="outline" title={row.latestVerdict.stateId}>
-                          {row.latestVerdict.verdict}{#if row.latestVerdict.confidence !== undefined}
+                        {@const verdictText = truncate(row.latestVerdict.verdict, 30)}
+                        <Badge variant="outline" title={row.latestVerdict.verdict}>
+                          {verdictText}{#if row.latestVerdict.confidence !== undefined}
                             &nbsp;({formatConfidence(row.latestVerdict.confidence)})
                           {/if}
                         </Badge>

@@ -42,12 +42,30 @@
   import Check from 'phosphor-svelte/lib/Check';
   import TreeStructure from 'phosphor-svelte/lib/TreeStructure';
   import UserCircle from 'phosphor-svelte/lib/UserCircle';
+  import List from 'phosphor-svelte/lib/List';
+  import X from 'phosphor-svelte/lib/X';
 
   let tokenInput = $state('');
   let currentTheme = $state<ThemeId>('iron');
   let showThemePicker = $state(false);
   let escalationModalOpen = $state(false);
+  let drawerOpen = $state(false);
   let stopFlash: (() => void) | null = null;
+
+  function closeDrawer(): void {
+    drawerOpen = false;
+  }
+
+  // Close the mobile drawer on Escape so keyboard users can dismiss it without
+  // hunting for the backdrop or close button.
+  $effect(() => {
+    if (!drawerOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') drawerOpen = false;
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  });
 
   // Reduced-motion detection for Matrix rain login splash.
   // Initialized synchronously so the first paint (including the card's
@@ -207,113 +225,176 @@
     </div>
   </div>
 {:else}
-  <div class="flex h-screen theme-transition overflow-hidden">
-    <nav class="w-56 bg-sidebar border-r border-border flex flex-col shrink-0">
-      <div class="px-4 py-4 border-b border-border">
-        <div class="flex items-center gap-2.5">
-          <div class="w-7 h-7 rounded-lg bg-primary/15 flex items-center justify-center shrink-0">
-            <ShieldCheck size={16} class="text-primary" weight="duotone" />
-          </div>
-          <div>
-            <span class="text-sm font-semibold tracking-tight">IronCurtain</span>
-            <div data-testid="connection-status" class="flex items-center gap-1.5 mt-0.5">
-              <span class="inline-flex rounded-full h-2 w-2 {appState.connected ? 'bg-success' : 'bg-destructive'}"
-              ></span>
-              <span class="text-[10px] text-muted-foreground uppercase tracking-wider">
-                {appState.connected ? 'Live' : 'Offline'}
-              </span>
-            </div>
+  {#snippet navContents()}
+    <div class="px-4 py-4 border-b border-border">
+      <div class="flex items-center gap-2.5">
+        <div class="w-7 h-7 rounded-lg bg-primary/15 flex items-center justify-center shrink-0">
+          <ShieldCheck size={16} class="text-primary" weight="duotone" />
+        </div>
+        <div>
+          <span class="text-sm font-semibold tracking-tight">IronCurtain</span>
+          <div data-testid="connection-status" class="flex items-center gap-1.5 mt-0.5">
+            <span class="inline-flex rounded-full h-2 w-2 {appState.connected ? 'bg-success' : 'bg-destructive'}"
+            ></span>
+            <span class="text-[10px] text-muted-foreground uppercase tracking-wider">
+              {appState.connected ? 'Live' : 'Offline'}
+            </span>
           </div>
         </div>
       </div>
+    </div>
 
-      <div class="flex-1 py-2 px-2 space-y-0.5">
-        {#each navItems as item (item.id)}
-          <button
-            onclick={() => (appState.currentView = item.id)}
-            aria-current={appState.currentView === item.id ? 'page' : undefined}
-            class="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-all
-              {appState.currentView === item.id
-              ? 'bg-accent text-accent-foreground font-medium shadow-sm'
-              : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground'}"
-          >
-            <item.icon size={16} class="shrink-0" />
-            {item.label}
-            {#if item.id === 'escalations' && appState.escalationCount > 0}
-              <Badge
-                variant="destructive"
-                class="ml-auto px-1.5 font-mono font-semibold min-w-[18px] text-center text-[10px] leading-none"
-              >
-                {appState.escalationCount}
-              </Badge>
-            {/if}
-            {#if item.id === 'workflows' && appState.pendingGates.size > 0}
-              <Badge
-                variant="warning"
-                class="ml-auto px-1.5 font-mono font-semibold min-w-[18px] text-center text-[10px] leading-none"
-              >
-                {appState.pendingGates.size}
-              </Badge>
-            {/if}
-            {#if item.id === 'sessions' && appState.activeSessionCount > 0}
-              <span class="ml-auto text-[10px] font-mono text-muted-foreground">
-                {appState.activeSessionCount}
-              </span>
-            {/if}
-          </button>
-        {/each}
-      </div>
-
-      {#if appState.daemonStatus}
-        <div class="px-4 py-3 border-t border-border text-[11px] text-muted-foreground space-y-1.5 font-mono">
-          <div class="flex justify-between">
-            <span>Uptime</span>
-            <span class="text-foreground/70">{formatUptime(appState.daemonStatus.uptimeSeconds)}</span>
-          </div>
-          <div class="flex justify-between">
-            <span>Jobs</span>
-            <span class="text-foreground/70"
-              >{appState.daemonStatus.jobs.enabled}/{appState.daemonStatus.jobs.total}</span
+    <div class="flex-1 py-2 px-2 space-y-0.5">
+      {#each navItems as item (item.id)}
+        <button
+          onclick={() => {
+            appState.currentView = item.id;
+            closeDrawer();
+          }}
+          aria-current={appState.currentView === item.id ? 'page' : undefined}
+          class="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-all
+            {appState.currentView === item.id
+            ? 'bg-accent text-accent-foreground font-medium shadow-sm'
+            : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground'}"
+        >
+          <item.icon size={16} class="shrink-0" />
+          {item.label}
+          {#if item.id === 'escalations' && appState.escalationCount > 0}
+            <Badge
+              variant="destructive"
+              class="ml-auto px-1.5 font-mono font-semibold min-w-[18px] text-center text-[10px] leading-none"
             >
-          </div>
-          {#if appState.daemonStatus.signalConnected}
-            <div class="flex justify-between">
-              <span>Signal</span>
-              <span class="text-success">connected</span>
-            </div>
+              {appState.escalationCount}
+            </Badge>
           {/if}
-        </div>
-      {/if}
-
-      <div class="px-2 py-2 border-t border-border">
-        <DropdownMenu bind:open={showThemePicker} align="top-left" contentClass="w-48" class="w-full">
-          {#snippet trigger()}
-            <button
-              onclick={() => (showThemePicker = !showThemePicker)}
-              class="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm text-muted-foreground hover:bg-accent/50 hover:text-foreground transition-all"
+          {#if item.id === 'workflows' && appState.pendingGates.size > 0}
+            <Badge
+              variant="warning"
+              class="ml-auto px-1.5 font-mono font-semibold min-w-[18px] text-center text-[10px] leading-none"
             >
-              <Palette size={16} class="shrink-0" />
-              Theme: {themes.find((t) => t.id === currentTheme)?.label}
-            </button>
-          {/snippet}
-          {#each themes as t (t.id)}
-            <DropdownMenuItem active={currentTheme === t.id} onclick={() => switchTheme(t.id)} class="py-2.5">
-              <div class="flex items-center justify-between w-full">
-                <div>
-                  <div class="font-medium">{t.label}</div>
-                  <div class="text-[11px] text-muted-foreground">{t.desc}</div>
-                </div>
-                {#if currentTheme === t.id}
-                  <Check size={16} class="text-primary shrink-0" />
-                {/if}
-              </div>
-            </DropdownMenuItem>
-          {/each}
-        </DropdownMenu>
+              {appState.pendingGates.size}
+            </Badge>
+          {/if}
+          {#if item.id === 'sessions' && appState.activeSessionCount > 0}
+            <span class="ml-auto text-[10px] font-mono text-muted-foreground">
+              {appState.activeSessionCount}
+            </span>
+          {/if}
+        </button>
+      {/each}
+    </div>
+
+    {#if appState.daemonStatus}
+      <div class="px-4 py-3 border-t border-border text-[11px] text-muted-foreground space-y-1.5 font-mono">
+        <div class="flex justify-between">
+          <span>Uptime</span>
+          <span class="text-foreground/70">{formatUptime(appState.daemonStatus.uptimeSeconds)}</span>
+        </div>
+        <div class="flex justify-between">
+          <span>Jobs</span>
+          <span class="text-foreground/70">{appState.daemonStatus.jobs.enabled}/{appState.daemonStatus.jobs.total}</span
+          >
+        </div>
+        {#if appState.daemonStatus.signalConnected}
+          <div class="flex justify-between">
+            <span>Signal</span>
+            <span class="text-success">connected</span>
+          </div>
+        {/if}
       </div>
+    {/if}
+
+    <div class="px-2 py-2 border-t border-border">
+      <DropdownMenu bind:open={showThemePicker} align="top-left" contentClass="w-48" class="w-full">
+        {#snippet trigger()}
+          <button
+            onclick={() => (showThemePicker = !showThemePicker)}
+            class="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm text-muted-foreground hover:bg-accent/50 hover:text-foreground transition-all"
+          >
+            <Palette size={16} class="shrink-0" />
+            Theme: {themes.find((t) => t.id === currentTheme)?.label}
+          </button>
+        {/snippet}
+        {#each themes as t (t.id)}
+          <DropdownMenuItem active={currentTheme === t.id} onclick={() => switchTheme(t.id)} class="py-2.5">
+            <div class="flex items-center justify-between w-full">
+              <div>
+                <div class="font-medium">{t.label}</div>
+                <div class="text-[11px] text-muted-foreground">{t.desc}</div>
+              </div>
+              {#if currentTheme === t.id}
+                <Check size={16} class="text-primary shrink-0" />
+              {/if}
+            </div>
+          </DropdownMenuItem>
+        {/each}
+      </DropdownMenu>
+    </div>
+  {/snippet}
+
+  <div class="flex flex-col md:flex-row h-screen theme-transition overflow-hidden">
+    <!-- Mobile top bar: only visible below md. Desktop uses the persistent sidebar instead. -->
+    <div class="flex md:hidden items-center justify-between px-4 py-3 bg-sidebar border-b border-border shrink-0">
+      <div class="flex items-center gap-2.5">
+        <div class="w-7 h-7 rounded-lg bg-primary/15 flex items-center justify-center shrink-0">
+          <ShieldCheck size={16} class="text-primary" weight="duotone" />
+        </div>
+        <span class="text-sm font-semibold tracking-tight">IronCurtain</span>
+      </div>
+      <button
+        onclick={() => (drawerOpen = !drawerOpen)}
+        aria-label="Open menu"
+        aria-expanded={drawerOpen}
+        class="p-2 rounded-lg text-muted-foreground hover:bg-accent/50 hover:text-foreground transition-all"
+      >
+        <List size={20} />
+      </button>
+    </div>
+
+    <!-- Desktop sidebar: hidden below md. -->
+    <nav class="hidden md:flex w-56 bg-sidebar border-r border-border flex-col shrink-0">
+      {@render navContents()}
     </nav>
 
-    <main class="flex-1 min-h-0 overflow-hidden">
+    <!-- Mobile drawer backdrop. Click to dismiss. -->
+    {#if drawerOpen}
+      <div
+        data-testid="drawer-backdrop"
+        class="md:hidden fixed inset-0 z-40 bg-black/50"
+        onclick={closeDrawer}
+        onkeydown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') closeDrawer();
+        }}
+        role="button"
+        tabindex="-1"
+        aria-label="Close menu"
+      ></div>
+    {/if}
+
+    <!-- Mobile drawer. Always rendered so the slide transform animates; offscreen when closed. -->
+    <div
+      class="md:hidden fixed inset-y-0 left-0 z-50 w-64 bg-sidebar border-r border-border shadow-xl transition-transform duration-200 ease-out
+        {drawerOpen ? 'translate-x-0' : '-translate-x-full'}"
+      role="dialog"
+      aria-modal={drawerOpen ? 'true' : undefined}
+      aria-label="Main navigation"
+      aria-hidden={drawerOpen ? undefined : 'true'}
+    >
+      <nav class="flex flex-col h-full">
+        <div class="flex justify-end px-2 pt-2">
+          <button
+            onclick={closeDrawer}
+            aria-label="Close menu"
+            class="p-2 rounded-lg text-muted-foreground hover:bg-accent/50 hover:text-foreground transition-all"
+          >
+            <X size={18} />
+          </button>
+        </div>
+        {@render navContents()}
+      </nav>
+    </div>
+
+    <main class="flex-1 min-h-0 overflow-y-auto">
       {#if appState.currentView === 'dashboard'}
         <Dashboard />
       {:else if appState.currentView === 'sessions'}
