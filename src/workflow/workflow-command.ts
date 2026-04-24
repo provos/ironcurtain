@@ -15,6 +15,8 @@ import { getIronCurtainHome } from '../config/paths.js';
 import { formatHelp, type CommandSpec } from '../cli-help.js';
 import { FileCheckpointStore } from './checkpoint.js';
 import { discoverWorkflows, resolveWorkflowPath, parseDefinitionFile } from './discovery.js';
+import { WorkflowManager } from '../web-ui/workflow-manager.js';
+import { WebEventBus } from '../web-ui/web-event-bus.js';
 import { personaExists } from '../persona/resolve.js';
 import { countBySeverity, lintWorkflow, type Diagnostic, type LintContext } from './lint.js';
 import { preflightLint, type LintMode } from './lint-integration.js';
@@ -418,32 +420,54 @@ function runInspect(args: string[]): void {
     return;
   }
 
+  // WorkflowManager owns the canonical "load a past run" logic. We point it at
+  // the user-supplied baseDir via `baseDirOverride` so the same loader works
+  // for both the daemon's home directory and arbitrary `inspect` targets.
+  // The CLI never starts workflows through this manager, so the EventBus is
+  // a no-op sink and the orchestrator created lazily inside the manager is
+  // never used to spawn sessions.
+  const manager = new WorkflowManager({ eventBus: new WebEventBus(), baseDirOverride: baseDir });
+
   for (const dirName of workflowDirs) {
     const workflowId = dirName as WorkflowId;
     const workflowDir = resolve(baseDir, dirName);
 
+    const result = manager.loadPastRun(workflowId);
+
+    let checkpoint: WorkflowCheckpoint | undefined;
+    let loadedDef: WorkflowDefinition | undefined;
+
+    if ('error' in result) {
+      if (result.error === 'corrupted') {
+        // Behavior change: a malformed checkpoint or definition used to either
+        // throw (checkpoint) or be silently ignored (definition). We now print
+        // a clear error line and continue with the next workflow.
+        writeStdout(`${BOLD}${CYAN}Workflow: ${workflowId}${RESET}`);
+        writeStdout(`  ${RED}Failed to load: ${result.message ?? 'unknown error'}${RESET}`);
+        writeStdout('');
+        continue;
+      }
+      // not_found: no checkpoint on disk. Preserve current behavior -- render
+      // the directory with `checkpoint = undefined` and silently parse the
+      // definition (without strict schema validation) for state descriptions.
+      checkpoint = undefined;
+      loadedDef = tryParseDefinitionForStateDescriptions(workflowDir);
+    } else {
+      checkpoint = result.checkpoint;
+      loadedDef = result.definition;
+    }
+
     writeStdout(`${BOLD}${CYAN}Workflow: ${workflowId}${RESET}`);
 
-    // Checkpoint info (stateDescriptions populated below after definition is loaded,
-    // but checkpoint display runs first -- we load definition eagerly here)
-    const checkpoint = checkpointStore.load(workflowId);
-
-    // Load definition for state descriptions and definition path display
-    const defPath = resolve(workflowDir, 'definition.json');
-    let stateDescriptions: Map<string, string> | undefined;
-    let loadedDef: WorkflowDefinition | undefined;
-    if (existsSync(defPath)) {
-      try {
-        loadedDef = parseDefinitionFile(defPath) as WorkflowDefinition;
-        stateDescriptions = new Map(
+    const stateDescriptions = loadedDef
+      ? new Map(
           Object.entries(loadedDef.states)
             .filter(([, s]) => s.description)
             .map(([id, s]) => [id, s.description]),
-        );
-      } catch {
-        // Non-fatal — definition may be from older schema
-      }
-    }
+        )
+      : undefined;
+
+    const defPath = resolve(workflowDir, 'definition.json');
 
     if (checkpoint) {
       const stateStr = String(checkpoint.machineState);
@@ -540,6 +564,23 @@ function runInspect(args: string[]): void {
     }
 
     writeStdout('');
+  }
+}
+
+/**
+ * Best-effort definition load used in the `not_found` branch of `loadPastRun`.
+ * Mirrors the pre-refactor behavior: parse-only (no schema validation), errors
+ * swallowed. The returned definition is used solely to populate state
+ * descriptions in the rendered message log.
+ */
+function tryParseDefinitionForStateDescriptions(workflowDir: string): WorkflowDefinition | undefined {
+  const defPath = resolve(workflowDir, 'definition.json');
+  if (!existsSync(defPath)) return undefined;
+  try {
+    return parseDefinitionFile(defPath) as WorkflowDefinition;
+  } catch {
+    // Non-fatal -- definition may be from an older schema.
+    return undefined;
   }
 }
 

@@ -9,11 +9,34 @@
     resumeWorkflow as rpcResumeWorkflow,
     importWorkflow as rpcImportWorkflow,
   } from '../lib/stores.svelte.js';
-  import type { WorkflowSummaryDto, WorkflowDefinitionDto, ResumableWorkflowDto } from '$lib/types.js';
+  import type { WorkflowSummaryDto, WorkflowDefinitionDto, PastRunDto } from '$lib/types.js';
   import { phaseBadgeVariant } from '$lib/utils.js';
+  import {
+    mergePastRuns,
+    terminalSummariesAsPastRuns,
+    truncate,
+    isResumablePhase,
+    PAST_RUN_FILTERS,
+    filterPastRuns,
+    countByPhase,
+    formatConfidence,
+    formatDurationMs,
+    type PastRunFilter,
+  } from './workflows-helpers.js';
 
   function createWorkflowPlaceholder(workflowId: string, currentState: string): WorkflowSummaryDto {
-    return { workflowId, name: workflowId, phase: 'running', currentState, startedAt: new Date().toISOString() };
+    // F1 stub: card fields populated by F2 from real event/RPC payloads.
+    return {
+      workflowId,
+      name: workflowId,
+      phase: 'running',
+      currentState,
+      startedAt: new Date().toISOString(),
+      taskDescription: '',
+      round: 0,
+      maxRounds: 0,
+      totalTokens: 0,
+    };
   }
   import { Button } from '$lib/components/ui/button/index.js';
   import { Badge } from '$lib/components/ui/badge/index.js';
@@ -36,13 +59,14 @@
   // The auto-select effect will not re-select until the set of pending gates changes.
   let dismissedGateIds: Set<string> | null = $state(null);
 
-  // Resume section state
-  let resumableWorkflows: ResumableWorkflowDto[] = $state([]);
+  // Past-runs section state
+  let resumableWorkflows: PastRunDto[] = $state([]);
   let resumingId: string | null = $state(null);
   let importDirExpanded = $state(false);
   let importDir = $state('');
   let importing = $state(false);
   let resumeMessage = $state('');
+  let pastRunFilter: PastRunFilter = $state('all');
 
   const isCustomPath = $derived(selectedDefinition === CUSTOM_PATH_SENTINEL);
   const effectivePath = $derived(isCustomPath ? customPath.trim() : selectedDefinition);
@@ -178,7 +202,16 @@
     appState.selectedWorkflowId = null;
   }
 
-  const workflows = $derived([...appState.workflows.values()]);
+  const allWorkflows = $derived([...appState.workflows.values()]);
+  // Active section: only running / waiting_human entries.
+  const activeWorkflows = $derived(allWorkflows.filter((w) => w.phase === 'running' || w.phase === 'waiting_human'));
+  // In-memory terminal entries projected onto the past-run shape.
+  const inMemoryTerminal = $derived(terminalSummariesAsPastRuns(allWorkflows));
+  // Merged + dedup'd past runs (in-memory wins on conflict).
+  const pastRuns = $derived(mergePastRuns(resumableWorkflows, inMemoryTerminal));
+  const filteredPastRuns = $derived(filterPastRuns(pastRuns, pastRunFilter));
+  const pastRunCounts = $derived(countByPhase(pastRuns));
+
   const selectedWorkflow = $derived(
     appState.selectedWorkflowId ? (appState.workflows.get(appState.selectedWorkflowId) ?? null) : null,
   );
@@ -232,7 +265,7 @@
             >{appState.pendingGates.size} gate{appState.pendingGates.size > 1 ? 's' : ''} pending</Badge
           >
         {/if}
-        <Badge variant="outline">{workflows.length} active</Badge>
+        <Badge variant="outline">{activeWorkflows.length} active</Badge>
       </div>
     </div>
 
@@ -302,103 +335,214 @@
       <Alert variant="default" dismissible ondismiss={() => (resumeMessage = '')}>{resumeMessage}</Alert>
     {/if}
 
-    <Card>
-      <CardHeader>
-        <CardTitle>Resume Workflow</CardTitle>
-      </CardHeader>
-      <CardContent>
-        {#if resumableWorkflows.length > 0}
-          <div class="space-y-2 mb-4">
-            {#each resumableWorkflows as rw (rw.workflowId)}
-              <div class="flex items-center justify-between p-3 border border-border rounded-lg bg-background">
-                <div class="flex-1 min-w-0">
-                  <div class="flex items-center gap-2 text-sm">
-                    <Badge variant="outline">{rw.lastState}</Badge>
-                    <span class="text-muted-foreground">{new Date(rw.timestamp).toLocaleString()}</span>
-                  </div>
-                  <p class="text-sm mt-1 truncate" title={rw.taskDescription}>{rw.taskDescription}</p>
-                </div>
-                <Button
-                  size="sm"
-                  class="ml-3 shrink-0"
-                  loading={resumingId === rw.workflowId}
-                  disabled={resumingId !== null}
-                  onclick={() => handleResume(rw.workflowId)}
-                >
-                  Resume
-                </Button>
-              </div>
+    <!-- Active Workflows section -->
+    <section class="space-y-2" data-testid="active-workflows-section">
+      <h3 class="text-sm font-semibold text-muted-foreground uppercase tracking-wide">Active workflows</h3>
+      {#if activeWorkflows.length === 0}
+        <Card>
+          <CardContent>
+            <p class="text-center text-muted-foreground py-8">No active workflows. Start one above.</p>
+          </CardContent>
+        </Card>
+      {:else}
+        <Table>
+          <TableHeader>
+            <TableHead>Workflow</TableHead>
+            <TableHead>Phase</TableHead>
+            <TableHead>Current State</TableHead>
+            <TableHead>Task</TableHead>
+            <TableHead>Round</TableHead>
+            <TableHead>Verdict</TableHead>
+            <TableHead>Started</TableHead>
+            <TableHead class="text-right">Actions</TableHead>
+          </TableHeader>
+          <TableBody>
+            {#each activeWorkflows as wf (wf.workflowId)}
+              <TableRow clickable onclick={() => selectWorkflow(wf.workflowId)}>
+                <TableCell class="font-medium font-mono text-xs">{wf.name}</TableCell>
+                <TableCell>
+                  <span class="inline-flex items-center gap-1.5">
+                    <Badge variant={phaseBadgeVariant(wf.phase)}>{wf.phase.replace('_', ' ')}</Badge>
+                    {#if wf.phase === 'failed' && wf.error}
+                      <Badge variant="destructive" class="cursor-help" title={wf.error}>!</Badge>
+                    {/if}
+                  </span>
+                </TableCell>
+                <TableCell class="font-mono text-xs">{wf.currentState}</TableCell>
+                <TableCell class="text-sm max-w-[28ch]">
+                  <span title={wf.taskDescription}>{truncate(wf.taskDescription, 40) || '--'}</span>
+                </TableCell>
+                <TableCell class="text-sm tabular-nums">
+                  {wf.maxRounds > 0 ? `${wf.round}/${wf.maxRounds}` : '--'}
+                </TableCell>
+                <TableCell>
+                  {#if wf.latestVerdict}
+                    <Badge variant="outline" title={wf.latestVerdict.stateId}>
+                      {wf.latestVerdict.verdict}{#if wf.latestVerdict.confidence !== undefined}
+                        &nbsp;({formatConfidence(wf.latestVerdict.confidence)})
+                      {/if}
+                    </Badge>
+                  {:else}
+                    <span class="text-muted-foreground text-sm">--</span>
+                  {/if}
+                </TableCell>
+                <TableCell class="text-muted-foreground text-sm">
+                  {new Date(wf.startedAt).toLocaleTimeString()}
+                </TableCell>
+                <TableCell class="text-right">
+                  {#if wf.phase === 'running' || wf.phase === 'waiting_human'}
+                    <Button
+                      variant="destructive"
+                      size="sm"
+                      onclick={(e: MouseEvent) => {
+                        e.stopPropagation();
+                        handleAbort(wf.workflowId);
+                      }}>Abort</Button
+                    >
+                  {:else}
+                    <span class="text-muted-foreground text-sm">--</span>
+                  {/if}
+                </TableCell>
+              </TableRow>
             {/each}
-          </div>
-        {:else}
-          <p class="text-sm text-muted-foreground mb-4">No resumable workflows found.</p>
-        {/if}
+          </TableBody>
+        </Table>
+      {/if}
+    </section>
 
-        <div>
-          <button
-            type="button"
-            class="text-sm text-muted-foreground hover:text-foreground flex items-center gap-1 transition-colors"
-            onclick={() => (importDirExpanded = !importDirExpanded)}
-          >
-            <span class="inline-block transition-transform" class:rotate-90={importDirExpanded}>&#9654;</span>
-            Import from directory
-          </button>
-          {#if importDirExpanded}
-            <div class="flex gap-2 mt-2">
-              <Input bind:value={importDir} placeholder="/path/to/workflow-runs/" class="flex-1" />
-              <Button size="sm" loading={importing} disabled={!importDir.trim()} onclick={handleImportAndResume}>
-                Import & Resume
-              </Button>
-            </div>
-          {/if}
-        </div>
-      </CardContent>
-    </Card>
+    <!-- Past runs section (replaces the old "Resumable workflows" panel) -->
+    <section class="space-y-2" data-testid="past-runs-section">
+      <div class="flex items-center justify-between">
+        <h3 class="text-sm font-semibold text-muted-foreground uppercase tracking-wide">Past runs</h3>
+      </div>
 
-    {#if workflows.length === 0}
       <Card>
         <CardContent>
-          <p class="text-center text-muted-foreground py-8">No active workflows. Start one above.</p>
+          <!-- Filter pills -->
+          <div class="flex flex-wrap gap-2 mb-4" role="tablist" aria-label="Past runs filter">
+            {#each PAST_RUN_FILTERS as f (f.id)}
+              <Button
+                size="sm"
+                variant={pastRunFilter === f.id ? 'default' : 'outline'}
+                aria-pressed={pastRunFilter === f.id}
+                role="tab"
+                data-testid={`past-run-filter-${f.id}`}
+                onclick={() => (pastRunFilter = f.id)}
+              >
+                {f.label} ({pastRunCounts[f.id]})
+              </Button>
+            {/each}
+          </div>
+
+          {#if filteredPastRuns.length === 0}
+            <p class="text-sm text-muted-foreground py-4 text-center">
+              {pastRunFilter === 'all' ? 'No past runs found.' : `No ${pastRunFilter.replace('_', ' ')} runs.`}
+            </p>
+          {:else}
+            <Table>
+              <TableHeader>
+                <TableHead>Phase</TableHead>
+                <TableHead>Task</TableHead>
+                <TableHead>Last State</TableHead>
+                <TableHead>Round</TableHead>
+                <TableHead>Verdict</TableHead>
+                <TableHead>Duration</TableHead>
+                <TableHead>Timestamp</TableHead>
+                <TableHead class="text-right">Actions</TableHead>
+              </TableHeader>
+              <TableBody>
+                {#each filteredPastRuns as row (row.workflowId)}
+                  <TableRow>
+                    <TableCell>
+                      <span class="inline-flex items-center gap-1.5">
+                        <Badge variant={phaseBadgeVariant(row.phase)}>{row.phase.replace('_', ' ')}</Badge>
+                        {#if row.phase === 'failed' && row.error}
+                          <Badge variant="destructive" class="cursor-help" title={row.error}>!</Badge>
+                        {/if}
+                      </span>
+                    </TableCell>
+                    <TableCell class="text-sm max-w-[36ch]">
+                      <span title={row.taskDescription}>{truncate(row.taskDescription, 80) || '--'}</span>
+                    </TableCell>
+                    <TableCell class="font-mono text-xs">{row.lastState || '--'}</TableCell>
+                    <TableCell class="text-sm tabular-nums">
+                      {row.maxRounds > 0 ? `${row.round}/${row.maxRounds}` : '--'}
+                    </TableCell>
+                    <TableCell>
+                      {#if row.latestVerdict}
+                        <Badge variant="outline" title={row.latestVerdict.stateId}>
+                          {row.latestVerdict.verdict}{#if row.latestVerdict.confidence !== undefined}
+                            &nbsp;({formatConfidence(row.latestVerdict.confidence)})
+                          {/if}
+                        </Badge>
+                      {:else}
+                        <span class="text-muted-foreground text-sm">--</span>
+                      {/if}
+                    </TableCell>
+                    <TableCell class="text-muted-foreground text-sm">
+                      {formatDurationMs(row.durationMs) || '--'}
+                    </TableCell>
+                    <TableCell class="text-muted-foreground text-sm">
+                      {new Date(row.timestamp).toLocaleString()}
+                    </TableCell>
+                    <TableCell class="text-right space-x-1.5 whitespace-nowrap">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        data-testid={`investigate-${row.workflowId}`}
+                        onclick={() => selectWorkflow(row.workflowId)}
+                      >
+                        Investigate
+                      </Button>
+                      {#if isResumablePhase(row.phase)}
+                        <Button
+                          size="sm"
+                          loading={resumingId === row.workflowId}
+                          disabled={resumingId !== null}
+                          data-testid={`resume-${row.workflowId}`}
+                          onclick={() => handleResume(row.workflowId)}
+                        >
+                          Resume
+                        </Button>
+                      {:else}
+                        <Button
+                          size="sm"
+                          disabled
+                          aria-disabled="true"
+                          data-testid={`resume-${row.workflowId}`}
+                          title="Workflow is completed/aborted -- use Investigate"
+                        >
+                          Resume
+                        </Button>
+                      {/if}
+                    </TableCell>
+                  </TableRow>
+                {/each}
+              </TableBody>
+            </Table>
+          {/if}
+
+          <!-- Import & Resume from directory expander, preserved from the old layout -->
+          <div class="mt-4 pt-4 border-t border-border">
+            <button
+              type="button"
+              class="text-sm text-muted-foreground hover:text-foreground flex items-center gap-1 transition-colors"
+              onclick={() => (importDirExpanded = !importDirExpanded)}
+            >
+              <span class="inline-block transition-transform" class:rotate-90={importDirExpanded}>&#9654;</span>
+              Import &amp; Resume from directory
+            </button>
+            {#if importDirExpanded}
+              <div class="flex gap-2 mt-2">
+                <Input bind:value={importDir} placeholder="/path/to/workflow-runs/" class="flex-1" />
+                <Button size="sm" loading={importing} disabled={!importDir.trim()} onclick={handleImportAndResume}>
+                  Import &amp; Resume
+                </Button>
+              </div>
+            {/if}
+          </div>
         </CardContent>
       </Card>
-    {:else}
-      <Table>
-        <TableHeader>
-          <TableHead>Workflow</TableHead>
-          <TableHead>Phase</TableHead>
-          <TableHead>Current State</TableHead>
-          <TableHead>Started</TableHead>
-          <TableHead class="text-right">Actions</TableHead>
-        </TableHeader>
-        <TableBody>
-          {#each workflows as wf (wf.workflowId)}
-            <TableRow clickable onclick={() => selectWorkflow(wf.workflowId)}>
-              <TableCell class="font-medium font-mono text-xs">{wf.name}</TableCell>
-              <TableCell>
-                <Badge variant={phaseBadgeVariant(wf.phase)}>{wf.phase.replace('_', ' ')}</Badge>
-              </TableCell>
-              <TableCell class="font-mono text-xs">{wf.currentState}</TableCell>
-              <TableCell class="text-muted-foreground text-sm">
-                {new Date(wf.startedAt).toLocaleTimeString()}
-              </TableCell>
-              <TableCell class="text-right">
-                {#if wf.phase === 'running' || wf.phase === 'waiting_human'}
-                  <Button
-                    variant="destructive"
-                    size="sm"
-                    onclick={(e: MouseEvent) => {
-                      e.stopPropagation();
-                      handleAbort(wf.workflowId);
-                    }}>Abort</Button
-                  >
-                {:else}
-                  <span class="text-muted-foreground text-sm">--</span>
-                {/if}
-              </TableCell>
-            </TableRow>
-          {/each}
-        </TableBody>
-      </Table>
-    {/if}
+    </section>
   </div>
 {/if}

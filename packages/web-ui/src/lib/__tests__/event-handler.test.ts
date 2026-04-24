@@ -1,6 +1,20 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { handleEvent, type AppStateLike, type EventSideEffects } from '../event-handler.js';
-import type { SessionDto, EscalationDto, BudgetSummaryDto, OutputLine, PendingEscalation } from '../types.js';
+import {
+  handleEvent,
+  evictTerminalIfOverCap,
+  MAX_TERMINAL_WORKFLOWS,
+  type AppStateLike,
+  type EventSideEffects,
+} from '../event-handler.js';
+import type {
+  SessionDto,
+  EscalationDto,
+  BudgetSummaryDto,
+  OutputLine,
+  PendingEscalation,
+  WorkflowSummaryDto,
+  LiveWorkflowPhase,
+} from '../types.js';
 
 // ---------------------------------------------------------------------------
 // Factories
@@ -405,6 +419,10 @@ describe('handleEvent', () => {
             phase: 'running' as const,
             currentState: 'plan',
             startedAt: '2026-01-01T00:00:00Z',
+            taskDescription: '',
+            round: 0,
+            maxRounds: 0,
+            totalTokens: 0,
           },
         ],
       ]);
@@ -429,6 +447,10 @@ describe('handleEvent', () => {
             phase: 'running' as const,
             currentState: 'done',
             startedAt: '2026-01-01T00:00:00Z',
+            taskDescription: '',
+            round: 0,
+            maxRounds: 0,
+            totalTokens: 0,
           },
         ],
       ]);
@@ -451,6 +473,10 @@ describe('handleEvent', () => {
             phase: 'running' as const,
             currentState: 'implement',
             startedAt: '2026-01-01T00:00:00Z',
+            taskDescription: '',
+            round: 0,
+            maxRounds: 0,
+            totalTokens: 0,
           },
         ],
       ]);
@@ -474,6 +500,10 @@ describe('handleEvent', () => {
             phase: 'running' as const,
             currentState: 'plan',
             startedAt: '2026-01-01T00:00:00Z',
+            taskDescription: '',
+            round: 0,
+            maxRounds: 0,
+            totalTokens: 0,
           },
         ],
       ]);
@@ -530,6 +560,10 @@ describe('handleEvent', () => {
             phase: 'waiting_human' as const,
             currentState: 'plan_review',
             startedAt: '2026-01-01T00:00:00Z',
+            taskDescription: '',
+            round: 0,
+            maxRounds: 0,
+            totalTokens: 0,
           },
         ],
       ]);
@@ -567,6 +601,10 @@ describe('handleEvent', () => {
             phase: 'waiting_human' as const,
             currentState: 'plan_review',
             startedAt: '2026-01-01T00:00:00Z',
+            taskDescription: '',
+            round: 0,
+            maxRounds: 0,
+            totalTokens: 0,
           },
         ],
       ]);
@@ -615,6 +653,10 @@ describe('handleEvent', () => {
             phase: 'completed' as const,
             currentState: 'done',
             startedAt: '2026-01-01T00:00:00Z',
+            taskDescription: '',
+            round: 0,
+            maxRounds: 0,
+            totalTokens: 0,
           },
         ],
       ]);
@@ -652,6 +694,10 @@ describe('handleEvent', () => {
             phase: 'waiting_human' as const,
             currentState: 'review',
             startedAt: '2026-01-01T00:00:00Z',
+            taskDescription: '',
+            round: 0,
+            maxRounds: 0,
+            totalTokens: 0,
           },
         ],
       ]);
@@ -711,6 +757,10 @@ describe('handleEvent', () => {
             phase: 'running' as const,
             currentState: 'plan',
             startedAt: '2026-01-01T00:00:00Z',
+            taskDescription: '',
+            round: 0,
+            maxRounds: 0,
+            totalTokens: 0,
           },
         ],
       ]);
@@ -750,6 +800,10 @@ describe('handleEvent', () => {
             phase: 'waiting_human' as const,
             currentState: 'plan_review',
             startedAt: '2026-01-01T00:00:00Z',
+            taskDescription: '',
+            round: 0,
+            maxRounds: 0,
+            totalTokens: 0,
           },
         ],
       ]);
@@ -787,6 +841,10 @@ describe('handleEvent', () => {
             phase: 'waiting_human' as const,
             currentState: 'plan_review',
             startedAt: '2026-01-01T00:00:00Z',
+            taskDescription: '',
+            round: 0,
+            maxRounds: 0,
+            totalTokens: 0,
           },
         ],
       ]);
@@ -818,6 +876,287 @@ describe('handleEvent', () => {
         verdict: 'approved',
       });
       expect(handled2).toBe(true);
+    });
+
+    // ── F2: error capture, latestVerdict capture, terminal-cap eviction ──
+
+    it('populates taskDescription from the workflow.started event payload', () => {
+      const state = createMockState();
+      handleEvent(state, createMockEffects(), 'workflow.started', {
+        workflowId: 'wf-task',
+        name: 'vuln-discovery',
+        taskDescription: 'Investigate the auth bypass report',
+      });
+      expect(state.workflows.get('wf-task')?.taskDescription).toBe('Investigate the auth bypass report');
+    });
+
+    it('captures error string from workflow.failed onto the summary', () => {
+      const state = createMockState();
+      state.workflows = new Map([
+        [
+          'wf-err',
+          {
+            workflowId: 'wf-err',
+            name: 'test',
+            phase: 'running' as const,
+            currentState: 'implement',
+            startedAt: '2026-01-01T00:00:00Z',
+            taskDescription: '',
+            round: 0,
+            maxRounds: 0,
+            totalTokens: 0,
+          },
+        ],
+      ]);
+
+      handleEvent(state, createMockEffects(), 'workflow.failed', {
+        workflowId: 'wf-err',
+        error: 'agent OOMed at round 3',
+      });
+
+      const wf = state.workflows.get('wf-err');
+      expect(wf?.phase).toBe('failed');
+      expect(wf?.error).toBe('agent OOMed at round 3');
+    });
+
+    it('captures latestVerdict from workflow.agent_completed onto the summary', () => {
+      const state = createMockState();
+      state.workflows = new Map([
+        [
+          'wf-v',
+          {
+            workflowId: 'wf-v',
+            name: 'test',
+            phase: 'running' as const,
+            currentState: 'review',
+            startedAt: '2026-01-01T00:00:00Z',
+            taskDescription: '',
+            round: 0,
+            maxRounds: 0,
+            totalTokens: 0,
+          },
+        ],
+      ]);
+
+      handleEvent(state, createMockEffects(), 'workflow.agent_completed', {
+        workflowId: 'wf-v',
+        stateId: 'plan_review',
+        verdict: 'approved',
+        confidence: '0.92',
+      });
+
+      const wf = state.workflows.get('wf-v');
+      expect(wf?.latestVerdict).toEqual({
+        stateId: 'plan_review',
+        verdict: 'approved',
+        confidence: 0.92,
+      });
+    });
+
+    it('overwrites latestVerdict with the most recent agent_completed event', () => {
+      const state = createMockState();
+      state.workflows = new Map([
+        [
+          'wf-v2',
+          {
+            workflowId: 'wf-v2',
+            name: 'test',
+            phase: 'running' as const,
+            currentState: 'review',
+            startedAt: '2026-01-01T00:00:00Z',
+            taskDescription: '',
+            round: 0,
+            maxRounds: 0,
+            totalTokens: 0,
+          },
+        ],
+      ]);
+
+      handleEvent(state, createMockEffects(), 'workflow.agent_completed', {
+        workflowId: 'wf-v2',
+        stateId: 'plan_review',
+        verdict: 'needs_revision',
+        confidence: '0.40',
+      });
+      handleEvent(state, createMockEffects(), 'workflow.agent_completed', {
+        workflowId: 'wf-v2',
+        stateId: 'final_review',
+        verdict: 'approved',
+        confidence: '0.95',
+      });
+
+      expect(state.workflows.get('wf-v2')?.latestVerdict).toEqual({
+        stateId: 'final_review',
+        verdict: 'approved',
+        confidence: 0.95,
+      });
+    });
+
+    it('omits confidence on latestVerdict when wire payload omits it', () => {
+      const state = createMockState();
+      state.workflows = new Map([
+        [
+          'wf-nc',
+          {
+            workflowId: 'wf-nc',
+            name: 'test',
+            phase: 'running' as const,
+            currentState: 'review',
+            startedAt: '2026-01-01T00:00:00Z',
+            taskDescription: '',
+            round: 0,
+            maxRounds: 0,
+            totalTokens: 0,
+          },
+        ],
+      ]);
+
+      handleEvent(state, createMockEffects(), 'workflow.agent_completed', {
+        workflowId: 'wf-nc',
+        stateId: 'plan_review',
+        verdict: 'approved',
+      });
+
+      const verdict = state.workflows.get('wf-nc')?.latestVerdict;
+      expect(verdict?.verdict).toBe('approved');
+      expect(verdict?.confidence).toBeUndefined();
+    });
+  });
+
+  // ── F2: terminal-cap eviction (D7) ─────────────────────────────────────
+
+  describe('terminal-phase eviction', () => {
+    /** Build a workflow summary with a fixed `startedAt` and phase. */
+    function makeWorkflow(id: string, startedAt: string, phase: LiveWorkflowPhase): WorkflowSummaryDto {
+      return {
+        workflowId: id,
+        name: id,
+        phase,
+        currentState: phase === 'running' ? 'implement' : 'done',
+        startedAt,
+        taskDescription: '',
+        round: 0,
+        maxRounds: 0,
+        totalTokens: 0,
+      };
+    }
+
+    /** Count terminal workflows in a map. */
+    function countTerminal(workflows: ReadonlyMap<string, WorkflowSummaryDto>): number {
+      let n = 0;
+      for (const wf of workflows.values()) {
+        if (wf.phase === 'completed' || wf.phase === 'failed' || wf.phase === 'aborted') n++;
+      }
+      return n;
+    }
+
+    it('drops the oldest terminal entry when a 51st terminal completion arrives', () => {
+      const state = createMockState();
+
+      // Seed 50 terminal completed workflows (startedAt 2026-01-01..2026-02-19).
+      const terminal = new Map<string, WorkflowSummaryDto>();
+      for (let i = 0; i < MAX_TERMINAL_WORKFLOWS; i++) {
+        const day = String(i + 1).padStart(2, '0');
+        const startedAt = i < 31 ? `2026-01-${day}T00:00:00Z` : `2026-02-${String(i - 30).padStart(2, '0')}T00:00:00Z`;
+        terminal.set(`done-${i}`, makeWorkflow(`done-${i}`, startedAt, 'completed'));
+      }
+      // Plus 5 active running workflows.
+      for (let i = 0; i < 5; i++) {
+        terminal.set(`live-${i}`, makeWorkflow(`live-${i}`, `2026-03-0${i + 1}T00:00:00Z`, 'running'));
+      }
+      state.workflows = terminal;
+
+      // Sanity check seeding.
+      expect(countTerminal(state.workflows)).toBe(MAX_TERMINAL_WORKFLOWS);
+      expect(state.workflows.size).toBe(MAX_TERMINAL_WORKFLOWS + 5);
+
+      // The 51st terminal workflow: introduce a new running one and complete it.
+      const newId = 'new-completion';
+      state.workflows = new Map(state.workflows).set(newId, makeWorkflow(newId, '2026-03-15T00:00:00Z', 'running'));
+      handleEvent(state, createMockEffects(), 'workflow.completed', { workflowId: newId });
+
+      // Cap should hold at 50 terminal entries; oldest (done-0 with 2026-01-01) gone.
+      expect(countTerminal(state.workflows)).toBe(MAX_TERMINAL_WORKFLOWS);
+      expect(state.workflows.has('done-0')).toBe(false);
+      // New completion survives.
+      expect(state.workflows.get(newId)?.phase).toBe('completed');
+      // All 5 running workflows survive untouched.
+      for (let i = 0; i < 5; i++) {
+        const wf = state.workflows.get(`live-${i}`);
+        expect(wf?.phase).toBe('running');
+      }
+    });
+
+    it('also evicts on workflow.failed transitions', () => {
+      const state = createMockState();
+      const terminal = new Map<string, WorkflowSummaryDto>();
+      for (let i = 0; i < MAX_TERMINAL_WORKFLOWS; i++) {
+        const day = String(i + 1).padStart(2, '0');
+        const startedAt = i < 31 ? `2026-01-${day}T00:00:00Z` : `2026-02-${String(i - 30).padStart(2, '0')}T00:00:00Z`;
+        terminal.set(`done-${i}`, makeWorkflow(`done-${i}`, startedAt, 'completed'));
+      }
+      const newId = 'failing-wf';
+      terminal.set(newId, makeWorkflow(newId, '2026-03-15T00:00:00Z', 'running'));
+      state.workflows = terminal;
+
+      handleEvent(state, createMockEffects(), 'workflow.failed', {
+        workflowId: newId,
+        error: 'crashed',
+      });
+
+      expect(countTerminal(state.workflows)).toBe(MAX_TERMINAL_WORKFLOWS);
+      expect(state.workflows.has('done-0')).toBe(false);
+      expect(state.workflows.get(newId)?.error).toBe('crashed');
+    });
+
+    it('evicts the oldest by startedAt — not by Map insertion order', () => {
+      // Insert workflows in an order where the oldest startedAt is NOT first inserted.
+      const workflows = new Map<string, WorkflowSummaryDto>();
+      // Insert "newer" entries first; the truly-oldest entry is inserted last.
+      workflows.set('w-newer-a', makeWorkflow('w-newer-a', '2026-05-01T00:00:00Z', 'completed'));
+      workflows.set('w-newer-b', makeWorkflow('w-newer-b', '2026-04-01T00:00:00Z', 'completed'));
+      workflows.set('w-truly-oldest', makeWorkflow('w-truly-oldest', '2026-01-01T00:00:00Z', 'completed'));
+
+      // Use a small cap so we can prove eviction picks by startedAt.
+      const evicted = evictTerminalIfOverCap(workflows, 2);
+      expect(evicted.size).toBe(2);
+      expect(evicted.has('w-truly-oldest')).toBe(false);
+      expect(evicted.has('w-newer-a')).toBe(true);
+      expect(evicted.has('w-newer-b')).toBe(true);
+    });
+
+    it('does not evict when terminal count is at or below cap', () => {
+      const workflows = new Map<string, WorkflowSummaryDto>();
+      workflows.set('w-1', makeWorkflow('w-1', '2026-01-01T00:00:00Z', 'completed'));
+      workflows.set('w-2', makeWorkflow('w-2', '2026-01-02T00:00:00Z', 'completed'));
+      // Plus a few running ones — these never count toward the cap.
+      workflows.set('w-3', makeWorkflow('w-3', '2026-01-03T00:00:00Z', 'running'));
+      workflows.set('w-4', makeWorkflow('w-4', '2026-01-04T00:00:00Z', 'running'));
+
+      const evicted = evictTerminalIfOverCap(workflows, 2);
+      expect(evicted.size).toBe(4);
+      expect(evicted.has('w-1')).toBe(true);
+      expect(evicted.has('w-2')).toBe(true);
+    });
+
+    it('never evicts running or waiting_human entries even when over cap', () => {
+      const workflows = new Map<string, WorkflowSummaryDto>();
+      // 3 terminal completions.
+      workflows.set('term-1', makeWorkflow('term-1', '2026-01-01T00:00:00Z', 'completed'));
+      workflows.set('term-2', makeWorkflow('term-2', '2026-01-02T00:00:00Z', 'completed'));
+      workflows.set('term-3', makeWorkflow('term-3', '2026-01-03T00:00:00Z', 'completed'));
+      // A running and a waiting_human entry, BOTH older than every terminal one.
+      workflows.set('run-old', makeWorkflow('run-old', '2025-12-01T00:00:00Z', 'running'));
+      workflows.set('gate-old', makeWorkflow('gate-old', '2025-12-02T00:00:00Z', 'waiting_human'));
+
+      const evicted = evictTerminalIfOverCap(workflows, 2);
+      // Cap is 2 terminals; 3 present -> drop oldest terminal (term-1).
+      expect(evicted.has('term-1')).toBe(false);
+      expect(evicted.has('term-2')).toBe(true);
+      expect(evicted.has('term-3')).toBe(true);
+      // Running and waiting_human entries never evicted, even though they are older.
+      expect(evicted.has('run-old')).toBe(true);
+      expect(evicted.has('gate-old')).toBe(true);
     });
   });
 });

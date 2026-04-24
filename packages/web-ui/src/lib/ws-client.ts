@@ -24,6 +24,21 @@ export type PreflightResult = 'ok' | 'invalid' | 'offline';
 
 export type PreflightFn = (token: string) => Promise<PreflightResult>;
 
+/**
+ * Error thrown by `WsClient.request` when the daemon returns a JSON-RPC error
+ * frame. Preserves the protocol `code` so callers can branch on specific error
+ * conditions (e.g. `WORKFLOW_CORRUPTED`) without parsing the message string.
+ */
+export class RpcError extends Error {
+  readonly code: string;
+
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = 'RpcError';
+    this.code = code;
+  }
+}
+
 export interface WsClient {
   request<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T>;
   onEvent(handler: EventHandler): () => void;
@@ -126,7 +141,7 @@ export function createWsClient(preflight?: PreflightFn): WsClient {
           if (frame.ok) {
             req.resolve(frame.payload);
           } else {
-            req.reject(new Error(frame.error.message));
+            req.reject(new RpcError(frame.error.code, frame.error.message));
           }
         }
       } catch {

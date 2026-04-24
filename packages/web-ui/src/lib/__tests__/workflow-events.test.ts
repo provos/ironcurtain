@@ -49,6 +49,10 @@ function mockWorkflow(id: string, overrides: Partial<WorkflowSummaryDto> = {}): 
     phase: 'running',
     currentState: 'plan',
     startedAt: '2026-01-01T00:00:00Z',
+    taskDescription: '',
+    round: 0,
+    maxRounds: 0,
+    totalTokens: 0,
     ...overrides,
   };
 }
