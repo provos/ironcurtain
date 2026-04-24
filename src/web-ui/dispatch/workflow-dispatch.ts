@@ -40,11 +40,7 @@ import {
 import { extractStateGraph } from '../state-graph.js';
 import type { StateGraphDto } from '../web-ui-types.js';
 import { isWithinDirectory } from '../../types/argument-roles.js';
-import { parseDefinitionFile } from '../../workflow/discovery.js';
-import { validateDefinition, WorkflowValidationError } from '../../workflow/validate.js';
-import { preflightLint } from '../../workflow/lint-integration.js';
-import { countBySeverity, type LintContext } from '../../workflow/lint.js';
-import { personaExists } from '../../persona/resolve.js';
+import { runPreflight } from '../../workflow/lint-integration.js';
 import * as logger from '../../logger.js';
 
 // ---------------------------------------------------------------------------
@@ -145,47 +141,45 @@ export interface WorkflowDispatchContext extends DispatchContext {
 // Lint pre-flight (daemon)
 // ---------------------------------------------------------------------------
 
-/** Real `LintContext` backed by the filesystem. Shared with the CLI path. */
-const daemonLintContext: LintContext = { personaExists };
-
 /**
  * Parses + validates the definition file, then runs the shared
- * `preflightLint()` helper in `warn` mode. Errors abort via
- * `LINT_FAILED`; warnings are logged and ignored.
+ * `runPreflight()` helper in `warn` mode. Errors abort via `LINT_FAILED`;
+ * warnings are logged and ignored.
  *
  * The `warn` mode is the right default for the daemon: warnings are
  * advisory and should not block a workflow start from the web UI,
  * whereas true errors indicate a workflow that will not run correctly.
  */
 function preflightLintForDaemon(definitionPath: string): void {
-  let definition;
-  try {
-    const raw = parseDefinitionFile(definitionPath);
-    definition = validateDefinition(raw);
-  } catch (err) {
-    if (err instanceof WorkflowValidationError) {
-      throw new RpcError('INVALID_PARAMS', `Workflow validation failed: ${err.issues.join('; ')}`);
+  const result = runPreflight(definitionPath, 'warn');
+
+  if (result.ok) {
+    if (result.warnings > 0) {
+      logger.warn(
+        `[workflow-dispatch] Lint warnings for ${definitionPath}: ${result.diagnostics
+          .map((d) => `[${d.code}] ${d.message}`)
+          .join(' | ')}`,
+      );
     }
-    const msg = err instanceof Error ? err.message : String(err);
-    throw new RpcError('INVALID_PARAMS', `Failed to load workflow definition: ${msg}`);
+    return;
   }
 
-  const result = preflightLint(definition, daemonLintContext, 'warn');
-  const { errors, warnings } = countBySeverity(result.diagnostics);
-
-  if (!result.ok) {
-    throw new RpcError('LINT_FAILED', `Workflow lint failed: ${errors} error(s), ${warnings} warning(s).`, {
-      diagnostics: result.diagnostics,
-    });
+  if (result.kind === 'load') {
+    // `loadDefinition` builds the message in the same format the previous
+    // inline implementation used: validate failures begin with "Workflow
+    // validation failed: ..."; parse failures are wrapped here with the
+    // legacy "Failed to load workflow definition:" prefix to preserve the
+    // existing wording for daemon consumers.
+    if (result.loadKind === 'validate') {
+      throw new RpcError('INVALID_PARAMS', result.message);
+    }
+    throw new RpcError('INVALID_PARAMS', `Failed to load workflow definition: ${result.message}`);
   }
 
-  if (warnings > 0) {
-    logger.warn(
-      `[workflow-dispatch] Lint warnings for ${definitionPath}: ${result.diagnostics
-        .map((d) => `[${d.code}] ${d.message}`)
-        .join(' | ')}`,
-    );
-  }
+  // Lint failure (load succeeded).
+  throw new RpcError('LINT_FAILED', `Workflow lint failed: ${result.errors} error(s), ${result.warnings} warning(s).`, {
+    diagnostics: result.diagnostics,
+  });
 }
 
 // ---------------------------------------------------------------------------

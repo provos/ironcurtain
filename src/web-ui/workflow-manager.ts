@@ -17,10 +17,9 @@ import {
   type WorkflowController,
 } from '../workflow/orchestrator.js';
 import { FileCheckpointStore } from '../workflow/checkpoint.js';
-import { createWorkflowSessionFactory, isCheckpointResumable } from '../workflow/cli-support.js';
-import { parseDefinitionFile } from '../workflow/discovery.js';
-import { discoverWorkflowRuns } from '../workflow/workflow-discovery.js';
-import { validateDefinition, WorkflowValidationError } from '../workflow/validate.js';
+import { createWorkflowSessionFactory } from '../workflow/cli-support.js';
+import { findLatestResumableCheckpoint } from '../workflow/checkpoint-selection.js';
+import { loadDefinition } from '../workflow/definition-loader.js';
 import type { WebEventBus } from './web-event-bus.js';
 import { type HumanGateRequestDto, toHumanGateRequestDto } from './web-ui-types.js';
 import { getIronCurtainHome } from '../config/paths.js';
@@ -134,24 +133,22 @@ export class WorkflowManager {
     if (workflowId) {
       targetId = workflowId as WorkflowId;
     } else {
-      const runs = discoverWorkflowRuns(externalBaseDir);
-      const candidateIds = runs.filter((r) => r.hasCheckpoint).map((r) => r.workflowId);
-      if (candidateIds.length === 0) {
-        throw new Error(`No checkpoints found in ${externalBaseDir}`);
-      }
-      let latestId: WorkflowId | undefined;
-      let latestTimestamp = '';
-      for (const id of candidateIds) {
-        const cp = externalStore.load(id);
-        if (cp && isCheckpointResumable(cp) && cp.timestamp > latestTimestamp) {
-          latestId = id;
-          latestTimestamp = cp.timestamp;
+      // `findLatestResumableCheckpoint` returns the most recent resumable
+      // run by `checkpoint.timestamp`. The two error paths preserve the
+      // pre-refactor wording so external callers (web UI, scripts) keep
+      // their existing diagnostics.
+      const latest = findLatestResumableCheckpoint(externalBaseDir, externalStore);
+      if (!latest) {
+        // Distinguish "no checkpoint files at all" from "checkpoints exist
+        // but none are resumable" using a single fast probe — the helper
+        // already enumerated and filtered, so we re-derive the discriminator
+        // by checking the store directly.
+        if (externalStore.listAll().length === 0) {
+          throw new Error(`No checkpoints found in ${externalBaseDir}`);
         }
-      }
-      if (!latestId) {
         throw new Error(`No valid checkpoints found in ${externalBaseDir}`);
       }
-      targetId = latestId;
+      targetId = latest.workflowId;
     }
 
     const checkpoint = externalStore.load(targetId);
@@ -273,26 +270,27 @@ export class WorkflowManager {
       };
     }
 
-    let raw: unknown;
-    try {
-      raw = parseDefinitionFile(definitionPath);
-    } catch (err: unknown) {
+    // Both `parse` and `validate` failures map to `corrupted`: the file is
+    // present on disk but unusable. Preserve the pre-refactor message
+    // wording so existing UI consumers keep their diagnostic strings.
+    const result = loadDefinition(definitionPath);
+    if (result.ok) return { definition: result.definition };
+
+    if (result.kind === 'parse') {
       return {
         error: 'corrupted',
-        message: `Failed to parse definition at ${definitionPath}: ${describeError(err)}`,
+        message: `Failed to parse definition at ${definitionPath}: ${result.message}`,
       };
     }
 
-    try {
-      const definition = validateDefinition(raw);
-      return { definition };
-    } catch (err: unknown) {
-      const detail = err instanceof WorkflowValidationError ? err.issues.join('; ') : describeError(err);
-      return {
-        error: 'corrupted',
-        message: `Invalid workflow definition at ${definitionPath}: ${detail}`,
-      };
-    }
+    // `validate`: prefer the structured issues list when present (parity
+    // with the old `WorkflowValidationError.issues.join('; ')` path); fall
+    // back to the loader's default message otherwise.
+    const detail = result.issues ? result.issues.join('; ') : result.message;
+    return {
+      error: 'corrupted',
+      message: `Invalid workflow definition at ${definitionPath}: ${detail}`,
+    };
   }
 
   private createOrchestrator(): WorkflowOrchestrator {

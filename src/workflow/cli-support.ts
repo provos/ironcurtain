@@ -25,20 +25,13 @@ import {
   type HumanGateEventType,
 } from './types.js';
 import type { WorkflowOrchestrator, WorkflowLifecycleEvent, WorkflowTabHandle } from './orchestrator.js';
-import { FileCheckpointStore } from './checkpoint.js';
-import { discoverWorkflowRuns } from './workflow-discovery.js';
+import { FileCheckpointStore, isCheckpointResumable } from './checkpoint.js';
+import { findResumableCheckpoints } from './checkpoint-selection.js';
 
-// ---------------------------------------------------------------------------
-// Checkpoint-resumability predicate
-// ---------------------------------------------------------------------------
-
-/**
- * Resumable iff not completed. `finalStatus` is undefined for mid-run and
- * pre-B3b legacy checkpoints — both correctly resolve to `true`.
- */
-export function isCheckpointResumable(cp: WorkflowCheckpoint): boolean {
-  return cp.finalStatus?.phase !== 'completed';
-}
+// Re-export for backward compatibility — the canonical location is now
+// `./checkpoint.js`, but external callers (e.g. `workflow-manager.ts`,
+// the test suite) historically imported it from here.
+export { isCheckpointResumable };
 
 // ---------------------------------------------------------------------------
 // ANSI colors
@@ -369,12 +362,10 @@ export function printResumeInfo(baseDir: string, workflowId: WorkflowId, checkpo
 /**
  * Picks the most-recent resumable workflow from a checkpoint store.
  *
- * Enumerates workflow-run directories via the shared
- * {@link discoverWorkflowRuns} utility (rather than
- * `checkpointStore.listAll()`) so that directory discovery goes through
- * the single source of truth used by both the CLI and the daemon. Filters
- * candidates with {@link isCheckpointResumable} so completed runs are
- * excluded post-B3b (completed runs now retain their checkpoint).
+ * Delegates enumeration + filtering + sorting to
+ * {@link findResumableCheckpoints} (single source of truth shared with the
+ * daemon). Adds the CLI-specific banner that lists every candidate when
+ * more than one is present.
  *
  * Exits with code 1 if no resumable workflows are found.
  */
@@ -382,14 +373,7 @@ export function selectResumableWorkflow(
   checkpointStore: FileCheckpointStore,
   baseDir: string,
 ): { workflowId: WorkflowId; checkpoint: WorkflowCheckpoint } {
-  const candidates = discoverWorkflowRuns(baseDir)
-    .filter((r) => r.hasCheckpoint)
-    .map((r) => ({ id: r.workflowId, checkpoint: checkpointStore.load(r.workflowId) }))
-    .filter(
-      (c): c is { id: WorkflowId; checkpoint: WorkflowCheckpoint } =>
-        c.checkpoint !== undefined && isCheckpointResumable(c.checkpoint),
-    )
-    .sort((a, b) => new Date(b.checkpoint.timestamp).getTime() - new Date(a.checkpoint.timestamp).getTime());
+  const candidates = findResumableCheckpoints(baseDir, checkpointStore);
 
   if (candidates.length === 0) {
     writeStderr(`${RED}No resumable workflows found in this directory.${RESET}`);
@@ -398,17 +382,19 @@ export function selectResumableWorkflow(
   }
 
   if (candidates.length === 1) {
-    return { workflowId: candidates[0].id, checkpoint: candidates[0].checkpoint };
+    return { workflowId: candidates[0].workflowId, checkpoint: candidates[0].checkpoint };
   }
 
   writeStdout(`${YELLOW}Found ${candidates.length} resumable workflows. Using most recent:${RESET}`);
-  for (const { id, checkpoint } of candidates) {
-    const marker = id === candidates[0].id ? `${GREEN}>>` : `${DIM}  `;
-    writeStdout(`${marker} ${id} — state: ${String(checkpoint.machineState)}, saved: ${checkpoint.timestamp}${RESET}`);
+  for (const { workflowId, checkpoint } of candidates) {
+    const marker = workflowId === candidates[0].workflowId ? `${GREEN}>>` : `${DIM}  `;
+    writeStdout(
+      `${marker} ${workflowId} — state: ${String(checkpoint.machineState)}, saved: ${checkpoint.timestamp}${RESET}`,
+    );
   }
   writeStdout('');
 
-  return { workflowId: candidates[0].id, checkpoint: candidates[0].checkpoint };
+  return { workflowId: candidates[0].workflowId, checkpoint: candidates[0].checkpoint };
 }
 
 /**
