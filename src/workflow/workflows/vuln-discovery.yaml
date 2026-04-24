@@ -156,7 +156,7 @@ states:
 
       - **When:** Build or upgrade a harness. Directive MUST specify the tier (see Tiered harness strategy below).
       - **Directive must supply:** Hypothesis, tier, component scope, WHY this tier. Do NOT prescribe specific test cases, fixed input values, or enumerated scenarios (T1, T2, T3...) — that is `harness_design`'s job. Trust the downstream agent to pick the sweep strategy given the hypothesis you describe.
-      - **Audit on return** (after `harness_validate` approves and control comes back to the orchestrator): confirm validation showed (a) the target function reached with non-zero coverage, AND (b) the fuzzer's self-reported feedback metric (e.g., libFuzzer `cov:` / AFL++ edge count / the stack's equivalent) recorded in `validation.md` passed the threshold from step 4 of `harness_validate`. If (b) is absent from an `approved` validation report, that is a prompt-conformance failure in `harness_validate` itself — do NOT bounce back to it (the state's own prompt forbids approval without (b), so repeat invocations are unlikely to self-correct and `maxVisits` only decrements on non-approved verdicts, creating a loop risk). Instead, set verdict `escalate` and route to `human_escalation` so a human can diagnose whether the issue is a tool-output-parsing edge case, a model quirk, or a missing field in the design that validate glossed over.
+      - **Audit on return** (after `harness_validate` approves and control comes back to the orchestrator): confirm validation showed (a) the target function reached with non-zero coverage, AND (b) the fuzzer's self-reported feedback metric (e.g., libFuzzer `cov:` / AFL++ edge count / the stack's equivalent) recorded in `validation.md` passed the threshold from step 4 of `harness_validate`. If (b) is absent from an `approved` validation report, that is a prompt-conformance failure in `harness_validate` itself — do NOT bounce back to it. The state's own prompt forbids approval without (b), so repeat invocations are unlikely to self-correct, and `harness_validate`'s approved transition is declared before the visit-cap escalation guard, so the guard never fires on approved verdicts (a buggy validator can keep re-entering the harness pipeline until the workflow-level round cap kicks in). Instead, set verdict `escalate` and route to `human_escalation` so a human can diagnose whether the issue is a tool-output-parsing edge case, a model quirk, or a missing field in the design that validate glossed over.
 
       ### `discover` — verdict: `discover`
 
@@ -517,7 +517,7 @@ states:
       - Compile-wrapper (AFL++): instrumented objects contain `__afl_area_ptr`; `afl-showmap` on a baseline reports non-trivial map density (≫100 edges).
       - Runtime agent (managed stacks): the fuzzer's startup output lists instrumented classes/modules; verify the target appears.
 
-      Record the verification command and output in `README.md`. If the target shows no instrumentation, STOP — this is a build defect, not an accepted outcome.
+      Record the verification command and output in `.workflow/harness_build/README.md` alongside the build instructions. If the target shows no instrumentation, STOP — this is a build defect, not an accepted outcome.
 
       Install all required dependencies eagerly. If anything cannot be installed, report verdict rejected with the specific error — do NOT report approved if fuzzer-feedback instrumentation is missing from the target code.
 
@@ -779,7 +779,7 @@ states:
 
       ### Mitigated issues
 
-      Findings triage scored as `mitigated` with execution evidence that the mitigation holds. Note the mitigation's location and whether it covers all input ranges / all call sites. Do NOT include findings whose mitigation rests on text-only reasoning — those belong under "Findings without demonstrated impact" with the mitigation analysis flagged as unverified.
+      Findings where `discover` returned `blocked` with execution evidence that the mitigation holds — coverage of the mitigation code AND a completed input sweep over the hypothesis's value range showing the mitigation held (the bar the orchestrator applies when auditing discover's `blocked` verdict). Note the mitigation's location and whether it covers all input ranges / all call sites. Do NOT include findings whose mitigation rests on text-only reasoning — those belong under "Findings without demonstrated impact" with the mitigation analysis flagged as unverified.
 
       ### Investigation coverage
 
