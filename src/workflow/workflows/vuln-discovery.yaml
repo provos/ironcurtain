@@ -137,13 +137,11 @@ states:
       Directive: [what the next agent should focus on]
       ```
 
-      **What to capture in Evidence.** You don't read source code, but you DO read the output files written by other agents. When filling in "Key findings," extract the specific details from those files: which function was tested, what input values were tried, what coverage showed, what mitigations were cited and at what source locations, what error messages appeared. A good evidence section lets someone reconstruct WHY the agent reached its verdict without re-reading the full artifact. A bad one says "the agent found it was mitigated."
+      **What to capture in Evidence.** Extract specific details from the completed agent's artifacts — functions tested, input values, coverage observed, mitigations cited (with source locations), error messages. A good evidence section lets someone reconstruct WHY the agent reached its verdict without re-reading the full artifact; a bad one says "the agent found it was mitigated."
 
-      On each invocation: update the status header in-place, then APPEND a new round section at the end. Never edit or delete previous round sections — they are the investigation's permanent record.
+      On each invocation: update the status header in-place, then APPEND a new round section. Never edit or delete previous round sections — they are the investigation's permanent record.
 
-      After updating the journal, decide the next action by setting your verdict. The sections below describe every state the orchestrator can dispatch to, one section each.
-
-      Every downstream state has its OWN detailed prompt covering the methodology it uses. Your directive must NOT re-specify that methodology — the state's prompt already covers it, and duplicating it creates tension and wastes tokens. Your directive should supply what is SPECIFIC to this invocation: the target, the hypothesis, the focus area, any human feedback, and WHY this state is being routed to now.
+      Every downstream state has its own detailed prompt covering its methodology. Your directive must NOT re-specify that methodology; it should supply what is SPECIFIC to this invocation — target, hypothesis, focus area, human feedback, and WHY this state is being routed to now.
 
       ## Routing decisions
 
@@ -158,7 +156,7 @@ states:
 
       - **When:** Build or upgrade a harness. Directive MUST specify the tier (see Tiered harness strategy below).
       - **Directive must supply:** Hypothesis, tier, component scope, WHY this tier. Do NOT prescribe specific test cases, fixed input values, or enumerated scenarios (T1, T2, T3...) — that is `harness_design`'s job. Trust the downstream agent to pick the sweep strategy given the hypothesis you describe.
-      - **Audit on return** (after `harness_validate` approves and control comes back to the orchestrator): confirm validation showed the target function reached with non-zero coverage.
+      - **Audit on return** (after `harness_validate` approves and control comes back to the orchestrator): confirm validation showed (a) the target function reached with non-zero coverage, AND (b) the fuzzer's self-reported feedback metric (e.g., libFuzzer `cov:` / AFL++ edge count / the stack's equivalent) recorded in `validation.md` passed the threshold from step 4 of `harness_validate`. If (b) is absent from an `approved` validation report, that is a prompt-conformance failure in `harness_validate` itself — do NOT bounce back to it. The state's own prompt forbids approval without (b), so repeat invocations are unlikely to self-correct, and `harness_validate`'s approved transition is declared before the visit-cap escalation guard, so the guard never fires on approved verdicts (a buggy validator can keep re-entering the harness pipeline until the workflow-level round cap kicks in). Instead, set verdict `escalate` and route to `human_escalation` so a human can diagnose whether the issue is a tool-output-parsing edge case, a model quirk, or a missing field in the design that validate glossed over.
 
       ### `discover` — verdict: `discover`
 
@@ -168,11 +166,11 @@ states:
 
         **If discover returned `approved` (confirmed):** route to `triage` if the evidence is solid, or back to `discover` for more evidence if it is thin.
 
-        **If discover returned `blocked` (mitigated or exhausted):** the "mitigated" claim is only authoritative when BOTH of these hold:
+        **If discover returned `blocked` (mitigated or exhausted):** the "mitigated" claim is authoritative only when BOTH of:
         - The tier matched the hypothesis scope — cross-component hypotheses require Tier 2+.
         - Evidence shows execution, not reasoning: coverage of the mitigation code AND a completed input sweep over the hypothesis's value range (fuzzing for value-dependent claims, bounded enumeration for discrete claims).
 
-        Textual reasoning about why the code looks safe is NOT sufficient evidence. If the evidence is text-only, re-route to `discover` with a directive to exercise the mitigation, or to `harness_design` at a higher tier if the harness cannot exercise it.
+        If the evidence is text-only ("the code looks safe"), re-route to `discover` to exercise the mitigation, or to `harness_design` at a higher tier if the harness cannot exercise it.
 
         **If discover returned `rejected` (couldn't run):**
         - Coverage shows the target function IS reached but the condition doesn't fire → `differential_validate` (values need adjustment for the live context: protocol encoding, byte order, framing).
@@ -192,8 +190,15 @@ states:
 
       ### `triage` — verdict: `triage`
 
-      - **When:** Enough evidence collected for independent validation.
+      - **When:** `.workflow/discoveries/findings.md` exists AND contains at least one finding from an `approved` discover round. Tier-1 detector output from `harness_validate` — whether a C/C++ sanitizer, a fuzz crash, a static analyzer hit, a tainted-flow report, or an assertion failure — is NOT sufficient evidence to route here. That output proves the detector fired, not that the attacker sees an impact. Route to `discover` first to demonstrate the effect with attacker-maximal parameters.
       - **Directive must supply:** Nothing extra — reads findings.
+      - **Audit on return** depends on the verdict triage produced:
+
+        **If triage returned `approved`:** the demonstrated evidence supports the severity assigned. Proceed to `conclude` (verdict `complete`) or continue the investigation loop as usual.
+
+        **If triage returned `insufficient`:** the triage agent found discover's evidence too thin for the severity it implied (e.g., a confidentiality claim anchored on zeroed padding instead of observed heap contents, or a theoretical OOB extent without a demonstration at adversary-maximal parameters). Route back to `discover` with a directive naming the **specific gap** triage identified. Do NOT retry triage without new discover output — that just reproduces the same insufficient assessment.
+
+        **If triage returned `escalate`:** evidence is contradictory or the severity question needs human judgment — route to `human_escalation`.
 
       ### `conclude` — verdict: `complete`
 
@@ -221,17 +226,13 @@ states:
 
       ## Strategic principles
 
-      IMPORTANT: Always update `.workflow/journal/journal.md` before setting your verdict. The journal is the persistent memory of this investigation — your conversation history may be long but the journal is the structured summary.
-
       **Human feedback overrides agent verdicts.** When report_review feedback contradicts an agent's "mitigated" or "ruled_out" verdict, the human's assessment takes precedence. Route to harness_design at a higher tier — never re-run the tier the human disputed. If the human describes a cross-component interaction, go to Tier 2 or 3.
 
-      **Completing the investigation.** When the evidence chain is conclusive — either a
-      vulnerability is confirmed and fully documented, or all viable hypotheses from the
-      analysis have been tested at appropriate tiers — set verdict to `complete`. Do NOT escalate for clean
-      completion. Escalation is for being stuck; completion is for being done. "No
-      exploitable vulnerability found" is a valid and valuable outcome.
+      **Detector evidence vs. impact evidence.** A validated harness tells you a detector fired (sanitizer, fuzz crash, static analyzer, tainted-flow report, assertion). That proves the detector caught something; it does NOT prove an attacker can demonstrate impact in the real system — padding, runtime guards, input sanitizers, schema validators, or attacker-uncontrolled state often absorb the effect. The attacker-observable outcome (data leak of non-trivial bytes, privilege escalation, auth bypass, injection landing in a reachable sink, controlled crash/DoS) must be demonstrated by `discover` with adversary-maximal parameters before triage can score severity beyond "detector anomaly present." If you are about to route `harness_validate` → `triage` without a `discover` round in between, stop — route to `discover` first.
 
-      If you detect stall patterns (same state visited 3+ times without progress, contradictory results between layers, or your own uncertainty about strategy), set verdict to escalate rather than continuing to burn rounds.
+      **Completing the investigation.** When the evidence chain is conclusive — either a vulnerability is confirmed and fully documented, or all viable hypotheses have been tested at appropriate tiers — set verdict to `complete`. Escalation is for being stuck; completion is for being done. "No exploitable vulnerability found" is a valid and valuable outcome.
+
+      **Stall detection.** If the same state has been visited 3+ times without progress, results contradict across layers, or you are uncertain about strategy, set verdict `escalate` rather than burning more rounds.
     inputs:
       - analysis?
       - harness_design?
@@ -330,7 +331,7 @@ states:
       - Which source files to link
       - Which functions' logic must be preserved vs stubbed
       - Which struct layouts must match the real project
-      - Coverage instrumentation (e.g., `-fprofile-instr-generate -fcoverage-mapping`)
+      - Coverage instrumentation (see "Coverage instrumentation" below — name both fuzzer-feedback and audit-coverage mechanisms)
 
       ### Tier 3 — Full build with instrumented input
       Compile the actual project with sanitizers (ASAN, UBSAN) and coverage. Design a driver that feeds crafted inputs through real entry points. Specify:
@@ -350,18 +351,28 @@ states:
 
       The design specifies input variables and ranges. The build agent implements the sweep. Do NOT prescribe individual "Test A / Test B / Test C" scenarios with fixed values — that's unit testing and will miss the actual boundary.
 
-      **Leverage existing fuzzing tools when appropriate.** For large input spaces, structured inputs, or whenever coverage-guided exploration would outperform a hand-rolled loop, design the harness around an existing fuzzer rather than reinventing one:
-      - **libFuzzer** — in-process, coverage-guided. Natural fit for Tier 1/2 when you can expose a `LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)` entry point.
-      - **AFL/AFL++** — out-of-process, coverage-guided. Good for Tier 3 with file/stdin-driven binaries.
-      - **Honggfuzz** — hardware performance-counter feedback, works well for complex native targets.
+      **Leverage existing fuzzing tools when appropriate.** For large input spaces, structured inputs, or whenever coverage-guided exploration would outperform a hand-rolled loop, design the harness around an existing fuzzer rather than reinventing one. Canonical examples: **libFuzzer** (in-process, coverage-guided; natural fit for Tier 1/2 with an `LLVMFuzzerTestOneInput` entry point), **AFL/AFL++** (out-of-process, coverage-guided; good for Tier 3 file/stdin-driven binaries). Managed-runtime stacks have their own equivalents (Jazzer for JVM, atheris for Python, `go test -fuzz` for Go). The build agent installs the tool; your design specifies WHICH tool and WHY, plus the entry-point shape.
 
-      The build agent is responsible for installing these tools (typically via `apt-get` or building from source). Your design specifies WHICH tool to use and WHY, plus the harness entry point shape (e.g., "libFuzzer target accepting a 4-byte slice_num value and returning 0"). Do not write the fuzzer invocation commands — that is the build agent's job.
+      **Seed corpus covers the dispatch surface.** If the target has a structured dispatch table (tag table, opcode switch, protocol message-type enum, state machine), the design MUST specify seeds generated programmatically from that table — at least one per dispatch case. Hand-curated deep-path seeds are additive, not a substitute. For small discrete targets, mark N/A with a one-line reason.
+
+      ## Coverage instrumentation — name two concerns separately
+
+      Fuzzing requires two distinct instrumentation decisions that are easy to confuse. The design MUST address both:
+
+      1. **Fuzzer-feedback coverage** — instrumentation the fuzzer consumes at runtime to guide mutation. Mechanism is tool-specific and falls into three categories: compile-time sanitizer flags (e.g., libFuzzer's `-fsanitize-coverage=edge,trace-pc-guard,trace-cmp,trace-div`), compile wrappers (e.g., AFL++'s `afl-clang-fast` / `afl-clang-lto`), or runtime agents for managed stacks (e.g., Jazzer's Java agent, atheris's import rewriter). Name the exact mechanism AND the exact metric field name the validator will read from the fuzzer's status output (e.g., libFuzzer's `cov` counter, AFL++'s `edges_found`, Go's `new interesting` total) — without this, `harness_validate` cannot gate on it.
+
+      2. **Audit coverage** — post-run reporting of which lines executed (`llvm-cov`, `gcov`, or the stack's equivalent). This is an audit tool, NOT a feedback signal. A harness can have (2) without (1) — which is the forgot-to-instrument-the-target pitfall.
+
+      **Target-code instrumentation (required).** Fuzzer-feedback coverage MUST reach the target code, not just the harness wrapper. Name the unit (library, package, module, class) that must carry it — prebuilt artifacts from elsewhere (system libraries, wheels, `.node` files, binary crates) do NOT carry instrumentation retroactively. The design must call for the target to be rebuilt under the fuzzer-feedback toolchain, or a pre-instrumented artifact to be located. If the project's build cannot accommodate that, say so — it is a signal to switch tools.
+
+      **Fallback path.** Specify an alternative tool that uses a *different* instrumentation mechanism (not just a different frontend on the same one) — a fallback on the same mechanism inherits the same failure mode. Canonical example: libFuzzer ↔ AFL++ (sanitizer-coverage vs. compile-wrapper).
 
       ## Requirements for all tiers
 
       **Diagnostic checkpoints.** The design must include verification steps:
-      1. **Baseline reachability:** With a benign input, confirm the target function is executed. If not reached, the harness is broken.
+      1. **Baseline reachability:** With a benign input, confirm the target function is executed.
       2. **Input integrity:** Verify inputs arrive at the target function unmodified.
+      3. **Fuzzer-feedback reach:** Specify a threshold the target code's fuzzer-feedback metric must meet after a short fuzz burst. If not met, the feedback chain is broken.
 
       **Mitigation testing.** The harness MUST test against UNMODIFIED source code. If the hypothesized condition doesn't trigger within the swept range, document which code intercepts it and whether that code covers ALL relevant paths.
 
@@ -398,11 +409,13 @@ states:
 
       4. **Observables and positive-finding condition are specific.** The design must name what the harness records at each input and what pattern indicates the hypothesis is confirmed. "A crash happens" is a fail; "the comparison at line 2344 evaluates to equal when the neighbor MB was not actually part of the current slice" is a pass.
 
-      5. **Coverage targets the right code.** The design must specify coverage instrumentation AND name the target function (or mitigation code, if the hypothesis claims a mitigation) whose execution coverage must demonstrate. Without this, a downstream "mitigated" verdict cannot be verified.
+      5. **Coverage targets the right code — both kinds.** The design must separately name (a) the fuzzer-feedback mechanism (e.g., libFuzzer's `-fsanitize-coverage=...`, AFL++'s `afl-clang-fast`, or a runtime agent for managed stacks), (b) the audit-coverage tool, and (c) the exact metric field name the validator will read from the fuzzer's status output (e.g., libFuzzer `cov`, AFL++ `edges_found`). It must name which units of code receive (a) — specifically the target code, not just the harness wrapper. A design that names only audit-coverage tooling, names feedback instrumentation only on the wrapper, or omits (c) is a fail. A design missing a fallback path on a *different* instrumentation mechanism is also a fail.
 
-      6. **Existing fuzzer used when appropriate.** For large or structured input spaces, the design should specify libFuzzer / AFL / Honggfuzz rather than a hand-rolled loop. For small discrete spaces, bounded enumeration is fine — but the design must state the choice and why.
+      6. **Existing fuzzer used when appropriate.** For large or structured input spaces, the design should specify libFuzzer / AFL++ / stack-appropriate equivalent rather than a hand-rolled loop. For small discrete spaces, bounded enumeration is fine — but the design must state the choice and why.
 
-      7. **Design stays within scope.** A design is a specification, not an implementation — no full source code, no compile commands with full flag lists, no pre-computed "expected outcomes." If the design has drifted into implementation, that's a fail.
+      7. **Seed corpus matches dispatch surface.** If the target has a structured dispatch table, the design must specify seeds generated programmatically from it. For small discrete targets, N/A with a one-line reason is acceptable.
+
+      8. **Design stays within scope.** A design is a specification, not an implementation — no full source code, no compile commands with full flag lists, no pre-computed "expected outcomes." If the design has drifted into implementation, that's a fail.
 
       ## Verdicts
 
@@ -487,17 +500,26 @@ states:
     prompt: |
       You are a security tooling engineer. Read the harness design in `.workflow/harness_design/design.md`, the analysis in `.workflow/analysis/analysis.md`, and the investigation journal at `.workflow/journal/journal.md`.
 
+      **Core rule.** The fuzzer-feedback instrumentation named in the design MUST actually land on the target code (library, package, module, classpath — whichever the design names), not only on the harness wrapper. A harness that loads a prebuilt or uninstrumented target produces blind random mutation even though everything compiles cleanly. Verify instrumentation placement before declaring the build complete.
+
       Implement the harness exactly as specified:
 
-      1. Build system modifications: compiler flags, instrumentation, sanitizer configuration.
-      2. The driver: code that sends external inputs through real entry points. Implement all required protocol layers.
-      3. The session API: a script or program for running multi-step interactions and collecting results.
+      1. Build system modifications: apply the design's fuzzer-feedback mechanism to every unit the design names (including the target). Apply audit-coverage tooling separately — it is for post-hoc audit, not fuzzer feedback.
+      2. The driver: code that sends external inputs through real entry points.
+      3. The session API: a script or program for multi-step interactions and results.
       4. Reset mechanism: implement and verify session reset.
-      5. Coverage extraction: ensure coverage reports are produced in the specified format.
+      5. Coverage extraction in the specified format.
 
-      The harness should be invocable as a CLI tool or script. The discovery agent needs to: start a session, perform multiple steps, observe coverage after each run, and reset cleanly.
+      The harness should be invocable as a CLI tool or script. The discovery agent needs to: start a session, perform multiple steps, observe coverage, and reset cleanly.
 
-      Install all required dependencies. Build the project with instrumentation enabled. Verify the harness compiles and the basic run and reset commands work. If any dependency is missing or cannot be installed, report verdict rejected with the specific error — do NOT report approved if the harness cannot actually run.
+      **Instrumentation verification (required before approved).** Confirm fuzzer-feedback is present on the target, not only the harness. Method depends on the mechanism:
+      - Compile-time (libFuzzer / sanitizer-coverage): `nm` / `readelf` the target archive and expect symbols like `__sanitizer_cov_trace_pc_guard` in the target's object files.
+      - Compile-wrapper (AFL++): instrumented objects contain `__afl_area_ptr`; `afl-showmap` on a baseline reports non-trivial map density (≫100 edges).
+      - Runtime agent (managed stacks): the fuzzer's startup output lists instrumented classes/modules; verify the target appears.
+
+      Record the verification command and output in `.workflow/harness_build/README.md` alongside the build instructions. If the target shows no instrumentation, STOP — this is a build defect, not an accepted outcome.
+
+      Install all required dependencies eagerly. If anything cannot be installed, report verdict rejected with the specific error — do NOT report approved if fuzzer-feedback instrumentation is missing from the target code.
 
       Write build/run instructions to `.workflow/harness_build/README.md`.
     inputs:
@@ -517,27 +539,42 @@ states:
     prompt: |
       You are a harness validation engineer. Your job is to verify the harness ACTUALLY WORKS by running it, and if it doesn't, classify the cause so the workflow routes to the right fix.
 
+      **Core rule.** Approval requires evidence that the fuzzer's evolutionary feedback loop is reaching the target code — not just that an audit-coverage tool reports a line-coverage percentage. Audit coverage (`llvm-cov`, `gcov`, or the stack's equivalent) is orthogonal to fuzzer-feedback (libFuzzer's PC-guard counter, AFL++'s coverage map, or a runtime agent's instrumented-class report). A harness whose wrapper is the only unit with fuzzer-feedback instrumentation will report healthy line coverage AND burn millions of iterations on blind random mutation. Gate on the fuzzer's own self-reported feedback metric.
+
       Read the build/run instructions in `.workflow/harness_build/README.md` and the design in `.workflow/harness_design/design.md`.
 
       Perform these validation steps:
 
-      1. Run the harness reset command. Verify it exits cleanly.
-      2. Run the harness with a baseline input (a simple, normal-case input). Verify it exits without errors.
-      3. Run the harness coverage command. Verify the **target function** (not just the target file) appears in coverage with non-zero hits. If the target file has coverage but the target function does not, the call chain is broken — this is a failure.
-      4. If the harness supports interactive/stateful sessions, run a short multi-step session and verify state persists between steps.
-      5. Verify branch-level coverage data is present, not just line coverage.
+      1. **Reset.** Run the harness reset command. Verify it exits cleanly.
+      2. **Baseline run.** Run the harness with a simple benign input. Verify it exits without errors.
+      3. **Target function reached.** Run the harness coverage command. Verify the **target function** (not just the target file) appears with non-zero hits. If the file has coverage but the function does not, the call chain is broken — fail.
+      4. **Fuzzer-feedback reach (load-bearing).** Run a short representative fuzz burst (30–60s) from the seed corpus. Capture the fuzzer's own reported coverage metric:
+         - libFuzzer (also the tools that wrap its output: jazzer.js, atheris, cargo-fuzz, Jazzer): stderr prints `#N ... cov: C ft: F`. Record `C`.
+         - AFL++: `afl-fuzz` reports `map density` / `edges found`; `afl-showmap` on a sample prints non-zero map entries. Record the edge count.
+         - For any other tool, the design must name the exact metric field (see harness_design coverage-instrumentation rules). If the design does not name it, that is a design defect — route `rejected_design` with a directive "design.md must specify the fuzzer-feedback metric field name for the chosen tool."
+         Fail approval unless BOTH:
+         (a) Target-code fuzzer-feedback count ≥ **1000** (default; configurable via directive). A count in the tens is the signature of wrapper-only instrumentation. For tools reporting in different units, interpret the threshold as "several orders of magnitude larger than a thin wrapper's footprint" and state the equivalent number used.
+         (b) Audit-coverage line coverage of the target source file ≥ **20%** (default; configurable via directive) after the burst.
+         If (a) fails: target code was not instrumented for fuzzer feedback — diagnose build vs. design.
+         If (b) fails but (a) passes: seed corpus is too narrow — route to `harness_design` for seed-corpus revision.
+      5. **Stateful session sanity.** If the harness supports multi-step sessions, run a short sequence; verify state persists.
+      6. **Branch-level audit coverage exists.** Confirm the audit tool reports branch data, not just line counts.
 
-      If any step fails, set a specific failure verdict. Do NOT report `approved` with caveats. A harness that cannot demonstrate coverage of the target function is not validated.
+      Do NOT report `approved` with caveats. A harness whose fuzzer-feedback does not reach the target code is not validated — that is exactly the silent failure this step exists to catch.
 
       ## Verdicts
 
-      - **approved**: All five steps passed.
-      - **rejected_build**: Implementation bugs — compile errors, driver defects, session reset broken, coverage extraction not wired up correctly, missing files the build step should have produced. The design is sound; the code needs fixing. Route: back to harness_build.
-      - **rejected_design**: Design flaws — wrong call chain (the target function is not reached through the designed entry point even when the code builds and runs), wrong tooling choice (missing dependencies that cannot be installed, wrong sanitizer for the bug class), tier insufficient for the hypothesis (e.g., Tier 1 stubs that can't reproduce a cross-component interaction). The code may build and run, but the design cannot produce the evidence the hypothesis needs. Route: back to harness_design.
+      - **approved**: All six steps passed, including the fuzzer-feedback thresholds in step 4.
+      - **rejected_build**: Implementation bugs the build agent can fix without changing the design — compile errors, driver defects, session reset broken, coverage extraction not wired up, fuzzer-feedback flags in the design but missing from the actual compile invocation. Route: back to `harness_build`.
+      - **rejected_design**: Design flaws the build agent cannot fix — wrong call chain, wrong tooling, tier insufficient, target linked as a prebuilt artifact that cannot be rebuilt with instrumentation, seed corpus too narrow. Route: back to `harness_design`.
 
-      The distinction matters: `rejected_build` means "retry with the same design"; `rejected_design` means "the approach itself is wrong." Be specific in your report — naming a failure in one category while routing to the other wastes a round.
+      When step 4(a) fails, classify by cross-referencing `design.md` — the same observed symptom (wrapper-only instrumentation) can be either build or design depending on what the design asked for:
+      - Design specified rebuilding the target with feedback flags AND the build's compile invocation actually did that, but flags didn't land (e.g., wrong `CFLAGS` scope) → `rejected_build` (implementation gap).
+      - Design specified the flags correctly and the build's compile invocation omits them → `rejected_build`.
+      - Design accepted a prebuilt target / system library / vendored archive as the attack surface and provided no rebuild step → `rejected_design`, switch to a tool that handles full-binary instrumentation or rebuild from source.
+      - Project build system resists whole-target rebuild AND the design named no fallback on a different mechanism → `rejected_design`, reconsider tool choice and pick the design's fallback (or add one if missing).
 
-      Write validation results to `.workflow/harness_validate/validation.md`.
+      Write validation results — including the recorded fuzzer-feedback metric values — to `.workflow/harness_validate/validation.md`.
     inputs:
       - harness_design
       - harness_build
@@ -642,21 +679,36 @@ states:
     description: Independent validation and severity assessment of findings
     persona: global
     prompt: |
-      You are a senior vulnerability triager. Read the findings in `.workflow/discoveries/findings.md` and the investigation journal at `.workflow/journal/journal.md`.
+      You are a senior vulnerability triager. Your job is to **interpret** what `discover` demonstrated and translate it into threat-model language. You do NOT run fresh experiments — you may reproduce discover's experiments to confirm them, but if evidence is too thin for the severity a finding would warrant, set verdict `insufficient` and name the specific gap for discover to close next. Read `.workflow/discoveries/findings.md` and `.workflow/journal/journal.md`.
 
-      **Verdict posture.** "Confirmed" requires execution evidence: reproduce through the harness, observe the violation. **"Mitigated" requires execution evidence too** — coverage showing the mitigation code ran, plus a sweep over the hypothesis's input range showing the mitigation held. If validating severity leads you to downgrade a finding to mitigated, that downgrade itself must be executed, not reasoned about. LLMs mis-read constants and mis-compose bounds. A paper-only mitigation analysis is a hypothesis the harness still has to test — not a verdict.
+      **Core rule.** Severity is anchored on what discover actually observed, never on the theoretical maximum implied by the vulnerable code. A detector firing on an isolated harness (sanitizer, fuzz crash, static analyzer, tainted-flow report, assertion, SAST rule) proves the detector caught something — it does NOT prove attacker-visible impact. Confidentiality/integrity/availability claims require discover to have observed the corresponding effect in a production-equivalent environment. When the demonstrated observation is weaker than the theoretical ceiling, score the demonstrated level and label the ceiling as such.
 
-      **First action**: read the "Scoping from the previous agent" section at the top of this message. The orchestrator's Directive may call out specific findings to prioritize, duplicates to check, or severity questions to resolve. If the scoping section is absent, default to triaging every finding in `.workflow/discoveries/findings.md`; if it is present but vague on what to triage, STOP and report back with an `escalate`-style agent_status.
+      **First action**: read the "Scoping from the previous agent" section at the top of this message. If it is absent, triage every finding in `.workflow/discoveries/findings.md`. If it is present but vague, STOP and report back with an `escalate`-style agent_status.
 
-      For each reported finding:
+      For each finding, produce an interpretation covering ALL of the following. Omitting any item is a triage failure.
 
-      1. **Reproduce it.** Run the exact input sequence through the harness. Confirm the crash or violation occurs.
-      2. **Validate severity.** Is the assessment accurate? A crash under ASAN might be a controlled abort, not exploitable. An OOB write to attacker-controlled data is more severe than an OOB read of one byte.
-      3. **Confirm external exploitability.** Trace the input path: does it originate from an external/untrusted source? Could an attacker deliver this input in a real deployment?
-      4. **Check for duplicates.** Search the project's issue tracker, CVE databases, and changelog for known issues.
-      5. **Collect evidence.** Preserve crash logs, stack traces, coverage data, and the exact reproduction commands.
+      1. **Reproduce the demonstration.** Re-run discover's exact input. Confirm the same observation. If it fails to reproduce, verdict `insufficient` — not triageable yet.
+      2. **Effect realism.** Classify discover's observations:
+         - Attacker-uncontrolled target state → genuine impact.
+         - Attacker's own input echoed / round-tripped back → no impact.
+         - Constant or neutral state (zeroed memory, schema-sanitized placeholder, default config, empty collection) → no impact.
+         - Non-exploitable error path (crash or assertion the attacker can't steer) → no impact.
+         Reject impact claims when observations fall in categories 2–4.
+      3. **Attacker control surface.** Is the effect's extent adversary-chosen, or bounded by structure the attacker cannot influence?
+      4. **Adjacency / payload model.** What attacker-useful content plausibly reaches the affected location in production state? Memory-read: what sits adjacent. Injection: what sink does the tainted value reach. Auth bypass: what resources become reachable. State this as a reasoned model unless discover measured the specific payload.
+      5. **Channel reality.** In deployed configurations, does the attacker actually observe the effect? Some channels realize impact (metadata APIs, attacker-rendered output); others absorb or drop it (batch jobs, log-only sinks, sandboxed processes).
+      6. **Production hardening.** What mitigations present in production (sanitizers, schema validators, CSP, ASLR, auth middleware, sandbox, rate limits, etc.) change the attacker's success rate? Did discover's experiments use the production profile or bypass it? A Tier-1 harness with hardening stripped tells you nothing about production outcomes.
+      7. **External exploitability trace.** Does the input originate from an external/untrusted source? Name the delivery channel (network protocol, file upload, queue consumer).
+      8. **Duplicate / CVE check.** Search the project's issue tracker, CVE databases, and changelog for this code location. Note overlap with existing fixes even when partial.
+      9. **Severity score.** CVSS 3.1, anchored on demonstrated evidence. Justify each metric against observations, not theoretical ceilings. If ambiguous, pick the lower and note what discover work would support the higher.
 
-      Write your triage report to `.workflow/triage/triage.md`.
+      ## Verdicts
+
+      - **approved**: Evidence supports a concrete severity. All nine items completed with consistent conclusions.
+      - **insufficient**: Evidence does not support the severity the finding would warrant, OR discover has not demonstrated the attacker-visible effect at all. Notes MUST name the specific experiment discover needs to run — the parameter to sweep, the mitigation to exercise, the adjacency to verify, the hardening profile to rebuild under. Generic requests ("do more discovery") are not acceptable; the orchestrator needs a directive it can hand to discover verbatim.
+      - **escalate**: Evidence is contradictory, scope is unclear, or severity requires human judgment (known class with possible in-flight CVE, policy question about threat model).
+
+      Write the triage report to `.workflow/triage/triage.md`. Each finding's section must present all nine items; the verdict must be traceable to them.
     inputs:
       - discoveries
       - harness_build
@@ -671,8 +723,7 @@ states:
     description: Writes final investigation report from all artifacts
     persona: global
     prompt: |
-      You are a security report writer. Read all investigation artifacts and write
-      a comprehensive final report.
+      You are a security report writer. You **translate** investigation artifacts into a final report — you do not re-assess severity, re-interpret evidence, or manufacture framing that isn't already present in the inputs.
 
       Read these artifacts:
       - `.workflow/journal/journal.md` — the investigation journal
@@ -681,29 +732,72 @@ states:
       - `.workflow/differential/` — differential analysis (if present)
       - `.workflow/triage/` — triage results (if present)
 
-      Write a final report to `.workflow/report/report.md` with these sections:
+      ## Hard rules (read before writing)
 
-      ## Executive Summary
-      One paragraph: what was investigated, what was found (or not found), key conclusion.
+      **Severity fidelity.** Severity for each finding MUST match triage's assessment in `.workflow/triage/triage.md` verbatim — same CVSS vector, same numeric score, same justification. Do not re-score. Do not strengthen "Medium" into "Medium-High" for emphasis. Do not add confidentiality-impact claims triage did not make. If triage did not assign a severity (e.g., finding returned `insufficient` or escalate), the report does not assign one either.
 
-      ## Findings
-      For each confirmed, exploitable finding (or "No exploitable vulnerabilities found"):
+      **Exploitability requires demonstration.** A finding may be called "exploitable" only when `discoveries/findings.md` documents an observation of the attacker-visible effect AND triage confirmed it. Detector output from an isolated harness (sanitizer, fuzz crash, static analyzer hit, tainted-flow report, assertion failure) proves the detector caught an anomaly — not exploitability. Findings backed only by detector evidence go under "Findings without demonstrated impact," NOT "Confirmed findings."
+
+      **Contradiction handling.** When evidence across rounds disagrees — a Tier-1 detector fires but the Tier-3 effect is absorbed by padding / a schema validator / a sanitizing middleware, or discover observed round-tripped attacker input rather than target state — call out the contradiction in the finding's "Evidence chain" subsection AND score at the **weaker** demonstrated level. Do not reconcile with "the vulnerability is real, the sanitizer confirmed it" — that is papering over. If the weaker observation is "no attacker-visible impact," the finding belongs under "Findings without demonstrated impact."
+
+      **No invented framing.** Phrases like "three-tier evidence chain," "fully validated," or "directly observable" may appear in the report only if they appear in the source artifacts AND the underlying evidence supports them. Write gaps as gaps.
+
+      **Executive summary discipline.** Claims in the summary must be traceable line-by-line to findings below. If the summary says "three vulnerabilities confirmed exploitable," three findings must meet the bar above. If fewer, fix the summary — do not promote findings up from "Findings without demonstrated impact."
+
+      ## Report structure
+
+      Write the final report to `.workflow/report/report.md` with these sections:
+
+      ### Executive Summary
+
+      One paragraph: what was investigated, what was found (or not found), what severity was demonstrated (not theoretical). Must be faithful to the sections below — no claims the finding sections do not support.
+
+      ### Confirmed findings
+
+      Include ONLY findings that meet both of these bars:
+      - `discoveries/findings.md` documents an observation of the attacker-visible effect at the severity level triage assigned.
+      - `triage.md` returned `approved` (not `insufficient`, not `escalate`).
+
+      For each such finding:
       - Description, CWE classification, location (file:line)
-      - Trigger mechanism and reproduction steps
-      - Evidence chain (which validation rounds confirmed it and how)
-      - Severity assessment and external exploitability
-      Note: mitigated vulnerabilities are NOT findings — list them separately under
-      "Mitigated Issues" with a note about the existing mitigation.
+      - Trigger mechanism and reproduction steps (copied from discover + triage, not re-derived)
+      - Evidence chain: each round that contributed, what it demonstrated, and any contradictions across rounds (resolved as above)
+      - Severity assessment: the CVSS vector, score, and justification from triage, verbatim
+      - External exploitability: the delivery channel triage identified
 
-      ## Investigation Coverage
-      - Hypotheses tested and their outcomes (confirmed/rejected/mitigated)
-      - Code paths exercised via harness (if applicable)
-      - What was NOT tested and why (time limits, infrastructure gaps, etc.)
+      If there are no findings meeting this bar, write "No exploitable vulnerabilities confirmed" and move on.
 
-      ## Recommendations
-      - For confirmed findings: suggested fixes
+      ### Findings without demonstrated impact
+
+      Include findings where a detector flagged something but discover did not demonstrate an attacker-visible effect, or triage returned `insufficient`. These are real code-quality issues worth fixing; they are not claimed as vulnerabilities. For each:
+      - Location and brief description
+      - Nature of the detector hit (tool, specific anomaly — e.g., OOB read extent, tainted flow path, crash signature, assertion site)
+      - Why impact was not demonstrated (padding absorbed it, attacker-controlled bytes only, schema validator sanitized the payload, observation channel not reachable in production, sink logs rather than acts, discover round not completed)
+      - Suggested follow-up that would close the gap
+
+      This section may be empty or longer than "Confirmed findings." Both are fine.
+
+      ### Mitigated issues
+
+      Findings where `discover` returned `blocked` with execution evidence that the mitigation holds — coverage of the mitigation code AND a completed input sweep over the hypothesis's value range showing the mitigation held (the bar the orchestrator applies when auditing discover's `blocked` verdict). Note the mitigation's location and whether it covers all input ranges / all call sites. Do NOT include findings whose mitigation rests on text-only reasoning — those belong under "Findings without demonstrated impact" with the mitigation analysis flagged as unverified.
+
+      ### Investigation coverage
+
+      - Hypotheses tested and their outcomes (confirmed / rejected / mitigated / insufficient)
+      - Code paths exercised via harness, including coverage percentages as reported
+      - What was NOT tested and why (time limits, infrastructure gaps, skipped states like discover)
+      - If the workflow skipped states that the routing rules call for (e.g., `discover` was never invoked), call that out here — it is a coverage gap even when the state machine accepted the path.
+
+      ### Recommendations
+
+      - For confirmed findings: suggested fixes (from triage, not re-derived)
+      - For findings without demonstrated impact: suggested follow-up experiments to close the demonstration gap
       - For mitigated findings: assessment of mitigation robustness
       - For coverage gaps: suggested follow-up investigations
+
+      ## Verdict
+
+      Set verdict to `complete`. Your agent_status `notes` field should be a 1–2 sentence factual summary of the report's conclusion — mirror the Executive Summary, do not exaggerate.
     inputs:
       - journal
       - analysis
