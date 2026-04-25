@@ -88,6 +88,23 @@ if (!subcommand || subcommand === 'help') {
   process.exit(0);
 }
 
+// Commands that require the V8 sandbox. We check early to catch Node version
+// mismatches (like Node 25) or stale native module builds before importing heavy dependencies.
+// `compile-policy` is the offline policy pipeline and never instantiates the V8 sandbox.
+const requiresSandbox = ['start', 'daemon', 'bot', 'workflow'];
+if (requiresSandbox.includes(subcommand)) {
+  const { checkSandboxViability } = await import('./utils/preflight-checks.js');
+  const result = await checkSandboxViability();
+  if (!result.ok) {
+    const chalk = (await import('chalk')).default;
+    console.error(`\n${chalk.bold(chalk.red('Fatal Error:'))} ${result.message}`);
+    if (result.details) {
+      console.error(chalk.dim(result.details) + '\n');
+    }
+    process.exit(1);
+  }
+}
+
 switch (subcommand) {
   case 'start': {
     const { main } = await import('./index.js');
