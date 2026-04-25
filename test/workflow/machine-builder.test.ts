@@ -868,6 +868,19 @@ describe('buildWorkflowMachine', () => {
       expect(Buffer.byteLength(result, 'utf-8')).toBeLessThanOrEqual(32_768);
       expect(result).toContain('[Output truncated');
     });
+
+    it("escapes NUL bytes so downstream spawn() won't reject the prompt", () => {
+      // Regression: a security-research agent described the JPEG APP1 header
+      // containing literal NULs in its notes; the NULs flowed into
+      // previousAgentNotes and the next state's docker spawn() threw
+      // ERR_INVALID_ARG_VALUE ("args[15] must be a string without null bytes").
+      const NUL = String.fromCharCode(0);
+      const text = `APP1 'Exif${NUL}${NUL}' + TIFF IFD0`;
+      const result = truncateAgentOutput(text);
+
+      expect(result).not.toContain(NUL);
+      expect(result).toBe("APP1 'Exif\\x00\\x00' + TIFF IFD0");
+    });
   });
 
   describe('terminal states', () => {

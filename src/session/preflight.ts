@@ -3,7 +3,8 @@
  *
  * When --agent is explicit, validates prerequisites and fails fast.
  * When no --agent is given, auto-detects the best mode (Docker preferred,
- * builtin fallback) without ever throwing.
+ * builtin fallback) without ever throwing, EXCEPT when the user has OAuth
+ * credentials but no API key (which strictly requires Docker).
  */
 
 import { execFile as execFileCb } from 'node:child_process';
@@ -26,10 +27,11 @@ import { resolveApiKeyForProvider } from '../config/model-provider.js';
 const execFile = promisify(execFileCb);
 
 const DOCKER_TIMEOUT_MS = 5_000;
+const DOCKER_UNAVAILABLE_REASON = 'Docker not available';
 
 /**
- * Thrown when explicit --agent prerequisites are not met.
- * Never thrown during auto-detect.
+ * Thrown when explicit --agent prerequisites are not met, or when
+ * auto-detect finds an unresolvable constraint (e.g. OAuth-only without Docker).
  */
 export class PreflightError extends Error {
   constructor(message: string) {
@@ -44,27 +46,52 @@ export interface PreflightResult {
   readonly reason: string;
 }
 
+export type DockerAvailability = { available: true } | { available: false; reason: string; detailedMessage: string };
+
 export interface PreflightOptions {
   config: IronCurtainConfig;
   /** The --agent flag value. undefined = auto-detect. */
   requestedAgent?: AgentId;
   /** Dependency injection for tests. Defaults to real Docker check. */
-  isDockerAvailable?: () => Promise<boolean>;
+  isDockerAvailable?: () => Promise<DockerAvailability>;
   /** Dependency injection for tests. Defaults to real credential detection. */
   credentialSources?: CredentialSources;
 }
 
 /**
  * Checks whether the Docker daemon is responsive.
- * Returns false if the binary is missing, the daemon is stopped, or the check times out.
+ * Returns detailed diagnostic information if it fails.
  */
-export async function checkDockerAvailable(): Promise<boolean> {
+export async function checkDockerAvailable(): Promise<DockerAvailability> {
   try {
     await execFile('docker', ['info'], { timeout: DOCKER_TIMEOUT_MS });
-    return true;
-  } catch {
-    return false;
+    return { available: true };
+  } catch (err: unknown) {
+    let detailedMessage = err instanceof Error ? err.message : String(err);
+    const errCode = isObjectWithProp(err, 'code') ? err.code : undefined;
+    const errStderr = isObjectWithProp(err, 'stderr') ? err.stderr : undefined;
+    if (errCode === 'ENOENT') {
+      detailedMessage = 'The "docker" command was not found in your PATH. Is Docker installed?';
+    } else if (typeof errStderr === 'string' && errStderr.length > 0) {
+      const stderr = errStderr.trim();
+      if (stderr.includes('permission denied')) {
+        detailedMessage =
+          'Permission denied while connecting to the Docker daemon socket.\n' + 'Is your user in the "docker" group?';
+      } else if (stderr.includes('Cannot connect to the Docker daemon')) {
+        detailedMessage =
+          'Cannot connect to the Docker daemon.\n' +
+          'Is the Docker service running? On macOS/Windows, ensure Docker Desktop is started.';
+      } else {
+        detailedMessage = stderr;
+      }
+    }
+    return { available: false, reason: DOCKER_UNAVAILABLE_REASON, detailedMessage };
   }
+}
+
+/** Type-narrowing helper for inspecting unknown error shapes. */
+function isObjectWithProp<K extends string>(value: unknown, key: K): value is Record<K, unknown> {
+  return typeof value === 'object' && value !== null && key in value;
 }
 
 /**
@@ -124,7 +151,8 @@ function credentialErrorMessage(agentId: AgentId, config: IronCurtainConfig): st
  * Resolves the session mode based on explicit --agent flag or auto-detection.
  *
  * - Explicit agent: validates prerequisites; throws PreflightError on failure.
- * - Auto-detect: prefers Docker when available; silently falls back to builtin. Never throws.
+ * - Auto-detect: prefers Docker when available; falls back to builtin, but throws if
+ *   OAuth is the only available credential (since builtin requires an API key).
  */
 export async function resolveSessionMode(options: PreflightOptions): Promise<PreflightResult> {
   const { config, requestedAgent, credentialSources } = options;
@@ -140,7 +168,7 @@ export async function resolveSessionMode(options: PreflightOptions): Promise<Pre
 async function resolveExplicit(
   agent: AgentId,
   config: IronCurtainConfig,
-  isDockerAvailable: () => Promise<boolean>,
+  isDockerAvailable: () => Promise<DockerAvailability>,
   credentialSources?: CredentialSources,
 ): Promise<PreflightResult> {
   if (agent === 'builtin') {
@@ -150,10 +178,11 @@ async function resolveExplicit(
     };
   }
 
-  const dockerOk = await isDockerAvailable();
-  if (!dockerOk) {
+  const dockerStatus = await isDockerAvailable();
+  if (!dockerStatus.available) {
     throw new PreflightError(
-      `--agent ${agent} requires Docker, but the Docker daemon is not available. ` + 'Is Docker installed and running?',
+      `--agent ${agent} requires Docker, but it is not available:\n\n${dockerStatus.detailedMessage}\n\n` +
+        'Please fix your Docker installation or use the builtin agent.',
     );
   }
 
@@ -170,19 +199,36 @@ async function resolveExplicit(
 
 async function resolveAutoDetect(
   config: IronCurtainConfig,
-  isDockerAvailable: () => Promise<boolean>,
+  isDockerAvailable: () => Promise<DockerAvailability>,
   credentialSources?: CredentialSources,
 ): Promise<PreflightResult> {
-  const dockerOk = await isDockerAvailable();
-  if (!dockerOk) {
+  const defaultAgent = config.userConfig.preferredDockerAgent as AgentId;
+  const [dockerStatus, credKind, authMethod] = await Promise.all([
+    isDockerAvailable(),
+    detectCredentials(defaultAgent, config, credentialSources),
+    detectAuthMethod(config, credentialSources ?? preflightSources),
+  ]);
+
+  if (!dockerStatus.available) {
+    // Check Anthropic OAuth presence directly, independent of the preferred agent.
+    // detectCredentials only probes Anthropic OAuth on the Claude Code path; when the
+    // preferred agent is goose it reports credKind based on the goose provider key and
+    // never looks at Anthropic OAuth. Call detectAuthMethod explicitly so we catch the
+    // OAuth-only-no-Docker failure even for goose-preferred configs.
+    if (authMethod.kind === 'oauth' && resolveApiKeyForProvider('anthropic', config.userConfig).length === 0) {
+      throw new PreflightError(
+        `Cannot start IronCurtain. You have Claude OAuth credentials, which require Docker mode, ` +
+          `but Docker is not available:\n\n${dockerStatus.detailedMessage}\n\n` +
+          `To run without Docker, you must provide an ANTHROPIC_API_KEY.`,
+      );
+    }
+
     return {
       mode: { kind: 'builtin' },
-      reason: 'Docker not available',
+      reason: DOCKER_UNAVAILABLE_REASON,
     };
   }
 
-  const defaultAgent = config.userConfig.preferredDockerAgent as AgentId;
-  const credKind = await detectCredentials(defaultAgent, config, credentialSources);
   if (credKind === null) {
     return {
       mode: { kind: 'builtin' },

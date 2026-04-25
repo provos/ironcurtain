@@ -16,9 +16,74 @@ import type {
   TokenStreamEvent,
   WorkflowSummaryDto,
   HumanGateRequestDto,
+  LatestVerdictDto,
+  LiveWorkflowPhase,
 } from './types.js';
 import { PHASE } from './types.js';
 import { tokenStreamStore } from './token-stream-store-singleton.js';
+
+// ---------------------------------------------------------------------------
+// Eviction policy (D7 from the workflow-display plan)
+// ---------------------------------------------------------------------------
+
+/**
+ * Maximum number of terminal-phase workflow entries (`completed` / `failed` /
+ * `aborted`) retained in the in-memory `appState.workflows` cache. Running and
+ * `waiting_human` entries do not count toward this cap and are never evicted
+ * by this policy. Past runs that fall out of the cache are still fetchable
+ * from the backend via `workflows.listResumable` / `workflows.get`.
+ */
+export const MAX_TERMINAL_WORKFLOWS = 50;
+
+const TERMINAL_PHASES: ReadonlySet<LiveWorkflowPhase> = new Set<LiveWorkflowPhase>([
+  PHASE.COMPLETED,
+  PHASE.FAILED,
+  PHASE.ABORTED,
+]);
+
+function isTerminalPhase(phase: LiveWorkflowPhase): boolean {
+  return TERMINAL_PHASES.has(phase);
+}
+
+/**
+ * If the number of terminal-phase entries exceeds `cap`, drop the single
+ * oldest terminal entry (by ISO `startedAt`, lexicographic comparison).
+ *
+ * Returns the (possibly new) workflows map. The input map is not mutated.
+ * Only one entry is evicted per call: a single terminal-phase transition
+ * pushes the count from cap -> cap+1, and we drop one to settle back at cap.
+ */
+export function evictTerminalIfOverCap(
+  workflows: ReadonlyMap<string, WorkflowSummaryDto>,
+  cap: number = MAX_TERMINAL_WORKFLOWS,
+): Map<string, WorkflowSummaryDto> {
+  let terminalCount = 0;
+  let oldest: WorkflowSummaryDto | undefined;
+  for (const wf of workflows.values()) {
+    if (!isTerminalPhase(wf.phase)) continue;
+    terminalCount++;
+    if (!oldest || wf.startedAt < oldest.startedAt) {
+      oldest = wf;
+    }
+  }
+  if (terminalCount <= cap || !oldest) {
+    return new Map(workflows);
+  }
+  const next = new Map(workflows);
+  next.delete(oldest.workflowId);
+  return next;
+}
+
+/**
+ * Coerce a wire-side confidence value (string per WebEventMap) into the
+ * frontend's numeric `LatestVerdictDto.confidence`. Returns undefined when
+ * the value is missing or cannot be parsed as a finite number.
+ */
+function parseConfidence(raw: string | undefined): number | undefined {
+  if (raw === undefined) return undefined;
+  const parsed = Number.parseFloat(raw);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
 
 /** Minimal state surface that handleEvent needs to read and write. */
 export interface AppStateLike {
@@ -325,13 +390,23 @@ function applyEvent(state: AppStateLike, effects: EventSideEffects, parsed: WebE
 
     // Workflow events
     case 'workflow.started': {
-      const { workflowId, name } = parsed.payload;
+      const { workflowId, name, taskDescription } = parsed.payload;
+      // round / maxRounds / totalTokens are not currently emitted on any
+      // workflow.* event (see WebEventMap in src/web-ui/web-event-bus.ts).
+      // They are populated by `workflows.list` / `workflows.get` polling at
+      // the routes layer; the wire start event has no value for them yet.
+      // Backend gap to address in a follow-up: emit a `workflow.context_update`
+      // (or piggyback on `state_entered`) with the orchestrator's context.
       const entry: WorkflowSummaryDto = {
         workflowId,
         name,
         phase: PHASE.RUNNING,
         currentState: 'starting...',
         startedAt: new Date().toISOString(),
+        taskDescription,
+        round: 0,
+        maxRounds: 0,
+        totalTokens: 0,
       };
       state.workflows = new Map(state.workflows).set(workflowId, entry);
       return true;
@@ -350,19 +425,38 @@ function applyEvent(state: AppStateLike, effects: EventSideEffects, parsed: WebE
     }
 
     case 'workflow.agent_started':
-    case 'workflow.agent_completed':
     case 'workflow.agent_session_ended':
-      // Informational events -- no state mutation needed for the basic dashboard
+      // Informational; no state mutation needed.
       return true;
+
+    case 'workflow.agent_completed': {
+      const { workflowId, stateId, verdict, confidence } = parsed.payload;
+      const wf = state.workflows.get(workflowId);
+      if (!wf || verdict === undefined) return true;
+      // "Latest" semantics: every agent_completed for the same workflow
+      // overwrites the previous verdict. On a terminal workflow this is the
+      // final verdict; on a live one it is the most recently observed.
+      const latestVerdict: LatestVerdictDto = {
+        stateId,
+        verdict,
+        confidence: parseConfidence(confidence),
+      };
+      state.workflows = new Map(state.workflows).set(workflowId, {
+        ...wf,
+        latestVerdict,
+      });
+      return true;
+    }
 
     case 'workflow.completed': {
       const { workflowId } = parsed.payload;
       const wf = state.workflows.get(workflowId);
       if (!wf) return true;
-      state.workflows = new Map(state.workflows).set(workflowId, {
+      const updated = new Map(state.workflows).set(workflowId, {
         ...wf,
         phase: PHASE.COMPLETED,
       });
+      state.workflows = evictTerminalIfOverCap(updated);
       const nextGates = new Map(state.pendingGates);
       for (const [gateId, gate] of nextGates) {
         if (gate.workflowId === workflowId) nextGates.delete(gateId);
@@ -372,13 +466,15 @@ function applyEvent(state: AppStateLike, effects: EventSideEffects, parsed: WebE
     }
 
     case 'workflow.failed': {
-      const { workflowId } = parsed.payload;
+      const { workflowId, error } = parsed.payload;
       const wf = state.workflows.get(workflowId);
       if (!wf) return true;
-      state.workflows = new Map(state.workflows).set(workflowId, {
+      const updated = new Map(state.workflows).set(workflowId, {
         ...wf,
         phase: PHASE.FAILED,
+        error,
       });
+      state.workflows = evictTerminalIfOverCap(updated);
       return true;
     }
 

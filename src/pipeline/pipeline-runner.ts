@@ -16,7 +16,7 @@ import type { LanguageModelV3 } from '@ai-sdk/provider';
 import type { LanguageModel, SystemModelMessage } from 'ai';
 import chalk from 'chalk';
 import pLimit from 'p-limit';
-import { extractServerDomainAllowlists } from '../config/index.js';
+import { extractServerDomainAllowlists, findAnnotationServerDrift, safeForDisplay } from '../config/index.js';
 import { createLanguageModel } from '../config/model-provider.js';
 import type { MCPServerConfig } from '../config/types.js';
 import { loadUserConfig } from '../config/user-config.js';
@@ -221,6 +221,40 @@ interface ServerCompilationState {
 
 function computeScenariosHash(systemPrompt: string, handwrittenScenarios: TestScenario[]): string {
   return computeHash(systemPrompt, JSON.stringify(handwrittenScenarios));
+}
+
+/**
+ * Preventive warning: if `mcp-servers.json` declares servers that are not
+ * present in `tool-annotations.json`, compiling will produce a policy with
+ * no rules for those servers and every call to them will default-deny at
+ * runtime. Surface this before starting the (slow) compile so the user
+ * can re-run the per-server annotator first.
+ *
+ * `mcpServers` may be undefined when compile-policy is run with `--no-mcp`,
+ * in which case the check is skipped.
+ */
+function warnOnCompileAnnotationGaps(
+  mcpServers: Record<string, MCPServerConfig> | undefined,
+  storedAnnotationsFile: StoredToolAnnotationsFile,
+): void {
+  if (!mcpServers) return;
+  const { missing } = findAnnotationServerDrift(storedAnnotationsFile, mcpServers);
+  if (missing.length === 0) return;
+
+  console.error(
+    chalk.yellow(
+      `Warning: ${missing.length} configured MCP server(s) have no tool annotations: ${missing.map(safeForDisplay).join(', ')}.`,
+    ),
+  );
+  console.error(
+    chalk.yellow('  The compiled policy will have no rules for these servers and their tools will be denied.'),
+  );
+  for (const name of missing) {
+    console.error(
+      chalk.yellow(`  Run \`ironcurtain annotate-tools --server ${safeForDisplay(name)}\` to annotate this server.`),
+    );
+  }
+  console.error('');
 }
 
 function extractPermittedDirectories(rules: CompiledRule[]): string[] {
@@ -586,6 +620,8 @@ export class PipelineRunner {
     if (!storedAnnotationsFile) {
       throw new Error("tool-annotations.json not found. Run 'ironcurtain annotate-tools' first.");
     }
+
+    warnOnCompileAnnotationGaps(config.mcpServers, storedAnnotationsFile);
 
     // Resolve conditional role specs to flat annotations for compiler prompts
     const toolAnnotationsFile = resolveStoredAnnotationsFile(storedAnnotationsFile);

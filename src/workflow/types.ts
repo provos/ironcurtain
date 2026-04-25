@@ -470,6 +470,12 @@ export interface WorkflowCheckpoint {
   readonly definitionPath: string;
   /** Workspace root directory. Used on resume to reconstruct artifactDir. */
   readonly workspacePath?: string;
+  /**
+   * Terminal-phase status, populated only when the workflow has reached a terminal
+   * phase (completed / aborted / failed / waiting_human). Absent for mid-run
+   * checkpoints and for legacy retained checkpoints written before this field existed.
+   */
+  readonly finalStatus?: WorkflowStatus;
 }
 
 export interface TransitionRecord {

@@ -14,6 +14,7 @@ import type {
 import type { AgentConversationId } from '../session/types.js';
 import { guardImplementations } from './guards.js';
 import { stripStatusBlock } from './status-parser.js';
+import { isAgentInvocationError } from './errors.js';
 
 // ---------------------------------------------------------------------------
 // Invoke input/result types
@@ -106,15 +107,27 @@ const MAX_AGENT_OUTPUT_BYTES = 32_768;
 const TRUNCATION_NOTICE = '\n\n[Output truncated. Read the artifact directories for full details.]';
 
 /**
- * Truncates agent response text to stay within the 32KB limit.
+ * Sanitizes agent response text for reuse in subsequent prompts: escapes any
+ * literal NUL bytes and truncates to stay within the 32KB limit.
+ *
+ * NUL escaping is load-bearing, not cosmetic. Agent output flows back into
+ * later prompts via `previousAgentOutput` / `previousAgentNotes`, which the
+ * Docker adapter passes as an argv element to `child_process.spawn`. Node
+ * refuses argv strings containing `\0` (`ERR_INVALID_ARG_VALUE`) and throws
+ * synchronously before the container even starts — aborting the workflow. A
+ * security-research agent describing a binary file format ("APP1 'Exif\\0\\0'")
+ * is the natural way this happens. We escape rather than strip so the textual
+ * description survives intact for downstream readers.
+ *
  * Exported for testing.
  */
 export function truncateAgentOutput(text: string): string {
-  if (Buffer.byteLength(text, 'utf-8') <= MAX_AGENT_OUTPUT_BYTES) {
-    return text;
+  const sanitized = text.includes('\0') ? text.replaceAll('\0', '\\x00') : text;
+  if (Buffer.byteLength(sanitized, 'utf-8') <= MAX_AGENT_OUTPUT_BYTES) {
+    return sanitized;
   }
   const budget = MAX_AGENT_OUTPUT_BYTES - Buffer.byteLength(TRUNCATION_NOTICE, 'utf-8');
-  let truncated = text;
+  let truncated = sanitized;
   while (Buffer.byteLength(truncated, 'utf-8') > budget) {
     truncated = truncated.slice(0, Math.floor(truncated.length * 0.9));
   }
@@ -246,7 +259,7 @@ function buildAgentState(stateId: string, config: AgentStateDefinition, definiti
       onDone: buildAgentOnDoneTransitions(config.transitions),
       onError: {
         target: findErrorTarget(config, definition),
-        actions: ['storeError'],
+        actions: ['storeError', 'updateContextFromAgentInvocationError'],
       },
     },
   };
@@ -523,6 +536,28 @@ export function buildWorkflowMachine(definition: WorkflowDefinition, taskDescrip
         // (logger.setup() redirects console.error to a log file).
         process.stderr.write(`[workflow] storeError action: ${message}\n`);
         return { lastError: message };
+      }),
+      /**
+       * Mirrors `updateContextFromAgentResult` for the error path: when
+       * the agent service rejects, recover the `agentConversationId` that
+       * was minted for the invocation (wrapped in `AgentInvocationError`)
+       * and persist it into `context.agentConversationsByState[stateId]`.
+       *
+       * Without this, `onError` drops the conversation id on the floor —
+       * `onDone` stamps the id into context, but `onError` used to record
+       * only `lastError`, which silently broke `freshSession: false`
+       * resume on the next visit to an errored state.
+       */
+      updateContextFromAgentInvocationError: assign(({ context, event }) => {
+        const errorEvent = event as { error?: unknown };
+        const err = errorEvent.error;
+        if (!isAgentInvocationError(err)) return {};
+        return {
+          agentConversationsByState: {
+            ...context.agentConversationsByState,
+            [err.stateId]: err.agentConversationId,
+          },
+        };
       }),
       incrementVisitCount: assign(({ context }, params: { stateId: string }) => ({
         visitCounts: {

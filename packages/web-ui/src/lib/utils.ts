@@ -20,6 +20,8 @@ export function phaseBadgeVariant(
       return 'destructive';
     case 'aborted':
       return 'secondary';
+    case 'interrupted':
+      return 'warning';
     default:
       return 'outline';
   }

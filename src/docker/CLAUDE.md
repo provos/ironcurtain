@@ -53,6 +53,8 @@ The `proxy` virtual MCP server (`proxy-tools.ts`) exposes `add_proxy_domain`, `r
 - `adapters/shared-scripts.ts` - Shared shell script generators (e.g., `resize-pty.sh`) and prompt sections used by both adapters.
 - `claude-md-seed.ts` - Builds `CLAUDE.md` content seeded into the container's `~/.claude/` for Claude Code sessions. Contains memory behavioral rules (pre-response MCP tool call protocol).
 
+**Quota exhaustion contract:** adapters MUST populate `AgentResponse.quotaExhausted` when the underlying CLI surfaces a 429-class envelope; the workflow orchestrator short-circuits on this signal instead of retrying. See `adapters/claude-code.ts` for the canonical implementation.
+
 ## Dual session modes: keep in sync
 
 `docker-agent-session.ts` (batch mode) and `pty-session.ts` (PTY mode) have parallel initialization paths that share adapter infrastructure but assemble container configs independently. When adding a mount, env var, or container lifecycle feature to one mode, always check the other mode and apply the same change if applicable. Past bug: conversation state mount was added to PTY mode but missed in batch mode, breaking `claude --continue` across container recreations.

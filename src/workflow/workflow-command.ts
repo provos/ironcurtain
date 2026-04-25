@@ -15,13 +15,15 @@ import { getIronCurtainHome } from '../config/paths.js';
 import { formatHelp, type CommandSpec } from '../cli-help.js';
 import { FileCheckpointStore } from './checkpoint.js';
 import { discoverWorkflows, resolveWorkflowPath, parseDefinitionFile } from './discovery.js';
-import { personaExists } from '../persona/resolve.js';
-import { countBySeverity, lintWorkflow, type Diagnostic, type LintContext } from './lint.js';
-import { preflightLint, type LintMode } from './lint-integration.js';
+import { discoverWorkflowRuns } from './workflow-discovery.js';
+import { WorkflowManager } from '../web-ui/workflow-manager.js';
+import { WebEventBus } from '../web-ui/web-event-bus.js';
+import { countBySeverity, lintWorkflow, type Diagnostic } from './lint.js';
+import { defaultLintContext, runPreflight, type LintMode } from './lint-integration.js';
+import { loadDefinition } from './definition-loader.js';
 import { MessageLog } from './message-log.js';
 import { WorkflowOrchestrator, type WorkflowOrchestratorDeps, type WorkflowTabHandle } from './orchestrator.js';
 import type { WorkflowId, WorkflowCheckpoint, WorkflowDefinition } from './types.js';
-import { validateDefinition, WorkflowValidationError } from './validate.js';
 import {
   createWorkflowSessionFactory,
   createConsoleTab,
@@ -40,6 +42,7 @@ import {
   DIM,
   MAGENTA,
   CYAN,
+  YELLOW,
   RESET,
 } from './cli-support.js';
 
@@ -99,14 +102,6 @@ const workflowSpec: CommandSpec = {
 // Lint helpers
 // ---------------------------------------------------------------------------
 
-/**
- * Builds a `LintContext` for CLI use. `personaExists` resolves against
- * the user's persona directory under `~/.ironcurtain/personas/`.
- */
-function createCliLintContext(): LintContext {
-  return { personaExists };
-}
-
 function formatDiagnostic(d: Diagnostic): string[] {
   const sevColor = d.severity === 'error' ? RED : CYAN;
   const location = d.stateId ? ` (state: ${d.stateId})` : '';
@@ -122,45 +117,60 @@ function printDiagnostics(diagnostics: readonly Diagnostic[]): void {
 }
 
 /**
- * Loads + validates a workflow definition from a path. Prints and
- * exits on structural validation errors (they take precedence over
- * lint diagnostics).
+ * Loads + validates a workflow definition from a path via the shared
+ * {@link loadDefinition} helper. Prints CLI-formatted errors and exits on
+ * any failure (parse or validate). Validation errors take precedence over
+ * lint diagnostics.
  */
 function loadAndValidateDefinition(path: string): WorkflowDefinition {
-  try {
-    const raw = parseDefinitionFile(path);
-    return validateDefinition(raw);
-  } catch (err) {
-    if (err instanceof WorkflowValidationError) {
-      writeStderr(`${RED}Workflow validation failed:${RESET}`);
-      for (const issue of err.issues) writeStderr(`  ${RED}- ${issue}${RESET}`);
-    } else {
-      const msg = err instanceof Error ? err.message : String(err);
-      writeStderr(`${RED}Failed to load workflow: ${msg}${RESET}`);
-    }
-    process.exit(1);
+  const result = loadDefinition(path);
+  if (result.ok) return result.definition;
+
+  if (result.kind === 'validate' && result.issues) {
+    writeStderr(`${RED}Workflow validation failed:${RESET}`);
+    for (const issue of result.issues) writeStderr(`  ${RED}- ${issue}${RESET}`);
+  } else {
+    writeStderr(`${RED}Failed to load workflow: ${result.message}${RESET}`);
   }
+  process.exit(1);
 }
 
 /**
- * Runs the shared `preflightLint()` helper and handles the CLI-specific
- * reporting: prints diagnostics to stderr, exits on failure. On success
- * with warnings-only output, prints a short continue notice.
+ * Loads + lints a workflow definition file via the shared
+ * {@link runPreflight} helper. CLI-specific reporting: prints diagnostics
+ * to stderr and exits on any failure (load or lint). On success with
+ * warnings-only output, prints a short continue notice.
+ *
+ * Returns the loaded definition on success so callers can continue using it
+ * without re-parsing (start/resume have already routed through the same
+ * file before calling this).
  */
-function runCliPreflightLint(def: WorkflowDefinition, mode: LintMode): void {
-  const result = preflightLint(def, createCliLintContext(), mode);
-  if (result.diagnostics.length === 0) return;
+function runCliPreflightLint(definitionPath: string, mode: LintMode): WorkflowDefinition {
+  const result = runPreflight(definitionPath, mode);
 
-  printDiagnostics(result.diagnostics);
-  const { errors, warnings } = countBySeverity(result.diagnostics);
+  if (result.ok) {
+    if (result.diagnostics.length > 0) {
+      printDiagnostics(result.diagnostics);
+      writeStderr(`${DIM}Lint: 0 errors, ${result.warnings} warning(s) — continuing.${RESET}`);
+    }
+    return result.definition;
+  }
 
-  if (!result.ok) {
-    writeStderr(`${RED}Lint failed: ${errors} error(s), ${warnings} warning(s).${RESET}`);
-    writeStderr(`${DIM}Rerun with --no-lint to bypass (not recommended).${RESET}`);
+  if (result.kind === 'load') {
+    // Reuse `loadAndValidateDefinition`'s nicer per-issue formatting on
+    // validate failures by re-running it (cheap; reads the same file once
+    // more) — it owns the structured-issues bullet rendering. For parse
+    // failures it falls through and prints "Failed to load workflow:".
+    loadAndValidateDefinition(definitionPath);
+    // Unreachable: `loadAndValidateDefinition` always exits on failure.
     process.exit(1);
   }
 
-  writeStderr(`${DIM}Lint: 0 errors, ${warnings} warning(s) — continuing.${RESET}`);
+  // Lint failure (load succeeded). Match the previous output verbatim.
+  printDiagnostics(result.diagnostics);
+  writeStderr(`${RED}Lint failed: ${result.errors} error(s), ${result.warnings} warning(s).${RESET}`);
+  writeStderr(`${DIM}Rerun with --no-lint to bypass (not recommended).${RESET}`);
+  process.exit(1);
 }
 
 function resolveLintMode(noLint: unknown, strictLint: unknown): LintMode {
@@ -209,9 +219,8 @@ async function runStart(args: string[]): Promise<void> {
   }
 
   // Pre-flight: validate + lint before any orchestrator side effects.
-  const definition = loadAndValidateDefinition(resolvedDef);
   const lintMode = resolveLintMode(values['no-lint'], values['strict-lint']);
-  runCliPreflightLint(definition, lintMode);
+  runCliPreflightLint(resolvedDef, lintMode);
 
   let workspacePath: string | undefined;
   if (values.workspace) {
@@ -315,22 +324,21 @@ async function runResume(args: string[]): Promise<void> {
 
   let selected: { workflowId: WorkflowId; checkpoint: WorkflowCheckpoint };
 
-  const hasCheckpoints = checkpointStore.listAll().length > 0;
+  const hasCheckpoints = discoverWorkflowRuns(baseDir).some((r) => r.hasCheckpoint);
   if (overrideState && !hasCheckpoints) {
     // Find a definition path from the workflow directory
     const definitionPath = findDefinitionPath(baseDir);
     selected = synthesizeCheckpoint(baseDir, overrideState, definitionPath, checkpointStore);
   } else {
-    selected = selectResumableWorkflow(checkpointStore);
+    selected = selectResumableWorkflow(checkpointStore, baseDir);
   }
 
   // Pre-flight lint before orchestrator.resume(). The checkpoint carries
   // a definitionPath we can re-validate + lint.
   const defPath = selected.checkpoint.definitionPath;
   if (defPath && existsSync(defPath)) {
-    const definition = loadAndValidateDefinition(defPath);
     const lintMode = resolveLintMode(values['no-lint'], values['strict-lint']);
-    runCliPreflightLint(definition, lintMode);
+    runCliPreflightLint(defPath, lintMode);
   }
 
   printResumeInfo(baseDir, selected.workflowId, selected.checkpoint);
@@ -406,43 +414,61 @@ function runInspect(args: string[]): void {
   }
 
   const showAll = values.all === true;
-  const checkpointStore = new FileCheckpointStore(baseDir);
-  const workflowIds = checkpointStore.listAll();
+  const runs = discoverWorkflowRuns(baseDir);
 
-  // Find workflow directories (may exist even without checkpoints)
-  const workflowDirs = findWorkflowDirs(baseDir);
-
-  if (workflowDirs.length === 0 && workflowIds.length === 0) {
+  if (runs.length === 0) {
     writeStdout(`${DIM}No workflows found in ${baseDir}${RESET}`);
     return;
   }
 
-  for (const dirName of workflowDirs) {
-    const workflowId = dirName as WorkflowId;
-    const workflowDir = resolve(baseDir, dirName);
+  // WorkflowManager owns the canonical "load a past run" logic. We point it at
+  // the user-supplied baseDir via `baseDirOverride` so the same loader works
+  // for both the daemon's home directory and arbitrary `inspect` targets.
+  // The CLI never starts workflows through this manager, so the EventBus is
+  // a no-op sink and the orchestrator created lazily inside the manager is
+  // never used to spawn sessions.
+  const manager = new WorkflowManager({ eventBus: new WebEventBus(), baseDirOverride: baseDir });
+
+  for (const run of runs) {
+    const workflowId = run.workflowId;
+    const workflowDir = run.directoryPath;
+
+    const result = manager.loadPastRun(workflowId);
+
+    let checkpoint: WorkflowCheckpoint | undefined;
+    let loadedDef: WorkflowDefinition | undefined;
+
+    if ('error' in result) {
+      if (result.error === 'corrupted') {
+        // Behavior change: a malformed checkpoint or definition used to either
+        // throw (checkpoint) or be silently ignored (definition). We now print
+        // a clear error line and continue with the next workflow.
+        writeStdout(`${BOLD}${CYAN}Workflow: ${workflowId}${RESET}`);
+        writeStdout(`  ${RED}Failed to load: ${result.message ?? 'unknown error'}${RESET}`);
+        writeStdout('');
+        continue;
+      }
+      // not_found: no checkpoint on disk. Preserve current behavior -- render
+      // the directory with `checkpoint = undefined` and silently parse the
+      // definition (without strict schema validation) for state descriptions.
+      checkpoint = undefined;
+      loadedDef = tryParseDefinitionForStateDescriptions(workflowDir);
+    } else {
+      checkpoint = result.checkpoint;
+      loadedDef = result.definition;
+    }
 
     writeStdout(`${BOLD}${CYAN}Workflow: ${workflowId}${RESET}`);
 
-    // Checkpoint info (stateDescriptions populated below after definition is loaded,
-    // but checkpoint display runs first -- we load definition eagerly here)
-    const checkpoint = checkpointStore.load(workflowId);
-
-    // Load definition for state descriptions and definition path display
-    const defPath = resolve(workflowDir, 'definition.json');
-    let stateDescriptions: Map<string, string> | undefined;
-    let loadedDef: WorkflowDefinition | undefined;
-    if (existsSync(defPath)) {
-      try {
-        loadedDef = parseDefinitionFile(defPath) as WorkflowDefinition;
-        stateDescriptions = new Map(
+    const stateDescriptions = loadedDef
+      ? new Map(
           Object.entries(loadedDef.states)
             .filter(([, s]) => s.description)
             .map(([id, s]) => [id, s.description]),
-        );
-      } catch {
-        // Non-fatal — definition may be from older schema
-      }
-    }
+        )
+      : undefined;
+
+    const defPath = resolve(workflowDir, 'definition.json');
 
     if (checkpoint) {
       const stateStr = String(checkpoint.machineState);
@@ -474,7 +500,7 @@ function runInspect(args: string[]): void {
     // Informational lint of the checkpointed definition. Read-only — never
     // affects exit code.
     if (loadedDef) {
-      const diagnostics = lintWorkflow(loadedDef, createCliLintContext());
+      const diagnostics = lintWorkflow(loadedDef, defaultLintContext);
       if (diagnostics.length > 0) {
         const { errors, warnings } = countBySeverity(diagnostics);
         writeStdout(`  ${BOLD}Lint:${RESET} ${errors} error(s), ${warnings} warning(s)`);
@@ -521,6 +547,11 @@ function runInspect(args: string[]): void {
           case 'error':
             writeStdout(`${prefix} ${RED}[error]${RESET} ${entry.error}`);
             break;
+          case 'quota_exhausted':
+            writeStdout(
+              `${prefix} ${YELLOW}[quota/${entry.role}]${RESET} resets=${entry.resetAt ?? 'unknown'} — ${truncate(entry.rawMessage, 80)}`,
+            );
+            break;
           case 'state_transition': {
             const toDesc = stateDescriptions?.get(entry.event);
             const toLabel = toDesc ? `${entry.event} ${DIM}\u2014 "${toDesc}"${RESET}` : entry.event;
@@ -537,6 +568,23 @@ function runInspect(args: string[]): void {
   }
 }
 
+/**
+ * Best-effort definition load used in the `not_found` branch of `loadPastRun`.
+ * Mirrors the pre-refactor behavior: parse-only (no schema validation), errors
+ * swallowed. The returned definition is used solely to populate state
+ * descriptions in the rendered message log.
+ */
+function tryParseDefinitionForStateDescriptions(workflowDir: string): WorkflowDefinition | undefined {
+  const defPath = resolve(workflowDir, 'definition.json');
+  if (!existsSync(defPath)) return undefined;
+  try {
+    return parseDefinitionFile(defPath) as WorkflowDefinition;
+  } catch {
+    // Non-fatal -- definition may be from an older schema.
+    return undefined;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -548,23 +596,10 @@ function computeExitCode(orchestrator: WorkflowOrchestrator, workflowId: Workflo
   return 1;
 }
 
-function findWorkflowDirs(baseDir: string): string[] {
-  if (!existsSync(baseDir)) return [];
-  return readdirSync(baseDir, { withFileTypes: true })
-    .filter((e) => e.isDirectory())
-    .map((e) => e.name);
-}
-
-/**
- * Finds the definition.json path for a workflow in a base directory.
- * Looks inside the first workflow subdirectory.
- */
+/** Finds the first definition.json path under a base directory's workflow runs. */
 function findDefinitionPath(baseDir: string): string {
-  const dirs = findWorkflowDirs(baseDir);
-  for (const dir of dirs) {
-    const defPath = resolve(baseDir, dir, 'definition.json');
-    if (existsSync(defPath)) return defPath;
-  }
+  const run = discoverWorkflowRuns(baseDir).find((r) => r.hasDefinition);
+  if (run) return resolve(run.directoryPath, 'definition.json');
   writeStderr(`${RED}No definition.json found in ${baseDir}${RESET}`);
   process.exit(1);
 }
@@ -611,7 +646,7 @@ function runLintCommand(args: string[]): void {
   // Structural validation first — a malformed definition cannot be linted.
   const definition = loadAndValidateDefinition(resolved);
 
-  const diagnostics = lintWorkflow(definition, createCliLintContext());
+  const diagnostics = lintWorkflow(definition, defaultLintContext);
 
   if (diagnostics.length === 0) {
     writeStderr(`${DIM}No lint diagnostics for ${resolved}.${RESET}`);

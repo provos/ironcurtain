@@ -26,10 +26,17 @@ export interface AgentReceivedEntry extends BaseEntry {
   readonly notes: string | null;
 }
 
+export type AgentRetryReason =
+  | 'missing_status_block'
+  | 'malformed_status_block'
+  | 'missing_artifacts'
+  | 'invalid_verdict'
+  | 'upstream_stall';
+
 export interface AgentRetryEntry extends BaseEntry {
   readonly type: 'agent_retry';
   readonly role: string;
-  readonly reason: 'missing_status_block' | 'malformed_status_block' | 'missing_artifacts' | 'invalid_verdict';
+  readonly reason: AgentRetryReason;
   readonly details: string;
   readonly retryMessage: string;
 }
@@ -57,6 +64,21 @@ export interface StateTransitionEntry extends BaseEntry {
   readonly event: string;
 }
 
+/**
+ * Emitted when the adapter detected upstream quota exhaustion and the
+ * orchestrator halted the run instead of retrying. `resetAt` is the
+ * ISO-formatted provider-advertised reset time when the adapter could
+ * parse one; absent when the provider did not supply a machine-readable
+ * timestamp. `rawMessage` preserves the original provider/CLI text for
+ * humans inspecting the log.
+ */
+export interface QuotaExhaustedEntry extends BaseEntry {
+  readonly type: 'quota_exhausted';
+  readonly role: string;
+  readonly resetAt?: string;
+  readonly rawMessage: string;
+}
+
 /** Discriminated union of all log entry types. */
 export type MessageLogEntry =
   | AgentSentEntry
@@ -65,7 +87,8 @@ export type MessageLogEntry =
   | GateRaisedEntry
   | GateResolvedEntry
   | ErrorEntry
-  | StateTransitionEntry;
+  | StateTransitionEntry
+  | QuotaExhaustedEntry;
 
 // ---------------------------------------------------------------------------
 // MessageLog

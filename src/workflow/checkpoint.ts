@@ -4,6 +4,21 @@ import { randomUUID } from 'node:crypto';
 import type { WorkflowId, WorkflowCheckpoint } from './types.js';
 
 // ---------------------------------------------------------------------------
+// Resumability predicate
+// ---------------------------------------------------------------------------
+
+/**
+ * Resumable iff not completed. `finalStatus` is undefined for mid-run and
+ * pre-B3b legacy checkpoints — both correctly resolve to `true`.
+ *
+ * Co-located with `WorkflowCheckpoint` storage so other modules can import
+ * the predicate without pulling in CLI / session dependencies.
+ */
+export function isCheckpointResumable(cp: WorkflowCheckpoint): boolean {
+  return cp.finalStatus?.phase !== 'completed';
+}
+
+// ---------------------------------------------------------------------------
 // Public interface
 // ---------------------------------------------------------------------------
 

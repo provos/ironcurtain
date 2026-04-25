@@ -20,12 +20,17 @@ const __dirname = dirname(__filename);
 const isCompiled = __filename.endsWith('.js');
 
 /**
- * Returns the user-local generated dir if it contains compiled-policy.json,
- * otherwise falls back to the package-bundled generated dir.
+ * Returns the user-local generated dir if it contains the given artifact,
+ * otherwise falls back to the package-bundled dir. Used independently for
+ * `compiled-policy.json` and `tool-annotations.json` so a user who drops
+ * an updated annotations file into `~/.ironcurtain/generated/` has it
+ * picked up even without a corresponding compiled policy there (tool
+ * annotations are globally scoped — see sandbox/index.ts comment on
+ * `toolAnnotationsDir`).
  */
-function resolveGeneratedDir(packageGeneratedDir: string): string {
+function resolveArtifactDir(filename: string, packageGeneratedDir: string): string {
   const userDir = getUserGeneratedDir();
-  if (existsSync(resolve(userDir, 'compiled-policy.json'))) {
+  if (existsSync(resolve(userDir, filename))) {
     return userDir;
   }
   return packageGeneratedDir;
@@ -216,7 +221,8 @@ export function loadConfig(): IronCurtainConfig {
 
   const constitutionPath = resolve(__dirname, 'constitution.md');
   const packageGeneratedDir = resolve(__dirname, 'generated');
-  const generatedDir = resolveGeneratedDir(packageGeneratedDir);
+  const generatedDir = resolveArtifactDir('compiled-policy.json', packageGeneratedDir);
+  const toolAnnotationsDir = resolveArtifactDir('tool-annotations.json', packageGeneratedDir);
 
   const protectedPaths = computeProtectedPaths({
     constitutionPath,
@@ -258,6 +264,7 @@ export function loadConfig(): IronCurtainConfig {
     mcpServers,
     protectedPaths,
     generatedDir,
+    toolAnnotationsDir,
     constitutionPath,
     agentModelId: finalUserConfig.agentModelId,
     escalationTimeoutSeconds: finalUserConfig.escalationTimeoutSeconds,
@@ -308,6 +315,72 @@ export function checkConstitutionFreshness(compiledPolicy: CompiledPolicyFile, c
         'Run `ironcurtain compile-policy` to update the compiled policy.\n',
     );
   }
+}
+
+/**
+ * Pure diff between the configured MCP servers and the servers covered by
+ * `tool-annotations.json`. Used by both the runtime freshness check and
+ * the compile-time preventive check, which format the same drift data
+ * differently.
+ *
+ *   - `missing`: configured servers with no annotations entry (these will
+ *     silently default-deny every call via the policy engine's
+ *     structural-unknown-tool fallback).
+ *   - `orphaned`: annotated servers no longer configured (informational).
+ */
+export function findAnnotationServerDrift(
+  toolAnnotations: StoredToolAnnotationsFile,
+  mcpServers: Record<string, MCPServerConfig>,
+): { missing: string[]; orphaned: string[] } {
+  const configuredNames = new Set(Object.keys(mcpServers));
+  const annotatedNames = new Set(Object.keys(toolAnnotations.servers));
+  return {
+    missing: [...configuredNames].filter((name) => !annotatedNames.has(name)).sort(),
+    orphaned: [...annotatedNames].filter((name) => !configuredNames.has(name)).sort(),
+  };
+}
+
+/**
+ * Runtime freshness check: emits stderr warnings when the on-disk
+ * tool-annotations.json no longer matches the configured MCP servers.
+ *
+ * The warning suggests re-running annotations for each specific server,
+ * not `--all`, so the user only re-classifies what actually changed.
+ */
+export function checkAnnotationFreshness(
+  toolAnnotations: StoredToolAnnotationsFile,
+  mcpServers: Record<string, MCPServerConfig>,
+): void {
+  const { missing, orphaned } = findAnnotationServerDrift(toolAnnotations, mcpServers);
+
+  if (missing.length > 0) {
+    process.stderr.write(
+      `Warning: ${missing.length} configured MCP server(s) have no tool annotations: ${missing.map(safeForDisplay).join(', ')}. ` +
+        `Tools from these servers will be denied by the policy engine until annotated.\n`,
+    );
+    for (const name of missing) {
+      process.stderr.write(
+        `  Run \`ironcurtain annotate-tools --server ${safeForDisplay(name)}\` to annotate this server.\n`,
+      );
+    }
+  }
+
+  if (orphaned.length > 0) {
+    process.stderr.write(
+      `Note: tool-annotations.json contains server(s) no longer in mcp-servers.json: ${orphaned.map(safeForDisplay).join(', ')}.\n`,
+    );
+  }
+}
+
+/**
+ * Quotes a user-supplied identifier for inclusion in a stderr message or a
+ * copy-paste shell command. Escapes control characters, quotes, and
+ * backslashes via JSON string semantics, and wraps the result in double
+ * quotes. The output is both safe to print (no terminal injection) and
+ * safe to paste into bash (`--server "name"`).
+ */
+export function safeForDisplay(identifier: string): string {
+  return JSON.stringify(identifier);
 }
 
 /**

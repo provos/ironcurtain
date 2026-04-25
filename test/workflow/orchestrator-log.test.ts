@@ -539,7 +539,7 @@ describe('WorkflowOrchestrator message log', () => {
     const firstRunCount = entriesAfterFirstRun.length;
     expect(firstRunCount).toBeGreaterThan(0);
 
-    // Save checkpoint before shutdown (abort removes it)
+    // Capture checkpoint before shutdown (abort rewrites it with terminal state)
     const checkpoint = checkpointStore.load(workflowId);
     expect(checkpoint).toBeDefined();
 

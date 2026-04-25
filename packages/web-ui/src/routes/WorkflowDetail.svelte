@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { WorkflowDetailDto, WorkflowSummaryDto, HumanGateRequestDto } from '$lib/types.js';
+  import type { WorkflowDetailDto, WorkflowSummaryDto, HumanGateRequestDto, MessageLogEntry } from '$lib/types.js';
   import {
     appState,
     connectionGeneration,
@@ -12,7 +12,9 @@
     unsubscribeAllTokenStreams,
     subscribeWorkflowAgentEvents,
     type WorkflowAgentEvent,
+    getWorkflowMessageLog,
   } from '$lib/stores.svelte.js';
+  import { RpcError } from '$lib/ws-client.js';
   import { phaseBadgeVariant } from '$lib/utils.js';
   import { Badge } from '$lib/components/ui/badge/index.js';
   import { Button } from '$lib/components/ui/button/index.js';
@@ -23,7 +25,10 @@
   import WorkflowTheater, { type AgentTransitionTrigger } from '$lib/components/features/workflow-theater.svelte';
   import GateReviewPanel from '$lib/components/features/gate-review-panel.svelte';
   import WorkspaceBrowser from '$lib/components/features/workspace-browser.svelte';
+  import MessageLogTimeline from '$lib/components/features/message-log-timeline.svelte';
   import { renderMarkdown } from '$lib/markdown.js';
+
+  const MESSAGE_LOG_PAGE_SIZE = 200;
 
   let {
     workflowId,
@@ -40,6 +45,10 @@
   let detail = $state<WorkflowDetailDto | null>(null);
   let loading = $state(true);
   let error = $state('');
+  // When the daemon returns WORKFLOW_CORRUPTED we render a dedicated panel
+  // instead of the generic destructive-banner so the operator can see the
+  // exact corruption cause without parsing the message string.
+  let corruptionMessage = $state('');
   let resolveError = $state('');
   let workspaceExpanded = $state(false);
   let expandedMessages = $state(new Set<number>());
@@ -108,6 +117,15 @@
     return () => unsub();
   });
 
+  // Message-log section state. The list is collapsed initially and only
+  // fetched once expanded (lazy load — D5 cursor pagination).
+  let messageLogExpanded = $state(false);
+  let messageLogEntries = $state<MessageLogEntry[]>([]);
+  let messageLogLoading = $state(false);
+  let messageLogHasMore = $state(false);
+  let messageLogError = $state('');
+  let messageLogFetched = $state(false);
+
   function toggleMessage(index: number): void {
     const next = new Set(expandedMessages);
     if (next.has(index)) {
@@ -138,6 +156,7 @@
       loading = true;
     }
     error = '';
+    corruptionMessage = '';
 
     getWorkflowDetail(id)
       .then((d) => {
@@ -152,12 +171,79 @@
         }
       })
       .catch((err) => {
-        if (version === fetchVersion) {
+        if (version !== fetchVersion) return;
+        // Distinguish WORKFLOW_CORRUPTED from generic RPC failures: the former
+        // gets a dedicated callout panel so the operator sees the corruption
+        // cause without parsing message text.
+        if (err instanceof RpcError && err.code === 'WORKFLOW_CORRUPTED') {
+          corruptionMessage = err.message;
+          error = '';
+        } else {
           error = err instanceof Error ? err.message : String(err);
-          loading = false;
+          corruptionMessage = '';
         }
+        loading = false;
       });
   });
+
+  async function loadMessageLogPage(before?: string): Promise<void> {
+    messageLogLoading = true;
+    messageLogError = '';
+    try {
+      const response = await getWorkflowMessageLog(workflowId, {
+        limit: MESSAGE_LOG_PAGE_SIZE,
+        ...(before !== undefined ? { before } : {}),
+      });
+      // Append for paginated loads; replace for the initial fetch. Either
+      // way the timeline stays newest-first since the RPC returns entries
+      // sorted newest-first.
+      const next = before === undefined ? [...response.entries] : [...messageLogEntries, ...response.entries];
+      messageLogEntries = next;
+      messageLogHasMore = response.hasMore;
+      messageLogFetched = true;
+    } catch (err) {
+      messageLogError = err instanceof Error ? err.message : String(err);
+    } finally {
+      messageLogLoading = false;
+    }
+  }
+
+  function toggleMessageLog(): void {
+    messageLogExpanded = !messageLogExpanded;
+    if (messageLogExpanded && !messageLogFetched && !messageLogLoading) {
+      void loadMessageLogPage();
+    }
+  }
+
+  function loadOlderMessages(): void {
+    if (messageLogLoading || !messageLogHasMore || messageLogEntries.length === 0) return;
+    const oldest = messageLogEntries[messageLogEntries.length - 1];
+    void loadMessageLogPage(oldest.ts);
+  }
+
+  // The error callout shows for hard failures and for interrupted runs that
+  // carry an explanatory `error` field. Plain "interrupted" without text is
+  // expected for daemon-restart cases, so suppress the callout in that case.
+  const showErrorCallout = $derived(
+    Boolean(detail) &&
+      ((detail!.phase === 'failed' && Boolean(detail!.error)) ||
+        (detail!.phase === 'interrupted' && Boolean(detail!.error))),
+  );
+
+  const errorCalloutTitle = $derived(detail?.phase === 'failed' ? 'Workflow failed' : 'Workflow interrupted');
+
+  // Latest verdict appears as a row in the summary grid only when the DTO
+  // actually carries one — every verdict has a stateId and verdict, the
+  // confidence field is optional.
+  const latestVerdict = $derived(detail?.latestVerdict);
+
+  function formatConfidence(value: number | undefined): string | undefined {
+    if (value === undefined || value === null) return undefined;
+    if (Number.isNaN(value)) return undefined;
+    // Confidences are nominally 0..1 but tolerate already-percentage values.
+    const pct = value <= 1 ? Math.round(value * 100) : Math.round(value);
+    return `${pct}%`;
+  }
 
   const completedStates = $derived(
     detail?.transitionHistory ? [...new Set(detail.transitionHistory.map((t) => t.from))] : [],
@@ -207,7 +293,7 @@
   }
 </script>
 
-<div class="p-6 space-y-5 animate-fade-in overflow-y-auto h-full">
+<div class="p-6 space-y-5 animate-fade-in">
   <div class="flex items-center gap-3">
     <Button variant="ghost" size="sm" onclick={onback}>&larr; Back</Button>
     <h2 class="text-xl font-semibold tracking-tight">{summary.name}</h2>
@@ -237,6 +323,21 @@
     <div class="flex items-center justify-center py-16">
       <Spinner size="md" />
     </div>
+  {:else if corruptionMessage}
+    <Card class="border-destructive/40">
+      <CardHeader>
+        <CardTitle class="text-destructive">Workflow checkpoint is corrupted</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <p class="text-sm text-muted-foreground mb-2">
+          The daemon could not load this workflow's checkpoint or definition file. The run cannot be displayed or
+          resumed until the underlying file is repaired.
+        </p>
+        <pre
+          data-testid="corruption-message"
+          class="text-xs font-mono whitespace-pre-wrap text-destructive bg-destructive/5 border border-destructive/20 rounded p-3 overflow-x-auto">{corruptionMessage}</pre>
+      </CardContent>
+    </Card>
   {:else if error}
     <Alert variant="destructive">{error}</Alert>
   {:else if detail}
@@ -251,6 +352,19 @@
         fetchFileTree={getWorkflowFileTree}
         fetchFileContent={getWorkflowFileContent}
       />
+    {/if}
+
+    {#if showErrorCallout}
+      <Card data-testid="workflow-error-callout" class="border-destructive/40">
+        <CardHeader>
+          <CardTitle class="text-destructive">{errorCalloutTitle}</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <pre
+            data-testid="workflow-error-text"
+            class="text-xs font-mono whitespace-pre-wrap text-destructive bg-destructive/5 border border-destructive/20 rounded p-3 overflow-x-auto max-h-80 overflow-y-auto">{detail.error}</pre>
+        </CardContent>
+      </Card>
     {/if}
 
     {#if vizMode === 'theater'}
@@ -323,6 +437,29 @@
             <p class="text-sm truncate" title={detail.description}>{detail.description || '--'}</p>
           </CardContent>
         </Card>
+        {#if latestVerdict}
+          {@const confidenceText = formatConfidence(latestVerdict.confidence)}
+          <Card data-testid="latest-verdict-card">
+            <CardContent>
+              <p class="text-xs text-muted-foreground">Latest verdict</p>
+              <p class="text-sm font-semibold truncate" title={latestVerdict.verdict}>
+                <span data-testid="latest-verdict-value">{latestVerdict.verdict}</span>
+                {#if confidenceText}
+                  <span class="text-muted-foreground font-normal" data-testid="latest-verdict-confidence">
+                    — {confidenceText}
+                  </span>
+                {/if}
+              </p>
+              <p
+                class="text-xs text-muted-foreground font-mono truncate"
+                title={`State: ${latestVerdict.stateId}`}
+                data-testid="latest-verdict-state"
+              >
+                {latestVerdict.stateId}
+              </p>
+            </CardContent>
+          </Card>
+        {/if}
       </div>
     {/if}
 
@@ -385,6 +522,46 @@
         </CardContent>
       </Card>
     {/if}
+
+    <Card>
+      <CardHeader>
+        <button
+          type="button"
+          onclick={toggleMessageLog}
+          class="flex items-center gap-2 w-full text-left"
+          data-testid="message-log-toggle"
+          aria-expanded={messageLogExpanded}
+        >
+          <span class="text-muted-foreground">{messageLogExpanded ? '▾' : '▸'}</span>
+          <CardTitle>Message log</CardTitle>
+          {#if messageLogExpanded && messageLogEntries.length > 0}
+            <span class="text-xs text-muted-foreground ml-auto">
+              {messageLogEntries.length} entr{messageLogEntries.length === 1 ? 'y' : 'ies'}
+            </span>
+          {/if}
+        </button>
+      </CardHeader>
+      {#if messageLogExpanded}
+        <CardContent>
+          {#if messageLogError}
+            <Alert variant="destructive" dismissible ondismiss={() => (messageLogError = '')}>
+              {messageLogError}
+            </Alert>
+          {:else if messageLogLoading && messageLogEntries.length === 0}
+            <div class="flex items-center justify-center py-8">
+              <Spinner size="sm" />
+            </div>
+          {:else}
+            <MessageLogTimeline
+              entries={messageLogEntries}
+              loading={messageLogLoading}
+              hasMore={messageLogHasMore}
+              onLoadOlder={loadOlderMessages}
+            />
+          {/if}
+        </CardContent>
+      {/if}
+    </Card>
   {/if}
 </div>
 

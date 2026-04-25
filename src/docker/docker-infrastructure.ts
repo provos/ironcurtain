@@ -48,7 +48,11 @@ import * as logger from '../logger.js';
  *
  * Rejects symlinks at the bundle path itself: even though these dirs
  * now live under `~/.ironcurtain/run/` (not `/tmp/`), we don't want to
- * silently follow a pre-existing symlink in the user's own tree.
+ * silently follow a pre-existing symlink in the user's own tree. The
+ * `lstatSync` check runs BEFORE `mkdirSync` — `mkdirSync({recursive:
+ * true})` follows symlinks, so checking after the create would let a
+ * pre-existing symlink redirect the directory creation before we got a
+ * chance to reject it.
  *
  * Ancestor components (`~/.ironcurtain/run/`, `~/.ironcurtain/`, `~/`)
  * are NOT walked — the user's home tree is our trust boundary, and an
@@ -57,14 +61,21 @@ import * as logger from '../logger.js';
  * within this helper would be theater.
  */
 export function ensureSecureBundleDir(path: string): void {
+  // Validate any pre-existing entry at `path` before creating so a
+  // planted symlink can't redirect our mkdir to an attacker target.
+  try {
+    const stats = lstatSync(path);
+    if (stats.isSymbolicLink()) {
+      throw new Error(`Refusing to use symlink at bundle path ${path}`);
+    }
+    if (!stats.isDirectory()) {
+      throw new Error(`Bundle path ${path} exists but is not a directory`);
+    }
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    // Path does not exist yet — fall through to mkdirSync.
+  }
   mkdirSync(path, { recursive: true, mode: 0o700 });
-  const stats = lstatSync(path);
-  if (stats.isSymbolicLink()) {
-    throw new Error(`Refusing to use symlink at bundle path ${path}`);
-  }
-  if (!stats.isDirectory()) {
-    throw new Error(`Bundle path ${path} exists but is not a directory`);
-  }
   chmodSync(path, 0o700);
 }
 

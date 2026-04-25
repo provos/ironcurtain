@@ -27,6 +27,39 @@ export interface AgentResponse {
   readonly text: string;
   /** Cumulative session cost in USD, if reported by the agent. */
   readonly costUsd?: number;
+  /**
+   * Set when the agent process was killed or crashed before producing
+   * any output (e.g., upstream provider closed the stream mid-generation).
+   * Signals to callers that a retry with a fresh conversation id is
+   * appropriate; a reprompt against the same id will fail because the
+   * agent CLI considers the id consumed.
+   */
+  readonly hardFailure?: boolean;
+  /**
+   * Set when the adapter detected that the agent aborted because of
+   * upstream quota exhaustion — the kind the agent CLI's own retry loop
+   * cannot recover from within a reasonable window (e.g. a multi-hour
+   * provider usage-limit reset, surfaced by Claude Code as an
+   * `api_error_status: 429` JSON envelope with a human-readable
+   * "limit will reset at ..." message).
+   *
+   * Adapters MUST populate this whenever their CLI surfaces such a
+   * signal. The orchestrator will neither retry nor spend further
+   * budget on a turn that sets it — it throws a dedicated error class
+   * so the workflow can be paused and resumed once the quota window
+   * opens instead of aborting. Leaving this undefined causes the
+   * orchestrator to fall through to the generic abort path — acceptable
+   * only when the adapter's CLI has no machine-readable quota signal.
+   *
+   * `rawMessage` is the original provider/CLI text, preserved for
+   * diagnostics and CLI output. `resetAt` is optional because not every
+   * provider emits a parseable timestamp; when absent the caller picks
+   * a conservative default pause.
+   */
+  readonly quotaExhausted?: {
+    readonly resetAt?: Date;
+    readonly rawMessage: string;
+  };
 }
 
 /**
@@ -189,6 +222,16 @@ export interface AgentAdapter {
 
   /**
    * Parses the agent's output to extract the response and optional cost.
+   *
+   * IMPORTANT: adapters are the sole place where CLI-specific error
+   * envelopes are translated into structured signals for the workflow
+   * engine. In particular, when the underlying CLI exposes a
+   * quota-exhaustion / rate-limit-exceeded signal (e.g. Claude Code's
+   * `api_error_status: 429` JSON envelope), the adapter MUST surface
+   * it via `AgentResponse.quotaExhausted`. See the Claude Code adapter
+   * (`adapters/claude-code.ts`) for the canonical implementation.
+   * Failing to surface this signal causes the orchestrator to treat
+   * quota exhaustion as a generic abort, wasting the workflow run.
    *
    * @param exitCode - the container's exit code
    * @param stdout - captured stdout from the container

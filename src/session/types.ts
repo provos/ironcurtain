@@ -50,10 +50,19 @@ const BUNDLE_SHORT_ID_LEN = 12;
 
 /**
  * Deterministic short slug of a `BundleId` for use in Docker container
- * names. Always the first `BUNDLE_SHORT_ID_LEN` chars of the UUID.
+ * names. Hyphens are stripped first so the result preserves
+ * `BUNDLE_SHORT_ID_LEN` hex chars of entropy (16^12 ≈ 2.8e14). A raw
+ * `substring(0, 12)` on a canonical UUID would include the hyphen at
+ * index 8 and yield only 11 hex digits.
+ *
+ * Mirrors `toBundleSlug` in `config/paths.ts`: both must produce the
+ * same 12-hex-char slug so that `ironcurtain.bundle` labels,
+ * `ironcurtain-<shortId>` container names, and the
+ * `~/.ironcurtain/run/<slug>/` runtime tree share a single
+ * bundle-identity convention.
  */
 export function getBundleShortId(bundleId: BundleId): string {
-  return bundleId.substring(0, BUNDLE_SHORT_ID_LEN);
+  return bundleId.replace(/-/g, '').substring(0, BUNDLE_SHORT_ID_LEN);
 }
 
 /**
@@ -442,21 +451,94 @@ export type BuiltinSessionOptions = SessionOptions & {
  * - After close(), no methods except getInfo() are valid
  * - The session ID is unique and immutable for the session's lifetime
  */
+/**
+ * Outcome of a single agent turn, as returned by
+ * `Session.sendMessageDetailed()`. Extends the bare response text
+ * with diagnostics the caller may need to decide on retry behavior.
+ */
+export interface AgentTurnResult {
+  /** The agent's text response. Empty string when the process produced no output. */
+  readonly text: string;
+  /**
+   * Set when the agent process was killed or crashed before producing
+   * any output (e.g., upstream provider closed the stream mid-generation).
+   * Callers that care about distinguishing "upstream stall — retry with a
+   * fresh session" from "agent replied but formatted the answer wrong"
+   * should consult this flag rather than parsing `text`.
+   */
+  readonly hardFailure: boolean;
+  /**
+   * Set when the adapter detected upstream quota exhaustion. When
+   * present, the caller MUST NOT retry the turn — the provider's
+   * rate-limit window is the bottleneck, not the agent. Workflow
+   * callers halt the run and surface `resetAt` (if any) to the user;
+   * interactive callers print and exit. See `AgentResponse.quotaExhausted`
+   * in `src/docker/agent-adapter.ts` for the adapter-side contract this
+   * field is populated from.
+   */
+  readonly quotaExhausted?: {
+    readonly resetAt?: Date;
+    readonly rawMessage: string;
+  };
+}
+
 export interface Session {
   /** Returns a read-only snapshot of session state. */
   getInfo(): SessionInfo;
 
   /**
-   * Sends a user message and returns the agent's response.
+   * Sends a user message and returns the agent's response text.
    *
    * Appends the user message to conversation history, calls the LLM
    * with the full history, appends the response messages, and returns
    * the agent's text.
    *
+   * For callers that need turn diagnostics (e.g., to detect upstream
+   * stalls and retry with a fresh conversation id), call
+   * `sendMessageDetailed()` when it exists.
+   *
    * @throws {SessionNotReadyError} if status is not 'ready'
    * @throws {SessionClosedError} if session has been closed
    */
   sendMessage(userMessage: string): Promise<string>;
+
+  /**
+   * Sends a user message and returns the response text plus turn
+   * diagnostics. Semantically equivalent to `sendMessage()` but surfaces
+   * `hardFailure` for callers (e.g., the workflow orchestrator's retry
+   * loop) that must react to upstream stalls.
+   *
+   * Optional because only external-agent sessions (e.g., Claude Code in
+   * Docker) can produce hard failures. Consumers that care about the
+   * diagnostic should fall back to `sendMessage()` and treat the result
+   * as the same response text with `hardFailure: false` when this method
+   * is absent.
+   *
+   * @throws {SessionNotReadyError} if status is not 'ready'
+   * @throws {SessionClosedError} if session has been closed
+   */
+  sendMessageDetailed?(userMessage: string): Promise<AgentTurnResult>;
+
+  /**
+   * Rotates the agent-CLI conversation id to a freshly-minted one and
+   * returns the new id.
+   *
+   * Intended for use after a hard failure (see `AgentTurnResult.hardFailure`):
+   * when the agent CLI was killed mid-stream, the prior id has been
+   * consumed by the CLI even though no resumable transcript exists,
+   * so a retry with the same id is rejected. Rotating mints a new id
+   * the next turn will pin with `--session-id` (or equivalent).
+   *
+   * Callers must observe the returned id and propagate it into any
+   * subsequent `AgentInvokeResult` / checkpoint persistence — otherwise
+   * a later `freshSession: false` visit will try to resume a stale id
+   * whose transcript never existed on disk.
+   *
+   * Optional because only external-agent sessions (e.g., Claude Code
+   * in Docker) have a durable conversation id. Built-in sessions that
+   * hold all state in-memory do not implement this.
+   */
+  rotateAgentConversationId?(): AgentConversationId;
 
   /**
    * Returns the conversation history as turn summaries.

@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import type { SessionOptions } from '../../src/session/types.js';
 import type { WorkflowId, HumanGateRequest, WorkflowDefinition } from '../../src/workflow/types.js';
 import { WorkflowOrchestrator, type WorkflowLifecycleEvent } from '../../src/workflow/orchestrator.js';
+import { FileCheckpointStore } from '../../src/workflow/checkpoint.js';
 import {
   MockSession,
   approvedResponse,
@@ -273,16 +274,17 @@ describe('WorkflowOrchestrator checkpoint + resume', () => {
     orchestrator.resolveGate(workflowId, { type: 'APPROVE' });
     await waitForCompletion(orchestrator, workflowId);
 
-    // After completion, checkpoint is removed (tested separately in test 2)
-    // But during execution, checkpoints were saved for intermediate states
+    // Checkpoints were saved during execution for intermediate states; the
+    // final retained checkpoint (tested separately in test 2) carries
+    // `finalStatus`.
     expect(checkpoint!.context.taskDescription).toBe('build API');
   });
 
   // -----------------------------------------------------------------------
-  // Test 2: Checkpoint is removed on successful completion
+  // Test 2: Checkpoint is retained with finalStatus on successful completion
   // -----------------------------------------------------------------------
 
-  it('removes checkpoint on successful completion', async () => {
+  it('retains checkpoint with finalStatus.phase === "completed" on successful completion', async () => {
     const defPath = writeDefinitionFile(tmpDir, simpleAgentDef);
     const checkpointStore = createCheckpointStore(tmpDir);
 
@@ -300,7 +302,198 @@ describe('WorkflowOrchestrator checkpoint + resume', () => {
     await waitForCompletion(orchestrator, workflowId);
 
     expect(orchestrator.getStatus(workflowId)?.phase).toBe('completed');
-    expect(checkpointStore.load(workflowId)).toBeUndefined();
+
+    // B3b: The checkpoint is retained on disk with `finalStatus` populated
+    // so the past-runs UI can surface the canonical phase and `listResumable`
+    // can exclude completed runs via `isCheckpointResumable`.
+    const surviving = checkpointStore.load(workflowId);
+    expect(surviving).toBeDefined();
+    expect(surviving?.finalStatus?.phase).toBe('completed');
+    if (surviving?.finalStatus?.phase === 'completed') {
+      expect(surviving.finalStatus.result.finalArtifacts).toBeDefined();
+    }
+  });
+
+  // -----------------------------------------------------------------------
+  // Test 2a: finalStatus persistence — completed with expected artifacts
+  // -----------------------------------------------------------------------
+
+  it('persists finalStatus.result.finalArtifacts on completion', async () => {
+    const defPath = writeDefinitionFile(tmpDir, simpleAgentDef);
+    const checkpointStore = createCheckpointStore(tmpDir);
+
+    const sessionFactory = vi.fn(async () => {
+      return createArtifactAwareSession([{ text: approvedResponse('done'), artifacts: ['code'] }], tmpDir);
+    });
+
+    const deps = createDeps(tmpDir, {
+      createSession: sessionFactory,
+      checkpointStore,
+    });
+
+    const orchestrator = trackOrchestrator(new WorkflowOrchestrator(deps));
+    const workflowId = await orchestrator.start(defPath, 'write code');
+    await waitForCompletion(orchestrator, workflowId);
+
+    const surviving = checkpointStore.load(workflowId);
+    expect(surviving).toBeDefined();
+    expect(surviving?.finalStatus).toBeDefined();
+    expect(surviving?.finalStatus?.phase).toBe('completed');
+    if (surviving?.finalStatus?.phase === 'completed') {
+      // The `code` artifact produced by the agent should appear in the
+      // persisted final artifacts map.
+      expect(surviving.finalStatus.result.finalArtifacts).toHaveProperty('code');
+    }
+  });
+
+  // -----------------------------------------------------------------------
+  // Test 2c: finalStatus persistence — aborted via ABORT event
+  // -----------------------------------------------------------------------
+
+  it('persists finalStatus.phase === "aborted" with a reason on ABORT-event terminal', async () => {
+    const defPath = writeDefinitionFile(tmpDir, linearWorkflowDef);
+    const checkpointStore = createCheckpointStore(tmpDir);
+
+    const sessionFactory = vi.fn(async () => {
+      return createArtifactAwareSession([{ text: approvedResponse('plan done'), artifacts: ['plan'] }], tmpDir);
+    });
+
+    const raiseGate = vi.fn();
+    const deps = createDeps(tmpDir, {
+      createSession: sessionFactory,
+      raiseGate,
+      checkpointStore,
+    });
+
+    const orchestrator = trackOrchestrator(new WorkflowOrchestrator(deps));
+    const workflowId = await orchestrator.start(defPath, 'build a thing');
+
+    await waitForGate(raiseGate, 1);
+    orchestrator.resolveGate(workflowId, { type: 'ABORT' });
+    await waitForCompletion(orchestrator, workflowId);
+
+    const surviving = checkpointStore.load(workflowId);
+    expect(surviving).toBeDefined();
+    expect(surviving?.finalStatus?.phase).toBe('aborted');
+    if (surviving?.finalStatus?.phase === 'aborted') {
+      expect(surviving.finalStatus.reason).toBeTruthy();
+      expect(typeof surviving.finalStatus.reason).toBe('string');
+    }
+  });
+
+  // -----------------------------------------------------------------------
+  // Test 2b: Aborted workflows keep their checkpoint so resume can restart them
+  // -----------------------------------------------------------------------
+
+  it('preserves checkpoint on user-invoked abort so resume can restart it', async () => {
+    const defPath = writeDefinitionFile(tmpDir, linearWorkflowDef);
+    const checkpointStore = createCheckpointStore(tmpDir);
+
+    const sessionFactory = vi.fn(async () => {
+      return createArtifactAwareSession([{ text: approvedResponse('plan done'), artifacts: ['plan'] }], tmpDir);
+    });
+
+    const raiseGate = vi.fn();
+    const deps = createDeps(tmpDir, {
+      createSession: sessionFactory,
+      raiseGate,
+      checkpointStore,
+    });
+
+    const orchestrator = trackOrchestrator(new WorkflowOrchestrator(deps));
+    const workflowId = await orchestrator.start(defPath, 'build a thing');
+
+    // Wait for plan_gate so a checkpoint is persisted.
+    await waitForGate(raiseGate, 1);
+    expect(checkpointStore.load(workflowId)).toBeDefined();
+
+    // User-invoked abort: should leave the checkpoint on disk.
+    await orchestrator.abort(workflowId);
+
+    expect(orchestrator.getStatus(workflowId)?.phase).toBe('aborted');
+    const surviving = checkpointStore.load(workflowId);
+    expect(surviving).toBeDefined();
+    expect(surviving!.machineState).toBe('plan_gate');
+  });
+
+  it('preserves checkpoint when workflow reaches aborted state via ABORT event', async () => {
+    const defPath = writeDefinitionFile(tmpDir, linearWorkflowDef);
+    const checkpointStore = createCheckpointStore(tmpDir);
+
+    const sessionFactory = vi.fn(async () => {
+      return createArtifactAwareSession([{ text: approvedResponse('plan done'), artifacts: ['plan'] }], tmpDir);
+    });
+
+    const raiseGate = vi.fn();
+    const deps = createDeps(tmpDir, {
+      createSession: sessionFactory,
+      raiseGate,
+      checkpointStore,
+    });
+
+    const orchestrator = trackOrchestrator(new WorkflowOrchestrator(deps));
+    const workflowId = await orchestrator.start(defPath, 'build a thing');
+
+    // Wait for plan_gate so a checkpoint is persisted.
+    await waitForGate(raiseGate, 1);
+    expect(checkpointStore.load(workflowId)).toBeDefined();
+
+    // Resolve the gate with ABORT, which drives the machine into the
+    // `aborted` terminal state via handleWorkflowComplete.
+    orchestrator.resolveGate(workflowId, { type: 'ABORT' });
+    await waitForCompletion(orchestrator, workflowId);
+
+    expect(orchestrator.getStatus(workflowId)?.phase).toBe('aborted');
+    // Post-B3b: `handleWorkflowComplete` writes a final checkpoint with
+    // `finalStatus` populated for all terminal phases. The surviving
+    // checkpoint therefore carries the terminal machineState plus a
+    // canonical `finalStatus.phase === 'aborted'` so the past-runs UI
+    // and `listResumable` predicate don't have to heuristically scrape
+    // state names.
+    const surviving = checkpointStore.load(workflowId);
+    expect(surviving).toBeDefined();
+    expect(surviving?.finalStatus?.phase).toBe('aborted');
+  });
+
+  // -----------------------------------------------------------------------
+  // Regression: aborted-state checkpoint must keep the LAST non-terminal
+  // machineState so resume() can re-enter a meaningful state.
+  // -----------------------------------------------------------------------
+
+  it('keeps last non-terminal machineState on disk when terminating via ABORT', async () => {
+    const defPath = writeDefinitionFile(tmpDir, linearWorkflowDef);
+    const checkpointStore = createCheckpointStore(tmpDir);
+
+    const sessionFactory = vi.fn(async () => {
+      return createArtifactAwareSession([{ text: approvedResponse('plan done'), artifacts: ['plan'] }], tmpDir);
+    });
+
+    const raiseGate = vi.fn();
+    const deps = createDeps(tmpDir, {
+      createSession: sessionFactory,
+      raiseGate,
+      checkpointStore,
+    });
+
+    const orchestrator = trackOrchestrator(new WorkflowOrchestrator(deps));
+    const workflowId = await orchestrator.start(defPath, 'build a thing');
+
+    // Wait for plan_gate so a non-terminal checkpoint is persisted.
+    await waitForGate(raiseGate, 1);
+    const preAbort = checkpointStore.load(workflowId);
+    expect(preAbort?.machineState).toBe('plan_gate');
+
+    // Drive into the `aborted` terminal via ABORT.
+    orchestrator.resolveGate(workflowId, { type: 'ABORT' });
+    await waitForCompletion(orchestrator, workflowId);
+
+    const surviving = checkpointStore.load(workflowId);
+    expect(surviving).toBeDefined();
+    expect(surviving?.finalStatus?.phase).toBe('aborted');
+    // The on-disk machineState must still be the last non-terminal state.
+    // Persisting the terminal `aborted` snapshot would cause `resume()` to
+    // re-enter the terminal and immediately re-complete.
+    expect(surviving?.machineState).toBe('plan_gate');
   });
 
   // -----------------------------------------------------------------------
@@ -340,12 +533,13 @@ describe('WorkflowOrchestrator checkpoint + resume', () => {
     expect(checkpoint).toBeDefined();
     expect(checkpoint!.machineState).toBe('error_gate');
 
-    // Simulate orchestrator crash by shutting down (which removes checkpoint via abort)
-    // Save checkpoint state before shutdown
+    // Simulate an orchestrator crash by shutting down. Clean abort now
+    // preserves the checkpoint, but we still re-save the snapshot to be
+    // explicit about the state under test (a real crash where the process
+    // died without even running the abort path).
     const savedCheckpoint = { ...checkpoint! };
     await orchestrator1.shutdownAll();
 
-    // Re-save checkpoint to simulate a real crash (process died, no clean abort)
     checkpointStore.save(workflowId, savedCheckpoint);
 
     // Resume with a new orchestrator that has working sessions
@@ -579,7 +773,12 @@ describe('WorkflowOrchestrator checkpoint + resume', () => {
   // -----------------------------------------------------------------------
 
   it('listResumable returns only failed workflow IDs, not completed ones', async () => {
-    const checkpointStore = createCheckpointStore(tmpDir);
+    // listResumable now enumerates baseDir via discoverWorkflowRuns and
+    // checks for checkpoint.json in each workflow directory. Align the
+    // checkpoint-store baseDir with the orchestrator baseDir so checkpoints
+    // land where the enumeration looks (this matches production, where the
+    // two always coincide).
+    const checkpointStore = new FileCheckpointStore(tmpDir);
 
     // Start and complete a workflow
     const defPath = writeDefinitionFile(tmpDir, simpleAgentDef);
@@ -656,6 +855,54 @@ describe('WorkflowOrchestrator checkpoint + resume', () => {
     const resumable = orchestrator.listResumable();
     expect(resumable).toContain(failedId);
     expect(resumable).not.toContain(completedId);
+  });
+
+  it('listResumable skips corrupt checkpoints instead of throwing', async () => {
+    // Place a valid + a corrupt checkpoint side by side. A single corrupt
+    // file must not break enumeration of all other resumable runs.
+    const checkpointStore = new FileCheckpointStore(tmpDir);
+
+    const validId = 'valid-run' as WorkflowId;
+    const corruptId = 'corrupt-run' as WorkflowId;
+
+    checkpointStore.save(validId, {
+      machineState: 'implement',
+      context: {
+        taskDescription: 'still resumable',
+        artifacts: {},
+        round: 0,
+        maxRounds: 4,
+        previousOutputHashes: {},
+        previousTestCount: null,
+        humanPrompt: null,
+        reviewHistory: [],
+        parallelResults: {},
+        worktreeBranches: [],
+        totalTokens: 0,
+        lastError: null,
+        agentConversationsByState: {},
+        previousAgentOutput: null,
+        previousAgentNotes: null,
+        previousStateName: null,
+        visitCounts: {},
+      },
+      timestamp: new Date().toISOString(),
+      transitionHistory: [],
+      definitionPath: writeDefinitionFile(tmpDir, simpleAgentDef),
+      workspacePath: resolve(tmpDir, validId, 'workspace'),
+    });
+
+    // Write raw bytes that won't parse as JSON.
+    const corruptDir = resolve(tmpDir, corruptId);
+    mkdirSync(corruptDir, { recursive: true });
+    writeFileSync(resolve(corruptDir, 'checkpoint.json'), 'not json');
+
+    const deps = createDeps(tmpDir, { checkpointStore });
+    const orchestrator = trackOrchestrator(new WorkflowOrchestrator(deps));
+
+    const resumable = orchestrator.listResumable();
+    expect(resumable).toContain(validId);
+    expect(resumable).not.toContain(corruptId);
   });
 
   // -----------------------------------------------------------------------

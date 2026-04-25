@@ -4,7 +4,13 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import chalk from 'chalk';
 import ora from 'ora';
-import { loadConfig, loadGeneratedPolicy, checkConstitutionFreshness, getPackageGeneratedDir } from './config/index.js';
+import {
+  loadConfig,
+  loadGeneratedPolicy,
+  checkConstitutionFreshness,
+  checkAnnotationFreshness,
+  getPackageGeneratedDir,
+} from './config/index.js';
 import { getUserConfigPath } from './config/paths.js';
 import { checkHelp, type CommandSpec } from './cli-help.js';
 import * as logger from './logger.js';
@@ -123,13 +129,14 @@ export async function main(args?: string[]): Promise<void> {
 
   const mode = preflight.mode;
 
-  // Check constitution freshness once here, before any proxy processes are spawned.
-  const { compiledPolicy } = loadGeneratedPolicy({
+  // Check constitution and annotation freshness once here, before any proxy processes are spawned.
+  const { compiledPolicy, toolAnnotations } = loadGeneratedPolicy({
     policyDir: config.generatedDir,
     toolAnnotationsDir: config.toolAnnotationsDir ?? config.generatedDir,
     fallbackDir: getPackageGeneratedDir(),
   });
   checkConstitutionFreshness(compiledPolicy, config.constitutionPath);
+  checkAnnotationFreshness(toolAnnotations, config.mcpServers);
 
   // PTY mode: attach terminal directly to Claude Code in a Docker container
   if (values.pty) {

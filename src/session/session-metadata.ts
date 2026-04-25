@@ -35,16 +35,24 @@ export function saveSessionMetadata(sessionId: string, metadata: SessionMetadata
 }
 
 /**
- * Reads session metadata from disk. Returns undefined if the file
- * is missing or contains invalid JSON (graceful for old sessions
- * created before metadata persistence was added).
+ * Reads session metadata from an explicit path. Used by callers (e.g. workflow
+ * per-state metadata under workflow-runs) that don't live under the standard
+ * sessions directory layout. Returns undefined for missing files or invalid JSON.
  */
-export function loadSessionMetadata(sessionId: string): SessionMetadata | undefined {
-  const path = getSessionMetadataPath(sessionId);
+export function loadSessionMetadataFromPath(path: string): SessionMetadata | undefined {
   try {
     const raw = readFileSync(path, 'utf-8');
     return JSON.parse(raw) as SessionMetadata;
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Reads session metadata for a session ID. Thin wrapper that derives the path
+ * from the session ID. Graceful for old sessions created before metadata
+ * persistence was added.
+ */
+export function loadSessionMetadata(sessionId: string): SessionMetadata | undefined {
+  return loadSessionMetadataFromPath(getSessionMetadataPath(sessionId));
 }

@@ -15,6 +15,7 @@ All notable changes to this project will be documented in this file.
 - **Shared `applyAllowedDirectoryToMcpArgs` helper** — single source of truth in `src/config/index.ts` for keeping `mcpServers.filesystem.args` in sync with the active `allowedDirectory`; fixes stale paths in shared-container workflow runs.
 - **Audit stream errors latch** — `AuditLog` now remembers stream errors and surfaces them synchronously on the next `log()` instead of silently dropping entries.
 - **Workflow run directory hardened at 0o700** — `chmodSync` enforces the mode so the control socket and audit log are protected by filesystem permissions.
+- **Completed workflow runs retain their checkpoint on disk** — previously `checkpoint.json` was deleted on successful completion, causing completed runs to vanish from the web-UI Past-runs list. The checkpoint is now kept for all terminal phases (completed / failed / aborted), each carrying a persistent `finalStatus` field. The CLI `workflow inspect` command and the daemon's past-runs UI list every past-run directory uniformly via a shared `discoverWorkflowRuns` utility, so historical runs that lost their checkpoint pre-fix are still surfaced via message-log + definition-only synthesis. No auto-cleanup; a follow-up retention policy is tracked separately.
 
 ## [0.10.0] - 2026-04-01
 

@@ -4,6 +4,7 @@ import {
   loadGeneratedPolicy,
   extractServerDomainAllowlists,
   checkConstitutionFreshness,
+  checkAnnotationFreshness,
   getPackageGeneratedDir,
 } from '../config/index.js';
 import { createLanguageModel } from '../config/model-provider.js';
@@ -87,6 +88,7 @@ export class TrustedProcess {
       fallbackDir: getPackageGeneratedDir(),
     });
     checkConstitutionFreshness(compiledPolicy, this.config.constitutionPath);
+    checkAnnotationFreshness(toolAnnotations, this.config.mcpServers);
 
     const serverDomainAllowlists = extractServerDomainAllowlists(this.config.mcpServers);
     const trustedServers = buildTrustedServerSet(this.config.mcpServers);

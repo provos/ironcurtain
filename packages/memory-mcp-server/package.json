@@ -24,6 +24,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "prepare": "tsc",
     "test": "vitest run",
     "test:e2e": "vitest run test/e2e/",
     "benchmark": "npx tsx benchmark/run.ts --verbose",

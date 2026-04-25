@@ -103,6 +103,32 @@ describe('workflow model validation', () => {
     expect(() => validateDefinition(def)).not.toThrow();
   });
 
+  it('accepts an Ollama-style "name:tag" model ID at workflow level', () => {
+    // Forwarded verbatim to an upstream gateway via ANTHROPIC_BASE_URL.
+    const def = baseWorkflow();
+    def.settings = { model: 'glm-5.1:cloud' };
+    expect(() => validateDefinition(def)).not.toThrow();
+  });
+
+  it('accepts an Ollama-style "name:tag" model ID at state level', () => {
+    const def = baseWorkflow();
+    const states = def.states as Record<string, Record<string, unknown>>;
+    states.plan.model = 'qwen3.5-uncensored:35b';
+    expect(() => validateDefinition(def)).not.toThrow();
+  });
+
+  it('rejects a model ID with an empty name before the colon', () => {
+    const def = baseWorkflow();
+    def.settings = { model: ':tag' };
+    expect(() => validateDefinition(def)).toThrow(WorkflowValidationError);
+  });
+
+  it('rejects a model ID with an empty tag after the colon', () => {
+    const def = baseWorkflow();
+    def.settings = { model: 'name:' };
+    expect(() => validateDefinition(def)).toThrow(WorkflowValidationError);
+  });
+
   it('rejects an empty-string model at workflow level', () => {
     const def = baseWorkflow();
     def.settings = { model: '' };
