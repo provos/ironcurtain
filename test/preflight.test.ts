@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { resolveSessionMode, PreflightError } from '../src/session/preflight.js';
+import { resolveSessionMode, PreflightError, type DockerAvailability } from '../src/session/preflight.js';
 import type { IronCurtainConfig } from '../src/config/types.js';
 import type { AgentId } from '../src/docker/agent-adapter.js';
 import type { CredentialSources } from '../src/docker/oauth-credentials.js';
@@ -54,8 +54,13 @@ function createTestConfig(overrides: { anthropicApiKey?: string } = {}): IronCur
   };
 }
 
-const dockerAvailable = (): Promise<boolean> => Promise.resolve(true);
-const dockerUnavailable = (): Promise<boolean> => Promise.resolve(false);
+const dockerAvailable = (): Promise<DockerAvailability> => Promise.resolve({ available: true });
+const dockerUnavailable = (): Promise<DockerAvailability> =>
+  Promise.resolve({
+    available: false,
+    reason: 'Docker not available',
+    detailedMessage: 'docker daemon not running (test fixture)',
+  });
 
 describe('resolveSessionMode', () => {
   describe('explicit --agent', () => {
@@ -202,6 +207,58 @@ describe('resolveSessionMode', () => {
       });
 
       expect(result.mode).toEqual({ kind: 'builtin' });
+    });
+
+    describe('OAuth-only without Docker', () => {
+      const oauthOnlySources: CredentialSources = {
+        loadFromFile: () => ({
+          accessToken: 'sk-ant-oat01-test',
+          refreshToken: 'sk-ant-ort01-test',
+          expiresAt: Date.now() + 3_600_000,
+        }),
+        loadFromKeychain: () => null,
+      };
+
+      it('throws PreflightError when Docker is unavailable and only OAuth is configured', async () => {
+        const promise = resolveSessionMode({
+          config: createTestConfig({ anthropicApiKey: '' }),
+          isDockerAvailable: dockerUnavailable,
+          credentialSources: oauthOnlySources,
+        });
+
+        await expect(promise).rejects.toThrow(PreflightError);
+        await expect(promise).rejects.toThrow(/Docker/);
+      });
+
+      it('falls back to builtin when Docker is unavailable but an API key is also configured', async () => {
+        const result = await resolveSessionMode({
+          config: createTestConfig({ anthropicApiKey: 'sk-ant-test-fallback' }),
+          isDockerAvailable: dockerUnavailable,
+          credentialSources: oauthOnlySources,
+        });
+
+        expect(result.mode).toEqual({ kind: 'builtin' });
+        expect(result.reason).toBe('Docker not available');
+      });
+
+      it('throws PreflightError when preferredDockerAgent is goose but Anthropic OAuth is the only credential', async () => {
+        // Regression: previously, detectCredentials on the goose path only probed the
+        // goose provider's API key and never looked at Anthropic OAuth, so OAuth-only
+        // users with preferredDockerAgent=goose silently fell back to builtin (which
+        // then failed without an API key). authMethod must be checked directly.
+        const config = createTestConfig({ anthropicApiKey: '' });
+        config.userConfig.preferredDockerAgent = 'goose';
+        config.userConfig.gooseProvider = 'anthropic';
+
+        const promise = resolveSessionMode({
+          config,
+          isDockerAvailable: dockerUnavailable,
+          credentialSources: oauthOnlySources,
+        });
+
+        await expect(promise).rejects.toThrow(PreflightError);
+        await expect(promise).rejects.toThrow(/Docker/);
+      });
     });
   });
 });

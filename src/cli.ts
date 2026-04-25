@@ -88,6 +88,26 @@ if (!subcommand || subcommand === 'help') {
   process.exit(0);
 }
 
+// Commands that require the V8 sandbox. We check early to catch Node version
+// mismatches (like Node 25) or stale native module builds before importing heavy dependencies.
+// `compile-policy` is the offline policy pipeline and never instantiates the V8 sandbox.
+const requiresSandbox = ['start', 'daemon', 'bot', 'workflow'];
+if (requiresSandbox.includes(subcommand)) {
+  const { checkSandboxViability } = await import('./utils/preflight-checks.js');
+  const result = await checkSandboxViability();
+  if (!result.ok) {
+    const chalk = (await import('chalk')).default;
+    // Use process.stderr.write rather than console.error because the logger
+    // (src/logger.ts) monkey-patches console.* to redirect into the session log
+    // file. Writing directly to stderr keeps fatal errors visible on the terminal.
+    process.stderr.write(`\n${chalk.bold(chalk.red('Fatal Error:'))} ${result.message}\n`);
+    if (result.details) {
+      process.stderr.write(chalk.dim(result.details) + '\n\n');
+    }
+    process.exit(1);
+  }
+}
+
 switch (subcommand) {
   case 'start': {
     const { main } = await import('./index.js');
