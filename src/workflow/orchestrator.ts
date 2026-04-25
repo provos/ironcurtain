@@ -1012,7 +1012,19 @@ export class WorkflowOrchestrator implements WorkflowController {
     const resumable: WorkflowId[] = [];
     for (const run of runs) {
       if (!run.hasCheckpoint || activeIds.has(run.workflowId)) continue;
-      const cp = this.deps.checkpointStore.load(run.workflowId);
+      // FileCheckpointStore.load() re-throws on JSON.parse failure (it only
+      // swallows ENOENT). A single corrupt checkpoint.json would otherwise
+      // poison the whole list and break `workflow inspect` discovery + the
+      // web UI past-runs panel. Skip and log instead.
+      let cp;
+      try {
+        cp = this.deps.checkpointStore.load(run.workflowId);
+      } catch (err) {
+        writeStderr(
+          `[workflow] Failed to load checkpoint for ${run.workflowId}: ${toErrorMessage(err)}; skipping in resumable list`,
+        );
+        continue;
+      }
       if (cp !== undefined && isCheckpointResumable(cp)) {
         resumable.push(run.workflowId);
       }
@@ -1888,10 +1900,27 @@ export class WorkflowOrchestrator implements WorkflowController {
     }
 
     // Persist finalStatus so isCheckpointResumable can later distinguish
-    // completed (excluded) from aborted/failed (still resumable).
+    // completed (excluded) from aborted/failed (still resumable). Preserve
+    // the existing on-disk machineState/context (which points at the last
+    // non-terminal state) so resume-after-abort can re-enter that state
+    // instead of immediately re-completing on a terminal snapshot. The
+    // fallback path covers the unusual case where no prior checkpoint
+    // exists (e.g. a workflow that transitioned straight to terminal
+    // without ever passing through a non-terminal save point).
     try {
-      const snapshot = instance.actor.getSnapshot() as { value: unknown; context: unknown };
-      const checkpoint = this.buildCheckpoint(instance, snapshot, instance.finalStatus);
+      const existing = this.deps.checkpointStore.load(workflowId);
+      const terminalCheckpoint = this.buildCheckpoint(
+        instance,
+        instance.actor.getSnapshot() as { value: unknown; context: unknown },
+        instance.finalStatus,
+      );
+      const checkpoint = existing
+        ? {
+            ...terminalCheckpoint,
+            machineState: existing.machineState,
+            context: existing.context,
+          }
+        : terminalCheckpoint;
       this.deps.checkpointStore.save(workflowId, checkpoint);
     } catch (err) {
       writeStderr(`[workflow] Failed to save terminal checkpoint for ${workflowId}: ${toErrorMessage(err)}`);
