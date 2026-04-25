@@ -240,6 +240,25 @@ describe('resolveSessionMode', () => {
         expect(result.mode).toEqual({ kind: 'builtin' });
         expect(result.reason).toBe('Docker not available');
       });
+
+      it('throws PreflightError when preferredDockerAgent is goose but Anthropic OAuth is the only credential', async () => {
+        // Regression: previously, detectCredentials on the goose path only probed the
+        // goose provider's API key and never looked at Anthropic OAuth, so OAuth-only
+        // users with preferredDockerAgent=goose silently fell back to builtin (which
+        // then failed without an API key). authMethod must be checked directly.
+        const config = createTestConfig({ anthropicApiKey: '' });
+        config.userConfig.preferredDockerAgent = 'goose';
+        config.userConfig.gooseProvider = 'anthropic';
+
+        const promise = resolveSessionMode({
+          config,
+          isDockerAvailable: dockerUnavailable,
+          credentialSources: oauthOnlySources,
+        });
+
+        await expect(promise).rejects.toThrow(PreflightError);
+        await expect(promise).rejects.toThrow(/Docker/);
+      });
     });
   });
 });

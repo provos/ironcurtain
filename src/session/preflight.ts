@@ -203,16 +203,19 @@ async function resolveAutoDetect(
   credentialSources?: CredentialSources,
 ): Promise<PreflightResult> {
   const defaultAgent = config.userConfig.preferredDockerAgent as AgentId;
-  const [dockerStatus, credKind] = await Promise.all([
+  const [dockerStatus, credKind, authMethod] = await Promise.all([
     isDockerAvailable(),
     detectCredentials(defaultAgent, config, credentialSources),
+    detectAuthMethod(config, credentialSources ?? preflightSources),
   ]);
 
   if (!dockerStatus.available) {
-    // detectCredentials reports 'oauth' whenever OAuth is present, even if an API key
-    // also exists, because detectAuthMethod prefers OAuth. Re-check specifically for an
-    // API key so we only throw when the user genuinely has no fallback to builtin.
-    if (credKind === 'oauth' && resolveApiKeyForProvider('anthropic', config.userConfig).length === 0) {
+    // Check Anthropic OAuth presence directly, independent of the preferred agent.
+    // detectCredentials only probes Anthropic OAuth on the Claude Code path; when the
+    // preferred agent is goose it reports credKind based on the goose provider key and
+    // never looks at Anthropic OAuth. Call detectAuthMethod explicitly so we catch the
+    // OAuth-only-no-Docker failure even for goose-preferred configs.
+    if (authMethod.kind === 'oauth' && resolveApiKeyForProvider('anthropic', config.userConfig).length === 0) {
       throw new PreflightError(
         `Cannot start IronCurtain. You have Claude OAuth credentials, which require Docker mode, ` +
           `but Docker is not available:\n\n${dockerStatus.detailedMessage}\n\n` +

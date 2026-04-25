@@ -97,9 +97,12 @@ if (requiresSandbox.includes(subcommand)) {
   const result = await checkSandboxViability();
   if (!result.ok) {
     const chalk = (await import('chalk')).default;
-    console.error(`\n${chalk.bold(chalk.red('Fatal Error:'))} ${result.message}`);
+    // Use process.stderr.write rather than console.error because the logger
+    // (src/logger.ts) monkey-patches console.* to redirect into the session log
+    // file. Writing directly to stderr keeps fatal errors visible on the terminal.
+    process.stderr.write(`\n${chalk.bold(chalk.red('Fatal Error:'))} ${result.message}\n`);
     if (result.details) {
-      console.error(chalk.dim(result.details) + '\n');
+      process.stderr.write(chalk.dim(result.details) + '\n\n');
     }
     process.exit(1);
   }

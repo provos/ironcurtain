@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 import { getIronCurtainHome } from '../config/paths.js';
 
@@ -28,24 +29,16 @@ function getCacheMarkerPath(): string {
  * (not the semver range from the root package.json) because the cache is
  * about ABI compatibility — the installed build is what actually runs.
  * Returns null if the package can't be located (treated as a cache miss).
+ *
+ * Uses Node's module resolution (via createRequire) rather than cwd-based
+ * guessing so this works from any invocation directory, including global
+ * installs.
  */
 function resolveUtcpVersion(): string | null {
   try {
-    // require.resolve isn't available in pure ESM; walk up from cwd looking for node_modules.
-    // Because this CLI runs from the project root or a global install, the package.json
-    // path is straightforward to construct — we search a couple of likely roots.
-    const candidates = [
-      resolve(process.cwd(), 'node_modules', '@utcp', 'code-mode', 'package.json'),
-      // Global install: the CLI lives at <prefix>/lib/node_modules/ironcurtain/dist/cli.js,
-      // and @utcp/code-mode sits next to it under <prefix>/lib/node_modules/.
-      resolve(process.cwd(), '..', 'node_modules', '@utcp', 'code-mode', 'package.json'),
-    ];
-    for (const candidate of candidates) {
-      if (existsSync(candidate)) {
-        const pkg = JSON.parse(readFileSync(candidate, 'utf-8')) as { version?: string };
-        if (typeof pkg.version === 'string') return pkg.version;
-      }
-    }
+    const pkgPath = createRequire(import.meta.url).resolve('@utcp/code-mode/package.json');
+    const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8')) as { version?: string };
+    if (typeof pkg.version === 'string') return pkg.version;
   } catch {
     // Fall through — caller treats null as "no cache, run real check".
   }
