@@ -54,12 +54,24 @@
     agent_retry: { label: 'Retry', badgeVariant: 'warning' },
   };
 
-  // Composite `ts:type` key — the orchestrator can write pairs of distinct
-  // entries at the same millisecond (e.g. state_transition + gate_raised) and
-  // Svelte 5 throws on duplicate keys. Index isn't an option: pagination
-  // prepends would shift selections.
+  // `ts:type` alone is not unique enough: rapid `agent_retry` bursts can emit
+  // multiple same-type entries within the same millisecond (orchestrator.ts:1531),
+  // which would crash Svelte 5's keyed `{#each}` with `each_key_duplicate`.
+  // We assign each entry object a monotonic id via WeakMap and include it in
+  // the rendered key. Trade-off: this loses `expanded` state on a full
+  // message-log refresh (re-fetched entries are new object references); a
+  // backend `seq` field on `MessageLogEntry` would fix that, but a silent
+  // expansion reset is far better than a fatal render crash.
+  const entryIds = new WeakMap<MessageLogEntry, number>();
+  let nextEntryId = 0;
+
   function entryKey(entry: MessageLogEntry): string {
-    return entry.ts + ':' + entry.type;
+    let id = entryIds.get(entry);
+    if (id === undefined) {
+      id = nextEntryId++;
+      entryIds.set(entry, id);
+    }
+    return entry.ts + ':' + entry.type + ':' + String(id);
   }
 
   let expanded = $state<Set<string>>(new Set());

@@ -74,7 +74,7 @@ import { collectFilesRecursive, hasAnyFiles, snapshotArtifacts } from './artifac
 import { validateDefinition } from './validate.js';
 import { parseDefinitionFile } from './discovery.js';
 import { discoverWorkflowRuns } from './workflow-discovery.js';
-import { isCheckpointResumable } from './cli-support.js';
+import { isCheckpointResumable } from './checkpoint.js';
 import { AgentInvocationError, WorkflowQuotaExhaustedError, isWorkflowQuotaExhaustedError } from './errors.js';
 
 const execFileAsync = promisify(execFileCb);

@@ -353,16 +353,12 @@
 
     <!-- Mobile drawer backdrop. Click to dismiss. -->
     {#if drawerOpen}
+      <!-- Decorative scrim. Keyboard users close the drawer via Escape or the X button. -->
       <div
         data-testid="drawer-backdrop"
         class="md:hidden fixed inset-0 z-40 bg-black/50"
         onclick={closeDrawer}
-        onkeydown={(e) => {
-          if (e.key === 'Enter' || e.key === ' ') closeDrawer();
-        }}
-        role="button"
-        tabindex="-1"
-        aria-label="Close menu"
+        aria-hidden="true"
       ></div>
     {/if}
 
