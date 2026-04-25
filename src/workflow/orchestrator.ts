@@ -1909,13 +1909,18 @@ export class WorkflowOrchestrator implements WorkflowController {
     // without ever passing through a non-terminal save point).
     try {
       const existing = this.deps.checkpointStore.load(workflowId);
+      const terminalCheckpoint = this.buildCheckpoint(
+        instance,
+        instance.actor.getSnapshot() as { value: unknown; context: unknown },
+        instance.finalStatus,
+      );
       const checkpoint = existing
-        ? { ...existing, finalStatus: instance.finalStatus }
-        : this.buildCheckpoint(
-            instance,
-            instance.actor.getSnapshot() as { value: unknown; context: unknown },
-            instance.finalStatus,
-          );
+        ? {
+            ...terminalCheckpoint,
+            machineState: existing.machineState,
+            context: existing.context,
+          }
+        : terminalCheckpoint;
       this.deps.checkpointStore.save(workflowId, checkpoint);
     } catch (err) {
       writeStderr(`[workflow] Failed to save terminal checkpoint for ${workflowId}: ${toErrorMessage(err)}`);
