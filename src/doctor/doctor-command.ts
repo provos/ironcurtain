@@ -77,17 +77,21 @@ export async function runDoctorCommand(argv: string[]): Promise<void> {
 
   const collected: CheckResult[] = [];
 
-  // Environment — sequential because failures invalidate later checks.
+  // Environment — sandbox and docker probes are independent, kick off in
+  // parallel and await in declaration order so output stays deterministic.
   printSection('Environment', { first: true });
   const nodeResult = checkNodeVersion();
   printCheck(nodeResult);
   collected.push(nodeResult);
 
-  const sandboxResult = await checkSandbox();
+  const sandboxPromise = checkSandbox();
+  const dockerPromise = checkDocker();
+
+  const sandboxResult = await sandboxPromise;
   printCheck(sandboxResult);
   collected.push(sandboxResult);
 
-  const dockerResult = await checkDocker();
+  const dockerResult = await dockerPromise;
   printCheck(dockerResult);
   collected.push(dockerResult);
 
@@ -100,8 +104,7 @@ export async function runDoctorCommand(argv: string[]): Promise<void> {
   if (!configCheck.config) {
     // Without a config we can't proceed past the basic environment.
     printSummary(collected);
-    if (collected.some((c) => c.status === 'fail')) process.exit(1);
-    return;
+    exitWithStatus(collected);
   }
   const config = configCheck.config;
 
@@ -157,8 +160,16 @@ export async function runDoctorCommand(argv: string[]): Promise<void> {
   }
 
   printSummary(collected);
+  exitWithStatus(collected);
+}
 
-  if (collected.some((c) => c.status === 'fail')) {
-    process.exit(1);
-  }
+/**
+ * Exits the process with status 1 on any check failure, 0 otherwise.
+ * Always exits explicitly because MCP server subprocesses spawned by the
+ * liveness probes can keep the Node event loop alive past the last printed
+ * line, even after `client.close()` (the MCP SDK doesn't aggressively
+ * SIGKILL the child).
+ */
+function exitWithStatus(collected: CheckResult[]): never {
+  process.exit(collected.some((c) => c.status === 'fail') ? 1 : 0);
 }

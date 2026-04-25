@@ -7,7 +7,6 @@
  * can call check functions directly without short-circuits.
  */
 
-import { generateText } from 'ai';
 import { checkSandboxViability } from '../utils/preflight-checks.js';
 import { checkDockerAvailable, type DockerAvailability } from '../session/preflight.js';
 import {
@@ -420,7 +419,7 @@ export async function checkMcpServerLiveness(
   }
 
   const tasks = entries.map(async ([name, serverConfig]): Promise<CheckResult> => {
-    if (hasUnsetCredentials(serverConfig, config)) {
+    if (checkServerCredentials(name, serverConfig, config).status === 'warn') {
       return { name, status: 'skip', message: 'skipped — missing creds' };
     }
     const result = await probe(name, serverConfig);
@@ -428,34 +427,6 @@ export async function checkMcpServerLiveness(
   });
 
   return Promise.all(tasks);
-}
-
-function hasUnsetCredentials(serverConfig: MCPServerConfig, config: IronCurtainConfig): boolean {
-  const required = collectDeclaredEnvVars(serverConfig);
-  if (required.length === 0) return false;
-  for (const varName of required) {
-    const fromEnv = process.env[varName];
-    if (typeof fromEnv === 'string' && fromEnv.length > 0) continue;
-    // serverCredentials lookup — keyed by server name in user config, but
-    // we don't have the server name here. The caller passes the resolved
-    // config; we look it up via reverse-lookup on mcpServers.
-    const serverName = findServerName(serverConfig, config.mcpServers);
-    const credBag = serverName ? config.userConfig.serverCredentials[serverName] : undefined;
-    const fromCfg: string | undefined = credBag ? credBag[varName] : undefined;
-    if (typeof fromCfg === 'string' && fromCfg.length > 0) continue;
-    return true;
-  }
-  return false;
-}
-
-function findServerName(
-  serverConfig: MCPServerConfig,
-  mcpServers: Record<string, MCPServerConfig>,
-): string | undefined {
-  for (const [name, candidate] of Object.entries(mcpServers)) {
-    if (candidate === serverConfig) return name;
-  }
-  return undefined;
 }
 
 function formatProbeResult(name: string, result: ProbeResult): CheckResult {
@@ -496,6 +467,8 @@ export async function checkAnthropicApi(config: IronCurtainConfig): Promise<Chec
   }
   try {
     const start = Date.now();
+    // Lazy-import the AI SDK so the default doctor run doesn't pay the load cost.
+    const { generateText } = await import('ai');
     const model = await createLanguageModel(config.agentModelId, config.userConfig);
     await generateText({
       model,
