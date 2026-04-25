@@ -456,6 +456,47 @@ describe('WorkflowOrchestrator checkpoint + resume', () => {
   });
 
   // -----------------------------------------------------------------------
+  // Regression: aborted-state checkpoint must keep the LAST non-terminal
+  // machineState so resume() can re-enter a meaningful state.
+  // -----------------------------------------------------------------------
+
+  it('keeps last non-terminal machineState on disk when terminating via ABORT', async () => {
+    const defPath = writeDefinitionFile(tmpDir, linearWorkflowDef);
+    const checkpointStore = createCheckpointStore(tmpDir);
+
+    const sessionFactory = vi.fn(async () => {
+      return createArtifactAwareSession([{ text: approvedResponse('plan done'), artifacts: ['plan'] }], tmpDir);
+    });
+
+    const raiseGate = vi.fn();
+    const deps = createDeps(tmpDir, {
+      createSession: sessionFactory,
+      raiseGate,
+      checkpointStore,
+    });
+
+    const orchestrator = trackOrchestrator(new WorkflowOrchestrator(deps));
+    const workflowId = await orchestrator.start(defPath, 'build a thing');
+
+    // Wait for plan_gate so a non-terminal checkpoint is persisted.
+    await waitForGate(raiseGate, 1);
+    const preAbort = checkpointStore.load(workflowId);
+    expect(preAbort?.machineState).toBe('plan_gate');
+
+    // Drive into the `aborted` terminal via ABORT.
+    orchestrator.resolveGate(workflowId, { type: 'ABORT' });
+    await waitForCompletion(orchestrator, workflowId);
+
+    const surviving = checkpointStore.load(workflowId);
+    expect(surviving).toBeDefined();
+    expect(surviving?.finalStatus?.phase).toBe('aborted');
+    // The on-disk machineState must still be the last non-terminal state.
+    // Persisting the terminal `aborted` snapshot would cause `resume()` to
+    // re-enter the terminal and immediately re-complete.
+    expect(surviving?.machineState).toBe('plan_gate');
+  });
+
+  // -----------------------------------------------------------------------
   // Test 3: Resume a failed workflow from checkpoint
   // -----------------------------------------------------------------------
 
@@ -814,6 +855,54 @@ describe('WorkflowOrchestrator checkpoint + resume', () => {
     const resumable = orchestrator.listResumable();
     expect(resumable).toContain(failedId);
     expect(resumable).not.toContain(completedId);
+  });
+
+  it('listResumable skips corrupt checkpoints instead of throwing', async () => {
+    // Place a valid + a corrupt checkpoint side by side. A single corrupt
+    // file must not break enumeration of all other resumable runs.
+    const checkpointStore = new FileCheckpointStore(tmpDir);
+
+    const validId = 'valid-run' as WorkflowId;
+    const corruptId = 'corrupt-run' as WorkflowId;
+
+    checkpointStore.save(validId, {
+      machineState: 'implement',
+      context: {
+        taskDescription: 'still resumable',
+        artifacts: {},
+        round: 0,
+        maxRounds: 4,
+        previousOutputHashes: {},
+        previousTestCount: null,
+        humanPrompt: null,
+        reviewHistory: [],
+        parallelResults: {},
+        worktreeBranches: [],
+        totalTokens: 0,
+        lastError: null,
+        agentConversationsByState: {},
+        previousAgentOutput: null,
+        previousAgentNotes: null,
+        previousStateName: null,
+        visitCounts: {},
+      },
+      timestamp: new Date().toISOString(),
+      transitionHistory: [],
+      definitionPath: writeDefinitionFile(tmpDir, simpleAgentDef),
+      workspacePath: resolve(tmpDir, validId, 'workspace'),
+    });
+
+    // Write raw bytes that won't parse as JSON.
+    const corruptDir = resolve(tmpDir, corruptId);
+    mkdirSync(corruptDir, { recursive: true });
+    writeFileSync(resolve(corruptDir, 'checkpoint.json'), 'not json');
+
+    const deps = createDeps(tmpDir, { checkpointStore });
+    const orchestrator = trackOrchestrator(new WorkflowOrchestrator(deps));
+
+    const resumable = orchestrator.listResumable();
+    expect(resumable).toContain(validId);
+    expect(resumable).not.toContain(corruptId);
   });
 
   // -----------------------------------------------------------------------

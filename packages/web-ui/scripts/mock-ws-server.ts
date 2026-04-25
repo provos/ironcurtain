@@ -1273,7 +1273,7 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
               workflowId: newId,
               stateId: 'plan',
               verdict: 'success',
-              confidence: 0.87,
+              confidence: '0.87',
             });
             wf.currentState = 'plan_review';
             wf.phase = 'waiting_human';
@@ -1371,7 +1371,7 @@ function handleMethod(ws: WebSocket, method: string, params: Record<string, unkn
                 workflowId: resolveWfId,
                 stateId: nextState,
                 verdict: 'success',
-                confidence: 0.79,
+                confidence: '0.79',
               });
               if (nextState === 'implement') {
                 wf.currentState = 'review';
